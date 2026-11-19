@@ -1627,7 +1627,7 @@ const SHELL_ROUTES = {
     goal: 'goals', q: 'overview', talk: 'overview',
     act: 'loop', decision: 'loop', lesson: 'loop', problem: 'loop', signal: 'loop', learning: 'loop', observation: 'loop',
     sensor: 'sensors', retro: 'retros',
-    artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library',
+    artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library', lib: 'library',
   },
   files: [[/(^|\/)docs\/devteam\/(governance|process)\//, 'governance'], [/(^|\/)strategy\.md$/, 'governance']],
   redirects: {
@@ -4181,7 +4181,7 @@ const TYPE_META = {
   wave: ['waves', 'Wave'], milestone: ['milestone', 'Milestone'], act: ['zap', 'Act'], decision: ['scale', 'Decision'], retro: ['history', 'Retro'],
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
   q: ['circle-help', 'Question'], file: ['file-text', 'File'], sensor: ['activity', 'Sensor'],
-  observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'],
+  observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'], lib: ['library', 'Library item'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -4469,7 +4469,7 @@ let LAST_HTML = '';
 let AFTER = [];
 // The hash that opens a record's peek: #<kind>/<encoded id>; a file's is #file?path=<encoded path>.
 const peekFor = (kind, id) => (kind === 'file' ? `#file?path=${encodeURIComponent(id)}` : `#${kind}/${encodeURIComponent(id)}`);
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -6018,7 +6018,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // (at once: the card replaces the peek, with no slide)
   // (its own head first: a card on a framed page opens the viewer before this route ends)
   if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); LAST_HEAD = location.hash; return void tlRoute(h.slice(5)); }
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -6569,6 +6569,61 @@ document.addEventListener('securitypolicyviolation', (e) => {
   if (out) thumbsFill();
 });
 /* library-thumbs end */
+/* library-peek start */
+// A Library item's side peek (kit-92): #lib/<id>, the item found by its id among libraryItems. Properties first, on
+// props/attrRow and not attrs (whose How it changes reads otherwise for a kind with no record, and which puts what is
+// computed under its own head): ID, Kind, Drawn by, For, Where, State, Published, Error, a link's Where, For and Notes,
+// Updated, How it changes; then the thumbnail's box at the peek's width (its frame, as on the card) and the summary.
+// An id no item has is not found.
+function openLib(id) {
+  drawerFor('lib', id);
+  const lib = DATA?.library ?? {};
+  const x = libraryItems(DATA ?? {}, Date.now(), { previewState, artHref, artViewer, pvViewer, fileHref }).find((i) => i.id === id);
+  if (!x) return notFound('lib', id, null, 'No such item in the Library.', { noRecord: true });
+  const [, label, icon] = LIB_KINDS.find(([k]) => k === x.kind);
+  const me = PUBLIC ? publicHere(location, lib) : null;
+  const pvHere = previewHere(location, PREVIEWS);
+  // the card's words: a for ref as a link, its kind prefix dropped; a draft's worktree by its id, linked to its ticket
+  const forRef = (f) => { const m = /^(goal|ticket|feature):(.+)$/.exec(f ?? ''); return m?.[1] === 'feature' ? flink(m[2]) : linkify(m ? m[2] : f); };
+  const forOf = (refs) => (refs?.length ? refs.map(forRef).join(', ') : '');
+  const wtOf = (at) => { const t = ticketMap().get(at); return t ? `<a class="linkish" href="#ticket/${esc(encodeURIComponent(at))}" title="${esc(t.title)}">${esc(at)}</a>` : esc(at); };
+  const PV_BADGE = { live: '<span class="badge good">live</span>', checking: '<span class="badge">checking</span>', 'not-running': '<span class="badge medium">not running</span>', 'not-answering': '<span class="badge medium">not answering</span>', expired: '<span class="badge">expired</span>' };
+  const a = x.art && !x.error ? x.art : null, p = x.preview, l = x.link, q = x.review;
+  const ps = x.landed && !x.landed.error ? publicState(x.landed, PUBLIC, me) : null;
+  // publish details: the state, where it is public, the record's date and channel, drift (the actions stay on the card)
+  const pub = !ps?.rec ? '' : [
+    ps.state === 'public' ? `<span class="badge good"><i class="icon-globe" aria-hidden="true"></i>Public</span> ${ps.from ? `from instance ${esc(ps.from)}` : 'Public on this box'}` : ps.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : '<span class="badge">published</span>',
+    `recorded ${esc(when(ps.rec.at))} from the ${ps.rec.channel === 'dashboard' ? 'dashboard' : 'terminal'}`,
+    ps.drift ? '<span class="lib-drift">changed on main since</span>' : '',
+  ].filter(Boolean).join(' · ');
+  const where = x.art ? (x.art.at !== 'main' ? `<span class="badge amber">draft</span> in ${wtOf(x.art.at)}${x.landed ? ' · Landed on main' : ''}` : 'Landed on main')
+    : l ? (() => { const loc = l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path || ''); return loc ? `<code>${esc(loc)}</code>` : ''; })() : '';
+  const forRefs = a ? a.for : l ? l.for : q ? (q.goal ? [`goal:${q.goal}`] : q.ticket ? [`ticket:${q.ticket}`] : []) : [];
+  const updated = a?.updated_at ?? (p ? p.at : q ? q.asked_at : null);
+  const kindHtml = `<i class="icon-${esc(icon)}" aria-hidden="true"></i> ${esc(label)}${l?.kind ? ` · <span class="badge">${esc(l.kind)}</span>` : ''}`;
+  // a link's Where comes before its For, as on its card
+  const placed = l ? [attrRow('Where', where, 'Its URL, its remote and path, or its path in this repository.'), attrRow('For', forOf(forRefs), 'What it is for.')]
+    : [attrRow('For', forOf(forRefs), 'What it is for.'), attrRow('Where', where, 'Landed on main, or a draft in a worktree, the newest draft shown.')];
+  const rows = [
+    attrRow('ID', `<code>${esc(id)}</code>`, 'Its id in the Library: artifact:<slug>, review:<question>, preview:<name> or link:<id>. Copy ID copies exactly this.'),
+    attrRow('Kind', kindHtml, 'What sort of item it is.'),
+    attrRow('Drawn by', a?.by ? linkify(a.by) : p?.session ? linkify(p.session) : '', 'The session that drew it; open it to see that session.'),
+    ...placed,
+    attrRow('State', p ? `${PV_BADGE[x.pstate.state] ?? ''}${x.pstate.since ? ` down since ${esc(when(x.pstate.since))}` : ''}` : '', 'Whether the preview answers now.'),
+    attrRow('Published', pub, 'Its public record: where it is public, when it was recorded and from where.'),
+    attrRow('Error', x.error ? esc(x.error) : '', 'Why it can\'t be shown.'),
+    attrRow('Notes', l?.notes ? esc(l.notes) : '', 'What the link\'s author wrote about it.'),
+    attrRow('Updated', updated ? esc(when(updated)) : '', 'When it last changed.'),
+    attrRow('How it changes', 'Shift+click it and say so in a thread'),
+  ].filter(Boolean);
+  // the card's box: its frame's source, or the kind's icon (a link: its site's icon and host)
+  const go = `${x.href ? ` href="${esc(x.href)}"` : ''}${l?.url ? ' target="_blank" rel="noopener noreferrer"' : ''}`;
+  const src = a ? artSrc(a.slug, a.at) : x.pstate?.state === 'live' ? previewUrl(pvHere, p) : '';
+  const thumb = `<a class="lib-thumb"${go} tabindex="-1" aria-hidden="true" data-thumb-src="${esc(src)}">${l && x.host ? `<img src="https://${esc(x.host)}/favicon.ico" referrerpolicy="no-referrer" alt=""><span class="lib-host small muted">${esc(x.host)}</span>` : `<i class="icon-${esc(icon)}" aria-hidden="true"></i>`}</a>`;
+  AFTER.push(() => thumbsWatch($('drawer-body')));
+  showDrawer(`<h2 id="drawer-title">${esc(x.title)}</h2><section class="attrs">${props(rows)}</section>${thumb}${x.summary ? `<p class="measure lib-sum">${esc(x.summary)}</p>` : ''}`);
+}
+/* library-peek end */
 
 /* score-of start */
 // The Overview's Autonomy row (kit-90): each tile's label, the path of its score record in /api/data,

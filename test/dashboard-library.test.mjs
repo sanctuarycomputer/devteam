@@ -1065,3 +1065,107 @@ test('a card removed by a poll frees its slot', { ...CHROME, timeout: 300000 }, 
   assert.equal(await p.ev("[...document.querySelectorAll('iframe')].filter((f) => f.closest('.lib-thumb') && !f.closest('#lib-grid')).length"), 0);
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
+
+// ---- in Chrome (kit-92 T5): an item's side peek, properties first ----
+
+// the peek as drawn: shown, its bar's type badge and title, its properties (dt, dd text, dd's links), what follows them
+const PEEK = `(() => { const d = document.getElementById('drawer'), b = document.getElementById('drawer-body');
+  const dl = b.querySelector('section.attrs > dl.props');
+  const rows = dl ? [...dl.querySelectorAll(':scope > dt')].map((dt) => { const dd = dt.nextElementSibling; return [dt.textContent, dd.textContent, [...dd.querySelectorAll('a')].map((a) => a.getAttribute('href'))]; }) : [];
+  const after = dl ? [...b.querySelector('section.attrs').parentElement.children].filter((e) => b.querySelector('section.attrs').compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING) : [];
+  return { shown: !d.hidden, type: document.querySelector('#drawer-bar-title .dtype .badge')?.textContent ?? null, title: document.querySelector('#drawer-bar-title .dtitle')?.textContent ?? null, rows,
+    thumb: after[0]?.matches('.lib-thumb') ?? false, thumbW: after[0] ? Math.round(after[0].getBoundingClientRect().width) : 0, bodyW: Math.round(b.clientWidth - parseFloat(getComputedStyle(b).paddingLeft) - parseFloat(getComputedStyle(b).paddingRight)),
+    measure: after[1]?.matches('.measure') ? after[1].textContent : null }; })()`;
+// the properties' order: each row a peek can have, in the spec's order; a link's (its Kind the item's Kind row) Where, For, Notes
+const LIB_ORDER = ['ID', 'Kind', 'Drawn by', 'For', 'Where', 'State', 'Published', 'Error', 'Updated', 'How it changes'];
+const LINK_ORDER = ['ID', 'Kind', 'Where', 'For', 'Notes', 'Updated', 'How it changes'];
+
+test('Open in side peek opens the item\'s properties', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, ids, items } = await libraryAll(t);
+  const id = `artifact:${ids.drafted}`;
+  const x = items.find((i) => i.id === id);
+  const sel = `#lib-grid > .lib-card[data-lib-id="${id}"] .card-head details.menu`;
+  await p.click(`${sel} > summary`);
+  await soon(`document.querySelector('${sel}').open`, 'the ⋯ menu open');
+  await p.click(`${sel} [data-menu-open]`);
+  // the menu writes it encoded, #lib/artifact%3A<slug>
+  await soon(`decodeURIComponent(location.hash) === ${JSON.stringify(`#lib/${id}`)} && !document.getElementById('drawer').hidden`, 'the peek on the item');
+  await soon(`${PEEK}.rows.length > 3`, 'its properties');
+  const pk = await p.ev(PEEK);
+  assert.equal(pk.shown, true);
+  assert.equal(pk.type, 'Library item', 'the bar\'s type badge');
+  assert.equal(pk.title, x.title, 'the item\'s title in the bar');
+  assert.deepEqual(pk.rows[0].slice(0, 2), ['ID', id], 'ID first, the item id');
+  const dts = pk.rows.map((r) => r[0]);
+  assert.deepEqual(dts, ['ID', 'Kind', 'Drawn by', 'For', 'Where', 'Updated', 'How it changes'], 'the drafted artifact\'s properties, in order');
+  const row = (k) => pk.rows.find((r) => r[0] === k);
+  assert.match(row('Kind')[1], /Mock/);
+  assert.deepEqual(row('Drawn by')[2], [`#planner/${ids.feat1}`], 'Drawn by: a link to the session');
+  assert.deepEqual(row('For')[2], [`#feature/${ids.feat1}`]);
+  assert.match(row('Where')[1], new RegExp(`draft.*in ${ids.wt2}`), 'the newest draft\'s worktree');
+  assert.deepEqual(row('Where')[2], [`#ticket/${ids.wt2}`]);
+  assert.equal(row('How it changes')[1], 'Shift+click it and say so in a thread');
+  // then the thumbnail at the peek's width, then the summary
+  assert.equal(pk.thumb, true, 'the thumbnail box after the properties');
+  assert.ok(Math.abs(pk.thumbW - pk.bodyW) <= 1, `the thumbnail at the peek's width (${pk.thumbW} against ${pk.bodyW})`);
+  assert.equal(pk.measure, x.summary, 'the summary');
+  // a published one has Published, with its details, in its place; a broken one its Error
+  await p.ev(`location.hash = ${JSON.stringify(`#lib/${encodeURIComponent(`artifact:${ids.public}`)}`)}`);
+  await soon(`${PEEK}.rows[0]?.[1] === ${JSON.stringify(`artifact:${ids.public}`)}`, 'the public artifact\'s peek');
+  const pub = await p.ev(PEEK);
+  assert.deepEqual(pub.rows.map((r) => r[0]), ['ID', 'Kind', 'Drawn by', 'For', 'Where', 'Published', 'Updated', 'How it changes']);
+  assert.match(pub.rows.find((r) => r[0] === 'Where')[1], /Landed on main/);
+  assert.match(pub.rows.find((r) => r[0] === 'Published')[1], /recorded .* from the dashboard/);
+  await p.ev(`location.hash = ${JSON.stringify(`#lib/${encodeURIComponent(`artifact:${ids.broken}`)}`)}`);
+  await soon(`${PEEK}.rows[0]?.[1] === ${JSON.stringify(`artifact:${ids.broken}`)}`, 'the broken artifact\'s peek');
+  const bad = await p.ev(PEEK);
+  assert.deepEqual(bad.rows.find((r) => r[0] === 'Error')?.[1], 'manifest.json: title is missing');
+  // every item's peek: ID first, How it changes last, the rows in the spec's order
+  for (const i of items) {
+    await p.ev(`location.hash = ${JSON.stringify(`#lib/${encodeURIComponent(i.id)}`)}`);
+    await soon(`${PEEK}.rows[0]?.[1] === ${JSON.stringify(i.id)}`, `${i.id}'s peek`);
+    const r = (await p.ev(PEEK)).rows.map((x) => x[0]);
+    const order = i.kind === 'link' ? LINK_ORDER : LIB_ORDER;
+    assert.deepEqual(r, order.filter((k) => r.includes(k)), `${i.id}: rows in order (${r.join(', ')})`);
+    assert.equal(r.length, new Set(r).size, `${i.id}: each row once`);
+    assert.deepEqual([r[0], r[1], r.at(-1)], ['ID', 'Kind', 'How it changes'], `${i.id}: ID, Kind first, How it changes last`);
+  }
+  // an unknown id: not found, the type badge still the item's
+  await p.ev("location.hash = '#lib/artifact%3Ano-such-thing'");
+  await soon("document.querySelector('#drawer-bar-title .dtitle')?.textContent === 'artifact:no-such-thing'", 'not found');
+  assert.equal(await p.ev("document.querySelector('#drawer-bar-title .dtype .badge')?.textContent"), 'Library item');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a link\'s peek has its details', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, ids } = await libraryAll(t);
+  await p.ev(`location.hash = ${JSON.stringify(`#lib/link:${ids.linkUrl}`)}`);
+  await soon(`${PEEK}.rows[0]?.[1] === ${JSON.stringify(`link:${ids.linkUrl}`)}`, 'the link\'s peek');
+  const pk = await p.ev(PEEK);
+  assert.equal(pk.type, 'Library item');
+  assert.equal(pk.title, 'The pay flow in Figma');
+  assert.deepEqual(pk.rows.map((r) => r[0]), ['ID', 'Kind', 'Where', 'For', 'Notes', 'How it changes'], 'a link\'s Kind, Where, For, Notes');
+  const row = (k) => pk.rows.find((r) => r[0] === k);
+  assert.match(row('Kind')[1], /Link/);
+  assert.match(row('Kind')[1], /url/, 'the link\'s own kind');
+  assert.match(row('Where')[1], /https:\/\/www\.figma\.com\/file\/pay-flow/);
+  assert.deepEqual(row('For')[2], [`#goal/${ids.goal1}`]);
+  assert.equal(row('Notes')[1], 'The screens the pay tickets build');
+  assert.equal(row('How it changes')[1], 'Shift+click it and say so in a thread');
+  // a local remote's ↗ opens this peek (T2): its Where is the remote and path
+  await p.ev(`location.hash = ${JSON.stringify(`#lib/${encodeURIComponent(`link:${ids.linkPath}`)}`)}`);
+  await soon(`${PEEK}.rows[0]?.[1] === ${JSON.stringify(`link:${ids.linkPath}`)}`, 'the path link\'s peek');
+  const path_ = await p.ev(PEEK);
+  assert.match(path_.rows.find((r) => r[0] === 'Where')[1], /docs\/devteam\/project\/designs\/pay\.md/);
+  assert.deepEqual(path_.rows.find((r) => r[0] === 'For')[2], [`#feature/${ids.feat1}`]);
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a cold link opens over the Library', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, go, ids } = await libraryAll(t);
+  await go(`#lib/${encodeURIComponent(`artifact:${ids.drafted}`)}`);
+  await soon(`!document.getElementById('drawer').hidden && ${PEEK}.rows[0]?.[1] === ${JSON.stringify(`artifact:${ids.drafted}`)}`, 'the peek on a cold load');
+  assert.equal(await p.ev('history.state.page'), '#library', 'over the Library');
+  assert.equal(await p.ev("document.getElementById('library').classList.contains('on')"), true, 'the Library under it');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
