@@ -126,6 +126,7 @@ exit 0
     "registry-attest": "Confirming the registry is complete",
     "new-dependency": "Adding a new dependency",
     "artifact-publish": "Publishing a page",
+    "recurring-edit": "Adding, changing or stopping a job",
     "pane-answer": "Answering the supervisor's terminal",
     "goal-order": "Putting the goals in order",
     "goal-approval": "Approving a goal",
@@ -2468,6 +2469,17 @@ exit 0
       "value": 7,
       "set": false,
       "default": 7,
+      "owner_only": null
+    },
+    {
+      "key": "recurring",
+      "group": "Rhythm",
+      "name": "Jobs",
+      "description": "the jobs that run on a schedule under Upkeep: checks and chores",
+      "shown": "names",
+      "value": [],
+      "set": false,
+      "default": [],
       "owner_only": null
     },
     {
