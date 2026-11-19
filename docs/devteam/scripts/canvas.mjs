@@ -5,7 +5,9 @@
 // code. Every op is idempotent. The tables (LIMITS, RANGES, TYPES, PROPS, CLASSES, TOKEN_TYPES,
 // DOC_RULES, OPS, REFUSALS) are frozen and are the ones the next canvas tickets read; so are
 // `opErrors(op)` (an op's own shape, nothing that needs a document) and `NODE_ID_RE`, kit-internal
-// helpers for the merge and the CLI, held to the fake through `apply`.
+// helpers for the merge and the CLI, held to the fake through `apply`. `resolve(doc, instanceId)` gives
+// an instance's descendants with their effective values (§2's resolution order), a port of the fake's
+// held to it by test/canvas-static-page.test.mjs.
 //
 // A port of the rules half of test/lib/canvas-fake.mjs, the contract's executable form: the fake is
 // the reference, and test/canvas-document.test.mjs holds this module to it (the same errors, the same
@@ -1034,4 +1036,48 @@ export function apply(doc, ops, { images = null, folderBytes = 0, level = 'full'
   const errs = validate(d, { images, folderBytes });
   if (errs.length) return no(errs[0].code);
   return { doc: d, why: null };
+}
+
+// ---- resolve: an instance's tree, five levels (the fake's resolve) ----
+
+// For each descendant of the instance's component: every plain property's value as the instance shows
+// it (contract §2's order). Base (the node's value, else its default), then a prop's default aimed at
+// it, then the chosen variant's override, then the instance's override, then the instance's prop value
+// aimed at it. Throws when `instanceId` is not an instance or its component is not a component.
+export function resolve(doc, instanceId) {
+  const nodes = doc.nodes;
+  const inst = ownGet(nodes, instanceId);
+  if (!isObj(inst) || inst.type !== 'instance') throw new Error(`resolve: ${instanceId} is not an instance`);
+  const comp = ownGet(nodes, inst.component);
+  if (!isObj(comp) || comp.type !== 'component') throw new Error(`resolve: ${inst.component} is not a component`);
+  const out = {};
+  const stack = [...comp.children].reverse();
+  while (stack.length) {
+    const id = stack.pop();
+    if (own(out, id)) continue;
+    const n = ownGet(nodes, id);
+    if (!isObj(n) || !TYPES.includes(n.type)) continue;
+    const vals = {};
+    for (const path of PLAIN[n.type]) {
+      if (path === 'props' || path === 'variants' || path === 'overrides') continue;
+      let v = getPath(n, path);
+      if (v === undefined) v = PROPS[n.type][path].default;
+      if (v !== undefined) vals[path] = structuredClone(v);
+    }
+    put(out, id, vals);
+    if (CONTAINERS.has(n.type)) for (let i = n.children.length - 1; i >= 0; i--) stack.push(n.children[i]);
+  }
+  const props = isObj(comp.props) ? comp.props : {};
+  const set = (id, prop, v) => { if (own(out, id)) put(out[id], prop, structuredClone(v)); };
+  for (const pd of Object.values(props)) if (isObj(pd) && isObj(pd.target)) set(pd.target.id, pd.target.prop, pd.default);
+  const variant = typeof inst.variant === 'string' && isObj(comp.variants) ? ownGet(comp.variants, inst.variant) : null;
+  if (isObj(variant)) for (const [id, o] of Object.entries(variant)) for (const [prop, v] of Object.entries(o)) set(id, prop, v);
+  if (isObj(inst.overrides)) for (const [id, o] of Object.entries(inst.overrides)) for (const [prop, v] of Object.entries(o)) set(id, prop, v);
+  if (isObj(inst.props)) {
+    for (const [name, v] of Object.entries(inst.props)) {
+      const pd = ownGet(props, name);
+      if (isObj(pd) && isObj(pd.target)) set(pd.target.id, pd.target.prop, v);
+    }
+  }
+  return out;
 }
