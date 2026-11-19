@@ -7780,6 +7780,12 @@ const SUBJECT_MAX = 2500; // bytes, as encoded in the line
 const OUTCOME_MAX = 300; // bytes
 const THREAD_TITLE_MAX = 120; // characters
 const THREAD_WAIT_MS = 10 * 60000;
+// An owner's turn no supervisor terminal took, unseen this long (no check since), is a high finding;
+// unanswered three times this long, whatever the checks (undeliveredTurns).
+const TURN_UNDELIVERED_MS = 5 * 60000;
+// Those turns, machine-local as delivery is: { "<u-id>": { thread, at } }. Named at load, so every
+// process's loose-file check knows it.
+const UNDELIVERED_FILE = runPath('undelivered-turns.json');
 const THREAD_ID = /^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 const TURN_ID = /^u-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 // When a proposal was made, as the log stamps it: what the owner's accept names to bind to it.
@@ -7960,7 +7966,34 @@ function deliverOwnerTurn(t, text, files) {
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
   return typeInto(target, `[devteam thread ${t.id} from owner${subjectWords(t.subject)}] ${said} — devteam.mjs thread show ${t.id}${droppedWords(files)}`, droppedPaths(files));
 }
-const deliveredWords = (typed) => (typed === true ? "sent to the supervisor's pane" : typed ? heldWords(typed, "the supervisor's") : 'recorded; the supervisor reads it when it next checks (thread list --waiting)');
+// Never "supervisor's pane" (the page reads that as typed) nor "recorded and held" for a turn no
+// terminal took: it says so, and when the supervisor last checked.
+const deliveredWords = (typed) => {
+  if (typed === true) return "sent to the supervisor's pane";
+  if (typed) return heldWords(typed, "the supervisor's");
+  const at = supervisorCheckedAt();
+  const when = at ? `it last checked ${Math.floor(Math.max(0, Date.now() - Date.parse(at)) / 60000)} min ago (${at.slice(11, 16)} UTC)` : 'it has not checked yet';
+  return `not delivered: no supervisor terminal took it, so the supervisor sees it only when it next checks; ${when}`;
+};
+// When the supervisor last checked, as ISO, or null: the newest of its host check (every tick's,
+// and a wait's every HOST_REFRESH_MS) and wait-since (a wait woke it for a tick). A claim refused
+// (another machine holds the repo) is no check by this one.
+function supervisorCheckedAt() {
+  const h = hostState();
+  const times = [Number(readText(runPath('wait-since'))) || 0];
+  if (h.refused !== true) times.push(Number(h.checked) || 0, Date.parse(h.at) || 0);
+  const t = Math.max(...times);
+  return t > 0 ? new Date(t).toISOString() : null;
+}
+// The owner's turns no terminal took (UNDELIVERED_FILE), read once and guarded: a missing,
+// unreadable or non-map file is none. entries: the map itself.
+function undeliveredTurns(now = Date.now(), { entries = false } = {}) {
+  let m = null;
+  try { m = JSON.parse(readText(UNDELIVERED_FILE) ?? 'null'); } catch {}
+  if (!isObj(m)) m = {};
+  if (entries) return m;
+  return [];
+}
 // The title and subject as the supervisor reads them: inside a frame that says they are data, every
 // value quoted (quoteData), in the pattern the prompt's knowledge and link blocks use.
 function threadDataFrame(v) {
@@ -7999,6 +8032,19 @@ function threadCounts() {
 // second says whether it was typed into the supervisor's pane.
 function cmdThread() {
   const [sub, id] = positional;
+  // An owner's turn typed into the supervisor's pane, or held for it; one no terminal took is
+  // recorded (UNDELIVERED_FILE, under its lock; entries over 7 days dropped) for the card and
+  // undeliveredTurns. The words say which.
+  const deliver = (t, u, words, files) => {
+    const typed = deliverOwnerTurn(t, words, files);
+    if (typed === false) withLock(UNDELIVERED_FILE, () => {
+      const m = undeliveredTurns(Date.now(), { entries: true });
+      for (const [k, v] of Object.entries(m)) if (!(Date.now() - Date.parse(v?.at) <= 7 * 86400000)) delete m[k];
+      m[u.id] = { thread: t.id, at: u.at };
+      writeJsonAtomic(UNDELIVERED_FILE, m);
+    });
+    return deliveredWords(typed);
+  };
   if (sub === 'new') {
     const { by } = threadOwner();
     const words = turnText(wordsFrom(1));
@@ -8020,9 +8066,9 @@ function cmdThread() {
     // both lines checked before the thread's is written: a refused first turn leaves no thread with none
     if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
-    appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
+    const u = appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
     out(t.id);
-    return out(deliveredWords(deliverOwnerTurn(t, words, files)));
+    return out(deliver(t, u, words, files));
   }
   // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
   // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
@@ -8044,7 +8090,7 @@ function cmdThread() {
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
     const u = appendLog(line, by);
     out(u.id);
-    if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words, files)));
+    if (by === 'owner') out(deliver(t, u, words, files));
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -8134,9 +8180,9 @@ function cmdThread() {
     const n = openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
     appendLog({ type: 'thread', op: 'set', id: t.id, status: 'open' }, by);
-    if (words) appendLog({ type: 'turn', thread: t.id, text: words }, by);
+    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words }, by) : null;
     out(`reopened ${t.id}`);
-    if (words) return out(deliveredWords(deliverOwnerTurn(t, words)));
+    if (words) return out(deliver(t, u, words));
     return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
   if (sub === 'show') {
