@@ -42,18 +42,25 @@ function project(name, home) {
   return P;
 }
 
-// browser <args> on project P: { status, out, err }. cwd defaults to the project's checkout.
-function cli(P, args, extraEnv = {}, cwd = P.old) {
+// browser <args> on project P: { status, out, err }. cwd defaults to the project's checkout. input,
+// when given, is written to stdin, which is then ended unless keepOpen (then it ends when the child
+// closes); a client that exits before reading it all must not crash this process (EPIPE).
+function cli(P, args, extraEnv = {}, cwd = P.old, { input, keepOpen } = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...P.env, ...extraEnv };
     for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
-    const child = spawn(process.execPath, [path.join(P.old, 'docs/devteam/scripts/devteam.mjs'), 'browser', ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [path.join(P.old, 'docs/devteam/scripts/devteam.mjs'), 'browser', ...args], { cwd, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    if (input !== undefined) {
+      child.stdin.on('error', () => {});
+      child.stdin.write(input);
+      if (!keepOpen) child.stdin.end();
+    }
     let out = '', err = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
     const timer = setTimeout(() => child.kill('SIGKILL'), 90000);
     child.on('error', reject);
-    child.on('close', (status) => { clearTimeout(timer); seen.push(out, err); resolve({ status, out: out.trim(), err: err.trim() }); });
+    child.on('close', (status) => { clearTimeout(timer); if (keepOpen) child.stdin?.end(); seen.push(out, err); resolve({ status, out: out.trim(), err: err.trim() }); });
   });
 }
 
@@ -539,6 +546,42 @@ test('B3 only http and https', opts, async () => {
   assert.deepEqual(devWindows(e), []);
 });
 
+test('S1 type --stdin refusals', opts, async () => {
+  assert.equal(fs.existsSync(e.state), false, 'e has no browser');
+  const cases = [
+    { name: 'empty stdin', args: ['type', 'e1', '--stdin'], input: '' },
+    { name: 'a text word with --stdin', args: ['type', 'e1', '--stdin', 'word'], input: 'zq-a' },
+    { name: '--stdin=<value>', args: ['type', 'e1', '--stdin=zq-b'], secret: 'zq-b' },
+    { name: 'text after -- with --stdin', args: ['type', 'e1', '--stdin', '--', 'zq-c'], secret: 'zq-c' },
+    { name: '65537 bytes', args: ['type', 'e1', '--stdin'], input: 'x'.repeat(65537) },
+    { name: '65536 bytes, a newline, more', args: ['type', 'e1', '--stdin'], input: `${'x'.repeat(65536)}\nmore` },
+    { name: 'a TTY', args: ['type', 'e1', '--stdin'], input: 'zq-e', env: { DEVTEAM_TEST_BROWSER_STDIN_TTY: '1' }, err: /reads the text from a pipe/ },
+    { name: 'stdin held open', args: ['type', 'e1', '--stdin'], input: 'zq-d', keepOpen: true, env: { DEVTEAM_TEST_BROWSER_STDIN_MS: '1000' }, err: /didn't close in/ },
+  ];
+  for (const c of cases) {
+    const r = await cli(e, c.args, c.env, e.old, c.input === undefined ? {} : { input: c.input, keepOpen: c.keepOpen });
+    assert.equal(r.status, 1, `${c.name}: exited ${r.status}`);
+    if (c.err) assert.match(r.err, c.err, c.name);
+    const text = c.secret ?? c.input;
+    if (text) assert.ok(!(r.out + r.err).includes(text), `${c.name}: the text is echoed`);
+    assert.equal(fs.existsSync(e.state), false, `${c.name}: no daemon started`);
+    assert.deepEqual(devWindows(e), [], c.name);
+  }
+});
+
+test('S1 help and prompt', opts, async () => {
+  const run = (...args) => spawnSync(process.execPath, [path.join(e.old, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: e.old, env: e.env, encoding: 'utf8' });
+  const h = run('help');
+  assert.equal(h.status, 0, h.stderr);
+  assert.match(h.stdout, /type <ref> --stdin/);
+  const line = h.stdout.split('\n').find((l) => l.includes('browser start [--headed]'));
+  assert.ok(line, 'help has a browser line');
+  assert.match(line, /password or one-time code goes in on stdin/);
+  const p = run('prompt', 'supervisor');
+  assert.equal(p.status, 0, p.stderr);
+  assert.ok(p.stdout.includes('browser type <ref> --stdin'), 'the supervisor prompt says to pipe a secret in');
+});
+
 test('B4 the dashboard is refused', opts, async () => {
   const port = await dashboard();
   const before = dashLines(), seen0 = standIn.rec.requests;
@@ -663,6 +706,24 @@ test('A3 type and press', opts, async () => {
   assert.equal(bad.status, 1);
   assert.match(bad.err, /Enter, Tab, Escape/);
   assert.ok(!bad.err.includes('F13zq'));
+});
+
+test('S1 type --stdin', opts, async () => {
+  // T1, RF-b, RF-c: each on a fresh /record, so the page's value is this text alone
+  const typed = async (input, want) => {
+    await ok(a, ['open', `${site.origin}/record`]);
+    const ref = refOf(await snap(a), 'textbox', '');
+    const r = await cli(a, ['type', ref, '--stdin'], {}, a.old, { input });
+    assert.equal(r.status, 0, `type --stdin exited ${r.status}`);
+    assert.equal(r.out, `typed into ${ref}`);
+    if (want !== undefined) await until(() => site.events().some((x) => x.kind === 'input' && x.value === want), 'the typed value reaches the page');
+  };
+  await typed('zq-s3cret\n', 'zq-s3cret');
+  assert.ok(!seen.some((x) => x.includes('zq-s3cret')), 'nothing printed holds the text');
+  await typed('pässwörd✓', 'pässwörd✓');
+  await typed('zq-crlf\r\n', 'zq-crlf');
+  // T2b: the limit is the text's after the strip
+  await typed(`${'x'.repeat(65536)}\r\n`);
 });
 
 test('A4 scroll', opts, async () => {
@@ -790,4 +851,6 @@ test('J2 nothing secret printed', opts, async () => {
   assert.ok(secrets.size >= 2, 'control secrets were read');
   [...secrets].forEach((v, i) => assert.ok(!all.includes(v), `control secret ${i} printed`));
   for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!all.includes(v), `the ${what} printed`);
+  // S1: every text typed or offered with --stdin
+  for (const v of ['zq-s3cret', 'pässwörd✓', 'zq-crlf', 'zq-a', 'zq-b', 'zq-c', 'zq-d', 'zq-e']) assert.ok(!all.includes(v), `${v} printed`);
 });

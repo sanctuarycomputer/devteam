@@ -20249,7 +20249,7 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in (browser type <ref> --stdin), never as an argument: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -25432,7 +25432,7 @@ async function cmdBrowserGuard() {
 // devteam.mjs browser (browser@1; design supervisors-can-use-a-browser-with-the-o, §2 and §3): the
 // supervisor's own Chrome, driven from its shell. One private profile per project (the owner's
 // answer to q-20261114-203933946-supervisor), at ~/.devteam/browser/<key>/, used by nobody else.
-const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>]';
+const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | type <ref> --stdin | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>]';
 // The instance key, the contract's instance pattern: <project slug>-<12 hex>. A path is built from a
 // key only once it matches, so no key can climb out of browserHome().
 const BROWSER_KEY = /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$/;
@@ -26378,6 +26378,32 @@ async function browserStatus() {
   if (r) { process.exitCode = r.code; return out(r.out); }
   return out(flags.json ? JSON.stringify(off) : `browser isn't running (profile ${off.instance})`);
 }
+// browser type --stdin's text: stdin read to its end, bounded in bytes (stops once past max + 2, room
+// for a \r\n) and in time, decoded once at the end so a character split across reads stays whole,
+// with one trailing \n or \r\n dropped and then held to max. A refusal never echoes the text.
+function browserReadStdin({ max, ms }) {
+  if (process.stdin.isTTY || browserTestEnv('DEVTEAM_TEST_BROWSER_STDIN_TTY') === '1') die('browser type --stdin reads the text from a pipe: printf %s "$SECRET" | devteam.mjs browser type <ref> --stdin');
+  const over = `browser type --stdin: the text is over ${max} bytes`;
+  return new Promise((resolve) => {
+    const chunks = [];
+    let size = 0;
+    const timer = setTimeout(() => die(`browser type --stdin: stdin didn't close in ${ms / 1000} s`), ms);
+    process.stdin.on('data', (d) => {
+      size += d.length;
+      if (size > max + 2) { clearTimeout(timer); die(over); }
+      chunks.push(d);
+    });
+    process.stdin.on('error', (e) => { clearTimeout(timer); die(`browser type --stdin: stdin unreadable (${e.code ?? 'error'})`); });
+    process.stdin.on('end', () => {
+      clearTimeout(timer);
+      let b = Buffer.concat(chunks);
+      if (b.length >= 2 && b[b.length - 2] === 0x0d && b[b.length - 1] === 0x0a) b = b.subarray(0, -2);
+      else if (b.length >= 1 && b[b.length - 1] === 0x0a) b = b.subarray(0, -1);
+      if (b.length > max) die(over);
+      resolve(b.toString('utf8'));
+    });
+  });
+}
 // Which gates each verb runs: status, profiles and stop skip Chrome; the memory check is browserEnsure's.
 const BROWSER_VERBS = {
   ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve'].map((v) => [v, { chrome: true }])),
@@ -26407,13 +26433,16 @@ async function cmdBrowser() {
   // value or a key.
   const usage = () => die(`usage: ${BROWSER_USAGE}`);
   const n = positional.length, ref = () => (/^e[1-9]\d{0,5}$/.test(positional[1] ?? '') ? positional[1] : usage());
-  const send = {
+  let send = {
     open: () => ({ url: positional[1] }),
     snapshot: () => ({ json: !!flags.json }),
     click: () => (n === 2 ? { ref: ref() } : usage()),
-    // a word starting with -- would be read as an option and dropped: refused (unnamed, it may be part
-    // of the text), and text after a bare -- is taken whole
-    type: () => (Object.keys(flags).length ? die("browser type: a word starting with -- can't be typed as it stands; put the text after a bare --: browser type <ref> -- <text>")
+    // --stdin alone takes the text from stdin (read below, before any daemon is touched); with a value,
+    // text words or text after -- it is a usage error. Any other word starting with -- would be read as
+    // an option and dropped: refused (unnamed, it may be part of the text), and text after a bare -- is
+    // taken whole
+    type: () => (Object.hasOwn(flags, 'stdin') && Object.keys(flags).length === 1 ? (flags.stdin === true && n === 2 && rest === null ? { ref: ref(), stdin: true } : usage())
+      : Object.keys(flags).length ? die("browser type: a word starting with -- can't be typed as it stands; put the text after a bare --: browser type <ref> -- <text>")
       : rest !== null ? (n === 2 && rest.length ? { ref: ref(), text: rest.join(' ') } : usage()) : n >= 3 ? { ref: ref(), text: positional.slice(2).join(' ') } : usage()),
     press: () => (n === 2 && browserKeyOk(positional[1]) ? { key: positional[1] } : die(BROWSER_KEY_LIST)),
     scroll: () => (n === 2 && ['up', 'down'].includes(positional[1]) ? { dir: positional[1] } : usage()),
@@ -26422,6 +26451,11 @@ async function cmdBrowser() {
     tab: () => (n === 2 && /^[1-9]\d{0,2}$/.test(positional[1]) ? { n: Number(positional[1]) } : die('browser tab takes a tab number (browser tabs lists them)')),
     screenshot: () => (n === 1 && flags.out !== true ? { out: flagStr('out') === undefined ? undefined : path.resolve(flagStr('out')) } : usage()),
   }[verb]();
+  if (send.stdin) {
+    const text = await browserReadStdin({ max: 65536, ms: Number(browserTestEnv('DEVTEAM_TEST_BROWSER_STDIN_MS')) || 30000 });
+    if (!text) usage();
+    send = { ref: send.ref, text };
+  }
   const s = await browserEnsure();
   let r;
   try { r = await browserCall(verb, send, { state: s }); } catch (e) { die(`browser ${verb}: ${e.message}`); }
@@ -26493,7 +26527,7 @@ Decide and act (supervisor.md, constitution.md)
   preview url [<name>]            the link, as the owner will open it
   preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
   browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
-  ${BROWSER_USAGE}   supervisor: the supervisor's own Chrome (Node 22+), in a tmux window beside yours, with one private profile per project under ~/.devteam/browser/; profiles lists them as JSON, and forget removes one (every site in it signed out)
+  ${BROWSER_USAGE}   supervisor: the supervisor's own Chrome (Node 22+), in a tmux window beside yours, with one private profile per project under ~/.devteam/browser/; profiles lists them as JSON, and forget removes one (every site in it signed out); a password or one-time code goes in on stdin, never as an argument (other local users can read a command line): browser type <ref> --stdin
   preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
