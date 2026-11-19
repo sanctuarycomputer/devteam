@@ -152,6 +152,19 @@ test('canvas module: outside the shape domain apply refuses shape, never throws'
   assert.equal(canvas.apply(null, []).why, 'shape');
 });
 
+test('canvas module: a del of a container listing 200000 children never throws', async () => {
+  // past the nodes limit, but inside the shape rules: a hand-edited file; apply judges it, never throws
+  const canvas = await load();
+  const n = 200000;
+  const nodes = { f: { type: 'frame', parent: 'p1', children: [] } };
+  for (let i = 0; i < n; i++) { nodes.f.children.push(`c${i}`); nodes[`c${i}`] = { type: 'rect', parent: 'f' }; }
+  const doc = { canvas: 1, rev: 0, tokens: {}, pages: [{ id: 'p1', name: 'P', children: ['f'] }], nodes };
+  let r;
+  assert.doesNotThrow(() => { r = canvas.apply(doc, [{ op: 'del', id: 'f' }]); }, 'no throw');
+  assert.equal(r.why, null, 'the del applies');
+  assert.deepEqual(Object.keys(r.doc.nodes), [], 'the subtree is gone');
+});
+
 test('canvas module: images as an array equal the Set', async () => {
   const canvas = await load();
   const doc = deepFreeze(withImage());

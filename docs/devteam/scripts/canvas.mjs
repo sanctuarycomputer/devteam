@@ -890,7 +890,8 @@ function removeSubtrees(d, roots) {
     const id = stack.pop();
     if (!own(d.nodes, id)) continue;
     const n = d.nodes[id];
-    if (CONTAINERS.has(n.type) && Array.isArray(n.children)) stack.push(...n.children);
+    // one at a time: a spread of a huge children list (a hand-edited file) would overflow the call stack
+    if (CONTAINERS.has(n.type) && Array.isArray(n.children)) for (const c of n.children) stack.push(c);
     delete d.nodes[id];
   }
 }
