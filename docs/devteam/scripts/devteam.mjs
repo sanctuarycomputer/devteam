@@ -8795,7 +8795,7 @@ async function previewAwait(rec) {
   const end = Date.now() + 60000;
   for (;;) {
     if (await probePort(rec.port)) return { up: true };
-    const text = sh('tmux', ['capture-pane', '-p', '-J', '-t', rec.run.window]);
+    const text = sh('tmux', ['capture-pane', '-p', '-t', rec.run.window]);
     if (text === null || text.includes(PREVIEW_EXITED)) return { up: false, exited: true, text: text ?? '' };
     if (Date.now() > end) return { up: false, exited: false };
     await new Promise((r) => setTimeout(r, 250));

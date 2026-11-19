@@ -103,6 +103,7 @@ function testBrowserPids() {
 let e; // E1 to E4, D4, D5's planted form, Review Focus 1: refusals that start nothing
 let a; // the long-lived browser
 let h; // restart-heavy: the status/stop round trip, E5, G3, K2, Review Focus 5
+let g; // T3's second chain: H1 to H3, I1 to I3, beside h's F and G
 let k; // K1 only: its tmux session is the test's own, made before anything runs on it
 before(async () => {
   if (skip) return;
@@ -112,6 +113,7 @@ before(async () => {
   e = project('brw-e', newHome());
   a = project('brw-a', newHome());
   h = project('brw-h', newHome());
+  g = project('brw-g', newHome());
   k = project('brw-k', newHome());
 });
 
@@ -252,8 +254,16 @@ function devWindows(P) {
 const readState = (P) => JSON.parse(fs.readFileSync(P.state, 'utf8'));
 const previewRec = (P, name) => JSON.parse(fs.readFileSync(path.join(P.old, 'docs', 'devteam', 'run', 'previews', `${name}.json`), 'utf8'));
 const cmdline = (pid) => fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+// Starts run one at a time across the file: T3's two chains run at once, and two projects' daemons
+// starting together can pick the same free view port before either binds it. ms is the start's own.
+let starting = Promise.resolve();
+function startCli(P, extra) {
+  const run = starting.then(async () => { const t0 = Date.now(); const r = await cli(P, ['start'], extra); return { ...r, ms: Date.now() - t0 }; });
+  starting = run.catch(() => {});
+  return run;
+}
 async function started(P, extra) {
-  const r = await cli(P, ['start'], extra);
+  const r = await startCli(P, extra);
   assert.equal(r.status, 0, `start: ${r.err || r.out}`);
   assert.match(r.out, /browser running \(preview [a-z]+-[a-z]+(-\d+)?, profile /);
   return r;
@@ -514,6 +524,10 @@ test('K1 run.env reaches the daemon', opts, async () => {
 
 // ----- profile hygiene on every start (T3) -----
 
+// Each check below needs starts of its own, so they run as two chains at once to keep the file inside
+// its time budget: F and G on project h, H and I on project g. Each check takes its project as h.
+const hygiene = [];
+
 // Groups and pids the test made for H and I; each test kills its own, and this catches the rest. Only
 // these are ever signalled as a group: never one the test didn't create.
 const ownGroups = new Set();
@@ -533,6 +547,7 @@ function plantState(P, chromePid) {
 // SingletonLock as Chrome makes it: a symlink to <host>-<pid>.
 function plantLock(P, target) {
   const f = path.join(P.profile, 'SingletonLock');
+  fs.mkdirSync(P.profile, { recursive: true });
   fs.rmSync(f, { force: true });
   fs.symlinkSync(target, f);
 }
@@ -555,7 +570,7 @@ async function crash(P, { chrome }) {
   return s;
 }
 
-test('F1 the prefs are rewritten', opts, async () => {
+hygiene.push(['F1 the prefs are rewritten', async (h) => {
   fs.mkdirSync(path.dirname(PREFS(h)), { recursive: true });
   fs.writeFileSync(PREFS(h), JSON.stringify({ credentials_enable_service: true, profile: { password_manager_enabled: true, name: 'kept' }, autofill: { profile_enabled: true, credit_card_enabled: true }, session: { restore_on_startup: 4 } }));
   const check = (when) => {
@@ -567,9 +582,9 @@ test('F1 the prefs are rewritten', opts, async () => {
   assert.equal(JSON.parse(fs.readFileSync(PREFS(h), 'utf8')).profile.name, 'kept', 'every other key kept');
   await stopped(h);
   check('after stop');
-});
+}]);
 
-test('F2 the session files go', opts, async () => {
+hygiene.push(['F2 the session files go', async (h) => {
   await started(h);
   await crash(h, { chrome: true });
   const d = path.join(h.profile, 'Default');
@@ -582,21 +597,21 @@ test('F2 the session files go', opts, async () => {
   assert.equal(s.tabs, 1);
   assert.equal(s.url, 'about:blank');
   await stopped(h);
-});
+}]);
 
-test('F3 a failed delete refuses', opts, async () => {
+hygiene.push(['F3 a failed delete refuses', async (h) => {
   const f = path.join(h.profile, 'Default', 'Sessions', 'x');
   fs.mkdirSync(path.dirname(f), { recursive: true });
   fs.writeFileSync(f, 'x');
   try {
-    const r = await cli(h, ['start'], { DEVTEAM_TEST_BROWSER_DELETE_FAILS: '1' });
+    const r = await startCli(h, { DEVTEAM_TEST_BROWSER_DELETE_FAILS: '1' });
     assert.equal(r.status, 1, r.out);
     assert.match(r.err, /couldn't delete/);
     assert.deepEqual(testBrowserPids().filter((p) => carries(p, h)), [], 'no Chrome on the profile');
   } finally { fs.rmSync(path.dirname(f), { recursive: true, force: true }); }
-});
+}]);
 
-test('G1 the daemon\'s death leaves Chrome; the next start kills it', opts, async () => {
+hygiene.push(['G1 the daemon\'s death leaves Chrome; the next start kills it', async (h) => {
   await started(h);
   const old = await crash(h, { chrome: false });
   await new Promise((r) => setTimeout(r, 1000));
@@ -608,9 +623,9 @@ test('G1 the daemon\'s death leaves Chrome; the next start kills it', opts, asyn
   assert.equal(s.restarted, true);
   assert.equal(s.tabs, 1);
   await stopped(h);
-});
+}]);
 
-test('G2 the same with state.json deleted: the SingletonLock names it', opts, async () => {
+hygiene.push(['G2 the same with state.json deleted: the SingletonLock names it', async (h) => {
   await started(h);
   const old = await crash(h, { chrome: false });
   fs.rmSync(h.state);
@@ -619,9 +634,9 @@ test('G2 the same with state.json deleted: the SingletonLock names it', opts, as
   assert.equal(alive(old.chrome_pid), false, 'the old Chrome is gone');
   assert.equal((await statusJson(h)).restarted, true);
   await stopped(h);
-});
+}]);
 
-test('H1 a sleep is left alone', opts, async () => {
+hygiene.push(['H1 a sleep is left alone', async (h) => {
   const sleep = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' });
   ownGroups.add(sleep.pid);
   try {
@@ -632,22 +647,21 @@ test('H1 a sleep is left alone', opts, async () => {
     assert.equal((await statusJson(h)).restarted, false);
     await stopped(h);
   } finally { await killGroup(sleep.pid); }
-});
+}]);
 
-test('H2 a TERM-proof stand-in and its group go', opts, async () => {
+hygiene.push(['H2 a TERM-proof stand-in and its group go', async (h) => {
   const si = await standInOn(h);
   try {
     plantState(h, si.pid);
-    const t0 = Date.now();
-    await started(h);
-    assert.ok(Date.now() - t0 < 10000, `took ${Date.now() - t0} ms`);
+    const r = await started(h);
+    assert.ok(r.ms < 10000, `took ${r.ms} ms`);
     assert.equal(alive(si.pid), false, 'the stand-in is gone');
     assert.equal(alive(si.child), false, 'its group\'s child is gone');
     await stopped(h);
   } finally { await killGroup(si.pid); }
-});
+}]);
 
-test('H3 a non-leader is signalled alone', opts, async () => {
+hygiene.push(['H3 a non-leader is signalled alone', async (h) => {
   const c = spawn('sh', ['-c', `'${process.execPath}' -e "process.on('SIGTERM',()=>{});setInterval(()=>{},1e3)" -- --user-data-dir='${h.profile}' & echo $!; sleep 600 & echo $!; wait`], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
   ownGroups.add(c.pid);
   try {
@@ -662,9 +676,9 @@ test('H3 a non-leader is signalled alone', opts, async () => {
     assert.ok(alive(c.pid), 'sh lives');
     await stopped(h);
   } finally { await killGroup(c.pid); }
-});
+}]);
 
-test('I1 a foreign stale lock is cleared and said', opts, async () => {
+hygiene.push(['I1 a foreign stale lock is cleared and said', async (h) => {
   fs.rmSync(h.state, { force: true });
   plantLock(h, 'a-b-c-1234');
   const ino = {};
@@ -677,27 +691,27 @@ test('I1 a foreign stale lock is cleared and said', opts, async () => {
   // gone, or replaced: Chrome's own are symlinks, the planted ones plain files (an inode can be reused)
   for (const n of ['SingletonSocket', 'SingletonCookie']) { const st = fs.lstatSync(path.join(h.profile, n), { throwIfNoEntry: false }); assert.ok(!st || st.isSymbolicLink() || st.ino !== ino[n], `${n} gone or replaced`); }
   await stopped(h);
-});
+}]);
 
-test('I2 a foreign lock with a local holder is refused', opts, async () => {
+hygiene.push(['I2 a foreign lock with a local holder is refused', async (h) => {
   fs.rmSync(h.state, { force: true });
   const si = await standInOn(h);
   try {
     plantLock(h, 'a-b-c-1234');
-    const r = await cli(h, ['start']);
+    const r = await startCli(h);
     assert.equal(r.status, 1, r.out);
     assert.match(r.err, /host a-b-c/);
     assert.ok(alive(si.pid), 'the holder lives');
   } finally { await killGroup(si.pid); }
-});
+}]);
 
-test('I3 the last hyphen splits', opts, async () => {
+hygiene.push(['I3 the last hyphen splits', async (h) => {
   const hook = { DEVTEAM_TEST_BROWSER_HOSTNAME: 'x-y-z' };
   fs.rmSync(h.state, { force: true });
   const one = await standInOn(h);
   try {
     plantLock(h, `x-y-z-${one.pid}`);
-    const r = await cli(h, ['start'], hook);
+    const r = await startCli(h, hook);
     assert.equal(r.status, 0, r.err);
     assert.equal(alive(one.pid), false, 'read as this host: the stand-in is killed');
     await stopped(h);
@@ -706,10 +720,17 @@ test('I3 the last hyphen splits', opts, async () => {
   const two = await standInOn(h);
   try {
     plantLock(h, `x-y-${two.pid}`);
-    const r = await cli(h, ['start'], hook);
+    const r = await startCli(h, hook);
     assert.equal(r.status, 1, r.out);
     assert.match(r.err, /host x-y\b/);
     assert.ok(alive(two.pid));
   } finally { await killGroup(two.pid); }
   fs.rmSync(path.join(h.profile, 'SingletonLock'), { force: true });
+}]);
+
+test('profile hygiene on every start: F1 to F3, G1, G2, H1 to H3, I1 to I3', { skip, timeout: 240000, concurrency: 2 }, async (t) => {
+  const chain = (P, ids) => t.test(`on ${P.name}`, { concurrency: 1 }, async (c) => {
+    for (const [name, fn] of hygiene.filter(([x]) => ids.test(x))) await c.test(name, { timeout: 120000 }, () => fn(P));
+  });
+  await Promise.all([chain(h, /^[FG]/), chain(g, /^[HI]/)]);
 });
