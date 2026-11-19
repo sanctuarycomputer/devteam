@@ -6669,15 +6669,26 @@ function tFit(s) {
   return x;
 }
 // The line under the turns: nothing once the supervisor has the last word (its reply is the state).
-// Else: "Sent." when the POST that sent it said a pane took it; "will read it when it next checks"
-// when none did, or nobody knows (a reload); after 10 minutes with the supervisor running (a pane, as
-// /api/threads says), that it hasn't replied.
-function tCardState(t, now, typed, pane) {
+// Else: "Sent." when the POST that sent it said a pane took it; "Not delivered" when no terminal took
+// it (sup: /api/threads' record of such turns and the supervisor's last check, as tlRefresh keeps
+// it); "will read it when it next checks" when nobody knows (a reload); after 10 minutes with the
+// supervisor running (a pane, as /api/threads says), that it hasn't replied.
+function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.sup ?? null : null) {
   const last = t.turns[t.turns.length - 1];
   if (!last || last.by !== 'owner') return null;
   if (last.pending) return 'Sending…';
   // its terminal is asking a question: these words wait, and are never the answer to it
   if (typed === 'held' && pane) return "Held: the supervisor's terminal is asking something, and these words must not answer it. They reach the supervisor once it is answered (see the card).";
+  // missed: a turn in the log is the server's record's to say (typed is the thread's last send, and
+  // can be stale); the page's own turn, before a read has it, is its send's. Never "no pane now".
+  const missed = sup && /^u-/.test(last.id ?? '') ? !!sup.undelivered?.includes(last.id) : typed === false;
+  if (missed) {
+    const at = Date.parse(sup?.checked ?? '');
+    const m = Math.max(0, Math.round((now - at) / 60000));
+    const ago = m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+    if (at > Date.parse(last.at)) return `Not delivered: no supervisor terminal took it. The supervisor has checked since (${ago}) but hasn't replied yet.`;
+    return `Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; ${at > 0 ? `it last checked ${ago}` : 'it has not checked yet'}.`;
+  }
   if (now - Date.parse(last.at) > T_WAIT_MS) return pane ? "The supervisor hasn't replied yet." : 'Sent; the supervisor will read it when it next checks.';
   return typed === true ? 'Sent.' : 'Sent; the supervisor will read it when it next checks.';
 }
@@ -7500,6 +7511,7 @@ async function tlRefresh() {
     TL.raw = j.threads || [];
     tlRelay();
     TL.pane = !!j.supervisor?.pane;
+    TL.sup = { checked: typeof j.supervisor?.checked === 'string' ? j.supervisor.checked : null, undelivered: Array.isArray(j.supervisor?.undelivered) ? j.supervisor.undelivered : [] };
     askSet(j.supervisor?.question);
     const first = !TL.have;
     TL.have = n;

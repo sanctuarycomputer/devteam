@@ -1,0 +1,37 @@
+{
+  "doc": {
+    "canvas": 1,
+    "rev": 0,
+    "tokens": {},
+    "pages": [
+      {
+        "id": "p1",
+        "name": "Page\u00001",
+        "children": [
+          "t1"
+        ]
+      }
+    ],
+    "nodes": {
+      "t1": {
+        "type": "text",
+        "parent": "p1",
+        "text": "Hello\u001b[31m world\u007f"
+      }
+    }
+  },
+  "errors": [
+    {
+      "rule": "classes",
+      "code": "value",
+      "where": "pages[0].name",
+      "message": "not name: a control character"
+    },
+    {
+      "rule": "classes",
+      "code": "value",
+      "where": "nodes.t1.text",
+      "message": "not text: a control character"
+    }
+  ]
+}

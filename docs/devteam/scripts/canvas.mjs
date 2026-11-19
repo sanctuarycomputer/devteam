@@ -259,9 +259,12 @@ function codePoints(s) {
   }
   return n;
 }
+// The control characters free text refuses: every C0 but tab, line feed and carriage return, DEL and every C1 (kit-312).
+const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
 const textOf = (v, max) => {
   if (typeof v !== 'string') return 'not a string';
   if (!wellFormed(v)) return 'a lone surrogate';
+  if (CONTROL_RE.test(v)) return 'a control character';
   if (codePoints(v) > max) return `over ${max} characters`;
   return null;
 };
@@ -442,6 +445,9 @@ const isTokenNode = (v) => isObj(v) && Object.keys(v).some((k) => k.startsWith('
 
 // ---- validate (the fake's docErrors) ----
 
+// A node key holding a dot: a property is stored nested, never flat (kit-312); only an override's keys are flat.
+const DOTTED_MESSAGE = 'a dotted key (a property is stored nested: "layout": { "mode": … })';
+
 // `images` as the rules read it: a Set of file names, or null; an array is made a Set.
 const imageSet = (images) => (Array.isArray(images) ? new Set(images) : images);
 
@@ -539,6 +545,7 @@ export function validate(doc, { images = null, folderBytes = 0 } = {}) {
         if (k === 'id') add('keys', `${w}.id`, 'a node holds no id key (its key is its id)');
         continue;
       }
+      if (k.includes('.')) { add('keys', `${w}.${k}`, DOTTED_MESSAGE); continue; }
       if (GROUPS[n.type].has(k)) {
         if (!isObj(n[k])) { add('keys', `${w}.${k}`, 'a group that is not an object'); continue; }
         for (const sub of Object.keys(n[k])) if (!own(PROPS[n.type], `${k}.${sub}`)) add('keys', `${w}.${k}.${sub}`, `not a property of a ${n.type}`);
