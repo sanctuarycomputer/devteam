@@ -1270,7 +1270,7 @@ test('the public store: content-addressed blobs, one change at a time, swept to 
 function standIn(port, arts, { project = 'beta', root = '/srv/beta' } = {}) {
   const made = JSON.stringify({ arts, project, root });
   const S = { recorded: [] };
-  S.reset = () => Object.assign(S, JSON.parse(made), { lie: {}, tree: {}, title: {}, trickle: {}, asked: [] });
+  S.reset = () => Object.assign(S, JSON.parse(made), { lie: {}, tree: {}, title: {}, trickle: {}, asked: [], getOrigins: [] });
   S.reset();
   const hex = (t) => crypto.createHash('sha256').update(t).digest('hex');
   S.manifest = (slug) => {
@@ -1282,6 +1282,7 @@ function standIn(port, arts, { project = 'beta', root = '/srv/beta' } = {}) {
     const reply = (code, body, type = 'application/json') => { res.writeHead(code, { 'content-type': type }); res.end(body); };
     let m;
     S.asked.push(req.url);
+    if (req.method === 'GET') S.getOrigins.push(req.headers.origin ?? null);
     if (req.method === 'GET' && (m = /^\/public-manifest\/([a-z0-9-]+)$/.exec(req.url))) return Object.hasOwn(S.arts, m[1]) ? reply(200, JSON.stringify(S.manifest(m[1]))) : reply(404, '{"error":"not an artifact landed on main"}');
     if (req.method === 'GET' && (m = /^\/artifact\/main\/([a-z0-9-]+)\/(.+)$/.exec(req.url)) && Object.hasOwn(S.arts, m[1]) && Object.hasOwn(S.arts[m[1]], m[2])) {
       const text = S.lie[`${m[1]}/${m[2]}`] ?? S.arts[m[1]][m[2]];
@@ -1437,7 +1438,8 @@ test('public artifacts: a publish is refused unless every byte, the tree and the
     assert.ok(x.results[0].ok && y.results[0].ok, JSON.stringify([x.results, y.results]));
     assert.equal((await pubGet('/beta/a/x/y.js')).body, 'y()');
     assert.equal((await pubGet('/beta/b/')).body, '<p>b');
-    assert.deepEqual(S.recorded.map((r) => [r.op, r.slug, r.tree.length, r.headers.origin, r.headers['sec-fetch-site'], r.headers.cookie]).sort(), [['publish', 'a', 40, undefined, undefined, undefined], ['publish', 'b', 40, undefined, undefined, undefined]], 'recorded through a loopback request');
+    assert.deepEqual(S.recorded.map((r) => [r.op, r.slug, r.tree.length, r.headers.origin, r.headers['sec-fetch-site'], r.headers.cookie]).sort(), [['publish', 'a', 40, `http://127.0.0.1:${P + 10}`, undefined, undefined], ['publish', 'b', 40, `http://127.0.0.1:${P + 10}`, undefined, undefined]], 'recorded through a loopback request, which says the instance\'s own Origin (kit-324), never the box\'s');
+    assert.ok(S.getOrigins.length > 0 && S.getOrigins.every((o) => o === null), `the gateway's GETs (manifest, files) say no Origin: ${JSON.stringify(S.getOrigins)}`);
     assert.equal(blobsOf(gw).length, 3);
     // the same tree again is no change; another tree is an update
     let again = await confirmAndPublish(gw, P + 10, ['b']);
@@ -1542,8 +1544,11 @@ test('public artifacts: on a new box a forged record leads to an unticked, expla
     assert.match(held.body, /<b>changed<\/b> index\.html/);
     assert.match(held.body, /<b>new<\/b> extra\.txt/);
     await first.close();
-    // a local process, as a worker could be: no Origin, no sec-fetch-*, the same as the gateway's own call
-    const forged = await fetch(`http://127.0.0.1:${P + 24}/api/artifact-publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'publish', slug: 'weekly', tree: treeOf('weekly') }) });
+    // a local process, as a worker could be: with no browser header it is refused (kit-324)
+    const bare = await fetch(`http://127.0.0.1:${P + 24}/api/artifact-publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'publish', slug: 'weekly', tree: treeOf('weekly') }) });
+    assert.equal(bare.status, 403, 'a bare client is refused: it says no Origin and no Sec-Fetch-Site');
+    // but one that forges the instance's Origin, as the gateway's own call says it, is what the route can't refuse
+    const forged = await fetch(`http://127.0.0.1:${P + 24}/api/artifact-publish`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${P + 24}` }, body: JSON.stringify({ op: 'publish', slug: 'weekly', tree: treeOf('weekly') }) });
     assert.equal(forged.status, 200, 'what the route can\'t refuse');
     // a new box: the log moved, the gateway's copy didn't
     box = await gateway('public-repro-new');
@@ -1588,7 +1593,7 @@ test('public artifacts: unpublish takes a page down, and records it only where t
     assert.equal((await down({ project: 'beta', slug: 'a' }, { cookie: '' })).status, 401);
     let r = await down({ project: 'beta', slug: 'a', port: P + 15 });
     assert.deepEqual([r.status, r.json.recorded], [200, true], r.body);
-    assert.deepEqual([S.recorded.at(-1).op, S.recorded.at(-1).slug, S.recorded.at(-1).headers.origin], ['unpublish', 'a', undefined]);
+    assert.deepEqual([S.recorded.at(-1).op, S.recorded.at(-1).slug, S.recorded.at(-1).headers.origin], ['unpublish', 'a', `http://127.0.0.1:${P + 15}`]);
     assert.equal(await pubStatus('/beta/a/'), 404);
     assert.equal(await pubStatus('/beta/a'), 404, 'no redirect once it is down');
     assert.equal((await down({ project: 'beta', slug: 'a', port: P + 15 })).status, 404, 'once');
