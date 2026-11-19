@@ -68,8 +68,13 @@ test('an open question says when its linked page moved, once per log read', { ti
 
   const MOVED = `${qm} links the artifact moved-mock, which changed since it was asked; ask again about the page as it is now`;
   const GONE = `${qg} links the artifact gone-mock, which is no longer available; ask again`;
+  let answered = 0;
   for (const n of [1, 2]) {
+    // the dashboard serves a build again while it is young (3 s after it finished, kit-633): the second
+    // read waits until 3.1 s after the first's answer arrived, which was after that build finished
+    if (n === 2) await new Promise((r) => setTimeout(r, Math.max(0, answered + 3100 - Date.now())));
     const { data, reads } = await get();
+    answered = Date.now();
     const q = (id) => data.questions.find((x) => x.id === id);
     assert.equal(q(qm)?.links_moved, MOVED, `call ${n}: the moved page, in answer's words`);
     assert.equal(q(qs)?.links_moved, null, `call ${n}: the unchanged page`);

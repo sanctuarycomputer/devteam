@@ -1,0 +1,417 @@
+{
+  "canvas": "doc-minimal.json",
+  "slug": "local-board",
+  "steps": [
+    {
+      "local": {
+        "by": "supervisor",
+        "via": "apply",
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "r1",
+              "type": "rect",
+              "parent": "p1"
+            },
+            "after": null
+          }
+        ]
+      },
+      "status": 503,
+      "body": {
+        "why": "no-session"
+      }
+    },
+    {
+      "open": "a",
+      "person": "ana;name=Ana%20Lima",
+      "level": null,
+      "expect": {
+        "a": [
+          {
+            "t": "welcome",
+            "canvas": 1,
+            "session": "$session",
+            "rev": 0,
+            "you": {
+              "id": "ana",
+              "conn": "$conn:a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "local": {
+        "by": "supervisor",
+        "via": "apply",
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "r1",
+              "type": "rect",
+              "parent": "p1"
+            },
+            "after": null
+          }
+        ]
+      },
+      "status": 200,
+      "body": {
+        "rev": 1,
+        "edits": 1,
+        "saved": true
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 1,
+            "by": {
+              "id": "supervisor",
+              "name": "supervisor",
+              "via": "apply"
+            },
+            "ack": null,
+            "ops": [
+              {
+                "op": "add",
+                "node": {
+                  "id": "r1",
+                  "type": "rect",
+                  "parent": "p1"
+                },
+                "after": null
+              }
+            ]
+          },
+          {
+            "t": "saved",
+            "rev": 1
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 1,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1"
+          }
+        }
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "a": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "select",
+        "ids": [
+          "r1"
+        ]
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "a": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": [
+                  "r1"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "local": {
+        "by": "plan-checkout",
+        "via": "take",
+        "ops": [
+          {
+            "op": "set",
+            "id": "r1",
+            "prop": "name",
+            "value": "Taken"
+          },
+          {
+            "op": "set",
+            "id": "p1",
+            "prop": "name",
+            "value": "Board"
+          }
+        ]
+      },
+      "status": 200,
+      "body": {
+        "rev": 2,
+        "edits": 1,
+        "saved": true
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 2,
+            "by": {
+              "id": "plan-checkout",
+              "name": "plan-checkout",
+              "via": "take"
+            },
+            "ack": null,
+            "ops": [
+              {
+                "op": "set",
+                "id": "r1",
+                "prop": "name",
+                "value": "Taken"
+              },
+              {
+                "op": "set",
+                "id": "p1",
+                "prop": "name",
+                "value": "Board"
+              }
+            ]
+          },
+          {
+            "t": "saved",
+            "rev": 2
+          }
+        ]
+      }
+    },
+    {
+      "local": {
+        "by": "kit-651",
+        "via": "apply",
+        "ops": [
+          {
+            "op": "del",
+            "id": "r1"
+          }
+        ]
+      },
+      "status": 200,
+      "body": {
+        "rev": 3,
+        "edits": 1,
+        "saved": true
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 3,
+            "by": {
+              "id": "kit-651",
+              "name": "kit-651",
+              "via": "apply"
+            },
+            "ack": null,
+            "ops": [
+              {
+                "op": "del",
+                "id": "r1"
+              }
+            ]
+          },
+          {
+            "t": "saved",
+            "rev": 3
+          }
+        ]
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "a": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "local": {
+        "by": "supervisor",
+        "via": "apply",
+        "ops": [
+          {
+            "op": "set",
+            "id": "ghost",
+            "prop": "name",
+            "value": "G"
+          }
+        ]
+      },
+      "status": 409,
+      "body": {
+        "why": "missing"
+      }
+    },
+    {
+      "local": {
+        "by": "supervisor",
+        "via": "apply",
+        "ops": []
+      },
+      "status": 409,
+      "body": {
+        "why": "shape"
+      }
+    },
+    {
+      "local": {
+        "by": "not ok",
+        "via": "apply",
+        "ops": [
+          {
+            "op": "del",
+            "id": "p1"
+          }
+        ]
+      },
+      "status": 400,
+      "doc": {
+        "canvas": 1,
+        "rev": 3,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Board",
+            "children": []
+          }
+        ],
+        "nodes": {}
+      }
+    },
+    {
+      "as": "a",
+      "close": true
+    },
+    {
+      "local": {
+        "by": "supervisor",
+        "via": "apply",
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "r1",
+              "type": "rect",
+              "parent": "p1"
+            },
+            "after": null
+          }
+        ]
+      },
+      "status": 503,
+      "body": {
+        "why": "no-session"
+      }
+    },
+    {
+      "open": "a2",
+      "person": "ana;name=Ana%20Lima",
+      "level": null,
+      "expect": {
+        "a2": [
+          {
+            "t": "welcome",
+            "canvas": 1,
+            "session": "$session",
+            "rev": 3,
+            "you": {
+              "id": "ana",
+              "conn": "$conn:a2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "do": "remove",
+      "expect": {
+        "a2": [
+          {
+            "t": "closed",
+            "why": "removed"
+          },
+          {
+            "$close": 1000
+          }
+        ]
+      }
+    },
+    {
+      "open": "b",
+      "person": "ben;name=Ben%20Okafor",
+      "level": null,
+      "status": 404
+    },
+    {
+      "local": {
+        "by": "supervisor",
+        "via": "apply",
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "r1",
+              "type": "rect",
+              "parent": "p1"
+            },
+            "after": null
+          }
+        ]
+      },
+      "status": 404
+    }
+  ]
+}

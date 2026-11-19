@@ -2,13 +2,20 @@
 # devteam in the cloud: one container that is the owner's dev box. Its only public listener is the
 # gateway (gateway.mjs), which lets in a passkey registered when the box is claimed and passes the
 # owner to the machine's devteam hub, a terminal on the box's tmux server (where supervisors and
-# workers run), and each repo's dashboard on a subdomain of its own. What lasts lives on /data.
+# workers run), and each project at a host of its own. What lasts lives on /data.
 #
-# It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com: each
-# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and the terminal has
-# its own too (term.box.example.com). Signing in is at box.example.com/auth.
-# public.box.example.com, under the same wildcard, serves the artifacts the owner published, to
-# anyone, from the gateway's own copy (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default).
+# Until the gateway change (kit-277) ships, the project hosts below don't answer and the older addresses
+# do (<box> is the box's name): <port>.<box> for a project's dashboard, public.<box>/<project>/<slug>/ for
+# a public page, <box>/public/publish?port=... for Publish, and /box.json says box: 1.
+# It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com. Each project is
+# at <project>.box.example.com: its dashboard and every private view after sign-in, and its public
+# pages (what the owner published) at /<artifact>/ for anyone, from the gateway's own copy
+# (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default). Older releases' addresses (a port number
+# or public. in front of the box's name) no longer answer, and nothing redirects them. The wildcard
+# certificate covers every project host: no DNS record or certificate to add. A project's host is its
+# name, `project` in its settings.md (else its folder's name): a DNS label of a-z, 0-9 and -, not all
+# digits, not term, public or www, unique on the box. The terminal has its own host
+# (term.box.example.com). Signing in is at box.example.com/auth.
 # A session's running dev server gets a name of its own under the same wildcard, cool-tiger.box.example.com,
 # behind the owner's session; box.example.com/dev/ lists them. DEVTEAM_PREVIEWS=1 says this image's
 # gateway serves them, so the kit prints a link only then.
@@ -39,7 +46,8 @@ FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8
 
 ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1 DEVTEAM_PREVIEWS=1
 
-RUN apt-get update \
+RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
+ && apt-get update \
  && apt-get install -y --no-install-recommends git tmux tini curl ca-certificates gnupg openssh-client procps less vim-tiny jq unzip build-essential python3 \
  && rm -rf /var/lib/apt/lists/*
 
@@ -47,7 +55,7 @@ RUN apt-get update \
 # outside /data resets on a deploy, so only what needs root lives here: system libraries, and things
 # worth having prebuilt. Languages and their versions are per project, with mise, on the disk.
 # Postgres 14, 16 and 17 with pgvector, as on the owner's Mac; `box-pg` runs a server of any of them.
-RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/pgdg.asc \
+RUN curl -fsSL --retry 5 --retry-all-errors https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/pgdg.asc \
  && echo "deb [signed-by=/usr/share/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends postgresql-common \
@@ -83,20 +91,20 @@ RUN case "$(uname -m)" in \
       aarch64) sum=$TTYD_SHA256_AARCH64 ;; \
       *) echo "no ttyd for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/$TTYD_VERSION/ttyd.$(uname -m)" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/$TTYD_VERSION/ttyd.$(uname -m)" \
  && echo "$sum  /usr/local/bin/ttyd" | sha256sum -c - && chmod 755 /usr/local/bin/ttyd
 
 # gh, from its release tarball (only the binary; the image has no man). /usr/bin/gh stays, as a
 # link: `gh auth setup-git` wrote that path into ~/.gitconfig's credential helper, on the volume.
-ARG GH_VERSION=2.104.0
-ARG GH_SHA256_X86_64=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
-ARG GH_SHA256_AARCH64=cb34cefc6f4e77b90731374a2b737516bb8f3033c6ca46aa949e5344f68069e3
+ARG GH_VERSION=2.105.0
+ARG GH_SHA256_X86_64=79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f
+ARG GH_SHA256_AARCH64=b1278c75107423d818f1937fd92cafc9e5e9b606631568f68d7fb816f5885a02
 RUN case "$(uname -m)" in \
       x86_64) arch=amd64; sum=$GH_SHA256_X86_64 ;; \
       aarch64) arch=arm64; sum=$GH_SHA256_AARCH64 ;; \
       *) echo "no gh for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$arch.tar.gz" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$arch.tar.gz" \
  && echo "$sum  /tmp/gh.tgz" | sha256sum -c - \
  && tar -xzf /tmp/gh.tgz --no-same-owner -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_$arch/bin/gh" && rm /tmp/gh.tgz \
  && chmod 755 /usr/local/bin/gh && ln -sf /usr/local/bin/gh /usr/bin/gh
@@ -111,19 +119,19 @@ RUN case "$(uname -m)" in \
       aarch64) arch=arm64; sum=$MISE_SHA256_AARCH64 ;; \
       *) echo "no mise for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/$MISE_VERSION/mise-$MISE_VERSION-linux-$arch" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/$MISE_VERSION/mise-$MISE_VERSION-linux-$arch" \
  && echo "$sum  /usr/local/bin/mise" | sha256sum -c - && chmod 755 /usr/local/bin/mise
 
 # uv, which brings claude-swap the Python 3.12 it needs (Debian's is older)
-ARG UV_VERSION=0.13.8
-ARG UV_SHA256_X86_64=5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
-ARG UV_SHA256_AARCH64=74f2f5c6024d397481db228db8fc25eed420db192243f88438c118e7e013e585
+ARG UV_VERSION=0.13.9
+ARG UV_SHA256_X86_64=a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+ARG UV_SHA256_AARCH64=0797542018e541a9288855df555c8077eed06f7a47d206362030480e8ecc9f3d
 RUN case "$(uname -m)" in \
       x86_64) sum=$UV_SHA256_X86_64 ;; \
       aarch64) sum=$UV_SHA256_AARCH64 ;; \
       *) echo "no uv for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$(uname -m)-unknown-linux-gnu.tar.gz" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$(uname -m)-unknown-linux-gnu.tar.gz" \
  && echo "$sum  /tmp/uv.tgz" | sha256sum -c - && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 && rm /tmp/uv.tgz
 
 # claude-swap: with it devteam rotates this box's Claude accounts on its own; its logins land in $HOME, on the volume
@@ -132,7 +140,7 @@ RUN UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_D
  && chmod -R a+rX /opt/uv
 
 # Claude Code (its own updater can't write to /usr/local)
-ARG CLAUDE_CODE_VERSION=2.1.325
+ARG CLAUDE_CODE_VERSION=2.1.328
 RUN npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION && npm cache clean --force
 
 # Two users. dev is the owner at the terminal, and every agent: home on the volume. gw runs only
@@ -243,8 +251,9 @@ say "gateway answers; starting dev's side"
 trap - EXIT
 install -d -o dev -g dev -m 2775 /var/run/postgresql
 as_dev /usr/local/bin/devteam-dev >/dev/null 2>&1 &   # not the platform's log: no agent can write a fake claim link there
-# each user stops its own (root may not signal theirs)
-trap 'say "stopping"; as_dev tmux kill-server 2>/dev/null || true; sleep 2; as_gw kill -TERM "$gw" 2>/dev/null || true; exit 0' TERM INT
+# each user stops its own (root may not signal theirs). The mark first: dev's minute loop then
+# takes the server going for the stop it is, and brings nothing back.
+trap 'say "stopping"; as_dev touch /data/home/.box/stopping 2>/dev/null; as_dev DEVTEAM_ALLOW_KILL_SERVER=1 tmux kill-server 2>/dev/null || true; sleep 2; as_gw kill -TERM "$gw" 2>/dev/null || true; exit 0' TERM INT
 say "up"
 rc=0; wait "$gw" || rc=$?
 say "the gateway exited with $rc; the box stops"
@@ -258,6 +267,119 @@ COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
 # The operator's commands (operator.md): the image's kit, for every repo in ~/code and any other the
 # machine has recorded. box-recover brings back what was up before a restart (the list devteam-dev
 # keeps), each repo by its own kit's recover, in tmux session home as sup-<repo>.
+# tmux, for everyone on the box: Debian's behind two guards, since every supervisor, worker, dashboard
+# and the operator live on one tmux server. The guard is /usr/bin/tmux itself, with Debian's binary
+# diverted to /usr/bin/tmux.distrib (dpkg-divert, so an upgrade keeps it there): an absolute
+# /usr/bin/tmux, or an exec with no PATH (glibc and node fall back to /usr/bin), reaches the guard too.
+# (a) A caller that set TMUX_TMPDIR, and named no -S or -L, gets the private server it meant: in a
+# pane, $TMUX would otherwise win, and the call would reach the box's server. (b) kill-server aimed at
+# the box's server (dev's default socket, the one the boot and the terminal use) is refused: on
+# 2026-11-16, twice, a test's kill-server, meant for a server of its own, ran in a pane and stopped the
+# whole box. DEVTEAM_ALLOW_KILL_SERVER=1 lets a deliberate one through (the box's own stop does). The
+# socket is worked out as tmux does: -S; -L under the tmpdir; $TMUX; default. kill-server counts as the
+# command first, after a ;, and anywhere after a command that is handed one as a word (if-shell,
+# confirm-before, set-hook, display-menu, choose-tree, command-prompt, bind-key, source-file). Not
+# caught: kill-session, kill-server typed at tmux's : prompt or inside a file source-file reads, or a
+# tmux earlier on PATH than this one (a mise or project install).
+# Everything else goes straight to tmux, arguments untouched: every tmux call the kit makes runs this.
+RUN dpkg-divert --local --rename --divert /usr/bin/tmux.distrib --add /usr/bin/tmux
+COPY --chmod=755 <<'EOF' /usr/bin/tmux
+#!/bin/sh
+s='' l='' w='' o=1 k='' at='' any=''
+for a do
+  case $w in S) s=$a; w=; continue ;; L) l=$a; w=; continue ;; x) w=; continue ;; esac
+  if [ -n "$o" ]; then
+    case $a in
+      --) o='' at=1; continue ;;
+      -?*) r=${a#-}
+        while [ -n "$r" ]; do
+          c=${r%"${r#?}"}; r=${r#?}
+          case $c in S|L|c|f|T) case $c$r in S?*) s=$r ;; L?*) l=$r ;; S|L) w=$c ;; ?) w=x ;; esac; r= ;; esac
+        done
+        continue ;;
+    esac
+    o='' at=1
+  fi
+  # a command's name: the first word, the first after a ; (not send-keys' text, a target), and any
+  # word up to the next ; once a command that takes a command as a word has come (if-shell,
+  # confirm-before, set-hook, a menu, a prompt, a binding, source-file)
+  if [ -n "$any" ]; then case $a in *kill-ser*) k=1 ;; esac
+  elif [ -n "$at" ]; then
+    case $a in
+      kill-ser|kill-serv|kill-serve|kill-server|kill-ser\;|kill-serv\;|kill-serve\;|kill-server\;) k=1 ;;
+      if|if-*|confirm|confirm-*|set-hook|hook|display-menu|menu|choose-*|command-prompt|bind|bind-key|source|source-file) any=1 ;;
+    esac
+  fi
+  case $a in *\;) at=1 any= ;; *) at= ;; esac
+done
+if [ -n "$TMUX_TMPDIR" ] && [ -n "$TMUX" ] && [ -z "$s$l" ]; then
+  case ${TMUX%%,*} in "${TMUX_TMPDIR%/}"/*) ;; *) unset TMUX TMUX_PANE ;; esac
+fi
+if [ -n "$k" ] && [ "$DEVTEAM_ALLOW_KILL_SERVER" != 1 ]; then
+  d=${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)
+  if [ -n "$s" ]; then t=$s; elif [ -n "$l" ]; then t=$d/$l; elif [ -n "${TMUX%%,*}" ]; then t=${TMUX%%,*}; else t=$d/default; fi
+  box=/tmp/tmux-$(id -u dev 2>/dev/null)/default
+  if [ "$t" = "$box" ] || [ "$t" -ef "$box" ]; then
+    echo "tmux: kill-server refused: this would stop every supervisor on the box; use a private server: tmux -S <socket> …" >&2
+    exit 1
+  fi
+fi
+exec /usr/bin/tmux.distrib "$@"
+EOF
+RUN [ -x /usr/bin/tmux.distrib ] && grep -q 'kill-server refused' /usr/bin/tmux && [ "$(command -v tmux)" = /usr/bin/tmux ] && [ "$(su -l -s /bin/sh -c 'command -v tmux' dev 2>/dev/null)" = /usr/bin/tmux ] && [ "$(env -i /bin/sh -c 'command -v tmux')" = /usr/bin/tmux ] && tmux -V
+# Tap ☰ at the left of tmux's status bar: scroll, and every window on the box, each a tap away. A phone
+# can't fit every tab in the bar, nor scroll tmux without a wheel (the gateway's page turns swipes into one).
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-tmux-menu
+#!/bin/sh
+c="$1"
+tab=$(printf '\t')
+# the pane the menu's scroll items act on: the tapping client's own, never another client's
+pane=$(tmux display-message -p -c "$c" '#{pane_id}')
+# tmux draws no menu taller than the client and says nothing: fit the list to its height
+h=$(tmux display-message -p -c "$c" '#{client_height}')
+case "$h" in ''|*[!0-9]*) h=24 ;; esac
+# nor wider: labels are cut to the client's width (the menu's frame takes 4 columns, its keys 4)
+w=$(tmux display-message -p -c "$c" '#{client_width}')
+case "$w" in ''|*[!0-9]*) w=80 ;; esac
+cut=$((w - 8)); [ "$cut" -gt 34 ] && cut=34; [ "$cut" -lt 6 ] && cut=6
+# the scroll rows and their separator, and a separator and "More windows…" kept back in case it is cut
+room=$((h - 2 - 4 - 2))
+# the home session's windows first, then each project's agents under its name
+list=$(tmux list-windows -a -F "#{session_name}${tab}#{window_index}${tab}#{window_name}${tab}#{window_id}" |
+  awk -F"$tab" '$1=="home"{print} $1!="home"{o=o $0 "\n"} END{printf "%s", o}')
+# too many for the screen: the home session and each project's supervisor only
+count=$(printf '%s\n' "$list" | awk -F"$tab" -v OFS="$tab" '$4!="" && $3!="dashboard"{s[$1]=1; n++} END{for (k in s) if (k!="home") n++; print n+0}')
+only_sup=0
+[ "$count" -gt "$room" ] && only_sup=1
+set -- display-menu -c "$c" -t "$pane" -T "#[align=centre] Box " -x 0 -y S \
+  "Scroll up a page" u "copy-mode -u" \
+  "Scroll down a page" d "send-keys -X page-down" \
+  "Stop scrolling" q "send-keys -X cancel" \
+  ""
+used=0
+cut_short=0
+last=""
+while IFS="$tab" read -r s _ n id; do
+  [ -n "$id" ] && [ -n "$n" ] && [ "$n" != dashboard ] || continue
+  [ "$only_sup" = 1 ] && [ "$s" != home ] && case "$n" in sup-*) ;; *) continue ;; esac
+  case "$s" in home) tag="" ;; devteam-*) tag=$(echo "$s" | sed -E 's/^devteam-//; s/-[0-9a-f]{6}$//') ;; *) tag="$s" ;; esac
+  need=1
+  [ "$s" != "$last" ] && [ -n "$last" ] && need=2
+  [ $((used + need)) -gt "$room" ] && { cut_short=1; break; }
+  [ "$need" = 2 ] && set -- "$@" "-#[align=centre]$(printf '%s' "$tag" | sed 's/#/##/g')" "" ""
+  last="$s"
+  used=$((used + need))
+  # a window's name is anyone's on the box, and tmux expands #(...) in a menu label: show it
+  # literally; a leading - would make it a disabled item, so it gets a space first
+  label=$(printf '%s' "$n" | sed 's/^sup-/* /' | cut -c1-"$cut" | sed 's/#/##/g; s/^-/ -/')
+  set -- "$@" "$label" "" "switch-client -c '$c' -t '$id'"
+done <<LIST
+$list
+LIST
+# anything left out stays a tap away: tmux's own window tree, full screen
+[ "$only_sup" = 1 ] || [ "${cut_short:-0}" = 1 ] && set -- "$@" "" "More windows…" m "choose-tree -Zw"
+exec tmux "$@"
+EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-recover
 #!/bin/sh
 exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs recover --machine --in "$HOME/code" --session home --was-up "$HOME/.devteam-supervisors.boot" "$@"
@@ -338,7 +460,9 @@ find "$HOME/tmp" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null
 # Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
 # start again at %0, so one noted before this boot could be another program's by now; its mark
 # (supervisor-pane-role) goes with it.
-find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
+# Only inside each repo's own .git (a worktree's locks live in its repo's .git/worktrees/), never a
+# walk of every worktree and node_modules: that took minutes on a box with many checkouts.
+for g in "$HOME"/code/*/.git "$HOME"/code/*/*/.git; do [ -d "$g" ] && find "$g" -name '*.lock' -type f -delete 2>/dev/null; done
 # so is a Postgres pid file: its old pid is often held by another process by now, and it wouldn't start
 rm -f "$HOME"/.pg/*/postmaster.pid
 rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devteam/run/supervisor-pane-role
@@ -349,12 +473,26 @@ rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devtea
 grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
 # Claude Code asks for it in every pane: without it, it can't tell when its pane gains or loses focus
 grep -q focus-events .tmux.conf || echo 'set -g focus-events on' >> .tmux.conf
+# a phone's screen (under 80 columns): short tabs and no status-right; every screen gets the ☰ menu
+# (box-tmux-menu) to scroll and reach any window
+grep -q MouseDown1StatusLeft .tmux.conf || cat >> .tmux.conf <<'TMUX'
+set -g status-left '#[reverse] ☰ #[default] '
+set -g status-left-length 5
+set -g window-status-separator ''
+set -g status-right '#{?#{e|<:#{client_width},80},,"#{=21:pane_title}" %H:%M %d-%b-%y}'
+set -g window-status-format '#{?#{e|<:#{client_width},80}, #I #{=7:#{s/^sup-//:window_name}} , #I:#W#F }'
+set -g window-status-current-format '#[reverse]#{?#{e|<:#{client_width},80}, #I #{=7:#{s/^sup-//:window_name}} , #I:#W#F }#[default]'
+bind -n MouseDown1StatusLeft run-shell -b "box-tmux-menu '#{client_name}'"
+TMUX
+# ⌘⌥←/→ in the terminal page (gateway.mjs, TERM_KEYS) arrive as Ctrl+Alt+Shift+←/→: previous and next window
+grep -q 'C-M-S-Left' .tmux.conf || echo 'bind -n C-M-S-Left previous-window' >> .tmux.conf
+grep -q 'C-M-S-Right' .tmux.conf || echo 'bind -n C-M-S-Right next-window' >> .tmux.conf
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'
 eval "$(mise activate bash)"
 [ -f ~/.devteam-quiet ] || cat <<'MOTD'
-devteam box. Window 0 (operator) looks after the box: tell it what you want. First time here:
+devteam box. Window 0 (operator) looks after the box: tell it what you want. Closed, it comes back within a minute; don't rename it. First time here:
   in window 0, log in to Claude Code
   claude plugin marketplace add obra/superpowers-marketplace && claude plugin install superpowers@superpowers-marketplace
   gh auth login && gh auth setup-git       # GitHub, and git over HTTPS with it
@@ -381,16 +519,30 @@ if [ -f "$up.boot.at" ]; then [ -f "$up.boot" ] && awk 'NR == FNR { r = $0; sub(
 if [ -s "$up" ]; then now=$(date +%s); sed "s/^/$now /" "$up" >> "$up.boot"; fi
 rm -f "$up"
 # Window 0 is the operator (operator.md): the first thing the Terminal shows, and what checks the restore.
-mkdir -p operator
-if ! tmux has-session -t home 2>/dev/null; then
-  tmux new-session -d -s home -n operator -c "$HOME/operator"
-  tmux new-window -d -t home -n shell -c "$HOME"
+# A window named operator in home is how the box knows it is up: one closed, even on purpose, is back
+# within a minute (the minute loop), and one renamed is no longer seen, so a second starts.
+# start_operator: at boot, and again whenever the minute loop finds the tmux server lost ($1 says
+# which). Only if home has no operator window: a home the terminal made meanwhile gets one added.
+# .box/stopping is the box's stop under way (devteam-box marks it): a mark left from the last boot goes.
+mkdir -p operator .box
+rm -f .box/stopping
+start_operator() {
+  timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx operator && return 0
+  if timeout 20 tmux has-session -t =home 2>/dev/null; then
+    timeout 20 tmux new-window -d -t '=home:0' -n operator -c "$HOME/operator" 2>/dev/null || timeout 20 tmux new-window -d -t '=home:' -n operator -c "$HOME/operator" || return 1
+  else
+    timeout 20 tmux new-session -d -s home -n operator -c "$HOME/operator" || return 1
+    timeout 20 tmux new-window -d -t '=home:' -n shell -c "$HOME"
+  fi
   ask='You are the sanctuarycomputer/devteam operator for this box. The boot has run box-recover, and what it printed is in ~/.box/recover.log: read it, sort out anything NOT started, and make sure your supervisors are all up and running.'
-  if ls .claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; ask="The box restarted. $ask"; else c=''; fi
+  case $1 in lost) why='The tmux server on this box stopped, and every window on it went with it; it was started again as at a boot.' ;; *) why='The box restarted.' ;; esac
+  if ls "$HOME"/.claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; ask="$why $ask"; else c=''; fi
   # its job is in its system prompt, so what it's told, and what the owner tells it, stays plain English
-  tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
-  tmux send-keys -t home:operator Enter
-fi
+  # (and holds no ' : it is typed inside one)
+  timeout 20 tmux send-keys -t '=home:operator' -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
+  timeout 20 tmux send-keys -t '=home:operator' Enter
+}
+start_operator boot
 # The machine's hub, from the image's kit (devteam.mjs hub), in window home:hub: started here, so it
 # is up by the time the dashboards start (each steps back from the port: DEVTEAM_IMAGE_HUB), and
 # brought back by the minute loop below. Its cwd is $HOME and its kit has no repo, so nothing it
@@ -400,8 +552,9 @@ fi
 # so otherwise), and env drops what would load other code into node or point the hub at another
 # home or port, and sets HOME to dev's own. -t '=home:' with the colon: a bare =home is first a window named home in the
 # current session. Started only if home has no hub window yet (devteam-dev run again by hand), as
-# the minute loop does. hub_wait gives it ${DEVTEAM_HUB_WAIT_SECONDS:-15}s to answer, then goes on.
-hub_window() { case $DEVTEAM_KIT_RELEASE in *[!v0-9.]*) hub_rel= ;; *) hub_rel=$(printf '%s\n' "$DEVTEAM_KIT_RELEASE" | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+') ;; esac; hub_cmd="while :; do /usr/bin/env -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE -u DEVTEAM_HOME -u DEVTEAM_RUN -u DEVTEAM_PROJECT -u DEVTEAM_HUB_PORT HOME='$HOME' PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs hub --release '$hub_rel'; sleep 1; done"; if timeout 20 tmux has-session -t =home 2>/dev/null; then timeout 20 tmux new-window -d -t '=home:' -n hub -c "$HOME" "$hub_cmd"; else timeout 20 tmux new-session -d -s home -n hub -c "$HOME" "$hub_cmd"; fi; }
+# the minute loop does; with no tmux server at all it starts none (the minute loop's restore
+# starts everything). hub_wait gives it ${DEVTEAM_HUB_WAIT_SECONDS:-15}s to answer, then goes on.
+hub_window() { case $DEVTEAM_KIT_RELEASE in *[!v0-9.]*) hub_rel= ;; *) hub_rel=$(printf '%s\n' "$DEVTEAM_KIT_RELEASE" | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+') ;; esac; hub_cmd="while :; do /usr/bin/env -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE -u DEVTEAM_HOME -u DEVTEAM_RUN -u DEVTEAM_PROJECT -u DEVTEAM_HUB_PORT HOME='$HOME' PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs hub --release '$hub_rel'; sleep 1; done"; if timeout 20 tmux has-session -t =home 2>/dev/null; then timeout 20 tmux new-window -d -t '=home:' -n hub -c "$HOME" "$hub_cmd"; elif timeout 20 tmux list-sessions >/dev/null 2>&1; then timeout 20 tmux new-session -d -s home -n hub -c "$HOME" "$hub_cmd"; fi; }
 hub_wait() { hub_w=${DEVTEAM_HUB_WAIT_SECONDS:-15}; case $hub_w in ''|*[!0-9]*|0?*) hub_w=15 ;; esac; hub_end=$(( $(date +%s) + hub_w )); while :; do curl -fsS --max-time 1 "http://127.0.0.1:$DEVTEAM_IMAGE_HUB/instances.json" 2>/dev/null | grep -q '"hub":1[,}]' && return 0; [ "$(date +%s)" -lt "$hub_end" ] || { note "hub: nothing answered hub 1 on 127.0.0.1:$DEVTEAM_IMAGE_HUB after ${hub_w}s; going on (see ~/.devteam/hub-$DEVTEAM_IMAGE_HUB.log)"; return 1; }; sleep 1; done; }
 timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
 # The operator's tick: typed into its window every 30 minutes. Never over someone's half-typed line, a
@@ -482,39 +635,95 @@ box-pg 17                  # the default Postgres, port 5432
 BOOT
 timeout 120 sh .box/boot.sh >> box.log 2>&1 || note "boot.sh failed (exit $?): see box.log"
 hub_wait || :
-for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
-  [ -f "$k" ] || continue
-  r=${k%/docs/devteam/scripts/devteam.mjs}
-  # adopted repos only, as the kit counts them: a checkout of devteam itself has the kit but
-  # no settings, and its dashboard would only fail every 5s in a window of its own
-  [ -f "$r/docs/devteam/project/settings.md" ] || continue
-  # In the project's own tmux session, as the window named dashboard: where the kit keeps it
-  # (supervisor.md, the dashboard), so a supervisor that resumes finds it there and starts no
-  # second one on another port. A kit too old to name its session keeps it in home.
-  c="while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
-  s=$(cd "$r" && /usr/local/bin/node docs/devteam/scripts/devteam.mjs settings --get tmux_session 2>/dev/null) || s=
-  if [ -z "$s" ] || [ "$s" = null ]; then
-    tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "$c"
-  elif tmux has-session -t "=$s" 2>/dev/null; then
-    tmux new-window -d -t "=$s" -n dashboard -c "$r" "$c"
-  else
-    tmux new-session -d -s "$s" -n dashboard -c "$r" "$c"
-  fi
-done
+# start_dashboards: every adopted repo's dashboard, at boot and again after a lost tmux server. One
+# already in its window stays as it is.
+start_dashboards() {
+  for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
+    [ -f "$k" ] || continue
+    r=${k%/docs/devteam/scripts/devteam.mjs}
+    # adopted repos only, as the kit counts them: a checkout of devteam itself has the kit but
+    # no settings, and its dashboard would only fail every 5s in a window of its own
+    [ -f "$r/docs/devteam/project/settings.md" ] || continue
+    # In the project's own tmux session, as the window named dashboard: where the kit keeps it
+    # (supervisor.md, the dashboard), so a supervisor that resumes finds it there and starts no
+    # second one on another port. A kit too old to name its session keeps it in home.
+    c="while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
+    s=$(cd "$r" && /usr/local/bin/node docs/devteam/scripts/devteam.mjs settings --get tmux_session 2>/dev/null) || s=
+    if [ -z "$s" ] || [ "$s" = null ]; then
+      w="dash-$(basename "$r")"
+      timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qxF "$w" || timeout 20 tmux new-window -d -t '=home:' -n "$w" -c "$r" "$c"
+    elif timeout 20 tmux has-session -t "=$s" 2>/dev/null; then
+      timeout 20 tmux list-windows -t "=$s" -F '#{window_name}' 2>/dev/null | grep -qx dashboard || timeout 20 tmux new-window -d -t "=$s:" -n dashboard -c "$r" "$c"
+    else
+      timeout 20 tmux new-session -d -s "$s" -n dashboard -c "$r" "$c"
+    fi
+  done
+}
+# start_recover [wait]: box-recover, in the background, into ~/.box/recover.log, one at a time, so a
+# restore never races the boot's. With wait (the boot) it waits its turn; without (the minute loop)
+# it starts nothing when a run is under way. Either way a run that didn't happen leaves
+# ~/.box/recover.owed, and the loop tries again the next minute, so no queue of waiting runs builds
+# up while the box has no tmux server, and none is lost.
+owed="$HOME/.box/recover.owed"
+start_recover() {
+  if [ "$1" = wait ]; then f='-w 3600'; else flock -n "$HOME/.box/recover.lock" true 2>/dev/null || { : > "$owed"; return 1; }; f=-n; fi
+  ( flock $f 9 || { : > "$owed"; note "box-recover: another run held it; this one did not run, the next minute tries again"; exit 1; }; /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) 9> "$HOME/.box/recover.lock" &
+}
+start_dashboards
 # The restore runs here, after boot.sh and the dashboards, not by the operator's hand: an operator
 # resumed on its old conversation can reach for a command from before the deploy, and every supervisor
 # waits on it. Safe to run again, so the operator running it too changes nothing. In the background:
 # the terminal comes up meanwhile. It reads the list saved above; the loop below keeps it current.
-mkdir -p "$HOME/.box"; ( /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) &
+rm -f "$owed"
+start_recover wait
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
 # the end, and one the owner stopped (its pane gone, or back at a shell) is off the list by then.
-# tmux not answering (the box stopping) leaves the list as it was. First, the hub's window comes back
-# if it is gone (closed, or the whole home session with it). With the tmux server gone too, that
-# starts a new one holding only the hub, even in a stop's last seconds, which is harmless: the
-# container is exiting. A list-windows that fails for a moment can add a second hub window; it only
-# retries the port.
+# tmux not answering (a call timing out) leaves everything as it was. First, a lost tmux server: on
+# 2026-11-16 a test's kill-server, run in a pane, stopped the box's, and with it every supervisor,
+# worker, dashboard and the operator. The server's pid changed (the terminal or anything else
+# started a new one), or no server: the box is brought back as at a boot, from the list as it stood
+# the minute before, never from the new server, which has nobody on it yet. That list holds only
+# what was running: what the owner stopped (back at a shell, or closed) was off it already. Every
+# step is safe to run again, so a loss that repeats only restores again. Pane ids start again at %0
+# on a new server, so the noted panes go, as at boot. Not while the box stops (devteam-box marks it
+# before it closes the server). With the same server, a missing operator window comes back alone.
+# Then the hub's window, if it is gone (closed, or the whole home session with it); hub_window
+# starts no tmux server. A list-windows that fails for a moment can add a second hub window; it
+# only retries the port.
+# note_srv: the server's pid; empty when tmux didn't answer in time (the next answer is taken as
+# the box's), lost when no server answered (the next one seen is a new server: restore).
+note_srv() { srv=$(timeout 20 tmux display-message -p '#{pid}' 2>/dev/null); case $? in 0) ;; 124) srv= ;; *) srv=lost ;; esac; }
+note_srv
 while :; do
   sleep 60
+  [ -e "$HOME/.box/stopping" ] && continue
+  now_srv=$(timeout 20 tmux display-message -p '#{pid}' 2>/dev/null); rc=$?
+  [ "$rc" = 124 ] && continue
+  wins=$(timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null); [ "$?" = 124 ] && continue
+  [ -z "$srv" ] && [ "$rc" = 0 ] && srv=$now_srv
+  if [ "$rc" != 0 ] || [ "$now_srv" != "$srv" ]; then
+    [ -e "$HOME/.box/stopping" ] && continue
+    note "tmux server lost (pid $srv, now ${now_srv:-none}): bringing the box back as at a boot: the operator, the hub, every dashboard, then box-recover (~/.box/recover.log)"
+    # once per server lost: a restore that found no server to start tries again, and adds nothing twice.
+    # A supervisor its own kit marked stopped on the old server (the owner closed it since the list
+    # was last kept) stays stopped.
+    if [ "$srv" != lost ]; then
+      if [ -s "$up" ]; then now=$(date +%s); while IFS= read -r r; do grep -Eq '"up": *false' "$r/docs/devteam/run/supervisor-up.json" 2>/dev/null || echo "$now $r"; done < "$up" >> "$up.boot"; fi
+      rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devteam/run/supervisor-pane-role
+    fi
+    start_operator lost
+    timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
+    start_dashboards
+    [ -e "$HOME/.box/stopping" ] || { rm -f "$owed"; start_recover; }
+    note_srv
+    continue
+  fi
+  # the same server, only the operator's window gone: just that comes back (nothing else was lost)
+  if ! printf '%s\n' "$wins" | grep -qx operator; then
+    note "the operator's window is gone (tmux server $srv): bringing it back"
+    start_operator lost
+  fi
+  if [ -e "$owed" ]; then rm -f "$owed"; start_recover; fi
   timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
   panes=$(timeout 20 tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
   for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
@@ -537,11 +746,17 @@ EOF
 # dashboard whose hub port it names leaves that port alone. It comes with the boot that starts the
 # hub, so no image tells dashboards to step back without serving the hub itself.
 ENV DEVTEAM_IMAGE_HUB=4320
+# The platform stops this container when its memory reaches the cap, counting the page cache the
+# kernel could still drop (2026-11-17: five restarts in an hour at 31 of 32 GB, 11 GB of it cache,
+# while the kit counted 17). So the kit's memory ceiling, and machine status, count it too, all but
+# the inactive cache the kernel drops first (the working set; devteam.mjs machineMemory). ENV, like
+# the hub's port: the boot, dev's sessions and every dashboard get it (as_dev keeps the environment).
+ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.55.0
+ARG DEVTEAM_RELEASE=v0.65.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 
