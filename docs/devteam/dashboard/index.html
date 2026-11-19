@@ -6672,11 +6672,30 @@ function tFit(s) {
 // Else: "Sent." when the POST that sent it said a pane took it; "Not delivered" when no terminal took
 // it (sup: /api/threads' record of such turns and the supervisor's last check, as tlRefresh keeps
 // it); "will read it when it next checks" when nobody knows (a reload); after 10 minutes with the
-// supervisor running (a pane, as /api/threads says), that it hasn't replied.
-function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.sup ?? null : null) {
-  const last = t.turns[t.turns.length - 1];
-  if (!last || last.by !== 'owner') return null;
+// supervisor running (a pane, as /api/threads says), that it hasn't replied. A session that has the
+// newest owner turn (working: /api/threads' records, as tlRefresh keeps them) says it picked it up or
+// is responding, even after its own first reply, and over held or not delivered for that turn.
+function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.sup ?? null : null, working = typeof TL !== 'undefined' ? TL.working ?? null : null) {
+  const turns = t.turns;
+  const last = turns[turns.length - 1];
+  if (!last) return null;
+  // a record counts only for the newest owner turn, and only while every turn after it is a non-owner
+  // one written before the record began; the view names every non-owner turn supervisor, so this
+  // compares times, not writers. A record for an older turn never speaks for a newer one.
+  const w = working && typeof working === 'object' && Object.hasOwn(working, t.id) ? working[t.id] : null;
+  const o = turns.findLastIndex((x) => x.by === 'owner');
+  const wAt = Date.parse(w?.at ?? '');
+  const has = !!w && (w.stage === 'picked-up' || w.stage === 'responding') && o >= 0 && !!turns[o].id && w.turn === turns[o].id
+    && turns.slice(o + 1).every((x) => x.by !== 'owner' && Date.parse(x.at) < wAt);
+  if (last.by !== 'owner' && !has) return null;
   if (last.pending) return 'Sending…';
+  if (has) {
+    // plain words for who: ticket ids have no fixed shape, so any other name is a session on it
+    const b = w.by;
+    const plan = typeof b === 'string' ? /^plan-(.+)$/.exec(b) : null;
+    const who = typeof b !== 'string' || !b ? 'A session' : b === 'supervisor' ? 'The supervisor' : b === 'responder' ? 'The responder' : plan ? `The planner for ${plan[1]}` : `The session on ${b}`;
+    return w.stage === 'responding' ? `${who} is responding…` : `${who} picked it up.`;
+  }
   // its terminal is asking a question: these words wait, and are never the answer to it
   if (typed === 'held' && pane) return "Held: the supervisor's terminal is asking something, and these words must not answer it. They reach the supervisor once it is answered (see the card).";
   // missed: a turn in the log is the server's record's to say (typed is the thread's last send, and
@@ -7235,7 +7254,7 @@ function tArtFpNow(s) {
   return (DATA?.library?.artifacts ?? []).find((a) => a.slug === s.slug && a.at === (tree ? 'main' : s.at))?.fp ?? null;
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
-  <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
+  <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted"><span id="tl-c-spin" aria-hidden="true" hidden style="display:inline-block;width:10px;height:10px;margin-right:6px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;vertical-align:-1px;animation:spin .9s linear infinite"></span><span id="tl-c-state" role="status" aria-live="polite"></span></div>
   <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Shift+Enter sends; Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
 // The subject as one tight line (an icon, its name, where it is), opening to what was captured.
 // Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
@@ -7313,7 +7332,15 @@ function tlCardBody(t) {
     turns.innerHTML = t ? tlTurns(t) : '<p class="small muted">Say what you want done about it. Nothing is sent until you do.</p>';
     turns.scrollTop = turns.scrollHeight;
   }
-  tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  const line = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  // a live region: written only when the words change, so a poll with the same stage announces nothing
+  const state = tlEl('tl-c-state');
+  if (state.textContent !== line) state.textContent = line;
+  // the spinner only adds to the words while a session is responding, slowed as button.busy is
+  const spin = tlEl('tl-c-spin');
+  spin.hidden = !/ is responding…$/.test(line);
+  // '0.9s', not '': clearing the longhand also drops the duration the inline shorthand set, leaving 0s
+  spin.style.animationDuration = matchMedia('(prefers-reduced-motion: reduce)').matches ? '2.5s' : '.9s';
 }
 // Beside its pin, in page coordinates so it scrolls with the page; a thread whose home is the Inbox tab
 // (in-threads, kit-100 spec §2.6) in the window's coordinates instead, fixed as the panel is; in the dock when
@@ -7512,6 +7539,8 @@ async function tlRefresh() {
     tlRelay();
     TL.pane = !!j.supervisor?.pane;
     TL.sup = { checked: typeof j.supervisor?.checked === 'string' ? j.supervisor.checked : null, undelivered: Array.isArray(j.supervisor?.undelivered) ? j.supervisor.undelivered : [] };
+    // the sessions holding a thread's newest turn, for the card's line: a map, else none
+    TL.working = j.working && typeof j.working === 'object' && !Array.isArray(j.working) ? j.working : {};
     askSet(j.supervisor?.question);
     const first = !TL.have;
     TL.have = n;
