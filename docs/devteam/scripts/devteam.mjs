@@ -26795,9 +26795,9 @@ async function cmdBrowser() {
 }
 /* browser end */
 
-const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
-
-Setup and roles
+/* HELP start */
+/* helpSections start */
+const HELP_SETUP = `Setup and roles
   init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
@@ -26806,9 +26806,8 @@ Setup and roles
   operator-thread new "<words>" [--title t] [--subject json] | say <ot-id> "<words>" | close <ot-id> | reopen <ot-id> ["<words>"] | start | reply <ot-id> "<words>" | list [--open | --waiting] [--json] | show <ot-id> | status   the owner's threads with the machine's operator, as the hub's Overview keeps them (beside the operator, in no repo): new, say, close, reopen and start are the owner's (start brings up a laptop's operator, once, in tmux session devteam-home); reply is the operator's; each owner turn is typed into the operator's pane as one line
   worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, or (a resume of one that ran aside) while the machine's memory is at its machine_memory_ceiling, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
-  hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
-
-Holds and the fleet (planning.md §1, holds; supervisor.md §12)
+  hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists`;
+const HELP_HOLDS = `Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
@@ -26817,29 +26816,25 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   fleet park|drain [--reason r] [--move] [--owner]   hold every goal: a pause on this machine, or with --move a move to another (it releases the host claim)
   fleet status [--json] [--no-fetch]   ready to move? per session parked (or, drained, nothing running), pushed, clean, handoff on origin; the log landed, spend observed, review results committed; the new machine's checklist; which machine supervises the repo
   fleet host [--json] [--no-fetch] | --release | --take   which machine supervises this repo (origin's refs/devteam/host claim); the owner's, when that machine is gone: --release frees it for the next start anywhere, --take takes it for the machine it runs on. It grants nothing
-  drain --status | undrain           the old names: drain --status is fleet status; undrain lifts an old drain still in force (drain itself now asks for fleet park or fleet drain)
-
-The graph (planning.md)
+  drain --status | undrain           the old names: drain --status is fleet status; undrain lifts an old drain still in force (drain itself now asks for fleet park or fleet drain)`;
+const HELP_GRAPH = `The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
   moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
-  components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
-
-Checks and merging (quality.md)
+  components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines`;
+const HELP_CHECKS = `Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
   check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
   merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid [qid …]] [--decision d-id] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
-  review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's
-
-Sessions (worker.md)
+  review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's`;
+const HELP_SESSIONS = `Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
   gate <name> [--junit f] -- <cmd…>   run a gate and record it   |   gate --all: every settings gate here
   send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | messages [--open] [--to x] [--json]
-  stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
-
-Decide and act (supervisor.md, constitution.md)
+  stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line`;
+const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
   link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit
   link add <id> --kind repo --remote r --title t [--path p] [--main_branch b] [--forge f] [--gates '{…}'] … [--approved qid]   supervisor: drafts a repo link (or link set|rm on one) and asks the owner (governance-edit; gate-change for a gate field); with the answer, writes it for the chore-registry PR
@@ -26888,9 +26883,8 @@ Decide and act (supervisor.md, constitution.md)
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
   correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | correct <id> --from-turn <u-id> --said "<whole clauses>" [--at <n>] | correct <id> --from-chat --said "<owner's words>"   (supervisor, the owner's correction) | repair <id> --how undo|fix-ticket|none
   correct <goal-impact d-id> --reason r --impact 1-4   (owner) give the goal's impact yourself; it stands until you give another
-  trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
-
-Observe and orient
+  trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class`;
+const HELP_OBSERVE = `Observe and orient
   observe --subject s --kind k --detail d [--source owner-chat|owner-answer|owner-thread|retro|…] [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
   observe-link --url u | --path p --title t [--for scope…] [--notes n] [--owner]   a resource the work uses; orient proposes it for the registry
   wait [--minutes n]   supervisor, between ticks: blocks until a new message to you, a new owner line, a new high finding, or the tick is due (tick_minutes, default 15); an open high finding returns at once until acted on or acked
@@ -26900,9 +26894,8 @@ Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
-  problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
-
-Goals and retros
+  problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
+const HELP_GOALS = `Goals and retros
   goal [list|check|show|forecast|add|set|order|decide|approve|status|reading|hold|park-sessions|impact] …
   goal impact <g-id> <1-4> --rationale "…" [--confidence 0-1]   supervisor: how much the goal matters to the project, judged against project/strategy.md (4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping); orders the Inbox, never the work
   goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
@@ -26910,23 +26903,26 @@ Goals and retros
   goal order [<g-id> …] --approved <qid>   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
-  chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
-
-The log
+  chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR`;
+const HELP_LOG = `The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
   sensor status [--json] | sensor test <name> [--since t] | sensor poll [--due] [--name n] [--rollup-day d] [--json] (supervisor; wait runs it) | sensor series <name> [--range 24h|7d]   production sensors from settings
   sensor show <fingerprint> | sensor discover [--record] [--json] | sensor stream <name> (wait runs it) | sensor scrub < text   a cached event (untrusted), what production is and can be seen, a stream's collector, the scrubber
   sensor triage [--all] [--peek] [--json] | sensor ignore|unignore <fingerprint> --reason r [--owner] | sensor incident <fingerprint…> --title t | sensor incident <p-id> --add <fingerprint…>   what changed since the last triage, ignores, incidents (supervisor)
-  remediate <action> --decision d-… [--to <release>]   run a reviewed remediation from settings (production-remediation; a rollback across a production migration needs the owner's own answer)
-
-Dashboard and releases
+  remediate <action> --decision d-… [--to <release>]   run a reviewed remediation from settings (production-remediation; a rollback across a production migration needs the owner's own answer)`;
+const HELP_DASHBOARD = `Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
   box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run]  (each [--dockerfile p])   in the kit's own checkout: the box image's tool pins in cloud/Dockerfile (Claude Code, claude-swap, gh, ttyd, mise, uv). verify checks them and the release stamp offline; check says which are behind upstream (exit 1 stale, 3 some unknown, 0 none, 2 no file or one that doesn't verify); bump moves every tool not held (a "# hold: <reason>" line above its _VERSION ARG) to its latest, with sums from the downloaded assets, and stamps the release. Only the top package of the npm and PyPI tools is pinned: their dependencies resolve when the image is built
   box-pins installed   inside the box image: each tool's version, asked at its path in the image (never through PATH), against DEVTEAM_BOX_TOOLS
-  hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)
+  hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)`;
+/* helpSections end */
+const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
+
+${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, HELP_OBSERVE, HELP_GOALS, HELP_LOG, HELP_DASHBOARD].join('\n\n')}
 `;
 
+/* HELP end */
 // What the box's operator may run: reads only (a test runs each and diffs the log and git status). A
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
 // recover, machine and operator-thread write, and are allowed by name below: bringing a supervisor
