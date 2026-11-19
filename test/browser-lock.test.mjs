@@ -4,12 +4,13 @@
 // own source, cut from devteam.mjs, with every fs call, sleep and step of fn a point where it parks
 // until the test grants it. The schedule is a fixed script (T5-3's two cases, S1), a seeded random
 // sweep over three kinds of stale lock (S2), the sweep with a starter killed mid-way (S2b), or a small
-// unit case of one rule (S3). Each starter has a fake pid of its own, and browserAlive answers from
-// the test's list of live fake pids, so a dead owner or a killed starter is dead to the code.
+// unit case of one rule (S3; S4 for kit-323's sweep of dead starters' leftovers). Each starter has a
+// fake pid of its own, and browserAlive answers from the test's list of live fake pids, so a dead
+// owner or a killed starter is dead to the code.
 // DEVTEAM_TEST_LOCK_SOURCE names another devteam.mjs to cut the function from (a copy of main's, or a
 // mutant); DEVTEAM_TEST_LOCK_SEEDS=<from>-<to> sweeps that range of seeds instead of the fixed lists;
 // DEVTEAM_TEST_LOCK_TRACE=1 prints every run's schedule. The spec: tickets/kit-321-browser-lock-three-
-// starters/spec.md (home), A1, A2, A2b and A4.
+// starters/spec.md (home), A1, A2, A2b and A4; S4's, tickets/kit-323-browser-lock-sweep/spec.md.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
@@ -143,16 +144,17 @@ let runs = 0;
 // { who, until } (grant starter `who` until its next parked op is `until`, an fs method, enter, sleep,
 // exit or '*' for one grant; or until it parks on enter or a sleep or finishes; at most 50 grants) or
 // a function run on this thread between steps. After the script: a seeded random choice when `seed`
-// is given, else round-robin. `kill`, a seed, kills one starter at a seeded step. Returns what the
-// run's assertions read.
-async function run({ dir, n, env = {}, script = [], seed = null, kill = null, livePids = [] }) {
+// is given, else round-robin. `kill`, a seed, kills one starter at a seeded step. Starter i's pid is
+// pidBase + i (another base keeps an earlier run's starters dead to this one). Returns what the run's
+// assertions read.
+async function run({ dir, n, env = {}, script = [], seed = null, kill = null, livePids = [], pidBase = STARTER_PID }) {
   assert.ok(SRC, `browserStartLock was not found in ${SOURCE}`);
   const id = ++runs;
   const file = path.join(dir, 'start');
   const ws = workers(n);
   live.fill(0);
   livePids.forEach((p, i) => { live[8 + i] = p; });
-  const pids = ws.map((_, i) => STARTER_PID + i);
+  const pids = ws.map((_, i) => pidBase + i);
   const r = { inside: new Set(), twice: [], entries: Array(n).fill(0), errors: Array(n).fill(null), hang: false, killed: null, killedHolding: false, trace: [], steps: 0 };
   const gone = new Set(); // finished or killed
   for (let i = 0; i < n; i++) {
@@ -320,19 +322,23 @@ const SEEDS_ENV = /^(\d+)-(\d+)$/.exec(process.env.DEVTEAM_TEST_LOCK_SEEDS ?? ''
 // A search over a range has no time cap: the fixed lists keep each test well inside its cap.
 const SWEEP_TIMEOUT = SEEDS_ENV ? Infinity : 120000;
 const seeds = (list) => (SEEDS_ENV ? range(Number(SEEDS_ENV[1]), Number(SEEDS_ENV[2])) : list);
-// The fixed lists (and KILL_SEEDS below) were chosen by searching seeds 1 to 400 against the
-// mutants of the ticket's mutants.mjs (home, tickets/kit-321-browser-lock-three-starters) and main's
-// lock (d7fc46e0); the rest is padding, and every seed passes at the head. The seeds there to catch:
+// The fixed lists (and KILL_SEEDS below) were chosen by searching seeds against the mutants of
+// mutants.mjs and main's lock (d7fc46e0); the rest is padding, and every seed passes at the head.
+// kit-321 chose them over seeds 1 to 400 (tickets/kit-321-browser-lock-three-starters, home); the
+// sweep kit-323 added at each start shifts every schedule, so its mutants.mjs rebuilds kit-321's M1
+// to M8 on the sweep and the seeds were searched again (1 to 400, ownerless 4 to 1400), keeping the
+// old ones. The seeds that catch each now (main's are unchanged: its lock has no sweep):
 //   main (d7fc46e0): dead 3: 30 42; dead 4: 5 34; live 3: 1 5; live 4: 1; ownerless 3: 16; ownerless 4: 11
-//   M1 no claim: dead 3: 43 53; dead 4: 2 7; live 3: 43; live 4: 2
-//   M2 split look(), no look under the claim: dead 3: 21 22; dead 4: 4 65; live 3: 21; live 4: 4
-//   M4 the old put-back: dead 3, dead 4, live 3, live 4: 1; ownerless 3 and 4: 4
-//   M5 dead claims never passed over: KILL_SEEDS (and S3)
-//   M6 no token check under the claim: no seed in 1 to 2000; S3's release race
+//   M1 no claim: dead 3: 4 5 30; dead 4: 9 65; live 3: 4 5; live 4: 9
+//   M2 split look(), no look under the claim: dead 3: 10; dead 4: 9 11; live 3: 10; live 4: 9 11
+//   M4 the old put-back: dead 3: 7 30 53; dead 4: 2 6 11 13; live 3: 7; live 4: 2 6 11 13;
+//      ownerless 4: 11
+//   M5 dead claims never passed over: KILL_SEEDS (and S3, S4)
+//   M6 no token check under the claim: no seed in 1 to 2000 (kit-321); S3's release race
 //   M7 an ownerless folder renamed when no owner can be read, not owned first (design-change-1):
-//      ownerless 4: 398, which moved a live lock at the code before that change
-//   M8 the owner write on an ownerless folder not exclusive ('w', not 'wx'): ownerless 3: 20;
-//      ownerless 4: 40 107 143 (task-3 T3-1)
+//      ownerless 4: 639 (398 before the sweep)
+//   M8 the owner write on an ownerless folder not exclusive ('w', not 'wx'): ownerless 3: 148;
+//      ownerless 4: 55 (20, 40, 107 and 143 before the sweep; task-3 T3-1)
 // On the ownerless lock M1 and M2 are caught by no seed: the exclusive write alone keeps two takers
 // apart there. M3 (rmdir's error code ignored) is equivalent since design-change-1, the exclusive
 // write failing on a free path too; its old seeds 41, 253 and 222 stay as ownerless padding.
@@ -340,7 +346,7 @@ const plus = (list, extra) => [...new Set([...list, ...extra])].sort((a, b) => a
 const SWEEP = {
   'dead-owner': { 3: plus(range(1, 20), [21, 22, 30, 42, 43, 53]), 4: plus(range(1, 15), [34, 65]) },
   'old live-owner': { 3: plus(range(1, 12), [21, 43]), 4: range(1, 15) },
-  'old ownerless': { 3: plus(range(1, 10), [16, 20, 41, 253]), 4: plus(range(1, 10), [11, 16, 40, 107, 143, 162, 222, 398]) },
+  'old ownerless': { 3: plus(range(1, 10), [16, 20, 41, 148, 253]), 4: plus(range(1, 10), [11, 16, 40, 55, 107, 143, 162, 222, 398, 639]) },
 };
 
 // Runs every seed and returns one message naming each failing seed and its problems ('' when none
@@ -370,20 +376,31 @@ for (const [kind, lock] of Object.entries(LOCKS)) {
 // it is parked, its pid then dead). The survivors keep the run assertions; the killed starter counts
 // inside fn until it is killed. Its leftovers (a claim, a prepared folder) may stay, but no lock. At
 // least one seed must kill a starter while its claim stands, so the pass-over of a dead claim is
-// reached and not only the take of a dead owner's lock.
-// Catching: M5 10 14; M1 70 248; M2 21; M4 1 19; main 3 (search of 1 to 400, as for SWEEP above).
-const KILL_SEEDS = plus(range(1, 20), [21, 70, 248]);
+// reached and not only the take of a dead owner's lock. Then one more start, its pid none of the
+// run's, must sweep the killed starter's leftovers and leave the folder empty (kit-323 A1); at least
+// one seed must leave a prepared folder and one a claim for it to sweep.
+// Catching on the sweep (kit-323): M5 13; M1 13; M4 4 9 13 21; and seed 93 leaves a killed starter's
+// claim for the next start to sweep. Before it: M5 10 14; M1 70 248; M2 21; M4 1 19; main 3.
+const KILL_SEEDS = plus(range(1, 20), [21, 70, 93, 248]);
 test('S2b: 3 starters on the dead-owner lock, one killed mid-way', { timeout: SWEEP_TIMEOUT }, async () => {
-  let holding = 0;
+  let holding = 0, prepLeft = 0, claimLeft = 0;
   const bad = await sweep(seeds(KILL_SEEDS), async (seed, dir) => {
     LOCKS['dead-owner'].plant(path.join(dir, 'start.lock'));
     const r = await run({ dir, n: 3, seed, kill: seed });
     if (r.killedHolding) holding++;
     const p = problems(r, { left: null });
     if (!r.hang && r.left.includes('start.lock')) p.push(`start.lock is left: ${JSON.stringify(r.left)}`);
-    return p;
+    if (r.hang || p.length) return p;
+    if (r.left.some((f) => f.startsWith('start.lock.new.'))) prepLeft++;
+    if (r.left.some((f) => f.startsWith('start.lock.take.'))) claimLeft++;
+    const next = await run({ dir, n: 1, pidBase: 2001 });
+    return problems(next).map((x) => `the next start: ${x}`);
   });
-  const none = holding ? '' : 'no seed killed a starter while its claim (start.lock.take.*) stood';
+  const none = [
+    holding ? '' : 'no seed killed a starter while its claim (start.lock.take.*) stood',
+    prepLeft ? '' : 'no seed left a prepared folder (start.lock.new.*) for the next start to sweep',
+    claimLeft ? '' : 'no seed left a claim (start.lock.take.*) for the next start to sweep',
+  ].filter(Boolean).join('\n');
   const msg = [bad, none].filter(Boolean).join('\n');
   assert.ok(!msg, msg);
 });
@@ -468,4 +485,68 @@ unit('a start that times out on a held lock leaves no prepared folder', async (d
   fs.mkdirSync(lock);
   fs.writeFileSync(path.join(lock, 'owner'), `${LIVE_OWNER}-89abcdef01234567`);
   check(await run({ dir, n: 1, env: quick, livePids: [LIVE_OWNER] }), { entries: 0, errors: /timed out/, left: ['start.lock'] });
+});
+
+// S4 (kit-323): a start sweeps dead starters' leftovers and never a live one's, and a timeout says
+// what to do. The spec: tickets/kit-323-browser-lock-sweep/spec.md (home), A1 to A4.
+const LIVE_PREP = 3003, LIVE_ASIDE = 3004;
+const sweepCase = (name, body) => test(`S4: ${name}`, { timeout: 60000 }, () => inTmp(body));
+const tok = (pid, hex) => `${pid}-${hex.repeat(16 / hex.length)}`;
+const prepOf = (dir, t) => { const d = path.join(dir, `start.lock.new.${t}`); fs.mkdirSync(d); fs.writeFileSync(path.join(d, 'owner'), t); return path.basename(d); };
+const asideOf = (dir, t) => { const d = path.join(dir, `start.lock.${t}.0a1b2c3d`); fs.mkdirSync(d); fs.writeFileSync(path.join(d, 'owner'), 'moved'); return path.basename(d); };
+const claimOf = (dir, seen, claimant, n = 0) => { const f = claimName(seen, n); fs.symlinkSync(claimant, path.join(dir, f)); return f; };
+
+sweepCase('a start removes dead starters\' prepared folders, asides and claims, and keeps live ones and strangers', async (dir) => {
+  prepOf(dir, DEAD);
+  asideOf(dir, DEAD);
+  claimOf(dir, tok(2147483640, 'a1'), DEAD_CLAIM);
+  claimOf(dir, '', DEAD_CLAIM); // a dead claim on an ownerless folder, none on the path now
+  const keep = [
+    prepOf(dir, tok(LIVE_PREP, 'b2')),
+    asideOf(dir, tok(LIVE_ASIDE, 'c3')),
+    claimOf(dir, tok(2147483639, 'd4'), tok(LIVE_CLAIM, 'e5')),
+    prepOf(dir, '0-0123456789abcdef'), // pid 0: not a token
+    'start.lock.new.junk',
+    'notes.txt',
+  ];
+  fs.writeFileSync(path.join(dir, 'start.lock.new.junk'), 'x');
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'x');
+  check(await run({ dir, n: 1, livePids: [LIVE_PREP, LIVE_ASIDE, LIVE_CLAIM] }), { left: keep });
+});
+
+// A dead claim on the key of the token the lock holds may stand between two live claimants of that
+// token: removing it would let this start claim the same token beside the live claimant at .1.
+sweepCase('a dead claim on the lock\'s own token stays, and the start yields to the live claim past it', async (dir) => {
+  LOCKS['dead-owner'].plant(path.join(dir, 'start.lock'));
+  const dead0 = claimOf(dir, DEAD, DEAD_CLAIM, 0), live1 = claimOf(dir, DEAD, tok(LIVE_CLAIM, 'f6'), 1);
+  check(await run({ dir, n: 1, env: quick, livePids: [LIVE_CLAIM] }), { entries: 0, errors: /timed out/, left: ['start.lock', dead0, live1] });
+  assert.equal(ownerOf(dir), DEAD);
+});
+
+// The claims are listed before the lock is looked at. A parks at its listing; B takes the free path;
+// B's lock is aged past 120 s and given a dead claim at .0 and a live one at .1, as if a remover were
+// mid-take. A, looking after its listing, finds B's token and keeps .0, so its take yields to .1.
+// Looking first would find no lock, sweep .0, and let A claim .0 and move B's live lock (A2).
+sweepCase('the sweep lists before it looks: a token that reached the path after a look keeps its claims', async (dir) => {
+  const liveClaim = tok(LIVE_CLAIM, '07');
+  let t = null;
+  const script = [
+    { who: 0, until: 'readdirSync' },
+    { who: 1, until: 'enter' },
+    (c) => { t = ownerOf(c.dir); claimOf(c.dir, t, DEAD_CLAIM, 0); claimOf(c.dir, t, liveClaim, 1); back(path.join(c.lock, 'owner')); },
+    { who: 0, until: 'sleep' },
+    (c) => fs.unlinkSync(path.join(c.dir, claimName(t, 1))),
+  ];
+  const r = await run({ dir, n: 2, script, livePids: [LIVE_CLAIM] });
+  check(r, {});
+  assert.ok(t, 'B never made its lock');
+});
+
+sweepCase('a start that times out names start.lock and says to remove it when no browser start runs', async (dir) => {
+  const lock = path.join(dir, 'start.lock');
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'owner'), `${LIVE_OWNER}-89abcdef01234567`);
+  const r = await run({ dir, n: 1, env: quick, livePids: [LIVE_OWNER] });
+  const esc = lock.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  check(r, { entries: 0, errors: new RegExp(`timed out waiting for ${esc}; if no browser start is running, remove that folder`), left: ['start.lock'] });
 });
