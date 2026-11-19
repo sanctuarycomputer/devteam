@@ -93,6 +93,8 @@
   .props .swatch.none { border-style: dashed; }
   .props .fnote { margin: -4px 0 8px 80px; color: var(--red-fg); }
   .props :disabled { opacity: .5; cursor: not-allowed; }
+  .props .acts { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+  .props .vname { flex: 1 1 auto; overflow-wrap: anywhere; }
 
   /* the stage: the page surface is the one element zoom and pan move */
   /* clip, not hidden: the stage is no scroll container, so nothing (scrollIntoView included) scrolls it */
@@ -250,6 +252,9 @@
   const state = {
     slug: null, session: null, rev: null, doc: null, repo: null, pageId: null, sel: null,
     base: null, pending: [], saved: null, locked: null, paused: false, closedText: null,
+    // Change in (spec §3): { comp, name }, the variant a component's nodes are edited in, or null (Base);
+    // placing: the component Place instance adds an instance of at the next click, or null
+    variantMode: null, placing: null,
   };
   // The shown page's drawn nodes and Layers rows, by node id (Maps: an id is the document's string).
   let drawn = new Map();
@@ -339,6 +344,7 @@
   // ---- checkers: every style value comes from one of these, never a document string passed through ----
 
   const HEX_RE = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+  const VARIANT_RE = /^[A-Za-z][A-Za-z0-9_]{0,39}$/; // a variant's name (canvas-doc@1 variantName)
   const HEX6_RE = /^#[0-9a-f]{6}$/i;
   const SRC_RE = /^images\/([0-9a-f]{16}\.(?:png|jpg|webp|gif))$/;
   const FR_RE = /^([1-9][0-9]{0,2})fr$/;
@@ -1644,7 +1650,43 @@
     return true;
   }
   // One property of one node set: one edit of one set op.
-  const setProp = (id, prop, value) => edit([{ op: 'set', id, prop, value }]);
+  const setRaw = (id, prop, value) => edit([{ op: 'set', id, prop, value }]);
+  // A field's change: one set on the node, or in Change in one set on its component of the variant's
+  // override, `variants.<name>.<node id>.<prop>` (contract §2). Every field sends through here.
+  function setProp(id, prop, value) {
+    const vm = variantFor(id);
+    if (vm === null) return setRaw(id, prop, value);
+    return setRaw(vm.comp, `variants.${vm.name}.${id}.${prop}`, value);
+  }
+  // The component a node is inside (its nearest component ancestor, never the node itself), or null.
+  function componentOf(id) {
+    const n = nodeOf(id);
+    let cur = n ? n.parent : null;
+    for (let steps = 0; steps <= MAX_ELEMENTS && nodeOf(cur); steps++) {
+      if (nodeOf(cur).type === 'component') return cur;
+      cur = nodeOf(cur).parent;
+    }
+    return null;
+  }
+  // A component's variant names, in order.
+  const variantNames = (c) => (c && c.type === 'component' && isObj(c.variants) ? Object.keys(c.variants).filter((k) => VARIANT_RE.test(k)) : []);
+  // The variant a node's fields edit (Change in): { comp, name } while the panel is set to a variant of
+  // the component the node is inside and that variant still exists, else null (Base).
+  function variantFor(id) {
+    const vm = state.variantMode;
+    if (vm === null) return null;
+    const comp = componentOf(id);
+    if (comp === null || comp !== vm.comp || !variantNames(nodeOf(comp)).includes(vm.name)) return null;
+    return vm;
+  }
+  // In Change in, whether the variant holds an override of `path` on the node, and its value.
+  function variantHeld(id, path) {
+    const vm = variantFor(id);
+    if (vm === null) return { held: false };
+    const v = nodeOf(vm.comp).variants[vm.name];
+    const o = isObj(v) && own(v, id) && isObj(v[id]) ? v[id] : null;
+    return o !== null && own(o, path) ? { held: true, value: o[path] } : { held: false };
+  }
   // Delete a node (Delete, Backspace, Delete layer); a component that still has instances is kept.
   function deleteNode(id) {
     if (!editable()) return;
@@ -1681,10 +1723,16 @@
   const PAINTED = new Set(['frame', 'component', 'rect', 'ellipse', 'vector']);
   const ROUNDED = new Set(['frame', 'component', 'rect', 'image']);
   // A property's value on the node as drawn now, or its default.
-  function valueOf(id, path) {
+  function baseOf(id, path) {
     const n = nodeOf(id);
     const v = n ? getPath(n, path) : undefined;
     return v === undefined ? DEFAULT[path] : v;
+  }
+  // A field's value: in Change in, the variant's override where it holds one (a null included), else
+  // the base's; otherwise the base's.
+  function valueOf(id, path) {
+    const o = variantHeld(id, path);
+    return o.held ? o.value : baseOf(id, path);
   }
   const numText = (v) => String(Math.round(v * 10000) / 10000);
   const lenOk = (x) => isRef(x) || (finite(x) && x >= 0 && x <= PX);
@@ -1873,14 +1921,26 @@
   }
   // The colour field: a select of the colour tokens, Hex and (where null is allowed) None, a swatch
   // drawn through color(), and for Hex a hex input. Choosing Hex sends nothing: the hex typed is sent.
+  // In Change in, None is replaced by From base (`@base`), which sends null and so removes the
+  // variant's override (contract §2); the field says From base while the variant holds none, and a
+  // null the variant does hold (no paint in that variant) shows as None.
   function colourField(id, path, label, none) {
     const v = valueOf(id, path);
-    const key = `${id} ${path}`;
+    const vm = variantFor(id);
+    const key = `${id} ${path} ${vm === null ? '' : vm.name}`;
     const chosen = hexChosen.has(key);
-    const mode = isRef(v) && !chosen ? v.$ref : v === null && none && !chosen ? '@none' : '@hex';
     const opts = tokensOf('color').map((t) => [t, t]);
     opts.push(['@hex', 'Hex']);
-    if (none) opts.push(['@none', 'None']);
+    let mode;
+    if (vm === null) {
+      mode = isRef(v) && !chosen ? v.$ref : v === null && none && !chosen ? '@none' : '@hex';
+      if (none) opts.push(['@none', 'None']);
+    } else {
+      const held = variantHeld(id, path).held;
+      mode = chosen ? '@hex' : !held ? '@base' : isRef(v) ? v.$ref : v === null ? '@none' : '@hex';
+      opts.push(['@base', 'From base']);
+      if (mode === '@none') opts.push(['@none', 'None']);
+    }
     const s = selectOf(path, label, opts, mode);
     const sw = document.createElement('span');
     sw.className = 'swatch';
@@ -1891,7 +1951,7 @@
       if (s.value === '@hex') hexChosen.add(key);
       else {
         hexChosen.delete(key);
-        setProp(id, path, s.value === '@none' ? null : { $ref: s.value });
+        setProp(id, path, s.value === '@none' || s.value === '@base' ? null : { $ref: s.value });
       }
       buildProps();
     });
@@ -2026,22 +2086,157 @@
       out.push(buttons(id, 'align', 'Align', [['left', 'Left'], ['center', 'Center'], ['right', 'Right'], ['justify', 'Justify']]));
     }
     if (t === 'image') out.push(wordSelect(id, 'fit', 'Fit', [['cover', 'Cover'], ['contain', 'Contain'], ['fill', 'Fill']]));
-    if (t === 'instance') out.push(variantField(id, n));
+    // an inner instance's own wiring can't be overridden, so its Variant is hidden in Change in
+    if (t === 'instance' && variantFor(id) === null) out.push(variantField(id, n));
     return out;
   }
 
-  // The fields under the read-only rows, for the selected node: Name, its type's fields, then Delete
-  // layer at the foot. Disabled once editing has stopped.
+  // ---- components, variants and instances (spec §3) ----
+
+  const MAX_VARIANTS = 32; // canvas@1 §7 variants
+  const SAY3 = {
+    variantName: "A variant's name is a letter, then letters, digits or _.",
+    variantExists: 'This component already has that variant.',
+    variantsFull: 'A component has at most 32 variants.',
+    ownComponent: "An instance can't go inside its own component.",
+  };
+  function actionButton(action, label, run) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.action = action;
+    b.textContent = label;
+    b.addEventListener('click', run);
+    return b;
+  }
+  // Make component is offered on a frame where a component may be: not inside a component, and not
+  // holding one (a component never sits inside another, at any depth).
+  const mayMakeComponent = (id, n) => n.type === 'frame' && componentOf(id) === null && !subtreeOf(id).some((x) => x.type === 'component');
+  // Make component: one edit that adds a component with the frame's properties after the frame under
+  // its parent, moves the frame's children into it in order, and deletes the frame; then selected.
+  const COMPONENT_PROPS = ['name', 'visible', 'opacity', 'x', 'y', 'size', 'fill', 'stroke', 'strokeWidth', 'radius', 'clip', 'layout'];
+  function makeComponent(frameId) {
+    const f = nodeOf(frameId);
+    if (!editable() || !f || !mayMakeComponent(frameId, f)) return;
+    const cid = newId();
+    const node = { id: cid, type: 'component', parent: f.parent };
+    for (const k of COMPONENT_PROPS) if (own(f, k)) node[k] = structuredClone(f[k]);
+    const ops = [{ op: 'add', node, after: frameId }];
+    let after = null;
+    for (const c of kidsOf(f)) {
+      ops.push({ op: 'move', id: c, parent: cid, after });
+      after = c;
+    }
+    ops.push({ op: 'del', id: frameId });
+    if (edit(ops)) select(cid);
+  }
+  // The variants of a selected component: each listed with Remove (a set of null), then a name field
+  // and Add variant (a set of {}), Enter in the name field adding it too.
+  function variantsBlock(id, n) {
+    const out = [];
+    for (const name of variantNames(n)) {
+      const nm = document.createElement('span');
+      nm.className = 'vname';
+      nm.textContent = name;
+      const rm = actionButton('remove-variant', 'Remove', () => {
+        if (variantNames(nodeOf(id)).includes(name)) setRaw(id, `variants.${name}`, null);
+      });
+      rm.dataset.variant = name;
+      rm.setAttribute('aria-label', `Remove variant ${name}`);
+      out.push(fieldRow('Variant', nm, rm));
+    }
+    const field = textInput('@new-variant', 'New variant name', '');
+    field.maxLength = 40;
+    field.placeholder = 'name';
+    let row = null;
+    const add = () => {
+      const name = field.value.trim();
+      const names = variantNames(nodeOf(id));
+      const why = !VARIANT_RE.test(name) ? SAY3.variantName : names.includes(name) ? SAY3.variantExists : names.length >= MAX_VARIANTS ? SAY3.variantsFull : null;
+      fieldNote(row, why);
+      if (why !== null) return;
+      if (setRaw(id, `variants.${name}`, {})) field.value = '';
+    };
+    field.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+    row = fieldRow('New variant', field, actionButton('add-variant', 'Add variant', add));
+    out.push(row);
+    return out;
+  }
+  // Change in, on a node inside a component that has variants: Base or one of its variants.
+  function changeInRow(id) {
+    const comp = componentOf(id);
+    const names = variantNames(nodeOf(comp));
+    if (comp === null || names.length === 0) return null;
+    const vm = variantFor(id);
+    const s = selectOf('@variant', 'Change in', [['@base', 'Base'], ...names.map((x) => [x, x])], vm === null ? '@base' : vm.name);
+    s.addEventListener('change', () => {
+      state.variantMode = s.value === '@base' ? null : { comp, name: s.value };
+      buildProps();
+    });
+    return fieldRow('Change in', s);
+  }
+  // Place instance: the next click on the stage adds an instance of the component (setTool('instance')).
+  function startPlacing(compId) {
+    const c = nodeOf(compId);
+    if (!editable() || narrow() || !c || c.type !== 'component') return;
+    setTool('instance');
+    state.placing = compId;
+  }
+  // Does component `a` use component `b`: is it `b`, or does it hold an instance of `b` or of a component
+  // that uses `b` (walked, bounded)? An instance of `a` never goes inside `b` then (contract §2).
+  function usesComponent(a, b) {
+    const seen = new Set();
+    const stack = [a];
+    while (stack.length && seen.size <= MAX_ELEMENTS) {
+      const c = stack.pop();
+      if (c === b) return true;
+      if (seen.has(c)) continue;
+      seen.add(c);
+      for (const x of subtreeOf(c)) if (x.type === 'instance' && typeof x.component === 'string' && !seen.has(x.component)) stack.push(x.component);
+    }
+    return false;
+  }
+  // Would an instance of component `compId` placed under `pid` be inside its own component?
+  const ownComponentAbove = (compId, pid) => [...componentsAbove(pid)].some((c) => usesComponent(compId, c));
+  // The instance placed at a click: by the placing rule (§2), never inside its own component.
+  function placeInstance(compId, at) {
+    const c = nodeOf(compId);
+    if (!c || c.type !== 'component') return;
+    if (ownComponentAbove(compId, at.parent)) { say(SAY3.ownComponent); return; }
+    addNode('instance', at, { name: typeof c.name === 'string' ? c.name : 'Instance', component: compId, size: { w: 'hug', h: 'hug' } });
+  }
+
+  // The fields under the read-only rows, for the selected node: Change in (a node inside a component
+  // with variants), Name (hidden in Change in: names aren't overridden), its type's fields, a
+  // component's variants and Place instance, a frame's Make component, then Delete layer at the foot.
+  // Disabled once editing has stopped.
   function editFields(id, n) {
     const box = document.createElement('div');
     box.className = 'fields';
-    const name = textInput('name', 'Name', typeof n.name === 'string' ? n.name : '');
-    name.maxLength = 200;
-    name.addEventListener('change', () => {
-      const v = name.value;
-      if (v.length <= 200 && wellFormed(v)) setProp(id, 'name', v);
-    });
-    const row = fieldRow('Name', name);
+    const change = changeInRow(id);
+    if (change !== null) box.append(change);
+    if (variantFor(id) === null) {
+      const name = textInput('name', 'Name', typeof n.name === 'string' ? n.name : '');
+      name.maxLength = 200;
+      name.addEventListener('change', () => {
+        const v = name.value;
+        if (v.length <= 200 && wellFormed(v)) setProp(id, 'name', v);
+      });
+      box.append(fieldRow('Name', name));
+    }
+    box.append(...fieldsFor(id, n));
+    if (n.type === 'component') {
+      box.append(...variantsBlock(id, n));
+      const acts = document.createElement('div');
+      acts.className = 'acts';
+      acts.append(actionButton('place-instance', 'Place instance', () => startPlacing(id)));
+      box.append(acts);
+    }
+    if (mayMakeComponent(id, n)) {
+      const acts = document.createElement('div');
+      acts.className = 'acts';
+      acts.append(actionButton('make-component', 'Make component', () => makeComponent(id)));
+      box.append(acts);
+    }
     const foot = document.createElement('div');
     foot.className = 'foot';
     const del = document.createElement('button');
@@ -2050,7 +2245,7 @@
     del.textContent = 'Delete layer';
     del.addEventListener('click', () => deleteNode(id));
     foot.append(del);
-    box.append(row, ...fieldsFor(id, n), foot);
+    box.append(foot);
     if (!editable()) for (const c of box.querySelectorAll('input, select, textarea, button')) c.disabled = true;
     return box;
   }
@@ -2070,7 +2265,8 @@
   // placeAt; the new node is selected and the tool goes back to Move. Space or the middle button pans
   // in every tool (the pan's own handlers run first and the tools leave such a press alone).
 
-  const TOOLS = ['move', 'frame', 'text', 'rect', 'ellipse', 'vector', 'image'];
+  // `instance` has no button: Place instance (§3) picks it, the component in state.placing
+  const TOOLS = ['move', 'frame', 'text', 'rect', 'ellipse', 'vector', 'image', 'instance'];
   const TOOL_KEY = { v: 'move', f: 'frame', t: 'text', r: 'rect', o: 'ellipse', p: 'vector', i: 'image' };
   const NEW_NAME = { frame: 'Frame', text: 'Text', rect: 'Rectangle', ellipse: 'Ellipse', vector: 'Vector', image: 'Image' };
   const IMAGE_SAY = {
@@ -2096,6 +2292,7 @@
     endGesture();
     dropPen();
     tool = name;
+    if (name !== 'instance') state.placing = null;
     for (const b of $('tools').querySelectorAll('button[data-tool]')) b.setAttribute('aria-pressed', String(b.dataset.tool === tool));
     $('stage').classList.toggle('drawing', tool !== 'move');
   }
@@ -2279,6 +2476,13 @@
         $('imageFile').value = '';
         $('imageFile').click();
         return;
+      case 'instance': {
+        // Place instance: an instance of the component, placed where this press was
+        const comp = state.placing;
+        setTool('move');
+        placeInstance(comp, at);
+        return;
+      }
       default:
     }
   }
@@ -2348,13 +2552,16 @@
     }
     return out;
   }
-  // May node `id` go under `pid`? Never into itself or its subtree, never a component inside a
-  // component, never an instance inside the component it names.
-  function mayGo(id, pid) {
-    if (inSubtree(pid, id)) return false;
-    const comps = componentsAbove(pid);
-    if (comps.size === 0) return true;
-    return !subtreeOf(id).some((n) => n.type === 'component' || (n.type === 'instance' && comps.has(n.component)));
+  // Why node `id` may not go under `pid`, in the page's words, or null when it may: never into itself
+  // or its subtree, never a component inside a component ("That layer can't go there."), never an
+  // instance inside its own component, directly or through other instances (§3's words).
+  function goRefusal(id, pid) {
+    if (inSubtree(pid, id)) return REFUSED.parent;
+    if (componentsAbove(pid).size === 0) return null;
+    const sub = subtreeOf(id);
+    if (sub.some((n) => n.type === 'component')) return REFUSED.parent;
+    if (sub.some((n) => n.type === 'instance' && typeof n.component === 'string' && ownComponentAbove(n.component, pid))) return SAY3.ownComponent;
+    return null;
   }
   // The release: placed by placeAt at the pointer (the node's own subtree skipped). Under the same
   // `none` frame or page: set x, set y, only those that changed. Elsewhere, or within an auto-layout
@@ -2367,7 +2574,8 @@
     const n = nodeOf(id);
     if (!n || !layerRows.has(id)) return; // gone, or no longer on the shown page
     const at = placeAt(g.cx, g.cy, id);
-    if (!mayGo(id, at.parent)) { say(REFUSED.parent); return; }
+    const no = goRefusal(id, at.parent);
+    if (no !== null) { say(no); return; }
     const { dx, dy } = moveBy(g);
     if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
     const left = clamp(Math.round(at.x - g.gx), -PX, PX);
@@ -2375,7 +2583,7 @@
     const ops = [];
     if (at.parent === n.parent && at.free) {
       for (const [k, d, drop] of [['x', dx, left], ['y', dy, top]]) {
-        const v = valueOf(id, k);
+        const v = baseOf(id, k);
         const next = finite(v) ? clamp(Math.round(v + d), -PX, PX) : drop;
         if (next !== v) ops.push({ op: 'set', id, prop: k, value: next });
       }
@@ -2400,8 +2608,8 @@
     const n = nodeOf(id);
     if (!editable() || !n || !placedByXY(n)) return;
     for (const [k, d] of [['x', dx], ['y', dy]]) {
-      const v = valueOf(id, k);
-      if (d !== 0 && finite(v)) setProp(id, k, clamp(v + d, -PX, PX));
+      const v = baseOf(id, k);
+      if (d !== 0 && finite(v)) setRaw(id, k, clamp(v + d, -PX, PX));
     }
   }
   document.addEventListener('keydown', (e) => {

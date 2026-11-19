@@ -650,11 +650,37 @@ async function drawnQuiet(p, fake) {
   const want = await cssColor(p, hexOf(EVERY, resolve(fake.doc('every'), 'buy')['button-bg'].fill));
   const got = () => p.ev("(() => { const e = document.querySelector('#surface [data-of=\"buy\"][data-src=\"button-bg\"]'); return e ? getComputedStyle(e).backgroundColor : null; })()");
   await within(async () => (await got()) === want, `buy's background drawn as resolve gives it (${want})`, got);
+  // a check that can fail on this fixture (T2-1): buy's own override of button-bg's fill equals primary's
+  await within(async () => (await text(p, '#props [data-field="variant"]')) === 'quiet', "the read-only Variant row reads quiet", async () => text(p, '#props [data-field="variant"]'));
+}
+// After Change in quiet sets button-bg's fill: the panel is still in quiet, the fields that can't be
+// overridden (name) are hidden, and the stage keeps drawing the component's base (contract §2).
+async function changedInQuiet(p) {
+  assert.equal(await p.ev("document.querySelector('#props [data-prop=\"@variant\"]')?.value ?? null"), 'quiet', 'Change in still quiet');
+  assert.equal(await count(p, '#props [data-prop="name"]'), 0, 'Name is hidden in Change in');
+  const base = await cssColor(p, '#e5e7eb');
+  assert.equal(await p.ev("getComputedStyle(document.querySelector('#surface [data-id=\"button-bg\"]')).backgroundColor"), base, "the stage keeps button-bg's base fill");
+}
+// After From base: the variant holds no fill, and the field says "From base".
+async function saysFromBase(p) {
+  const shown = () => p.ev("(() => { const s = document.querySelector('#props [data-prop=\"fill\"]'); return s ? `${s.value} ${s.selectedOptions[0]?.textContent}` : null; })()");
+  await within(async () => (await shown()) === '@base From base', 'the fill field says From base', shown);
+}
+// One step of a C2 row: a field set (fieldSet); with 'type', the text typed into the field and no
+// Enter; with 'click', the panel's button of that data-action (and data-variant, when given).
+async function rowStep(p, [f, v, how]) {
+  if (how === 'type') {
+    assert.equal(await focusField(p, f), true, `${f} focused`);
+    await typeKeys(p, String(v));
+  } else if (how === 'click') {
+    await p.click(`#props [data-action="${f}"]${v === null ? '' : `[data-variant="${v}"]`}`);
+    await leavePanel(p);
+  } else await fieldSet(p, f, v);
 }
 
 // The C2 table (spec C2), in its order: the node, its page, the field changed (each step a fieldSet),
-// and the one set op sent (on `on`, else the node). Task 5 adds the four rows on button's variants
-// before the last row, which stays last.
+// and the one set op sent (on `on`, else the node). The four rows on button's variants come before the
+// last row, which stays last (the spec's order).
 const C2_ROWS = [
   { id: 'card', steps: [['layout.mode', 'row']], prop: 'layout.mode', value: 'row', after: drawnRow },
   { id: 'card', steps: [['layout.gap', '24']], prop: 'layout.gap', value: 24 },
@@ -691,6 +717,10 @@ const C2_ROWS = [
   { id: 'photo', steps: [['fit', 'contain']], prop: 'fit', value: 'contain' },
   { id: 'buy', steps: [['variant', 'quiet']], prop: 'variant', value: 'quiet', after: drawnQuiet },
   { id: 'buy', steps: [['variant', '@none']], prop: 'variant', value: null },
+  { id: 'button', page: 'p-parts', steps: [['@new-variant', 'x1', 'type'], ['add-variant', null, 'click']], prop: 'variants.x1', value: {} },
+  { id: 'button', page: 'p-parts', steps: [['remove-variant', 'x1', 'click']], prop: 'variants.x1', value: null },
+  { id: 'button-bg', on: 'button', page: 'p-parts', steps: [['@variant', 'quiet'], ['fill', '@hex'], ['fill#hex', '#00ff00']], prop: 'variants.quiet.button-bg.fill', value: '#00ff00', after: changedInQuiet },
+  { id: 'button-bg', on: 'button', page: 'p-parts', steps: [['@variant', 'quiet'], ['fill', '@base']], prop: 'variants.quiet.button-bg.fill', value: null, after: saysFromBase },
   { id: 'loose', steps: [['visible', false]], prop: 'visible', value: false },
 ];
 
@@ -705,7 +735,7 @@ test('every property sends one set op the fake accepts', { skip: canDrive ? fals
     const value = typeof row.value === 'function' ? await row.value(p) : row.value;
     assert.equal(holds(fake.doc('every').nodes[on], row.prop, value), false, `${what}: ${on} doesn't already hold ${JSON.stringify(value)}`);
     const n0 = edits(rec).length;
-    for (const [f, v] of row.steps) await fieldSet(p, f, v);
+    for (const step of row.steps) await rowStep(p, step);
     const e = await nextEdit(rec, n0);
     assert.deepEqual(e.ops, [setOp(on, row.prop, value)], `${what}: one set op`);
     await ackOf(rec, e);
@@ -1480,6 +1510,209 @@ test('a drag into its own subtree sends nothing', { skip: canDrive ? false : 'ne
   const m = await nextEdit(rec, n0);
   assert.deepEqual(m.ops.map((o) => [o.op, o.id, o.prop]), [['set', 'chip', 'x'], ['set', 'chip', 'y']], 'chip moved on its page');
   await ackOf(rec, m);
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+// ---- components, variants and instances (spec §3) ----
+
+const VARIANT_NOTE = "A variant's name is a letter, then letters, digits or _.";
+const OWN_COMPONENT = "An instance can't go inside its own component.";
+const offered = (p, action) => count(p, `#props [data-action="${action}"]`);
+const variantsListed = (p) => p.ev("[...document.querySelectorAll('#props [data-action=\"remove-variant\"]')].map((b) => b.dataset.variant)");
+const hideToast = (p) => p.ev("document.getElementById('toast').hidden = true");
+
+test('make component', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  // offered on a frame where a component may be; not on another type, nor on a frame in a component,
+  // nor on a frame holding a component
+  await selectRow(p, 'badge');
+  assert.equal(await offered(p, 'make-component'), 0, 'not on a rect');
+  const a = await ana(fake, later);
+  await a.edit([
+    { op: 'add', node: { id: 'holder', type: 'frame', parent: 'p-parts', name: 'Holder', x: 400, y: 200, size: { w: 200, h: 150 }, layout: { mode: 'none' } }, after: 'button' },
+    { op: 'add', node: { id: 'chip', type: 'component', parent: 'holder', name: 'Chip', x: 10, y: 10, size: { w: 40, h: 40 }, layout: { mode: 'none' } }, after: null },
+  ]);
+  await within(async () => (await body(p, 'rev')) === String(fake.rev('every')), "the page has Ana's edit");
+  await showPg(p, 'p-parts');
+  await selectRow(p, 'button-bg');
+  assert.equal(await offered(p, 'make-component'), 0, 'not on a frame inside a component');
+  await selectRow(p, 'holder');
+  assert.equal(await offered(p, 'make-component'), 0, 'not on a frame holding a component');
+
+  // loose (a `none` frame on the page, holding badge) made a component: one edit
+  await showPg(p, 'p-main');
+  await selectRow(p, 'loose');
+  assert.equal(await offered(p, 'make-component'), 1, 'offered on loose');
+  const looseBox = await box(p, '#surface [data-id="loose"]');
+  const badgeBox = await box(p, '#surface [data-id="badge"]');
+  const n0 = edits(rec).length;
+  await p.click('#props [data-action="make-component"]');
+  const e = await nextEdit(rec, n0);
+  assert.equal(e.ops.length, 3, `one edit of three ops (${JSON.stringify(e.ops)})`);
+  const cid = e.ops[0].node?.id;
+  assert.match(String(cid), /^[0-9a-z]{6}-\d+$/, 'a new id <prefix>-<n>');
+  assert.deepEqual(e.ops, [
+    { op: 'add', node: { id: cid, type: 'component', parent: 'p-main', name: 'Loose', layout: { mode: 'none' }, size: { w: 200, h: 200 }, x: 400, y: 0 }, after: 'loose' },
+    { op: 'move', id: 'badge', parent: cid, after: null },
+    { op: 'del', id: 'loose' },
+  ], 'add the component with the frame\'s properties after it, move its child, delete the frame');
+  await ackOf(rec, e);
+  await sleep(200);
+  assert.equal(edits(rec).length, n0 + 1, 'exactly one edit frame');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  const d = fake.doc('every');
+  assert.equal(Object.hasOwn(d.nodes, 'loose'), false, 'the frame is gone');
+  assert.equal(d.nodes[cid].type, 'component');
+  assert.deepEqual(d.nodes[cid].children, ['badge'], 'the component holds badge');
+  assert.equal(d.nodes.badge.parent, cid);
+  assert.deepEqual([d.nodes.badge.x, d.nodes.badge.y], [12, -8], 'badge keeps its place');
+  assert.deepEqual(d.pages[0].children, ['card', cid, 'tiles'], "the component in the frame's place");
+  // drawn with its child, where the frame was, and selected
+  await within(async () => (await count(p, `#surface [data-id="${cid}"] [data-id="badge"]`)) === 1, 'the component drawn holding badge');
+  assert.equal(await count(p, '#surface [data-id="loose"]'), 0, 'loose no longer drawn');
+  const cb = await box(p, `#surface [data-id="${cid}"]`);
+  const bb = await box(p, '#surface [data-id="badge"]');
+  for (const k of ['l', 't', 'w', 'h']) {
+    near(cb[k], looseBox[k], 0.5, `the component drawn as loose was: ${k}`);
+    near(bb[k], badgeBox[k], 0.5, `badge drawn where it was: ${k}`);
+  }
+  assert.deepEqual(await selectedIds(p), [cid], 'the component selected');
+  assert.equal(await offered(p, 'make-component'), 0, 'a component is not offered make component');
+  assert.equal(await offered(p, 'place-instance'), 1, 'a component offers place instance');
+  await waitSaved(p);
+  noExceptions(rec);
+});
+
+test('variants', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await showPg(p, 'p-parts');
+  await selectRow(p, 'button');
+  assert.deepEqual(await variantsListed(p), ['primary', 'quiet'], "button's variants listed, each with Remove");
+  // Add variant dark
+  let n0 = edits(rec).length;
+  assert.equal(await focusField(p, '@new-variant'), true, 'the variant name field');
+  await typeKeys(p, 'dark');
+  await p.click('#props [data-action="add-variant"]');
+  let e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [setOp('button', 'variants.dark', {})], 'Add variant sends one set of {}');
+  await ackOf(rec, e);
+  await within(async () => JSON.stringify(await variantsListed(p)) === '["primary","quiet","dark"]', 'dark listed', () => variantsListed(p));
+  assert.deepEqual(fake.doc('every').nodes.button.variants.dark, {}, 'the fake holds dark');
+  // a bad name: its note, nothing sent
+  for (const bad of ['1x', 'dark-mode']) {
+    n0 = edits(rec).length;
+    assert.equal(await focusField(p, '@new-variant'), true, 'the variant name field');
+    await typeKeys(p, bad);
+    await p.click('#props [data-action="add-variant"]');
+    await within(async () => (await notes(p)).includes(VARIANT_NOTE), `${bad}: the variant name's note`, () => notes(p), 5000);
+    await sendsNothing(rec, n0, `the name ${bad}`);
+  }
+  // Remove on dark
+  n0 = edits(rec).length;
+  await p.click('#props [data-action="remove-variant"][data-variant="dark"]');
+  e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [setOp('button', 'variants.dark', null)], 'Remove sends one set of null');
+  await ackOf(rec, e);
+  await within(async () => JSON.stringify(await variantsListed(p)) === '["primary","quiet"]', 'dark no longer listed', () => variantsListed(p));
+  assert.equal(Object.hasOwn(fake.doc('every').nodes.button.variants, 'dark'), false, 'the fake no longer holds dark');
+  // Change in shows on a node inside the component (it has variants), not on the component itself
+  assert.equal(await count(p, '#props [data-prop="@variant"]'), 0, 'no Change in on the component');
+  await selectRow(p, 'button-label');
+  const opts = await p.ev("[...document.querySelectorAll('#props [data-prop=\"@variant\"] option')].map((o) => o.textContent)");
+  assert.deepEqual(opts, ['Base', 'primary', 'quiet'], 'Change in: Base or a variant');
+  // in primary, the label's text shows the variant's value and sends to the variant
+  await fieldSet(p, '@variant', 'primary');
+  assert.equal(await p.ev("document.querySelector('#props [data-prop=\"text\"]').value"), 'Variant label', "the variant's value shown");
+  n0 = edits(rec).length;
+  await fieldSet(p, 'text', 'Go');
+  e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [setOp('button', 'variants.primary.button-label.text', 'Go')], 'sent to the variant');
+  await ackOf(rec, e);
+  assert.equal(await text(p, '#surface [data-id="button-label"]'), 'Base label', 'the stage keeps the base');
+  // back to Base: a set on the node itself
+  await fieldSet(p, '@variant', '@base');
+  assert.equal(await p.ev("document.querySelector('#props [data-prop=\"text\"]').value"), 'Base label', 'the base value shown');
+  await waitSaved(p);
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+test('place an instance and set its variant', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await showPg(p, 'p-parts');
+  // Place instance, then a click on the stage beside button
+  await selectRow(p, 'button');
+  const b = await box(p, '#surface [data-id="button"]');
+  const pt = { x: Math.round(b.r + 150), y: Math.round(b.t + 30) };
+  assert.equal(['button', 'button-bg', 'button-label'].includes(await hitAt(p, pt)), false, 'the click is beside button');
+  let n0 = edits(rec).length;
+  await p.click('#props [data-action="place-instance"]');
+  await mouse(p, 'mousePressed', pt.x, pt.y);
+  await mouse(p, 'mouseReleased', pt.x, pt.y);
+  const add = await added(rec, n0, 'the instance');
+  const iid = add.node.id;
+  assert.equal(add.node.type, 'instance');
+  assert.equal(add.node.component, 'button', 'of button');
+  assert.equal(add.node.name, 'Button', "named as button");
+  assert.deepEqual(add.node.size, { w: 'hug', h: 'hug' }, 'hug × hug');
+  assert.equal(add.node.parent, 'p-parts', 'on the page');
+  assert.equal(add.after, 'button', 'after the last node');
+  const s = await p.ev("(() => { const r = document.getElementById('surface').getBoundingClientRect(); return { l: r.left, t: r.top }; })()");
+  const z = await zoomNow(p);
+  assert.deepEqual([add.node.x, add.node.y], [Math.round((pt.x - s.l) / z), Math.round((pt.y - s.t) / z)], 'at the pointer');
+  await madeAndSelected(p, iid, 'the instance');
+  await within(async () => (await count(p, `#surface [data-id="${iid}"]`)) === 1, 'the instance drawn');
+  assert.equal(fake.doc('every').nodes[iid].component, 'button', 'the fake holds the instance');
+  // its Variant set to primary
+  n0 = edits(rec).length;
+  await fieldSet(p, 'variant', 'primary');
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [setOp(iid, 'variant', 'primary')], 'the variant set');
+  await ackOf(rec, e);
+  assert.equal(fake.doc('every').nodes[iid].variant, 'primary');
+  await within(async () => (await text(p, '#props [data-field="variant"]')) === 'primary', 'the Variant row reads primary');
+
+  // never inside its own component: a click on button's drawn box adds nothing and says so
+  await selectRow(p, 'button');
+  await hideToast(p);
+  n0 = edits(rec).length;
+  await p.click('#props [data-action="place-instance"]');
+  const inside = centre(await box(p, '#surface [data-id="button-label"]'));
+  await mouse(p, 'mousePressed', inside.x, inside.y);
+  await mouse(p, 'mouseReleased', inside.x, inside.y);
+  await within(async () => (await shownText(p, '#toast')) === OWN_COMPONENT, 'the page says an instance cannot go inside its own component', () => shownText(p, '#toast'), 5000);
+  await sendsNothing(rec, n0, 'an instance inside its own component');
+  assert.equal(await pressedTool(p), 'move', 'the tool back to Move');
+  // Escape ends placing: the next click adds nothing
+  await p.click('#props [data-action="place-instance"]');
+  await p.key('Escape');
+  await mouse(p, 'mousePressed', pt.x, pt.y + 120);
+  await mouse(p, 'mouseReleased', pt.x, pt.y + 120);
+  await sendsNothing(rec, n0, 'a click after Escape');
+
+  // an instance dragged into the component it names (T4-1): buy, moved to Parts by Ana, onto button
+  const a = await ana(fake, later);
+  await a.edit([
+    { op: 'move', id: 'buy', parent: 'p-parts', after: iid },
+    { op: 'set', id: 'buy', prop: 'x', value: 0 },
+    { op: 'set', id: 'buy', prop: 'y', value: 300 },
+  ]);
+  await within(async () => (await count(p, '#surface [data-id="buy"]')) === 1, 'buy drawn on Parts');
+  const buy0 = await box(p, '#surface [data-id="buy"]');
+  await hideToast(p);
+  n0 = edits(rec).length;
+  await dragPath(p, [centre(buy0), centre(await box(p, '#surface [data-id="button"]'))]);
+  await within(async () => (await shownText(p, '#toast')) === OWN_COMPONENT, 'buy dropped on button: the own-component words', () => shownText(p, '#toast'), 5000);
+  await sendsNothing(rec, n0, 'buy into button');
+  const buy1 = await box(p, '#surface [data-id="buy"]');
+  near(buy1.l, buy0.l, 0.5, 'buy drawn back: x');
+  near(buy1.t, buy0.t, 0.5, 'buy drawn back: y');
+  assert.equal(fake.doc('every').nodes.buy.parent, 'p-parts', 'buy still on the page');
+  await waitSaved(p);
   assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
   noExceptions(rec);
 });
