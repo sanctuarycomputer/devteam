@@ -1,16 +1,19 @@
-# Deploys the owner's cloud box (cloud/) at each release. Only on this repository, and only when
-# the RENDER_DEPLOY_HOOK secret holds the service's deploy hook (Render: the service's Settings,
+# Deploys the owner's cloud box (cloud/) at each minor release. Only on this repository, and only
+# when the RENDER_DEPLOY_HOOK secret holds the service's deploy hook (Render: the service's Settings,
 # Deploy Hook); a fork, or a repo without it, does nothing. The box resumes each supervisor that was
-# running on boot, and the supervisors their fleets, so a release costs the fleet a few minutes,
-# not its work.
+# running on boot, and the supervisors their fleets, so a deploy costs the fleet a few minutes, not
+# its work.
 #
-# The gate: the job runs in the GitHub environment "box", holds the hook there, and deploys only a
-# full release whose commit is on main, whose cloud/Dockerfile is stamped and pinned for its tag
-# (box-pins verify --release: the release-prep PR's box-pins bump), and that changed something the
-# image is built from. Each release-prep PR stamps the Dockerfile, so every release deploys, and the
-# box always runs the latest release's hub and kit. A release runs this file as of its own commit,
-# so only the environment is out of that commit's reach; the README's "deploy gate" says what the
-# rest relies on.
+# A minor (vX.Y.0) or a major deploys the box, as before: the job runs in the GitHub environment
+# "box", holds the hook there, and deploys only a full release whose commit is on main, whose
+# cloud/Dockerfile is stamped and pinned for its tag (box-pins verify --release: the release-prep
+# PR's box-pins bump), and that changed something the image is built from.
+# A patch (vX.Y.Z, Z > 0) never deploys the box: it is stamped with its minor (vX.Y.0), gets no
+# release-prep PR, and lands in place, each project adopting it, when that minor deployed (a
+# box-deploy run at its commit concluded success) and box-pins changed --smoke says nothing the box
+# image runs or relies on changed since it. Otherwise the job fails red without deploying: cut the
+# next minor. It never reads the hook. A release runs this file as of its own commit, so only the
+# environment is out of that commit's reach; the README's "deploy gate" says what the rest relies on.
 name: box-deploy
 on:
   release:
@@ -26,12 +29,13 @@ jobs:
     environment: box
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
-      # the stamp check runs the kit, on the image's node
+      # the stamp check and the patch's classifier run the kit, on the image's node
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -45,8 +49,51 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          # first, so a run without the hook refuses too: a release cut without its release-prep PR
-          node docs/devteam/scripts/devteam.mjs box-pins verify --release "$TAG" || { echo "refusing $TAG: cloud/Dockerfile isn't stamped and pinned for it; run box-pins bump --release $TAG in a release-prep PR, merge it, and publish the release again"; exit 1; }
+          # first, so a run without the hook refuses too. A minor or major is stamped with its own tag
+          # (its release-prep PR's box-pins bump); a patch with the minor it builds on, vX.Y.0. The
+          # words are worked out in a subshell: in a step, an expansion error ends only the command it
+          # is in and the step runs on, so nothing that can fail sits beside an exit.
+          node docs/devteam/scripts/devteam.mjs box-pins verify --release "$TAG" || {
+            (
+              if [[ $TAG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] && ! [[ ${BASH_REMATCH[3]} =~ ^0+$ ]]; then
+                [[ $TAG =~ ^v([0-9]{1,9})\.([0-9]{1,9})\. ]] || { echo "refusing $TAG: a patch is stamped with its minor (vX.Y.0) and gets no release-prep PR: cut a minor"; exit 0; }
+                px=$((10#${BASH_REMATCH[1]})) py=$((10#${BASH_REMATCH[2]}))
+                echo "refusing $TAG: a patch is stamped with its minor, so cloud/Dockerfile must say v$px.$py.0 and verify (its lines above say what is wrong); a patch gets no release-prep PR: cut v$px.$((py + 1)).0"
+                exit 0
+              fi
+              echo "refusing $TAG: cloud/Dockerfile isn't stamped and pinned for it; run box-pins bump --release $TAG in a release-prep PR, merge it, and publish the release again"
+            ) || true
+            exit 1
+          }
+          # The tag: each number at most 9 digits; whether it is a patch is read from Z's digits, as
+          # verify reads it, never from arithmetic.
+          [[ $TAG =~ ^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})$ ]] || { echo "refusing $TAG: not vX.Y.Z (each number at most 9 digits)"; exit 1; }
+          x=${BASH_REMATCH[1]} y=${BASH_REMATCH[2]} z=${BASH_REMATCH[3]}
+          if ! [[ $z =~ ^0+$ ]]; then
+            # A patch never deploys: it lands in place (each project adopts it) when its minor
+            # deployed and nothing the image runs changed since that minor; otherwise this job fails
+            # red. All of it runs in a subshell, which exits 0 only where it says the patch lands: any
+            # other end, an expansion error included, reaches the exit 1 below it.
+            (
+              minor="v$((10#$x)).$((10#$y)).0" next="v$((10#$x)).$((10#$y + 1)).0"
+              base=$(git rev-parse --verify -q "refs/tags/$minor^{commit}") || { echo "refusing $TAG: there is no tag $minor, so the box isn't on it; cut $next"; exit 1; }
+              # any box-deploy run at the minor's commit, for its release, that concluded success
+              runs=$(gh run list --workflow box-deploy.yml --commit "$base" -L 100 --json event,conclusion) || { echo "refusing $TAG: can't read $minor's box-deploy runs; re-run this job"; exit 1; }
+              n=$(jq '[.[] | select(.event == "release" and .conclusion == "success")] | length' <<<"$runs" 2>/dev/null) || n=0
+              [ "$n" -gt 0 ] 2>/dev/null || { echo "refusing $TAG: $minor never deployed, so the box isn't on it; cut $next"; exit 1; }
+              # image-changes@1: 0 a patch, 3 a minor, anything else can't tell; its lines say which changes
+              rc=0
+              node docs/devteam/scripts/devteam.mjs box-pins changed --since "$minor" --to "$SHA" --smoke || rc=$?
+              case $rc in
+                0) echo "$TAG is a patch: nothing the box image runs or relies on changed since $minor, which the box runs; it lands in place (each project adopts it)"; exit 0 ;;
+                3) echo "refusing to deploy $TAG: a patch may not change what the box image runs; cut $next for these"; exit 1 ;;
+              esac
+              echo "refusing $TAG: box-pins changed couldn't tell whether it changes what the box image runs (exit $rc); cut $next, or re-run this job once that is fixed"
+              exit 1
+            ) && exit 0
+            exit 1
+          fi
+          # A minor or a major, as before.
           [ -n "$HOOK" ] || { echo "no RENDER_DEPLOY_HOOK secret: no box to deploy"; exit 0; }
           # git answers 1 for "not on main" and 128 for "can't tell": either refuses
           git merge-base --is-ancestor "$SHA" origin/main || { echo "refusing $SHA: it isn't on main"; exit 1; }

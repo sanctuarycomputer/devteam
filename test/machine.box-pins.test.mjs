@@ -376,7 +376,8 @@ test('verify --release takes a patch\'s minor as its stamp, and a minor\'s own t
   const verify = (tag, v) => pins(['verify', '--release', tag, '--dockerfile', stamped(v)]);
   const ok = verify('v9.1.3', 'v9.1.0');
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
-  for (const v of ['v9.1.2', 'v9.0.0']) {
+  assert.equal(verify('v9.1.1', 'v9.1.0').status, 0, 'a minor\'s first patch too');
+  for (const v of ['v9.1.2', 'v9.0.0', 'v9.1.3']) {
     const r = verify('v9.1.3', v);
     assert.equal(r.status, 1, `v9.1.3 stamped ${v}: ${r.stdout}`);
     assert.match(r.stdout, new RegExp(`DEVTEAM_RELEASE is ${v.replace(/\./g, '\\.')}, not v9\\.1\\.3's minor, v9\\.1\\.0`));
