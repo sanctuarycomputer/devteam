@@ -8773,10 +8773,12 @@ const PREVIEW_EXITED = '[devteam] the command exited with status';
 // In a window of its own, with PORT on the command line (a new window doesn't inherit this shell's
 // environment, and -e needs tmux 3.2), and this shell's PATH, or a project's pinned tools aren't
 // found. Written with window null first, so a tick that sees the new window doesn't take it for
-// an orphan, and the id after.
+// an orphan, and the id after. run.env (the browser's daemon) adds NAME=value words after PATH,
+// each a plain name with a value holding no NUL: separate argv words, so no shell quoting.
 function launchPreviewWindow(rec) {
   const cmd = rec.run.cmd.split('{port}').join(String(rec.port));
-  const argv = ['env', `PORT=${rec.port}`, `PATH=${process.env.PATH ?? ''}`, 'sh', '-c', `sh -c "$1"; s=$?; printf '\\n${PREVIEW_EXITED} %s\\n' "$s"; sleep 30`, 'sh', cmd];
+  const extra = isObj(rec.run.env) ? Object.entries(rec.run.env).filter(([k, v]) => /^[A-Z_][A-Z0-9_]*$/.test(k) && typeof v === 'string' && !v.includes('\0')).map(([k, v]) => `${k}=${v}`) : [];
+  const argv = ['env', `PORT=${rec.port}`, `PATH=${process.env.PATH ?? ''}`, ...extra, 'sh', '-c', `sh -c "$1"; s=$?; printf '\\n${PREVIEW_EXITED} %s\\n' "$s"; sleep 30`, 'sh', cmd];
   writePreview({ ...rec, run: { ...rec.run, window: null } });
   const session = tmuxSession({ save: true });
   const name = `dev~${rec.name}`;
