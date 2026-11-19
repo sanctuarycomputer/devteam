@@ -230,6 +230,72 @@ test('R1 a state.json the reader can\'t use restarts, never crashes', opts, asyn
   await stopped(q);
 });
 
+// The start lock, as browserStartLock makes it: run/browser/start.lock/owner holding a token.
+const startLock = (P) => path.join(path.dirname(P.state), 'start.lock');
+function plantStartLock(P, token) {
+  fs.mkdirSync(startLock(P), { recursive: true });
+  fs.writeFileSync(path.join(startLock(P), 'owner'), token);
+}
+// SingletonLock as Chrome makes it: a symlink to <host>-<pid>.
+function plantLock(P, target) {
+  const f = path.join(P.profile, 'SingletonLock');
+  fs.mkdirSync(P.profile, { recursive: true });
+  fs.rmSync(f, { force: true });
+  fs.symlinkSync(target, f);
+}
+
+test('L1 a dead owner\'s start lock is taken at once', opts, async () => {
+  await stopped(q);
+  plantStartLock(q, `${deadPid()}-0123456789abcdef`);
+  try {
+    const r = await startCli(q);
+    assert.equal(r.status, 0, `start: ${r.err || r.out}`);
+    assert.ok(r.ms < 30000, `start took ${r.ms} ms`);
+    assert.equal(fs.existsSync(startLock(q)), false, 'the start lock is gone');
+  } finally { fs.rmSync(startLock(q), { recursive: true, force: true }); }
+  await stopped(q);
+});
+
+test('L2 a live owner\'s lock, or a garbage token, is not taken', opts, async () => {
+  await stopped(q);
+  const sleep = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' });
+  try {
+    for (const token of [`${sleep.pid}-0123456789abcdef`, 'abc']) {
+      plantStartLock(q, token);
+      const r = await startCli(q, { DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS: '2000' });
+      assert.equal(r.status, 1, `start with owner ${token} exited ${r.status}`);
+      assert.match(r.err, /timed out waiting/);
+      assert.equal(fs.readFileSync(path.join(startLock(q), 'owner'), 'utf8'), token, 'the planted token is still in place');
+      fs.rmSync(startLock(q), { recursive: true, force: true });
+    }
+  } finally {
+    try { sleep.kill('SIGKILL'); } catch {}
+    fs.rmSync(startLock(q), { recursive: true, force: true });
+  }
+  await stopped(q);
+});
+
+test('I4 a lock\'s host is cleaned and cut in what is printed', opts, async () => {
+  await stopped(q);
+  fs.rmSync(q.state, { force: true });
+  const NOTE = 'Cleared a stale SingletonLock left by host ';
+  plantLock(q, `evil\nhost${'h'.repeat(400)}-1234`);
+  await started(q);
+  const note = (await statusJson(q)).notes.find((n) => n.startsWith(NOTE));
+  assert.ok(note, 'the stale-lock note is there');
+  assert.ok(note.length <= 300, `the note is ${note.length} characters`);
+  assert.doesNotMatch(note, /[\x00-\x1f\x7f]/, 'no control character');
+  const cut = `evil?host${'h'.repeat(91)}`;
+  assert.equal(cut.length, 100);
+  assert.ok(note.includes(`${cut}…`), 'the host is cleaned and cut to 100 characters, then …');
+  await stopped(q);
+  plantLock(q, `${'a'.repeat(100)}-1234`);
+  await started(q);
+  const whole = (await statusJson(q)).notes.find((n) => n.startsWith(NOTE));
+  assert.ok(whole?.includes(`left by host ${'a'.repeat(100)}.`), 'a 100-character host is printed whole');
+  await stopped(q);
+});
+
 test('K1 run.env reaches the daemon', opts, async () => {
   const other = newHome();
   const env = { ...k.env, HOME: other };

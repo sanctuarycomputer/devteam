@@ -25504,23 +25504,28 @@ function browserIdleMs() {
   const v = loadSettings().browser_idle_minutes;
   return (Number.isInteger(v) && v >= 1 && v <= 1440 ? v : SETTINGS_DEFAULTS.browser_idle_minutes) * 60000;
 }
-// The pids of local processes whose command line carries this profile as --user-data-dir, or null
-// when they can't be listed (so nothing is removed on a guess). /proc, else ps (macOS).
+// The pids of this user's local processes whose command line carries this profile as --user-data-dir,
+// or null when they can't be listed (so nothing is removed on a guess). /proc, else ps (macOS). Only
+// this uid's count (kit-316 S4): another user can't read a 0700 profile, so it can't hold one. The uid
+// is /proc's real uid (status's Uid: line), not the /proc/<pid> owner, which reads as root for a
+// non-dumpable process; a status that can't be read isn't counted. DEVTEAM_TEST_BROWSER_UID in tests.
 function browserProcsOn(profile) {
+  const me = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_UID') ?? process.getuid());
   const want = new Set([profile, realPath(profile)].flatMap((p) => [p, `${p}${path.sep}`]));
   const carries = (args) => args.some((a, i) => (a.startsWith('--user-data-dir=') && want.has(a.slice('--user-data-dir='.length))) || (a === '--user-data-dir' && want.has(args[i + 1])));
   if (fs.existsSync('/proc/self/cmdline')) {
     const pids = [];
     for (const d of fs.readdirSync('/proc')) {
       if (!/^\d+$/.test(d) || Number(d) === process.pid) continue;
-      let c; try { c = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8'); } catch { continue; }
+      let c, u; try { c = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8'); u = /^Uid:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${d}/status`, 'utf8'))?.[1]; } catch { continue; }
+      if (u === undefined || Number(u) !== me) continue;
       if (carries(c.split('\0'))) pids.push(Number(d));
     }
     return pids;
   }
-  const r = spawnSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8' });
+  const r = spawnSync('ps', ['-axww', '-o', 'pid=,uid=,command='], { encoding: 'utf8' });
   if (r.status !== 0) return null;
-  return r.stdout.split('\n').map((l) => /^\s*(\d+)\s+(.*)$/.exec(l)).filter((m) => m && Number(m[1]) !== process.pid && [...want].some((w) => ` ${m[2]} `.includes(` --user-data-dir=${w} `))).map((m) => Number(m[1]));
+  return r.stdout.split('\n').map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter((m) => m && Number(m[1]) !== process.pid && Number(m[2]) === me && [...want].some((w) => ` ${m[3]} `.includes(` --user-data-dir=${w} `))).map((m) => Number(m[1]));
 }
 function browserProfiles() {
   const mine = browserKey();
@@ -25597,12 +25602,14 @@ async function browserLive() {
   try { return (await browserCall('ping', {}, { state: s, ms: 5000 })).code === 0 ? s : null; } catch { return null; }
 }
 // The region's own lock, held across awaits (withLock is synchronous): mkdir <file>.lock holding its
-// owner's token, stale after 120 s, waited on up to 60 s. A lock is only ever removed by first renaming
+// owner's token, stale after 120 s, or at once when the token's pid is dead (kit-316 F1), waited on up
+// to 60 s (DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS in tests). A lock is only ever removed by first renaming
 // it to a name of the remover's own, and only when it still holds the token seen: so of two waiters
 // on one stale lock only one takes it, and release removes only its own. A die() inside lets it go.
 async function browserStartLock(file, fn) {
   const lock = `${file}.lock`, owner = path.join(lock, 'owner'), start = Date.now();
   const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS')) || 60000;
   const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
   // Remove the lock if it still holds `seen`; a lock taken from under us is put back.
   const drop = (seen) => {
@@ -25617,7 +25624,11 @@ async function browserStartLock(file, fn) {
       const st = fs.statSync(owner, { throwIfNoEntry: false }) ?? fs.statSync(lock, { throwIfNoEntry: false });
       const seen = read(owner);
       if (st && Math.abs(Date.now() - st.mtimeMs) > 120000) { drop(seen); continue; }
-      if (Date.now() - start > 60000) die(`browser: timed out waiting for ${lock}`);
+      // a well-formed token naming a dead pid that isn't ours: stale now. No owner file yet, a token
+      // that isn't one, or a live owner (EPERM counts as alive) keeps the 120 s rule.
+      const op = /^(\d+)-[0-9a-f]{16}$/.exec(seen ?? '')?.[1];
+      if (op && Number(op) !== process.pid && !browserAlive(Number(op))) { drop(seen); continue; }
+      if (Date.now() - start > wait) die(`browser: timed out waiting for ${lock}`);
       await browserSleep(100);
     }
   }
@@ -25685,6 +25696,13 @@ function browserSingleton(profile) {
   try { t = fs.readlinkSync(path.join(profile, 'SingletonLock')); } catch { return null; }
   const i = t.lastIndexOf('-'), pid = Number(t.slice(i + 1));
   return i > 0 && Number.isInteger(pid) && pid > 0 ? { host: t.slice(0, i), pid } : null;
+}
+// A SingletonLock's host as printed (kit-316 F4): each character outside printable ASCII (U+0021 to
+// U+007E) becomes ?, so no newline starts a forged line, and past 100 characters it is cut, with …
+// added. Comparisons use the raw host.
+function browserHostWords(host) {
+  const w = String(host).replace(/[^\x21-\x7e]/gu, '?');
+  return w.length > 100 ? `${w.slice(0, 100)}…` : w;
 }
 // The proof: one argument of pid's command line is exactly --user-data-dir=<profile>. /proc's cmdline
 // split at NUL, else ps (macOS), matched as a word.
@@ -25758,9 +25776,9 @@ async function browserPrepareProfile(profile, notes) {
   const { killed } = await browserKillChrome(profile, browserCandidates(profile));
   const lock = browserSingleton(profile), procs = browserProcsOn(profile);
   if (lock && lock.host !== browserHostname()) {
-    if (procs === null) throw new Error(`browser: the profile is locked by host ${lock.host}, and this machine's processes couldn't be listed to see whether one here has it open`);
-    if (procs.length) throw new Error(`browser: the profile is locked by host ${lock.host} and a process here (pid ${procs[0]}) has it open`);
-    notes.push(`Cleared a stale SingletonLock left by host ${lock.host}.`);
+    if (procs === null) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)}, and this machine's processes couldn't be listed to see whether one here has it open`);
+    if (procs.length) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)} and a process here (pid ${procs[0]}) has it open`);
+    notes.push(`Cleared a stale SingletonLock left by host ${browserHostWords(lock.host)}.`);
   }
   if (procs?.length === 0) for (const n of fs.readdirSync(profile).filter((x) => x.startsWith('Singleton'))) fs.rmSync(path.join(profile, n), { force: true });
   browserDeleteSession(profile);

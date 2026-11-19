@@ -266,6 +266,24 @@ test('forget --profile removes another profile, refusing while a process carries
   assert.equal(fs.existsSync(dir), false);
 });
 
+test('S4a a process of another uid doesn\'t hold a profile', opts, async () => {
+  const key = 'other-uid-00aa11bb22cc';
+  const dir = path.join(e.home, '.devteam', 'browser', key);
+  fs.mkdirSync(path.join(dir, 'Default'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'root.json'), JSON.stringify({ root: path.join(tmp, 'gone') }));
+  const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', `--user-data-dir=${dir}`], { stdio: 'ignore' });
+  try {
+    await until(() => fs.existsSync(`/proc/${holder.pid}/cmdline`) && fs.readFileSync(`/proc/${holder.pid}/cmdline`, 'utf8').includes(dir), 'the holder');
+    const res = await cli(e, ['forget', '--profile', key], { DEVTEAM_TEST_BROWSER_UID: String(process.getuid() + 1) });
+    assert.equal(res.status, 0, res.err);
+    assert.equal(fs.existsSync(dir), false, 'the folder is gone');
+  } finally {
+    holder.kill('SIGKILL');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  await new Promise((r) => (holder.exitCode !== null || holder.signalCode !== null ? r() : holder.once('exit', r)));
+});
+
 test('unknown verbs print the usage line', opts, async () => {
   for (const args of [[], ['frobnicate']]) {
     const res = await cli(e, args);
