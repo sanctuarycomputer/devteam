@@ -258,6 +258,31 @@ const rect = (p, sel) => p.ev(`(${RECT})(${JSON.stringify(sel)})`);
 const near = (a, b, tol, what) => assert.ok(Math.abs(a - b) <= tol, `${what}: ${a} vs ${b} (±${tol})`);
 const CHECKOUT_IDS = ['card', 'title', 'rule', 'dot', 'icon', 'photo', 'actions', 'buy', 'loose', 'badge', 'tiles'];
 
+// A fixture colour (a hex or a colour token's $ref) as getComputedStyle gives it: rgb(r, g, b).
+function rgbOf(doc, v) {
+  let hex = v;
+  if (v && typeof v === 'object' && typeof v.$ref === 'string') hex = v.$ref.split('.').reduce((o, k) => o?.[k], doc.tokens)?.$value?.hex;
+  assert.match(String(hex), /^#([0-9a-f]{3}|[0-9a-f]{6})$/i, `a colour in the fixture: ${JSON.stringify(v)}`);
+  const h = hex.length === 4 ? hex.slice(1).split('').map((c) => c + c).join('') : hex.slice(1);
+  return `rgb(${parseInt(h.slice(0, 2), 16)}, ${parseInt(h.slice(2, 4), 16)}, ${parseInt(h.slice(4, 6), 16)})`;
+}
+// An instance of `button` drawn as the fake's resolve(doc, instanceId) has it, every level the
+// resolution order sets: button-bg's shown or not, fill and width rule (fill: it grows in the row);
+// button-label's text and colour.
+async function drawnAsResolved(p, doc, instanceId) {
+  const r = resolve(doc, instanceId);
+  const bg = `[data-of="${instanceId}"][data-src="button-bg"]`;
+  const label = `[data-of="${instanceId}"][data-src="button-label"]`;
+  assert.equal(await count(p, bg), 1, `${instanceId}: one button-bg`);
+  assert.equal(await count(p, label), 1, `${instanceId}: one button-label`);
+  assert.equal((await css(p, bg, 'display')) !== 'none', r['button-bg'].visible !== false, `${instanceId}: button-bg shown as resolved`);
+  assert.equal(await css(p, bg, 'background-color'), rgbOf(doc, r['button-bg'].fill), `${instanceId}: button-bg's fill as resolved`);
+  assert.equal(await css(p, bg, 'flex-grow'), r['button-bg']['size.w'] === 'fill' ? '1' : '0', `${instanceId}: button-bg's width rule as resolved (${r['button-bg']['size.w']})`);
+  assert.equal(await text(p, label), r['button-label'].text, `${instanceId}: button-label's text as resolved`);
+  assert.equal(await css(p, label, 'color'), rgbOf(doc, r['button-label'].color), `${instanceId}: button-label's colour as resolved`);
+  return r;
+}
+
 test('every node type', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
   const { p, origin, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
   assert.equal(await state(p), 'ready');
@@ -325,6 +350,13 @@ test('every node type', { skip: canDrive ? false : 'needs Chrome and WebSocket',
   assert.notEqual(await css(p, '[data-of="buy"][data-src="button-bg"]', 'display'), 'none', "buy's background is displayed");
   assert.equal(await count(p, '#surface [data-id="button-label"], #surface [data-id="button-bg"]'), 0, "an instance's inner nodes carry no data-id");
   assert.equal(await count(p, '.clabel'), 0, 'no component on Checkout');
+  // below the prop level: buy's override sets button-bg's fill (color.brand) and width (fill) over the
+  // variant, and the variant sets button-label's colour over the base
+  const buy = await drawnAsResolved(p, EVERY, 'buy');
+  assert.deepEqual(buy['button-bg'].fill, { $ref: 'color.brand' }, "buy's fill is its override's");
+  assert.equal(await css(p, '[data-of="buy"][data-src="button-bg"]', 'background-color'), 'rgb(59, 91, 219)', "buy's background: color.brand");
+  assert.equal(await css(p, '[data-of="buy"][data-src="button-bg"]', 'flex-grow'), '1', "buy's background fills its row (override size.w)");
+  assert.equal(await css(p, '[data-of="buy"][data-src="button-label"]', 'color'), 'rgb(255, 255, 255)', "buy's label: white, not the base #111");
 
   // C1.7 component, on Parts (clicked in the Pages list)
   await p.click('#pages a[data-page="p-parts"]');
@@ -352,6 +384,37 @@ test('every node type', { skip: canDrive ? false : 'needs Chrome and WebSocket',
     assert.equal(await state(o.p), 'ready');
     assert.equal(await css(o.p, '[data-of="buy"][data-src="button-bg"]', 'display'), 'none');
     assert.notEqual(await css(o.p, '[data-of="buy"][data-src="button-label"]', 'display'), 'none');
+    noExceptions(o.rec);
+  });
+
+  // Three more instances of button beside buy, each stopping at one level: `plain` has no variant,
+  // override or prop (the prop default shows), `varied` only the variant (it beats the default), `over`
+  // the variant and an override whose fill and label differ from the variant's (the override beats it).
+  await t.test("C1.7 each level of an instance's resolution shows where it is the last present", async (st) => {
+    const doc = structuredClone(EVERY);
+    const like = (id, extra) => {
+      const n = structuredClone(EVERY.nodes.buy);
+      delete n.variant; delete n.props; delete n.overrides;
+      doc.nodes[id] = { ...n, name: id, ...extra };
+      doc.nodes.actions.children.push(id);
+    };
+    like('plain', {});
+    like('varied', { variant: 'primary' });
+    like('over', { variant: 'primary', overrides: { 'button-bg': { fill: '#12b886' }, 'button-label': { text: 'Over label', color: '#e03131' } } });
+    const o = await open(st, { canvases: { 'every-levels': doc }, images: EVERY_IMAGES('every-levels') });
+    assert.equal(await state(o.p), 'ready');
+    for (const id of ['buy', 'plain', 'varied', 'over']) await drawnAsResolved(o.p, doc, id);
+    const bg = (id) => `[data-of="${id}"][data-src="button-bg"]`;
+    const label = (id) => `[data-of="${id}"][data-src="button-label"]`;
+    assert.equal(await text(o.p, label('plain')), 'Default label', 'no props: the prop default, not the base');
+    assert.equal(await css(o.p, bg('plain'), 'background-color'), 'rgb(229, 231, 235)', 'no variant: the base fill');
+    assert.equal(await css(o.p, bg('plain'), 'flex-grow'), '0', 'no override: no fill width');
+    assert.equal(await text(o.p, label('varied')), 'Variant label', 'no override: the variant beats the prop default');
+    assert.equal(await css(o.p, bg('varied'), 'background-color'), 'rgb(59, 91, 219)', "no override: the variant's #3b5bdb");
+    assert.equal(await css(o.p, label('varied'), 'color'), 'rgb(255, 255, 255)', "the variant's label colour");
+    assert.equal(await text(o.p, label('over')), 'Over label', 'the override beats the variant');
+    assert.equal(await css(o.p, bg('over'), 'background-color'), 'rgb(18, 184, 134)', 'the override fill beats the variant fill');
+    assert.equal(await css(o.p, label('over'), 'color'), 'rgb(224, 49, 49)', 'the override colour beats the variant colour');
     noExceptions(o.rec);
   });
 });
