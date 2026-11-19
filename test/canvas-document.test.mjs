@@ -1303,9 +1303,10 @@ test('canvas module: limits: each refused limit at and over', async (t) => {
     check: (r) => assert.equal(tokenCount(r), L.tokens, 'tokens: the limit reached'),
   });
 
+  const segs = (n) => Array.from({ length: n }, (_, i) => `s${i}`);
   edge(canvas, ms, 'tokenDepth', {
-    doc: blank(), at: [{ op: 'token', path: 'a.b.c.d.e.f.g.h', value: NUM }], over: [{ op: 'token', path: 'a.b.c.d.e.f.g.i.j', value: NUM }], code: 'limit',
-    check: (r) => assert.equal(r.tokens.a.b.c.d.e.f.g.h.$value, 1, 'tokenDepth: a token 8 deep'),
+    doc: blank(), at: [{ op: 'token', path: segs(L.tokenDepth).join('.'), value: NUM }], over: [{ op: 'token', path: [...segs(L.tokenDepth - 1), 'o0', 'o1'].join('.'), value: NUM }], code: 'limit',
+    check: (r) => assert.equal(segs(L.tokenDepth).reduce((g, k) => g[k], r.tokens).$value, 1, `tokenDepth: a token ${L.tokenDepth} deep`),
   });
 
   d = blank();
@@ -1422,6 +1423,9 @@ test('canvas module: limits: each refused value at and over', async (t) => {
   const tok = (n) => [{ op: 'token', path: `g.${s(n, 'a')}`, value: NUM }];
   both("tokenSegmentChars (a token op's path)", tok(L.tokenSegmentChars), tok(L.tokenSegmentChars + 1), 'shape');
   both("idChars (an add's node.id)", [rect(s(L.idChars, 'a'), 'p1')], [rect(s(L.idChars + 1, 'a'), 'p1')], 'shape');
+  both("idChars (a set's id)", set(comp40, 'name', 'n'), set(`${comp40}x`, 'name', 'n'), 'shape');
+  both("idChars (a del's id)", [{ op: 'del', id: comp40 }], [{ op: 'del', id: `${comp40}x` }], 'shape');
+  both("idChars (a move's id)", [{ op: 'move', id: comp40, parent: 'p1', after: null }], [{ op: 'move', id: `${comp40}x`, parent: 'p1', after: null }], 'shape');
   both('idChars (a componentRef value)', set('inst', 'component', comp40), set('inst', 'component', `${comp40}x`));
 
   t.diagnostic(`ms per limit ${JSON.stringify(ms)}; the test ${Date.now() - t0} ms`);
