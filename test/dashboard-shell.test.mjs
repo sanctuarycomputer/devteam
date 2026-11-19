@@ -132,7 +132,10 @@ test("every layout rule is scoped to .shell: index adopts it with its old region
   assert.doesNotMatch(IDX.match(/<[a-z]+\b[^>]*\bid="library"[^>]*>/)?.[0] ?? 'missing', /no-shell|missing/, '#library is there and carries no no-shell');
   // Trust is ported (kit-93)
   assert.doesNotMatch(IDX.match(/<[a-z]+\b[^>]*\bid="trust"[^>]*>/)?.[0] ?? 'missing', /no-shell|missing/, '#trust is there and carries no no-shell');
-  for (const id of ['loop', 'retros', 'health', 'monitoring', 'review-view', 'artifact-view', 'tl']) {
+  // Sensors is ported and Health folded into its Fleet tab (kit-93): no #health, #monitoring unfenced
+  assert.doesNotMatch(IDX, /\bid="health"/, 'index.html has no #health section');
+  assert.doesNotMatch(IDX.match(/<[a-z]+\b[^>]*\bid="monitoring"[^>]*>/)?.[0] ?? 'missing', /no-shell|missing/, '#monitoring is there and carries no no-shell');
+  for (const id of ['loop', 'retros', 'review-view', 'artifact-view', 'tl']) {
     const tag = IDX.match(new RegExp(`<[a-z]+\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
     assert.ok(tag, `index.html has #${id}`);
     assert.match(tag, /\bclass="[^"]*(?<![\w-])no-shell(?![\w-])/, `#${id} carries no-shell: ${tag}`);

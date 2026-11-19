@@ -536,4 +536,228 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await polls(2);
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
+
+  // ---- Sensors (T6): Production (the incidents board, a card a sensor) and Fleet (Health's tables) ----
+  const J = JSON.stringify;
+  const FLEET = (n) => `#monitoring [data-tbl="fleet:${n}"]`;
+  const SCARD = (n) => `#monitoring .sensor-card[data-open="sensor/${n}"]`;
+  // a card head's own label: its text nodes, without the icon and the .grow extra
+  const headLabels = (sel) => p.ev(`[...document.querySelectorAll(${J(sel)})].map((h) => [...h.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim())`);
+  const selectedTab = () => p.ev("document.querySelector('#monitoring [role=\"tab\"][aria-selected=\"true\"]')?.dataset.tab ?? null");
+  const productionDrawn = () => soon("!!document.querySelector('#monitoring .sensor-card') && !!document.querySelector('#incidents')", 'Production drawn');
+  const fleetDrawn = () => soon(`!!document.querySelector(${J(`${FLEET('findings')} tr[data-row]`)})`, 'Fleet drawn');
+  // a peek section's body text, and the hashes its rows open (null: no such section)
+  const PSECT = (title) => `[...document.querySelectorAll('#drawer-body .psect')].find((x) => x.querySelector('.card-head .grow')?.textContent.trim() === ${J(title)})`;
+  const psectText = (title) => p.ev(`(() => { const s = ${PSECT(title)}; return s ? s.querySelector('.psect-body').textContent.replace(/\\s+/g, ' ').trim() : null; })()`);
+  const psectOpens = (title) => p.ev(`(() => { const s = ${PSECT(title)}; return s ? [...s.querySelectorAll('.rowline[data-open]')].map((r) => decodeURIComponent(r.dataset.open)) : null; })()`);
+
+  await t.test('Sensors has two tabs', async () => {
+    await load(autonomyFixture(), '#sensors');
+    await productionDrawn();
+    assert.equal(await p.ev("document.getElementById('monitoring').classList.contains('no-shell')"), false);
+    const tabs = await texts('#monitoring [role="tab"]');
+    assert.equal(tabs.length, 2, tabs.join(' | '));
+    assert.match(tabs[0], /^Production\b/);
+    assert.match(tabs[1], /^Fleet\b/);
+    assert.equal(await selectedTab(), 'production');
+    // the incidents card first, then one card per sensor, in the order the server gives them
+    assert.deepEqual(await headLabels('#monitoring .g12 > .card > .card-head'), ['Incidents', 'hub', 'kit-github', 'errors']);
+    assert.equal(await p.ev("!!document.querySelector('#monitoring .g12 > .card:first-child #incidents')"), true);
+    assert.equal(await p.ev("document.querySelectorAll('#monitoring .sensor-card').length"), 3);
+    for (const id of ['sensor-feed', 'sensor-exceptions']) assert.equal(await p.ev(`!!document.getElementById(${J(id)})`), false, `no #${id}`);
+    const heads = await texts('#monitoring h1, #monitoring h2, #monitoring h3, #monitoring h4, #monitoring .card-head');
+    for (const h of ['Observations', 'Exceptions and errors']) assert.ok(!heads.some((x) => x.startsWith(h)), `no heading ${h}: ${heads.join(' | ')}`);
+    // the error tracker's card shows its events by level (C7), as the probe's does
+    const tracker = await text(SCARD('errors'));
+    assert.match(tracker, /\berror 5\b/);
+    assert.match(tracker, /\bwarn 3\b/);
+    assert.match(await text(SCARD('kit-github')), /\binfo 8\b/);
+    // a card is a button to the keyboard
+    assert.equal(await p.ev(`[...document.querySelectorAll('#monitoring .sensor-card')].every((c) => c.getAttribute('role') === 'button' && c.getAttribute('tabindex') === '0')`), true);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('the incidents board by stage', async () => {
+    const fx = autonomyFixture();
+    const inc = fx.ids.incidents;
+    await load(fx, '#sensors');
+    await soon("!!document.querySelector('#incidents .tcard')", 'the incident board');
+    assert.deepEqual(await texts('#incidents .board.inc > .col > h3 > span:first-child'), ['Open', 'Investigating', 'Fixing', 'Watching', 'Resolved']);
+    const col = (i) => p.ev(`(() => { const c = document.querySelectorAll('#incidents .board.inc > .col')[${i}]; return c ? [...c.querySelectorAll('.tcard')].map((x) => decodeURIComponent(x.dataset.open)) : null; })()`);
+    const P = (...ks) => ks.map((k) => `problem/${inc[k]}`);
+    assert.deepEqual(await col(0), P('new', 'regressed'));
+    assert.deepEqual(await col(1), P('triaged'));
+    assert.deepEqual(await col(2), P('fixing', 'merged'));
+    assert.deepEqual(await col(3), P('verifying'));
+    assert.deepEqual(await col(4), P('resolved'));
+    const card = (id) => `document.querySelector('#incidents .tcard[data-open="problem/${encodeURIComponent(id)}"]')`;
+    assert.equal(await p.ev(`${card(inc.regressed)}.classList.contains('blocked')`), true, 'the regressed one marked red');
+    assert.equal(await p.ev(`${card(inc.new)}.classList.contains('blocked')`), false);
+    assert.match(await p.ev(`${card(inc.merged)}.textContent`), /merged, not yet verified/);
+    assert.doesNotMatch(await p.ev(`${card(inc.fixing)}.textContent`), /not yet verified/);
+    for (const x of fx.patch.incidents) {
+      const c = (await p.ev(`${card(x.id)}.textContent`)).replace(/\s+/g, ' ');
+      assert.match(c, new RegExp(`severity ${x.severity}\\b`), `${x.stage}: its severity`);
+      assert.match(c, new RegExp(`\\b${x.events} event`), `${x.stage}: its events`);
+      if (x.waiting) assert.ok(c.includes(x.waiting.replace(/ at \S+$/, '')), `${x.stage}: its waiting line: ${c}`);
+    }
+    // none: "None"
+    await p.ev('window.__fx.patch.incidents = []; void 0');
+    await polls(2);
+    await soon("document.getElementById('incidents').textContent.trim() === 'None'", 'no incidents: None');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test("a sensor card's trouble", async () => {
+    await load(autonomyFixture(), '#sensors');
+    await productionDrawn();
+    const errors = await text(SCARD('errors'));
+    assert.match(errors, /connection refused/);
+    assert.match(errors, /trying again in 4 min/);
+    const hub = await text(SCARD('hub'));
+    assert.match(hub, /certificate 41 days left/);
+    assert.doesNotMatch(hub, /trying again/);
+    assert.match(hub, /checked /);
+    const kg = await text(SCARD('kit-github'));
+    assert.doesNotMatch(kg, /connection refused|trying again/);
+    assert.match(kg, /ran /);
+  });
+
+  await t.test('Fleet', async () => {
+    const fx = autonomyFixture();
+    const m = fx.patch.metrics;
+    await load(fx, '#sensors?st=fleet');
+    await fleetDrawn();
+    assert.equal(await selectedTab(), 'fleet');
+    assert.deepEqual(await headLabels('#monitoring .card > .card-head'), ['Findings', 'Set aside', 'Checks before merge', 'Flaky tests', 'Slowest tests']);
+    const all = await text('#monitoring');
+    for (const h of ['Hours by phase', 'USD by phase', 'USD by model', 'Tokens']) assert.ok(!all.includes(h), `R1: no ${h} on Fleet`);
+    // each finding with its next step
+    const fs = await rowsOf(FLEET('findings'));
+    assert.deepEqual(fs.map((r) => r[2]), m.findings.map((f) => f.suggestion));
+    assert.match(fs[0][0], /no phase line for 3 hours/);
+    assert.match(fs[0][1], /high/);
+    // set aside: why, by, until
+    const aside = await rowsOf(FLEET('aside'));
+    assert.equal(aside.length, 1);
+    assert.equal(aside[0][2], 'the suite is being split');
+    assert.equal(aside[0][3], 'the supervisor');
+    // the configured checks, trouble first; the one-off checks counted in the head, named in its title
+    const gs = await rowsOf(FLEET('gates'));
+    assert.deepEqual(gs.map((r) => r[0].split(' ')[0]), ['scripts', 'devteam']);
+    assert.match(gs[0][0], /\bflaky\b/);
+    assert.match(gs[0][3], /allowed because main failed too/);
+    assert.doesNotMatch(gs[1][0], /flaky/);
+    const gHead = `document.querySelector(${J(FLEET('gates'))}).closest('.card').querySelector('.card-head')`;
+    assert.match(await p.ev(`${gHead}.textContent`), /\+ 2 one-off checks/);
+    const tip = await p.ev(`${gHead}.querySelector('[title]')?.getAttribute('title') ?? ''`);
+    for (const g of fx.ids.oneOff) assert.ok(tip.includes(g), `${g} named in the title: ${tip}`);
+    assert.deepEqual((await rowsOf(FLEET('flaky'))).map((r) => r[0]), m.gates.flaky_tests.map((x) => x.name));
+    assert.deepEqual((await rowsOf(FLEET('slowest'))).map((r) => r[0]), m.gates.slowest_tests.map((x) => x.name));
+    // empty tables say None
+    await p.ev('window.__fx.patch.metrics.acknowledged = []; void 0');
+    await polls(2);
+    await soon(`(document.querySelector(${J(FLEET('aside'))})?.textContent ?? '').trim().startsWith('Finding') && /None$/.test(document.querySelector(${J(FLEET('aside'))}).textContent.trim())`, 'Set aside: None');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('Fleet rows open', async () => {
+    const fx = autonomyFixture();
+    const ROW_A = (sel, i) => p.ev(`${ROWS(sel)}[${i}].querySelectorAll('a').length`);
+    // the fixture's set-aside subject is a check's name, no record: nothing opens
+    await load(fx, '#sensors?st=fleet');
+    await fleetDrawn();
+    assert.equal(await openRow(FLEET('aside'), 0, 'click'), null);
+    // one whose subject names a record (a sensor) opens it
+    fx.patch.metrics.acknowledged[0].subject = 'sensor:hub';
+    await load(fx, '#sensors?st=fleet');
+    await fleetDrawn();
+    for (const how of ['click', 'enter']) {
+      assert.deepEqual(await openRow(FLEET('findings'), 0, how), { kind: 'ticket', id: fx.ids.findingTicket }, `the ticket finding by ${how}`);
+      await closePeek();
+      assert.deepEqual(await openRow(FLEET('aside'), 0, how), { kind: 'sensor', id: 'hub' }, `the set-aside row by ${how}`);
+      await closePeek();
+      assert.equal(await selectedTab(), 'fleet', 'back on Fleet');
+      // a commit names no record; a check and a test are figures
+      for (const [sel, i] of [[FLEET('findings'), 1], [FLEET('gates'), 0], [FLEET('gates'), 1], [FLEET('flaky'), 0], [FLEET('slowest'), 0]]) {
+        assert.equal(await openRow(sel, i, how), null, `${sel} row ${i} by ${how} opens nothing`);
+        assert.equal(await ROW_A(sel, i), 0, `${sel} row ${i} holds no link`);
+      }
+    }
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('the sensor peek', async () => {
+    const fx = autonomyFixture();
+    await load(fx, '#sensors');
+    await productionDrawn();
+    // a click on the tracker's card opens its peek
+    await p.click(SCARD('errors'));
+    await soon(`${drawerOpen} && DRAWER.kind === 'sensor' && DRAWER.id === 'errors'`, "the tracker's peek");
+    await soon(`!!(${PSECT('Fingerprints')})`, 'its fingerprints');
+    const obs = fx.ids.observations.errors.map((id) => `observation/${id}`);
+    assert.deepEqual(await psectOpens('Observations it made'), obs);
+    assert.match(await psectText('Observations it made'), /TypeError: card is undefined/);
+    const incs = fx.patch.incidents.filter((x) => x.sensor === 'errors').map((x) => `problem/${x.id}`);
+    assert.deepEqual((await psectOpens('Incidents')).sort(), incs.sort());
+    assert.match(await psectText('Incidents'), /Receipts fail to mail after the fix/);
+    const fp = await psectText('Fingerprints');
+    assert.match(fp, /5 in 24h · 5 seen/);
+    assert.match(fp, /3 in 24h · 3 seen/);
+    assert.equal(await psectText('What it read'), null, 'a tracker reads fingerprints');
+    // its sections come before its history
+    assert.equal(await p.ev(`(() => { const s = ${PSECT('Incidents')}; const h = [...document.querySelectorAll('#drawer-body .psect')].find((x) => /^History/.test(x.querySelector('.card-head .grow')?.textContent.trim() ?? '')); return !h || !!(s.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING); })()`), true);
+    // a row opens its record: one by a click, the next by Enter
+    await p.ev(`(${PSECT('Observations it made')}).querySelector('.rowline[data-open]').click(); void 0`);
+    await soon(`DRAWER.kind === 'observation' && DRAWER.id === ${J(fx.ids.observations.errors[0])}`, 'an observation by a click');
+    await p.ev('history.back(); void 0');
+    await soon(`DRAWER.kind === 'sensor' && DRAWER.id === 'errors' && !!(${PSECT('Observations it made')})`, 'back on the peek');
+    assert.equal(await p.ev(`(() => { const r = (${PSECT('Observations it made')}).querySelectorAll('.rowline[data-open]')[1]; r.focus(); return document.activeElement === r; })()`), true);
+    await p.key('Enter');
+    await soon(`DRAWER.kind === 'observation' && DRAWER.id === ${J(fx.ids.observations.errors[1])}`, 'an observation by Enter');
+    // the probe: What it read, no Fingerprints
+    await p.ev("location.hash = '#sensor/kit-github'; void 0");
+    await soon(`DRAWER.kind === 'sensor' && DRAWER.id === 'kit-github' && !!(${PSECT('What it read')})`, "the probe's peek");
+    assert.equal(await psectText('Fingerprints'), null);
+    // no link to an Incidents page, on the page or in a peek
+    assert.equal(await p.ev("document.querySelectorAll('a[href=\"#incidents\"]').length"), 0);
+    assert.equal(await p.ev("[...document.querySelectorAll('a')].filter((a) => /Incidents page/i.test(a.textContent)).length"), 0);
+    await closePeek();
+    // a sensor card by Enter
+    assert.equal(await p.ev(`(() => { const c = document.querySelector(${J(SCARD('hub'))}); c.focus(); return document.activeElement === c; })()`), true);
+    await p.key('Enter');
+    await soon(`${drawerOpen} && DRAWER.kind === 'sensor' && DRAWER.id === 'hub'`, "the http sensor's peek by Enter");
+    assert.deepEqual(await psectOpens('Observations it made'), fx.ids.observations.hub.map((id) => `observation/${id}`));
+    assert.equal(await p.ev("document.querySelectorAll('#drawer-body table.db-t, #drawer-body .sensor-rows button').length"), 0, 'rows, no table or sort button in the peek (D1)');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('tabs by keyboard', async () => {
+    await load(autonomyFixture(), '#sensors');
+    await productionDrawn();
+    assert.equal(await p.ev("(() => { const b = document.querySelector('#monitoring [role=\"tab\"][data-tab=\"production\"]'); b.focus(); return document.activeElement === b; })()"), true);
+    await p.key('ArrowRight');
+    await soon("location.hash === '#sensors?st=fleet'", 'Fleet by ArrowRight');
+    await fleetDrawn();
+    assert.equal(await selectedTab(), 'fleet');
+    assert.equal(await p.ev('document.activeElement?.dataset?.tab ?? null'), 'fleet', 'the focus on the Fleet tab');
+    await p.ev('history.back(); void 0');
+    await soon("location.hash === '#sensors'", 'Back to Production');
+    await productionDrawn();
+    assert.equal(await selectedTab(), 'production');
+    // a click on a tab
+    await p.click('#monitoring [role="tab"][data-tab="fleet"]');
+    await soon("location.hash === '#sensors?st=fleet'", 'Fleet by a click');
+    await fleetDrawn();
+  });
+
+  await t.test('redraw keeps the tab', async () => {
+    await load(autonomyFixture(), '#sensors?st=fleet');
+    await fleetDrawn();
+    await polls(2);
+    assert.equal(await selectedTab(), 'fleet');
+    assert.equal(await p.ev("!!document.querySelector('#monitoring .sensor-card')"), false, 'Production not drawn');
+    assert.equal(await p.ev('location.hash'), '#sensors?st=fleet');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
 });

@@ -925,7 +925,8 @@ const inventory = (ids) => {
     ...['State', 'Reads', 'Triage', 'Last run', 'Today', 'Invalid lines'].map((k) => row('sensor', 'sensorReader', `reader: ${k}`, `dt:${k}`)),
     row('sensor', 'sensorReader', 'reader: the ignored list', 'sect:Ignored >> text:a crawler, not a person'),
     row('sensor', 'sensorReader', 'reader: its CLI command', 'sect:Ignored >> text:sensor unignore reader:exception:E2 --owner'),
-    row('sensor', 'sensorReader', 'reader: what it read', 'sect:What it read >> .fp-row'),
+    // the reader groups what it reads into fingerprints: an error tracker, its section titled so (kit-93 C7)
+    row('sensor', 'sensorReader', 'reader: what it read', 'sect:Fingerprints >> .fp-row'),
   ];
 };
 // In the page: an inventory row's selectorOrText, true when the peek's body holds it, else why not.
@@ -1414,7 +1415,7 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
   });
 
   // each page's record cards, where they are drawn
-  const PLACES = [['#goals', '#goals-list'], ['#board', '#board-cols'], ['#loop?lt=observe', '#observations'], ['#loop?lt=orient', '#debt, #clusters, #problems, #knowledge'], ['#loop?lt=decide', '#decisions-feed'], ['#loop?lt=act', '#acts-feed'], ['#sensors', '#incidents, #sensor-feed']];
+  const PLACES = [['#goals', '#goals-list'], ['#board', '#board-cols'], ['#loop?lt=observe', '#observations'], ['#loop?lt=orient', '#debt, #clusters, #problems, #knowledge'], ['#loop?lt=decide', '#decisions-feed'], ['#loop?lt=act', '#acts-feed'], ['#sensors', '#incidents']];
   const cardsIn = (sel) => `[...document.querySelectorAll(${J(sel)})].flatMap((x) => [...x.querySelectorAll(${J(CARDS)})])`;
   const DEC = 'const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } };';
 
@@ -1470,8 +1471,9 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
       assert.equal(await enter(el), true);
       await opened(open, `${sel}: Enter on the focused card`);
     }
-    // a Loop card and a Sensors card (spec §2.5: a card that stands for a record, role=button, tabindex=0)
-    for (const [page, sel] of [['#loop?lt=observe', '#observations .card[data-open]'], ['#sensors', '#sensor-feed .card[data-open]']]) {
+    // a Loop card (spec §2.5: a card that stands for a record, role=button, tabindex=0); a sensor's observations
+    // are rows in its peek now (kit-93), checked by A12 in dashboard-autonomy.test.mjs
+    for (const [page, sel] of [['#loop?lt=observe', '#observations .card[data-open]']]) {
       await on(page);
       await soon(`!!document.querySelector(${J(sel)})`, `${sel}: drawn`);
       assert.equal(await p.ev(`[...document.querySelectorAll(${J(sel)})].every((c) => c.getAttribute('role') === 'button' && c.getAttribute('tabindex') === '0')`), true, `${sel}: every card a button to the keyboard`);

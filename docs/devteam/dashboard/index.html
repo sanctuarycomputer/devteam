@@ -463,6 +463,24 @@ try {
   .gov-card > .sec:last-child { border-bottom: 0; }
   .gov-card .sec-b { min-width: 0; }
   .gov-card > .err, .gov-card > .loading { margin: 14px 16px; }
+  /* Sensors: the tab bar first in its section (as Goals': the shell's first-child rule doesn't reach it), then
+     Production's incidents board (five columns) and a card a sensor, or Fleet's tables */
+  #monitoring > .tabbar:first-child { margin-top: -8px; margin-bottom: 14px; }
+  #incidents .board.inc { grid-template-columns: repeat(5, minmax(132px, 1fr)); }
+  .inc-card #incidents { min-width: 0; }
+  .sensor-card .sensor-src { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin: 8px 0 6px; }
+  .sensor-card .sensor-err { margin: 0 0 6px; font-size: 12px; color: var(--red-fg); overflow-wrap: anywhere; }
+  .sensor-card .sensor-stats, .sensor-card .sensor-levels { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; margin-bottom: 6px; }
+  .sensor-card .sensor-stats b, .sensor-card .sensor-levels b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sensor-card .sensor-levels > span { display: inline-flex; align-items: center; gap: 6px; }
+  .sensor-card .sensor-chart { min-width: 0; overflow-x: auto; }
+  .sensor-card .sensor-chart svg { max-width: 100%; height: auto; }
+  .sensor-card > .meta { margin-top: auto; }
+  /* a sensor's peek: its observations and incidents, rows that open their records */
+  .sensor-rows .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .sensor-rows .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .sensor-rows .rowline[data-open]:hover .t, .sensor-rows .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .sensor-rows .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
 
 /* css-autonomy-pages end */
 /* css-progress start */
@@ -1305,27 +1323,9 @@ try {
 
 <!-- html-retros end -->
 <!-- html-health start -->
-  <section id="health" class="no-shell" data-page="health">
-    <h2>Health <span class="sub">what the supervisor is watching and working on; anything it needs from you comes to your Inbox</span></h2>
-    <div id="findings"></div>
-    <h3 style="margin-top:14px">Checks before merge <span class="sub">the automated checks every change must pass (settings <code>gates</code>)</span></h3>
-    <div id="gates"></div>
-    <div class="two" style="margin-top:14px" id="test-lists"></div>
-  </section>
-
 <!-- html-health end -->
 <!-- html-sensors start -->
-  <section id="monitoring" class="no-shell" data-page="sensors">
-    <h2>Sensors <span class="sub">each one takes samples of production, kept here; a meaningful change becomes an observation in the log, for the supervisor's loop and Health to act on</span></h2>
-    <div id="sensors"></div>
-    <h3 style="margin-top:14px">Incidents</h3>
-    <div id="incidents"></div>
-    <h3 style="margin-top:14px">Exceptions and errors</h3>
-    <div id="sensor-exceptions"></div>
-    <h3 style="margin-top:14px">Observations</h3>
-    <div class="feed" id="sensor-feed"></div>
-  </section>
-
+  <section id="monitoring" data-page="sensors"></section>
 <!-- html-sensors end -->
 <!-- html-settings start -->
   <section id="settings" data-page="settings"></section>
@@ -2290,6 +2290,119 @@ function govBlockAt(el) {
   if (DRAWER.kind !== 'file' || !govListed(DRAWER.id) || DRAWER.arg?.get?.('repo')) return null;
   const b = el?.closest?.('p, li, h1, h2, h3, h4, h5, h6, blockquote, pre');
   return b && b.closest('#drawer-body .md') ? b : null;
+}
+// ---- Sensors (kit-93): Production (the incidents board, a card a sensor) and Fleet (Health's tables) ----
+// SENSOR_TAB: the tab shown, from the head's st (showHead): fleet, else production
+let SENSOR_TAB = 'production';
+// Selecting a tab is a new entry (#sensors, #sensors?st=fleet), so Back restores the tab before; drawn at once,
+// so the focus moves to the new tab's element
+bindTabBar($('monitoring'), { onSelect: (id) => {
+  if (!['production', 'fleet'].includes(id)) return;
+  const cur = parseHead(location.hash, SHELL_ROUTES);
+  const state = cur.link === undefined && cur.page === 'sensors' ? { ...cur.state } : {};
+  if (id === 'fleet') state.st = 'fleet'; else delete state.st;
+  SENSOR_TAB = id;
+  if (DATA) renderMonitoring(DATA);
+  location.hash = headFor({ page: 'sensors', state });
+} });
+// today's events by level (a probe's output, an error tracker's errors, C7), a dot and a count each; '' with none
+const SENSOR_LEVEL_DOT = { fatal: 'red', error: 'red', warning: 'amber', warn: 'amber' };
+function sensorLevels(by) {
+  const xs = Object.entries(by || {}).filter(([, n]) => Number.isFinite(n) && n > 0);
+  return xs.length ? `<div class="sensor-levels">${xs.map(([l, n]) => `<span><span class="dot ${SENSOR_LEVEL_DOT[l] || 'blue'}"></span>${esc(l)} <b>${esc(n)}</b></span>`).join(' ')}</div>` : '';
+}
+// One sensor's card (pure: series is its 24h latency, or null while loading): its name and state, what it reads,
+// its trouble (the last error and the retry), its figures, its live output, when it last ran; a click or Enter
+// opens its peek
+function sensorCard(m, series) {
+  const [tone, label] = monState(m);
+  const http = m.kind === 'http', t = m.today || {};
+  const failed = !!m.last && !m.last.ok;
+  const trouble = failed ? `${esc(m.last_error || m.last?.error || 'failed')}${m.backoff_minutes ? ` · trying again in ${esc(m.backoff_minutes)} min` : ''}` : '';
+  const msOr = (x) => (x == null ? '–' : `${x}ms`);
+  const src = http ? esc(m.url || '') : `${esc(m.kind)} · ${esc(m.probe || '')}${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}`;
+  const stats = http
+    ? [`24h <b>${esc(pctOr(m.uptime_24h))}</b> up`, `7d <b>${esc(pctOr(m.uptime_7d))}</b>`, `p50 <b>${esc(msOr(m.p50_24h))}</b>`, `p95 <b>${esc(msOr(m.p95_24h))}</b>`, ...(m.tls_days != null ? [`certificate <b>${esc(m.tls_days)}</b> days left`] : [])]
+    : [`today <b>${esc(t.events ?? 0)}</b> event(s)`, `<b>${esc(t.qualified ?? 0)}</b> new for triage`, `<b>${esc(m.fingerprints ?? 0)}</b> fingerprint(s)`, ...(t.mean_ms != null ? [`run <b>${esc(t.mean_ms < 1000 ? `${t.mean_ms}ms` : `${(t.mean_ms / 1000).toFixed(1)}s`)}</b>`] : [])];
+  const output = http ? `<div class="sensor-chart" data-mon-chart="${esc(m.name)}">${series ? sensorChart(series, m, true) : '<p class="muted small">Loading…</p>'}</div>` : sensorLevels(t.by_level);
+  const ran = http ? `checked ${m.last_at ? esc(when(m.last_at)) : 'never'}` : m.last_at ? `ran ${esc(when(m.last_at))}` : 'never run';
+  return `<div class="card c6 sensor-card" data-open="sensor/${esc(encodeURIComponent(m.name))}" tabindex="0" role="button" aria-label="Open the sensor ${esc(m.name)}">${cardHead('activity', esc(m.name), { extra: `<span class="badge ${tone}">${esc(label)}</span>` })}
+    <div class="sensor-src">${src}</div> ${trouble ? `<p class="sensor-err">${trouble}</p> ` : ''}
+    <div class="sensor-stats">${stats.map((s) => `<span>${s}</span>`).join(' ')}</div> ${output} <div class="meta">${ran}</div></div>`;
+}
+// Production: the incidents board first, then a card a sensor, two across
+function sensorsProduction(d) {
+  const ms = d.sensors || [], incs = d.incidents || [];
+  const open = incs.filter((x) => x.stage !== 'resolved').length;
+  return `<div class="g12"><div class="card c12 inc-card">${cardHead('siren', 'Incidents', { extra: open ? `<span class="muted">${open} open</span>` : '' })}<div id="incidents">${incidentBoard(incs)}</div></div>${
+    ms.map((m) => sensorCard(m, MON_SERIES.get(m.name)?.data ?? null)).join('')}${ms.length ? '' : '<p class="empty c12">None</p>'}</div>`;
+}
+// The hash of the record a finding's subject names, else null (R2): a ticket (by the list, or an id's shape), a
+// planner, a sensor, a thread, a goal or another logged id by its prefix (as linkify maps it); a commit, a check
+// or anything else names none
+const SUBJ_KINDS = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk', o: 'observation', q: 'q' };
+function subjectOpen(subj) {
+  const s = String(subj ?? '');
+  if (/^thread:t-/.test(s)) return subjectOpen(s.slice(7));
+  if (/^sensor:[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(s)) return `#sensor/${encodeURIComponent(s.slice(7))}`;
+  if (/^plan-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s)) return `#planner/${encodeURIComponent(s.slice(5))}`;
+  const id = /^([gkapmodtq])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/.exec(s);
+  if (id) return `#${SUBJ_KINDS[id[1]]}/${encodeURIComponent(s)}`;
+  if (ticketMap().has(s) || /^[a-z][a-z0-9]*-\d+(?:-[a-z0-9]+)*$/.test(s)) return `#ticket/${encodeURIComponent(s)}`;
+  return null;
+}
+// A subject as plain text (the row opens it): a ticket by its title, a sensor by its name, else as written
+const subjectText = (subj) => { const s = String(subj ?? ''); const t = ticketMap().get(s); return t ? esc(t.title) : /^sensor:/.test(s) ? esc(s.slice(7)) : s ? `<code>${esc(s)}</code>` : ''; };
+const SEV_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
+// Fleet's five tables, from metrics: the findings with the supervisor's next step, the ones set aside, the
+// configured checks (trouble first; the one-off checks only named, in gates.oneOff), the flaky and slowest tests.
+// Only a finding or a set-aside row with a record opens; checks and tests are figures (R2)
+function fleetTables(m, configured) {
+  const g = m?.gates || {}, all = g.gates || [];
+  const flakyG = new Set((g.flaky_gates || []).map((f) => f.gate));
+  const conf = new Set(configured || []);
+  const gl = all.filter((x) => !conf.size || conf.has(x.gate)), oneOff = all.filter((x) => conf.size && !conf.has(x.gate)).map((x) => x.gate);
+  const trouble = (x) => (flakyG.has(x.gate) ? 2 : 0) + (x.fail_rate >= 0.2 ? 1 : 0);
+  gl.sort((a, b) => trouble(b) - trouble(a) || b.runs - a.runs);
+  return {
+    findings: { cols: ['Finding', 'Severity', 'Next step for the supervisor', 'Subject'], rows: (m?.findings || []).map((f) => ({
+      cells: [`<b>${esc(words(f.kind))}</b> <span class="dim">${esc(f.detail ?? '')}</span>`, `<span class="badge ${esc(f.severity)}">${esc(f.severity)}</span>`, esc(f.suggestion ?? ''), subjectText(f.subject)],
+      sort: [words(f.kind), SEV_RANK[f.severity] ?? 0, f.suggestion ?? '', f.subject ?? ''],
+      open: subjectOpen(f.subject),
+    })) },
+    aside: { cols: ['Finding', 'Subject', 'Why', 'By', 'Until'], rows: (m?.acknowledged || []).map((f) => ({
+      cells: [esc(words(f.kind)), subjectText(f.subject), esc(f.ack?.reason ?? ''), esc(who(f.ack?.by)), f.ack?.until ? esc(when(f.ack.until)) : '—'],
+      sort: [words(f.kind), f.subject ?? '', f.ack?.reason ?? '', who(f.ack?.by), f.ack?.until ?? null],
+      open: subjectOpen(f.subject),
+    })) },
+    gates: { oneOff, cols: ['Check', 'Runs', 'Usually', 'Fails'], rows: gl.map((x) => ({
+      cells: [`<code>${esc(x.gate)}</code>${flakyG.has(x.gate) ? ' <span class="badge high">flaky</span>' : ''}${x.fail_rate >= 0.2 ? ' <span class="badge medium">often fails</span>' : ''}`, esc(x.runs), esc(dur(x.median_seconds)),
+        `${Math.round((x.fail_rate || 0) * 100)}%${x.preexisting_fails ? ` <span class="dim small">+ ${esc(x.preexisting_fails)} allowed because main failed too</span>` : ''}`],
+      sort: [x.gate, x.runs, x.median_seconds, x.fail_rate], open: null,
+    })) },
+    flaky: { cols: ['Test', 'Times'], rows: (g.flaky_tests || []).map((x) => ({ cells: [`<code>${esc(x.name)}</code>`, `${esc(x.times)}×`], sort: [x.name, x.times], open: null })) },
+    slowest: { cols: ['Test', 'Usually'], rows: (g.slowest_tests || []).map((x) => ({ cells: [`<code>${esc(x.name)}</code>`, esc(dur(x.median_seconds))], sort: [x.name, x.median_seconds], open: null })) },
+  };
+}
+// Fleet: a card a table (R1: no spend cards, they are Efficiency's); the checks' head counts the one-off checks
+function sensorsFleet(d) {
+  const t = fleetTables(d.metrics || {}, d.gates_configured || []);
+  const one = t.gates.oneOff;
+  const card = (cls, icon, label, key, opts = {}) => `<div class="card flush ${cls}">${cardHead(icon, label, opts)}${pageTable(`fleet:${key}`, t[key].cols, t[key].rows)}</div>`;
+  const oneOff = one.length ? `<span class="muted" title="${esc(`One-off checks workers ran by hand: ${one.slice(0, 4).join(', ')}${one.length > 4 ? ', …' : ''}`)}">+ ${one.length} one-off check${one.length === 1 ? '' : 's'}</span>` : '';
+  return `<div class="g12">${card('c12', 'heart-pulse', 'Findings', 'findings')}${card('c12', 'archive', 'Set aside', 'aside')}${card('c12', 'list-checks', 'Checks before merge', 'gates', { extra: oneOff })}${
+    card('c6', 'shuffle', 'Flaky tests', 'flaky')}${card('c6', 'timer', 'Slowest tests', 'slowest')}</div>`;
+}
+// A sensor's peek (C6, D1): the observations it made and its incidents, rows that open their records
+function sensorPeekRows(name, d) {
+  const obs = (d?.ooda?.observations || []).filter((o) => o.subject === `sensor:${name}`);
+  const incs = (d?.incidents || []).filter((x) => x.sensor === name);
+  const row = (open, dot, t, r) => `<div class="rowline" data-open="${esc(open)}" tabindex="0" role="link"><span class="dot ${dot}"></span><span class="t">${esc(t)}</span><span class="r">${esc(r)}</span></div>`;
+  const stage = (x) => { const c = INC_COLS.find(([, , st]) => st.includes(x.stage)); return x.stage === 'merged' ? 'fixing: merged, not yet verified' : x.stage === 'regressed' ? 'open: regressed' : c ? c[1].toLowerCase() : words(x.stage); };
+  return psect('Observations it made', obs.length ? `<div class="rows sensor-rows">${obs.map((o) => row(`observation/${encodeURIComponent(o.id)}`, o.severity >= 3 ? 'red' : o.severity === 2 ? 'amber' : 'blue', o.detail || words(o.kind),
+    [o.severity != null ? `severity ${o.severity}` : '', o.created_at ? when(o.created_at) : ''].filter(Boolean).join(' · '))).join('')}</div>` : effNone())
+    + psect('Incidents', incs.length ? `<div class="rows sensor-rows">${incs.map((x) => row(`problem/${encodeURIComponent(x.id)}`, x.stage === 'resolved' ? 'green' : x.stage === 'regressed' ? 'red' : 'amber', x.title || x.id,
+      [stage(x), x.severity != null ? `severity ${x.severity}` : '', x.created_at ? `opened ${when(x.created_at)}` : ''].filter(Boolean).join(' · '))).join('')}</div>` : effNone());
 }
 /* autonomy-pages end */
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
@@ -5216,19 +5329,20 @@ async function loadSensorSeries(name) {
   const m = (DATA.sensors || []).find((x) => x.name === name);
   if (el && m) el.innerHTML = sensorChart(MON_SERIES.get(name).data, m, true);
 }
-// Incidents as a board: new, triaged, fixing, merged, verifying, resolved (the last few), and
-// regressed in red.
-const INC_COLS = [['new', 'New'], ['triaged', 'Triaged'], ['fixing', 'Fixing'], ['merged', 'Merged'], ['verifying', 'Verifying'], ['resolved', 'Resolved'], ['regressed', 'Regressed']];
+// Incidents as a board in the design's five columns, each fed from incidentView's stages (kit-93 C1): Open
+// (new, and regressed in red), Investigating (triaged), Fixing (fixing, and merged: not yet verified),
+// Watching (verifying), Resolved (the last five).
+const INC_COLS = [['open', 'Open', ['new', 'regressed']], ['investigating', 'Investigating', ['triaged']], ['fixing', 'Fixing', ['fixing', 'merged']], ['watching', 'Watching', ['verifying']], ['resolved', 'Resolved', ['resolved']]];
 function incidentBoard(incs) {
-  if (!incs.length) return empty('No incidents. The supervisor folds what it triages into one when it is worth fixing or watching.');
-  return `<div class="board inc">${INC_COLS.map(([k, label]) => {
-    let cards = incs.filter((x) => x.stage === k);
+  if (!incs.length) return '<p class="empty">None</p>';
+  return `<div class="board inc">${INC_COLS.map(([k, label, stages]) => {
+    let cards = incs.filter((x) => stages.includes(x.stage));
     const total = cards.length;
     if (k === 'resolved') cards = cards.slice(-5);
     return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<div class="tcard${x.question?.status === 'open' || x.stage === 'regressed' ? ' blocked' : ''}"${subj('problem', x.id, x.title)} role="button" tabindex="0" data-open="problem/${esc(encodeURIComponent(x.id))}" aria-label="Open ${esc(x.title)}">${cardMenu('problem', x.id)}
       <div class="t"><a class="title-link" href="${esc(peekFor('problem', x.id))}"><b>${esc(x.title)}</b></a></div>
       <div class="muted">severity ${esc(x.severity)} · ${esc(x.events)} event(s)${x.component ? ` · ${esc(x.component)}` : ''}</div>
-      ${x.waiting ? `<div class="pills"><span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span></div>` : ''}
+      ${x.stage === 'merged' || x.stage === 'regressed' || x.waiting ? `<div class="pills">${x.stage === 'merged' ? '<span class="badge pill">merged, not yet verified</span>' : ''}${x.stage === 'regressed' ? '<span class="badge pill high">regressed</span>' : ''}${x.waiting ? `<span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span>` : ''}</div>` : ''}
     </div>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('')}</div>`;
 }
@@ -5238,27 +5352,13 @@ function renderMonitoring(d) {
   const banner = down.length ? `<i class="icon-triangle-alert" aria-hidden="true"></i> ${down.map((m) => `<a href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a> is down since ${esc(when(m.since))}${m.last?.error ? ` (${esc(m.last.error)})` : ''}`).join('; ')}` : '';
   // only when it changes, so a screen reader announces an outage once
   if ($('down-banner').innerHTML !== banner) { $('down-banner').innerHTML = banner; $('down-banner').hidden = !down.length; }
-  $('sensors').innerHTML = ms.length ? `<div class="mon-grid">${ms.map((m) => {
-    const [tone, label] = monState(m);
-    if (m.kind !== 'http') return `<div class="card mon-card">
-      <h4><a class="title-link" href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
-      <div class="mon-url">${esc(m.kind)} · ${esc(m.probe || '')}${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}</div>
-      <div class="mon-stats"><span>today <b>${esc(m.today.events)}</b> event(s)</span><span><b>${esc(m.today.qualified)}</b> new for triage</span><span><b>${esc(m.fingerprints)}</b> fingerprint(s)</span>${m.today.mean_ms != null ? `<span>run <b>${esc(m.today.mean_ms < 1000 ? `${m.today.mean_ms}ms` : `${(m.today.mean_ms / 1000).toFixed(1)}s`)}</b></span>` : ''}<span class="muted">${m.last_at ? `ran ${esc(when(m.last_at))}` : 'never run'}</span></div>
-      ${m.last && !m.last.ok ? `<p class="small">${esc(m.last_error || m.last.error || 'failed')}${m.backoff_minutes ? ` · trying again in ${esc(m.backoff_minutes)} min` : ''}</p>` : ''}
-    </div>`;
-    return `<div class="card mon-card">
-      <h4><a class="title-link" href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
-      <div class="mon-url">${esc(m.url || '')}</div>
-      <div class="mon-stats"><span>24h <b>${esc(pctOr(m.uptime_24h))}</b> up</span><span>7d <b>${esc(pctOr(m.uptime_7d))}</b></span><span>p50 <b>${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)}</b></span><span>p95 <b>${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)}</b></span>${m.tls_days != null ? `<span>certificate <b>${esc(m.tls_days)}d</b></span>` : ''}<span class="muted">checked ${m.last_at ? esc(when(m.last_at)) : 'never'}</span></div>
-      <div data-mon-chart="${esc(m.name)}">${MON_SERIES.get(m.name)?.data ? sensorChart(MON_SERIES.get(m.name).data, m, true) : '<p class="muted small">Loading…</p>'}</div>
-    </div>`;
-  }).join('')}</div>` : empty('No sensors yet. The supervisor starts one for each production URL, log and error tracker it finds (settings <code>sensors</code>), and polls them while it runs.');
-  for (const m of ms.filter((x) => x.kind === 'http')) loadSensorSeries(m.name);
-  $('incidents').innerHTML = incidentBoard(d.incidents || []);
-  const feed = d.sensor_feed || [];
-  $('sensor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
-  const obs = (d.ooda?.observations || []).filter((o) => /^sensor:/.test(o.subject || ''));
-  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)} role="button" tabindex="0" data-open="observation/${esc(encodeURIComponent(o.id))}"><div><div class="act-head">${titled(peekFor('observation', o.id), `${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}`)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div>${cardMenu('observation', o.id)}</div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+  // the page (kit-93): its tabs, then Production or Fleet, written only when its HTML changed (focus kept)
+  const fs = d.metrics?.findings || [];
+  const html = tabBar({ tabs: [{ id: 'production', label: 'Production', count: ms.length || null }, { id: 'fleet', label: 'Fleet', count: fs.length || null, waiting: true }], selected: SENSOR_TAB })
+    + (SENSOR_TAB === 'fleet' ? sensorsFleet(d) : sensorsProduction(d));
+  const el = $('monitoring');
+  if (el.__html !== html) { el.__html = html; el.innerHTML = html; bindPageTables(el, () => renderMonitoring(DATA)); }
+  if (SENSOR_TAB !== 'fleet') for (const m of ms.filter((x) => x.kind === 'http')) loadSensorSeries(m.name);
 }
 function openSensor(name) {
   drawerFor('sensor', name);
@@ -5277,7 +5377,8 @@ function openSensor(name) {
       ['Invalid lines', m.invalid ? esc(m.invalid.lines.map((l) => l.why).join('; ')) : '', 'Lines its last run printed that are not events: the provider may have changed its API (probe-drift).'],
     ] })}
     ${(p?.ignores || []).length ? psect('Ignored', `<ul>${p.ignores.map((x) => `<li><code>${esc(x.fingerprint)}</code>: ${esc(x.reason)} <span class="muted">(${esc(who(x.by))}, ${esc(when(x.at))}; lift with <code>sensor unignore ${esc(x.fingerprint)} --owner</code>)</span></li>`).join('')}</ul>`) : ''}
-    ${psect('What it read', (p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>')}
+    ${psect(m.fingerprints > 0 ? 'Fingerprints' : 'What it read', (p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>')}
+    ${sensorPeekRows(name, DATA)}
     ${historySection(p, `sensor:${name}`)}`);
   showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
     ${attrs({ id: name, idTip: 'Its name in the settings (sensors).', peek: p, noRecord: true, computed: [
@@ -5291,6 +5392,7 @@ function openSensor(name) {
     ] })}
     ${p?.series ? `${psect('Last 24 hours', sensorChart(p.series['24h'], m))}${psect('Last 7 days', sensorChart(p.series['7d'], m))}` : '<p class="loading">Loading…</p>'}
     ${fails.length ? psect('Failed checks', `<ul>${fails.map((s) => `<li>${esc(when(s.at))}: ${esc(s.error || 'failed')}${s.ms != null ? ` <span class="muted">(${esc(s.ms)}ms)</span>` : ''}</li>`).join('')}</ul>`) : ''}
+    ${sensorPeekRows(name, DATA)}
     ${historySection(p, `sensor:${name}`)}`);
 }
 
@@ -6319,6 +6421,8 @@ function showHead(p, opts) {
   if (p.page === 'goals') { GOALS_TAB = GOALS_TABS.includes(p.state?.gt) ? p.state.gt : 'active'; renderGoals(); }
   // Governance (kit-93): its listing read on arriving (unless read in the last minute), drawn meanwhile
   if (p.page === 'governance') { renderGovernance(); loadGovernance(); }
+  // Sensors (kit-93): its tab from the head's st (fleet; none is Production), drawn again on every head change
+  if (p.page === 'sensors') { SENSOR_TAB = p.state?.st === 'fleet' ? 'fleet' : 'production'; if (DATA) renderMonitoring(DATA); }
   drawFilterPage(p.page);
 }
 // A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
@@ -7331,7 +7435,6 @@ function renderOverview() {
 function render(d) {
   DATA = d;
   const focus = focusMark();
-  const m = d.metrics;
   $('title').textContent = d.project && !String(d.project).startsWith('<') ? String(d.project) : 'devteam';
   const kit = $('kit'), local = /\+local$/.test(d.kit ?? '');
   kit.hidden = !d.kit;
@@ -7407,13 +7510,7 @@ function render(d) {
   renderProgress();
   drawFilters(PAGE_NOW);
 
-  const fkey = (f) => `${f.kind} ${f.subject}`;
-  $('findings').innerHTML = (m.findings.length ? m.findings.map((f) => `
-    <div class="card">${cardHead(f.severity === 'high' ? 'triangle-alert' : 'activity', `<span class="badge ${f.severity}">${esc(f.severity)}</span>${esc(words(f.kind))}`, { extra: subjectLink(f.subject) })}
-    <div>${linkify(f.detail)}</div><div class="muted">Next step for the supervisor: ${linkify(f.suggestion)}</div></div>`).join('') : empty('None. Blockers and slow spots show here, each with the supervisor’s next step.')) +
-    ((m.acknowledged || []).length ? `<h3 style="margin-top:14px">Set aside</h3>` + m.acknowledged.map((f) => `
-    <div class="card small"><b>${esc(words(f.kind))}</b> ${subjectLink(f.subject)} <span class="muted">· set aside by ${esc(who(f.ack.by))}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
-
+  // Health's findings, checks and tests are Sensors › Fleet's now (kit-93: renderMonitoring above)
   // Hours by phase, USD by phase, USD by model and Tokens are Efficiency's now (kit-174): Where it goes
   renderEfficiency(d);
   renderTrust(d);
@@ -7421,22 +7518,6 @@ function render(d) {
   // Governance's listing is its own read (kit-93): read again at most once a minute while the page is shown
   renderGovernance();
   if (PAGE_NOW === 'governance') loadGovernance();
-
-  // The configured checks, one plain line each, trouble first; one-off checks a worker ran by hand
-  // are counted, not listed.
-  const configured = new Set(DATA.gates_configured || []);
-  const flakyG = new Set(m.gates.flaky_gates.map((f) => f.gate));
-  const gl = m.gates.gates.filter((g) => !configured.size || configured.has(g.gate));
-  const adhoc = m.gates.gates.filter((g) => configured.size && !configured.has(g.gate));
-  const trouble = (g) => (flakyG.has(g.gate) ? 2 : 0) + (g.fail_rate >= 0.2 ? 1 : 0);
-  gl.sort((a, b) => trouble(b) - trouble(a) || b.runs - a.runs);
-  $('gates').innerHTML = gl.length
-    ? `<div class="card small">${gl.map((g) => `<div class="gate-row"><code>${esc(g.gate)}</code> <span class="muted">${g.runs} run${g.runs === 1 ? '' : 's'} · usually ${dur(g.median_seconds)} · fails ${Math.round(g.fail_rate * 100)}% of the time${g.preexisting_fails ? ` (plus ${g.preexisting_fails} allowed because main failed it too)` : ''}</span>${flakyG.has(g.gate) ? ' <span class="badge high">flaky</span>' : ''}${g.fail_rate >= 0.2 ? ' <span class="badge medium">often fails</span>' : ''}</div>`).join('')}${adhoc.length ? `<div class="muted" style="margin-top:6px">and ${adhoc.length} one-off check${adhoc.length === 1 ? '' : 's'} workers ran by hand (${adhoc.slice(0, 4).map((g) => esc(g.gate)).join(', ')}${adhoc.length > 4 ? ', …' : ''})</div>` : ''}</div>`
-    : empty('No checks have run yet.');
-  $('test-lists').innerHTML = [
-    m.gates.flaky_tests.length ? `<div><h3>Flaky tests</h3>${m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('')}</div>` : '',
-    m.gates.slowest_tests.length ? `<div><h3>Slowest tests</h3>${m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('')}</div>` : '',
-  ].join('');
 
   refreshDrawer();
   // the records owner-action cards read by peek: again, so one changed elsewhere shows (a retired one stays retired)
