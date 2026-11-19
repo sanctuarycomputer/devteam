@@ -7986,13 +7986,31 @@ function supervisorCheckedAt() {
   return t > 0 ? new Date(t).toISOString() : null;
 }
 // The owner's turns no terminal took (UNDELIVERED_FILE), read once and guarded: a missing,
-// unreadable or non-map file is none. entries: the map itself.
+// unreadable or non-map file is none. entries: the map itself. Else the open threads waiting on the
+// supervisor whose every owner turn since its last word was missed, the first of them unseen past
+// TURN_UNDELIVERED_MS (no check since) or unanswered past three times that, whatever the checks:
+// [{ id, waited_min, checked }] (checked: the last check in words), oldest first. An empty file folds no threads (hello runs often).
 function undeliveredTurns(now = Date.now(), { entries = false } = {}) {
   let m = null;
   try { m = JSON.parse(readText(UNDELIVERED_FILE) ?? 'null'); } catch {}
   if (!isObj(m)) m = {};
   if (entries) return m;
-  return [];
+  if (!Object.keys(m).length) return [];
+  const at = supervisorCheckedAt();
+  const checkedMs = at ? Date.parse(at) : 0;
+  const checked = at ? `last checked ${Math.floor(Math.max(0, now - checkedMs) / 60000)} min ago` : 'has no record of checking';
+  const found = [];
+  for (const v of threadViews(readLog().objects)) {
+    if (v.status !== 'open' || v.waiting !== 'supervisor') continue;
+    let i = v.turns.length;
+    while (i > 0 && v.turns[i - 1].by === 'owner') i--;
+    const mine = v.turns.slice(i);
+    if (!mine.length || !mine.every((u) => Object.hasOwn(m, u.id))) continue;
+    const firstMs = Date.parse(mine[0].at);
+    const waited = now - firstMs;
+    if ((waited > TURN_UNDELIVERED_MS && !(checkedMs > firstMs)) || waited > 3 * TURN_UNDELIVERED_MS) found.push({ id: v.id, waited_min: Math.floor(waited / 60000), checked, first_at: mine[0].at });
+  }
+  return found.sort((a, b) => a.first_at.localeCompare(b.first_at)).map(({ first_at, ...x }) => x);
 }
 // The title and subject as the supervisor reads them: inside a frame that says they are data, every
 // value quoted (quoteData), in the pattern the prompt's knowledge and link blocks use.
@@ -14221,6 +14239,9 @@ function collectMetrics(since) {
     const ago = now - Date.parse(x.turns[x.turns.length - 1].at);
     if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
   }
+  // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
+  // it reaches past the stalled supervisor (hello's alert: machine status, the hub). By id only.
+  for (const x of undeliveredTurns(now)) add('high', 'thread-undelivered', x.id, `the owner wrote ${x.waited_min} min ago and no supervisor terminal took it; the supervisor ${x.checked}`, `the supervisor is not checking: resume it (inside tmux, so turns reach it at once) and answer thread show ${x.id}`);
   // A harness's runtime file committed by accident: it churns in every worktree and means nothing elsewhere.
   const trackedRuntime = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => f && isHarnessRuntime(f));
   if (trackedRuntime.length) add('medium', 'tracked-runtime-file', trackedRuntime.slice(0, 3).join(', '), `${trackedRuntime.length} agent-harness runtime file(s) are tracked in git (${trackedRuntime.slice(0, 5).join(', ')}): machine-local state that changes in every worktree`, `a chore (it changes .gitignore, so it needs the owner's answer): git rm --cached ${trackedRuntime.map((f) => `'${f}'`).join(' ')}, and add ${RUNTIME_RES.filter(([, re]) => trackedRuntime.some((f) => re.test(f))).map(([pat]) => pat).join(' ')} to .gitignore`);
@@ -23877,7 +23898,17 @@ function boxAlert() {
     return readText(f)?.trim().slice(0, 200) || null;
   } catch { return null; }
 }
-const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
+// Worked out once a process: cmdHello reads it twice.
+const helloAlert = (() => {
+  let memo;
+  const undelivered = () => {
+    const xs = undeliveredTurns();
+    if (!xs.length) return null;
+    const [x] = xs;
+    return `A message in a thread reached no supervisor and has waited ${x.waited_min} min (thread ${x.id}${xs.length > 1 ? `, and ${xs.length - 1} more` : ''}); the supervisor ${x.checked}: resume it`;
+  };
+  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
+})();
 // The hub's Overview: is this project moving, and if not, why. From the log in one pass; from git,
 // only whether each ticket has merged (main's log and the refs, one call each under cmdHello's
 // read cache, never one per ticket), so hello stays cheap at every 10 s.

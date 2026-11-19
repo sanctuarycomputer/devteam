@@ -201,7 +201,7 @@ test('an undelivered turn left unseen or unanswered: a high finding, and an aler
 });
 
 test('machine status prints the alert for the box operator', { skip: hasTmux ? false : 'no tmux' }, async () => {
-  const { dtIn, home, machine, repo } = await import('./lib/machine-fixture.mjs');
+  const { code, dtIn, home, machine, repo } = await import('./lib/machine-fixture.mjs');
   fs.rmSync(path.join(home, '.box/alert'), { force: true });
   const r = repo('undelivered');
   const d = new Date(Date.now() - 6 * MIN - 20000);
@@ -215,6 +215,6 @@ test('machine status prints the alert for the box operator', { skip: hasTmux ? f
   fs.writeFileSync(path.join(r, 'docs/devteam/run/undelivered-turns.json'), JSON.stringify({ [U]: { thread: T, at: d.toISOString() } }));
   const lc = dtIn(r, ['log-check']);
   assert.equal(lc.status, 0, lc.stderr + lc.stdout);
-  const st = machine(['machine', 'status']);
+  const st = machine(['machine', 'status', '--in', code]);
   assert.match(st.stdout, new RegExp(`^attention: undelivered: A message in a thread reached no supervisor and has waited 6 min \\(thread ${T}\\)`, 'm'), st.stdout + st.stderr);
 });
