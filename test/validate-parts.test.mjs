@@ -273,6 +273,19 @@ test('the gate: lines inserted inside another part are that part\'s, however the
   assert.deepEqual(partsChanged(doc, doc.replace('### A1\n', '### X\nx\n### A1\n'), 'x.md', named('+x')), ['p:a'], 'before A1');
   assert.deepEqual(partsChanged(doc, doc.replace('## B\n', '### X\nx\n## B\n'), 'x.md', named('+x')), ['p:a'], 'after A1: still under A');
   assert.deepEqual(partsChanged(doc, doc.replace('## B\n', '## X\nx\n## B\n'), 'x.md', named('+x')), [], 'a new section beside A: the title holds the whole file');
+  // final review F1: an insertion whose edge lines equal its neighbour's (a closing brace, a blank
+  // line) may sit either side of them; the diff's pick is arbitrary, so it is a held place's only when
+  // every placement is, and it never slides over a marker, a heading or a declaration line
+  const fns = ['function loadA() {', '  return a;', '}', '', 'function parseB() {', '  return b;', '}', '', 'function saveC() {', '  return c;', '}', ''].join('\n');
+  const newN = 'function newN() {\n  return n;\n}\n\n';
+  assert.deepEqual(partsChanged(fns, fns.replace('function saveC', `${newN}function saveC`), 'x.mjs', named('+newN')), [], 'a new function alone');
+  assert.deepEqual(partsChanged(fns, fns.replace('  return a;', '  return a2;').replace('function saveC', `${newN}function saveC`), 'x.mjs', named('loadA', '+newN')), [], '(a) its own function edited and a new one added');
+  const moved = ['function parseB() {', '  return b;', '}', '', 'function loadA() {', '  return a;', '}', '', 'function saveC() {', '  return c;', '}', ''].join('\n');
+  assert.deepEqual(partsChanged(fns, moved, 'x.mjs', named('loadA')), [], '(b) its own function moved below another');
+  const sec = ['# Doc', '', '## Alpha', '', 'a', '', '## Beta', '', 'b', '', '## Gamma', '', 'g', ''].join('\n');
+  assert.deepEqual(partsChanged(sec, sec.replace('\na\n', '\na2\n').replace('## Gamma', '## New\n\nn\n\n## Gamma'), 'x.md', named('alpha', '+new')), [], '(c) its own section edited and a new one added');
+  // still refused: a new function inside parseB's body, with no placement outside it
+  assert.deepEqual(partsChanged(fns, fns.replace('  return b;\n', '  return b;\nfunction n() {}\n'), 'x.mjs', named('+n')).sort(), ['d:parseB#1', 'p:parseB']);
   assert.deepEqual(partsChanged(doc, doc.replace('### A1\n', '### X\nx\n### A1\n'), 'x.md', named('a', '+x')), [], 'naming A');
 });
 

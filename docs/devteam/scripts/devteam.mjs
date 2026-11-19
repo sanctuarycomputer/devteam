@@ -3332,9 +3332,12 @@ function fileParts(text, file) {
   // regions
   const open = new Map();
   const regions = [];
+  // the lines that open or close a place: markers, headings, declaration lines
+  const bounds = new Set();
   for (let i = 1; i <= n; i++) {
     const m = partMark(lines[i - 1], file);
     if (!m) continue;
+    bounds.add(i);
     if (m[2] === 'start') { if (!open.has(m[1])) open.set(m[1], i); }
     else if (open.has(m[1])) { regions.push({ name: m[1], from: open.get(m[1]), to: i }); add(m[1], open.get(m[1]), i); open.delete(m[1]); }
   }
@@ -3350,7 +3353,7 @@ function fileParts(text, file) {
       if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; continue; }
       if (fence) continue;
       const h = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
-      if (h) heads.push({ i, level: h[1].length, name: headingSlug(h[2]) });
+      if (h) { heads.push({ i, level: h[1].length, name: headingSlug(h[2]) }); bounds.add(i); }
     }
     const above = [];
     for (let j = 0; j < heads.length; j++) {
@@ -3366,7 +3369,7 @@ function fileParts(text, file) {
   } else {
     const html = /\.html?$/i.test(file);
     const decls = [];
-    if (hasDecls(file)) for (let i = 1; i <= n; i++) { const m = lines[i - 1].match(PART_DECL); if (m) decls.push({ i, name: m[1] ?? m[2] }); }
+    if (hasDecls(file)) for (let i = 1; i <= n; i++) { const m = lines[i - 1].match(PART_DECL); if (m) { decls.push({ i, name: m[1] ?? m[2] }); bounds.add(i); } }
     // a declaration starts at the comment lines directly above it
     for (const d of decls) { d.from = d.i; while (d.from > 1 && PART_COMMENT.test(lines[d.from - 2]) && !isMark(d.from - 1) && !PART_DECL.test(lines[d.from - 2])) d.from--; }
     for (let j = 0; j < decls.length; j++) {
@@ -3382,7 +3385,7 @@ function fileParts(text, file) {
   // the rest: lines no declaration or heading owns, by innermost region
   const restKey = (i) => { let best = null; for (const r of regions) if (r.from <= i && i <= r.to && (!best || r.from >= best.from)) best = r; return best ? `r:${best.name}` : 'r:'; };
   for (let i = 1; i <= n; i++) if (!owner[i]) owner[i] = restKey(i);
-  return { places, regions, owner, lines, n };
+  return { places, regions, owner, lines, n, bounds };
 }
 // The leaf keys a named part covers in these parts: every leaf with a line inside one of its places.
 function partLeaves(P, name) {
@@ -3428,19 +3431,33 @@ function partsChanged(baseText, headText, file, named) {
   // it overlaps every part, so no other ticket runs beside it). A new heading or declaration is also
   // its head ancestors': each one main has must be named or whole-like. With no part named every
   // changed or new leaf is in the gap already.
+  // The diff's place for an insertion is one of several equal ones when its edge lines equal the
+  // lines beside it (a closing brace, a blank line): it may slide over them, never over a line that
+  // opens or closes a place (a marker, a heading, a declaration line). It is a held place's only
+  // when every placement is.
   if (named.length) {
     const hunks = lineHunks(B.lines, H.lines);
     const names = new Set(named.filter((x) => !x.added).map((x) => x.name));
     const free = (name) => names.has(name) || wholeLike(B, name);
     if (!hunks) gap.add('x:');
-    else for (const [af, at, bf, bt] of hunks) {
+    else hunks.forEach(([af, at, bf, bt], hi) => {
       for (let i = af + 1; i <= at; i++) if (!covB.has(B.owner[i])) gap.add(B.owner[i]);
-      if (af !== at || bf === bt) continue;
-      const p = af, q = af + 1; // 1-based base lines round a pure insertion
-      const holding = [];
-      for (const [name, pls] of B.places) for (const pl of pls) if (pl.from <= p && q <= pl.to) holding.push({ name, size: pl.to - pl.from });
-      if (holding.length && !holding.some((h) => names.has(h.name)) && !holding.every((h) => wholeLike(B, h.name))) gap.add(`p:${holding.sort((x, y) => x.size - y.size)[0].name}`);
-    }
+      if (af !== at || bf === bt) return;
+      // the placements, as the 0-based base index the block goes before: up while the block's last
+      // line equals the base line above it, down while its first equals the base line below, within
+      // the equal run between the hunks beside it
+      const lo = hi ? hunks[hi - 1][1] : 0, hiA = hi + 1 < hunks.length ? hunks[hi + 1][0] : B.lines.length;
+      const places = [af];
+      for (let j = 1; af - j >= lo && H.lines[bt - j] === B.lines[af - j] && !B.bounds.has(af - j + 1); j++) places.push(af - j);
+      for (let j = 0; af + j < hiA && H.lines[bf + j] === B.lines[af + j] && !B.bounds.has(af + j + 1); j++) places.push(af + j + 1);
+      const held = (p) => { // p, p + 1: 1-based base lines round the insertion
+        const holding = [];
+        for (const [name, pls] of B.places) for (const pl of pls) if (pl.from <= p && p + 1 <= pl.to) holding.push({ name, size: pl.to - pl.from });
+        return holding.length && !holding.some((h) => names.has(h.name)) && !holding.every((h) => wholeLike(B, h.name)) ? holding.sort((x, y) => x.size - y.size)[0].name : null;
+      };
+      const by = places.map(held);
+      if (by.every(Boolean)) gap.add(`p:${by[0]}`);
+    });
     for (const k of th.keys()) {
       if (tb.has(k) || !k.startsWith('d:')) continue;
       for (const anc of k.slice(2).replace(/#\d+$/, '').split('/').slice(0, -1)) if (B.places.has(anc) && !free(anc)) gap.add(`p:${anc}`);
@@ -3449,7 +3466,7 @@ function partsChanged(baseText, headText, file, named) {
   return [...gap];
 }
 // The runs where two arrays of lines differ (Myers), as [aFrom, aTo, bFrom, bTo], 0-based and end
-// exclusive; null past maxD edits (the trace grows as their square).
+// exclusive; null past maxD edits, each line inserted or deleted (the trace grows as their square).
 function lineHunks(a, b, maxD = 4000) {
   let s = 0;
   while (s < a.length && s < b.length && a[s] === b[s]) s++;
@@ -3486,7 +3503,7 @@ function lineHunks(a, b, maxD = 4000) {
   return out;
 }
 // A leaf key in words: a declaration's or heading's name, or whose rest it is.
-const leafWords = (k) => (k === 'x:' ? 'more than 4000 changed lines, too many to place by part (name the whole file)' : k.startsWith('p:') ? `${k.slice(2)} (lines added inside it)` : k === 'r:' ? "the file's rest" : k.startsWith('r:') ? `region ${k.slice(2)}'s rest` : k.slice(2).replace(/#\d+$/, ''));
+const leafWords = (k) => (k === 'x:' ? 'more than 4000 lines inserted or deleted, too many to place by part (name the whole file)' : k.startsWith('p:') ? `${k.slice(2)} (lines added inside it)` : k === 'r:' ? "the file's rest" : k.startsWith('r:') ? `region ${k.slice(2)}'s rest` : k.slice(2).replace(/#\d+$/, ''));
 /* parts end */
 // Parts of a file at a repo's main, read once per process and only for a file some entry names a
 // part of, or that a dependency's two tickets both claim (validate's big-file warning): null when this machine can't read the repo or its main has no such file (a folder too).
