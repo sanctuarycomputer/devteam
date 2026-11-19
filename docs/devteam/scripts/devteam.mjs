@@ -570,6 +570,9 @@ const SETTINGS_DEFAULTS = {
   // supervisor's own, like caps and timings. sensor_defaults overrides the built-in defaults for all of them.
   sensors: {},
   sensor_defaults: {},
+  // Jobs under Upkeep: { "<name>": { kind: 'check'|'chore', title, what, every, … } }, each as
+  // RECURRING_ENTRY_SHAPE holds it. Checks run commands on a schedule, chores are done on one.
+  recurring: {},
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
   // The forge's checks merge doesn't wait for (names, e.g. a broken optional one); owner-only.
@@ -689,6 +692,7 @@ const SETTINGS_WORDS = Object.freeze({
   secret_commands: ['Production', 'Commands a secret may be sent to', "command prefixes a secret's sink may run, as you", 'count'],
   retro_every_days: ['Rhythm', 'Retro every', 'days between retrospectives', 'value'],
   research_every_days: ['Rhythm', 'Research every', 'days between research spikes on new tools and practice', 'value'],
+  recurring: ['Rhythm', 'Jobs', 'the jobs that run on a schedule under Upkeep: checks and chores', 'names'],
   project: ['Project and links', 'Project name', "this project's name on the hub and in its public links", 'value'],
   components: ['Project and links', 'Components', 'the parts of the work, each with its own lines of files', 'names'],
   links: ['Project and links', 'Linked repos and resources', 'the repos and resources this project works in or reads', 'names'],
@@ -1448,6 +1452,7 @@ const CLASS_WORDS = Object.freeze({
   'registry-attest': 'Confirming the registry is complete',
   'new-dependency': 'Adding a new dependency',
   'artifact-publish': 'Publishing a page',
+  'recurring-edit': 'Adding, changing or stopping a job',
   'pane-answer': "Answering the supervisor's terminal",
   'goal-order': 'Putting the goals in order',
   'goal-approval': 'Approving a goal',
@@ -4232,6 +4237,15 @@ function cmdValidate() {
     const s = loadSettings();
     const reg = registryProblems(s);
     errors.push(...reg.errors, ...sensorProblems(s));
+    // Jobs (recurring) as this checkout's settings.md writes them, not loadSettings': an owner's key
+    // reads as main has it there, and a branch's edit to the jobs is what must be checked.
+    {
+      const own = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
+      let jobs;
+      try { jobs = own == null ? undefined : JSON.parse(own).recurring; } catch { jobs = undefined; }
+      if (jobs !== undefined && !isObj(jobs)) errors.push('settings recurring: an object of { "<name>": { kind, title, what, every, … } }');
+      else for (const [n, e] of Object.entries(jobs ?? {})) errors.push(...recurringEntryProblems(n, e));
+    }
     { const p = memoryCeilingProblem(s.machine_memory_ceiling); if (p) errors.push(p); }
     warnings.push(...reg.warnings);
     // With lines, check-pr and merge judge the tree a PR would land, which takes git 2.38; say so
@@ -21792,6 +21806,146 @@ function fleetHost() {
   if (!w.wrote) die(`could not take the claim: ${w.offline ?? w.failed ?? 'another machine wrote it at the same moment; try again'}`);
   const from = r.claim && !r.claim.unreadable && r.claim.machine !== hostMachineId() ? r.claim : null;
   out(`${hostName()} now supervises this repo${from ? ` (taken from ${from.hostname}, last seen ${from.at}; if its supervisor is still running, it stops at its next tick)` : ''}`);
+}
+
+// A job under Upkeep (settings recurring, keyed by name): a check, a command run on a schedule in a
+// throwaway checkout of main and failing by its rule, or a chore, instructions the supervisor or a
+// worker carries out on a schedule. Contract RECURRING_ENTRY_SHAPE@1: the rules and defaults every
+// reader takes from here (validate, and the registry, the runner, merge and ask that build on it).
+// fields: which kinds carry each field (by: only a chore with that by), whether it must be set, its
+// default when unset, and its ceiling. A check runs at most hourly, a chore at most daily, neither
+// less often than 90 days, 12 weeks or 3 months; on is a weekday with w and a day 1..28 with mo
+// (every month has it); at is HH:MM UTC, never with h. A run command carries no credential: no word
+// with one (as a sensor URL or a link), and nothing the scrubber would hide but a host, a phone
+// number or an email, after each whole environment reference ($NAME, ${NAME}, after any Bearer,
+// Basic or token) is read as one, since a check runs in the supervisor's environment as a gate does.
+const RECURRING_ENTRY_SHAPE = Object.freeze({
+  version: 1,
+  name: /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/,
+  name_length: Object.freeze([2, 40]),
+  kinds: Object.freeze(['check', 'chore']),
+  every: /^([1-9][0-9]{0,3})(h|d|w|mo)$/,
+  every_min: Object.freeze({ check: 'h', chore: 'd' }),
+  every_max: Object.freeze({ h: 2160, d: 90, w: 12, mo: 3 }),
+  weekdays: Object.freeze(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
+  month_day_max: 28,
+  at: /^([01][0-9]|2[0-3]):[0-5][0-9]$/,
+  last_line_rules: Object.freeze(['above', 'below', 'is_not']),
+  by: Object.freeze(['supervisor', 'worker']),
+  fields: Object.freeze({
+    kind: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true }),
+    title: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true, max: 80 }),
+    what: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true, max: 160 }),
+    every: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true }),
+    on: Object.freeze({ kinds: Object.freeze(['check', 'chore']) }),
+    at: Object.freeze({ kinds: Object.freeze(['check', 'chore']) }),
+    run: Object.freeze({ kinds: Object.freeze(['check']), required: true, max: 500 }),
+    timeout_s: Object.freeze({ kinds: Object.freeze(['check']), default: 120, max: 1800 }),
+    fail: Object.freeze({ kinds: Object.freeze(['check']), default: Object.freeze({ exit: 'nonzero' }) }),
+    fail_after: Object.freeze({ kinds: Object.freeze(['check']), default: 1, max: 10 }),
+    severity: Object.freeze({ kinds: Object.freeze(['check']), default: 2, max: 3 }),
+    by: Object.freeze({ kinds: Object.freeze(['chore']), required: true }),
+    prompt: Object.freeze({ kinds: Object.freeze(['chore']), required: true, max: 2000 }),
+    component: Object.freeze({ kinds: Object.freeze(['chore']), by: 'worker', required: true }),
+    touches: Object.freeze({ kinds: Object.freeze(['chore']), by: 'worker', required: true }),
+    done_when: Object.freeze({ kinds: Object.freeze(['chore']), by: 'worker', required: true }),
+    grace_days: Object.freeze({ kinds: Object.freeze(['chore']), default: Object.freeze({ supervisor: 1, worker: 3 }), max: 30 }),
+  }),
+});
+// What is wrong with one job, each problem naming the entry and field ("settings recurring.<name>.<field>: …"),
+// empty when it holds. It reads no log and no other setting but sensor_scrub (a run its patterns
+// would scrub is refused), so any reader can check any entry.
+function recurringEntryProblems(name, entry) {
+  const R = RECURRING_ENTRY_SHAPE;
+  const UNITS = Object.keys(R.every_max); // h, d, w, mo: shortest first
+  // a whole environment reference: $NAME or ${NAME} (never ${X:-default} or ${X}more), after any scheme word
+  const REF = /(?:\b(?:bearer|basic|token)\s+)?\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})(?=$|[\s"';&|)])/gi;
+  const SCRUB_ALLOWED = ['[ip]', '[phone]', '[email]'];
+  const at = `settings recurring.${name}`;
+  const [lo, hi] = R.name_length;
+  if (typeof name !== 'string' || !R.name.test(name) || name.length < lo || name.length > hi) return [`${at}: a name is ${lo} to ${hi} lowercase letters and digits, in words joined by single hyphens (it becomes a chore slug and a ticket id)`];
+  if (!isObj(entry)) return [`${at}: an object { kind, title, what, every, … }`];
+  const errs = [];
+  const bad = (f, m) => errs.push(`${at}.${f}: ${m}`);
+  const kind = entry.kind;
+  if (!R.kinds.includes(kind)) return [`${at}.kind: check or chore`];
+  for (const [f, spec] of Object.entries(R.fields)) {
+    const carried = spec.kinds.includes(kind) && (!spec.by || entry.by === spec.by);
+    if (!carried && entry[f] !== undefined) bad(f, spec.kinds.includes(kind) ? `only a chore with by "${spec.by}" has ${f}` : `a ${spec.kinds[0]}'s field, not a ${kind}'s`);
+    else if (carried && spec.required && entry[f] === undefined) bad(f, 'required');
+  }
+  for (const f of Object.keys(entry)) if (!Object.hasOwn(R.fields, f)) bad(f, 'not a field of a job');
+  const has = (f) => entry[f] !== undefined && R.fields[f].kinds.includes(kind) && (!R.fields[f].by || entry.by === R.fields[f].by);
+  const whole = (f, lo2, hi2) => { if (has(f) && !(Number.isInteger(entry[f]) && entry[f] >= lo2 && entry[f] <= hi2)) bad(f, `a whole number from ${lo2} to ${hi2}`); };
+  for (const f of ['title', 'what']) if (has(f) && (typeof entry[f] !== 'string' || !entry[f].length || entry[f].length > R.fields[f].max || UNSAFE_TEXT.test(entry[f]))) bad(f, `one line of 1 to ${R.fields[f].max} characters`);
+  let unit = null;
+  if (has('every')) {
+    const m = typeof entry.every === 'string' ? R.every.exec(entry.every) : null;
+    if (!m) bad('every', '<n>h, <n>d, <n>w or <n>mo');
+    else if (UNITS.indexOf(m[2]) < UNITS.indexOf(R.every_min[kind])) bad('every', 'a chore runs at most daily: <n>d, <n>w or <n>mo');
+    else if (Number(m[1]) > R.every_max[m[2]]) bad('every', `at most ${R.every_max.d}d, ${R.every_max.w}w or ${R.every_max.mo}mo (${R.every_max.h}h)`);
+    else unit = m[2];
+  }
+  if (has('on') && unit) {
+    if (unit === 'w') { if (!R.weekdays.includes(entry.on)) bad('on', `with w, a weekday: ${R.weekdays.join(', ')}`); }
+    else if (unit === 'mo') { if (!(Number.isInteger(entry.on) && entry.on >= 1 && entry.on <= R.month_day_max)) bad('on', `with mo, a day of the month from 1 to ${R.month_day_max}, a number`); }
+    else bad('on', 'goes with w (a weekday) or mo (a day of the month), not h or d');
+  }
+  if (has('at')) {
+    if (typeof entry.at !== 'string' || !R.at.test(entry.at)) bad('at', 'HH:MM, UTC');
+    else if (unit === 'h') bad('at', 'goes with d, w or mo, not h');
+  }
+  if (has('run')) {
+    const r = entry.run;
+    if (typeof r !== 'string' || !r.length || r.length > R.fields.run.max || UNSAFE_TEXT.test(r)) bad('run', `one line of 1 to ${R.fields.run.max} characters`);
+    else {
+      // Each whole reference becomes one plain word (VAR), and a quote right after one joins what
+      // follows to it, as the shell joins $X"abc" into one value. Every built-in scrub rule then runs
+      // as scrubText runs them, and a value a rule would hide must be references alone (or a host, a
+      // phone number or an email): a literal glued, quoted or spaced after a reference hides as much
+      // as one with no reference. A second reading joins the words inside each quoted string, so a
+      // header or a JSON value ("Authorization: Bearer $X abc…") is judged whole. What an owner's
+      // sensor_scrub pattern would hide is refused whenever it matches at all, whatever it writes.
+      const VAR = 'zzvarzzz';
+      const glue = (t) => t.replace(new RegExp(`${VAR}["']`, 'g'), VAR);
+      const named = r.replace(REF, VAR);
+      const hidden = new Set();
+      for (const text of [glue(named), glue(named.replace(/"[^"]*"|'[^']*'/g, (q) => q.replace(/\s+/g, '_')))]) {
+        let t = text;
+        for (const [re, to] of [...SCRUB_RULES, ...SCRUB_RULES]) {
+          t = t.replace(re, (...a) => {
+            const m = a[0];
+            const out = typeof to === 'function' ? to(...a) : to.replace(/\$(\d)/g, (_, i) => a[Number(i)] ?? '');
+            if (out === m) return m;
+            let p = 0;
+            while (p < m.length && p < out.length && m[p] === out[p]) p++;
+            let s = 0;
+            while (s < m.length - p && s < out.length - p && m[m.length - 1 - s] === out[out.length - 1 - s]) s++;
+            const literal = m.slice(p, m.length - s).split(VAR).join('').replace(/["'\s_]/g, '');
+            if (literal) for (const x of out.slice(p, out.length - s).match(/\[[a-z-]+\]/g) ?? ['[scrubbed]']) if (!SCRUB_ALLOWED.includes(x)) hidden.add(x);
+            return out;
+          });
+        }
+      }
+      if (scrubExtra().some(([re]) => new RegExp(re.source, re.flags.replace('g', '')).test(named))) hidden.add('sensor_scrub');
+      if (r.split(/\s+/).some((w) => hasCredentials(w.replace(/^(["'])(.*)\1$/, '$2'))) || hidden.size) bad('run', `it carries a credential${hidden.size ? ` (${[...hidden].join(', ')})` : ''}; ${CREDENTIALS_REFUSED}. A check runs with the supervisor's environment: name a secret by reference ($NAME), never by value`);
+    }
+  }
+  whole('timeout_s', 1, R.fields.timeout_s.max);
+  if (has('fail')) {
+    const f = entry.fail;
+    const one = (o) => isObj(o) && Object.keys(o).length === 1;
+    const rule = one(f) && f.last_line !== undefined && one(f.last_line) ? Object.entries(f.last_line)[0] : null;
+    const ok = (one(f) && f.exit === 'nonzero') || (rule && ((['above', 'below'].includes(rule[0]) && typeof rule[1] === 'number' && Number.isFinite(rule[1])) || (rule[0] === 'is_not' && typeof rule[1] === 'string' && rule[1].length >= 1 && rule[1].length <= 200 && !UNSAFE_TEXT.test(rule[1]))));
+    if (!ok) bad('fail', '{ "exit": "nonzero" }, or { "last_line": { "above": n } }, { "below": n } or { "is_not": "<text, at most 200 characters>" }');
+  }
+  whole('fail_after', 1, R.fields.fail_after.max);
+  whole('severity', 1, R.fields.severity.max);
+  if (has('by') && !R.by.includes(entry.by)) bad('by', R.by.join(' or '));
+  if (has('prompt') && (typeof entry.prompt !== 'string' || !entry.prompt.length || entry.prompt.length > R.fields.prompt.max || UNSAFE_TEXT.test(entry.prompt.replace(/[\n\t]/g, '')))) bad('prompt', `1 to ${R.fields.prompt.max} characters: text, line breaks and tabs`);
+  for (const f of ['component', 'touches', 'done_when']) if (has(f)) for (const e of schemaErrors(SCHEMA.$defs.types.ticket.properties[f], entry[f], f)) bad(f, `as ticket add checks it: ${e}`);
+  whole('grace_days', 1, R.fields.grace_days.max);
+  return errs;
 }
 
 // ===== sensors: production signals into the loop =====

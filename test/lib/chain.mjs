@@ -138,7 +138,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     // repo: the kit runs the check on main and records main's sha; nobody types the number
     const Gr = must(['goal', 'add', '--title', 'Fewer scripts', '--outcome', 'one script', '--measure', 'files in scripts/', '--target', '0', '--unit', 'files', '--direction', 'down', '--source', 'repo', ...rest, '--priority', '42'], { role: 'sup' });
     assert.match(must(['goal', 'check', Gr]), /no check: the command whose last line is the number/);
-    must(['goal', 'set', Gr, '--check', 'echo counting; ls docs/devteam/scripts | wc -l'], { role: 'sup' });
+    must(['goal', 'set', Gr, '--check', 'echo counting; ls docs/devteam/scripts/devteam.mjs | wc -l'], { role: 'sup' });
     assert.match(dt(['goal', 'reading', Gr, '--value', '0'], { role: 'sup' }).err, /the kit runs its check \(goal reading .* --run\), nobody types the number/);
     const main = git(['rev-parse', 'origin/main']);
     assert.match(must(['goal', 'reading', Gr, '--run'], { role: 'sup' }), new RegExp(`recorded 1 for ${Gr} \\(main at ${main.slice(0, 12)}\\)`));
