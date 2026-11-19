@@ -368,7 +368,7 @@ test('the Efficiency page', { skip: canDrive ? false : 'needs Chrome and a Node 
 
   await t.test("where a suggestion's thread lives", async () => {
     assert.equal(await p.ev("tWhere({ kind: 'page', view: '#efficiency?suggestion=eff-x' })"), 'Efficiency');
-    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#trust' })"), 'Trust Ladder');
+    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#trust' })"), 'Trust');
     assert.equal(await p.ev("tWhere({ kind: 'page', view: '#loop/decide' })"), 'Loop, Decide');
     const s = JSON.stringify(openThread().subject);
     assert.equal(await p.ev(`tlRowOf(${s}).el === ${ITEM('eff-costly-ticket-kit-87')}`), true);

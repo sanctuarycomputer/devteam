@@ -1266,6 +1266,12 @@ try {
   <!-- kit-174: the Efficiency Score card, beside Trust, on the shell (render() draws it: renderEfficiency) -->
   <section id="efficiency" data-page="efficiency"></section>
 <!-- html-efficiency end -->
+<!-- html-awareness start -->
+  <section id="awareness" data-page="awareness"></section>
+<!-- html-awareness end -->
+<!-- html-governance start -->
+  <section id="governance" data-page="governance"></section>
+<!-- html-governance end -->
 
 <!-- html-retros start -->
   <section id="retros" class="no-shell" data-page="retros">
@@ -1656,21 +1662,20 @@ function saveFilters(page, state) {
 // The router's table (dashboard-shell@1, test/contracts/shell.md §6): the page ids, each link kind's home page (what a
 // link opens over on a cold load), file homes by path, and the redirects. The page's own, outside the
 // shared block, so the tickets that change it never touch the block.
-// until kit-93: health is its own page (it folds into Sensors) and governance is not a page yet (a
-// governance file's home below then opens over Overview); kit-93 swaps both
-const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'sensors', 'health', 'retros', 'loop', 'settings'];
+// kit-93: Health folds into Sensors (its head redirects) and Governance is a page, so a governance file opens over it
+const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'awareness', 'governance', 'sensors', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
   links: {
     ticket: 'board', feature: 'board', story: 'board', release: 'board', wave: 'board', milestone: 'board', planner: 'board', thread: 'board',
     goal: 'goals', q: 'overview', talk: 'overview',
     act: 'loop', decision: 'loop', lesson: 'loop', problem: 'loop', signal: 'loop', learning: 'loop', observation: 'loop',
-    sensor: 'sensors', retro: 'retros',
+    sensor: 'sensors', retro: 'retros', class: 'trust',
     artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library', lib: 'library',
   },
   files: [[/(^|\/)docs\/devteam\/(governance|process)\//, 'governance'], [/(^|\/)strategy\.md$/, 'governance']],
   redirects: {
-    monitoring: 'sensors',
+    monitoring: 'sensors', health: 'sensors?st=fleet',
     // permanent: the old Loop tab subjects open the Loop page (and its tab)
     'loop/observe': 'loop', 'loop/orient': 'loop?lt=orient', 'loop/decide': 'loop?lt=decide', 'loop/act': 'loop?lt=act',
     // the Inbox is the Threads panel's first tab (kit-100): its old heads open it over Overview
@@ -1687,11 +1692,11 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // Each page is today's section (its data-page); render() still draws every section on every read,
 // shown or not, so nothing a page holds is lost while another shows. A page's nav count is today's
 // element, which render() fills (PAGE_COUNT_ID: the count each nav item carries).
-const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
+const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', awareness: 'n-awareness', sensors: 'n-sensors', retros: 'n-retros', loop: 'n-knowledge' };
 for (const [id, title, group, icon] of [
   ['overview', 'Overview', 'project', 'layout-dashboard'], ['goals', 'Goals', 'project', 'target'],
   ['progress', 'Progress', 'project', 'chart-line'], ['board', 'Board', 'project', 'kanban'], ['library', 'Library', 'project', 'library'],
-  ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['health', 'Health', 'autonomy', 'heart-pulse'],
+  ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['awareness', 'Awareness', 'autonomy', 'eye'], ['governance', 'Governance', 'autonomy', 'scale'], ['sensors', 'Sensors', 'autonomy', 'activity'],
   ['retros', 'Retros', 'autonomy', 'history'], ['loop', 'Self Improvement', 'autonomy', 'repeat'], ['settings', 'Settings', 'settings', 'settings'],
 ]) registerPage({ id, title, group, icon, count: () => null, render: () => {} });
 for (const nav of document.querySelectorAll('.side nav.nav[data-group]')) {
@@ -1987,6 +1992,19 @@ document.addEventListener('keydown', (e) => {
   if (t?.matches?.('[data-open][tabindex]')) { e.preventDefault(); location.hash = t.dataset.open; }
 });
 
+/* autonomy-pages start */
+// kit-93: the Autonomy pages' nav counts. Trust and Awareness carry this week's score; Sensors the
+// sensors down, else the findings, hot when one is down or a finding is high.
+function navCounts(d) {
+  const set = (id, txt, hot = false) => { const el = $(id); if (!el) return; el.textContent = txt; el.classList.toggle('hot', !!hot); };
+  const pct = (s) => (Number.isFinite(s?.this_week) ? `${s.this_week}%` : '');
+  set('n-trust', pct(d.autonomy?.decisions?.score));
+  set('n-awareness', pct(d.awareness?.score));
+  const down = (d.sensors || []).filter((m) => m.state === 'down');
+  const fs = d.metrics?.findings || [];
+  set('n-sensors', down.length ? `${down.length} down` : (fs.length || ''), down.length > 0 || fs.some((f) => f.severity === 'high'));
+}
+/* autonomy-pages end */
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
 // Each is [value, label, group]; Progress's Narrow offers them (narrowViews), its goal held by the Goal filter.
 function views(p) {
@@ -4933,8 +4951,6 @@ function incidentBoard(incs) {
 function renderMonitoring(d) {
   const ms = d.sensors || [];
   const down = ms.filter((m) => m.state === 'down');
-  $('n-sensors').textContent = down.length ? `${down.length} down` : '';
-  $('n-sensors').classList.toggle('hot', down.length > 0);
   const banner = down.length ? `<i class="icon-triangle-alert" aria-hidden="true"></i> ${down.map((m) => `<a href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a> is down since ${esc(when(m.since))}${m.last?.error ? ` (${esc(m.last.error)})` : ''}`).join('; ')}` : '';
   // only when it changes, so a screen reader announces an outage once
   if ($('down-banner').innerHTML !== banner) { $('down-banner').innerHTML = banner; $('down-banner').hidden = !down.length; }
@@ -7054,13 +7070,12 @@ function render(d) {
     $('retro-list').innerHTML = all.length ? all.map((r) => `<a class="card retro-row" href="#retro/${encodeURIComponent(r.id)}"><b>${esc(retroDate(r))}</b><span>${esc(r.summary)}</span></a>`).join('') : '<p class="empty">No retro yet.</p>';
   }
   renderLibrary(d.library);
-  count('n-findings', m.findings.length, m.findings.some((f) => f.severity === 'high'));
   count('n-knowledge', o.knowledge.filter(ownerLesson).length);
   $('n-observe').textContent = o.observations.length || '';
   $('n-orient').textContent = (o.clusters.length + o.problems.length + o.knowledge.length) || '';
   const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
   $('n-decide').textContent = (o.decisions || []).filter((r) => r.at > weekAgo && r.kind !== 'correction' && !routine(r)).length || '';
-  count('n-trust', o.trust.filter((t) => t.can_ask).length);
+  navCounts(d);
   $('n-act').textContent = o.acts.length || '';
   renderOverview();
 
@@ -7177,7 +7192,7 @@ const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a que
 // Threads panel's Inbox tab (#th-inbox #questions, kit-100 spec §2.6), not a page's section.
 const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
 // The sections' names, as the sidebar shows them.
-const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', efficiency: 'Efficiency', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
+const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust', awareness: 'Awareness', governance: 'Governance', efficiency: 'Efficiency', retros: 'Retros', health: 'Sensors', monitoring: 'Sensors' };
 // T_ENCODED_MAX: a turn as the log line holds it, JSON-escaped (a quotation mark is two bytes there,
 // a control character six), so a line of 4,096 bytes always has room for it.
 const T_TURN_MAX = 2000, T_ENCODED_MAX = 3800, T_SUBJECT_MAX = 2500, T_TITLE_MAX = 120, T_WAIT_MS = 10 * 60000;

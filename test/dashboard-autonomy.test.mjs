@@ -128,4 +128,50 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await polls(2);
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
+  await t.test('nav order', async () => {
+    await load(autonomyFixture(), '#trust');
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('.side nav.nav[data-group=\"autonomy\"] a')].map((a) => a.getAttribute('href'))"), ['#trust', '#efficiency', '#awareness', '#governance', '#sensors', '#retros', '#loop']);
+  });
+
+  await t.test('#health redirects', async () => {
+    // every load adds the same entries to the tab's session history, so a redirect that pushed one would show
+    const len = () => p.ev('history.length');
+    await load(autonomyFixture(), '#sensors?st=fleet');
+    const a = await len();
+    await load(autonomyFixture(), '#sensors?st=fleet');
+    const b = await len();
+    assert.equal(await p.ev('location.hash'), '#sensors?st=fleet');
+    await load(autonomyFixture(), '#health');
+    await soon("location.hash === '#sensors?st=fleet'", 'health redirected to sensors');
+    assert.equal((await len()) - b, b - a, 'the redirect adds no history entry');
+  });
+
+  await t.test('Trust counts the score', async () => {
+    await load(autonomyFixture(), '#trust');
+    assert.equal(await text('#n-trust'), '64%');
+  });
+
+  await t.test('Awareness counts its score', async () => {
+    await load(autonomyFixture(), '#trust');
+    assert.equal(await text('#n-awareness'), '71%');
+  });
+
+  await t.test('Sensors count', async () => {
+    await load(autonomyFixture(), '#trust');
+    assert.equal(await text('#n-sensors'), '2');
+    assert.equal(await p.ev("$('n-sensors').classList.contains('hot')"), true);
+    await p.ev("window.__fx.patch.sensors[0].state = 'down'; void 0");
+    await polls(2);
+    await soon("$('n-sensors').textContent.trim() === '1 down'", 'one down');
+    assert.equal(await p.ev("$('n-sensors').classList.contains('hot')"), true);
+    await p.ev("window.__fx.patch.sensors[0].state = 'up'; window.__fx.patch.metrics.findings.forEach((f) => { f.severity = 'low'; }); void 0");
+    await polls(2);
+    await soon("$('n-sensors').textContent.trim() === '2'", 'two findings');
+    assert.equal(await p.ev("$('n-sensors').classList.contains('hot')"), false);
+  });
+
+  await t.test('a #health thread is on Sensors', async () => {
+    await load(autonomyFixture(), '#trust');
+    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#health' })"), 'Sensors');
+  });
 });
