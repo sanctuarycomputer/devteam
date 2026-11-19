@@ -25,6 +25,8 @@ const DATA = {
       { id: 'arrangements', kind: 'repo', remote: 'git@github.com:acme/arrangements.nyc.git', url: null, path: null },
       { id: 'console', kind: 'repo', remote: 'acme/console', url: null, path: null },
       { id: 'mirror', kind: 'repo', remote: 'https://gitlab.com/acme/mirror.git', url: null, path: null },
+      // a local remote looks like org/repo shorthand but is no GitHub repo
+      { id: 'local', kind: 'repo', remote: '../local', url: null, path: null },
       { id: 'docs-site', kind: 'url', remote: null, url: 'https://example.com', path: null },
     ],
   },
@@ -33,9 +35,12 @@ const DATA = {
 function dashboard(data = DATA) {
   const html = fs.readFileSync(path.join(ROOT, 'docs/devteam/dashboard/index.html'), 'utf8');
   const src = html.slice(html.indexOf('<script>', html.indexOf('</style>')) + '<script>'.length, html.lastIndexOf('</script>'));
-  const take = (name) => {
+  // a name the page lacks takes its stand-in (repoDocHref is new: on main it is a home path's null,
+  // so the tests fail there for the bug, not for a missing name)
+  const take = (name, missing) => {
     const fn = src.indexOf(`\nfunction ${name}(`), arrow = src.indexOf(`\nconst ${name} =`);
     const at = (fn >= 0 ? fn : arrow) + 1;
+    if (at === 0 && missing) return missing;
     assert.ok(at > 0, name);
     if (fn < 0) return src.slice(at, src.indexOf(';\n', at) + 1);
     let depth = 0, i = src.indexOf('{', at);
@@ -45,7 +50,7 @@ function dashboard(data = DATA) {
   const ctx = { DATA: data, URLSearchParams };
   vm.createContext(ctx);
   vm.runInContext([
-    take('esc'), take('ticketMap'), take('tlink'), take('repoDocHref'), take('fileHref'), take('linkify'),
+    take('esc'), take('ticketMap'), take('tlink'), take('repoDocHref', 'const repoDocHref = () => null;'), take('fileHref'), take('linkify'),
     'const qlink = (id) => `<a href="#q/${id}">q</a>`;',
     'const idLink = (k, id) => `<a href="#id/${id}">${id}</a>`;',
     'this.linkify = linkify; this.fileHref = fileHref;',
@@ -102,6 +107,9 @@ test('a home doc on a branch opens in the file peek at that branch (its merge co
   a = anchors(linkify('See mirror/docs/x.md on ticket/kit-12.'));
   const m = new URLSearchParams(unesc(a[0].href).replace(/^#file\?/, ''));
   assert.deepEqual([m.get('repo'), m.get('path'), m.get('ref')], ['mirror', 'docs/x.md', 'ticket/kit-12']);
+  a = anchors(linkify('See local/docs/x.md on main.'));
+  const lo = new URLSearchParams(unesc(a[0].href).replace(/^#file\?/, ''));
+  assert.deepEqual([lo.get('repo'), lo.get('path'), lo.get('ref')], ['local', 'docs/x.md', 'main']);
 });
 
 test('a ticket id inside a path, branch or filename is never a link of its own; a bare one still is', () => {
@@ -125,7 +133,7 @@ test('what linkify did before stays: a bare path is text, other ids still link, 
   assert.equal(linkify(`at ${SHA_C}`), `at <code>${SHA_C.slice(0, 12)}</code>`);
   assert.equal(linkify('<b>x</b> & docs/x.md'), '&lt;b&gt;x&lt;/b&gt; &amp; docs/x.md');
   // a path inside a URL's query, an address, or numbers is not a doc
-  for (const s of ['https://x.example/?a=1&b=console/docs/x.md', 'mail ops@console/x.md', 'about 1/2.5 on main', 'see console/docs/x.md-old']) assert.equal(anchors(linkify(s)).length, 0, `no link in "${s}": ${linkify(s)}`);
+  for (const s of ['https://x.example/?a=1&b=console/docs/x.md', 'see ?a=1&console/docs/x.md on main', 'mail ops@console/x.md', 'about 1/2.5 on main', 'see console/docs/x.md-old']) assert.equal(anchors(linkify(s)).length, 0, `no link in "${s}": ${linkify(s)}`);
   // a path left as text keeps the ids inside it that link today
   assert.match(linkify('see q-20261119-143912078-supervisor/notes.md'), /href="#q\/q-20261119-143912078-supervisor"/);
 });
