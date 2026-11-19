@@ -139,7 +139,10 @@ test("every first segment the dashboard server answers is reserved, so no publis
   const start = src.lastIndexOf('http.createServer(', mark);
   const end = src.indexOf('server.listen(port, host)', mark);
   assert.ok(start > 0 && end > mark, "the dashboard server's handler is found");
-  const handler = src.slice(start, end);
+  // the route groups (kit-322) live in the dashboardRoutes region, above cmdDashboard
+  const ra = src.indexOf('/* dashboardRoutes start */'), rb = src.indexOf('/* dashboardRoutes end */');
+  assert.ok(ra > 0 && rb > ra, 'devteam.mjs has its dashboardRoutes region');
+  const handler = src.slice(ra, rb + '/* dashboardRoutes end */'.length) + src.slice(start, end);
   const segs = new Set();
   // a path literal, quoted or a template, whatever it is compared with; a segment ends at / ? or #
   for (const m of handler.matchAll(/['"`]\/([a-z][a-z0-9.-]*)/g)) segs.add(m[1]);

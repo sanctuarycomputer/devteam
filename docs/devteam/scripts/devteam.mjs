@@ -19527,44 +19527,18 @@ function dashboardHub(log) {
   if (imageHub() === HUB_PORT) { log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); return null; }
   return startHub(log, { kit: ownKitVersion() });
 }
-async function cmdDashboard() {
-  // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
-  // while it starts is then a change it sees
-  const startPrint = kitPrint(fileURLToPath(import.meta.url));
-  const picked = await pickDashboardPort();
-  let port = picked.port;
-  const host = flagStr('host') ?? '127.0.0.1';
-  const log = dashboardLogger();
-  if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
-  processLog(log, 'dashboard');
-  // the terminal's routes (terminal@1): the port as a getter, since it is re-picked when taken
-  const term = termRoutes({ port: () => port, host, log });
-  const page = path.join(kitDir, 'dashboard', 'index.html');
-  // The page's policy, at / and at /view/: its frames are its own pages and, where a preview's lens
-  // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
-  const pageCsp = (frames = []) => `frame-src ${['\'self\'', ...frames].join(' ')}; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
-  const self = fileURLToPath(import.meta.url);
-  // Its timers, kept so a hand-over to a new kit stops each (nothing new starts while it drains) and
-  // a respawn that failed starts them again.
-  const timers = [];
-  const every = (f, ms) => { const t = { f, ms, id: setInterval(f, ms) }; t.id.unref(); timers.push(t); };
-  const stopTimers = () => { for (const t of timers) clearInterval(t.id); };
-  const startTimers = () => { for (const t of timers) { clearInterval(t.id); t.id = setInterval(t.f, t.ms); t.id.unref(); } };
-  const ownerEnv = ownerActionEnv('dashboard');
-  // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
-  // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
-  // An argument execFile refuses (a NUL in it) throws as it is called, not to the callback: that is a
-  // failed run too, never a rejection, which would end the dashboard.
-  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => {
-    try {
-      execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr }));
-    } catch (e) { resolve({ ok: false, code: 1, stdout: '', stderr: `devteam: ${args.slice(0, 2).join(' ')} could not start: ${e.code ?? e.message}` }); }
-  });
-  // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
-  const describing = new Map();
-  // /api/artifact-versions runs in flight, by slug: one child process however many ask at once
-  const versioning = new Map();
-  const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
+/* cmdDashboard start */
+/* dashboardRoutes start */
+// What a route group returns when none of its routes matched the request.
+const DASH_NEXT = Symbol('next route');
+// The routes' context: a name a group reads from it that cmdDashboard did not pass throws, not undefined.
+// A symbol or the key "then" reads through unchecked, so logging or awaiting it never throws.
+function dashContext(o) {
+  return new Proxy(o, { get(t, k, r) { if (typeof k === 'string' && k !== 'then' && !(k in t)) throw new Error(`dashboard route context has no ${k}`); return Reflect.get(t, k, r); } });
+}
+// The owner actions the dashboard takes at POST /api/<name>, each a body check that gives the argv or
+// null, with what they share. A new owner action is an entry here.
+function dashboardActions() {
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   // no string an action puts in argv holds a NUL: no process can be given one
   const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max && !x.includes('\0');
@@ -19630,6 +19604,530 @@ async function cmdDashboard() {
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
+  return { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS };
+}
+// POST /upload; GET/HEAD /upload/…
+async function dashRoutesUpload(D, req, res, q) {
+  const { send } = D;
+  // a file dropped on the page: before every other route, and before a byte of its body is read
+  if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
+    clearTimeout(q.bodyTimer);
+    try { return await receiveLaptopUpload(req, res, new URL(req.url, 'http://x').searchParams.get('name'), send); } catch (e) {
+      process.stderr.write(`a dropped file could not be stored: ${e.message}\n`);
+      if (!res.headersSent && !res.destroyed) return send(res, 500, 'application/json', JSON.stringify({ error: 'this machine could not store this file' }), { connection: 'close' });
+      return void req.destroy();
+    }
+  }
+  // a dropped file, back to this page: before the routes below, which parse the URL
+  if ((req.method === 'GET' || req.method === 'HEAD') && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url.split('?')[0], send);
+  return DASH_NEXT;
+}
+// /api/hello; / and /index.html; /api/data
+async function dashRoutesPage(D, req, res, q) {
+  const { page, pageCsp, send, helloBody, stageFrames, dashboardData, logWatch } = D;
+  if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
+  // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
+  // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
+  if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
+    // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
+    // can't lay it under its own page and steer a click onto an owner action.
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': pageCsp(stageFrames()) });
+    return res.end(fs.readFileSync(page));
+  }
+  if (req.method === 'GET' && req.url.startsWith('/api/data')) {
+    // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
+    logWatch.look();
+    // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
+    // the run goes on and the next read has it, but no page waits minutes on a stuck child.
+    let waited;
+    const slow = new Promise((resolve) => { waited = setTimeout(() => resolve({ ok: false, stderr: '' }), DATA_WAIT_MS); });
+    const r = await (D.lastData ? Promise.race([dashboardData(), slow]) : dashboardData());
+    clearTimeout(waited);
+    if (!r.ok && !D.lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    // The page in use says which version of itself it is: an open tab keeps the code it loaded,
+    // so after a kit update it compares this with the first one it saw and offers a reload.
+    let version = '';
+    try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
+    // a run that failed or timed out serves the last good data, marked stale
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok ? {} : { 'x-devteam-stale': 'true' }) });
+    return res.end(r.ok ? r.stdout : D.lastData);
+  }
+  return DASH_NEXT;
+}
+// /view/artifact/…, /view/preview/…, /api/view, /api/artifact-versions
+async function dashRoutesViewer(D, req, res, q) {
+  const { u } = q;
+  const { page, pageCsp, run, describing, versioning, send, previewStage } = D;
+  // The viewer (spec §7): this page in viewer mode, one artifact on its stage. Its frames are this
+  // dashboard's own pages. It may be framed by itself and the machine's hub, by policy alone and
+  // never X-Frame-Options: on a box the gateway adds the public name to frame-ancestors for its
+  // owner wrapper, and leaves every other header as it is.
+  const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
+  if (vw) {
+    if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp() });
+    return res.end(fs.readFileSync(page));
+  }
+  // A preview's viewer: the same page, framing the preview's lens where it is served (previewStage):
+  // frame-src names exactly that origin, the preview's own name on a box (the gateway rewrites no
+  // dev port) or this laptop's relay (decision 5). Never opens a relay: any page can navigate here
+  // (decision 3); the page's own /api/view does, and says so.
+  const vp = req.method === 'GET' ? /^\/view\/preview\/([^/]+)$/.exec(u.pathname) : null;
+  if (vp) {
+    const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
+    if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+    const { origin } = await previewStage(rec);
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
+    return res.end(fs.readFileSync(page));
+  }
+  // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
+  // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
+  // never polled: a child process per ask, shared by asks for the same one while it runs. A GET
+  // carries no Origin: same-origin only, as /api/threads. 404 only when describe says nothing is
+  // there (the viewer then shows main); a timeout or a crash is a 500, never mistaken for that.
+  if (req.method === 'GET' && u.pathname === '/api/view') {
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+    const slug = u.searchParams.get('slug') ?? '';
+    const at = u.searchParams.get('at') || 'main';
+    if (u.searchParams.get('kind') === 'preview') {
+      const rec = readPreviews().find((r) => r.name === u.searchParams.get('name') && PREVIEW_NAME.test(r.name));
+      if (!rec) return send(res, 404, 'application/json', JSON.stringify({ error: 'no such preview here' }));
+      // the one place a relay opens: this same-origin ask, never a GET of /view/preview/ (decision 3)
+      const { origin, opened } = await previewStage(rec, { open: true });
+      return send(res, 200, 'application/json', JSON.stringify({ name: rec.name, label: rec.label, session: rec.session, project: rec.project, up: previewUp.get(rec.name) ?? null, origin, opened, lens: origin ? `${origin}/.devteam/lens` : null, served: previewServed() }));
+    }
+    if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
+    const key = `${slug}|${at}`;
+    let job = describing.get(key);
+    if (!job) { job = run(['artifact', 'describe', slug, `--at=${at}`, '--json'], { timeout: 12000 }).finally(() => describing.delete(key)); describing.set(key, job); }
+    const r = await job;
+    if (r.ok) return send(res, 200, 'application/json', r.stdout);
+    return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
+  }
+  // An artifact's versions (kit-172): the CLI's list, run in a child process shared by asks for the
+  // same slug. Same-origin only, as /api/view. 404 only when the subcommand says nothing is there.
+  if (req.method === 'GET' && u.pathname === '/api/artifact-versions') {
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+    const slug = u.searchParams.get('slug') ?? '';
+    if (!LINK_ID.test(slug)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad slug' }));
+    let job = versioning.get(slug);
+    if (!job) { job = run(['artifact', 'versions', slug, '--json'], { timeout: 12000 }).finally(() => versioning.delete(slug)); versioning.set(slug, job); }
+    const r = await job;
+    if (r.ok) return send(res, 200, 'application/json', r.stdout);
+    return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no versions of ${slug}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the versions could not be read' }));
+  }
+  return DASH_NEXT;
+}
+// /api/threads
+async function dashRoutesThreads(D, req, res, q) {
+  const { u } = q;
+  const { send, threadsRead, supervisorPane, supervisorAsks, paneToken } = D;
+  // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
+  // browser says another site's page asks.
+  if (req.method === 'GET' && u.pathname === '/api/threads') {
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+    let r;
+    try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
+    const pane = supervisorPane();
+    const asks = supervisorAsks();
+    // the card's "not delivered": the turns no terminal took, and when the supervisor last checked
+    // (two small run files, read here: no child, no tmux)
+    const undelivered = Object.keys(undeliveredTurns(Date.now(), { entries: true }));
+    const checked = supervisorCheckedAt();
+    // which session holds each owner's turn and how far it got (kit-314): one small run file and a
+    // kill(0) per entry, so a session that died mid-turn drops out here on the next read
+    const working = threadWorking(Date.now());
+    // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
+    // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
+    // this process's work is saved.
+    // the token for an answer goes only to this page's own read, said so by the browser
+    if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
+    const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}`).slice(0, 20)}"`;
+    const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
+    if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
+    res.writeHead(200, { 'content-type': 'application/json', ...head });
+    return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
+  }
+  return DASH_NEXT;
+}
+// /api/fleet, /api/record, /api/peek, /api/sensor, /api/schema, /api/timeline, /api/governance
+async function dashRoutesReads(D, req, res, q) {
+  const { u } = q;
+  const { run, send } = D;
+  // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
+  if (req.method === 'GET' && u.pathname === '/api/fleet') {
+    const r = await run(['fleet', 'status', '--json', ...(u.searchParams.get('fetch') === '1' ? [] : ['--no-fetch'])]);
+    return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+  }
+  // One record's stored fields, and the schema's words for each field (the sidepeek's attributes).
+  if (req.method === 'GET' && u.pathname === '/api/record') {
+    const id = u.searchParams.get('id') ?? '';
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad id' }));
+    const r = await run(['record', id, '--json']);
+    return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+  }
+  if (req.method === 'GET' && u.pathname === '/api/peek') {
+    const kind = u.searchParams.get('kind') ?? '';
+    const id = u.searchParams.get('id') ?? '';
+    const ts = (u.searchParams.get('tickets') ?? '').split(',').filter(Boolean);
+    const rec = u.searchParams.get('rec') ?? '';
+    const ref = u.searchParams.get('ref') ?? '';
+    if (ref && !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ref' }));
+    const prepo = u.searchParams.get('repo') ?? '';
+    if (prepo && !LINK_ID.test(prepo)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad repo' }));
+    if (!/^[a-z]+$/.test(kind) || !id || id.length > 400 || /[\0\n]/.test(id) || id.startsWith('-') || ts.some((x) => !/^[a-z0-9][a-z0-9-]*$/.test(x)) || (rec && !/^[a-z0-9][a-z0-9-]*$/.test(rec))) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, id, rec or tickets' }));
+    const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), ...(prepo ? ['--repo', prepo] : []), '--json']);
+    return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+  }
+  if (req.method === 'GET' && u.pathname === '/api/sensor') {
+    const name = u.searchParams.get('name') ?? '';
+    const range = u.searchParams.get('range') === '7d' ? '7d' : '24h';
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad sensor name' }));
+    const r = await run(['sensor', 'series', name, '--range', range]);
+    return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+  }
+  if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
+  if (req.method === 'GET' && u.pathname === '/api/timeline') {
+    const id = u.searchParams.get('id') ?? '';
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ticket id' }));
+    const r = await run(['timeline', id, '--json']);
+    return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+  }
+  if (req.method === 'GET' && u.pathname === '/api/governance') {
+    const r = await run(['governance', '--json']);
+    return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+  }
+  return DASH_NEXT;
+}
+// /api/file, /api/review
+async function dashRoutesFiles(D, req, res, q) {
+  const { u } = q;
+  const { run, ID, send } = D;
+  // An artifact a question or ticket links to, read from git (committed content only, never a
+  // path outside the repo). HTML mocks are served sandboxed so they can't call the owner API.
+  if (req.method === 'GET' && u.pathname === '/api/file') {
+    const p = u.searchParams.get('path') ?? '';
+    // repo=<link>: a file in another repo's checkout (a sibling ticket's records), read by name
+    // only when this machine can read that repo
+    const rid = u.searchParams.get('repo');
+    if (rid && rid !== 'home' && !LINK_ID.test(rid)) return send(res, 400, 'text/plain', 'bad repo');
+    const R = !rid || rid === 'home' ? repo('home') : repoReadable(rid) ? repo(rid) : null;
+    if (!R) return send(res, 404, 'text/plain', `no checkout of ${rid} here`);
+    const ref = u.searchParams.get('ref') || R.mainRef() || 'HEAD';
+    if (!/^(?!\/)(?!.*\.\.)[^\s]+$/.test(p) || !/^[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
+    const body = await new Promise((resolve) => execFile('git', ['show', `${ref}:${p}`], { cwd: R.root, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
+    if (!body) return send(res, 404, 'text/plain', `not found: ${p} at ${ref}`);
+    const ext = path.extname(p).toLowerCase();
+    const type = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf', '.html': 'text/html; charset=utf-8' }[ext] ?? 'text/plain; charset=utf-8';
+    res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'x-content-type-options': 'nosniff' });
+    return res.end(body);
+  }
+  // A review: what the dashboard's review view loads (the question, its verified files, the
+  // owner's draft and stored result), or the result as TSV for the owner's own use.
+  if (req.method === 'GET' && u.pathname === '/api/review') {
+    const id = u.searchParams.get('id') ?? '';
+    if (!ID.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad question id' }));
+    if (u.searchParams.get('format') === 'tsv') {
+      const r = await run(['review', 'result', id, '--tsv']);
+      return r.ok ? send(res, 200, 'text/tab-separated-values; charset=utf-8', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    const r = await run(['review', 'show', id, '--json', '--contents']);
+    return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+  }
+  return DASH_NEXT;
+}
+// /public-manifest/…, /artifact/…
+async function dashRoutesArtifacts(D, req, res, q) {
+  const { u } = q;
+  const { run, send } = D;
+  // An artifact's files: landed from main's tree, a published version from its tree by id (what the
+  // gateway's owner wrapper frames, spec §8), a draft off its worktree's disk. Matched on the raw
+  // path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
+  // sec-fetch-site: under its sandbox the page is an opaque origin, so its own loads say cross-site.
+  const rawPath = req.url.split('?')[0];
+  // What publishing an artifact would put up, for the cloud gateway's confirm page. Its loopback
+  // request sends no sec-fetch-site; a browser's must come from this page's own origin.
+  if (req.method === 'GET' && rawPath.startsWith('/public-manifest/')) {
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: 'not for another site\'s page' }));
+    const slug = rawPath.slice('/public-manifest/'.length);
+    if (!LINK_ID.test(slug)) return send(res, 404, 'application/json', JSON.stringify({ error: 'not an artifact slug' }));
+    const r = await run(['artifact', 'manifest', slug, '--json'], { timeout: 12000 });
+    return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+  }
+  if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
+    const am = /^\/artifact\/(?:main|wt\/([^/]+)|tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\/([^/]+)(\/.*)?$/.exec(rawPath);
+    const at = am ? (am[2] ? `tree:${am[2]}` : am[1] ?? 'main') : null;
+    if (!am || (at !== 'main' && !am[2] && !draftWorktree(at)) || !LINK_ID.test(am[3])) return send(res, 404, 'text/plain', 'not found');
+    if (am[4] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
+    const rel = am[4] === '/' ? 'index.html' : am[4].slice(1);
+    if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
+    const blobAt = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
+    let bytes = null;
+    if (at === 'main') {
+      const ref = mainRef();
+      if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
+    } else if (am[2]) {
+      // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
+      // against a commit or the root tree as well, which would serve any committed file. A tree
+      // never changes: what was published is what is shown.
+      if (await artifactTreeOk(am[2], am[3])) bytes = await blobAt(`${am[2]}:${rel}`);
+    } else {
+      // the real path stays inside the artifact's folder: a symlink out of it is not found
+      try {
+        const root = draftWorktree(at);
+        const dir = path.join(root, ARTIFACTS_REL, am[3]);
+        const real = draftDirOk(root, am[3]) ? fs.realpathSync(path.join(dir, rel)) : null;
+        if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
+      } catch {}
+    }
+    if (!bytes) return send(res, 404, 'text/plain', 'not found');
+    const base = `http://${req.headers.host}`;
+    // frame-ancestors by policy alone, never X-Frame-Options: on a box the gateway adds the public
+    // name to this list for a published tree, and an X-Frame-Options would still refuse it
+    // the lens (spec §6): a framed load of a page only, so a top-level load, curl and the gateway's
+    // loopback fetch for a publish get the bytes as committed. Vary says so to anything that keeps
+    // an answer, though no-store already keeps none.
+    const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
+    res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
+    return res.end(framed ? withArtifactLens(bytes) : bytes);
+  }
+  return DASH_NEXT;
+}
+// /review/<seg>/<file>
+async function dashRoutesReviewPage(D, req, res, q) {
+  const { u } = q;
+  const { run, ID, send } = D;
+  // A review page: the agent's bytes, verbatim, only into the dashboard's own sandboxed frame,
+  // under a policy that allows no network (reviewPageCsp). Under a question's path the server
+  // serves exactly two other files, the kit's helpers; nothing else.
+  const rvm = req.method === 'GET' ? /^\/review\/([^/]+)\/([^/]*)$/.exec(u.pathname) : null;
+  if (rvm) {
+    const [, seg, file] = rvm;
+    if (seg !== 'preview' && !ID.test(seg)) return send(res, 404, 'text/plain', 'not found');
+    if (file === 'devteam-ui.css' || file === 'devteam-ui.js') {
+      res.writeHead(200, { 'content-type': file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', file)));
+    }
+    if (file !== '') return send(res, 404, 'text/plain', 'not found');
+    // Opened top-level it would be same-origin with the owner API; it is served only into a frame
+    // of this page (and its policy makes its origin opaque even then).
+    if (!q.okHost || !['iframe', 'frame'].includes(req.headers['sec-fetch-dest']) || req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, 'text/plain; charset=utf-8', 'A review page opens only inside the dashboard: open the Inbox and choose "Open the review".');
+    const blob = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
+    let bytes;
+    if (seg === 'preview') {
+      // the supervisor's (or an agent's) look at a committed page before anyone asks
+      const p = u.searchParams.get('path') ?? '';
+      const ref = u.searchParams.get('ref') || mainRef() || 'HEAD';
+      if (!REPO_PATH.test(p) || !/\.html?$/i.test(p) || !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
+      bytes = await blob(`${ref}:${p}`);
+      if (!bytes) return send(res, 404, 'text/plain', `not found: ${p} at ${ref}`);
+    } else {
+      const r = await run(['review', 'show', seg, '--json']);
+      if (!r.ok) return send(res, 404, 'text/plain', `not a review question: ${seg}`);
+      const shown = JSON.parse(r.stdout);
+      const rv = shown.review;
+      if (shown.files.some((f) => f.status === 'missing')) return send(res, 404, 'text/plain', `the page's commit ${String(rv.commit).slice(0, 12)} is gone and its files are not on main; nothing can be answered on it`);
+      if (shown.files.some((f) => f.status === 'tampered')) return send(res, 403, 'text/plain', 'the page or its data no longer hash to the question; it is not the page the supervisor asked on');
+      // read from where it verified: the pinned commit, or main once a squash merge landed it
+      const at = shown.files.find((f) => f.role === 'page')?.at ?? rv.commit;
+      if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(at)) return send(res, 404, 'text/plain', 'the page is gone');
+      bytes = await blob(`${at}:${rv.page.path}`);
+      if (!bytes) return send(res, 404, 'text/plain', 'the page is gone');
+      if (sha256(bytes) !== rv.page.sha256) return send(res, 403, 'text/plain', 'the page no longer hashes to the question');
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': reviewPageCsp(`http://${req.headers.host}`), 'referrer-policy': 'no-referrer', 'x-dns-prefetch-control': 'off' });
+    return res.end(bytes);
+  }
+  return DASH_NEXT;
+}
+// every POST /api/<name> (pane-answer, owner-setting, secret, review-draft and review-answer, the ACTIONS), and the 404 for everything else
+async function dashRoutesOwner(D, req, res, q) {
+  const { u } = q;
+  const { log, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer } = D;
+  const name = req.method === 'POST' && u.pathname.startsWith('/api/') ? u.pathname.slice(5) : null;
+  const isSecret = name === 'secret';
+  const isReview = name === 'review-draft' || name === 'review-answer';
+  const isPane = name === 'pane-answer';
+  const isOwnerSetting = name === 'owner-setting';
+  const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
+  if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
+  // an owner action, answered however it ends: the kept /api/data build is stale from its answer's
+  // head on, before a byte of it reaches the page, so the page's next read waits for a new build
+  const head = res.writeHead;
+  res.writeHead = function (...a) { D.dataEpoch += 1; return head.apply(this, a); };
+  const site = req.headers['sec-fetch-site'];
+  const origin = req.headers.origin;
+  // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
+  // present. A sandboxed frame's request says Origin: null and is refused here too.
+  const strict = isSecret || isReview || isPane || isOwnerSetting;
+  const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
+  if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
+  // A review's result or draft is up to 4 MB, plus its envelope.
+  const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : isOwnerSetting ? 512 : 20000;
+  // Bytes first, decoded once: a multibyte character split across chunks stays whole.
+  const chunks = [];
+  let size = 0;
+  let body = '';
+  let over = false;
+  req.on('data', (c) => {
+    size += c.length;
+    if (size <= cap) return void chunks.push(c);
+    over = true;
+    chunks.length = 0;
+    // a review or setting body over the cap is drained and refused with a reason; one far over it is cut off
+    if (!(isReview || isOwnerSetting) || size > 4 * cap) req.destroy();
+  });
+  req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
+  // A body no check foresaw (a result nested thousands deep, which JSON.stringify can't walk) is
+  // a bad request, never a crash: a throw from an end handler is an uncaught exception, and that
+  // ends the dashboard.
+  const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
+  // The owner's own process, with the body on its stdin (never in argv or the server's output).
+  const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
+  if (isPane) {
+    const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+    return req.on('end', () => guarded(() => {
+      if (over) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+      let parsed;
+      try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+      // exactly an option's press or an Esc's, as the page sends them (paneAnswerShape): nothing else reaches the terminal
+      if (!paneAnswerShape(parsed)) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { digest, option, token } or { digest, escape: true, token }' }));
+      if (!paneTokenOk(parsed.digest, parsed.token)) return send(res, 403, 'application/json', JSON.stringify({ error: "nothing was answered: that is not this page's card for the question (reload the page)" }));
+      let proof = null;
+      if (threadsNeedGateway()) {
+        const boxOnly = "nothing was answered: on a box the owner answers only through the box's gateway";
+        if (!(gw('ts') && gw('nonce') && gw('sig'))) return send(res, 403, 'application/json', JSON.stringify({ error: boxOnly }));
+        proof = { port: D.port, ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: Buffer.from(body, 'utf8').toString('base64') };
+        const why = paneProofProblem(proof) ?? (paneNonces.has(proof.nonce) ? 'its signature was used already' : null);
+        if (why) { log(`refused /api/pane-answer: ${why}`); return send(res, 403, 'application/json', JSON.stringify({ error: `${boxOnly} (${why})` })); }
+        const now = Date.now();
+        for (const [n, at] of paneNonces) if (now - at > 2 * OPERATOR_PROOF_MS) paneNonces.delete(n);
+        paneNonces.set(proof.nonce, now);
+      }
+      if (D.paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
+      D.paneAnswering = true;
+      paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { D.paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+    }));
+  }
+  // The owner's Save on the Settings page: exactly { key, value }, an askable key, and on a box the
+  // gateway's signature for it (each nonce once here, and in the log for the command it runs).
+  if (isOwnerSetting) {
+    const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+    return req.on('end', () => guarded(() => {
+      const bad = () => send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { key, value }' }));
+      if (over) return bad();
+      let parsed;
+      try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+      if (!isObj(parsed) || Object.keys(parsed).sort().join(',') !== 'key,value' || typeof parsed.key !== 'string' || !(parsed.value === null || Number.isInteger(parsed.value))) return bad();
+      const why = askableProblem(parsed.key, parsed.value);
+      if (why) return send(res, 400, 'application/json', JSON.stringify({ error: why }));
+      let proof = null;
+      if (threadsNeedGateway()) {
+        const boxOnly = "not saved: on a box the owner saves settings only through the box's gateway";
+        if (!(gw('ts') && gw('nonce') && gw('sig'))) return send(res, 403, 'application/json', JSON.stringify({ error: boxOnly }));
+        proof = { port: D.port, ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: Buffer.from(body, 'utf8').toString('base64') };
+        const w = ownerSettingProofProblem(proof) ?? (ownerSettingNonces.has(proof.nonce) ? 'its signature was used already' : null);
+        if (w) { log(`refused /api/owner-setting: ${w}`); return send(res, 403, 'application/json', JSON.stringify({ error: `${boxOnly} (${w})` })); }
+        const now = Date.now();
+        for (const [n, at] of ownerSettingNonces) if (now - at > 2 * OPERATOR_PROOF_MS) ownerSettingNonces.delete(n);
+        ownerSettingNonces.set(proof.nonce, now);
+      }
+      ownerChild(['owner-setting', parsed.key, parsed.value === null ? 'none' : String(parsed.value)], proof ? JSON.stringify({ proof }) : null);
+    }));
+  }
+  if (isSecret) {
+    // The values go to a child on stdin; the child pipes each to its sink (secret post --json)
+    // and logs only names.
+    return req.on('end', () => guarded(() => {
+      let parsed;
+      try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+      body = '';
+      if (!ID.test(parsed.id ?? '') || typeof parsed.values !== 'object' || !parsed.values) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+      ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values));
+      parsed = null;
+    }));
+  }
+  if (isReview) {
+    return req.on('end', () => guarded(() => {
+      if (over) return send(res, 400, 'application/json', JSON.stringify({ error: `the body is over ${cap} bytes; a review result or draft is at most ${REVIEW_MAX} (4 MB)` }));
+      let parsed;
+      try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+      body = '';
+      if (!ID.test(parsed.id ?? '')) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+      if (name === 'review-draft') {
+        if (parsed.state === undefined) return send(res, 400, 'application/json', JSON.stringify({ error: 'a draft has a state' }));
+        const savedAt = typeof parsed.saved_at === 'string' && !Number.isNaN(Date.parse(parsed.saved_at)) ? parsed.saved_at : nowIso();
+        return ownerChild(['review', 'draft', parsed.id, '-'], JSON.stringify({ state: parsed.state, saved_at: savedAt }));
+      }
+      // The answer is the object the owner's preview rendered: its JSON text is hashed in the page
+      // and here, and the owner's process reads exactly those bytes.
+      if (!isObj(parsed.result) || !/^[0-9a-f]{64}$/.test(parsed.sha256 ?? '')) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { id, result, sha256 }' }));
+      const textOut = JSON.stringify(parsed.result);
+      if (sha256(Buffer.from(textOut)) !== parsed.sha256) return send(res, 400, 'application/json', JSON.stringify({ error: 'the result is not the one the preview showed (its sha256 differs); nothing was answered' }));
+      ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut);
+    }));
+  }
+  req.on('end', async () => {
+    let parsed;
+    try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+    // a body no check foresaw (one nested thousands deep) is a bad request, never a crash: a throw
+    // here is an unhandled rejection, and that ends the dashboard
+    let args;
+    try { args = action(parsed); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); }
+    if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
+    if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+    const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
+    // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once
+    if (r.ok) refreshHello();
+    send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
+  });
+  return;
+}
+const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesOwner];
+/* dashboardRoutes end */
+async function cmdDashboard() {
+  // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
+  // while it starts is then a change it sees
+  const startPrint = kitPrint(fileURLToPath(import.meta.url));
+  const picked = await pickDashboardPort();
+  let port = picked.port;
+  const host = flagStr('host') ?? '127.0.0.1';
+  const log = dashboardLogger();
+  if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
+  processLog(log, 'dashboard');
+  // the terminal's routes (terminal@1): the port as a getter, since it is re-picked when taken
+  const term = termRoutes({ port: () => port, host, log });
+  const page = path.join(kitDir, 'dashboard', 'index.html');
+  // The page's policy, at / and at /view/: its frames are its own pages and, where a preview's lens
+  // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
+  const pageCsp = (frames = []) => `frame-src ${['\'self\'', ...frames].join(' ')}; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
+  const self = fileURLToPath(import.meta.url);
+  // Its timers, kept so a hand-over to a new kit stops each (nothing new starts while it drains) and
+  // a respawn that failed starts them again.
+  const timers = [];
+  const every = (f, ms) => { const t = { f, ms, id: setInterval(f, ms) }; t.id.unref(); timers.push(t); };
+  const stopTimers = () => { for (const t of timers) clearInterval(t.id); };
+  const startTimers = () => { for (const t of timers) { clearInterval(t.id); t.id = setInterval(t.f, t.ms); t.id.unref(); } };
+  const ownerEnv = ownerActionEnv('dashboard');
+  // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
+  // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
+  // An argument execFile refuses (a NUL in it) throws as it is called, not to the callback: that is a
+  // failed run too, never a rejection, which would end the dashboard.
+  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => {
+    try {
+      execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr }));
+    } catch (e) { resolve({ ok: false, code: 1, stdout: '', stderr: `devteam: ${args.slice(0, 2).join(' ')} could not start: ${e.code ?? e.message}` }); }
+  });
+  // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
+  const describing = new Map();
+  // /api/artifact-versions runs in flight, by slug: one child process however many ask at once
+  const versioning = new Map();
+  const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
+  const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS } = dashboardActions();
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
@@ -20096,6 +20594,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   const server = http.createServer(async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
@@ -20115,436 +20614,8 @@ async function cmdDashboard() {
     if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
     // the terminal: right after the global guards, before any other route
     if (isTerm) return await term.handle(req, res, new URL(req.url, 'http://x'));
-    // a file dropped on the page: before every other route, and before a byte of its body is read
-    if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
-      clearTimeout(bodyTimer);
-      try { return await receiveLaptopUpload(req, res, new URL(req.url, 'http://x').searchParams.get('name'), send); } catch (e) {
-        process.stderr.write(`a dropped file could not be stored: ${e.message}\n`);
-        if (!res.headersSent && !res.destroyed) return send(res, 500, 'application/json', JSON.stringify({ error: 'this machine could not store this file' }), { connection: 'close' });
-        return void req.destroy();
-      }
-    }
-    // a dropped file, back to this page: before the routes below, which parse the URL
-    if ((req.method === 'GET' || req.method === 'HEAD') && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url.split('?')[0], send);
-    if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
-    // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
-    // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
-    if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
-      // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
-      // can't lay it under its own page and steer a click onto an owner action.
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': pageCsp(stageFrames()) });
-      return res.end(fs.readFileSync(page));
-    }
-    if (req.method === 'GET' && req.url.startsWith('/api/data')) {
-      // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
-      logWatch.look();
-      // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
-      // the run goes on and the next read has it, but no page waits minutes on a stuck child.
-      let waited;
-      const slow = new Promise((resolve) => { waited = setTimeout(() => resolve({ ok: false, stderr: '' }), DATA_WAIT_MS); });
-      const r = await (lastData ? Promise.race([dashboardData(), slow]) : dashboardData());
-      clearTimeout(waited);
-      if (!r.ok && !lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
-      // The page in use says which version of itself it is: an open tab keeps the code it loaded,
-      // so after a kit update it compares this with the first one it saw and offers a reload.
-      let version = '';
-      try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
-      // a run that failed or timed out serves the last good data, marked stale
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok ? {} : { 'x-devteam-stale': 'true' }) });
-      return res.end(r.ok ? r.stdout : lastData);
-    }
-    const u = new URL(req.url, 'http://x');
-    // The viewer (spec §7): this page in viewer mode, one artifact on its stage. Its frames are this
-    // dashboard's own pages. It may be framed by itself and the machine's hub, by policy alone and
-    // never X-Frame-Options: on a box the gateway adds the public name to frame-ancestors for its
-    // owner wrapper, and leaves every other header as it is.
-    const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
-    if (vw) {
-      if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp() });
-      return res.end(fs.readFileSync(page));
-    }
-    // A preview's viewer: the same page, framing the preview's lens where it is served (previewStage):
-    // frame-src names exactly that origin, the preview's own name on a box (the gateway rewrites no
-    // dev port) or this laptop's relay (decision 5). Never opens a relay: any page can navigate here
-    // (decision 3); the page's own /api/view does, and says so.
-    const vp = req.method === 'GET' ? /^\/view\/preview\/([^/]+)$/.exec(u.pathname) : null;
-    if (vp) {
-      const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
-      if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
-      const { origin } = await previewStage(rec);
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
-      return res.end(fs.readFileSync(page));
-    }
-    // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
-    // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
-    // never polled: a child process per ask, shared by asks for the same one while it runs. A GET
-    // carries no Origin: same-origin only, as /api/threads. 404 only when describe says nothing is
-    // there (the viewer then shows main); a timeout or a crash is a 500, never mistaken for that.
-    if (req.method === 'GET' && u.pathname === '/api/view') {
-      const site = req.headers['sec-fetch-site'];
-      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
-      const slug = u.searchParams.get('slug') ?? '';
-      const at = u.searchParams.get('at') || 'main';
-      if (u.searchParams.get('kind') === 'preview') {
-        const rec = readPreviews().find((r) => r.name === u.searchParams.get('name') && PREVIEW_NAME.test(r.name));
-        if (!rec) return send(res, 404, 'application/json', JSON.stringify({ error: 'no such preview here' }));
-        // the one place a relay opens: this same-origin ask, never a GET of /view/preview/ (decision 3)
-        const { origin, opened } = await previewStage(rec, { open: true });
-        return send(res, 200, 'application/json', JSON.stringify({ name: rec.name, label: rec.label, session: rec.session, project: rec.project, up: previewUp.get(rec.name) ?? null, origin, opened, lens: origin ? `${origin}/.devteam/lens` : null, served: previewServed() }));
-      }
-      if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
-      const key = `${slug}|${at}`;
-      let job = describing.get(key);
-      if (!job) { job = run(['artifact', 'describe', slug, `--at=${at}`, '--json'], { timeout: 12000 }).finally(() => describing.delete(key)); describing.set(key, job); }
-      const r = await job;
-      if (r.ok) return send(res, 200, 'application/json', r.stdout);
-      return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
-    }
-    // An artifact's versions (kit-172): the CLI's list, run in a child process shared by asks for the
-    // same slug. Same-origin only, as /api/view. 404 only when the subcommand says nothing is there.
-    if (req.method === 'GET' && u.pathname === '/api/artifact-versions') {
-      const site = req.headers['sec-fetch-site'];
-      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
-      const slug = u.searchParams.get('slug') ?? '';
-      if (!LINK_ID.test(slug)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad slug' }));
-      let job = versioning.get(slug);
-      if (!job) { job = run(['artifact', 'versions', slug, '--json'], { timeout: 12000 }).finally(() => versioning.delete(slug)); versioning.set(slug, job); }
-      const r = await job;
-      if (r.ok) return send(res, 200, 'application/json', r.stdout);
-      return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no versions of ${slug}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the versions could not be read' }));
-    }
-    // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
-    // browser says another site's page asks.
-    if (req.method === 'GET' && u.pathname === '/api/threads') {
-      const site = req.headers['sec-fetch-site'];
-      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
-      let r;
-      try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
-      const pane = supervisorPane();
-      const asks = supervisorAsks();
-      // the card's "not delivered": the turns no terminal took, and when the supervisor last checked
-      // (two small run files, read here: no child, no tmux)
-      const undelivered = Object.keys(undeliveredTurns(Date.now(), { entries: true }));
-      const checked = supervisorCheckedAt();
-      // which session holds each owner's turn and how far it got (kit-314): one small run file and a
-      // kill(0) per entry, so a session that died mid-turn drops out here on the next read
-      const working = threadWorking(Date.now());
-      // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
-      // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
-      // this process's work is saved.
-      // the token for an answer goes only to this page's own read, said so by the browser
-      if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
-      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}`).slice(0, 20)}"`;
-      const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
-      if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
-      res.writeHead(200, { 'content-type': 'application/json', ...head });
-      return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
-    }
-    // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
-    if (req.method === 'GET' && u.pathname === '/api/fleet') {
-      const r = await run(['fleet', 'status', '--json', ...(u.searchParams.get('fetch') === '1' ? [] : ['--no-fetch'])]);
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
-    }
-    // One record's stored fields, and the schema's words for each field (the sidepeek's attributes).
-    if (req.method === 'GET' && u.pathname === '/api/record') {
-      const id = u.searchParams.get('id') ?? '';
-      if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad id' }));
-      const r = await run(['record', id, '--json']);
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
-    }
-    if (req.method === 'GET' && u.pathname === '/api/peek') {
-      const kind = u.searchParams.get('kind') ?? '';
-      const id = u.searchParams.get('id') ?? '';
-      const ts = (u.searchParams.get('tickets') ?? '').split(',').filter(Boolean);
-      const rec = u.searchParams.get('rec') ?? '';
-      const ref = u.searchParams.get('ref') ?? '';
-      if (ref && !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ref' }));
-      const prepo = u.searchParams.get('repo') ?? '';
-      if (prepo && !LINK_ID.test(prepo)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad repo' }));
-      if (!/^[a-z]+$/.test(kind) || !id || id.length > 400 || /[\0\n]/.test(id) || id.startsWith('-') || ts.some((x) => !/^[a-z0-9][a-z0-9-]*$/.test(x)) || (rec && !/^[a-z0-9][a-z0-9-]*$/.test(rec))) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, id, rec or tickets' }));
-      const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), ...(prepo ? ['--repo', prepo] : []), '--json']);
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
-    }
-    if (req.method === 'GET' && u.pathname === '/api/sensor') {
-      const name = u.searchParams.get('name') ?? '';
-      const range = u.searchParams.get('range') === '7d' ? '7d' : '24h';
-      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad sensor name' }));
-      const r = await run(['sensor', 'series', name, '--range', range]);
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
-    }
-    if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
-    if (req.method === 'GET' && u.pathname === '/api/timeline') {
-      const id = u.searchParams.get('id') ?? '';
-      if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ticket id' }));
-      const r = await run(['timeline', id, '--json']);
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
-    }
-    if (req.method === 'GET' && u.pathname === '/api/governance') {
-      const r = await run(['governance', '--json']);
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
-    }
-    // An artifact a question or ticket links to, read from git (committed content only, never a
-    // path outside the repo). HTML mocks are served sandboxed so they can't call the owner API.
-    if (req.method === 'GET' && u.pathname === '/api/file') {
-      const p = u.searchParams.get('path') ?? '';
-      // repo=<link>: a file in another repo's checkout (a sibling ticket's records), read by name
-      // only when this machine can read that repo
-      const rid = u.searchParams.get('repo');
-      if (rid && rid !== 'home' && !LINK_ID.test(rid)) return send(res, 400, 'text/plain', 'bad repo');
-      const R = !rid || rid === 'home' ? repo('home') : repoReadable(rid) ? repo(rid) : null;
-      if (!R) return send(res, 404, 'text/plain', `no checkout of ${rid} here`);
-      const ref = u.searchParams.get('ref') || R.mainRef() || 'HEAD';
-      if (!/^(?!\/)(?!.*\.\.)[^\s]+$/.test(p) || !/^[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
-      const body = await new Promise((resolve) => execFile('git', ['show', `${ref}:${p}`], { cwd: R.root, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
-      if (!body) return send(res, 404, 'text/plain', `not found: ${p} at ${ref}`);
-      const ext = path.extname(p).toLowerCase();
-      const type = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf', '.html': 'text/html; charset=utf-8' }[ext] ?? 'text/plain; charset=utf-8';
-      res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'x-content-type-options': 'nosniff' });
-      return res.end(body);
-    }
-    // A review: what the dashboard's review view loads (the question, its verified files, the
-    // owner's draft and stored result), or the result as TSV for the owner's own use.
-    if (req.method === 'GET' && u.pathname === '/api/review') {
-      const id = u.searchParams.get('id') ?? '';
-      if (!ID.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad question id' }));
-      if (u.searchParams.get('format') === 'tsv') {
-        const r = await run(['review', 'result', id, '--tsv']);
-        return r.ok ? send(res, 200, 'text/tab-separated-values; charset=utf-8', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
-      }
-      const r = await run(['review', 'show', id, '--json', '--contents']);
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
-    }
-    // An artifact's files: landed from main's tree, a published version from its tree by id (what the
-    // gateway's owner wrapper frames, spec §8), a draft off its worktree's disk. Matched on the raw
-    // path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
-    // sec-fetch-site: under its sandbox the page is an opaque origin, so its own loads say cross-site.
-    const rawPath = req.url.split('?')[0];
-    // What publishing an artifact would put up, for the cloud gateway's confirm page. Its loopback
-    // request sends no sec-fetch-site; a browser's must come from this page's own origin.
-    if (req.method === 'GET' && rawPath.startsWith('/public-manifest/')) {
-      const site = req.headers['sec-fetch-site'];
-      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: 'not for another site\'s page' }));
-      const slug = rawPath.slice('/public-manifest/'.length);
-      if (!LINK_ID.test(slug)) return send(res, 404, 'application/json', JSON.stringify({ error: 'not an artifact slug' }));
-      const r = await run(['artifact', 'manifest', slug, '--json'], { timeout: 12000 });
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
-    }
-    if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
-      const am = /^\/artifact\/(?:main|wt\/([^/]+)|tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\/([^/]+)(\/.*)?$/.exec(rawPath);
-      const at = am ? (am[2] ? `tree:${am[2]}` : am[1] ?? 'main') : null;
-      if (!am || (at !== 'main' && !am[2] && !draftWorktree(at)) || !LINK_ID.test(am[3])) return send(res, 404, 'text/plain', 'not found');
-      if (am[4] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
-      const rel = am[4] === '/' ? 'index.html' : am[4].slice(1);
-      if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
-      const blobAt = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
-      let bytes = null;
-      if (at === 'main') {
-        const ref = mainRef();
-        if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
-      } else if (am[2]) {
-        // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
-        // against a commit or the root tree as well, which would serve any committed file. A tree
-        // never changes: what was published is what is shown.
-        if (await artifactTreeOk(am[2], am[3])) bytes = await blobAt(`${am[2]}:${rel}`);
-      } else {
-        // the real path stays inside the artifact's folder: a symlink out of it is not found
-        try {
-          const root = draftWorktree(at);
-          const dir = path.join(root, ARTIFACTS_REL, am[3]);
-          const real = draftDirOk(root, am[3]) ? fs.realpathSync(path.join(dir, rel)) : null;
-          if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
-        } catch {}
-      }
-      if (!bytes) return send(res, 404, 'text/plain', 'not found');
-      const base = `http://${req.headers.host}`;
-      // frame-ancestors by policy alone, never X-Frame-Options: on a box the gateway adds the public
-      // name to this list for a published tree, and an X-Frame-Options would still refuse it
-      // the lens (spec §6): a framed load of a page only, so a top-level load, curl and the gateway's
-      // loopback fetch for a publish get the bytes as committed. Vary says so to anything that keeps
-      // an answer, though no-store already keeps none.
-      const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
-      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
-      return res.end(framed ? withArtifactLens(bytes) : bytes);
-    }
-    // A review page: the agent's bytes, verbatim, only into the dashboard's own sandboxed frame,
-    // under a policy that allows no network (reviewPageCsp). Under a question's path the server
-    // serves exactly two other files, the kit's helpers; nothing else.
-    const rvm = req.method === 'GET' ? /^\/review\/([^/]+)\/([^/]*)$/.exec(u.pathname) : null;
-    if (rvm) {
-      const [, seg, file] = rvm;
-      if (seg !== 'preview' && !ID.test(seg)) return send(res, 404, 'text/plain', 'not found');
-      if (file === 'devteam-ui.css' || file === 'devteam-ui.js') {
-        res.writeHead(200, { 'content-type': file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-        return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', file)));
-      }
-      if (file !== '') return send(res, 404, 'text/plain', 'not found');
-      // Opened top-level it would be same-origin with the owner API; it is served only into a frame
-      // of this page (and its policy makes its origin opaque even then).
-      if (!okHost || !['iframe', 'frame'].includes(req.headers['sec-fetch-dest']) || req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, 'text/plain; charset=utf-8', 'A review page opens only inside the dashboard: open the Inbox and choose "Open the review".');
-      const blob = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
-      let bytes;
-      if (seg === 'preview') {
-        // the supervisor's (or an agent's) look at a committed page before anyone asks
-        const p = u.searchParams.get('path') ?? '';
-        const ref = u.searchParams.get('ref') || mainRef() || 'HEAD';
-        if (!REPO_PATH.test(p) || !/\.html?$/i.test(p) || !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
-        bytes = await blob(`${ref}:${p}`);
-        if (!bytes) return send(res, 404, 'text/plain', `not found: ${p} at ${ref}`);
-      } else {
-        const r = await run(['review', 'show', seg, '--json']);
-        if (!r.ok) return send(res, 404, 'text/plain', `not a review question: ${seg}`);
-        const shown = JSON.parse(r.stdout);
-        const rv = shown.review;
-        if (shown.files.some((f) => f.status === 'missing')) return send(res, 404, 'text/plain', `the page's commit ${String(rv.commit).slice(0, 12)} is gone and its files are not on main; nothing can be answered on it`);
-        if (shown.files.some((f) => f.status === 'tampered')) return send(res, 403, 'text/plain', 'the page or its data no longer hash to the question; it is not the page the supervisor asked on');
-        // read from where it verified: the pinned commit, or main once a squash merge landed it
-        const at = shown.files.find((f) => f.role === 'page')?.at ?? rv.commit;
-        if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(at)) return send(res, 404, 'text/plain', 'the page is gone');
-        bytes = await blob(`${at}:${rv.page.path}`);
-        if (!bytes) return send(res, 404, 'text/plain', 'the page is gone');
-        if (sha256(bytes) !== rv.page.sha256) return send(res, 403, 'text/plain', 'the page no longer hashes to the question');
-      }
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': reviewPageCsp(`http://${req.headers.host}`), 'referrer-policy': 'no-referrer', 'x-dns-prefetch-control': 'off' });
-      return res.end(bytes);
-    }
-    const name = req.method === 'POST' && u.pathname.startsWith('/api/') ? u.pathname.slice(5) : null;
-    const isSecret = name === 'secret';
-    const isReview = name === 'review-draft' || name === 'review-answer';
-    const isPane = name === 'pane-answer';
-    const isOwnerSetting = name === 'owner-setting';
-    const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
-    if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
-    // an owner action, answered however it ends: the kept /api/data build is stale from its answer's
-    // head on, before a byte of it reaches the page, so the page's next read waits for a new build
-    const head = res.writeHead;
-    res.writeHead = function (...a) { dataEpoch += 1; return head.apply(this, a); };
-    const site = req.headers['sec-fetch-site'];
-    const origin = req.headers.origin;
-    // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
-    // present. A sandboxed frame's request says Origin: null and is refused here too.
-    const strict = isSecret || isReview || isPane || isOwnerSetting;
-    const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
-    if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
-    // A review's result or draft is up to 4 MB, plus its envelope.
-    const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : isOwnerSetting ? 512 : 20000;
-    // Bytes first, decoded once: a multibyte character split across chunks stays whole.
-    const chunks = [];
-    let size = 0;
-    let body = '';
-    let over = false;
-    req.on('data', (c) => {
-      size += c.length;
-      if (size <= cap) return void chunks.push(c);
-      over = true;
-      chunks.length = 0;
-      // a review or setting body over the cap is drained and refused with a reason; one far over it is cut off
-      if (!(isReview || isOwnerSetting) || size > 4 * cap) req.destroy();
-    });
-    req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
-    // A body no check foresaw (a result nested thousands deep, which JSON.stringify can't walk) is
-    // a bad request, never a crash: a throw from an end handler is an uncaught exception, and that
-    // ends the dashboard.
-    const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
-    // The owner's own process, with the body on its stdin (never in argv or the server's output).
-    const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
-    if (isPane) {
-      const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
-      return req.on('end', () => guarded(() => {
-        if (over) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-        let parsed;
-        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-        // exactly an option's press or an Esc's, as the page sends them (paneAnswerShape): nothing else reaches the terminal
-        if (!paneAnswerShape(parsed)) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { digest, option, token } or { digest, escape: true, token }' }));
-        if (!paneTokenOk(parsed.digest, parsed.token)) return send(res, 403, 'application/json', JSON.stringify({ error: "nothing was answered: that is not this page's card for the question (reload the page)" }));
-        let proof = null;
-        if (threadsNeedGateway()) {
-          const boxOnly = "nothing was answered: on a box the owner answers only through the box's gateway";
-          if (!(gw('ts') && gw('nonce') && gw('sig'))) return send(res, 403, 'application/json', JSON.stringify({ error: boxOnly }));
-          proof = { port, ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: Buffer.from(body, 'utf8').toString('base64') };
-          const why = paneProofProblem(proof) ?? (paneNonces.has(proof.nonce) ? 'its signature was used already' : null);
-          if (why) { log(`refused /api/pane-answer: ${why}`); return send(res, 403, 'application/json', JSON.stringify({ error: `${boxOnly} (${why})` })); }
-          const now = Date.now();
-          for (const [n, at] of paneNonces) if (now - at > 2 * OPERATOR_PROOF_MS) paneNonces.delete(n);
-          paneNonces.set(proof.nonce, now);
-        }
-        if (paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
-        paneAnswering = true;
-        paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
-      }));
-    }
-    // The owner's Save on the Settings page: exactly { key, value }, an askable key, and on a box the
-    // gateway's signature for it (each nonce once here, and in the log for the command it runs).
-    if (isOwnerSetting) {
-      const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
-      return req.on('end', () => guarded(() => {
-        const bad = () => send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { key, value }' }));
-        if (over) return bad();
-        let parsed;
-        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-        if (!isObj(parsed) || Object.keys(parsed).sort().join(',') !== 'key,value' || typeof parsed.key !== 'string' || !(parsed.value === null || Number.isInteger(parsed.value))) return bad();
-        const why = askableProblem(parsed.key, parsed.value);
-        if (why) return send(res, 400, 'application/json', JSON.stringify({ error: why }));
-        let proof = null;
-        if (threadsNeedGateway()) {
-          const boxOnly = "not saved: on a box the owner saves settings only through the box's gateway";
-          if (!(gw('ts') && gw('nonce') && gw('sig'))) return send(res, 403, 'application/json', JSON.stringify({ error: boxOnly }));
-          proof = { port, ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: Buffer.from(body, 'utf8').toString('base64') };
-          const w = ownerSettingProofProblem(proof) ?? (ownerSettingNonces.has(proof.nonce) ? 'its signature was used already' : null);
-          if (w) { log(`refused /api/owner-setting: ${w}`); return send(res, 403, 'application/json', JSON.stringify({ error: `${boxOnly} (${w})` })); }
-          const now = Date.now();
-          for (const [n, at] of ownerSettingNonces) if (now - at > 2 * OPERATOR_PROOF_MS) ownerSettingNonces.delete(n);
-          ownerSettingNonces.set(proof.nonce, now);
-        }
-        ownerChild(['owner-setting', parsed.key, parsed.value === null ? 'none' : String(parsed.value)], proof ? JSON.stringify({ proof }) : null);
-      }));
-    }
-    if (isSecret) {
-      // The values go to a child on stdin; the child pipes each to its sink (secret post --json)
-      // and logs only names.
-      return req.on('end', () => guarded(() => {
-        let parsed;
-        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-        body = '';
-        if (!ID.test(parsed.id ?? '') || typeof parsed.values !== 'object' || !parsed.values) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-        ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values));
-        parsed = null;
-      }));
-    }
-    if (isReview) {
-      return req.on('end', () => guarded(() => {
-        if (over) return send(res, 400, 'application/json', JSON.stringify({ error: `the body is over ${cap} bytes; a review result or draft is at most ${REVIEW_MAX} (4 MB)` }));
-        let parsed;
-        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-        body = '';
-        if (!ID.test(parsed.id ?? '')) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-        if (name === 'review-draft') {
-          if (parsed.state === undefined) return send(res, 400, 'application/json', JSON.stringify({ error: 'a draft has a state' }));
-          const savedAt = typeof parsed.saved_at === 'string' && !Number.isNaN(Date.parse(parsed.saved_at)) ? parsed.saved_at : nowIso();
-          return ownerChild(['review', 'draft', parsed.id, '-'], JSON.stringify({ state: parsed.state, saved_at: savedAt }));
-        }
-        // The answer is the object the owner's preview rendered: its JSON text is hashed in the page
-        // and here, and the owner's process reads exactly those bytes.
-        if (!isObj(parsed.result) || !/^[0-9a-f]{64}$/.test(parsed.sha256 ?? '')) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { id, result, sha256 }' }));
-        const textOut = JSON.stringify(parsed.result);
-        if (sha256(Buffer.from(textOut)) !== parsed.sha256) return send(res, 400, 'application/json', JSON.stringify({ error: 'the result is not the one the preview showed (its sha256 differs); nothing was answered' }));
-        ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut);
-      }));
-    }
-    req.on('end', async () => {
-      let parsed;
-      try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-      // a body no check foresaw (one nested thousands deep) is a bad request, never a crash: a throw
-      // here is an unhandled rejection, and that ends the dashboard
-      let args;
-      try { args = action(parsed); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); }
-      if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
-      if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
-      // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once
-      if (r.ok) refreshHello();
-      send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
-    });
+    const q = { okHost, bodyTimer, get u() { return this._u ??= new URL(req.url, 'http://x'); } };
+    for (const route of DASHBOARD_ROUTES) if (await route(D, req, res, q) !== DASH_NEXT) return;
   });
   // Two dashboards starting at once can pick the same free port: the one that loses picks again.
   const tried = [];
@@ -20650,6 +20721,7 @@ async function cmdDashboard() {
 
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
+/* cmdDashboard end */
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
@@ -26006,43 +26078,99 @@ async function browserLive() {
   if (!s) return null;
   try { return (await browserCall('ping', {}, { state: s, ms: 5000 })).code === 0 ? s : null; } catch { return null; }
 }
-// The region's own lock, held across awaits (withLock is synchronous): mkdir <file>.lock holding its
-// owner's token, stale after 120 s, or at once when the token's pid is dead (kit-316 F1), waited on up
-// to 60 s (DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS in tests). A lock is only ever removed by first renaming
-// it to a name of the remover's own, and only when it still holds the token seen: so of two waiters
-// on one stale lock only one takes it, and release removes only its own. A die() inside lets it go.
+// The region's own lock, held across awaits (withLock is synchronous): the folder <file>.lock holding
+// its owner's token, stale after 120 s, or at once when the token's pid is dead (kit-316 F1), waited on
+// up to 60 s (DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS in tests). A starter renames a prepared folder, its
+// owner already written, onto the path, so a lock on the path never lacks its owner. A lock holding S
+// leaves its path only by a rename made under a claim on S, after a look under that claim still shows
+// S, stale (release: its own). Tokens are never reused and an owner is never rewritten on the path, so
+// while the claim stands the lock can't change: other removers of S fail to claim, removers of other
+// tokens find S, and no starter can rename onto a non-empty folder. So the lock moved is always the
+// one judged, a live lock is never moved, and nothing ever needs putting back (kit-321). A die() inside
+// lets it go.
 async function browserStartLock(file, fn) {
   const lock = `${file}.lock`, owner = path.join(lock, 'owner'), start = Date.now();
   const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
   const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS')) || 60000;
+  const prep = `${lock}.new.${token}`;
   const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
-  // Remove the lock if it still holds `seen`; a lock taken from under us is put back. True only when
-  // the lock was moved off its path: a waiter whose take fails (the rename refused, or the test hook
-  // DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL) goes on to the deadline and the sleep, never spins. An aside
-  // that can't be removed is left behind: the lock's path is free either way.
+  const link = (f) => { try { return fs.readlinkSync(f); } catch { return null; } };
+  // a well-formed token naming a dead pid (a positive integer) that isn't ours. No token, one that
+  // isn't one (pid 0 too), or a live owner (EPERM counts as alive) isn't dead.
+  const dead = (t) => { const p = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(t ?? '')?.[1]; return !!p && Number(p) !== process.pid && !browserAlive(Number(p)); };
+  // The lock's token and mtime from one open of its owner, so both are one file's (a stat and then a
+  // read can pair an old lock's mtime with a new lock's token). No readable owner: a null token and the
+  // folder's mtime. No lock: null.
+  const look = () => {
+    let fd;
+    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch {
+      const st = fs.statSync(lock, { throwIfNoEntry: false });
+      return st ? { token: null, mtime: st.mtimeMs } : null;
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
+  };
+  const stale = (l) => Math.abs(Date.now() - l.mtime) > 120000 || dead(l.token);
+  // Remove the lock holding `seen` (null: a folder with no owner) under a claim on it: the symlink
+  // <lock>.take.<k>.<n> (k from seen's hash) pointing at the claimant's token. A dead claimant's claim
+  // is passed over to n + 1, not removed while seen may still be on the path; any other means another
+  // remover holds seen, and we yield. Claims have no age rule: passing over a hung holder could let it
+  // wake and move a live lock. True only when the lock was moved off its path: a waiter whose take
+  // fails (no claim, the lock changed, or the test hook DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL) goes on to
+  // the deadline and the sleep, never spins. An aside that can't be removed is left behind: the lock's
+  // path is free either way.
   const drop = (seen) => {
     if (seen !== token && browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL')) return false;
-    const aside = `${lock}.${token}.${crypto.randomBytes(4).toString('hex')}`;
-    try { fs.renameSync(lock, aside); } catch { return false; }
-    if (read(path.join(aside, 'owner')) === seen) { try { fs.rmSync(aside, { recursive: true, force: true }); } catch {} return true; }
-    try { fs.renameSync(aside, lock); } catch { fs.rmSync(aside, { recursive: true, force: true }); }
-    return false;
+    const key = `${lock}.take.${crypto.createHash('sha256').update(seen ?? '').digest('hex').slice(0, 16)}.`;
+    let n = 0, claim = null, took = false;
+    for (let tries = 0; tries < 64 && !claim; tries++) {
+      try { fs.symlinkSync(token, key + n); claim = key + n; } catch (e) {
+        if (e.code !== 'EEXIST') return false;
+        const t = link(key + n);
+        if (t === null) continue; // the claim went between the two calls: try n again
+        if (!dead(t)) return false;
+        n++;
+      }
+    }
+    if (!claim) return false;
+    try {
+      if (seen === null) {
+        // an empty folder goes at once; ENOENT is a free path, not a take. A non-empty folder is owned
+        // first: an exclusive write of our token as its owner works only on a folder with none (a live
+        // lock has one, a free path has no folder), and then it holds a live token, ours, which no one
+        // else removes and no starter can rename over, so the rename below moves exactly it. Reading
+        // "no owner" instead can't tell an ownerless folder from a path a release just freed (kit-321
+        // design-change-1).
+        try { fs.rmdirSync(lock); return (took = true); } catch (e) {
+          if (e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST') return false;
+          try { fs.writeFileSync(owner, token, { flag: 'wx' }); } catch { return false; }
+        }
+      } else {
+        const l = look();
+        if (l?.token !== seen || (seen !== token && !stale(l))) return false;
+      }
+      const aside = `${lock}.${token}.${crypto.randomBytes(4).toString('hex')}`;
+      try { fs.renameSync(lock, aside); } catch { return false; }
+      try { fs.rmSync(aside, { recursive: true, force: true }); } catch {}
+      return (took = true);
+    } finally {
+      // seen is gone for good now, so its dead claims can go; our own goes last
+      if (took) for (let m = 0; m < n; m++) if (dead(link(key + m))) try { fs.unlinkSync(key + m); } catch {}
+      try { fs.unlinkSync(claim); } catch {}
+    }
   };
-  for (;;) {
-    try { fs.mkdirSync(lock); fs.writeFileSync(owner, token); break; } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      const st = fs.statSync(owner, { throwIfNoEntry: false }) ?? fs.statSync(lock, { throwIfNoEntry: false });
-      const seen = read(owner);
-      if (st && Math.abs(Date.now() - st.mtimeMs) > 120000 && drop(seen)) continue;
-      // a well-formed token naming a dead pid (a positive integer) that isn't ours: stale now. No owner
-      // file yet, a token that isn't one (pid 0 too), or a live owner (EPERM counts as alive) keeps the
-      // 120 s rule.
-      const op = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(seen ?? '')?.[1];
-      if (op && Number(op) !== process.pid && !browserAlive(Number(op)) && drop(seen)) continue;
-      if (Date.now() - start > wait) die(`browser: timed out waiting for ${lock}`);
+  // Each attempt rewrites the prepared owner (its mtime is the lock's age) and renames the folder onto
+  // the path: EEXIST or ENOTEMPTY while a lock is held, and an empty leftover folder is replaced at
+  // once. The prepared folder goes before a die() or a throw.
+  try {
+    fs.mkdirSync(prep);
+    for (;;) {
+      fs.writeFileSync(path.join(prep, 'owner'), token);
+      try { fs.renameSync(prep, lock); break; } catch (e) { if (e.code !== 'EEXIST' && e.code !== 'ENOTEMPTY') throw e; }
+      const l = look();
+      if (!l || (stale(l) && drop(l.token))) continue;
+      if (Date.now() - start > wait) { fs.rmSync(prep, { recursive: true, force: true }); die(`browser: timed out waiting for ${lock}`); }
       await browserSleep(100);
     }
-  }
+  } catch (e) { try { fs.rmSync(prep, { recursive: true, force: true }); } catch {} throw e; }
   const release = () => { if (read(owner) === token) drop(token); };
   process.on('exit', release);
   try { return await fn(); } finally { process.off('exit', release); release(); }
@@ -26897,9 +27025,9 @@ async function cmdBrowser() {
 }
 /* browser end */
 
-const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
-
-Setup and roles
+/* HELP start */
+/* helpSections start */
+const HELP_SETUP = `Setup and roles
   init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
@@ -26908,9 +27036,8 @@ Setup and roles
   operator-thread new "<words>" [--title t] [--subject json] | say <ot-id> "<words>" | close <ot-id> | reopen <ot-id> ["<words>"] | start | reply <ot-id> "<words>" | list [--open | --waiting] [--json] | show <ot-id> | status   the owner's threads with the machine's operator, as the hub's Overview keeps them (beside the operator, in no repo): new, say, close, reopen and start are the owner's (start brings up a laptop's operator, once, in tmux session devteam-home); reply is the operator's; each owner turn is typed into the operator's pane as one line
   worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, or (a resume of one that ran aside) while the machine's memory is at its machine_memory_ceiling, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
-  hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
-
-Holds and the fleet (planning.md §1, holds; supervisor.md §12)
+  hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists`;
+const HELP_HOLDS = `Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
@@ -26919,29 +27046,25 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   fleet park|drain [--reason r] [--move] [--owner]   hold every goal: a pause on this machine, or with --move a move to another (it releases the host claim)
   fleet status [--json] [--no-fetch]   ready to move? per session parked (or, drained, nothing running), pushed, clean, handoff on origin; the log landed, spend observed, review results committed; the new machine's checklist; which machine supervises the repo
   fleet host [--json] [--no-fetch] | --release | --take   which machine supervises this repo (origin's refs/devteam/host claim); the owner's, when that machine is gone: --release frees it for the next start anywhere, --take takes it for the machine it runs on. It grants nothing
-  drain --status | undrain           the old names: drain --status is fleet status; undrain lifts an old drain still in force (drain itself now asks for fleet park or fleet drain)
-
-The graph (planning.md)
+  drain --status | undrain           the old names: drain --status is fleet status; undrain lifts an old drain still in force (drain itself now asks for fleet park or fleet drain)`;
+const HELP_GRAPH = `The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
   moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
-  components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
-
-Checks and merging (quality.md)
+  components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines`;
+const HELP_CHECKS = `Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
   check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
   merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid [qid …]] [--decision d-id] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
-  review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's
-
-Sessions (worker.md)
+  review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's`;
+const HELP_SESSIONS = `Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
   gate <name> [--junit f] -- <cmd…>   run a gate and record it   |   gate --all: every settings gate here
   send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | messages [--open] [--to x] [--json]
-  stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
-
-Decide and act (supervisor.md, constitution.md)
+  stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line`;
+const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
   link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit
   link add <id> --kind repo --remote r --title t [--path p] [--main_branch b] [--forge f] [--gates '{…}'] … [--approved qid]   supervisor: drafts a repo link (or link set|rm on one) and asks the owner (governance-edit; gate-change for a gate field); with the answer, writes it for the chore-registry PR
@@ -26990,9 +27113,8 @@ Decide and act (supervisor.md, constitution.md)
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
   correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | correct <id> --from-turn <u-id> --said "<whole clauses>" [--at <n>] | correct <id> --from-chat --said "<owner's words>"   (supervisor, the owner's correction) | repair <id> --how undo|fix-ticket|none
   correct <goal-impact d-id> --reason r --impact 1-4   (owner) give the goal's impact yourself; it stands until you give another
-  trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
-
-Observe and orient
+  trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class`;
+const HELP_OBSERVE = `Observe and orient
   observe --subject s --kind k --detail d [--source owner-chat|owner-answer|owner-thread|retro|…] [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
   observe-link --url u | --path p --title t [--for scope…] [--notes n] [--owner]   a resource the work uses; orient proposes it for the registry
   wait [--minutes n]   supervisor, between ticks: blocks until a new message to you, a new owner line, a new high finding, or the tick is due (tick_minutes, default 15); an open high finding returns at once until acted on or acked
@@ -27002,9 +27124,8 @@ Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
-  problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
-
-Goals and retros
+  problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
+const HELP_GOALS = `Goals and retros
   goal [list|check|show|forecast|add|set|order|decide|approve|status|reading|hold|park-sessions|impact] …
   goal impact <g-id> <1-4> --rationale "…" [--confidence 0-1]   supervisor: how much the goal matters to the project, judged against project/strategy.md (4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping); orders the Inbox, never the work
   goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
@@ -27012,23 +27133,26 @@ Goals and retros
   goal order [<g-id> …] --approved <qid>   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
-  chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
-
-The log
+  chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR`;
+const HELP_LOG = `The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
   sensor status [--json] | sensor test <name> [--since t] | sensor poll [--due] [--name n] [--rollup-day d] [--json] (supervisor; wait runs it) | sensor series <name> [--range 24h|7d]   production sensors from settings
   sensor show <fingerprint> | sensor discover [--record] [--json] | sensor stream <name> (wait runs it) | sensor scrub < text   a cached event (untrusted), what production is and can be seen, a stream's collector, the scrubber
   sensor triage [--all] [--peek] [--json] | sensor ignore|unignore <fingerprint> --reason r [--owner] | sensor incident <fingerprint…> --title t | sensor incident <p-id> --add <fingerprint…>   what changed since the last triage, ignores, incidents (supervisor)
-  remediate <action> --decision d-… [--to <release>]   run a reviewed remediation from settings (production-remediation; a rollback across a production migration needs the owner's own answer)
-
-Dashboard and releases
+  remediate <action> --decision d-… [--to <release>]   run a reviewed remediation from settings (production-remediation; a rollback across a production migration needs the owner's own answer)`;
+const HELP_DASHBOARD = `Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
   box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run]  (each [--dockerfile p])   in the kit's own checkout: the box image's tool pins in cloud/Dockerfile (Claude Code, claude-swap, gh, ttyd, mise, uv). verify checks them and the release stamp offline; check says which are behind upstream (exit 1 stale, 3 some unknown, 0 none, 2 no file or one that doesn't verify); bump moves every tool not held (a "# hold: <reason>" line above its _VERSION ARG) to its latest, with sums from the downloaded assets, and stamps the release. Only the top package of the npm and PyPI tools is pinned: their dependencies resolve when the image is built
   box-pins installed   inside the box image: each tool's version, asked at its path in the image (never through PATH), against DEVTEAM_BOX_TOOLS
-  hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)
+  hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)`;
+/* helpSections end */
+const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
+
+${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, HELP_OBSERVE, HELP_GOALS, HELP_LOG, HELP_DASHBOARD].join('\n\n')}
 `;
 
+/* HELP end */
 // What the box's operator may run: reads only (a test runs each and diffs the log and git status). A
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
 // recover, machine and operator-thread write, and are allowed by name below: bringing a supervisor
@@ -27036,17 +27160,40 @@ Dashboard and releases
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
 const OPERATOR_READS = new Set(['search', 'status', 'moves', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings', 'unread']);
-const COMMANDS = {
+/* commandGroups start */
+const COMMANDS_SETUP = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
+};
+const COMMANDS_GRAPH = {
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
+};
+const COMMANDS_CHECKS = {
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
+};
+const COMMANDS_SESSIONS = {
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
+};
+const COMMANDS_DECIDE = {
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+};
+const COMMANDS_OBSERVE = {
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+};
+const COMMANDS_GOALS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
+};
+const COMMANDS_LOG = {
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
+};
+const COMMANDS_HOLDS = {
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
+};
+const COMMANDS_DASHBOARD = {
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard, browser: cmdBrowser,
+};
+/* commandGroups end */
+const COMMANDS = {
+  ...COMMANDS_SETUP, ...COMMANDS_GRAPH, ...COMMANDS_CHECKS, ...COMMANDS_SESSIONS, ...COMMANDS_DECIDE, ...COMMANDS_OBSERVE, ...COMMANDS_GOALS, ...COMMANDS_LOG, ...COMMANDS_HOLDS, ...COMMANDS_DASHBOARD,
 };
 /* dispatch start */
 if (!command || command === 'help' || command === '--help') out(HELP);
