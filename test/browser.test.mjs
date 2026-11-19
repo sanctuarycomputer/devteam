@@ -104,7 +104,6 @@ function testBrowserPids() {
 
 let e; // E1 to E4, D4, D5's planted form, Review Focus 1, B3: refusals that start nothing
 let a; // the long-lived browser
-let h; // restart-heavy: the status/stop round trip, E5, K2, Review Focus 5 (F to I: browser-hygiene)
 let k; // K1 only: its tmux session is the test's own, made before anything runs on it
 let dash; // B4 to B6: a real dashboard on a's fixture
 // after waits for it: with every test filtered out (--test-name-pattern), node runs after while
@@ -118,7 +117,6 @@ before(() => {
     standIn = await startStandIn();
     e = project('brw-e', newHome());
     a = project('brw-a', newHome());
-    h = project('brw-h', newHome());
     k = project('brw-k', newHome());
   })();
   return setup;
@@ -414,82 +412,6 @@ test('T1-5 verbs that talk to a daemon make no profile', opts, async () => {
     assert.equal(r.status, 0, `${verb[0]}: ${r.err}`);
   }
   assert.equal(fs.existsSync(path.join(P.home, '.devteam')), false, 'no ~/.devteam');
-});
-
-test('two starts at once start one daemon', opts, async () => {
-  // first on h, so both clients also race to write a fresh profile's root.json (T2-1)
-  assert.equal(fs.existsSync(h.profile), false);
-  // T2-3: every dev~ window and every daemon that wrote state.json while the two ran; without the
-  // start lock each client launches its own window and daemon.
-  const windows = new Set(), daemons = new Set();
-  const watch = setInterval(() => {
-    for (const w of devWindows(h)) windows.add(w.id);
-    try { daemons.add(readState(h).daemon_pid); } catch {}
-  }, 50);
-  let one, two;
-  try { [one, two] = await Promise.all([cli(h, ['start']), cli(h, ['start'])]); } finally { clearInterval(watch); }
-  assert.equal(one.status, 0, one.err);
-  assert.equal(two.status, 0, two.err);
-  assert.equal(windows.size, 1, `one dev~ window ever: ${[...windows]}`);
-  assert.equal(daemons.size, 1, `one daemon ever wrote state.json: ${daemons.size}`);
-  const s = readState(h);
-  assert.ok(alive(s.daemon_pid));
-  assert.equal(devWindows(h).length, 1, JSON.stringify(devWindows(h)));
-  const st = await statusJson(h);
-  assert.equal(st.running, true);
-  assert.equal(readState(h).daemon_pid, s.daemon_pid);
-  await stopped(h);
-});
-
-test('status and stop: the round trip', opts, async () => {
-  const off = await statusJson(h);
-  assert.deepEqual(off, { browser: 1, instance: h.key, running: false, held: null });
-  await started(h);
-  const s = readState(h);
-  const sj = await statusJson(h);
-  assert.equal(sj.running, true);
-  assert.equal(sj.tabs, 1);
-  const r = await cli(h, ['stop']);
-  assert.equal(r.status, 0, r.err);
-  assert.equal(r.out, 'browser stopped');
-  assert.deepEqual(await statusJson(h), { browser: 1, instance: h.key, running: false, held: null });
-  assert.equal(fs.existsSync(h.state), false);
-  await until(() => !alive(s.chrome_pid), 'Chrome gone after stop');
-  assert.deepEqual(devWindows(h), []);
-  assert.equal(fs.existsSync(path.join(h.old, 'docs', 'devteam', 'run', 'previews', `${s.preview}.json`)), false);
-  const again = await cli(h, ['stop']);
-  assert.equal(again.status, 0, again.err);
-  assert.equal(again.out, "browser wasn't running");
-});
-
-test('Review Focus 5: a stale state.json starts afresh', opts, async () => {
-  fs.mkdirSync(path.dirname(h.state), { recursive: true });
-  fs.writeFileSync(h.state, '{');
-  const s = await statusJson(h);
-  assert.equal(s.running, false);
-  await started(h);
-  assert.deepEqual(validate('state', readState(h)), []);
-  await stopped(h);
-});
-
-test('E5 the idle timer', opts, async () => {
-  await started(h, { DEVTEAM_TEST_BROWSER_IDLE_MS: '1500' });
-  const s = readState(h);
-  const t0 = Date.now();
-  await until(() => !alive(s.daemon_pid) && !alive(s.chrome_pid) && !fs.existsSync(h.state), 'the idle stop');
-  assert.ok(Date.now() - t0 < 8000, `took ${Date.now() - t0} ms`);
-});
-
-test('K2 a killed window takes Chrome', opts, async () => {
-  await started(h);
-  const s = readState(h);
-  const w = devWindows(h).find((x) => x.name === `dev~${s.preview}`);
-  assert.ok(w);
-  const t0 = Date.now();
-  assert.equal(tmuxOf(h, ['kill-window', '-t', w.id]).status, 0);
-  await until(() => !alive(s.chrome_pid) && !fs.existsSync(h.state), 'Chrome gone with its window');
-  assert.ok(Date.now() - t0 < 10000, `took ${Date.now() - t0} ms`);
-  await cli(h, ['stop']);
 });
 
 test('K1 run.env reaches the daemon', opts, async () => {

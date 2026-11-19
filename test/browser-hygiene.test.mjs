@@ -1,5 +1,6 @@
-// devteam.mjs browser (kit-64): profile hygiene on every start and stop, the restart-heavy checks
-// (spec F, G, H and I; docs/devteam/project/tickets/kit-64-browser-command/spec.md, home), split
+// devteam.mjs browser (kit-64): the restart-heavy checks, profile hygiene on every start and stop
+// (spec F, G, H and I) and the daemon's own start and stop round trips (E5, K2, Review Focus 5;
+// docs/devteam/project/tickets/kit-64-browser-command/spec.md, home), split
 // from test/browser.test.mjs so each file stays inside CI's per-file watchdog. The CLI runs async,
 // never through a blocking call: the fixture site lives in this process and must keep answering.
 import { test, before, after } from 'node:test';
@@ -10,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { canDrive, openChrome } from './lib/chrome.mjs';
-import { monoFixture, until } from './lib/kit.mjs';
+import { monoFixture, until, sessionOf } from './lib/kit.mjs';
 import { startSites } from './lib/sites.mjs';
 import { validate } from './fixtures/browser/check.mjs';
 
@@ -96,7 +97,7 @@ async function stopped(P) {
   if (before) await until(() => !alive(before.chrome_pid) && !alive(before.daemon_pid), 'the stopped browser gone');
 }
 
-let h; // F, G
+let h; // the start/stop round trip, two starts, E5, K2, Review Focus 5; then F, G
 let g; // H, I, beside h's chain
 // after waits for it: with every test filtered out (--test-name-pattern), node runs after while
 // before is still starting the site, which would then keep the process alive.
@@ -356,6 +357,93 @@ hygiene.push(['I3 the last hyphen splits', async (h) => {
   } finally { await killGroup(two.pid); }
   fs.rmSync(path.join(h.profile, 'SingletonLock'), { force: true });
 }]);
+
+const tmuxOf = (P, args, env = {}) => spawnSync('tmux', args, { encoding: 'utf8', env: { ...process.env, TMUX_TMPDIR: P.env.TMUX_TMPDIR, ...env } });
+// The project's dev~ windows: { name, pid, id }.
+function devWindows(P) {
+  const r = tmuxOf(P, ['list-panes', '-s', '-t', `=${sessionOf(P.old, P.name)}`, '-F', '#{window_name} #{pane_pid} #{window_id}']);
+  if (r.status !== 0) return [];
+  return r.stdout.split('\n').filter(Boolean).map((l) => { const [name, pid, id] = l.split(' '); return { name, pid: Number(pid), id }; }).filter((w) => w.name.startsWith('dev~'));
+}
+
+// ----- the daemon's own start and stop on h, restart-heavy (T2): before the chains -----
+
+test('two starts at once start one daemon', { skip, timeout: 120000 }, async () => {
+  // first on h, so both clients also race to write a fresh profile's root.json (T2-1)
+  assert.equal(fs.existsSync(h.profile), false);
+  // T2-3: every dev~ window and every daemon that wrote state.json while the two ran; without the
+  // start lock each client launches its own window and daemon.
+  const windows = new Set(), daemons = new Set();
+  const watch = setInterval(() => {
+    for (const w of devWindows(h)) windows.add(w.id);
+    try { daemons.add(readState(h).daemon_pid); } catch {}
+  }, 50);
+  let one, two;
+  try { [one, two] = await Promise.all([cli(h, ['start']), cli(h, ['start'])]); } finally { clearInterval(watch); }
+  assert.equal(one.status, 0, one.err);
+  assert.equal(two.status, 0, two.err);
+  assert.equal(windows.size, 1, `one dev~ window ever: ${[...windows]}`);
+  assert.equal(daemons.size, 1, `one daemon ever wrote state.json: ${daemons.size}`);
+  const s = readState(h);
+  assert.ok(alive(s.daemon_pid));
+  assert.equal(devWindows(h).length, 1, JSON.stringify(devWindows(h)));
+  const st = await statusJson(h);
+  assert.equal(st.running, true);
+  assert.equal(readState(h).daemon_pid, s.daemon_pid);
+  await stopped(h);
+});
+
+test('status and stop: the round trip', { skip, timeout: 120000 }, async () => {
+  const off = await statusJson(h);
+  assert.deepEqual(off, { browser: 1, instance: h.key, running: false, held: null });
+  await started(h);
+  const s = readState(h);
+  const sj = await statusJson(h);
+  assert.equal(sj.running, true);
+  assert.equal(sj.tabs, 1);
+  const r = await cli(h, ['stop']);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(r.out, 'browser stopped');
+  assert.deepEqual(await statusJson(h), { browser: 1, instance: h.key, running: false, held: null });
+  assert.equal(fs.existsSync(h.state), false);
+  await until(() => !alive(s.chrome_pid), 'Chrome gone after stop');
+  assert.deepEqual(devWindows(h), []);
+  assert.equal(fs.existsSync(path.join(h.old, 'docs', 'devteam', 'run', 'previews', `${s.preview}.json`)), false);
+  const again = await cli(h, ['stop']);
+  assert.equal(again.status, 0, again.err);
+  assert.equal(again.out, "browser wasn't running");
+});
+
+test('Review Focus 5: a stale state.json starts afresh', { skip, timeout: 120000 }, async () => {
+  fs.mkdirSync(path.dirname(h.state), { recursive: true });
+  fs.writeFileSync(h.state, '{');
+  const s = await statusJson(h);
+  assert.equal(s.running, false);
+  await started(h);
+  assert.deepEqual(validate('state', readState(h)), []);
+  await stopped(h);
+});
+
+test('E5 the idle timer', { skip, timeout: 120000 }, async () => {
+  await started(h, { DEVTEAM_TEST_BROWSER_IDLE_MS: '1500' });
+  const s = readState(h);
+  const t0 = Date.now();
+  await until(() => !alive(s.daemon_pid) && !alive(s.chrome_pid) && !fs.existsSync(h.state), 'the idle stop');
+  assert.ok(Date.now() - t0 < 8000, `took ${Date.now() - t0} ms`);
+});
+
+test('K2 a killed window takes Chrome', { skip, timeout: 120000 }, async () => {
+  await started(h);
+  const s = readState(h);
+  const w = devWindows(h).find((x) => x.name === `dev~${s.preview}`);
+  assert.ok(w);
+  const t0 = Date.now();
+  assert.equal(tmuxOf(h, ['kill-window', '-t', w.id]).status, 0);
+  await until(() => !alive(s.chrome_pid) && !fs.existsSync(h.state), 'Chrome gone with its window');
+  assert.ok(Date.now() - t0 < 10000, `took ${Date.now() - t0} ms`);
+  await cli(h, ['stop']);
+});
+
 
 test('profile hygiene on every start and stop: F1 to F4, G1 to G3, H1 to H3, I1 to I3', { skip, timeout: 280000, concurrency: 2 }, async (t) => {
   const chain = (P, ids) => t.test(`on ${P.name}`, { concurrency: 1 }, async (c) => {
