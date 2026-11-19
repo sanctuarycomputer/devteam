@@ -679,14 +679,21 @@ test('canvas cursors: the presence socket answers pings, reconnects when dropped
   const a1 = await pointOn(A, 'n-card', 0.5, 0.5);
   await A.move(a1.pt.x, a1.pt.y);
   await cursorAt(ctx, B, 'ana', 'n-card', async () => at(await nodeBox(B, 'n-card'), a1.fx, a1.fy), "Ana's cursor on B");
+  assert.equal(await cursorCount(A, 'ben'), 1, "Ben's cursor on A before A is hidden");
   const v0 = A.rec.order();
   await ctx.hideA();
   await within(ctx, async () => (await A.ev('document.visibilityState')) === 'hidden', 'C1.10: A hidden');
+  // final-1 F1: a hidden page drops others' cursors (it is sent no moves meanwhile)
+  await within(ctx, async () => (await cursorCount(A, 'ben')) === 0, "C1.10: Ben's cursor dropped on hidden A", async () => JSON.stringify(await cursorOf(A, 'ben')));
   await within(ctx, async () => ofKind(after(A.rec.psent, v0), 'here').some((f) => f.m.visible === false), 'C1.10: A says here visible false');
   await within(ctx, async () => (await cursorCount(B, 'ana')) === 0, "C1.10: Ana's cursor gone from B", async () => JSON.stringify(await cursorOf(B, 'ana')));
   await ctx.showA();
   await within(ctx, async () => (await A.ev('document.visibilityState')) === 'visible', 'A shown again');
   await within(ctx, async () => ofKind(after(A.rec.psent, v0), 'here').at(-1)?.m.visible === true, 'C1.10: A says here visible true');
+  assert.equal(await cursorCount(A, 'ben'), 0, 'C1.10: no stale Ben cursor on A once shown');
+  const b3 = await pointOn(B, 'n-card', 0.25, 0.75);
+  await B.move(b3.pt.x, b3.pt.y);
+  await cursorAt(ctx, A, 'ben', 'n-card', async () => at(await nodeBox(A, 'n-card'), b3.fx, b3.fy), "C1.10: Ben's cursor on A with his next move");
 
   // C1.11 (task-2 T2-2; presence@1 §9): A loaded while hidden says here visible false, closes its
   // presence socket within 60 s (plus slack) and opens a new one when shown

@@ -4907,6 +4907,10 @@
       return;
     }
     sendHere();
+    // hidden, the page is sent no moves (presence@1 §9), so others' cursors would go stale: drop them;
+    // each comes back with that person's next move once the page is shown (final-1 F1)
+    pres.cursors.clear();
+    placeCursors();
     pres.hiddenTimer = setTimeout(() => {
       pres.hiddenTimer = null;
       if (document.visibilityState === 'visible') return;
