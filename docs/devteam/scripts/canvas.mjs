@@ -1086,6 +1086,8 @@ export function resolve(doc, instanceId) {
 
 // The most elements instances may expand to on one page (the cap is applied by the walk below).
 export const STATIC_MAX_ELEMENTS = 100000;
+// The length of page body past which no further instance is expanded (half the artifact check's 8 MB).
+export const STATIC_MAX_CHARS = 4000000;
 // The page's one style block: resets only, nothing from the document.
 export const STATIC_STYLE = '*{box-sizing:border-box;margin:0;padding:0}html,body{min-height:100%}body{font-family:sans-serif}main{position:relative;min-height:100vh}img,svg{display:block}';
 // The page's one comment.
@@ -1264,6 +1266,10 @@ function expandedSizes(nodes) {
 // The cap: the count starts at every element written outside instances, and an instance there whose
 // expansion would take it past STATIC_MAX_ELEMENTS is cut (its own empty box, `data-cut="true"`), so
 // the page body holds at most STATIC_MAX_ELEMENTS elements, or the outside elements alone when more.
+// And the length cap: any instance, nested ones included, reached once the body written so far is at or
+// past STATIC_MAX_CHARS is cut too, so long paths or texts repeated through instances can't make a
+// page too long for a string (the page stays within STATIC_MAX_CHARS + the page with every instance
+// cut + the longest component's own tree).
 export function staticPage(doc) {
   const errors = validate(doc, { images: null });
   if (errors.length) return { ok: false, errors };
@@ -1276,6 +1282,8 @@ export function staticPage(doc) {
     return resolved.get(id);
   };
   const parts = [];
+  let chars = 0; // the length of the parts written so far
+  const write = (s) => { parts.push(s); chars += s.length; };
   const stack = [];
   const pushChildren = (ids, inst, pm) => {
     for (let i = ids.length - 1; i >= 0; i--) stack.push({ id: ids[i], inst, pm });
@@ -1293,7 +1301,7 @@ export function staticPage(doc) {
   pushChildren(page.children, null, 'page');
   while (stack.length) {
     const item = stack.pop();
-    if (own(item, 'close')) { parts.push(`</${item.close}>`); continue; }
+    if (own(item, 'close')) { write(`</${item.close}>`); continue; }
     const { id, inst, pm } = item;
     const n = nodes[id];
     const v = inst ? inst[id] : ownValues(n);
@@ -1304,7 +1312,7 @@ export function staticPage(doc) {
     switch (n.type) {
       case 'frame':
       case 'component':
-        parts.push(`<div${head}${styleAttr([...common, ...boxDecls(css, v, absolute, hidden)])}>`);
+        write(`<div${head}${styleAttr([...common, ...boxDecls(css, v, absolute, hidden)])}>`);
         stack.push({ close: 'div' });
         pushChildren(n.children, inst, v['layout.mode']);
         break;
@@ -1317,26 +1325,26 @@ export function staticPage(doc) {
         const comp = nodes[n.component];
         const cv = ownValues(comp);
         const box = `<div${head}${styleAttr([...common, ...boxDecls(css, cv, absolute, hidden)])}`;
-        if (!inst) {
-          if (written + sizes.get(n.component) > STATIC_MAX_ELEMENTS) {
-            parts.push(`${box}${attr('data-cut', 'true')}></div>`);
-            break;
-          }
-          written += sizes.get(n.component);
+        // The length cap, at every instance, nested ones included: once the page written so far is at
+        // or past STATIC_MAX_CHARS, the cut box.
+        if (chars >= STATIC_MAX_CHARS || (!inst && written + sizes.get(n.component) > STATIC_MAX_ELEMENTS)) {
+          write(`${box}${attr('data-cut', 'true')}></div>`);
+          break;
         }
-        parts.push(`${box}>`);
+        if (!inst) written += sizes.get(n.component);
+        write(`${box}>`);
         stack.push({ close: 'div' });
         pushChildren(comp.children, resolveOf(id), cv['layout.mode']);
         break;
       }
       case 'rect':
-        parts.push(`<div${head}${styleAttr([...common, ...paintDecls(css, v), ...radiusDecls(css, v)])}></div>`);
+        write(`<div${head}${styleAttr([...common, ...paintDecls(css, v), ...radiusDecls(css, v)])}></div>`);
         break;
       case 'ellipse':
-        parts.push(`<div${head}${styleAttr([...common, ...paintDecls(css, v), ['border-radius', '50%']])}></div>`);
+        write(`<div${head}${styleAttr([...common, ...paintDecls(css, v), ['border-radius', '50%']])}></div>`);
         break;
       case 'text':
-        parts.push(`<div${head}${styleAttr([...common, ...textDecls(css, v)])}>${escHtml(v.text)}</div>`);
+        write(`<div${head}${styleAttr([...common, ...textDecls(css, v)])}>${escHtml(v.text)}</div>`);
         break;
       case 'vector': {
         let size = '';
@@ -1346,11 +1354,11 @@ export function staticPage(doc) {
         }
         let paint = attr('fill', v.fill === null ? 'none' : css.color(v.fill));
         if (v.stroke !== null) paint += `${attr('stroke', css.color(v.stroke))}${attr('stroke-width', String(css.len(v.strokeWidth)))}`;
-        parts.push(`<svg${head}${size}${styleAttr([...common, ['overflow', 'visible']])}><path${attr('d', v.path)}${paint}></path></svg>`);
+        write(`<svg${head}${size}${styleAttr([...common, ['overflow', 'visible']])}><path${attr('d', v.path)}${paint}></path></svg>`);
         break;
       }
       case 'image':
-        parts.push(`<img${head}${attr('src', v.src)}${attr('alt', v.name)}${styleAttr([...common, ['object-fit', v.fit], ...radiusDecls(css, v)])}>`);
+        write(`<img${head}${attr('src', v.src)}${attr('alt', v.name)}${styleAttr([...common, ['object-fit', v.fit], ...radiusDecls(css, v)])}>`);
         break;
       default:
     }

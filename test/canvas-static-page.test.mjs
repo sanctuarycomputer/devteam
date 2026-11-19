@@ -727,6 +727,35 @@ test('canvas static page: instance expansion is capped', { timeout: 60000 }, () 
   assert.equal(within.filter((el) => nodeOf(el) === 'r2' && el.attrs['data-type'].value === 'rect').length, 4);
 });
 
+// chain(n) whose last component holds one vector with a path of about 60 KB in place of the rect.
+function longChain(n) {
+  const doc = chain(n);
+  const leaf = `r${n - 1}`;
+  doc.nodes[leaf] = { ...vectorNode(`c${n - 1}`, 'Long'), path: `M0 0${' L1 1'.repeat(11999)}` };
+  return doc;
+}
+
+test('canvas static page: the page\'s length is capped', { timeout: 60000 }, () => {
+  const bound = canvas.STATIC_MAX_CHARS + 8 * 1024 * 1024;
+  assert.equal(typeof canvas.STATIC_MAX_CHARS, 'number');
+  const cutIn = (html) => all(scan(html, canvas.STATIC_COMMENT).root).some((el) => el.attrs['data-cut']?.value === 'true');
+  // The cheap case first (about 15 MB uncapped), so a missing cap fails here and never builds 2 G.
+  for (const n of [9, 16]) {
+    const doc = longChain(n);
+    assert.deepEqual(canvas.validate(doc), [], `chain ${n}`);
+    const r = canvas.staticPage(doc);
+    assert.equal(r.ok, true, `chain ${n}: ${JSON.stringify(r.errors)}`);
+    assert.ok(r.html.length <= bound, `chain ${n}: the page is ${r.html.length} characters`);
+    assert.ok(cutIn(r.html), `chain ${n}: no data-cut="true"`);
+    if (n === 16) assert.equal(canvas.staticPage(doc).html, r.html, 'two runs differ');
+  }
+  const small = longChain(4);
+  assert.deepEqual(canvas.validate(small), []);
+  const s = render(small, 'chain 4');
+  assert.ok(all(s.tree.root).every((el) => !own(el.attrs, 'data-cut')), 'a data-cut in chain 4');
+  assert.equal(all(topEl(s.tree, 'top')).filter((el) => el.name === 'path').length, 8);
+});
+
 const vectorNode = (parent, name) => ({ type: 'vector', parent, name, size: { w: 16, h: 16 }, path: 'M2 8 L6 12 L14 4', fill: null, stroke: '#111111ff', strokeWidth: 2 });
 // The scanner's element count of a page, asserted within STATIC_MAX_ELEMENTS + the node count.
 function cappedTree(doc, what) {
