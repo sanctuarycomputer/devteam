@@ -167,10 +167,10 @@ test('thread working and the pickup: the record, who writes it, and what clears 
     const freshThread = (agoMs, from = Date.now() - agoMs) => {
       const dirs = [F.logDir, path.join(F.old, 'docs/devteam/project/log')].filter((d) => fs.existsSync(d));
       const taken = dirs.flatMap((d) => fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).map((f) => fs.readFileSync(path.join(d, f), 'utf8'))).join('\n');
-      for (let t = from; ; t--) {
-        const iso = new Date(t).toISOString();
+      for (let ms = from; ; ms--) {
+        const iso = new Date(ms).toISOString();
         const id = `t-${iso.slice(0, 10).replace(/-/g, '')}-${iso.slice(11, 23).replace(/[:.]/g, '')}-owner`;
-        if (!taken.includes(`"${id}"`)) return F.hand('owner', { type: 'thread', title: 'No owner turn', id }, Date.now() - t);
+        if (!taken.includes(`"${id}"`)) return F.hand('owner', { type: 'thread', title: 'No owner turn', id }, Date.now() - ms);
       }
     };
     const snap = F.snapLog();
