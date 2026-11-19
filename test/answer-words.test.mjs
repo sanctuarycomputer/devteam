@@ -13,7 +13,7 @@ const RATE = ['--stake', '1', '--urgency', '1'];
 const YN = JSON.stringify([{ label: 'Yes' }, { label: 'No' }]);
 const firstId = (s) => s.split('\n')[0].trim();
 // Distinct words for each question, so the kit's re-ask refusal never takes one for another.
-const TEXTS = ['Should checkout move to the new pricing page before launch?', 'Do invoices go out on the first business day of each month?', 'Can refunds skip the manual review queue under fifty dollars?', 'Will the mobile app share the web login cookie?', 'Must exports include archived customers by default?', 'Is dark mode worth shipping ahead of the holiday freeze?', 'Should trial accounts keep their data after ninety days?', 'May the support team see partial card numbers?', 'Does the onboarding tour replay after every major release?', 'Could weekly digests replace the daily summary email?', 'Ought the status page show maintenance windows a week ahead?', 'Should failed webhooks retry for a full day?', 'Are team invitations limited to verified domains?', 'Would a yearly plan discount of twenty percent hurt margins?', 'Shall the legacy API stay up until spring?', 'Should search index deleted projects for thirty days?', 'Can admins impersonate users without a ticket?', 'Do we localise receipts into French and German first?', 'Is single sign-on included on the starter tier?', 'Should usage alerts fire at eighty percent of quota?', 'Do contractors get read access to the billing dashboard?', 'Should the changelog email go to every workspace admin?', 'Can a workspace hold more than one custom domain?', 'Will the free tier keep its API rate limit next year?'];
+const TEXTS = ['Should checkout move to the new pricing page before launch?', 'Do invoices go out on the first business day of each month?', 'Can refunds skip the manual review queue under fifty dollars?', 'Will the mobile app share the web login cookie?', 'Must exports include archived customers by default?', 'Is dark mode worth shipping ahead of the holiday freeze?', 'Should trial accounts keep their data after ninety days?', 'May the support team see partial card numbers?', 'Does the onboarding tour replay after every major release?', 'Could weekly digests replace the daily summary email?', 'Ought the status page show maintenance windows a week ahead?', 'Should failed webhooks retry for a full day?', 'Are team invitations limited to verified domains?', 'Would a yearly plan discount of twenty percent hurt margins?', 'Shall the legacy API stay up until spring?', 'Should search index deleted projects for thirty days?', 'Can admins impersonate users without a ticket?', 'Do we localise receipts into French and German first?', 'Is single sign-on included on the starter tier?', 'Should usage alerts fire at eighty percent of quota?', 'Do contractors get read access to the billing dashboard?', 'Should the changelog email go to every workspace admin?', 'Can a workspace hold more than one custom domain?', 'Will the free tier keep its API rate limit next year?', 'Should archived boards stay searchable for a year?', 'Do guests see the comment history on shared docs?', 'Can billing contacts change the plan without an admin?', 'Should the desktop app update itself overnight?'];
 
 // A ready goal read from a repo check, approved by the owner (as goal-met.test.mjs's first test).
 function readyGoal(F) {
@@ -205,6 +205,7 @@ test('the answer line records the pick beside the words, and words alone wait fo
         ['wrong class', { class: 'goal-change' }],
         ['cite not in the words', { cite: 'no thanks' }],
         ['cite splitting a word', { cite: 'es pleas' }],
+        ['cite in another case', { cite: 'Yes Please' }],
         ['label not in the set', { choice: 'Maybe' }],
         ['of an older answer', { of: '2026-01-01T00:00:00.000Z' }],
         ['no act', { act: undefined }],
@@ -214,6 +215,19 @@ test('the answer line records the pick beside the words, and words alone wait fo
         const w = view(q);
         assert.deepEqual([w.matched, w.label, w.read_by, w.reading], [false, null, null, null], why);
       }
+      // a cite is at most 600 characters: 120 words (599) count, 121 (604) don't
+      const long = Array.from({ length: 150 }, () => 'word').join(' ');
+      for (const [k, counts] of [[120, true], [121, false]]) {
+        const q = plain('--no-default', 'the test waits for the owner');
+        F.owner(['answer', q, long, '--in-words']);
+        hand(q, { ...good(q), cite: long.split(' ').slice(0, k).join(' ') });
+        assert.equal(view(q).read_by, counts ? 'supervisor' : null, `a cite of ${k} words`);
+      }
+      // a reading of an answer that has a pick counts for nothing (check 2)
+      const qp = plain('--no-default', 'the test waits for the owner');
+      F.owner(['answer', qp, 'yes please', '--choice', 'Yes']);
+      hand(qp, { ...good(qp), choice: 'No' });
+      assert.deepEqual([view(qp).reading, view(qp).read_by, view(qp).label], [null, null, 'Yes'], 'a pick is never read');
       // two readings: the first valid one counts, a later one with another label doesn't
       const q2 = inWords();
       F.sup(['answer', q2, '--read', 'Yes', '--cite', 'yes  please', '--class', 'owner-decision']);
