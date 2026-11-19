@@ -292,7 +292,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
   });
 
   step('a held ticket is left out of ready and idle capacity until released', () => {
-    must(['ticket', 'set', 'bill-01-card', '--json', '{"held": "may duplicate the existing CI"}'], { role: 'sup' });
+    must(['ticket', 'set', 'bill-01-card', '--json', JSON.stringify({ held: 'may duplicate the existing CI', held_for: ['external:the CI check'], held_until: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10) })], { role: 'sup' });
     const r = json(must(['ready', '--json']));
     assert.deepEqual(r.ready.map((x) => x.id), [], 'held is not ready');
     assert.deepEqual(r.held, [{ id: 'bill-01-card', held: 'may duplicate the existing CI' }]);
@@ -2565,7 +2565,7 @@ http.createServer((req, res) => {
     const hold = () => json(must(['goal', 'show', G, '--json'])).hold_view;
     // the supervisor drains a running goal, with a reason; it can't park one, or release the owner's hold
     assert.match(dt(['goal', 'hold', G, 'drain'], { role: 'sup' }).err, /--reason/);
-    must(['goal', 'hold', G, 'drain', '--reason', 'billing waits on pricing'], { role: 'sup' });
+    must(['goal', 'hold', G, 'drain', '--reason', 'billing waits on pricing', '--for', 'external:pricing', '--until', new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)], { role: 'sup' });
     assert.deepEqual([hold().mode, hold().by], ['drain', 'supervisor']);
     assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'goal-hold' && /drained "Self-serve billing"/.test(a.what)));
     assert.match(dt(['goal', 'hold', G, 'park', '--reason', 'x'], { role: 'sup' }).err, /only the owner parks a single goal/);
@@ -2606,7 +2606,7 @@ http.createServer((req, res) => {
     assert.match(must(['questions']), new RegExp(Qh));
     // run again; the owner's release lets the supervisor drain once more
     must(['goal', 'hold', G, 'run', '--owner']);
-    must(['goal', 'hold', G, 'drain', '--reason', 'again'], { role: 'sup' });
+    must(['goal', 'hold', G, 'drain', '--reason', 'again', '--for', 'external:the rerun', '--until', new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)], { role: 'sup' });
     must(['goal', 'hold', G, 'run', '--reason', 'pricing landed'], { role: 'sup' });
     assert.equal(hold().mode, 'run');
     must(['answer', Qh, 'monthly']);
