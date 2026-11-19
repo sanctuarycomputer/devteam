@@ -395,7 +395,7 @@ test('bump refuses a patch tag before it reads or asks anything, and writes noth
   const f = pinsCopy();
   const sum = fileSha(f);
   const r = await pinsAsync(['bump', '--release', 'v9.1.3', '--dockerfile', f], upEnv(u));
-  assert.notEqual(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stderr, /--release v9\.1\.3 is a patch/);
   assert.match(r.stderr, /v9\.1\.0/);
   assert.match(r.stderr, /nothing written/);

@@ -437,6 +437,7 @@ write(path.join(deployShims, 'gh'), [
   ''].join('\n'));
 write(path.join(deployShims, 'node'), [
   '#!/bin/sh',
+  'echo "$2 $3 HOOK=${HOOK+set} GH_TOKEN=${GH_TOKEN+set}" >> "$NODE_ENVS"',
   'if [ -n "${STUB_CHANGED:-}" ] && [ "$1" = docs/devteam/scripts/devteam.mjs ] && [ "$2" = box-pins ] && [ "$3" = changed ]; then',
   '  for a in "$@"; do printf \'%s\\037\' "$a"; done >> "$STUB_CALLS"; echo >> "$STUB_CALLS"',
   '  f="$FIXTURES/$STUB_CHANGED"',
@@ -453,10 +454,13 @@ function deploy({ tag, sha, hook = 'https://hook.invalid/deploy?key=k', runs, st
   const d = path.join(tmp, `deploy-run-${++deployRuns}`);
   fs.mkdirSync(d);
   const f = (n) => path.join(d, n);
-  const env = { ...deployEnv(), PATH: `${deployShims}${path.delimiter}${process.env.PATH}`, HOME: d, TAG: tag, SHA: sha, PUBLISHED: '2026-06-01T00:00:00Z', HOOK: hook, GH_TOKEN: 'fake-token', GH_REPO: 'sanctuarycomputer/devteam', CURLS: f('curls'), GH_CALLS: f('gh'), STUB_CALLS: f('stub'), FIXTURES: path.join(REPO, 'test', 'fixtures', 'image-changes'), RELEASES: JSON.stringify(RELEASED) };
+  const env = { ...deployEnv(), PATH: `${deployShims}${path.delimiter}${process.env.PATH}`, HOME: d, TAG: tag, SHA: sha, PUBLISHED: '2026-06-01T00:00:00Z', HOOK: hook, GH_TOKEN: 'fake-token', GH_REPO: 'sanctuarycomputer/devteam', CURLS: f('curls'), GH_CALLS: f('gh'), STUB_CALLS: f('stub'), NODE_ENVS: f('node-envs'), FIXTURES: path.join(REPO, 'test', 'fixtures', 'image-changes'), RELEASES: JSON.stringify(RELEASED) };
   if (runs !== undefined) env.RUNS = typeof runs === 'string' ? runs : JSON.stringify(runs);
   if (stub) env.STUB_CHANGED = stub;
-  const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', deployStep()], { cwd: deployRepo, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 600000 });
+  // as a file, as Actions runs a step (bash --noprofile --norc -eo pipefail {0}): a file and -c differ
+  // in what an expansion error skips
+  write(f('step.sh'), `${deployStep()}\n`);
+  const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', f('step.sh')], { cwd: deployRepo, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 600000 });
   const read = (n) => (fs.existsSync(f(n)) ? fs.readFileSync(f(n), 'utf8').split('\n').filter(Boolean) : []);
   const calls = (n) => read(n).map((l) => l.split('\x1f').slice(0, -1));
   const gh = calls('gh');
@@ -467,7 +471,9 @@ function deploy({ tag, sha, hook = 'https://hook.invalid/deploy?key=k', runs, st
     assert.equal(at('-L'), '100', `run list -L 100: ${c.join(' ')}`);
     assert.equal(at('--workflow'), 'box-deploy.yml', c.join(' '));
   }
-  return { ...r, out: r.stdout + r.stderr, curls: read('curls'), gh, runLists: gh.filter((c) => c[0] === 'run' && c[1] === 'list'), stubs: calls('stub') };
+  // the kit commands the step runs never get the hook or the token
+  for (const l of read('node-envs')) assert.match(l, / HOOK= GH_TOKEN=$/, `node ran with the hook or the token: ${l}`);
+  return { ...r, out: r.stdout + r.stderr, nodeRuns: read('node-envs'), curls: read('curls'), gh, runLists: gh.filter((c) => c[0] === 'run' && c[1] === 'list'), stubs: calls('stub') };
 }
 const v910 = () => (deployKit(), dg(['rev-parse', 'v9.1.0^{commit}']).trim());
 const appendTo = (s) => (t) => `${t}${s}`;
@@ -479,8 +485,11 @@ test('box-deploy refuses a release whose stamp isn\'t its tag, before it reads t
   const script = deployStep();
   const sha = deployRelease('minor-stamped', { tag: 'v9.2.0', stamp: 'v9.2.0' });
   const ok = deploy({ tag: 'v9.2.0', sha, hook: '' });
-  assert.equal(ok.status, 0, ok.out);
-  assert.match(ok.stdout, /no RENDER_DEPLOY_HOOK/);
+  // a stamped minor gets past verify to the hook; without it the run fails red, so no patch can take
+  // a green run of it for a deploy
+  assert.equal(ok.status, 1, ok.out);
+  assert.match(ok.stdout, /^refusing v9\.2\.0: no RENDER_DEPLOY_HOOK secret, so the box can't deploy/m);
+  assert.deepEqual(ok.curls, []);
   dg(['checkout', '-q', '-f', 'v9.1.0']);
   const bad = deploy({ tag: 'v9.2.0', sha: v910(), hook: '' });
   assert.equal(bad.status, 1, bad.out);
@@ -498,16 +507,17 @@ test('box-deploy: verify, then the tag, then a patch branch that never reads the
   const wf = fs.readFileSync(DEPLOY_WF, 'utf8');
   const L = deployStep().split('\n');
   const at = (pred, what) => { const i = L.findIndex(pred); assert.ok(i >= 0, what); return i; };
-  const iVerify = at((l) => l.startsWith('node docs/devteam/scripts/devteam.mjs box-pins verify --release "$TAG" ||'), 'verify');
+  const iVerify = at((l) => l.startsWith('env -u HOOK -u GH_TOKEN node docs/devteam/scripts/devteam.mjs box-pins verify --release "$TAG" ||'), 'verify');
   const iParse = at((l) => l.startsWith('[[ $TAG =~ ^v([0-9]{1,9})\\.([0-9]{1,9})\\.([0-9]{1,9})$ ]] ||'), 'the tag parse');
   const iPatch = at((l) => l === 'if ! [[ $z =~ ^0+$ ]]; then', 'the patch branch');
   const iEnd = L.findIndex((l, i) => i > iPatch && l === 'fi');
-  const iHook = at((l) => /\bHOOK\b/.test(l), 'the hook');
+  // the first line that reads the hook (env -u HOOK only takes it away)
+  const iHook = at((l) => /\bHOOK\b/.test(l.replaceAll('env -u HOOK -u GH_TOKEN ', '')), 'the hook');
   assert.ok(iVerify < iParse && iParse < iPatch && iPatch < iEnd && iEnd < iHook, `${iVerify} < ${iParse} < ${iPatch} < ${iEnd} < ${iHook}`);
   const branch = L.slice(iPatch + 1, iEnd);
   const text = branch.join('\n');
-  for (const need of ['gh run list --workflow box-deploy.yml --commit "$base" -L 100 --json event,conclusion', '.event == "release"', '.conclusion == "success"', 'node docs/devteam/scripts/devteam.mjs box-pins changed --since "$minor" --to "$SHA" --smoke', 'exit 0']) assert.ok(text.includes(need), need);
-  assert.doesNotMatch(text, /HOOK|curl/i, 'nothing on the patch path reads the hook or calls curl');
+  for (const need of ['gh run list --workflow box-deploy.yml --commit "$base" -L 100 --json event,conclusion', '.event == "release"', '.conclusion == "success"', 'env -u HOOK -u GH_TOKEN node docs/devteam/scripts/devteam.mjs box-pins changed --since "$minor" --to "$SHA" --smoke', 'exit 0']) assert.ok(text.includes(need), need);
+  assert.doesNotMatch(text.replaceAll('env -u HOOK -u GH_TOKEN ', ''), /HOOK|curl/i, 'nothing on the patch path reads the hook or calls curl');
   // In a step, an expansion error ends only the command it is in, and the step runs on: the patch
   // path is one subshell that only an exit 0 lets out as success, then an exit 1 nothing can skip.
   const code = branch.filter((l) => l.trim() && !l.trim().startsWith('#')).map((l) => l.trim());
@@ -526,6 +536,7 @@ test('box-deploy: a dashboard-only patch whose minor deployed lands in place, po
   assert.equal(r.status, 0, r.out);
   assert.match(r.stdout, /^v9\.1\.1 is a patch: nothing the box image runs or relies on changed since v9\.1\.0, which the box runs; it lands in place/m);
   assert.deepEqual(r.curls, [], 'no deploy');
+  assert.deepEqual(r.nodeRuns, ['box-pins verify HOOK= GH_TOKEN=', 'box-pins changed HOOK= GH_TOKEN='], 'verify and the classifier ran without the hook or the token');
   assert.equal(r.runLists.length, 1);
   assert.equal(r.runLists[0][r.runLists[0].indexOf('--commit') + 1], v910());
 });

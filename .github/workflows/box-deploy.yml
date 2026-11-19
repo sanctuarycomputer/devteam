@@ -1,8 +1,8 @@
-# Deploys the owner's cloud box (cloud/) at each minor release. Only on this repository, and only
-# when the RENDER_DEPLOY_HOOK secret holds the service's deploy hook (Render: the service's Settings,
-# Deploy Hook); a fork, or a repo without it, does nothing. The box resumes each supervisor that was
-# running on boot, and the supervisors their fleets, so a deploy costs the fleet a few minutes, not
-# its work.
+# Deploys the owner's cloud box (cloud/) at each minor release. Only on this repository (a fork does
+# nothing), with the service's deploy hook in the RENDER_DEPLOY_HOOK secret (Render: the service's
+# Settings, Deploy Hook); a minor's run without it fails red, so no later patch takes that run for a
+# deploy. The box resumes each supervisor that was running on boot, and the supervisors their
+# fleets, so a deploy costs the fleet a few minutes, not its work.
 #
 # A minor (vX.Y.0) or a major deploys the box, as before: the job runs in the GitHub environment
 # "box", holds the hook there, and deploys only a full release whose commit is on main, whose
@@ -12,8 +12,9 @@
 # release-prep PR, and lands in place, each project adopting it, when that minor deployed (a
 # box-deploy run at its commit concluded success) and box-pins changed --smoke says nothing the box
 # image runs or relies on changed since it. Otherwise the job fails red without deploying: cut the
-# next minor. It never reads the hook. A release runs this file as of its own commit, so only the
-# environment is out of that commit's reach; the README's "deploy gate" says what the rest relies on.
+# next minor. It never reads the hook, and the kit commands it runs get neither the hook nor the
+# token. A release runs this file as of its own commit, so only the environment is out of that
+# commit's reach; the README's "deploy gate" says what the rest relies on.
 name: box-deploy
 on:
   release:
@@ -53,7 +54,7 @@ jobs:
           # (its release-prep PR's box-pins bump); a patch with the minor it builds on, vX.Y.0. The
           # words are worked out in a subshell: in a step, an expansion error ends only the command it
           # is in and the step runs on, so nothing that can fail sits beside an exit.
-          node docs/devteam/scripts/devteam.mjs box-pins verify --release "$TAG" || {
+          env -u HOOK -u GH_TOKEN node docs/devteam/scripts/devteam.mjs box-pins verify --release "$TAG" || {
             (
               if [[ $TAG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] && ! [[ ${BASH_REMATCH[3]} =~ ^0+$ ]]; then
                 [[ $TAG =~ ^v([0-9]{1,9})\.([0-9]{1,9})\. ]] || { echo "refusing $TAG: a patch is stamped with its minor (vX.Y.0) and gets no release-prep PR: cut a minor"; exit 0; }
@@ -83,7 +84,7 @@ jobs:
               [ "$n" -gt 0 ] 2>/dev/null || { echo "refusing $TAG: $minor never deployed, so the box isn't on it; cut $next"; exit 1; }
               # image-changes@1: 0 a patch, 3 a minor, anything else can't tell; its lines say which changes
               rc=0
-              node docs/devteam/scripts/devteam.mjs box-pins changed --since "$minor" --to "$SHA" --smoke || rc=$?
+              env -u HOOK -u GH_TOKEN node docs/devteam/scripts/devteam.mjs box-pins changed --since "$minor" --to "$SHA" --smoke || rc=$?
               case $rc in
                 0) echo "$TAG is a patch: nothing the box image runs or relies on changed since $minor, which the box runs; it lands in place (each project adopts it)"; exit 0 ;;
                 3) echo "refusing to deploy $TAG: a patch may not change what the box image runs; cut $next for these"; exit 1 ;;
@@ -94,7 +95,9 @@ jobs:
             exit 1
           fi
           # A minor or a major, as before.
-          [ -n "$HOOK" ] || { echo "no RENDER_DEPLOY_HOOK secret: no box to deploy"; exit 0; }
+          # without the hook a minor fails red: a green run must mean the box was asked to deploy, since
+          # a patch takes its minor's successful run as the box being on it
+          [ -n "$HOOK" ] || { echo "refusing $TAG: no RENDER_DEPLOY_HOOK secret, so the box can't deploy; set it in the box environment and re-run this job"; exit 1; }
           # git answers 1 for "not on main" and 128 for "can't tell": either refuses
           git merge-base --is-ancestor "$SHA" origin/main || { echo "refusing $SHA: it isn't on main"; exit 1; }
           # What the image is built from: every path cloud/Dockerfile copies (the kit whole), and the Dockerfile itself.
