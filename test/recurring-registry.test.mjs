@@ -138,16 +138,18 @@ test('A5: another class, a standing rule, or a question changed after its answer
     T.jobsChore('add', (j) => { j.recurring = { 'ci-main': check() }; });
     refused(T.dry('add'), /recurring-edit/);
     for (const cls of ['governance-edit', 'new-feature']) {
-      const r = T.run(['ask', '--class', cls, '--question', `A ${cls} question?`, '--recommendation', 'Yes']);
+      const r = T.run(['ask', '--class', cls, '--question', { 'governance-edit': 'Should I change how the project is governed?', 'new-feature': 'Should I start a new feature?' }[cls], '--recommendation', 'Yes', ...(cls === 'new-feature' ? ['--no-default', 'only the owner starts one'] : [])]);
       passes({ status: r.status, text: T.text(r) });
       const q = QID.exec(r.out)[0];
       T.answer(q);
       refused(T.dry('add', q), /recurring-edit/);
     }
-    // a question whose change is rewritten after the owner answered it
+    // a question whose change is rewritten after the owner answered it: its own line edited in place
+    // (no writer may set question.change or question.question, so a set line would be dropped unread)
     const rewrite = (fields) => {
       const q = T.yes({ recurring: { 'ci-main': check() } });
-      fs.appendFileSync(T.logFile('supervisor'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: q, at: new Date(Date.now() + 1000).toISOString(), by: 'supervisor', ...fields })}\n`);
+      const f = T.logFile('supervisor');
+      fs.writeFileSync(f, fs.readFileSync(f, 'utf8').split('\n').map((l) => { const o = l ? JSON.parse(l) : null; return o?.type === 'question' && o.op === 'new' && o.id === q ? JSON.stringify({ ...o, ...fields }) : l; }).join('\n'));
       refused(T.dry('add', q), /not a question the owner answered/);
       T.run(['withdraw', q, '--reason', 'test']);
     };

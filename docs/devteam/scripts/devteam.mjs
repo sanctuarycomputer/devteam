@@ -5702,6 +5702,19 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   if (R.name === 'home' && base0) {
     const [a, b] = [settingsAt(base0, { orNull: true }), settingsAt(sha, { orNull: true })];
     if (a && b && ['sensors', 'sensor_defaults'].some((k) => canonical(a[k]) !== canonical(b[k]))) fails.push(...sensorProblems(b).map((e) => `settings at landing: ${e}`));
+    // the jobs that would land (kit-162): each head entry's shape, and the cap counted on main's
+    // jobs as they are now with this PR's changes over them
+    if (a && b && canonical(a.recurring) !== canonical(b.recurring)) {
+      if (!isObj(b.recurring)) fails.push('settings at landing: settings recurring: an object of { "<name>": { kind, title, what, every, … } }');
+      else {
+        fails.push(...Object.entries(b.recurring).flatMap(([n, e]) => recurringEntryProblems(n, e)).map((e) => `settings at landing: ${e}`));
+        const now = settingsAt(mainRef(), { orNull: true })?.recurring;
+        const would = { ...(isObj(now) ? now : {}) };
+        for (const [n, e] of Object.entries(recurringRegistry.changed(a.recurring, b.recurring))) { if (e === null) delete would[n]; else would[n] = e; }
+        const over = recurringRegistry.capProblem(would, 'main\'s jobs with this PR\'s changes; a check every n hours runs 24/n times, anything daily or slower once');
+        if (over) fails.push(`settings at landing: ${over}`);
+      }
+    }
   }
   // sensors are the supervisor's: no owner answer, and no ticket or plan either (a chore PR)
   if (R.name === 'home' && base0 && /^(ticket|plan)\//.test(branch)) {
@@ -5709,6 +5722,8 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const keys = a && b ? ['sensors', 'sensor_defaults', 'sensor_scrub'].filter((k) => canonical(a[k]) !== canonical(b[k])) : [];
     const files = (changedFiles(base0, sha) ?? []).filter((f) => f.startsWith(`${projectRel}/sensors/`));
     if (keys.length || files.length) fails.push(`${branch} changes ${[...keys, ...files].slice(0, 4).join(', ')}: sensors are the supervisor's, so they land in a chore PR (chore start …), not a ticket or plan`);
+    // the jobs are the owner's: never from a ticket or plan (kit-162)
+    if (a && b && canonical(a.recurring) !== canonical(b.recurring)) fails.push(`${branch} changes recurring: jobs are the owner's, so they land only in the supervisor's chore PR with the owner's answer (recurring apply), never from a ticket or plan`);
   }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records, inHome }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
@@ -6816,11 +6831,25 @@ function cmdMerge() {
   // link-landing rule under --approved below
   let ownerChanged = null;
   let choreOutside = [];
+  // the jobs (recurring, kit-162): whether this PR changes them, whether --approved is a
+  // recurring-edit answer (each holds the chore to project/ files below), and the Upkeep hold
+  // this merge was forced past, for the act's words
+  let jobsChanged = false;
+  let jobAnswer = false;
+  let jobsForced = null;
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
   if (R.name === 'home') {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const classed = base ? ownerSettingsChanged(base, sha) : [];
+    jobsChanged = !!classed?.some((c) => c.key === 'recurring');
+    { const aq = approved ? logGet(approved) : null; jobAnswer = aq?.type === 'question' && aq.class === 'recurring-edit'; }
+    // One answer, one key: read before the supervisor's own classes are taken out, so any other
+    // change (an owner key, a gate the supervisor adds alone, a link) splits the PR, whatever --approved is.
+    if (jobsChanged && classed.length > 1) {
+      const keys = classed.filter((c) => c.key !== 'recurring').map((c) => c.key).join(', ');
+      fails.push(`changes recurring and also ${keys}: one answer lands one key, so split this into two PRs (the jobs in one, ${keys} in the other)`);
+    }
     // Only a chore: the supervisor's own PR. A plan PR is a planner's, and a ticket's can't change
     // settings.md at all, so a gate added there is still the owner's gate-change.
     const gateAdd = classed?.some((c) => c.key === 'gates') ? (chore ? gateAdditions(base, sha) : { problem: 'only the supervisor\'s own chore PR adds a gate without the owner' }) : null;
@@ -6836,7 +6865,8 @@ function cmdMerge() {
       const gatesWhy = gateAdd?.problem && changed.some((c) => c.key === 'gates') ? ` (gates: ${gateAdd.problem}; only adding a gate is the supervisor's)` : '';
       // A standing rule the owner gave themselves settles a class in owner_rules (constitution.md):
       // only when every changed setting is of such a class, and only the owner's own accepted rule.
-      const ruled = !approved && classes.every((c) => (ladder().owner_rules ?? []).includes(c)) && classes.map((c) => ownerRuleFor(c)).every(Boolean);
+      // Never for the jobs: only an answer that showed the exact change lands one (kit-162).
+      const ruled = !approved && !classes.includes('recurring-edit') && classes.every((c) => (ladder().owner_rules ?? []).includes(c)) && classes.map((c) => ownerRuleFor(c)).every(Boolean);
       if (ruled) { const rs = classes.map((c) => ownerRuleFor(c)); standing = { rule: rs[0] }; out(`changes owner settings: ${what}; approved by the owner's standing rule${rs.length > 1 ? 's' : ''} ${rs.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
       else if (!approved) fails.push(`changes owner settings: ${what}${gatesWhy}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
       else {
@@ -6847,6 +6877,17 @@ function cmdMerge() {
         fails.push(...ownerLinkActFails(changed, sha, approved));
         fails.push(...remediationBindingFails(base, sha, approved));
       }
+    }
+    // The jobs' binding: whenever --approved is a recurring-edit answer, the PR changing recurring
+    // or not (it then lands none of what the answer showed), and whenever the PR changes recurring.
+    if (approved && (jobAnswer || jobsChanged)) fails.push(...recurringBindingFails(base, sha, approved));
+    // A change to the jobs, or the recurring chore, waits while Upkeep is drained or parked, whatever
+    // its slug (record-keeping ones too); heldBy's own refusal, when it has one, is the one given.
+    const jobsHold = chore === 'recurring' || jobsChanged ? goalMode(upkeepOrVirtual()) : 'run';
+    if (jobsHold !== 'run' && !['park', 'let-go'].includes(heldBy)) {
+      if (flags.force) jobsForced = jobsHold === 'drain' ? 'drained' : holdWords(jobsHold);
+      else if (jobsHold === 'drain') fails.push('Upkeep is drained: a change to the jobs lands when Upkeep runs (goal hold upkeep run --owner); --force lands it anyway, logged');
+      else fails.push(`its goal is ${holdWords(jobsHold)}: it merges when the goal runs or drains again (planning.md §1, holds); --force merges it anyway, logged`);
     }
   }
   // Deploys on merge: merging this is releasing it, so it needs release-production's authority: the
@@ -6891,6 +6932,8 @@ function cmdMerge() {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const outside = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
     choreOutside = outside;
+    // a recurring-edit answer approves the jobs it showed and nothing else: no file outside project/ beside them
+    if ((jobsChanged || jobAnswer) && outside.length) fails.push(`changes files outside project/ (${outside.slice(0, 6).join(', ')}${outside.length > 6 ? ', …' : ''}) beside the jobs: a recurring-edit answer approves the jobs it showed and nothing else; land those in a PR of their own`);
     const kitFiles = outside.filter(isKitFile);
     const kitAnswer = approved && kitFiles.length ? ownerAnswer(approved, 'merge --approved') : null;
     // A secret chore isn't a kit change: the encrypted stores its answer posted (a sops file can
@@ -7082,7 +7125,7 @@ function cmdMerge() {
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}${coveredNotes.map((n) => `; ${n}`).join('')}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : jobsForced ? ` while its goal is ${jobsForced}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}${coveredNotes.map((n) => `; ${n}`).join('')}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   // Adding a gate is the supervisor's own act (constitutional gate-add), recorded apart from the merge
   // so the owner sees each new check in the act feed and can correct it.
   if (gateAdds?.length) {
@@ -23034,6 +23077,39 @@ const recurringRegistry = Object.freeze({
     return { text: out, problem: null };
   },
 });
+// merge's binding of a recurring-edit answer to the jobs a PR lands (kit-162): the answer must be
+// live (a Yes, not landed, not superseded; read here, whatever ownerAnswer accepted), it must show
+// a change, and the PR must change recurring exactly as it showed, name by name (main's merge base
+// against the head, compared canonically). An answer of another class is the class check's to refuse.
+function recurringBindingFails(base, sha, approved) {
+  const R = recurringRegistry;
+  const q = logGet(approved);
+  if (q?.type !== 'question' || q.class !== 'recurring-edit') return [];
+  const v = questionView(q);
+  const fails = [];
+  const landed = R.landed(approved);
+  if (landed) fails.push(`${approved} already landed (${landed.id})`);
+  else if (!R.live(v)) {
+    const later = R.superseded(v);
+    fails.push(`${approved} can't approve a job change: ${later ? `superseded by ${later.qid}, asked later about ${later.name}` : `${v.status === 'answered' ? `answered "${String(v.answer ?? '').slice(0, 80)}"` : `it is ${v.status}`}, not Yes`}`);
+  }
+  const shown = R.shown(v);
+  if (!shown) return [...fails, `${approved} showed no job change (no change.recurring): ask again with --change`];
+  const a = settingsAt(base, { orNull: true })?.recurring;
+  const b = settingsAt(sha, { orNull: true })?.recurring;
+  const A = isObj(a) ? a : {};
+  const B = isObj(b) ? b : {};
+  const diff = R.changed(A, B);
+  const how = (n) => (!Object.hasOwn(A, n) ? 'added' : !Object.hasOwn(B, n) ? 'removed' : 'changed');
+  for (const n of Object.keys(diff)) if (!Object.hasOwn(shown, n)) fails.push(`recurring.${n} is ${how(n)} here, which ${approved} did not show the owner: ask again for it, or take it out`);
+  for (const [n, e] of Object.entries(shown)) {
+    const exact = Object.hasOwn(diff, n) && (e === null ? !Object.hasOwn(B, n) : Object.hasOwn(B, n) && canonical(B[n]) === canonical(e));
+    if (exact) continue;
+    const did = !Object.hasOwn(diff, n) ? 'leaves it as main has it' : !Object.hasOwn(B, n) ? 'removes it' : !Object.hasOwn(A, n) ? `adds ${JSON.stringify(B[n])}` : `makes it ${JSON.stringify(B[n])}`;
+    fails.push(`recurring.${n}: ${approved} showed ${e === null ? 'a stop' : JSON.stringify(e)}, and this PR ${did}: land exactly what the owner saw`);
+  }
+  return fails;
+}
 
 // ===== sensors: production signals into the loop =====
 // A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
