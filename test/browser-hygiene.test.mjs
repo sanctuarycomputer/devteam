@@ -191,9 +191,9 @@ function plantLock(P, target) {
   fs.symlinkSync(target, f);
 }
 const carries = (pid, P) => { try { return cmdline(pid).includes(`--user-data-dir=${P.profile}`); } catch { return false; } };
-// H2's stand-in: carries the profile, ignores SIGTERM, leads its own group with a sleep in it.
-async function standInOn(P) {
-  const c = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});require('child_process').spawn('sleep',['600'],{stdio:'ignore'});setInterval(()=>{},1e3)", '--', `--user-data-dir=${P.profile}`], { detached: true, stdio: 'ignore' });
+// H2's stand-in: carries the profile, ignores SIGTERM (stamping Date.now() into termFile first), leads its own group with a sleep in it.
+async function standInOn(P, termFile = os.devNull) {
+  const c = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{require('fs').writeFileSync(process.argv[1],String(Date.now()))});require('child_process').spawn('sleep',['600'],{stdio:'ignore'});setInterval(()=>{},1e3)", '--', termFile, `--user-data-dir=${P.profile}`], { detached: true, stdio: 'ignore' });
   ownGroups.add(c.pid);
   await until(() => carries(c.pid, P), 'the stand-in up');
   const child = await until(() => Number(spawnSync('pgrep', ['-g', String(c.pid), 'sleep'], { encoding: 'utf8' }).stdout.trim().split('\n')[0]) || 0, "the stand-in's child");
@@ -336,11 +336,16 @@ hygiene.push(['H1 a sleep is left alone', async (h) => {
 }]);
 
 hygiene.push(['H2 a TERM-proof stand-in and its group go', async (h) => {
-  const si = await standInOn(h);
+  const termFile = path.join(tmp, `term-${process.pid}-${Date.now()}`);
+  const si = await standInOn(h, termFile);
   try {
     plantState(h, si.pid);
-    const r = await started(h);
-    assert.ok(r.ms < 10000, `took ${r.ms} ms`);
+    let goneAt = 0;
+    const poll = setInterval(() => { if (!goneAt && !alive(si.pid)) goneAt = Date.now(); }, 25);
+    try { await started(h); } finally { clearInterval(poll); }
+    assert.ok(fs.existsSync(termFile), 'the stand-in saw SIGTERM');
+    const took = goneAt - Number(fs.readFileSync(termFile, 'utf8'));
+    assert.ok(goneAt > 0 && took < 5000, `SIGTERM to gone took ${took} ms`);
     assert.equal(alive(si.pid), false, 'the stand-in is gone');
     assert.equal(alive(si.child), false, 'its group\'s child is gone');
     await stopped(h);
