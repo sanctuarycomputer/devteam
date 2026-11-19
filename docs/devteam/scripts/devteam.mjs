@@ -1577,6 +1577,7 @@ function integrity(o, file) {
     }
     // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
     if (o.type === 'message' && o.kind === 'handoff' && typeof o.thread !== 'string') return 'a handoff names its thread';
+    if (o.type === 'message' && o.kind === 'handoff' && o.to !== 'supervisor') return 'a handoff goes to the supervisor';
     if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
     if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
     if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
@@ -21011,7 +21012,16 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, 
 // nothing else here (a responder turn or the owner's resolve never settles it; a reply citing it
 // with --re closes it through each reader's replied set, as for any message).
 function settledByLanding(m) {
-  if (m.kind === 'handoff') return logObjects('turn').some((u) => u.thread === m.thread && u.created_by === 'supervisor' && u.created_at > m.created_at);
+  if (m.kind === 'handoff') {
+    // the supervisor's newest turn per thread, worked out once per fold (readLog's object), not per message per read
+    const log = readLog();
+    if (settledByLanding.log !== log) {
+      const last = new Map();
+      for (const u of log.byType.get('turn') ?? []) if (u.created_by === 'supervisor' && typeof u.thread === 'string' && !(last.get(u.thread) >= u.created_at)) last.set(u.thread, u.created_at);
+      Object.assign(settledByLanding, { log, last });
+    }
+    return (settledByLanding.last.get(m.thread) ?? '') > m.created_at;
+  }
   const by = m.created_by ?? m.by;
   if (!by) return false;
   const cls = writerClass(by);

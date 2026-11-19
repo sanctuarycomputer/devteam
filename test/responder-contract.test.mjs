@@ -299,8 +299,9 @@ test('responder-contract A3: the handoff, sent, open and settled; writer on thre
         ['a handoff from the supervisor', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen], F.SUP, /the responder hands threads to the supervisor/],
         ['a handoff from a worker', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen], worker, /the responder hands threads to the supervisor/],
         ['a handoff to a ticket', ['send', 'kit-9-probe', 'x', '--kind', 'handoff', '--thread', Topen], RESPONDER, /the responder hands threads to the supervisor/],
-        ["the responder's info with --re", ['send', 'supervisor', 'x', '--re', M], RESPONDER, /the responder replies to no message \(re\)/],
-        ["the responder's handoff with --re", ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen, '--re', M], RESPONDER, /the responder replies to no message \(re\)/],
+        // cmdSend's own words (task-4 T4-2): integrity's refusal starts the same way, so match what only send says
+        ["the responder's info with --re", ['send', 'supervisor', 'x', '--re', M], RESPONDER, /the responder replies to no message \(re\): a reply would close what it names/],
+        ["the responder's handoff with --re", ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen, '--re', M], RESPONDER, /the responder replies to no message \(re\): a reply would close what it names/],
       ];
       for (const [what, args, role, why] of cases) {
         const before = hashDirs([F.logDir]);
@@ -334,12 +335,20 @@ test('responder-contract A3: the handoff, sent, open and settled; writer on thre
       try {
         const T2 = newThread('Settled handoff');
         const T3 = newThread('Unsettled handoff');
-        const mid = (ago, n) => { const d = new Date(Date.now() - ago - n); return `m-${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}-responder`; };
+        // one clock read for every id (task-4 T4-1): two reads a millisecond apart made H1 and H2 the same id
+        const now = Date.now();
+        const mid = (ago, n) => { const d = new Date(now - ago - n); return `m-${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}-responder`; };
         const H1 = mid(40 * 60000, 0);
         const H2 = mid(40 * 60000, 1);
+        const H3 = mid(40 * 60000, 2);
+        assert.equal(new Set([H1, H2, H3]).size, 3, 'three distinct ids');
         F.hand('responder', { id: H1, type: 'message', to: 'supervisor', kind: 'handoff', text: 'merge it', re: null, sha: null, ticket: null, thread: T2 }, 40 * 60000, 'responder.jsonl');
         F.hand('responder', { id: H2, type: 'message', to: 'supervisor', kind: 'handoff', text: 'merge that', re: null, sha: null, ticket: null, thread: T3 }, 40 * 60000 + 1, 'responder.jsonl');
         F.hand('supervisor', { type: 'turn', thread: T2, text: 'Done.' }, 35 * 60000);
+        // a hand-written handoff to anyone but the supervisor is no line at all (task-4 T4-4)
+        F.hand('responder', { id: H3, type: 'message', to: 'kit-9-probe', kind: 'handoff', text: 'merge this', re: null, sha: null, ticket: null, thread: T3 }, 40 * 60000 + 2, 'responder.jsonl');
+        assert.notEqual(F.run(F.old, ['record', H3], F.SUP).status, 0, 'record finds no handoff to a worker');
+        assert.ok(!JSON.parse(F.run(F.old, ['messages', '--open', '--to', 'kit-9-probe', '--json'], F.SUP).out).map((x) => x.id).includes(H3), 'the worker owes no reply to it');
         const m = F.run(F.old, ['metrics', '--json'], F.SUP);
         assert.equal(m.status, 0, m.err);
         const unanswered = (JSON.parse(m.out).findings ?? []).filter((x) => x.kind === 'unanswered-message').map((x) => x.subject);
