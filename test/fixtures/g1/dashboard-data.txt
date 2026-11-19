@@ -197,6 +197,17 @@ exit 0
       "matched": null,
       "hash": "<sha>",
       "rewritten": false,
+      "labels": [
+        "yes",
+        "no"
+      ],
+      "choice": null,
+      "words": null,
+      "in_words": null,
+      "label": null,
+      "reading": null,
+      "read_by": null,
+      "agreed_by_owner": null,
       "autonomy": null,
       "standing_rule": null,
       "channel": null,
