@@ -162,6 +162,13 @@
   .handle[data-handle="ne"], .handle[data-handle="sw"] { cursor: nesw-resize; }
   .handle[data-handle="n"], .handle[data-handle="s"] { cursor: ns-resize; }
   .handle[data-handle="e"], .handle[data-handle="w"] { cursor: ew-resize; }
+  /* others on the canvas (kit-663): stage chrome over the design, never under the pointer; each
+     person's colour (--who) is set by script */
+  #others { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 2; }
+  #others [hidden] { display: none; }
+  #others .cursor { position: absolute; left: 0; top: 0; }
+  #others .cursor svg { display: block; }
+  #others .cursor-name { position: absolute; left: 14px; top: 16px; font: 500 11px/18px var(--sans); color: #fff; background: var(--who); padding: 0 6px; border-radius: 4px; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
   body[data-state="error"] #surface, body[data-state="error"] .zoom { display: none; }
 
   /* under 760 px, watch and comment: no panels, the stage the full width under the bar, the bar's
@@ -1283,6 +1290,7 @@
     $('zoomPct').textContent = `${Math.round(view.z * 100)}%`;
     drawPen(); // a path being drawn follows the view
     drawHandles(); // and the resize handles
+    placeOthers(); // and others' cursors (kit-663)
   }
   // Zoom by `factor` around the stage point (sx, sy), which stays put; z kept to [0.1, 8], so at a
   // bound the view doesn't change at all.
@@ -1503,6 +1511,7 @@
     const pg = pageById(id) || pages()[0];
     if (pg.id !== state.pageId) { state.sel = null; state.sels = []; } // a page switch clears the selection
     state.pageId = pg.id;
+    sendHere(); // presence: the spot follows the shown page (kit-663)
     const n = ++shown;
     renderPages(); // the row buttons follow the shown page
     markPage(pg);
@@ -1517,6 +1526,7 @@
       if (n !== shown) return;
       if (!moved) fit();
       drawHandles();
+      placeOthers();
       setState('ready');
     });
   }
@@ -1910,6 +1920,7 @@
     syncBody();
     keepDrag();
     drawHandles();
+    placeOthers();
   }
 
   // The message line (#toast) for 6 s, and the banner (#banner; null hides it).
@@ -3149,8 +3160,8 @@
     }
   }
   // an image loaded later (load doesn't bubble: caught on the way down) moves the box
-  $('surface').addEventListener('load', () => drawHandles(), true);
-  $('surface').addEventListener('error', () => drawHandles(), true);
+  $('surface').addEventListener('load', () => { drawHandles(); placeOthers(); }, true);
+  $('surface').addEventListener('error', () => { drawHandles(); placeOthers(); }, true);
   // A press on a handle: the resize of the one selected node, followed as kit-668's drag (gesture fields
   // as pressMove's). start: the stored x, y, size.w, size.h where they are numbers, else as drawn (in
   // the parent's page px, whole px; hug, fill and a token become fixed); loose: placed by x, y (its left
@@ -4424,6 +4435,10 @@
     fetching: false, held: [], stale: false, again: false, session: null, highest: 0, epoch: 0, lowered: false,
     // kit-669: the ids of the last `select` sent on this socket (as JSON), null since its welcome
     lastSelect: null,
+    // kit-663 §6: a fetch has landed on a new session (a restart or a reload) or a lowered rev since the
+    // last `select` went: the next one goes even when it equals the last (an empty one too), since the
+    // server's selection may have lost those ids
+    resendSelect: false,
   };
   // ---- the `select` sender (kit-669 §2, canvas@1 §5) ----
   // Whenever the selection changes the server is told its ids in layer order, the first 100 (contract
@@ -4452,9 +4467,10 @@
     selq.want = false;
     const ids = state.sels.slice(0, SELECT_IDS);
     const key = JSON.stringify(ids);
-    if (key === (sock.lastSelect ?? '[]')) return;
+    if (!sock.resendSelect && key === (sock.lastSelect ?? '[]')) return;
     if (send({ t: 'select', ids })) {
       sock.lastSelect = key;
+      sock.resendSelect = false;
       selq.lastAt = now;
     }
   }
@@ -4654,6 +4670,7 @@
     sock.stale = false;
     takeDoc(b);
     if (state.session !== before || sock.lowered) {
+      sock.resendSelect = true; // kit-663 §6 (kit-669 F2): the server's selections may have lost ours
       state.pending = [...state.kept.sort(bySeq), ...state.pending];
       state.kept = [];
       sock.lowered = false;
@@ -4668,12 +4685,280 @@
     if (sock.again && !sock.fetching) refetch();
     redraw();
     pump();
-    // kit-663 §6 (kit-669 F2): the selection is sent again once the fetch lands, after the re-sent
-    // edits are acked, even when it equals the last one sent: a restart or a reload may have taken
-    // those ids out of the server's selection
-    sock.lastSelect = null;
-    queueSelect();
+    // kit-663 §6 (kit-669 F2): redraw's selectIds has queued the selection, which goes once the re-sent
+    // edits are acked, even when it equals the last one sent (resendSelect, set above)
   }
+
+  // ---- others on the canvas (kit-663): presence@1 cursors ----
+
+  // The overlay others are drawn in: stage chrome over the design, placed in stage px from anchors.
+  const othersLayer = document.createElement('div');
+  othersLayer.id = 'others';
+  othersLayer.setAttribute('aria-hidden', 'true');
+  $('stage').insertBefore(othersLayer, $('surface').nextSibling);
+  // A person's colour, by a hash of their id: each holds white text at 4.5:1 or more.
+  const PALETTE = ['#c92a2a', '#a61e4d', '#862e9c', '#5f3dc4', '#364fc7', '#1864ab', '#0b7285', '#1f6f3f'];
+  function colourOf(id) {
+    let h = 0;
+    for (const ch of String(id)) h = (Math.imul(h, 31) + ch.codePointAt(0)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+
+  // SHA-256 of a string's UTF-8 bytes, as hex (presence@1 §5's h: rule; crypto.subtle exists only on
+  // secure origins, and a laptop's dashboard may be plain http on a LAN address). The constants are the
+  // standard's: the first 32 bits of the fractional parts of the square and cube roots of the primes.
+  const SHA = (() => {
+    const primes = [];
+    for (let n = 2; primes.length < 64; n++) if (primes.every((p) => n % p !== 0)) primes.push(n);
+    const frac = (v) => Math.floor((v - Math.floor(v)) * 0x100000000) >>> 0;
+    return { K: primes.map((p) => frac(Math.cbrt(p))), H: primes.slice(0, 8).map((p) => frac(Math.sqrt(p))) };
+  })();
+  const ror = (x, n) => (x >>> n) | (x << (32 - n));
+  function sha256Hex(str) {
+    const bytes = new TextEncoder().encode(str);
+    const len = bytes.length;
+    const total = Math.ceil((len + 9) / 64) * 64;
+    const m = new Uint8Array(total);
+    m.set(bytes);
+    m[len] = 0x80;
+    const dv = new DataView(m.buffer);
+    dv.setUint32(total - 8, Math.floor(len / 0x20000000));
+    dv.setUint32(total - 4, (len * 8) >>> 0);
+    const h = SHA.H.slice();
+    const w = new Uint32Array(64);
+    for (let o = 0; o < total; o += 64) {
+      for (let i = 0; i < 16; i++) w[i] = dv.getUint32(o + i * 4);
+      for (let i = 16; i < 64; i++) {
+        const s0 = ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      }
+      let [a, b, c, d, e, f, g, k] = h;
+      for (let i = 0; i < 64; i++) {
+        const t1 = (k + (ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)) + ((e & f) ^ (~e & g)) + SHA.K[i] + w[i]) >>> 0;
+        const t2 = ((ror(a, 2) ^ ror(a, 13) ^ ror(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+        k = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+      }
+      [a, b, c, d, e, f, g, k].forEach((v, i) => { h[i] = (h[i] + v) >>> 0; });
+    }
+    return h.map((v) => v.toString(16).padStart(8, '0')).join('');
+  }
+  // An `at` part as presence@1 §5 sends it: as it is when in the set and at most 120 characters, else h:.
+  const AT_PART = /^[A-Za-z0-9._:@/-]{1,120}$/;
+  const atPart = (v) => (AT_PART.test(v) ? v : `h:${sha256Hex(v).slice(0, 16)}`);
+
+  // The presence socket. ws: open or null; live: welcomed; you: our person id; here: the at last sent
+  // (and visible, as JSON in hereKey); people: conn -> { id, name, on } for others' connections, `on`
+  // when on our spot and visible; cursors: conn -> { id, name, k, x, y }; parked: closed while hidden.
+  const MOVE_MS = 67; // presence@1 §6: at most 15 moves a second
+  const HIDDEN_MS = 60000; // §9: a page hidden this long closes its socket
+  const SPOT = ['page', 'tab', 'peek', 'art'];
+  const pres = {
+    ws: null, live: false, tries: 0, you: null, here: null, hereKey: null, people: new Map(), cursors: new Map(),
+    parked: false, hiddenTimer: null, retryTimer: null, lastMoveAt: -Infinity, moveTimer: null, nextMove: undefined,
+  };
+  function connectPresence() {
+    if (pres.ws || pres.parked || state.session === null || pres.retryTimer !== null) return;
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    let ws;
+    try { ws = new WebSocket(`${scheme}://${location.host}/presence`); } catch { retryPresence(); return; }
+    pres.ws = ws;
+    ws.addEventListener('message', (e) => { if (pres.ws === ws) presenceMessage(e.data); });
+    ws.addEventListener('close', () => presenceClosed(ws));
+  }
+  // §8: reconnect after 1, 2, 4 … up to 30 s.
+  function retryPresence() {
+    const ms = Math.min(30000, 1000 * 2 ** Math.min(pres.tries, 5));
+    pres.tries += 1;
+    pres.retryTimer = setTimeout(() => { pres.retryTimer = null; connectPresence(); }, ms);
+  }
+  // Down: every cursor goes (§8: cursors stop), and the page tries again unless it is parked (hidden).
+  function presenceClosed(ws) {
+    if (pres.ws !== ws) return;
+    pres.ws = null;
+    pres.live = false;
+    pres.here = null;
+    pres.hereKey = null;
+    pres.people.clear();
+    pres.cursors.clear();
+    placeOthers();
+    if (!pres.parked) retryPresence();
+  }
+  function presenceSend(m) {
+    if (!pres.ws || !pres.live) return false;
+    try { pres.ws.send(JSON.stringify(m)); return true; } catch { return false; }
+  }
+  // `here`, when the socket is welcomed and the spot or the visibility changed (or `force`).
+  function sendHere(force = false) {
+    if (!pres.live || state.pageId === null || state.slug === null) return;
+    const at = { page: 'canvas', tab: atPart(String(state.pageId)), peek: null, art: atPart(`${state.slug}@canvas`), thread: null };
+    const visible = document.visibilityState === 'visible';
+    const key = JSON.stringify([at, visible]);
+    if (!force && key === pres.hereKey) return;
+    if (presenceSend({ t: 'here', at, visible })) { pres.here = at; pres.hereKey = key; }
+  }
+  function presenceMessage(data) {
+    let m;
+    try { m = JSON.parse(data); } catch { return; }
+    if (!isObj(m) || typeof m.t !== 'string') return;
+    if (m.t === 'welcome') {
+      pres.live = true;
+      pres.tries = 0;
+      pres.you = isObj(m.you) && typeof m.you.id === 'string' ? m.you.id : null;
+      sendHere(true);
+    } else if (m.t === 'people') takePeople(m);
+    else if (m.t === 'move') takeMove(m);
+    else if (m.t === 'ping') presenceSend({ t: 'pong' });
+    // `changed` and any other kind: nothing on a canvas
+  }
+  // people: others' connections, each `on` when its at is our spot and it is visible; a cursor whose
+  // conn isn't on any more goes.
+  function takePeople(m) {
+    if (!Array.isArray(m.people)) return;
+    pres.people.clear();
+    for (const p of m.people) {
+      if (!isObj(p) || typeof p.id !== 'string' || p.id === pres.you || !Array.isArray(p.conns)) continue;
+      const name = typeof p.name === 'string' && p.name ? p.name : p.id;
+      for (const c of p.conns) {
+        if (!isObj(c) || typeof c.conn !== 'string' || !isObj(c.at)) continue;
+        const on = c.visible === true && pres.here !== null && SPOT.every((k) => c.at[k] === pres.here[k]);
+        pres.people.set(c.conn, { id: p.id, name, on });
+      }
+    }
+    for (const conn of [...pres.cursors.keys()]) {
+      const who = pres.people.get(conn);
+      if (!who || !who.on) pres.cursors.delete(conn);
+    }
+    placeOthers();
+  }
+  const unit = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
+  function takeMove(m) {
+    const who = typeof m.conn === 'string' ? pres.people.get(m.conn) : undefined;
+    if (!who || !who.on) return;
+    const a = m.a;
+    if (a === null) pres.cursors.delete(m.conn);
+    else if (isObj(a) && typeof a.k === 'string' && a.k && unit(a.x) && unit(a.y)) pres.cursors.set(m.conn, { id: who.id, name: who.name, k: a.k, x: a.x, y: a.y });
+    else return;
+    placeOthers();
+  }
+
+  // Our pointer: the drawn node under it and its fraction across that node's box, else `@<page id>`
+  // and its fraction across the page's content bounds (canvas@1 §9), in page px.
+  const fracOf = (d, w) => (w > 0 ? clamp(d / w, 0, 1) : 0);
+  // The content bounds for cursors: contentBounds(), or on an empty page the -200..200 square.
+  const cursorBounds = () => contentBounds() ?? { l: -200, t: -200, r: 200, b: 200 };
+  function anchorAt(cx, cy) {
+    for (const el of document.elementsFromPoint(cx, cy)) {
+      const n = el.closest('#surface [data-id]');
+      if (!n) continue;
+      const r = n.getBoundingClientRect();
+      return { k: n.dataset.id, x: fracOf(cx - r.left, r.width), y: fracOf(cy - r.top, r.height) };
+    }
+    const o = $('surface').getBoundingClientRect();
+    const b = cursorBounds();
+    const px = (cx - o.left) / view.z;
+    const py = (cy - o.top) / view.z;
+    return { k: `@${state.pageId}`, x: fracOf(px - b.l, b.r - b.l), y: fracOf(py - b.t, b.b - b.t) };
+  }
+  // At most one move per 67 ms: the latest waits for the window's end, those in between are dropped.
+  function flushMove() {
+    if (pres.moveTimer !== null || pres.nextMove === undefined) return;
+    const now = performance.now();
+    const wait = pres.lastMoveAt + MOVE_MS - now;
+    if (wait > 0) {
+      pres.moveTimer = setTimeout(() => { pres.moveTimer = null; flushMove(); }, Math.ceil(wait));
+      return;
+    }
+    const a = pres.nextMove;
+    pres.nextMove = undefined;
+    if (presenceSend({ t: 'move', a })) pres.lastMoveAt = now;
+  }
+  $('stage').addEventListener('pointermove', (e) => {
+    if (!pres.live || !ready() || state.pageId === null) return;
+    pres.nextMove = anchorAt(e.clientX, e.clientY);
+    flushMove();
+  });
+  $('stage').addEventListener('pointerleave', () => {
+    if (!pres.live) return;
+    pres.nextMove = null;
+    flushMove();
+  });
+
+  // Visibility (§9): every change says `here`; hidden for 60 s closes the socket, shown reconnects.
+  document.addEventListener('visibilitychange', () => {
+    clearTimeout(pres.hiddenTimer);
+    pres.hiddenTimer = null;
+    if (document.visibilityState === 'visible') {
+      if (pres.parked) { pres.parked = false; connectPresence(); }
+      sendHere();
+      return;
+    }
+    sendHere();
+    pres.hiddenTimer = setTimeout(() => {
+      pres.hiddenTimer = null;
+      if (document.visibilityState === 'visible') return;
+      pres.parked = true;
+      clearTimeout(pres.retryTimer);
+      pres.retryTimer = null;
+      if (pres.ws) pres.ws.close(); else presenceClosed(null);
+    }, HIDDEN_MS);
+  });
+
+  // ---- drawing others ----
+
+  // An anchor's point on screen: a drawn node's box at the fraction, or the shown page's content bounds
+  // at the fraction through the view; null when it can't be drawn here (another page, a node not drawn).
+  function anchorPoint(k, x, y) {
+    if (k.startsWith('@')) {
+      if (k.slice(1) !== state.pageId) return null;
+      const o = $('surface').getBoundingClientRect();
+      const b = cursorBounds();
+      return { x: o.left + (b.l + x * (b.r - b.l)) * view.z, y: o.top + (b.t + y * (b.b - b.t)) * view.z };
+    }
+    const el = drawn.get(k);
+    if (!el || el.getClientRects().length === 0) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left + x * r.width, y: r.top + y * r.height };
+  }
+  const SVG = 'http://www.w3.org/2000/svg';
+  function cursorEl(conn, c) {
+    const el = document.createElement('div');
+    el.className = 'cursor';
+    el.dataset.conn = conn;
+    el.dataset.person = c.id;
+    el.style.setProperty('--who', colourOf(c.id));
+    const svg = document.createElementNS(SVG, 'svg');
+    svg.setAttribute('width', '16');
+    svg.setAttribute('height', '18');
+    svg.setAttribute('viewBox', '0 0 16 18');
+    const path = document.createElementNS(SVG, 'path');
+    path.setAttribute('d', 'M0 0L14 7.5L7.5 9.5L4.5 16Z');
+    path.setAttribute('fill', colourOf(c.id));
+    path.setAttribute('stroke', '#fff');
+    path.setAttribute('stroke-width', '1.2');
+    svg.append(path);
+    const name = document.createElement('span');
+    name.className = 'cursor-name';
+    name.textContent = c.name;
+    el.append(svg, name);
+    return el;
+  }
+  // Every other person's cursor placed again from its anchor (after every redraw, zoom, pan, resize and
+  // late image load). Cursors are rebuilt whole: there are few, and a name or person never goes stale.
+  function placeOthers() {
+    const st = $('stage').getBoundingClientRect();
+    const els = [];
+    for (const [conn, c] of pres.cursors) {
+      const el = cursorEl(conn, c);
+      el.dataset.k = c.k;
+      const pt = ready() ? anchorPoint(c.k, c.x, c.y) : null;
+      if (pt === null) el.hidden = true;
+      else el.style.transform = `translate(${pt.x - st.left}px, ${pt.y - st.top}px)`;
+      els.push(el);
+    }
+    othersLayer.replaceChildren(...els);
+  }
+  window.addEventListener('resize', () => placeOthers());
 
   async function start() {
     setState('loading');
@@ -4703,7 +4988,7 @@
     showPage(hashPage());
     syncBody();
     // main's copy (session null) is read-only: no socket, no editing
-    if (state.session !== null) connect();
+    if (state.session !== null) { connect(); connectPresence(); }
   }
 
   start().catch(() => fail(TEXT.notLoaded));
