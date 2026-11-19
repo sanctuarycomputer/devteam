@@ -112,10 +112,24 @@
   .say { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; width: max-content; max-width: calc(100% - 24px); z-index: 4; pointer-events: none; }
   .say p { margin: 0; max-width: var(--measure); font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); box-shadow: var(--shadow); }
   #banner { background: var(--amber-bg); color: var(--amber-fg); border-color: var(--amber-fg); }
-  /* the tools bar (kit-662): at the stage's foot, centred, its right edge at least 168 px from the
-     stage's (kit-661 checks the stage's own bottom-right corner, 60 and 120 px in); it wraps when narrow */
-  .tools { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; flex-wrap: wrap; justify-content: center; gap: 2px; width: max-content; max-width: calc(100% - 336px); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 3px; box-shadow: var(--shadow); z-index: 3; }
-  .tools button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; border-color: transparent; background: transparent; }
+  /* the tools bar (kit-662): one row at the stage's foot, centred, its right edge at least 160 px left
+     of the stage's (kit-661 checks the stage's own bottom-right corner, 60 and 120 px in). It never
+     wraps: by the stage's width it shows names and keys (about 470 px), the keys alone (about 190 px),
+     then the keys in 12 px buttons at the stage's left (90 px); under a 260 px stage, where not even
+     that keeps 160 px clear, it is hidden and the tool keys still work. */
+  .stage { container: stage / inline-size; }
+  .tools { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; flex-wrap: nowrap; gap: 2px; width: max-content; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 3px; box-shadow: var(--shadow); z-index: 3; }
+  .tools button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; border-color: transparent; background: transparent; }
+  @container stage (width < 840px) {
+    .tools .tn { display: none; }
+  }
+  @container stage (width < 540px) {
+    .tools { left: 4px; transform: none; gap: 0; padding: 2px; }
+    .tools button { width: 12px; padding: 0; overflow: hidden; }
+  }
+  @container stage (width < 260px) {
+    .tools { display: none; }
+  }
   .tools button:hover { background: var(--hover); }
   .tools button[aria-pressed="true"] { background: var(--well); border-color: var(--fg-2); }
   .tools button:disabled { opacity: .5; cursor: not-allowed; }
@@ -197,13 +211,13 @@
       <p id="toast" role="status" hidden></p>
     </div>
     <div class="tools" id="tools" role="toolbar" aria-label="Tools" hidden>
-      <button type="button" data-tool="move" aria-pressed="true">Move <kbd>V</kbd></button>
-      <button type="button" data-tool="frame" aria-pressed="false">Frame <kbd>F</kbd></button>
-      <button type="button" data-tool="text" aria-pressed="false">Text <kbd>T</kbd></button>
-      <button type="button" data-tool="rect" aria-pressed="false">Rectangle <kbd>R</kbd></button>
-      <button type="button" data-tool="ellipse" aria-pressed="false">Ellipse <kbd>O</kbd></button>
-      <button type="button" data-tool="vector" aria-pressed="false">Vector <kbd>P</kbd></button>
-      <button type="button" data-tool="image" aria-pressed="false">Image <kbd>I</kbd></button>
+      <button type="button" data-tool="move" aria-pressed="true" aria-label="Move" title="Move (V)"><span class="tn">Move</span> <kbd>V</kbd></button>
+      <button type="button" data-tool="frame" aria-pressed="false" aria-label="Frame" title="Frame (F)"><span class="tn">Frame</span> <kbd>F</kbd></button>
+      <button type="button" data-tool="text" aria-pressed="false" aria-label="Text" title="Text (T)"><span class="tn">Text</span> <kbd>T</kbd></button>
+      <button type="button" data-tool="rect" aria-pressed="false" aria-label="Rectangle" title="Rectangle (R)"><span class="tn">Rectangle</span> <kbd>R</kbd></button>
+      <button type="button" data-tool="ellipse" aria-pressed="false" aria-label="Ellipse" title="Ellipse (O)"><span class="tn">Ellipse</span> <kbd>O</kbd></button>
+      <button type="button" data-tool="vector" aria-pressed="false" aria-label="Vector" title="Vector (P)"><span class="tn">Vector</span> <kbd>P</kbd></button>
+      <button type="button" data-tool="image" aria-pressed="false" aria-label="Image" title="Image (I)"><span class="tn">Image</span> <kbd>I</kbd></button>
     </div>
     <input type="file" id="imageFile" accept="image/png,image/jpeg,image/webp,image/gif" aria-label="Image file" hidden>
   </section>

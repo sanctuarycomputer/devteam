@@ -878,7 +878,7 @@ async function madeAndSelected(p, id, what) {
 const shownMsg = (p) => shownText(p, '#msg');
 
 test('tool keys', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
-  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  const { p, rec, size } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
   await live(p);
   // the bar: a toolbar at the stage's foot, centred, its right edge at least 160 px from the stage's
   assert.equal(await p.ev("document.getElementById('tools')?.getAttribute('role') ?? null"), 'toolbar');
@@ -913,6 +913,32 @@ test('tool keys', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeo
   }
   assert.equal(await p.ev("document.querySelector('#props [data-prop=\"name\"]').value"), TOOL_KEYS.map(([k]) => k).join(''), 'the keys went to the field');
   assert.equal(edits(rec).length, n0, 'nothing sent while typing');
+  await leavePanel(p);
+  // a narrower desktop stage (review T3-1): the bar stays one row at the foot, every button inside
+  // it, its right edge at least 160 px left of the stage's, and the stage's own corner points bare
+  for (const w of [1280, 1024, 870, 800]) {
+    await size(w, 900);
+    await within(async () => (await p.ev('innerWidth')) === w, `the window at ${w}`);
+    const st = await box(p, '#stage');
+    const g = await p.ev(`(() => {
+      const t = document.getElementById('tools');
+      const b = t.getBoundingClientRect();
+      const btns = [...t.querySelectorAll('button[data-tool]')].map((x) => { const r = x.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom, w: r.width }; });
+      return { shown: getComputedStyle(t).display !== 'none' && b.width > 0, bar: { l: b.left, r: b.right, t: b.top, b: b.bottom }, btns };
+    })()`);
+    assert.equal(g.shown, true, `${w}: the bar shown`);
+    assert.equal(g.btns.length, 7, `${w}: seven tools`);
+    for (const [i, r] of g.btns.entries()) {
+      assert.ok(r.w > 0 && r.l >= g.bar.l - 0.5 && r.r <= g.bar.r + 0.5 && r.t >= g.bar.t - 0.5 && r.b <= g.bar.b + 0.5, `${w}: button ${i} ${JSON.stringify(r)} inside the bar ${JSON.stringify(g.bar)}`);
+    }
+    assert.equal(new Set(g.btns.map((r) => Math.round(r.t))).size, 1, `${w}: the bar is one row`);
+    assert.ok(st.r - g.bar.r >= 160, `${w}: the bar's right edge ${st.r - g.bar.r} px left of the stage's`);
+    assert.ok(g.bar.l >= st.l && st.b - g.bar.b >= 0 && st.b - g.bar.b < 40, `${w}: the bar inside the stage, at its foot`);
+    for (const d of [60, 120]) assert.equal(await p.ev(`document.elementFromPoint(${st.r - d}, ${st.b - d})?.id`), 'stage', `${w}: the stage's corner point ${d} px in is bare stage`);
+    await p.key('F');
+    assert.equal(await pressedTool(p), 'frame', `${w}: F still presses Frame`);
+    await p.key('Escape');
+  }
   noExceptions(rec);
 });
 
