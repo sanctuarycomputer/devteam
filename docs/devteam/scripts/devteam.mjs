@@ -1741,22 +1741,33 @@ function fold(all) {
     // A goal's hold has its own rule (planning.md §1, holds): the owner's line always counts; the
     // supervisor's counts as a fleet op, the undo of a fleet op still in force on this goal, a drain
     // of a running goal, or the release of a drain it set itself. Anything else is ignored, with why.
+    // hold_for and hold_until (what the hold waits on, and when to look again) are part of the hold
+    // line: they apply with its hold, are refused with it, and a hold line without them leaves the
+    // hold with no cause. A line carrying them with no hold changes neither.
+    const holdKey = (k) => k === 'hold' || k === 'hold_for' || k === 'hold_until';
+    const onlyHold = () => Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || holdKey(k));
+    const holdWith = (h) => {
+      obj.hold = h;
+      obj.__holdBy = cls;
+      for (const k of ['hold_for', 'hold_until']) if (l[k] !== undefined && l[k] !== null) obj[k] = l[k]; else delete obj[k];
+      return { hold: h, ...(l.hold_for !== undefined ? { hold_for: l.hold_for } : {}), ...(l.hold_until !== undefined ? { hold_until: l.hold_until } : {}) };
+    };
     let holdLine = null;
+    if (obj.type === 'goal' && !l.hold && (l.hold_for !== undefined || l.hold_until !== undefined)) {
+      ignored.push({ line: l, why: 'hold_for and hold_until go with a hold' });
+      if (onlyHold()) continue;
+    }
     if (obj.type === 'goal' && l.hold) {
       const cur = obj.hold ?? { mode: 'run' };
       const why = holdRefusal(l.hold, cur, obj.__holdBy ?? null, cls);
       if (why) {
         ignored.push({ line: l, why });
-        if (Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold')) continue;
+        if (onlyHold()) continue;
       } else holdLine = l.hold;
     }
-    const holdOnly = obj.type === 'goal' && Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold');
+    const holdOnly = obj.type === 'goal' && onlyHold();
     if (holdOnly) {
-      if (holdLine) {
-        obj.hold = holdLine;
-        obj.__holdBy = cls;
-        obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), hold: holdLine });
-      }
+      if (holdLine) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...holdWith(holdLine) });
       continue;
     }
     // A supervisor's line under an answer to a goal-change --order question is that answer applied, on
@@ -1801,14 +1812,9 @@ function fold(all) {
       continue;
     }
     const rank = RANK[cls];
-    const changed = {};
-    if (holdLine) {
-      obj.hold = holdLine;
-      obj.__holdBy = cls;
-      changed.hold = holdLine;
-    }
+    const changed = holdLine ? holdWith(holdLine) : {};
     for (const [k, val] of Object.entries(l)) {
-      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (notOwnTag && k === 'kit_lesson')) continue;
+      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (obj.type === 'goal' && holdKey(k)) || (notOwnTag && k === 'kit_lesson')) continue;
       // an order line's priority is the owner's answer, at the owner's rank; its approved stays the
       // supervisor's, so a later answer's approved still lands and is seen as used
       const r = byOrder && k === 'priority' ? RANK.owner : rank;
@@ -14415,6 +14421,43 @@ function cmdMetrics() {
   ].join('\n'));
 }
 
+// What a hold waits on, read from one entry of a ticket's held_for or a goal's hold_for (design
+// every-wait-names-its-cause-and-every-put, the cause table): { form, id, state, since, holder_subject },
+// or null for a string in no known form (until:<date> among them: the review date is held_until or
+// hold_until, never a cause). form is q | ticket | chore | goal | pr | run | external; id the question's,
+// ticket's or goal's id, the chore's slug, <link>#<n>, <link>:<run id>, or the external words. state is
+// open | resolved | failed and since when it became so (null while open); here every cause is open,
+// and kit-572 (the log's forms) and kit-573 (pr: and run:) read the rest. holder_subject is the
+// next-move subject a hold's move is copied from, its via (ticket:, chore:, goal:), null for a question (its
+// move is the owner's answer) and for pr:, run: and external:. Whether the kit can follow a cause, and
+// so whether it needs a date, is read from form (q, ticket, chore, goal), never from holder_subject.
+// Self-contained: its patterns copy the log schema's ids, LINK_ID and choreSlug's slug.
+function waitCause(ref) {
+  const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
+  const TICKET = /^[a-z][a-z0-9]*(-[a-z0-9]+)*-[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$/;
+  const LINK = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+  const SLUG = /^[a-z0-9]+([.-][a-z0-9]+)*$/;
+  if (typeof ref !== 'string') return null;
+  const cause = (form, id, holder_subject = null) => ({ form, id, state: 'open', since: null, holder_subject });
+  if (ID.test(ref)) return ref.startsWith('q-') ? cause('q', ref) : null;
+  // shaped like a log id (a letter, a date, a time) but not one: never read as a ticket id
+  if (/^[a-z]-\d{8}-\d{9}/.test(ref)) return null;
+  const i = ref.indexOf(':');
+  const [kind, rest] = i === -1 ? [null, ref] : [ref.slice(0, i), ref.slice(i + 1)];
+  if (kind === 'chore') return SLUG.test(rest) && !/\.lock$/.test(rest) ? cause('chore', rest, `chore:${rest}`) : null;
+  if (kind === 'goal') return ID.test(rest) && rest.startsWith('g-') ? cause('goal', rest, `goal:${rest}`) : null;
+  if (kind === 'pr') {
+    const m = rest.match(/^([^#]+)#([1-9]\d*)$/);
+    return m && LINK.test(m[1]) ? cause('pr', rest) : null;
+  }
+  if (kind === 'run') {
+    const m = rest.match(/^([^:]+):([1-9]\d*)$/);
+    return m && LINK.test(m[1]) ? cause('run', rest) : null;
+  }
+  if (kind === 'external') return rest.length <= 200 && /^\S(?:.*\S)?$/.test(rest) && !/[\r\n\v\f\u0085\u2028\u2029]/.test(rest) ? cause('external', rest) : null;
+  if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
+  return null;
+}
 /* next-moves start */
 // The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
 // one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
@@ -14422,13 +14465,17 @@ function cmdMetrics() {
 // itself; it names it.
 //
 // The contract next-move@1. A move is one object:
-//   subject     "goal:<g-id>" | "ticket:<id>" | "planner:<feature>" | "chore:<slug>"
+//   subject     "goal:<g-id>" | "ticket:<id>" | "planner:<feature>" | "chore:<slug>", and the waits goal's
+//               "follow-up:<o-id>" (a put-off note), "thread:<t-id>" (a thread bound to work),
+//               "answer:<q-id>" (an owner's answer to carry out), "duty:<name>" (a duty fallen due, e.g.
+//               duty:retro) and "record:<id>" (a loop record: a corrected act, a trial with no outcome)
 //   move        the row's key, kebab-case (e.g. ask-goal-met)
 //   words       a plain sentence for the owner (e.g. "Ask you whether it is met")
 //   holder      owner | supervisor | planner | worker | nobody
-//   ref         null, or { kind, id, url }: kind q | m | ticket | goal | chore | pr; id the question's,
-//               message's, ticket's, goal's or chore branch's id as a string, or for a pr the PR number
-//               as an integer; url the PR's URL on a pr ref, absent on every other kind
+//   ref         null, or { kind, id, url }: kind q | m | ticket | goal | chore | pr | o | t | a; id the
+//               question's, message's, ticket's, goal's or chore branch's id as a string, o a follow-up
+//               observation's id, t a thread's id, a an act's id, or for a pr the PR number as an
+//               integer; url the PR's URL on a pr ref, absent on every other kind
 //   title       the subject's own title: the goal's, the ticket's, the planner's feature's, a chore's
 //               --what or its tip commit's subject
 //   since       ISO time the move began (never stored: each row names its source)
@@ -14450,8 +14497,13 @@ function cmdMetrics() {
 //               rung 1 or 2, a stalled one at 2, a quiet one stays 0
 //   chore       on a chore: move only (absent on every other): { branch: "chore-<slug>", ahead: the
 //               commits main lacks, pr: null | { number, url }, for: [ the refs from chore start --for ] }
-// Every field but chore is always present; ref, command, quiet, via and flag carry null, never go
-// missing.
+//   wait        on a ticket move whose hold names its causes (held_for) only, absent on every other:
+//               { "causes": [ { "ref", "words", "state" } ], "until": null | "<YYYY-MM-DD>" }: each cause
+//               as held_for gives it (ref), in words, and its state open | resolved | failed
+//               (waitCause()); until the hold's held_until. A page shows what the hold waits on from it
+//               without a second read
+// Every field but chore and wait is always present; ref, command, quiet, via and flag carry null,
+// never go missing.
 //
 // Its five places:
 //   1. moves --json: { "next_move": 1, "moves": [ … ] }
@@ -14462,16 +14514,19 @@ function cmdMetrics() {
 //      running goals' moves only (no chore moves)
 //   5. hello's pulse.next: one move (the top flagged, else top-priority, running goal's), or null
 // Additive changes keep @1; a renamed or removed field, or a changed meaning, bumps it. Fixtures:
-// test/fixtures/next-moves/. The closed lists, one per line (test/next-moves.test.mjs reads them):
-// values fields: subject | move | words | holder | ref | title | since | command | covered_by | quiet | via | flag | rung | chore
-// values subject: goal: | ticket: | planner: | chore:
+// test/fixtures/next-moves/, and for the waits goal's additions (its subjects, ref kinds o, t and a, and
+// wait) test/fixtures/waits/. via gains no values: the new rows copy moves from tickets and chores.
+// The closed lists, one per line (test/next-moves.test.mjs reads them):
+// values fields: subject | move | words | holder | ref | title | since | command | covered_by | quiet | via | flag | rung | chore | wait
+// values subject: goal: | ticket: | planner: | chore: | follow-up: | thread: | answer: | duty: | record:
 // values holder: owner | supervisor | planner | worker | nobody
-// values ref.kind: q | m | ticket | goal | chore | pr
+// values ref.kind: q | m | ticket | goal | chore | pr | o | t | a
 // values quiet: null | hold | drain | queue
 // values via: null | ticket: | planner: | goal: | chore:
 // values flag: null | owed | stalled | none
 // values rung: 0 | 1 | 2
 // values chore: branch | ahead | pr | for
+// values wait.state: open | resolved | failed
 function nextMoves() {
   return [];
 }

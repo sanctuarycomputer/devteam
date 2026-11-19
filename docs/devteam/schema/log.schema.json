@@ -290,6 +290,29 @@
             "additionalProperties": false,
             "x-tip": "The goal's toggle: run, drain (nothing new starts, work in flight finishes) or park (sessions stop with a handoff)."
           },
+          "hold_for": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "minItems": 1,
+            "description": "What the goal's current drain waits on (design every-wait-names-its-cause-and-every-put): each entry a question id, a ticket id, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id> or external:<words>. Top-level beside hold, never inside it, and part of the line that sets hold: a later hold line without it leaves the hold with no cause. null clears it.",
+            "x-tip": "What the drain waits on: a question, a ticket, a chore, a goal, a PR, a CI run or something outside."
+          },
+          "hold_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "When the supervisor looks again at the drain if it still waits (a date); part of the hold line, like hold_for. null clears it.",
+            "x-tip": "When the drain is looked at again if it still waits."
+          },
           "decision": {
             "type": "object",
             "description": "The owner's latest decision on the goal: approve (ready), refine (notes the planner takes into account before asking again), let-go (abandoned), restore (a let-go goal back to the status it had, parked), met (the owner's yes to a goal-met question, named in question, marked it met).",
@@ -357,7 +380,9 @@
         "x-set-only": [
           "approved",
           "carried",
-          "hold"
+          "hold",
+          "hold_for",
+          "hold_until"
         ]
       },
       "feature": {
@@ -569,6 +594,42 @@
             ],
             "description": "Why the supervisor is not scheduling this ticket yet; null releases it. A held ticket is left out of `ready` and the idle-capacity finding.",
             "x-tip": "Why the supervisor is not scheduling it yet; empty once released."
+          },
+          "held_for": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "minItems": 1,
+            "description": "What the ticket's hold waits on (design every-wait-names-its-cause-and-every-put): each entry a question id, a ticket id, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id> or external:<words>. Beside held; a release writes null.",
+            "x-tip": "What the hold waits on: a question, a ticket, a chore, a goal, a PR, a CI run or something outside."
+          },
+          "held_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "When the supervisor looks again at the hold if it still waits (a date); beside held, null on release.",
+            "x-tip": "When the hold is looked at again if it still waits."
+          },
+          "from": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^o-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+            },
+            "minItems": 1,
+            "description": "The follow-up observations this ticket was made from (kind follow-up), by id; citing one takes it off the supervisor's list until the ticket ends.",
+            "x-tip": "The put-off notes this ticket was made from."
           },
           "notes": {
             "description": "Anything else the planner wanted on record.",
@@ -2932,7 +2993,9 @@
           "plan_after",
           "approved",
           "carried",
-          "hold"
+          "hold",
+          "hold_for",
+          "hold_until"
         ],
         "owner": [
           "title",
@@ -2947,7 +3010,9 @@
           "status",
           "decision",
           "plan_after",
-          "hold"
+          "hold",
+          "hold_for",
+          "hold_until"
         ]
       },
       "feature": {
@@ -2995,6 +3060,9 @@
           "one_way_doors",
           "superseded_by",
           "held",
+          "held_for",
+          "held_until",
+          "from",
           "notes"
         ],
         "supervisor": [
@@ -3012,6 +3080,9 @@
           "one_way_doors",
           "superseded_by",
           "held",
+          "held_for",
+          "held_until",
+          "from",
           "notes"
         ],
         "owner": [
@@ -3029,6 +3100,9 @@
           "one_way_doors",
           "superseded_by",
           "held",
+          "held_for",
+          "held_until",
+          "from",
           "notes"
         ]
       },
