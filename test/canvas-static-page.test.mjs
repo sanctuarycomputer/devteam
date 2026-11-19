@@ -5,10 +5,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as canvas from '../docs/devteam/scripts/canvas.mjs';
 import * as fake from './lib/canvas-fake.mjs';
+import { bareProject, freePort } from './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(here, 'fixtures', 'canvas');
@@ -768,4 +771,58 @@ test('canvas static page: the cap leaves room for what is written outside instan
   assert.ok(flags.slice(firstCut).every(Boolean), 'an instance after a cut one is let in');
   for (let k = 0; k < firstCut; k++) assert.equal(all(topEl(f.tree, `fi${k}`)).length, 1001, `fi${k}`);
   for (let k = firstCut; k < 150; k++) assert.equal(all(topEl(f.tree, `fi${k}`)).length, 1, `fi${k}`);
+});
+
+// ---- the kit's artifact check (C5): the page, as an artifact in a bare project ----
+
+test('canvas static page: the page passes the kit\'s artifact check', { timeout: 120000 }, async (t) => {
+  const savedHome = process.env.HOME;
+  const savedDt = {};
+  for (const k of Object.keys(process.env)) if (k.startsWith('DEVTEAM_')) { savedDt[k] = process.env[k]; delete process.env[k]; }
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-canvas-home-'));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-canvas-base-'));
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    for (const k of Object.keys(process.env)) if (k.startsWith('DEVTEAM_')) delete process.env[k];
+    Object.assign(process.env, savedDt);
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+  process.env.HOME = home;
+  const project = bareProject(base, 'canvas-check');
+  const devteam = path.join(project, 'docs', 'devteam', 'scripts', 'devteam.mjs');
+  const port = await freePort();
+  const env = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(port) };
+  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && k !== 'DEVTEAM_HUB_PORT') delete env[k];
+  const put = (slug, title, doc, html) => {
+    const dir = path.join(project, 'docs', 'devteam', 'project', 'artifacts', slug);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'index.html'), html);
+    fs.writeFileSync(path.join(dir, 'artifact.json'), JSON.stringify({ v: 1, title, summary: `${title}, a canvas page`, by: 'supervisor', for: [] }));
+    fs.writeFileSync(path.join(dir, 'canvas.json'), JSON.stringify(doc));
+    fs.cpSync(path.join(FIXTURES, 'images'), path.join(dir, 'images'), { recursive: true });
+  };
+  const check = (slug) => spawnSync(process.execPath, [devteam, 'artifact', 'check', slug], { cwd: project, env, encoding: 'utf8' });
+  const pageOf = (name) => {
+    const doc = fixture(name);
+    const r = canvas.staticPage(doc);
+    assert.equal(r.ok, true, `${name}: ${JSON.stringify(r.errors)}`);
+    return { doc, html: r.html };
+  };
+
+  // the control: a script off the allowed CDNs is flagged on stderr, so a clean stderr below means something
+  const every = pageOf('doc-every-type.json');
+  put('canvas-control', 'Canvas control', every.doc, every.html.replace('</body>', '<script src="https://evil.example/x.js"></script></body>'));
+  assert.ok(every.html.includes('</body>'), 'the page has a body to end');
+  const control = check('canvas-control');
+  assert.match(control.stderr, /not on an allowed CDN/);
+
+  for (const [slug, name] of [['canvas-every-type', 'doc-every-type.json'], ['canvas-minimal', 'doc-minimal.json'], ['canvas-hostile', 'hostile.json']]) {
+    const { doc, html } = pageOf(name);
+    put(slug, slug, doc, html);
+    const r = check(slug);
+    assert.equal(r.status, 0, `${slug}: ${r.stderr}${r.stdout}`);
+    assert.match(r.stdout, /1 artifact pass/, slug);
+    assert.equal(r.stderr, '', slug);
+  }
 });
