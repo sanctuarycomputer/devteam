@@ -8795,7 +8795,7 @@ async function previewAwait(rec) {
   const end = Date.now() + 60000;
   for (;;) {
     if (await probePort(rec.port)) return { up: true };
-    const text = sh('tmux', ['capture-pane', '-p', '-t', rec.run.window]);
+    const text = sh('tmux', ['capture-pane', '-p', '-J', '-t', rec.run.window]);
     if (text === null || text.includes(PREVIEW_EXITED)) return { up: false, exited: true, text: text ?? '' };
     if (Date.now() > end) return { up: false, exited: false };
     await new Promise((r) => setTimeout(r, 250));
@@ -25296,7 +25296,13 @@ function browserProfile() {
   const key = browserKey(), here = realPath(mainRoot), dir = path.join(browserHome(), key), file = path.join(dir, 'root.json');
   for (const d of [browserHome(), dir]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fs.chmodSync(d, 0o700); }
   const forget = 'Forget it (devteam.mjs browser forget) to start signed out';
-  if (!fs.lstatSync(file, { throwIfNoEntry: false })) fs.writeFileSync(file, `${JSON.stringify({ root: here })}\n`, { mode: 0o600, flag: 'wx' });
+  // Written whole to a tmp file, then linked in (never replacing one): of two first-ever starts at
+  // once, the one that loses the link reads the winner's root, never a half-written file.
+  if (!fs.lstatSync(file, { throwIfNoEntry: false })) {
+    const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify({ root: here })}\n`, { mode: 0o600, flag: 'wx' });
+    try { fs.linkSync(tmp, file); } catch (e) { if (e.code !== 'EEXIST') throw e; } finally { fs.rmSync(tmp, { force: true }); }
+  }
   const root = browserRootOf(dir);
   if (root === null) die(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
   if (root !== here) die(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
@@ -25357,7 +25363,7 @@ function browserAlive(pid) {
   return r.status === 0 && !!r.stdout.trim() && !r.stdout.includes('Z');
 }
 const browserSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function browserGone(pid, ms) { const end = Date.now() + ms; while (browserAlive(pid)) { if (Date.now() > end) return false; await browserSleep(50); } return true; }
+async function browserGone(pid, ms) { const end = Date.now() + ms; while (browserAlive(pid)) { if (Date.now() > end) return false; await browserSleep(100); } return true; }
 // run/browser (0700): state.json, the start lock, shots/.
 const BROWSER_DIR = () => runPath('browser');
 const browserStateFile = () => path.join(BROWSER_DIR(), 'state.json');
@@ -25400,20 +25406,32 @@ async function browserLive() {
   if (!s) return null;
   try { return (await browserCall('ping', {}, { state: s, ms: 5000 })).code === 0 ? s : null; } catch { return null; }
 }
-// The region's own lock, held across awaits (withLock is synchronous): mkdir <file>.lock, stale after
-// 120 s, waited on up to 60 s. A die() inside still lets it go, on exit.
+// The region's own lock, held across awaits (withLock is synchronous): mkdir <file>.lock holding its
+// owner's token, stale after 120 s, waited on up to 60 s. A lock is only ever removed by first renaming
+// it to a name of the remover's own, and only when it still holds the token seen: so of two waiters
+// on one stale lock only one takes it, and release removes only its own. A die() inside lets it go.
 async function browserStartLock(file, fn) {
-  const lock = `${file}.lock`, start = Date.now();
+  const lock = `${file}.lock`, owner = path.join(lock, 'owner'), start = Date.now();
+  const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
+  // Remove the lock if it still holds `seen`; a lock taken from under us is put back.
+  const drop = (seen) => {
+    const aside = `${lock}.${token}.${crypto.randomBytes(4).toString('hex')}`;
+    try { fs.renameSync(lock, aside); } catch { return; }
+    if (read(path.join(aside, 'owner')) === seen) fs.rmSync(aside, { recursive: true, force: true });
+    else { try { fs.renameSync(aside, lock); } catch { fs.rmSync(aside, { recursive: true, force: true }); } }
+  };
   for (;;) {
-    try { fs.mkdirSync(lock); break; } catch (e) {
+    try { fs.mkdirSync(lock); fs.writeFileSync(owner, token); break; } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      const at = fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs;
-      if (at !== undefined && Math.abs(Date.now() - at) > 120000) { fs.rmSync(lock, { recursive: true, force: true }); continue; }
+      const st = fs.statSync(owner, { throwIfNoEntry: false }) ?? fs.statSync(lock, { throwIfNoEntry: false });
+      const seen = read(owner);
+      if (st && Math.abs(Date.now() - st.mtimeMs) > 120000) { drop(seen); continue; }
       if (Date.now() - start > 60000) die(`browser: timed out waiting for ${lock}`);
       await browserSleep(100);
     }
   }
-  const release = () => fs.rmSync(lock, { recursive: true, force: true });
+  const release = () => { if (read(owner) === token) drop(token); };
   process.on('exit', release);
   try { return await fn(); } finally { process.off('exit', release); release(); }
 }
@@ -25453,7 +25471,7 @@ async function browserEnsure({ headed = false } = {}) {
     for (;;) {
       const s = browserState();
       if (s?.preview === name && (await browserLive())) return s;
-      const text = sh('tmux', ['capture-pane', '-p', '-t', rec.run.window]);
+      const text = sh('tmux', ['capture-pane', '-p', '-J', '-t', rec.run.window]);
       if (text === null || text.includes(PREVIEW_EXITED)) {
         const tail = (text ?? '').split('\n').filter((l) => !l.includes(PREVIEW_EXITED)).join('\n').trimEnd().split('\n').slice(-20).join('\n');
         process.stderr.write(`devteam: browser: the daemon stopped before it was up:\n${tail}\n`);
@@ -25464,15 +25482,56 @@ async function browserEnsure({ headed = false } = {}) {
     }
   });
 }
+// This machine's name, as Chrome writes it into SingletonLock. DEVTEAM_TEST_BROWSER_HOSTNAME in tests.
+const browserHostname = () => browserTestEnv('DEVTEAM_TEST_BROWSER_HOSTNAME') ?? os.hostname();
+// The profile's SingletonLock: a symlink to <host>-<pid>, split at the last hyphen; or null.
+function browserSingleton(profile) {
+  let t;
+  try { t = fs.readlinkSync(path.join(profile, 'SingletonLock')); } catch { return null; }
+  const i = t.lastIndexOf('-'), pid = Number(t.slice(i + 1));
+  return i > 0 && Number.isInteger(pid) && pid > 0 ? { host: t.slice(0, i), pid } : null;
+}
+// The proof: one argument of pid's command line is exactly --user-data-dir=<profile>. /proc's cmdline
+// split at NUL, else ps (macOS), matched as a word.
+function browserProofPid(pid, profile) {
+  const want = `--user-data-dir=${profile}`;
+  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').includes(want); } catch {}
+  if (fs.existsSync('/proc/self/cmdline')) return false;
+  const r = spawnSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 && ` ${r.stdout.trim()} `.includes(` ${want} `);
+}
+// Stop each candidate proven to carry the profile: SIGTERM (its group only when it leads one), SIGKILL
+// 2 s later if it is still up and still proven, and a refusal if it outlives that by 3 s.
+async function browserKillChrome(profile, pids) {
+  let killed = false;
+  for (const pid of new Set(pids.filter((p) => Number.isInteger(p) && p > 0 && p !== process.pid))) {
+    if (!browserAlive(pid) || !browserProofPid(pid, profile)) continue;
+    const sig = (s) => { try { process.kill(browserLeads(pid) ? -pid : pid, s); } catch {} };
+    killed = true;
+    sig('SIGTERM');
+    if (await browserGone(pid, 2000)) continue;
+    if (!browserProofPid(pid, profile)) continue;
+    sig('SIGKILL');
+    if (!(await browserGone(pid, 3000))) throw new Error(`browser: Chrome (pid ${pid}) on this profile won't stop`);
+  }
+  return { killed };
+}
+// The candidates for that: state.json's chrome_pid, then this host's SingletonLock pid.
+function browserCandidates(profile) {
+  const lock = browserSingleton(profile);
+  return [browserRawState()?.chrome_pid, lock?.host === browserHostname() ? lock.pid : null];
+}
 // Chrome's session files: every Default/ entry named Sessions*, and the four old ones. A delete that
 // fails (but ENOENT) throws the refusal: Chrome would bring the tabs back.
 const BROWSER_SESSION_FILES = ['Current Session', 'Current Tabs', 'Last Session', 'Last Tabs'];
-function browserDeleteSessions(profile) {
+function browserSessionFiles(profile) {
   const d = path.join(profile, 'Default');
   let names = [];
   try { names = fs.readdirSync(d).filter((n) => n.startsWith('Sessions')); } catch {}
-  for (const n of [...names, ...BROWSER_SESSION_FILES]) {
-    const f = path.join(d, n);
+  return [...names, ...BROWSER_SESSION_FILES].map((n) => path.join(d, n));
+}
+function browserDeleteSession(profile) {
+  for (const f of browserSessionFiles(profile)) {
     try {
       if (browserTestEnv('DEVTEAM_TEST_BROWSER_DELETE_FAILS') && fs.lstatSync(f, { throwIfNoEntry: false })) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
       fs.rmSync(f, { recursive: true });
@@ -25497,27 +25556,27 @@ function browserWritePrefs(profile) {
   fs.writeFileSync(tmp, JSON.stringify(p), { mode: 0o600 });
   fs.renameSync(tmp, f);
 }
-// Every start step before Chrome launches. T3 adds the leftover-Chrome kill and the lock steps.
+// Every start step before Chrome launches, in order: a leftover Chrome stopped (only a proven one), a
+// foreign host's stale lock cleared (refused while a process here holds the profile), any Singleton*
+// left with nobody on the profile removed, the session files deleted, the prefs written.
 async function browserPrepareProfile(profile, notes) {
-  void notes;
-  browserDeleteSessions(profile);
+  const { killed } = await browserKillChrome(profile, browserCandidates(profile));
+  const lock = browserSingleton(profile), procs = browserProcsOn(profile);
+  if (lock && lock.host !== browserHostname()) {
+    if (procs === null) throw new Error(`browser: the profile is locked by host ${lock.host}, and this machine's processes couldn't be listed to see whether one here has it open`);
+    if (procs.length) throw new Error(`browser: the profile is locked by host ${lock.host} and a process here (pid ${procs[0]}) has it open`);
+    notes.push(`Cleared a stale SingletonLock left by host ${lock.host}.`);
+  }
+  if (procs?.length === 0) for (const n of fs.readdirSync(profile).filter((x) => x.startsWith('Singleton'))) fs.rmSync(path.join(profile, n), { force: true });
+  browserDeleteSession(profile);
   browserWritePrefs(profile);
-  return { restarted: false };
+  return { restarted: killed };
 }
-// Whether pid leads its process group (pgid = pid): /proc's stat, else ps.
+// Whether pid leads its process group (pgid = pid): field 5 of /proc's stat, after the command name's
+// closing paren; else ps.
 function browserLeads(pid) {
   try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) === pid; } catch {}
   return Number(spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).stdout?.trim()) === pid;
-}
-// A local process proven to carry the profile: SIGTERM to it (its group only when it leads one), then
-// SIGKILL 2 s later. The stop path's fallback for a daemon that died and left its Chrome.
-async function browserKillOn(profile) {
-  for (const pid of browserProcsOn(profile) ?? []) {
-    const lead = browserLeads(pid);
-    const sig = (s) => { try { process.kill(lead ? -pid : pid, s); } catch {} };
-    sig('SIGTERM');
-    if (!(await browserGone(pid, 2000))) { sig('SIGKILL'); await browserGone(pid, 3000); }
-  }
 }
 // The CDP client: one browser-level WebSocket, ids from 1, each call rejected on an error or after
 // 30 s, every pending one rejected when the socket closes. on(method, fn) gets (params, sessionId).
@@ -25644,7 +25703,7 @@ function browserShutdown(ctx, why) {
     }
     if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
     ctx.cdp?.close();
-    try { browserDeleteSessions(ctx.profile); } catch {}
+    try { browserDeleteSession(ctx.profile); } catch {}
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
     await Promise.race([ctx.guard?.close(), browserSleep(2000)]).catch(() => {});
@@ -25665,8 +25724,8 @@ function browserVerbs(ctx) {
   };
 }
 // The control server: POST / only, Host 127.0.0.1:<port>, JSON, and the secret (timingSafeEqual);
-// anything else 403 and nothing run. Verbs run one at a time, each re-arming the idle timer (ping
-// doesn't).
+// anything else 403 and nothing run. Verbs run one at a time; the idle timer is paused while one runs
+// and re-armed after it (ping leaves it alone).
 function browserControl(ctx, secret) {
   const want = Buffer.from(secret);
   let queue = Promise.resolve();
@@ -25687,7 +25746,7 @@ function browserControl(ctx, secret) {
       queue = queue.then(async () => {
         if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
         if (!verb) return { code: 1, out: `usage: ${BROWSER_USAGE}` };
-        if (verb !== 'ping') arm();
+        if (verb !== 'ping') clearTimeout(ctx.idle); // paused while the verb runs
         try { return await ctx.verbs[verb](isObj(m.args) ? m.args : {}); } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
       }).then((r) => {
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -25695,7 +25754,7 @@ function browserControl(ctx, secret) {
         const after = ctx.after;
         ctx.after = null;
         if (after) res.once('finish', after);
-      });
+      }).catch(() => { try { res.destroy(); } catch {} }); // one bad answer never stops the queue
     });
   });
   return { server, arm };
@@ -25705,6 +25764,14 @@ const browserListen = (server, port) => new Promise((resolve, reject) => { serve
 // placeholder, Chrome, the CDP tabs, the control server, then state.json. It writes nothing to its
 // window once it is up.
 async function browserServe({ chrome: bin }) {
+  // The daemon keeps only run.env's allow-list (and PATH, PORT): its window also inherits the tmux
+  // server's environment, which can hold secrets, and Chrome inherits the daemon's. Where Node can, it
+  // re-executes itself (same pid) with only those, so not even /proc/<pid>/environ keeps the rest.
+  const keep = new Set(['PATH', 'PORT', 'HOME', 'DEVTEAM_BROWSER_SERVE', 'DEVTEAM_BROWSER_HEADED', ...BROWSER_ENV]);
+  const test = !!process.env.DEVTEAM_TEST;
+  const drop = Object.keys(process.env).filter((k) => !keep.has(k) && !(test && (k === 'DEVTEAM_TEST' || k.startsWith('DEVTEAM_TEST_BROWSER_'))));
+  for (const k of drop) delete process.env[k];
+  if (drop.length && typeof process.execve === 'function') process.execve(process.execPath, [process.execPath, '--no-warnings', ...process.execArgv, ...process.argv.slice(1)], { ...process.env });
   const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   const viewPort = Number(process.env.PORT);
@@ -25750,8 +25817,10 @@ async function browserStop() {
   }
   const profile = path.join(browserHome(), browserKey());
   if (fs.existsSync(profile)) {
-    await browserKillOn(profile);
-    try { browserDeleteSessions(profile); } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); }
+    try {
+      await browserKillChrome(profile, [...browserCandidates(profile), ...(browserProcsOn(profile) ?? [])]);
+      browserDeleteSession(profile);
+    } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); process.exitCode = 1; }
   }
   const rec = browserPreviewRec();
   if (rec) { killPreviewWindow(rec); removePreview(rec.name); }

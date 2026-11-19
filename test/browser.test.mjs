@@ -272,9 +272,9 @@ async function stopped(P) {
   if (before) await until(() => !alive(before.chrome_pid) && !alive(before.daemon_pid), 'the stopped browser gone');
 }
 // A POST to the daemon's control port with the headers given: the status code.
-function controlPost(port, headers, body = JSON.stringify({ verb: 'status', args: {} })) {
+function controlPost(port, headers, body = JSON.stringify({ verb: 'status', args: {} }), { method = 'POST', route = '/' } = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...headers } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+    const req = http.request({ host: '127.0.0.1', port, method, path: route, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...headers } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
     req.on('error', reject);
     req.end(body);
   });
@@ -322,6 +322,11 @@ test('Review Focus 2: the control port answers only its own client', opts, async
   const s = readState(a);
   assert.equal(await controlPost(s.control_port, { host: `127.0.0.1:${s.control_port}`, 'x-devteam-browser': '0'.repeat(64) }), 403);
   assert.equal(await controlPost(s.control_port, { host: 'evil.example', 'x-devteam-browser': s.control_secret }), 403);
+  // T2-5: the right secret and Host, but not JSON, or not POST /, gets 403 too
+  const right = { host: `127.0.0.1:${s.control_port}`, 'x-devteam-browser': s.control_secret };
+  assert.equal(await controlPost(s.control_port, { ...right, 'content-type': 'text/plain' }), 403, 'text/plain');
+  assert.equal(await controlPost(s.control_port, right, '', { method: 'GET' }), 403, 'GET /');
+  assert.equal(await controlPost(s.control_port, right, undefined, { route: '/x' }), 403, 'POST /x');
   assert.equal(await controlPost(s.control_port, { host: `127.0.0.1:${s.control_port}`, 'x-devteam-browser': s.control_secret }), 200, 'the control: the right request answers');
   const sj = await statusJson(a);
   assert.equal(sj.running, true);
@@ -392,6 +397,31 @@ test('T1-5 verbs that talk to a daemon make no profile', opts, async () => {
   assert.equal(fs.existsSync(path.join(P.home, '.devteam')), false, 'no ~/.devteam');
 });
 
+test('two starts at once start one daemon', opts, async () => {
+  // first on h, so both clients also race to write a fresh profile's root.json (T2-1)
+  assert.equal(fs.existsSync(h.profile), false);
+  // T2-3: every dev~ window and every daemon that wrote state.json while the two ran; without the
+  // start lock each client launches its own window and daemon.
+  const windows = new Set(), daemons = new Set();
+  const watch = setInterval(() => {
+    for (const w of devWindows(h)) windows.add(w.id);
+    try { daemons.add(readState(h).daemon_pid); } catch {}
+  }, 50);
+  let one, two;
+  try { [one, two] = await Promise.all([cli(h, ['start']), cli(h, ['start'])]); } finally { clearInterval(watch); }
+  assert.equal(one.status, 0, one.err);
+  assert.equal(two.status, 0, two.err);
+  assert.equal(windows.size, 1, `one dev~ window ever: ${[...windows]}`);
+  assert.equal(daemons.size, 1, `one daemon ever wrote state.json: ${daemons.size}`);
+  const s = readState(h);
+  assert.ok(alive(s.daemon_pid));
+  assert.equal(devWindows(h).length, 1, JSON.stringify(devWindows(h)));
+  const st = await statusJson(h);
+  assert.equal(st.running, true);
+  assert.equal(readState(h).daemon_pid, s.daemon_pid);
+  await stopped(h);
+});
+
 test('status and stop: the round trip', opts, async () => {
   const off = await statusJson(h);
   assert.deepEqual(off, { browser: 1, instance: h.key, running: false, held: null });
@@ -411,19 +441,6 @@ test('status and stop: the round trip', opts, async () => {
   const again = await cli(h, ['stop']);
   assert.equal(again.status, 0, again.err);
   assert.equal(again.out, "browser wasn't running");
-});
-
-test('two starts at once start one daemon', opts, async () => {
-  const [one, two] = await Promise.all([cli(h, ['start']), cli(h, ['start'])]);
-  assert.equal(one.status, 0, one.err);
-  assert.equal(two.status, 0, two.err);
-  const s = readState(h);
-  assert.ok(alive(s.daemon_pid));
-  assert.equal(devWindows(h).length, 1, JSON.stringify(devWindows(h)));
-  const st = await statusJson(h);
-  assert.equal(st.running, true);
-  assert.equal(readState(h).daemon_pid, s.daemon_pid);
-  await stopped(h);
 });
 
 test('Review Focus 5: a stale state.json starts afresh', opts, async () => {
@@ -473,6 +490,7 @@ test('K1 run.env reaches the daemon', opts, async () => {
   const env = { ...k.env, HOME: other };
   delete env.DEVTEAM_TEST;
   delete env.DEVTEAM_TEST_BROWSER_ALLOW;
+  env.DEVTEAM_CLAIM_TOKEN = 'zq-claim'; // T2-4: in the tmux server's own environment, so every window inherits it
   const made = spawnSync('tmux', ['new-session', '-d', '-s', sessionName(k)], { env, encoding: 'utf8', cwd: k.old });
   assert.equal(made.status, 0, made.stderr);
   await started(k, { DEVTEAM_CLAIM_TOKEN: 'zq-claim' });
@@ -484,4 +502,214 @@ test('K1 run.env reaches the daemon', opts, async () => {
   assert.ok(cmdline(s.chrome_pid).includes(`--user-data-dir=${k.profile}`), 'the daemon took the test HOME from run.env');
   assert.equal(fs.existsSync(path.join(other, '.devteam')), false, 'nothing under the session\'s HOME');
   assert.equal((await statusJson(k)).tabs, 1);
+  // T2-4: the daemon keeps only the allow-list, so neither it nor Chrome holds the token. Names only:
+  // the environment's values are never printed.
+  const names = (pid) => fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean).map((x) => x.slice(0, x.indexOf('=')));
+  for (const [who, pid] of [['the daemon', s.daemon_pid], ['Chrome', s.chrome_pid]]) {
+    const n = names(pid);
+    assert.ok(n.includes('DEVTEAM_TEST_BROWSER_ALLOW'), `${who} has the allow-list's names`);
+    assert.ok(!n.includes('DEVTEAM_CLAIM_TOKEN'), `${who} holds no DEVTEAM_CLAIM_TOKEN`);
+  }
+});
+
+// ----- profile hygiene on every start (T3) -----
+
+// Groups and pids the test made for H and I; each test kills its own, and this catches the rest. Only
+// these are ever signalled as a group: never one the test didn't create.
+const ownGroups = new Set();
+after(() => { for (const g of ownGroups) { try { process.kill(-g, 'SIGKILL'); } catch {} } });
+const PREFS = (P) => path.join(P.profile, 'Default', 'Preferences');
+const SESSION_NAMES = ['Current Session', 'Current Tabs', 'Last Session', 'Last Tabs'];
+const sessionLeft = (P) => { const d = path.join(P.profile, 'Default'); return [...fs.readdirSync(d).filter((n) => n.startsWith('Sessions')), ...SESSION_NAMES.filter((n) => fs.existsSync(path.join(d, n)))]; };
+// A pid that is certainly dead: a process that ran and was reaped.
+const deadPid = () => spawnSync('true').pid;
+// A schema-valid state.json of a dead daemon, naming chrome_pid.
+function plantState(P, chromePid) {
+  const s = { browser: 1, daemon_pid: deadPid(), chrome_pid: chromePid, control_port: 1, control_secret: '0'.repeat(64), cdp_port: 1, guard_port: 1, view_port: 1, preview: 'gone-preview' };
+  assert.deepEqual(validate('state', s), []);
+  fs.mkdirSync(path.dirname(P.state), { recursive: true });
+  fs.writeFileSync(P.state, JSON.stringify(s));
+}
+// SingletonLock as Chrome makes it: a symlink to <host>-<pid>.
+function plantLock(P, target) {
+  const f = path.join(P.profile, 'SingletonLock');
+  fs.rmSync(f, { force: true });
+  fs.symlinkSync(target, f);
+}
+const carries = (pid, P) => { try { return cmdline(pid).includes(`--user-data-dir=${P.profile}`); } catch { return false; } };
+// H2's stand-in: carries the profile, ignores SIGTERM, leads its own group with a sleep in it.
+async function standInOn(P) {
+  const c = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});require('child_process').spawn('sleep',['600'],{stdio:'ignore'});setInterval(()=>{},1e3)", '--', `--user-data-dir=${P.profile}`], { detached: true, stdio: 'ignore' });
+  ownGroups.add(c.pid);
+  await until(() => carries(c.pid, P), 'the stand-in up');
+  const child = await until(() => Number(spawnSync('pgrep', ['-g', String(c.pid), 'sleep'], { encoding: 'utf8' }).stdout.trim().split('\n')[0]) || 0, "the stand-in's child");
+  return { pid: c.pid, child };
+}
+const killGroup = async (g) => { try { process.kill(-g, 'SIGKILL'); } catch {} ownGroups.delete(g); await until(() => !alive(g), 'the group gone'); };
+// SIGKILL the daemon (and Chrome, if asked) so nothing of the stop path runs.
+async function crash(P, { chrome }) {
+  const s = readState(P);
+  process.kill(s.daemon_pid, 'SIGKILL');
+  if (chrome) process.kill(s.chrome_pid, 'SIGKILL');
+  await until(() => !alive(s.daemon_pid) && (!chrome || !alive(s.chrome_pid)), 'the crash');
+  return s;
+}
+
+test('F1 the prefs are rewritten', opts, async () => {
+  fs.mkdirSync(path.dirname(PREFS(h)), { recursive: true });
+  fs.writeFileSync(PREFS(h), JSON.stringify({ credentials_enable_service: true, profile: { password_manager_enabled: true, name: 'kept' }, autofill: { profile_enabled: true, credit_card_enabled: true }, session: { restore_on_startup: 4 } }));
+  const check = (when) => {
+    const p = JSON.parse(fs.readFileSync(PREFS(h), 'utf8'));
+    assert.deepEqual([p.credentials_enable_service, p.profile.password_manager_enabled, p.autofill.profile_enabled, p.autofill.credit_card_enabled, p.session.restore_on_startup], [false, false, false, false, 1], when);
+  };
+  await started(h);
+  check('right after start');
+  assert.equal(JSON.parse(fs.readFileSync(PREFS(h), 'utf8')).profile.name, 'kept', 'every other key kept');
+  await stopped(h);
+  check('after stop');
+});
+
+test('F2 the session files go', opts, async () => {
+  await started(h);
+  await crash(h, { chrome: true });
+  const d = path.join(h.profile, 'Default');
+  for (const f of ['Sessions/Session_1', 'Sessions_Encrypted/Session_1', ...SESSION_NAMES]) { fs.mkdirSync(path.dirname(path.join(d, f)), { recursive: true }); fs.writeFileSync(path.join(d, f), 'x'); }
+  await started(h);
+  // Chromium 156 makes Sessions/ and Sessions_Encrypted/ afresh as it starts: what is checked is that
+  // nothing planted is left in them, and none of the four files.
+  assert.deepEqual(sessionLeft(h).flatMap((n) => (n.startsWith('Sessions') ? fs.readdirSync(path.join(d, n)).filter((f) => f === 'Session_1').map((f) => `${n}/${f}`) : [n])), []);
+  const s = await statusJson(h);
+  assert.equal(s.tabs, 1);
+  assert.equal(s.url, 'about:blank');
+  await stopped(h);
+});
+
+test('F3 a failed delete refuses', opts, async () => {
+  const f = path.join(h.profile, 'Default', 'Sessions', 'x');
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, 'x');
+  try {
+    const r = await cli(h, ['start'], { DEVTEAM_TEST_BROWSER_DELETE_FAILS: '1' });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.err, /couldn't delete/);
+    assert.deepEqual(testBrowserPids().filter((p) => carries(p, h)), [], 'no Chrome on the profile');
+  } finally { fs.rmSync(path.dirname(f), { recursive: true, force: true }); }
+});
+
+test('G1 the daemon\'s death leaves Chrome; the next start kills it', opts, async () => {
+  await started(h);
+  const old = await crash(h, { chrome: false });
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.ok(alive(old.chrome_pid), 'Chrome outlives a SIGKILLed daemon');
+  await started(h);
+  assert.equal(alive(old.chrome_pid), false, 'the old Chrome is gone');
+  assert.notEqual(readState(h).chrome_pid, old.chrome_pid);
+  const s = await statusJson(h);
+  assert.equal(s.restarted, true);
+  assert.equal(s.tabs, 1);
+  await stopped(h);
+});
+
+test('G2 the same with state.json deleted: the SingletonLock names it', opts, async () => {
+  await started(h);
+  const old = await crash(h, { chrome: false });
+  fs.rmSync(h.state);
+  assert.ok(alive(old.chrome_pid));
+  await started(h);
+  assert.equal(alive(old.chrome_pid), false, 'the old Chrome is gone');
+  assert.equal((await statusJson(h)).restarted, true);
+  await stopped(h);
+});
+
+test('H1 a sleep is left alone', opts, async () => {
+  const sleep = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' });
+  ownGroups.add(sleep.pid);
+  try {
+    plantState(h, sleep.pid);
+    plantLock(h, `${os.hostname()}-${sleep.pid}`);
+    await started(h);
+    assert.ok(alive(sleep.pid), 'a pid without the profile flag is never signalled');
+    assert.equal((await statusJson(h)).restarted, false);
+    await stopped(h);
+  } finally { await killGroup(sleep.pid); }
+});
+
+test('H2 a TERM-proof stand-in and its group go', opts, async () => {
+  const si = await standInOn(h);
+  try {
+    plantState(h, si.pid);
+    const t0 = Date.now();
+    await started(h);
+    assert.ok(Date.now() - t0 < 10000, `took ${Date.now() - t0} ms`);
+    assert.equal(alive(si.pid), false, 'the stand-in is gone');
+    assert.equal(alive(si.child), false, 'its group\'s child is gone');
+    await stopped(h);
+  } finally { await killGroup(si.pid); }
+});
+
+test('H3 a non-leader is signalled alone', opts, async () => {
+  const c = spawn('sh', ['-c', `'${process.execPath}' -e "process.on('SIGTERM',()=>{});setInterval(()=>{},1e3)" -- --user-data-dir='${h.profile}' & echo $!; sleep 600 & echo $!; wait`], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  ownGroups.add(c.pid);
+  try {
+    let text = '';
+    c.stdout.on('data', (d) => { text += d; });
+    const [stand, sib] = await until(() => { const p = text.trim().split('\n').map(Number).filter(Boolean); return p.length === 2 && p; }, 'the two pids');
+    await until(() => carries(stand, h), 'the stand-in up');
+    plantState(h, stand);
+    await started(h);
+    assert.equal(alive(stand), false, 'the stand-in is gone');
+    assert.ok(alive(sib), 'its sibling lives: the group was not signalled');
+    assert.ok(alive(c.pid), 'sh lives');
+    await stopped(h);
+  } finally { await killGroup(c.pid); }
+});
+
+test('I1 a foreign stale lock is cleared and said', opts, async () => {
+  fs.rmSync(h.state, { force: true });
+  plantLock(h, 'a-b-c-1234');
+  const ino = {};
+  for (const n of ['SingletonSocket', 'SingletonCookie']) { const f = path.join(h.profile, n); fs.rmSync(f, { force: true }); fs.writeFileSync(f, ''); ino[n] = fs.lstatSync(f).ino; }
+  await started(h);
+  const s = await statusJson(h);
+  assert.ok(s.notes.includes('Cleared a stale SingletonLock left by host a-b-c.'), JSON.stringify(s.notes));
+  let link = null; try { link = fs.readlinkSync(path.join(h.profile, 'SingletonLock')); } catch {}
+  assert.notEqual(link, 'a-b-c-1234');
+  // gone, or replaced: Chrome's own are symlinks, the planted ones plain files (an inode can be reused)
+  for (const n of ['SingletonSocket', 'SingletonCookie']) { const st = fs.lstatSync(path.join(h.profile, n), { throwIfNoEntry: false }); assert.ok(!st || st.isSymbolicLink() || st.ino !== ino[n], `${n} gone or replaced`); }
+  await stopped(h);
+});
+
+test('I2 a foreign lock with a local holder is refused', opts, async () => {
+  fs.rmSync(h.state, { force: true });
+  const si = await standInOn(h);
+  try {
+    plantLock(h, 'a-b-c-1234');
+    const r = await cli(h, ['start']);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.err, /host a-b-c/);
+    assert.ok(alive(si.pid), 'the holder lives');
+  } finally { await killGroup(si.pid); }
+});
+
+test('I3 the last hyphen splits', opts, async () => {
+  const hook = { DEVTEAM_TEST_BROWSER_HOSTNAME: 'x-y-z' };
+  fs.rmSync(h.state, { force: true });
+  const one = await standInOn(h);
+  try {
+    plantLock(h, `x-y-z-${one.pid}`);
+    const r = await cli(h, ['start'], hook);
+    assert.equal(r.status, 0, r.err);
+    assert.equal(alive(one.pid), false, 'read as this host: the stand-in is killed');
+    await stopped(h);
+  } finally { await killGroup(one.pid); }
+  fs.rmSync(h.state, { force: true });
+  const two = await standInOn(h);
+  try {
+    plantLock(h, `x-y-${two.pid}`);
+    const r = await cli(h, ['start'], hook);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.err, /host x-y\b/);
+    assert.ok(alive(two.pid));
+  } finally { await killGroup(two.pid); }
+  fs.rmSync(path.join(h.profile, 'SingletonLock'), { force: true });
 });
