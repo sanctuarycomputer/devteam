@@ -5704,13 +5704,15 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     if (a && b && ['sensors', 'sensor_defaults'].some((k) => canonical(a[k]) !== canonical(b[k]))) fails.push(...sensorProblems(b).map((e) => `settings at landing: ${e}`));
     // the jobs that would land (kit-162): each head entry's shape, and the cap counted on main's
     // jobs as they are now with this PR's changes over them
-    if (a && b && canonical(a.recurring) !== canonical(b.recurring)) {
-      if (!isObj(b.recurring)) fails.push('settings at landing: settings recurring: an object of { "<name>": { kind, title, what, every, … } }');
+    // a head with no recurring key has no jobs, as validate reads it (task-2 F2)
+    const jobsOf = (s) => (s.recurring === undefined ? {} : s.recurring);
+    if (a && b && canonical(jobsOf(a)) !== canonical(jobsOf(b))) {
+      if (!isObj(jobsOf(b))) fails.push('settings at landing: settings recurring: an object of { "<name>": { kind, title, what, every, … } }');
       else {
-        fails.push(...Object.entries(b.recurring).flatMap(([n, e]) => recurringEntryProblems(n, e)).map((e) => `settings at landing: ${e}`));
+        fails.push(...Object.entries(jobsOf(b)).flatMap(([n, e]) => recurringEntryProblems(n, e)).map((e) => `settings at landing: ${e}`));
         const now = settingsAt(mainRef(), { orNull: true })?.recurring;
         const would = { ...(isObj(now) ? now : {}) };
-        for (const [n, e] of Object.entries(recurringRegistry.changed(a.recurring, b.recurring))) { if (e === null) delete would[n]; else would[n] = e; }
+        for (const [n, e] of Object.entries(recurringRegistry.changed(jobsOf(a), jobsOf(b)))) { if (e === null) delete would[n]; else would[n] = e; }
         const over = recurringRegistry.capProblem(would, 'main\'s jobs with this PR\'s changes; a check every n hours runs 24/n times, anything daily or slower once');
         if (over) fails.push(`settings at landing: ${over}`);
       }
@@ -6839,11 +6841,13 @@ function cmdMerge() {
   let jobsForced = null;
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
+  { const aq = approved ? logGet(approved) : null; jobAnswer = aq?.type === 'question' && aq.class === 'recurring-edit'; }
+  // a linked repo's ticket never changes home's settings, so it never lands a job change (task-2 F3)
+  if (R.name !== 'home' && jobAnswer) fails.push(`${approved} approves job changes in this repo's settings: land it in a chore PR here`);
   if (R.name === 'home') {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const classed = base ? ownerSettingsChanged(base, sha) : [];
     jobsChanged = !!classed?.some((c) => c.key === 'recurring');
-    { const aq = approved ? logGet(approved) : null; jobAnswer = aq?.type === 'question' && aq.class === 'recurring-edit'; }
     // One answer, one key: read before the supervisor's own classes are taken out, so any other
     // change (an owner key, a gate the supervisor adds alone, a link) splits the PR, whatever --approved is.
     if (jobsChanged && classed.length > 1) {
@@ -23083,6 +23087,12 @@ const recurringRegistry = Object.freeze({
 // against the head, compared canonically). An answer of another class is the class check's to refuse.
 function recurringBindingFails(base, sha, approved) {
   const R = recurringRegistry;
+  // what lands is the head merged onto main as it is now: the base-to-head diff is that change
+  // only while main's jobs are still the merge base's (task-2 F1)
+  const jobsAt = (ref) => { const s = settingsAt(ref, { orNull: true }); return s && s.recurring === undefined ? {} : s?.recurring; };
+  const [then, now] = mainRef() ? [jobsAt(base), jobsAt(mainRef())] : [null, null];
+  const moved = isObj(then) && isObj(now) ? Object.keys(R.changed(then, now)) : [];
+  if (moved.length) return [`main's jobs changed since this branch (${moved.join(', ')}): merge main into it, then check again`];
   const q = logGet(approved);
   if (q?.type !== 'question' || q.class !== 'recurring-edit') return [];
   const v = questionView(q);
@@ -23095,8 +23105,8 @@ function recurringBindingFails(base, sha, approved) {
   }
   const shown = R.shown(v);
   if (!shown) return [...fails, `${approved} showed no job change (no change.recurring): ask again with --change`];
-  const a = settingsAt(base, { orNull: true })?.recurring;
-  const b = settingsAt(sha, { orNull: true })?.recurring;
+  const a = jobsAt(base);
+  const b = jobsAt(sha);
   const A = isObj(a) ? a : {};
   const B = isObj(b) ? b : {};
   const diff = R.changed(A, B);

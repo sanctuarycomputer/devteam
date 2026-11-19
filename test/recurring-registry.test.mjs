@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { monoFixture, write, json, kit } from './lib/kit.mjs';
+import { monoFixture, multiFixture, write, json, kit } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const QID = /q-[0-9]+-[0-9]+-supervisor/;
@@ -123,6 +123,19 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     passes(T.dry('stop-b', stop));
     T.jobsChore('stop-b-and-more', (j) => { delete j.recurring.bb; j.recurring.aa = check({ every: '2h' }); });
     refused(T.dry('stop-b-and-more', stop), /recurring\.aa/);
+    // an answer cited on a chore that changes no owner setting lands none of what it showed (task-2 F4)
+    T.choreBranch('no-jobs', () => {});
+    refused(T.dry('no-jobs', qa), /recurring\.aa[^\n]*leaves it as main has it/);
+    // main's jobs moved since the branch: what would land is not what the base-to-head diff shows (task-2 F1)
+    T.jobsChore('stale', (j) => { j.recurring.dd = check({ every: '8h' }); });
+    T.onMain((j) => { j.recurring.bb = chore({ every: '2w' }); });
+    const qd = T.yes({ recurring: { dd: check({ every: '8h' }) } });
+    refused(T.dry('stale', qd), /main's jobs changed since this branch \(bb\): merge main into it/);
+    const stale = path.join(T.old, '.worktrees/chore-stale');
+    T.g(['fetch', '-q', 'origin'], stale);
+    T.g(['merge', '-q', '--no-edit', 'origin/main'], stale);
+    T.g(['push', '-q', 'origin', 'chore-stale'], stale);
+    passes(T.dry('stale', qd));
   } finally { T.done(); }
 });
 
@@ -193,6 +206,9 @@ test('A7: a chore that only removes a job lands only with an answer whose change
     T.jobsChore('stop', (j) => { delete j.recurring['old-job']; });
     refused(T.dry('stop'), /recurring-edit/);
     const q = T.yes({ recurring: { 'old-job': null } });
+    // no recurring key at all reads as no jobs, as validate reads it (task-2 F2)
+    T.jobsChore('drop-key', (j) => { delete j.recurring; });
+    passes(T.dry('drop-key', q));
     passes(T.merge('stop', ['--approved', q]));
     assert.deepEqual(T.mainSettings().recurring, {});
   } finally { T.done(); }
@@ -310,6 +326,27 @@ test('A10: a ticket or plan branch that changes recurring is refused by check-pr
     const m = T.run(['merge', '--plan', 'jobs', '--dry-run']);
     refused({ status: m.status, text: T.text(m) }, /changes recurring: jobs are the owner's/);
   } finally { T.done(); }
+});
+
+test("A10b: merge refuses a recurring-edit answer cited for a ticket whose code lands in a linked repo", () => {
+  // the binding reads home's settings, which a linked repo's ticket never changes (task-2 F3)
+  const F = multiFixture('recur-linked');
+  const { old, g } = F;
+  try {
+    F.ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    write(path.join(w, 'src/main.js'), 'changed\n');
+    g(['commit', '-qam', 'console-01-a: x'], w);
+    g(['push', '-q', 'origin', 'ticket/console-01-a'], w);
+    write(path.join(old, 'docs/devteam/run/pr/ticket/console-01-a.md'), '# console-01-a: x\n\n## One-way doors\n\nNone.\n');
+    const a = F.runIn(old, ['ask', '--class', 'recurring-edit', '--question', 'Should I add this job?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { 'ci-main': check() } })], SUP);
+    assert.equal(a.status, 0, a.err);
+    const q = QID.exec(a.out)[0];
+    F.okIn(old, ['answer', q, 'Yes']);
+    const r = F.runIn(old, ['merge', 'console-01-a', '--dry-run', '--approved', q], SUP);
+    refused({ status: r.status, text: `${r.out}\n${r.err}` }, new RegExp(`${q} approves job changes in this repo's settings: land it in a chore PR here`));
+  } finally { if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(F.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
 test('A11: merge refuses a job that breaks the shape; validate and merge refuse over 100 runs a day, naming the jobs', () => {
