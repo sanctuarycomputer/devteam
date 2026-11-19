@@ -47,6 +47,8 @@ async function peekPage(t, { seed, fixture, name = 'peek' } = {}) {
   later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
+  // DEVTEAM_TEST_CPU_THROTTLE=n runs the page n times slower, as on a loaded runner
+  if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
   // no classic scrollbar: innerWidth is the window's right edge
   await p.send('Emulation.setScrollbarsHidden', { hidden: true });
   const size = (width, height) => p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
@@ -54,6 +56,11 @@ async function peekPage(t, { seed, fixture, name = 'peek' } = {}) {
   const evNav = (expr) => p.ev(expr).catch((e) => { if (/navigated or closed|Cannot find context|context was destroyed|Execution context/i.test(e.message)) return false; throw e; });
   const soon = (expr, what) => until(() => evNav(expr), what);
   const load = async (hash) => {
+    // Chrome keeps 50 entries a tab and, when full, prunes the oldest one left without a user gesture (every
+    // hash here is set by script). Over a whole test that can be the entry right under a peek, and its close
+    // then goes back past the page. Each visit starts the tab's history afresh, with this visit's about:blank
+    // right below it, so a close one entry too far still lands off the dashboard and fails
+    await p.send('Page.resetNavigationHistory');
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'about:blank');
     await p.send('Page.navigate', { url: url(hash) });
@@ -461,6 +468,10 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon("document.getElementById('artifact-view').hidden && !document.body.classList.contains('overlay-open') && document.getElementById('scrim').hidden", 'the preview closed, overlay-open cleared');
   });
 
+  // the viewer's frame has loaded the artifact (a frame of its own process: the page hears it, as a load in the
+  // capture phase on the frame with a src); armed after each visit's load, before the viewer opens
+  const armLoad = () => p.ev("window.__avLoaded = false; if (!window.__avArmed) { window.__avArmed = true; document.addEventListener('load', (e) => { if (e.target.id === 'av-frame' && e.target.getAttribute('src')) window.__avLoaded = true; }, true); } true");
+  const frameLoaded = () => p.ev('window.__avLoaded === true');
   await t.test('the shared scrim: the viewer and a review show it and close on it; the viewer leaves a peek it opened over', async () => {
     const scrimShown = "(!document.getElementById('scrim').hidden && getComputedStyle(document.getElementById('scrim')).opacity === '1')";
     const scrimClick = async () => {
@@ -481,34 +492,112 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon(`!document.getElementById('review-view').hidden && ${scrimShown}`, 'the review over the scrim');
     await scrimClick();
     await soon("document.getElementById('review-view').hidden && document.getElementById('scrim').hidden && !document.body.classList.contains('overlay-open')", 'the review closed by the scrim');
-    // the viewer over a peek: closing it shows the peek again. Each viewer opens in a fresh visit: once a
-    // visit's viewer frame has loaded a page, the next page it loads is a history entry of its own, and
-    // the viewer's close (history.back()) moves the frame, not the hash
+    // the viewer over a peek: closing it shows the peek again (a fresh visit, so each case's history is short;
+    // see load())
     await load('#board');
     await openPeek(`#ticket/${T}`);
-    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
-    await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
-    await p.click('#av-close');
-    await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed');
-    assert.ok(await p.ev(isOpen), 'the peek is still open');
-    assert.ok(await p.ev(scrimShown), 'with its scrim');
-    await closePeek();
+    // DEVTEAM_TEST_FRAME_LATENCY_MS=n holds the viewer's frame back until after the close is pressed, the order
+    // CI's speed gives
+    const FL = Number(process.env.DEVTEAM_TEST_FRAME_LATENCY_MS) || 0;
+    const latency = (ms) => p.send('Network.emulateNetworkConditions', { offline: false, latency: ms, downloadThroughput: -1, uploadThroughput: -1 });
+    if (FL) { await p.send('Network.enable'); await latency(FL); }
+    // (taken off again however the section ends, so a later subtest's failure is never the knob's)
+    try {
+      await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+      await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
+      await p.click('#av-close');
+      await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed');
+      assert.ok(await p.ev(isOpen), 'the peek is still open');
+      assert.ok(await p.ev(scrimShown), 'with its scrim');
+      await closePeek();
+    } finally {
+      if (FL) await latency(0).catch(() => {});
+    }
     // the viewer over a review: closing it leaves the review's scrim dark (R1)
     await load('#library');
     await p.ev("location.hash = '#review-preview?path=review%2Fpage.html&ref=main'");
     await soon(`!document.getElementById('review-view').hidden && ${scrimShown}`, 'the review');
+    await armLoad();
     await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
     await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the review');
+    await until(frameLoaded, "the viewer's frame loaded");
     await p.click('#av-close');
     await soon("document.getElementById('artifact-view').hidden && location.hash.startsWith('#review-preview')", 'back to the review');
     await new Promise((r) => setTimeout(r, 400));
     assert.ok(await p.ev(`!document.getElementById('review-view').hidden && document.body.classList.contains('overlay-open') && ${scrimShown}`), 'the review keeps its scrim');
-    // (not closed here by the scrim: the viewer's frame left an entry in the joint history, so the review's
-    // history.back() would move that frame; a fresh visit instead)
+    // and the review's own close then lands on the page under it: the viewer's close, its frame loaded, left no
+    // frame entry for its history.back() to step instead (kit-303)
+    await scrimClick();
+    await soon("document.getElementById('review-view').hidden && document.getElementById('scrim').hidden && !document.body.classList.contains('overlay-open')", 'the review closed by the scrim after the viewer');
+    assert.equal(await p.ev('location.hash'), '#library', 'the review closed to #library');
+    await load('#board');
+  });
+
+  await t.test('a peek under a closed viewer closes to #board, and a reload shows the board (kit-303)', async () => {
+    // the viewer's frame has loaded before its ×, as a person's has ('the shared scrim' closes it loaded or not)
+    await load('#board');
+    await openPeek(`#ticket/${T}`);
+    await armLoad();
+    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+    await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
+    await until(frameLoaded, "the viewer's frame loaded");
+    await p.click('#av-close');
+    await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed by ×');
+    await closePeek();
+    // the peek's close lands on the page it was opened over, not on an entry the viewer's frame left
+    // (kit-303): a reload then shows the board, with no peek. closePeek waits for the slide out, not for the
+    // history.go it started, so the hash is read after the same settle as the history checks
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await p.ev('location.hash'), '#board', 'the peek closed to #board');
+    await p.ev('window.__beforeReload = true');
+    await p.send('Page.reload');
+    await soon("!window.__beforeReload && location.protocol === 'http:' && !!document.querySelector('main') && !document.querySelector('main.waiting')", 'the dashboard drawn again');
+    assert.equal(await p.ev('location.hash'), '#board', 'reloaded on #board');
+    const after = await p.ev(`({ closed: ${isClosed}, board: document.getElementById('board').classList.contains('on') })`);
+    assert.deepEqual(after, { closed: true, board: true }, 'the reload shows the board, not the ticket');
+    await load('#board');
+  });
+
+  await t.test('closing the viewer by its × adds no history entry once its frame has loaded (kit-303)', async () => {
+    // back to the peek's entry, with the viewer's entry still ahead of it: an entry the close pushed for the frame
+    // would have replaced that one, and the peek's next close would move only the frame
+    const nav = () => p.send('Page.getNavigationHistory');
+    await load('#board');
+    await openPeek(`#ticket/${T}`);
+    await armLoad();
+    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+    await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
+    await until(frameLoaded, "the viewer's frame loaded");
+    const open = await nav();
+    await p.click('#av-close');
+    await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed by ×');
+    await new Promise((r) => setTimeout(r, 400));
+    const shut = await nav();
+    assert.equal(shut.entries.length, open.entries.length, 'as many entries');
+    assert.equal(shut.currentIndex, open.currentIndex - 1, 'one back');
+    assert.match(shut.entries[open.currentIndex].url, /#artifact\//, "the viewer's entry is still ahead");
+    await closePeek();
+    await load('#board');
+  });
+
+  await t.test('closing the viewer by a route away adds no history entry once its frame has loaded (kit-303)', async () => {
+    // history.length goes up by the new hash's entry, and by none for the frame
+    await load('#library');
+    await armLoad();
+    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+    await soon("!document.getElementById('artifact-view').hidden", 'the viewer');
+    await until(frameLoaded, "the viewer's frame loaded");
+    const before = await p.ev('history.length');
+    await p.ev("location.hash = '#board'");
+    await soon("document.getElementById('artifact-view').hidden && document.getElementById('board').classList.contains('on')", 'the viewer closed by a route');
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await p.ev('history.length'), before + 1, "the route's entry only");
     await load('#board');
   });
 
   await t.test('the top-right button stays reachable beside the peek', async () => {
+    // a fresh visit: a kit-303 case that failed partway leaves no viewer or peek here
+    await load('#board');
     const m = () => p.ev(`(() => { ${SEEN}
       const tt = document.querySelector('.pagebar .tt'), tp = document.getElementById('tt-peek'), d = document.getElementById('drawer');
       const r = tp?.getBoundingClientRect(), tr = tt.getBoundingClientRect(), dr = d.getBoundingClientRect();

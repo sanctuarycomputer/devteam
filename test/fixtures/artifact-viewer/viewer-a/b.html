@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Viewer A, page B</title>
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  #to-c { position: absolute; display: block; box-sizing: border-box; left: 40px; top: 160px; width: 160px; height: 32px; }
+</style></head>
+<body>
+<a id="to-c" href="c.html">To page C</a>
+<script>
+const rects = () => { const r = document.getElementById('to-c').getBoundingClientRect(); return { 'to-c': { x: r.left, y: r.top, w: r.width, h: r.height } }; };
+const say = () => parent.postMessage({ own: 'at', page: 'viewer-a/b.html', hash: location.hash, rects: rects() }, '*');
+// (and again once drawn, and on a resize: a frame laid out before the stage had its size says 0x0)
+addEventListener('load', () => { say(); requestAnimationFrame(() => requestAnimationFrame(say)); });
+addEventListener('resize', say);
+</script>
+</body></html>

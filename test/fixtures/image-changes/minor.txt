@@ -1,0 +1,5 @@
+image: (smoke)#machine status --questions
+image: cloud/gateway.mjs
+image: docs/devteam/scripts/devteam.mjs#(rest)
+image: docs/devteam/scripts/devteam.mjs#cmdHub
+kind: minor (4 changes the image runs)

@@ -832,7 +832,7 @@ test("Settings on a box: Signing in and Serving, boxLine's parts", CHROME, async
   let F;
   F = await fixtureHub(t, { kit: 'v0.57.0', image: true, box: () => {
     const at = (h) => `http://${h}.localhost:${F.port}/`;
-    return { box: 1, terminal: at('terminal'), instance: `http://i{port}.localhost:${F.port}/`, passkeys: at('auth'), previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } } };
+    return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: at('auth'), previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } } };
   } });
   F.setList([]);
   const p = await hubPage(t, `http://hub.localhost:${F.port}/#settings`);
