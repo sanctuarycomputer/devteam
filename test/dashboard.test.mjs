@@ -637,6 +637,10 @@ test('an answer posts the pick and the words on the first press, with no which-c
     assert.equal(sent.seen, q.hash, 'bound to the question as the page showed it');
     await polls(2);
     assert.equal(await asks(), 0, 'none after a redraw either');
+    // the Matched row: words wait for a reading, and a reading is never "you went with it" (final-1 F3)
+    assert.equal(await p.ev(`matchedWords({ matched: false, in_words: true, read_by: null, label: null })`), 'not yet: you answered in your own words, which the supervisor reads');
+    assert.equal(await p.ev(`matchedWords({ matched: true, in_words: true, read_by: 'supervisor', label: 'Yes' })`), 'yes: the supervisor read your words as “Yes”; not counted as your agreement');
+    assert.equal(await p.ev(`matchedWords({ matched: true, in_words: false, read_by: null, label: 'Yes' })`), 'yes: you went with its recommendation');
   });
 
   await t.test('a pick and words: "<label> — <words>", the pick recorded beside them', async () => {

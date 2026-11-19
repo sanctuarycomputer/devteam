@@ -3997,10 +3997,20 @@ function renderOoda(o) {
     </div>`; }).join('') : empty('None yet. Everything the supervisor does shows here.');
 }
 const DEC_KIND = { decision: 'Decided', act: 'Did, as its own call', answer: 'You answered', goal: 'Your call on a goal', rule: 'A standing rule you gave', correction: 'Corrected' };
+// The question's Matched row in words (kit-313): the owner's own pick, the supervisor's reading of
+// their words, or words not yet read; a reading matches, but it is not the owner's agreement
+function matchedWords(q) {
+  if (q.matched == null) return '';
+  if (q.read_by) return `${q.matched ? 'yes' : 'no'}: the supervisor read your words as “${esc(q.label)}”; not counted as your agreement`;
+  if (q.in_words) return 'not yet: you answered in your own words, which the supervisor reads';
+  return q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise';
+}
 function decisionUnder(r) {
   if (r.who === 'supervisor' && ['decision', 'act'].includes(r.kind)) return authorityWords(r.under);
   const u = r.under || {};
-  if (r.kind === 'answer') return [u.recommendation ? (u.matched ? 'went with its recommendation' : `its recommendation was “${esc(u.recommendation)}”`) : '', u.autonomy ? `moved ${esc(words(u.autonomy.class))} to ${esc(RUNG_WORDS[u.autonomy.rung])}` : '', u.standing_rule ? `and gave a standing rule: “${esc(u.standing_rule)}”` : '', u.channel === 'chat' ? 'said in the supervisor chat' : u.channel === 'thread' ? 'said in a thread' : ''].filter(Boolean).join(' · ');
+  // in the owner's own words (kit-313): the supervisor's reading, or none yet, never "went with" it
+  const aq = r.kind === 'answer' ? (DATA.questions || []).find((x) => x.id === r.id) : null;
+  if (r.kind === 'answer') return [aq?.read_by ? `in your own words, read by the supervisor as “${esc(aq.label)}”` : aq?.in_words ? 'in your own words, not yet read' : '', !aq?.in_words && u.recommendation ? (u.matched ? 'went with its recommendation' : `its recommendation was “${esc(u.recommendation)}”`) : '', u.autonomy ? `moved ${esc(words(u.autonomy.class))} to ${esc(RUNG_WORDS[u.autonomy.rung])}` : '', u.standing_rule ? `and gave a standing rule: “${esc(u.standing_rule)}”` : '', u.channel === 'chat' ? 'said in the supervisor chat' : u.channel === 'thread' ? 'said in a thread' : ''].filter(Boolean).join(' · ');
   if (r.kind === 'correction') return [u.severity != null ? `severity ${esc(u.severity)}` : '', u.repaired ? `repaired: ${esc(u.repaired)}` : 'not repaired yet'].filter(Boolean).join(' · ');
   if (r.kind === 'rule') return u.status === 'accepted' ? '' : esc(u.status);
   return '';
@@ -5449,7 +5459,7 @@ function openQuestion(id) {
       ['Status', esc(q.status), 'open, answered, defaulted or withdrawn.'],
       ['Settled', q.answered_at ? `${esc(when(q.answered_at))}${q.answered_by ? ` by ${esc(q.answered_by === 'owner' ? 'you' : q.answered_by)}` : ''}` : '', 'When it was answered, defaulted or withdrawn, and by whom.'],
       ['Took', took != null && ['answered', 'defaulted'].includes(q.status) ? esc(took < 3600e3 ? `${Math.max(1, Math.round(took / 60e3))} minutes` : took < 2 * DAY ? `${(took / 3600e3).toFixed(1)} hours` : `${(took / DAY).toFixed(1)} days`) : '', 'From asking to the answer.'],
-      ['Matched', q.matched == null ? '' : q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise', 'Whether your answer was its recommendation; this is the evidence for more trust.'],
+      ['Matched', matchedWords(q), 'Whether your answer was its recommendation; only your own pick is evidence for more trust, never the supervisor’s reading of your words.'],
     ] })}
     ${q.context ? `<div class="ctx measure">${qblock(q.context, q.links)}</div>` : ''}
     ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? (/\n/.test(c.detail) ? `<div class="ctx">${qblock(c.detail, q.links)}</div>` : ` · ${qinline(c.detail, q.links)}`) : ''}${c.effect ? (/\n/.test(c.effect) ? `<div class="ctx">For users:${qblock(c.effect, q.links)}</div>` : ` · For users: ${qinline(c.effect, q.links)}`) : ''}</li>`).join('')}</ul>` : ''}
