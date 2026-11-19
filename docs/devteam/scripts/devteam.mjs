@@ -8778,7 +8778,9 @@ const PREVIEW_EXITED = '[devteam] the command exited with status';
 function launchPreviewWindow(rec) {
   const cmd = rec.run.cmd.split('{port}').join(String(rec.port));
   const extra = isObj(rec.run.env) ? Object.entries(rec.run.env).filter(([k, v]) => /^[A-Z_][A-Z0-9_]*$/.test(k) && typeof v === 'string' && !v.includes('\0')).map(([k, v]) => `${k}=${v}`) : [];
-  const argv = ['env', `PORT=${rec.port}`, `PATH=${process.env.PATH ?? ''}`, ...extra, 'sh', '-c', `sh -c "$1"; s=$?; printf '\\n${PREVIEW_EXITED} %s\\n' "$s"; sleep 30`, 'sh', cmd];
+  // A record with env (the browser's) starts from an empty environment: the tmux server's own can hold
+  // secrets. One without keeps today's argv.
+  const argv = ['env', ...(isObj(rec.run.env) ? ['-i'] : []), `PORT=${rec.port}`, `PATH=${process.env.PATH ?? ''}`, ...extra, 'sh', '-c', `sh -c "$1"; s=$?; printf '\\n${PREVIEW_EXITED} %s\\n' "$s"; sleep 30`, 'sh', cmd];
   writePreview({ ...rec, run: { ...rec.run, window: null } });
   const session = tmuxSession({ save: true });
   const name = `dev~${rec.name}`;
@@ -25435,16 +25437,16 @@ async function browserStartLock(file, fn) {
   process.on('exit', release);
   try { return await fn(); } finally { process.off('exit', release); release(); }
 }
-// The daemon's environment, an allow-list stored in the preview record and put on its window's env
-// line: several other variables hold secrets (DEVTEAM_CLAIM_TOKEN, DEVTEAM_SECRET_*), and none of
-// them is passed.
+// The daemon's environment, an allow-list stored in the preview record and put on its window's
+// `env -i` line: several other variables hold secrets (DEVTEAM_CLAIM_TOKEN, DEVTEAM_SECRET_*), and
+// none of them is passed. Under --headed, the display's variables too.
 const BROWSER_ENV = ['CHROME_PATH', 'DEVTEAM_ROLE', 'DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_PROJECT', 'DEVTEAM_PUBLIC_URL', 'DEVTEAM_PREVIEWS', 'DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_TTYD_PORT', 'DEVTEAM_RELAY_PORTS', 'DEVTEAM_BOX', 'DEVTEAM_CGROUP', 'DEVTEAM_MEMINFO', 'DEVTEAM_MEMORY_COUNTS_CACHE'];
 function browserRunEnv({ headed }) {
   const env = { HOME: os.homedir() };
   for (const k of BROWSER_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
   if (process.env.DEVTEAM_TEST) for (const k of Object.keys(process.env)) if (k === 'DEVTEAM_TEST' || k.startsWith('DEVTEAM_TEST_BROWSER_')) env[k] = process.env[k];
   env.DEVTEAM_BROWSER_SERVE = '1';
-  if (headed) env.DEVTEAM_BROWSER_HEADED = '1';
+  if (headed) { env.DEVTEAM_BROWSER_HEADED = '1'; for (const k of ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY']) if (process.env[k] !== undefined) env[k] = process.env[k]; }
   return env;
 }
 // This checkout's browser preview record (label browser), or undefined.
@@ -25764,14 +25766,6 @@ const browserListen = (server, port) => new Promise((resolve, reject) => { serve
 // placeholder, Chrome, the CDP tabs, the control server, then state.json. It writes nothing to its
 // window once it is up.
 async function browserServe({ chrome: bin }) {
-  // The daemon keeps only run.env's allow-list (and PATH, PORT): its window also inherits the tmux
-  // server's environment, which can hold secrets, and Chrome inherits the daemon's. Where Node can, it
-  // re-executes itself (same pid) with only those, so not even /proc/<pid>/environ keeps the rest.
-  const keep = new Set(['PATH', 'PORT', 'HOME', 'DEVTEAM_BROWSER_SERVE', 'DEVTEAM_BROWSER_HEADED', ...BROWSER_ENV]);
-  const test = !!process.env.DEVTEAM_TEST;
-  const drop = Object.keys(process.env).filter((k) => !keep.has(k) && !(test && (k === 'DEVTEAM_TEST' || k.startsWith('DEVTEAM_TEST_BROWSER_'))));
-  for (const k of drop) delete process.env[k];
-  if (drop.length && typeof process.execve === 'function') process.execve(process.execPath, [process.execPath, '--no-warnings', ...process.execArgv, ...process.argv.slice(1)], { ...process.env });
   const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   const viewPort = Number(process.env.PORT);
