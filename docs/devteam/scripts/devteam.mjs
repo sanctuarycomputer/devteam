@@ -8451,8 +8451,21 @@ const ARTIFACT_LENS = String.raw`(() => {
   let shiftDown = false;
   // no key is told before the page that frames it has said hello, as the preview lens tells nothing first
   let heard = false;
+  // A Shift pressed while typing in one of the page's own fields is a capital letter, not a point: it
+  // is never told, as the viewer never raises its overlay for a Shift typed in its own fields. Told,
+  // it raised the overlay over a page being typed in, and only the pointer moving lowered it again,
+  // so a click made without moving the pointer was the overlay's, never the page's.
+  const NOT_TYPED = ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'];
+  const typingIn = (el) => {
+    // the field itself, inside any open shadow roots
+    for (let n = 0; el && el.shadowRoot && el.shadowRoot.activeElement && n < 32; n++) el = el.shadowRoot.activeElement;
+    if (!el || el.nodeType !== 1) return false;
+    const tag = String(el.localName || '').toLowerCase();
+    return !!el.isContentEditable || tag === 'textarea' || (tag === 'input' && !NOT_TYPED.includes(String(el.type || 'text').toLowerCase()));
+  };
   const onKey = (e) => {
     if (!heard || (e.key !== 'Shift' && e.key !== 'Escape')) return;
+    if (e.type === 'keydown' && e.key === 'Shift' && typingIn(e.target && e.target.nodeType === 1 ? e.target : document.activeElement)) return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
     tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
@@ -9452,6 +9465,10 @@ function artifactProblems(slug, entries) {
     if (!host) { warnings.push(`${slug}: ${redactUrl(url)} is not on an allowed CDN (${ARTIFACT_CDNS.join(', ')}); it won't load`); continue; }
     if (ARTIFACT_CDNS.includes(host) && !/@\d+\.\d+\.\d+/.test(url) && !/\/ajax\/libs\/[^/]+\/\d+\.\d+\.\d+\//.test(url)) warnings.push(`${slug}: ${redactUrl(url)} has no exact version (name@x.y.z); pin it so the page renders the same tomorrow`);
   }
+  // Images and media load from its own folder, data: and blob: alone, never a CDN or any other host.
+  const media = new Set();
+  for (const [, url] of html.matchAll(/<(?:img|source|video|audio|track|input)\b[^>]*?\b(?:src|poster)\s*=\s*["'](https?:[^"']+)["']/gi)) media.add(url);
+  for (const url of media) warnings.push(`${slug}: ${redactUrl(url)} is an image or media from another host; it won't load (copy it into the artifact's folder)`);
   if (/<meta\b[^>]*http-equiv\s*=\s*["']?refresh/i.test(html)) warnings.push(`${slug}: a meta refresh; an artifact doesn't navigate itself`);
   return { errors, warnings, manifest: m.manifest ?? null };
 }
