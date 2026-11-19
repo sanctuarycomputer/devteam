@@ -674,3 +674,33 @@ test('canvas merge: a person\'s edit to what the copy didn\'t change survives (C
     assert.ok(kept >= 150, `${name}: only ${kept} disjoint pairs`);
   }
 });
+
+test('canvas merge: subtrees, nested rescue, dropped children, ids already there (task-2 review)', () => {
+  // a nested subtree deleted by one del
+  const base = edit(LISTS, [add('x', 'frame', 'g'), add('y', 'frame', 'x'), add('z', 'rect', 'y')]);
+  let copy = edit(base, [del('x')]);
+  assert.deepEqual(opsOf(base, copy).ops, [del('x')]);
+  // a kept node two levels under a deleted frame is rescued
+  let now = edit(base, [mv('b', 'y', null)]);
+  copy = edit(base, [del('x')]);
+  let r = opsOf(base, copy, now);
+  let out = after(now, r.ops);
+  assert.equal(out.nodes.b.parent, 'f');
+  assert.equal(out.nodes.x, undefined);
+  // the children of a node dropped for a deleted parent are listed too
+  now = edit(LISTS, [del('g')]);
+  copy = edit(LISTS, [add('x', 'frame', 'g'), add('y', 'rect', 'x')]);
+  r = opsOf(LISTS, copy, now);
+  assert.deepEqual(r.ops, []);
+  assert.deepEqual(r.skipped, [{ id: 'x', why: 'parent-deleted' }, { id: 'y', why: 'parent-deleted' }]);
+  // a node the copy adds that is already there elsewhere (a person moved it after a first take): moved, then set
+  copy = edit(LISTS, [add('x', 'rect', 'f', 'b', { name: 'X' })]);
+  now = edit(copy, [mv('x', 'g', null)]);
+  r = opsOf(LISTS, copy, now);
+  out = after(now, r.ops);
+  assert.deepEqual(kids(out, 'f'), ['a', 'b', 'x', 'c', 'd']);
+  assert.deepEqual(kids(out, 'g'), []);
+  // already in place: nothing moves
+  r = opsOf(LISTS, copy, copy);
+  assert.ok(r.ops.every((o) => o.op !== 'move'), JSON.stringify(r.ops));
+});
