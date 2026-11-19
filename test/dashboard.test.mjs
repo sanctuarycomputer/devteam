@@ -711,6 +711,11 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     await p.send('Runtime.enable');
     await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 600, deviceScaleFactor: 1, mobile: false });
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+    // kit-307: DEVTEAM_TEST_CPU_THROTTLE=<n> runs the page n times slower, as a loaded runner does;
+    // DEVTEAM_TEST_ROUTE_DELAY_MS=<ms> runs the page's hashchange listeners that much later, as a runner too
+    // loaded to reach the route's task before the test's next step does
+    if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
+    if (process.env.DEVTEAM_TEST_ROUTE_DELAY_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const add = window.addEventListener; window.addEventListener = function (type, f, ...a) { return add.call(this, type, type === 'hashchange' && typeof f === 'function' ? (e) => setTimeout(() => f(e), ${Number(process.env.DEVTEAM_TEST_ROUTE_DELAY_MS)}) : f, ...a); }; })()` });
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
     const box = `textarea[data-q="${Q}"]`;
     const soon = soonIn(p, 15000, () => dash.out());
