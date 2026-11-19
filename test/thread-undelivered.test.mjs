@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { hasTmux, line, threadsFixture, until } from './lib/kit.mjs';
+import vm from 'node:vm';
+import { dashboardOnFreePort, hasTmux, kit, line, threadsFixture, until } from './lib/kit.mjs';
 
 const MIN = 60000;
 const NOT_DELIVERED = /^not delivered: no supervisor terminal took it, so the supervisor sees it only when it next checks; it last checked (\d+) min ago \((\d\d:\d\d) UTC\)$/;
@@ -217,4 +218,54 @@ test('machine status prints the alert for the box operator', { skip: hasTmux ? f
   assert.equal(lc.status, 0, lc.stderr + lc.stdout);
   const st = machine(['machine', 'status', '--in', code]);
   assert.match(st.stdout, new RegExp(`^attention: undelivered: A message in a thread reached no supervisor and has waited 6 min \\(thread ${T}\\)`, 'm'), st.stdout + st.stderr);
+});
+
+// The card's line, as the page draws it: the threads-core block, in a vm, as dashboard.test.mjs loads it.
+test("the card says a turn wasn't delivered: from the send before it lands, from the server's record after, never from 'no pane now'", () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
+  const ctx = vm.createContext({ TextEncoder, URL });
+  vm.runInContext(`${src}\n;globalThis.api = { tCardState };`, ctx);
+  const { tCardState } = ctx.api;
+  const now = Date.parse('2026-11-10T12:00:00Z');
+  const iso = (min) => new Date(now - min * MIN).toISOString();
+  const U = 'u-20261110-115700000-owner';
+  const pending = { turns: [{ by: 'owner', at: iso(0.1), text: 'hi' }] };
+  const landed = (min = 3) => ({ turns: [{ by: 'owner', id: U, at: iso(min), text: 'hi' }] });
+  const NOT = 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; ';
+  assert.equal(tCardState(pending, now, false, false, { checked: iso(37), undelivered: [] }), `${NOT}it last checked 37 min ago.`, 'the send said no terminal took it');
+  assert.equal(tCardState(pending, now, false, false, null), `${NOT}it has not checked yet.`, 'no read yet: the send decides');
+  assert.equal(tCardState(landed(), now, undefined, false, { checked: null, undelivered: [U] }), `${NOT}it has not checked yet.`, 'after a reload: the record decides');
+  assert.equal(tCardState(landed(), now, undefined, false, { checked: iso(90), undelivered: [U] }), `${NOT}it last checked 2 h ago.`);
+  assert.equal(tCardState(landed(), now, false, false, { checked: null, undelivered: [] }), 'Sent; the supervisor will read it when it next checks.', 'a stale typed for the thread: the record says delivered');
+  assert.equal(tCardState(landed(), now, undefined, false, { checked: null, undelivered: [] }), 'Sent; the supervisor will read it when it next checks.', 'no pane now is no miss');
+  assert.equal(tCardState(landed(3), now, undefined, false, { checked: iso(1), undelivered: [U] }), "Not delivered: no supervisor terminal took it. The supervisor has checked since (1 min ago) but hasn't replied yet.");
+  assert.equal(tCardState(landed(1), now, true, true, null), 'Sent.');
+  assert.equal(tCardState(landed(11), now, true, false, null), 'Sent; the supervisor will read it when it next checks.', 'delivered, then the supervisor went');
+  assert.equal(tCardState({ turns: [...landed().turns, { by: 'supervisor', at: iso(1), text: 'ok' }] }, now, false, false, { undelivered: [U] }), null, 'the reply is the state');
+});
+
+test('/api/threads carries the last check and the turns no terminal took', async (t) => {
+  const F = threadsFixture('undelivered-api');
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  t.after(async () => { await dash.stop(); F.done(); });
+  const run = path.join(F.old, 'docs/devteam/run');
+  const at = Date.now() - 37 * MIN;
+  fs.writeFileSync(path.join(run, 'host-claim.json'), JSON.stringify({ checked: at }));
+  const [T] = F.owner(['thread', 'new', 'Narrow this', '--title', 'Checkout']).split('\n');
+  const [U] = F.owner(['thread', 'say', T, 'and this']).split('\n');
+  const get = (h = {}) => fetch(`http://127.0.0.1:${port}/api/threads`, { headers: h });
+  const r = await get();
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.ok(j.supervisor.undelivered.includes(U), JSON.stringify(j.supervisor));
+  assert.equal(j.supervisor.checked, new Date(at).toISOString());
+  // a change to the record alone is a new body, never a 304
+  fs.writeFileSync(path.join(run, 'undelivered-turns.json'), '{}');
+  const r2 = await get({ 'if-none-match': r.headers.get('etag') });
+  assert.equal(r2.status, 200);
+  assert.deepEqual((await r2.json()).supervisor.undelivered, []);
+  fs.writeFileSync(path.join(run, 'host-claim.json'), JSON.stringify({ checked: at + MIN }));
+  const r3 = await get({ 'if-none-match': r2.headers.get('etag') });
+  assert.equal(r3.status, 200, 'a new check is a new body too');
 });
