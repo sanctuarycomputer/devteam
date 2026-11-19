@@ -112,6 +112,20 @@
   .say { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; width: max-content; max-width: calc(100% - 24px); z-index: 4; pointer-events: none; }
   .say p { margin: 0; max-width: var(--measure); font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); box-shadow: var(--shadow); }
   #banner { background: var(--amber-bg); color: var(--amber-fg); border-color: var(--amber-fg); }
+  /* the tools bar (kit-662): at the stage's foot, centred, its right edge at least 168 px from the
+     stage's (kit-661 checks the stage's own bottom-right corner, 60 and 120 px in); it wraps when narrow */
+  .tools { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; flex-wrap: wrap; justify-content: center; gap: 2px; width: max-content; max-width: calc(100% - 336px); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 3px; box-shadow: var(--shadow); z-index: 3; }
+  .tools button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; border-color: transparent; background: transparent; }
+  .tools button:hover { background: var(--hover); }
+  .tools button[aria-pressed="true"] { background: var(--well); border-color: var(--fg-2); }
+  .tools button:disabled { opacity: .5; cursor: not-allowed; }
+  .tools kbd { font: 10px/1 var(--mono); color: var(--muted); }
+  .stage.drawing:not(.space):not(.panning) { cursor: crosshair; }
+  /* a tool's preview: stage chrome, never a drawn node, taking no pointer events */
+  .draft { position: absolute; border: 1px dashed var(--sel); pointer-events: none; z-index: 2; }
+  .draft.round { border-radius: 50%; }
+  .pen { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 2; }
+  .pen polyline { fill: none; stroke: var(--sel); stroke-width: 1.5px; stroke-dasharray: 4 3; }
   body[data-state="error"] #surface, body[data-state="error"] .zoom { display: none; }
 
   /* under 760 px, watch and comment: no panels, the stage the full width under the bar, the bar's
@@ -134,6 +148,7 @@
     #pageSel { display: block; max-width: 100%; }
     .say { top: 52px; }
     #narrowNote { display: block; }
+    #tools { display: none; }
   }
 
   /* the design being drawn keeps its own colours, light or dark */
@@ -181,6 +196,16 @@
       <p id="banner" role="status" hidden></p>
       <p id="toast" role="status" hidden></p>
     </div>
+    <div class="tools" id="tools" role="toolbar" aria-label="Tools" hidden>
+      <button type="button" data-tool="move" aria-pressed="true">Move <kbd>V</kbd></button>
+      <button type="button" data-tool="frame" aria-pressed="false">Frame <kbd>F</kbd></button>
+      <button type="button" data-tool="text" aria-pressed="false">Text <kbd>T</kbd></button>
+      <button type="button" data-tool="rect" aria-pressed="false">Rectangle <kbd>R</kbd></button>
+      <button type="button" data-tool="ellipse" aria-pressed="false">Ellipse <kbd>O</kbd></button>
+      <button type="button" data-tool="vector" aria-pressed="false">Vector <kbd>P</kbd></button>
+      <button type="button" data-tool="image" aria-pressed="false">Image <kbd>I</kbd></button>
+    </div>
+    <input type="file" id="imageFile" accept="image/png,image/jpeg,image/webp,image/gif" aria-label="Image file" hidden>
   </section>
   <aside class="panel right">
     <h2 class="ptitle">Properties</h2>
@@ -993,13 +1018,17 @@
   // on empty stage nothing. The stage's own controls are not the stage.
   $('stage').addEventListener('click', (e) => {
     if (panned) { panned = false; return; } // the click that ends a Space drag is a pan, not a click
+    if (toolPress) { toolPress = false; return; } // the click that ends a tool's press made something
     if (!state.doc || e.button !== 0 || !(e.target instanceof Element)) return;
-    if (e.target.closest('.zoom, .stage-top')) return;
+    if (e.target.closest('.zoom, .stage-top, #tools')) return;
     const hit = e.target.closest('#surface [data-id]');
     select(hit ? hit.dataset.id : null);
   });
+  // Escape ends a tool (a drag, a path) and returns to Move; with Move on, it clears the selection.
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && state.sel !== null) select(null);
+    if (e.key !== 'Escape') return;
+    if (tool !== 'move' || gesture !== null || pen !== null) { setTool('move'); return; }
+    if (state.sel !== null) select(null);
   });
 
   // ---- zoom and pan ----
@@ -1017,6 +1046,7 @@
   function applyView() {
     $('surface').style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
     $('zoomPct').textContent = `${Math.round(view.z * 100)}%`;
+    drawPen(); // a path being drawn follows the view
   }
   // Zoom by `factor` around the stage point (sx, sy), which stays put; z kept to [0.1, 8], so at a
   // bound the view doesn't change at all.
@@ -1070,7 +1100,10 @@
   $('zoomOut').addEventListener('click', () => { if (ready()) zoomCentre(view.z / STEP); });
   $('zoomFit').addEventListener('click', () => { if (ready()) fit(); });
   // a resized window (a phone turned, a panel shown or hidden at 760 px) refits, unless the person has moved
-  window.addEventListener('resize', () => { if (ready() && !moved) fit(); });
+  window.addEventListener('resize', () => {
+    if (narrow() && (tool !== 'move' || gesture !== null || pen !== null)) setTool('move'); // under 760 px, watch only
+    if (ready() && !moved) fit();
+  });
 
   // The wheel pans; with Ctrl or ⌘ (a trackpad's pinch comes as Ctrl+wheel) it zooms around the pointer.
   $('stage').addEventListener('wheel', (e) => {
@@ -1117,7 +1150,7 @@
   }
   $('stage').addEventListener('pointerdown', (e) => {
     if (touches.size === 0) panned = false;
-    if (!ready() || !(e.target instanceof Element) || e.target.closest('.zoom, .stage-top')) return;
+    if (!ready() || !(e.target instanceof Element) || e.target.closest('.zoom, .stage-top, #tools')) return;
     if (isTouch(e)) {
       if (e.button !== 0 || (pan && !pan.touch)) return;
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -1513,6 +1546,7 @@
     state.rev = d.rev;
     state.session = own(b, 'session') && typeof b.session === 'string' ? b.session : null;
     state.repo = b.repo;
+    $('tools').hidden = state.session === null; // main's copy is watched, never edited: no tools
   }
   // For tests and the bar: data-live, data-rev (base's), data-pending (its count) and data-saved.
   function syncBody() {
@@ -1573,6 +1607,8 @@
   function lock(kind, text = null) {
     if (state.locked !== 'closed') state.locked = kind;
     if (kind === 'closed') { sock.ended = true; state.closedText = text; }
+    setTool('move');
+    placing = null;
     for (const c of document.querySelectorAll('#tools button, #props input, #props select, #props textarea, #props button')) c.disabled = true;
     showBanner();
   }
@@ -2011,6 +2047,302 @@
       deleteNode(state.sel);
     }
   });
+
+  // ---- the tools (spec §2) ----
+  // Move (the default) selects; Frame, Text, Rectangle, Ellipse and Image make a node by a click or a
+  // drag on the stage, Vector by a click per point. Each made node is one `add` edit, placed by
+  // placeAt; the new node is selected and the tool goes back to Move. Space or the middle button pans
+  // in every tool (the pan's own handlers run first and the tools leave such a press alone).
+
+  const TOOLS = ['move', 'frame', 'text', 'rect', 'ellipse', 'vector', 'image'];
+  const TOOL_KEY = { v: 'move', f: 'frame', t: 'text', r: 'rect', o: 'ellipse', p: 'vector', i: 'image' };
+  const NEW_NAME = { frame: 'Frame', text: 'Text', rect: 'Rectangle', ellipse: 'Ellipse', vector: 'Vector', image: 'Image' };
+  const IMAGE_SAY = {
+    tooBig: 'That image is too big (at most 4 MB).',
+    types: 'Only PNG, JPEG, WebP or GIF images can be added.',
+    failed: "The image couldn't be added.",
+  };
+  const IMAGE_BYTES = 4 * 1024 * 1024; // canvas@1 §7 imageBytes
+  const DRAG_SLOP = 3; // px a press may move and still be a click
+  let tool = 'move';
+  // gesture: the press a tool is following ({ id, tool, sx, sy, cx, cy, dragged, draft }), or null;
+  // toolPress: the click that ends such a press is the tool's, not a selection; pen: the path being
+  // drawn ({ pts in page px, el, line }), or null; placing: where the image being chosen goes, or null.
+  let gesture = null;
+  let toolPress = false;
+  let pen = null;
+  let placing = null;
+  const toolsOn = () => ready() && editable() && !narrow();
+
+  function setTool(name) {
+    if (!TOOLS.includes(name)) return;
+    endGesture();
+    dropPen();
+    tool = name;
+    for (const b of $('tools').querySelectorAll('button[data-tool]')) b.setAttribute('aria-pressed', String(b.dataset.tool === tool));
+    $('stage').classList.toggle('drawing', tool !== 'move');
+  }
+  $('tools').addEventListener('click', (e) => {
+    const b = e.target instanceof Element ? e.target.closest('button[data-tool]') : null;
+    if (b && !b.disabled && editable()) setTool(b.dataset.tool);
+  });
+  // The tool keys, only while no field has focus, at 760 px and over, and while editing is allowed.
+  // Enter ends a path.
+  document.addEventListener('keydown', (e) => {
+    if (!toolsOn() || typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'Enter' && pen !== null) { e.preventDefault(); finishPen(); return; }
+    const k = typeof e.key === 'string' && e.key.length === 1 ? e.key.toLowerCase() : '';
+    if (own(TOOL_KEY, k)) { e.preventDefault(); setTool(TOOL_KEY[k]); }
+  });
+
+  // Is `id` the node `root` or inside its subtree (walked up, bounded)?
+  function inSubtree(id, root) {
+    let cur = id;
+    for (let steps = 0; steps <= MAX_ELEMENTS && nodeOf(cur); steps++) {
+      if (cur === root) return true;
+      cur = nodeOf(cur).parent;
+    }
+    return false;
+  }
+  const inComponent = (id) => {
+    let cur = id;
+    for (let steps = 0; steps <= MAX_ELEMENTS && nodeOf(cur); steps++) {
+      if (nodeOf(cur).type === 'component') return true;
+      cur = nodeOf(cur).parent;
+    }
+    return false;
+  };
+  // Where a new (or moved) node goes for a pointer at (cx, cy): the deepest frame or component drawn
+  // under it (an instance's inner nodes are its component's, not the page's: they carry no data-id),
+  // skipping `exclude`'s subtree and, for a component (`component: true`), any component or anything
+  // in one; else the shown page. { parent, after, x, y, free }: x, y the pointer in the parent's page
+  // px; free when the parent places by x, y (a `none` frame or the page), after then its last child
+  // (on top); in a row, column or grid, after the last child whose middle along the axis (a grid or a
+  // wrapped row or column: by reading order) is before the pointer, null for first.
+  function placeAt(cx, cy, exclude = null, { component = false } = {}) {
+    let parent = null;
+    let pel = null;
+    for (const el of document.elementsFromPoint(cx, cy)) {
+      if (!(el instanceof HTMLElement) || !$('surface').contains(el) || el.dataset.id === undefined) continue;
+      const id = el.dataset.id;
+      const n = nodeOf(id);
+      if (!n || !CONTAINERS.has(n.type) || drawn.get(id) !== el) continue;
+      if (exclude !== null && inSubtree(id, exclude)) continue;
+      if (component && inComponent(id)) continue;
+      parent = id;
+      pel = el;
+      break;
+    }
+    const z = view.z;
+    const o = (pel ?? $('surface')).getBoundingClientRect();
+    const x = (cx - o.left) / z;
+    const y = (cy - o.top) / z;
+    const pid = parent ?? state.pageId;
+    const pn = parent === null ? null : nodeOf(parent);
+    const kids = (pn ? kidsOf(pn) : kidsOf(pageById(pid) || { children: [] })).filter((k) => k !== exclude);
+    const mode = pn ? pick(MODE, getPath(pn, 'layout.mode'), 'none') : 'none';
+    if (mode === 'none') return { parent: pid, after: kids.length ? kids[kids.length - 1] : null, x, y, free: true };
+    const wrap = getPath(pn, 'layout.wrap') === true;
+    let after = null;
+    for (const k of kids) {
+      const el = drawn.get(k);
+      if (!el || el.getClientRects().length === 0) continue;
+      const r = el.getBoundingClientRect();
+      const mx = (r.left + r.right) / 2;
+      const my = (r.top + r.bottom) / 2;
+      let before;
+      if (mode === 'row' && !wrap) before = mx < cx;
+      else if (mode === 'column' && !wrap) before = my < cy;
+      else if (mode === 'column') before = r.right <= cx || (r.left <= cx && my < cy);
+      else before = r.bottom <= cy || (r.top <= cy && mx < cx);
+      if (before) after = k;
+    }
+    return { parent: pid, after, x, y, free: false };
+  }
+
+  // A new node of `type` at a placement, with its own properties: one add edit; then selected, and the
+  // tool back to Move. The new node's id is new (newId). True when it was queued.
+  function addNode(type, at, props) {
+    const id = newId();
+    const node = { id, type, parent: at.parent, name: NEW_NAME[type] };
+    if (at.free) { node.x = Math.round(at.x); node.y = Math.round(at.y); }
+    Object.assign(node, props);
+    setTool('move');
+    if (!edit([{ op: 'add', node, after: at.after }])) return false;
+    select(id);
+    return true;
+  }
+  const fixedSize = (w, h) => ({ w: Math.round(clamp(w, 1, PX)), h: Math.round(clamp(h, 1, PX)) });
+
+  // A press by a creating tool: followed with the pointer captured, so a release outside the stage
+  // still ends it; past 3 px it is a drag, previewed by a dashed draft. A press with Space held, by the
+  // middle button or by touch is the pan's.
+  $('stage').addEventListener('pointerdown', (e) => {
+    toolPress = false;
+    if (tool === 'move' || !toolsOn() || isTouch(e) || e.button !== 0 || spaceHeld || pan || gesture) return;
+    if (!(e.target instanceof Element) || e.target.closest('.zoom, .stage-top, #tools')) return;
+    toolPress = true;
+    if (tool === 'vector') { penPoint(e.clientX, e.clientY); return; }
+    gesture = { id: e.pointerId, tool, sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null };
+    try { $('stage').setPointerCapture(e.pointerId); } catch { /* moves over the stage still arrive */ }
+  });
+  $('stage').addEventListener('pointermove', (e) => {
+    if (pen !== null && tool === 'vector') drawPen(e.clientX, e.clientY);
+    const g = gesture;
+    if (!g || e.pointerId !== g.id) return;
+    g.cx = e.clientX;
+    g.cy = e.clientY;
+    if (!g.dragged && Math.hypot(g.cx - g.sx, g.cy - g.sy) <= DRAG_SLOP) return;
+    g.dragged = true;
+    if (g.tool === 'text') return; // a text is placed where it was pressed
+    if (!g.draft) {
+      g.draft = document.createElement('div');
+      g.draft.className = g.tool === 'ellipse' ? 'draft round' : 'draft';
+      $('stage').append(g.draft);
+    }
+    const st = $('stage').getBoundingClientRect();
+    g.draft.style.left = `${Math.min(g.sx, g.cx) - st.left}px`;
+    g.draft.style.top = `${Math.min(g.sy, g.cy) - st.top}px`;
+    g.draft.style.width = `${Math.abs(g.cx - g.sx)}px`;
+    g.draft.style.height = `${Math.abs(g.cy - g.sy)}px`;
+  });
+  function endGesture() {
+    if (!gesture) return;
+    try { $('stage').releasePointerCapture(gesture.id); } catch { /* already released */ }
+    if (gesture.draft) gesture.draft.remove();
+    gesture = null;
+  }
+  $('stage').addEventListener('pointerup', (e) => {
+    const g = gesture;
+    if (!g || e.pointerId !== g.id) return;
+    endGesture();
+    if (!toolsOn()) return;
+    make(g);
+  });
+  $('stage').addEventListener('pointercancel', (e) => { if (gesture && e.pointerId === gesture.id) endGesture(); });
+
+  // What a press made: placed by where it was pressed; a drag's box (frame, rectangle, ellipse, image)
+  // gives its top-left and its size, in page px.
+  function make(g) {
+    const at = placeAt(g.sx, g.sy);
+    const z = view.z;
+    const box = g.dragged && g.tool !== 'text'
+      ? { at: { ...at, x: at.x + (Math.min(g.sx, g.cx) - g.sx) / z, y: at.y + (Math.min(g.sy, g.cy) - g.sy) / z }, w: Math.abs(g.cx - g.sx) / z, h: Math.abs(g.cy - g.sy) / z }
+      : null;
+    const where = box ? box.at : at;
+    switch (g.tool) {
+      case 'frame':
+        addNode('frame', where, { size: box ? fixedSize(box.w, box.h) : { w: 200, h: 120 }, layout: { mode: 'none' }, fill: '#ffffff' });
+        return;
+      case 'rect':
+      case 'ellipse':
+        addNode(g.tool, where, { size: box ? fixedSize(box.w, box.h) : { w: 100, h: 100 }, fill: '#d9d9d9' });
+        return;
+      case 'text':
+        if (addNode('text', where, { size: { w: 'hug', h: 'hug' }, text: 'Text' })) {
+          // its Text field focused, its text selected, so typing replaces it
+          const f = $('props').querySelector('[data-prop="text"]');
+          if (f instanceof HTMLTextAreaElement && !f.disabled) { f.focus({ preventScroll: true }); f.select(); }
+        }
+        return;
+      case 'image':
+        // the picker; the chosen file is posted, and the image added where this press was
+        placing = { at: where, size: box ? fixedSize(box.w, box.h) : { w: 'hug', h: 'hug' } };
+        setTool('move');
+        $('imageFile').value = '';
+        $('imageFile').click();
+        return;
+      default:
+    }
+  }
+
+  // ---- the image: posted, then added under the src the server answers ----
+  $('imageFile').addEventListener('cancel', () => { placing = null; });
+  $('imageFile').addEventListener('change', () => {
+    const f = $('imageFile').files;
+    const file = f && f.length ? f[0] : null;
+    const place = placing;
+    placing = null;
+    $('imageFile').value = '';
+    if (file && place && editable()) uploadImage(file, place);
+  });
+  // The upload's name: the file's, cut to 200 characters, or "image".
+  function uploadName(s) {
+    const cut = [...(typeof s === 'string' ? s : '')].slice(0, 200).join('');
+    return cut.trim() && wellFormed(cut) ? cut : 'image';
+  }
+  async function uploadImage(file, place) {
+    if (file.size > IMAGE_BYTES) { say(IMAGE_SAY.tooBig); return; }
+    let status = 0;
+    let src = null;
+    try {
+      // base64 by btoa over the bytes as a binary string, built 32 KB at a time
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 32768) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+      const body = JSON.stringify({ name: uploadName(file.name), data: btoa(bin) });
+      const res = await fetch(`/api/canvas/image?slug=${encodeURIComponent(state.slug)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, credentials: 'same-origin', cache: 'no-store' });
+      status = res.status;
+      if (status === 200) {
+        const j = await res.json();
+        if (isObj(j) && typeof j.src === 'string' && SRC_RE.test(j.src)) src = j.src;
+      }
+    } catch { src = null; }
+    if (src === null) {
+      say(status === 413 ? IMAGE_SAY.tooBig : status === 415 ? IMAGE_SAY.types : IMAGE_SAY.failed);
+      return;
+    }
+    addNode('image', place.at, { size: place.size, src });
+  }
+
+  // ---- the pen: a click per point; Enter or a double-click ends the path, Escape drops it ----
+  function penPoint(cx, cy) {
+    const s = $('surface').getBoundingClientRect();
+    const pt = [(cx - s.left) / view.z, (cy - s.top) / view.z];
+    if (pen === null) pen = { pts: [], el: null, line: null };
+    const last = pen.pts[pen.pts.length - 1];
+    // a double-click's second press, or a click on the last point, adds none
+    if (last && Math.hypot(pt[0] - last[0], pt[1] - last[1]) * view.z < 2) return;
+    pen.pts.push(pt);
+    drawPen(cx, cy);
+  }
+  // The path's preview (stage chrome), in stage px, to the pointer when given.
+  function drawPen(cx = null, cy = null) {
+    if (pen === null) return;
+    if (pen.el === null) {
+      pen.el = document.createElementNS(SVG_NS, 'svg');
+      pen.el.classList.add('pen');
+      pen.el.setAttribute('aria-hidden', 'true');
+      pen.line = document.createElementNS(SVG_NS, 'polyline');
+      pen.el.append(pen.line);
+      $('stage').append(pen.el);
+    }
+    const st = $('stage').getBoundingClientRect();
+    const s = $('surface').getBoundingClientRect();
+    const pts = pen.pts.map(([x, y]) => [s.left - st.left + x * view.z, s.top - st.top + y * view.z]);
+    if (cx !== null && cy !== null) pts.push([cx - st.left, cy - st.top]);
+    pen.line.setAttribute('points', pts.map(([x, y]) => `${x},${y}`).join(' '));
+  }
+  function dropPen() {
+    if (pen !== null && pen.el !== null) pen.el.remove();
+    pen = null;
+  }
+  // The path made a vector: placed by its first point; x, y its points' top-left (whole px), the path
+  // `M x y L x y …` from there, numbers to 0.1; at least two points, else nothing.
+  function finishPen() {
+    const pts = pen === null ? [] : pen.pts;
+    dropPen();
+    if (pts.length < 2 || !toolsOn()) { setTool('move'); return; }
+    const s = $('surface').getBoundingClientRect();
+    const at = placeAt(s.left + pts[0][0] * view.z, s.top + pts[0][1] * view.z);
+    const lp = pts.map(([x, y]) => [x - pts[0][0] + at.x, y - pts[0][1] + at.y]);
+    const x0 = Math.round(Math.min(...lp.map(([x]) => x)));
+    const y0 = Math.round(Math.min(...lp.map(([, y]) => y)));
+    const r = (v) => String(Math.round(v * 10) / 10 || 0);
+    const path = lp.map(([x, y], i) => `${i ? 'L' : 'M'} ${r(x - x0)} ${r(y - y0)}`).join(' ');
+    addNode('vector', { ...at, x: x0, y: y0 }, { path, size: { w: 'hug', h: 'hug' }, stroke: '#000000', strokeWidth: 1 });
+  }
+  $('stage').addEventListener('dblclick', () => { if (pen !== null && tool === 'vector') finishPen(); });
 
   // ---- the socket (canvas@1 §3, §5) ----
 

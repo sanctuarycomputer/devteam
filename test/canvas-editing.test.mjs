@@ -44,14 +44,15 @@ const DOM_GONE = /navigated or closed|Cannot find context|context was destroyed|
 // Fetch for every URL: recorded (`urls`, a set, and `requests`, every one in order), then answered by
 // `answer`, continued when same-origin, failed otherwise; dialogs recorded and dismissed; exceptions
 // recorded. Network for the page's WebSocket frames: `sent` (the page's, parsed) and `got` (the
-// server's, parsed), with the time each was seen here (`sentAt`, `gotAt`, Date.now()). `answer` may
+// server's, parsed), with the time each was seen here (`sentAt`, `gotAt`, Date.now()). File choosers
+// the page opens (once a test has set Page.setInterceptFileChooserDialog) in `choosers`. `answer` may
 // return { fail: true } to fail the request; a test may set `rec.hold` to a URL test, and the requests
 // it matches wait in `rec.held` (their URLs in `rec.heldUrl`) until `rec.release()`.
 async function recorder(ws, origin, answer) {
   let seq = 0;
   const waiting = new Map();
   const rec = {
-    urls: new Set(), requests: [], dialogs: [], exceptions: [], sent: [], sentAt: [], got: [], gotAt: [],
+    urls: new Set(), requests: [], dialogs: [], exceptions: [], sent: [], sentAt: [], got: [], gotAt: [], choosers: [],
     send: null, hold: null, held: [], heldUrl: new Map(), release: null,
   };
   const raw = (method, params = {}) => new Promise((resolve, reject) => {
@@ -100,6 +101,8 @@ async function recorder(ws, origin, answer) {
     } else if (o.method === 'Network.webSocketFrameReceived') {
       const f = frame(o.params.response);
       if (f) { rec.got.push(f); rec.gotAt.push(Date.now()); }
+    } else if (o.method === 'Page.fileChooserOpened') {
+      rec.choosers.push(o.params);
     } else if (o.method === 'Page.javascriptDialogOpening') {
       rec.dialogs.push(o.params);
       quiet('Page.handleJavaScriptDialog', { accept: false });
@@ -427,7 +430,12 @@ test('paused, resumed and landed', { skip: canDrive ? false : 'needs Chrome and 
   assert.ok(ctl.length > 0, 'the panel has property controls');
   for (const c of ctl) assert.equal(c.off, true, `${c.prop} disabled after landed`);
   assert.equal(await p.ev("document.querySelector('#props [data-action=\"delete\"]')?.disabled ?? null"), true, 'Delete layer disabled');
-  // (Task 3 adds the tools bar here: at least one #tools button[data-tool], and each disabled.)
+  // the tools bar's buttons too: at least one, and each disabled (plan-2 F2-1)
+  const tools = await p.ev("[...document.querySelectorAll('#tools button')].map((b) => b.disabled)");
+  assert.ok(tools.length > 0, 'the tools bar has buttons');
+  assert.ok(tools.every((d) => d === true), `every tool disabled after landed (${JSON.stringify(tools)})`);
+  await p.key('F');
+  assert.equal(await p.ev("document.querySelector('#tools button[aria-pressed=\"true\"]')?.dataset.tool ?? null"), 'move', 'F changes no tool after landed');
   // no edit goes out, and no reconnect is tried
   const n0 = edits(rec).length;
   await p.click('#layers .layer[data-node="title"]');
@@ -824,6 +832,311 @@ test("a remote edit doesn't take a field from under a person typing", { skip: ca
   await waitSaved(p);
   assert.equal(fake.doc('every').nodes.title.text, 'Typed', "the server's order: the page's edit came last");
   assert.equal(await p.ev("document.querySelector('#props [data-prop=\"text\"]').value"), 'Typed');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+// ---- C4.1, C4.6 and C1.1a: the tools ----
+
+const MINIMAL = fixture('doc-minimal.json');
+const IMG_PATH = path.join(FIX, 'images', IMG_FILE);
+const IMAGE_SAY = {
+  tooBig: 'That image is too big (at most 4 MB).',
+  types: 'Only PNG, JPEG, WebP or GIF images can be added.',
+  failed: "The image couldn't be added.",
+};
+const TOOL_KEYS = [['F', 'frame'], ['T', 'text'], ['R', 'rect'], ['O', 'ellipse'], ['P', 'vector'], ['I', 'image'], ['V', 'move']];
+const pressedTool = (p) => p.ev("[...document.querySelectorAll('#tools button[aria-pressed=\"true\"]')].map((b) => b.dataset.tool).join(' ') || null");
+// An element's box on screen.
+const box = (p, sel) => p.ev(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return null; const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height }; })()`);
+const zoomNow = (p) => p.ev("new DOMMatrix(getComputedStyle(document.getElementById('surface')).transform).a");
+const hitAt = (p, pt) => p.ev(`(() => { const e = document.elementFromPoint(${pt.x}, ${pt.y}); return e ? (e.closest('#surface [data-id]')?.dataset.id ?? e.id ?? null) : null; })()`);
+const mouse = (p, type, x, y, extra = {}) => p.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1, ...extra });
+// A left drag from `a` by (dx, dy), in steps; `mid` runs while the button is still down.
+async function drag(p, a, dx, dy, mid = null) {
+  await p.move(a.x, a.y);
+  await mouse(p, 'mousePressed', a.x, a.y);
+  for (let i = 1; i <= 4; i++) await mouse(p, 'mouseMoved', a.x + (dx * i) / 4, a.y + (dy * i) / 4);
+  if (mid) await mid();
+  await mouse(p, 'mouseReleased', a.x + dx, a.y + dy);
+}
+// The one add the page sent after the first n0 edits, acked.
+async function added(rec, n0, what) {
+  const e = await nextEdit(rec, n0);
+  assert.equal(e.ops.length, 1, `${what}: one op`);
+  assert.equal(e.ops[0].op, 'add', `${what}: an add`);
+  assert.equal(Object.hasOwn(e.ops[0].node, 'children'), false, `${what}: no children key`);
+  assert.match(e.ops[0].node.id, /^[0-9a-z]{6}-\d+$/, `${what}: a new id <prefix>-<n>`);
+  await ackOf(rec, e);
+  return e.ops[0];
+}
+// After a creation: the tool is Move again and the new node is selected.
+async function madeAndSelected(p, id, what) {
+  await within(async () => (await pressedTool(p)) === 'move', `${what}: the tool back to Move`, async () => pressedTool(p), 5000);
+  await within(async () => (await p.ev(`document.querySelector('#layers .layer[data-node="${id}"]')?.getAttribute('aria-selected') ?? null`)) === 'true', `${what}: the new node selected`, async () => p.ev("[...document.querySelectorAll('#layers .layer[aria-selected=\"true\"]')].map((r) => r.dataset.node).join(' ')"), 5000);
+}
+const shownMsg = (p) => shownText(p, '#msg');
+
+test('tool keys', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  // the bar: a toolbar at the stage's foot, centred, its right edge at least 160 px from the stage's
+  assert.equal(await p.ev("document.getElementById('tools')?.getAttribute('role') ?? null"), 'toolbar');
+  const tools = await p.ev("[...document.querySelectorAll('#tools button[data-tool]')].map((b) => [b.dataset.tool, b.querySelector('kbd')?.textContent ?? null])");
+  assert.deepEqual(tools.map(([tool]) => tool).sort(), ['ellipse', 'frame', 'image', 'move', 'rect', 'text', 'vector']);
+  for (const [k, tool] of TOOL_KEYS) assert.deepEqual(tools.find(([x]) => x === tool), [tool, k], `${tool}'s key hint is a kbd ${k}`);
+  const stage = await box(p, '#stage');
+  const bar = await box(p, '#tools');
+  assert.ok(stage.r - bar.r >= 160, `the bar's right edge ${stage.r - bar.r} px from the stage's`);
+  assert.ok(Math.abs((bar.l + bar.r) / 2 - (stage.l + stage.r) / 2) < 1, 'the bar centred');
+  assert.ok(stage.b - bar.b >= 0 && stage.b - bar.b < 40, `the bar at the stage's foot (${stage.b - bar.b})`);
+  assert.equal(await pressedTool(p), 'move', 'Move at first');
+  // C4.1: each key presses its button, Escape returns to Move
+  for (const [k, tool] of TOOL_KEYS) {
+    await p.key(k);
+    assert.equal(await pressedTool(p), tool, `${k} presses ${tool}`);
+    await p.key('Escape');
+    assert.equal(await pressedTool(p), 'move', `Escape after ${k}: Move`);
+  }
+  // a click on a button presses it too, and Escape with Move on still clears the selection
+  await p.click('#tools button[data-tool="rect"]');
+  assert.equal(await pressedTool(p), 'rect', 'the Rectangle button pressed by a click');
+  await p.key('Escape');
+  assert.equal(await pressedTool(p), 'move');
+  await selectRow(p, 'title');
+  // the same keys typed in the Name field change no tool
+  assert.equal(await focusField(p, 'name'), true, 'the Name field focused');
+  const n0 = edits(rec).length;
+  for (const [k] of TOOL_KEYS) {
+    await p.key(k);
+    assert.equal(await pressedTool(p), 'move', `${k} in the Name field changes no tool`);
+  }
+  assert.equal(await p.ev("document.querySelector('#props [data-prop=\"name\"]').value"), TOOL_KEYS.map(([k]) => k).join(''), 'the keys went to the field');
+  assert.equal(edits(rec).length, n0, 'nothing sent while typing');
+  noExceptions(rec);
+});
+
+test('new nodes go where the pointer is', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await rec.send('Page.setInterceptFileChooserDialog', { enabled: true });
+  const z = await zoomNow(p);
+  const made = {};
+  const node = (id) => fake.doc('every').nodes[id];
+
+  // C4.6: a frame clicked into the row `actions`, right of buy: after buy, no x, y, 200 × 120
+  let actions = await box(p, '#surface [data-id="actions"]');
+  const buy = await box(p, '#surface [data-id="buy"]');
+  let pt = { x: Math.round((buy.r + actions.r) / 2), y: Math.round((actions.t + actions.b) / 2) };
+  assert.equal(await hitAt(p, pt), 'actions', 'the point is on actions, right of buy');
+  let n0 = edits(rec).length;
+  await p.key('F');
+  await p.clickAt(pt.x, pt.y);
+  let op = await added(rec, n0, 'frame in actions');
+  assert.equal(op.after, 'buy', 'after buy');
+  assert.deepEqual(op.node, { id: op.node.id, type: 'frame', parent: 'actions', name: op.node.name, size: { w: 200, h: 120 }, layout: { mode: 'none' }, fill: '#ffffff' }, 'a frame in actions, no x, y');
+  await madeAndSelected(p, op.node.id, 'frame in actions');
+  assert.deepEqual(fake.doc('every').nodes.actions.children, ['buy', op.node.id], "the fake's actions: buy, then the frame");
+  assert.equal(Object.hasOwn(node(op.node.id), 'x') || Object.hasOwn(node(op.node.id), 'y'), false, 'no x, y stored');
+  made.frameInRow = op.node.id;
+
+  // C4.6: a frame clicked into the none frame `loose`: its x, y at the pointer in loose's px
+  let loose = await box(p, '#surface [data-id="loose"]');
+  pt = { x: Math.round(loose.l + 100 * z), y: Math.round(loose.t + 100 * z) };
+  assert.equal(await hitAt(p, pt), 'loose');
+  n0 = edits(rec).length;
+  await p.key('F');
+  await p.clickAt(pt.x, pt.y);
+  op = await added(rec, n0, 'frame in loose');
+  assert.equal(op.node.parent, 'loose');
+  assert.equal(op.after, 'badge', 'on top: after the last child');
+  assert.equal(op.node.x, Math.round((pt.x - loose.l) / z), 'x at the pointer');
+  assert.equal(op.node.y, Math.round((pt.y - loose.t) / z), 'y at the pointer');
+  assert.deepEqual(op.node.size, { w: 200, h: 120 });
+  await madeAndSelected(p, op.node.id, 'frame in loose');
+  assert.equal(node(op.node.id).x, op.node.x, 'x stored');
+  assert.equal(node(op.node.id).y, op.node.y, 'y stored');
+
+  // a frame dragged out on the page, right of loose: that size, at the press point, a dashed draft meanwhile
+  loose = await box(p, '#surface [data-id="loose"]');
+  const surf = await box(p, '#surface');
+  pt = { x: Math.round(loose.r + 40), y: Math.round(loose.t + 10) };
+  assert.equal(await hitAt(p, pt), 'stage', 'empty stage right of loose');
+  n0 = edits(rec).length;
+  await p.key('F');
+  let draft = null;
+  await drag(p, pt, 90, 60, async () => { draft = await p.ev("(() => { const d = document.querySelector('#stage .draft'); return d ? { dashed: getComputedStyle(d).borderStyle, id: d.dataset.id ?? null, pe: getComputedStyle(d).pointerEvents } : null; })()"); });
+  assert.deepEqual(draft, { dashed: 'dashed', id: null, pe: 'none' }, 'a dashed draft while dragging, no data-id');
+  op = await added(rec, n0, 'frame dragged on the page');
+  assert.equal(await count(p, '#stage .draft'), 0, 'the draft gone');
+  assert.equal(op.node.parent, 'p-main');
+  assert.equal(op.after, 'tiles', "after the page's last node");
+  assert.equal(op.node.x, Math.round((pt.x - surf.l) / z));
+  assert.equal(op.node.y, Math.round((pt.y - surf.t) / z));
+  assert.deepEqual(op.node.size, { w: Math.round(90 / z), h: Math.round(60 / z) }, 'the dragged size, fixed');
+  await madeAndSelected(p, op.node.id, 'frame on the page');
+  made.frameOnPage = op.node.id;
+
+  // a text clicked into loose: "Text", hug × hug, its Text field focused
+  loose = await box(p, '#surface [data-id="loose"]');
+  pt = { x: Math.round(loose.l + 30 * z), y: Math.round(loose.t + 150 * z) };
+  assert.equal(await hitAt(p, pt), 'loose');
+  n0 = edits(rec).length;
+  await p.key('T');
+  await p.clickAt(pt.x, pt.y);
+  op = await added(rec, n0, 'text');
+  assert.deepEqual(op.node, { id: op.node.id, type: 'text', parent: 'loose', name: op.node.name, x: Math.round((pt.x - loose.l) / z), y: Math.round((pt.y - loose.t) / z), size: { w: 'hug', h: 'hug' }, text: 'Text' });
+  await madeAndSelected(p, op.node.id, 'text');
+  await within(async () => (await p.ev('document.activeElement?.dataset.prop ?? null')) === 'text', 'the Text field focused', async () => p.ev('document.activeElement?.outerHTML.slice(0, 80) ?? null'), 5000);
+  await leavePanel(p);
+  made.text = op.node.id;
+
+  // a rectangle dragged out in loose: that size, fill #d9d9d9
+  pt = { x: Math.round(loose.l + 120 * z), y: Math.round(loose.t + 30 * z) };
+  assert.equal(await hitAt(p, pt), 'loose');
+  n0 = edits(rec).length;
+  await p.key('R');
+  await drag(p, pt, 40, 30);
+  op = await added(rec, n0, 'rect');
+  assert.deepEqual(op.node, { id: op.node.id, type: 'rect', parent: 'loose', name: op.node.name, x: Math.round((pt.x - loose.l) / z), y: Math.round((pt.y - loose.t) / z), size: { w: Math.round(40 / z), h: Math.round(30 / z) }, fill: '#d9d9d9' });
+  await madeAndSelected(p, op.node.id, 'rect');
+  made.rect = op.node.id;
+
+  // an ellipse clicked on the page, below the frames made right of loose: 100 × 100
+  pt = { x: Math.round(loose.r + 40), y: Math.round(loose.t + 260 * z) };
+  assert.equal(await hitAt(p, pt), 'stage', 'empty stage below the frames right of loose');
+  n0 = edits(rec).length;
+  await p.key('O');
+  await p.clickAt(pt.x, pt.y);
+  op = await added(rec, n0, 'ellipse');
+  assert.deepEqual(op.node, { id: op.node.id, type: 'ellipse', parent: 'p-main', name: op.node.name, x: Math.round((pt.x - surf.l) / z), y: Math.round((pt.y - surf.t) / z), size: { w: 100, h: 100 }, fill: '#d9d9d9' });
+  assert.equal(op.after, made.frameOnPage, "after the page's last node");
+  await madeAndSelected(p, op.node.id, 'ellipse');
+  made.ellipse = op.node.id;
+
+  // a vector: Escape drops a path; then three clicks in loose ended with Enter
+  const pts = [[150, 20], [185, 60], [160, 90]].map(([x, y]) => ({ x: Math.round(loose.l + x * z), y: Math.round(loose.t + y * z) }));
+  n0 = edits(rec).length;
+  await p.key('P');
+  await p.clickAt(pts[0].x, pts[0].y);
+  await p.clickAt(pts[1].x, pts[1].y);
+  assert.equal(await count(p, '#stage .pen'), 1, 'the path previewed');
+  await p.key('Escape');
+  assert.equal(await pressedTool(p), 'move', 'Escape: Move');
+  assert.equal(await count(p, '#stage .pen'), 0, 'the preview gone');
+  await sleep(300);
+  assert.equal(edits(rec).length, n0, 'Escape sends nothing');
+  await p.key('P');
+  for (const q of pts) await p.clickAt(q.x, q.y);
+  await enter(p);
+  op = await added(rec, n0, 'vector');
+  const lp = pts.map((q) => [(q.x - loose.l) / z, (q.y - loose.t) / z]);
+  const x0 = Math.round(Math.min(...lp.map(([x]) => x)));
+  const y0 = Math.round(Math.min(...lp.map(([, y]) => y)));
+  assert.equal(op.node.type, 'vector');
+  assert.equal(op.node.parent, 'loose');
+  assert.equal(op.node.x, x0, 'x: the points’ left');
+  assert.equal(op.node.y, y0, 'y: the points’ top');
+  assert.deepEqual(op.node.size, { w: 'hug', h: 'hug' });
+  assert.match(op.node.path, /^M -?[\d.]+ -?[\d.]+ L -?[\d.]+ -?[\d.]+ L -?[\d.]+ -?[\d.]+$/, `the path (${op.node.path})`);
+  const nums = op.node.path.match(/-?[\d.]+/g).map(Number);
+  lp.forEach(([x, y], i) => {
+    assert.ok(Math.abs(nums[2 * i] - (x - x0)) <= 0.051 && Math.abs(nums[2 * i + 1] - (y - y0)) <= 0.051, `point ${i} at (${x - x0}, ${y - y0}) in the path (${op.node.path})`);
+  });
+  assert.ok(nums.every((v) => Math.round(v * 10) === v * 10 || Math.abs(Math.round(v * 10) - v * 10) < 1e-9), 'numbers to 0.1');
+  assert.equal(await count(p, '#stage .pen'), 0, 'the preview gone');
+  await madeAndSelected(p, op.node.id, 'vector');
+  made.vector = op.node.id;
+
+  // an image clicked into the column `card`, in photo's lower half: after photo, the picker, the upload
+  const photo = await box(p, '#surface [data-id="photo"]');
+  pt = { x: Math.round((photo.l + photo.r) / 2), y: Math.round(photo.t + photo.h * 0.75) };
+  assert.equal(await hitAt(p, pt), 'photo');
+  n0 = edits(rec).length;
+  const c0 = rec.choosers.length;
+  await p.key('I');
+  await p.clickAt(pt.x, pt.y);
+  await within(async () => rec.choosers.length > c0, 'the file chooser opened', async () => JSON.stringify(rec.choosers));
+  const ch = rec.choosers[c0];
+  assert.equal(ch.mode, 'selectSingle');
+  await rec.send('DOM.setFileInputFiles', { files: [IMG_PATH], backendNodeId: ch.backendNodeId });
+  op = await added(rec, n0, 'image');
+  assert.deepEqual(op.node, { id: op.node.id, type: 'image', parent: 'card', name: op.node.name, size: { w: 'hug', h: 'hug' }, src: `images/${IMG_FILE}` });
+  assert.equal(op.after, 'photo', 'after photo');
+  assert.ok(rec.requests.some((u) => u.endsWith('/api/canvas/image?slug=every')), 'the image posted');
+  await madeAndSelected(p, op.node.id, 'image');
+  made.image = op.node.id;
+
+  await waitSaved(p);
+  const doc = fake.doc('every');
+  const types = Object.values(made).map((id) => doc.nodes[id]?.type);
+  assert.deepEqual(types.sort(), ['ellipse', 'frame', 'frame', 'image', 'rect', 'text', 'vector'], "the fake's document holds each made node");
+  assert.equal(doc.nodes.card.children.indexOf(made.image), doc.nodes.card.children.indexOf('photo') + 1, 'the image after photo in card');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+test('an upload the server refuses adds nothing', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  // the image route answered by the recorder: 415, 413, then a 200 whose src isn't an images/ file
+  const answers = [
+    [{ status: 415, body: '' }, IMAGE_SAY.types],
+    [{ status: 413, body: '' }, IMAGE_SAY.tooBig],
+    [{ status: 200, body: { src: 'https://evil.example/x.png' } }, IMAGE_SAY.failed],
+    [{ status: 500, body: '' }, IMAGE_SAY.failed],
+  ];
+  let i = 0;
+  const answer = (url) => (url.includes('/api/canvas/image?') ? answers[i++][0] : null);
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), answer });
+  await live(p);
+  await rec.send('Page.setInterceptFileChooserDialog', { enabled: true });
+  const loose = await box(p, '#surface [data-id="loose"]');
+  const pt = { x: Math.round(loose.r + 40), y: Math.round(loose.t + 10) };
+  assert.equal(await hitAt(p, pt), 'stage');
+  const n0 = edits(rec).length;
+  for (const [, words] of answers) {
+    const c0 = rec.choosers.length;
+    const seen = i;
+    await p.ev("document.getElementById('toast').hidden = true");
+    await p.key('I');
+    await p.clickAt(pt.x, pt.y);
+    await within(async () => rec.choosers.length > c0, 'the file chooser opened');
+    await rec.send('DOM.setFileInputFiles', { files: [IMG_PATH], backendNodeId: rec.choosers[c0].backendNodeId });
+    await within(async () => i > seen, 'the image posted');
+    await within(async () => (await shownText(p, '#toast')) === words, `said: ${words}`, async () => shownText(p, '#toast'));
+    assert.equal(await pressedTool(p), 'move', 'the tool back to Move');
+  }
+  await sleep(500);
+  assert.equal(edits(rec).length, n0, 'no add sent');
+  assert.equal(await body(p, 'pending'), '0');
+  assert.equal(await count(p, '#surface img'), 1, 'only photo drawn as an image');
+  noExceptions(rec);
+});
+
+test('the empty-page note follows the page', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { draw: MINIMAL } });
+  await live(p);
+  assert.equal(await shownMsg(p), 'This page is empty.', 'the note on the empty page');
+  // the note takes no pointer events: the stage under it can be drawn on
+  const msg = await box(p, '#msg');
+  const pt = { x: Math.round(msg.l + msg.w / 2), y: Math.round(msg.t + msg.h / 2) };
+  assert.equal(await hitAt(p, pt), 'stage', 'the stage under the note');
+  const n0 = edits(rec).length;
+  await p.key('F');
+  await drag(p, pt, 120, 80);
+  const op = await added(rec, n0, 'the first frame');
+  assert.equal(op.node.parent, 'p1');
+  assert.equal(op.after, null, 'first on the page');
+  // C1.1a: once the page has a node, the note is gone
+  await within(async () => (await shownMsg(p)) === null, 'the note hidden', async () => shownMsg(p), 5000);
+  await madeAndSelected(p, op.node.id, 'the first frame');
+  await waitSaved(p);
+  assert.deepEqual(fake.doc('draw').pages[0].children, [op.node.id]);
+  // deleting it shows the note again
+  await p.key('Delete');
+  const e = await nextEdit(rec, n0 + 1);
+  assert.deepEqual(e.ops, [{ op: 'del', id: op.node.id }]);
+  await ackOf(rec, e);
+  await within(async () => (await shownMsg(p)) === 'This page is empty.', 'the note shown again', async () => shownMsg(p), 5000);
   assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
   noExceptions(rec);
 });
