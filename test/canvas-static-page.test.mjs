@@ -317,3 +317,329 @@ test('canvas static page: resolve is the fake\'s', () => {
   assert.throws(() => canvas.resolve(broken, 'buy'), { message: 'resolve: card is not a component' });
   assert.throws(() => fake.resolve(broken, 'buy'), { message: 'resolve: card is not a component' });
 });
+
+// ---- the page (T2): staticPage on the fixtures, read through the scanner ----
+
+// A deep-frozen deep copy, so a renderer that writes to its input throws.
+function frozenCopy(v) {
+  const root = structuredClone(v);
+  const stack = [root];
+  while (stack.length) {
+    const x = stack.pop();
+    if (x === null || typeof x !== 'object' || Object.isFrozen(x)) continue;
+    Object.freeze(x);
+    for (const k of Object.keys(x)) stack.push(x[k]);
+  }
+  return root;
+}
+// staticPage's page, asserted ok, and its scan with the kit's comment.
+function render(doc, what = 'the document') {
+  const r = canvas.staticPage(doc);
+  assert.equal(r.ok, true, `${what}: ${JSON.stringify(r.errors)}`);
+  return { html: r.html, tree: scan(r.html, canvas.STATIC_COMMENT) };
+}
+const nodeOf = (el) => el.attrs['data-node']?.value;
+// Elements not inside an instance's element (an instance's own element is one), in document order.
+function topLevel(root) {
+  const out = [];
+  const stack = [[root, false]];
+  while (stack.length) {
+    const [el, inside] = stack.pop();
+    if (!inside) out.push(el);
+    const under = inside || el.attrs['data-type']?.value === 'instance';
+    for (let k = el.children.length - 1; k >= 0; k--) if (el.children[k].name) stack.push([el.children[k], under]);
+  }
+  return out;
+}
+// The one top-level element for a node id (asserted one).
+function topEl(tree, id) {
+  const els = topLevel(tree.root).filter((el) => nodeOf(el) === id);
+  assert.equal(els.length, 1, `${id}: ${els.length} top-level elements`);
+  return els[0];
+}
+// An element under `el` (not el itself) for a node id (asserted one).
+function inside(el, id) {
+  const els = all(el).filter((e) => e !== el && nodeOf(e) === id);
+  assert.equal(els.length, 1, `${id} inside ${nodeOf(el)}: ${els.length} elements`);
+  return els[0];
+}
+const styleOf = (el) => decls(el.attrs.style ? el.attrs.style.value : '');
+// Every id reached from pages[0] through children (not through instances).
+function firstPageIds(doc) {
+  const out = [];
+  const stack = [...doc.pages[0].children].reverse();
+  while (stack.length) {
+    const id = stack.pop();
+    out.push(id);
+    const kids = doc.nodes[id].children || [];
+    for (let k = kids.length - 1; k >= 0; k--) stack.push(kids[k]);
+  }
+  return out;
+}
+// Declarations a style must hold, each compared exactly.
+function holds(el, want, what) {
+  const d = styleOf(el);
+  for (const [k, v] of Object.entries(want)) assert.equal(d.get(k), v, `${what}: ${k} in ${JSON.stringify(el.attrs.style?.value)}`);
+}
+
+test('canvas static page: staticPage gives a stable page and leaves its input alone', () => {
+  assert.equal(typeof canvas.staticPage, 'function', 'canvas.staticPage is exported');
+  assert.equal(canvas.STATIC_MAX_ELEMENTS, 100000);
+  assert.equal(typeof canvas.STATIC_STYLE, 'string');
+  assert.equal(typeof canvas.STATIC_COMMENT, 'string');
+  assert.ok(canvas.STATIC_COMMENT.startsWith('<!--') && canvas.STATIC_COMMENT.endsWith('-->'));
+  for (const name of FIXTURE_NAMES) {
+    const doc = frozenCopy(fixture(name));
+    const before = structuredClone(doc);
+    const r = canvas.staticPage(doc);
+    assert.equal(r.ok, true, `${name}: ${JSON.stringify(r.errors)}`);
+    assert.equal(typeof r.html, 'string');
+    assert.ok(r.html.startsWith('<!doctype html>'), name);
+    assert.equal(canvas.staticPage(doc).html, r.html, `${name}: the same bytes twice`);
+    assert.equal(canvas.staticPage(structuredClone(before)).html, r.html, `${name}: the same bytes from a copy`);
+    assert.deepEqual(doc, before, `${name}: unchanged`);
+    assert.equal(scan(r.html, canvas.STATIC_COMMENT).comments, 1, `${name}: one kit comment`);
+  }
+});
+
+test('canvas static page: every node of the first page appears, typed', () => {
+  const types = new Set();
+  for (const name of FIXTURE_NAMES) {
+    const doc = fixture(name);
+    const { tree } = render(doc, name);
+    const ids = firstPageIds(doc);
+    for (const id of ids) assert.equal(topEl(tree, id).attrs['data-type']?.value, doc.nodes[id].type, `${name}: ${id}'s type`);
+    const shown = topLevel(tree.root).map(nodeOf).filter((x) => x !== undefined);
+    assert.deepEqual(shown.slice().sort(), ids.slice().sort(), `${name}: the top-level nodes are the first page's`);
+    for (const el of all(tree.root)) if (el.attrs['data-type']) types.add(el.attrs['data-type'].value);
+  }
+  assert.deepEqual([...types].sort(), [...canvas.TYPES].sort());
+});
+
+test('canvas static page: instances show their resolved component', () => {
+  for (const name of FIXTURE_NAMES) {
+    const doc = fixture(name);
+    for (const [id, n] of Object.entries(doc.nodes)) if (n.type === 'instance') assert.deepEqual(canvas.resolve(doc, id), fake.resolve(doc, id), `${name} ${id}`);
+  }
+  const { tree } = render(fixture('doc-every-type.json'));
+  const buy = topEl(tree, 'buy');
+  assert.equal(buy.attrs['data-type'].value, 'instance');
+  assert.equal(buy.attrs['data-name'].value, 'Buy');
+  const label = inside(buy, 'button-label');
+  const bg = inside(buy, 'button-bg');
+  assert.equal(label.attrs['data-type'].value, 'text');
+  assert.equal(label.attrs['data-name'].value, 'Label');
+  assert.equal(bg.attrs['data-type'].value, 'frame');
+  assert.equal(textOf(label), 'Buy now');
+  const seen = all(buy).flatMap((el) => [...el.children.filter((c) => c.text).map((c) => c.text.value), ...Object.values(el.attrs).map((a) => a.value)]).join('\n');
+  for (const gone of ['Base label', 'Override label', 'Variant label', 'Default label']) assert.ok(!seen.includes(gone), `${gone} inside buy`);
+  holds(bg, { 'background-color': 'rgb(59 91 219 / 1)', flex: '1 1 0' }, 'button-bg');
+  holds(label, { color: '#ffffff' }, 'button-label');
+  // The instance's box is the component root's: a row with its fill, border and radius.
+  holds(buy, { display: 'flex', 'flex-direction': 'row', gap: '16px', 'background-color': 'rgb(255 255 255 / 1)', border: '1px solid #d0d4dc', 'border-radius': '4px', overflow: 'hidden' }, 'buy');
+});
+
+test('canvas static page: styles come from the properties', () => {
+  const { tree } = render(fixture('doc-every-type.json'));
+  holds(topEl(tree, 'card'), {
+    display: 'flex', 'flex-direction': 'column', width: '360px', 'border-radius': '4px', gap: '16px', overflow: 'hidden',
+    'background-color': 'rgb(255 255 255 / 1)', border: '1px solid #d0d4dc', padding: '16px 16px 16px 16px',
+    'align-items': 'stretch', 'justify-content': 'space-between', position: 'absolute', left: '0px', top: '0px',
+  }, 'card');
+  assert.equal(styleOf(topEl(tree, 'card')).has('height'), false, 'card: hug height writes nothing');
+  holds(topEl(tree, 'tiles'), { display: 'grid', 'grid-template-columns': '1fr 1fr', 'grid-template-rows': '80px auto', gap: '4px' }, 'tiles');
+  holds(topEl(tree, 'loose'), { position: 'absolute', left: '400px', top: '0px', width: '200px', height: '200px' }, 'loose');
+  holds(topEl(tree, 'badge'), { position: 'absolute', left: '12px', top: '-8px', width: '24px', height: '24px', 'border-radius': '12px', 'background-color': '#ef4444' }, 'badge');
+  holds(topEl(tree, 'dot'), { 'border-radius': '50%', 'background-color': 'rgb(59 91 219 / 1)', border: '0.5px solid #fff', width: '8px', height: '8px' }, 'dot');
+  holds(topEl(tree, 'rule'), { 'align-self': 'stretch', height: '1px', 'background-color': '#e5e7eb' }, 'rule');
+  assert.equal(styleOf(topEl(tree, 'rule')).has('border'), false, 'rule: no stroke, no border');
+  const icon = topEl(tree, 'icon');
+  assert.equal(icon.name, 'svg');
+  assert.equal(icon.attrs.width.value, '16');
+  assert.equal(icon.attrs.height.value, '16');
+  holds(icon, { overflow: 'visible' }, 'icon');
+  const pathEl = icon.children.filter((c) => c.name);
+  assert.equal(pathEl.length, 1);
+  assert.equal(pathEl[0].name, 'path');
+  assert.equal(pathEl[0].attrs.d.value, 'M2 8 L6 12 L14 4');
+  assert.equal(pathEl[0].attrs.fill.value, 'none');
+  assert.equal(pathEl[0].attrs.stroke.value, '#111111ff');
+  assert.equal(pathEl[0].attrs['stroke-width'].value, '2');
+  const photo = topEl(tree, 'photo');
+  assert.equal(photo.name, 'img');
+  assert.equal(photo.attrs.src.value, 'images/429be16d0a91e377.png');
+  assert.equal(photo.attrs.alt.value, 'Photo');
+  holds(photo, { 'object-fit': 'cover', 'border-radius': '8px', height: '120px', 'align-self': 'stretch' }, 'photo');
+  const title = topEl(tree, 'title');
+  assert.equal(textOf(title), 'Order summary');
+  holds(title, {
+    'white-space': 'pre-wrap', 'font-family': 'sans-serif', 'font-size': '16px', 'font-weight': '400', 'line-height': '1.4',
+    'letter-spacing': '0px', color: 'rgb(17 17 17 / 1)', 'text-align': 'left', 'align-self': 'stretch',
+  }, 'title');
+  holds(topEl(tree, 'actions'), { display: 'flex', 'flex-direction': 'row', gap: '8px', 'align-self': 'stretch' }, 'actions');
+  // Review focus 3: button-label's literal font, every part a token reference; no letter spacing.
+  const label = inside(topEl(tree, 'buy'), 'button-label');
+  holds(label, { 'font-family': 'serif', 'font-size': '16px', 'font-weight': '700', 'line-height': '1.5' }, 'button-label');
+  assert.equal(styleOf(label).has('letter-spacing'), false, 'button-label: a literal font has no letter spacing');
+});
+
+test('canvas static page: a hidden node stays, with display:none', () => {
+  const doc = fixture('doc-every-type.json');
+  doc.nodes.card.visible = false;
+  assert.deepEqual(canvas.validate(doc), []);
+  const { tree } = render(doc);
+  const card = topEl(tree, 'card');
+  holds(card, { display: 'none', 'flex-direction': 'column' }, 'card');
+  assert.equal(inside(card, 'title').attrs['data-type'].value, 'text');
+});
+
+test('canvas static page: an empty first page renders an empty main', () => {
+  const doc = fixture('doc-minimal.json');
+  const { tree } = render(doc);
+  const main = find(tree.root, (el) => el.name === 'main');
+  assert.equal(main.attrs['data-page'].value, 'p1');
+  assert.deepEqual(main.children, []);
+  assert.equal(textOf(find(tree.root, (el) => el.name === 'title')), 'Page 1');
+  const unnamed = structuredClone(doc);
+  unnamed.pages[0].name = '';
+  assert.equal(textOf(find(render(unnamed).tree.root, (el) => el.name === 'title')), 'p1', 'the page id when the name is empty');
+});
+
+test('canvas static page: a document that is not valid gives no page', () => {
+  const broken = fixture('doc-every-type.json');
+  broken.nodes.card.fill = 'red; background:url(x)';
+  const errors = canvas.validate(broken, { images: null });
+  assert.ok(errors.length > 0);
+  const r = canvas.staticPage(broken);
+  assert.deepEqual(r, { ok: false, errors });
+  assert.equal(Object.hasOwn(r, 'html'), false);
+  for (const v of [42, null, 'x', [], undefined]) {
+    const e = canvas.validate(v, { images: null });
+    assert.ok(e.length > 0 && e[0].rule === 'top', String(v));
+    assert.deepEqual(canvas.staticPage(v), { ok: false, errors: e }, `${String(v)}`);
+  }
+});
+
+test('canvas static page: no script and no handler', () => {
+  for (const name of FIXTURE_NAMES) {
+    const { tree } = render(fixture(name), name);
+    assert.deepEqual(hostileProblems(tree, canvas.STATIC_STYLE), [], name);
+    const els = all(tree.root);
+    for (const bad of ['script', 'iframe', 'object', 'embed', 'link', 'base', 'form', 'a', 'foreignObject', 'foreignobject']) {
+      assert.equal(els.filter((el) => el.name === bad).length, 0, `${name}: <${bad}>`);
+    }
+    const metas = els.filter((el) => el.name === 'meta').map((el) => Object.fromEntries(Object.entries(el.attrs).map(([k, v]) => [k, v.value])));
+    assert.deepEqual(metas, [{ charset: 'utf-8' }, { name: 'viewport', content: 'width=device-width, initial-scale=1' }], `${name}: the skeleton's two metas`);
+    for (const el of els) {
+      assert.ok(TAGS.has(el.name), `${name}: <${el.name}>`);
+      for (const a of Object.keys(el.attrs)) {
+        assert.ok(ATTRS.has(a), `${name}: <${el.name}> ${a}`);
+        assert.ok(!a.startsWith('on'), `${name}: <${el.name}> ${a}`);
+      }
+    }
+  }
+});
+
+test('canvas static page: no url() and no loading', () => {
+  assert.deepEqual(styleBad(canvas.STATIC_STYLE), []);
+  for (const name of FIXTURE_NAMES) {
+    const { tree } = render(fixture(name), name);
+    const els = all(tree.root);
+    const styles = els.filter((el) => el.name === 'style');
+    assert.equal(styles.length, 1, name);
+    assert.equal(rawText(styles[0]), canvas.STATIC_STYLE, `${name}: the style block is the kit's`);
+    for (const el of els) {
+      if (el.attrs.style) assert.deepEqual(styleBad(el.attrs.style.value), [], `${name}: ${nodeOf(el)}'s style`);
+      if (el.attrs.src) assert.match(el.attrs.src.value, SRC_RE, `${name}: ${nodeOf(el)}'s src`);
+    }
+  }
+});
+
+test('canvas static page: every free text is there, escaped, field by field', () => {
+  const doc = fixture('hostile.json');
+  const { html, tree } = render(doc);
+  const title = find(tree.root, (el) => el.name === 'title');
+  assert.equal(rawText(title), esc(doc.pages[0].name));
+  assert.equal(textOf(title), doc.pages[0].name);
+  const nameIs = (el, n, what) => {
+    assert.equal(el.attrs['data-name']?.raw, esc(n), `${what}: raw data-name`);
+    assert.equal(el.attrs['data-name'].value, n, `${what}: data-name`);
+  };
+  for (const id of ['hf', 'ht', 'hr', 'hv', 'him', 'hc', 'hct', 'hi']) nameIs(topEl(tree, id), doc.nodes[id].name, id);
+  const hi = topEl(tree, 'hi');
+  const inHi = all(hi).filter((el) => el !== hi && nodeOf(el) !== undefined);
+  assert.ok(inHi.length > 0);
+  for (const el of inHi) nameIs(el, doc.nodes[nodeOf(el)].name, `${nodeOf(el)} inside hi`);
+  const him = topEl(tree, 'him');
+  assert.equal(him.attrs.alt.raw, esc(doc.nodes.him.name));
+  assert.equal(him.attrs.alt.value, doc.nodes.him.name);
+  for (const id of ['ht', 'hct']) {
+    assert.equal(rawText(topEl(tree, id)), esc(doc.nodes[id].text), `${id}: raw text`);
+    assert.equal(textOf(topEl(tree, id)), doc.nodes[id].text, `${id}: text`);
+  }
+  const want = canvas.resolve(doc, 'hi').hct.text;
+  assert.equal(rawText(inside(hi, 'hct')), esc(want));
+  assert.equal(textOf(inside(hi, 'hct')), want);
+  for (const { where, value } of fake.freeTexts(doc)) if (value.includes('<')) assert.ok(!html.includes(value), `${where} raw in the page`);
+  // The markers holding a `<` occur no more often than in the page of the copy whose free texts are `x`
+  // (the skeleton's own `<style>`).
+  const count = (s, m) => s.split(m).length - 1;
+  const plainHtml = render(plainCopy(doc)).html;
+  for (const m of fake.HOSTILE_MARKERS) if (m.includes('<')) assert.equal(count(html, m), count(plainHtml, m), `${JSON.stringify(m)} raw in the page`);
+});
+
+// The page as a tree of tag names, attribute names and text markers: what a hostile string must not change.
+function structure(root) {
+  const out = [];
+  const stack = [[root, 0]];
+  while (stack.length) {
+    const [el, depth] = stack.pop();
+    out.push(`${depth} <${el.name} ${Object.keys(el.attrs).join(' ')}>`);
+    for (let k = el.children.length - 1; k >= 0; k--) {
+      const c = el.children[k];
+      if (c.name) stack.push([c, depth + 1]);
+      else stack.push([{ name: '#text', attrs: {}, children: [] }, depth + 1]);
+    }
+  }
+  return out;
+}
+// A copy with every free text (fake.freeTexts' fields) set to `x`.
+function plainCopy(doc) {
+  const d = structuredClone(doc);
+  for (const { where } of fake.freeTexts(doc)) {
+    const m = /^pages\[(\d+)\]\.name$/.exec(where);
+    if (m) { d.pages[Number(m[1])].name = 'x'; continue; }
+    const segs = where.split('.');
+    let at = d;
+    for (const s of segs.slice(0, -1)) at = at[s];
+    at[segs[segs.length - 1]] = 'x';
+  }
+  return d;
+}
+
+test('canvas static page: nothing of the document outside text', () => {
+  const doc = fixture('hostile.json');
+  const plain = plainCopy(doc);
+  assert.deepEqual(canvas.validate(plain), []);
+  assert.ok(fake.freeTexts(plain).every((f) => f.value === 'x'));
+  assert.deepEqual(structure(render(doc).tree.root), structure(render(plain).tree.root));
+});
+
+test('canvas static page: a nested instance takes the enclosing instance\'s values', () => {
+  const doc = fixture('doc-every-type.json');
+  doc.pages[1].children.push('chip');
+  doc.nodes.chip = { type: 'component', parent: 'p-parts', name: 'Chip', children: ['chip-t'] };
+  doc.nodes['chip-t'] = { type: 'text', parent: 'chip', name: 'Chip text', text: 'From the chip' };
+  doc.nodes.button.children.push('inner');
+  doc.nodes.inner = { type: 'instance', parent: 'button', name: 'Inner', component: 'chip' };
+  doc.nodes.buy.overrides.inner = { opacity: 0.5, visible: false };
+  assert.deepEqual(canvas.validate(doc), []);
+  const { tree } = render(doc);
+  const inner = inside(topEl(tree, 'buy'), 'inner');
+  assert.equal(inner.attrs['data-type'].value, 'instance');
+  assert.equal(inner.attrs['data-name'].value, 'Inner');
+  holds(inner, { opacity: '0.5', display: 'none' }, 'inner');
+  const t = inside(inner, 'chip-t');
+  assert.equal(t.attrs['data-type'].value, 'text');
+  assert.equal(textOf(t), 'From the chip');
+});
