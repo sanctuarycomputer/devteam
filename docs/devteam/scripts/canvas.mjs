@@ -3,7 +3,9 @@
 // rule in DOC_RULES order; `apply(doc, ops, { images, folderBytes, level, maxOpsBytes })` judges an edit
 // as a whole (canvas@1 §4) and gives the new document at rev + 1, or the same document and the refusal
 // code. Every op is idempotent. The tables (LIMITS, RANGES, TYPES, PROPS, CLASSES, TOKEN_TYPES,
-// DOC_RULES, OPS, REFUSALS) are frozen and are the ones the next canvas tickets read.
+// DOC_RULES, OPS, REFUSALS) are frozen and are the ones the next canvas tickets read; so are
+// `opErrors(op)` (an op's own shape, nothing that needs a document) and `NODE_ID_RE`, kit-internal
+// helpers for the merge and the CLI, held to the fake through `apply`.
 //
 // A port of the rules half of test/lib/canvas-fake.mjs, the contract's executable form: the fake is
 // the reference, and test/canvas-document.test.mjs holds this module to it (the same errors, the same

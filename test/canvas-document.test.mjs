@@ -53,7 +53,7 @@ function unfrozen(root, at = '') {
 }
 
 // Every module specifier a source names: static `import … from`, bare `import '…'`, dynamic
-// `import('…')`, `export … from`; and whether it calls `require(`.
+// `import('…')`, `export … from`; and whether it calls `require(` or makes one (`createRequire`).
 function specifiers(source) {
   const out = [];
   const forms = [
@@ -63,7 +63,7 @@ function specifiers(source) {
     /\bexport\s+[^'"();]*?\bfrom\s*(['"])([^'"]*)\1/g,
   ];
   for (const rx of forms) for (const m of source.matchAll(rx)) out.push(m[2]);
-  return { specs: out, requires: /\brequire\s*\(/.test(source) };
+  return { specs: out, requires: /\brequire\s*\(|\bcreateRequire\b/.test(source) };
 }
 
 // A small document holding an image node, valid with its image in `images`.
@@ -106,11 +106,12 @@ test('canvas module: Node built-ins only', () => {
   ].join('\n');
   assert.deepEqual(specifiers(sample).specs.sort(), ['../../test/lib/canvas-fake.mjs', '../x.mjs', './side.mjs', 'node:fs', 'node:path', 'pkg', 'ws'].sort());
   assert.equal(specifiers('const m = require("fs");').requires, true);
+  assert.equal(specifiers("import { createRequire } from 'node:module';\nconst r = createRequire(import.meta.url);").requires, true, 'createRequire counts as require');
   const source = fs.readFileSync(MODULE_FILE, 'utf8');
   const { specs, requires } = specifiers(source);
   const bad = specs.filter((s) => !s.startsWith('node:'));
   assert.deepEqual(bad, [], 'every import names a node: module');
-  assert.equal(requires, false, 'no require(');
+  assert.equal(requires, false, 'no require( and no createRequire');
 });
 
 test("canvas module: tables equal the contract fake's", async () => {
