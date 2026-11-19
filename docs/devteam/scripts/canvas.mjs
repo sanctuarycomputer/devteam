@@ -1261,9 +1261,9 @@ function expandedSizes(nodes) {
 // instance it shows inside (null outside one) and its parent's layout mode) and close items
 // ({ close: tag }); an instance opens as its component root's box and pushes its component's children
 // with its own `resolve` map. A node's values are its entry in `inst`, or its own outside an instance.
-// Elements outside instances are counted as written; an instance there whose expansion would pass
-// STATIC_MAX_ELEMENTS is cut (its own empty box, `data-cut="true"`), so a page holds at most
-// STATIC_MAX_ELEMENTS + the node count elements.
+// The cap: the count starts at every element written outside instances, and an instance there whose
+// expansion would take it past STATIC_MAX_ELEMENTS is cut (its own empty box, `data-cut="true"`), so
+// the page body holds at most STATIC_MAX_ELEMENTS elements, or the outside elements alone when more.
 export function staticPage(doc) {
   const errors = validate(doc, { images: null });
   if (errors.length) return { ok: false, errors };
@@ -1281,14 +1281,21 @@ export function staticPage(doc) {
     for (let i = ids.length - 1; i >= 0; i--) stack.push({ id: ids[i], inst, pm });
   };
   const sizes = expandedSizes(nodes);
-  let written = 0; // elements written so far, counted as each node is opened
+  // The count starts at every element the page writes outside instances (the first page's tree, each
+  // instance there as its one box), so instances get only what is left; each instance let in adds
+  // its expansion.
+  let written = 0;
+  for (const outside = [...page.children]; outside.length;) {
+    const n = nodes[outside.pop()];
+    written += ownElements(n);
+    if (n.type !== 'instance' && Array.isArray(n.children)) outside.push(...n.children);
+  }
   pushChildren(page.children, null, 'page');
   while (stack.length) {
     const item = stack.pop();
     if (own(item, 'close')) { parts.push(`</${item.close}>`); continue; }
     const { id, inst, pm } = item;
     const n = nodes[id];
-    if (!inst) written += ownElements(n); // inside an instance, counted when the instance was let in
     const v = inst ? inst[id] : ownValues(n);
     const head = nodeAttrs(id, n.type, v.name);
     const common = commonDecls(css, v, pm, n.type === 'vector');
@@ -1305,8 +1312,8 @@ export function staticPage(doc) {
         // Its own common values (from the enclosing instance's resolve inside one), its component
         // root's box, its component's children with its own resolve.
         // The cap, outside instances only (an instance let in holds its whole expansion, already
-        // counted): when its box and expansion would take the count past STATIC_MAX_ELEMENTS, its own
-        // box with data-cut="true" and nothing in it.
+        // counted; its box was counted with the page's outside elements): when its expansion would take
+        // the count past STATIC_MAX_ELEMENTS, its own box with data-cut="true" and nothing in it.
         const comp = nodes[n.component];
         const cv = ownValues(comp);
         const box = `<div${head}${styleAttr([...common, ...boxDecls(css, cv, absolute, hidden)])}`;

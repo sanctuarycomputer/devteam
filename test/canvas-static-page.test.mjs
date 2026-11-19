@@ -723,3 +723,49 @@ test('canvas static page: instance expansion is capped', { timeout: 60000 }, () 
   for (const el of boxes) assert.equal(el.attrs['data-type'].value, 'instance', nodeOf(el));
   assert.equal(within.filter((el) => nodeOf(el) === 'r2' && el.attrs['data-type'].value === 'rect').length, 4);
 });
+
+const vectorNode = (parent, name) => ({ type: 'vector', parent, name, size: { w: 16, h: 16 }, path: 'M2 8 L6 12 L14 4', fill: null, stroke: '#111111ff', strokeWidth: 2 });
+// The scanner's element count of a page, asserted within STATIC_MAX_ELEMENTS + the node count.
+function cappedTree(doc, what) {
+  assert.deepEqual(canvas.validate(doc), [], what);
+  const r = canvas.staticPage(doc);
+  assert.equal(r.ok, true, `${what}: ${JSON.stringify(r.errors)}`);
+  assert.ok(r.html.length < 64 * 1024 * 1024, `${what}: the page is ${r.html.length} bytes`);
+  const tree = scan(r.html, canvas.STATIC_COMMENT);
+  const els = all(tree.root);
+  const limit = canvas.STATIC_MAX_ELEMENTS + Object.keys(doc.nodes).length;
+  assert.ok(els.length <= limit, `${what}: ${els.length} elements, more than ${limit}`);
+  return { tree, els };
+}
+
+test('canvas static page: the cap leaves room for what is written outside instances', { timeout: 60000 }, () => {
+  // chain(16)'s top instance expands to 98302 elements; 3000 vectors after it write 6000 more.
+  const doc = chain(16);
+  for (let k = 0; k < 3000; k++) {
+    doc.nodes[`v${k}`] = vectorNode('p1', `V${k}`);
+    doc.pages[0].children.push(`v${k}`);
+  }
+  const { tree, els } = cappedTree(doc, 'chain(16) and 3000 vectors');
+  assert.equal(topEl(tree, 'top').attrs['data-cut']?.value, 'true', 'top is not cut');
+  assert.equal(els.filter((el) => el.name === 'svg').length, 3000);
+
+  // Fan-out: 150 instances of a component of 500 vectors (1000 elements each, 150150 uncapped).
+  const fan = { canvas: 1, rev: 0, tokens: {}, pages: [{ id: 'p1', name: 'Page 1', children: [] }, { id: 'p2', name: 'Parts', children: ['fan'] }], nodes: {} };
+  fan.nodes.fan = { type: 'component', parent: 'p2', name: 'Fan', children: [] };
+  for (let k = 0; k < 500; k++) {
+    fan.nodes[`fv${k}`] = vectorNode('fan', `F${k}`);
+    fan.nodes.fan.children.push(`fv${k}`);
+  }
+  for (let k = 0; k < 150; k++) {
+    fan.nodes[`fi${k}`] = { type: 'instance', parent: 'p1', name: `I${k}`, component: 'fan' };
+    fan.pages[0].children.push(`fi${k}`);
+  }
+  const f = cappedTree(fan, 'fan-out');
+  const cut = (id) => topEl(f.tree, id).attrs['data-cut']?.value === 'true';
+  const flags = fan.pages[0].children.map(cut);
+  const firstCut = flags.indexOf(true);
+  assert.ok(firstCut > 0, `first cut at ${firstCut}`);
+  assert.ok(flags.slice(firstCut).every(Boolean), 'an instance after a cut one is let in');
+  for (let k = 0; k < firstCut; k++) assert.equal(all(topEl(f.tree, `fi${k}`)).length, 1001, `fi${k}`);
+  for (let k = firstCut; k < 150; k++) assert.equal(all(topEl(f.tree, `fi${k}`)).length, 1, `fi${k}`);
+});
