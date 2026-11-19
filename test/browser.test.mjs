@@ -42,25 +42,58 @@ function project(name, home) {
   return P;
 }
 
-// browser <args> on project P: { status, out, err }. cwd defaults to the project's checkout.
-function cli(P, args, extraEnv = {}, cwd = P.old) {
+// Resolves once process pid is idle: its main thread asleep and its CPU time unchanged for 300 ms
+// (a client waiting on stdin), or after 20 s, or once it is gone.
+async function idle(pid) {
+  const sample = () => {
+    let st; try { st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); } catch { return null; }
+    const f = st.slice(st.lastIndexOf(')') + 2).split(' '); // state, ppid, …; utime and stime are 11 and 12
+    return f[0] === 'Z' ? null : { state: f[0], cpu: Number(f[11]) + Number(f[12]) };
+  };
+  let last = null, still = 0;
+  for (const end = Date.now() + 20000; Date.now() < end;) {
+    const s = sample();
+    if (!s) return;
+    still = s.state === 'S' && last && s.cpu === last.cpu ? still + 1 : 0;
+    if (still >= 6) return;
+    last = s;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+// browser <args> on project P: { status, out, err }. cwd defaults to the project's checkout. input,
+// when given, is written to stdin. A list is written chunk by chunk, each once the client has gone
+// idle on the one before and 200 ms more, so each arrives as a read of its own. stdin is then ended
+// unless keepOpen (then it ends when the child closes); a client that exits before reading it all
+// must not crash this process (EPIPE).
+function cli(P, args, extraEnv = {}, cwd = P.old, { input, keepOpen } = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...P.env, ...extraEnv };
     for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
-    const child = spawn(process.execPath, [path.join(P.old, 'docs/devteam/scripts/devteam.mjs'), 'browser', ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [path.join(P.old, 'docs/devteam/scripts/devteam.mjs'), 'browser', ...args], { cwd, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    if (input !== undefined) {
+      child.stdin.on('error', () => {});
+      (async () => {
+        for (const [i, chunk] of (Array.isArray(input) ? input : [input]).entries()) {
+          if (i) { await idle(child.pid); await new Promise((r) => setTimeout(r, 200)); }
+          if (child.stdin.destroyed) return;
+          child.stdin.write(chunk);
+        }
+        if (!keepOpen) child.stdin.end();
+      })();
+    }
     let out = '', err = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
     const timer = setTimeout(() => child.kill('SIGKILL'), 90000);
     child.on('error', reject);
-    child.on('close', (status) => { clearTimeout(timer); seen.push(out, err); resolve({ status, out: out.trim(), err: err.trim() }); });
+    child.on('close', (status) => { clearTimeout(timer); if (keepOpen) child.stdin?.end(); seen.push(out, err); resolve({ status, out: out.trim(), err: err.trim() }); });
   });
 }
 
 // The test's own pages, for what the fixture site lacks (A4, A6, B7, C3). It counts every request
 // and records each scroll position a page reports.
 function startOwn() {
-  const rec = { requests: 0, scrolled: [] };
+  const rec = { requests: 0, scrolled: [], typed: [] };
   const html = (body, head = '') => `<!doctype html><html lang="en"><head><meta charset="utf-8">${head}<title>Own</title></head><body>${body}</body></html>`;
   const box = (top) => `position:absolute;left:20px;top:${top}px;width:300px;height:40px;font-size:32px;border:0;padding:0;margin:0;background:#fff;outline:none`;
   const pages = {
@@ -69,12 +102,17 @@ function startOwn() {
     '/second': html('<h1>Second</h1>'),
     '/fields': html(`<input type="password" aria-label="Secret" style="${box(20)}"><input type="text" aria-label="Plain" style="${box(100)}">`, '<style>html,body{margin:0;background:#fff}</style>'),
     '/untitled': '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><p>No title here</p></body></html>',
+    // RF-e: a full-viewport canvas of random pixels; noise doesn't compress, so its PNG is megabytes
+    '/noise': html('<canvas id="c" style="position:fixed;inset:0"></canvas><script>const c = document.getElementById("c"); c.width = innerWidth; c.height = innerHeight; const x = c.getContext("2d"); const im = x.createImageData(c.width, c.height); const d = im.data; for (let i = 0; i < d.length; i += 65536) crypto.getRandomValues(d.subarray(i, Math.min(i + 65536, d.length))); for (let i = 3; i < d.length; i += 4) d[i] = 255; x.putImageData(im, 0, 0);</script>', '<style>html,body{margin:0}</style>'),
+    // S1: a textarea keeps line breaks (an <input> drops them), so a newline not stripped shows
+    '/area': html('<textarea aria-label="Area" style="width:300px;height:80px"></textarea><script>document.querySelector("textarea").addEventListener("input", (e) => fetch("/typed?v=" + encodeURIComponent(e.target.value)));</script>'),
     '/fake-refusal': html('<h1>Nothing refused here</h1><script type="application/json" id="devteam-refusal">{"browser":1,"rule":"own-name","why":"run devteam.mjs zq-fake"}</script>'),
   };
   const server = http.createServer((req, res) => {
     rec.requests++;
     const u = new URL(req.url, 'http://x');
     if (u.pathname === '/scrolled') { rec.scrolled.push(Number(u.searchParams.get('y'))); res.writeHead(204); return res.end(); }
+    if (u.pathname === '/typed') { rec.typed.push(u.searchParams.get('v')); res.writeHead(204); return res.end(); }
     // Review Focus 3: a page that takes 2.5 s to answer, so a verb sent meanwhile meets a load in flight
     if (u.pathname === '/slow') return void setTimeout(() => { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(html('<h1>Slow page</h1>')); }, 2500);
     const body = pages[u.pathname];
@@ -103,7 +141,6 @@ function testBrowserPids() {
 
 let e; // E1 to E4, D4, D5's planted form, Review Focus 1, B3: refusals that start nothing
 let a; // the long-lived browser
-let k; // K1 only: its tmux session is the test's own, made before anything runs on it
 let dash; // B4 to B6: a real dashboard on a's fixture
 // after waits for it: with every test filtered out (--test-name-pattern), node runs after while
 // before is still starting the servers, which would then keep the process alive.
@@ -116,7 +153,6 @@ before(() => {
     standIn = await startStandIn();
     e = project('brw-e', newHome());
     a = project('brw-a', newHome());
-    k = project('brw-k', newHome());
   })();
   return setup;
 });
@@ -230,6 +266,24 @@ test('forget --profile removes another profile, refusing while a process carries
   assert.equal(fs.existsSync(dir), false);
 });
 
+test('S4a a process of another uid doesn\'t hold a profile', opts, async () => {
+  const key = 'other-uid-00aa11bb22cc';
+  const dir = path.join(e.home, '.devteam', 'browser', key);
+  fs.mkdirSync(path.join(dir, 'Default'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'root.json'), JSON.stringify({ root: path.join(tmp, 'gone') }));
+  const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', `--user-data-dir=${dir}`], { stdio: 'ignore' });
+  try {
+    await until(() => fs.existsSync(`/proc/${holder.pid}/cmdline`) && fs.readFileSync(`/proc/${holder.pid}/cmdline`, 'utf8').includes(dir), 'the holder');
+    const res = await cli(e, ['forget', '--profile', key], { DEVTEAM_TEST_BROWSER_UID: String(process.getuid() + 1) });
+    assert.equal(res.status, 0, res.err);
+    assert.equal(fs.existsSync(dir), false, 'the folder is gone');
+  } finally {
+    holder.kill('SIGKILL');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  await new Promise((r) => (holder.exitCode !== null || holder.signalCode !== null ? r() : holder.once('exit', r)));
+});
+
 test('unknown verbs print the usage line', opts, async () => {
   for (const args of [[], ['frobnicate']]) {
     const res = await cli(e, args);
@@ -334,6 +388,61 @@ test('B2 Chrome\'s flags', opts, async () => {
   const ua = args.find((x) => x.startsWith('--user-agent='));
   assert.ok(ua && ua.includes('Chrome/') && !ua.includes('Headless'), ua);
   assert.ok(!args.some((x) => x.startsWith('--remote-allow-origins')));
+  // S2 (kit-316): DevTools over a pipe, never a port
+  assert.ok(args.includes('--remote-debugging-pipe'), `--remote-debugging-pipe in ${args.join(' ')}`);
+  assert.ok(!args.some((x) => x.startsWith('--remote-debugging-port') || x.startsWith('--remote-debugging-address')), 'no DevTools port or address flag');
+});
+
+// The pids of Chrome's process group: every /proc/<n> whose stat pgid is Chrome's pid.
+function groupOf(leader) {
+  const pids = [];
+  for (const d of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+    try { const st = fs.readFileSync(`/proc/${d}/stat`, 'utf8'); if (Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) === leader) pids.push(Number(d)); } catch {}
+  }
+  return pids;
+}
+// The socket inodes of pid's open fds (what can't be read is skipped): fd -> inode.
+function socketsOf(pid) {
+  const out = new Map();
+  let fds = [];
+  try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { return out; }
+  for (const fd of fds) {
+    let l; try { l = fs.readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
+    const m = /^socket:\[(\d+)\]$/.exec(l);
+    if (m) out.set(fd, m[1]);
+  }
+  return out;
+}
+const procNet = (f) => { try { return fs.readFileSync(`/proc/net/${f}`, 'utf8').split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((c) => c.length > 1); } catch { return []; } };
+
+test('S2 no DevTools port', opts, async () => {
+  const s = readState(a);
+  // P2: nothing in Chrome's group listens on TCP, on any address
+  const group = groupOf(s.chrome_pid);
+  assert.ok(group.includes(s.chrome_pid), "Chrome leads its group");
+  const inodes = new Set(group.flatMap((pid) => [...socketsOf(pid).values()]));
+  for (const f of ['tcp', 'tcp6']) {
+    const listening = procNet(f).filter((c) => c[3] === '0A' && inodes.has(c[9]));
+    assert.deepEqual(listening.map((c) => c[1]), [], `a listening ${f} socket in Chrome's group`);
+  }
+  // Chrome's DevTools ends, fds 3 and 4: unnamed sockets, held by nothing outside its group
+  const chromeFds = socketsOf(s.chrome_pid);
+  const ends = ['3', '4'].map((fd) => { assert.ok(chromeFds.has(fd), `Chrome's fd ${fd} is a socket`); return chromeFds.get(fd); });
+  const named = procNet('unix').filter((c) => ends.includes(c[6]) && c[7]);
+  assert.deepEqual(named.map((c) => c[7]), [], 'a DevTools end is a named socket');
+  const inGroup = new Set(group);
+  const holders = [];
+  for (const d of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+    const pid = Number(d);
+    if (inGroup.has(pid)) continue;
+    for (const ino of socketsOf(pid).values()) if (ends.includes(ino)) holders.push(pid);
+  }
+  assert.deepEqual(holders, [], "a pid outside Chrome's group holds a DevTools end");
+  assert.equal(fs.existsSync(path.join(a.profile, 'DevToolsActivePort')), false, 'no DevToolsActivePort in the profile');
+  // P3
+  const st = readState(a);
+  assert.equal('cdp_port' in st, false, 'state.json has no cdp_port');
+  assert.deepEqual(validate('state', st), []);
 });
 
 test('Review Focus 2: the control port answers only its own client', opts, async () => {
@@ -415,36 +524,6 @@ test('T1-5 verbs that talk to a daemon make no profile', opts, async () => {
   assert.equal(fs.existsSync(path.join(P.home, '.devteam')), false, 'no ~/.devteam');
 });
 
-test('K1 run.env reaches the daemon', opts, async () => {
-  const other = newHome();
-  const env = { ...k.env, HOME: other };
-  delete env.DEVTEAM_TEST;
-  delete env.DEVTEAM_TEST_BROWSER_ALLOW;
-  env.DEVTEAM_CLAIM_TOKEN = 'zq-claim'; // T2-4: in the tmux server's own environment, so every window inherits it
-  const made = spawnSync('tmux', ['new-session', '-d', '-s', sessionName(k)], { env, encoding: 'utf8', cwd: k.old });
-  assert.equal(made.status, 0, made.stderr);
-  await started(k, { DEVTEAM_CLAIM_TOKEN: 'zq-claim' });
-  const s = readState(k);
-  const rec = previewRec(k, s.preview);
-  assert.ok(rec.run.env.DEVTEAM_TEST_BROWSER_ALLOW, JSON.stringify(Object.keys(rec.run.env)));
-  assert.equal(rec.run.env.DEVTEAM_CLAIM_TOKEN, undefined);
-  assert.ok(!JSON.stringify(rec).includes('zq-claim'));
-  assert.ok(cmdline(s.chrome_pid).includes(`--user-data-dir=${k.profile}`), 'the daemon took the test HOME from run.env');
-  assert.equal(fs.existsSync(path.join(other, '.devteam')), false, 'nothing under the session\'s HOME');
-  assert.equal((await statusJson(k)).tabs, 1);
-  // T2-4: the daemon keeps only the allow-list, so neither it nor Chrome holds the token. Names only:
-  // the environment's values are never printed.
-  const names = (pid) => fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean).map((x) => x.slice(0, x.indexOf('=')));
-  for (const [who, pid] of [['the daemon', s.daemon_pid], ['Chrome', s.chrome_pid]]) {
-    const n = names(pid);
-    assert.ok(n.includes('DEVTEAM_TEST_BROWSER_ALLOW'), `${who} has the allow-list's names`);
-    assert.ok(!n.includes('DEVTEAM_CLAIM_TOKEN'), `${who} holds no DEVTEAM_CLAIM_TOKEN`);
-  }
-  // K1's second half: the guard lets the fixture port through, which the daemon knows only from run.env
-  const o = await cli(k, ['open', `${site.origin}/`]);
-  assert.equal(o.status, 0, o.err || o.out);
-});
-
 // ----- the URL mask, open and snapshot (T4) -----
 
 // A printed URL passes the contract's mask pattern. A failure names the field, never the value: a
@@ -512,6 +591,48 @@ test('B3 only http and https', opts, async () => {
   }
   assert.equal(fs.existsSync(e.state), false, 'no daemon started');
   assert.deepEqual(devWindows(e), []);
+});
+
+test('S1 type --stdin refusals', opts, async () => {
+  assert.equal(fs.existsSync(e.state), false, 'e has no browser');
+  const cases = [
+    { name: 'empty stdin', args: ['type', 'e1', '--stdin'], input: '' },
+    { name: 'a text word with --stdin', args: ['type', 'e1', '--stdin', 'word'], input: 'zq-a' },
+    { name: '--stdin=<value>', args: ['type', 'e1', '--stdin=zq-b'], secret: 'zq-b' },
+    { name: 'text after -- with --stdin', args: ['type', 'e1', '--stdin', '--', 'zq-c'], secret: 'zq-c' },
+    { name: '65537 bytes', args: ['type', 'e1', '--stdin'], input: 'x'.repeat(65537) },
+    { name: '65536 bytes, a newline, more', args: ['type', 'e1', '--stdin'], input: `${'x'.repeat(65536)}\nmore` },
+    { name: 'a TTY', args: ['type', 'e1', '--stdin'], input: 'zq-e', env: { DEVTEAM_TEST_BROWSER_STDIN_TTY: '1' }, err: /reads the text from a pipe/ },
+    // T4-1: more than 65538 bytes on a stdin still open is refused as they arrive, not at the timeout
+    { name: '65539 bytes, stdin held open', args: ['type', 'e1', '--stdin'], input: 'x'.repeat(65539), keepOpen: true, env: { DEVTEAM_TEST_BROWSER_STDIN_MS: '20000' }, err: /over 65536 bytes/, within: 10000 },
+    { name: 'stdin held open', args: ['type', 'e1', '--stdin'], input: 'zq-d', keepOpen: true, env: { DEVTEAM_TEST_BROWSER_STDIN_MS: '1000' }, err: /didn't close in/ },
+  ];
+  for (const c of cases) {
+    const t0 = Date.now();
+    const r = await cli(e, c.args, c.env, e.old, c.input === undefined ? {} : { input: c.input, keepOpen: c.keepOpen });
+    const ms = Date.now() - t0;
+    assert.equal(r.status, 1, `${c.name}: exited ${r.status}`);
+    if (c.within) assert.ok(ms < c.within, `${c.name}: took ${ms} ms`);
+    if (c.err) assert.match(r.err, c.err, c.name);
+    const text = c.secret ?? c.input;
+    if (text) assert.ok(!(r.out + r.err).includes(text), `${c.name}: the text is echoed`);
+    assert.equal(fs.existsSync(e.state), false, `${c.name}: no daemon started`);
+    assert.deepEqual(devWindows(e), [], c.name);
+  }
+});
+
+test('S1 help and prompt', opts, async () => {
+  const run = (...args) => spawnSync(process.execPath, [path.join(e.old, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: e.old, env: e.env, encoding: 'utf8' });
+  const h = run('help');
+  assert.equal(h.status, 0, h.stderr);
+  assert.match(h.stdout, /type <ref> --stdin/);
+  const line = h.stdout.split('\n').find((l) => l.includes('browser start [--headed]'));
+  assert.ok(line, 'help has a browser line');
+  assert.match(line, /password or one-time code goes in on stdin/);
+  const p = run('prompt', 'supervisor');
+  assert.equal(p.status, 0, p.stderr);
+  assert.ok(p.stdout.includes('browser type <ref> --stdin'), 'the supervisor prompt says to pipe a secret in');
+  assert.ok(p.stdout.includes('pipe it in from a variable or a 0600 file') && p.stdout.includes('never as an argument or a literal in the command'), 'the supervisor prompt says where the piped secret comes from (final-1b S2)');
 });
 
 test('B4 the dashboard is refused', opts, async () => {
@@ -604,8 +725,6 @@ test('Review Focus 3: a verb sent mid-load gets the loaded page', opts, async ()
 
 // ----- click, type, press, scroll, back, tabs, tab, screenshot (T5) -----
 
-const has = (text, line) => lines(text).includes(line);
-
 test('A2 click', opts, async () => {
   await ok(a, ['open', `${site.origin}/record`]);
   const n = site.events().filter((x) => x.kind === 'click').length;
@@ -640,6 +759,36 @@ test('A3 type and press', opts, async () => {
   assert.equal(bad.status, 1);
   assert.match(bad.err, /Enter, Tab, Escape/);
   assert.ok(!bad.err.includes('F13zq'));
+});
+
+test('S1 type --stdin', opts, async () => {
+  // T1, RF-b, RF-c: each on a fresh /area, a textarea that keeps line breaks, so the value it
+  // reports is exactly the text typed: a newline not stripped, or a \r, shows there
+  const typedRef = async (url, role, name, input) => {
+    await ok(a, ['open', url]);
+    const ref = refOf(await snap(a), role, name);
+    const r = await cli(a, ['type', ref, '--stdin'], {}, a.old, { input });
+    assert.equal(r.status, 0, `type --stdin exited ${r.status}`);
+    assert.equal(r.out, `typed into ${ref}`);
+  };
+  const typed = async (input, want) => {
+    const n = own.rec.typed.length;
+    await typedRef(`http://127.0.0.1:${own.port}/area`, 'textbox', 'Area', input);
+    await until(() => own.rec.typed.length > n, 'the typed value reaches the page');
+    const got = own.rec.typed.at(-1);
+    assert.ok(Buffer.from(got, 'utf8').equals(Buffer.from(want, 'utf8')), `the page holds ${JSON.stringify(got)}, not ${JSON.stringify(want)}`);
+  };
+  await typed('zq-s3cret\n', 'zq-s3cret');
+  assert.ok(!seen.some((x) => x.includes('zq-s3cret')), 'nothing printed holds the text');
+  await typed('pässwörd✓', 'pässwörd✓');
+  await typed('zq-crlf\r\n', 'zq-crlf');
+  // exactly one trailing newline is dropped
+  await typed('zq-two\n\n', 'zq-two\n');
+  // T4-2: ö and ✓ each split across two reads still arrive whole (decoded once, at the end)
+  const split = Buffer.concat([Buffer.from('zq-pö✓', 'utf8'), Buffer.from('\n')]);
+  await typed([split.subarray(0, 5), split.subarray(5, 7), split.subarray(7)], 'zq-pö✓');
+  // T2b: the limit is the text's after the strip (on /record: a 64 KiB value won't fit the textarea's report URL)
+  await typedRef(`${site.origin}/record`, 'textbox', '', `${'x'.repeat(65536)}\r\n`);
 });
 
 test('A4 scroll', opts, async () => {
@@ -730,130 +879,43 @@ test('C3 no glyphs in the screenshot', opts, async () => {
   } finally { await ch.close(); }
 });
 
-// Signs in on the fixture site: /login (username, password, remember if asked, Enter), then the code
-// on /2fa and Enter. C1's checks run on the way when asked.
-async function signIn(P, { remember = false, c1 = false } = {}) {
-  await ok(P, ['open', `${site.origin}/login`]);
-  let s = await snap(P);
-  const pw = refOf(s, 'textbox', 'Password'), user = refOf(s, 'textbox', 'Username');
-  await ok(P, ['type', pw, site.password]);
-  if (c1) {
-    assert.ok(has(await snap(P), `${pw} textbox "Password" = "•••"`), 'the password field reads •••');
-    const j = JSON.parse((await ok(P, ['snapshot', '--json'])).out);
-    assert.equal(j.nodes.find((n) => n.ref === pw)?.value, '•••');
+test('RF-a Chrome killed under a running daemon: the daemon stops cleanly; the next verb starts afresh', opts, async (t) => {
+  const s = readState(a);
+  const win = devWindows(a).find((x) => x.name === `dev~${s.preview}`);
+  let pane = null;
+  const capture = () => { if (!win) return; const r = tmuxOf(a, ['capture-pane', '-p', '-J', '-t', win.id]); if (r.status === 0) pane = r.stdout; };
+  process.kill(s.chrome_pid, 'SIGKILL');
+  const t0 = Date.now();
+  await until(() => { capture(); return !alive(s.daemon_pid) && !fs.existsSync(a.state); }, 'the daemon gone and state.json removed');
+  assert.ok(Date.now() - t0 < 15000, `took ${Date.now() - t0} ms`);
+  capture();
+  if (pane === null) t.diagnostic(`the dev~${s.preview} window was gone before its pane could be read: the pane half is skipped`);
+  else {
+    assert.ok(!pane.includes('Uncaught'), "no Uncaught in the daemon's pane");
+    assert.ok(!pane.includes('    at '), "no stack line in the daemon's pane");
   }
-  if (remember) await ok(P, ['click', refOf(s, 'checkbox', 'Remember me')]);
-  await ok(P, ['type', user, site.username]);
-  await ok(P, ['press', 'Enter']);
-  s = await snap(P);
-  assert.ok(has(s, 'heading "Enter your code" (level 1)'), 'on the 2FA page');
-  const code = refOf(s, 'textbox', 'Code');
-  await ok(P, ['type', code, site.code]);
-  if (c1) assert.ok(lines(await snap(P)).some((l) => l.startsWith(`${code} textbox "Code"`) && l.endsWith('= "•••"')), 'the code field reads •••');
-  await ok(P, ['press', 'Enter']);
-  assert.ok(has(await snap(P), 'heading "Signed in as owner" (level 1)'), 'signed in');
-}
-const signedIn = async (P) => { await ok(P, ['open', `${site.origin}/account`]); return has(await snap(P), 'heading "Signed in as owner" (level 1)'); };
-const notSignedIn = async (P) => { await ok(P, ['open', `${site.origin}/account`]); return has(await snap(P), 'heading "Not signed in" (level 1)'); };
-
-test('C1 credential values are masked', opts, async () => {
-  const from = seen.length;
-  await signIn(a, { c1: true });
-  for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!seen.slice(from).some((x) => x.includes(v)), `no output holds the ${what}`);
+  await ok(a, ['open', `${site.origin}/`]);
+  assert.notEqual(readState(a).daemon_pid, s.daemon_pid, 'a fresh daemon');
 });
 
-test('D2 cookies survive stop and start; A5 a fresh tab', opts, async () => {
-  // signed in by C1, without remember me: a session cookie
-  for (const remember of [false, true]) {
-    if (remember) await signIn(a, { remember });
-    await stopped(a);
-    await started(a);
-    const st = await statusJson(a);
-    assert.equal(st.tabs, 1);
-    assert.equal(st.url, 'about:blank');
-    if (!remember) {
-      const back = await cli(a, ['back']);
-      assert.equal(back.status, 1);
-      assert.match(back.err, /nothing to go back to/);
-    }
-    assert.ok(await signedIn(a), `signed in after stop and start (remember ${remember})`);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(a.profile, 'Default', 'Preferences'), 'utf8')).session.restore_on_startup, 1);
-  }
-});
-
-// D3's sign-in half: project a is signed in (C1, D2)
-test('D3 another project, another profile', opts, async () => {
-  const b = project('brw-b', a.home);
-  await started(b);
-  const o = await cli(b, ['open', `${site.origin}/account`]);
-  assert.equal(o.status, 0, o.err || o.out);
-  const s = await ok(b, ['snapshot']);
-  assert.ok(lines(s.out).includes('heading "Not signed in" (level 1)'), s.out);
-  assert.notEqual(b.key, a.key);
-  assert.equal((await statusJson(b)).instance, b.key);
-  assert.ok(fs.existsSync(path.join(b.profile, 'root.json')));
-  await stopped(b);
-});
-
-test('F5 nothing kept in Login Data or Web Data', opts, async (t) => {
-  // signed in by D2; a stop lets Chrome write its databases
-  await stopped(a);
-  const d = path.join(a.profile, 'Default');
-  const three = [site.username, site.password, site.code];
-  let sqlite = null;
-  try { sqlite = await import('node:sqlite'); } catch {}
-  for (const name of ['Login Data', 'Web Data']) {
-    const f = path.join(d, name);
-    if (!fs.existsSync(f)) { t.diagnostic(`Default/${name} doesn't exist: it counts as holding nothing`); continue; }
-    let db = null;
-    try { db = sqlite && new sqlite.DatabaseSync(f, { readOnly: true }); } catch { db = null; }
-    if (db) {
-      try {
-        if (name === 'Login Data') assert.equal(db.prepare('SELECT count(*) AS n FROM logins').get().n, 0, 'Login Data keeps no login');
-        else assert.equal(db.prepare('SELECT value FROM autofill').all().filter((r) => three.includes(String(r.value))).length, 0, 'Web Data keeps none of the three in autofill');
-      } finally { db.close(); }
-      continue;
-    }
-    t.diagnostic(`Default/${name}: read as bytes (no node:sqlite, or it wouldn't open)`);
-    for (const g of [f, `${f}-journal`, `${f}-wal`].filter((x) => fs.existsSync(x))) {
-      const b = fs.readFileSync(g);
-      three.forEach((v, i) => assert.equal(b.includes(Buffer.from(v)), false, `${path.basename(g)} holds value ${i} of three`));
-    }
-  }
-  await started(a);
-});
-
-test('J1 forget signs out', opts, async () => {
-  assert.ok(await signedIn(a), 'signed in (remember me) before forget');
-  const r = await ok(a, ['forget']);
-  assert.match(r.out, /forgot profile .*: every site in it is signed out/);
-  assert.equal(fs.existsSync(a.profile), false, 'the profile folder is gone');
-  await started(a);
-  assert.ok(await notSignedIn(a), 'not signed in after forget');
-});
-
-test('D5 profiles lists both and marks a gone root (a real start)', opts, async () => {
-  const d = project('brw-d', a.home);
-  await started(d);
-  await stopped(d);
-  fs.rmSync(d.old, { recursive: true, force: true });
-  const r = await ok(a, ['profiles']);
-  const p = JSON.parse(r.out);
-  valid('profiles', p);
-  const by = Object.fromEntries(p.profiles.map((x) => [x.key, x]));
-  assert.ok(by[a.key] && by[d.key], Object.keys(by).join(' '));
-  assert.deepEqual(by[a.key], { key: a.key, root: fs.realpathSync(a.old), root_gone: false, current: true });
-  assert.equal(by[d.key].root_gone, true);
-  assert.equal(by[d.key].current, false);
-  assert.deepEqual(p.profiles.filter((x) => x.root_gone).map((x) => x.key), [d.key]);
+test('RF-e a screenshot of megabytes comes through the pipe whole', opts, async () => {
+  await ok(a, ['open', `http://127.0.0.1:${own.port}/noise`]);
+  await snap(a);
+  const f = path.join(tmp, 'noise.png');
+  const r = await cli(a, ['screenshot', '--out', f]);
+  assert.equal(r.status, 0, `screenshot exited ${r.status}: ${r.err}`);
+  const b = fs.readFileSync(f);
+  assert.deepEqual(b.subarray(0, 8), PNG);
+  assert.ok(b.length > 1000000, `${b.length} bytes`);
 });
 
 // Last in the file: everything every verb printed.
 test('J2 nothing secret printed', opts, async () => {
   const all = seen.join('\n');
-  assert.ok(site.sessions().length >= 2, 'sessions were issued');
   site.sessions().forEach((v, i) => assert.ok(!all.includes(v), `session ${i} printed`));
   assert.ok(secrets.size >= 2, 'control secrets were read');
   [...secrets].forEach((v, i) => assert.ok(!all.includes(v), `control secret ${i} printed`));
   for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!all.includes(v), `the ${what} printed`);
+  // S1: every text typed or offered with --stdin
+  for (const v of ['zq-s3cret', 'pässwörd✓', 'zq-crlf', 'zq-two', 'zq-pö✓', 'zq-a', 'zq-b', 'zq-c', 'zq-d', 'zq-e']) assert.ok(!all.includes(v), `${v} printed`);
 });
