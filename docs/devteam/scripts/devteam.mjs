@@ -1525,6 +1525,8 @@ function schemaErrors(schema, value, where) {
 // The writer a log file belongs to, from its name alone: owner-<yyyy-mm>, supervisor-<yyyy-mm>,
 // plan-<feature> (a planner's graph, landed by its plan PR), plan-<feature>-<yyyy-mm> (the same
 // planner's messages and observations, live), or a ticket id. Anything else counts for nothing.
+// responder.jsonl is the responder's (responder-1): it falls to the last rule, and no ticket id can be
+// "responder", since a keyed ticket id carries a -NN- number.
 const MONTHLY = /^(owner|supervisor|plan-[a-z0-9]+(?:-[a-z0-9]+)*?)-\d{4}-\d{2}$/;
 function writerOfFile(name) {
   const base = name.replace(/\.jsonl$/, '');
@@ -1533,7 +1535,7 @@ function writerOfFile(name) {
   if (/^(owner|supervisor)(-|$)/.test(base)) return null;
   return /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(base) ? base : null;
 }
-const writerClass = (by) => (by === 'owner' || by === 'supervisor' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
+const writerClass = (by) => (by === 'owner' || by === 'supervisor' || by === 'responder' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
 const planFeature = (by) => (writerClass(by) === 'planner' ? by.slice('plan-'.length) : null);
 
 // The cheap checks every reader runs, so a line never grants more than its file's writer has: the
@@ -1561,6 +1563,21 @@ function integrity(o, file) {
       if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
     }
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
+    // responder-1: the responder answers the owner's turns and hands work over, and no more. It asks
+    // nothing, replies to no message (a reply's re closes what it names, in every reader of open
+    // messages), and its observations are its own and of no kind readers honour by kind alone.
+    if (cls === 'responder') {
+      if (o.type === 'turn' && o.question !== undefined) return "the responder's turns ask nothing";
+      if (o.type === 'message' && !['handoff', 'info'].includes(o.kind)) return 'the responder sends handoff and info messages only';
+      if (o.type === 'message' && o.re !== undefined && o.re !== null) return 'the responder replies to no message (re)';
+      if (o.type === 'observation' && o.source !== 'responder') return "the responder's observations have source responder";
+      if (o.type === 'observation' && [...SET_ASIDE_KINDS, 'outcome', 'escaped-defect'].includes(o.kind)) return `the responder doesn't write ${o.kind} observations`;
+    }
+    // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
+    if (o.type === 'message' && o.kind === 'handoff' && o.thread === undefined) return 'a handoff names its thread';
+    if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
+    if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
+    if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
     // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
     // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
     // (goal order), and of asking for one of the supervisor's settings (owner-setting). Nobody else
@@ -11415,7 +11432,7 @@ const stageOf = (o) => { const s = Object.hasOwn(OODA.stages, o?.type ?? '') ? O
 // The sources each writer may name for itself (observe --source); sensor, metrics and spend are the
 // kit's own, read off its own lines, never given. The supervisor records what the owner said (an
 // answer, a thread, the chat), but never speaks as the owner.
-const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'] };
+const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner', 'responder'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'], responder: ['responder'] };
 // An owner-* source on a line someone else wrote is a claim about the owner's words, so it counts
 // only when its ref is the record that holds them: an answered question (the owner's answer) for
 // owner-answer, the owner's turn or thread for owner-thread, either for owner-chat. A ref that
@@ -11469,7 +11486,7 @@ function cmdObserve() {
   // a goal's reading (source repo, prod or owner) is the kit's, from goal check or an answer
   if (flagStr('kind') === 'reading' && ['repo', 'prod', 'owner'].includes(src)) die(`observe --kind reading --source ${src}: a goal's readings come from the kit itself (goal check, the owner's answer)`);
   const mine = SOURCE_FOR[writerClass(by)];
-  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: a ${{ ticket: 'worker', planner: 'planner', supervisor: 'supervisor', owner: 'owner' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
+  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: ${{ ticket: 'a worker', planner: 'a planner', supervisor: 'a supervisor', owner: 'a owner', responder: 'the responder' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
   if (writerClass(by) !== 'owner' && String(src).startsWith('owner-') && !ownerRefHolds(src, flagStr('ref'))) die(`observe --source ${src} needs --ref <id> naming where the owner said it: ${src === 'owner-answer' ? 'a question they answered' : src === 'owner-thread' ? 'their turn or the thread' : 'a question they answered, or their turn'}`);
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
