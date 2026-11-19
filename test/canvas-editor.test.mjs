@@ -526,3 +526,165 @@ test('pages', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 
   assert.equal(await p.ev("document.getElementById('pageSel').value"), 'p-main');
   assert.deepEqual(rec.exceptions, []);
 });
+
+// ---- zoom and pan (C1.9, and the review focus's zoom at its bounds) ----
+
+// The zoom #surface's transform holds, and the page's content bounds on screen: the union of the
+// top-level drawn nodes' rectangles plus 200 page px around, which scale with the zoom.
+const zoomOf = (p) => p.ev("(() => { const t = getComputedStyle(document.getElementById('surface')).transform; return t === 'none' ? 1 : new DOMMatrixReadOnly(t).a; })()");
+const screenRect = (p, sel) => p.ev(`(() => { const r = ${q(sel)}.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height }; })()`);
+const contentBounds = (p) => p.ev(`(() => {
+  const s = document.getElementById('surface');
+  const t = getComputedStyle(s).transform;
+  const z = t === 'none' ? 1 : new DOMMatrixReadOnly(t).a;
+  const rs = [...s.children].filter((e) => e.dataset.id && e.getClientRects().length).map((e) => e.getBoundingClientRect());
+  return { l: Math.min(...rs.map((r) => r.left)) - 200 * z, t: Math.min(...rs.map((r) => r.top)) - 200 * z, r: Math.max(...rs.map((r) => r.right)) + 200 * z, b: Math.max(...rs.map((r) => r.bottom)) + 200 * z };
+})()`);
+const mouse = (p, type, x, y, extra = {}) => p.send('Input.dispatchMouseEvent', { type, x, y, ...extra });
+// A key by its key, code and virtual key code (the helper's key() names '+' 'Key+'), typed text and all.
+const press = async (p, key, code, vk, modifiers = 0) => {
+  await p.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: vk, modifiers, text: key });
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, modifiers });
+};
+const plusKey = (p) => press(p, '+', 'Equal', 187, 8);
+const minusKey = (p) => press(p, '-', 'Minus', 189);
+const zeroKey = (p) => press(p, '0', 'Digit0', 48);
+const shiftOne = async (p) => {
+  await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: '!', code: 'Digit1', windowsVirtualKeyCode: 49, modifiers: 8 });
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', key: '!', code: 'Digit1', windowsVirtualKeyCode: 49, modifiers: 8 });
+};
+const centre = (r) => ({ x: (r.l + r.r) / 2, y: (r.t + r.b) / 2 });
+// A press at `from`, two moves to `from` + (dx, dy) with the button held, and a release there.
+async function drag(p, from, dx, dy, button, buttons) {
+  await mouse(p, 'mouseMoved', from.x, from.y);
+  await mouse(p, 'mousePressed', from.x, from.y, { button, buttons, clickCount: 1 });
+  await mouse(p, 'mouseMoved', from.x + dx / 2, from.y + dy / 2, { button, buttons });
+  await mouse(p, 'mouseMoved', from.x + dx, from.y + dy, { button, buttons });
+  await mouse(p, 'mouseReleased', from.x + dx, from.y + dy, { button, buttons: 0, clickCount: 1 });
+}
+
+test('zoom and pan', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  assert.equal(await state(p), 'ready');
+  const stage = await screenRect(p, '#stage');
+  const pct = () => text(p, '#zoomPct');
+  const card = () => screenRect(p, '#surface [data-id="card"]');
+  const buttonAt = async (sel) => centre(await screenRect(p, sel));
+  const clickButton = async (sel) => { const at = await buttonAt(sel); await p.clickAt(at.x, at.y); };
+  const inside = (b, what) => {
+    for (const [k, cmp] of [['l', (v) => v >= stage.l - 1], ['t', (v) => v >= stage.t - 1], ['r', (v) => v <= stage.r + 1], ['b', (v) => v <= stage.b + 1]]) {
+      assert.ok(cmp(b[k]), `${what}: content bounds ${k} ${b[k]} inside the stage ${JSON.stringify(stage)}`);
+    }
+  };
+  // fitted when first shown
+  inside(await contentBounds(p), 'at load');
+  const zLoad = await zoomOf(p);
+  assert.ok(zLoad > 0 && zLoad <= 1, `at most 100%: ${zLoad}`);
+
+  // Fit: the content bounds inside the stage, filling it on one axis, at most 100%
+  await clickButton('#zoomFit');
+  const zFit = await zoomOf(p);
+  const fitted = await contentBounds(p);
+  inside(fitted, 'after Fit');
+  assert.ok(zFit === 1 || Math.abs((fitted.r - fitted.l) - stage.w) <= 1 || Math.abs((fitted.b - fitted.t) - stage.h) <= 1, `Fit fills the stage on one axis: ${JSON.stringify(fitted)}`);
+  assert.equal(await pct(), `${Math.round(zFit * 100)}%`);
+
+  // + (the button): 1.25 times the zoom, and the card 1.25 times as wide on screen
+  const w0 = (await card()).w;
+  await clickButton('#zoomIn');
+  near(await zoomOf(p), zFit * 1.25, 1e-4, '+ zooms by 1.25');
+  near((await card()).w, w0 * 1.25, 1, "the card's on-screen width after +");
+  assert.equal(await pct(), `${Math.round(zFit * 125)}%`);
+  // the + key does the same again
+  await plusKey(p);
+  near(await zoomOf(p), zFit * 1.25 * 1.25, 1e-4, 'the + key zooms by 1.25');
+  near((await card()).w, w0 * 1.25 * 1.25, 1, "the card's on-screen width after the + key");
+  // - divides by 1.25
+  await minusKey(p);
+  near(await zoomOf(p), zFit * 1.25, 1e-4, 'the - key divides by 1.25');
+  near((await card()).w, w0 * 1.25, 1, "the card's on-screen width after -");
+  // 0 returns to 100%
+  await zeroKey(p);
+  assert.equal(await zoomOf(p), 1);
+  assert.equal(await pct(), '100%');
+  near((await card()).w, 360, 1, "the card's own width at 100%");
+  // Shift+1 fits again
+  await shiftOne(p);
+  near(await zoomOf(p), zFit, 1e-4, 'Shift+1 fits');
+  assert.equal(await pct(), `${Math.round(zFit * 100)}%`);
+  inside(await contentBounds(p), 'after Shift+1');
+
+  // the wheel pans: deltaY 100 moves the card up 100 px
+  let c0 = await card();
+  const over = { x: stage.l + 40, y: stage.b - 40 };
+  await mouse(p, 'mouseWheel', over.x, over.y, { deltaX: 0, deltaY: 100 });
+  let c1 = await card();
+  near(c1.t, c0.t - 100, 1, 'the wheel moves the card up');
+  near(c1.l, c0.l, 1, 'the wheel keeps the card across');
+  assert.equal(await zoomOf(p), zFit, 'the wheel alone does not zoom');
+
+  // a middle-button drag of (40, 30), from on the card, moves it by (40, 30) and selects nothing
+  c0 = await card();
+  await drag(p, centre(c0), 40, 30, 'middle', 4);
+  c1 = await card();
+  near(c1.l, c0.l + 40, 1, 'middle drag x');
+  near(c1.t, c0.t + 30, 1, 'middle drag y');
+  assert.deepEqual(await selectedRows(p), [], 'a middle drag selects nothing');
+
+  // a drag with Space held does the same; the left button's click that ends it selects nothing
+  c0 = await card();
+  await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+  await drag(p, centre(c0), 40, 30, 'left', 1);
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+  c1 = await card();
+  near(c1.l, c0.l + 40, 1, 'Space drag x');
+  near(c1.t, c0.t + 30, 1, 'Space drag y');
+  assert.deepEqual(await selectedRows(p), [], 'a Space drag selects nothing');
+  assert.equal(await zoomOf(p), zFit, 'panning does not zoom');
+
+  // a click on empty stage after a pan still clears a selection, and a plain click still selects
+  await p.click('#layers .layer[data-node="title"]');
+  assert.deepEqual(await selectedRows(p), ['title']);
+  assert.equal(await p.ev(`document.elementFromPoint(${stage.r - 60}, ${stage.b - 60})?.id`), 'stage', 'the point is empty stage');
+  await p.clickAt(stage.r - 60, stage.b - 60);
+  assert.deepEqual(await selectedRows(p), [], 'a click on empty stage clears');
+
+  // Ctrl+wheel zooms around the pointer: the point under it stays put
+  c0 = await card();
+  const pt = { x: c0.l + c0.w * 0.3, y: c0.t + c0.h * 0.6 };
+  const fx = (pt.x - c0.l) / c0.w;
+  const fy = (pt.y - c0.t) / c0.h;
+  await mouse(p, 'mouseMoved', pt.x, pt.y);
+  await mouse(p, 'mouseWheel', pt.x, pt.y, { deltaX: 0, deltaY: -120, modifiers: 2 });
+  const zW = await zoomOf(p);
+  assert.ok(zW > zFit * 1.2, `Ctrl+wheel zooms in: ${zFit} to ${zW}`);
+  c1 = await card();
+  near(c1.l + c1.w * fx, pt.x, 1, 'the point under the pointer, x');
+  near(c1.t + c1.h * fy, pt.y, 1, 'the point under the pointer, y');
+  assert.equal(await pct(), `${Math.round(zW * 100)}%`);
+
+  // the bounds: + at 800% and - at 10% stay put
+  for (let k = 0; k < 20; k++) await plusKey(p);
+  assert.equal(await zoomOf(p), 8);
+  assert.equal(await pct(), '800%');
+  c0 = await card();
+  await plusKey(p);
+  await clickButton('#zoomIn');
+  assert.equal(await zoomOf(p), 8, '+ at 800%');
+  assert.equal(await pct(), '800%');
+  c1 = await card();
+  near(c1.l, c0.l, 0.01, '+ at 800% keeps the card, x');
+  near(c1.t, c0.t, 0.01, '+ at 800% keeps the card, y');
+  for (let k = 0; k < 30; k++) await minusKey(p);
+  assert.equal(await zoomOf(p), 0.1);
+  assert.equal(await pct(), '10%');
+  c0 = await card();
+  await minusKey(p);
+  await clickButton('#zoomOut');
+  assert.equal(await zoomOf(p), 0.1, '- at 10%');
+  assert.equal(await pct(), '10%');
+  c1 = await card();
+  near(c1.l, c0.l, 0.01, '- at 10% keeps the card, x');
+  near(c1.t, c0.t, 0.01, '- at 10% keeps the card, y');
+  assert.deepEqual(rec.exceptions, []);
+});

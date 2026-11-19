@@ -72,7 +72,10 @@
   .note { font-size: 12px; color: var(--fg-2); margin: 8px 0; max-width: var(--measure); }
 
   /* the stage: the page surface is the one element zoom and pan move */
-  .stage { position: relative; background: var(--stage); overflow: hidden; min-width: 0; touch-action: none; }
+  /* clip, not hidden: the stage is no scroll container, so nothing (scrollIntoView included) scrolls it */
+  .stage { position: relative; background: var(--stage); overflow: clip; min-width: 0; touch-action: none; user-select: none; }
+  .stage.panning, .stage.space { cursor: grab; }
+  .stage.panning { cursor: grabbing; }
   #surface { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
   .zoom { position: absolute; right: 12px; top: 12px; display: flex; gap: 4px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 3px; z-index: 3; }
   .zoom .pct { font-size: 12px; width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
@@ -809,6 +812,7 @@
   // A click on the stage: the nearest drawn node with a data-id (inside an instance, the instance), or
   // on empty stage nothing. The stage's own controls are not the stage.
   $('stage').addEventListener('click', (e) => {
+    if (panned) { panned = false; return; } // the click that ends a Space drag is a pan, not a click
     if (!state.doc || e.button !== 0 || !(e.target instanceof Element)) return;
     if (e.target.closest('.zoom, .stage-top')) return;
     const hit = e.target.closest('#surface [data-id]');
@@ -817,6 +821,146 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && state.sel !== null) select(null);
   });
+
+  // ---- zoom and pan ----
+
+  // The view: #surface moved by translate(x, y) scale(z), origin top-left, x and y in stage px.
+  const ZMIN = 0.1;
+  const ZMAX = 8;
+  const STEP = 1.25;
+  const view = { x: 0, y: 0, z: 1 };
+  let moved = false; // the person has zoomed or panned since the page was shown
+  let panned = false; // the pointer press now ending was a pan
+  let pan = null;
+  let spaceHeld = false;
+
+  function applyView() {
+    $('surface').style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
+    $('zoomPct').textContent = `${Math.round(view.z * 100)}%`;
+  }
+  // Zoom by `factor` around the stage point (sx, sy), which stays put; z kept to [0.1, 8], so at a
+  // bound the view doesn't change at all.
+  function zoomTo(target, sx, sy) {
+    if (!Number.isFinite(target) || target <= 0) return;
+    const z = Math.min(ZMAX, Math.max(ZMIN, target));
+    if (z === view.z) return;
+    const k = z / view.z;
+    view.x = sx - (sx - view.x) * k;
+    view.y = sy - (sy - view.y) * k;
+    view.z = z;
+    moved = true;
+    applyView();
+  }
+  const zoomAt = (factor, sx, sy) => zoomTo(view.z * factor, sx, sy);
+  const stageSize = () => ({ w: $('stage').clientWidth, h: $('stage').clientHeight });
+  const zoomCentre = (z) => { const s = stageSize(); zoomTo(z, s.w / 2, s.h / 2); };
+  // The shown page's content bounds in page px: the union of its top-level nodes' rectangles plus
+  // 200 px around (contract §9), or null on a page with nothing shown.
+  function contentBounds() {
+    const surface = $('surface');
+    const o = surface.getBoundingClientRect();
+    let b = null;
+    for (const el of surface.children) {
+      if (!el.dataset.id || el.getClientRects().length === 0) continue;
+      const r = el.getBoundingClientRect();
+      const l = (r.left - o.left) / view.z;
+      const t = (r.top - o.top) / view.z;
+      const rr = l + r.width / view.z;
+      const bb = t + r.height / view.z;
+      b = b === null ? { l, t, r: rr, b: bb } : { l: Math.min(b.l, l), t: Math.min(b.t, t), r: Math.max(b.r, rr), b: Math.max(b.b, bb) };
+    }
+    return b && { l: b.l - 200, t: b.t - 200, r: b.r + 200, b: b.b + 200 };
+  }
+  // Fit: the content bounds fill the stage, at most 100%, centred.
+  function fit() {
+    const b = contentBounds();
+    const s = stageSize();
+    if (!b || s.w <= 0 || s.h <= 0) {
+      Object.assign(view, { x: 0, y: 0, z: 1 });
+    } else {
+      const z = Math.min(1, Math.max(ZMIN, Math.min(s.w / (b.r - b.l), s.h / (b.b - b.t))));
+      Object.assign(view, { z, x: (s.w - (b.r - b.l) * z) / 2 - b.l * z, y: (s.h - (b.b - b.t) * z) / 2 - b.t * z });
+    }
+    moved = false;
+    applyView();
+  }
+  const ready = () => state.doc !== null && document.body.dataset.state !== 'error';
+
+  $('zoomIn').addEventListener('click', () => { if (ready()) zoomCentre(view.z * STEP); });
+  $('zoomOut').addEventListener('click', () => { if (ready()) zoomCentre(view.z / STEP); });
+  $('zoomFit').addEventListener('click', () => { if (ready()) fit(); });
+
+  // The wheel pans; with Ctrl or ⌘ (a trackpad's pinch comes as Ctrl+wheel) it zooms around the pointer.
+  $('stage').addEventListener('wheel', (e) => {
+    if (!ready()) return;
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? stageSize().h : 1;
+    const dx = e.deltaX * unit;
+    const dy = e.deltaY * unit;
+    if (e.ctrlKey || e.metaKey) {
+      const r = $('stage').getBoundingClientRect();
+      zoomAt(Math.exp(-dy / 300), e.clientX - r.left, e.clientY - r.top);
+      return;
+    }
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    view.x -= dx;
+    view.y -= dy;
+    moved = true;
+    applyView();
+  }, { passive: false });
+
+  // Dragging with the middle button, or with Space held, pans; the stage keeps the pointer meanwhile.
+  $('stage').addEventListener('pointerdown', (e) => {
+    panned = false;
+    if (!ready() || pan || !(e.target instanceof Element) || e.target.closest('.zoom, .stage-top')) return;
+    if (!(e.button === 1 || (e.button === 0 && spaceHeld))) return;
+    e.preventDefault();
+    pan = { id: e.pointerId, cx: e.clientX, cy: e.clientY, x: view.x, y: view.y };
+    panned = true;
+    try { $('stage').setPointerCapture(e.pointerId); } catch { /* the pan still follows moves over the stage */ }
+    $('stage').classList.add('panning');
+  });
+  $('stage').addEventListener('pointermove', (e) => {
+    if (!pan || e.pointerId !== pan.id) return;
+    view.x = pan.x + e.clientX - pan.cx;
+    view.y = pan.y + e.clientY - pan.cy;
+    moved = true;
+    applyView();
+  });
+  const endPan = (e) => {
+    if (!pan || e.pointerId !== pan.id) return;
+    pan = null;
+    $('stage').classList.remove('panning');
+  };
+  $('stage').addEventListener('pointerup', endPan);
+  $('stage').addEventListener('pointercancel', endPan);
+  // no middle-button autoscroll or paste on the stage
+  $('stage').addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+  $('stage').addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
+
+  // Keys: +/= zoom in, - zoom out, 0 sets 100%, Shift+1 fits (by its code, so any layout's Shift+1);
+  // Space held makes a drag pan. None of them while typing in a field.
+  const typing = (t) => t instanceof Element && (t.closest('input, select, textarea') !== null || (t instanceof HTMLElement && t.isContentEditable));
+  document.addEventListener('keydown', (e) => {
+    if (!ready() || typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.code === 'Space' || e.key === ' ') {
+      e.preventDefault(); // nor a focused button pressed, nor anything scrolled
+      spaceHeld = true;
+      $('stage').classList.add('space');
+      return;
+    }
+    if (e.code === 'Digit1' && e.shiftKey) { e.preventDefault(); fit(); return; }
+    if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomCentre(view.z * STEP); return; }
+    if (e.key === '-') { e.preventDefault(); zoomCentre(view.z / STEP); return; }
+    if (e.key === '0') { e.preventDefault(); zoomCentre(1); }
+  });
+  const spaceUp = () => { spaceHeld = false; $('stage').classList.remove('space'); };
+  document.addEventListener('keyup', (e) => {
+    if (e.code !== 'Space' && e.key !== ' ') return;
+    if (spaceHeld && !typing(e.target)) e.preventDefault();
+    spaceUp();
+  });
+  window.addEventListener('blur', spaceUp);
 
   // ---- pages ----
 
@@ -835,7 +979,13 @@
     renderLayers(pg.id);
     select(state.sel);
     if (kidsOf(pg).length === 0) showMsg(TEXT.empty); else hideMsg();
-    imagesSettled().then(() => { if (n === shown) setState('ready'); });
+    // fitted when shown, and again once its images have their sizes, unless the person has moved since
+    fit();
+    imagesSettled().then(() => {
+      if (n !== shown) return;
+      if (!moved) fit();
+      setState('ready');
+    });
   }
 
   // The shown page from the address (#page=<id>), or null.
