@@ -2458,18 +2458,33 @@ const approvedBy = (id) => (id?.startsWith('q-') ? `with your answer to ${qlink(
 function linkify(text) {
   // One pass over the escaped text: each id becomes a link once, and nothing inside a link (its
   // href, its text) is scanned again, so an id holding a planner's name (m-…-plan-x) stays whole.
+  // A doc path, with the branch or commit written after it: one link to the file, the " on <ref>"
+  // left as text after it (kit-327). A ticket id only where it stands alone, never inside a path, a
+  // branch or a filename (ticket/<id>, <id>/x.md, docs/<id>.md).
   const h = esc(text ?? '');
   const ids = [...ticketMap().keys()].sort((a, b) => b.length - a.length);
+  const DOC = String.raw`(?<![^\s(\[\x7b,;>])(?<!&amp;)(?:\.\.\/)?[A-Za-z_.][\w.-]*(?:\/[\w.-]+)*\/[\w.-]*\.[A-Za-z][A-Za-z0-9]*(?![\w\/-])(?: (?:on (?:(?:ticket|plan)\/[\w.-]*[A-Za-z0-9]|main)|at [0-9a-f]{40})(?![\w\/-]|\.\w))?`;
   const parts = [
     String.raw`\bq-\d{8}-\d{9}-[a-z0-9-]+`,
     String.raw`\b[gkapmodt]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
-    ...(ids.length ? [String.raw`\b(?:${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\b`] : []),
+    ...(ids.length ? [String.raw`(?<![\w./-])(?:${ids.map((x) => x.replace(/[-.]/g, '\\$&')).join('|')})(?![\w\/-]|\.[A-Za-z0-9])`] : []),
     String.raw`\bsensor:[A-Za-z0-9][A-Za-z0-9_.-]*`,
     String.raw`\bplan-[a-z0-9]+(?:-[a-z0-9]+)*\b`,
     String.raw`\b[0-9a-f]{40}\b`,
     String.raw`\bsanctuarycomputer\/devteam#\d+`,
   ];
-  return h.replace(new RegExp(parts.join('|'), 'g'), (m) => {
+  const rest = new RegExp(parts.join('|'), 'g');
+  const doc = (m) => {
+    const [, p, sep, ref] = /^(\S+?)(?:( (?:on|at) )(\S+))?$/.exec(m);
+    const repoHref = repoDocHref(p, ref);
+    // a home path keeps its ref, a merged home ticket's its merge commit; any other .. is no doc
+    const t = !repoHref && ref?.startsWith('ticket/') ? ticketMap().get(ref.slice('ticket/'.length)) : null;
+    const at = t?.merge_sha && t.repo === 'home' ? t.merge_sha : ref;
+    if (!repoHref && (!ref || p.split('/').includes('..'))) return m.replace(rest, one);
+    const href = repoHref || fileHref({ path: p, ref: at, title: p });
+    return `<a class="linkish" href="${esc(href)}"${/^https:/.test(href) ? ' target="_blank" rel="noopener noreferrer"' : ''}>${p}</a>${sep ? `${sep}${ref}` : ''}`;
+  };
+  const one = (m) => {
     if (/^q-\d{8}-\d{9}-/.test(m)) return qlink(m);
     if (/^[gkapmodt]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
     if (ticketMap().has(m)) return tlink(m);
@@ -2478,7 +2493,8 @@ function linkify(text) {
     if (/^[0-9a-f]{40}$/.test(m)) return `<code>${m.slice(0, 12)}</code>`;
     const pr = m.split('#')[1];
     return `<a class="linkish" href="https://github.com/sanctuarycomputer/devteam/pull/${pr}" target="_blank" rel="noopener noreferrer">devteam #${pr}</a>`;
-  });
+  };
+  return h.replace(new RegExp(`(${DOC})|${rest.source}`, 'g'), (m, d) => (d !== undefined ? doc(m) : one(m)));
 }
 const FIELD_WORDS = { depends_on: 'what it waits on', touches: 'which files it may change', done_when: 'what “done” means', title: 'its title', held: 'whether it is on hold', superseded_by: 'what replaces it', serves: 'which stories it serves', risk: 'its risk', size: 'its size', kind: 'its kind', contracts: 'its contracts', one_way_doors: 'its hard-to-undo parts', notes: 'its notes' };
 const syncTag = (x) => x.replace(/^(v\d+)-(\d+)-(\d+)/, '$1.$2.$3');
