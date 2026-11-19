@@ -255,11 +255,11 @@ const argOf = (text, name) => new RegExp(`^ARG ${name}=(.*)$`, 'm').exec(text)?.
 const fileSha = (f) => sha256(fs.readFileSync(f));
 const assetBody = (tool, tag, i) => `${REPOS[tool]}/${assetNames(tool, tag)[i]}/${tag}`;
 
-test('box-pins bump --release v9.9.9 sets each unheld tool to latest with the assets\' real sums', async (t) => {
+test('box-pins bump --release v9.9.0 sets each unheld tool to latest with the assets\' real sums', async (t) => {
   const u = await upstream(t);
   const f = pinsCopy((x) => x.replace(/^ARG UV_VERSION=/m, '# hold: 0.13.8 breaks claude-swap\n$&'));
   const before = fs.readFileSync(f, 'utf8');
-  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  const r = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', f], upEnv(u));
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const after = fs.readFileSync(f, 'utf8');
   assert.deepEqual(['CLAUDE_CODE', 'CLAUDE_SWAP', 'GH', 'TTYD', 'MISE', 'UV'].map((p) => argOf(after, `${p}_VERSION`)), ['2.1.308', '1.0.1', '2.105.0', '1.7.8', 'v2026.11.8', FIXED.UV]);
@@ -270,24 +270,24 @@ test('box-pins bump --release v9.9.9 sets each unheld tool to latest with the as
   for (const a of ['UV_VERSION', 'UV_SHA256_X86_64', 'UV_SHA256_AARCH64']) assert.equal(argOf(after, a), argOf(before, a), `held uv keeps ${a}`);
   assert.match(after, /^# hold: 0\.13\.8 breaks claude-swap\nARG UV_VERSION=/m);
   assert.ok(!u.state.hits.some((h) => h.path.includes('astral-sh/uv')), 'nothing asked about a held tool');
-  assert.equal(argOf(after, 'DEVTEAM_RELEASE'), 'v9.9.9');
+  assert.equal(argOf(after, 'DEVTEAM_RELEASE'), 'v9.9.0');
   assert.match(r.stdout, /^TTYD_VERSION 1\.7\.7 -> 1\.7\.8$/m);
   assert.match(r.stdout, /^held uv: 0\.13\.8 breaks claude-swap$/m);
   assert.match(r.stdout, new RegExp(`^wrote ${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
   const notArg = (x) => x.split('\n').filter((l) => !l.startsWith('ARG '));
   assert.deepEqual(notArg(after), notArg(before), 'only ARG lines were rewritten');
-  assert.equal(pins(['verify', '--release', 'v9.9.9', '--dockerfile', f]).status, 0);
+  assert.equal(pins(['verify', '--release', 'v9.9.0', '--dockerfile', f]).status, 0);
 });
 
 test('bump --dry-run prints the change and leaves the file byte-identical', async (t) => {
   const u = await upstream(t);
   const f = pinsCopy();
   const sum = fileSha(f);
-  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dry-run', '--dockerfile', f], upEnv(u));
+  const r = await pinsAsync(['bump', '--release', 'v9.9.0', '--dry-run', '--dockerfile', f], upEnv(u));
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.match(r.stdout, /^TTYD_VERSION 1\.7\.7 -> 1\.7\.8$/m);
   assert.match(r.stdout, new RegExp(`^TTYD_SHA256_X86_64 ${fixedSum('TTYD_SHA256_X86_64')} -> ${sha256(assetBody('ttyd', '1.7.8', 0))}$`, 'm'));
-  assert.match(r.stdout, /^DEVTEAM_RELEASE v0\.52\.0 -> v9\.9\.9$/m);
+  assert.match(r.stdout, /^DEVTEAM_RELEASE v0\.52\.0 -> v9\.9\.0$/m);
   assert.match(r.stdout, /^--dry-run: nothing written$/m);
   assert.equal(fileSha(f), sum);
 });
@@ -297,19 +297,19 @@ test('bump writes nothing when an upstream fails, or a digest disagrees', async 
   const f = pinsCopy();
   const sum = fileSha(f);
   u.state.assets[`cli/cli/${assetNames('gh', LATEST.gh)[1]}`] = { status: 500 };
-  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  const r = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', f], upEnv(u));
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stderr, /box-pins bump: gh: .*500.*; nothing written/);
   assert.equal(fileSha(f), sum);
   u.state.assets[`cli/cli/${assetNames('gh', LATEST.gh)[1]}`] = { body: assetBody('gh', LATEST.gh, 1) };
   u.state.releases['jdx/mise'][0].assets[0].digest = `sha256:${'0'.repeat(64)}`;
-  const d = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  const d = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', f], upEnv(u));
   assert.equal(d.status, 1, d.stdout);
   assert.match(d.stderr, /box-pins bump: mise: .*digest.*; nothing written/);
   assert.equal(fileSha(f), sum);
   u.state.releases['jdx/mise'][0].assets[0].digest = `sha256:${sha256(assetBody('mise', LATEST.mise, 0))}`;
   u.state.npm['@anthropic-ai/claude-code'] = { status: 503 };
-  const n = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  const n = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', f], upEnv(u));
   assert.equal(n.status, 1);
   assert.match(n.stderr, /box-pins bump: claude-code: HTTP 503; nothing written/);
   assert.equal(fileSha(f), sum);
@@ -317,7 +317,7 @@ test('bump writes nothing when an upstream fails, or a digest disagrees', async 
 
 test('bump sends no token with a download', async (t) => {
   const u = await upstream(t);
-  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', pinsCopy()], { ...upEnv(u), GH_TOKEN: 'fake-token' });
+  const r = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', pinsCopy()], { ...upEnv(u), GH_TOKEN: 'fake-token' });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.ok(u.state.hits.some((h) => h.path.startsWith('/dl/')) && u.state.hits.some((h) => h.path.startsWith('/assets/')), 'downloads went through the redirect');
   for (const h of u.state.hits) {
@@ -330,11 +330,11 @@ test('bump keeps the file\'s mode, and writes nothing when nothing changes', asy
   const u = await upstream(t);
   const f = pinsCopy();
   fs.chmodSync(f, 0o664); // group-writable: a umask of 022 alone would lose it
-  assert.equal((await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u))).status, 0);
+  assert.equal((await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', f], upEnv(u))).status, 0);
   assert.equal(fs.statSync(f).mode & 0o777, 0o664);
   const { mtimeMs } = fs.statSync(f);
   const sum = fileSha(f);
-  const again = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  const again = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', f], upEnv(u));
   assert.equal(again.status, 0, again.stderr);
   assert.match(again.stdout, /^unchanged$/m);
   assert.equal(fileSha(f), sum);
@@ -346,7 +346,7 @@ test('bump and check refuse a malformed hold', async (t) => {
   const u = await upstream(t);
   const f = pinsCopy((x) => x.replace(/^ARG MISE_VERSION=/m, '# Hold: x\n$&'));
   const sum = fileSha(f);
-  const b = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  const b = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', f], upEnv(u));
   assert.equal(b.status, 1);
   assert.match(b.stdout, /box-pins bump: line \d+ looks like a hold but is not "# hold: <reason>"/);
   assert.equal(fileSha(f), sum);
@@ -364,8 +364,42 @@ test('bump refuses a --release older than the stamp, and needs one', async (t) =
   const none = await pinsAsync(['bump', '--dockerfile', f], upEnv(u));
   assert.equal(none.status, 1);
   assert.match(none.stderr, /usage: box-pins/);
+  assert.match(none.stderr, /a patch, vX\.Y\.Z with Z > 0, is stamped vX\.Y\.0 and bump takes only a minor/);
   assert.equal(fileSha(f), sum);
   assert.equal(u.state.hits.length, 0);
+});
+
+// A patch (vX.Y.Z, Z > 0) is stamped with the minor it builds on; a minor or major with its own tag
+// (image-changes@1 §8). Only a minor gets a release-prep PR, so bump takes only a minor.
+test('verify --release takes a patch\'s minor as its stamp, and a minor\'s own tag', () => {
+  const stamped = (v) => pinsCopy((t) => t.replace(/^ARG DEVTEAM_RELEASE=.*$/m, `ARG DEVTEAM_RELEASE=${v}`));
+  const verify = (tag, v) => pins(['verify', '--release', tag, '--dockerfile', stamped(v)]);
+  const ok = verify('v9.1.3', 'v9.1.0');
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  for (const v of ['v9.1.2', 'v9.0.0']) {
+    const r = verify('v9.1.3', v);
+    assert.equal(r.status, 1, `v9.1.3 stamped ${v}: ${r.stdout}`);
+    assert.match(r.stdout, new RegExp(`DEVTEAM_RELEASE is ${v.replace(/\./g, '\\.')}, not v9\\.1\\.3's minor, v9\\.1\\.0`));
+  }
+  assert.equal(verify('v9.2.0', 'v9.2.0').status, 0);
+  for (const v of ['v9.1.0', 'v9.2.1']) {
+    const r = verify('v9.2.0', v);
+    assert.equal(r.status, 1, `v9.2.0 stamped ${v}: ${r.stdout}`);
+    assert.match(r.stdout, new RegExp(`DEVTEAM_RELEASE is ${v.replace(/\./g, '\\.')}, not v9\\.2\\.0$`, 'm'));
+  }
+});
+
+test('bump refuses a patch tag before it reads or asks anything, and writes nothing', async (t) => {
+  const u = await upstream(t);
+  const f = pinsCopy();
+  const sum = fileSha(f);
+  const r = await pinsAsync(['bump', '--release', 'v9.1.3', '--dockerfile', f], upEnv(u));
+  assert.notEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, /--release v9\.1\.3 is a patch/);
+  assert.match(r.stderr, /v9\.1\.0/);
+  assert.match(r.stderr, /nothing written/);
+  assert.equal(fileSha(f), sum, 'the Dockerfile is byte-identical');
+  assert.deepEqual(u.state.hits, [], 'no upstream asked');
 });
 
 test('bump writes nothing that would not verify, says a failed download in its own words, and bumps a symlink\'s target (task-3 review)', async (t) => {
@@ -373,19 +407,19 @@ test('bump writes nothing that would not verify, says a failed download in its o
   // a comment already naming ttyd's next version becomes a stray once ttyd moves to it
   const f = pinsCopy((x) => x.replace(/^# ttyd, the web terminal$/m, '$& (1.7.8 fixes resize)'));
   const sum = fileSha(f);
-  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  const r = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', f], upEnv(u));
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stderr, /box-pins bump: the result would not verify \(ttyd's version 1\.7\.8 is written outside its ARG .*\); nothing written/);
   assert.equal(fileSha(f), sum);
   // a refused download: our words and the error code, not Node's message
   for (const n of assetNames('uv', LATEST.uv)) u.state.releases['astral-sh/uv'][0].assets.find((a) => a.name === n).browser_download_url = `http://127.0.0.1:${await closedPort()}/x`;
-  const d = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', pinsCopy()], upEnv(u));
+  const d = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', pinsCopy()], upEnv(u));
   assert.equal(d.status, 1);
   assert.match(d.stderr, /box-pins bump: uv: download of uv-x86_64-unknown-linux-gnu\.tar\.gz failed \(ECONNREFUSED\); nothing written/);
   // a download whose body stalls after its headers: timed out
   u.state.releases['astral-sh/uv'] = [u.release('uv', LATEST.uv)];
   u.state.stall = (p) => p.startsWith('/assets/astral-sh/');
-  const h = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', pinsCopy()], { ...upEnv(u), DEVTEAM_PINS_TIMEOUT_MS: '500' });
+  const h = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', pinsCopy()], { ...upEnv(u), DEVTEAM_PINS_TIMEOUT_MS: '500' });
   assert.equal(h.status, 1);
   assert.match(h.stderr, /box-pins bump: uv: download of .* failed \(timed out\); nothing written/);
   u.state.stall = null;
@@ -393,10 +427,10 @@ test('bump writes nothing that would not verify, says a failed download in its o
   const target = pinsCopy();
   const link = path.join(path.dirname(target), 'Dockerfile.link');
   fs.symlinkSync(target, link);
-  const l = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', link], upEnv(u));
+  const l = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', link], upEnv(u));
   assert.equal(l.status, 0, l.stderr);
   assert.ok(fs.lstatSync(link).isSymbolicLink());
-  assert.equal(argOf(fs.readFileSync(target, 'utf8'), 'DEVTEAM_RELEASE'), 'v9.9.9');
+  assert.equal(argOf(fs.readFileSync(target, 'utf8'), 'DEVTEAM_RELEASE'), 'v9.9.0');
 });
 
 test('bump downloads nothing for a tool already current', async (t) => {
@@ -405,7 +439,7 @@ test('bump downloads nothing for a tool already current', async (t) => {
   for (const n of assetNames('ttyd', FIXED.TTYD)) u.state.assets[`tsl0922/ttyd/${n}`] = { status: 500 };
   const f = pinsCopy();
   const before = fs.readFileSync(f, 'utf8');
-  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  const r = await pinsAsync(['bump', '--release', 'v9.9.0', '--dockerfile', f], upEnv(u));
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.ok(!u.state.hits.some((h) => /^\/(dl|assets)\/tsl0922\//.test(h.path)), 'no ttyd download');
   const after = fs.readFileSync(f, 'utf8');
