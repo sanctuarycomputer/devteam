@@ -6880,7 +6880,6 @@ window.addEventListener('keydown', (e) => {
 // the viewer closed (however: X, Back, Escape, a route): its lists close with it
 new MutationObserver(() => { if ($('artifact-view').hidden) avPopsClose(); }).observe($('artifact-view'), { attributes: true, attributeFilter: ['hidden'] });
 /* library-versions end */
-
 /* score-of start */
 // The Overview's Autonomy row (kit-90): each tile's label, the path of its score record in /api/data,
 // and where in that record its % sits. The place is named per tile, never guessed: autonomy_score
