@@ -93,7 +93,8 @@ test('an undelivered turn: the words, the last check, and the record', async (t)
     let out = '';
     p.stdout.on('data', (d) => { out += d; });
     const exited = new Promise((r) => p.on('exit', r));
-    const logged = () => fs.readdirSync(F.logDir).some((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').includes('held by the lock'));
+    // only the log's own files: its writer's .lock is a directory beside them (final-1 F1)
+    const logged = () => fs.readdirSync(F.logDir).filter((f) => f.endsWith('.jsonl')).some((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').includes('held by the lock'));
     await until(logged, 'the turn line, written before the lock is taken');
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(fs.existsSync(file), false, 'nothing written while the lock is held');
