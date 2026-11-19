@@ -3759,6 +3759,9 @@
   };
   const DOC_BYTES = 5242880; // canvas@1 §7 docBytes
   const NODES_MAX = 20000; // canvas@1 §7 nodes
+  const DEPTH_MAX = 100; // canvas@1 §7 depth (a page's children are depth 1)
+  const MAP_MAX = 32; // canvas@1 §7 props and variants, per component
+  const OVERRIDE_ENTRIES = 1000; // canvas@1 §7 overrideEntries, per instance's overrides or variant
   const PAGES_MAX_DOC = 100; // canvas@1 §7 pages
   const NODE_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
   const TOKEN_PATH_RE = /^[A-Za-z0-9_-]{1,40}(?:\.[A-Za-z0-9_-]{1,40}){0,7}$/;
@@ -3910,15 +3913,22 @@
     return undefined;
   }
   const propValueOf = (v) => (typeof v === 'boolean' || textOk(v, 10000) ? v : undefined);
-  // An override map's shape ({ <node id>: { <prop>: value } }) as a fresh object; its values are
-  // checked at paste, against the target's type there (overrideOf).
+  // An override map's shape ({ <node id>: { <prop>: value } }) as a fresh object, its first 1000
+  // entries (canvas@1 §7 overrideEntries; the rest left out and said); its values are checked at
+  // paste, against the target's type there (overrideOf).
   function overridesOf(m, said) {
     const out = {};
     if (!isObj(m)) { said.values = true; return out; }
+    let room = OVERRIDE_ENTRIES;
     for (const tid of Object.keys(m)) {
       if (!NODE_ID_RE.test(tid) || !isObj(m[tid])) { said.values = true; continue; }
+      const props = Object.keys(m[tid]);
+      if (props.length > room) said.values = true;
+      const kept = props.slice(0, room);
+      if (kept.length === 0) continue;
       const o = put(out, tid, {});
-      for (const prop of Object.keys(m[tid])) put(o, prop, m[tid][prop]);
+      for (const prop of kept) put(o, prop, m[tid][prop]);
+      room -= kept.length;
     }
     return out;
   }
@@ -3964,13 +3974,16 @@
       if (!pageIds.has(pid) && !(own(doc.nodes, pid) && CONTAINERS.has(node(pid).type))) return 'tree';
       if (listedBy.get(id) !== pid) return 'tree';
     }
+    // the walk carries each node's depth: deeper than 100 is refused (limits), so no walk up a
+    // clip's parents is longer than that
     const queue = [];
-    for (const pg of doc.pages) for (const c of pg.children) queue.push([c, false]);
+    for (const pg of doc.pages) for (const c of pg.children) queue.push([c, false, 1]);
     for (let i = 0; i < queue.length; i++) {
-      const [id, inComp] = queue[i];
+      const [id, inComp, depth] = queue[i];
       const n = node(id);
+      if (depth > DEPTH_MAX) return 'limits';
       if (n.type === 'component' && inComp) return 'components';
-      if (CONTAINERS.has(n.type)) for (const c of n.children) queue.push([c, inComp || n.type === 'component']);
+      if (CONTAINERS.has(n.type)) for (const c of n.children) queue.push([c, inComp || n.type === 'component', depth + 1]);
     }
     if (queue.length !== ids.length) return 'tree';
     return null;
@@ -4016,14 +4029,15 @@
           if (k === 'overrides') Object.assign(out, { overrides: overridesOf(m, said) });
           else if (k === 'variants') {
             for (const name of Object.keys(m)) {
-              if (VARIANT_RE.test(name)) put(o, name, overridesOf(m[name], said));
+              if (VARIANT_RE.test(name) && Object.keys(o).length < MAP_MAX) put(o, name, overridesOf(m[name], said));
               else said.values = true;
             }
             out.variants = o;
           } else {
             const check = n.type === 'component' ? propDefOf : propValueOf;
             for (const name of Object.keys(m)) {
-              const v = VARIANT_RE.test(name) ? check(m[name]) : undefined;
+              const room = n.type !== 'component' || Object.keys(o).length < MAP_MAX;
+              const v = VARIANT_RE.test(name) && room ? check(m[name]) : undefined;
               if (v === undefined) said.values = true; else put(o, name, v);
             }
             out.props = o;
@@ -4117,17 +4131,20 @@
         stack.push(...[...(clip.nodes.get(id).children ?? [])].reverse());
       }
     }
-    // inside: `id` a descendant of component `comp` (its nearest component), in the clip or on this canvas
-    const insideClip = (id, comp) => {
-      let cur = clip.nodes.get(id)?.parent;
-      for (let steps = 0; steps <= NODES_MAX && cur !== undefined; steps++) {
-        if (cur === comp) return true;
-        const pn = clip.nodes.get(cur);
-        if (!pn || pn.type === 'component') return false;
-        cur = pn.parent;
+    // each clip node's nearest component (null for none), found once by a walk down from the pages
+    const encl = new Map();
+    for (const cp of clip.pages) {
+      const stack = cp.children.map((c) => [c, null]);
+      while (stack.length) {
+        const [id, comp] = stack.pop();
+        encl.set(id, comp);
+        const n = clip.nodes.get(id);
+        const inside = n.type === 'component' ? id : comp;
+        for (const c of n.children ?? []) stack.push([c, inside]);
       }
-      return false;
-    };
+    }
+    // inside: `id` a descendant of component `comp` (its nearest component), in the clip or on this canvas
+    const insideClip = (id, comp) => encl.get(id) === comp;
     const insideHere = (id, comp) => {
       let cur = nodeIn(d, id)?.parent;
       for (let steps = 0; steps <= MAX_ELEMENTS && cur !== undefined; steps++) {

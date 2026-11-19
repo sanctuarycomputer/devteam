@@ -1820,10 +1820,86 @@ test('C1.9 an image this canvas has stays an image', { skip: canDrive ? false : 
   // a fetch asks for the same URL (any cache mode, probed), so the pasted image's own drawing loads it
   // again as an Image request: counted apart, by the recorder's resource type (Chrome reports the
   // page's fetch as XHR or Fetch).
-  const after = rec.requests.map((u, i) => [u, rec.kinds[i]]).slice(r0).filter(([u]) => u === img);
+  // Ruling m-20261119-121523795: strict.
+  const after = rec.requests.map((u, i) => [u, rec.kinds[i]]).slice(r0);
+  assert.deepEqual(after.filter(([u]) => u !== img), [], `no request but for the image: ${JSON.stringify(after)}`);
   assert.equal(after.filter(([, k]) => k === 'Fetch' || k === 'XHR').length, 1, `the image checked once by fetch: ${JSON.stringify(after)}`);
   assert.ok(after.every(([, k]) => k === 'Fetch' || k === 'XHR' || k === 'Image'), `else only the drawing's loads: ${JSON.stringify(after)}`);
   assert.equal(await shownText(p, '#toast'), null, 'nothing said');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('C1.10 hostile values outside free text are left out', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  // computed keys, so `__proto__` is an own key of each object, as JSON.parse makes it
+  const nodes = {
+    im1: { type: 'image', parent: 'q', name: 'Evil 1', src: 'https://evil.example/a.png' },
+    im2: { type: 'image', parent: 'q', name: 'Evil 2', src: 'images/../../429be16d0a91e377.png' },
+    im3: { type: 'image', parent: 'q', name: 'Evil 3', src: 'javascript:alert(1)' },
+    r1: { type: 'rect', parent: 'q', name: 'Wrong ref', fill: { $ref: 'space.m' }, radius: { $ref: 'color.brand' }, ['__proto__']: { polluted: 1 } },
+    i1: {
+      type: 'instance', parent: 'q', name: 'Inst', component: 'button',
+      props: { label: 'Hi', constructor: 'x', ['__proto__']: 'y' },
+      overrides: { 'button-label': { text: 'ok', name: 'X', bogus: 1, 'layout.gap': 4 }, ['__proto__']: { visible: false }, constructor: { visible: false } },
+    },
+    ['__proto__']: { type: 'rect', parent: 'q', name: 'Proto', x: 1, y: 2 },
+  };
+  const order = ['im1', 'im2', 'im3', 'r1', 'i1', '__proto__'];
+  const clip = { canvas: 1, rev: 0, tokens: {}, pages: [{ id: 'q', name: 'Q', children: order }], nodes };
+  const s = JSON.stringify(clip);
+  assert.ok(s.includes('"__proto__":{"type":"rect"'), 'the clip text holds a __proto__ node');
+  await hideToast(p);
+  const r0 = rec.requests.length;
+  const n0 = edits(rec).length;
+  await pasteText(p, s);
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops.map((o) => [o.op, o.node.type, o.node.name]), [['add', 'rect', 'Wrong ref'], ['add', 'instance', 'Inst'], ['add', 'rect', 'Proto']], 'the images with a src outside images/ left out');
+  const [r1, i1, proto] = e.ops.map((o) => o.node);
+  for (const nd of [r1, i1, proto]) assert.match(nd.id, NEW_ID, 'a new id');
+  assert.deepEqual(nodeless(r1), { type: 'rect', parent: 'p-main', name: 'Wrong ref' }, 'refs of the wrong type and the __proto__ key left out');
+  assert.deepEqual([i1.props, i1.overrides], [{ label: 'Hi' }, { 'button-label': { text: 'ok' } }], 'props and overrides the component lacks or the target cannot take left out');
+  assert.deepEqual(nodeless(proto), { type: 'rect', parent: 'p-main', name: 'Proto', x: 1, y: 2 }, 'the __proto__ node pasted as a plain node, under a new id');
+  assert.ok(!JSON.stringify(e.ops).includes('__proto__') && !JSON.stringify(e.ops).includes('constructor') && !JSON.stringify(e.ops).includes('polluted'), 'no __proto__, constructor or polluted in what is sent');
+  await toastSays(p, PASTE_SAY.values);
+  await accepted(rec, n0);
+  assert.equal(await p.ev("Object.keys(Object.prototype).length === 0 && ({}).polluted === undefined && ({}).type === undefined && ({}).visible === undefined"), true, 'Object.prototype untouched');
+  assert.deepEqual(rec.requests.slice(r0), [], 'nothing loaded');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+// The paste's own time on the page: the dispatch of the paste event to its return, then until #toast says `words`.
+const pasteTimed = (p, s) => p.ev(`(() => { const dt = new DataTransfer(); dt.setData('text/plain', ${JSON.stringify(s)}); const t0 = performance.now(); document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); return performance.now() - t0; })()`);
+
+test('C1.11 a deep or wide hostile clip is refused or handled at once', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const N = 20000;
+  // the review's clip: a component holding a chain of 19999 frames, a variant naming every one
+  const deep = { canvas: 1, rev: 0, tokens: {}, pages: [{ id: 'pg', name: 'P', children: ['c'] }], nodes: {} };
+  deep.nodes.c = { type: 'component', parent: 'pg', children: ['n0'], variants: { v: {} } };
+  for (let i = 0; i < N - 1; i++) {
+    deep.nodes[`n${i}`] = { type: 'frame', parent: i ? `n${i - 1}` : 'c', children: i < N - 2 ? [`n${i + 1}`] : [] };
+    deep.nodes.c.variants.v[`n${i}`] = { visible: false };
+  }
+  // the same nodes side by side: depth 2, so it is built, and refused only by its size
+  const wide = { canvas: 1, rev: 0, tokens: {}, pages: [{ id: 'pg', name: 'P', children: ['c'] }], nodes: {} };
+  wide.nodes.c = { type: 'component', parent: 'pg', children: [], variants: { v: {} } };
+  for (let i = 0; i < N - 1; i++) {
+    wide.nodes[`n${i}`] = { type: 'frame', parent: 'c', children: [] };
+    wide.nodes.c.children.push(`n${i}`);
+    wide.nodes.c.variants.v[`n${i}`] = { visible: false };
+  }
+  const { p, rec } = await open(t, { canvases: { minimal: MINIMAL } });
+  await live(p);
+  const n0 = edits(rec).length;
+  for (const [what, clip, words] of [['deep', deep, PASTE_SAY.notClip], ['wide', wide, PASTE_SAY.tooMuch]]) {
+    await hideToast(p);
+    const ms = await pasteTimed(p, JSON.stringify(clip));
+    assert.ok(ms < 2000, `${what}: the paste took ${Math.round(ms)} ms, under 2 s`);
+    await toastSays(p, words);
+  }
+  await sendsNothing(rec, n0, 'the deep and wide pastes');
   noDialogs(rec);
   noExceptions(rec);
 });
