@@ -18308,11 +18308,14 @@ async function imageChanges(since, to, { smoke = false } = {}) {
     }
   }
 }
-const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | changed --since <ref> [--to <ref>] [--smoke] [--json] | installed   (verify, check and bump take --dockerfile <path>)';
+const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | changed --since <ref> [--to <ref>] [--smoke] [--json] | installed   (verify, check and bump take --dockerfile <path>; a patch, vX.Y.Z with Z > 0, is stamped vX.Y.0 and bump takes only a minor)';
 // box-pins: verify, check and bump in the kit's own checkout (a KIT_VIEWS command; bump writes only
 // the Dockerfile's pins), and installed inside the box image, from anywhere.
 async function cmdBoxPins() {
   const mode = positional[0];
+  // the stamp a release needs (image-changes@1 §8): a patch (Z > 0) is stamped with the minor it
+  // builds on, vX.Y.0; a minor or major with its own tag. tag is a vX.Y.Z releaseFlag let through.
+  const stampFor = (tag) => { const [x, y, z] = tag.slice(1).split('.').map(Number); return z > 0 ? `v${x}.${y}.0` : tag; };
   if (mode === 'changed') {
     // image-changes@1: exit 0 patch, 3 minor, 2 can't tell (said on stderr, nothing on stdout)
     const usage = () => die(`usage: ${BOX_PINS_USAGE}`, 2);
@@ -18337,7 +18340,8 @@ async function cmdBoxPins() {
     const want = releaseFlag();
     const { text } = pinsFile();
     const pins = readPins(text);
-    if (want !== undefined && pins.release !== null && pins.release !== want) pins.problems.push(`DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}`);
+    const need = want === undefined ? undefined : stampFor(want);
+    if (need !== undefined && pins.release !== null && pins.release !== need) pins.problems.push(need === want ? `DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}` : `DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}'s minor, ${need} (a patch is stamped with the minor it builds on)`);
     for (const p of pins.problems) out(`box-pins verify: ${p}`);
     if (pins.problems.length) { process.exitCode = 1; return; }
     out(`box-pins verify: ok, ${pins.tools.length} tools, release ${pins.release}`);
@@ -18362,6 +18366,7 @@ async function cmdBoxPins() {
   if (mode === 'bump') {
     const release = releaseFlag();
     if (release === undefined) die(`box-pins bump needs --release vX.Y.Z\nusage: ${BOX_PINS_USAGE}`);
+    if (stampFor(release) !== release) die(`box-pins bump: --release ${release} is a patch; only a minor gets a release-prep PR (a patch keeps its minor's stamp, ${stampFor(release)}); nothing written`);
     const { file, text } = pinsFile();
     const pins = readPins(text);
     if (pins.problems.length) {
