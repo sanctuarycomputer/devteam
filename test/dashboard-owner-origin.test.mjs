@@ -16,10 +16,13 @@ import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 
-// A fixture project with a question, a goal and a thread to act on, and its dashboard.
+// A fixture project with a question, a goal and a thread to act on, and its dashboard. Its teardown
+// (later, lib/chrome.mjs's cleanup) runs last-registered first, each step on its own: the dashboard
+// (and a test's Chrome) stop before the folder goes, and a removal that throws skips no stop.
 async function fixture(t, name, offset) {
+  const later = cleanup(t);
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${name}-`));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + offset), DEVTEAM_PORT_BASE: String(PORTS + offset + 1), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of Object.keys(env)) if (/^DEVTEAM_(ROLE|TICKET|FEATURE|RUN|SUPERVISOR|HOME)$/.test(k) || k === 'TMUX' || k === 'TMUX_PANE') delete env[k];
   const root = bareProject(base, name);
@@ -31,14 +34,14 @@ async function fixture(t, name, offset) {
   const T = (dt(['thread', 'new', '--title', 'A thread', '--', 'first words']).match(/\bt-\d{8}-\d{9}-[a-z0-9-]+/) ?? [])[0];
   assert.ok(T, 'a thread to act on');
   const { dash, port } = await dashboardOnFreePort(root, env);
-  t.after(() => dash.stop());
+  later(() => dash.stop());
   const B = `http://127.0.0.1:${port}`;
   // every log line, from both log folders
   const logDirs = [path.join(root, 'docs/devteam/run/log'), path.join(root, 'docs/devteam/project/log')];
   const logFiles = () => logDirs.flatMap((d) => (fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).map((f) => path.join(d, f)) : []));
   const logHash = () => crypto.createHash('sha256').update(logFiles().sort().map((f) => `${f}\0${fs.readFileSync(f, 'utf8')}`).join('\0')).digest('hex');
   const lines = () => logFiles().flatMap((f) => fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
-  return { root, dt, dash, port, B, Q, Q2, G, T, logHash, lines };
+  return { root, dt, dash, port, B, Q, Q2, G, T, logHash, lines, later };
 }
 
 // The action names, read from the dashboard's own source (dashboardActions' ACTIONS table), so an
@@ -143,7 +146,7 @@ test('kit-324: an owner action without the page\'s own browser signal is refused
 
 test('kit-324: the owner\'s page in a real browser still answers', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const F = await fixture(t, 'owner-origin-browser', 30);
-  const later = cleanup(t);
+  const { later } = F;
   const chrome = await openChrome();
   later(() => chrome.close());
   const p = await chrome.newPage();

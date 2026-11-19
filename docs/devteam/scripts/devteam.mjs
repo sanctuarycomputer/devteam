@@ -20090,7 +20090,8 @@ async function dashRoutesOwner(D, req, res, q) {
   res.writeHead = function (...a) { D.dataEpoch += 1; return head.apply(this, a); };
   const site = req.headers['sec-fetch-site'];
   const origin = req.headers.origin;
-  // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
+  // A browser sends Origin on every fetch POST, and Sec-Fetch-Site to a loopback or https origin
+  // (not to a --host LAN address over http); a secret or a review is accepted only with both
   // present. Every other owner action needs at least one of them saying this page, and neither
   // saying another (kit-324): a client that sends neither (curl, an agent's fetch) is not the
   // owner's browser. A sandboxed frame's request says Origin: null and is refused here too. Only a

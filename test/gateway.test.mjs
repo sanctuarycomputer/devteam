@@ -1270,7 +1270,7 @@ test('the public store: content-addressed blobs, one change at a time, swept to 
 function standIn(port, arts, { project = 'beta', root = '/srv/beta' } = {}) {
   const made = JSON.stringify({ arts, project, root });
   const S = { recorded: [] };
-  S.reset = () => Object.assign(S, JSON.parse(made), { lie: {}, tree: {}, title: {}, trickle: {}, asked: [] });
+  S.reset = () => Object.assign(S, JSON.parse(made), { lie: {}, tree: {}, title: {}, trickle: {}, asked: [], getOrigins: [] });
   S.reset();
   const hex = (t) => crypto.createHash('sha256').update(t).digest('hex');
   S.manifest = (slug) => {
@@ -1282,6 +1282,7 @@ function standIn(port, arts, { project = 'beta', root = '/srv/beta' } = {}) {
     const reply = (code, body, type = 'application/json') => { res.writeHead(code, { 'content-type': type }); res.end(body); };
     let m;
     S.asked.push(req.url);
+    if (req.method === 'GET') S.getOrigins.push(req.headers.origin ?? null);
     if (req.method === 'GET' && (m = /^\/public-manifest\/([a-z0-9-]+)$/.exec(req.url))) return Object.hasOwn(S.arts, m[1]) ? reply(200, JSON.stringify(S.manifest(m[1]))) : reply(404, '{"error":"not an artifact landed on main"}');
     if (req.method === 'GET' && (m = /^\/artifact\/main\/([a-z0-9-]+)\/(.+)$/.exec(req.url)) && Object.hasOwn(S.arts, m[1]) && Object.hasOwn(S.arts[m[1]], m[2])) {
       const text = S.lie[`${m[1]}/${m[2]}`] ?? S.arts[m[1]][m[2]];
@@ -1438,6 +1439,7 @@ test('public artifacts: a publish is refused unless every byte, the tree and the
     assert.equal((await pubGet('/beta/a/x/y.js')).body, 'y()');
     assert.equal((await pubGet('/beta/b/')).body, '<p>b');
     assert.deepEqual(S.recorded.map((r) => [r.op, r.slug, r.tree.length, r.headers.origin, r.headers['sec-fetch-site'], r.headers.cookie]).sort(), [['publish', 'a', 40, `http://127.0.0.1:${P + 10}`, undefined, undefined], ['publish', 'b', 40, `http://127.0.0.1:${P + 10}`, undefined, undefined]], 'recorded through a loopback request, which says the instance\'s own Origin (kit-324), never the box\'s');
+    assert.ok(S.getOrigins.length > 0 && S.getOrigins.every((o) => o === null), `the gateway's GETs (manifest, files) say no Origin: ${JSON.stringify(S.getOrigins)}`);
     assert.equal(blobsOf(gw).length, 3);
     // the same tree again is no change; another tree is an update
     let again = await confirmAndPublish(gw, P + 10, ['b']);
