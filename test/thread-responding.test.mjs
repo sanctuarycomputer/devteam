@@ -4,9 +4,10 @@
 // machine-local (run/thread-working.json), served on /api/threads and drawn on the open card.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { threadsFixture } from './lib/kit.mjs';
+import { dashboardOnFreePort, hasTmux, threadsFixture } from './lib/kit.mjs';
 
 const WORKER = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'kit-9' };
 const RESPONDER = { DEVTEAM_ROLE: 'responder' };
@@ -175,4 +176,106 @@ test('thread working and the pickup: the record, who writes it, and what clears 
     try { process.kill(pid, 0); } catch (e) { alive = e.code === 'EPERM'; }
     assert.ok(alive, `pid ${pid} is alive`);
   });
+});
+
+// A wait with its own bound: the stage must show (or go) within seconds, not lib/kit.mjs's 2 min.
+async function within(ms, f, what) {
+  for (const end = Date.now() + ms; ;) {
+    const v = await f();
+    if (v) return v;
+    if (Date.now() > end) assert.fail(`not within ${ms} ms: ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+test('/api/threads serves the live stages, and a change to one is past the etag', async (t) => {
+  const F = threadsFixture('responding-api');
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  t.after(async () => { await dash.stop(); F.done(); });
+  const file = path.join(F.old, 'docs/devteam/run/thread-working.json');
+  const T = F.owner(['thread', 'new', 'Look at this', '--title', 'Live stage']).split('\n')[0];
+  const U = JSON.parse(F.owner(['thread', 'show', T, '--json'])).turns[0].id;
+  const get = (h = {}) => fetch(`http://127.0.0.1:${port}/api/threads`, { headers: h });
+  // an etag the server keeps with nothing changed (the dashboard's first hello may still move its pane)
+  const settled = () => within(15000, async () => {
+    const r = await get();
+    const tag = r.headers.get('etag');
+    return (await get({ 'if-none-match': tag })).status === 304 && { tag, j: await r.json() };
+  }, 'a 304 for an unchanged answer');
+
+  F.sup(['thread', 'show', T]);
+  let { tag, j } = await settled();
+  const w = j.working?.[T];
+  assert.equal(w?.stage, 'picked-up', JSON.stringify(j.working));
+  assert.deepEqual(Object.keys(w).sort(), ['at', 'beat', 'by', 'stage', 'turn'], 'no pid on the page');
+  assert.equal(w.by, 'supervisor');
+  assert.equal(w.turn, U);
+
+  // P6: the log is unchanged, the stage alone moved, and the etag says so
+  F.sup(['thread', 'working', T]);
+  let r = await get({ 'if-none-match': tag });
+  assert.equal(r.status, 200, 'a new stage is a new body, never a 304');
+  assert.equal((await r.json()).working[T]?.stage, 'responding');
+  tag = r.headers.get('etag');
+
+  F.sup(['thread', 'working', T, '--done']);
+  r = await get({ 'if-none-match': tag });
+  assert.equal(r.status, 200, 'a cleared stage is a new body');
+  assert.equal((await r.json()).working[T], undefined);
+
+  // the null path, by hand: a fresh beat shows, one 11 min old doesn't
+  const ago = (min) => new Date(Date.now() - min * 60000).toISOString();
+  const e = (min) => ({ by: 'supervisor', stage: 'responding', turn: U, at: ago(min), beat: ago(min), pid: null });
+  const m = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  fs.writeFileSync(file, JSON.stringify({ ...m, 't-20260101-000000000-stale': e(11), 't-20260101-000000000-fresh': e(0) }));
+  j = await (await get()).json();
+  assert.equal(j.working['t-20260101-000000000-stale'], undefined, 'a beat 11 min old is not shown');
+  assert.equal(j.working['t-20260101-000000000-fresh']?.stage, 'responding', 'pid null and a fresh beat is shown');
+});
+
+test('a session that died mid-turn: its stage goes from /api/threads', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
+  const F = threadsFixture('responding-dead');
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  // a tmux server of this test's own (a short socket under the fixture), never the machine's
+  const sock = path.join(F.base, 's');
+  const tenv = F.env({});
+  delete tenv.TMUX;
+  delete tenv.TMUX_PANE;
+  const tmux = (...a) => spawnSync('tmux', ['-S', sock, ...a], { env: tenv, encoding: 'utf8', timeout: 10000 });
+  t.after(async () => { tmux('kill-server'); await dash.stop(); F.done(); });
+  const file = path.join(F.old, 'docs/devteam/run/thread-working.json');
+  const T = F.owner(['thread', 'new', 'Look at this', '--title', 'Dead session']).split('\n')[0];
+  // The stand-in agent: the pane's bash forks it, and it runs the command through a shell hop
+  // (`; true` keeps sh from exec'ing), so the walk must pass sh and take the pane shell's child.
+  const dir = fs.mkdtempSync(path.join(F.base, 'agent-'));
+  const agent = path.join(dir, 'agent.mjs');
+  const cfg = path.join(dir, 'cfg.json');
+  const pidFile = path.join(dir, 'pid');
+  const doneFile = path.join(dir, 'done');
+  fs.writeFileSync(cfg, JSON.stringify({ cwd: F.old, pidFile, doneFile, out: path.join(dir, 'out.txt'),
+    env: { ...F.env(F.SUP), NODE: process.execPath, DT: path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), T } }));
+  fs.writeFileSync(agent, [
+    "import fs from 'node:fs';",
+    "import { spawnSync } from 'node:child_process';",
+    "const c = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));",
+    'fs.writeFileSync(c.pidFile, String(process.pid));',
+    "const r = spawnSync('sh', ['-c', '\"$NODE\" \"$DT\" thread working \"$T\"; true'], { cwd: c.cwd, env: c.env, encoding: 'utf8', timeout: 60000 });",
+    'fs.writeFileSync(c.out, `${r.status}\\n${r.stdout}\\n${r.stderr}`);',
+    "fs.writeFileSync(c.doneFile, 'done');",
+    'process.stdin.resume();',
+    '',
+  ].join('\n'));
+  // separate words: tmux execs bash itself, which stays the pane's root as a real pane shell does
+  assert.equal(tmux('new-session', '-d', '-c', F.old, '--', 'bash', '--norc', '--noprofile').status, 0, 'the throwaway tmux');
+  tmux('send-keys', '-l', `${process.execPath} ${agent} ${cfg}`);
+  tmux('send-keys', 'Enter');
+  await within(10000, () => fs.existsSync(pidFile) && fs.existsSync(doneFile), 'the stand-in ran thread working');
+  const standIn = Number(fs.readFileSync(pidFile, 'utf8'));
+  const said = fs.readFileSync(path.join(dir, 'out.txt'), 'utf8');
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'))[T];
+  assert.equal(rec?.pid, standIn, `the stand-in agent's pid, not the sh's or the pane's bash (${said})`);
+  const working = async () => (await (await fetch(`http://127.0.0.1:${port}/api/threads`)).json()).working ?? {};
+  assert.equal((await working())[T]?.stage, 'responding');
+  process.kill(standIn);
+  await within(4000, async () => !(T in await working()), 'the dead session\'s stage gone');
 });

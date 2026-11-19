@@ -19850,16 +19850,19 @@ async function cmdDashboard() {
       // (two small run files, read here: no child, no tmux)
       const undelivered = Object.keys(undeliveredTurns(Date.now(), { entries: true }));
       const checked = supervisorCheckedAt();
+      // which session holds each owner's turn and how far it got (kit-314): one small run file and a
+      // kill(0) per entry, so a session that died mid-turn drops out here on the next read
+      const working = threadWorking(Date.now());
       // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
       // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
       // this process's work is saved.
       // the token for an answer goes only to this page's own read, said so by the browser
       if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
-      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}`).slice(0, 20)}"`;
+      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}`).slice(0, 20)}"`;
       const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
       if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
       res.writeHead(200, { 'content-type': 'application/json', ...head });
-      return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"threads":${r.body}}`);
+      return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
     }
     // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
     if (req.method === 'GET' && u.pathname === '/api/fleet') {
