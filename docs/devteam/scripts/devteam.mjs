@@ -15468,10 +15468,12 @@ const RESTART_MAX = 3;
 const RESTART_CHILD_MS = 100000;
 const RESTART_TICK_MS = 110000;
 const RESTART_MIN_MS = 30000;
+// A page's first read is answered at once with the last data. It goes unmarked only while that data
+// is younger than this (two of the page's polls) and nothing was logged since its run started: older,
+// or with a change since, it comes marked stale with its time, until the run it started lands.
+const DATA_EARLY_FRESH_MS = 20000;
 // How long a dashboard read waits on a dashboard-data run before it has the last good data instead
 // (0 is no wait at all; anything that isn't a number is the default).
-// A first read's last data younger than this is served as current: the page's next poll replaces it.
-const DATA_EARLY_FRESH_MS = 10 * 60000;
 const DATA_WAIT_MS = ((n) => (process.env.DEVTEAM_DATA_WAIT_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_WAIT_MS));
 // makeSession --if-gone found the window there after all (it never types into one): not a failure.
 const IF_GONE_LEFT = 3;
@@ -19378,11 +19380,12 @@ async function cmdDashboard() {
   let lastStart = -Infinity;
   let lastData = null;
   let lastDataAt = 0;
+  let lastDataEpoch = -1;
   const startBuild = () => {
     lastStart = Date.now();
     const b = { epoch: dataEpoch, finished: null, r: null };
     b.done = new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-      if (!err && stdout) { lastData = stdout; lastDataAt = Date.now(); }
+      if (!err && stdout) { lastData = stdout; lastDataAt = Date.now(); lastDataEpoch = b.epoch; }
       b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
@@ -19579,16 +19582,16 @@ async function cmdDashboard() {
       logWatch.look();
       // A page's first read (?first=1: a tab just opened, or the hub's frame made) is answered at once
       // with the last data there is, and a run starts for its next poll (ten seconds on): opening a
-      // tab never waits on dashboard-data. Data older than DATA_EARLY_FRESH_MS comes marked stale, so
-      // the page says what time it shows until the fresh read lands.
+      // tab never waits on dashboard-data. Data older than DATA_EARLY_FRESH_MS, or from before a change
+      // to the log, comes marked stale, so the page says what time it shows until the fresh read lands.
       const first = /[?&]first=1(?:&|$)/.test(req.url);
       // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
       // the run goes on and the next read has it, but no page waits minutes on a stuck child.
       let waited;
-      const slow = new Promise((resolve) => { waited = setTimeout(() => resolve({ ok: false, stderr: '' }), first ? 0 : DATA_WAIT_MS); });
+      const slow = new Promise((resolve) => { waited = setTimeout(() => resolve({ ok: false, stderr: '', slow: true }), first ? 0 : DATA_WAIT_MS); });
       const r = await (lastData ? Promise.race([dashboardData(), slow]) : dashboardData());
       clearTimeout(waited);
-      const early = first && !r.ok && lastData && Date.now() - lastDataAt < DATA_EARLY_FRESH_MS;
+      const early = first && r.slow && lastData && lastDataEpoch === dataEpoch && Date.now() - lastDataAt < DATA_EARLY_FRESH_MS;
       if (!r.ok && !lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
       // The page in use says which version of itself it is: an open tab keeps the code it loaded,
       // so after a kit update it compares this with the first one it saw and offers a reload.
