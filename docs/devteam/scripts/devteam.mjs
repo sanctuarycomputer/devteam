@@ -13300,10 +13300,12 @@ function cmdGoal() {
     if (by === 'supervisor' && !reason) die('the supervisor says why: --reason "…"');
     // a drain names what it waits on (holdCause): the supervisor's is checked, the owner's written as given
     const causes = flags.for !== undefined ? [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))] : [];
-    const until = flagStr('until') ?? null;
-    if (until !== null && !causes.length && by === 'supervisor') die('--until goes with --for: name what the hold waits on');
-    if ((causes.length || until !== null || flags.for !== undefined) && isUpkeep(g)) die("Upkeep's hold takes no cause (--for, --until)");
-    if ((causes.length || until !== null || flags.for !== undefined) && mode !== 'drain') die('--for goes with a drain');
+    // trimmed, as ticket hold reads it; a bare or blank --until is still a date given, for the shape rules
+    const until = flagStr('until')?.trim() || null;
+    const dated = flags.until !== undefined;
+    if (dated && !causes.length && by === 'supervisor') die('--until goes with --for: name what the hold waits on');
+    if ((causes.length || dated || flags.for !== undefined) && isUpkeep(g)) die("Upkeep's hold takes no cause (--for, --until)");
+    if ((causes.length || dated || flags.for !== undefined) && mode !== 'drain') die('--for goes with a drain');
     if (by === 'supervisor' && mode === 'drain' && !isUpkeep(g)) {
       const refusal = holdCause({ kind: 'goal', id: g.id, causes, until, whole: null });
       if (refusal) die(refusal);
@@ -22249,7 +22251,14 @@ function fleetUndo(mode) {
   const restored = [];
   for (const g of held.filter((x) => x.hold.fleet === op)) {
     const p = g.hold.prior ?? { mode: 'run' };
-    writeHold(g, { mode: p.mode, ...(p.reason ? { reason: p.reason } : {}), ...(p.fleet ? { fleet: p.fleet } : {}), undoes: op, host }, by);
+    // a supervisor's own drain comes back with its cause: the line that set it is the latest hold
+    // line before this op's (a park then a park --move writes two)
+    let extra = {};
+    if (p.mode === 'drain' && !p.fleet) {
+      const u = [...(g.updates ?? [])].reverse().find((x) => x.hold && x.hold.fleet !== op);
+      if (u?.hold.mode === 'drain' && !u.hold.fleet && u.hold_for) extra = { hold_for: u.hold_for, hold_until: u.hold_until ?? null };
+    }
+    writeHold(g, { mode: p.mode, ...(p.reason ? { reason: p.reason } : {}), ...(p.fleet ? { fleet: p.fleet } : {}), undoes: op, host }, by, extra);
     restored.push(`${isUpkeep(g) ? 'Upkeep' : g.title} → ${p.mode}`);
   }
   if (legacy) appendLog({ type: 'act', class: 'undrain', what: `undrained the fleet on ${host} (drained by ${legacy.id}${drainHost(legacy) ? ` on ${drainHost(legacy)}` : ''})`, refs: [legacy.id], reversible: true }, 'supervisor');

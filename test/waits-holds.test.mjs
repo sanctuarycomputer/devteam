@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { bareProject } from './lib/kit.mjs';
+import { bareProject, fleetFixture } from './lib/kit.mjs';
 import { runNode } from './lib/cli.mjs';
 
 const bases = [];
@@ -513,5 +513,80 @@ test('waits A5: a supervisor\'s goal drain names its cause (goal hold <g> drain 
       }
       assert.equal(JSON.parse(ok(dir, ['goal', 'show', G])).hold.mode, 'drain');
     }
+  });
+
+  await t.test('--until is trimmed, and a bare or blank --until is a date given: refused on Upkeep, on run and park, and with no --for', () => {
+    const { dir, G } = fixture('a5-until');
+    const OWNER = {}; // envFor strips DEVTEAM_* and TMUX: an owner's terminal
+    const goalLines = () => allLines(dir).filter((l) => l.type === 'goal').length;
+    const goalRefused = (args, words, extra = {}) => {
+      const before = goalLines();
+      const actsBefore = acts(dir).length;
+      const r = cli(dir, args, extra);
+      assert.notEqual(r.status, 0, `${args.join(' ')} is refused: ${r.out}`);
+      assert.ok(r.err.includes(words), `${args.join(' ')}: stderr names "${words}": ${r.err}`);
+      assert.equal(goalLines(), before, `${args.join(' ')}: nothing written`);
+      assert.equal(acts(dir).length, actsBefore, `${args.join(' ')}: no act written`);
+    };
+    for (const u of [[], ['']]) {
+      const until = ['--until', ...u];
+      goalRefused(['goal', 'hold', 'upkeep', 'drain', '--owner', ...until], 'Upkeep\'s hold takes no cause (--for, --until)', OWNER);
+      goalRefused(['goal', 'hold', G, 'run', '--owner', ...until], '--for goes with a drain', OWNER);
+      goalRefused(['goal', 'hold', G, 'park', '--owner', ...until], '--for goes with a drain', OWNER);
+      goalRefused(['goal', 'hold', 'upkeep', 'drain', '--reason', 'r', ...until], '--until goes with --for');
+      goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', ...until], '--until goes with --for');
+    }
+    goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', '--until', ' ', '--for', 'external:x'], 'the kit can\'t follow external:x: give it --until <date>');
+    const until = atDay(() => { ok(dir, ['goal', 'hold', G, 'drain', '--reason', 'r', '--for', 'external:x', '--until', ` ${day(5)} `]); return day(5); });
+    assert.equal(lastFor(dir, 'goal', G).hold_until, until, 'the date is trimmed');
+  });
+
+  await t.test('fleet drain and undrain leave a supervisor\'s drain and its cause alone; fleet unpark puts it back with its cause, past a park --move too', () => {
+    const F = fleetFixture('waits-holds-fleet');
+    try {
+      // a HOME of its own, away from the hub, and nothing of the caller's DEVTEAM_* or TMUX
+      const ENV = { ...Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith('DEVTEAM_') || k === 'TMUX').map((k) => [k, undefined])), HOME: F.home, DEVTEAM_HUB_PORT: '1' };
+      fs.mkdirSync(F.home, { recursive: true });
+      const run = (args) => { const r = F.run(F.old, args, ENV); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
+      const dir = F.old;
+      const G = readyGoal(dir);
+      const G2 = readyGoal(dir);
+      logLine(dir, 'supervisor', featureLine('fg', [G]));
+      logLine(dir, 'supervisor', featureLine('fo', [G2]));
+      logLine(dir, 'supervisor', ticketLine(T, 'fg'));
+      logLine(dir, 'supervisor', ticketLine('kit-09-elsewhere', 'fo'));
+      const until = atDay(() => { run(['goal', 'hold', G, 'drain', '--reason', 'waits on elsewhere', '--for', 'kit-09-elsewhere', '--until', day(5)]); return day(5); });
+      const drain = lastFor(dir, 'goal', G);
+      assert.deepEqual(drain.hold_for, ['kit-09-elsewhere']);
+      const shown = () => JSON.parse(run(['goal', 'show', G]));
+      const hasCause = (g, what) => {
+        assert.equal(g.hold.mode, 'drain', `${what}: draining`);
+        assert.equal(g.hold.fleet, undefined, `${what}: its own drain, not a fleet op's`);
+        assert.equal(g.hold.reason, 'waits on elsewhere', `${what}: its reason`);
+        assert.deepEqual(g.hold_for, ['kit-09-elsewhere'], `${what}: hold_for`);
+        assert.equal(g.hold_until, until, `${what}: hold_until`);
+      };
+      // fleet drain skips a goal already draining, so neither op writes a line for it
+      let before = linesFor(dir, 'goal', G);
+      run(['fleet', 'drain', '--reason', 'quiet week']);
+      run(['fleet', 'undrain']);
+      assert.equal(linesFor(dir, 'goal', G), before, 'fleet drain and undrain write no line for a goal already draining');
+      hasCause(shown(), 'after fleet drain + undrain');
+      // fleet park records prior drain; unpark writes the drain back with the drain line's cause
+      for (const ops of [[['park', '--reason', 'a pause']], [['park', '--reason', 'a pause'], ['park', '--move', '--reason', 'moving']]]) {
+        const what = ops.map((o) => `fleet ${o[0]}${o.includes('--move') ? ' --move' : ''}`).join(' + ');
+        before = linesFor(dir, 'goal', G);
+        for (const o of ops) run(['fleet', ...o]);
+        assert.equal(linesFor(dir, 'goal', G), before + ops.length, `${what}: one line each`);
+        assert.equal(shown().hold.mode, 'park', `${what}: parked`);
+        run(['fleet', 'unpark']);
+        assert.equal(linesFor(dir, 'goal', G), before + ops.length + 1, `${what} + unpark: one line`);
+        const line = lastFor(dir, 'goal', G);
+        assert.equal(line.hold.mode, 'drain', `${what}: the unpark line restores the drain`);
+        assert.deepEqual(line.hold_for, drain.hold_for, `${what}: the unpark line's hold_for is the drain line's`);
+        assert.equal(line.hold_until, drain.hold_until, `${what}: the unpark line's hold_until is the drain line's`);
+        hasCause(shown(), `after ${what} + unpark`);
+      }
+    } finally { F.done(); }
   });
 });
