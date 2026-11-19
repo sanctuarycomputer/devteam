@@ -1571,10 +1571,12 @@ function integrity(o, file) {
       if (o.type === 'message' && !['handoff', 'info'].includes(o.kind)) return 'the responder sends handoff and info messages only';
       if (o.type === 'message' && o.re !== undefined && o.re !== null) return 'the responder replies to no message (re)';
       if (o.type === 'observation' && o.source !== 'responder') return "the responder's observations have source responder";
-      if (o.type === 'observation' && [...SET_ASIDE_KINDS, 'outcome', 'escaped-defect'].includes(o.kind)) return `the responder doesn't write ${o.kind} observations`;
+      if (o.type === 'observation' && [...SET_ASIDE_KINDS, 'outcome', 'escaped-defect', 'discovery'].includes(o.kind)) return `the responder doesn't write ${o.kind} observations`;
+      // a detector line is the kit's own (sensor, findings), which readers act on by detector alone
+      if (o.type === 'observation' && o.detector !== undefined && o.detector !== null) return "the responder's observations name no detector";
     }
     // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
-    if (o.type === 'message' && o.kind === 'handoff' && o.thread === undefined) return 'a handoff names its thread';
+    if (o.type === 'message' && o.kind === 'handoff' && typeof o.thread !== 'string') return 'a handoff names its thread';
     if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
     if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
     if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";

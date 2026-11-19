@@ -60,13 +60,9 @@ test('responder-contract A1: the fake, its refusals by name, and readers droppin
         // the worker's review-request to the supervisor, sent first
         const worker = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'kit-9-probe' };
         const sent = F.run(F.old, ['send', 'supervisor', 'review please', '--kind', 'review-request'], worker);
-        let req;
-        if (sent.status === 0 && /^m-\S+-kit-9-probe$/m.test(sent.out)) req = sent.out.match(/^m-\S+-kit-9-probe$/m)[0];
-        else {
-          const d = new Date();
-          req = `m-${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}-kit-9-probe`;
-          F.hand('kit-9-probe', { id: req, type: 'message', to: 'supervisor', kind: 'review-request', text: 'review please', re: null, sha: null, ticket: 'kit-9-probe' }, 0, 'kit-9-probe.jsonl');
-        }
+        assert.equal(sent.status, 0, `the worker's send: ${sent.err || sent.out}`);
+        assert.match(sent.out, /^m-\S+-kit-9-probe$/m, `the worker's send prints its id: ${sent.out}`);
+        const req = sent.out.match(/^m-\S+-kit-9-probe$/m)[0];
         // fresh ids, one per line: <prefix>-<yyyymmdd>-<hhmmssmmm>-<writer>, a millisecond apart
         const base = Date.now() - 30000;
         let n = 0;
@@ -104,6 +100,14 @@ test('responder-contract A1: the fake, its refusals by name, and readers droppin
         assert.ok(turns.includes(twin['responder turn with question']), "thread show lists the responder's repaired turn");
         assert.ok(turns.includes(twin['routed_to on a supervisor turn']), "thread show lists the supervisor's repaired turn");
         for (const nm of named) assert.ok(found(twin[nm]), `record finds the repaired "${nm}" line`);
+
+        // task-2 review: readers drop a handoff whose thread is null (no type check in readers),
+        // and the responder's observations of kind discovery or with a detector (acted on by readers)
+        const nullThread = place({ ...cases['responder message blocked'].repaired, kind: 'handoff', thread: null }, cases['responder message blocked']);
+        const discovery = place({ ...cases['responder observation finding-ack'].repaired, kind: 'discovery', subject: 'sensors' }, cases['responder observation finding-ack']);
+        const detector = place({ ...cases['responder observation finding-ack'].repaired, kind: 'exception', detector: 'sensor' }, cases['responder observation finding-ack']);
+        for (const [what, id] of [['a handoff with thread null', nullThread], ['a responder discovery observation', discovery], ['a responder observation with a detector', detector]]) assert.ok(!found(id), `record finds no ${what}`);
+        assert.ok(!open().includes(nullThread), 'the null-thread handoff is not open');
       } finally { F.restoreLog(snap); }
     });
   } finally { F.done(); }
