@@ -26250,7 +26250,8 @@ async function browserLive() {
 // lets it go.
 async function browserStartLock(file, fn) {
   const lock = `${file}.lock`, owner = path.join(lock, 'owner'), start = Date.now();
-  const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const mint = () => `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const token = mint();
   const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS')) || 60000;
   const prep = `${lock}.new.${token}`;
   const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
@@ -26260,15 +26261,17 @@ async function browserStartLock(file, fn) {
   const dead = (t) => { const p = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(t ?? '')?.[1]; return !!p && Number(p) !== process.pid && !browserAlive(Number(p)); };
   // The lock's token and mtime from one open of its owner, so both are one file's (a stat and then a
   // read can pair an old lock's mtime with a new lock's token). No readable owner: a null token and the
-  // folder's mtime. No lock: null.
+  // folder's mtime, and why the owner couldn't be read (`code`: ENOENT for a folder with none). No
+  // lock: null.
   const look = () => {
     let fd;
-    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch {
+    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch (e) {
       const st = fs.statSync(lock, { throwIfNoEntry: false });
-      return st ? { token: null, mtime: st.mtimeMs } : null;
+      return st ? { token: null, mtime: st.mtimeMs, code: e?.code } : null;
     } finally { if (fd !== undefined) fs.closeSync(fd); }
   };
   const stale = (l) => Math.abs(Date.now() - l.mtime) > 120000 || dead(l.token);
+  const keyOf = (seen) => crypto.createHash('sha256').update(seen ?? '').digest('hex').slice(0, 16);
   // Remove the lock holding `seen` (null: a folder with no owner) under a claim on it: the symlink
   // <lock>.take.<k>.<n> (k from seen's hash) pointing at the claimant's token. A dead claimant's claim
   // is passed over to n + 1, not removed while seen may still be on the path; any other means another
@@ -26279,7 +26282,7 @@ async function browserStartLock(file, fn) {
   // path is free either way.
   const drop = (seen) => {
     if (seen !== token && browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL')) return false;
-    const key = `${lock}.take.${crypto.createHash('sha256').update(seen ?? '').digest('hex').slice(0, 16)}.`;
+    const key = `${lock}.take.${keyOf(seen)}.`;
     let n = 0, claim = null, took = false;
     for (let tries = 0; tries < 64 && !claim; tries++) {
       try { fs.symlinkSync(token, key + n); claim = key + n; } catch (e) {
@@ -26294,14 +26297,15 @@ async function browserStartLock(file, fn) {
     try {
       if (seen === null) {
         // an empty folder goes at once; ENOENT is a free path, not a take. A non-empty folder is owned
-        // first: an exclusive write of our token as its owner works only on a folder with none (a live
-        // lock has one, a free path has no folder), and then it holds a live token, ours, which no one
-        // else removes and no starter can rename over, so the rename below moves exactly it. Reading
-        // "no owner" instead can't tell an ownerless folder from a path a release just freed (kit-321
-        // design-change-1).
+        // first: an exclusive write of a fresh token of ours as its owner works only on a folder with
+        // none (a live lock has one, a free path has no folder), and then it holds a live token, ours,
+        // which no one else removes and no starter can rename over, so the rename below moves exactly
+        // it. Reading "no owner" instead can't tell an ownerless folder from a path a release just freed
+        // (kit-321 design-change-1). Fresh, not our lock's token: so a token is on the path once, and
+        // once off it is gone for good, which drop's cleanup and the sweep rest on (kit-323 S1-1).
         try { fs.rmdirSync(lock); return (took = true); } catch (e) {
           if (e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST') return false;
-          try { fs.writeFileSync(owner, token, { flag: 'wx' }); } catch { return false; }
+          try { fs.writeFileSync(owner, mint(), { flag: 'wx' }); } catch { return false; }
         }
       } else {
         const l = look();
@@ -26317,6 +26321,39 @@ async function browserStartLock(file, fn) {
       try { fs.unlinkSync(claim); } catch {}
     }
   };
+  // The leftovers of starters that died (kit-323), each removed only when its token's pid is dead (a
+  // live pid, a reused one, ours, or a name that holds no token keeps it): a prepared folder
+  // <lock>.new.<token>, an aside <lock>.<token>.<8 hex>, and a claim <lock>.take.<k>.<n> whose link is
+  // the claimant's token. Neither folder is ever renamed onto the path but by its own live starter.
+  // The claims are listed before the lock is looked at, and those on the key of the token it then
+  // holds (an ownerless folder's: null's) stay: a dead claim there may stand between that token's
+  // live claimants, and drop removes it once the token is gone. A claim on any other token is
+  // removable, since its claimant read that token on the path before the listing, and a token that has
+  // left the path never comes back: each is minted fresh and put on the path once (null's claims need
+  // no order: the exclusive owner write keeps two takers of an ownerless folder apart). A claim is
+  // judged and then unlinked by name, so one made anew at that name in between can go too: harmless
+  // for the same reason, and drop's cleanup has the same gap. What can't be read or removed is left.
+  // Like the dead-owner rule, it takes every starter to share one pid namespace.
+  const sweep = () => {
+    const dir = path.dirname(lock), base = `${path.basename(lock)}.`;
+    let names;
+    try { names = fs.readdirSync(dir); } catch { return; }
+    const l = look(), held = l ? keyOf(l.token) : null;
+    // an owner that is there but unreadable (EMFILE, EIO, EACCES…) may hold a token: no claim goes
+    const claims = !l || l.token !== null || l.code === 'ENOENT';
+    for (const name of names) {
+      if (!name.startsWith(base)) continue;
+      const rest = name.slice(base.length), f = path.join(dir, name);
+      const folder = /^new\.(\d+-[0-9a-f]{16})$/.exec(rest)?.[1] ?? /^(\d+-[0-9a-f]{16})\.[0-9a-f]{8}$/.exec(rest)?.[1];
+      if (folder !== undefined) {
+        try { if (dead(folder) && fs.lstatSync(f).isDirectory()) fs.rmSync(f, { recursive: true, force: true }); } catch {}
+        continue;
+      }
+      const k = /^take\.([0-9a-f]{16})\.\d+$/.exec(rest)?.[1];
+      if (k !== undefined && claims && k !== held && dead(link(f))) try { fs.unlinkSync(f); } catch {}
+    }
+  };
+  sweep();
   // Each attempt rewrites the prepared owner (its mtime is the lock's age) and renames the folder onto
   // the path: EEXIST or ENOTEMPTY while a lock is held, and an empty leftover folder is replaced at
   // once. The prepared folder goes before a die() or a throw.
@@ -26327,7 +26364,7 @@ async function browserStartLock(file, fn) {
       try { fs.renameSync(prep, lock); break; } catch (e) { if (e.code !== 'EEXIST' && e.code !== 'ENOTEMPTY') throw e; }
       const l = look();
       if (!l || (stale(l) && drop(l.token))) continue;
-      if (Date.now() - start > wait) { fs.rmSync(prep, { recursive: true, force: true }); die(`browser: timed out waiting for ${lock}`); }
+      if (Date.now() - start > wait) { fs.rmSync(prep, { recursive: true, force: true }); die(`browser: timed out waiting for ${lock}; if no browser start is running, remove that folder and start again`); }
       await browserSleep(100);
     }
   } catch (e) { try { fs.rmSync(prep, { recursive: true, force: true }); } catch {} throw e; }
