@@ -890,17 +890,29 @@
 
   // The Properties panel: kit-661's read-only rows (the selected node's name and type, and for an
   // instance its component's name and variant), then, on a canvas open for editing, the fields that
-  // change it (kit-662); with nothing selected, a note. While a field in the panel has focus it isn't
-  // rebuilt (someone else's edit never takes a field from under a person typing): it is rebuilt once
-  // focus leaves the panel's fields.
+  // change it (kit-662); with nothing selected, a note. The panel isn't rebuilt while focus is anywhere
+  // in it or a press that started in it is under way: someone else's edit never takes a field from under
+  // a person typing, and a click that follows a field's edit (whose change fires on that very press)
+  // lands on the button it was aimed at. It is rebuilt once focus leaves the panel, and after a press or
+  // a click in it ends with no field focused (the focused control, when the new panel has it again,
+  // keeps focus).
   let propsStale = false;
+  let pressing = false;
+  const inProps = (x) => x instanceof Node && $('props').contains(x);
   const fieldFocused = () => {
     const a = document.activeElement;
-    return a instanceof Element && $('props').contains(a) && a.matches('input, select, textarea');
+    return inProps(a) && a.matches('input, select, textarea');
   };
+  const holdProps = () => pressing || inProps(document.activeElement);
   function renderProps() {
-    if (fieldFocused()) { propsStale = true; return; }
+    if (holdProps()) { propsStale = true; return; }
+    buildProps();
+  }
+  // The same control in a rebuilt panel: by its data-prop or data-action, and its data-value or data-variant.
+  const controlKey = (e) => (e instanceof HTMLElement ? ['prop', 'action', 'value', 'variant'].map((k) => e.dataset[k] ?? '').join('\u0000') : null);
+  function buildProps() {
     propsStale = false;
+    const was = inProps(document.activeElement) ? controlKey(document.activeElement) : null;
     const box = $('props');
     const n = state.sel === null ? null : nodeOf(state.sel);
     if (!n) {
@@ -919,10 +931,25 @@
     }
     if (state.session !== null) out.push(editFields(state.sel, n));
     box.replaceChildren(...out);
+    if (was !== null && was !== '\u0000\u0000\u0000') {
+      const again = [...box.querySelectorAll('input, select, textarea, button')].find((e) => controlKey(e) === was);
+      if (again && !again.disabled) again.focus({ preventScroll: true });
+    }
   }
+  // After a press or a click in the panel ends: rebuilt when due, unless a field has focus.
+  const settleProps = () => { if (propsStale && !pressing && !fieldFocused()) buildProps(); };
+  $('props').addEventListener('pointerdown', () => { pressing = true; }, true);
+  const pressEnd = () => {
+    if (!pressing) return;
+    // the click this press makes comes before this timer, so it reaches the control pressed
+    setTimeout(() => { pressing = false; settleProps(); }, 0);
+  };
+  window.addEventListener('pointerup', pressEnd, true);
+  window.addEventListener('pointercancel', pressEnd, true);
+  $('props').addEventListener('click', () => { setTimeout(settleProps, 0); });
   $('props').addEventListener('focusout', () => {
-    // after focus has landed: a move to another field of the panel keeps it as it is
-    setTimeout(() => { if (propsStale && !fieldFocused()) renderProps(); }, 0);
+    // after focus has landed: a move within the panel keeps it as it is
+    setTimeout(() => { if (propsStale && !holdProps()) buildProps(); }, 0);
   });
 
   // Select a node of the shown page (its row and its drawn node marked), or nothing (null).

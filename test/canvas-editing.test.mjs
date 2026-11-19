@@ -502,3 +502,32 @@ test('the own edit wins until acked', { skip: canDrive ? false : 'needs Chrome a
   assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
   noExceptions(rec);
 });
+
+// ---- a click on the panel right after a field edit (review T1-1) ----
+
+test('a click on the panel after a field edit is kept', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  // typed, then Delete layer clicked (the field's change fires on that press), and typed, Enter, then
+  // Delete layer clicked: each sends one set, then one del
+  for (const [id, name, withEnter] of [['rule', 'Rule 2', false], ['dot', 'Dot 2', true]]) {
+    await selectRow(p, id);
+    const n0 = edits(rec).length;
+    assert.equal(await focusField(p, 'name'), true, `${id}: the Name field focused`);
+    await p.type(name);
+    if (withEnter) await enter(p);
+    await p.click('#props [data-action="delete"]');
+    const set = await nextEdit(rec, n0);
+    const del = await nextEdit(rec, n0 + 1);
+    const how = withEnter ? 'with Enter' : 'without Enter';
+    assert.deepEqual(set.ops, [{ op: 'set', id, prop: 'name', value: name }], `${id} (${how}): one set of name`);
+    assert.deepEqual(del.ops, [{ op: 'del', id }], `${id} (${how}): then one del`);
+    await ackOf(rec, del);
+    assert.equal(await count(p, `#surface [data-id="${id}"]`), 0, `${id} no longer drawn`);
+    assert.equal(await count(p, '#props [data-field]'), 0, `${id}: the panel shows no selection`);
+  }
+  await waitSaved(p);
+  for (const id of ['rule', 'dot']) assert.equal(fake.doc('every').nodes[id], undefined, `${id} gone from the fake's document`);
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
