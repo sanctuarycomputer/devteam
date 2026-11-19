@@ -4750,7 +4750,12 @@ function cmdStatus() {
 // a date that is a real day from today to 30 days ahead (UTC). kind is ticket or goal, id the held
 // thing's, causes trimmed and de-duplicated, until a date or null, whole the --whole words or null.
 // Never applied to the owner's holds. Holds already in the log are never read through it.
-function holdCause({ causes, until }) {
+// A hold may not wait on itself (rule 6): for a ticket, on the ticket, one of its goals or a ticket
+// depending on it (transitively); for a goal, on the goal or one of its tickets; nor on a cause whose
+// own holds in force (a held ticket's held_for, a draining goal's hold_for) reach one of those.
+// A ticket held for a question names why the whole ticket waits (rule 7): whole, else split first.
+// ticket is the held ticket (for ticket add, its body: its feature gives its goals).
+function holdCause({ kind, id, causes, until, whole, ticket }) {
   const FORMS = 'a q-… question, a ticket id, goal:<g-id>, chore:<slug>, pr:<link>#<n>, run:<link>:<run id> or external:<words>';
   if (!causes.length) return until ? '--until goes with --for: name what the hold waits on' : `a hold names what it waits on: --for <cause>… (${FORMS})`;
   const today = new Date().toISOString().slice(0, 10);
@@ -4772,6 +4777,58 @@ function holdCause({ causes, until }) {
     if (!real) return `--until ${until} is not a date (YYYY-MM-DD)`;
     if (until < today) return `--until ${until} is in the past (today is ${today}, UTC)`;
     if (until > latest) return `--until ${until} is more than 30 days ahead (at most ${latest})`;
+  }
+  // rule 6: the subjects a hold of this thing may not wait on, each with why it is the thing itself
+  const self = new Map();
+  if (kind === 'ticket') {
+    self.set(id, null);
+    for (const g of ticketGoals(ticket)) self.set(`goal:${g.id}`, `goal:${g.id} is one of its goals`);
+    const all = [...tickets().values()];
+    const queue = [id];
+    const seen = new Set(queue);
+    while (queue.length) {
+      const at = queue.shift();
+      for (const t of all) {
+        if (seen.has(t.id) || !(t.depends_on ?? []).includes(at)) continue;
+        seen.add(t.id);
+        queue.push(t.id);
+        self.set(t.id, `${t.id} depends on it`);
+      }
+    }
+  } else {
+    self.set(`goal:${id}`, null);
+    for (const t of tickets().values()) if (ticketGoals(t).some((g) => g.id === id)) self.set(t.id, `${t.id} is one of its tickets`);
+  }
+  // a cause as a subject the walk follows: a ticket's id or goal:<id>; anything else ends the walk
+  const subject = (c) => { const w = waitCause(c); return w?.form === 'ticket' ? w.id : w?.form === 'goal' ? `goal:${w.id}` : null; };
+  const next = (s) => {
+    if (s.startsWith('goal:')) { const g = logGet(s.slice(5)); return g?.type === 'goal' && goalMode(g) === 'drain' ? g.hold_for ?? [] : []; }
+    const t = tickets().get(s);
+    return t && isHeld(t) ? t.held_for ?? [] : [];
+  };
+  for (const c of causes) {
+    const start = subject(c);
+    if (!start) continue;
+    const from = new Map([[start, null]]);
+    const queue = [start];
+    while (queue.length) {
+      const at = queue.shift();
+      if (self.has(at)) {
+        const chain = [];
+        for (let s = at; s !== null; s = from.get(s)) chain.unshift(s);
+        const why = self.get(at);
+        return `${c} waits on ${id} itself${chain.length > 1 ? `, through ${chain.join(' -> ')}` : ''}${why ? ` (${why})` : ''}`;
+      }
+      for (const n of next(at)) {
+        const s = subject(n);
+        if (s && !from.has(s)) { from.set(s, at); queue.push(s); }
+      }
+    }
+  }
+  // rule 7: a question gates only part of a ticket, unless the hold says why it gates the whole
+  if (kind === 'ticket' && !whole) {
+    const q = causes.find((c) => waitCause(c)?.form === 'q');
+    if (q) return `${id} waits on ${q}: hold only the part the answer gates. Split first: ticket add a ticket with the touches and done-whens that don't need the answer, ticket set ${id} to what is left, then hold it; or, if no part can go ahead without the answer, pass --whole "<why>"`;
   }
   return null;
 }
@@ -4808,6 +4865,7 @@ function cmdTicket() {
   if (!reason) die('ticket hold needs --reason "<why>"');
   const causes = [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))];
   const until = flagStr('until')?.trim() || null;
+  if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
   const whole = flagStr('whole')?.trim() || null;
   const why = holdCause({ kind: 'ticket', id, causes, until, whole, ticket: t });
   if (why) die(why);

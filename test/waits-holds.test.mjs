@@ -1,7 +1,8 @@
 // The writers of a wait (kit-571; design every-wait-names-its-cause-and-every-put, "Writers" and
 // "Fleet ops keep the cause"): `ticket hold` and `ticket release`, a hold the supervisor or a planner
 // writes refused when it names no cause, a cause in no known form or not in the log, a cause the kit
-// can't follow with no date, or a date out of range. devteam.mjs exports nothing, so every rule is
+// can't follow with no date, a date out of range, a wait on itself (directly or through a chain of
+// holds), or a question cause with no --whole. devteam.mjs exports nothing, so every rule is
 // tested through the CLI on throwaway projects, each with a HOME of its own and no DEVTEAM_* from the
 // caller, as test/waits.test.mjs builds them.
 import { test } from 'node:test';
@@ -34,7 +35,7 @@ const PLANNER = { DEVTEAM_FEATURE: 'fg' };
 
 // Hand-written lines, as each writer's kit would append them: a clock that moves a millisecond a line.
 let clock = Date.parse('2026-11-18T09:00:00.000Z');
-const PREFIX = { goal: 'g', observation: 'o', question: 'q' };
+const PREFIX = { goal: 'g', observation: 'o', question: 'q', act: 'a' };
 function logLine(dir, writer, body) {
   const at = new Date((clock += 1)).toISOString();
   const d = at.replace(/[-:TZ.]/g, '');
@@ -153,12 +154,13 @@ test('waits A3: ticket hold and ticket release write a hold\'s cause and clear i
   await t.test('the supervisor re-holds a ticket it holds with a new cause', () => {
     const { dir } = fixture('a3-rehold');
     accepted(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', 'kit-02-other']);
-    const line = accepted(dir, ['ticket', 'hold', T, '--reason', 'r2', '--for', 'external:the vendor key', '--until', day(5)]);
+    const until = day(5);
+    const line = accepted(dir, ['ticket', 'hold', T, '--reason', 'r2', '--for', 'external:the vendor key', '--until', until]);
     assert.deepEqual(line.held_for, ['external:the vendor key']);
     const s = show(dir, T);
     assert.equal(s.held, 'r2');
     assert.deepEqual(s.held_for, ['external:the vendor key']);
-    assert.equal(s.held_until, day(5));
+    assert.equal(s.held_until, until);
   });
 
   await t.test('ticket release writes the three nulls in one line, and ticket show reads none held', () => {
@@ -191,7 +193,7 @@ test('waits A3: ticket hold and ticket release write a hold\'s cause and clear i
   });
 });
 
-test('waits A4: a hold with no cause, a cause in no known form or not in the log, or a bad date is refused', async (t) => {
+test('waits A4: a hold with no cause, a cause in no known form or not in the log, a bad date, a wait on itself, or a question with no --whole is refused', async (t) => {
   await t.test('rules 1-5 and the command\'s own words: each refused, nothing written', () => {
     const { dir } = fixture('a4-refused', { 'kit-03-third': { superseded_by: 'kit-02-other' } });
     const hold = (...rest) => ['ticket', 'hold', T, '--reason', 'r', ...rest];
@@ -209,6 +211,76 @@ test('waits A4: a hold with no cause, a cause in no known form or not in the log
     refused(dir, ['ticket', 'hold', T, '--for', 'kit-02-other'], 'ticket hold needs --reason "<why>"');
     refused(dir, ['ticket', 'hold', T, '--reason', '  ', '--for', 'kit-02-other'], 'ticket hold needs --reason "<why>"');
     refused(dir, ['ticket', 'hold', 'kit-03-third', '--reason', 'r', '--for', 'kit-02-other'], 'kit-03-third is superseded: nothing to hold', {}, 'kit-03-third');
+  });
+
+  await t.test('a merged ticket is not held', () => {
+    const { dir } = fixture('a4-merged');
+    // a squash commit on main named for the ticket is its merge (findMergeSha)
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', `${T}: landed`], { cwd: dir, env: envFor(dir), stdio: 'pipe' });
+    refused(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', 'kit-02-other'], `${T} is merged: nothing to hold`);
+  });
+
+  await t.test('a chore cause is accepted when an act refs chore-<slug> (its merge), with no branch', () => {
+    const { dir } = fixture('a4-chore-act');
+    refused(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', 'chore:tidy'], 'chore:tidy is not in the log');
+    logLine(dir, 'supervisor', { type: 'act', class: 'merge-chore', what: 'merged chore-tidy at 0000000', refs: ['chore-tidy'], reversible: false });
+    const line = accepted(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', 'chore:tidy']);
+    assert.deepEqual(line.held_for, ['chore:tidy']);
+  });
+
+  await t.test('a hold that waits on itself is refused, naming the path', () => {
+    // kit-02-other depends on kit-01-probe, kit-03-third on kit-02-other: T, U, V of goal G
+    const U = 'kit-02-other';
+    const V = 'kit-03-third';
+    const { dir, G } = fixture('a4-self', { [U]: { depends_on: [T] }, [V]: { depends_on: [U] } });
+    const hold = (id, ...causes) => ['ticket', 'hold', id, '--reason', 'r', '--for', ...causes];
+    refused(dir, hold(T, `goal:${G}`), `goal:${G} waits on ${T} itself`);
+    refused(dir, hold(T, T), `${T} waits on ${T} itself`);
+    refused(dir, hold(T, U), `${U} waits on ${T} itself`);
+    refused(dir, hold(T, V), `${V} waits on ${T} itself`);
+    // a good cause first does not let a self-wait through
+    refused(dir, hold(T, 'kit-09-elsewhere', V), `${V} waits on ${T} itself`);
+    // U may still be held for something else, and V for an unrelated ticket of another goal
+    accepted(dir, hold(V, 'kit-09-elsewhere'), {}, V);
+  });
+
+  await t.test('a hold whose cause\'s holds reach it is refused (one hop, two hops, to its goal)', () => {
+    const W = 'kit-04-w';
+    const X = 'kit-05-x';
+    const Y = 'kit-06-y';
+    const U2 = 'kit-09-elsewhere';
+    const { dir, G } = fixture('a4-chain');
+    for (const id of [W, X, Y]) logLine(dir, 'supervisor', ticketLine(id, 'fg'));
+    // hand-written holds, so each case is independent of what the CLI would let through
+    logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: X, held: 'x', held_for: [W], held_until: null });
+    refused(dir, ['ticket', 'hold', W, '--reason', 'r', '--for', X], `${X} waits on ${W} itself, through ${X} -> ${W}`, {}, W);
+    logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: Y, held: 'y', held_for: [X], held_until: null });
+    refused(dir, ['ticket', 'hold', W, '--reason', 'r', '--for', Y], `${Y} waits on ${W} itself, through ${Y} -> ${X} -> ${W}`, {}, W);
+    // U2 (a ticket of G2) held for goal:G: T (of G) held for U2 reaches its own goal
+    logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: U2, held: 'u2', held_for: [`goal:${G}`], held_until: null });
+    refused(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', U2], `${U2} waits on ${T} itself, through ${U2} -> goal:${G}`);
+    // a released hold is not followed
+    logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: U2, held: null, held_for: null, held_until: null });
+    accepted(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', U2]);
+  });
+
+  await t.test('a question holds only what it gates: --whole "<why>", or split first', () => {
+    const { dir } = fixture('a4-question');
+    const q = question(dir);
+    const hold = (...rest) => ['ticket', 'hold', T, '--reason', 'r', '--for', q, ...rest];
+    refused(dir, hold(), `${T} waits on ${q}: hold only the part the answer gates`);
+    const r = cli(dir, hold());
+    assert.ok(r.err.includes('ticket add') && r.err.includes('--whole "<why>"'), `the words say to split or pass --whole: ${r.err}`);
+    // a question among other causes still needs it
+    refused(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', 'kit-09-elsewhere', q], `${T} waits on ${q}: hold only the part the answer gates`);
+    // --whole with no words, or blank words
+    refused(dir, hold('--whole'), '--whole needs the reason no part can go ahead');
+    refused(dir, hold('--whole', '  '), '--whole needs the reason no part can go ahead');
+    const line = accepted(dir, hold('--whole', 'w'));
+    assert.equal(line.held, 'r (whole: w)');
+    // no question: no --whole needed
+    const plain = accepted(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', 'kit-09-elsewhere']);
+    assert.equal(plain.held, 'r');
   });
 
   await t.test('accepted: the date edges, an unrelated ticket, a goal and a chore whose branch exists', () => {
