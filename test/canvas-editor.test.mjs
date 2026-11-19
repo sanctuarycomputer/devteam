@@ -688,3 +688,163 @@ test('zoom and pan', { skip: canDrive ? false : 'needs Chrome and WebSocket', ti
   near(c1.t, c0.t, 0.01, '- at 10% keeps the card, y');
   assert.deepEqual(rec.exceptions, []);
 });
+
+// ---- width rules (C4, and the review focus's long hostile title at 390 px) ----
+
+// Every visible element outside the drawn design (#surface) that directly holds a non-blank text node
+// and may wrap its text: a name for it and its width on screen.
+const RUNNING_TEXT = `(() => {
+  const surface = document.getElementById('surface');
+  const out = [];
+  for (const el of document.body.querySelectorAll('*')) {
+    if (surface.contains(el) || el.closest('script, style')) continue;
+    if (![...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.data.trim() !== '')) continue;
+    if (el.getClientRects().length === 0) continue;
+    const cs = getComputedStyle(el);
+    if (cs.visibility !== 'visible') continue;
+    const wraps = cs.textWrapMode ? cs.textWrapMode !== 'nowrap' : !['nowrap', 'pre'].includes(cs.whiteSpace);
+    if (!wraps) continue;
+    const name = el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + [...el.classList].map((c) => '.' + c).join('');
+    out.push({ name, w: el.getBoundingClientRect().width });
+  }
+  return out;
+})()`;
+// A probe given width: var(--measure), measured (a custom property read back is its unresolved text).
+const MEASURE_PROBE = `(() => {
+  const d = document.createElement('div');
+  d.style.width = 'var(--measure)';
+  d.style.position = 'absolute';
+  document.body.append(d);
+  const w = d.getBoundingClientRect().width;
+  d.remove();
+  return w;
+})()`;
+
+test('running text within six columns at 1440', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, load } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  near(await p.ev(MEASURE_PROBE), 560, 0.01, 'a probe width: var(--measure)');
+  const check = async (what, mustHold) => {
+    const found = await p.ev(RUNNING_TEXT);
+    for (const { name, w } of found) assert.ok(w <= 560.5, `${what}: ${name} is ${w} px wide, over the measure`);
+    for (const m of mustHold) assert.ok(found.some((f) => f.name.startsWith(m)), `${what}: the walk reaches ${m} (found ${found.map((f) => f.name).join(', ')})`);
+    // the fixture's texts are short, so the running-text elements also carry the cap itself
+    for (const sel of mustHold) {
+      const mw = await p.ev(`[...document.querySelectorAll(${JSON.stringify(sel)})].filter((e) => e.getClientRects().length).map((e) => getComputedStyle(e).maxWidth)`);
+      assert.ok(mw.length > 0 && mw.every((v) => /^(min\()?560px\b/.test(v)), `${what}: ${sel} capped at the measure (${mw.join(', ')})`);
+    }
+  };
+  assert.equal(await state(p), 'ready');
+  await check('every, nothing selected', ['p.note']);
+  await p.click('#layers .layer[data-node="title"]');
+  assert.equal(await field(p, 'name'), 'Title');
+  await check('every, title selected', ['span.v']);
+  await load('/view/canvas/nope');
+  assert.equal(await state(p), 'error');
+  assert.equal(await shown(p, '#msg'), true);
+  await check('a slug the server does not have', ['p#msg']);
+  near(await p.ev(MEASURE_PROBE), 560, 0.01, 'a probe width: var(--measure), on the error page');
+});
+
+// The bar at the current width: its height, and every shown item of it (the title and the repo chip
+// among them) inside it on one line, not wrapping, and nothing scrolled sideways.
+async function barChecks(p, barH, what) {
+  const width = await p.ev('innerWidth');
+  assert.ok(await p.ev('document.documentElement.scrollWidth') <= width, `${what}: no sideways scroll (${await p.ev('document.documentElement.scrollWidth')} > ${width})`);
+  const bar = await screenRect(p, '.bar');
+  near(bar.h, barH, 0.01, `${what}: the bar's height, as at 1440`);
+  near(bar.l, 0, 0.01, `${what}: the bar's left`);
+  near(bar.w, width, 0.5, `${what}: the bar's width`);
+  for (const sel of ['#title', '#repoChip']) {
+    assert.equal(await shown(p, sel), true, `${what}: ${sel} shown`);
+    const r = await screenRect(p, sel);
+    assert.ok(r.w >= 8, `${what}: ${sel} keeps some width (${r.w})`);
+    assert.ok(r.l >= bar.l - 0.5 && r.r <= bar.r + 0.5 && r.t >= bar.t - 0.5 && r.b <= bar.b + 0.5, `${what}: ${sel} ${JSON.stringify(r)} inside the bar ${JSON.stringify(bar)}`);
+    assert.equal(await css(p, sel, 'text-wrap-mode'), 'nowrap', `${what}: ${sel} never wraps`);
+    assert.equal(await css(p, sel, 'text-overflow'), 'ellipsis', `${what}: ${sel} ends in an ellipsis when cut`);
+  }
+  const items = await p.ev("[...document.querySelector('.bar').children].filter((e) => e.getClientRects().length).map((e) => { const r = e.getBoundingClientRect(); return { name: e.className || e.id, l: r.left, r: r.right, t: r.top, b: r.bottom, h: r.height }; })");
+  for (const it of items) {
+    assert.ok(it.l >= bar.l - 0.5 && it.r <= bar.r + 0.5, `${what}: bar item ${it.name} ${JSON.stringify(it)} inside the bar across`);
+    assert.ok(it.t >= bar.t - 0.5 && it.b <= bar.b + 0.5, `${what}: bar item ${it.name} ${JSON.stringify(it)} inside the bar down`);
+  }
+  const mids = items.map((it) => (it.t + it.b) / 2);
+  assert.ok(Math.max(...mids) - Math.min(...mids) <= 1, `${what}: the bar's items on one line (${mids.join(', ')})`);
+}
+const overlap = (a, b) => a.l < b.r && b.l < a.r && a.t < b.b && b.t < a.b;
+
+test('watch and comment at 390', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, rec, load, size } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  const barH = (await screenRect(p, '.bar')).h;
+  assert.ok(barH > 0);
+  // at 1440 the page select and the note are not shown
+  assert.equal(await css(p, '#pageSel', 'display'), 'none', 'no page select at 1440');
+  assert.equal(await css(p, '#narrowNote', 'display'), 'none', 'no narrow note at 1440');
+
+  await size(390, 844);
+  await load('/view/canvas/every');
+  assert.equal(await state(p), 'ready');
+  assert.equal(await p.ev('innerWidth'), 390);
+  // the panels hidden, the stage the window's full width under the bar
+  assert.equal(await css(p, '.panel.left', 'display'), 'none', 'the left panel');
+  assert.equal(await css(p, '.panel.right', 'display'), 'none', 'the right panel');
+  const stage = await screenRect(p, '#stage');
+  near(stage.l, 0, 0.5, "the stage's left");
+  near(stage.w, 390, 0.5, "the stage's width");
+  await barChecks(p, barH, 'every at 390');
+  near(stage.t, (await screenRect(p, '.bar')).b, 1, 'the stage under the bar');
+  // the note, and the page select, on the stage and clear of the zoom controls
+  assert.equal(await shown(p, '#narrowNote'), true, 'the narrow note shown');
+  assert.equal(await text(p, '#narrowNote'), 'Watching: editing needs a wider screen.');
+  assert.equal(await shown(p, '#pageSel'), true, 'the page select shown');
+  const zoomBox = await screenRect(p, '.zoom');
+  for (const sel of ['#narrowNote', '#pageSel']) {
+    const r = await screenRect(p, sel);
+    assert.ok(r.l >= stage.l && r.r <= stage.r && r.t >= stage.t && r.b <= stage.b, `${sel} ${JSON.stringify(r)} on the stage ${JSON.stringify(stage)}`);
+    assert.ok(!overlap(r, zoomBox), `${sel} ${JSON.stringify(r)} clear of the zoom controls ${JSON.stringify(zoomBox)}`);
+  }
+  // fitted to the 390 px stage: the whole content-bounds box inside it, at a zoom below 100%
+  const z = await zoomOf(p);
+  assert.ok(z < 1, `a zoom below 100% (${z})`);
+  const b = await contentBounds(p);
+  assert.ok((b.r - b.l) / z > 390, `left as drawn, Checkout's bounds overflow the stage (${(b.r - b.l) / z} px)`);
+  assert.ok(b.l >= stage.l - 1 && b.r <= stage.r + 1 && b.t >= stage.t - 1 && b.b <= stage.b + 1, `content bounds ${JSON.stringify(b)} inside the stage ${JSON.stringify(stage)}`);
+  assert.equal(await text(p, '#zoomPct'), `${Math.round(z * 100)}%`);
+  // the page select lists both pages; choosing Parts draws button
+  assert.deepEqual(await p.ev("[...document.querySelectorAll('#pageSel option')].map((o) => o.textContent)"), ['Checkout', 'Parts']);
+  await p.ev("(() => { const s = document.getElementById('pageSel'); s.value = 'p-parts'; s.dispatchEvent(new Event('change', { bubbles: true })); })()");
+  await until(() => p.ev("document.body.dataset.state === 'ready' && !!document.querySelector('#surface [data-id=\"button\"]')"), 'Parts by the page select at 390');
+  assert.equal(await count(p, '#surface [data-id="card"]'), 0);
+  assert.equal(await shown(p, '#surface [data-id="button"]'), true, 'button drawn and on screen');
+  // + changes the zoom percentage
+  const before = await text(p, '#zoomPct');
+  const zb = await zoomOf(p);
+  const zi = centre(await screenRect(p, '#zoomIn'));
+  await p.clickAt(zi.x, zi.y);
+  near(await zoomOf(p), zb * 1.25, 1e-4, '+ at 390');
+  assert.notEqual(await text(p, '#zoomPct'), before, '+ changes the percentage');
+  assert.ok(await p.ev('document.documentElement.scrollWidth') <= 390, 'still no sideways scroll');
+  assert.deepEqual(rec.exceptions, []);
+});
+
+const HOSTILE = fixture('hostile.json');
+const LONG_SLUG = `hostile-${'a-very-long-canvas-name-'.repeat(8)}end`;
+
+test('a hostile document and a long title in the bar at 390', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, rec, load, size } = await open(t, { canvases: { hostile: HOSTILE, [LONG_SLUG]: HOSTILE }, images: { hostile: { [IMG_FILE]: IMG }, [LONG_SLUG]: { [IMG_FILE]: IMG } } });
+  assert.equal(await state(p), 'ready');
+  const barH = (await screenRect(p, '.bar')).h;
+  await size(390, 844);
+  for (const slug of ['hostile', LONG_SLUG]) {
+    for (const page of ['h1', 'h2']) {
+      await load(`/view/canvas/${slug}#page=${page}`);
+      assert.equal(await state(p), 'ready', `${slug} ${page}`);
+      assert.equal(await text(p, '#title'), slug);
+      await barChecks(p, barH, `${slug.slice(0, 20)}… ${page} at 390`);
+      const stage = await screenRect(p, '#stage');
+      const sel = await screenRect(p, '#pageSel');
+      assert.ok(sel.l >= stage.l && sel.r <= stage.r, `the page select ${JSON.stringify(sel)} within the stage across`);
+      assert.ok(!overlap(sel, await screenRect(p, '.zoom')), 'the page select clear of the zoom controls');
+    }
+  }
+  assert.deepEqual(rec.exceptions, []);
+});

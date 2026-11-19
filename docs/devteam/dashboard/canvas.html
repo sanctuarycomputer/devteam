@@ -85,6 +85,22 @@
   #msg { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); margin: 0; padding: 0 16px; width: max-content; max-width: min(var(--measure), 100%); color: var(--fg-2); text-align: center; z-index: 2; }
   body[data-state="error"] #surface, body[data-state="error"] .zoom { display: none; }
 
+  /* under 760 px, watch and comment: no panels, the stage the full width under the bar, the bar's
+     title and chip cut with an ellipsis (never wrapped), the page select and the note on the stage,
+     at its bottom left, clear of the zoom controls at its top right */
+  @media (max-width: 760px) {
+    .work { grid-template-columns: minmax(0, 1fr); }
+    .panel { display: none; }
+    .bar { gap: 8px; }
+    .bar > * { min-width: 0; }
+    .bar .where { display: none; }
+    .bar h1, .bar .chip, .bar .back { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar .back { flex: none; }
+    .stage-top { top: auto; bottom: 12px; }
+    #pageSel { display: block; max-width: 100%; }
+    #narrowNote { display: block; }
+  }
+
   /* the design being drawn keeps its own colours, light or dark */
   .dnode { margin: 0; }
   img.dnode, svg.dnode { display: block; }
@@ -889,6 +905,8 @@
   $('zoomIn').addEventListener('click', () => { if (ready()) zoomCentre(view.z * STEP); });
   $('zoomOut').addEventListener('click', () => { if (ready()) zoomCentre(view.z / STEP); });
   $('zoomFit').addEventListener('click', () => { if (ready()) fit(); });
+  // a resized window (a phone turned, a panel shown or hidden at 760 px) refits, unless the person has moved
+  window.addEventListener('resize', () => { if (ready() && !moved) fit(); });
 
   // The wheel pans; with Ctrl or ⌘ (a trackpad's pinch comes as Ctrl+wheel) it zooms around the pointer.
   $('stage').addEventListener('wheel', (e) => {
