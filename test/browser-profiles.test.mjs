@@ -177,6 +177,11 @@ test('G1b a leftover Chrome is killed by the next start', opts, async () => {
   ownGroups.add(c.pid);
   try {
     await until(() => carries(c.pid, q), 'the leftover Chrome up');
+    // only the planted chrome_pid can find it: no SingletonLock names it (T3-3). Chrome writes its lock
+    // a moment after it starts, so wait for it first, or the removal races the write.
+    const lock = path.join(q.profile, 'SingletonLock');
+    await until(() => { try { return fs.readlinkSync(lock) === `${os.hostname()}-${c.pid}`; } catch { return false; } }, 'the leftover holds its SingletonLock');
+    fs.rmSync(lock, { force: true });
     plantState(q, c.pid);
     await started(q);
     assert.equal(alive(c.pid), false, 'the leftover Chrome is gone');
@@ -191,9 +196,11 @@ test('R1 a state.json the reader can\'t use restarts, never crashes', opts, asyn
   await stopped(q);
   await started(q);
   const s1 = readState(q);
-  // the old form, with cdp_port, reaches the same daemon
+  // the old form, with cdp_port, reaches the same daemon: status sees it running, and a verb that
+  // needs the daemon starts none (T3-1)
   fs.writeFileSync(q.state, JSON.stringify({ ...s1, cdp_port: 1 }));
-  await ok(q, ['status', '--json']);
+  assert.equal((await statusJson(q)).running, true, 'status reads the old form as running');
+  await ok(q, ['open', `${site.origin}/`]);
   assert.equal(readState(q).daemon_pid, s1.daemon_pid, 'the old form is accepted with no restart');
   // a state.json the reader can't use: a fresh daemon, no crash
   const unusable = { ...s1 };
@@ -208,6 +215,17 @@ test('R1 a state.json the reader can\'t use restarts, never crashes', opts, asyn
   assert.deepEqual(validate('state', s2), []);
   assert.equal('cdp_port' in s2, false, 'no cdp_port');
   await until(() => !alive(s1.daemon_pid) && !alive(s1.chrome_pid), 'the old daemon and its Chrome gone');
+  assert.equal((await statusJson(q)).tabs, 1);
+  // a cdp_port that is present must be a port: 0 is unusable, so a fresh daemon, no crash (T3-2)
+  fs.writeFileSync(q.state, JSON.stringify({ ...s2, cdp_port: 0 }));
+  const z = await cli(q, ['open', `${site.origin}/`]);
+  assert.equal(z.status, 0, `open exited ${z.status}`);
+  assert.ok(!(z.out + z.err).includes('    at '), 'no stack line');
+  assert.ok(!(z.out + z.err).includes('TypeError'), 'no TypeError');
+  const s3 = readState(q);
+  assert.notEqual(s3.daemon_pid, s2.daemon_pid, 'cdp_port 0: a fresh daemon');
+  assert.deepEqual(validate('state', s3), []);
+  await until(() => !alive(s2.daemon_pid) && !alive(s2.chrome_pid), 'the cdp_port 0 daemon and its Chrome gone');
   assert.equal((await statusJson(q)).tabs, 1);
   await stopped(q);
 });
