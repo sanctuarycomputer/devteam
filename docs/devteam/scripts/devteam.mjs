@@ -4839,24 +4839,30 @@ function oneWayDoorsSection(body) {
 }
 
 // A verdict at commit V holds at head H only if V is an ancestor of H, every non-merge commit V..H
-// just ADDS review-record files under `dir`, and any merge between only brought main in: each merge's
+// just ADDS review-record files under `dir` or fills one in (fillInOnly), save a commit and its exact
+// revert, which change nothing together, and any merge between only brought main in: each merge's
 // other parents are on main, and the branch's own change against main (three-dot, review records
 // aside) is byte-identical at H to what was reviewed at V, or, where main touched the same files,
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
 // changes both, so it voids the verdict; a clean merge of main does not.
 // A record edit that only fills in what the record lacked: a "- Reviewer:" line where there was
-// none, and Disposition cells that were empty or held no disposition yet, each given a disposition.
-// Verdicts, findings and dispositions already given can't change this way, so a dissent still
-// can't be edited away.
-function fillInOnly(before, after) {
+// none, a "- Records: <full sha>" line where there was none (only where `records` allows it:
+// verdictHolds allows it on a record written after the verdict's commit), and Disposition cells
+// that were empty or held no disposition yet, each given a disposition. Verdicts, findings and
+// dispositions already given can't change this way, so a dissent still can't be edited away.
+function fillInOnly(before, after, records = false) {
   if (before === null || after === null) return false;
   // blank lines carry nothing in a record, so they're left out of the comparison
   const a = before.split('\n').filter((l) => l.trim()), b = after.split('\n').filter((l) => l.trim());
-  const REVIEWER = /^-[ \t]*Reviewer:[ \t]*\S/;
-  if (b.length === a.length + 1 && !a.some((l) => REVIEWER.test(l))) {
+  // each added line one of these, at most once, where the record had no such line (the parser's own patterns)
+  const ADDED = [[/^-[ \t]*Reviewer:[ \t]*\S/, /^-[ \t]*Reviewer:[ \t]*\S/], ...(records ? [[/^-[ \t]*Records:[ \t]*[0-9a-f]{40}[ \t]*$/, /^-[ \t]*Records:/]] : [])];
+  const open = ADDED.filter(([, had]) => !a.some((l) => had.test(l)));
+  while (b.length > a.length) {
     const i = b.findIndex((l, k) => l !== a[k]);
-    if (i < 0 || !REVIEWER.test(b[i])) return false;
+    const k = open.findIndex(([line]) => line.test(b[i]));
+    if (i < 0 || k < 0) return false;
     b.splice(i, 1);
+    open.splice(k, 1);
   }
   if (b.length !== a.length) return false;
   let disp = -1;
@@ -4877,18 +4883,41 @@ function verdictHolds(v, head, dir, R = repo('home')) {
   const main = R.mainRef();
   // the branch's own commits since V: what a merge brought in from main is main's, not the branch's.
   // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
-  // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
+  // filled, a missing "- Reviewer:" line added, a missing "- Records:" line added to a record written
+  // after V. Nothing else in a record may change, except by a commit its exact revert undoes.
   let commit = null;
+  const range = [`${v}..${head}`, ...(main ? [`^${main}`] : [])];
   // <stage>-<pass>[<track>].md, or a task's later pass, task-<n>-<pass>[<track>].md
   const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+(?:-\d+)?[a-z]?\.md$/.test(file.slice(dir.length));
-  const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
+  // A commit and a later one whose diff is its exact inverse change nothing together: both are left
+  // out. Each pairs once, with the oldest later match, so an edit reverted and redone is still judged;
+  // a commit adding or deleting a record never pairs, so a dissent added and reverted still voids.
+  // Worked out only once a commit would otherwise be refused; a diff git can't make never pairs.
+  let paired = null;
+  const undone = (c) => {
+    if (!paired) {
+      paired = new Set();
+      const list = (R.git(['rev-list', '--no-merges', '--reverse', ...range]) ?? '').split('\n').filter(Boolean);
+      const diff = (x, y) => R.git(['diff', '--binary', '--full-index', '--no-renames', '--no-ext-diff', '--no-textconv', x, y]);
+      const addsOrDeletes = (x) => (R.git(['diff', '--name-status', '--no-renames', `${x}^`, x]) ?? 'x').split('\n').some((l) => { const [st, file] = l.split('\t'); return st !== 'M' && (st === 'x' || isRecord(file)); });
+      const forward = list.map((x) => (addsOrDeletes(x) ? null : diff(`${x}^`, x)));
+      const inverse = [];
+      const inverseOf = (j) => (j in inverse ? inverse[j] : (inverse[j] = diff(list[j], `${list[j]}^`)));
+      for (let i = 0; i < list.length; i++) {
+        if (paired.has(list[i]) || !forward[i]) continue;
+        for (let j = i + 1; j < list.length; j++) if (!paired.has(list[j]) && forward[j] !== null && inverseOf(j) === forward[i]) { paired.add(list[i]); paired.add(list[j]); break; }
+      }
+    }
+    return !!c && paired.has(c);
+  };
+  const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', ...range]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
     // a drained session's handoff note is prose about the session, not the work (supervisor.md, Moving the fleet)
-    if (isHandoffFile(file)) return st === 'A' || st === 'M';
-    if (!isRecord(file)) return false;
-    if (st === 'A') return true;
-    return st === 'M' && !!commit && fillInOnly(R.git(['show', `${commit}^:${file}`]), R.git(['show', `${commit}:${file}`]));
+    if (isHandoffFile(file) && (st === 'A' || st === 'M')) return true;
+    if (isRecord(file) && st === 'A') return true;
+    if (isRecord(file) && st === 'M' && !!commit && fillInOnly(R.git(['show', `${commit}^:${file}`]), R.git(['show', `${commit}:${file}`]), R.git(['cat-file', '-e', `${v}:${file}`]) === null)) return true;
+    return undone(commit);
   });
   if (!onlyRecords) return false;
   const merges = (R.git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').split('\n').filter(Boolean);
