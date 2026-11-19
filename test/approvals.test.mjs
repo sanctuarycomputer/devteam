@@ -21,7 +21,7 @@ function choreOf(F, slug, files) {
   return (...extra) => { const r = run(old, ['merge', '--chore', slug, '--dry-run', ...extra], SUP); return { status: r.status, text: r.out + r.err }; };
 }
 const answered = (F, opts, answer, role) => { const q = F.ok(F.old, ['ask', ...opts], SUP); F.ok(F.old, ['answer', q, answer, ...(role ?? [])], role ? SUP : undefined); return q; };
-const asked = (question, cls) => ['--question', question, '--recommendation', 'yes', ...(cls ? ['--class', cls, '--reasons', cls === 'release-scope' ? 'below-rung' : 'owner-only'] : [])];
+const asked = (question, cls) => ['--question', question, '--recommendation', 'yes', ...(cls ? ['--class', cls, ...(cls === 'release-scope' ? ['--reasons', 'below-rung', '--no-default', 'the test waits for the owner'] : ['--reasons', 'owner-only'])] : [])];
 
 test('a chore that changes a real kit file needs a kit-class answer; outside the kit, the chore rule is as it was', () => {
   const F = fleetFixture('kit-answers');
@@ -93,7 +93,7 @@ test('metrics records a chat quote that is not in an owner-typed line of the sup
   const F = fleetFixture('chat-quote');
   const { old, ok, home } = F;
   try {
-    const q = (text) => { const id = ok(old, ['ask', '--question', text, '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes'], SUP); return id; };
+    const q = (text) => { const id = ok(old, ['ask', '--question', text, '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes', '--no-default', 'the test waits for the owner'], SUP); return id; };
     const said = 'Ship it, I checked staging';
     const real = q('Ship?');
     ok(old, ['answer', real, 'yes', '--from-chat', '--said', said], SUP);
