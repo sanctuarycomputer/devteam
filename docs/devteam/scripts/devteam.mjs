@@ -18145,18 +18145,21 @@ const IMAGE_RUNS = {
     // the project-side parts the image relies on (the crossings): the presses the gateway signs and
     // a dashboard verifies, and the operator's role guard
     'gatewaySigned', 'termSigned', 'dashboardProofProblem', 'paneSigned', 'ownerSettingSigned', 'paneProofProblem', 'ownerSettingProofProblem', 'OPERATOR_READS', 'OPERATOR_SUBCOMMANDED',
-    // the dispatcher and the operator's role guard (region dispatch)
-    'dispatch',
+    // the dispatcher and the operator's role guard (region dispatch), and what they read: the command
+    // and its arguments
+    'dispatch', 'command', 'parseArgs',
     // what keeps a project's kit read-only for the operator: no facts saved, no usage cache written, no host claim at a prompt
     'factsSaveAtExit', 'usageCache', 'cmdPrompt',
     // what the boot script calls in a project's kit: settings --get tmux_session, and the run/supervisor-pane record it reads and removes
-    'cmdSettings', 'tmuxSession', 'supervisorPaneFile', 'supervisorPaneMark', 'recordSupervisorPane',
+    // (its name, its writers, when it is written, and the mark beside it, which the image reads through markedPane)
+    'cmdSettings', 'tmuxSession', 'supervisorPaneFile', 'supervisorPaneMark', 'recordSupervisorPane', 'rememberSupervisorPane', 'markUpgradedPane', 'markedPane',
     // run/supervisor-up.json, which the boot script reads ("up": false) to choose whom to restore, and its writers, recover's own included
     'SUPERVISOR_UP_FILE', 'writeSupervisorUp', 'noteSupervisorFromTick', 'noteSupervisorSelf', 'recoverOne',
     // the ~/.devteam/repos-<port> records a project's kit writes and recover --machine reads
     'registerOnMachine', 'machineRepoDir',
-    // a dashboard leaves the machine's hub to the image (dashboardHub)
-    'dashboardHub',
+    // a dashboard leaves the machine's hub to the image (dashboardHub); the hub's port, which names the
+    // repos records too, and the block of ports a project's dashboard binds in, which the hub scans
+    'dashboardHub', 'HUB_PORT', 'PORT_BASE', 'PORT_RANGE',
     // the classifier itself, and the readers it is built from, so a change to the list is a minor
     'IMAGE_RUNS', 'imageChanges', 'parts', 'globs',
   ],

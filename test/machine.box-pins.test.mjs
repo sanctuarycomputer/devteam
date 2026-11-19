@@ -641,6 +641,16 @@ test('box-pins changed reads a change to each part the image relies on as a mino
     ['globs', 'const pathMatches = (entry, file) => globMatcher(entry)(file);', ' // kit-306 probe', 'globs'],
     ['register', 'function registerOnMachine() {\n', '  // kit-306 probe\n', 'registerOnMachine'],
     ['repo-dir', "const machineRepoDir = () => path.join(os.homedir(), '.devteam', `repos-${HUB_PORT}`);", ' // kit-306 probe', 'machineRepoDir'],
+    // final-1b F1, F2, F4: the hub's port and the dashboards' block, every supervisor-pane writer and
+    // its mark's reader, and what the operator guard reads (the command and its arguments)
+    ['hub-port', 'const HUB_PORT = Number(process.env.DEVTEAM_HUB_PORT ?? 4320);', ' // kit-306 probe', 'HUB_PORT'],
+    ['port-base', 'const PORT_BASE = Number(process.env.DEVTEAM_PORT_BASE ?? 4321);', ' // kit-306 probe', 'PORT_BASE'],
+    ['port-range', 'const PORT_RANGE = Array.from({ length: 25 }, (_, i) => PORT_BASE + i);', ' // kit-306 probe', 'PORT_RANGE'],
+    ['pane-remember', 'function rememberSupervisorPane() {\n', '  // kit-306 probe\n', 'rememberSupervisorPane'],
+    ['pane-upgraded', 'function markUpgradedPane() {\n', '  // kit-306 probe\n', 'markUpgradedPane'],
+    ['pane-marked', 'function markedPane(run) {\n', '  // kit-306 probe\n', 'markedPane'],
+    ['args', 'function parseArgs(args) {\n', '  // kit-306 probe\n', 'parseArgs'],
+    ['command', 'const command = argv.shift();', ' // kit-306 probe', 'command'],
   ].map(([name, anchor, add, part]) => [name, after(anchor, add), part]);
   // the check itself, not a comment: the image relies on it to leave the machine's hub to the image
   const hubCheck = 'if (imageHub() === HUB_PORT) {';
@@ -798,7 +808,7 @@ test('IMAGE_RUNS: the three kinds under the rule, with the parts the design name
   const named = ['gatewaySigned', 'termSigned', 'dashboardProofProblem', 'paneSigned', 'ownerSettingSigned', 'paneProofProblem', 'ownerSettingProofProblem', 'OPERATOR_READS', 'OPERATOR_SUBCOMMANDED',
     'homeAt', 'realPathMade', 'startHub', 'HUB_ACTIONS', 'probeHello', 'recoverMachine', 'projectKit', 'box', 'box-memory', 'readPins', 'imageHub',
     'dispatch', 'factsSaveAtExit', 'usageCache', 'cmdPrompt', 'cmdSettings', 'tmuxSession', 'supervisorPaneFile', 'supervisorPaneMark', 'recordSupervisorPane', 'SUPERVISOR_UP_FILE', 'writeSupervisorUp',
-    'noteSupervisorFromTick', 'noteSupervisorSelf', 'recoverOne', 'registerOnMachine', 'machineRepoDir', 'dashboardHub', 'IMAGE_RUNS', 'imageChanges', 'parts', 'globs'];
+    'noteSupervisorFromTick', 'noteSupervisorSelf', 'recoverOne', 'registerOnMachine', 'machineRepoDir', 'dashboardHub', 'HUB_PORT', 'PORT_BASE', 'PORT_RANGE', 'rememberSupervisorPane', 'markUpgradedPane', 'markedPane', 'parseArgs', 'command', 'IMAGE_RUNS', 'imageChanges', 'parts', 'globs'];
   for (const n of named) assert.ok(list.parts.includes(n), `${n} is listed`);
   // a dashboard is the project's own, its hub check the only crossing (dashboardHub); the table is no crossing, the dispatch after it is
   assert.ok(!list.parts.includes('cmdDashboard'));
@@ -1002,4 +1012,18 @@ test('box-pins changed --smoke removes its own worktree and leaves another stale
     cg(['worktree', 'prune']);
   }
   leftNothing(tmpd);
+});
+
+test('box-pins changed --smoke removes a worktree an interrupted add left locked "initializing" (kit-306)', () => {
+  changedKit();
+  cg(['checkout', '-q', '-B', 'smoke-locked', 'v9.1.0']);
+  // a git on PATH whose worktree add makes the worktree, leaves it locked as an add cut short does,
+  // and fails: the smoke dies (2), and its cleanup must still remove that worktree and its record
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const shim = fakeBins('locked-git', { git: `if [ "$1" = worktree ] && [ "$2" = add ]; then "${realGit}" "$@" || exit 1; "${realGit}" worktree lock --reason initializing "$5" || exit 1; exit 1; fi\nexec "${realGit}" "$@"` });
+  const s = smokeRun(['--since', 'v9.1.0'], { PATH: `${shim}${path.delimiter}${pinsEnv().PATH}` });
+  assert.equal(s.r.status, 2, s.r.stderr + s.r.stdout);
+  assert.equal(s.r.stdout, '');
+  assert.match(s.r.stderr, /^devteam: box-pins changed: --smoke: git worktree add of [0-9a-f]{40} failed \(exit 1\)/m);
+  leftNothing(s.tmpd);
 });
