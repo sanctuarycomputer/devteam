@@ -119,6 +119,14 @@ async function front(canvasPort, presencePort, person) {
   return {
     url: `http://127.0.0.1:${port}`,
     drop() { const n = presence.size; for (const [a, b] of [...presence]) { a.destroy(); b.destroy(); } presence.clear(); return n; },
+    // A server-to-browser text frame written onto every open presence connection, as if the presence
+    // server had sent it (unmasked; up to 65535 bytes).
+    inject(text) {
+      const p = Buffer.from(text);
+      const head = p.length < 126 ? Buffer.from([0x81, p.length]) : Buffer.from([0x81, 126, p.length >> 8, p.length & 255]);
+      for (const [a] of presence) a.write(Buffer.concat([head, p]));
+      return presence.size;
+    },
     dropCanvas() { const n = canvasSocks.size; for (const [a, b] of [...canvasSocks]) { a.destroy(); b.destroy(); } canvasSocks.clear(); return n; },
     close: () => new Promise((r) => { for (const s of sockets) s.destroy(); server.close(() => r()); }),
   };
@@ -685,6 +693,12 @@ test('canvas cursors: the presence socket answers pings, reconnects when dropped
   await within(ctx, async () => (await A.ev('document.visibilityState')) === 'hidden', 'C1.10: A hidden');
   // final-1 F1: a hidden page drops others' cursors (it is sent no moves meanwhile)
   await within(ctx, async () => (await cursorCount(A, 'ben')) === 0, "C1.10: Ben's cursor dropped on hidden A", async () => JSON.stringify(await cursorOf(A, 'ben')));
+  // final-2 F2-1: a move of Ben's that was on its way before the relay heard A hide draws nothing
+  const benConn = A.rec.pgot.filter((f) => f.m.t === 'move' && f.m.id === 'ben').at(-1).m.conn;
+  const g0 = A.rec.order();
+  assert.ok(fa.inject(JSON.stringify({ t: 'move', id: 'ben', conn: benConn, a: { k: 'n-card', x: 0.5, y: 0.5 } })) >= 1, "a late move written to A's presence socket");
+  await within(ctx, async () => after(A.rec.pgot, g0).some((f) => f.m.t === 'move'), 'A got the late move');
+  assert.equal(await cursorCount(A, 'ben'), 0, "C1.10: the late move draws no cursor on hidden A");
   await within(ctx, async () => ofKind(after(A.rec.psent, v0), 'here').some((f) => f.m.visible === false), 'C1.10: A says here visible false');
   await within(ctx, async () => (await cursorCount(B, 'ana')) === 0, "C1.10: Ana's cursor gone from B", async () => JSON.stringify(await cursorOf(B, 'ana')));
   await ctx.showA();

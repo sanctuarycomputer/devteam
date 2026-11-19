@@ -4845,6 +4845,9 @@
   }
   const unit = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
   function takeMove(m) {
+    // hidden, others' cursors are dropped (onVisibility); a move sent before the relay heard our here
+    // visible false must not draw one back, stale when the page is shown (final-2 F2-1)
+    if (document.visibilityState !== 'visible') return;
     const who = typeof m.conn === 'string' ? pres.people.get(m.conn) : undefined;
     if (!who || !who.on) return;
     const a = m.a;
