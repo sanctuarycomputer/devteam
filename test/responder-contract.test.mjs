@@ -154,24 +154,36 @@ test('responder-contract A2: the responder is its own writer, and is refused the
     await t.test('A2b: each supervisor or owner command, run as the responder, exits non-zero and writes no log file', () => {
       const dirs = [F.logDir, path.join(F.old, 'docs/devteam/project/log'), path.join(wt, 'docs/devteam/project/log'), path.join(wt, 'docs/devteam/run/log')];
       const ask = ['--question', 'Which?', '--goal', F.goal, '--stake', '1', '--urgency', '1'];
+      // a current finding to ack (task-3 T3-1): a worker's review-request 40 min old is unanswered-message
+      const d = new Date(Date.now() - 40 * 60000);
+      const mid = `m-${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}-kit-9-probe`;
+      F.hand('kit-9-probe', { id: mid, type: 'message', to: 'supervisor', kind: 'review-request', text: 'review please', re: null, sha: null, ticket: null }, 40 * 60000, 'kit-9-probe.jsonl');
+      const m = F.run(F.old, ['metrics', '--json'], F.SUP);
+      assert.equal(m.status, 0, m.err);
+      assert.ok((JSON.parse(m.out).findings ?? []).some((x) => x.kind === 'unanswered-message' && x.subject === mid), `the finding to ack is current: ${mid}`);
+      // each refusal comes from the guard: the responder's hand-over hint, or the owner's commands' refusal
+      const GUARD = /the supervisor does this; hand it over: send supervisor "…" --kind handoff --thread <t-id>/;
+      const OWNER = /owner commands don't run in an agent session \(DEVTEAM_ROLE=responder\)/;
       const cmds = [
-        ['answer', q, 'yes'],
-        ['ask', ...ask],
-        ['ack', 'stale-worker', 'w-01-a', '--reason', 'r'],
-        ['thread', 'ask', T, ...ask],
-        ['thread', 'ready', T, '--outcome', 'done'],
-        ['merge', 'kit-9-probe'],
-        ['act', '--class', 'worker-slots', '--', 'x'],
-        ['decide', '--class', 'rename-column', '--', 'x'],
-        ['goal', 'set', F.goal, '--title', 'x'],
-        ['chore', 'start', 'x'],
-        ['thread', 'say', T, 'words'],
-        ['phase', 'supervisor', '--usd', '1'],
+        [['answer', q, 'yes'], OWNER],
+        [['ask', ...ask], GUARD],
+        [['ack', 'unanswered-message', mid, '--reason', 'r'], GUARD],
+        [['thread', 'ask', T, ...ask], GUARD],
+        [['thread', 'ready', T, '--outcome', 'done'], GUARD],
+        [['merge', 'kit-9-probe'], GUARD],
+        [['act', '--class', 'worker-slots', '--', 'x'], GUARD],
+        [['decide', '--class', 'rename-column', '--', 'x'], GUARD],
+        [['goal', 'set', F.goal, '--title', 'x'], GUARD],
+        [['chore', 'start', 'x'], GUARD],
+        [['thread', 'say', T, 'words'], OWNER],
+        [['phase', 'supervisor', '--usd', '1'], GUARD],
+        [['phase', 'supervisor'], GUARD],
       ];
-      for (const args of cmds) {
+      for (const [args, why] of cmds) {
         const before = hashDirs(dirs);
         const r = R(args);
         assert.notEqual(r.status, 0, `${args.join(' ')} should fail as the responder: ${r.out}`);
+        assert.match(r.err, why, `${args.join(' ')} is refused by its guard: ${r.err}`);
         assert.deepEqual(hashDirs(dirs), before, `${args.join(' ')} leaves every log file as it was, and adds none`);
       }
     });

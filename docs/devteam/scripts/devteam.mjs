@@ -21012,8 +21012,8 @@ function cmdPhase() {
     ? { usd: flagNum('usd') ?? prev?.usd ?? 0, input_tokens: flagNum('in') ?? prev?.input_tokens ?? 0, output_tokens: flagNum('out') ?? prev?.output_tokens ?? 0 }
     : {};
   if (supervisor) {
-    if (cost.usd === undefined) die('phase supervisor needs --usd (its cumulative spend)');
     supervisorOnly('phase supervisor');
+    if (cost.usd === undefined) die('phase supervisor needs --usd (its cumulative spend)');
     appendLog({ type: 'phase', from: 'supervisor', to: 'supervisor', ...cost }, 'supervisor');
     return out('recorded supervisor cost');
   }
