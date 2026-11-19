@@ -89,6 +89,45 @@ test('held lines are typed once each, in the order they came, however many proce
   assert.deepEqual(fs.readdirSync(path.join(F.old, 'docs/devteam/run/held')).filter((n) => n.includes('.claim-')), [], 'no claim left behind');
 });
 
+test('a line sent while a flusher holds the claim goes after the held lines', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
+  const F = threadsFixture('pane-putback');
+  const later = cleanup(t);
+  later(() => F.done());
+  const pane = menuPane(F);
+  const S = { DEVTEAM_SUPERVISOR: pane.target };
+  for (let i = 0; i < 3; i++) assert.equal(F.run(F.old, ['send', 'supervisor', `held ${i}`, '--owner'], S).status, 0);
+  assert.equal(heldFor(F, pane).length, 3);
+  pane.press('2');
+  await until(() => /answered 2/.test(pane.shows()), 'the answer');
+  // a flusher at work: its claim, under a live pid, touched just now
+  const live = spawn('sleep', ['600']);
+  later(() => live.kill());
+  const k = encodeURIComponent(pane.key);
+  const held = heldDirOf(F, pane);
+  const claimed = `${held}.claim-${live.pid}-${Date.now()}`;
+  fs.renameSync(held, claimed);
+  // a late sender, held open between its read of the held folder and its read of the claims
+  const DT = path.join(F.old, 'docs/devteam/scripts/devteam.mjs');
+  let exited = false;
+  const sender = new Promise((resolve) => execFile(process.execPath, [DT, 'send', 'supervisor', 'late', '--owner'], { cwd: F.old, env: F.env({ ...S, DEVTEAM_HELD_CHECK_DELAY_MS: '2000' }) }, (err, so, se) => { exited = true; resolve({ err, se }); }));
+  const locks = path.join(F.old, 'docs/devteam/run/held-locks');
+  await until(() => exited || fs.existsSync(path.join(locks, `${k}.checking`)), 'the sender inside its check, or gone');
+  // the flusher stops and puts its claim back, under the window's lock, as the kit does
+  fs.mkdirSync(locks, { recursive: true });
+  const lock = path.join(locks, `${k}.lock`);
+  await until(() => { try { fs.mkdirSync(lock); return true; } catch (e) { if (e.code !== 'EEXIST') throw e; return false; } }, "the window's lock");
+  fs.mkdirSync(held, { recursive: true });
+  for (const n of fs.readdirSync(claimed).filter((x) => x.endsWith('.json'))) fs.renameSync(path.join(claimed, n), path.join(held, n));
+  fs.rmSync(claimed, { recursive: true, force: true });
+  fs.rmSync(lock, { recursive: true, force: true });
+  const r = await sender;
+  assert.equal(r.err, null, r.se);
+  const all = ['held 0', 'held 1', 'held 2', 'late'];
+  await until(() => { if (heldFor(F, pane).length) tick(F, S); return !heldFor(F, pane).length && all.every((x) => pane.typed().includes(`${x}\r`)); }, 'every line typed');
+  const lines = pane.typed().slice(1).split('\r').filter(Boolean).map((l) => l.replace(/^\[devteam info \S+ from owner\] /, ''));
+  assert.deepEqual(lines, all, 'the late line after the held ones, each once');
+});
+
 test("a claim nobody is working goes back as it was: its process gone, or alive but silent for a minute (a pid can be anyone's); one being worked is left alone", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-claims');
   const later = cleanup(t);
