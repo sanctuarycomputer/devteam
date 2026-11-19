@@ -488,7 +488,7 @@ if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operat
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'owner-cursor.json', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', 'held', 'held-locks', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'owner-cursor.json', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', 'held', 'held-locks', 'browser', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
@@ -546,6 +546,9 @@ const SETTINGS_DEFAULTS = {
   // shared with other fleets, so this is the supervisor's, like the caps above: 0.5 to 0.95, and
   // an invalid value counts as the default.
   machine_memory_ceiling: 0.8,
+  // Minutes without a browser command before the supervisor's browser (devteam.mjs browser) stops
+  // its Chrome; a whole number from 1 to 1440, and anything else counts as the default.
+  browser_idle_minutes: 30,
   stale_after_minutes: 30,
   // A goal parked this long (not by a fleet op) is worth asking the owner about again.
   hold_review_days: 14,
@@ -652,6 +655,7 @@ const SETTINGS_WORDS = Object.freeze({
   max_active_per_component: ['Fleet and capacity', 'Workers at once, per component', 'the most workers at the same time within one component', 'value'],
   max_active_planners: ['Fleet and capacity', 'Planners at once', 'the most planners running together; none means no cap', 'value'],
   machine_memory_ceiling: ['Fleet and capacity', 'Memory ceiling', "share of the machine's memory at or above which a new worker or planner waits", 'value'],
+  browser_idle_minutes: ['Fleet and capacity', 'Browser idle stop', "minutes without a browser command before the supervisor's browser stops", 'value'],
   tick_minutes: ['Fleet and capacity', 'Supervisor tick', 'how often the supervisor looks over everything when nothing wakes it', 'value'],
   stale_after_minutes: ['Fleet and capacity', 'Silent session after', 'minutes without a sign of life before a worker counts as stuck', 'value'],
   tmux_session: ['Fleet and capacity', 'Terminal session name', 'the tmux session the windows live in; none means one named after the project', 'value'],
@@ -702,7 +706,7 @@ const settingNum = (v) => v === null || Number.isFinite(v);
 const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
 const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
 const SETTING_SHAPES = Object.freeze({
-  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
   worktree_setup_always: (v) => typeof v === 'boolean',
   forge: (v) => ['github', 'git'].includes(v),
@@ -25234,6 +25238,128 @@ async function cmdBrowserGuard() {
 }
 /* browser-guard end */
 
+/* browser start */
+// devteam.mjs browser (browser@1; design supervisors-can-use-a-browser-with-the-o, §2 and §3): the
+// supervisor's own Chrome, driven from its shell. One private profile per project (the owner's
+// answer to q-20261114-203933946-supervisor), at ~/.devteam/browser/<key>/, used by nobody else.
+const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>]';
+// The instance key, the contract's instance pattern: <project slug>-<12 hex>. A path is built from a
+// key only once it matches, so no key can climb out of browserHome().
+const BROWSER_KEY = /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$/;
+const browserHome = () => path.join(os.homedir(), '.devteam', 'browser');
+// A test hook's value, read only while DEVTEAM_TEST is set and non-empty.
+const browserTestEnv = (name) => (process.env.DEVTEAM_TEST ? process.env[name] : undefined);
+const BROWSER_MAC_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const BROWSER_CHROME_NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
+const browserExecutable = (f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch { return false; } };
+// Chrome's binary: CHROME_PATH, then the macOS app, then each name on PATH in order. A CHROME_PATH
+// that isn't an executable file is refused, never passed over.
+function browserChrome() {
+  const looked = (first) => `browser: no Chrome found (looked for ${first}, ${[...(process.platform === 'darwin' ? [BROWSER_MAC_CHROME] : []), ...BROWSER_CHROME_NAMES].join(', ')}); install Chrome or Chromium, or set CHROME_PATH to its binary`;
+  const given = process.env.CHROME_PATH;
+  if (given) return browserExecutable(given) ? given : die(looked(`CHROME_PATH=${given}, not an executable file`));
+  if (browserExecutable(BROWSER_MAC_CHROME)) return BROWSER_MAC_CHROME;
+  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  for (const n of BROWSER_CHROME_NAMES) for (const d of dirs) if (browserExecutable(path.join(d, n))) return path.join(d, n);
+  return die(looked('CHROME_PATH'));
+}
+// Who may run it, and on what, in this order, before anything else; each refusal exits 1 and changes
+// nothing. The role check is the kit's supervisor guard loosened to let an empty role through (the
+// owner's own terminal on main), so a worker shell that lost its role is still refused by its writer.
+function browserGates({ chrome = true, memory = true } = {}) {
+  const role = process.env.DEVTEAM_ROLE;
+  if ((role && role !== 'supervisor') || logWriter() !== 'supervisor') die("browser: the supervisor's browser; workers ask the supervisor");
+  const hook = browserTestEnv('DEVTEAM_TEST_BROWSER_NODE');
+  if (!(Number(hook || process.versions.node.split('.')[0]) >= 22) || typeof WebSocket !== 'function') die(`browser needs Node 22 or newer (this is ${hook ? `v${hook}` : process.version})`);
+  const found = chrome ? browserChrome() : null;
+  const full = memory ? memoryFull() : null;
+  if (full) die(`browser: ${full.words}; start the browser when some sessions finish`);
+  return { chrome: found };
+}
+function browserKey() {
+  const slug = String(loadSettings().project ?? path.basename(mainRoot)).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
+  return `${slug}-${crypto.createHash('sha1').update(realPath(mainRoot)).digest('hex').slice(0, 12)}`;
+}
+// The root a profile's root.json names, or null without a readable one.
+function browserRootOf(dir) {
+  try { const r = JSON.parse(fs.readFileSync(path.join(dir, 'root.json'), 'utf8'))?.root; return typeof r === 'string' && path.isAbsolute(r) && r.length <= 4096 ? r : null; } catch { return null; }
+}
+// This checkout's profile folder (0700, its parent too), with root.json naming this checkout: a
+// profile naming another root is a copied or moved checkout's, refused; a missing root.json is written.
+function browserProfile() {
+  const key = browserKey(), here = realPath(mainRoot), dir = path.join(browserHome(), key);
+  for (const d of [browserHome(), dir]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fs.chmodSync(d, 0o700); }
+  const root = browserRootOf(dir);
+  if (root !== null && root !== here) die(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. Forget it (devteam.mjs browser forget) to start signed out`);
+  if (root === null) fs.writeFileSync(path.join(dir, 'root.json'), `${JSON.stringify({ root: here })}\n`, { mode: 0o600 });
+  return dir;
+}
+// browser_idle_minutes in ms, read like machine_memory_ceiling: anything but a whole number from 1 to
+// 1440 counts as the default. DEVTEAM_TEST_BROWSER_IDLE_MS stands in for it in tests.
+function browserIdleMs() {
+  const hook = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_IDLE_MS'));
+  if (Number.isInteger(hook) && hook > 0) return hook;
+  const v = loadSettings().browser_idle_minutes;
+  return (Number.isInteger(v) && v >= 1 && v <= 1440 ? v : SETTINGS_DEFAULTS.browser_idle_minutes) * 60000;
+}
+// The pids of local processes whose command line carries this profile as --user-data-dir, or null
+// when they can't be listed (so nothing is removed on a guess). /proc, else ps (macOS).
+function browserProcsOn(profile) {
+  const want = new Set([profile, realPath(profile)].flatMap((p) => [p, `${p}${path.sep}`]));
+  const carries = (args) => args.some((a, i) => (a.startsWith('--user-data-dir=') && want.has(a.slice('--user-data-dir='.length))) || (a === '--user-data-dir' && want.has(args[i + 1])));
+  if (fs.existsSync('/proc/self/cmdline')) {
+    const pids = [];
+    for (const d of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(d) || Number(d) === process.pid) continue;
+      let c; try { c = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8'); } catch { continue; }
+      if (carries(c.split('\0'))) pids.push(Number(d));
+    }
+    return pids;
+  }
+  const r = spawnSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8' });
+  if (r.status !== 0) return null;
+  return r.stdout.split('\n').map((l) => /^\s*(\d+)\s+(.*)$/.exec(l)).filter((m) => m && Number(m[1]) !== process.pid && [...want].some((w) => ` ${m[2]} `.includes(` --user-data-dir=${w} `))).map((m) => Number(m[1]));
+}
+function browserProfiles() {
+  const mine = browserKey();
+  let keys = [];
+  try { keys = fs.readdirSync(browserHome(), { withFileTypes: true }).filter((d) => d.isDirectory() && BROWSER_KEY.test(d.name)).map((d) => d.name).sort(); } catch {}
+  return keys.map((key) => { const root = browserRootOf(path.join(browserHome(), key)); return { key, root: root ?? '(unknown)', root_gone: root !== null && !fs.existsSync(root), current: key === mine }; });
+}
+// forget --profile <another key>: refused while any local process carries it, else removed. The path
+// removed is the validated key under the literal folder, never one read from anywhere.
+function browserForgetOther(key) {
+  if (!BROWSER_KEY.test(key)) die(`browser forget --profile: ${JSON.stringify(key.slice(0, 80))} isn't a profile key (<project>-<12 hex>); browser profiles lists them`);
+  const dir = path.join(browserHome(), key);
+  if (!fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory()) die(`browser forget --profile: no profile ${key} under ${browserHome()}`);
+  const pids = browserProcsOn(dir);
+  if (pids === null) die(`browser forget --profile: couldn't list this machine's processes to see whether profile ${key} is in use; nothing removed`);
+  if (pids.length) die(`browser forget --profile: profile ${key} is in use (process ${pids.join(', ')} carries it); stop that browser first`);
+  fs.rmSync(path.join(browserHome(), key), { recursive: true, force: true });
+  out(`forgot profile ${key}: every site in it is signed out`);
+}
+// Which gates each verb runs: status, profiles and stop skip Chrome and memory; forget skips memory.
+const BROWSER_VERBS = {
+  ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot'].map((v) => [v, { chrome: true, memory: true }])),
+  status: { chrome: false, memory: false }, stop: { chrome: false, memory: false }, profiles: { chrome: false, memory: false },
+  forget: { chrome: true, memory: false }, serve: { chrome: true, memory: false },
+};
+async function cmdBrowser() {
+  const verb = positional[0];
+  if (!Object.hasOwn(BROWSER_VERBS, verb ?? '')) die(`usage: ${BROWSER_USAGE}`);
+  if (verb === 'serve' && process.env.DEVTEAM_BROWSER_SERVE !== '1') die('browser serve is internal: browser start runs it in its own window');
+  browserGates(BROWSER_VERBS[verb]);
+  if (verb === 'profiles') return out(JSON.stringify({ browser: 1, profiles: browserProfiles() }));
+  if (verb === 'forget') {
+    if (flags.profile === true) die(`usage: ${BROWSER_USAGE}`);
+    const key = flagStr('profile');
+    if (key !== undefined && key !== browserKey()) return browserForgetOther(key);
+  }
+  if (BROWSER_VERBS[verb].memory) browserProfile();
+  die(`browser ${verb}: not in this build yet`);
+}
+/* browser end */
+
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
 Setup and roles
@@ -25296,6 +25422,7 @@ Decide and act (supervisor.md, constitution.md)
   preview url [<name>]            the link, as the owner will open it
   preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
   browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
+  ${BROWSER_USAGE}   supervisor: the supervisor's own Chrome (Node 22+), in a tmux window beside yours, with one private profile per project under ~/.devteam/browser/; profiles lists them as JSON, and forget removes one (every site in it signed out)
   preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
@@ -25381,7 +25508,7 @@ const COMMANDS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
-  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard,
+  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard, browser: cmdBrowser,
 };
 /* dispatch start */
 if (!command || command === 'help' || command === '--help') out(HELP);
