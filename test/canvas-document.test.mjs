@@ -1064,3 +1064,360 @@ test('canvas module: rules: each broken copy', async () => {
     });
   }
 });
+
+// ---- the done-when tests (C8 to C12) ----
+//
+// Each refusal is asserted with the code the contract states (§4, §6, §7), on a deep-frozen document,
+// and returns that very object; the fake is asked the same and must agree.
+
+const writtenBytes = (d) => Buffer.byteLength(`${JSON.stringify(d, null, 2)}\n`);
+const onPage = (doc, op) => (op.op === 'add' ? op.node.type === 'page' : op.op !== 'token' && pageIds(doc).includes(op.id));
+const brief = (ops) => { const s = JSON.stringify(ops); return s.length > 160 ? `${s.slice(0, 160)}…` : s; };
+
+// An edit that must apply; its document, deep-frozen.
+function mustApply(canvas, doc, ops, opts, label) {
+  const r = canvas.apply(doc, ops, opts);
+  assert.equal(r.why, null, `${label}: applies (${brief(ops)})`);
+  assert.equal(fake.applyEdit(doc, ops, opts).why, null, `${label}: the fake applies it too`);
+  return deepFreeze(r.doc);
+}
+// An edit that must be refused with `code`, the document (deep-frozen) unchanged: the same object back.
+function mustRefuse(canvas, doc, ops, opts, code, label) {
+  deepFreeze(doc);
+  const r = canvas.apply(doc, ops, opts);
+  assert.equal(r.why, code, `${label}: refused ${code} (${brief(ops)})`);
+  assert.equal(r.doc, doc, `${label}: the document unchanged (the same object)`);
+  assert.equal(fake.applyEdit(doc, ops, opts).why, code, `${label}: the fake refuses it ${code} too`);
+}
+
+const EVERY = { images: FIXTURE_IMAGES };
+const everyType = () => deepFreeze(fixture('doc-every-type.json'));
+const rect = (id, parent, more = {}) => ({ op: 'add', node: { id, type: 'rect', parent, ...more }, after: null });
+const kids = (d, id) => (pageIds(d).includes(id) ? d.pages.find((pg) => pg.id === id).children : d.nodes[id].children);
+
+// C8
+test('canvas module: ops: each applied twice is the same as once', async (t) => {
+  const canvas = await load();
+  const edits = await appliedSingleEdits();
+  const counts = Object.fromEntries(fake.OPS.map((k) => [k, 0]));
+  const pages = { add: 0, del: 0, move: 0, set: 0 };
+  let unbounded = 0;
+  const t0 = Date.now();
+  for (const { doc, op, opts, from } of edits) {
+    const label = `${from}: ${brief([op])}`;
+    const first = canvas.apply(doc, [op], opts);
+    assert.equal(first.why, null, `${label}: applies once`);
+    deepFreeze(first.doc);
+    const again = canvas.apply(first.doc, [op], opts);
+    assert.equal(again.why, null, `${label}: applies again`);
+    assert.equal(again.doc.rev, first.doc.rev + 1, `${label}: again raises rev by one`);
+    assert.deepStrictEqual({ ...again.doc, rev: first.doc.rev }, first.doc, `${label}: again is the same document but rev`);
+    // the op twice in one edit; a page's bound lifted when the doubled ops alone would pass it
+    let twiceOpts = opts;
+    if (opts.maxOpsBytes !== null && Buffer.byteLength(JSON.stringify([op, op])) > fake.LIMITS.editOpsBytes) {
+      twiceOpts = { ...opts, maxOpsBytes: null };
+      unbounded += 1;
+    }
+    const twice = canvas.apply(doc, [op, op], twiceOpts);
+    assert.equal(twice.why, null, `${label}: [op, op] applies`);
+    assert.deepStrictEqual(twice.doc, first.doc, `${label}: [op, op] is the same document as [op]`);
+    counts[op.op] += 1;
+    if (onPage(doc, op)) pages[op.op] += 1;
+  }
+  t.diagnostic(`${edits.length} applied single-op edits in ${Date.now() - t0} ms; by op ${JSON.stringify(counts)}; page ops ${JSON.stringify(pages)}; ${unbounded} doubled edits judged unbounded`);
+  for (const k of fake.OPS) assert.ok(counts[k] >= 1, `a ${k} checked (${counts[k]})`);
+  for (const k of Object.keys(pages)) assert.ok(pages[k] >= 1, `a page ${k} checked (${pages[k]})`);
+});
+
+// C9
+test('canvas module: ops: add of an existing id with another type or parent is exists', async () => {
+  const canvas = await load();
+  const doc = everyType();
+  const cases = [
+    ['another type, the same parent', { id: 'icon', type: 'rect', parent: 'card' }],
+    ['the same type, another parent', { id: 'icon', type: 'vector', parent: 'loose', path: 'M0 0' }],
+    ['the same type, another page parent', { id: 'card', type: 'frame', parent: 'p-parts' }],
+    ["a node with a page's id", { id: 'p-parts', type: 'rect', parent: 'card' }],
+    ["a page with a node's id", { id: 'card', type: 'page', parent: null, name: 'Card page' }],
+  ];
+  for (const [label, node] of cases) mustRefuse(canvas, doc, [{ op: 'add', node, after: null }], EVERY, 'exists', label);
+  // the same type and parent: its properties as sets, its place kept (after null would put a new one first)
+  const at = doc.nodes.card.children.indexOf('icon');
+  assert.ok(at > 0, 'icon is not first in card');
+  const got = mustApply(canvas, doc, [{ op: 'add', node: { id: 'icon', type: 'vector', parent: 'card', name: 'Icon 2', opacity: 0.5 }, after: null }], EVERY, 'the same type and parent');
+  const want = clone(doc);
+  want.rev += 1;
+  want.nodes.icon.name = 'Icon 2';
+  want.nodes.icon.opacity = 0.5;
+  assert.deepStrictEqual(got, want, 'the same type and parent: only its properties change');
+  assert.equal(got.nodes.card.children.indexOf('icon'), at, 'its index in its parent is unchanged');
+  // a page added again with its own id sets its name, in place
+  const pg = mustApply(canvas, doc, [{ op: 'add', node: { id: 'p-parts', type: 'page', parent: null, name: 'Parts 2' }, after: null }], EVERY, 'a page again');
+  assert.deepEqual(pg.pages.map((p) => [p.id, p.name]), [['p-main', 'Checkout'], ['p-parts', 'Parts 2']], 'a page added again: its name set, its place kept');
+});
+
+// C10
+test('canvas module: ops: a move into itself or its subtree is cycle', async () => {
+  const canvas = await load();
+  const doc = everyType();
+  mustRefuse(canvas, doc, [{ op: 'move', id: 'card', parent: 'card', after: null }], EVERY, 'cycle', 'card into itself');
+  mustRefuse(canvas, doc, [{ op: 'move', id: 'card', parent: 'actions', after: null }], EVERY, 'cycle', 'card into its child actions');
+  // a chain p1 > a > b > c > d, each a frame
+  const chain = { canvas: 1, rev: 3, tokens: {}, pages: [{ id: 'p1', name: 'P', children: ['a'] }], nodes: {} };
+  ['a', 'b', 'c', 'd'].forEach((id, i, all) => {
+    chain.nodes[id] = { type: 'frame', parent: i ? all[i - 1] : 'p1', children: i < all.length - 1 ? [all[i + 1]] : [] };
+  });
+  deepFreeze(chain);
+  assert.deepEqual(canvas.validate(chain), [], 'the chain is valid');
+  for (const [into, what] of [['a', 'itself'], ['b', 'a child'], ['c', 'a grandchild'], ['d', 'a descendant three down']]) {
+    mustRefuse(canvas, chain, [{ op: 'move', id: 'a', parent: into, after: null }], {}, 'cycle', `a into ${what}`);
+  }
+  mustRefuse(canvas, chain, [{ op: 'move', id: 'b', parent: 'd', after: null }], {}, 'cycle', 'b into its grandchild');
+  // the walk is up from the new parent: an ancestor into a sibling's subtree is no cycle
+  mustApply(canvas, chain, [{ op: 'move', id: 'd', parent: 'a', after: null }], {}, 'd up under a');
+});
+
+// C11
+test('canvas module: ops: add or move after a gone sibling places last', async () => {
+  const canvas = await load();
+  const doc = everyType();
+  const last = (d, holder) => kids(d, holder)[kids(d, holder).length - 1];
+  const cases = [
+    ['an add under a page, after nothing', [{ ...rect('n1', 'p-main'), after: 'nope' }], 'p-main', 'n1'],
+    ['an add under a frame, after nothing', [{ ...rect('n1', 'card'), after: 'nope' }], 'card', 'n1'],
+    ['an add under a frame, after a sibling deleted in the edit', [{ op: 'del', id: 'rule' }, { ...rect('n1', 'card'), after: 'rule' }], 'card', 'n1'],
+    ['an add under a page, after a sibling deleted in the edit', [{ op: 'del', id: 'loose' }, { ...rect('n1', 'p-main'), after: 'loose' }], 'p-main', 'n1'],
+    ['a move to another parent, after nothing', [{ op: 'move', id: 'badge', parent: 'card', after: 'nope' }], 'card', 'badge'],
+    ['a move in its own parent, after nothing', [{ op: 'move', id: 'title', parent: 'card', after: 'nope' }], 'card', 'title'],
+    ['a move after a sibling deleted in the edit', [{ op: 'del', id: 'dot' }, { op: 'move', id: 'title', parent: 'card', after: 'dot' }], 'card', 'title'],
+  ];
+  for (const [label, ops, holder, id] of cases) {
+    const before = kids(doc, holder).filter((x) => x !== id);
+    const got = mustApply(canvas, doc, ops, EVERY, label);
+    assert.equal(last(got, holder), id, `${label}: placed last`);
+    assert.equal(kids(got, holder).filter((x) => x === id).length, 1, `${label}: listed once`);
+    assert.deepEqual(kids(got, holder).slice(0, -1), before.filter((x) => own(got.nodes, x)), `${label}: the others in their order`);
+  }
+  const page = mustApply(canvas, doc, [{ op: 'add', node: { id: 'p3', type: 'page', parent: null, name: 'Three' }, after: 'nope' }], EVERY, 'a page add after nothing');
+  assert.deepEqual(pageIds(page), ['p-main', 'p-parts', 'p3'], 'a page add after nothing: placed last');
+  const moved = mustApply(canvas, doc, [{ op: 'move', id: 'p-main', parent: null, after: 'nope' }], EVERY, 'a page move after nothing');
+  assert.deepEqual(pageIds(moved), ['p-parts', 'p-main'], 'a page move after nothing: placed last');
+});
+
+// ---- C12: the limits ----
+
+const L = fake.LIMITS;
+const blank = () => ({ canvas: 1, rev: 0, tokens: {}, pages: [{ id: 'p1', name: 'Page 1', children: [] }], nodes: {} });
+// Puts a node into a document being built, listed last in its parent.
+function place(d, id, type, parent, more = {}) {
+  d.nodes[id] = { type, parent, ...more };
+  if (CONTAINER_TYPES.includes(type)) d.nodes[id].children = [];
+  kids(d, parent).push(id);
+  return d;
+}
+const id5 = (prefix, i) => `${prefix}${String(i).padStart(5, '0')}`;
+// A valid SVG path of exactly n bytes (n ≥ 2): a move and zeros.
+const pathOf = (n) => `M0${' 0'.repeat(Math.floor((n - 2) / 2))}${(n - 2) % 2 ? '0' : ''}`;
+// The properties a rect takes as overrides, ten of them, and values for them.
+const OVERRIDE_PROPS = [['visible', false], ['opacity', 0.5], ['x', 1], ['y', 2], ['size.w', 10], ['size.h', 10], ['fill', '#000000'], ['stroke', '#ffffff'], ['strokeWidth', 1], ['radius', 2]];
+// A component `comp` holding rects r0..r<n-1>, and an instance `inst` of it, on p1.
+function withComponent(n) {
+  const d = place(blank(), 'comp', 'component', 'p1', { props: {}, variants: {} });
+  for (let i = 0; i < n; i++) place(d, `r${i}`, 'rect', 'comp');
+  place(d, 'inst', 'instance', 'p1', { component: 'comp' });
+  return d;
+}
+// An override map of `count` entries over r0, r1, … (ten each).
+function overrideMap(count) {
+  const m = {};
+  for (let i = 0; i < count; i++) {
+    const [prop, v] = OVERRIDE_PROPS[i % 10];
+    (m[`r${Math.floor(i / 10)}`] ??= {})[prop] = v;
+  }
+  return m;
+}
+const entryCount = (m) => Object.values(m).reduce((s, o) => s + Object.keys(o).length, 0);
+// A valid document exactly `target` bytes as written, holding an empty-named rect `f`: text nodes of
+// 10000 characters, the last cut to fit.
+function ofBytes(target) {
+  const d = place(blank(), 'f', 'rect', 'p1', { name: '' });
+  const full = 'x'.repeat(L.textChars);
+  const n = Math.floor((target - writtenBytes(d)) / (L.textChars + 200));
+  for (let i = 0; i < n; i++) place(d, id5('t', i), 'text', 'p1', { text: full });
+  place(d, 'tlast', 'text', 'p1', { text: '' });
+  let need = target - writtenBytes(d);
+  for (let i = n; need > L.textChars; i++) {
+    place(d, id5('t', i), 'text', 'p1', { text: full });
+    need = target - writtenBytes(d);
+  }
+  assert.ok(need >= 0, `the filler fits (${need})`);
+  d.nodes.tlast.text = 'x'.repeat(need);
+  assert.equal(writtenBytes(d), target, 'the document is the bytes asked');
+  return d;
+}
+const tokenCount = (d) => tokenList(d).filter(([, tk]) => tk).length;
+const NUM = { $type: 'number', $value: 1 };
+
+// One limit: `at` applies to `doc` and `check` holds on what it reaches; `over` (on what `at` reached,
+// or on `doc` when `fromStart`) is refused `code`, the document unchanged.
+function edge(canvas, ms, name, { doc, at, over, opts = {}, overOpts = opts, code, fromStart = false, check }) {
+  const t0 = Date.now();
+  deepFreeze(doc);
+  const reached = mustApply(canvas, doc, at, opts, `${name}: at the limit`);
+  if (check) check(reached);
+  mustRefuse(canvas, fromStart ? doc : reached, over, overOpts, code, `${name}: over by one`);
+  ms[name] = Date.now() - t0;
+  return reached;
+}
+
+test('canvas module: limits: each refused limit at and over', async (t) => {
+  const canvas = await load();
+  const ms = {};
+  const t0 = Date.now();
+
+  let d = blank();
+  for (let i = 0; i < L.nodes - 1; i++) place(d, id5('n', i), 'rect', 'p1');
+  edge(canvas, ms, 'nodes', {
+    doc: d, at: [rect('at', 'p1')], over: [rect('over', 'p1')], code: 'limit',
+    check: (r) => assert.equal(Object.keys(r.nodes).length, L.nodes, 'nodes: the limit reached'),
+  });
+
+  d = blank();
+  for (let i = 2; i < L.pages; i++) d.pages.push({ id: `p${i}`, name: '', children: [] });
+  const page = (id) => [{ op: 'add', node: { id, type: 'page', parent: null, name: id }, after: null }];
+  edge(canvas, ms, 'pages', {
+    doc: d, at: page('pat'), over: page('pover'), code: 'limit',
+    check: (r) => assert.equal(r.pages.length, L.pages, 'pages: the limit reached'),
+  });
+
+  d = blank();
+  d.tokens.t = {};
+  for (let i = 0; i < L.tokens - 1; i++) d.tokens.t[`k${i}`] = { ...NUM };
+  edge(canvas, ms, 'tokens', {
+    doc: d, at: [{ op: 'token', path: 't.at', value: NUM }], over: [{ op: 'token', path: 't.over', value: NUM }], code: 'limit',
+    check: (r) => assert.equal(tokenCount(r), L.tokens, 'tokens: the limit reached'),
+  });
+
+  edge(canvas, ms, 'tokenDepth', {
+    doc: blank(), at: [{ op: 'token', path: 'a.b.c.d.e.f.g.h', value: NUM }], over: [{ op: 'token', path: 'a.b.c.d.e.f.g.i.j', value: NUM }], code: 'limit',
+    check: (r) => assert.equal(r.tokens.a.b.c.d.e.f.g.h.$value, 1, 'tokenDepth: a token 8 deep'),
+  });
+
+  d = blank();
+  for (let i = 1; i < L.depth; i++) place(d, `f${i}`, 'frame', i === 1 ? 'p1' : `f${i - 1}`);
+  edge(canvas, ms, 'depth', {
+    doc: d, at: [{ ...rect('at', `f${L.depth - 1}`), node: { id: `f${L.depth}`, type: 'frame', parent: `f${L.depth - 1}` } }],
+    over: [rect('over', `f${L.depth}`)], code: 'limit',
+    check: (r) => { let n = 0; for (let c = `f${L.depth}`; own(r.nodes, c); c = r.nodes[c].parent) n += 1; assert.equal(n, L.depth, 'depth: a node at the limit'); },
+  });
+
+  const rects = Math.ceil(L.overrideEntries / 10) + 1;
+  const [atProp, atValue] = OVERRIDE_PROPS[(L.overrideEntries - 1) % 10];
+  const atTarget = `r${Math.floor((L.overrideEntries - 1) / 10)}`;
+  const overTarget = `r${rects - 1}`;
+  d = withComponent(rects);
+  d.nodes.inst.overrides = overrideMap(L.overrideEntries - 1);
+  edge(canvas, ms, "overrideEntries (an instance's)", {
+    doc: d, at: [{ op: 'set', id: 'inst', prop: `overrides.${atTarget}.${atProp}`, value: atValue }],
+    over: [{ op: 'set', id: 'inst', prop: `overrides.${overTarget}.visible`, value: false }], code: 'limit',
+    check: (r) => assert.equal(entryCount(r.nodes.inst.overrides), L.overrideEntries, "overrideEntries (an instance's): the limit reached"),
+  });
+  d = withComponent(rects);
+  d.nodes.comp.variants.v = overrideMap(L.overrideEntries - 1);
+  edge(canvas, ms, "overrideEntries (a variant's)", {
+    doc: d, at: [{ op: 'set', id: 'comp', prop: `variants.v.${atTarget}.${atProp}`, value: atValue }],
+    over: [{ op: 'set', id: 'comp', prop: `variants.v.${overTarget}.visible`, value: false }], code: 'limit',
+    check: (r) => assert.equal(entryCount(r.nodes.comp.variants.v), L.overrideEntries, "overrideEntries (a variant's): the limit reached"),
+  });
+
+  const def = { type: 'bool', default: true, target: { id: 'r0', prop: 'visible' } };
+  d = withComponent(1);
+  for (let i = 0; i < L.props - 1; i++) d.nodes.comp.props[`p${i}`] = { ...def, target: { ...def.target } };
+  edge(canvas, ms, 'props', {
+    doc: d, at: [{ op: 'set', id: 'comp', prop: 'props.pat', value: def }], over: [{ op: 'set', id: 'comp', prop: 'props.pover', value: def }], code: 'limit',
+    check: (r) => assert.equal(Object.keys(r.nodes.comp.props).length, L.props, 'props: the limit reached'),
+  });
+
+  const variant = { r0: { visible: false } };
+  d = withComponent(1);
+  for (let i = 0; i < L.variants - 1; i++) d.nodes.comp.variants[`v${i}`] = clone(variant);
+  edge(canvas, ms, 'variants', {
+    doc: d, at: [{ op: 'set', id: 'comp', prop: 'variants.vat', value: variant }], over: [{ op: 'set', id: 'comp', prop: 'variants.vover', value: variant }], code: 'limit',
+    check: (r) => assert.equal(Object.keys(r.nodes.comp.variants).length, L.variants, 'variants: the limit reached'),
+  });
+
+  // canvas.json as written: 100 bytes short, then a name of 100 (at) or 101 (over) characters
+  const name = (n) => [{ op: 'set', id: 'f', prop: 'name', value: 'x'.repeat(n) }];
+  edge(canvas, ms, 'docBytes', {
+    doc: ofBytes(L.docBytes - 100), at: name(100), over: name(101), code: 'limit', fromStart: true,
+    check: (r) => assert.equal(writtenBytes(r), L.docBytes, 'docBytes: canvas.json at the limit'),
+  });
+
+  d = place(blank(), 'f', 'rect', 'p1', { name: '' });
+  const others = L.folderBytes - (writtenBytes(d) + 100);
+  edge(canvas, ms, 'folderBytes', {
+    doc: d, at: name(100), over: name(101), opts: { folderBytes: others }, code: 'limit', fromStart: true,
+    check: (r) => assert.equal(writtenBytes(r) + others, L.folderBytes, 'folderBytes: the folder at the limit'),
+  });
+
+  // an edit's ops as JSON: exactly 64 KB (at), one byte more (over); over, unbounded, applies
+  d = place(blank(), 'v', 'vector', 'p1', { path: 'M0 0' });
+  const setPath = (n) => [{ op: 'set', id: 'v', prop: 'path', value: pathOf(n) }];
+  const around = Buffer.byteLength(JSON.stringify(setPath(2))) - 2;
+  const atOps = setPath(L.editOpsBytes - around);
+  const overOps = setPath(L.editOpsBytes - around + 1);
+  assert.equal(Buffer.byteLength(JSON.stringify(atOps)), L.editOpsBytes, 'editOpsBytes: the at edit is 64 KB');
+  assert.equal(Buffer.byteLength(JSON.stringify(overOps)), L.editOpsBytes + 1, 'editOpsBytes: the over edit is a byte more');
+  edge(canvas, ms, 'editOpsBytes', { doc: d, at: atOps, over: overOps, code: 'limit', fromStart: true });
+  const free = mustApply(canvas, d, overOps, { maxOpsBytes: null }, 'editOpsBytes: over with maxOpsBytes null');
+  assert.equal(free.nodes.v.path, overOps[0].value, 'editOpsBytes: unbounded, the path set');
+
+  d = blank();
+  d.pages.push({ id: 'p2', name: '', children: [] });
+  place(d, 'gone', 'rect', 'p1');
+  edge(canvas, ms, 'the last page', {
+    doc: d, at: [{ op: 'del', id: 'p2' }], over: [{ op: 'del', id: 'p1' }], code: 'limit',
+    check: (r) => assert.deepEqual(pageIds(r), ['p1'], 'the last page: one left'),
+  });
+
+  t.diagnostic(`ms per limit ${JSON.stringify(ms)}; the test ${Date.now() - t0} ms`);
+});
+
+test('canvas module: limits: each refused value at and over', async (t) => {
+  const canvas = await load();
+  const ms = {};
+  const t0 = Date.now();
+  const comp40 = `k${'x'.repeat(L.idChars - 1)}`;
+  const d = withComponent(1);
+  place(d, 'fr', 'frame', 'p1');
+  place(d, 'tx', 'text', 'p1');
+  place(d, 'v', 'vector', 'p1', { path: 'M0 0' });
+  place(d, comp40, 'component', 'p1');
+  deepFreeze(d);
+  assert.deepEqual(canvas.validate(d), [], 'the document is valid');
+  const set = (id, prop, value) => [{ op: 'set', id, prop, value }];
+  const both = (name, at, over, code = 'value', opts = {}) => edge(canvas, ms, name, { doc: d, at, over, code, opts, fromStart: true });
+  const s = (n, c = 'x') => c.repeat(n);
+  const pname = (n) => `p${s(n - 1, 'a')}`;
+  const def = { type: 'bool', default: true, target: { id: 'r0', prop: 'visible' } };
+  const variant = { r0: { visible: false } };
+
+  both('tracks', set('fr', 'layout.columns', Array(L.tracks).fill('auto')), set('fr', 'layout.columns', Array(L.tracks + 1).fill('auto')));
+  both('nameChars (a node)', set('fr', 'name', s(L.nameChars)), set('fr', 'name', s(L.nameChars + 1)));
+  both('nameChars (a page)', set('p1', 'name', s(L.nameChars)), set('p1', 'name', s(L.nameChars + 1)));
+  both('textChars', set('tx', 'text', s(L.textChars)), set('tx', 'text', s(L.textChars + 1)));
+  both('pathBytes (a local apply)', set('v', 'path', pathOf(L.pathBytes)), set('v', 'path', pathOf(L.pathBytes + 1)), 'value', { maxOpsBytes: null });
+  both('figmaChars', set('fr', 'figma', s(L.figmaChars, 'a')), set('fr', 'figma', s(L.figmaChars + 1, 'a')));
+  const n40 = pname(L.propNameChars);
+  const n41 = pname(L.propNameChars + 1);
+  both('propNameChars (the whole props map)', set('comp', 'props', { [n40]: def }), set('comp', 'props', { [n41]: def }));
+  both('propNameChars (the whole variants map)', set('comp', 'variants', { [n40]: variant }), set('comp', 'variants', { [n41]: variant }));
+  both('propNameChars (a props entry path)', set('comp', `props.${n40}`, def), set('comp', `props.${n41}`, def), 'prop');
+  both('propNameChars (a variants entry path)', set('comp', `variants.${n40}`, variant), set('comp', `variants.${n41}`, variant), 'prop');
+  const tok = (n) => [{ op: 'token', path: `g.${s(n, 'a')}`, value: NUM }];
+  both("tokenSegmentChars (a token op's path)", tok(L.tokenSegmentChars), tok(L.tokenSegmentChars + 1), 'shape');
+  both("idChars (an add's node.id)", [rect(s(L.idChars, 'a'), 'p1')], [rect(s(L.idChars + 1, 'a'), 'p1')], 'shape');
+  both('idChars (a componentRef value)', set('inst', 'component', comp40), set('inst', 'component', `${comp40}x`));
+
+  t.diagnostic(`ms per limit ${JSON.stringify(ms)}; the test ${Date.now() - t0} ms`);
+});
