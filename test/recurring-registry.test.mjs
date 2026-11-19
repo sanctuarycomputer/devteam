@@ -104,6 +104,11 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     refused(T.dry('also-edits', qa), /recurring\.b/);
     T.jobsChore('other-field', (j) => { j.recurring.a = check({ every: '12h', timeout_s: 300 }); });
     refused(T.dry('other-field', qa), /recurring\.a/);
+    T.jobsChore('with-workflow', (j) => { j.recurring.a = check({ every: '12h' }); });
+    fs.appendFileSync(path.join(T.old, '.worktrees/chore-with-workflow/.github/workflows/ci.yml'), '# more\n');
+    T.g(['commit', '-qam', 'workflow too'], path.join(T.old, '.worktrees/chore-with-workflow'));
+    T.g(['push', '-q', '-f', 'origin', 'chore-with-workflow'], path.join(T.old, '.worktrees/chore-with-workflow'));
+    refused(T.dry('with-workflow', qa), /outside project\/[^\n]*\.github\/workflows\/ci\.yml/);
     T.jobsChore('exact', (j) => { j.recurring.a = check({ every: '12h' }); });
     passes(T.dry('exact', qa));
     const stop = T.yes({ recurring: { b: null } });
@@ -133,9 +138,20 @@ test('A5: another class, a standing rule, or a question changed after its answer
       refused(T.dry('add', q), /recurring-edit/);
     }
     // a question whose change is rewritten after the owner answered it
-    const q = T.yes({ recurring: { 'ci-main': check({ every: '12h' }) } });
-    fs.appendFileSync(T.logFile('supervisor'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: q, at: new Date(Date.now() + 1000).toISOString(), by: 'supervisor', change: { recurring: { 'ci-main': check() } } })}\n`);
-    refused(T.dry('add', q));
+    const rewrite = (fields) => {
+      const q = T.yes({ recurring: { 'ci-main': check() } });
+      fs.appendFileSync(T.logFile('supervisor'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: q, at: new Date(Date.now() + 1000).toISOString(), by: 'supervisor', ...fields })}\n`);
+      refused(T.dry('add', q), /not a question the owner answered/);
+      T.run(['withdraw', q, '--reason', 'test']);
+    };
+    rewrite({ change: { recurring: { 'ci-main': check({ every: '12h' }) } } });
+    rewrite({ question: 'Should I add a job that runs every hour?' });
+    // answered No, then asked again about the same job, then the first re-answered Yes: superseded
+    const first = T.asked({ recurring: { 'ci-main': check() } });
+    T.answer(first, 'No');
+    T.asked({ recurring: { 'ci-main': check({ every: '12h' }) } });
+    T.answer(first, 'Yes');
+    refused(T.dry('add', first), /superseded/);
   } finally { T.done(); }
 });
 
@@ -184,6 +200,10 @@ test('A8: the registry chore waits while Upkeep is drained or parked; --force go
       passes(T.merge('recurring', ['--approved', q, '--force']));
       const act = T.acts().find((a) => a.class === 'merge-chore' && a.approved_by === q);
       assert.match(act.what, /with --force/);
+      // a chore of another slug that changes the jobs is held too
+      T.jobsChore('jobs-other', (j) => { j.recurring['tidy'] = chore(); });
+      const q2 = T.yes({ recurring: { tidy: chore() } });
+      refused(T.dry('jobs-other', q2), /Upkeep|goal is/);
     } finally { T.done(); }
   }
 });
@@ -205,12 +225,23 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     T.answer(add.qid);
     refused(T.ask({ recurring: { 'ci-main': check({ every: '12h' }) } }), /not landed/);
     refused(T.ask(undefined), /--change/);
+    refused(T.ask({ recurring: { tidy: chore() } }), /already has exactly this/);
+    refused((() => { const r = T.run(['ask', '--class', 'recurring-edit', '--question', 'Add it?', '--recommendation', 'Later', '--change', JSON.stringify({ recurring: { z1: chore() } })]); return r; })(), /Yes/);
+    refused(T.ask({ recurring: { z2: chore() } }, ['--kind', 'owner-action', '--secrets', '["API_KEY"]']), /secrets|owner-decision/);
+    refused(T.ask({ recurring: { z3: chore() } }, ['--context', `${HEADER}\nrecurring.z3: add {}`]), /approval/);
     // the cap: main at 90 with hourly x (24); an open stop of x; then an hourly y is refused
     const filler = Object.fromEntries(Array.from({ length: 66 }, (_, i) => [`daily-${i + 1}`, chore({ every: '1d' })]));
     T.onMain((j) => { j.recurring = { ...filler, x: check({ every: '1h' }) }; });
     passes(T.ask({ recurring: { x: null } }));
     refused(T.ask({ recurring: { y: check({ every: '1h' }) } }), /cap of 100/);
     passes(T.ask({ recurring: { y: check({ every: '1d' }) } }));
+    // a pending addition counts: main at 60, an open hourly z, then an hourly y is refused until z is withdrawn
+    const sixty = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`d-${i + 1}`, chore({ every: '1d' })]));
+    T.onMain((j) => { j.recurring = sixty; });
+    const z = T.asked({ recurring: { z: check({ every: '1h' }) } });
+    refused(T.ask({ recurring: { w: check({ every: '1h' }) } }), /cap of 100/);
+    T.ok(['withdraw', z, '--reason', 'test']);
+    passes(T.ask({ recurring: { w: check({ every: '1h' }) } }));
   } finally { T.done(); }
 });
 
@@ -255,33 +286,67 @@ test('A11: merge refuses a job that breaks the shape; validate and merge refuse 
 test('A12: recurring apply writes exactly the answered change and leaves every other byte alone', () => {
   const T = setup('apply');
   try {
-    T.onMain((j) => { j.recurring = { a: check(), b: chore() }; });
+    // main's block in a form JSON.stringify never writes: compact, odd spacing, a key after recurring
+    const compact = (jobs) => (txt) => txt.replace(BLOCK, (m, body) => {
+      const o = JSON.parse(body);
+      delete o.recurring;
+      const keys = Object.keys(o);
+      const head = keys.slice(0, -1).map((k) => `"${k}" :${JSON.stringify(o[k])}`).join(',\n ');
+      const last = keys.at(-1);
+      return `\`\`\`json devteam\n{ ${head},\n${jobs === undefined ? '' : `   "recurring":${JSON.stringify(jobs)} ,\n`}  "${last}":   ${JSON.stringify(o[last])}\n}\n\`\`\``;
+    });
+    const toMain = (fn) => { fs.writeFileSync(T.settingsFile, fn(fs.readFileSync(T.settingsFile, 'utf8'))); T.g(['commit', '-qam', 'main block'], T.old); T.g(['push', '-q', 'origin', 'main'], T.old); T.g(['fetch', '-q', 'origin'], T.old); };
+    const wt = path.join(T.old, '.worktrees/chore-recurring');
+    const wtFile = path.join(wt, 'docs/devteam/project/settings.md');
+    const apply = (q) => T.run(['recurring', 'apply', q]);
+    // the text around the recurring value: before the key, and after the value's closing bracket
+    const around = (t) => { const i = t.indexOf('"recurring"'); let d = 0; let j = t.indexOf('{', i); for (let k = j; k < t.length; k++) { if (t[k] === '{') d++; else if (t[k] === '}' && --d === 0) { j = k; break; } } return [t.slice(0, i), t.slice(j + 1)]; };
+    const others = (t) => { const o = JSON.parse(BLOCK.exec(t)[1]); delete o.recurring; return o; };
+    toMain(compact({ a: check(), b: chore() }));
     const change = { recurring: { a: check({ every: '12h' }), c: chore({ every: '2w' }) } };
     const open = T.asked(change);
     T.ok(['chore', 'start', 'recurring']);
-    const wtFile = path.join(T.old, '.worktrees/chore-recurring/docs/devteam/project/settings.md');
     const before = fs.readFileSync(wtFile, 'utf8');
-    refused((() => { const r = T.run(['recurring', 'apply', open]); return { status: r.status, text: T.text(r) }; })(), /answered/);
+    refused(apply(open), /answered/);
     T.answer(open);
-    passes((() => { const r = T.run(['recurring', 'apply', open]); return { status: r.status, text: T.text(r) }; })());
+    passes(apply(open));
     const after = fs.readFileSync(wtFile, 'utf8');
     assert.deepEqual(T.blockAt(wtFile).recurring, { a: check({ every: '12h' }), b: chore(), c: chore({ every: '2w' }) });
-    // every other key byte-identical: the text outside the recurring value is the same
-    const outside = (t) => { const i = t.indexOf('"recurring":'); const o = JSON.parse(BLOCK.exec(t)[1]); const s = JSON.stringify(o.recurring, null, 2).split('\n').length; return [t.slice(0, i), t.split('\n').slice(t.slice(0, i).split('\n').length - 1 + s).join('\n')]; };
-    assert.equal(outside(after)[0], outside(before)[0]);
-    const keysOf = (t) => { const o = JSON.parse(BLOCK.exec(t)[1]); delete o.recurring; return o; };
-    assert.deepEqual(keysOf(after), keysOf(before));
-    assert.equal(after.replace(BLOCK, ''), before.replace(BLOCK, ''));
-    // declined and other classes
-    T.g(['checkout', '-q', '--', '.'], path.join(T.old, '.worktrees/chore-recurring'));
-    const no = T.asked({ recurring: { d: chore() } });
+    assert.deepEqual(around(after), around(before));
+    assert.deepEqual(others(after), others(before));
+    // the worktree's jobs now differ from main's: a second answer can't be applied on top
+    const second = T.yes({ recurring: { d: chore() } });
+    refused(apply(second), /differs from main/);
+    // landed: the PR merges, and the answer applies no more
+    T.ok(['chore', 'pr', 'recurring', '--title', 'jobs']);
+    write(path.join(T.old, 'docs/devteam/run/pr/chore-recurring.md'), '# chore-recurring: jobs\n\n## One-way doors\n\nNone.\n');
+    passes(T.merge('recurring', ['--approved', open]));
+    T.g(['worktree', 'remove', '--force', wt], T.old);
+    T.g(['branch', '-D', 'chore-recurring'], T.old);
+    T.ok(['chore', 'start', 'recurring']);
+    refused(apply(open), /already landed/);
+    // declined, and another class
+    const no = T.asked({ recurring: { e: chore() } });
     T.answer(no, 'No');
-    refused((() => { const r = T.run(['recurring', 'apply', no]); return { status: r.status, text: T.text(r) }; })());
+    refused(apply(no));
     const gr = T.run(['ask', '--class', 'governance-edit', '--question', 'Something else?', '--recommendation', 'Yes']);
     const gq = QID.exec(gr.out)[0];
     T.answer(gq);
-    refused((() => { const r = T.run(['recurring', 'apply', gq]); return { status: r.status, text: T.text(r) }; })(), /recurring-edit/);
-    assert.equal(fs.readFileSync(wtFile, 'utf8'), before);
+    refused(apply(gq), /recurring-edit/);
+    // no recurring key on main: apply inserts it and changes nothing else
+    T.g(['worktree', 'remove', '--force', wt], T.old);
+    T.g(['branch', '-D', 'chore-recurring'], T.old);
+    T.g(['merge', '-q', '--ff-only', 'origin/main'], T.old);
+    toMain(compact(undefined));
+    T.ok(['chore', 'start', 'recurring']);
+    const bare = fs.readFileSync(wtFile, 'utf8');
+    assert.ok(!bare.includes('"recurring"'), bare);
+    const add = T.yes({ recurring: { f: chore() } });
+    passes(apply(add));
+    const added = fs.readFileSync(wtFile, 'utf8');
+    assert.deepEqual(T.blockAt(wtFile).recurring, { f: chore() });
+    assert.deepEqual(others(added), others(bare));
+    assert.equal(added.replace(/,?\s*"recurring":[\s\S]*?\n  \}/, ''), bare);
   } finally { T.done(); }
 });
 
@@ -318,4 +383,9 @@ test('A14: supervisor.md documents registering, changing and stopping a job, and
   for (const w of ['recurring-edit', 'thread ask', 'answer', '--from-turn', 'recurring apply', 'chore start recurring', 'merge --chore recurring --approved', 'null', 'recurring propose', '--stop', 'production']) assert.ok(section.includes(w), `the section says ${w}`);
   const mon = doc.slice(at(/^### Monitoring$/m), at(/^## Recurring jobs$/m));
   assert.match(mon, /Recurring jobs/);
+  const five = doc.slice(at(/^## 5\. /m), at(/^## 6\. /m));
+  assert.match(five, /Owner settings, in any PR[^\n]*recurring/);
+  const q = fs.readFileSync(path.join(kit, 'governance/quality.md'), 'utf8');
+  const four = q.slice(q.search(/^## 4\. /m), q.search(/^## 5\. /m));
+  assert.match(four, /`recurring`[^\n]*recurring-edit/);
 });
