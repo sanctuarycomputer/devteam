@@ -178,7 +178,12 @@ test('limit-state: whether the operator is stopped at a limit, and whether there
   write(stub, `#!/bin/sh\n[ "$1" = list ] && cat ${JSON.stringify(list)}\n`);
   fs.chmodSync(stub, 0o755);
   const accounts = (...rows) => write(list, JSON.stringify({ schemaVersion: 1, accounts: rows }));
-  const state = (pane) => machine(['machine', 'limit-state', pane], { DEVTEAM_CSWAP: stub }).stdout.trim();
+  // the conversation the pane started in (nowhere) must end on a rate-limit error too
+  const claude = path.join(tmp, 'claude-limit');
+  const conv = path.join(claude, 'projects', fs.realpathSync(nowhere).replace(/[^a-zA-Z0-9]/g, '-'), 's.jsonl');
+  const ends = (error) => write(conv, `${JSON.stringify({ type: 'user', message: { content: 'go' } })}\n${JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), ...(error ? { error } : {}), message: { content: [{ type: 'text', text: 'You\'ve hit your limit' }] } })}\n`);
+  ends('rate_limit');
+  const state = (pane, env = {}) => machine(['machine', 'limit-state', pane], { DEVTEAM_CSWAP: stub, CLAUDE_CONFIG_DIR: claude, ...env }).stdout.trim();
   const menu = 'You\'ve hit your limit · resets 9pm\n❯ /rate-limit-options\n  What do you want to do?\n  ❯ 1. Stop and wait for limit to reset\n    2. Wait here, then continue automatically\n    3. Switch to usage credits\n  Enter to confirm · Esc to cancel\n';
   const stopped = agent({ screens: [menu] });
   await shown(stopped.pane, 'What do you want');
@@ -189,7 +194,17 @@ test('limit-state: whether the operator is stopped at a limit, and whether there
   const fine = agent({ screens: [box(prompt)] });
   await shown(fine.pane, 'status');
   assert.equal(state(fine.pane), 'none', 'not stopped: nothing to do');
+  assert.equal(state(stopped.pane, { DEVTEAM_CSWAP: 'off' }), 'unknown', 'no cswap: nothing to go on');
+  accounts({ number: 1, email: 'a@x', active: true, usageStatus: 'error', usage: {} });
+  assert.equal(state(stopped.pane), 'unknown', 'the usage can\'t be read');
+  ends(null);
+  assert.equal(state(stopped.pane), 'none', 'the pane shows a limit, but the conversation did not end on one (a quoted banner)');
+  ends('rate_limit');
+  const drafted = agent({ screens: [`You've hit your limit · resets 9pm\n${box(`${prompt}half a line`)}`] });
+  await shown(drafted.pane, 'half a line');
+  assert.equal(state(drafted.pane), 'unsafe', 'a draft under the banner: left alone');
+  const asked = agent({ screens: [`You've hit your limit · resets 9pm\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n`] });
+  await shown(asked.pane, 'Do you want');
+  assert.equal(state(asked.pane), 'unsafe', 'another prompt: left alone');
   assert.equal(machine(['machine', 'limit-state']).status, 2);
-  // no key ever reaches the pane
-  assert.equal(stopped.keys(), '');
 });

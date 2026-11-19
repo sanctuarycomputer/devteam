@@ -591,34 +591,48 @@ tick='Check on the box and your supervisors.'
 # menu for hours once. Each minute the kit says whether the operator is stopped at a limit and whether
 # the active account has room (machine limit-state): with room, its process is replaced and it starts
 # again on the same conversation, never a key sent to the menu (so nothing can pick usage credits), at
-# most once in 10 minutes; with every account at its limit, one alert says so, cleared once there is
-# room. A person, a draft or another prompt in the pane leaves it alone (unsafe).
-( last=0; raised=
+# most once in 10 minutes and 3 times in 6 hours (as the kit restarts a supervisor); past that it stops
+# trying, notes it and raises one alert. With every account at its limit, one alert says so, held
+# while the reading is unknown (cswap slow, a usage read failing) or unsafe (someone at window 0), and
+# cleared once there is room or the operator is no longer stopped. A person, a draft or another prompt
+# in the pane leaves it alone (unsafe). Only what this loop raised is cleared.
+limit_full="Every Claude account is at its usage limit, the operator's included. Fleets and the operator restart on their own once one resets or you add an account (cswap add)."
+limit_clear() { if [ -n "$raised" ] && [ "$(cat "$HOME/.box/alert" 2>/dev/null)" = "$raised" ]; then box-alert --clear >/dev/null; fi; raised=; }
+operator_limit_turn() {
+  p=$(timeout 20 tmux display-message -p -t home:operator '#{pane_id}' 2>/dev/null) || return 0
+  ls=$(timeout 90 /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine limit-state "$p" 2>/dev/null) || return 0
+  now=$(date +%s)
+  kept=; for t in $starts; do [ $((now - t)) -lt "${DEVTEAM_OPERATOR_LIMIT_SPAN:-21600}" ] && kept="$kept $t"; done; starts=$kept
+  case $ls in
+    room)
+      [ "$raised" = "$limit_full" ] && limit_clear
+      [ $((now - last)) -ge "${DEVTEAM_OPERATOR_LIMIT_COOLDOWN:-600}" ] || return 0
+      if [ $(echo $starts | wc -w) -ge "${DEVTEAM_OPERATOR_LIMIT_MAX:-3}" ]; then
+        [ -n "$gaveup" ] && return 0
+        gaveup=1
+        note "the operator keeps stopping at a usage limit although its account reads as having room: restarted $(echo $starts | wc -w) times in 6 hours, so the box has stopped restarting it"
+        limit_clear
+        raised="The operator keeps stopping at a usage limit although its account reads as having room. The box restarted it 3 times in 6 hours and has stopped trying. Look at window 0 of the terminal."
+        box-alert "$raised" >/dev/null
+        return 0
+      fi
+      last=$now; starts="$starts $now"
+      note "the operator was stopped at a usage limit and the active account has room: restarting it on the same conversation"
+      if timeout 20 tmux respawn-pane -k -t "$p" -c "$HOME/operator"; then
+        sleep 3
+        again='You were restarted after a usage limit, on this same conversation, by the box. Carry on from where you were, then check on the box and your supervisors.'
+        timeout 20 tmux send-keys -t "$p" -l "export DEVTEAM_ROLE=operator; claude --continue --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$again'" && timeout 20 tmux send-keys -t "$p" Enter
+      fi ;;
+    no-room)
+      if [ "$raised" != "$limit_full" ] && [ -z "$gaveup" ]; then limit_clear; raised=$limit_full; box-alert "$raised" >/dev/null; fi ;;
+    none) limit_clear; gaveup= ;;
+  esac
+  return 0
+}
+( last=0; raised=; starts=; gaveup=
   while :; do
     sleep "${DEVTEAM_OPERATOR_LIMIT_SECONDS:-60}"
-    p=$(timeout 20 tmux display-message -p -t home:operator '#{pane_id}' 2>/dev/null) || continue
-    ls=$(timeout 90 /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine limit-state "$p" 2>/dev/null) || continue
-    case $ls in
-      room)
-        now=$(date +%s)
-        if [ $((now - last)) -ge "${DEVTEAM_OPERATOR_LIMIT_COOLDOWN:-600}" ]; then
-          last=$now
-          note "the operator was stopped at a usage limit and the active account has room: restarting it on the same conversation"
-          if timeout 20 tmux respawn-pane -k -t "$p" -c "$HOME/operator"; then
-            sleep 3
-            again='You were restarted after a usage limit, on this same conversation, by the box. Carry on from where you were, then check on the box and your supervisors.'
-            timeout 20 tmux send-keys -t "$p" -l "export DEVTEAM_ROLE=operator; claude --continue --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$again'" && timeout 20 tmux send-keys -t "$p" Enter
-          fi
-        fi ;;
-      no-room)
-        if [ -z "$raised" ]; then
-          raised="Every Claude account is at its usage limit, the operator's included. Fleets and the operator restart on their own once one resets or you add an account (cswap add)."
-          box-alert "$raised" >/dev/null
-        fi ;;
-      *)
-        if [ -n "$raised" ] && [ "$(cat "$HOME/.box/alert" 2>/dev/null)" = "$raised" ]; then box-alert --clear >/dev/null; fi
-        raised= ;;
-    esac
+    operator_limit_turn
   done ) &
 # The box's global tools, on the disk: edit the file to change them, and they come back each boot.
 mkdir -p .box .config/mise

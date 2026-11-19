@@ -15637,23 +15637,6 @@ function paneBottom(target) {
 // work would die with the session. Nor is it replaced with a person at it: a half-typed line under
 // the banner, or a client on that pane that pressed a key lately (read from tmux each time, so it
 // can't outlive the client).
-// Whether a pane (the box's operator, which no project's dashboard looks after) is stopped at a usage
-// limit, and whether there is room to start it again: none (not stopped at a limit), unsafe (stopped,
-// but a person, a draft or another prompt is there: left alone), room (the machine's active cswap
-// account has room: relaunch it on the same conversation), no-room (every account is at its limit),
-// or unknown (no cswap, or its accounts can't be read). The box's minute loop acts on it.
-function limitState(target) {
-  const st = limitStop(paneBottom(target));
-  if (!st.limit) return 'none';
-  if (!paneStoppedAtLimit(target)) return 'unsafe';
-  const bin = findCswap();
-  const rows = bin ? cswapAccounts(bin) : null;
-  if (!rows) return 'unknown';
-  const active = rows.find((a) => a.active);
-  if (active && accountHasRoom(active)) return 'room';
-  const usable = rows.filter((a) => !a.disabled);
-  return usable.length && usable.every(accountKnownFull) ? 'no-room' : 'unknown';
-}
 function paneStoppedAtLimit(target) {
   if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
   const st = limitStop(paneBottom(target));
@@ -15664,6 +15647,41 @@ function clientActiveOn(target) {
   if (active !== '11') return false;
   const now = Date.now() / 1000;
   return (sh('tmux', ['list-clients', '-t', `=${session}`, '-F', '#{client_activity}']) ?? '').split('\n').map(Number).some((t) => t > 0 && now - t < SETTLED_MS / 1000);
+}
+// Whether a pane (the box's operator, which no project's dashboard looks after) is stopped at a usage
+// limit, and whether there is room to start it again: none (not stopped at a limit), unsafe (stopped,
+// but a person, a draft or another prompt is there: left alone), room (the machine's active cswap
+// account has room: relaunch it on the same conversation), no-room (every account is at its limit),
+// or unknown (no cswap, or its accounts can't be read). The box's minute loop acts on it. The pane's
+// text alone isn't enough, as for the supervisor: tool output can quote a banner, so the newest
+// conversation started where the pane did must also end on a rate-limit error.
+function limitState(target) {
+  const st = limitStop(paneBottom(target));
+  if (!st.limit) return 'none';
+  if (!paneStoppedAtLimit(target)) return 'unsafe';
+  if (!transcriptEndsAtLimit(sh('tmux', ['display-message', '-p', '-t', target, '#{pane_start_path}']))) return 'none';
+  const bin = findCswap();
+  const rows = bin ? cswapAccounts(bin) : null;
+  if (!rows) return 'unknown';
+  const active = rows.find((a) => a.active);
+  if (active && accountHasRoom(active)) return 'room';
+  const usable = rows.filter((a) => !a.disabled);
+  return usable.length && usable.every(accountKnownFull) ? 'no-room' : 'unknown';
+}
+// The newest Claude Code conversation for a directory ends on a rate-limit error, within the week a
+// limit lasts at most. Read from its last MB only.
+function transcriptEndsAtLimit(dir) {
+  if (!dir) return false;
+  const tdir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(dir).replace(/[^a-zA-Z0-9]/g, '-'));
+  try {
+    const [f] = fs.readdirSync(tdir).filter((x) => x.endsWith('.jsonl')).map((x) => ({ f: path.join(tdir, x), m: fs.statSync(path.join(tdir, x)).mtimeMs })).sort((a, b) => b.m - a.m);
+    if (!f) return false;
+    const fd = fs.openSync(f.f, 'r');
+    let text;
+    try { const size = fs.fstatSync(fd).size; const n = Math.min(size, 1024 * 1024); const b = Buffer.alloc(n); text = b.toString('utf8', 0, fs.readSync(fd, b, 0, n, size - n)); } finally { fs.closeSync(fd); }
+    const last = text.split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }).filter((o) => o?.type === 'assistant').pop();
+    return last?.error === 'rate_limit' && Date.now() - Date.parse(last.timestamp) < SUPERVISOR_LIMIT_MAX_MS;
+  } catch { return false; }
 }
 // Did this pane start in that directory? Compared resolved: tmux keeps the path as it was given.
 function paneStartedIn(target, dir) {

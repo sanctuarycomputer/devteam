@@ -995,3 +995,65 @@ test('the minute loop brings back a lost tmux server as a boot does, from the li
   assert.deepEqual(c, []);
   assert.equal(recovers(), afterStop);
 });
+
+// The operator back from a usage limit, from cloud/Dockerfile's devteam-dev: operator_limit_turn run
+// for a schedule of minutes (when, and what machine limit-state said), with stand-ins for tmux, node,
+// date, sleep and box-alert. What it restarts, what it raises and clears, and when it gives up.
+test('the operator\'s limit loop restarts it with room, at most 3 times in 6 hours, and raises one alert while every account is out', () => {
+  const d = devteamDev();
+  const fn = (name) => { const i = d.findIndex((l) => l.startsWith(`${name}() {`)); assert.ok(i >= 0, name); return d[i].trimEnd().endsWith('}') ? [d[i]] : d.slice(i, d.indexOf('}', i) + 1); };
+  const full = d.find((l) => l.startsWith('limit_full='));
+  assert.ok(full, 'limit_full');
+  const h = fs.mkdtempSync(path.join(tmp, 'limit-'));
+  const fakes = path.join(h, '.fakes');
+  fs.mkdirSync(path.join(h, '.box'), { recursive: true });
+  write(path.join(fakes, 'tmux'), '#!/bin/sh\necho "tmux $1" >> "$HOME/.calls"\n[ "$1" = display-message ] && echo %9\nexit 0\n');
+  write(path.join(fakes, 'node'), '#!/bin/sh\ncat "$HOME/.ls"\n');
+  write(path.join(fakes, 'date'), '#!/bin/sh\n[ "$1" = +%s ] && exec cat "$HOME/.now"\nexec /bin/date "$@"\n');
+  write(path.join(fakes, 'sleep'), '#!/bin/sh\nexit 0\n');
+  write(path.join(fakes, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+  write(path.join(fakes, 'box-alert'), '#!/bin/sh\nif [ "$1" = --clear ]; then rm -f "$HOME/.box/alert"; echo "alert clear" >> "$HOME/.calls"; else printf %s "$1" > "$HOME/.box/alert"; echo "alert raise $1" >> "$HOME/.calls"; fi\n');
+  for (const f of fs.readdirSync(fakes)) fs.chmodSync(path.join(fakes, f), 0o755);
+  const run = (schedule) => {
+    fs.rmSync(path.join(h, '.calls'), { force: true });
+    fs.rmSync(path.join(h, '.box', 'alert'), { force: true });
+    fs.writeFileSync(path.join(h, '.schedule'), schedule.map(([at, ls]) => `${at} ${ls}\n`).join(''));
+    const script = [...fn('note'), full, ...fn('limit_clear'), ...fn('operator_limit_turn'), 'last=0; raised=; starts=; gaveup=', 'exec 3< "$HOME/.schedule"', 'while read at l <&3; do echo "$at" > "$HOME/.now"; echo "$l" > "$HOME/.ls"; echo "minute $at $l" >> "$HOME/.calls"; operator_limit_turn; done']
+      .join('\n').replaceAll('/usr/local/bin/node', `${fakes}/node`);
+    assert.equal(spawnSync('sh', ['-n', '-c', script]).status, 0, 'sh -n');
+    const r = spawnSync(fs.existsSync('/bin/dash') ? '/bin/dash' : 'sh', ['-c', script], { cwd: h, encoding: 'utf8', env: { PATH: `${fakes}:/usr/bin:/bin`, HOME: h } });
+    assert.equal(r.status, 0, r.stderr);
+    // per minute: what it did, in order
+    const out = {};
+    let at = null;
+    for (const l of fs.readFileSync(path.join(h, '.calls'), 'utf8').split('\n').filter(Boolean)) {
+      const m = /^minute (\d+) /.exec(l);
+      if (m) { at = m[1]; out[at] = []; } else if (l !== 'tmux display-message') out[at].push(l.replace(/^alert raise (Every|The operator keeps).*/, 'alert raise $1'));
+    }
+    return out;
+  };
+  const t0 = 1_000_000;
+  const m = (n) => t0 + n * 60;
+
+  // every account out: one alert, held through unknown and unsafe, cleared once there is room (and it restarts)
+  let o = run([[m(0), 'no-room'], [m(1), 'no-room'], [m(2), 'unknown'], [m(3), 'unsafe'], [m(4), 'no-room'], [m(5), 'room'], [m(6), 'room']]);
+  assert.deepEqual(o[m(0)], ['alert raise Every'], 'raised once');
+  for (const k of [1, 2, 3, 4]) assert.deepEqual(o[m(k)], [], `minute ${k}: held, not raised again`);
+  assert.deepEqual(o[m(5)], ['alert clear', 'tmux respawn-pane', 'tmux send-keys', 'tmux send-keys'], 'room: cleared, then the process replaced and the launch line typed');
+  assert.deepEqual(o[m(6)], [], 'within 10 minutes: not again');
+  // cleared once the operator is no longer stopped
+  o = run([[m(0), 'no-room'], [m(1), 'none'], [m(2), 'none']]);
+  assert.deepEqual(o[m(1)], ['alert clear']);
+  assert.deepEqual(o[m(2)], []);
+
+  // room that keeps coming back: 3 restarts, then it gives up once, noted and alerted
+  o = run([[m(0), 'room'], [m(11), 'room'], [m(22), 'room'], [m(33), 'room'], [m(44), 'room'], [m(45), 'no-room']]);
+  for (const k of [0, 11, 22]) assert.equal(o[m(k)].filter((x) => x === 'tmux respawn-pane').length, 1, `restart at minute ${k}`);
+  assert.deepEqual(o[m(33)], ['alert raise The operator keeps'], 'past 3 in 6 hours: gives up, with an alert');
+  assert.deepEqual(o[m(44)], [], 'once');
+  assert.deepEqual(o[m(45)], [], 'the gave-up alert is not replaced');
+  assert.match(fs.readFileSync(path.join(h, 'box.log'), 'utf8'), /has stopped restarting it/);
+  // six hours on, it may try again
+  o = run([[m(0), 'room'], [m(11), 'room'], [m(22), 'room'], [m(400), 'room']]);
+  assert.equal(o[m(400)].filter((x) => x === 'tmux respawn-pane').length, 1, 'the oldest restarts aged out');
+});

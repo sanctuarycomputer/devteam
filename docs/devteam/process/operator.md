@@ -42,6 +42,7 @@ After a restart the boot runs `box-recover` itself, which brings back each super
 - `box-recover --dry-run`: see what it would do.
 - `box-status`: the digest for a check-in. `box-status --questions`: open questions you haven't noted yet. `box-status --knowledge`: accepted knowledge you haven't noted yet, for the daily review.
 - `box-tell <repo> "<message>"`: tell a repo's supervisor something, and `box-alert "<line>"`: tell the owner something urgent (see Telling the owner).
+- Stopped at a usage limit yourself: on a box, a minute loop restarts you on this same conversation once the active account has room (never by answering the limit menu), at most once in 10 minutes and 3 times in 6 hours, and says in `~/box.log` when it gives up. While every account is at its limit it raises one alert saying so, and clears it once there is room. Either alert is the box's, not yours to clear.
 - `box-thread list --waiting`, `box-thread show <id>`, `box-thread reply <id> "<words>"`: the owner's threads from the hub (Threads from the hub).
 - A window can be named `sup-my.repo`; tmux reads a dot in a target as a pane, so always target a pane by its id (`%12`, from `box-status` or `tmux list-panes -a`), never `home:sup-<repo>`.
 
