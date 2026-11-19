@@ -4744,8 +4744,78 @@ function cmdStatus() {
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}`);
 }
 
+// Why a hold the supervisor or a planner writes is refused, or null (kit-571; design
+// every-wait-names-its-cause-and-every-put, "Writers"): it names what it waits on (--for), each cause
+// in a known form (waitCause) and in the log, a date (--until) for a cause the kit can't follow, and
+// a date that is a real day from today to 30 days ahead (UTC). kind is ticket or goal, id the held
+// thing's, causes trimmed and de-duplicated, until a date or null, whole the --whole words or null.
+// Never applied to the owner's holds. Holds already in the log are never read through it.
+function holdCause({ causes, until }) {
+  const FORMS = 'a q-… question, a ticket id, goal:<g-id>, chore:<slug>, pr:<link>#<n>, run:<link>:<run id> or external:<words>';
+  if (!causes.length) return until ? '--until goes with --for: name what the hold waits on' : `a hold names what it waits on: --for <cause>… (${FORMS})`;
+  const today = new Date().toISOString().slice(0, 10);
+  const dayAfter = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+  const latest = dayAfter(today, 30);
+  for (const c of causes) {
+    const w = waitCause(c);
+    if (!w) return `${c} is in no known form (${FORMS})`;
+    const there = w.form === 'q' ? logGet(w.id)?.type === 'question'
+      : w.form === 'ticket' ? tickets().has(w.id)
+      : w.form === 'goal' ? logGet(w.id)?.type === 'goal'
+      : w.form === 'chore' ? Boolean(resolveCommit(`refs/heads/chore-${w.id}`) || resolveCommit(`refs/remotes/origin/chore-${w.id}`) || logObjects('act').some((a) => (a.refs ?? []).includes(`chore-${w.id}`)))
+      : true;
+    if (!there) return w.form === 'chore' ? `${c} is not in the log (no chore-${w.id} branch here or on origin, and no act refs it)` : `${c} is not in the log`;
+    if (['pr', 'run', 'external'].includes(w.form) && !until) return `the kit can't follow ${c}: give it --until <date> (today to ${latest}) to look at it again`;
+  }
+  if (until !== null && until !== undefined) {
+    const real = /^\d{4}-\d{2}-\d{2}$/.test(until) && !Number.isNaN(Date.parse(`${until}T00:00:00Z`)) && new Date(Date.parse(`${until}T00:00:00Z`)).toISOString().slice(0, 10) === until;
+    if (!real) return `--until ${until} is not a date (YYYY-MM-DD)`;
+    if (until < today) return `--until ${until} is in the past (today is ${today}, UTC)`;
+    if (until > latest) return `--until ${until} is more than 30 days ahead (at most ${latest})`;
+  }
+  return null;
+}
+
 // ticket add <id> --json '{…}' | --file f ; ticket set <id> --json '{…}' ; feature add/set likewise.
-function cmdTicket() { graphEdit('ticket', SCHEMA['x-id'].keyed.ticket); }
+// ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole w] ; ticket release <id> [--reason r]:
+// a hold that names what it waits on (holdCause), and its release, each one ticket line.
+function cmdTicket() {
+  const [sub, id] = positional;
+  if (sub !== 'hold' && sub !== 'release') return graphEdit('ticket', SCHEMA['x-id'].keyed.ticket);
+  if (!id) die(sub === 'hold' ? 'usage: ticket hold <id> --reason "<why>" --for <cause>… [--until <YYYY-MM-DD>] [--whole "<why>"]' : 'usage: ticket release <id> [--reason "<why>"]');
+  const by = logWriter();
+  const cls = writerClass(by);
+  if (!['supervisor', 'planner'].includes(cls)) die('tickets are written by the supervisor or a planner (plan-<feature>)');
+  const t = logGet(id);
+  if (t?.type !== 'ticket') die(`no ticket ${id}`);
+  if (cls === 'planner') {
+    const f = planFeature(by);
+    if (t.feature !== f) die(`${by} may only change the feature "${f}" and its tickets`);
+    // the fold ranks a planner's held below the supervisor's and the owner's: once either wrote it, a
+    // planner's line would change nothing (a release with null keeps that rank too)
+    const over = readLog().lines.find((l) => l.type === 'ticket' && l.id === id && 'held' in l && ['supervisor', 'owner'].includes(writerClass(l.by)));
+    if (over) die(`${id}'s hold was set by the ${writerClass(over.by)}: a planner may not change it`);
+  }
+  const reason = flagStr('reason')?.trim() || null;
+  if (sub === 'release') {
+    if (!isHeld(t)) die(`${id} is not held`);
+    appendLog({ type: 'ticket', op: 'set', id, held: null, held_for: null, held_until: null }, by);
+    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'replan-within-feature', what: `released ticket ${id}${reason ? `: ${reason}` : ''}`, refs: [id], reversible: true }, 'supervisor');
+    return out(`released ${id}`);
+  }
+  if (!isActive(t)) die(`${id} is superseded: nothing to hold`);
+  if (mergeShaFor(id)) die(`${id} is merged: nothing to hold`);
+  if (!reason) die('ticket hold needs --reason "<why>"');
+  const causes = [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))];
+  const until = flagStr('until')?.trim() || null;
+  const whole = flagStr('whole')?.trim() || null;
+  const why = holdCause({ kind: 'ticket', id, causes, until, whole, ticket: t });
+  if (why) die(why);
+  const held = whole ? `${reason} (whole: ${whole})` : reason;
+  appendLog({ type: 'ticket', op: 'set', id, held, held_for: causes, held_until: until }, by);
+  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'replan-within-feature', what: `held ticket ${id} for ${causes.join(', ')}`, refs: [id], reversible: true }, 'supervisor');
+  out(`held ${id}`);
+}
 function cmdFeature() { graphEdit('feature', SCHEMA['x-id'].keyed.feature); }
 function graphEdit(type, idRe) {
   const [sub, id] = positional;
