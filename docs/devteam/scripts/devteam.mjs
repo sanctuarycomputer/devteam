@@ -12584,7 +12584,7 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id), at_target: atTargetView(g) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id), at_target: atTargetView(g), next_move: nextMoveOf(`goal:${g.id}`) };
 }
 // A running goal at its target, as its card shows it: the reading, and the open goal-met question.
 function atTargetView(g) {
@@ -14401,6 +14401,96 @@ function cmdMetrics() {
   ].join('\n'));
 }
 
+/* next-moves start */
+// The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
+// one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
+// planners, C chores) are tried in order and the first that matches wins. The kit never makes a move
+// itself; it names it.
+//
+// The contract next-move@1. A move is one object:
+//   subject     "goal:<g-id>" | "ticket:<id>" | "planner:<feature>" | "chore:<slug>"
+//   move        the row's key, kebab-case (e.g. ask-goal-met)
+//   words       a plain sentence for the owner (e.g. "Ask you whether it is met")
+//   holder      owner | supervisor | planner | worker | nobody
+//   ref         null, or { kind, id, url }: kind q | m | ticket | goal | chore | pr; id the question's,
+//               message's, ticket's, goal's or chore branch's id as a string, or for a pr the PR number
+//               as an integer; url the PR's URL on a pr ref, absent on every other kind
+//   title       the subject's own title: the goal's, the ticket's, the planner's feature's, a chore's
+//               --what or its tip commit's subject
+//   since       ISO time the move began (never stored: each row names its source)
+//   command     the supervisor's command for it, or null
+//   covered_by  [ { kind, subject } ]: the findings that already cover it, subject a finding subject or
+//               "*" (any subject); [] when none
+//   quiet       null | hold | drain | queue: it waits on purpose (a park or let-go hold, a drain, the
+//               queue for a slot or memory); shown, never raises a finding
+//   via         null, or "ticket:<id>" | "planner:<feature>" | "goal:<g-id>" | "chore:<slug>": a copied
+//               move (a goal's lead ticket's, planner's, chore's or plan_after goal's; a ticket's
+//               dependency's); it shows its source's flag, and findings are raised only on the source
+//   flag        null | owed | stalled | none, set by age and holder alone (a covering finding never
+//               clears it): owed when the supervisor holds it past next_move_owed_minutes; a chore with
+//               no PR yet (C4) is never owed, it goes straight to stalled; stalled when unchanged past
+//               next_move_stall_hours, whatever the holder; none for the rows with no next move (G20,
+//               T14), held by nobody; null otherwise, and always null when quiet
+//   rung        0 | 1 | 2 on the age ladder: 0 fresh, 1 owed, 2 stuck (stalled, or its finding or a
+//               covering finding acked three times on one subject since `since`); so an owed move is at
+//               rung 1 or 2, a stalled one at 2, a quiet one stays 0
+//   chore       on a chore: move only (absent on every other): { branch: "chore-<slug>", ahead: the
+//               commits main lacks, pr: null | { number, url }, for: [ the refs from chore start --for ] }
+// Every field but chore is always present; ref, command, quiet, via and flag carry null, never go
+// missing.
+//
+// Its five places:
+//   1. moves --json: { "next_move": 1, "moves": [ … ] }
+//   2. /api/data: next_moves, the same array
+//   3. each goal view (goal show, goal list --json, /api/data ooda.goals[]): next_move, its own move or null;
+//      goal show of the Upkeep goal isn't a goal view and has no next_move (chore moves carry its work)
+//   4. the hub's cache, run/cache/next-moves.json: { "next_move": 1, "at": "<ISO>", "moves": [ … ] }, the
+//      running goals' moves only (no chore moves)
+//   5. hello's pulse.next: one move (the top flagged, else top-priority, running goal's), or null
+// Additive changes keep @1; a renamed or removed field, or a changed meaning, bumps it. Fixtures:
+// test/fixtures/next-moves/. The closed lists, one per line (test/next-moves.test.mjs reads them):
+// values fields: subject | move | words | holder | ref | title | since | command | covered_by | quiet | via | flag | rung | chore
+// values subject: goal: | ticket: | planner: | chore:
+// values holder: owner | supervisor | planner | worker | nobody
+// values ref.kind: q | m | ticket | goal | chore | pr
+// values quiet: null | hold | drain | queue
+// values via: null | ticket: | planner: | goal: | chore:
+// values flag: null | owed | stalled | none
+// values rung: 0 | 1 | 2
+// values chore: branch | ahead | pr | for
+function nextMoves() {
+  return [];
+}
+// The move whose subject is this one ("goal:<g-id>", …), or null.
+function nextMoveOf(subject) {
+  return nextMoves().find((m) => m.subject === subject) ?? null;
+}
+const MOVE_HOLDERS = ['owner', 'supervisor', 'planner', 'worker', 'nobody'];
+// A move's age in words: 45 min, 3 h, 2 d.
+const moveAge = (since) => {
+  const t = Date.parse(since);
+  if (Number.isNaN(t)) return 'since ?';
+  const min = Math.max(0, Math.floor((Date.now() - t) / 60000));
+  return min < 120 ? `${min} min` : min < 48 * 60 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`;
+};
+// moves [--json] [--holder h]: every move, grouped by holder, oldest first, owed and stalled marked.
+// It only reads.
+function cmdMoves() {
+  if (flags.holder !== undefined && !MOVE_HOLDERS.includes(flagStr('holder'))) die(`moves --holder takes one of: ${MOVE_HOLDERS.join(', ')}`);
+  const holder = flagStr('holder');
+  const moves = nextMoves().filter((m) => !holder || m.holder === holder);
+  if (flags.json) return out(JSON.stringify({ next_move: 1, moves }));
+  if (!moves.length) return out('No next moves.');
+  const L = [];
+  for (const h of MOVE_HOLDERS) {
+    const mine = moves.filter((m) => m.holder === h).sort((a, b) => (Date.parse(a.since) || 0) - (Date.parse(b.since) || 0));
+    if (!mine.length) continue;
+    L.push(`${h}:`);
+    for (const m of mine) L.push(`  ${m.subject}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`);
+  }
+  out(L.join('\n'));
+}
+/* next-moves end */
 // Per-ticket progress data for the burn-up, board and roadmap.
 function collectProgress() {
   const sub = activeTickets();
@@ -14549,6 +14639,8 @@ function dashboardDataRead() {
     awareness,
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
+    // next-move@1: every move the table names (the comment above nextMoves())
+    next_moves: nextMoves(),
     ooda: collectOoda(),
     autonomy,
     autonomy_score: autonomyScore(autonomy, efficiency, awareness),
@@ -24843,6 +24935,7 @@ The graph (planning.md)
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
+  moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
 
 Checks and merging (quality.md)
@@ -24948,11 +25041,11 @@ Dashboard and releases
 // recover, machine and operator-thread write, and are allowed by name below: bringing a supervisor
 // back, the machine's digest, word to a supervisor and alert, and its own replies to the owner are
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
-const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
+const OPERATOR_READS = new Set(['search', 'status', 'moves', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings', 'unread']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
-  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
