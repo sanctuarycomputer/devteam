@@ -300,6 +300,16 @@ test('the gate: lines inserted inside another part are that part\'s, however the
   assert.deepEqual(partsChanged(py4, py4.replace('    a()\n', '    a()\n    # X start\n    return\n    # X end\n'), 'a.py', named('+X')), ['r:G'], 'X in the body of G, though G holds the whole file');
   const md2 = ['# T', '## a', 'text a', '### notes', 'mine', '## b', ''].join('\n');
   assert.deepEqual(partsChanged(md2, md2.replace('mine\n', 'mine\n### notes\ninjected\n'), 'd.md', named('notes')), ['p:a'], 'a second notes under a');
+  // review 3 F8: a blank line inside a rest's run is content (a YAML block scalar, a heredoc, a table)
+  const yml = (body) => `top: 1\n# mine start\nm: 1\n# mine end\n# other start\nscript: |\n  line one\n${body}  line two\n# other end\n`;
+  assert.deepEqual(partsChanged(yml(''), yml('\n'), 'c.yml', named('mine')), ['r:other'], 'Y1 a blank line added in a block scalar');
+  assert.deepEqual(partsChanged(yml('\n'), yml(''), 'c.yml', named('mine')), ['r:other'], 'Y2 one removed');
+  const sh = (body) => `#!/bin/sh\n# mine start\necho hi\n# mine end\n# other start\ncat <<EOT\nalpha\n${body}beta\nEOT\n# other end\n`;
+  assert.deepEqual(partsChanged(sh(''), sh('\n'), 'x.sh', named('mine')), ['r:other'], 'S1 a blank line in a heredoc');
+  const tbl = (body) => `<!-- other start -->\n| a | b |\n|---|---|\n| 1 | 2 |\n${body}| 3 | 4 |\n<!-- other end -->\n\n# T\n\n## mine\n\ntext\n`;
+  assert.deepEqual(partsChanged(tbl(''), tbl('\n'), 'd.md', named('mine')), ['r:other'], 'M1 a blank line splitting a table');
+  // a run's edges still aren't: blank lines added round your own part between two others
+  assert.deepEqual(partsChanged(yml(''), yml('').replace('# mine end\n', '# mine end\n\n\n'), 'c.yml', named('mine')), [], 'blank lines at a run\'s edge');
 
   assert.deepEqual(partsChanged(doc, doc.replace('### A1\n', '### X\nx\n### A1\n'), 'x.md', named('a', '+x')), [], 'naming A');
 });

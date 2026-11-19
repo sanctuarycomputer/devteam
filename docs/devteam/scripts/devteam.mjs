@@ -3425,21 +3425,24 @@ function wholeLike(P, name) {
   P.wholeLike ??= new Map();
   if (!P.wholeLike.has(name)) {
     const L = partLeaves(P, name);
-    P.wholeLike.set(name, L.size > 0 && P.owner.slice(1).every((k) => k === 'r:' || L.has(k)));
+    let all = L.size > 0;
+    for (let i = 1; all && i <= P.n; i++) all = P.owner[i] === 'r:' || L.has(P.owner[i]);
+    P.wholeLike.set(name, all);
   }
   return P.wholeLike.get(name);
 }
-// Each leaf's text, trailing blank lines dropped. A rest (the file's, a region's) is in runs: its
-// blank lines left out, and a mark where another leaf's lines come between two of its lines, so a
-// part put in the middle of the rest (between two imports, into a region's body) changes it.
+// Each leaf's text, trailing blank lines dropped. A rest (the file's, a region's) is in runs, the
+// blank lines at a run's edges left out (inside one they are content: a YAML block, a heredoc), and
+// a mark where another leaf's lines come between two of its lines, so a part put in the middle of
+// the rest (between two imports, into a region's body) changes it.
 function leafTexts(P) {
   const m = new Map();
   let last = null;
   for (let i = 1; i <= P.n; i++) {
     const k = P.owner[i], l = P.lines[i - 1], blank = !l.trim();
-    if (k.startsWith('r:') && blank) continue;
-    const cut = k.startsWith('r:') && m.has(k) && last !== k ? '\n\u241e' : '';
-    m.set(k, m.has(k) ? `${m.get(k)}${cut}\n${l}` : l);
+    if (k.startsWith('r:') && blank && last !== k) continue;
+    const cut = k.startsWith('r:') && m.has(k) && last !== k;
+    m.set(k, m.has(k) ? `${cut ? `${m.get(k).replace(/(?:\n\s*)+$/, '')}\n\u241e` : m.get(k)}\n${l}` : l);
     if (!blank) last = k;
   }
   for (const [k, v] of m) m.set(k, v.replace(/(?:\n\s*)+$/, ''));
