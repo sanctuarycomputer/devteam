@@ -873,6 +873,10 @@ try {
   .lib-body .lib-drift { color: var(--amber-fg); }
   .lib-body .lib-meta .badge { margin-right: 6px; }
   .lib-body .lib-pub a.ghost { padding: 0 8px; }
+  /* a thumbnail's frame fills its 16:9 box over the kind's icon, inert; a link's box: its site's icon over its host */
+  .lib-thumb { flex-direction: column; gap: 6px; }
+  .lib-thumb > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
+  .lib-thumb > img { width: 32px; height: 32px; object-fit: contain; }
 
 /* css-library end */
 /* css-viewer start */
@@ -6437,7 +6441,8 @@ function renderLibrary(lib) {
     const meta = !a ? '' : [a.by ? `<span class="lib-by">drawn by ${linkify(a.by)}</span>` : '', forOf(a.for), a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
     return `<div class="card lib-card" data-lib-id="${esc(x.id)}" data-kind="${esc(x.kind)}"${p ? ` data-preview="${esc(p.name)}"` : ''}${said}>`
       + `<div class="card-head"><i class="icon-${k.icon}" aria-hidden="true"></i>${title}${badges}${copy}${open}${menuOf(x.id, [], `lib/${x.id}`, menuExtra)}</div>`
-      + `<a class="lib-thumb"${go} tabindex="-1" aria-hidden="true" data-thumb-src="${esc(src)}"><i class="icon-${k.icon}" aria-hidden="true"></i></a>`
+      // a link's box: its site's icon (removed on error, thumbsWatch) and its host; with no host the kind's icon
+      + `<a class="lib-thumb"${go} tabindex="-1" aria-hidden="true" data-thumb-src="${esc(src)}">${x.link && x.host ? `<img src="https://${esc(x.host)}/favicon.ico" referrerpolicy="no-referrer" alt=""><span class="lib-host small muted">${esc(x.host)}</span>` : `<i class="icon-${k.icon}" aria-hidden="true"></i>`}</a>`
       + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}${pub}${details}${meta ? `<div class="lib-meta small muted">${meta}</div>` : ''}</div></div>`;
   };
   const f = filtersNow('library');
@@ -6473,8 +6478,86 @@ function renderLibrary(lib) {
       at = el.nextElementSibling;
     }
   }
+  // new boxes watched; a box the patch removed frees its slot
+  thumbsWatch(grid);
   if (AV?.slug) avHeader();
 }
+/* library-thumbs start */
+// The Library's thumbnails (kit-92): a box with a frame source (data-thumb-src) gets a sandboxed, inert frame
+// while it is in view, at most THUMB_MAX at once, top first; one whose load hasn't fired THUMB_WAIT ms after it
+// went in, or that this page's policy refuses, is taken out and the box keeps its icon until its card is drawn
+// anew. data-thumb: icon | live | failed. Frames are only put in and taken out here; a poll keeps the nodes.
+const THUMB_MAX = 12, THUMB_WAIT = 5000;
+// io: one IntersectionObserver; seen: the boxes in view; live: the boxes holding a frame
+const THUMBS = { io: null, seen: new Set(), live: new Set() };
+// Watches every .lib-thumb under root once (a box seen before is left alone), then fills the free slots.
+function thumbsWatch(root) {
+  THUMBS.io ??= new IntersectionObserver((es) => {
+    for (const e of es) if (e.isIntersecting) THUMBS.seen.add(e.target); else THUMBS.seen.delete(e.target);
+    thumbsFill();
+  });
+  for (const b of root.querySelectorAll('.lib-thumb')) {
+    if (b._thumbs) continue;
+    b._thumbs = true;
+    b.dataset.thumb ||= 'icon';
+    // a link's site icon that fails goes, the link icon in its place
+    for (const img of b.querySelectorAll(':scope > img')) {
+      const gone = () => { const i = document.createElement('i'); i.className = 'icon-link'; i.setAttribute('aria-hidden', 'true'); img.replaceWith(i); };
+      if (img.complete && !img.naturalWidth && img.getAttribute('src')) gone(); else img.addEventListener('error', gone, { once: true });
+    }
+    if (b.dataset.thumbSrc) THUMBS.io.observe(b);
+  }
+  thumbsFill();
+}
+// Frames out of boxes gone or out of view, then into the boxes in view, in page order, up to the cap.
+function thumbsFill() {
+  for (const b of THUMBS.seen) if (!b.isConnected) { THUMBS.seen.delete(b); THUMBS.io.unobserve(b); }
+  for (const b of THUMBS.live) if (!b.isConnected || !THUMBS.seen.has(b)) thumbOut(b, 'icon');
+  const want = [...THUMBS.seen].filter((b) => !THUMBS.live.has(b) && b.dataset.thumb !== 'failed' && b.dataset.thumbSrc)
+    .sort((a, c) => (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+  for (const b of want) {
+    if (THUMBS.live.size >= THUMB_MAX) break;
+    thumbIn(b);
+  }
+}
+function thumbIn(b) {
+  const f = document.createElement('iframe');
+  // scripts only: no same origin, so a frame of this dashboard's own origin can't reach the page
+  f.setAttribute('sandbox', 'allow-scripts');
+  f.setAttribute('loading', 'lazy');
+  f.setAttribute('tabindex', '-1');
+  f.setAttribute('aria-hidden', 'true');
+  f.src = b.dataset.thumbSrc;
+  let loaded = false;
+  f.addEventListener('load', () => { loaded = true; }, { once: true });
+  b._thumbFrame = f;
+  b._thumbTimer = setTimeout(() => { if (!loaded && b._thumbFrame === f) { thumbOut(b, 'failed'); thumbsFill(); } }, THUMB_WAIT);
+  b.append(f);
+  b.dataset.thumb = 'live';
+  THUMBS.live.add(b);
+}
+// A box's frame out; failed: not tried again (the box is no longer watched)
+function thumbOut(b, state) {
+  clearTimeout(b._thumbTimer);
+  b._thumbFrame?.remove();
+  b._thumbFrame = null;
+  THUMBS.live.delete(b);
+  b.dataset.thumb = state;
+  if (state === 'failed') { THUMBS.seen.delete(b); THUMBS.io?.unobserve(b); }
+}
+// a frame this page's frame-src refuses (on a laptop, a preview's own origin) goes at once, before Chrome's
+// error page shows in it: the blocked address's origin must be the frame's exactly
+document.addEventListener('securitypolicyviolation', (e) => {
+  if (!String(e.violatedDirective).startsWith('frame-src')) return;
+  let o;
+  try { o = new URL(e.blockedURI).origin; } catch { return; }
+  let out = false;
+  for (const b of [...THUMBS.live]) {
+    try { if (new URL(b.dataset.thumbSrc, location.href).origin === o) { thumbOut(b, 'failed'); out = true; } } catch {}
+  }
+  if (out) thumbsFill();
+});
+/* library-thumbs end */
 
 /* score-of start */
 // The Overview's Autonomy row (kit-90): each tile's label, the path of its score record in /api/data,

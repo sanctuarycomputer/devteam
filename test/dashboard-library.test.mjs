@@ -299,8 +299,9 @@ const ERRORS = "window.__errors.filter((e) => !/presence|websocket/i.test(e))";
 
 // A bare project (every Library record comes from the patch), its env with its own HOME and every
 // DEVTEAM_* but the ports unset; the dashboard on it and Chrome with init: { p, soon, port, go }. box: the
-// gateway's served map, and the page is at http://4321.box.localhost:<port>/ through boxPage.
-async function libraryOn(t, { width = 1440, height = 900, init, box = null } = {}) {
+// gateway's served map, and the page is at http://4321.box.localhost:<port>/ through boxPage. page: a
+// function (chrome, port) giving the page instead (tapPage).
+async function libraryOn(t, { width = 1440, height = 900, init, box = null, page = null } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-library-'));
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
@@ -312,7 +313,7 @@ async function libraryOn(t, { width = 1440, height = 900, init, box = null } = {
   later(() => dash.stop());
   const chrome = await openChrome();
   later(() => chrome.close());
-  const p = box ? await boxPage(chrome, port, { header: box }) : await chrome.newPage();
+  const p = page ? await page(chrome, port) : box ? await boxPage(chrome, port, { header: box }) : await chrome.newPage();
   later(() => p.close());
   const at = box ? p.origin : `http://127.0.0.1:${port}`;
   await p.send('Page.enable');
@@ -814,4 +815,219 @@ test('served by another instance: from instance <port> (box)', { ...CHROME, time
   const s = await p.ev(`${art(ids.public)}.textContent.replace(/\\s+/g, ' ')`);
   assert.ok(s.includes('from instance 4399') && !s.includes('Public on this box'), `from instance: ${s}`);
   assert.deepEqual(await p.ev(ERRORS), []);
+});
+
+// ---- in Chrome (kit-92 T4): thumbnails: sandboxed frames in view, at most 12, the icon after 5 s ----
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A page with a second DevTools connection that hears its events (the helper's own drops them): Fetch on
+// patterns, each paused request given to paused(params, reply), reply(method, params) answering on the
+// session it came from; children: also auto-attached to child frame targets (flatten), Fetch on each, so a
+// sandboxed frame in its own process is held too. Its close() closes both connections.
+async function tapPage(chrome, { patterns, paused, children = false }) {
+  const dir = chrome.proc.spawnargs.find((a) => a.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
+  const portFile = path.join(dir, 'DevToolsActivePort');
+  for (let i = 0; !(fs.existsSync(portFile) && /^\d+\n/.test(fs.readFileSync(portFile, 'utf8'))); i++) {
+    if (i > 200) throw new Error('no DevToolsActivePort');
+    await sleep(50);
+  }
+  const dt = fs.readFileSync(portFile, 'utf8').split('\n')[0];
+  const list = async () => (await fetch(`http://127.0.0.1:${dt}/json/list`)).json();
+  const before = new Set((await list()).map((x) => x.id));
+  const p = await chrome.newPage();
+  const target = (await list()).find((x) => x.type === 'page' && !before.has(x.id));
+  assert.ok(target, 'the new page target');
+  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('could not reach the page for the tap')); });
+  let seq = 0;
+  const waiting = new Map();
+  const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+    const id = ++seq;
+    waiting.set(id, { resolve, reject });
+    ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+  });
+  const quiet = (method, params, sessionId) => { send(method, params, sessionId).catch(() => {}); };
+  const attach = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true };
+  const sessions = [];
+  ws.onmessage = (m) => {
+    const o = JSON.parse(m.data);
+    if (o.id !== undefined) { const w = waiting.get(o.id); if (!w) return; waiting.delete(o.id); if (o.error) w.reject(new Error(o.error.message)); else w.resolve(o.result); return; }
+    if (o.method === 'Fetch.requestPaused') paused(o.params, (method, params) => quiet(method, params, o.sessionId));
+    if (o.method === 'Target.attachedToTarget' && children) {
+      const s = o.params.sessionId;
+      sessions.push(o.params.targetInfo);
+      quiet('Fetch.enable', { patterns }, s);
+      quiet('Target.setAutoAttach', attach, s);
+    }
+  };
+  ws.onclose = () => { for (const [id, w] of waiting) { waiting.delete(id); w.reject(new Error('the tap connection closed')); } };
+  await send('Fetch.enable', { patterns });
+  if (children) await send('Target.setAutoAttach', attach);
+  const close = p.close;
+  return { ...p, sessions, close: () => { try { ws.close(); } catch {} close(); } };
+}
+// an init that records every thumbnail frame put in and taken out, with the page's clock: window.__frames,
+// { id: its card's, in, out }
+const FRAMES_INIT = `(() => {
+  window.__frames = [];
+  const frames = (n) => (n.nodeName === 'IFRAME' ? [n] : n.querySelectorAll ? [...n.querySelectorAll('iframe')] : []);
+  new MutationObserver((ms) => {
+    const t = performance.now();
+    for (const m of ms) {
+      for (const n of m.addedNodes) for (const f of frames(n)) if (f.parentElement?.classList.contains('lib-thumb')) window.__frames.push({ el: f, id: f.closest('.lib-card')?.dataset.libId ?? null, in: t });
+      for (const n of m.removedNodes) for (const f of frames(n)) { const r = window.__frames.find((x) => x.el === f); if (r && r.out === undefined) r.out = t; }
+    }
+  }).observe(document, { childList: true, subtree: true });
+})();`;
+const FRAMES = "window.__frames.map(({ id, in: a, out }) => ({ id, in: a, out: out ?? null }))";
+// what is in view (the window scrolls): the boxes intersecting it, those with a frame source, the frames
+const VIEW = `(() => {
+  const H = innerHeight, inv = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.bottom > 0 && r.top < H; };
+  const boxes = [...document.querySelectorAll('#lib-grid .lib-thumb')], id = (b) => b.closest('.lib-card').dataset.libId;
+  return { frames: document.querySelectorAll('#lib-grid .lib-thumb iframe').length, inView: boxes.filter(inv).map(id), srcInView: boxes.filter((b) => inv(b) && b.dataset.thumbSrc).length,
+    holding: boxes.filter((b) => b.querySelector('iframe')).map((b) => ({ id: id(b), inView: inv(b) })) };
+})()`;
+// the page at #library once, every card drawn (a fresh profile: no remembered filter)
+async function libraryOnce(t, fx, opts = {}) {
+  const { items } = itemsOf(fx.patch);
+  const on = await libraryOn(t, { ...opts, init: `${dataPatchInit(fx.patch)}${opts.init ? `\n${opts.init}` : ''}` });
+  await on.go('#library');
+  await on.soon(idsAre(items.map((x) => x.id)), 'a card per item');
+  return { ...on, ...fx, items };
+}
+const thumb = (id) => `${card(id)}.querySelector('.lib-thumb')`;
+
+test('thumbnail frames are sandboxed, lazy and inert', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon } = await libraryAll(t);
+  await soon("document.querySelectorAll('#lib-grid .lib-thumb > iframe').length > 0", 'a thumbnail frame');
+  const fs_ = await p.ev(`[...document.querySelectorAll('#lib-grid .lib-thumb iframe')].map((f) => { const b = f.parentElement, r = f.getBoundingClientRect(), q = b.getBoundingClientRect(), s = getComputedStyle(b);
+    return { parent: b.matches('.lib-thumb'), sandbox: f.getAttribute('sandbox'), loading: f.getAttribute('loading'), lazy: f.loading, events: getComputedStyle(f).pointerEvents, tabindex: f.getAttribute('tabindex'), hidden: f.getAttribute('aria-hidden'),
+      src: f.getAttribute('src') === b.dataset.thumbSrc, state: b.dataset.thumb, ratio: Math.abs(q.width / q.height - 16 / 9) < 0.03,
+      fills: Math.abs(r.width - b.clientWidth) <= 1 && Math.abs(r.height - b.clientHeight) <= 1 && Math.abs(r.left - q.left - b.clientLeft) <= 1 && Math.abs(r.top - q.top - b.clientTop) <= 1 }; })`);
+  assert.ok(fs_.length > 0);
+  for (const f of fs_) assert.deepEqual(f, { parent: true, sandbox: 'allow-scripts', loading: 'lazy', lazy: 'lazy', events: 'none', tabindex: '-1', hidden: 'true', src: true, state: 'live', ratio: true, fills: true }, 'a sandboxed, lazy, inert frame filling its 16:9 box');
+  // every box says its state; one with no frame source never holds a frame
+  const states = await p.ev("[...document.querySelectorAll('#lib-grid .lib-thumb')].map((b) => [b.dataset.thumbSrc, b.dataset.thumb ?? null, !!b.querySelector('iframe')])");
+  for (const [src, state, frame] of states) {
+    assert.ok(['icon', 'live', 'failed'].includes(state), `a box's state: ${state}`);
+    if (!src) assert.deepEqual([state, frame], ['icon', false], 'no source: the icon');
+  }
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('at most 12 live, only in view', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon } = await libraryAll(t, { fx: libraryFixture({ artifacts: 60 }), height: 3000 });
+  await soon(`${VIEW}.frames === 12`, 'twelve frames');
+  await sleep(1500);
+  const top = await p.ev(VIEW);
+  assert.ok(top.srcInView > 12, `more than 12 boxes with a frame source in view (${top.srcInView})`);
+  assert.equal(top.frames, 12, 'exactly 12 frames');
+  assert.ok(top.holding.every((h) => h.inView), 'every frame in view');
+  await p.ev('window.scrollTo(0, document.scrollingElement.scrollHeight)');
+  const was = JSON.stringify(top.holding.map((h) => h.id));
+  await soon(`(() => { const v = ${VIEW}; return v.frames === 12 && v.holding.every((h) => h.inView) && !v.holding.some((h) => ${was}.includes(h.id)); })()`, 'twelve frames, all at the bottom');
+  await sleep(1500);
+  const bottom = await p.ev(VIEW);
+  assert.ok(bottom.srcInView > 12, `more than 12 boxes with a frame source in view at the bottom (${bottom.srcInView})`);
+  assert.equal(bottom.frames, 12, 'exactly 12 frames at the bottom');
+  assert.ok(bottom.holding.every((h) => h.inView), 'every frame in view at the bottom');
+  const tops = top.inView;
+  assert.ok(tops.every((id) => !bottom.inView.includes(id)), 'the top boxes are out of view');
+  assert.ok(bottom.holding.every((h) => !tops.includes(h.id)), 'the top boxes hold none');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a frame that never loads falls back after 5 s', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { ids } = fx;
+  const held = [];
+  // the slow artifact's request, paused and never continued, wherever the frame's request is made
+  const page = (chrome) => tapPage(chrome, { patterns: [{ urlPattern: `*/artifact/main/${ids.slow}/*` }], children: true, paused: (o) => { held.push(o.request.url); } });
+  const { p, soon } = await libraryOnce(t, fx, { height: 3000, init: FRAMES_INIT, page });
+  const slow = `artifact:${ids.slow}`, ok = `artifact:${ids.mock}`;
+  const rec = `window.__frames.find((f) => f.id === ${JSON.stringify(slow)})`;
+  await soon(`!!${rec}`, 'a frame put in the slow box');
+  const t0 = Date.now();
+  while (!held.some((u) => u.includes(`/artifact/main/${ids.slow}/`))) {
+    if (Date.now() - t0 > 3000) assert.fail(`no paused request for the slow frame within 3 s (held: ${JSON.stringify(held)})`);
+    await sleep(50);
+  }
+  await soon(`performance.now() - ${rec}.in >= 4000`, '4 s since the frame went in');
+  const at4 = await p.ev(`({ el: performance.now() - ${rec}.in, frame: !!${thumb(slow)}.querySelector('iframe'), state: ${thumb(slow)}.dataset.thumb })`);
+  assert.ok(at4.el < 5000, `read before 5 s (${at4.el} ms)`);
+  assert.deepEqual([at4.frame, at4.state], [true, 'live'], 'still a frame at 4 s');
+  await soon(`${thumb(slow)}.dataset.thumb === 'failed' || performance.now() - ${rec}.in > 8000`, 'the fallback');
+  const after = await p.ev(`({ gone: ${rec}.out - ${rec}.in, frame: !!${thumb(slow)}.querySelector('iframe'), state: ${thumb(slow)}.dataset.thumb, icon: !!${thumb(slow)}.querySelector(':scope > i.icon-layout-dashboard') })`);
+  assert.equal(after.state, 'failed', 'data-thumb="failed"');
+  assert.equal(after.frame, false, 'no frame');
+  assert.equal(after.icon, true, 'the kind\'s icon');
+  // the observer stamps the frame's going in at the end of the task that put it in, after the page's timer
+  // started (a run read 4995 ms), so 100 ms of slack below 5 s; a fallback at 4 s or earlier is still red
+  assert.ok(after.gone >= 4900 && after.gone <= 7000, `taken out between 5 and 7 s (${after.gone} ms)`);
+  // not retried; one that loads keeps its frame
+  await sleep(1500);
+  assert.deepEqual(await p.ev(`[${thumb(slow)}.dataset.thumb, !!${thumb(slow)}.querySelector('iframe'), window.__frames.filter((f) => f.id === ${JSON.stringify(slow)}).length]`), ['failed', false, 1], 'not retried');
+  assert.deepEqual(await p.ev(`[${thumb(ok)}.dataset.thumb, !!${thumb(ok)}.querySelector('iframe')]`), ['live', true], 'a normal box keeps its frame');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a refused preview frame is the icon', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { ids } = fx;
+  const { p, soon } = await libraryOnce(t, fx, { init: FRAMES_INIT });
+  const live = `preview:${ids.pvLive}`;
+  // on 127.0.0.1 the page's frame-src allows no preview's own origin
+  assert.match(await p.ev(`${thumb(live)}.dataset.thumbSrc`), /^http:\/\/127\.0\.0\.1:\d+\/$/);
+  await p.ev(`${card(live)}.scrollIntoView({ block: 'center' })`);
+  const rec = `window.__frames.find((f) => f.id === ${JSON.stringify(live)})`;
+  await soon(`!!${rec}`, 'a frame put in the live preview\'s box');
+  await soon(`${thumb(live)}.dataset.thumb === 'failed'`, 'the refused frame failed');
+  const r = await p.ev(`({ gone: ${rec}.out === undefined ? null : ${rec}.out - ${rec}.in, frame: !!${thumb(live)}.querySelector('iframe'), icon: !!${thumb(live)}.querySelector(':scope > i.icon-monitor-play') })`);
+  assert.ok(r.gone !== null && r.gone < 1000, `taken out within 1 s (${r.gone} ms)`);
+  assert.deepEqual([r.frame, r.icon], [false, true], 'the icon, no frame');
+  await sleep(1500);
+  const notLive = [ids.pvChecking, ids.pvNotRunning, ids.pvDown, ids.pvExpired].map((n) => `preview:${n}`);
+  assert.deepEqual(await p.ev(`[${thumb(live)}.dataset.thumb, !!${thumb(live)}.querySelector('iframe'), window.__frames.filter((f) => f.id === ${JSON.stringify(live)}).length]`), ['failed', false, 1], 'never a frame past that, not retried');
+  const inView = await p.ev(VIEW);
+  for (const id of notLive) assert.ok(inView.inView.includes(id), `${id} in view`);
+  assert.deepEqual(await p.ev(`${FRAMES}.filter((f) => ${JSON.stringify(notLive)}.includes(f.id))`), [], 'a preview that isn\'t live never had a frame');
+  for (const id of notLive) assert.equal(await p.ev(`${thumb(id)}.dataset.thumb`), 'icon', `${id}: the icon`);
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a link shows its site icon', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { ids } = fx;
+  const asked = [];
+  // figma's icon held (so it stays), github's refused (so it is removed)
+  const page = (chrome) => tapPage(chrome, { patterns: [{ urlPattern: 'https://www.figma.com/favicon.ico' }, { urlPattern: 'https://github.com/favicon.ico' }], paused: (o, reply) => {
+    asked.push(o.request.url);
+    if (o.request.url.startsWith('https://github.com/')) reply('Fetch.failRequest', { requestId: o.requestId, errorReason: 'Failed' });
+  } });
+  const { p, soon } = await libraryOnce(t, fx, { init: FRAMES_INIT, page });
+  const url = `link:${ids.linkUrl}`, remote = `link:${ids.linkRemote}`, file = `link:${ids.linkPath}`;
+  await p.ev(`${card(url)}.scrollIntoView({ block: 'center' })`);
+  const seen = (id) => p.ev(`(() => { const b = ${thumb(id)}, i = b.querySelector('img'); return { img: i ? [i.getAttribute('src'), i.getAttribute('referrerpolicy')] : null, text: b.textContent.trim(), icon: !!b.querySelector('i.icon-link'), frame: !!b.querySelector('iframe') }; })()`);
+  assert.deepEqual(await seen(url), { img: ['https://www.figma.com/favicon.ico', 'no-referrer'], text: 'www.figma.com', icon: false, frame: false }, 'the site\'s icon and its host');
+  // an icon that fails is removed; the host stays
+  await soon(`!${thumb(remote)}.querySelector('img')`, 'the failed icon removed');
+  assert.ok(asked.includes('https://github.com/favicon.ico'), 'github\'s icon was asked for');
+  assert.deepEqual(await seen(remote), { img: null, text: 'github.com', icon: true, frame: false }, 'its host, the link icon');
+  assert.deepEqual(await seen(file), { img: null, text: '', icon: true, frame: false }, 'no host: the link icon');
+  await sleep(1000);
+  assert.deepEqual(await p.ev(`${FRAMES}.filter((f) => f.id.startsWith('link:'))`), [], 'never a frame in a link\'s box');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a poll keeps a live frame', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { ids } = fx;
+  const { p, soon } = await libraryAll(t, { fx, init: READS_INIT });
+  const id = `artifact:${ids.mock}`;
+  await soon(`!!${thumb(id)}.querySelector('iframe')`, 'a live frame');
+  await p.ev(`${thumb(id)}.querySelector('iframe').__mark = 'kept'`);
+  const reads = await p.ev('window.__dataReads');
+  await soon(`window.__dataReads >= ${reads + 3}`, 'two more polls');
+  assert.deepEqual(await p.ev(`(() => { const f = ${thumb(id)}.querySelector('iframe'); return [f?.__mark ?? null, f?.isConnected ?? false, ${thumb(id)}.dataset.thumb]; })()`), ['kept', true, 'live'], 'the same frame in its box');
+  assert.deepEqual(await p.ev('window.__errors'), []);
 });
