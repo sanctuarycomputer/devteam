@@ -240,9 +240,67 @@ const soonIn = (p, ms = 20000, server = null) => async (expr, what) => {
   }
 };
 
+// The box (kit-92 T3): a page whose requests to http://<n>.box.localhost:<port>/ (Chrome sends *.localhost to
+// loopback; the dashboard answers only its own Host) are paused over a second DevTools connection (the helper's
+// own drops events) and fulfilled from http://127.0.0.1:<port>, method, body, headers and status passed through,
+// with x-devteam-public: <header> added to /api/data's answer, as the gateway adds it. header is the gateway's
+// served map, { [project]: { root, port, artifacts: { slug: tree } } }. Its close() closes both connections.
+async function boxPage(chrome, port, { n = 4321, header }) {
+  const dir = chrome.proc.spawnargs.find((a) => a.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
+  const portFile = path.join(dir, 'DevToolsActivePort');
+  for (let i = 0; !(fs.existsSync(portFile) && /^\d+\n/.test(fs.readFileSync(portFile, 'utf8'))); i++) {
+    if (i > 200) throw new Error('no DevToolsActivePort');
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  const dt = fs.readFileSync(portFile, 'utf8').split('\n')[0];
+  const list = async () => (await fetch(`http://127.0.0.1:${dt}/json/list`)).json();
+  const before = new Set((await list()).map((x) => x.id));
+  const p = await chrome.newPage();
+  const target = (await list()).find((x) => x.type === 'page' && !before.has(x.id));
+  assert.ok(target, 'the new page target');
+  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('could not reach the page for the proxy')); });
+  let seq = 0;
+  const waiting = new Map();
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = ++seq;
+    waiting.set(id, { resolve, reject });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+  // an answer for a page that has gone fails; nothing waits on it
+  const quiet = (method, params) => { send(method, params).catch(() => {}); };
+  const origin = `http://${n}.box.localhost:${port}`;
+  const answer = async ({ requestId, request }) => {
+    const u = new URL(request.url);
+    const headers = Object.fromEntries(Object.entries(request.headers).filter(([k]) => !/^(host|content-length|connection)$/i.test(k))
+      .map(([k, v]) => [k, /^origin$/i.test(k) && v === origin ? `http://127.0.0.1:${port}` : v]));
+    try {
+      const body = ['GET', 'HEAD'].includes(request.method) ? undefined : request.postData;
+      const r = await fetch(`http://127.0.0.1:${port}${u.pathname}${u.search}`, { method: request.method, headers, body, redirect: 'manual' });
+      const buf = Buffer.from(await r.arrayBuffer());
+      // fetch has decoded the body: its encoding and length go
+      const out = [...r.headers].filter(([k]) => !/^(content-encoding|content-length|transfer-encoding|connection)$/i.test(k)).map(([name, value]) => ({ name, value }));
+      if (u.pathname === '/api/data') out.push({ name: 'x-devteam-public', value: JSON.stringify(header) });
+      quiet('Fetch.fulfillRequest', { requestId, responseCode: r.status, responseHeaders: out, body: buf.toString('base64') });
+    } catch { quiet('Fetch.failRequest', { requestId, errorReason: 'Failed' }); }
+  };
+  ws.onmessage = (m) => {
+    const o = JSON.parse(m.data);
+    if (o.id !== undefined) { const w = waiting.get(o.id); if (!w) return; waiting.delete(o.id); if (o.error) w.reject(new Error(o.error.message)); else w.resolve(o.result); return; }
+    if (o.method === 'Fetch.requestPaused') answer(o.params);
+  };
+  ws.onclose = () => { for (const [id, w] of waiting) { waiting.delete(id); w.reject(new Error('the proxy connection closed')); } };
+  await send('Fetch.enable', { patterns: [{ urlPattern: `${origin}/*` }] });
+  const close = p.close;
+  return { ...p, origin, close: () => { try { ws.close(); } catch {} close(); } };
+}
+// what a box page's window.__errors holds but the /presence socket's (not proxied)
+const ERRORS = "window.__errors.filter((e) => !/presence|websocket/i.test(e))";
+
 // A bare project (every Library record comes from the patch), its env with its own HOME and every
-// DEVTEAM_* but the ports unset; the dashboard on it and Chrome with init: { p, soon, port, go }.
-async function libraryOn(t, { width = 1440, height = 900, init } = {}) {
+// DEVTEAM_* but the ports unset; the dashboard on it and Chrome with init: { p, soon, port, go }. box: the
+// gateway's served map, and the page is at http://4321.box.localhost:<port>/ through boxPage.
+async function libraryOn(t, { width = 1440, height = 900, init, box = null } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-library-'));
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
@@ -254,8 +312,9 @@ async function libraryOn(t, { width = 1440, height = 900, init } = {}) {
   later(() => dash.stop());
   const chrome = await openChrome();
   later(() => chrome.close());
-  const p = await chrome.newPage();
+  const p = box ? await boxPage(chrome, port, { header: box }) : await chrome.newPage();
   later(() => p.close());
+  const at = box ? p.origin : `http://127.0.0.1:${port}`;
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
@@ -266,10 +325,10 @@ async function libraryOn(t, { width = 1440, height = 900, init } = {}) {
   const go = async (hash) => {
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'about:blank');
-    await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
+    await p.send('Page.navigate', { url: `${at}/${hash}` });
     await soon(loaded, 'the page with its data');
   };
-  return { p, soon, port, go };
+  return { p, soon, port, go, at };
 }
 
 const CHROME = { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' };
@@ -497,4 +556,232 @@ test('a poll leaves the grid alone; a changed card is replaced, its ⋯ open aga
   assert.equal(await p.ev(`${IDS}.length`), 0);
   assert.equal(await p.ev("document.getElementById('n-library').textContent"), '', 'no count');
   assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+// ---- in Chrome (kit-92 T3): the card: head, badges, details, menu and actions; box states through boxPage ----
+
+// the page at #library with every card drawn, localStorage cleared first
+async function libraryAll(t, opts = {}) {
+  const fx = opts.fx ?? libraryFixture();
+  const { items } = itemsOf(fx.patch);
+  const on = await libraryOn(t, { ...opts, init: `${dataPatchInit(fx.patch)}${opts.init ? `\n${opts.init}` : ''}` });
+  await on.go('#library');
+  await on.p.ev('localStorage.clear()');
+  await on.go('#library');
+  await on.soon(idsAre(items.map((x) => x.id)), 'a card per item');
+  return { ...on, ...fx, items };
+}
+// the gateway's served map for libraryFixture, as x-devteam-public carries it
+const servedOf = (ids) => ({ [ids.project]: { root: ids.root, port: 4321, artifacts: ids.served } });
+// an artifact card by slug, in the page
+const art = (slug) => card(`artifact:${slug}`);
+
+test('a preview card keeps dev-links\' selectors', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, patch, ids } = await libraryAll(t);
+  const live = patch.library.previews.find((x) => x.name === ids.pvLive);
+  const sel = `[data-preview="${ids.pvLive}"]`;
+  assert.deepEqual(await p.ev(`(() => { const c = document.querySelector('${sel}'); return { card: c.matches('#lib-grid > .lib-card'), live: !!c.querySelector('.badge.good'), copy: c.querySelector('[data-copy]').dataset.copy, copyText: c.querySelector('[data-copy]').textContent, open: c.querySelector('a.av-open').getAttribute('href') }; })()`),
+    { card: true, live: true, copy: `http://127.0.0.1:${live.port}/`, copyText: 'Copy link', open: `/view/preview/${ids.pvLive}` }, 'data-preview, the live .badge.good, Copy link the first [data-copy], ↗ as a.av-open');
+  // Copy link in the head, before ↗ and ⋯
+  assert.equal(await p.ev(`(() => { const h = document.querySelector('${sel} .card-head'), k = [...h.children]; return k.at(-3).matches('[data-copy]'); })()`), true);
+  // every preview card carries data-preview; no card has a preview's error span (the bar's alone)
+  for (const x of patch.library.previews) {
+    assert.equal(await p.ev(`document.querySelector('[data-preview="${x.name}"]')?.dataset.libId`), `preview:${x.name}`);
+    assert.equal(await p.ev(`document.querySelectorAll('[id="e-preview-${x.name}"]').length`), 0, `${x.name}: no e-preview span on the Library`);
+  }
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a card\'s head', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, items, ids } = await libraryAll(t);
+  const heads = await p.ev(`[...document.querySelectorAll('#lib-grid > .lib-card')].map((c) => {
+    const h = c.querySelector(':scope > .card-head'), k = [...h.children], m = h.querySelector(':scope > details.menu');
+    const edge = h.getBoundingClientRect().right - parseFloat(getComputedStyle(h).paddingRight);
+    return { id: c.dataset.libId, title: !!h.querySelector(':scope > .lib-title'), tab: k.at(-2).matches('a.lib-tab') && !!k.at(-2).querySelector('i.icon-external-link'), menu: k.at(-1).matches('details.menu'), right: Math.abs(m.getBoundingClientRect().right - edge) };
+  })`);
+  for (const [i, x] of items.entries()) {
+    const h = heads[i];
+    assert.equal(h.title, true, `${x.id}: the title in .card-head`);
+    assert.equal(h.menu, true, `${x.id}: ⋯ last`);
+    if (x.kind !== 'review') assert.equal(h.tab, true, `${x.id}: ↗ (a.lib-tab, icon-external-link) then ⋯`);
+    else assert.equal(h.tab, false, `${x.id}: a review's head ends with ⋯ alone`);
+    assert.ok(h.right <= 1, `${x.id}: ⋯ at the head's right edge (off by ${h.right}px)`);
+  }
+  // the drafts: the draft badge, then "in <worktree>" (the newest draft's)
+  const draft = (slug) => p.ev(`(() => { const h = ${art(slug)}.querySelector('.card-head'), b = h.querySelector('.badge.amber'); return { badge: b?.textContent ?? null, afterTitle: !!b && h.querySelector('.lib-title').compareDocumentPosition(b) === Node.DOCUMENT_POSITION_FOLLOWING, in: b?.nextElementSibling?.textContent.startsWith('in ') ?? false, wt: b?.nextElementSibling?.querySelector('a')?.getAttribute('href') ?? null }; })()`);
+  assert.deepEqual(await draft(ids.drafted), { badge: 'draft', afterTitle: true, in: true, wt: `#ticket/${ids.wt2}` }, 'the newest draft\'s worktree');
+  assert.deepEqual(await draft(ids.draftOnly), { badge: 'draft', afterTitle: true, in: true, wt: `#ticket/${ids.wt1}` });
+  assert.equal(await p.ev(`!!${art(ids.docs)}.querySelector('.badge.amber')`), false, 'a landed card has no draft badge');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('clicks open the viewer, links a new tab', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, ids } = await libraryAll(t);
+  const wt = ids.wt2, slug = ids.drafted;
+  const c = `[data-lib-id="artifact:${slug}"]`;
+  assert.deepEqual(await p.ev(`[document.querySelector('${c} .lib-title').getAttribute('href'), document.querySelector('${c} .lib-thumb').matches('a'), document.querySelector('${c} .lib-thumb').getAttribute('href')]`),
+    [`#artifact/wt/${wt}/${slug}`, true, `#artifact/wt/${wt}/${slug}`], 'title and thumbnail open the newest draft');
+  const viewer = `!document.getElementById('artifact-view').hidden && document.getElementById('av-frame').getAttribute('src').endsWith('/artifact/wt/${wt}/${slug}/')`;
+  await p.click(`${c} .lib-title`);
+  await soon(viewer, 'the title opens the viewer on the draft');
+  assert.equal(await p.ev("document.getElementById('drawer').hidden"), true, 'no peek');
+  await p.click('#av-close');
+  await soon("document.getElementById('artifact-view').hidden && location.hash.startsWith('#library')", 'closed, back on the Library');
+  await p.click(`${c} .lib-thumb`);
+  await soon(viewer, 'the thumbnail opens the viewer on the draft');
+  assert.equal(await p.ev("document.getElementById('drawer').hidden"), true, 'no peek');
+  await p.click('#av-close');
+  await soon("document.getElementById('artifact-view').hidden && location.hash.startsWith('#library')", 'closed again');
+  // a link's title: a new tab, the page stays (the default is stopped last, so no real tab loads; the page's own handlers ran first)
+  const lc = `[data-lib-id="link:${ids.linkUrl}"]`;
+  assert.deepEqual(await p.ev(`[document.querySelector('${lc} .lib-title').getAttribute('href'), document.querySelector('${lc} .lib-title').getAttribute('target'), document.querySelector('${lc} .lib-thumb').getAttribute('href'), document.querySelector('${lc} .lib-thumb').getAttribute('target')]`),
+    ['https://www.figma.com/file/pay-flow', '_blank', 'https://www.figma.com/file/pay-flow', '_blank']);
+  const href = await p.ev(`(() => { window.__opened = []; window.__clicked = []; const o = window.open; window.open = (...a) => { window.__opened.push(a); return null; };
+    window.addEventListener('click', (e) => { const a = e.target.closest('a'); window.__clicked.push({ href: a?.getAttribute('href') ?? null, target: a?.target ?? null, prevented: e.defaultPrevented }); e.preventDefault(); }, { once: true }); return location.href; })()`);
+  await p.click(`${lc} .lib-title`);
+  await soon('window.__clicked.length === 1', 'the click seen');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(await p.ev('[location.href, window.__opened.length, window.__clicked[0]]'), [href, 0, { href: 'https://www.figma.com/file/pay-flow', target: '_blank', prevented: false }], 'a new tab, the page unchanged');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+  // a preview's title opens #preview/<name>; a review's #review/<qid>
+  assert.equal(await p.ev(`document.querySelector('[data-lib-id="preview:${ids.pvLive}"] .lib-title').getAttribute('href')`), `#preview/${ids.pvLive}`);
+  assert.equal(await p.ev(`document.querySelector('[data-lib-id="review:${ids.reviewQ}"] .lib-title').getAttribute('href')`), `#review/${ids.reviewQ}`);
+  await p.click(`[data-lib-id="preview:${ids.pvLive}"] .lib-title`);
+  await soon(`location.hash === '#preview/${ids.pvLive}' && !document.getElementById('artifact-view').hidden`, 'the preview in the viewer');
+  await p.click('#av-close');
+  await soon("document.getElementById('artifact-view').hidden && location.hash.startsWith('#library')", 'closed');
+  await p.click(`[data-lib-id="review:${ids.reviewQ}"] .lib-title`);
+  await soon(`location.hash === '#review/${ids.reviewQ}'`, 'the review page');
+});
+
+test('an artifact card\'s meta', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, ids } = await libraryAll(t);
+  const meta = (slug) => p.ev(`(() => { const m = ${art(slug)}.querySelector('.lib-meta'); const by = m?.querySelector('.lib-by'), f = m?.querySelector('.lib-for');
+    return { by: by ? [by.firstChild.textContent, [...by.querySelectorAll('a')].map((a) => a.getAttribute('href'))] : null, for: f ? [f.firstChild.textContent, [...f.querySelectorAll('a')].map((a) => a.getAttribute('href'))] : null, text: m?.textContent ?? '' }; })()`);
+  const d = await meta(ids.drafted);
+  assert.deepEqual([d.by, d.for], [['drawn by ', ['#planner/pay']], ['for ', [`#feature/${ids.feat1}`]]], 'the planner\'s session; the feature');
+  const pub = await meta(ids.public);
+  assert.deepEqual([pub.by, pub.for], [['drawn by ', ['#planner/pay']], ['for ', [`#goal/${ids.goal1}`]]], 'a goal');
+  const nl = await meta(ids.notLive);
+  assert.deepEqual([nl.by, nl.for], [['drawn by ', [`#ticket/${ids.tHeld}`]], ['for ', [`#ticket/${ids.tHeld}`]]], 'a ticket\'s session; a ticket');
+  const broken = await meta(ids.broken);
+  assert.equal(broken.by, null, 'no by: no drawn by');
+  assert.ok(!broken.text.includes('drawn by'));
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('the ⋯ menu', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, items } = await libraryAll(t);
+  const menus = await p.ev(`[...document.querySelectorAll('#lib-grid > .lib-card')].map((c) => { const m = c.querySelector('.card-head > details.menu'); const b = (s) => [...m.querySelectorAll(s)].map((x) => [x.textContent, x.dataset.copy ?? x.dataset.menuOpen]);
+    return { id: c.dataset.libId, kv: m.querySelector('.kv code')?.textContent, copy: b('[data-copy]').filter(([s]) => s === 'Copy ID'), peek: b('[data-menu-open]') }; })`);
+  for (const [i, x] of items.entries()) {
+    assert.deepEqual(menus[i], { id: x.id, kv: x.id, copy: [['Copy ID', x.id]], peek: [['Open in side peek', `lib/${x.id}`]] }, `${x.id}: ID, Copy ID, Open in side peek`);
+  }
+});
+
+test('the gap-audit rows off a box', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, patch, ids } = await libraryAll(t);
+  const text = (id) => p.ev(`${card(id)}.textContent.replace(/\\s+/g, ' ')`);
+  const badges = (id) => p.ev(`[...${card(id)}.querySelectorAll('.card-head .badge')].map((b) => b.textContent)`);
+  // each preview state, its name, project, session (a link) and offered
+  const states = { [ids.pvLive]: 'live', [ids.pvChecking]: 'checking', [ids.pvNotRunning]: 'not running', [ids.pvDown]: 'not answering', [ids.pvExpired]: 'expired' };
+  for (const x of patch.library.previews) {
+    const id = `preview:${x.name}`;
+    assert.ok((await badges(id)).includes(states[x.name]), `${x.name}: its state`);
+    const s = await text(id);
+    assert.ok(s.includes(x.name) && s.includes(x.project) && s.includes('offered '), `${x.name}: name, project, offered: ${s}`);
+    assert.equal(await p.ev(`${card(id)}.querySelector('.lib-body code')?.textContent`), x.name, `${x.name}: the name in code`);
+  }
+  assert.equal(await p.ev(`${card(`preview:${ids.pvLive}`)}.querySelector('.lib-body a[href="#ticket/${ids.tBuilding}"]') !== null`), true, 'the session a link');
+  assert.ok((await text(`preview:${ids.pvDown}`)).includes('down since '), 'not answering: down since');
+  const live = patch.library.previews.find((x) => x.name === ids.pvLive);
+  assert.equal(await p.ev(`${card(`preview:${ids.pvLive}`)}.querySelector('[data-copy]').dataset.copy`), `http://127.0.0.1:${live.port}/`, 'Copy link on the live card');
+  for (const x of [ids.pvNotRunning, ids.pvDown, ids.pvExpired]) assert.equal(await p.ev(`[...${card(`preview:${x}`)}.querySelectorAll('[data-copy]')].some((b) => b.textContent === 'Copy link')`), false, `${x}: no Copy link`);
+  // no Start or Stop on any card
+  assert.deepEqual(await p.ev("[...document.querySelectorAll('#lib-grid *')].filter((e) => ['Start', 'Stop'].includes(e.textContent.trim())).length"), 0, 'no Start or Stop');
+  assert.equal(await p.ev("document.querySelectorAll('#lib-grid [data-preview-start], #lib-grid [data-preview-stop]').length"), 0);
+  // the broken card
+  assert.deepEqual(await badges(`artifact:${ids.broken}`), ['broken']);
+  assert.equal(await p.ev(`${art(ids.broken)}.querySelector('.card-head .badge').matches('.badge.high')`), true);
+  assert.ok((await text(`artifact:${ids.broken}`)).includes('manifest.json: title is missing'), 'its error');
+  // each link: kind badge, id, location, for, notes
+  for (const l of patch.library.links) {
+    const id = `link:${l.id}`;
+    const s = await text(id);
+    assert.equal(await p.ev(`${card(id)}.querySelector('.lib-body .badge')?.textContent`), l.kind, `${l.id}: its kind`);
+    assert.equal(await p.ev(`[...${card(id)}.querySelectorAll('.lib-body code')].some((c) => c.textContent === ${JSON.stringify(l.id)})`), true, `${l.id}: its id`);
+    const loc = l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path);
+    assert.ok(s.includes(loc), `${l.id}: its location ${loc}`);
+    if (l.notes) assert.ok(s.includes(l.notes), `${l.id}: its notes`);
+    if (l.for.length) assert.ok(s.includes('for '), `${l.id}: for`);
+  }
+  assert.equal(await p.ev(`${card(`link:${ids.linkUrl}`)}.querySelector('.lib-body a[href="#goal/${ids.goal1}"]') !== null`), true, 'for: a goal link');
+  // published, off a box; no Public badge
+  assert.ok((await badges(`artifact:${ids.public}`)).includes('published'), 'published off a box');
+  assert.ok(!(await badges(`artifact:${ids.public}`)).includes('Public'));
+  assert.ok((await text(`artifact:${ids.public}`)).includes('recorded '), 'when it was recorded');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('publish on the card (box)', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { p, port, ids } = await libraryAll(t, { fx, box: servedOf(fx.ids) });
+  assert.equal(await p.ev("typeof PUBLIC === 'object' && !!PUBLIC && location.host.startsWith('4321.box.localhost')"), true, 'on the box');
+  const pub = art(ids.public);
+  assert.deepEqual(await p.ev(`(() => { const c = ${pub}, b = c.querySelector('.lib-title').nextElementSibling; return { good: b.matches('.badge.good'), globe: !!b.querySelector('i.icon-globe'), text: b.textContent.trim(), dot: !!c.querySelector('.dot'), live: /\\blive\\b/i.test(c.textContent), border: getComputedStyle(c).borderColor === getComputedStyle(${art(ids.docs)}).borderColor }; })()`),
+    { good: true, globe: true, text: 'Public', dot: false, live: false, border: true }, 'Public with a globe, after the title; no dot, no live, the plain border');
+  const text = (slug) => p.ev(`${art(slug)}.textContent.replace(/\\s+/g, ' ')`);
+  const s = await text(ids.public);
+  assert.ok(s.includes('Public on this box') && /recorded .+ from the dashboard/.test(s), `publish details: ${s}`);
+  assert.ok((await text(ids.drift)).includes('changed on main since'), 'drift');
+  assert.ok(await p.ev(`${art(ids.drift)}.querySelector('.amber, .lib-drift') !== null`), 'drift in amber');
+  // not live: the badge, Restore (the gateway's publish page, a new tab), the error span, Forget in ⋯
+  const box = `http://box.localhost:${port}`;
+  const nl = art(ids.notLive);
+  assert.ok((await text(ids.notLive)).includes('not live on this box'));
+  assert.deepEqual(await p.ev(`(() => { const a = [...${nl}.querySelectorAll('a')].find((x) => x.textContent === 'Restore'); return a && [a.getAttribute('href'), a.target]; })()`), [`${box}/public/publish?port=4321&slug=${ids.notLive}`, '_blank']);
+  assert.equal(await p.ev(`${nl}.querySelector('#e-pub-${ids.notLive}') !== null`), true, 'its error span');
+  assert.equal(await p.ev(`${nl}.querySelector('.card-head details.menu [data-forget="${ids.notLive}"]')?.textContent`), 'Forget', 'Forget in ⋯');
+  assert.equal(await p.ev("[...document.querySelectorAll('#lib-top a')].some((a) => a.textContent === 'Restore all')"), true, 'Restore all above the grid');
+  // the public card's ⋯: Copy public link
+  assert.equal(await p.ev(`[...${pub}.querySelectorAll('.card-head details.menu [data-copy]')].find((b) => b.textContent === 'Copy public link')?.dataset.copy`), `http://public.box.localhost:${port}/${ids.project}/${ids.public}/`);
+  assert.deepEqual(await p.ev(ERRORS), []);
+});
+
+test('no publish buttons on any card (box)', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { p, port, ids } = await libraryAll(t, { fx, box: servedOf(fx.ids) });
+  const badges = (slug) => p.ev(`[...${art(slug)}.querySelectorAll('.card-head .badge')].map((b) => b.textContent.trim())`);
+  // every state drawn: public, public with an update, drifted and not live, not live
+  assert.ok((await badges(ids.public)).includes('Public'));
+  assert.ok((await badges(ids.pubUpdate)).includes('Public'));
+  assert.ok((await badges(ids.drift)).includes('not live on this box'));
+  assert.ok((await badges(ids.notLive)).includes('not live on this box'));
+  const WORDS = ['Unpublish', 'Update', 'Publish', 'Start', 'Stop', "Review main's version"];
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#lib-grid *')].map((e) => e.textContent.trim()).filter((s) => ${JSON.stringify(WORDS)}.includes(s))`), [], 'none of the publish or preview buttons, menus included');
+  // the gateway's pages: Restore alone, on a not-live card
+  assert.deepEqual(await p.ev(`[...new Set([...document.querySelectorAll('#lib-grid a[href]')].filter((a) => a.getAttribute('href').startsWith(${JSON.stringify(`http://box.localhost:${port}/`)})).map((a) => a.textContent))]`), ['Restore']);
+  assert.deepEqual(await p.ev(ERRORS), []);
+});
+
+// an init after dataPatchInit: the server refuses POST /api/artifact-publish with 400 {"error":"no"}
+const FORGET_FAILS = `(() => {
+  const f = window.fetch;
+  window.fetch = (u, o) => (String(u && u.url ? u.url : u).startsWith('/api/artifact-publish') && String(o?.method || 'GET').toUpperCase() === 'POST'
+    ? Promise.resolve(new Response(JSON.stringify({ error: 'no' }), { status: 400, headers: { 'content-type': 'application/json' } })) : f(u, o));
+})();`;
+
+test('a refused Forget says why (box)', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { p, soon, ids } = await libraryAll(t, { fx, box: servedOf(fx.ids), init: FORGET_FAILS });
+  const c = `[data-lib-id="artifact:${ids.notLive}"]`;
+  await p.click(`${c} .card-head details.menu > summary`);
+  await soon(`document.querySelector('${c} .card-head details.menu').open`, 'the ⋯ open');
+  await p.click(`${c} [data-forget]`);
+  await soon(`document.querySelector('${c} [data-forget]').textContent === 'Confirm forget'`, 'the confirm step');
+  await p.click(`${c} [data-forget]`);
+  await soon(`document.getElementById('e-pub-${ids.notLive}').textContent.includes('no')`, 'the refusal in e-pub');
+  assert.equal(await p.ev(`document.getElementById('e-pub-${ids.notLive}').textContent`), 'Not saved: no');
+  assert.equal(await p.ev(`document.querySelector('${c}').contains(document.getElementById('e-pub-${ids.notLive}'))`), true, 'on the card');
+  assert.deepEqual(await p.ev(ERRORS), []);
 });

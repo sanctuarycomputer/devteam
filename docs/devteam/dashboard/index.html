@@ -862,6 +862,13 @@ try {
   .lib-thumb > i { font-size: 28px; }
   .lib-body { margin-top: 8px; min-width: 0; }
   .lib-body .lib-sum { color: var(--fg-2); max-width: var(--measure); }
+  /* the thumbnail opens what the title opens; Public's globe; publish details, drift in amber; the details and meta lines */
+  a.lib-thumb { text-decoration: none; cursor: pointer; }
+  .lib-card .card-head .badge > i { font-size: 11px; margin-right: 4px; }
+  .lib-body > .lib-pub, .lib-body > .lib-meta, .lib-body > .err { margin-top: 6px; max-width: var(--measure); }
+  .lib-body .lib-drift { color: var(--amber-fg); }
+  .lib-body .lib-meta .badge { margin-right: 6px; }
+  .lib-body .lib-pub a.ghost { padding: 0 8px; }
 
 /* css-library end */
 /* css-viewer start */
@@ -6377,20 +6384,55 @@ function renderLibrary(lib) {
   const top = $('lib-top');
   if (top.dataset.drawn !== pubHead + pvNote) { top.innerHTML = pubHead + pvNote; top.dataset.drawn = pubHead + pvNote; top.hidden = !(pubHead + pvNote); }
   const KIND = Object.fromEntries(LIB_KINDS.map(([k, label, icon]) => [k, { label, icon }]));
-  // a card: its head built in place (cardHead would put the trailing items in its grow span), the thumbnail's box
-  // (data-thumb-src: the frame's src, or empty where only the kind's icon shows), the body
+  const PV_BADGE = { live: '<span class="badge good">live</span>', checking: '<span class="badge">checking</span>', 'not-running': '<span class="badge medium">not running</span>', 'not-answering': '<span class="badge medium">not answering</span>', expired: '<span class="badge">expired</span>' };
+  // a for ref as a link, its kind prefix dropped: a feature to its peek (linkify knows no feature ids), a goal or
+  // ticket as linkify makes it (its title), anything else as linkify leaves it
+  const forRef = (f) => { const m = /^(goal|ticket|feature):(.+)$/.exec(f ?? ''); return m?.[1] === 'feature' ? `<a class="linkish" href="#feature/${esc(encodeURIComponent(m[2]))}">${esc(m[2])}</a>` : linkify(m ? m[2] : f); };
+  const forOf = (refs) => (refs?.length ? `<span class="lib-for">for ${refs.map(forRef).join(', ')}</span>` : '');
+  // a card: its head built in place (cardHead would put the trailing items in its grow span: kind icon, title,
+  // badges, a preview's Copy link, ↗, ⋯), the thumbnail's box (an anchor opening what the title opens;
+  // data-thumb-src: the frame's src, or empty where only the kind's icon shows), the body (summary, details, meta)
   const libraryCard = (x) => {
     const k = KIND[x.kind];
     const own = x.kind === 'link' && x.link?.url;
-    const title = `<a class="lib-title"${x.href ? ` href="${esc(x.href)}"` : ''}${own ? ' target="_blank" rel="noopener noreferrer"' : ''}>${esc(x.title)}</a>`;
+    const go = `${x.href ? ` href="${esc(x.href)}"` : ''}${own ? ' target="_blank" rel="noopener noreferrer"' : ''}`;
+    const title = `<a class="lib-title"${go}>${esc(x.title)}</a>`;
+    // the landed row gives the publish state, the shown row (the newest draft, else the landed) the rest
+    const ps = x.landed && !x.landed.error ? publicState(x.landed, PUBLIC, me) : null;
+    const badges = [
+      x.art && x.art.at !== 'main' ? `<span class="badge amber">draft</span><span class="small muted">in ${linkify(x.art.at)}</span>` : '',
+      ps?.state === 'public' ? '<span class="badge good"><i class="icon-globe" aria-hidden="true"></i>Public</span>' : ps?.state === 'published' ? '<span class="badge">published</span>' : ps?.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : '',
+      x.pstate ? PV_BADGE[x.pstate.state] : '',
+      x.error ? '<span class="badge high">broken</span>' : '',
+    ].join('');
     const copy = x.pstate?.actions.includes('copy') ? `<button class="ghost" data-copy="${esc(previewUrl(pvHere, x.preview))}">Copy link</button>` : '';
     const open = x.kind !== 'review' && x.tab ? `<a class="lib-tab av-open" href="${esc(x.tab)}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own" aria-label="Open in a new tab"><i class="icon-external-link" aria-hidden="true"></i></a>` : '';
+    // ⋯: Copy public link on a public artifact, Forget on a not-live one (today's handler and its two steps)
+    const menuExtra = (ps?.state === 'public' ? `<button class="ghost" data-copy="${esc(L.page(x.landed.slug))}">Copy public link</button>` : '')
+      + (ps?.state === 'not-live' ? `<button class="ghost" data-forget="${esc(x.landed.slug)}">Forget</button>` : '');
     const src = x.art && !x.error ? artSrc(x.art.slug, x.art.at) : x.pstate?.state === 'live' ? previewUrl(pvHere, x.preview) : '';
     const said = x.art ? subj('artifact', x.art.slug, x.art.title || x.art.slug) : x.preview ? subj('preview', x.preview.name, x.title) : '';
-    return `<div class="card lib-card" data-lib-id="${esc(x.id)}" data-kind="${esc(x.kind)}"${said}>`
-      + `<div class="card-head"><i class="icon-${k.icon}" aria-hidden="true"></i>${title}${copy}${open}${menuOf(x.id, [], `lib/${x.id}`, '')}</div>`
-      + `<div class="lib-thumb" data-thumb-src="${esc(src)}"><i class="icon-${k.icon}" aria-hidden="true"></i></div>`
-      + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}</div></div>`;
+    // publish details: where it is public, the record's date and channel (a forged line can look the same), drift;
+    // on a not-live one Restore (main's version goes up, R4) and the span a refused Forget writes to
+    const pub = !ps?.rec ? '' : `<div class="lib-pub small">${[
+      ps.state === 'public' ? (ps.from ? `<span>from instance ${esc(ps.from)}</span>` : '<span>Public on this box</span>') : '',
+      `<span class="muted">recorded ${esc(when(ps.rec.at))} from the ${ps.rec.channel === 'dashboard' ? 'dashboard' : 'terminal'}</span>`,
+      ps.drift ? '<span class="lib-drift">changed on main since</span>' : '',
+      ps.state === 'not-live' ? tab(L.publish([x.landed.slug]), 'Restore') : '',
+    ].filter(Boolean).join(' · ')}<span class="err" id="e-pub-${esc(x.landed.slug)}"></span></div>`;
+    const p = x.preview;
+    const details = x.error ? `<div class="err">${esc(x.error)}</div>`
+      : p ? `<div class="lib-meta small muted">${[`<code>${esc(p.name)}</code>`, esc(p.project), linkify(p.session), p.at ? `offered ${esc(when(p.at))}` : '', x.pstate.since ? `down since ${esc(when(x.pstate.since))}` : ''].filter(Boolean).join(' · ')}</div>`
+      : x.link ? (() => { const l = x.link, loc = l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path || '');
+        return `<div class="lib-meta small muted"><span class="badge">${esc(l.kind)}</span><code>${esc(l.id)}</code>${loc ? ` · <span class="loc">${esc(loc)}</span>` : ''}${l.for?.length ? ` · ${forOf(l.for)}` : ''}</div>`; })()
+      : '';
+    // an artifact's meta: the session that drew it (a link that opens it), what it is for, when
+    const a = x.art && !x.error ? x.art : null;
+    const meta = !a ? '' : [a.by ? `<span class="lib-by">drawn by ${linkify(a.by)}</span>` : '', forOf(a.for), a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
+    return `<div class="card lib-card" data-lib-id="${esc(x.id)}" data-kind="${esc(x.kind)}"${p ? ` data-preview="${esc(p.name)}"` : ''}${said}>`
+      + `<div class="card-head"><i class="icon-${k.icon}" aria-hidden="true"></i>${title}${badges}${copy}${open}${menuOf(x.id, [], `lib/${x.id}`, menuExtra)}</div>`
+      + `<a class="lib-thumb"${go} tabindex="-1" aria-hidden="true" data-thumb-src="${esc(src)}"><i class="icon-${k.icon}" aria-hidden="true"></i></a>`
+      + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}${pub}${details}${meta ? `<div class="lib-meta small muted">${meta}</div>` : ''}</div></div>`;
   };
   const f = filtersNow('library');
   const cards = items.filter((x) => libraryKeep(x, f)).map((x) => [x.id, libraryCard(x)]);
