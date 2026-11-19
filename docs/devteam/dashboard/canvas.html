@@ -67,6 +67,9 @@
   .layer { display: flex; align-items: center; gap: 6px; height: 26px; padding-right: 8px; color: var(--fg-2); cursor: pointer; white-space: nowrap; font-size: 12px; }
   .layer:hover { background: var(--hover); }
   .layer[aria-selected="true"] { background: color-mix(in srgb, var(--sel) 14%, transparent); color: var(--fg); }
+  /* the focused row (kit-662: the tree by keyboard) is ringed, not only tinted */
+  .layer:focus { outline: none; }
+  .layer:focus-visible { outline: 2px solid var(--sel); outline-offset: -2px; }
   .layer .ic { width: 14px; text-align: center; color: var(--muted); font-family: var(--mono); font-size: 10px; flex: none; }
   .layer .nm { overflow: hidden; text-overflow: ellipsis; }
   .props { padding: 0 12px 24px; }
@@ -74,6 +77,27 @@
   .props .row .k { color: var(--fg-2); }
   .props .row .v { overflow-wrap: anywhere; max-width: var(--measure); }
   .note { font-size: 12px; color: var(--fg-2); margin: 8px 0; max-width: var(--measure); }
+  /* the editable fields (kit-662), under the read-only rows */
+  .props .fields { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 4px; }
+  .props .fields .row { align-items: center; }
+  .props input, .props textarea { font: inherit; font-size: 12px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; height: 28px; padding: 0 8px; min-width: 0; width: 100%; }
+  .props .foot { margin-top: 16px; }
+  .props .ctl { display: flex; gap: 4px; align-items: center; min-width: 0; }
+  .props .ctl > select, .props .ctl > input:not([type="checkbox"]) { flex: 1 1 0; width: auto; }
+  .props select { width: 100%; }
+  .props input[type="checkbox"] { width: 16px; height: 16px; margin: 0; padding: 0; }
+  .props textarea { height: auto; min-height: 64px; padding: 4px 8px; resize: vertical; line-height: 1.4; }
+  .props .group { display: flex; flex-wrap: wrap; gap: 2px; flex: 1 1 auto; min-width: 0; }
+  .props .group button { flex: 1 1 auto; padding: 0 5px; }
+  .props .group button[aria-pressed="true"] { background: var(--well); border-color: var(--fg-2); color: var(--fg); }
+  .props .pad { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; flex: 1 1 auto; min-width: 0; }
+  .props .pad input { padding: 0 4px; }
+  .props .swatch { flex: none; width: 20px; height: 20px; border-radius: 4px; border: 1px solid var(--line-2); }
+  .props .swatch.none { border-style: dashed; }
+  .props .fnote { margin: -4px 0 8px 80px; color: var(--red-fg); }
+  .props :disabled { opacity: .5; cursor: not-allowed; }
+  .props .acts { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+  .props .vname { flex: 1 1 auto; overflow-wrap: anywhere; }
 
   /* the stage: the page surface is the one element zoom and pan move */
   /* clip, not hidden: the stage is no scroll container, so nothing (scrollIntoView included) scrolls it */
@@ -87,7 +111,41 @@
   #pageSel, #narrowNote { display: none; }
   #capNote { font-size: 12px; color: var(--fg-2); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin: 0; max-width: var(--measure); }
   #narrowNote { font-size: 12px; color: var(--fg-2); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin: 0; max-width: var(--measure); }
-  #msg { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); margin: 0; padding: 0 16px; width: max-content; max-width: min(var(--measure), 100%); color: var(--fg-2); text-align: center; z-index: 2; }
+  #msg { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); margin: 0; padding: 0 16px; width: max-content; max-width: min(var(--measure), 100%); color: var(--fg-2); text-align: center; z-index: 2; pointer-events: none; }
+  /* the banner and the message line (kit-662): at the stage's top, centred, clear of its corners; they
+     take no pointer events, so the stage under them can still be used */
+  .say { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; width: max-content; max-width: calc(100% - 24px); z-index: 4; pointer-events: none; }
+  .say p { margin: 0; max-width: var(--measure); font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); box-shadow: var(--shadow); }
+  #banner { background: var(--amber-bg); color: var(--amber-fg); border-color: var(--amber-fg); }
+  /* the tools bar (kit-662): one row at the stage's foot, centred, its right edge at least 160 px left
+     of the stage's (kit-661 checks the stage's own bottom-right corner, 60 and 120 px in). It never
+     wraps, and stays centred while key buttons of a usable size fit so: by the stage's width it shows
+     names and keys (about 470 px, centred, from 840 px), the keys alone (about 190 px, centred, from
+     520 px), then below that the keys in 12 px buttons at the stage's left (90 px); under a 260 px
+     stage, where not even that keeps 160 px clear, it is hidden and the tool keys still work. */
+  .stage { container: stage / inline-size; }
+  .tools { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; flex-wrap: nowrap; gap: 2px; width: max-content; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 3px; box-shadow: var(--shadow); z-index: 3; }
+  .tools button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; border-color: transparent; background: transparent; }
+  @container stage (width < 840px) {
+    .tools .tn { display: none; }
+  }
+  @container stage (width < 520px) {
+    .tools { left: 4px; transform: none; gap: 0; padding: 2px; }
+    .tools button { width: 12px; padding: 0; overflow: hidden; }
+  }
+  @container stage (width < 260px) {
+    .tools { display: none; }
+  }
+  .tools button:hover { background: var(--hover); }
+  .tools button[aria-pressed="true"] { background: var(--well); border-color: var(--fg-2); }
+  .tools button:disabled { opacity: .5; cursor: not-allowed; }
+  .tools kbd { font: 10px/1 var(--mono); color: var(--muted); }
+  .stage.drawing:not(.space):not(.panning) { cursor: crosshair; }
+  /* a tool's preview: stage chrome, never a drawn node, taking no pointer events */
+  .draft { position: absolute; border: 1px dashed var(--sel); pointer-events: none; z-index: 2; }
+  .draft.round { border-radius: 50%; }
+  .pen { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 2; }
+  .pen polyline { fill: none; stroke: var(--sel); stroke-width: 1.5px; stroke-dasharray: 4 3; }
   body[data-state="error"] #surface, body[data-state="error"] .zoom { display: none; }
 
   /* under 760 px, watch and comment: no panels, the stage the full width under the bar, the bar's
@@ -108,7 +166,9 @@
     .bar .chip { flex: 0 1 auto; }
     .stage-top { top: auto; bottom: 12px; }
     #pageSel { display: block; max-width: 100%; }
+    .say { top: 52px; }
     #narrowNote { display: block; }
+    #tools { display: none; }
   }
 
   /* the design being drawn keeps its own colours, light or dark */
@@ -152,6 +212,20 @@
       <button id="zoomFit" type="button">Fit</button>
     </div>
     <p id="msg" role="status" hidden></p>
+    <div class="say">
+      <p id="banner" role="status" hidden></p>
+      <p id="toast" role="status" hidden></p>
+    </div>
+    <div class="tools" id="tools" role="toolbar" aria-label="Tools" hidden>
+      <button type="button" data-tool="move" aria-pressed="true" aria-label="Move" title="Move (V)"><span class="tn">Move</span> <kbd>V</kbd></button>
+      <button type="button" data-tool="frame" aria-pressed="false" aria-label="Frame" title="Frame (F)"><span class="tn">Frame</span> <kbd>F</kbd></button>
+      <button type="button" data-tool="text" aria-pressed="false" aria-label="Text" title="Text (T)"><span class="tn">Text</span> <kbd>T</kbd></button>
+      <button type="button" data-tool="rect" aria-pressed="false" aria-label="Rectangle" title="Rectangle (R)"><span class="tn">Rectangle</span> <kbd>R</kbd></button>
+      <button type="button" data-tool="ellipse" aria-pressed="false" aria-label="Ellipse" title="Ellipse (O)"><span class="tn">Ellipse</span> <kbd>O</kbd></button>
+      <button type="button" data-tool="vector" aria-pressed="false" aria-label="Vector" title="Vector (P)"><span class="tn">Vector</span> <kbd>P</kbd></button>
+      <button type="button" data-tool="image" aria-pressed="false" aria-label="Image" title="Image (I)"><span class="tn">Image</span> <kbd>I</kbd></button>
+    </div>
+    <input type="file" id="imageFile" accept="image/png,image/jpeg,image/webp,image/gif" aria-label="Image file" hidden>
   </section>
   <aside class="panel right">
     <h2 class="ptitle">Properties</h2>
@@ -173,9 +247,18 @@
   const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
   const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
-  // What the page holds: the slug, the response's session and rev (kit-662 and kit-668 use them), the
-  // document, and the page shown.
-  const state = { slug: null, session: null, rev: null, doc: null, repo: null, pageId: null, sel: null };
+  // What the page holds: the slug, the response's session and rev, the document drawn, and the page
+  // shown. Editing (kit-662) keeps two copies: `base`, the document as the server has applied it, and
+  // `pending`, the page's own edits not yet acked ({ ops, seq }, seq null until sent), in order; `doc`
+  // is base with pending applied over it, what is drawn. `saved` is the last `saved` rev; `locked` is
+  // null, 'view' (refused as a View person) or 'closed' (landed or removed): no more edits either way.
+  const state = {
+    slug: null, session: null, rev: null, doc: null, repo: null, pageId: null, sel: null,
+    base: null, pending: [], saved: null, locked: null, paused: false, closedText: null,
+    // Change in (spec §3): { comp, name }, the variant a component's nodes are edited in, or null (Base);
+    // placing: the component Place instance adds an instance of at the next click, or null
+    variantMode: null, placing: null,
+  };
   // The shown page's drawn nodes and Layers rows, by node id (Maps: an id is the document's string).
   let drawn = new Map();
   let layerRows = new Map();
@@ -226,9 +309,22 @@
   const pageById = (id) => pages().find((pg) => pg.id === id) || null;
   const pageName = (pg) => (typeof pg.name === 'string' ? pg.name : '');
 
-  // The Pages list: one link per page, by name, in order.
+  // The pages' ids and names, in order, as one string: the Pages list and the page select are rebuilt
+  // only when it changes, so another person's edit leaves a focused link focused and an open picker's
+  // options in place (redraw runs on every edit).
+  const pagesKey = () => JSON.stringify(pages().map((pg) => [typeof pg.id === 'string' ? pg.id : '', pageName(pg)]));
+  let pagesDrawn = null;
+  let pageSelDrawn = null;
+
+  // The Pages list: one link per page, by name, in order. A link that had focus has it again (its
+  // page's new link), when the pages changed under it.
   function renderPages() {
     const nav = $('pages');
+    const key = pagesKey();
+    if (key === pagesDrawn) return;
+    pagesDrawn = key;
+    const a = document.activeElement;
+    const focusPage = a instanceof Element && a.matches('#pages a[data-page]') ? a.dataset.page : null;
     const links = pages().map((pg) => {
       const a = document.createElement('a');
       const id = typeof pg.id === 'string' ? pg.id : '';
@@ -238,11 +334,16 @@
       return a;
     });
     nav.replaceChildren(...links);
+    const back = focusPage === null ? null : links.find((l) => l.dataset.page === focusPage) || links[0] || null;
+    if (back) back.focus({ preventScroll: true });
   }
 
   // The page <select> (the stage's page switch on a narrow screen): one option per page, by name.
   function renderPageSel() {
     const sel = $('pageSel');
+    const key = pagesKey();
+    if (key === pageSelDrawn) return;
+    pageSelDrawn = key;
     const opts = pages().map((pg) => {
       const o = document.createElement('option');
       o.value = typeof pg.id === 'string' ? pg.id : '';
@@ -264,6 +365,7 @@
   // ---- checkers: every style value comes from one of these, never a document string passed through ----
 
   const HEX_RE = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+  const VARIANT_RE = /^[A-Za-z][A-Za-z0-9_]{0,39}$/; // a variant's name (canvas-doc@1 variantName)
   const HEX6_RE = /^#[0-9a-f]{6}$/i;
   const SRC_RE = /^images\/([0-9a-f]{16}\.(?:png|jpg|webp|gif))$/;
   const FR_RE = /^([1-9][0-9]{0,2})fr$/;
@@ -347,9 +449,14 @@
   }
   // A whole font: a typography token, or the four fields each a literal or a token. A size or line
   // height that is a number is clamped to its range (as a length is); a field that is no number, or a
-  // weight off the 100 steps, takes its default.
+  // weight off the 100 steps, takes its default. fontWords gives the family as its word (sans, serif,
+  // mono), font as the page's own font stack for it.
   function font(v) {
-    const out = { family: FAMILY.sans, size: 16, weight: 400, lineHeight: 1.4 };
+    const w = fontWords(v);
+    return { ...w, family: FAMILY[w.family] };
+  }
+  function fontWords(v) {
+    const out = { family: 'sans', size: 16, weight: 400, lineHeight: 1.4 };
     let fam; let size; let weight; let lh;
     if (isRef(v)) {
       const t = ref(v, 'typography');
@@ -364,7 +471,7 @@
       weight = isRef(v.weight) ? ref(v.weight, 'fontWeight') : v.weight;
       lh = isRef(v.lineHeight) ? ref(v.lineHeight, 'number') : v.lineHeight;
     } else return out;
-    if (typeof fam === 'string' && own(FAMILY, fam)) out.family = FAMILY[fam];
+    if (typeof fam === 'string' && own(FAMILY, fam)) out.family = fam;
     if (finite(size)) out.size = clamp(size, 1, 1000);
     if (finite(weight) && weight >= 100 && weight <= 900 && weight % 100 === 0) out.weight = weight;
     if (finite(lh)) out.lineHeight = clamp(lh, 0.5, 10);
@@ -866,9 +973,35 @@
     return row;
   }
 
-  // The Properties panel, read-only: the selected node's name and type, and for an instance its
-  // component's name and variant; with nothing selected, a note.
+  // The Properties panel: kit-661's read-only rows (the selected node's name and type, and for an
+  // instance its component's name and variant), then, on a canvas open for editing, the fields that
+  // change it (kit-662); with nothing selected, a note. The panel isn't rebuilt while a field in it has
+  // focus or a press that started in it is under way: someone else's edit never takes a field from under
+  // a person typing, and a click that follows a field's edit (whose change fires on that very press)
+  // lands on the button it was aimed at. It is rebuilt once focus leaves the field, and after a press or
+  // a click in it ends with no field focused; a button that merely has focus holds nothing, and the
+  // focused control, when the new panel has it again, keeps focus.
+  let propsStale = false;
+  let pressing = false;
+  // The colour fields set to Hex while their value isn't one (`<id> <path>`): kept until a hex is sent
+  // or the selection changes, so the panel rebuilt meanwhile still shows the hex input.
+  const hexChosen = new Set();
+  const inProps = (x) => x instanceof Node && $('props').contains(x);
+  // A field a person types or chooses in (a checkbox, like a button, holds nothing).
+  const fieldFocused = () => {
+    const a = document.activeElement;
+    return inProps(a) && a.matches('input:not([type="checkbox"]), select, textarea');
+  };
+  const holdProps = () => pressing || fieldFocused();
   function renderProps() {
+    if (holdProps()) { propsStale = true; return; }
+    buildProps();
+  }
+  // The same control in a rebuilt panel: by its data-prop or data-action, and its data-value or data-variant.
+  const controlKey = (e) => (e instanceof HTMLElement ? ['prop', 'action', 'value', 'variant'].map((k) => e.dataset[k] ?? '').join('\u0000') : null);
+  function buildProps() {
+    propsStale = false;
+    const was = inProps(document.activeElement) ? controlKey(document.activeElement) : null;
     const box = $('props');
     const n = state.sel === null ? null : nodeOf(state.sel);
     if (!n) {
@@ -885,15 +1018,41 @@
       out.push(propRow('Component', 'component', compName));
       out.push(propRow('Variant', 'variant', typeof n.variant === 'string' && n.variant ? n.variant : 'none'));
     }
+    if (state.session !== null) out.push(editFields(state.sel, n));
     box.replaceChildren(...out);
+    if (was !== null && was !== '\u0000\u0000\u0000') {
+      const again = [...box.querySelectorAll('input, select, textarea, button')].find((e) => controlKey(e) === was);
+      if (again && !again.disabled) again.focus({ preventScroll: true });
+    }
   }
+  // After a press or a click in the panel ends: rebuilt when due, unless a field has focus.
+  const settleProps = () => { if (propsStale && !pressing && !fieldFocused()) buildProps(); };
+  $('props').addEventListener('pointerdown', () => { pressing = true; }, true);
+  const pressEnd = () => {
+    if (!pressing) return;
+    // the click this press makes comes before this timer, so it reaches the control pressed
+    setTimeout(() => { pressing = false; settleProps(); }, 0);
+  };
+  window.addEventListener('pointerup', pressEnd, true);
+  window.addEventListener('pointercancel', pressEnd, true);
+  $('props').addEventListener('click', () => { setTimeout(settleProps, 0); });
+  $('props').addEventListener('focusout', () => {
+    // after focus has landed: a move to another field of the panel keeps it as it is
+    setTimeout(() => { if (propsStale && !holdProps()) buildProps(); }, 0);
+  });
 
-  // Select a node of the shown page (its row and its drawn node marked), or nothing (null).
+  // Select a node of the shown page (its row and its drawn node marked), or nothing (null). The tree
+  // keeps one row in the tab order (the ARIA tree pattern): the selected row, else the first.
   function select(id) {
     const next = id !== null && layerRows.has(id) ? id : null;
-    for (const [rid, row] of layerRows) row.setAttribute('aria-selected', rid === next ? 'true' : 'false');
+    const stop = next !== null ? next : (layerRows.keys().next().value ?? null);
+    for (const [rid, row] of layerRows) {
+      row.setAttribute('aria-selected', rid === next ? 'true' : 'false');
+      row.tabIndex = rid === stop ? 0 : -1;
+    }
     for (const el of $('surface').querySelectorAll('.sel')) el.classList.remove('sel');
     if (next !== null && drawn.has(next)) drawn.get(next).classList.add('sel');
+    if (next !== state.sel) hexChosen.clear();
     state.sel = next;
     renderProps();
   }
@@ -902,17 +1061,42 @@
     const row = e.target instanceof Element ? e.target.closest('.layer[data-node]') : null;
     if (row) select(row.dataset.node);
   });
+  // The tree by keyboard: ArrowDown and ArrowUp select the next and previous row, Home and End the first
+  // and last, focus following (they are the tree's: they never nudge); Delete or Backspace deletes the
+  // focused row's node as the Delete key does elsewhere (same guard, same words), at 760 px and over.
+  $('layers').addEventListener('keydown', (e) => {
+    if (!ready() || e.ctrlKey || e.metaKey || e.altKey) return;
+    const row = e.target instanceof Element ? e.target.closest('.layer[data-node]') : null;
+    if (!row || !layerRows.has(row.dataset.node)) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      e.stopPropagation(); // the page's own Delete would delete the selection, which may be another row
+      if (editable()) deleteNode(row.dataset.node);
+      return;
+    }
+    const ids = [...layerRows.keys()];
+    const i = ids.indexOf(row.dataset.node);
+    const to = { ArrowDown: ids[Math.min(i + 1, ids.length - 1)], ArrowUp: ids[Math.max(i - 1, 0)], Home: ids[0], End: ids[ids.length - 1] }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    select(to);
+    layerRows.get(to).focus();
+  });
   // A click on the stage: the nearest drawn node with a data-id (inside an instance, the instance), or
   // on empty stage nothing. The stage's own controls are not the stage.
   $('stage').addEventListener('click', (e) => {
     if (panned) { panned = false; return; } // the click that ends a Space drag is a pan, not a click
+    if (toolPress) { toolPress = false; return; } // the click that ends a tool's press made something
     if (!state.doc || e.button !== 0 || !(e.target instanceof Element)) return;
-    if (e.target.closest('.zoom, .stage-top')) return;
+    if (e.target.closest('.zoom, .stage-top, #tools')) return;
     const hit = e.target.closest('#surface [data-id]');
     select(hit ? hit.dataset.id : null);
   });
+  // Escape ends a tool (a drag, a path) and returns to Move; with Move on, it clears the selection.
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && state.sel !== null) select(null);
+    if (e.key !== 'Escape') return;
+    if (tool !== 'move' || gesture !== null || pen !== null) { setTool('move'); return; }
+    if (state.sel !== null) select(null);
   });
 
   // ---- zoom and pan ----
@@ -930,6 +1114,7 @@
   function applyView() {
     $('surface').style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
     $('zoomPct').textContent = `${Math.round(view.z * 100)}%`;
+    drawPen(); // a path being drawn follows the view
   }
   // Zoom by `factor` around the stage point (sx, sy), which stays put; z kept to [0.1, 8], so at a
   // bound the view doesn't change at all.
@@ -983,7 +1168,13 @@
   $('zoomOut').addEventListener('click', () => { if (ready()) zoomCentre(view.z / STEP); });
   $('zoomFit').addEventListener('click', () => { if (ready()) fit(); });
   // a resized window (a phone turned, a panel shown or hidden at 760 px) refits, unless the person has moved
-  window.addEventListener('resize', () => { if (ready() && !moved) fit(); });
+  let wasNarrow = null;
+  window.addEventListener('resize', () => {
+    if (narrow() && (tool !== 'move' || gesture !== null || pen !== null)) setTool('move'); // under 760 px, watch only
+    // across 760 px the panel's fields are built again, usable or not
+    if (narrow() !== wasNarrow) { wasNarrow = narrow(); if (ready()) renderProps(); }
+    if (ready() && !moved) fit();
+  });
 
   // The wheel pans; with Ctrl or ⌘ (a trackpad's pinch comes as Ctrl+wheel) it zooms around the pointer.
   $('stage').addEventListener('wheel', (e) => {
@@ -1030,7 +1221,7 @@
   }
   $('stage').addEventListener('pointerdown', (e) => {
     if (touches.size === 0) panned = false;
-    if (!ready() || !(e.target instanceof Element) || e.target.closest('.zoom, .stage-top')) return;
+    if (!ready() || !(e.target instanceof Element) || e.target.closest('.zoom, .stage-top, #tools')) return;
     if (isTouch(e)) {
       if (e.button !== 0 || (pan && !pan.touch)) return;
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -1131,15 +1322,20 @@
   // ---- pages ----
 
   let shown = 0; // the count of showPage calls: a slower one finishing after a newer one doesn't mark it ready
+  // The shown page marked in the Pages list and the page select.
+  function markPage(pg) {
+    for (const a of $('pages').querySelectorAll('a[data-page]')) {
+      if (a.dataset.page === pg.id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    }
+    const id = typeof pg.id === 'string' ? pg.id : '';
+    if ($('pageSel').value !== id) $('pageSel').value = id;
+  }
   function showPage(id) {
     const pg = pageById(id) || pages()[0];
     if (pg.id !== state.pageId) state.sel = null;
     state.pageId = pg.id;
     const n = ++shown;
-    for (const a of $('pages').querySelectorAll('a[data-page]')) {
-      if (a.dataset.page === pg.id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-    }
-    $('pageSel').value = typeof pg.id === 'string' ? pg.id : '';
+    markPage(pg);
     setState('loading');
     drawPage(pg.id);
     renderLayers(pg.id);
@@ -1168,6 +1364,1564 @@
   window.addEventListener('hashchange', () => { if (state.doc) showPage(hashPage()); });
   $('pageSel').addEventListener('change', (e) => { if (state.doc) goPage(e.target.value); });
 
+  // ---- editing (kit-662): the socket, the two copies, and the edits ----
+
+  // What the page says when an edit is refused (by refused.why), and its other plain words.
+  const REFUSED = {
+    missing: 'That layer was deleted by someone else.',
+    parent: "That layer can't go there.",
+    cycle: "A layer can't go inside itself.",
+    exists: 'That layer is already on the canvas.',
+    ref: "That is still used by a component, an instance or a token, so it wasn't changed.",
+    limit: "The canvas is at its size limit, so that wasn't added.",
+    view: 'You can watch this canvas but not change it.',
+  };
+  const NOT_VALID = "That change wasn't valid, so it wasn't kept.";
+  const SAY = {
+    tooBig: 'That change is too big to send.',
+    instancesFirst: "Delete this component's instances first.",
+  };
+  const BANNER = {
+    paused: "Saving paused: the canvas's branch changed. Your edits are kept here.",
+    landed: 'This canvas has landed. It is read-only until it is opened for editing again.',
+    removed: 'This canvas was closed for editing.',
+    down: 'Reconnecting… your edits are kept here.',
+  };
+  const RATE = 20; // edits sent a second at most (canvas@1 §7 allows 30 messages, pongs included)
+  const OPS_BYTES = 65536; // an edit's ops as JSON (canvas@1 §7 editOpsBytes)
+
+  // Who this page is: `client` (16 of [0-9a-z]) and the new-id prefix (6 of base 36), each chosen once
+  // per page load; new ids are <prefix>-<n>, n counting from 1 (canvas-doc@1 §2's convention).
+  const B36 = '0123456789abcdefghijklmnopqrstuvwxyz';
+  function randomB36(n) {
+    let out = '';
+    const buf = new Uint8Array(n * 2);
+    while (out.length < n) {
+      crypto.getRandomValues(buf);
+      // 252 is 7 × 36: bytes from it up are dropped, so every character is equally likely
+      for (const x of buf) if (x < 252 && out.length < n) out += B36[x % 36];
+    }
+    return out;
+  }
+  const CLIENT = randomB36(16);
+  const ID_PREFIX = randomB36(6);
+  let idCount = 0;
+  const idTaken = (d, id) => !!d && (own(d.nodes, id) || d.pages.some((pg) => isObj(pg) && pg.id === id));
+  // A new node id, skipping any id the document (as the server has it, or as drawn) already has.
+  function newId() {
+    for (;;) {
+      const id = `${ID_PREFIX}-${++idCount}`;
+      if (!idTaken(state.base, id) && !idTaken(state.doc, id)) return id;
+    }
+  }
+
+  // ---- ops (canvas@1 §4) applied to a document ----
+  // The page's own apply, for ops the server has judged (to `base`) or is yet to judge (`pending`, over
+  // a copy of base): an op that doesn't apply as the document stands (its node gone, a parent that holds
+  // no children) is skipped, and the server judges it. Keys are put as own data properties, so an id
+  // that is an Object.prototype name is a plain key.
+  const put = (o, k, v) => { Object.defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true }); return v; };
+  const nodeIn = (d, id) => (typeof id === 'string' && own(d.nodes, id) && isObj(d.nodes[id]) ? d.nodes[id] : null);
+  const pageAt = (d, id) => d.pages.findIndex((pg) => isObj(pg) && pg.id === id);
+  const STRUCTURAL = new Set(['id', 'type', 'parent', 'children']);
+  // A property path's keys as stored: a plain path splits at every dot; an override's property is one
+  // flat dotted key, so variants.<name>.<id>.<prop> splits at its third dot and overrides.<id>.<prop>
+  // at its second (canvas-doc@1 §2).
+  function pathKeys(path) {
+    const s = path.split('.');
+    if (s[0] === 'variants' && s.length >= 4) return ['variants', s[1], s[2], s.slice(3).join('.')];
+    if (s[0] === 'overrides' && s.length >= 3) return ['overrides', s[1], s.slice(2).join('.')];
+    return s;
+  }
+  const isOverride = (keys) => (keys[0] === 'variants' && keys.length === 4) || (keys[0] === 'overrides' && keys.length === 3);
+  // A null that removes: a property whose default is absent (figma, an entry of props, variants or overrides).
+  const removing = (keys) => (keys.length === 1 && keys[0] === 'figma') || (['props', 'variants', 'overrides'].includes(keys[0]) && keys.length >= 2);
+  function setPath(n, path, value) {
+    if (typeof path !== 'string' || STRUCTURAL.has(path)) return;
+    const keys = pathKeys(path);
+    if (value === null && removing(keys)) {
+      const chain = [n];
+      for (const k of keys.slice(0, -1)) {
+        const at = chain[chain.length - 1];
+        if (!own(at, k) || !isObj(at[k])) return;
+        chain.push(at[k]);
+      }
+      const last = chain.length - 1;
+      delete chain[last][keys[last]];
+      // an override's id map left empty goes too, never the variant or a map above it
+      if (isOverride(keys) && Object.keys(chain[last]).length === 0) delete chain[last - 1][keys[last - 1]];
+      return;
+    }
+    let at = n;
+    for (const k of keys.slice(0, -1)) at = own(at, k) && isObj(at[k]) ? at[k] : put(at, k, {});
+    put(at, keys[keys.length - 1], structuredClone(value));
+  }
+  // An added node's properties as paths: a group's (layout, size) keys under its name, the rest as they are.
+  const GROUPS = new Set(['layout', 'size']);
+  function addedProps(nd) {
+    const out = [];
+    for (const k of Object.keys(nd)) {
+      if (STRUCTURAL.has(k)) continue;
+      if (GROUPS.has(k) && isObj(nd[k])) for (const sub of Object.keys(nd[k])) out.push([`${k}.${sub}`, nd[k][sub]]);
+      else out.push([k, nd[k]]);
+    }
+    return out;
+  }
+  // The children list of a page or a container, or null.
+  function childrenOf(d, id) {
+    const pi = pageAt(d, id);
+    if (pi >= 0) return Array.isArray(d.pages[pi].children) ? d.pages[pi].children : null;
+    const n = nodeIn(d, id);
+    return n && CONTAINERS.has(n.type) && Array.isArray(n.children) ? n.children : null;
+  }
+  // Put `item` after `after` (first for null; last when `after` is gone).
+  function insertAfter(list, item, after, key = (x) => x) {
+    if (after === null) { list.unshift(item); return; }
+    const i = list.findIndex((x) => key(x) === after);
+    if (i < 0) list.push(item); else list.splice(i + 1, 0, item);
+  }
+  function unlist(list, item) {
+    const i = list ? list.indexOf(item) : -1;
+    if (i >= 0) list.splice(i, 1);
+  }
+  function dropSubtrees(d, roots) {
+    const stack = [...roots];
+    while (stack.length) {
+      const id = stack.pop();
+      const n = nodeIn(d, id);
+      if (!n) continue;
+      stack.push(...kidsOf(n));
+      delete d.nodes[id];
+    }
+  }
+  const isTokenNode = (x) => isObj(x) && Object.keys(x).some((k) => k.startsWith('$'));
+  const APPLY = {
+    set(d, op) {
+      const pi = pageAt(d, op.id);
+      if (pi >= 0) { if (op.prop === 'name') d.pages[pi].name = op.value; return; }
+      const n = nodeIn(d, op.id);
+      if (n) setPath(n, op.prop, op.value);
+    },
+    add(d, op) {
+      const nd = op.node;
+      if (!isObj(nd) || typeof nd.id !== 'string') return;
+      const after = typeof op.after === 'string' ? op.after : null;
+      if (nd.type === 'page') {
+        const pi = pageAt(d, nd.id);
+        if (pi >= 0) { d.pages[pi].name = nd.name; return; }
+        if (!own(d.nodes, nd.id)) insertAfter(d.pages, { id: nd.id, name: nd.name, children: [] }, after, (pg) => pg.id);
+        return;
+      }
+      const ex = nodeIn(d, nd.id);
+      if (ex) {
+        // the same id again, of the same type and parent: its properties as sets
+        if (ex.type === nd.type && ex.parent === nd.parent) for (const [path, v] of addedProps(nd)) setPath(ex, path, v);
+        return;
+      }
+      const list = childrenOf(d, nd.parent);
+      if (!list || pageAt(d, nd.id) >= 0) return;
+      const n = { type: nd.type, parent: nd.parent };
+      if (CONTAINERS.has(nd.type)) n.children = [];
+      for (const [path, v] of addedProps(nd)) setPath(n, path, v);
+      put(d.nodes, nd.id, n);
+      insertAfter(list, nd.id, after);
+    },
+    del(d, op) {
+      const pi = pageAt(d, op.id);
+      if (pi >= 0) {
+        const [pg] = d.pages.splice(pi, 1);
+        dropSubtrees(d, kidsOf(pg));
+        return;
+      }
+      const n = nodeIn(d, op.id);
+      if (!n) return;
+      unlist(childrenOf(d, n.parent), op.id);
+      dropSubtrees(d, [op.id]);
+    },
+    move(d, op) {
+      const after = typeof op.after === 'string' ? op.after : null;
+      const pi = pageAt(d, op.id);
+      if (pi >= 0) {
+        const prev = pi > 0 ? d.pages[pi - 1].id : null;
+        if (op.parent !== null || after === prev || after === op.id) return;
+        const [pg] = d.pages.splice(pi, 1);
+        insertAfter(d.pages, pg, after, (x) => (isObj(x) ? x.id : null));
+        return;
+      }
+      const n = nodeIn(d, op.id);
+      const list = n ? childrenOf(d, op.parent) : null;
+      if (!list) return;
+      // never into its own subtree (walked up from the new parent, bounded)
+      let cur = op.parent;
+      for (let steps = 0; nodeIn(d, cur) && steps <= 20001; steps++) {
+        if (cur === op.id) return;
+        cur = d.nodes[cur].parent;
+      }
+      const old = childrenOf(d, n.parent);
+      if (old && n.parent === op.parent) {
+        const i = old.indexOf(op.id);
+        const prev = i > 0 ? old[i - 1] : null;
+        if (after === prev || after === op.id) return;
+      }
+      unlist(old, op.id);
+      insertAfter(list, op.id, after);
+      n.parent = op.parent;
+    },
+    token(d, op) {
+      if (typeof op.path !== 'string') return;
+      if (!isObj(d.tokens)) d.tokens = {};
+      const segs = op.path.split('.');
+      const chain = [[d.tokens, null]];
+      let g = d.tokens;
+      for (const seg of segs.slice(0, -1)) {
+        if (!own(g, seg)) {
+          if (op.value === null) return;
+          put(g, seg, {});
+        } else if (!isObj(g[seg]) || isTokenNode(g[seg])) return;
+        chain.push([g[seg], seg]);
+        g = g[seg];
+      }
+      const last = segs[segs.length - 1];
+      if (op.value === null) {
+        if (!own(g, last)) return;
+        delete g[last];
+        // a group left empty goes
+        for (let i = chain.length - 1; i >= 1; i--) if (Object.keys(chain[i][0]).length === 0) delete chain[i - 1][0][chain[i][1]];
+        return;
+      }
+      put(g, last, structuredClone(op.value));
+    },
+  };
+  // Apply `ops` to `d` in order (it is changed in place); an op that doesn't apply is skipped.
+  function applyOps(d, ops) {
+    if (!Array.isArray(ops)) return;
+    for (const op of ops) {
+      if (!isObj(op) || typeof op.op !== 'string' || !own(APPLY, op.op)) continue;
+      try { APPLY[op.op](d, op); } catch { /* skipped: the server judges it */ }
+    }
+  }
+
+  // ---- the two copies ----
+
+  // What is drawn: base, with every pending edit applied over a copy of it (base itself when none).
+  function viewDoc() {
+    if (state.pending.length === 0) return state.base;
+    const d = structuredClone(state.base);
+    for (const e of state.pending) applyOps(d, e.ops);
+    return d;
+  }
+  // A doc response taken as base: its document, rev and session.
+  function takeDoc(b) {
+    const d = b.doc;
+    d.rev = Number.isSafeInteger(b.rev) ? b.rev : Number.isSafeInteger(d.rev) ? d.rev : 0;
+    state.base = d;
+    state.rev = d.rev;
+    state.session = own(b, 'session') && typeof b.session === 'string' ? b.session : null;
+    state.repo = b.repo;
+    $('tools').hidden = state.session === null; // main's copy is watched, never edited: no tools
+  }
+  // For tests and the bar: data-live, data-rev (base's), data-pending (its count) and data-saved.
+  function syncBody() {
+    const b = document.body.dataset;
+    b.live = sock.live ? 'on' : 'off';
+    b.rev = state.base ? String(state.base.rev) : '';
+    b.pending = String(state.pending.length);
+    b.saved = state.saved === null ? '' : String(state.saved);
+  }
+  // Draw again from the two copies: the shown page, its layers, the selection and the properties (the
+  // view kept, not refitted). A row of the Layers tree that had focus has it again; the Pages list and
+  // the page select are rebuilt only when the pages changed.
+  function redraw() {
+    if (!state.base) return;
+    state.doc = viewDoc();
+    state.rev = state.base.rev;
+    renderPages();
+    renderPageSel();
+    const pg = pageById(state.pageId);
+    if (!pg) { showPage(hashPage()); syncBody(); keepDrag(); return; } // the shown page is gone: the first one
+    const a = document.activeElement;
+    const focusRow = a instanceof Element && a.matches('#layers .layer[data-node]') ? a.dataset.node : null;
+    markPage(pg);
+    drawPage(pg.id);
+    renderLayers(pg.id);
+    select(state.sel);
+    // a focused row that is gone (deleted) leaves focus in the tree, on its tab stop
+    const back = focusRow === null ? null : layerRows.get(focusRow) || [...layerRows.values()].find((r) => r.tabIndex === 0);
+    if (back) back.focus({ preventScroll: true });
+    if (document.body.dataset.state !== 'error') { if (kidsOf(pg).length === 0) showMsg(TEXT.empty); else hideMsg(); }
+    syncBody();
+    keepDrag();
+  }
+
+  // The message line (#toast) for 6 s, and the banner (#banner; null hides it).
+  let toastTimer = null;
+  function say(text) {
+    const t = $('toast');
+    t.textContent = text;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; t.textContent = ''; }, 6000);
+  }
+  function banner(text) {
+    const b = $('banner');
+    b.textContent = text === null ? '' : text;
+    b.hidden = text === null;
+  }
+  // The one banner due: closed, else the socket down, else saving paused, else none.
+  function showBanner() {
+    if (state.closedText !== null) banner(state.closedText);
+    else if (sock.down) banner(BANNER.down);
+    else if (state.paused) banner(BANNER.paused);
+    else banner(null);
+  }
+
+  // Editing is allowed on a canvas open for editing (a session), until it is closed or refused `view`,
+  // and only at 760 px and over: under that the page is watch-only (no tools, keys or fields; edits
+  // already queued are still sent).
+  const narrow = () => window.matchMedia('(max-width: 760px)').matches;
+  const editable = () => state.base !== null && state.session !== null && state.locked === null && !narrow();
+  // No more edits: the tools and fields disabled; after `closed`, its banner and no reconnect.
+  function lock(kind, text = null) {
+    if (state.locked !== 'closed') state.locked = kind;
+    if (kind === 'closed') { sock.ended = true; state.closedText = text; }
+    setTool('move');
+    placing = null;
+    for (const c of document.querySelectorAll('#tools button, #props input, #props select, #props textarea, #props button')) c.disabled = true;
+    showBanner();
+  }
+
+  // One edit: queued in pending, drawn at once, sent when the socket and the rate allow. A single set of
+  // the same node and property as the last unsent edit replaces it (so a held key sends the latest
+  // value, never a burst). False when nothing was queued.
+  function edit(ops) {
+    if (!editable() || !Array.isArray(ops) || ops.length === 0) return false;
+    if (new TextEncoder().encode(JSON.stringify(ops)).length > OPS_BYTES) { say(SAY.tooBig); return false; }
+    const last = state.pending[state.pending.length - 1];
+    const oneSet = (o) => o.length === 1 && isObj(o[0]) && o[0].op === 'set';
+    if (last && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) last.ops = ops;
+    else state.pending.push({ ops, seq: null });
+    redraw();
+    pump();
+    return true;
+  }
+  // One property of one node set: one edit of one set op.
+  const setRaw = (id, prop, value) => edit([{ op: 'set', id, prop, value }]);
+  // A field's change: one set on the node, or in Change in one set on its component of the variant's
+  // override, `variants.<name>.<node id>.<prop>` (contract §2). Every field sends through here.
+  function setProp(id, prop, value) {
+    const vm = variantFor(id);
+    if (vm === null) return setRaw(id, prop, value);
+    return setRaw(vm.comp, `variants.${vm.name}.${id}.${prop}`, value);
+  }
+  // The component a node is inside (its nearest component ancestor, never the node itself), or null.
+  function componentOf(id) {
+    const n = nodeOf(id);
+    let cur = n ? n.parent : null;
+    for (let steps = 0; steps <= MAX_ELEMENTS && nodeOf(cur); steps++) {
+      if (nodeOf(cur).type === 'component') return cur;
+      cur = nodeOf(cur).parent;
+    }
+    return null;
+  }
+  // A component's variant names, in order.
+  const variantNames = (c) => (c && c.type === 'component' && isObj(c.variants) ? Object.keys(c.variants).filter((k) => VARIANT_RE.test(k)) : []);
+  // The variant a node's fields edit (Change in): { comp, name } while the panel is set to a variant of
+  // the component the node is inside and that variant still exists, else null (Base).
+  function variantFor(id) {
+    const vm = state.variantMode;
+    if (vm === null) return null;
+    const comp = componentOf(id);
+    if (comp === null || comp !== vm.comp || !variantNames(nodeOf(comp)).includes(vm.name)) return null;
+    return vm;
+  }
+  // In Change in, whether the variant holds an override of `path` on the node, and its value.
+  function variantHeld(id, path) {
+    const vm = variantFor(id);
+    if (vm === null) return { held: false };
+    const v = nodeOf(vm.comp).variants[vm.name];
+    const o = isObj(v) && own(v, id) && isObj(v[id]) ? v[id] : null;
+    return o !== null && own(o, path) ? { held: true, value: o[path] } : { held: false };
+  }
+  // Delete a node (Delete, Backspace, Delete layer); a component that still has instances is kept.
+  function deleteNode(id) {
+    if (!editable()) return;
+    const n = nodeOf(id);
+    if (!n) return;
+    if (n.type === 'component' && Object.values(state.doc.nodes).some((x) => isObj(x) && x.type === 'instance' && x.component === id)) {
+      say(SAY.instancesFirst);
+      return;
+    }
+    edit([{ op: 'del', id }]);
+  }
+  const wellFormed = (v) => typeof v.isWellFormed !== 'function' || v.isWellFormed();
+
+  // ---- the Properties panel's fields (spec §4) ----
+  // Each field shows the node's value as drawn and sends one edit of one set (setProp) of a value
+  // checked against its class: a number clamped to its range, a colour, tracks or a font built only
+  // from what the class allows. Text and number inputs send on change (Enter or leaving), the text
+  // textarea on leaving it. A field reads the value it builds on when it changes, not when it was built.
+
+  const PX = 100000;
+  const NUM_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+  const TRACK_PX_RE = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
+  const NOTE = {
+    tracks: 'Tracks are numbers, auto or 1fr-like, apart by spaces.',
+    colour: 'A colour is #rgb, #rrggbb or #rrggbbaa.',
+  };
+  // Each field's default (canvas-doc@1 §2 Properties), shown when the node doesn't store it.
+  const DEFAULT = {
+    visible: true, opacity: 1, x: 0, y: 0, 'size.w': 'hug', 'size.h': 'hug', fill: null, stroke: null, strokeWidth: 0,
+    radius: 0, clip: false, 'layout.mode': 'none', 'layout.gap': 0, 'layout.padding': [0, 0, 0, 0], 'layout.align': 'start',
+    'layout.justify': 'start', 'layout.wrap': false, 'layout.columns': [], 'layout.rows': [], text: '',
+    font: { family: 'sans', size: 16, weight: 400, lineHeight: 1.4 }, color: '#000000', align: 'left', fit: 'cover', variant: null,
+  };
+  const PAINTED = new Set(['frame', 'component', 'rect', 'ellipse', 'vector']);
+  const ROUNDED = new Set(['frame', 'component', 'rect', 'image']);
+  // A property's value on the node as drawn now, or its default.
+  function baseOf(id, path) {
+    const n = nodeOf(id);
+    const v = n ? getPath(n, path) : undefined;
+    return v === undefined ? DEFAULT[path] : v;
+  }
+  // A field's value: in Change in, the variant's override where it holds one (a null included), else
+  // the base's; otherwise the base's.
+  function valueOf(id, path) {
+    const o = variantHeld(id, path);
+    return o.held ? o.value : baseOf(id, path);
+  }
+  const numText = (v) => String(Math.round(v * 10000) / 10000);
+  const lenOk = (x) => isRef(x) || (finite(x) && x >= 0 && x <= PX);
+
+  // A field's note under its row (null removes it).
+  function fieldNote(row, text) {
+    let p = row.nextElementSibling;
+    if (!(p instanceof HTMLElement && p.classList.contains('fnote'))) {
+      if (text === null) return;
+      p = document.createElement('p');
+      p.className = 'note fnote';
+      p.setAttribute('role', 'status');
+      row.after(p);
+    }
+    if (text === null) p.remove(); else p.textContent = text;
+  }
+  // A labelled row of controls.
+  function fieldRow(label, ...controls) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = label;
+    const c = document.createElement('div');
+    c.className = 'ctl';
+    c.append(...controls);
+    row.append(k, c);
+    return row;
+  }
+  function control(tag, prop, label) {
+    const e = document.createElement(tag);
+    e.dataset.prop = prop;
+    e.setAttribute('aria-label', label);
+    return e;
+  }
+  function textInput(prop, label, value) {
+    const e = control('input', prop, label);
+    e.type = 'text';
+    e.spellcheck = false;
+    e.value = value;
+    return e;
+  }
+  // A select of [value, label] options showing `value` (an option of its own when none has it).
+  function selectOf(prop, label, opts, value) {
+    const s = control('select', prop, label);
+    const v = String(value);
+    const all = opts.some(([o]) => o === v) ? opts : [...opts, [v, v]];
+    for (const [o, l] of all) {
+      const opt = document.createElement('option');
+      opt.value = o;
+      opt.textContent = l;
+      s.append(opt);
+    }
+    s.value = v;
+    return s;
+  }
+  // A number input: the value shown times `scale` (a dimension token's path as its placeholder, the
+  // input then empty); on change the number typed, clamped to [min, max], is sent divided by `scale`;
+  // anything else puts back what was shown and sends nothing.
+  function numInput(prop, label, v, min, max, send, scale = 1) {
+    const e = textInput(prop, label, '');
+    e.inputMode = 'decimal';
+    if (isRef(v)) e.placeholder = v.$ref; else if (finite(v)) e.value = numText(v * scale);
+    let was = e.value;
+    e.addEventListener('change', () => {
+      const s = e.value.trim();
+      if (!NUM_RE.test(s)) { e.value = was; return; }
+      const x = clamp(Number(s), min, max);
+      e.value = numText(x);
+      was = e.value;
+      send(x / scale);
+    });
+    return e;
+  }
+  function checkbox(id, path, label) {
+    const e = control('input', path, label);
+    e.type = 'checkbox';
+    e.checked = valueOf(id, path) === true;
+    e.addEventListener('change', () => setProp(id, path, e.checked));
+    return fieldRow(label, e);
+  }
+  function numField(id, path, label, min, max, scale = 1) {
+    return fieldRow(label, numInput(path, label, valueOf(id, path), min, max, (x) => setProp(id, path, x), scale));
+  }
+  // Buttons, one per [value, label], the current one pressed; a press on another sends it.
+  function buttons(id, path, label, opts) {
+    const cur = valueOf(id, path);
+    const g = document.createElement('div');
+    g.className = 'group';
+    g.setAttribute('role', 'group');
+    g.setAttribute('aria-label', label);
+    g.dataset.prop = path;
+    for (const [v, l] of opts) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.dataset.value = v;
+      b.textContent = l;
+      b.setAttribute('aria-pressed', String(v === cur));
+      b.addEventListener('click', () => { if (valueOf(id, path) !== v) setProp(id, path, v); });
+      g.append(b);
+    }
+    return fieldRow(label, g);
+  }
+  // A select of fixed words; the panel is rebuilt after a choice, which keeps focus on it.
+  function wordSelect(id, path, label, opts) {
+    const s = selectOf(path, label, opts, valueOf(id, path));
+    s.addEventListener('change', () => { setProp(id, path, s.value); buildProps(); });
+    return fieldRow(label, s);
+  }
+
+  // size.w or size.h: Hug, Fill or Fixed and its number. Choosing Fixed sends the size drawn now, in
+  // page px, rounded.
+  function sizeField(id, axis, label) {
+    const path = `size.${axis}`;
+    const v = valueOf(id, path);
+    const kind = v === 'fill' ? 'fill' : finite(v) || isRef(v) ? 'fixed' : 'hug';
+    const s = selectOf(path, label, [['hug', 'Hug'], ['fill', 'Fill'], ['fixed', 'Fixed']], kind);
+    s.addEventListener('change', () => {
+      if (s.value === 'fixed') {
+        const el = drawn.get(id);
+        const r = el ? el.getBoundingClientRect() : null;
+        const px = r ? (axis === 'w' ? r.width : r.height) / view.z : 100;
+        setProp(id, path, Math.round(clamp(Number.isFinite(px) ? px : 100, 0, PX)));
+      } else setProp(id, path, s.value === 'fill' ? 'fill' : 'hug');
+      buildProps();
+    });
+    const parts = [s];
+    if (kind === 'fixed') parts.push(numInput(`${path}#n`, `${label} in px`, v, 0, PX, (x) => setProp(id, path, x)));
+    return fieldRow(label, ...parts);
+  }
+  // Padding: four numbers; one changed sends the whole array, the other sides as stored ($refs kept).
+  function paddingSides(id) {
+    const v = valueOf(id, 'layout.padding');
+    return [0, 1, 2, 3].map((i) => (Array.isArray(v) && v.length === 4 && lenOk(v[i]) ? v[i] : 0));
+  }
+  function paddingField(id) {
+    const sides = paddingSides(id);
+    const box = document.createElement('div');
+    box.className = 'pad';
+    ['top', 'right', 'bottom', 'left'].forEach((side, i) => {
+      box.append(numInput(`layout.padding#${i}`, `Padding ${side}`, sides[i], 0, PX, (x) => {
+        const now = paddingSides(id);
+        now[i] = x;
+        setProp(id, 'layout.padding', now);
+      }));
+    });
+    return fieldRow('Padding', box);
+  }
+  // Tracks typed apart by spaces, each a number, `auto` or `<n>fr`, at most 64; null when any isn't.
+  function parseTracks(s) {
+    const parts = s.trim() === '' ? [] : s.trim().split(/\s+/);
+    if (parts.length > 64) return null;
+    const out = [];
+    for (const t of parts) {
+      if (t === 'auto' || FR_RE.test(t)) out.push(t);
+      else if (TRACK_PX_RE.test(t) && Number(t) <= PX) out.push(Number(t));
+      else return null;
+    }
+    return out;
+  }
+  function tracksField(id, path, label) {
+    const v = valueOf(id, path);
+    const e = textInput(path, label, Array.isArray(v) ? v.map((t) => (finite(t) ? numText(t) : typeof t === 'string' ? t : '?')).join(' ') : '');
+    const row = fieldRow(label, e);
+    e.addEventListener('change', () => {
+      const t = parseTracks(e.value);
+      fieldNote(row, t === null ? NOTE.tracks : null);
+      if (t !== null) setProp(id, path, t);
+    });
+    return row;
+  }
+  // The document's tokens of one $type, by path (groups walked in order, at most 8 deep).
+  function tokensOf(type) {
+    const out = [];
+    const walk = (g, pre, depth) => {
+      if (!isObj(g) || depth > 8) return;
+      for (const k of Object.keys(g)) {
+        const x = g[k];
+        if (!isObj(x)) continue;
+        const at = pre ? `${pre}.${k}` : k;
+        if (own(x, '$type')) { if (x.$type === type) out.push(at); } else walk(x, at, depth + 1);
+      }
+    };
+    walk(state.doc.tokens, '', 1);
+    return out;
+  }
+  // The colour field: a select of the colour tokens, Hex and (where null is allowed) None, a swatch
+  // drawn through color(), and for Hex a hex input. Choosing Hex sends nothing: the hex typed is sent.
+  // In Change in, None is replaced by From base (`@base`), which sends null and so removes the
+  // variant's override (contract §2); the field says From base while the variant holds none, and a
+  // null the variant does hold (no paint in that variant) shows as None.
+  function colourField(id, path, label, none) {
+    const v = valueOf(id, path);
+    const vm = variantFor(id);
+    const key = `${id} ${path} ${vm === null ? '' : vm.name}`;
+    const chosen = hexChosen.has(key);
+    const opts = tokensOf('color').map((t) => [t, t]);
+    opts.push(['@hex', 'Hex']);
+    let mode;
+    if (vm === null) {
+      mode = isRef(v) && !chosen ? v.$ref : v === null && none && !chosen ? '@none' : '@hex';
+      if (none) opts.push(['@none', 'None']);
+    } else {
+      const held = variantHeld(id, path).held;
+      mode = chosen ? '@hex' : !held ? '@base' : isRef(v) ? v.$ref : v === null ? '@none' : '@hex';
+      opts.push(['@base', 'From base']);
+      if (mode === '@none') opts.push(['@none', 'None']);
+    }
+    const s = selectOf(path, label, opts, mode);
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    sw.setAttribute('aria-hidden', 'true');
+    const c = color(v);
+    if (c) sw.style.backgroundColor = c; else sw.classList.add('none');
+    s.addEventListener('change', () => {
+      if (s.value === '@hex') hexChosen.add(key);
+      else {
+        hexChosen.delete(key);
+        setProp(id, path, s.value === '@none' || s.value === '@base' ? null : { $ref: s.value });
+      }
+      buildProps();
+    });
+    const parts = [s, sw];
+    let row = null;
+    if (mode === '@hex') {
+      const r = isRef(v) ? ref(v, 'color') : v;
+      const h = textInput(`${path}#hex`, `${label} hex`, typeof r === 'string' && HEX_RE.test(r) ? r : '');
+      h.maxLength = 9;
+      h.placeholder = '#rrggbb';
+      h.addEventListener('change', () => {
+        const x = h.value.trim();
+        if (!HEX_RE.test(x)) { fieldNote(row, NOTE.colour); return; }
+        fieldNote(row, null);
+        hexChosen.delete(key);
+        sw.classList.remove('none');
+        sw.style.backgroundColor = x;
+        setProp(id, path, x);
+      });
+      parts.push(h);
+    }
+    row = fieldRow(label, ...parts);
+    return row;
+  }
+  // The font: a select of the typography tokens and Custom; choosing Custom sends the font drawn now
+  // as literals. Custom shows family, size, weight and line height, any of which sends the whole font
+  // (the other parts as stored, $refs kept, or as drawn when not stored in their class).
+  const FONT_PART_OK = {
+    family: (x) => typeof x === 'string' && own(FAMILY, x),
+    size: (x) => finite(x) && x >= 1 && x <= 1000,
+    weight: (x) => finite(x) && x >= 100 && x <= 900 && x % 100 === 0,
+    lineHeight: (x) => finite(x) && x >= 0.5 && x <= 10,
+  };
+  function fontParts(id) {
+    const now = valueOf(id, 'font');
+    const words = fontWords(now);
+    const out = {};
+    for (const k of ['family', 'size', 'weight', 'lineHeight']) {
+      const x = isObj(now) && !isRef(now) ? now[k] : undefined;
+      out[k] = isRef(x) || FONT_PART_OK[k](x) ? x : words[k];
+    }
+    return out;
+  }
+  function fontField(id) {
+    const v = valueOf(id, 'font');
+    const custom = !isRef(v);
+    const opts = tokensOf('typography').map((t) => [t, t]);
+    opts.push(['@custom', 'Custom']);
+    const s = selectOf('font', 'Font', opts, custom ? '@custom' : v.$ref);
+    s.addEventListener('change', () => {
+      setProp(id, 'font', s.value === '@custom' ? fontWords(valueOf(id, 'font')) : { $ref: s.value });
+      buildProps();
+    });
+    const rows = [fieldRow('Font', s)];
+    if (!custom) return rows;
+    const parts = fontParts(id);
+    const sendPart = (k, x) => {
+      const now = fontParts(id);
+      now[k] = x;
+      setProp(id, 'font', now);
+    };
+    // a part held by a token shows as that token in its select (its value `@<path>`)
+    const refOpt = (x) => (isRef(x) ? [[`@${x.$ref}`, x.$ref]] : []);
+    const partSelect = (k, label, opts) => {
+      const x = parts[k];
+      const ps = selectOf(`font#${k}`, label, [...opts, ...refOpt(x)], isRef(x) ? `@${x.$ref}` : x);
+      ps.addEventListener('change', () => {
+        const val = ps.value;
+        sendPart(k, val.startsWith('@') ? { $ref: val.slice(1) } : k === 'weight' ? Number(val) : val);
+        buildProps();
+      });
+      return fieldRow(label, ps);
+    };
+    rows.push(partSelect('family', 'Family', [['sans', 'Sans'], ['serif', 'Serif'], ['mono', 'Mono']]));
+    rows.push(fieldRow('Size', numInput('font#size', 'Font size', parts.size, 1, 1000, (x) => sendPart('size', x))));
+    rows.push(partSelect('weight', 'Weight', [100, 200, 300, 400, 500, 600, 700, 800, 900].map((w) => [String(w), String(w)])));
+    rows.push(fieldRow('Line height', numInput('font#lineHeight', 'Line height', parts.lineHeight, 0.5, 10, (x) => sendPart('lineHeight', x))));
+    return rows;
+  }
+  // The text: a textarea (Enter is a new line), sent on leaving it.
+  function textField(id) {
+    const v = valueOf(id, 'text');
+    const e = control('textarea', 'text', 'Text');
+    e.maxLength = 10000;
+    e.rows = 3;
+    e.spellcheck = false;
+    e.value = typeof v === 'string' ? v : '';
+    e.addEventListener('change', () => {
+      if ([...e.value].length <= 10000 && wellFormed(e.value)) setProp(id, 'text', e.value);
+    });
+    return fieldRow('Text', e);
+  }
+  // An instance's variant: None or one of its component's variants.
+  function variantField(id, n) {
+    const comp = nodeOf(n.component);
+    const names = comp && comp.type === 'component' && isObj(comp.variants) ? Object.keys(comp.variants) : [];
+    const v = valueOf(id, 'variant');
+    const s = selectOf('variant', 'Variant', [['@none', 'None'], ...names.map((x) => [x, x])], typeof v === 'string' ? v : '@none');
+    s.addEventListener('change', () => { setProp(id, 'variant', s.value === '@none' ? null : s.value); buildProps(); });
+    return fieldRow('Variant', s);
+  }
+  // x and y place a node only under a `none` frame or component, or the page.
+  function placedByXY(n) {
+    if (pageAt(state.doc, n.parent) >= 0) return true;
+    const p = nodeOf(n.parent);
+    return !!p && CONTAINERS.has(p.type) && pick(MODE, getPath(p, 'layout.mode'), 'none') === 'none';
+  }
+
+  // The fields of a node's type (spec §4's table), in the panel's order, after Name.
+  function fieldsFor(id, n) {
+    const t = n.type;
+    const out = [checkbox(id, 'visible', 'Visible'), numField(id, 'opacity', 'Opacity %', 0, 100, 100)];
+    if (placedByXY(n)) out.push(numField(id, 'x', 'X', -PX, PX), numField(id, 'y', 'Y', -PX, PX));
+    out.push(sizeField(id, 'w', 'Width'), sizeField(id, 'h', 'Height'));
+    if (CONTAINERS.has(t)) {
+      const mode = pick(MODE, valueOf(id, 'layout.mode'), 'none');
+      out.push(buttons(id, 'layout.mode', 'Direction', [['none', 'Free'], ['row', 'Row'], ['column', 'Column'], ['grid', 'Grid']]));
+      if (mode !== 'none') {
+        out.push(numField(id, 'layout.gap', 'Gap', 0, PX));
+        out.push(buttons(id, 'layout.align', 'Align', [['start', 'Start'], ['center', 'Center'], ['end', 'End'], ['stretch', 'Stretch']]));
+        out.push(buttons(id, 'layout.justify', 'Justify', [['start', 'Start'], ['center', 'Center'], ['end', 'End'], ['between', 'Apart']]));
+      }
+      if (mode === 'row' || mode === 'column') out.push(checkbox(id, 'layout.wrap', 'Wrap'));
+      out.push(paddingField(id));
+      if (mode === 'grid') out.push(tracksField(id, 'layout.columns', 'Columns'), tracksField(id, 'layout.rows', 'Rows'));
+    }
+    if (PAINTED.has(t)) out.push(colourField(id, 'fill', 'Fill', true), colourField(id, 'stroke', 'Stroke', true), numField(id, 'strokeWidth', 'Stroke width', 0, PX));
+    if (ROUNDED.has(t)) out.push(numField(id, 'radius', 'Radius', 0, PX));
+    if (CONTAINERS.has(t)) out.push(checkbox(id, 'clip', 'Clip'));
+    if (t === 'text') {
+      out.push(textField(id), ...fontField(id), colourField(id, 'color', 'Colour', false));
+      out.push(buttons(id, 'align', 'Align', [['left', 'Left'], ['center', 'Center'], ['right', 'Right'], ['justify', 'Justify']]));
+    }
+    if (t === 'image') out.push(wordSelect(id, 'fit', 'Fit', [['cover', 'Cover'], ['contain', 'Contain'], ['fill', 'Fill']]));
+    // an inner instance's own wiring can't be overridden, so its Variant is hidden in Change in
+    if (t === 'instance' && variantFor(id) === null) out.push(variantField(id, n));
+    return out;
+  }
+
+  // ---- components, variants and instances (spec §3) ----
+
+  const MAX_VARIANTS = 32; // canvas@1 §7 variants
+  const SAY3 = {
+    variantName: "A variant's name is a letter, then letters, digits or _.",
+    variantExists: 'This component already has that variant.',
+    variantsFull: 'A component has at most 32 variants.',
+    ownComponent: "An instance can't go inside its own component.",
+  };
+  function actionButton(action, label, run) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.action = action;
+    b.textContent = label;
+    b.addEventListener('click', run);
+    return b;
+  }
+  // Make component is offered on a frame where a component may be: not inside a component, and not
+  // holding one (a component never sits inside another, at any depth).
+  const mayMakeComponent = (id, n) => n.type === 'frame' && componentOf(id) === null && !subtreeOf(id).some((x) => x.type === 'component');
+  // Make component: one edit that adds a component with the frame's properties after the frame under
+  // its parent, moves the frame's children into it in order, and deletes the frame; then selected.
+  const COMPONENT_PROPS = ['name', 'visible', 'opacity', 'x', 'y', 'size', 'fill', 'stroke', 'strokeWidth', 'radius', 'clip', 'layout'];
+  function makeComponent(frameId) {
+    const f = nodeOf(frameId);
+    if (!editable() || !f || !mayMakeComponent(frameId, f)) return;
+    const cid = newId();
+    const node = { id: cid, type: 'component', parent: f.parent };
+    for (const k of COMPONENT_PROPS) if (own(f, k)) node[k] = structuredClone(f[k]);
+    const ops = [{ op: 'add', node, after: frameId }];
+    let after = null;
+    for (const c of kidsOf(f)) {
+      ops.push({ op: 'move', id: c, parent: cid, after });
+      after = c;
+    }
+    ops.push({ op: 'del', id: frameId });
+    if (edit(ops)) select(cid);
+  }
+  // The variants of a selected component: each listed with Remove (a set of null), then a name field
+  // and Add variant (a set of {}), Enter in the name field adding it too.
+  function variantsBlock(id, n) {
+    const out = [];
+    for (const name of variantNames(n)) {
+      const nm = document.createElement('span');
+      nm.className = 'vname';
+      nm.textContent = name;
+      const rm = actionButton('remove-variant', 'Remove', () => {
+        if (variantNames(nodeOf(id)).includes(name)) setRaw(id, `variants.${name}`, null);
+      });
+      rm.dataset.variant = name;
+      rm.setAttribute('aria-label', `Remove variant ${name}`);
+      out.push(fieldRow('Variant', nm, rm));
+    }
+    const field = textInput('@new-variant', 'New variant name', '');
+    field.maxLength = 40;
+    field.placeholder = 'name';
+    let row = null;
+    const add = () => {
+      const name = field.value.trim();
+      const names = variantNames(nodeOf(id));
+      const why = !VARIANT_RE.test(name) ? SAY3.variantName : names.includes(name) ? SAY3.variantExists : names.length >= MAX_VARIANTS ? SAY3.variantsFull : null;
+      fieldNote(row, why);
+      if (why !== null) return;
+      if (setRaw(id, `variants.${name}`, {})) field.value = '';
+    };
+    field.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+    row = fieldRow('New variant', field, actionButton('add-variant', 'Add variant', add));
+    out.push(row);
+    return out;
+  }
+  // Change in, on a node inside a component that has variants: Base or one of its variants.
+  function changeInRow(id) {
+    const comp = componentOf(id);
+    const names = variantNames(nodeOf(comp));
+    if (comp === null || names.length === 0) return null;
+    const vm = variantFor(id);
+    const s = selectOf('@variant', 'Change in', [['@base', 'Base'], ...names.map((x) => [x, x])], vm === null ? '@base' : vm.name);
+    s.addEventListener('change', () => {
+      state.variantMode = s.value === '@base' ? null : { comp, name: s.value };
+      buildProps();
+    });
+    return fieldRow('Change in', s);
+  }
+  // Place instance: the next click on the stage adds an instance of the component (setTool('instance')).
+  function startPlacing(compId) {
+    const c = nodeOf(compId);
+    if (!editable() || narrow() || !c || c.type !== 'component') return;
+    setTool('instance');
+    state.placing = compId;
+  }
+  // Does component `a` use component `b`: is it `b`, or does it hold an instance of `b` or of a component
+  // that uses `b` (walked, bounded)? An instance of `a` never goes inside `b` then (contract §2).
+  function usesComponent(a, b) {
+    const seen = new Set();
+    const stack = [a];
+    while (stack.length && seen.size <= MAX_ELEMENTS) {
+      const c = stack.pop();
+      if (c === b) return true;
+      if (seen.has(c)) continue;
+      seen.add(c);
+      for (const x of subtreeOf(c)) if (x.type === 'instance' && typeof x.component === 'string' && !seen.has(x.component)) stack.push(x.component);
+    }
+    return false;
+  }
+  // Would an instance of component `compId` placed under `pid` be inside its own component?
+  const ownComponentAbove = (compId, pid) => [...componentsAbove(pid)].some((c) => usesComponent(compId, c));
+  // The instance placed at a click: by the placing rule (§2), never inside its own component.
+  function placeInstance(compId, at) {
+    const c = nodeOf(compId);
+    if (!c || c.type !== 'component') return;
+    if (ownComponentAbove(compId, at.parent)) { say(SAY3.ownComponent); return; }
+    addNode('instance', at, { name: typeof c.name === 'string' ? c.name : 'Instance', component: compId, size: { w: 'hug', h: 'hug' } });
+  }
+
+  // The fields under the read-only rows, for the selected node: Change in (a node inside a component
+  // with variants), Name (hidden in Change in: names aren't overridden), its type's fields, a
+  // component's variants and Place instance, a frame's Make component, then Delete layer at the foot.
+  // Disabled once editing has stopped.
+  function editFields(id, n) {
+    const box = document.createElement('div');
+    box.className = 'fields';
+    const change = changeInRow(id);
+    if (change !== null) box.append(change);
+    if (variantFor(id) === null) {
+      const name = textInput('name', 'Name', typeof n.name === 'string' ? n.name : '');
+      name.maxLength = 200;
+      name.addEventListener('change', () => {
+        const v = name.value;
+        if (v.length <= 200 && wellFormed(v)) setProp(id, 'name', v);
+      });
+      box.append(fieldRow('Name', name));
+    }
+    box.append(...fieldsFor(id, n));
+    if (n.type === 'component') {
+      box.append(...variantsBlock(id, n));
+      const acts = document.createElement('div');
+      acts.className = 'acts';
+      acts.append(actionButton('place-instance', 'Place instance', () => startPlacing(id)));
+      box.append(acts);
+    }
+    if (mayMakeComponent(id, n)) {
+      const acts = document.createElement('div');
+      acts.className = 'acts';
+      acts.append(actionButton('make-component', 'Make component', () => makeComponent(id)));
+      box.append(acts);
+    }
+    const foot = document.createElement('div');
+    foot.className = 'foot';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.dataset.action = 'delete';
+    del.textContent = 'Delete layer';
+    del.addEventListener('click', () => deleteNode(id));
+    foot.append(del);
+    box.append(foot);
+    if (!editable()) for (const c of box.querySelectorAll('input, select, textarea, button')) c.disabled = true;
+    return box;
+  }
+
+  // Delete or Backspace deletes the selected node, while no field has focus, at 760 px and over.
+  document.addEventListener('keydown', (e) => {
+    if (!ready() || !editable() || narrow() || typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if ((e.key === 'Delete' || e.key === 'Backspace') && state.sel !== null) {
+      e.preventDefault();
+      deleteNode(state.sel);
+    }
+  });
+
+  // ---- the tools (spec §2) ----
+  // Move (the default) selects; Frame, Text, Rectangle, Ellipse and Image make a node by a click or a
+  // drag on the stage, Vector by a click per point. Each made node is one `add` edit, placed by
+  // placeAt; the new node is selected and the tool goes back to Move. Space or the middle button pans
+  // in every tool (the pan's own handlers run first and the tools leave such a press alone).
+
+  // `instance` has no button: Place instance (§3) picks it, the component in state.placing
+  const TOOLS = ['move', 'frame', 'text', 'rect', 'ellipse', 'vector', 'image', 'instance'];
+  const TOOL_KEY = { v: 'move', f: 'frame', t: 'text', r: 'rect', o: 'ellipse', p: 'vector', i: 'image' };
+  const NEW_NAME = { frame: 'Frame', text: 'Text', rect: 'Rectangle', ellipse: 'Ellipse', vector: 'Vector', image: 'Image' };
+  const IMAGE_SAY = {
+    tooBig: 'That image is too big (at most 4 MB).',
+    types: 'Only PNG, JPEG, WebP or GIF images can be added.',
+    failed: "The image couldn't be added.",
+  };
+  const IMAGE_BYTES = 4 * 1024 * 1024; // canvas@1 §7 imageBytes
+  const DRAG_SLOP = 3; // px a press may move and still be a click
+  let tool = 'move';
+  // gesture: the press a tool is following ({ id, tool, sx, sy, cx, cy, dragged, draft }, and for
+  // Move the node, its element and where the press was: see pressMove), or null;
+  // toolPress: the click that ends such a press is the tool's, not a selection; pen: the path being
+  // drawn ({ pts in page px, el, line }), or null; placing: where the image being chosen goes, or null.
+  let gesture = null;
+  let toolPress = false;
+  let pen = null;
+  let placing = null;
+  const toolsOn = () => ready() && editable() && !narrow();
+
+  function setTool(name) {
+    if (!TOOLS.includes(name)) return;
+    endGesture();
+    dropPen();
+    tool = name;
+    if (name !== 'instance') state.placing = null;
+    for (const b of $('tools').querySelectorAll('button[data-tool]')) b.setAttribute('aria-pressed', String(b.dataset.tool === tool));
+    $('stage').classList.toggle('drawing', tool !== 'move');
+  }
+  $('tools').addEventListener('click', (e) => {
+    const b = e.target instanceof Element ? e.target.closest('button[data-tool]') : null;
+    if (b && !b.disabled && editable()) setTool(b.dataset.tool);
+  });
+  // The tool keys, only while no field has focus, at 760 px and over, and while editing is allowed.
+  // Enter ends a path.
+  document.addEventListener('keydown', (e) => {
+    if (!toolsOn() || typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'Enter' && pen !== null) { e.preventDefault(); finishPen(); return; }
+    const k = typeof e.key === 'string' && e.key.length === 1 ? e.key.toLowerCase() : '';
+    if (own(TOOL_KEY, k)) { e.preventDefault(); setTool(TOOL_KEY[k]); }
+  });
+
+  // Is `id` the node `root` or inside its subtree (walked up, bounded)?
+  function inSubtree(id, root) {
+    let cur = id;
+    for (let steps = 0; steps <= MAX_ELEMENTS && nodeOf(cur); steps++) {
+      if (cur === root) return true;
+      cur = nodeOf(cur).parent;
+    }
+    return false;
+  }
+  const inComponent = (id) => {
+    let cur = id;
+    for (let steps = 0; steps <= MAX_ELEMENTS && nodeOf(cur); steps++) {
+      if (nodeOf(cur).type === 'component') return true;
+      cur = nodeOf(cur).parent;
+    }
+    return false;
+  };
+  // Where a new (or moved) node goes for a pointer at (cx, cy): the deepest frame or component drawn
+  // under it (an instance's inner nodes are its component's, not the page's: they carry no data-id),
+  // skipping `exclude`'s subtree and, for a component (`component: true`), any component or anything
+  // in one; else the shown page. { parent, after, x, y, free }: x, y the pointer in the parent's page
+  // px; free when the parent places by x, y (a `none` frame or the page), after then its last child
+  // (on top); in a row, column or grid, after the last child whose middle along the axis (a grid or a
+  // wrapped row or column: by reading order) is before the pointer, null for first.
+  function placeAt(cx, cy, exclude = null, { component = false } = {}) {
+    let parent = null;
+    let pel = null;
+    for (const el of document.elementsFromPoint(cx, cy)) {
+      if (!(el instanceof HTMLElement) || !$('surface').contains(el) || el.dataset.id === undefined) continue;
+      const id = el.dataset.id;
+      const n = nodeOf(id);
+      if (!n || !CONTAINERS.has(n.type) || drawn.get(id) !== el) continue;
+      if (exclude !== null && inSubtree(id, exclude)) continue;
+      if (component && inComponent(id)) continue;
+      parent = id;
+      pel = el;
+      break;
+    }
+    const z = view.z;
+    const o = (pel ?? $('surface')).getBoundingClientRect();
+    const x = (cx - o.left) / z;
+    const y = (cy - o.top) / z;
+    const pid = parent ?? state.pageId;
+    const pn = parent === null ? null : nodeOf(parent);
+    const kids = (pn ? kidsOf(pn) : kidsOf(pageById(pid) || { children: [] })).filter((k) => k !== exclude);
+    const mode = pn ? pick(MODE, getPath(pn, 'layout.mode'), 'none') : 'none';
+    if (mode === 'none') return { parent: pid, after: kids.length ? kids[kids.length - 1] : null, x, y, free: true };
+    const wrap = getPath(pn, 'layout.wrap') === true;
+    let after = null;
+    for (const k of kids) {
+      const el = drawn.get(k);
+      if (!el || el.getClientRects().length === 0) continue;
+      const r = el.getBoundingClientRect();
+      const mx = (r.left + r.right) / 2;
+      const my = (r.top + r.bottom) / 2;
+      let before;
+      if (mode === 'row' && !wrap) before = mx < cx;
+      else if (mode === 'column' && !wrap) before = my < cy;
+      else if (mode === 'column') before = r.right <= cx || (r.left <= cx && my < cy);
+      else before = r.bottom <= cy || (r.top <= cy && mx < cx);
+      if (before) after = k;
+    }
+    return { parent: pid, after, x, y, free: false };
+  }
+
+  // A new node of `type` at a placement, with its own properties: one add edit; then selected, and the
+  // tool back to Move. The new node's id is new (newId). True when it was queued.
+  function addNode(type, at, props) {
+    const id = newId();
+    const node = { id, type, parent: at.parent, name: NEW_NAME[type] };
+    if (at.free) { node.x = Math.round(at.x); node.y = Math.round(at.y); }
+    Object.assign(node, props);
+    setTool('move');
+    if (!edit([{ op: 'add', node, after: at.after }])) return false;
+    select(id);
+    return true;
+  }
+  const fixedSize = (w, h) => ({ w: Math.round(clamp(w, 1, PX)), h: Math.round(clamp(h, 1, PX)) });
+
+  // A press by a creating tool: followed with the pointer captured, so a release outside the stage
+  // still ends it; past 3 px it is a drag, previewed by a dashed draft. A press with Space held, by the
+  // middle button or by touch is the pan's.
+  $('stage').addEventListener('pointerdown', (e) => {
+    toolPress = false;
+    if (!toolsOn() || isTouch(e) || e.button !== 0 || spaceHeld || pan || gesture) return;
+    if (!(e.target instanceof Element) || e.target.closest('.zoom, .stage-top, #tools')) return;
+    if (tool === 'move') { pressMove(e); return; }
+    toolPress = true;
+    if (tool === 'vector') { penPoint(e.clientX, e.clientY); return; }
+    gesture = { id: e.pointerId, tool, sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null };
+    try { $('stage').setPointerCapture(e.pointerId); } catch { /* moves over the stage still arrive */ }
+  });
+  $('stage').addEventListener('pointermove', (e) => {
+    if (pen !== null && tool === 'vector') drawPen(e.clientX, e.clientY);
+    const g = gesture;
+    if (!g || e.pointerId !== g.id) return;
+    g.cx = e.clientX;
+    g.cy = e.clientY;
+    if (!g.dragged && Math.hypot(g.cx - g.sx, g.cy - g.sy) <= DRAG_SLOP) return;
+    if (g.tool === 'move' && !g.dragged) {
+      // past 3 px a Move press is a drag: the pointer kept (a release outside the stage still ends
+      // it), and the click that ends it isn't a selection
+      try { $('stage').setPointerCapture(g.id); } catch { /* moves over the stage still arrive */ }
+      toolPress = true;
+    }
+    g.dragged = true;
+    if (g.tool === 'move') { movePreview(g); return; }
+    if (g.tool === 'text') return; // a text is placed where it was pressed
+    if (!g.draft) {
+      g.draft = document.createElement('div');
+      g.draft.className = g.tool === 'ellipse' ? 'draft round' : 'draft';
+      $('stage').append(g.draft);
+    }
+    const st = $('stage').getBoundingClientRect();
+    g.draft.style.left = `${Math.min(g.sx, g.cx) - st.left}px`;
+    g.draft.style.top = `${Math.min(g.sy, g.cy) - st.top}px`;
+    g.draft.style.width = `${Math.abs(g.cx - g.sx)}px`;
+    g.draft.style.height = `${Math.abs(g.cy - g.sy)}px`;
+  });
+  function endGesture() {
+    if (!gesture) return;
+    try { $('stage').releasePointerCapture(gesture.id); } catch { /* already released */ }
+    if (gesture.draft) gesture.draft.remove();
+    if (gesture.el) gesture.el.style.translate = '';
+    gesture = null;
+  }
+  $('stage').addEventListener('pointerup', (e) => {
+    const g = gesture;
+    if (!g || e.pointerId !== g.id) return;
+    endGesture();
+    if (!toolsOn()) return;
+    make(g);
+  });
+  $('stage').addEventListener('pointercancel', (e) => { if (gesture && e.pointerId === gesture.id) endGesture(); });
+
+  // What a press made: placed by where it was pressed; a drag's box (frame, rectangle, ellipse, image)
+  // gives its top-left and its size, in page px.
+  function make(g) {
+    if (g.tool === 'move') { dropMove(g); return; }
+    const at = placeAt(g.sx, g.sy);
+    const z = view.z;
+    const box = g.dragged && g.tool !== 'text'
+      ? { at: { ...at, x: at.x + (Math.min(g.sx, g.cx) - g.sx) / z, y: at.y + (Math.min(g.sy, g.cy) - g.sy) / z }, w: Math.abs(g.cx - g.sx) / z, h: Math.abs(g.cy - g.sy) / z }
+      : null;
+    const where = box ? box.at : at;
+    switch (g.tool) {
+      case 'frame':
+        addNode('frame', where, { size: box ? fixedSize(box.w, box.h) : { w: 200, h: 120 }, layout: { mode: 'none' }, fill: '#ffffff' });
+        return;
+      case 'rect':
+      case 'ellipse':
+        addNode(g.tool, where, { size: box ? fixedSize(box.w, box.h) : { w: 100, h: 100 }, fill: '#d9d9d9' });
+        return;
+      case 'text':
+        if (addNode('text', where, { size: { w: 'hug', h: 'hug' }, text: 'Text' })) {
+          // its Text field focused, its text selected, so typing replaces it
+          const f = $('props').querySelector('[data-prop="text"]');
+          if (f instanceof HTMLTextAreaElement && !f.disabled) { f.focus({ preventScroll: true }); f.select(); }
+        }
+        return;
+      case 'image':
+        // the picker; the chosen file is posted, and the image added where this press was
+        placing = { at: where, size: box ? fixedSize(box.w, box.h) : { w: 'hug', h: 'hug' } };
+        setTool('move');
+        $('imageFile').value = '';
+        $('imageFile').click();
+        return;
+      case 'instance': {
+        // Place instance: an instance of the component, placed where this press was
+        const comp = state.placing;
+        setTool('move');
+        placeInstance(comp, at);
+        return;
+      }
+      default:
+    }
+  }
+
+  // ---- Move: a press selects, a drag moves, arrows nudge (spec §2) ----
+  // A press on a drawn node selects it (kit-661's rule: inside an instance, the instance); past 3 px it
+  // drags it, the node previewed under the pointer by a translate on its element; the release sends one
+  // edit. Escape (setTool) or a lost pointer drops the drag. The press, the grab and the movement are
+  // kept in page px, so the grab point stays under the pointer whatever the view does meanwhile.
+
+  function pressMove(e) {
+    const hit = e.target.closest('#surface [data-id]');
+    const id = hit ? hit.dataset.id : null;
+    if (id === null || !nodeOf(id)) return;
+    select(id);
+    if (state.sel !== id) return;
+    const s = $('surface').getBoundingClientRect();
+    const r = (drawn.get(id) ?? hit).getBoundingClientRect();
+    const z = view.z;
+    gesture = {
+      id: e.pointerId, tool: 'move', sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null,
+      node: id, el: null,
+      px: (e.clientX - s.left) / z, py: (e.clientY - s.top) / z, // the press, in page px
+      gx: (e.clientX - r.left) / z, gy: (e.clientY - r.top) / z, // the grab, from the node's top-left
+    };
+  }
+  // The pointer's movement since the press, in page px.
+  function moveBy(g) {
+    const s = $('surface').getBoundingClientRect();
+    return { dx: (g.cx - s.left) / view.z - g.px, dy: (g.cy - s.top) / view.z - g.py };
+  }
+  function movePreview(g) {
+    const el = drawn.get(g.node);
+    if (g.el && g.el !== el) g.el.style.translate = '';
+    g.el = el ?? null;
+    if (!g.el) return;
+    const { dx, dy } = moveBy(g);
+    if (Number.isFinite(dx) && Number.isFinite(dy)) g.el.style.translate = `${dx}px ${dy}px`;
+  }
+  // After a redraw (someone's edit) the dragged node's new element takes the preview; a node gone or
+  // no longer on the shown page ends the drag.
+  function keepDrag() {
+    const g = gesture;
+    if (!g || g.tool !== 'move' || !g.dragged) return;
+    if (!nodeOf(g.node) || !drawn.has(g.node)) { endGesture(); return; }
+    movePreview(g);
+  }
+  // Every node of a subtree (the root first), bounded.
+  function subtreeOf(id) {
+    const out = [];
+    const stack = [id];
+    while (stack.length && out.length <= MAX_ELEMENTS) {
+      const n = nodeOf(stack.pop());
+      if (!n) continue;
+      out.push(n);
+      if (CONTAINERS.has(n.type)) stack.push(...kidsOf(n));
+    }
+    return out;
+  }
+  // The components at or above a parent (a node id, or a page id: none).
+  function componentsAbove(pid) {
+    const out = new Set();
+    let cur = pid;
+    for (let steps = 0; steps <= MAX_ELEMENTS && nodeOf(cur); steps++) {
+      if (nodeOf(cur).type === 'component') out.add(cur);
+      cur = nodeOf(cur).parent;
+    }
+    return out;
+  }
+  // Why node `id` may not go under `pid`, in the page's words, or null when it may: never into itself
+  // or its subtree, never a component inside a component ("That layer can't go there."), never an
+  // instance inside its own component, directly or through other instances (§3's words).
+  function goRefusal(id, pid) {
+    if (inSubtree(pid, id)) return REFUSED.parent;
+    if (componentsAbove(pid).size === 0) return null;
+    const sub = subtreeOf(id);
+    if (sub.some((n) => n.type === 'component')) return REFUSED.parent;
+    if (sub.some((n) => n.type === 'instance' && typeof n.component === 'string' && ownComponentAbove(n.component, pid))) return SAY3.ownComponent;
+    return null;
+  }
+  // The release: placed by placeAt at the pointer (the node's own subtree skipped). Under the same
+  // `none` frame or page: set x, set y, only those that changed. Elsewhere, or within an auto-layout
+  // frame: a move with its `after` (nothing when that is where it already is), plus set x, set y (its
+  // top-left as previewed, whole px) when the new parent places by x, y. A drop the canvas would
+  // refuse sends nothing and says so.
+  function dropMove(g) {
+    if (!g.dragged || !editable()) return;
+    const id = g.node;
+    const n = nodeOf(id);
+    if (!n || !layerRows.has(id)) return; // gone, or no longer on the shown page
+    const at = placeAt(g.cx, g.cy, id);
+    const no = goRefusal(id, at.parent);
+    if (no !== null) { say(no); return; }
+    const { dx, dy } = moveBy(g);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    const left = clamp(Math.round(at.x - g.gx), -PX, PX);
+    const top = clamp(Math.round(at.y - g.gy), -PX, PX);
+    const ops = [];
+    if (at.parent === n.parent && at.free) {
+      for (const [k, d, drop] of [['x', dx, left], ['y', dy, top]]) {
+        const v = baseOf(id, k);
+        const next = finite(v) ? clamp(Math.round(v + d), -PX, PX) : drop;
+        if (next !== v) ops.push({ op: 'set', id, prop: k, value: next });
+      }
+    } else {
+      if (at.parent === n.parent) {
+        const sibs = kidsOf(nodeOf(n.parent) ?? pageById(n.parent) ?? { children: [] });
+        const i = sibs.indexOf(id);
+        if (i >= 0 && at.after === (i > 0 ? sibs[i - 1] : null)) return; // dropped where it was
+      }
+      ops.push({ op: 'move', id, parent: at.parent, after: at.after });
+      if (at.free) ops.push({ op: 'set', id, prop: 'x', value: left }, { op: 'set', id, prop: 'y', value: top });
+    }
+    if (ops.length) edit(ops);
+  }
+
+  // Arrow keys nudge the selected node placed by x, y: 1 px, 10 with Shift; one set each, so held keys
+  // coalesce in the sender while unsent (§1). Only while focus is on the page itself or the stage: in a
+  // field the arrows are the field's, in the Layers tree they move between rows.
+  const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  function nudge(dx, dy) {
+    const id = state.sel;
+    const n = nodeOf(id);
+    if (!editable() || !n || !placedByXY(n)) return;
+    for (const [k, d] of [['x', dx], ['y', dy]]) {
+      const v = baseOf(id, k);
+      if (d !== 0 && finite(v)) setRaw(id, k, clamp(v + d, -PX, PX));
+    }
+  }
+  document.addEventListener('keydown', (e) => {
+    if (!own(ARROWS, e.key) || !toolsOn() || e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    if (t !== document.body && t !== document.documentElement && t !== $('stage')) return;
+    if (state.sel === null || gesture !== null || pen !== null) return;
+    e.preventDefault();
+    const step = e.shiftKey ? 10 : 1;
+    const [dx, dy] = ARROWS[e.key];
+    nudge(dx * step, dy * step);
+  });
+
+  // ---- the image: posted, then added under the src the server answers ----
+  $('imageFile').addEventListener('cancel', () => { placing = null; });
+  $('imageFile').addEventListener('change', () => {
+    const f = $('imageFile').files;
+    const file = f && f.length ? f[0] : null;
+    const place = placing;
+    placing = null;
+    $('imageFile').value = '';
+    if (file && place && editable()) uploadImage(file, place);
+  });
+  // The upload's name: the file's, cut to 200 characters, or "image".
+  function uploadName(s) {
+    const cut = [...(typeof s === 'string' ? s : '')].slice(0, 200).join('');
+    return cut.trim() && wellFormed(cut) ? cut : 'image';
+  }
+  async function uploadImage(file, place) {
+    if (file.size > IMAGE_BYTES) { say(IMAGE_SAY.tooBig); return; }
+    let status = 0;
+    let src = null;
+    try {
+      // base64 by btoa over the bytes as a binary string, built 32 KB at a time
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 32768) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+      const body = JSON.stringify({ name: uploadName(file.name), data: btoa(bin) });
+      const res = await fetch(`/api/canvas/image?slug=${encodeURIComponent(state.slug)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, credentials: 'same-origin', cache: 'no-store' });
+      status = res.status;
+      if (status === 200) {
+        const j = await res.json();
+        if (isObj(j) && typeof j.src === 'string' && SRC_RE.test(j.src)) src = j.src;
+      }
+    } catch { src = null; }
+    if (src === null) {
+      say(status === 413 ? IMAGE_SAY.tooBig : status === 415 ? IMAGE_SAY.types : IMAGE_SAY.failed);
+      return;
+    }
+    addNode('image', place.at, { size: place.size, src });
+  }
+
+  // ---- the pen: a click per point; Enter or a double-click ends the path, Escape drops it ----
+  function penPoint(cx, cy) {
+    const s = $('surface').getBoundingClientRect();
+    const pt = [(cx - s.left) / view.z, (cy - s.top) / view.z];
+    if (pen === null) pen = { pts: [], el: null, line: null };
+    const last = pen.pts[pen.pts.length - 1];
+    // a double-click's second press, or a click on the last point, adds none
+    if (last && Math.hypot(pt[0] - last[0], pt[1] - last[1]) * view.z < 2) return;
+    pen.pts.push(pt);
+    drawPen(cx, cy);
+  }
+  // The path's preview (stage chrome), in stage px, to the pointer when given.
+  function drawPen(cx = null, cy = null) {
+    if (pen === null) return;
+    if (pen.el === null) {
+      pen.el = document.createElementNS(SVG_NS, 'svg');
+      pen.el.classList.add('pen');
+      pen.el.setAttribute('aria-hidden', 'true');
+      pen.line = document.createElementNS(SVG_NS, 'polyline');
+      pen.el.append(pen.line);
+      $('stage').append(pen.el);
+    }
+    const st = $('stage').getBoundingClientRect();
+    const s = $('surface').getBoundingClientRect();
+    const pts = pen.pts.map(([x, y]) => [s.left - st.left + x * view.z, s.top - st.top + y * view.z]);
+    if (cx !== null && cy !== null) pts.push([cx - st.left, cy - st.top]);
+    pen.line.setAttribute('points', pts.map(([x, y]) => `${x},${y}`).join(' '));
+  }
+  function dropPen() {
+    if (pen !== null && pen.el !== null) pen.el.remove();
+    pen = null;
+  }
+  // The path made a vector: placed by its first point; x, y its points' top-left (whole px), the path
+  // `M x y L x y …` from there, numbers to 0.1; at least two points, else nothing.
+  function finishPen() {
+    const pts = pen === null ? [] : pen.pts;
+    dropPen();
+    if (pts.length < 2 || !toolsOn()) { setTool('move'); return; }
+    const s = $('surface').getBoundingClientRect();
+    const at = placeAt(s.left + pts[0][0] * view.z, s.top + pts[0][1] * view.z);
+    const lp = pts.map(([x, y]) => [x - pts[0][0] + at.x, y - pts[0][1] + at.y]);
+    const x0 = Math.round(Math.min(...lp.map(([x]) => x)));
+    const y0 = Math.round(Math.min(...lp.map(([, y]) => y)));
+    const r = (v) => String(Math.round(v * 10) / 10 || 0);
+    const path = lp.map(([x, y], i) => `${i ? 'L' : 'M'} ${r(x - x0)} ${r(y - y0)}`).join(' ');
+    addNode('vector', { ...at, x: x0, y: y0 }, { path, size: { w: 'hug', h: 'hug' }, stroke: '#000000', strokeWidth: 1 });
+  }
+  $('stage').addEventListener('dblclick', () => { if (pen !== null && tool === 'vector') finishPen(); });
+
+  // ---- the socket (canvas@1 §3, §5) ----
+
+  // ws: the open socket or null; live: welcomed; down: closed and reconnecting; ended: closed for good;
+  // tries: reconnects since the last welcome; cursor: pending[cursor] is the next edit to send on this
+  // socket; sentAt: when the edits of the last second went; seq: the last seq given; fetching: the
+  // document being fetched again, the ops that arrive meanwhile waiting in held; stale: fetch at the next
+  // welcome whatever it says; again: fetch once more when this fetch ends.
+  const sock = {
+    ws: null, live: false, down: false, ended: false, tries: 0, cursor: 0, sentAt: [], pumpTimer: null, seq: 0,
+    fetching: false, held: [], stale: false, again: false,
+  };
+  function connect() {
+    if (sock.ended || sock.ws) return;
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    let ws;
+    try { ws = new WebSocket(`${scheme}://${location.host}/canvas?slug=${encodeURIComponent(state.slug)}`); } catch { retry(); return; }
+    sock.ws = ws;
+    ws.addEventListener('message', (e) => { if (sock.ws === ws) message(e.data); });
+    ws.addEventListener('close', () => closed(ws));
+  }
+  // A socket closed for any reason but `closed` reconnects after 1 s, then 2, 4, up to 10 s.
+  function retry() {
+    const ms = Math.min(10000, 1000 * 2 ** Math.min(sock.tries, 4));
+    sock.tries += 1;
+    setTimeout(connect, ms);
+  }
+  function closed(ws) {
+    if (sock.ws !== ws) return;
+    sock.ws = null;
+    sock.live = false;
+    if (sock.pumpTimer !== null) { clearTimeout(sock.pumpTimer); sock.pumpTimer = null; }
+    if (!sock.ended) { sock.down = true; retry(); }
+    showBanner();
+    syncBody();
+  }
+  function send(m) {
+    if (!sock.ws) return false;
+    try { sock.ws.send(JSON.stringify(m)); return true; } catch { return false; }
+  }
+  // Send what waits, in order, at most RATE edits in any second; a seq is given when an edit is first
+  // sent, and an edit resent keeps it.
+  function pump() {
+    if (sock.pumpTimer !== null || !sock.ws || !sock.live || sock.fetching) return;
+    while (sock.cursor < state.pending.length) {
+      const now = performance.now();
+      while (sock.sentAt.length && now - sock.sentAt[0] >= 1000) sock.sentAt.shift();
+      if (sock.sentAt.length >= RATE) {
+        sock.pumpTimer = setTimeout(() => { sock.pumpTimer = null; pump(); }, 1001 - (now - sock.sentAt[0]));
+        return;
+      }
+      const e = state.pending[sock.cursor];
+      if (e.seq === null) e.seq = ++sock.seq;
+      if (!send({ t: 'edit', client: CLIENT, seq: e.seq, ops: e.ops })) return;
+      sock.sentAt.push(now);
+      sock.cursor += 1;
+    }
+  }
+  // Drop the pending edits `drop` picks, keeping the cursor on the same next edit.
+  function dropPending(drop) {
+    const keep = [];
+    let before = 0;
+    state.pending.forEach((e, i) => { if (!drop(e)) keep.push(e); else if (i < sock.cursor) before += 1; });
+    state.pending = keep;
+    sock.cursor -= before;
+  }
+
+  function message(data) {
+    let m;
+    try { m = JSON.parse(data); } catch { return; }
+    if (!isObj(m) || typeof m.t !== 'string' || !state.base) return;
+    if (m.t === 'welcome') welcome(m);
+    else if (m.t === 'ops') { if (Number.isSafeInteger(m.rev)) ops(m); }
+    else if (m.t === 'refused') refused(m);
+    else if (m.t === 'saved') { if (Number.isSafeInteger(m.rev)) { state.saved = m.rev; syncBody(); } }
+    else if (m.t === 'ping') send({ t: 'pong' });
+    else if (m.t === 'paused') { state.paused = true; showBanner(); }
+    else if (m.t === 'resumed') { state.paused = false; showBanner(); }
+    else if (m.t === 'closed') lock('closed', m.why === 'landed' ? BANNER.landed : BANNER.removed);
+    else if (m.t === 'reload') {
+      // the document replaced whole: taken again over HTTP with its session; the old session's unacked
+      // edits go with it (kit-668 adds the resend)
+      dropPending(() => true);
+      refetch();
+    }
+    // any other kind is ignored
+  }
+  // welcome: on the session loaded and at base's rev, send again what was sent and not acked, then the
+  // rest; on any other (a new session, or edits made while away, which the socket doesn't replay), fetch
+  // the document first.
+  function welcome(m) {
+    sock.live = true;
+    sock.down = false;
+    sock.tries = 0;
+    sock.cursor = 0;
+    showBanner();
+    syncBody();
+    if (!sock.stale && m.session === state.session && m.rev === state.base.rev) pump();
+    else refetch();
+  }
+  // ops: applied to base when it is the next rev (dropped at or below base's rev; one missed fetches
+  // the document); this page's own ack drops that edit, and any earlier one, from pending.
+  function ops(m) {
+    if (sock.fetching) { sock.held.push(m); return; }
+    takeOps(m);
+    redraw();
+    pump();
+  }
+  function takeOps(m) {
+    if (m.rev > state.base.rev + 1) { sock.held.push(m); refetch(); return; }
+    if (m.rev === state.base.rev + 1) {
+      applyOps(state.base, m.ops);
+      state.base.rev = m.rev;
+    }
+    const ack = m.ack;
+    if (isObj(ack) && ack.client === CLIENT && Number.isSafeInteger(ack.seq)) dropPending((e) => e.seq !== null && e.seq <= ack.seq);
+  }
+  // refused, for this page: that edit dropped (so undone on screen), and why said in plain words.
+  function refused(m) {
+    if (m.client !== CLIENT || !Number.isSafeInteger(m.seq)) return;
+    dropPending((e) => e.seq === m.seq);
+    const why = typeof m.why === 'string' && own(REFUSED, m.why) ? m.why : null;
+    say(why === null ? NOT_VALID : REFUSED[why]);
+    if (why === 'view') lock('view');
+    redraw();
+  }
+  // The document fetched again as base (its session too); the ops held meanwhile applied after it, in
+  // order, those above its rev. A fetch that fails closes the socket, and the next welcome fetches.
+  async function refetch() {
+    if (sock.fetching) { sock.again = true; return; }
+    sock.fetching = true;
+    sock.again = false;
+    let b = null;
+    try {
+      const res = await fetch(`/api/canvas/doc?slug=${encodeURIComponent(state.slug)}`, { credentials: 'same-origin', cache: 'no-store' });
+      if (res.status === 200) {
+        const j = await res.json();
+        if (frameOk(j)) b = j;
+      }
+    } catch { b = null; }
+    sock.fetching = false;
+    if (b === null) {
+      sock.held = [];
+      sock.stale = true;
+      if (sock.ws) sock.ws.close();
+      return;
+    }
+    sock.stale = false;
+    takeDoc(b);
+    for (const m of sock.held.splice(0)) {
+      if (sock.fetching) sock.held.push(m); else takeOps(m);
+    }
+    if (sock.again && !sock.fetching) refetch();
+    redraw();
+    pump();
+  }
+
   async function start() {
     setState('loading');
     const m = /^\/view\/canvas\/([^/]*)$/.exec(location.pathname);
@@ -1188,14 +2942,15 @@
     let body;
     try { body = await res.json(); } catch { return fail(withStatus); }
     if (!frameOk(body)) return fail(withStatus);
-    state.session = own(body, 'session') ? body.session : null;
-    state.rev = own(body, 'rev') ? body.rev : null;
-    state.doc = body.doc;
-    state.repo = body.repo;
+    takeDoc(body);
+    state.doc = state.base;
     showRepo(body.repo);
     renderPages();
     renderPageSel();
     showPage(hashPage());
+    syncBody();
+    // main's copy (session null) is read-only: no socket, no editing
+    if (state.session !== null) connect();
   }
 
   start().catch(() => fail(TEXT.notLoaded));
