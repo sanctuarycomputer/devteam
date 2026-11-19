@@ -434,7 +434,7 @@ test('canvas cursors: a select made while the document is fetched after a restar
   await within(ctx, async () => anaSelections(B, b1).some((ids) => ids && ids.includes(x2.id)), "B's selections after the reload list Ana with X2", async () => JSON.stringify(anaSelections(B, b1)));
   await within(ctx, async () => (await boxesOf(B, 'others-sel', 'ana')).map((b) => b.node).join(' ') === x2.id, "B draws Ana's box on X2", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')));
 
-  // S6.3 (task-1 T1-1, T1-2, task-1-2 T1-2-1): A's selection cleared while a reload's fetch is held goes
+  // S6.3 (task-1 T1-1, T1-2, task-1-2 F2-1): A's selection cleared while a reload's fetch is held goes
   // out as an empty select once the fetch lands and the re-sent edit X3 is acked, although an empty
   // selection is what the old dedupe took a fresh socket's last select to be; B's selections then list
   // Ana with none
