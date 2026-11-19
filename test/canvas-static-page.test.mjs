@@ -97,6 +97,8 @@ function scan(html, comment) {
         const end = html.indexOf('</style>', i);
         if (end < 0) throw new Error(`scan: at ${i}: <style> never closes`);
         const raw = html.slice(i, end);
+        // A browser ends the block at `</style` in any case: one before the exact close throws.
+        if (raw.toLowerCase().includes('</style')) throw new Error(`scan: at ${i}: </style in another case inside <style>`);
         if (raw) el.children.push({ text: { raw, value: raw } });
         i = end + '</style>'.length;
       } else if (!VOID.has(el.name)) {
@@ -202,19 +204,27 @@ test('canvas static page: the scanner refuses a broken page', () => {
   for (const [what, body] of Object.entries(thrown)) {
     assert.throws(() => scan(page(body), COMMENT), /^Error: scan: /, what);
   }
+  assert.throws(() => scan(page('', 'a{}</STYLE><script>x</script>'), COMMENT), /^Error: scan: /, 'a style block closed in upper case');
   // Inside the grammar but hostile: it scans, and hostileProblems lists it.
+  // Each with the problem its own check must list (so turning any one check off fails here).
   const listed = {
-    'a script': '<script>alert(1)</script>',
-    'a quoted handler': '<b onerror="x">b</b>',
-    'a url( style': '<div style="background:url(x)"></div>',
-    'an @import style block': ['', '@import "https://evil.example/x.css";'],
-    'a javascript: link': '<a href="javascript:x">a</a>',
+    'a script': ['<script>alert(1)</script>', 'tag <script>'],
+    'a quoted handler': ['<b onerror="x">b</b>', 'tag <b>'],
+    'a handler on an allowed tag': ['<div onerror="x"></div>', '<div> handler onerror'],
+    'a handler on an allowed tag, by the allow-list':['<div onerror="x"></div>', '<div> attribute onerror'],
+    'a disallowed attribute on an allowed tag': ['<div href="x"></div>', '<div> attribute href'],
+    'a url( style': ['<div style="background:url(x)"></div>', 'holds url('],
+    'an @import style block': ['', '<style> holds @import', '@import "https://evil.example/x.css";'],
+    'a javascript: link': ['<a href="javascript:x">a</a>', 'tag <a>'],
+    'a remote src': ['<img src="https://x/y.png" alt="a">', '<img> src'],
+    'a third meta': ['<meta name="viewport" content="width=device-width"><meta name="x" content="y">', '3 <meta> tags'],
   };
-  for (const [what, v] of Object.entries(listed)) {
-    const html = Array.isArray(v) ? page(v[0], v[1]) : page(v);
-    const tree = scan(html, COMMENT);
-    assert.notDeepEqual(hostileProblems(tree), [], what);
-    assert.notDeepEqual(hostileProblems(tree, STYLE), [], `${what}, with the style given`);
+  for (const [what, [body, want, style]] of Object.entries(listed)) {
+    const tree = scan(page(body, style), COMMENT);
+    for (const given of [undefined, STYLE]) {
+      const problems = hostileProblems(tree, given);
+      assert.ok(problems.some((p) => p.includes(want)), `${what}${given ? ', with the style given' : ''}: ${JSON.stringify(problems)} lacks ${want}`);
+    }
   }
   // A good page scans to the expected tree and has no problem.
   const good = page('<div data-node="a" data-type="text" data-name="&lt;b&gt; &amp; &quot;q&quot; &#39;s" style="width:10px;color:#111">x &lt; y</div><img data-node="i" data-type="image" src="images/429be16d0a91e377.png" alt="P"><svg width="16" height="16" style="overflow:visible"><path d="M2 8 L6 12" fill="none"></path></svg>');
