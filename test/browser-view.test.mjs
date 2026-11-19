@@ -355,6 +355,9 @@ test('V6 a socket on either loopback form gets held, url and frames of the page 
     assert.deepEqual(c.msgs.find((m) => m.t === 'held'), { t: 'held', qid: null });
     assert.equal(c.msgs.find((m) => m.t === 'url')?.url, `${site.origin}/record`);
     assert.deepEqual(c.bad, [], 'every message is browser@1');
+    // in CSS pixels of the page, not the frame image's (400 px at most here): the page is wider
+    const f = c.msgs.find(isFrame);
+    assert.ok(f.w > 400 && f.w <= 8192 && f.h > 0, `frame size ${f.w}x${f.h} is the page's, not the image's`);
     c.close();
     await sleep(300);
   }
@@ -507,8 +510,8 @@ test('R5 a viewer that answers no ping is closed, and the next one gets in', opt
     assert.equal(silent.status, 101);
     await silent.wait(isFrame, 2000);
     const t0 = Date.now();
-    assert.notEqual(await silent.closedIn(2500), null, 'the silent one is closed');
-    assert.ok(Date.now() - t0 <= 2500);
+    assert.notEqual(await silent.closedIn(2000), null, 'the silent one is closed within 2 s');
+    assert.ok(Date.now() - t0 <= 2000);
     const next = await ws(view.port);
     assert.equal(next.status, 101);
     await next.wait(isFrame, 2000);
@@ -544,7 +547,6 @@ test('I6 forget signs the browser out and restarts it on an empty profile', opts
   const marker = path.join(a.profile, 'kit-66-marker');
   fs.writeFileSync(marker, 'x');
   await sleep(500);
-  const n = c.msgs.length, top = Math.max(-1, ...c.msgs.filter(isFrame).map((m) => m.seq));
   c.send({ t: 'forget' });
   await within(20000, () => { try { const s = readState(a); return s.chrome_pid !== old.chrome_pid; } catch { return false; } }, 'a new Chrome in state.json');
   assert.equal(readState(a).daemon_pid, old.daemon_pid, 'the same daemon');
@@ -552,8 +554,11 @@ test('I6 forget signs the browser out and restarts it on an empty profile', opts
   assert.ok(alive(old.daemon_pid), 'the daemon stays');
   assert.equal(fs.existsSync(marker), false, 'the profile was emptied');
   assert.equal(JSON.parse(fs.readFileSync(path.join(a.profile, 'root.json'), 'utf8')).root, fs.realpathSync(a.old));
-  const f = await c.wait((m) => isFrame(m) && m.seq > top, 10000, n);
-  assert.ok(f.seq > top, 'the frame count keeps rising');
+  // frames after the new Chrome is up and the old one gone: drawn by the new screencast
+  const n = c.msgs.length;
+  await c.wait(isFrame, 10000, n);
+  const seqs = c.msgs.filter(isFrame).map((m) => m.seq);
+  for (let i = 1; i < seqs.length; i++) assert.ok(seqs[i] > seqs[i - 1], `the frame count keeps rising over the socket's life: ${seqs.slice(Math.max(0, i - 3), i + 2).join(', ')}`);
   assert.equal(c.closed, null, 'the socket stayed open');
   await ok(a, ['open', `${site.origin}/account`]);
   assert.match(await ok(a, ['snapshot']), /Not signed in/);
@@ -648,7 +653,7 @@ test('G2 without a session the gateway refuses the view', opts, async () => {
   } finally { await close(); }
 });
 
-test('V7 preview stop on it stops the browser, whoever runs it; V8 the name is kept across stops and starts', opts, async () => {
+test('V7 preview stop on it stops the browser, whoever runs it', opts, async () => {
   s1?.close();
   const s = await running();
   const r = await kitCli(a, ['preview', 'stop', view.name], { DEVTEAM_ROLE: undefined, DEVTEAM_TICKET: 'kit-1-x' });
@@ -658,7 +663,15 @@ test('V7 preview stop on it stops the browser, whoever runs it; V8 the name is k
   assert.equal(fs.existsSync(recFile(a, view.name)), false, 'the record');
   assert.equal(fs.existsSync(a.state), false, 'state.json');
   assert.ok(!devWindows(a).some((x) => x.name === `dev~${view.name}`), 'the window');
+});
+
+test('V8 the name is kept across stops and starts', opts, async () => {
+  s1?.close();
+  await running();
   const name = view.name;
+  // a preview stop (works on main by the daemon's SIGHUP), then a browser stop
+  await kitCli(a, ['preview', 'stop', name]);
+  await until(() => !fs.existsSync(recFile(a, name)), 'the record gone');
   await running();
   assert.equal(view.name, name, 'the same name after preview stop and browser start');
   await ok(a, ['stop']);
