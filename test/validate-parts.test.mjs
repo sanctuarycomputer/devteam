@@ -387,3 +387,28 @@ test('validate: a mostly serial graph warns, and names the links that only seria
     assert.deepEqual(serial(), []);
   } finally { F.done(); }
 });
+
+test('validate: a deep chain beside enough ready tickets is not serial, and named parts that really overlap are not a serializing link', () => {
+  const F = partsProject('parts-serial-wide', [DT]);
+  try {
+    const serial = () => F.validate().split('\n').filter((l) => l.includes('mostly serial'));
+    const ids = Array.from({ length: 9 }, (_, i) => `app-${String(i + 41)}-step`);
+    ids.forEach((id, i) => F.ticket(id, [DT], { depends_on: i ? [ids[i - 1]] : [] }));
+    // 9 deep, 2 ready (app-41 and one free ticket): 9 >= 4 x 2, still serial
+    F.ticket('app-61-free', ['app/free-1.txt']);
+    let w = serial();
+    assert.equal(w.length, 1, w.join(' | '));
+    assert.match(w[0], /9 tickets deep .* while 2 of 10 are ready/);
+    // 3 ready: 9 < 4 x 3, wide enough, no warning
+    F.ticket('app-62-free', ['app/free-2.txt']);
+    assert.deepEqual(serial(), []);
+    F.ok(F.old, ['ticket', 'set', 'app-62-free', '--json', JSON.stringify({ depends_on: ['app-61-free'] })], SUP);
+    assert.equal(serial().length, 1, 'back to 2 ready: serial again');
+    // every link names the same part on both sides: they really overlap, so none only serializes
+    for (const id of ids) F.touches(id, [`${DT}#cmdReady`]);
+    w = serial();
+    assert.equal(w.length, 1, w.join(' | '));
+    assert.doesNotMatch(w[0], /only serialize/);
+    assert.match(w[0], /find dependencies a contract ticket or a split could break/);
+  } finally { F.done(); }
+});
