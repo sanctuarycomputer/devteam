@@ -487,3 +487,394 @@ test('help names box-pins and says only the top package of npm and PyPI tools is
   assert.equal(r.status, 0, r.stderr);
   for (const re of [/box-pins verify \[--release vX\.Y\.Z\]/, /check \[--json\]/, /bump --release vX\.Y\.Z \[--dry-run\]/, /box-pins installed/, /only the top package of the npm and PyPI tools is pinned/i]) assert.match(r.stdout, re);
 });
+
+// ===== box-pins changed: what a release range changes in what the box image runs (image-changes@1) =====
+// A kit repo made from this checkout's tracked tree (the working tree's copy, so the change under
+// test is in it), tagged v9.1.0; each case is a branch off the tag with one commit, run with that
+// branch's own script, as a release script or the deploy gate runs it from a checkout at --to.
+const SCRIPT = 'docs/devteam/scripts/devteam.mjs';
+const GIT_ID = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+const changedRepo = path.join(tmp, 'changed-kit');
+const cg = (args) => execFileSync('git', args, { cwd: changedRepo, encoding: 'utf8', env: { ...pinsEnv(), ...GIT_ID } });
+let changedBuilt = false;
+function changedKit() {
+  if (changedBuilt) return changedRepo;
+  fs.mkdirSync(changedRepo);
+  cg(['init', '-q', '-b', 'main']);
+  cg(['remote', 'add', 'origin', 'git@github.com:sanctuarycomputer/devteam.git']);
+  for (const f of execFileSync('git', ['ls-files', '-z'], { cwd: REPO, encoding: 'utf8' }).split('\0').filter(Boolean)) {
+    const from = path.join(REPO, f), to = path.join(changedRepo, f);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    const st = fs.lstatSync(from, { throwIfNoEntry: false });
+    if (!st) continue; // deleted in the working tree, not yet committed
+    if (st.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(from), to);
+    else fs.copyFileSync(from, to), fs.chmodSync(to, st.mode & 0o777);
+  }
+  cg(['add', '-A']);
+  cg(['commit', '-qm', 'v9.1.0']);
+  cg(['tag', 'v9.1.0']);
+  changedBuilt = true;
+  return changedRepo;
+}
+// edits: { path: (text) => text | null (delete) }, or a function given the repo for anything else
+function onBranch(name, edits, from = 'v9.1.0') {
+  changedKit();
+  cg(['checkout', '-q', '-B', name, from]);
+  if (typeof edits === 'function') edits(changedRepo);
+  else for (const [f, fn] of Object.entries(edits)) {
+    const p = path.join(changedRepo, f);
+    const t = fn(fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '');
+    if (t === null) fs.rmSync(p); else write(p, t);
+  }
+  cg(['add', '-A']);
+  cg(['commit', '-qm', name]);
+  return cg(['rev-parse', 'HEAD']).trim();
+}
+// one edit to the script: text after an anchor that must occur exactly once
+const after = (anchor, add) => (t) => { assert.equal(t.split(anchor).length, 2, `anchor ${anchor} once`); return t.replace(anchor, () => `${anchor}${add}`); };
+const changed = (args, env = {}) => spawnSync(process.execPath, [path.join(changedRepo, SCRIPT), 'box-pins', 'changed', ...args], { cwd: changedRepo, encoding: 'utf8', env: pinsEnv(env), timeout: 600000 });
+const append = (s) => (t) => `${t}${s}`;
+
+test('box-pins changed: dashboards, process docs, an unlisted declaration and a new command are a patch', () => {
+  onBranch('patch', {
+    'docs/devteam/dashboard/index.html': append('<!-- kit-671 probe -->\n'),
+    'docs/devteam/process/supervisor.md': append('\nkit-671 probe.\n'),
+    [SCRIPT]: (t) => after("  dashboard: cmdDashboard,", " 'kit-671-probe': cmdTimeline,")(after('function cmdTimeline() {\n', '  // kit-671 probe\n')(t)),
+  });
+  const r = changed(['--since', 'v9.1.0']);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(r.stdout, 'kind: patch\n');
+});
+
+test('box-pins changed names each change to what the image runs, alone, and exits 3', () => {
+  const cases = [
+    ['gateway', { 'cloud/gateway.mjs': append('// kit-671 probe\n') }, ['cloud/gateway.mjs']],
+    ['dockerfile', { 'cloud/Dockerfile': append('# kit-671 probe\n') }, ['cloud/Dockerfile']],
+    ['hub-page', { 'docs/devteam/dashboard/hub.html': append('<!-- kit-671 probe -->\n') }, ['docs/devteam/dashboard/hub.html']],
+    ['operator', { 'docs/devteam/process/operator.md': append('\nkit-671 probe.\n') }, ['docs/devteam/process/operator.md']],
+    ['cmd-hub', { [SCRIPT]: after('function cmdHub() {\n', '  // kit-671 probe\n') }, [`${SCRIPT}#cmdHub`]],
+    ['import', { [SCRIPT]: after("import crypto from 'node:crypto';\n", "import util from 'node:util';\n") }, [`${SCRIPT}#(rest)`]],
+    ['home-at', { [SCRIPT]: after('const homeAt = (() => {\n', '  // kit-671 probe\n') }, [`${SCRIPT}#homeAt`]],
+    ['proof', { [SCRIPT]: after('function dashboardProofProblem(proof, signed, now = Date.now()) {\n', '  // kit-671 probe\n') }, [`${SCRIPT}#dashboardProofProblem`]],
+    ['reads', { [SCRIPT]: after("'sensor series', 'peek'", ", 'kit-671-probe'") }, [`${SCRIPT}#OPERATOR_READS`]],
+    ['subcommanded', { [SCRIPT]: after("'sensor', 'settings', 'unread'", ", 'kit-671-probe'") }, [`${SCRIPT}#OPERATOR_SUBCOMMANDED`]],
+    ['rename', (r) => execFileSync('git', ['mv', 'cloud/gateway.mjs', 'cloud/gw.mjs'], { cwd: r }), ['cloud/gateway.mjs', 'cloud/gw.mjs']],
+    ['in-region', { [SCRIPT]: after('/* box start */\n', 'const kit671Probe = 1;\n') }, [`${SCRIPT}#box`]],
+  ];
+  for (const [name, edits, want] of cases) {
+    onBranch(`minor-${name}`, edits);
+    const r = changed(['--since', 'v9.1.0']);
+    assert.equal(r.status, 3, `${name}: ${r.stderr}${r.stdout}`);
+    assert.equal(r.stdout, `${want.map((w) => `image: ${w}\n`).join('')}kind: minor (${want.length} changes the image runs)\n`, name);
+  }
+  // parts only the --since side has (a declaration gone, from a listed region or a listed name), read backwards
+  for (const [name, want] of [['in-region', `${SCRIPT}#box`], ['cmd-hub', `${SCRIPT}#cmdHub`]]) {
+    cg(['checkout', '-q', `minor-${name}`]);
+    const r = changed(['--since', `minor-${name}`, '--to', 'v9.1.0']);
+    assert.equal(r.status, 3, `${name} backwards: ${r.stderr}${r.stdout}`);
+    assert.equal(r.stdout, `image: ${want}\nkind: minor (1 changes the image runs)\n`);
+  }
+  // a region's own rest is that region's, never the file's: an unlisted region's is a patch, a listed one's its name
+  onBranch('region-rest', { [SCRIPT]: after('/* term-server start */\n', 'void 0;\n') });
+  const rr = changed(['--since', 'v9.1.0']);
+  assert.equal(rr.status, 0, rr.stderr + rr.stdout);
+  onBranch('box-rest', { [SCRIPT]: after('/* box start */\n', 'void 0;\n') });
+  const br = changed(['--since', 'v9.1.0']);
+  assert.equal(br.status, 3, br.stderr);
+  assert.equal(br.stdout, `image: ${SCRIPT}#box\nkind: minor (1 changes the image runs)\n`);
+});
+
+test('box-pins changed reads the range --to names, not HEAD', () => {
+  const a = onBranch('to-a', { 'cloud/gateway.mjs': append('// kit-671 probe\n') });
+  const b = onBranch('to-b', (r) => execFileSync('git', ['checkout', 'v9.1.0', '--', 'cloud/gateway.mjs'], { cwd: r }), 'to-a');
+  const ra = changed(['--since', 'v9.1.0', '--to', a]);
+  assert.equal(ra.status, 3, ra.stderr);
+  assert.equal(ra.stdout, 'image: cloud/gateway.mjs\nkind: minor (1 changes the image runs)\n');
+  for (const args of [['--to', b], []]) {
+    const r = changed(['--since', 'v9.1.0', ...args]);
+    assert.equal(r.status, 0, `${args}: ${r.stderr}${r.stdout}`);
+    assert.equal(r.stdout, 'kind: patch\n');
+  }
+});
+
+test('box-pins changed exits 2, saying why on stderr and nothing on stdout, when it can\'t tell', () => {
+  onBranch('cant-tell', { 'docs/devteam/dashboard/index.html': append('<!-- x -->\n') });
+  for (const json of [[], ['--json']]) {
+    const r = changed(['--since', 'v9.9.0', ...json]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr.split('\n')[0], /^devteam: .*--since/);
+  }
+  for (const args of [[], ['--since'], ['--since', 'v9.1.0', '--frob'], ['--since', 'v9.1.0', '--to'], ['--since', 'v9.1.0', 'extra'], ['--since', 'v9.1.0', 'v9.1.0']]) {
+    const r = changed(args);
+    assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+    assert.equal(r.stdout, '', args.join(' '));
+    assert.match(r.stderr, /^devteam: /, args.join(' '));
+  }
+});
+
+// keys in order, and each value's type; a change's part is a string or null
+const shapeOf = (v) => (v === null ? 'null' : Array.isArray(v) ? ['array'] : typeof v === 'object' ? Object.entries(v).map(([k, x]) => [k, shapeOf(x)]) : typeof v);
+const render = (j) => `${j.changes.map((c) => `image: ${c.file}${c.part === null ? '' : `#${c.part}`}\n`).join('')}${j.kind === 'patch' ? 'kind: patch' : `kind: minor (${j.changes.length} changes the image runs)`}\n`;
+const sortedChanges = (cs) => [...cs].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.part === b.part ? 0 : a.part === null ? -1 : b.part === null ? 1 : a.part < b.part ? -1 : 1));
+
+test('box-pins changed --json has the shape of image-changes@1\'s fixtures, and the text renders it', () => {
+  const fixture = (f) => JSON.parse(fs.readFileSync(path.join(REPO, 'test/fixtures/image-changes', f), 'utf8'));
+  const since = (changedKit(), cg(['rev-parse', 'v9.1.0^{commit}']).trim());
+  const cases = [
+    ['json-patch', { 'docs/devteam/dashboard/index.html': append('<!-- x -->\n') }, 'patch.json', 0],
+    ['json-minor', { 'cloud/gateway.mjs': append('// x\n'), [SCRIPT]: (t) => after('const HUB_ACTIONS = {\n', '  // x\n')(after("import crypto from 'node:crypto';\n", "import util from 'node:util';\n")(after('function cmdHub() {\n', '  // x\n')(t))) }, 'minor.json', 3],
+  ];
+  for (const [name, edits, fx, code] of cases) {
+    const head = onBranch(name, edits);
+    const j = changed(['--since', 'v9.1.0', '--json']);
+    assert.equal(j.status, code, j.stderr);
+    const got = JSON.parse(j.stdout);
+    const want = fixture(fx);
+    assert.deepEqual(shapeOf(got), shapeOf(want), name);
+    for (const c of got.changes) {
+      assert.deepEqual(Object.keys(c), ['file', 'part']);
+      assert.equal(typeof c.file, 'string');
+      assert.ok(c.part === null || typeof c.part === 'string');
+    }
+    assert.equal(got.v, 1);
+    assert.equal(got.since, since);
+    assert.equal(got.to, head);
+    assert.equal(got.kind, code === 0 ? 'patch' : 'minor');
+    assert.equal(got.changes.length === 0, got.kind === 'patch');
+    assert.deepEqual(got.changes, sortedChanges(got.changes));
+    const t = changed(['--since', 'v9.1.0']);
+    assert.equal(t.status, code);
+    assert.equal(t.stdout, render(got), name);
+  }
+  assert.deepEqual(JSON.parse(changed(['--since', 'v9.1.0', '--json']).stdout).changes, [
+    { file: 'cloud/gateway.mjs', part: null }, { file: SCRIPT, part: '(rest)' }, { file: SCRIPT, part: 'HUB_ACTIONS' }, { file: SCRIPT, part: 'cmdHub' },
+  ]);
+  // outside the kit's own checkout it can't tell
+  cg(['remote', 'set-url', 'origin', 'git@github.com:acme/not-the-kit.git']);
+  try {
+    const o = changed(['--since', 'v9.1.0']);
+    assert.notEqual(o.status, 0); assert.notEqual(o.status, 3); assert.equal(o.stdout, '');
+  } finally { cg(['remote', 'set-url', 'origin', 'git@github.com:sanctuarycomputer/devteam.git']); }
+});
+
+// IMAGE_RUNS and the kit's parts and glob readers, read from this checkout's script
+const kitSource = fs.readFileSync(path.join(REPO, SCRIPT), 'utf8');
+const regionOf = (name) => kitSource.slice(kitSource.indexOf(`/* ${name} start */`), kitSource.indexOf(`/* ${name} end */`));
+const partsLib = new Function(`${regionOf('parts')}; return { fileParts, partLeaves };`)();
+const globsLib = new Function(`${regionOf('globs')}; return { pathMatches };`)();
+function imageRunsFromSource() {
+  const at = kitSource.indexOf('\nconst IMAGE_RUNS = {');
+  assert.ok(at !== -1, 'IMAGE_RUNS is declared');
+  const end = kitSource.indexOf('\n};\n', at);
+  return { list: new Function(`return ${kitSource.slice(at + '\nconst IMAGE_RUNS = '.length, end + 2)}`)(), at };
+}
+
+test('IMAGE_RUNS lists every machineWide handler, the guards, and only parts and files that exist', () => {
+  const { list } = imageRunsFromSource();
+  assert.equal(list.script, SCRIPT);
+  const listed = new Set(list.parts);
+  const wide = kitSource.split('\n').find((l) => /^\s*const machineWide = /.test(l));
+  assert.ok(wide, 'the machineWide line');
+  const commands = [...new Set([...[...wide.matchAll(/\[([^\]]*)\]\.includes\(command\)/g)].flatMap((m) => [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1])), ...[...wide.matchAll(/command === '([^']+)'/g)].map((m) => m[1])])];
+  assert.deepEqual(commands.sort(), ['box-pins', 'hub', 'machine', 'operator-thread', 'recover']);
+  const table = kitSource.slice(kitSource.indexOf('\nconst COMMANDS = {'), kitSource.indexOf('\n};\n', kitSource.indexOf('\nconst COMMANDS = {')));
+  const handlers = commands.map((c) => { const m = new RegExp(`(?:^|[\\s,{])(?:'${c}'|${c.includes('-') ? `'${c}'` : c}): (\\w+)`).exec(table); assert.ok(m, `COMMANDS has ${c}`); return m[1]; });
+  assert.deepEqual(handlers.sort(), ['cmdBoxPins', 'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover']);
+  for (const h of handlers) assert.ok(listed.has(h), `${h} is in IMAGE_RUNS`);
+  const P = partsLib.fileParts(kitSource, SCRIPT);
+  const guardLine = P.lines.findIndex((l) => l.startsWith('if (process.env.DEVTEAM_RUN && command')) + 1;
+  assert.ok(guardLine > 0, 'the DEVTEAM_RUN guard');
+  const guardPart = P.owner[guardLine].slice(2).replace(/#\d+$/, "").split("/").pop();
+  assert.ok(listed.has(guardPart), `the guard's part ${guardPart} is in IMAGE_RUNS`);
+  assert.ok(listed.has('homeAt'));
+  for (const n of list.parts) assert.ok(P.places.has(n), `${n} is a part of ${SCRIPT}`);
+  assert.equal(new Set(list.parts).size, list.parts.length, 'no part twice');
+  const tracked = execFileSync('git', ['ls-files'], { cwd: REPO, encoding: 'utf8' }).split('\n').filter(Boolean);
+  for (const g of list.files) assert.ok(tracked.some((f) => globsLib.pathMatches(g, f)), `${g} matches a tracked file`);
+});
+
+test('IMAGE_RUNS: the three kinds under the rule, with the parts the design names; usage names changed', () => {
+  const { list, at } = imageRunsFromSource();
+  assert.deepEqual(list.files, ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md']);
+  const named = ['gatewaySigned', 'termSigned', 'dashboardProofProblem', 'paneSigned', 'ownerSettingSigned', 'paneProofProblem', 'ownerSettingProofProblem', 'OPERATOR_READS', 'OPERATOR_SUBCOMMANDED',
+    'homeAt', 'realPathMade', 'startHub', 'HUB_ACTIONS', 'probeHello', 'recoverMachine', 'projectKit', 'box', 'box-memory', 'readPins', 'imageHub'];
+  for (const n of named) assert.ok(list.parts.includes(n), `${n} is listed`);
+  const before = kitSource.slice(0, at).split('\n');
+  let i = before.length - 1;
+  const comment = [];
+  while (i >= 0 && /^\/\//.test(before[i])) comment.unshift(before[i--]);
+  const rule = comment.map((l) => l.replace(/^\/\/ ?/, '')).join(' ');
+  assert.match(rule, /box image runs[\s\S]*relies on/);
+  assert.match(rule, /new image command adds its parts here/);
+  assert.match(rule, /bumps a crossing's version is a minor/);
+  assert.match(kitSource, /^const BOX_PINS_USAGE = '[^\n]*changed --since <ref> \[--to <ref>\] \[--smoke\] \[--json\]/m);
+});
+
+// --smoke: the image's readers of a project (as of --since) against a fixture on each kit. Each run
+// gets a TMPDIR of its own, so what the command leaves behind there is seen; the trace is the
+// command's test seam (DEVTEAM_SMOKE_TRACE): one line per reader run.
+const SMOKE_COMMANDS = ['machine status', 'machine status --questions', 'machine status --knowledge', 'recover --machine --dry-run --force'];
+let smokeRuns = 0;
+function smokeRun(args, extra = {}) {
+  const tmpd = fs.realpathSync(fs.mkdtempSync(path.join(tmp, 'smoke-tmp-')));
+  const trace = path.join(tmp, `smoke-trace-${++smokeRuns}.jsonl`);
+  const r = changed([...args, '--smoke'], { TMPDIR: tmpd, DEVTEAM_SMOKE_TRACE: trace, ...extra });
+  const lines = fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+  return { r, tmpd, trace: lines };
+}
+const testHome = pinsEnv().HOME;
+const lsOr = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
+function leftNothing(tmpd) {
+  assert.deepEqual(fs.readdirSync(tmpd), [], 'the temporary folder, its worktree and tmux folder are gone');
+  assert.deepEqual(lsOr(path.join(changedRepo, '.git', 'worktrees')), [], 'git\'s worktree record is pruned');
+  assert.equal(cg(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
+  assert.equal(cg(['status', '--porcelain']), '', 'nothing written in the checkout');
+  const dot = lsOr(path.join(testHome, '.devteam'));
+  assert.deepEqual(dot.filter((n) => n.startsWith('repos-') || n.startsWith('status-last-')), [], 'nothing under the test HOME\'s ~/.devteam');
+}
+
+test('box-pins changed --smoke: two fixtures from one tree compare equal, each on a HOME of its own', () => {
+  changedKit();
+  cg(['checkout', '-q', '-B', 'smoke-equal', 'v9.1.0']);
+  const { r, tmpd, trace } = smokeRun(['--since', 'v9.1.0', '--to', 'v9.1.0']);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(r.stdout, 'kind: patch\n');
+  assert.deepEqual(trace.map((x) => [x.fixture, x.command]), [...SMOKE_COMMANDS.map((c) => ['since', c]), ...SMOKE_COMMANDS.map((c) => ['to', c])]);
+  const homeOf = (f) => { const hs = [...new Set(trace.filter((x) => x.fixture === f).map((x) => x.home))]; assert.equal(hs.length, 1, `${f} runs share one HOME`); return hs[0]; };
+  const hs = homeOf('since'), ht = homeOf('to');
+  assert.notEqual(hs, ht);
+  for (const h of [hs, ht]) { assert.notEqual(h, testHome); assert.ok(h.startsWith(`${tmpd}${path.sep}`), `${h} is in the run's temporary folder`); }
+  // each fixture's machine status writes into its own HOME: absent before, there after, the to run's too
+  for (const f of ['since', 'to']) {
+    const ms = trace.find((x) => x.fixture === f && x.command === 'machine status');
+    assert.ok(!ms.home_devteam_before.some((n) => n.startsWith('status-last-')), `${f}: no status-last before its own machine status`);
+    assert.ok(ms.home_devteam.some((n) => n.startsWith('status-last-')), `${f}: status-last after its own machine status`);
+  }
+  // each run lists exactly its own fixture, and each fixture its own seeding
+  for (const x of trace) {
+    assert.equal(x.exit, 0, `${x.fixture} ${x.command}: ${x.stdout}`);
+    assert.equal(x.stdout.split('\n').filter((l) => /(^|[^\w-])smoke-fixture([^\w-]|$)/.test(l)).length, 1, `${x.fixture} ${x.command}: one line of one fixture\n${x.stdout}`);
+  }
+  const ids = (f) => trace.filter((x) => x.fixture === f && / --(questions|knowledge)$/.test(x.command)).map((x) => /\b[qk]-\d{8}-\d{9}-[a-z0-9-]+/.exec(x.stdout)?.[0]);
+  const [is, it] = [ids('since'), ids('to')];
+  assert.equal(is.length, 2); assert.ok(is.every(Boolean) && it.every(Boolean), `${is} ${it}`);
+  for (let i = 0; i < 2; i++) assert.notEqual(is[i], it[i]);
+  leftNothing(tmpd);
+});
+
+test('box-pins changed --smoke names a project kit the image\'s readers can no longer read; without --smoke it is a patch', () => {
+  const cases = [
+    ['questions', 'function cmdQuestions() {\n', "  if (flags.json) return out('{}');\n", 'machine status --questions'],
+    ['hello', 'function cmdHello() {\n', "  if (flags.json) return out('not json');\n", 'machine status'],
+  ];
+  for (const [name, anchor, add, command] of cases) {
+    onBranch(`smoke-${name}`, { [SCRIPT]: after(anchor, add) });
+    const plain = changed(['--since', 'v9.1.0']);
+    assert.equal(plain.status, 0, `${name} without --smoke: ${plain.stderr}${plain.stdout}`);
+    const { r, tmpd } = smokeRun(['--since', 'v9.1.0']);
+    assert.equal(r.status, 3, `${name}: ${r.stderr}${r.stdout}`);
+    const lines = r.stdout.trim().split('\n');
+    const kinds = lines.pop();
+    assert.equal(kinds, `kind: minor (${lines.length} changes the image runs)`);
+    assert.ok(lines.every((l) => l.startsWith('image: (smoke)#')), `${name}: only smoke changes\n${r.stdout}`);
+    assert.ok(lines.includes(`image: (smoke)#${command}`), `${name}: names ${command}\n${r.stdout}`);
+    assert.match(r.stderr, new RegExp(command.replace(/[-]/g, '\\-')), 'the first differing lines go to stderr');
+    leftNothing(tmpd);
+  }
+});
+
+const before = (anchor, add) => (t) => { assert.equal(t.split(anchor).length, 2, `anchor ${anchor} once`); return t.replace(anchor, () => `${add}${anchor}`); };
+
+test('box-pins changed --smoke: a kit= the image can\'t read is a difference, never a placeholder; an exit alone is one too', () => {
+  // a number where the image reads a string: its line says kit=?, which the kit placeholder must not take
+  onBranch('smoke-kit', { [SCRIPT]: before('  return flags.json ? json(r) : out(`${r.name} at', '  r.kit = 42;\n') });
+  const k = smokeRun(['--since', 'v9.1.0']);
+  assert.equal(k.r.status, 3, k.r.stderr + k.r.stdout);
+  assert.ok(k.r.stdout.split('\n').includes('image: (smoke)#machine status'), k.r.stdout);
+  leftNothing(k.tmpd);
+  // the fixture's own recover says the same and exits 1: the image's recover --machine exits 1 with the same line
+  onBranch('smoke-exit', { [SCRIPT]: after("  out(say);\n  if (say.startsWith('NOT started')) process.exitCode = 1;\n", '  process.exitCode = 1;\n') });
+  const e = smokeRun(['--since', 'v9.1.0']);
+  assert.equal(e.r.status, 3, e.r.stderr + e.r.stdout);
+  const lines = e.r.stdout.split('\n');
+  assert.ok(lines.includes('image: (smoke)#recover --machine --dry-run --force'), e.r.stdout);
+  assert.ok(!lines.some((l) => l.startsWith('image: (smoke)#machine')), e.r.stdout);
+  const rec = e.trace.filter((x) => x.command === 'recover --machine --dry-run --force');
+  assert.deepEqual(rec.map((x) => x.exit), [0, 1]);
+  assert.equal(rec[0].stdout, rec[1].stdout, 'the same line, only the exit differs');
+  leftNothing(e.tmpd);
+});
+
+test('box-pins changed --smoke exits 2, says why and cleans up, when a fixture can\'t be seeded or the image is blind', () => {
+  onBranch('smoke-no-init', { [SCRIPT]: after('function cmdInit() {\n', "  die('broken for the test');\n") });
+  const s = smokeRun(['--since', 'v9.1.0']);
+  assert.equal(s.r.status, 2, s.r.stderr + s.r.stdout);
+  assert.equal(s.r.stdout, '');
+  assert.match(s.r.stderr, /^devteam: box-pins changed: --smoke: the to fixture's init failed \(exit 1\): devteam: broken for the test$/m);
+  leftNothing(s.tmpd);
+  // the image's own kit prints nothing of its fixture for --questions: the comparison would be blind
+  onBranch('smoke-blind', { [SCRIPT]: after('function machineQuestions() {\n', '  return;\n') });
+  const b = smokeRun(['--since', 'smoke-blind', '--to', 'v9.1.0']);
+  assert.equal(b.r.status, 2, b.r.stderr + b.r.stdout);
+  assert.equal(b.r.stdout, '');
+  assert.match(b.r.stderr, /^devteam: box-pins changed: --smoke: machine status --questions printed no line of the --since fixture$/m);
+  leftNothing(b.tmpd);
+});
+
+test('box-pins changed --smoke stopped by a signal exits 2 and leaves nothing', async () => {
+  cg(['checkout', '-q', '-B', 'smoke-signal', 'v9.1.0']);
+  const tmpd = fs.realpathSync(fs.mkdtempSync(path.join(tmp, 'smoke-tmp-')));
+  let killed = false;
+  const done = new Promise((resolve) => {
+    const c = execFile(process.execPath, [path.join(changedRepo, SCRIPT), 'box-pins', 'changed', '--since', 'v9.1.0', '--smoke'], { cwd: changedRepo, encoding: 'utf8', env: pinsEnv({ TMPDIR: tmpd }), timeout: 600000 }, (err, stdout, stderr) => resolve({ status: err ? err.code : 0, signal: err?.signal ?? null, stdout, stderr }));
+    // once the first fixture is being made, mid-run
+    const poll = setInterval(() => {
+      const made = lsOr(tmpd).some((d) => fs.existsSync(path.join(tmpd, d, 'since', 'smoke-fixture')));
+      if (made && !killed) { killed = true; clearInterval(poll); c.kill('SIGTERM'); }
+    }, 50);
+    c.on('close', () => clearInterval(poll));
+  });
+  const r = await done;
+  assert.ok(killed, 'the signal was sent mid-run');
+  assert.equal(r.status, 2, `${r.signal} ${r.stderr}${r.stdout}`);
+  assert.equal(r.stdout, '');
+  leftNothing(tmpd);
+});
+
+test('box-pins changed --smoke runs from a git hook\'s environment: GIT_DIR and its relatives reach no fixture', () => {
+  cg(['checkout', '-q', '-B', 'smoke-hook', 'v9.1.0']);
+  const head = cg(['rev-parse', 'HEAD']);
+  const gitDir = path.join(changedRepo, '.git');
+  const s = smokeRun(['--since', 'v9.1.0', '--to', 'v9.1.0'], { GIT_DIR: gitDir, GIT_WORK_TREE: changedRepo, GIT_INDEX_FILE: path.join(gitDir, 'index'), GH_TOKEN: 'smoke-not-a-token' });
+  assert.equal(s.r.status, 0, s.r.stderr + s.r.stdout);
+  assert.equal(s.r.stdout, 'kind: patch\n');
+  assert.equal(cg(['rev-parse', 'HEAD']), head, 'the caller\'s repo is untouched');
+  assert.equal(cg(['status', '--porcelain']), '');
+  leftNothing(s.tmpd);
+});
+
+test('box-pins changed --smoke stopped mid-reader kills what the reader started too', async () => {
+  // the --to kit, read by the image as a project's kit (DEVTEAM_ROLE=operator), hangs, then writes
+  onBranch('smoke-orphan', { [SCRIPT]: after('function cmdHello() {\n', "  if (process.env.DEVTEAM_ROLE === 'operator') { execFileSync('sleep', ['6']); const d = path.join(path.dirname(process.argv[1]), '..', 'run', 'late'); fs.mkdirSync(d, { recursive: true }); }\n") });
+  const tmpd = fs.realpathSync(fs.mkdtempSync(path.join(tmp, 'smoke-tmp-')));
+  const trace = path.join(tmp, `smoke-trace-${++smokeRuns}.jsonl`);
+  let killed = false;
+  const r = await new Promise((resolve) => {
+    const c = execFile(process.execPath, [path.join(changedRepo, SCRIPT), 'box-pins', 'changed', '--since', 'v9.1.0', '--smoke'], { cwd: changedRepo, encoding: 'utf8', env: pinsEnv({ TMPDIR: tmpd, DEVTEAM_SMOKE_TRACE: trace }), timeout: 600000 }, (err, stdout, stderr) => resolve({ status: err ? err.code : 0, signal: err?.signal ?? null, stdout, stderr }));
+    // the --since fixture's four readers are done: the --to fixture's first reader is hanging in hello
+    let seen = 0;
+    const poll = setInterval(() => {
+      const n = fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter(Boolean).length : 0;
+      if (n >= 4 && !seen) seen = Date.now();
+      if (seen && Date.now() - seen > 2000 && !killed) { killed = true; clearInterval(poll); c.kill('SIGTERM'); }
+    }, 50);
+    c.on('close', () => clearInterval(poll));
+  });
+  assert.ok(killed, 'the signal was sent mid-reader');
+  assert.equal(r.status, 2, `${r.signal} ${r.stderr}${r.stdout}`);
+  assert.equal(r.stdout, '');
+  // long enough for an orphaned hello to wake and write
+  await new Promise((resolve) => setTimeout(resolve, 8000));
+  leftNothing(tmpd);
+});

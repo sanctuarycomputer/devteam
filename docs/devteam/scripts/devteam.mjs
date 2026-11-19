@@ -18056,11 +18056,247 @@ async function bumpPins(pins, release) {
   set(pins.releaseLine, 'DEVTEAM_RELEASE', pins.release, release);
   return { text: lines.join('\n'), changes, held: pins.tools.filter((p) => p.hold).map((p) => ({ name: p.tool.name, reason: p.hold })) };
 }
-const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | installed   (verify, check and bump take --dockerfile <path>)';
+// What the box image runs from its own copy of the kit, or relies on in a project's kit: a change to
+// any of it since the minor the image was built at makes a release a minor (box-pins changed,
+// test/contracts/image-changes.md). A new image command adds its parts here; a change that bumps a
+// crossing's version is a minor whatever this list says. Anything not listed reaches the image at
+// the next minor: staleness, never breakage, since the image is always a whole release. The file's
+// rest (the imports, the Node check, the re-exec) always counts, so it isn't listed.
+const IMAGE_RUNS = {
+  // whole files, as globs relative to the kit repo
+  files: ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md'],
+  // parts of this file, as fileParts names them
+  script: 'docs/devteam/scripts/devteam.mjs',
+  parts: [
+    // the handlers the machineWide expression dispatches to
+    'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover', 'cmdBoxPins',
+    // what they are built from that serves only the image: the hub
+    'probeHello', 'HUB_BODY_MAX', 'hubTurnOk', 'HUB_ACTIONS', 'startHub', 'hubLogger', 'imageHub',
+    // recover --machine (the project's own recover is each project's kit, never the image's)
+    'siblingOf', 'isAdopted', 'machineProjects', 'projectKit', 'projectJson', 'kitHasRecover', 'notedPaneOf', 'tmuxName', 'readUpList', 'recoverMachine', 'LEGACY_RECOVER_MESSAGE', 'legacyRecover',
+    // machine status, tell, alert, pane-state
+    'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
+    'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
+    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'machineStatus',
+    // operator threads
+    'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
+    'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
+    'operatorStartFile', 'operatorStartNote', 'operatorStarting', 'operatorNoted', 'isShellPane', 'operatorSeat', 'operatorState', 'OPERATOR_OPENING', 'operatorStart', 'typeLine', 'OPERATOR_HELD',
+    'operatorHeld', 'deliverToOperator', 'operatorDataFrame', 'operatorThreadUsage',
+    // box-pins (installed runs in the image; verify, check and bump beside it)
+    'firstVersion', 'BOX_TOOLS', 'BOX_ARCHES', 'pinForm', 'escapeRe', 'HOLD_LIKE', 'readPins', 'pinsFile', 'releaseFlag', 'pinsBase', 'timedOut', 'unreachable', 'upstreamJson', 'notRelease', 'latestOf', 'holdText',
+    'checkPins', 'pinsCheckLine', 'assetSum', 'bumpPins', 'BOX_PINS_USAGE',
+    // the guards that let the image's commands run outside a project: the machineWide expression,
+    // and the DEVTEAM_RUN guard in realPathMade's part, which repeats that list (the helpers homeAt
+    // also calls, KIT_VIEWS, kitsOwnRepoAt, projectIn and repoLinksIn, are shared, so not listed)
+    'homeAt', 'realPathMade',
+    // the project-side parts the image relies on (the crossings): the presses the gateway signs and
+    // a dashboard verifies, and the operator's role guard
+    'gatewaySigned', 'termSigned', 'dashboardProofProblem', 'paneSigned', 'ownerSettingSigned', 'paneProofProblem', 'ownerSettingProofProblem', 'OPERATOR_READS', 'OPERATOR_SUBCOMMANDED',
+  ],
+};
+// box-pins changed: the changes, sorted (image-changes@1 §5), between two commits of the cwd's repo
+// in what IMAGE_RUNS names: a file a glob matches (either side of a rename), a listed part of the
+// script whose leaves changed (judged as partsChanged judges them), and the script's rest (its r:
+// leaf only, never a region's rest). With smoke, also what the image's readers print of a project on
+// each kit. Dies with 2 when it can't tell.
+async function imageChanges(since, to, { smoke = false } = {}) {
+  const cant = (why) => die(`box-pins changed: ${why}`, 2);
+  const found = new Map();
+  const add = (file, part) => found.set(`${file}\0${part ?? ''}`, { file, part });
+  // git with a deadline and no prompt (a partial clone fetches blobs; a credential prompt would wait)
+  const git = (args) => { try { return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 120000, maxBuffer: 256 * 1024 * 1024 }).replace(/\n$/, ''); } catch { return null; } };
+  const raw = git(['diff', '-z', '--name-status', '-M', since, to]);
+  if (raw === null) cant(`git diff ${since} ${to} failed in ${repoRoot}`);
+  const tokens = raw.split('\0');
+  const paths = [];
+  const S = IMAGE_RUNS.script;
+  // which side has the script, from the diff's own letters (A added, D deleted, R/C old then new)
+  let baseHas = null, headHas = null;
+  for (let i = 0; i < tokens.length;) {
+    const status = tokens[i++];
+    if (!status) continue;
+    const n = /^[RC]/.test(status) ? 2 : 1;
+    const ps = tokens.slice(i, i + n);
+    paths.push(...ps);
+    i += n;
+    if (n === 2) { if (ps[0] === S) { baseHas = true; headHas ??= status[0] === 'C'; } if (ps[1] === S) { headHas = true; baseHas ??= false; } }
+    else if (ps[0] === S) { baseHas = status[0] !== 'A'; headHas = status[0] !== 'D'; }
+  }
+  for (const p of paths) if (IMAGE_RUNS.files.some((g) => pathMatches(g, p))) add(p, null);
+  if (paths.includes(S)) {
+    const textAt = (sha, has) => {
+      if (!has) return '';
+      const t = git(['show', `${sha}:${S}`]);
+      if (t === null) cant(`git show ${sha}:${S} failed`);
+      return t;
+    };
+    const base = textAt(since, baseHas), head = textAt(to, headHas);
+    const B = fileParts(base, S), H = fileParts(head, S);
+    const inBase = new Set(B.owner.slice(1));
+    const leaves = partsChanged(base, head, S, []);
+    if (leaves.includes('r:')) add(S, '(rest)');
+    for (const name of IMAGE_RUNS.parts) {
+      const cb = partLeaves(B, name), ch = partLeaves(H, name);
+      if (leaves.some((k) => (inBase.has(k) ? cb : ch).has(k))) add(S, name);
+    }
+  }
+  if (smoke) for (const command of await smokeDiffers()) add('(smoke)', command);
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  return [...found.values()].sort((a, b) => cmp(a.file, b.file) || (a.part === b.part ? 0 : a.part === null ? -1 : b.part === null ? 1 : cmp(a.part, b.part)));
+  // --smoke (image-changes@1 §6): the image (a worktree of since) runs its readers of a project
+  // against a fixture made by each kit, each fixture on a HOME of its own, in a temporary folder that
+  // is removed on every exit (and git's record of the worktree pruned). A different exit, or a
+  // different line of the fixture's own (after placeholders), is a change named for the command.
+  // Each child is awaited, so a signal is handled between children (and kills the running one).
+  async function smokeDiffers() {
+    const tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-smoke-')));
+    const tmuxDir = path.join(tmpDir, 'tmux'), imageDir = path.join(tmpDir, 'image');
+    // the children's environment is an allowlist: no DEVTEAM_*, no TMUX, no GIT_DIR or its relatives
+    // (a hook's), and none of the caller's tokens
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(PATH|HOME|LANG|LANGUAGE|LC_\w+|TZ|TMPDIR|USER|LOGNAME|SHELL)$/.test(k)));
+    let cleaned = false;
+    let child = null;
+    // each child leads a process group, so what it started (a fixture's kit under the image) goes too
+    const killGroup = (c) => { try { process.kill(-c.pid, 'SIGKILL'); } catch { try { c.kill('SIGKILL'); } catch {} } };
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (child) killGroup(child);
+      // nothing here starts a tmux server, but one left on this folder's own sockets is stopped
+      let socks = [];
+      try { socks = fs.readdirSync(tmuxDir).flatMap((d) => { try { return fs.readdirSync(path.join(tmuxDir, d)).map((s) => path.join(tmuxDir, d, s)); } catch { return []; } }); } catch {}
+      for (const s of socks) spawnSync('tmux', ['-S', s, 'kill-server'], { env, stdio: 'ignore', timeout: 10000 });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, stdio: 'ignore', timeout: 60000 });
+    };
+    // a die (process.exit) cleans up too, and so does a signal: the running child is killed first
+    const onSignal = () => { cleanup(); process.exit(2); };
+    process.on('exit', cleanup);
+    for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(s, onSignal);
+    try {
+      fs.mkdirSync(tmuxDir);
+      const port = Number(spawnSync(process.execPath, ['-e', "const s = require('net').createServer(); s.listen(0, '127.0.0.1', () => { console.log(s.address().port); s.close(); })"], { encoding: 'utf8', timeout: 20000 }).stdout);
+      if (!Number.isInteger(port) || port <= 0 || port === 4320) cant('--smoke: no free port for the fixtures\' hub');
+      Object.assign(env, { DEVTEAM_HUB_PORT: String(port), TMUX_TMPDIR: tmuxDir, GIT_AUTHOR_NAME: 'devteam-smoke', GIT_COMMITTER_NAME: 'devteam-smoke', GIT_AUTHOR_EMAIL: 'devteam-smoke@example.invalid', GIT_COMMITTER_EMAIL: 'devteam-smoke@example.invalid' });
+      // spawnSync's result, awaited: { status, signal, stdout (a Buffer when binary), stderr, error }
+      const run = (cmd, args, { cwd, home, input, binary = false, childEnv } = {}) => new Promise((resolve) => {
+        const c = spawn(cmd, args, { cwd, env: childEnv ?? { ...env, HOME: home ?? env.HOME }, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'], detached: true });
+        child = c;
+        const so = [], se = [];
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; killGroup(c); }, 120000);
+        c.stdout.on('data', (d) => so.push(d));
+        c.stderr.on('data', (d) => se.push(d));
+        const done = (r) => { clearTimeout(timer); if (child === c) child = null; resolve(r); };
+        c.on('error', (error) => done({ status: null, signal: null, stdout: binary ? Buffer.alloc(0) : '', stderr: '', error }));
+        c.on('close', (status, signal) => { const out = Buffer.concat(so); done({ status, signal, stdout: binary ? out : out.toString('utf8'), stderr: Buffer.concat(se).toString('utf8'), error: timedOut ? Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) : undefined }); });
+        if (input) c.stdin.end(input);
+      });
+      const must = (r, what) => {
+        // the line that says why: the kit's own (devteam: …), or an error's, else the first
+        const lines = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+        const why = lines.find((l) => /^devteam: /.test(l)) ?? lines.find((l) => /^\w*Error\b/.test(l)) ?? lines[0];
+        if (r.error || r.status !== 0) cant(`--smoke: ${what} failed (${r.error ? r.error.code ?? r.error.message : r.signal ?? `exit ${r.status}`})${why ? `: ${why.slice(0, 300)}` : ''}`);
+        return r;
+      };
+      must(await run('git', ['worktree', 'add', '-q', '--detach', imageDir, since], { cwd: repoRoot }), `git worktree add of ${since}`);
+      const kitIn = (root) => path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
+      const sides = [];
+      for (const [side, sha] of [['since', since], ['to', to]]) {
+        const parent = path.join(tmpDir, side), root = path.join(parent, 'smoke-fixture'), home = path.join(tmpDir, `home-${side}`);
+        fs.mkdirSync(root, { recursive: true });
+        fs.mkdirSync(home);
+        must(await run('git', ['init', '-q', '-b', 'main'], { cwd: root, home }), `git init of the ${side} fixture`);
+        const tar = must(await run('git', ['archive', '--format=tar', sha, 'docs/devteam'], { cwd: repoRoot, binary: true }), `git archive of ${sha}`);
+        must(await run('tar', ['-x', '-C', root], { input: tar.stdout }), `unpacking the ${side} fixture's kit`);
+        for (const d of ['project', 'run']) fs.rmSync(path.join(root, 'docs', 'devteam', d), { recursive: true, force: true });
+        const own = async (args, what) => must(await run(process.execPath, [kitIn(root), ...args], { cwd: root, home }), `the ${side} fixture's ${what}`);
+        await own(['init'], 'init');
+        must(await run('git', ['add', '-A'], { cwd: root, home }), `git add in the ${side} fixture`);
+        must(await run('git', ['commit', '-q', '-m', 'fixture'], { cwd: root, home }), `git commit in the ${side} fixture`);
+        await own(['ask', '--question', 'Smoke question?', '--stake', '1', '--urgency', '1'], 'ask');
+        await own(['knowledge', 'add', '--owner', '--kind', 'fact', '--statement', 'Smoke fact.'], 'knowledge add');
+        fs.rmSync(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json'), { force: true });
+        sides.push({ side, parent, root, home, outs: {} });
+      }
+      const READERS = [['machine status', ['machine', 'status']], ['machine status --questions', ['machine', 'status', '--questions']], ['machine status --knowledge', ['machine', 'status', '--knowledge']], ['recover --machine --dry-run --force', ['recover', '--machine', '--dry-run', '--force']]];
+      const trace = process.env.DEVTEAM_SMOKE_TRACE;
+      const listing = (home) => { try { return fs.readdirSync(path.join(home, '.devteam')).sort(); } catch { return []; } };
+      for (const s of sides) for (const [name, args] of READERS) {
+        const childEnv = { ...env, HOME: s.home };
+        const before = listing(childEnv.HOME);
+        const r = await run(process.execPath, [kitIn(imageDir), ...args, '--in', s.parent], { cwd: imageDir, childEnv });
+        if (r.error || r.status === null) cant(`--smoke: the image's ${name} against the ${s.side} fixture did not finish (${r.error?.code ?? r.signal})`);
+        s.outs[name] = { exit: r.status, stdout: r.stdout };
+        if (trace) fs.appendFileSync(trace, `${JSON.stringify({ fixture: s.side, command: name, home: childEnv.HOME, parent: s.parent, exit: r.status, stdout: r.stdout, home_devteam_before: before, home_devteam: listing(childEnv.HOME) })}\n`);
+      }
+      // only the fixture's own lines (§6.7), then the placeholders (§6.8, and tools= as §1 allows)
+      const re = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const word = (s, extra = '') => new RegExp(`(?<![\\w${extra}-])${re(s)}(?![\\w${extra}-])`, 'g');
+      const kept = (s, name) => {
+        const lines = s.outs[name].stdout.split('\n');
+        const mine = (l) => word(s.root).test(l) || word('smoke-fixture').test(l);
+        const k = [];
+        for (let i = 0; i < lines.length; i++) {
+          if (!mine(lines[i])) continue;
+          k.push(lines[i]);
+          if (lines[i].endsWith(':')) while (i + 1 < lines.length && /^\s/.test(lines[i + 1])) k.push(lines[++i]);
+        }
+        const kit = /(?:^|\s)kit=(\S+)/.exec(s.outs['machine status'].stdout.split('\n').find((l) => word('smoke-fixture').test(l)) ?? '')?.[1];
+        return k.map((l) => {
+          let t = l.split(s.root).join('<path>').replace(word('smoke-fixture'), '<name>');
+          if (kit && /^[A-Za-z0-9][\w.+-]*$/.test(kit)) t = t.replace(word(kit, '.+'), '<kit>');
+          return t.replace(/(^|\s)tools=\S*/g, '$1tools=<tools>')
+            .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?/g, '<time>')
+            .replace(/\b[a-z]{1,2}-\d{8}-\d{9}-[a-z0-9][a-z0-9-]*/g, '<id>');
+        });
+      };
+      const [a, b] = sides;
+      const differs = [];
+      for (const [name] of READERS) {
+        const ka = kept(a, name), kb = kept(b, name);
+        // the image's own kit prints nothing of its own fixture: the comparison would see nothing
+        if (!ka.length) cant(`--smoke: ${name} printed no line of the --since fixture`);
+        if (a.outs[name].exit === b.outs[name].exit && ka.join('\n') === kb.join('\n')) continue;
+        differs.push(name);
+        const i = ka.findIndex((l, j) => l !== kb[j]);
+        const at = i === -1 ? ka.length : i;
+        process.stderr.write(`devteam: --smoke: ${name} differs (exit ${a.outs[name].exit} on the --since fixture, ${b.outs[name].exit} on the --to one)\n  --since: ${ka[at] ?? '(no more lines)'}\n  --to:    ${kb[at] ?? '(no more lines)'}\n`);
+      }
+      return differs;
+    } finally {
+      cleanup();
+      process.removeListener('exit', cleanup);
+      for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.removeListener(s, onSignal);
+    }
+  }
+}
+const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | changed --since <ref> [--to <ref>] [--smoke] [--json] | installed   (verify, check and bump take --dockerfile <path>)';
 // box-pins: verify, check and bump in the kit's own checkout (a KIT_VIEWS command; bump writes only
 // the Dockerfile's pins), and installed inside the box image, from anywhere.
 async function cmdBoxPins() {
   const mode = positional[0];
+  if (mode === 'changed') {
+    // image-changes@1: exit 0 patch, 3 minor, 2 can't tell (said on stderr, nothing on stdout)
+    const usage = () => die(`usage: ${BOX_PINS_USAGE}`, 2);
+    if (positional.length !== 1 || rest !== null || Object.keys(flags).some((k) => !['since', 'to', 'smoke', 'json'].includes(k))) usage();
+    for (const k of ['since', 'to']) if (flags[k] !== undefined && (typeof flags[k] !== 'string' || !flags[k] || flags[k].startsWith('-'))) usage();
+    for (const k of ['smoke', 'json']) if (flags[k] !== undefined && flags[k] !== true) usage();
+    if (flags.since === undefined) usage();
+    if (!kitsOwnRepoAt(repoRoot)) die(`box-pins changed: ${repoRoot} is not a checkout of the kit's own repo (${KIT_UPSTREAM}); run it there, at --to`, 2);
+    const sha = (k, ref) => (() => { try { return execFileSync('git', ['rev-parse', '--verify', '-q', `${ref}^{commit}`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000 }).trim(); } catch { return null; } })() ?? die(`box-pins changed: --${k} ${ref} does not resolve to a commit`, 2);
+    const since = sha('since', flags.since), to = sha('to', flags.to ?? 'HEAD');
+    const changes = await imageChanges(since, to, { smoke: !!flags.smoke });
+    const kind = changes.length ? 'minor' : 'patch';
+    if (flags.json) out(JSON.stringify({ v: 1, since, to, kind, changes }, null, 2));
+    else {
+      for (const c of changes) out(`image: ${c.file}${c.part === null ? '' : `#${c.part}`}`);
+      out(kind === 'patch' ? 'kind: patch' : `kind: minor (${changes.length} changes the image runs)`);
+    }
+    process.exitCode = changes.length ? 3 : 0;
+    return;
+  }
   if (mode === 'verify') {
     const want = releaseFlag();
     const { text } = pinsFile();
