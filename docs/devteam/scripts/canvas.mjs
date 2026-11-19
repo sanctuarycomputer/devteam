@@ -7,7 +7,10 @@
 // `opErrors(op)` (an op's own shape, nothing that needs a document) and `NODE_ID_RE`, kit-internal
 // helpers for the merge and the CLI, held to the fake through `apply`. `resolve(doc, instanceId)` gives
 // an instance's descendants with their effective values (§2's resolution order), a port of the fake's
-// held to it by test/canvas-static-page.test.mjs.
+// held to it by test/canvas-static-page.test.mjs. `merge(base, copy, now)` merges the supervisor's
+// working copy three ways against the base it checked out, into ops that apply to the canvas as it is
+// now (`canvas take`), and `normalDoc(doc)` gives a document by effective value; both held by
+// test/canvas-merge.test.mjs.
 //
 // A port of the rules half of test/lib/canvas-fake.mjs, the contract's executable form: the fake is
 // the reference, and test/canvas-document.test.mjs holds this module to it (the same errors, the same
@@ -1087,6 +1090,421 @@ export function resolve(doc, instanceId) {
     }
   }
   return out;
+}
+
+// ---- merge: a copy three ways against its base (kit-653) ----
+
+// A value as canonical JSON (object keys sorted), so two values compare equal whatever their key order.
+// Only ever called on values of a validated document, whose nesting is bounded by its classes.
+function canon(v) {
+  return JSON.stringify(v, (_k, x) => (isObj(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
+}
+const same = (a, b) => (a === undefined || b === undefined ? a === b : canon(a) === canon(b));
+const MAPS = ['props', 'variants', 'overrides'];
+
+// A plain path's keys, split once (the merge walks every path of every node).
+const KEYS = new Map();
+const keysOfPath = (path) => { let k = KEYS.get(path); if (!k) { k = path.split('.'); KEYS.set(path, k); } return k; };
+function valueAt(n, path) {
+  let v = n;
+  for (const seg of keysOfPath(path)) { if (!isObj(v) || !own(v, seg)) return undefined; v = v[seg]; }
+  return v;
+}
+function deletePath(n, path) {
+  const keys = keysOfPath(path);
+  let at = n;
+  for (const k of keys.slice(0, -1)) { if (!isObj(ownGet(at, k))) return; at = at[k]; }
+  delete at[keys[keys.length - 1]];
+}
+
+// The document by effective value (spec "The normal form"): `rev` 0; on every node each stored
+// property equal to its default dropped, then each group (`layout`, `size`), override id map
+// (`overrides.<id>`, `variants.<name>.<id>`) and map (`props`, `variants`, `overrides`) left empty.
+// Two documents with the same normal form show the same canvas, and ops can't tell them apart (a
+// `set` can't remove a property that has a default). Takes a document that passes the shape rules.
+export function normalDoc(doc) {
+  const d = structuredClone(doc);
+  d.rev = 0;
+  for (const id of Object.keys(d.nodes)) {
+    const n = d.nodes[id];
+    for (const p of PLAIN[n.type]) {
+      const def = PROPS[n.type][p].default;
+      if (def === undefined) continue;
+      const v = valueAt(n, p);
+      if (v !== undefined && same(v, def)) deletePath(n, p);
+    }
+    for (const g of GROUPS[n.type]) if (isObj(ownGet(n, g)) && Object.keys(n[g]).length === 0) delete n[g];
+    const idMaps = [];
+    if (isObj(ownGet(n, 'overrides')) && n.type === 'instance') idMaps.push(n.overrides);
+    if (isObj(ownGet(n, 'variants')) && n.type === 'component') for (const v of Object.values(n.variants)) if (isObj(v)) idMaps.push(v);
+    for (const m of idMaps) for (const k of Object.keys(m)) if (isObj(m[k]) && Object.keys(m[k]).length === 0) delete m[k];
+    for (const m of MAPS) if (isObj(ownGet(n, m)) && Object.keys(n[m]).length === 0 && PROPS[n.type][m]) delete n[m];
+  }
+  return d;
+}
+
+// The `set`s that make node `b` into node `c` (both of `type`, from normal forms): plain properties at
+// their paths, map entries never a whole map (spec step 5). A property `c` lacks gets its default, or
+// null when it has none (which removes it).
+function propDiffs(type, b, c) {
+  const out = [];
+  const T = PROPS[type];
+  const fill = (p, cv, def) => (cv !== undefined ? cv : def !== undefined ? def : null);
+  for (const p of PLAIN[type]) {
+    if (MAPS.includes(p)) continue;
+    const bv = valueAt(b, p), cv = valueAt(c, p);
+    if (!same(bv, cv)) out.push([p, fill(p, cv, T[p].default)]);
+  }
+  const mapOf = (n, k) => (isObj(ownGet(n, k)) ? n[k] : {});
+  const keysOf = (...objs) => [...new Set(objs.flatMap((o) => (isObj(o) ? Object.keys(o) : [])))];
+  if (own(T, 'props.<name>')) {
+    const bm = mapOf(b, 'props'), cm = mapOf(c, 'props');
+    for (const k of keysOf(bm, cm)) if (!same(ownGet(bm, k), ownGet(cm, k))) out.push([`props.${k}`, fill(null, ownGet(cm, k))]);
+  }
+  // { id: { prop: value } } entries under `prefix`
+  const idEntries = (prefix, bm, cm) => {
+    for (const id of keysOf(bm, cm)) {
+      const bo = ownGet(bm, id), co = ownGet(cm, id);
+      for (const p of keysOf(bo, co)) if (!same(ownGet(bo, p), ownGet(co, p))) out.push([`${prefix}${id}.${p}`, fill(null, ownGet(co, p))]);
+    }
+  };
+  if (own(T, 'overrides.<id>.<prop>')) idEntries('overrides.', mapOf(b, 'overrides'), mapOf(c, 'overrides'));
+  if (own(T, 'variants.<name>')) {
+    const bm = mapOf(b, 'variants'), cm = mapOf(c, 'variants');
+    for (const name of keysOf(bm, cm)) {
+      const bv = ownGet(bm, name), cv = ownGet(cm, name);
+      if (cv === undefined) out.push([`variants.${name}`, null]);
+      else if (bv === undefined) out.push([`variants.${name}`, cv]);
+      else idEntries(`variants.${name}.`, bv, cv);
+    }
+  }
+  return out;
+}
+
+// Token path → token, for every token in a token tree (own keys, an explicit stack).
+function tokenLeaves(tokens) {
+  const out = new Map();
+  const stack = [[tokens, '']];
+  while (stack.length) {
+    const [g, prefix] = stack.pop();
+    for (const k of Object.keys(g)) {
+      const p = prefix ? `${prefix}.${k}` : k;
+      if (isTokenNode(g[k])) out.set(p, g[k]);
+      else if (isObj(g[k])) stack.push([g[k], p]);
+    }
+  }
+  return out;
+}
+
+function parseDoc(x, who) {
+  if (typeof x !== 'string') return { doc: x };
+  try { return { doc: JSON.parse(x) }; } catch (e) { return { why: `the ${who} does not parse: ${e.message}` }; }
+}
+// An id's kind in a shape-valid document: 'page', a node type, or undefined.
+function kindOf(doc, id) {
+  if (doc.pages.some((pg) => pg.id === id)) return 'page';
+  return isObj(ownGet(doc.nodes, id)) ? doc.nodes[id].type : undefined;
+}
+
+// The supervisor's working copy merged three ways (spec project/tickets/kit-653-canvas-merge/spec.md):
+// what `copy` changed from `base` (by normal form), as canvas@1 ops that apply to `now`, the canvas as
+// it is now, so a person's edit to anything the copy didn't change survives. `base` and `copy` may be
+// JSON text. → { ops, skipped, refused }: refused null and the ops, with `skipped` the copy's changes a
+// person's edit since made impossible ({ id | path, why }); or ops [] and refused { reason, errors }.
+// `images`, `folderBytes`: as validate's, for judging the copy. Pure; never throws for any base or copy.
+export function merge(base, copy, now, { images = null, folderBytes = 0 } = {}) {
+  const refuse = (reason, errors = []) => ({ ops: [], skipped: [], refused: { reason, errors } });
+  const judged = (x, who, opts) => {
+    const p = parseDoc(x, who);
+    if (p.why) return { why: refuse(p.why) };
+    let errors;
+    // What no document is (a cycle, nesting too deep to write as JSON) is a refusal too, found by
+    // writing it before validate walks it (validate's token walk would never end on a cycle)
+    try {
+      if (typeof x !== 'string') JSON.stringify(p.doc);
+      errors = validate(p.doc, opts);
+    } catch (e) {
+      return { why: refuse(`the ${who} breaks canvas-doc@1: ${String(e && e.message).split('\n')[0]}`) };
+    }
+    if (errors.length) {
+      const e = errors[0];
+      return { why: refuse(`the ${who} breaks canvas-doc@1: ${e.rule} at ${e.where}: ${e.message}`, errors) };
+    }
+    return { doc: p.doc };
+  };
+  const jb = judged(base, 'base', { images: null, folderBytes: 0 });
+  if (jb.why) return jb.why;
+  const jc = judged(copy, 'copy', { images, folderBytes });
+  if (jc.why) return jc.why;
+  if (!shapeOk(now)) return refuse('the live canvas is malformed');
+  const b = jb.doc, c = jc.doc;
+  for (const id of [...b.pages.map((pg) => pg.id), ...Object.keys(b.nodes)]) {
+    const kb = kindOf(b, id), kc = kindOf(c, id);
+    if (kc !== undefined && kc !== kb) return refuse(`node ${id} changed type from ${kb} to ${kc}: give the new node a new id`);
+  }
+  const nb = normalDoc(b), nc = normalDoc(c);
+
+  const ops = [];
+  const skipped = [];
+  const seenSkip = new Set();
+  const skip = (key, value, why) => {
+    const k = `${key}:${value}:${why}`;
+    if (!seenSkip.has(k)) { seenSkip.add(k); skipped.push({ [key]: value, why }); }
+  };
+  // 1. tokens: removals deepest first, then additions and changes in path order, each judged on a
+  // model of now's tokens as APPLY.token judges it
+  const tb = tokenLeaves(nb.tokens), tc = tokenLeaves(nc.tokens);
+  const tmodel = { tokens: structuredClone(now.tokens) };
+  const depth = (p) => p.split('.').length;
+  const removals = [...tb.keys()].filter((p) => !tc.has(p)).sort((x, y) => depth(y) - depth(x) || (x < y ? -1 : x > y ? 1 : 0));
+  const additions = [...tc.keys()].filter((p) => !tb.has(p) || !same(tb.get(p), tc.get(p))).sort();
+  // What the model holds at a path: 'token', 'group', or undefined (nothing, or a token on the way).
+  const tokenAt = (path) => {
+    let g = tmodel.tokens;
+    for (const seg of path.split('.')) {
+      if (!isObj(g) || isTokenNode(g) || !own(g, seg)) return undefined;
+      g = g[seg];
+    }
+    return isTokenNode(g) ? 'token' : isObj(g) ? 'group' : undefined;
+  };
+  for (const [p, value] of [...removals.map((p) => [p, null]), ...additions.map((p) => [p, tc.get(p)])]) {
+    // a removal of a token that isn't there (a person removed it or made it a group, or a second
+    // `take` after the copy made it a group) is nothing to do
+    if (value === null && tokenAt(p) !== 'token') continue;
+    const op = { op: 'token', path: p, value: value === null ? null : structuredClone(value) };
+    if (APPLY.token(tmodel, op)) skip('path', p, 'token-conflict');
+    else ops.push(op);
+  }
+
+  // The model of now's tree, updated op by op as APPLY updates the document: each id's kind and
+  // parent ('#pages' for a page), and each page's, container's and the pages' list as a doubly linked
+  // list (`head`/`tail` per list, `prev`/`next` per id; an id is in one list), so placing, moving and
+  // finding a neighbour cost the same on a 20000-child list as on a short one. `now` is never touched.
+  const PAGES = '#pages';
+  const kind = new Map(), parentOf = new Map();
+  const head = new Map(), tail = new Map(), prev = new Map(), next = new Map();
+  const linkLast = (P, id) => {
+    const t = tail.get(P);
+    prev.set(id, t); next.set(id, null);
+    if (t === null) head.set(P, id); else next.set(t, id);
+    tail.set(P, id);
+  };
+  const newList = (P, ids) => { head.set(P, null); tail.set(P, null); for (const id of ids) linkLast(P, id); };
+  const unlink = (P, id) => {
+    if (!prev.has(id)) return;
+    const p = prev.get(id), n = next.get(id);
+    if (p === null) head.set(P, n); else next.set(p, n);
+    if (n === null) tail.set(P, p); else prev.set(n, p);
+    prev.delete(id); next.delete(id);
+  };
+  const childrenOf = (P) => { const out = []; for (let x = head.get(P); x !== null && x !== undefined; x = next.get(x)) out.push(x); return out; };
+  newList(PAGES, now.pages.map((pg) => pg.id));
+  for (const pg of now.pages) { kind.set(pg.id, 'page'); parentOf.set(pg.id, PAGES); }
+  for (const id of Object.keys(now.nodes)) { kind.set(id, now.nodes[id].type); parentOf.set(id, now.nodes[id].parent); }
+  for (const pg of now.pages) newList(pg.id, Array.isArray(pg.children) ? pg.children : []);
+  for (const id of Object.keys(now.nodes)) if (CONTAINERS.has(now.nodes[id].type)) newList(id, Array.isArray(now.nodes[id].children) ? now.nodes[id].children : []);
+  const has = (id) => kind.has(id);
+  const hasList = (P) => head.has(P);
+  // insertAfter's rule on P's list: first for null, after `at` when it is in the list, else last
+  const place = (P, id, at) => {
+    if (at === null) {
+      const h = head.get(P);
+      prev.set(id, null); next.set(id, h);
+      if (h === null) tail.set(P, id); else prev.set(h, id);
+      head.set(P, id);
+    } else if (parentOf.get(at) === P && prev.has(at) && at !== id) {
+      const n = next.get(at);
+      prev.set(id, at); next.set(id, n); next.set(at, id);
+      if (n === null) tail.set(P, id); else prev.set(n, id);
+    } else linkLast(P, id);
+  };
+  const modelAdd = (id, type, parent, at) => {
+    if (has(id)) return; // an add of an existing id (same type and parent) is its properties as sets
+    kind.set(id, type);
+    if (type === 'page' || CONTAINERS.has(type)) newList(id, []);
+    place(parent, id, at);
+    parentOf.set(id, parent);
+  };
+  const modelMove = (id, parent, at) => {
+    const old = parentOf.get(id);
+    if (old === parent && (at === (prev.has(id) ? prev.get(id) : null) || at === id)) return; // where it is
+    unlink(old, id);
+    parentOf.set(id, undefined); // so `place` doesn't read it as its own anchor's list
+    place(parent, id, at);
+    parentOf.set(id, parent);
+  };
+  const modelDel = (id) => {
+    unlink(parentOf.get(id), id);
+    const stack = [id];
+    while (stack.length) {
+      const x = stack.pop();
+      if (hasList(x)) { for (const k of childrenOf(x)) stack.push(k); head.delete(x); tail.delete(x); }
+      kind.delete(x); parentOf.delete(x); prev.delete(x); next.delete(x);
+    }
+  };
+  // Would moving `id` under `parent` put it inside its own subtree?
+  const cycles = (id, parent) => {
+    let cur = parent;
+    for (let steps = 0; cur !== undefined && cur !== PAGES && steps <= LIMITS.nodes + 1; steps++) {
+      if (cur === id) return true;
+      cur = parentOf.get(cur);
+    }
+    return false;
+  };
+  // A move, unless the id is already there (as on a second `take`), which would be an op that changes nothing.
+  const emitMove = (id, parent, at) => {
+    if (parentOf.get(id) === parent && (prev.get(id) === at || at === id)) return;
+    ops.push({ op: 'move', id, parent: parent === PAGES ? null : parent, after: at });
+    modelMove(id, parent, at);
+  };
+
+  const bPage = new Map(nb.pages.map((pg) => [pg.id, pg]));
+  const cPage = new Map(nc.pages.map((pg) => [pg.id, pg]));
+  const inBase = (id) => bPage.has(id) || own(nb.nodes, id);
+  const baseList = (P) => (P === PAGES ? nb.pages.map((pg) => pg.id) : bPage.has(P) ? bPage.get(P).children : isObj(ownGet(nb.nodes, P)) && Array.isArray(nb.nodes[P].children) ? nb.nodes[P].children : []);
+  const parentInCopy = (id) => (cPage.has(id) ? PAGES : nc.nodes[id].parent);
+  const copyList = (P) => (P === PAGES ? nc.pages.map((pg) => pg.id) : cPage.has(P) ? cPage.get(P).children : nc.nodes[P].children);
+
+  // In the base and not in the copy: step 6 deletes it.
+  const doomed = (id) => inBase(id) && !(cPage.has(id) || own(nc.nodes, id));
+  // Where an id goes in list P (spec step 3): after the nearest settled id to its left in C, else
+  // right before the nearest kept id to its right in C that is in P's list, else first. "Right before"
+  // is after its nearest predecessor that stays put: not one step 6 deletes nor one of this list's ids
+  // still to be placed (`pending`), so the op places the same when `take` runs again.
+  const anchor = (P, leftSettled, C, from, keep, pending) => {
+    if (leftSettled !== null) return leftSettled;
+    for (let j = from + 1; j < C.length; j++) {
+      const r = C[j];
+      if (keep.has(r) && parentOf.get(r) === P) {
+        let p = prev.get(r);
+        while (p !== null && (doomed(p) || pending.has(p))) p = prev.get(p);
+        return p;
+      }
+    }
+    return null;
+  };
+
+  // One list: C (the copy's) against B (the base's), on P's list in the model.
+  const mergeList = (P, B, C) => {
+    const bpos = new Map(B.map((id, i) => [id, i]));
+    const common = C.filter((id) => bpos.has(id));
+    const keep = lisKeep(common.map((id) => bpos.get(id)), common);
+    const pending = new Set(C.filter((id) => !keep.has(id)));
+    let left = null;
+    for (let i = 0; i < C.length; i++) {
+      const x = C[i];
+      if (keep.has(x)) { if (parentOf.get(x) === P) left = x; continue; }
+      pending.delete(x);
+      if (!hasList(P)) { skip('id', x, 'parent-deleted'); continue; }
+      if (!inBase(x)) {
+        const at = anchor(P, left, C, i, keep, pending);
+        // already there (`take` run again after its ops applied): an add of an existing id only sets
+        // its properties, so put it in its place first
+        if (has(x) && at !== x && (parentOf.get(x) !== P || prev.get(x) !== at)) {
+          if (P !== PAGES && cycles(x, P)) { skip('id', x, 'cycle'); continue; }
+          emitMove(x, P, at);
+        }
+        if (P === PAGES) {
+          ops.push({ op: 'add', node: { id: x, type: 'page', parent: null, name: cPage.get(x).name }, after: at });
+          modelAdd(x, 'page', PAGES, at);
+        } else {
+          const node = { id: x };
+          const cn = nc.nodes[x];
+          for (const k of Object.keys(cn)) if (k !== 'children') put(node, k, structuredClone(cn[k]));
+          ops.push({ op: 'add', node, after: at });
+          modelAdd(x, cn.type, P, at);
+        }
+        left = x;
+        continue;
+      }
+      if (!has(x)) { skip('id', x, 'deleted'); continue; }
+      if (P !== PAGES && cycles(x, P)) { skip('id', x, 'cycle'); continue; }
+      emitMove(x, P, anchor(P, left, C, i, keep, pending));
+      left = x;
+    }
+  };
+
+  // 2. pages: the pages list (adds and moves), then names
+  mergeList(PAGES, baseList(PAGES), copyList(PAGES));
+  for (const pg of nc.pages) {
+    const bp = bPage.get(pg.id);
+    if (!bp || bp.name === pg.name) continue;
+    if (has(pg.id)) ops.push({ op: 'set', id: pg.id, prop: 'name', value: pg.name });
+    else skip('id', pg.id, 'deleted');
+  }
+
+  // 3. children lists, top-down in the copy's breadth-first order
+  const order = [];
+  const queue = nc.pages.map((pg) => pg.id);
+  for (let qi = 0; qi < queue.length; qi++) {
+    const P = queue[qi];
+    const C = copyList(P);
+    mergeList(P, baseList(P), C);
+    for (const id of C) { order.push(id); if (CONTAINERS.has(nc.nodes[id].type)) queue.push(id); }
+  }
+
+  // 4. kept nodes under something step 6 deletes: back to their copy parent
+  for (const id of order) {
+    if (!has(id)) continue;
+    let under = false;
+    let cur = parentOf.get(id);
+    for (let steps = 0; cur !== undefined && cur !== PAGES && steps <= LIMITS.nodes + 1; steps++) {
+      if (doomed(cur)) { under = true; break; }
+      cur = parentOf.get(cur);
+    }
+    if (!under) continue;
+    const P = parentInCopy(id);
+    if (!hasList(P)) { skip('id', id, 'parent-deleted'); continue; }
+    if (cycles(id, P)) { skip('id', id, 'cycle'); continue; }
+    const C = copyList(P);
+    const i = C.indexOf(id);
+    let left = null;
+    for (let j = i - 1; j >= 0; j--) if (parentOf.get(C[j]) === P) { left = C[j]; break; }
+    emitMove(id, P, anchor(P, left, C, i, new Set(C.filter((x) => parentOf.get(x) === P)), new Set()));
+  }
+
+  // 5. properties
+  for (const id of Object.keys(nc.nodes)) {
+    if (!own(nb.nodes, id)) continue;
+    const diffs = propDiffs(nc.nodes[id].type, nb.nodes[id], nc.nodes[id]);
+    if (!diffs.length) continue;
+    if (!has(id)) { skip('id', id, 'deleted'); continue; }
+    for (const [prop, value] of diffs) ops.push({ op: 'set', id, prop, value: structuredClone(value) });
+  }
+
+  // 6. deletions: nodes in the base's breadth-first order, then pages
+  const bq = nb.pages.flatMap((pg) => pg.children);
+  for (let qi = 0; qi < bq.length; qi++) {
+    const id = bq[qi];
+    const n = nb.nodes[id];
+    if (CONTAINERS.has(n.type)) for (const k of n.children) bq.push(k);
+    if (own(nc.nodes, id) || !has(id)) continue;
+    ops.push({ op: 'del', id });
+    modelDel(id);
+  }
+  for (const pg of nb.pages) {
+    if (cPage.has(pg.id) || !has(pg.id)) continue;
+    ops.push({ op: 'del', id: pg.id });
+    modelDel(pg.id);
+  }
+  return { ops, skipped, refused: null };
+}
+
+// The ids of a longest increasing subsequence of `seq` (distinct numbers, one per id in `ids`), by the
+// patience method: for each in order, replace the first tail not below it, else append; then walk back
+// from the last tail's predecessor links. O(n log n).
+function lisKeep(seq, ids) {
+  const tails = [], tailIdx = [], prev = new Array(seq.length);
+  for (let i = 0; i < seq.length; i++) {
+    let lo = 0, hi = tails.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (tails[m] < seq[i]) lo = m + 1; else hi = m; }
+    prev[i] = lo > 0 ? tailIdx[lo - 1] : -1;
+    tails[lo] = seq[i];
+    tailIdx[lo] = i;
+  }
+  const keep = new Set();
+  for (let k = tailIdx.length ? tailIdx[tailIdx.length - 1] : -1; k >= 0; k = prev[k]) keep.add(ids[k]);
+  return keep;
 }
 
 // ---- staticPage: the first page as a static, escaped HTML page ----
