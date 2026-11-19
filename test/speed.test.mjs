@@ -189,7 +189,7 @@ test('an answer from the dashboard: the reply comes before the supervisor is typ
   const port = await freePort();
   dash = startDashboard(root, env, ['--port', String(port)]);
   await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
-  const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: qid, answer: 'Left' }), signal: AbortSignal.timeout(60000) });
+  const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ id: qid, answer: 'Left' }), signal: AbortSignal.timeout(60000) });
   const body = await r.json();
   // every send-keys begun so far is still waiting: a reply that waited for the typing comes only
   // after tmux's own 30 s limit has killed the send-keys, whose pid is then gone
