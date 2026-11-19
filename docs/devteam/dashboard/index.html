@@ -6502,9 +6502,10 @@ function renderLibrary(lib) {
 }
 /* library-thumbs start */
 // The Library's thumbnails (kit-92): a box with a frame source (data-thumb-src) gets a sandboxed, inert frame
-// while it is in view, at most THUMB_MAX in the grid at once (an open peek's own box besides), top first; one whose load hasn't fired THUMB_WAIT ms after it
-// went in, or that this page's policy refuses, is taken out and the box keeps its icon until its card is drawn
-// anew. data-thumb: icon | live | failed. Frames are only put in and taken out here; a poll keeps the nodes.
+// while it is in view, at most THUMB_MAX at once in all (an open peek's box first, then the grid's, top first);
+// one whose load hasn't fired THUMB_WAIT ms after it went in, or that this page's policy refuses, is taken out
+// and the box keeps its icon until its card is drawn anew. data-thumb: icon | live | failed. Frames are only put
+// in and taken out here; a poll keeps the nodes.
 const THUMB_MAX = 12, THUMB_WAIT = 5000;
 // io: one IntersectionObserver; watched: the boxes it observes; seen: those in view; live: those holding a frame
 const THUMBS = { io: null, watched: new Set(), seen: new Set(), live: new Set() };
@@ -6542,14 +6543,21 @@ function thumbsFill() {
   for (const b of THUMBS.live) if (!b.isConnected || !THUMBS.seen.has(b)) thumbOut(b, 'icon');
   const want = [...THUMBS.seen].filter((b) => !THUMBS.live.has(b) && b.dataset.thumb !== 'failed' && b.dataset.thumbSrc)
     .sort((a, c) => (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
-  // the cap is the grid's: an open peek's box (one) always gets its frame, beside the grid's twelve
+  // an open peek's box takes a slot first: with none free, the grid's frame farthest from the viewport's centre
+  // goes (its box stays seen, and takes a slot again once the peek's is freed)
   const inPeek = (b) => !!b.closest('#drawer');
-  let grid = [...THUMBS.live].filter((b) => !inPeek(b)).length;
-  for (const b of want) {
-    if (inPeek(b)) { thumbIn(b); continue; }
-    if (grid >= THUMB_MAX) continue;
+  const far = (b) => { const r = b.getBoundingClientRect(); return Math.hypot((r.left + r.right - innerWidth) / 2, (r.top + r.bottom - innerHeight) / 2); };
+  for (const b of want.filter(inPeek)) {
+    if (THUMBS.live.size >= THUMB_MAX) {
+      const out = [...THUMBS.live].filter((x) => !inPeek(x)).sort((x, y) => far(y) - far(x))[0];
+      if (!out) break;
+      thumbOut(out, 'icon');
+    }
     thumbIn(b);
-    grid += 1;
+  }
+  for (const b of want) {
+    if (THUMBS.live.size >= THUMB_MAX) break;
+    if (!inPeek(b)) thumbIn(b);
   }
 }
 function thumbIn(b) {
@@ -6632,7 +6640,7 @@ function openLib(id) {
     attrRow('Updated', updated ? esc(when(updated)) : '', 'When it last changed.'),
     attrRow('How it changes', 'Shift+click it and say so in a thread'),
   ].filter(Boolean);
-  // the card's box, its frame outside the grid's cap (thumbsFill)
+  // the card's box, its frame within the cap of 12, ahead of the grid's (thumbsFill)
   AFTER.push(() => thumbsWatch($('drawer-body')));
   showDrawer(`<h2 id="drawer-title">${esc(x.title)}</h2><section class="attrs">${props(rows)}</section>${libThumb(x, previewHere(location, PREVIEWS))}${x.summary ? `<p class="measure lib-sum">${esc(x.summary)}</p>` : ''}`);
 }

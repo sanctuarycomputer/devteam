@@ -1200,20 +1200,36 @@ test('a lib peek asks the server for no peek', { ...CHROME, timeout: 300000 }, a
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
-test('the peek\'s frame is its own, beside the grid\'s 12', { ...CHROME, timeout: 300000 }, async (t) => {
+test('the peek\'s frame is one of the 12', { ...CHROME, timeout: 300000 }, async (t) => {
   const { p, soon } = await libraryAll(t, { fx: libraryFixture({ artifacts: 60 }), height: 3000 });
   await soon(`${VIEW}.frames === 12`, 'twelve frames');
   await sleep(1000);
-  const framed = (await p.ev(VIEW)).holding.map((h) => h.id).find((id) => id.startsWith('artifact:'));
+  const before = await p.ev(VIEW);
+  const framed = before.holding.map((h) => h.id).find((id) => id.startsWith('artifact:'));
   assert.ok(framed, 'a framed artifact');
+  // the grid frame farthest from the viewport's centre is the one that makes room (any of those tied for farthest)
+  const farthest = await p.ev(`(() => { const d = (b) => { const r = b.getBoundingClientRect(); return Math.hypot((r.left + r.right - innerWidth) / 2, (r.top + r.bottom - innerHeight) / 2); };
+    const xs = [...document.querySelectorAll('#lib-grid .lib-thumb')].filter((b) => b.querySelector('iframe')), m = Math.max(...xs.map(d));
+    return xs.filter((b) => d(b) > m - 0.5).map((b) => b.closest('.lib-card').dataset.libId); })()`);
+  const all = "document.querySelectorAll('.lib-thumb iframe').length";
+  const inPeek = "document.querySelectorAll('#drawer-body .lib-thumb iframe').length";
   await p.ev(`location.hash = ${JSON.stringify(`#lib/${encodeURIComponent(framed)}`)}`);
   const box = "document.querySelector('#drawer-body .lib-thumb')";
   await soon(`!!${box}?.querySelector('iframe')`, 'the peek\'s box holds a frame');
   await sleep(1000);
   assert.equal(await p.ev(`${box}.dataset.thumb`), 'live');
   assert.equal(await p.ev(`${box}.querySelector('iframe').getAttribute('src') === ${box}.dataset.thumbSrc`), true);
-  assert.equal(await p.ev(`${VIEW}.frames`), 12, 'the grid still has 12');
-  assert.equal(await p.ev("document.querySelectorAll('#drawer-body .lib-thumb iframe').length"), 1, 'one in the peek');
+  assert.deepEqual(await p.ev(`[${all}, ${inPeek}, ${VIEW}.frames]`), [12, 1, 11], '12 in all: 1 in the peek, 11 in the grid');
+  const open = await p.ev(VIEW);
+  const gone = before.holding.map((h) => h.id).filter((id) => !open.holding.some((h) => h.id === id));
+  assert.equal(gone.length, 1, 'one grid frame made room');
+  assert.ok(farthest.includes(gone[0]), `the grid frame farthest from the centre made room (${gone[0]}; farthest: ${farthest.join(', ')})`);
+  // closed: its slot goes back to the grid
+  await p.key('Escape');
+  await soon("document.getElementById('drawer').hidden", 'the peek closed');
+  await soon(`${VIEW}.frames === 12 && ${inPeek} === 0`, 'the grid back to 12');
+  await sleep(1000);
+  assert.deepEqual(await p.ev(`[${all}, ${VIEW}.frames]`), [12, 12]);
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
