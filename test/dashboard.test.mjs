@@ -578,6 +578,9 @@ test('an answer posts the pick and the words on the first press, with no which-c
   const D3 = door('Turn it on?');
   const D4 = door('Paint it blue?');
   const D6 = door('Lock the door?');
+  const D7 = door('Sweep the floor?');
+  const D8 = door('Water the plants?');
+  const D9 = dt(['ask', '--question', 'Which flag?', '--choices', '[{"label":"--all"},{"label":"none"}]', '--recommendation', 'none'], SUP);
   // a defaulted question, overruled in words from its answered card
   const Q5 = dt(['ask', '--question', 'Lights on?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', '--default', 'No'], SUP);
   pastDeadline(root, Q5);
@@ -590,6 +593,14 @@ test('an answer posts the pick and the words on the first press, with no which-c
   assert.equal(old.status, 200, await old.clone().text());
   const d6 = JSON.parse(dt(['questions', '--id', D6, '--json']))[0];
   assert.deepEqual([d6.status, d6.answer, d6.choice, d6.matched], ['answered', 'Yes — fine', null, true], 'an old-shaped body still answers');
+  // words, and a label, that start with "--" stay words and a label: never read as a flag (task-3 T3-1, T3-2)
+  const api = async (body) => { const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) }); assert.equal(r.status, 200, await r.clone().text()); return JSON.parse(dt(['questions', '--id', body.id, '--json']))[0]; };
+  const d7 = await api({ id: D7, answer: '-- but only after the release', choice: 'No' });
+  assert.deepEqual([d7.answer, d7.choice], ['No — -- but only after the release', 'No'], 'the words kept');
+  const d8 = await api({ id: D8, answer: '--rule=always yes', choice: 'Yes' });
+  assert.deepEqual([d8.answer, d8.choice, d8.standing_rule ?? null], ['Yes — --rule=always yes', 'Yes', null], 'typed words make no standing rule');
+  const d9 = await api({ id: D9, answer: '', choice: '--all' });
+  assert.deepEqual([d9.answer, d9.choice], ['--all', '--all'], 'a label that starts with "--"');
   const chrome = await openChrome();
   later(() => chrome.close());
   const p = await chrome.newPage();

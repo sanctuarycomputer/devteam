@@ -7701,7 +7701,8 @@ function turnAnswer(what, v) {
 // The owner answers (terminal, dashboard or, through the supervisor, chat). The supervisor may only
 // apply a default or withdraw.
 function cmdAnswer() {
-  const [id, ...restWords] = positional;
+  // the words: after the qid, or after "--" (the dashboard's form, so words that start with "--" stay words)
+  const [id, ...restWords] = [...positional, ...(rest ?? [])];
   const reviewResult = flagStr('review-result');
   const decline = !!flags.decline;
   // --read: the supervisor reads words the owner answered alone as one choice, citing the words it
@@ -19231,11 +19232,13 @@ async function cmdDashboard() {
       if (b.decline !== undefined && b.decline !== true) return null;
       const files = filesArgs(b);
       if (!files) return null;
-      const args = ['answer', b.id, ...(words ? [words] : []), ...(!picked ? [] : b.choice === null ? ['--in-words'] : ['--choice', b.choice.trim()]), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
+      // the owner's words, and a label, go as values no flag can be read from: the words after "--",
+      // the label and the rule inside their flag (--choice=<label>), so "--rule=…" typed is words
+      const args = ['answer', b.id, ...(!picked ? [] : b.choice === null ? ['--in-words'] : [`--choice=${b.choice.trim()}`]), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
       // "Send it back" on a review: the owner's reason, no result
-      if (b.decline === true) return [...args, '--decline'];
-      if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
-      return args;
+      if (b.decline === true) args.push('--decline');
+      else if (text(b.rule, 600)) args.push(`--rule=${b.rule.trim()}`);
+      return [...args, ...(words ? ['--', words] : [])];
     },
     correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) && (b.impact === undefined || [1, 2, 3, 4].includes(b.impact)) ? ['correct', b.id, '--reason', b.reason.trim(), ...(b.impact !== undefined ? ['--impact', String(b.impact)] : [])] : null),
     'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
