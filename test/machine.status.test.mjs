@@ -57,7 +57,7 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
   fs.writeFileSync(notes, `read ${q1.stdout.trim()}\n- ${seenL}: stays\nfriction: same as ${kitL}, in passing\n`);
   fs.mkdirSync(path.join(r, '.worktrees/a/node_modules'), { recursive: true });
   fs.writeFileSync(path.join(r, '.worktrees/a/node_modules/big'), Buffer.alloc(4096 * 256));
-  fs.writeFileSync(path.join(r, 'docs/devteam/run/accounts.json'), JSON.stringify({ at: new Date().toISOString(), cswap: true, active: 'a@b', active_no_room: false, exhausted: false, needs_login: ['c@d'], restart_gave_up: [], supervisor_limit: null, capacity: { accounts: 5, room: 1, active_week_pct: 9, active_5h_pct: 31, runs_out_at: null, next_reset_at: '2026-11-16T21:00:00Z', gap: false } }));
+  fs.writeFileSync(path.join(r, 'docs/devteam/run/accounts.json'), JSON.stringify({ at: new Date().toISOString(), cswap: true, active: 'a@b', active_no_room: false, exhausted: false, needs_login: ['c@d'], restart_gave_up: [], supervisor_limit: null, capacity: { accounts: 5, room: 1, unknown: 0, active_week_pct: 9, active_5h_pct: 31, runs_out_at: null, next_reset_at: '2026-11-16T21:00:00Z', gap: false } }));
   // tmux, as the kit sees it, noting what it was asked
   const logged = path.join(tmp, 'tmux-asked');
   const spy = path.join(tmp, 'spy');
@@ -81,6 +81,21 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     assert.match(st.stdout, /^machine: disk \S+ free of \S+.*; memory .*; cpus \S+.*; load [\d.]+ [\d.]+ [\d.]+$/m);
     assert.match(st.stdout, /^machine: accounts cswap active=a@b exhausted=false no-room=false needs-login=c@d as of /m);
     assert.match(st.stdout, /^machine: capacity 1 of 5 accounts with room THIN; active 9% week, 31% 5h; room runs out after the next reset; next reset 2026-11-16 21:00$/m);
+    // the capacity line, as accounts-tick last wrote it: usage that can't be read is unknown, never NONE
+    const accFile = path.join(r, 'docs/devteam/run/accounts.json');
+    const accounts = JSON.parse(fs.readFileSync(accFile, 'utf8'));
+    const withCap = (capacity) => { fs.writeFileSync(accFile, JSON.stringify({ ...accounts, capacity })); return status().stdout; };
+    const blank = { active_week_pct: null, active_5h_pct: null, runs_out_at: null, next_reset_at: null, gap: false };
+    const unread = withCap({ accounts: 3, room: 0, unknown: 3, ...blank });
+    assert.match(unread, /^machine: capacity 0 of 3 accounts with room, 3 unknown \(usage unreadable\); active \?% week, \?% 5h; room runs out unknown; next reset -$/m);
+    assert.doesNotMatch(unread, /NONE|THIN/, 'not knowing is no alarm');
+    assert.match(withCap({ accounts: 3, room: 0, unknown: 0, ...blank }), /^machine: capacity 0 of 3 accounts with room NONE; .*room runs out now; /m, 'every account known full');
+    assert.match(withCap({ accounts: 3, room: 1, unknown: 1, ...blank }), /^machine: capacity 1 of 3 accounts with room, 1 unknown \(usage unreadable\); /m, 'one with room and one unread is not thin');
+    // no cswap, or an accounts-tick from before capacity: no capacity line at all
+    const { capacity: _, ...none } = accounts;
+    fs.writeFileSync(accFile, JSON.stringify(none));
+    assert.doesNotMatch(status().stdout, /^machine: capacity/m);
+    fs.writeFileSync(accFile, JSON.stringify(accounts));
     assert.match(st.stdout, new RegExp(`^machine: hub ${process.env.DEVTEAM_HUB_PORT} DOWN$`, 'm'));
     assert.match(st.stdout, new RegExp(`^statused sup=up fleet=run kit=v0\\.1\\.0\\S* inbox=\\d+ missing=config/master\\.key tools=ok behind=v9\\.9\\.9 pane=${a.pane} state=ready dash=${portUp}/up wt=1/\\S+ new-questions=1 new-knowledge=2$`, 'm'));
     assert.match(st.stdout, /^machine: daily review due \(last never\)$/m);

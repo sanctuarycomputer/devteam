@@ -15578,11 +15578,13 @@ function lastReadingFull(a) {
 const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
 // The fleet's Claude capacity across every cswap account, for the operator and the supervisors: how many
 // have room, the active one's use, and whether the room left lasts until a full account resets. cswap
-// projects each window (projectedExhaustionAt, willLastToReset); a gap is room that runs out first.
+// projects each window (projectedExhaustionAt, willLastToReset); a gap is room that runs out first. An
+// account whose usage can't be read is neither room nor full: it's counted as unknown, never as none.
 function capacityOf(rows) {
   const usable = rows.filter((a) => !a.disabled);
   const room = usable.filter(accountHasRoom);
   const full = usable.filter(accountKnownFull);
+  const unknown = usable.length - room.length - full.length;
   const week = (a) => a?.usage?.sevenDay ?? a?.lastGoodUsage?.sevenDay ?? null;
   const pct = (w) => (typeof w?.pct === 'number' ? Math.round(w.pct) : null);
   const active = rows.find((a) => a.active);
@@ -15592,7 +15594,7 @@ function capacityOf(rows) {
   const runsOut = lasts || outs.length < room.length ? null : outs.pop() ?? null;
   const nextReset = resets[0] ?? null;
   return {
-    accounts: usable.length, room: room.length,
+    accounts: usable.length, room: room.length, unknown,
     active_week_pct: pct(week(active)), active_5h_pct: pct(active?.usage?.fiveHour),
     runs_out_at: runsOut, next_reset_at: nextReset,
     gap: !!(room.length && runsOut && nextReset && Date.parse(runsOut) < Date.parse(nextReset)),
@@ -17743,8 +17745,10 @@ async function machineStatus() {
   const cap = acc?.capacity;
   if (cap && typeof cap.accounts === 'number') {
     const when = (t) => (t ? t.slice(0, 16).replace('T', ' ') : '-');
-    const flag = cap.room === 0 ? ' NONE' : cap.gap ? ' GAP' : cap.room <= 1 && cap.accounts > 1 ? ' THIN' : '';
-    out(`machine: capacity ${cap.room} of ${cap.accounts} accounts with room${flag}; active ${cap.active_week_pct ?? '?'}% week, ${cap.active_5h_pct ?? '?'}% 5h; room runs out ${cap.runs_out_at ? when(cap.runs_out_at) : cap.room ? 'after the next reset' : 'now'}; next reset ${when(cap.next_reset_at)}`);
+    // NONE only when every account is known to be full: usage that can't be read is unknown, not none
+    const unknown = typeof cap.unknown === 'number' ? cap.unknown : 0;
+    const flag = cap.room === 0 && unknown === 0 && cap.accounts > 0 ? ' NONE' : cap.gap ? ' GAP' : cap.room + unknown <= 1 && cap.accounts > 1 ? ' THIN' : '';
+    out(`machine: capacity ${cap.room} of ${cap.accounts} accounts with room${unknown ? `, ${unknown} unknown (usage unreadable)` : ''}${flag}; active ${cap.active_week_pct ?? '?'}% week, ${cap.active_5h_pct ?? '?'}% 5h; room runs out ${cap.runs_out_at ? when(cap.runs_out_at) : cap.room ? 'after the next reset' : unknown ? 'unknown' : 'now'}; next reset ${when(cap.next_reset_at)}`);
   }
   // a hub that doesn't answer and each project's dashboard: nothing else says they went down
   const alert = readText(path.join(os.homedir(), '.box', 'alert'))?.trim();
