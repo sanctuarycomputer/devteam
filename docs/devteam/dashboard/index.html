@@ -864,9 +864,10 @@ try {
   .lib-body .lib-sum { color: var(--fg-2); max-width: var(--measure); }
   /* the thumbnail opens what the title opens; Public's globe; publish details, drift in amber; the details and meta lines */
   a.lib-thumb { text-decoration: none; } a.lib-thumb[href] { cursor: pointer; }
-  /* a draft's "in <worktree>" shrinks too, after the title has given way (its shrink is the title's thousandth) */
+  /* a draft's "in <worktree>" shrinks too, after the title has given way (its shrink is the title's thousandth); at most
+     40% of the head, so a long worktree never squeezes the title to nothing */
   .lib-card .card-head > .lib-title { flex-shrink: 1000; }
-  .lib-card .card-head > .lib-wt { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lib-card .card-head > .lib-wt { flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lib-card .card-head .badge > i { font-size: 11px; margin-right: 4px; }
   .lib-body > .lib-pub, .lib-body > .lib-meta, .lib-body > .err { margin-top: 6px; max-width: var(--measure); }
   .lib-body .lib-drift { color: var(--amber-fg); }
