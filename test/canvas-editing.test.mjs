@@ -1285,11 +1285,16 @@ test('drag a loose node', { skip: canDrive ? false : 'needs Chrome and WebSocket
     near(b.t, b0.t + 20, 1, 'previewed y');
     assert.equal(await count(p, '#surface [data-id="badge"]'), 1, 'one badge drawn while dragging');
   });
-  const e = await nextEdit(rec, n0);
+  // kit-668: any live frames (however many, none included), then the drop's set x and set y
+  await nextEdit(rec, n0);
+  await waitSaved(p); // every frame of the drag sent and acked
+  const dragged = edits(rec).slice(n0);
+  const e = dragged[dragged.length - 1];
   const want = [{ op: 'set', id: 'badge', prop: 'x', value: Math.round(12 + 30 / z) }, { op: 'set', id: 'badge', prop: 'y', value: Math.round(-8 + 20 / z) }];
-  assert.deepEqual(e.ops, want, 'one edit: set x and set y');
+  for (const f of dragged.slice(0, -1)) assert.ok(f.ops.length > 0 && f.ops.every((o) => o.op === 'set' && o.id === 'badge' && ['x', 'y'].includes(o.prop)), `a live frame only sets badge's x and/or y: ${JSON.stringify(f.ops)}`);
+  assert.deepEqual(e.ops, want, 'the last frame: set x and set y');
   await ackOf(rec, e);
-  await sendsNothing(rec, n0 + 1, 'after the drop');
+  await sendsNothing(rec, n0 + dragged.length, 'after the drop');
   const b1 = await box(p, '#surface [data-id="badge"]');
   near(b1.l, b0.l + 30, z, 'drawn there: x');
   near(b1.t, b0.t + 20, z, 'drawn there: y');
