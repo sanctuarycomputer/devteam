@@ -935,9 +935,10 @@ function linkAnswerCovers(qid, c) {
 }
 Object.assign(linkAnswerCovers, {
   HEADER: 'This answer approves exactly these repo link changes, and no other:',
-  // the owner's own yes, as recommended: a question asked with recommendation yes, answered yes
-  // (a note after " — " aside), never a review, a secrets question, a default or another choice
-  yes: (v) => v.status === 'answered' && v.answered_by === 'owner' && !!v.matched && v.kind !== 'review' && !(v.secrets ?? []).length && ['governance-edit', 'gate-change'].includes(v.class) && String(v.answer ?? '').split(' — ')[0].trim().toLowerCase() === 'yes',
+  // the owner's own yes, as recommended: a question asked with recommendation yes, whose label is
+  // yes (the pick, a reading that counts, or an older line's leading label), never a review, a
+  // secrets question, a default or another choice
+  yes: (v) => v.status === 'answered' && v.answered_by === 'owner' && !!v.matched && v.kind !== 'review' && !(v.secrets ?? []).length && ['governance-edit', 'gate-change'].includes(v.class) && String(v.label ?? '').trim().toLowerCase() === 'yes',
   // the lines of a context's approves section, or null when it has none
   section: (context) => {
     const ls = String(context ?? '').split('\n');
@@ -6857,16 +6858,17 @@ function rungFor(cls, scope = null) {
   return r;
 }
 // Evidence for a trust question: how often the owner went with the supervisor's recommendation on
-// the last N answered questions of the class (defaulted answers don't count), and calls in the
-// class since it last dropped (decisions, and acts that were their own), none corrected.
+// the last N answered questions of the class (defaulted answers don't count, nor words alone, read
+// or not: a reading is the supervisor's, not the owner's agreement), and calls in the class since it
+// last dropped (decisions, and acts that were their own), none corrected.
 function trustEvidence(cls) {
   const promo = ladder().promotion;
   const acts = calls().filter((a) => a.class === cls).sort(byTime);
   const drops = acts.map(correctionOf).filter(Boolean).map((c) => c.at).sort();
   const since = drops[drops.length - 1] ?? '';
   const after = acts.filter((a) => a.created_at > since);
-  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
-  const agree = answered.filter((q) => q.matched).length;
+  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && !q.in_words && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
+  const agree = answered.filter((q) => q.agreed_by_owner).length;
   return {
     acts_since_drop: after.length, uncorrected_acts: after.filter((a) => !correctionOf(a)).map((a) => a.id), corrections: drops.length,
     agreement: answered.length ? +(agree / answered.length).toFixed(2) : null, agreement_questions: answered.map((q) => q.id),
@@ -7109,7 +7111,7 @@ function answerSpent(v) {
 }
 function reaskWords(v) {
   const door = isDoorQuestion(v);
-  const cite = v.recommendation && v.matched === false && !door ? `they answered other than your recommendation, and that is their decision; act on it, and use it in your recommendations` : `cite the answer instead (--approved ${v.id} on decide or act${door ? `; for a plan under it, act --class approve-plan --approved ${v.id}, and when it was asked for the goal, "- Goal-level door: ${v.id} covers this plan" in the plan review` : ''})`;
+  const cite = v.in_words && !v.reading ? `they answered in their own words; read them (answer ${v.id} --read "<label>" --cite "<their words>" --class ${v.class ?? v.kind}) or ask back in its thread` : v.recommendation && v.matched === false && !door ? `they answered other than your recommendation, and that is their decision; act on it, and use it in your recommendations` : `cite the answer instead (--approved ${v.id} on decide or act${door ? `; for a plan under it, act --class approve-plan --approved ${v.id}, and when it was asked for the goal, "- Goal-level door: ${v.id} covers this plan" in the plan review` : ''})`;
   return `the owner already decided this: ${v.id} ${quoteData(capBytes300(v.question))} (answered ${quoteData(capBytes300(v.answer))} on ${String(v.answered_at).slice(0, 10)}). Never ask the owner a decision they have made: ${cite}. If something material changed since, ask again with --new-because "<what changed>", which the owner reads first (supervisor.md §6)`;
 }
 // Returns the --new-because to record: left off when nothing the owner answered is like this.
@@ -11031,7 +11033,7 @@ function cmdDecide() {
     if (approved?.startsWith('q-')) {
       const q = questionView(logGet(approved) ?? die(`no question ${approved}`));
       for (const ref of [rs[0], ...rel]) if (!(q.blocks ?? []).includes(ref)) die(`${approved} was asked about ${(q.blocks ?? []).join(', ') || 'nothing in particular'}, not ${ref}`);
-      if (q.status === 'answered' && (!q.matched || !answerIsRun(logGet(approved), q.answer))) die(`${approved}'s answer ("${q.answer}") isn't a yes to running it (recommended: "${q.recommendation}"): a remediation runs only on a yes`);
+      if (q.status === 'answered' && (!q.matched || !answerIsRun(logGet(approved), q.label ?? q.answer))) die(`${approved}'s answer ("${q.answer}") isn't a yes to running it (recommended: "${q.recommendation}"): a remediation runs only on a yes`);
       if (q.status === 'defaulted' && !saysRun(q.default)) die(`${approved} defaulted to "${q.default}": a remediation runs only on a yes`);
       const denied = remediationDenied(q, rs[0], rel[0] ?? null);
       if (denied) die(remediationDeniedWords(r.name, rel[0] ?? null, denied));
@@ -11215,6 +11217,10 @@ function cmdCorrect() {
   } else if (heard) corrected = { reason: flagStr('said').trim(), said: flagStr('said').trim() };
   else corrected = { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact };
   appendLog({ type: act.type, op: 'set', id: actId, ...(heard ? { channel: flags['from-turn'] !== undefined ? 'thread' : 'chat' } : {}), corrected }, by);
+  // the act of a supervisor's reading of the owner's words: the correction voids the reading (the
+  // owner's) or withdraws it (the supervisor's, at a retro), so it no longer counts from now on
+  const read = act.type === 'act' ? logGet(act.refs?.[0]) : null;
+  if (read?.type === 'question' && read.updates.some((u) => u.reading?.act === actId)) appendLog({ type: 'question', op: 'set', id: read.id, [writerClass(by) === 'owner' ? 'reading_void' : 'reading_withdrawn']: actId }, by);
   if (impact !== undefined) out(`${logGet(act.refs?.[0])?.title ?? act.refs?.[0]}: impact ${impact} (${IMPACT_WORDS[impact]}), set by the owner; it stands until the owner changes it`);
   if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
   // the supervisor wrote it from the owner's words: nobody to tell
@@ -12029,8 +12035,9 @@ function learningFigures(week, merges = mergeTimes()) {
     const ladderCalls = weekCalls.filter((c) => L.classes[c.class]).map((c) => ({ id: c.id, class: c.class, authority: authorityOfCall(c) }));
     const qs = questions();
     const asked = qs.filter((q) => inW(q.asked_at) && DECISION_KINDS.includes(q.kind)).map((q) => q.id);
-    // trustEvidence's filter: answered by the owner, with a recommendation (a review's proposals)
-    const answered = qs.filter((q) => q.status === 'answered' && inW(q.answered_at) && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).map((q) => ({ id: q.id, matched: !!q.matched }));
+    // trustEvidence's filter: answered by the owner, with a recommendation (a review's proposals),
+    // not in words alone; matched is the owner's own agreement
+    const answered = qs.filter((q) => q.status === 'answered' && !q.in_words && inW(q.answered_at) && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).map((q) => ({ id: q.id, matched: !!q.agreed_by_owner }));
     const corrections = all.filter((c) => inW(correctionOf(c)?.at)).map((c) => c.id);
     const merged = merges.filter(([, at]) => at >= from && at < from + WEEK).map(([id]) => id);
     const figures = {
@@ -12561,7 +12568,7 @@ function readinessGoal(refs) {
 }
 function registryAttestGap(goalId) {
   const qs = questions().filter((q) => q.class === 'registry-attest' && q.goal === goalId);
-  if (qs.some((q) => q.status === 'answered' && q.matched && q.answer.trim().toLowerCase().split(' — ')[0] === 'yes')) return null;
+  if (qs.some((q) => q.status === 'answered' && q.matched && String(q.label ?? '').trim().toLowerCase() === 'yes')) return null;
   const last = qs.sort((a, b) => (a.asked_at < b.asked_at ? -1 : 1)).pop();
   if (!last) return 'none asked yet';
   if (last.status !== 'answered') return `${last.id} is not answered by the owner (${last.status})`;
@@ -23723,7 +23730,7 @@ async function cmdRemediate() {
     if (!q.deadline || !st || Date.parse(st.at) < Date.parse(q.deadline)) die(`${q.id}'s default was applied before its deadline (${q.deadline ?? 'none'}): it approves nothing; ask again`);
   }
   if (!['answered', 'defaulted'].includes(q.status)) die(`${q.id} is ${q.status}: ask, and wait for the answer or the deadline`);
-  if (q.status === 'answered' && !answerIsRun(logGet(q.id), q.answer)) die(`${q.id}'s answer ("${String(q.answer ?? '').slice(0, 80)}") isn't a yes to running it: a remediation runs only on a yes`);
+  if (q.status === 'answered' && !answerIsRun(logGet(q.id), q.label ?? q.answer)) die(`${q.id}'s answer ("${String(q.answer ?? '').slice(0, 80)}") isn't a yes to running it: a remediation runs only on a yes`);
   if (q.status === 'defaulted' && !saysRun(q.default)) die(`${q.id} defaulted to "${q.default}": a remediation runs only on a yes`);
   const denied = remediationDenied(q, remediationRef(action), qrel);
   if (denied) die(remediationDeniedWords(action, qrel, denied));

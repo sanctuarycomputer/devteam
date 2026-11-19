@@ -6,14 +6,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { threadsFixture, monoFixture, write, json, hasTmux, until } from './lib/kit.mjs';
+import { threadsFixture, monoFixture, multiFixture, write, json, hasTmux, until } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const RATE = ['--stake', '1', '--urgency', '1'];
 const YN = JSON.stringify([{ label: 'Yes' }, { label: 'No' }]);
 const firstId = (s) => s.split('\n')[0].trim();
 // Distinct words for each question, so the kit's re-ask refusal never takes one for another.
-const TEXTS = ['Should checkout move to the new pricing page before launch?', 'Do invoices go out on the first business day of each month?', 'Can refunds skip the manual review queue under fifty dollars?', 'Will the mobile app share the web login cookie?', 'Must exports include archived customers by default?', 'Is dark mode worth shipping ahead of the holiday freeze?', 'Should trial accounts keep their data after ninety days?', 'May the support team see partial card numbers?', 'Does the onboarding tour replay after every major release?', 'Could weekly digests replace the daily summary email?', 'Ought the status page show maintenance windows a week ahead?', 'Should failed webhooks retry for a full day?', 'Are team invitations limited to verified domains?', 'Would a yearly plan discount of twenty percent hurt margins?', 'Shall the legacy API stay up until spring?', 'Should search index deleted projects for thirty days?', 'Can admins impersonate users without a ticket?', 'Do we localise receipts into French and German first?', 'Is single sign-on included on the starter tier?', 'Should usage alerts fire at eighty percent of quota?'];
+const TEXTS = ['Should checkout move to the new pricing page before launch?', 'Do invoices go out on the first business day of each month?', 'Can refunds skip the manual review queue under fifty dollars?', 'Will the mobile app share the web login cookie?', 'Must exports include archived customers by default?', 'Is dark mode worth shipping ahead of the holiday freeze?', 'Should trial accounts keep their data after ninety days?', 'May the support team see partial card numbers?', 'Does the onboarding tour replay after every major release?', 'Could weekly digests replace the daily summary email?', 'Ought the status page show maintenance windows a week ahead?', 'Should failed webhooks retry for a full day?', 'Are team invitations limited to verified domains?', 'Would a yearly plan discount of twenty percent hurt margins?', 'Shall the legacy API stay up until spring?', 'Should search index deleted projects for thirty days?', 'Can admins impersonate users without a ticket?', 'Do we localise receipts into French and German first?', 'Is single sign-on included on the starter tier?', 'Should usage alerts fire at eighty percent of quota?', 'Do contractors get read access to the billing dashboard?', 'Should the changelog email go to every workspace admin?', 'Can a workspace hold more than one custom domain?', 'Will the free tier keep its API rate limit next year?'];
 
 // A ready goal read from a repo check, approved by the owner (as goal-met.test.mjs's first test).
 function readyGoal(F) {
@@ -151,6 +151,43 @@ test('the answer line records the pick beside the words, and words alone wait fo
     F.owner(['answer', Ql, 'yes', '--in-words']);
     refused(['link', 'add', 'docs', '--kind', 'repo', '--remote', 'usbclub/docs', '--title', 'Docs site', '--approved', Ql], new RegExp(`${Ql} was answered in the owner's own words \\("yes"\\), not a choice: read them with answer ${Ql} --read .*--class governance-edit`), SUP);
 
+    // 17. the owner corrects the reading's act: the reading is void at once, and what was done on it stands
+    const goalTitle = () => json(F.owner(['goal', 'show', F.goal, '--json'])).title;
+    assert.equal(goalTitle(), 'X3', "case 5's goal set gave the goal Q3's title");
+    F.owner(['correct', act.id, '--reason', 'misread']);
+    const voids = lines().filter((l) => l.type === 'question' && l.id === Q3 && l.reading_void !== undefined);
+    assert.deepEqual(voids.map((l) => [l.reading_void, l.by]), [[act.id, 'owner']], 'the correction voids the reading, as the owner');
+    v = view(Q3);
+    assert.deepEqual([v.matched, v.read_by, v.reading, v.label], [false, null, null, null]);
+    assert.equal(goalTitle(), 'X3', 'the goal set made on the reading still folds');
+    assert.equal(run(['log-check']).status, 0, run(['log-check']).err);
+    // a fresh goal-change read, then corrected: it approves nothing
+    const Q7b = gc();
+    F.owner(['answer', Q7b, 'yes, rename it', '--in-words']);
+    F.sup(['answer', Q7b, '--read', 'Yes', '--cite', 'yes', '--class', 'goal-change']);
+    assert.equal(view(Q7b).matched, true);
+    F.owner(['correct', view(Q7b).reading.act, '--reason', 'misread']);
+    assert.equal(view(Q7b).matched, false);
+    refused(['goal', 'set', F.goal, '--approved', Q7b], /not its recommendation|own words/, SUP);
+    // the owner corrects A1 and answers again; the supervisor reads again (A2), then withdraws A2 at a retro
+    const Q7c = gc();
+    F.owner(['answer', Q7c, 'go ahead', '--in-words']);
+    F.sup(['answer', Q7c, '--read', 'Yes', '--cite', 'go ahead', '--class', 'goal-change']);
+    const A1 = view(Q7c).reading.act;
+    F.owner(['correct', A1, '--reason', 'misread']);
+    assert.equal(view(Q7c).reading, null);
+    F.hand('owner', { type: 'question', op: 'set', id: Q7c, answer: 'yes, go', choice: null, question_hash: view(Q7c).hash, channel: 'dashboard' }, 0);
+    assert.deepEqual([view(Q7c).answer, view(Q7c).in_words, view(Q7c).matched], ['yes, go', true, false]);
+    F.sup(['answer', Q7c, '--read', 'Yes', '--cite', 'yes', '--class', 'goal-change']);
+    const A2 = view(Q7c).reading.act;
+    assert.notEqual(A2, A1);
+    assert.equal(view(Q7c).matched, true);
+    F.sup(['correct', A2, '--retro', '--reason', 'x']);
+    const withdrawn = lines().filter((l) => l.type === 'question' && l.id === Q7c && (l.reading_withdrawn !== undefined || l.reading_void !== undefined));
+    assert.deepEqual(withdrawn.map((l) => [l.reading_void ?? null, l.reading_withdrawn ?? null, l.by]), [[A1, null, 'owner'], [null, A2, 'supervisor']], 'the owner voids A1, the supervisor withdraws A2');
+    assert.deepEqual([view(Q7c).matched, view(Q7c).read_by], [false, null]);
+    refused(['goal', 'set', F.goal, '--approved', Q7c], /not its recommendation|own words/, SUP);
+
     // 13. everything the kit wrote checks
     assert.equal(run(['log-check']).status, 0, run(['log-check']).err);
 
@@ -254,5 +291,66 @@ test('settles_if reads the pick: a pick settles, words alone settle nothing', { 
     F.owner(['answer', Qs2, 'Yes', '--in-words']);
     const said = await until(() => pane.typed().split(/[\r\n]+/).find((l) => l.includes(`[devteam answer ${Qs2} from owner]`)), 'the nudge for the words');
     assert.doesNotMatch(said, /settles/, 'words alone settle nothing');
+  } finally { F.done(); }
+});
+
+test('link --approved reads the label: words alone are refused until read, then the reading approves; a pick approves at once', () => {
+  const F = multiFixture('answer-words-link');
+  const { old, okIn, runIn } = F;
+  const add = (id) => ['link', 'add', id, '--kind', 'repo', '--remote', `usbclub/${id}`, '--title', `${id} site`];
+  const has = (id) => new RegExp(`"${id}"`).test(fs.readFileSync(path.join(old, 'docs/devteam/project/settings.md'), 'utf8'));
+  try {
+    const Q = /q-[0-9]+-[0-9]+-supervisor/.exec(okIn(old, add('docs'), SUP))[0];
+    // words that say yes and more: the old split of the answer text would never read them as yes
+    okIn(old, ['answer', Q, 'yes, add the docs repo', '--in-words']);
+    const r = runIn(old, [...add('docs'), '--approved', Q], SUP);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, /answered in the owner's own words .*--read/);
+    assert.equal(has('docs'), false, 'nothing written');
+    const cls = json(okIn(old, ['questions', '--id', Q, '--json']))[0].class;
+    okIn(old, ['answer', Q, '--read', 'yes', '--cite', 'yes', '--class', cls], SUP);
+    okIn(old, [...add('docs'), '--approved', Q], SUP);
+    assert.equal(has('docs'), true, 'the read answer approves the link');
+    const Q2 = /q-[0-9]+-[0-9]+-supervisor/.exec(okIn(old, add('handbook'), SUP))[0];
+    okIn(old, ['answer', Q2, 'go on then', '--choice', 'yes']);
+    okIn(old, [...add('handbook'), '--approved', Q2], SUP);
+    assert.equal(has('handbook'), true, 'a pick approves the link');
+  } finally { F.done(); }
+});
+
+test("trust counts the owner's own agreement: a pick counts, words read or unread stay out", () => {
+  const F = threadsFixture('answer-words-trust');
+  const view = (q) => json(F.owner(['questions', '--id', q, '--json']))[0];
+  try {
+    const cls = 'release-scope';
+    const row = () => json(F.owner(['trust', '--json'])).find((r) => r.class === cls);
+    assert.ok(row(), `${cls} is a ladder class trust lists`);
+    // distinct words and subjects for each, so the kit's re-ask refusal never takes one for another
+    const ask = (t) => firstId(F.sup(['ask', '--class', cls, '--question', t, '--reasons', 'below-rung', '--recommendation', 'Yes', '--choices', YN, '--default', 'Yes', ...RATE]));
+    const picked = ask(TEXTS[0]);
+    F.owner(['answer', picked, 'ship it', '--choice', 'Yes']);
+    const read = ask(TEXTS[5]);
+    F.owner(['answer', read, 'yes, ship it', '--in-words']);
+    F.sup(['answer', read, '--read', 'Yes', '--cite', 'yes', '--class', cls]);
+    assert.equal(view(read).matched, true, 'the reading makes it match');
+    const unread = ask(TEXTS[10]);
+    F.owner(['answer', unread, 'Yes', '--in-words']);
+    const r = row();
+    assert.deepEqual(r.agreement_questions, [picked], 'words alone, read or not, are out of the window');
+    assert.equal(r.agreement, 1);
+  } finally { F.done(); }
+});
+
+test('asking again what the owner answered in their own words says to read them', () => {
+  const F = threadsFixture('answer-words-reask');
+  try {
+    const args = ['ask', '--class', 'owner-decision', '--question', TEXTS[3], '--recommendation', 'Yes', '--choices', YN, ...RATE];
+    const Q16 = firstId(F.sup(args));
+    F.owner(['answer', Q16, 'sure, fine', '--in-words']);
+    const r = F.run(F.old, args, SUP);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, /in their own words/);
+    assert.match(r.err, /--read/);
+    assert.match(r.err, new RegExp(`answer ${Q16} --read`));
   } finally { F.done(); }
 });
