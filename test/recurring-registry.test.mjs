@@ -103,26 +103,26 @@ test('A3: editing one field of a live job (every, run, prompt) needs an answer s
 test('A4: an answer for one job lands nothing else; a null lands only that removal', () => {
   const T = setup('entries');
   try {
-    T.onMain((j) => { j.recurring = { a: check(), b: chore() }; });
-    const qa = T.yes({ recurring: { a: check({ every: '12h' }) } });
-    T.jobsChore('also-adds', (j) => { j.recurring.a = check({ every: '12h' }); j.recurring.c = chore(); });
-    refused(T.dry('also-adds', qa), /recurring\.c/);
-    T.jobsChore('also-edits', (j) => { j.recurring.a = check({ every: '12h' }); j.recurring.b = chore({ every: '2w' }); });
-    refused(T.dry('also-edits', qa), /recurring\.b/);
-    T.jobsChore('other-field', (j) => { j.recurring.a = check({ every: '12h', timeout_s: 300 }); });
-    refused(T.dry('other-field', qa), /recurring\.a/);
-    T.jobsChore('with-workflow', (j) => { j.recurring.a = check({ every: '12h' }); });
+    T.onMain((j) => { j.recurring = { aa: check(), bb: chore() }; });
+    const qa = T.yes({ recurring: { aa: check({ every: '12h' }) } });
+    T.jobsChore('also-adds', (j) => { j.recurring.aa = check({ every: '12h' }); j.recurring.cc = chore(); });
+    refused(T.dry('also-adds', qa), /recurring\.cc/);
+    T.jobsChore('also-edits', (j) => { j.recurring.aa = check({ every: '12h' }); j.recurring.bb = chore({ every: '2w' }); });
+    refused(T.dry('also-edits', qa), /recurring\.bb/);
+    T.jobsChore('other-field', (j) => { j.recurring.aa = check({ every: '12h', timeout_s: 300 }); });
+    refused(T.dry('other-field', qa), /recurring\.aa/);
+    T.jobsChore('with-workflow', (j) => { j.recurring.aa = check({ every: '12h' }); });
     fs.appendFileSync(path.join(T.old, '.worktrees/chore-with-workflow/.github/workflows/ci.yml'), '# more\n');
     T.g(['commit', '-qam', 'workflow too'], path.join(T.old, '.worktrees/chore-with-workflow'));
     T.g(['push', '-q', '-f', 'origin', 'chore-with-workflow'], path.join(T.old, '.worktrees/chore-with-workflow'));
     refused(T.dry('with-workflow', qa), /outside project\/[^\n]*\.github\/workflows\/ci\.yml/);
-    T.jobsChore('exact', (j) => { j.recurring.a = check({ every: '12h' }); });
+    T.jobsChore('exact', (j) => { j.recurring.aa = check({ every: '12h' }); });
     passes(T.dry('exact', qa));
-    const stop = T.yes({ recurring: { b: null } });
-    T.jobsChore('stop-b', (j) => { delete j.recurring.b; });
+    const stop = T.yes({ recurring: { bb: null } });
+    T.jobsChore('stop-b', (j) => { delete j.recurring.bb; });
     passes(T.dry('stop-b', stop));
-    T.jobsChore('stop-b-and-more', (j) => { delete j.recurring.b; j.recurring.a = check({ every: '2h' }); });
-    refused(T.dry('stop-b-and-more', stop), /recurring\.a/);
+    T.jobsChore('stop-b-and-more', (j) => { delete j.recurring.bb; j.recurring.aa = check({ every: '2h' }); });
+    refused(T.dry('stop-b-and-more', stop), /recurring\.aa/);
   } finally { T.done(); }
 });
 
@@ -236,8 +236,8 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     assert.ok(q.context.includes('recurring.ci-main: add'), q.context);
     assert.ok(q.context.includes('A check only looks: it never changes production') && q.context.includes('as it is on main each time'), q.context);
     passes(T.ask({ recurring: { tidy: null } }));
-    refused(T.ask({ recurring: { x: check() }, gates: {} }), /only "recurring"/);
-    refused(T.ask({ recurring: { x: check({ every: '30m' }) } }), /recurring\.x\.every/);
+    refused(T.ask({ recurring: { xx: check() }, gates: {} }), /only "recurring"/);
+    refused(T.ask({ recurring: { xx: check({ every: '30m' }) } }), /recurring\.xx\.every/);
     refused(T.ask({ recurring: { ghost: null } }), /no such job/);
     refused(T.ask({ recurring: { 'ci-main': check({ every: '12h' }) } }), new RegExp(`${add.qid}`));
     T.answer(add.qid);
@@ -250,21 +250,21 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     refused(T.ask({ recurring: { z3: chore() } }, ['--context', `${HEADER}\nrecurring.z3: add {}`]), /may not hold a job approval line/);
     // the cap: main at 90 with hourly x (24); an open stop of x; then an hourly y is refused
     const filler = Object.fromEntries(Array.from({ length: 66 }, (_, i) => [`daily-${i + 1}`, chore({ every: '1d' })]));
-    T.onMain((j) => { j.recurring = { ...filler, x: check({ every: '1h' }) }; });
-    passes(T.ask({ recurring: { x: null } }));
-    refused(T.ask({ recurring: { y: check({ every: '1h' }) } }), /cap of 100/);
-    passes(T.ask({ recurring: { y: check({ every: '1d' }) } }));
+    T.onMain((j) => { j.recurring = { ...filler, xx: check({ every: '1h' }) }; });
+    passes(T.ask({ recurring: { xx: null } }));
+    refused(T.ask({ recurring: { yy: check({ every: '1h' }) } }), /cap of 100/);
+    passes(T.ask({ recurring: { yy: check({ every: '1d' }) } }));
     // a pending addition counts: main at 60, an open hourly z, then an hourly y is refused until z is withdrawn
     const sixty = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`d-${i + 1}`, chore({ every: '1d' })]));
     T.onMain((j) => { j.recurring = sixty; });
-    const z = T.asked({ recurring: { z: check({ every: '1h' }) } });
-    refused(T.ask({ recurring: { w: check({ every: '1h' }) } }), /cap of 100/);
+    const z = T.asked({ recurring: { zz: check({ every: '1h' }) } });
+    refused(T.ask({ recurring: { ww: check({ every: '1h' }) } }), /cap of 100/);
     T.ok(['withdraw', z, '--reason', 'test']);
-    const w = T.ask({ recurring: { w: check({ every: '1h' }) } });
+    const w = T.ask({ recurring: { ww: check({ every: '1h' }) } });
     passes(w);
     // an answered Yes not landed yet still counts (89 here)
     T.answer(w.qid);
-    refused(T.ask({ recurring: { v: check({ every: '1h' }) } }), /cap of 100/);
+    refused(T.ask({ recurring: { vv: check({ every: '1h' }) } }), /cap of 100/);
     // a No frees its room: 89 + 8 fits, and once declined, another 8 fits too
     const p1 = T.asked({ recurring: { p1: check({ every: '3h' }) } });
     T.answer(p1, 'No');
@@ -333,8 +333,8 @@ test('A12: recurring apply writes exactly the answered change and leaves every o
     // the text around the recurring value: before the key, and after the value's closing bracket
     const around = (t) => { const i = t.indexOf('"recurring"'); let d = 0; let j = t.indexOf('{', i); for (let k = j; k < t.length; k++) { if (t[k] === '{') d++; else if (t[k] === '}' && --d === 0) { j = k; break; } } return [t.slice(0, i), t.slice(j + 1)]; };
     const others = (t) => { const o = JSON.parse(BLOCK.exec(t)[1]); delete o.recurring; return o; };
-    toMain(compact({ a: check(), b: chore() }));
-    const change = { recurring: { a: check({ every: '12h' }), c: chore({ every: '2w' }) } };
+    toMain(compact({ aa: check(), bb: chore() }));
+    const change = { recurring: { aa: check({ every: '12h' }), cc: chore({ every: '2w' }) } };
     const open = T.asked(change);
     T.ok(['chore', 'start', 'recurring']);
     const before = fs.readFileSync(wtFile, 'utf8');
@@ -342,11 +342,11 @@ test('A12: recurring apply writes exactly the answered change and leaves every o
     T.answer(open);
     passes(apply(open));
     const after = fs.readFileSync(wtFile, 'utf8');
-    assert.deepEqual(T.blockAt(wtFile).recurring, { a: check({ every: '12h' }), b: chore(), c: chore({ every: '2w' }) });
+    assert.deepEqual(T.blockAt(wtFile).recurring, { aa: check({ every: '12h' }), bb: chore(), cc: chore({ every: '2w' }) });
     assert.deepEqual(around(after), around(before));
     assert.deepEqual(others(after), others(before));
     // the worktree's jobs now differ from main's: a second answer can't be applied on top
-    const second = T.yes({ recurring: { d: chore() } });
+    const second = T.yes({ recurring: { dd: chore() } });
     refused(apply(second), /differs from main/);
     // landed: the PR merges, and the answer applies no more
     T.ok(['chore', 'pr', 'recurring', '--title', 'jobs']);
@@ -357,9 +357,9 @@ test('A12: recurring apply writes exactly the answered change and leaves every o
     T.ok(['chore', 'start', 'recurring']);
     refused(apply(open), /already landed/);
     // once landed, the question no longer blocks its jobs: a is asked about again
-    T.asked({ recurring: { a: check({ every: '24h' }) } });
+    T.asked({ recurring: { aa: check({ every: '24h' }) } });
     // declined, and another class
-    const no = T.asked({ recurring: { e: chore() } });
+    const no = T.asked({ recurring: { ee: chore() } });
     T.answer(no, 'No');
     refused(apply(no));
     const gr = T.run(['ask', '--class', 'governance-edit', '--question', 'Something else?', '--recommendation', 'Yes']);
@@ -374,10 +374,10 @@ test('A12: recurring apply writes exactly the answered change and leaves every o
     T.ok(['chore', 'start', 'recurring']);
     const bare = fs.readFileSync(wtFile, 'utf8');
     assert.ok(!bare.includes('"recurring"'), bare);
-    const add = T.yes({ recurring: { f: chore() } });
+    const add = T.yes({ recurring: { ff: chore() } });
     passes(apply(add));
     const added = fs.readFileSync(wtFile, 'utf8');
-    assert.deepEqual(T.blockAt(wtFile).recurring, { f: chore() });
+    assert.deepEqual(T.blockAt(wtFile).recurring, { ff: chore() });
     assert.deepEqual(others(added), others(bare));
     assert.equal(added.replace(/,?\s*"recurring":[\s\S]*?\n  \}/, ''), bare);
   } finally { T.done(); }
