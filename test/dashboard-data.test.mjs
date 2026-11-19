@@ -69,7 +69,7 @@ test('every kind of decision has a plain name, and no class id shows', { timeout
   F.sup(['ask', '--class', 'goal-change', '--goal', F.goal, '--change', JSON.stringify({ title: 'Launch the checkout' }), '--question', 'Rename the checkout goal?', '--recommendation', 'Yes', '--stake', '1', '--urgency', '1']);
   F.sup(['act', '--class', 'add-ticket', '--refs', 'x', '--', 'added x']);
   // a rung change: the owner moves new-feature to rung 3
-  const q = firstId(F.sup(['ask', '--class', 'new-feature', '--question', 'Start x?', '--recommendation', 'yes']));
+  const q = firstId(F.sup(['ask', '--class', 'new-feature', '--question', 'Start x?', '--recommendation', 'yes', '--no-default', 'the test waits for the owner']));
   F.owner(['answer', q, 'yes', '--autonomy', '3']);
   // a rule row, which has no class
   F.owner(['knowledge', 'add', '--kind', 'fact', '--statement', 'x builds with make', '--scope', 'project', '--owner']);

@@ -190,10 +190,10 @@ test('ask refuses only a decision the owner answered: not a defaulted or open on
     fs.appendFileSync(sf, `${JSON.stringify({ v: 1, id: qd, type: 'question', op: 'set', at: '2099-01-01T00:00:00.000Z', by: 'supervisor', status: 'defaulted' })}\n`);
     assert.equal(JSON.parse(ok(old, ['questions', '--id', qd, '--json']))[0].status, 'defaulted');
     // and a clarification the owner answered: clarifying again is never refused, only mentioned
-    const qc = ok(old, ['ask', '--kind', 'clarification', '--question', 'Do refunds go back to the original card?'], SUP).trim();
+    const qc = ok(old, ['ask', '--kind', 'clarification', '--question', 'Do refunds go back to the original card?', '--no-default', 'the test waits for the owner'], SUP).trim();
     ok(old, ['answer', qc, 'yes']);
     for (const [q, near, kind] of [[qo, 'Should the nightly export include the archived invoices too?'], [qd, 'Should the weekly digest list each failed payment retry?'], [qc, 'Do refunds go back to the original card?', 'clarification']]) {
-      const r = run(old, ['ask', '--question', near, '--recommendation', 'yes', ...(kind ? ['--kind', kind] : [])], SUP);
+      const r = run(old, ['ask', '--question', near, '--recommendation', 'yes', ...(kind ? ['--kind', kind, '--no-default', 'the test waits for the owner'] : [])], SUP);
       assert.equal(r.status, 0, `${q}: ${r.err}`);
       assert.doesNotMatch(r.err, /already decided/);
     }

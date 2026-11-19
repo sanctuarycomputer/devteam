@@ -40,9 +40,9 @@ test('the order is computed: a goal judged again, a ticket merged, a goal parked
     assert.match(d.chips[0], /^goes ahead with the default at \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$/);
     assert.match(d.chips[1], /^for Team billing/);
     // no discount for a class the owner keeps agreeing in: only a default halves
-    for (let i = 0; i < 10; i++) { const q = ask(`Move story ${i}?`, '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes', '--stake', '1', '--urgency', '1'); ok(old, ['answer', q, 'yes']); }
+    for (let i = 0; i < 10; i++) { const q = ask(`Move story ${i}?`, '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes', '--no-default', 'the test waits for the owner', '--stake', '1', '--urgency', '1'); ok(old, ['answer', q, 'yes']); }
     assert.equal(json(ok(old, ['trust', '--json'])).find((r) => r.class === 'release-scope').meets_agreement, true);
-    const agreed = ask('Move story 11?', '--goal', G, '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes', '--stake', '2', '--urgency', '2');
+    const agreed = ask('Move story 11?', '--goal', G, '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes', '--no-default', 'the test waits for the owner', '--stake', '2', '--urgency', '2');
     assert.deepEqual([rank(agreed).own, rank(agreed).parts.default], [16, false]);
 
     // the ticket merges: it is held up no more, so the unblock and the 3 go
