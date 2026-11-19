@@ -68,7 +68,7 @@ test("the dashboard: an answer only from its own page, with that page's token fo
   assert.match((await r.json()).error, /has changed since the page showed it/);
   assert.equal(pane.typed(), 'c', 'and no key was sent');
   // the owner's words meanwhile, from the page: held
-  r = await fetch(`${D.B}/api/thread-new`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Import it', text: 'Approved here' }) });
+  r = await fetch(`${D.B}/api/thread-new`, { method: 'POST', headers: { 'content-type': 'application/json', origin: D.B, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ title: 'Import it', text: 'Approved here' }) });
   assert.equal(r.status, 200);
   assert.match((await r.json()).out, /recorded and held: the supervisor's terminal is asking a question/);
   // the answer, to the question showing now
