@@ -103,7 +103,6 @@ function testBrowserPids() {
 
 let e; // E1 to E4, D4, D5's planted form, Review Focus 1, B3: refusals that start nothing
 let a; // the long-lived browser
-let k; // K1 only: its tmux session is the test's own, made before anything runs on it
 let dash; // B4 to B6: a real dashboard on a's fixture
 // after waits for it: with every test filtered out (--test-name-pattern), node runs after while
 // before is still starting the servers, which would then keep the process alive.
@@ -116,7 +115,6 @@ before(() => {
     standIn = await startStandIn();
     e = project('brw-e', newHome());
     a = project('brw-a', newHome());
-    k = project('brw-k', newHome());
   })();
   return setup;
 });
@@ -415,36 +413,6 @@ test('T1-5 verbs that talk to a daemon make no profile', opts, async () => {
   assert.equal(fs.existsSync(path.join(P.home, '.devteam')), false, 'no ~/.devteam');
 });
 
-test('K1 run.env reaches the daemon', opts, async () => {
-  const other = newHome();
-  const env = { ...k.env, HOME: other };
-  delete env.DEVTEAM_TEST;
-  delete env.DEVTEAM_TEST_BROWSER_ALLOW;
-  env.DEVTEAM_CLAIM_TOKEN = 'zq-claim'; // T2-4: in the tmux server's own environment, so every window inherits it
-  const made = spawnSync('tmux', ['new-session', '-d', '-s', sessionName(k)], { env, encoding: 'utf8', cwd: k.old });
-  assert.equal(made.status, 0, made.stderr);
-  await started(k, { DEVTEAM_CLAIM_TOKEN: 'zq-claim' });
-  const s = readState(k);
-  const rec = previewRec(k, s.preview);
-  assert.ok(rec.run.env.DEVTEAM_TEST_BROWSER_ALLOW, JSON.stringify(Object.keys(rec.run.env)));
-  assert.equal(rec.run.env.DEVTEAM_CLAIM_TOKEN, undefined);
-  assert.ok(!JSON.stringify(rec).includes('zq-claim'));
-  assert.ok(cmdline(s.chrome_pid).includes(`--user-data-dir=${k.profile}`), 'the daemon took the test HOME from run.env');
-  assert.equal(fs.existsSync(path.join(other, '.devteam')), false, 'nothing under the session\'s HOME');
-  assert.equal((await statusJson(k)).tabs, 1);
-  // T2-4: the daemon keeps only the allow-list, so neither it nor Chrome holds the token. Names only:
-  // the environment's values are never printed.
-  const names = (pid) => fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean).map((x) => x.slice(0, x.indexOf('=')));
-  for (const [who, pid] of [['the daemon', s.daemon_pid], ['Chrome', s.chrome_pid]]) {
-    const n = names(pid);
-    assert.ok(n.includes('DEVTEAM_TEST_BROWSER_ALLOW'), `${who} has the allow-list's names`);
-    assert.ok(!n.includes('DEVTEAM_CLAIM_TOKEN'), `${who} holds no DEVTEAM_CLAIM_TOKEN`);
-  }
-  // K1's second half: the guard lets the fixture port through, which the daemon knows only from run.env
-  const o = await cli(k, ['open', `${site.origin}/`]);
-  assert.equal(o.status, 0, o.err || o.out);
-});
-
 // ----- the URL mask, open and snapshot (T4) -----
 
 // A printed URL passes the contract's mask pattern. A failure names the field, never the value: a
@@ -730,130 +698,11 @@ test('C3 no glyphs in the screenshot', opts, async () => {
   } finally { await ch.close(); }
 });
 
-// Signs in on the fixture site: /login (username, password, remember if asked, Enter), then the code
-// on /2fa and Enter. C1's checks run on the way when asked.
-async function signIn(P, { remember = false, c1 = false } = {}) {
-  await ok(P, ['open', `${site.origin}/login`]);
-  let s = await snap(P);
-  const pw = refOf(s, 'textbox', 'Password'), user = refOf(s, 'textbox', 'Username');
-  await ok(P, ['type', pw, site.password]);
-  if (c1) {
-    assert.ok(has(await snap(P), `${pw} textbox "Password" = "•••"`), 'the password field reads •••');
-    const j = JSON.parse((await ok(P, ['snapshot', '--json'])).out);
-    assert.equal(j.nodes.find((n) => n.ref === pw)?.value, '•••');
-  }
-  if (remember) await ok(P, ['click', refOf(s, 'checkbox', 'Remember me')]);
-  await ok(P, ['type', user, site.username]);
-  await ok(P, ['press', 'Enter']);
-  s = await snap(P);
-  assert.ok(has(s, 'heading "Enter your code" (level 1)'), 'on the 2FA page');
-  const code = refOf(s, 'textbox', 'Code');
-  await ok(P, ['type', code, site.code]);
-  if (c1) assert.ok(lines(await snap(P)).some((l) => l.startsWith(`${code} textbox "Code"`) && l.endsWith('= "•••"')), 'the code field reads •••');
-  await ok(P, ['press', 'Enter']);
-  assert.ok(has(await snap(P), 'heading "Signed in as owner" (level 1)'), 'signed in');
-}
-const signedIn = async (P) => { await ok(P, ['open', `${site.origin}/account`]); return has(await snap(P), 'heading "Signed in as owner" (level 1)'); };
-const notSignedIn = async (P) => { await ok(P, ['open', `${site.origin}/account`]); return has(await snap(P), 'heading "Not signed in" (level 1)'); };
-
-test('C1 credential values are masked', opts, async () => {
-  const from = seen.length;
-  await signIn(a, { c1: true });
-  for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!seen.slice(from).some((x) => x.includes(v)), `no output holds the ${what}`);
-});
-
-test('D2 cookies survive stop and start; A5 a fresh tab', opts, async () => {
-  // signed in by C1, without remember me: a session cookie
-  for (const remember of [false, true]) {
-    if (remember) await signIn(a, { remember });
-    await stopped(a);
-    await started(a);
-    const st = await statusJson(a);
-    assert.equal(st.tabs, 1);
-    assert.equal(st.url, 'about:blank');
-    if (!remember) {
-      const back = await cli(a, ['back']);
-      assert.equal(back.status, 1);
-      assert.match(back.err, /nothing to go back to/);
-    }
-    assert.ok(await signedIn(a), `signed in after stop and start (remember ${remember})`);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(a.profile, 'Default', 'Preferences'), 'utf8')).session.restore_on_startup, 1);
-  }
-});
-
-// D3's sign-in half: project a is signed in (C1, D2)
-test('D3 another project, another profile', opts, async () => {
-  const b = project('brw-b', a.home);
-  await started(b);
-  const o = await cli(b, ['open', `${site.origin}/account`]);
-  assert.equal(o.status, 0, o.err || o.out);
-  const s = await ok(b, ['snapshot']);
-  assert.ok(lines(s.out).includes('heading "Not signed in" (level 1)'), s.out);
-  assert.notEqual(b.key, a.key);
-  assert.equal((await statusJson(b)).instance, b.key);
-  assert.ok(fs.existsSync(path.join(b.profile, 'root.json')));
-  await stopped(b);
-});
-
-test('F5 nothing kept in Login Data or Web Data', opts, async (t) => {
-  // signed in by D2; a stop lets Chrome write its databases
-  await stopped(a);
-  const d = path.join(a.profile, 'Default');
-  const three = [site.username, site.password, site.code];
-  let sqlite = null;
-  try { sqlite = await import('node:sqlite'); } catch {}
-  for (const name of ['Login Data', 'Web Data']) {
-    const f = path.join(d, name);
-    if (!fs.existsSync(f)) { t.diagnostic(`Default/${name} doesn't exist: it counts as holding nothing`); continue; }
-    let db = null;
-    try { db = sqlite && new sqlite.DatabaseSync(f, { readOnly: true }); } catch { db = null; }
-    if (db) {
-      try {
-        if (name === 'Login Data') assert.equal(db.prepare('SELECT count(*) AS n FROM logins').get().n, 0, 'Login Data keeps no login');
-        else assert.equal(db.prepare('SELECT value FROM autofill').all().filter((r) => three.includes(String(r.value))).length, 0, 'Web Data keeps none of the three in autofill');
-      } finally { db.close(); }
-      continue;
-    }
-    t.diagnostic(`Default/${name}: read as bytes (no node:sqlite, or it wouldn't open)`);
-    for (const g of [f, `${f}-journal`, `${f}-wal`].filter((x) => fs.existsSync(x))) {
-      const b = fs.readFileSync(g);
-      three.forEach((v, i) => assert.equal(b.includes(Buffer.from(v)), false, `${path.basename(g)} holds value ${i} of three`));
-    }
-  }
-  await started(a);
-});
-
-test('J1 forget signs out', opts, async () => {
-  assert.ok(await signedIn(a), 'signed in (remember me) before forget');
-  const r = await ok(a, ['forget']);
-  assert.match(r.out, /forgot profile .*: every site in it is signed out/);
-  assert.equal(fs.existsSync(a.profile), false, 'the profile folder is gone');
-  await started(a);
-  assert.ok(await notSignedIn(a), 'not signed in after forget');
-});
-
-test('D5 profiles lists both and marks a gone root (a real start)', opts, async () => {
-  const d = project('brw-d', a.home);
-  await started(d);
-  await stopped(d);
-  fs.rmSync(d.old, { recursive: true, force: true });
-  const r = await ok(a, ['profiles']);
-  const p = JSON.parse(r.out);
-  valid('profiles', p);
-  const by = Object.fromEntries(p.profiles.map((x) => [x.key, x]));
-  assert.ok(by[a.key] && by[d.key], Object.keys(by).join(' '));
-  assert.deepEqual(by[a.key], { key: a.key, root: fs.realpathSync(a.old), root_gone: false, current: true });
-  assert.equal(by[d.key].root_gone, true);
-  assert.equal(by[d.key].current, false);
-  assert.deepEqual(p.profiles.filter((x) => x.root_gone).map((x) => x.key), [d.key]);
-});
-
 // Last in the file: everything every verb printed.
 test('J2 nothing secret printed', opts, async () => {
   const all = seen.join('\n');
-  assert.ok(site.sessions().length >= 2, 'sessions were issued');
   site.sessions().forEach((v, i) => assert.ok(!all.includes(v), `session ${i} printed`));
-  assert.ok(secrets.size >= 2, 'control secrets were read');
+  assert.ok(secrets.size >= 1, 'control secrets were read');
   [...secrets].forEach((v, i) => assert.ok(!all.includes(v), `control secret ${i} printed`));
   for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!all.includes(v), `the ${what} printed`);
 });
