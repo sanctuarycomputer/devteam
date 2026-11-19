@@ -234,6 +234,7 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     const q = json(T.ok(['questions', '--id', add.qid, '--json']))[0];
     assert.ok(q.context.includes(HEADER), q.context);
     assert.ok(q.context.includes('recurring.ci-main: add'), q.context);
+    assert.ok(q.context.includes('A check only looks: it never changes production') && q.context.includes('as it is on main each time'), q.context);
     passes(T.ask({ recurring: { tidy: null } }));
     refused(T.ask({ recurring: { x: check() }, gates: {} }), /only "recurring"/);
     refused(T.ask({ recurring: { x: check({ every: '30m' }) } }), /recurring\.x\.every/);
@@ -412,7 +413,7 @@ test('A14: supervisor.md documents registering, changing and stopping a job, and
   assert.ok(s > at(/^## 3\. /m) && s < at(/^## 4\. /m), 'a level-2 section between §3 and §4');
   const end = doc.indexOf('\n## ', s + 1);
   const section = doc.slice(s, end);
-  for (const w of ['recurring-edit', 'thread ask', 'answer', '--from-turn', 'recurring apply', 'chore start recurring', 'merge --chore recurring --approved', 'null', 'recurring propose', '--stop', 'production']) assert.ok(section.includes(w), `the section says ${w}`);
+  for (const w of ['only looks', 'recurring-edit', 'thread ask', 'answer', '--from-turn', 'recurring apply', 'chore start recurring', 'merge --chore recurring --approved', 'null', 'recurring propose', '--stop', 'production']) assert.ok(section.includes(w), `the section says ${w}`);
   const mon = doc.slice(at(/^### Monitoring$/m), at(/^## Recurring jobs$/m));
   assert.match(mon, /Recurring jobs/);
   const five = doc.slice(at(/^## 5\. /m), at(/^## 6\. /m));
