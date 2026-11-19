@@ -3780,7 +3780,8 @@ http.createServer((req, res) => {
     const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
     // the nav is drawn from the page registry (kit-87): Library is registered in the Project group
     assert.match(html, /\['library', 'Library', 'project', 'library'\]/);
-    assert.match(html, /<section id="library"[\s>]/);
+    // on the shell (kit-92): its section unfenced, holding the line above the grid and the one grid of cards
+    assert.match(html, /<section id="library" data-page="library">\s*<div id="lib-top" hidden><\/div>\s*<div class="cards" id="lib-grid"><\/div>\s*<\/section>/);
     assert.match(html, /id="artifact-view"/);
     assert.match(html, /<iframe id="av-frame"[^>]* sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer">/);
     assert.ok(!/artifact[^\n]*allow-same-origin/.test(html), 'the viewer never shares the dashboard origin');

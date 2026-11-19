@@ -42,7 +42,17 @@ const OVERVIEW_GOALS = [
 // selector no element has (see PAGES). A page ticket replaces its entries here with its own.
 const frameOnly = (ids) => ids.map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } }));
 // kit-92: the Library
-const LIBRARY_PAGES = frameOnly(['library']);
+const LIBRARY_PAGES = [
+  // on the shell, whole, with test/lib/kit.mjs's libraryFixture (every kind, state and publish record exists only
+  // with it); page-top at 1440x900 only, as kit-90's and kit-91's entries
+  { hash: '#library', narrow: { view: '#no-such-view' }, init: lib.dataPatchInit(lib.libraryFixture().patch), ready: "!!document.querySelector('#lib-grid .lib-card')" },
+  // one item's peek over it (the public mock: the most rows), with the peeks' options (PEEK_OPTS, below); its wait
+  // is PEEK_READY's (defined after this list) and the item's own ID in the first row, so not-found never passes
+  { hash: `#lib/${encodeURIComponent(`artifact:${lib.libraryFixture().ids.public}`)}`, init: lib.dataPatchInit(lib.libraryFixture().patch), ready: `!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && document.querySelector('#drawer-body section.attrs dd')?.textContent.trim() === ${JSON.stringify(`artifact:${lib.libraryFixture().ids.public}`)}`, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } },
+  // a fresh, unpatched document (an init entry loads one; !window.__fx checks it), and it must stay before the goal
+  // pages: those load by a hash change alone (measureAt) and the fixture's data has no seeded goal. The empty Library
+  { hash: '#library', narrow: { view: '#no-such-view' }, init: '/* no patch: a new document */', ready: "!window.__fx && document.querySelector('#lib-grid > .empty')?.textContent.trim() === 'None'" },
+];
 // kit-93: the autonomy pages
 const AUTONOMY_PAGES = frameOnly(['trust', 'sensors', 'health', 'retros']);
 // kit-96: the Loop

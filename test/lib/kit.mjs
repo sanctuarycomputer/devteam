@@ -865,6 +865,87 @@ export function boardFixture({ now = Date.now() } = {}) {
   return { patch, ids };
 }
 
+// kit-92: the Library's /api/data parts, built on boardFixture's (so progress, ooda, tickets, planners
+// and questions stay whole for Board and Progress): { patch, ids }, patch for dataPatchInit. Artifact
+// rows as describeArtifact gives them (tree and published on landed rows) with an optional kind (mock,
+// missing, diagram, docs, and an unknown x read as Mock), listed out of kind order: a slug landed with
+// drafts in two worktrees, a draft-only slug, a broken row, publish states (public, public with an
+// update, drift, recorded but not live; ids.served is what the box serves, for x-devteam-public), a
+// landed mock slow-one, and artifacts: n landed mocks bulk-<i>; previews in each state; links by url,
+// remote only and path only; two open review questions beside boardFixture's plain ones.
+export function libraryFixture({ now = Date.now(), artifacts = 0 } = {}) {
+  const board = boardFixture({ now });
+  const b = board.ids;
+  const DAY = 864e5;
+  const iso = (daysAgo) => new Date(now - daysAgo * DAY).toISOString();
+  const hex = (n) => n.toString(16).padStart(8, '0').repeat(5);
+  const ids = {
+    ...b,
+    mock: 'checkout-mock', noKind: 'pay-flow', unknownKind: 'odd-kind', diagram: 'receipt-flow', docs: 'pay-guide', noGoal: 'kit-notes',
+    drafted: 'refund-screen', draftOnly: 'coupon-sketch', broken: 'bad-manifest', slow: 'slow-one',
+    public: 'checkout-mock', pubUpdate: 'receipt-mock', drift: 'wallet-mock', notLive: 'coupons-mock',
+    wt1: b.tBuilding, wt2: b.tHighRisk,
+    project: 'shop', root: '/srv/shop',
+    pvLive: 'cool-tiger', pvChecking: 'calm-otter', pvNotRunning: 'bold-heron', pvDown: 'quiet-moose', pvExpired: 'old-badger',
+    reviewQ: 'q-20261110-000000005-supervisor', reviewQ2: 'q-20261110-000000006-supervisor',
+    linkUrl: 'pay-figma', linkRemote: 'kit-repo', linkPath: 'pay-design',
+  };
+  let n = 0;
+  // a row as describeArtifact gives it; landed rows carry their tree and the log's publish record
+  const art = (slug, at, o = {}) => {
+    n += 1;
+    const row = { slug, at, title: `The ${slug.replace(/-/g, ' ')}`, summary: `What the ${slug.replace(/-/g, ' ')} shows`, by: `plan-${b.feat1}`, for: [`goal:${b.goal1}`], error: null, fp: `fp-${n}`, updated_at: iso(10 - n / 10), ...o };
+    return at === 'main' ? { tree: hex(n), published: null, ...row } : row;
+  };
+  const published = (tree, daysAgo) => ({ tree, at: iso(daysAgo), channel: 'dashboard' });
+  const pubTree = hex(901), updTree = hex(902), updOld = hex(903), driftTree = hex(904), driftOld = hex(905), notLiveTree = hex(906);
+  const rows = [
+    art(ids.docs, 'main', { kind: 'docs', by: `plan-${b.feat2}`, for: [`feature:${b.feat1}`] }),
+    art(ids.diagram, 'main', { kind: 'diagram', by: `plan-${b.planPromptQ}`, for: [`goal:${b.goal2}`] }),
+    art(ids.public, 'main', { kind: 'mock', tree: pubTree, published: published(pubTree, 3) }),
+    art(ids.noKind, 'main', { for: [`ticket:${b.tBuilding}`] }),
+    art(ids.unknownKind, 'main', { kind: 'x', for: [`ticket:${b.tHighRisk}`] }),
+    art(ids.noGoal, 'main', { kind: 'docs', by: 'supervisor', for: [] }),
+    art(ids.drafted, 'main', { for: [`feature:${b.feat1}`] }),
+    // the older draft first, so the newest isn't simply the first
+    art(ids.drafted, ids.wt1, { title: 'The refund screen, first draft', updated_at: iso(2), for: [`feature:${b.feat1}`] }),
+    art(ids.drafted, ids.wt2, { title: 'The refund screen, second draft', updated_at: iso(1), for: [`feature:${b.feat1}`] }),
+    art(ids.draftOnly, ids.wt1, { kind: 'diagram', for: [`ticket:${b.tHeld}`] }),
+    art(ids.broken, 'main', { title: null, summary: null, by: null, for: [], error: 'manifest.json: title is missing' }),
+    art(ids.pubUpdate, 'main', { tree: updTree, published: published(updTree, 4), for: [`goal:${b.goal2}`] }),
+    art(ids.drift, 'main', { tree: driftTree, published: published(driftOld, 6), by: `plan-${b.planAnswers}` }),
+    art(ids.notLive, 'main', { tree: notLiveTree, published: published(notLiveTree, 5), by: b.tHeld, for: [`ticket:${b.tHeld}`] }),
+    art(ids.slow, 'main', { kind: 'mock' }),
+    ...Array.from({ length: artifacts }, (_, i) => art(`bulk-${i}`, 'main', { kind: 'mock' })),
+  ];
+  ids.served = { [ids.public]: pubTree, [ids.pubUpdate]: updOld };
+  // previews as /api/data serves them (previewHelloRow, expires, down_since)
+  let port = 5170;
+  const pv = (name, session, o) => ({ name, port: (port += 1), project: 'home', session, label: null, at: iso(0.2), up: true, run: false, expires: iso(-1), down_since: null, ...o });
+  const previews = [
+    pv(ids.pvLive, b.tBuilding, { label: 'The refund screen, running' }),
+    pv(ids.pvChecking, `plan-${b.planPromptQ}`, { up: null }),
+    pv(ids.pvNotRunning, 'supervisor', { up: false, run: true }),
+    pv(ids.pvDown, `plan-${b.feat1}`, { up: false, down_since: iso(0.1) }),
+    pv(ids.pvExpired, b.tMerged, { expires: iso(0.05) }),
+  ];
+  const links = [
+    { id: ids.linkUrl, kind: 'url', title: 'The pay flow in Figma', notes: 'The screens the pay tickets build', for: [`goal:${b.goal1}`], url: 'https://www.figma.com/file/pay-flow', remote: null, path: null },
+    { id: ids.linkRemote, kind: 'repo', title: 'The kit', notes: null, for: [], url: null, remote: 'git@github.com:sanctuarycomputer/devteam.git', path: null },
+    { id: ids.linkPath, kind: 'repo', title: 'The pay design', notes: 'Read before a pay ticket', for: [`feature:${b.feat1}`], url: null, remote: null, path: 'docs/devteam/project/designs/pay.md' },
+  ];
+  // two open review questions, in boardFixture's question shape: one with a goal, one by its ticket
+  const q0 = board.patch.questions[0];
+  const reviewQ = (id, n_, o) => ({ ...q0, id, kind: 'review', ticket: null, goal: null, blocks: [], links: [], asked_at: iso(1 + n_), hash: `fedcba987654321${n_}`, rank: { ...q0.rank, position: 4 + n_, top: false, parts: { ...q0.rank.parts, goal: o.goal ?? null } }, ...o });
+  const questions = [
+    ...board.patch.questions,
+    reviewQ(ids.reviewQ, 1, { goal: b.goal2, question: 'Does the receipt mail read right?', review: { title: 'The receipt mail' } }),
+    reviewQ(ids.reviewQ2, 2, { ticket: b.tBuilding, question: 'Does the refund screen do what it should?', review: {} }),
+  ];
+  const patch = { ...board.patch, questions, library: { artifacts: rows, previews, links, public: { project: ids.project, root: ids.root } } };
+  return { patch, ids };
+}
+
 
 // kit-88: a project with a record for every side peek, every "How it changes" case and every item of
 // the design's peek inventory ("Every detail and widget stays"), for test/dashboard-peek.test.mjs (and
