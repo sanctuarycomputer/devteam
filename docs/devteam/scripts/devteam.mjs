@@ -18198,7 +18198,7 @@ async function imageChanges(since, to, { smoke = false } = {}) {
   return [...found.values()].sort((a, b) => cmp(a.file, b.file) || (a.part === b.part ? 0 : a.part === null ? -1 : b.part === null ? 1 : cmp(a.part, b.part)));
   // --smoke (image-changes@1 §6): the image (a worktree of since) runs its readers of a project
   // against a fixture made by each kit, each fixture on a HOME of its own, in a temporary folder that
-  // is removed on every exit (and git's record of the worktree pruned). A different exit, or a
+  // is removed on every exit (and git's record of that worktree with it, no other). A different exit, or a
   // different line of the fixture's own (after placeholders), is a change named for the command.
   // Each child is awaited, so a signal is handled between children (and kills the running one).
   async function smokeDiffers() {
@@ -18219,8 +18219,8 @@ async function imageChanges(since, to, { smoke = false } = {}) {
       let socks = [];
       try { socks = fs.readdirSync(tmuxDir).flatMap((d) => { try { return fs.readdirSync(path.join(tmuxDir, d)).map((s) => path.join(tmuxDir, d, s)); } catch { return []; } }); } catch {}
       for (const s of socks) spawnSync('tmux', ['-S', s, 'kill-server'], { env, stdio: 'ignore', timeout: 10000 });
+      spawnSync('git', ['worktree', 'remove', '--force', '--force', imageDir], { cwd: repoRoot, env, stdio: 'ignore', timeout: 60000 });
       fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-      spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, stdio: 'ignore', timeout: 60000 });
     };
     // a die (process.exit) cleans up too, and so does a signal: the running child is killed first
     const onSignal = () => { cleanup(); process.exit(2); };

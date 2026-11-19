@@ -981,3 +981,25 @@ test('box-pins changed --smoke stopped mid-reader kills what the reader started 
   await new Promise((resolve) => setTimeout(resolve, 8000));
   leftNothing(tmpd);
 });
+
+test('box-pins changed --smoke removes its own worktree and leaves another stale record alone (kit-306)', () => {
+  changedKit();
+  cg(['checkout', '-q', '-B', 'smoke-stale', 'v9.1.0']);
+  // a worktree of the caller's whose folder is gone: a prune would drop its record, the smoke must not
+  const stale = path.join(fs.realpathSync(tmp), 'stale-wt');
+  cg(['worktree', 'add', '-q', '--detach', stale, 'v9.1.0']);
+  fs.rmSync(stale, { recursive: true, force: true });
+  let tmpd;
+  try {
+    const s = smokeRun(['--since', 'v9.1.0', '--to', 'v9.1.0']);
+    tmpd = s.tmpd;
+    assert.equal(s.r.status, 0, s.r.stderr + s.r.stdout);
+    assert.equal(s.r.stdout, 'kind: patch\n');
+    const listed = cg(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree '));
+    assert.ok(listed.includes(`worktree ${stale}`), `the stale record is still there\n${listed.join('\n')}`);
+    assert.equal(listed.length, 2, `the main checkout and the stale record; the smoke's own is gone\n${listed.join('\n')}`);
+  } finally {
+    cg(['worktree', 'prune']);
+  }
+  leftNothing(tmpd);
+});
