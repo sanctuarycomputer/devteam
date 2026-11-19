@@ -25504,11 +25504,17 @@ async function browserPrepareProfile(profile, notes) {
   browserWritePrefs(profile);
   return { restarted: false };
 }
-// A local process proven to carry the profile: SIGTERM to it (its group when it leads one), then
+// Whether pid leads its process group (pgid = pid): /proc's stat, else ps.
+function browserLeads(pid) {
+  try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) === pid; } catch {}
+  return Number(spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).stdout?.trim()) === pid;
+}
+// A local process proven to carry the profile: SIGTERM to it (its group only when it leads one), then
 // SIGKILL 2 s later. The stop path's fallback for a daemon that died and left its Chrome.
 async function browserKillOn(profile) {
   for (const pid of browserProcsOn(profile) ?? []) {
-    const sig = (s) => { try { process.kill(-pid, s); } catch { try { process.kill(pid, s); } catch {} } };
+    const lead = browserLeads(pid);
+    const sig = (s) => { try { process.kill(lead ? -pid : pid, s); } catch {} };
     sig('SIGTERM');
     if (!(await browserGone(pid, 2000))) { sig('SIGKILL'); await browserGone(pid, 3000); }
   }
@@ -25712,6 +25718,7 @@ async function browserServe({ chrome: bin }) {
     ctx.view = http.createServer((req, res) => { req.resume(); res.on('error', () => {}); res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' }); res.end("The supervisor's browser runs here; its live view comes with a later release.\n"); });
     await browserListen(ctx.view, viewPort);
     const { wsUrl, cdpPort } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
     ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
     ctx.cdp = await cdpBrowser(wsUrl);
     ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
