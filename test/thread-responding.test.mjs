@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { dashboardOnFreePort, hasTmux, threadsFixture } from './lib/kit.mjs';
+import vm from 'node:vm';
+import { dashboardOnFreePort, hasTmux, kit, threadsFixture } from './lib/kit.mjs';
 
 const WORKER = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'kit-9' };
 const RESPONDER = { DEVTEAM_ROLE: 'responder' };
@@ -274,8 +275,78 @@ test('a session that died mid-turn: its stage goes from /api/threads', { skip: h
   const said = fs.readFileSync(path.join(dir, 'out.txt'), 'utf8');
   const rec = JSON.parse(fs.readFileSync(file, 'utf8'))[T];
   assert.equal(rec?.pid, standIn, `the stand-in agent's pid, not the sh's or the pane's bash (${said})`);
-  const working = async () => (await (await fetch(`http://127.0.0.1:${port}/api/threads`)).json()).working ?? {};
+  // every read must be a good one: a 500 after the kill has no working map, and must not pass for "gone"
+  const working = async () => {
+    const r = await fetch(`http://127.0.0.1:${port}/api/threads`);
+    assert.equal(r.status, 200, '/api/threads answers');
+    const w = (await r.json()).working;
+    assert.ok(w && typeof w === 'object' && !Array.isArray(w), 'a working map');
+    return w;
+  };
   assert.equal((await working())[T]?.stage, 'responding');
   process.kill(standIn);
   await within(4000, async () => !(T in await working()), 'the dead session\'s stage gone');
+});
+
+// The card's line, as the page draws it: the threads-core block in a vm, as kit-311's test loads it
+// (no TL, so the sup and working defaults must not throw).
+test('each stage shows for the right signal, and never hides the words for a newer turn', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
+  const ctx = vm.createContext({ TextEncoder, URL });
+  vm.runInContext(`${src}\n;globalThis.api = { tCardState };`, ctx);
+  const { tCardState } = ctx.api;
+  const MIN = 60000;
+  const now = Date.parse('2026-11-10T12:00:00Z');
+  const iso = (min) => new Date(now - min * MIN).toISOString();
+  const T = 't-20261110-110000000-owner';
+  const U = 'u-20261110-115700000-owner';
+  const U2 = 'u-20261110-115900000-owner';
+  const R = 'u-20261110-115800000-supervisor';
+  const th = (...turns) => ({ id: T, turns: turns.map(([by, id, min]) => ({ by, id, at: iso(min), text: 'x' })) });
+  const rec = (by, stage, turn, min) => ({ [T]: { by, stage, turn, at: iso(min), beat: iso(min) } });
+  const card = (t, w, sup = null, typed = true, pane = true) => tCardState(t, now, typed, pane, sup, w);
+  const one = th(['owner', U, 3]);
+
+  // the stages, and who
+  assert.equal(card(one, rec('supervisor', 'picked-up', U, 2)), 'The supervisor picked it up.');
+  assert.equal(card(one, rec('supervisor', 'responding', U, 2)), 'The supervisor is responding…');
+  assert.equal(card(one, rec('kit-9', 'responding', U, 2)), 'The session on kit-9 is responding…');
+  assert.equal(card(one, rec('plan-dash', 'responding', U, 2)), 'The planner for dash is responding…');
+  assert.equal(card(one, rec('responder', 'responding', U, 2)), 'The responder is responding…');
+  assert.equal(card(one, rec('', 'responding', U, 2)), 'A session is responding…', 'no name: plain words');
+  assert.equal(card(one, rec(7, 'picked-up', U, 2)), 'A session picked it up.', 'not a string: plain words');
+  // the record counts over held and over kit-311's record of the same turn: whoever picked it up has it
+  assert.equal(card(one, rec('supervisor', 'responding', U, 2), null, 'held', true), 'The supervisor is responding…', 'over held');
+  assert.equal(card(one, rec('supervisor', 'picked-up', U, 2), { checked: null, undelivered: [U] }, false, false), 'The supervisor picked it up.', 'over not delivered, for the turn it names');
+
+  // the session's own reply first, then still working (the view names every non-owner turn supervisor)
+  const replied = th(['owner', U, 3], ['supervisor', R, 2]);
+  for (const by of ['supervisor', 'responder', 'kit-9']) {
+    const who = { supervisor: 'The supervisor', responder: 'The responder', 'kit-9': 'The session on kit-9' }[by];
+    assert.equal(card(replied, rec(by, 'responding', U, 1)), `${who} is responding…`, `a reply before the record (${by})`);
+    assert.equal(card(replied, rec(by, 'responding', U, 2.5)), null, `a reply after the record is the state (${by})`);
+  }
+  assert.equal(card(replied, rec('supervisor', 'responding', U, 2)), null, 'a reply at the same moment: not before it');
+  assert.equal(card(replied, rec('supervisor', 'responding', R, 1)), null, 'a record naming no owner turn');
+
+  // a record for an older owner turn never speaks for the newer one
+  const newer = th(['owner', U, 5], ['supervisor', R, 4], ['owner', U2, 1]);
+  assert.equal(card(newer, rec('supervisor', 'responding', U, 3)), 'Sent.', "the newest turn's own words");
+  assert.equal(card(newer, rec('supervisor', 'responding', U, 3), { checked: null, undelivered: [U2] }),
+    'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it has not checked yet.', "kit-311's words for the newest");
+  assert.equal(card(newer, rec('supervisor', 'responding', U, 3), null, 'held', true).startsWith('Held: '), true, 'the held words for the newest');
+  assert.equal(card(newer, rec('supervisor', 'responding', U2, 0.5), { checked: null, undelivered: [U2] }), 'The supervisor is responding…', 'a record naming the newest');
+  // a record for another thread, or a stage it doesn't know, is no record
+  assert.equal(card(one, { 't-other': rec('supervisor', 'responding', U, 2)[T] }), 'Sent.');
+  assert.equal(card(one, rec('supervisor', 'replied', U, 2)), 'Sent.');
+
+  // no record: today's words
+  assert.equal(card(one, {}), 'Sent.');
+  assert.equal(card(one, null), 'Sent.');
+  assert.equal(card(replied, {}), null, 'the supervisor has the last word');
+  assert.equal(card(th(), rec('supervisor', 'responding', U, 2)), null, 'no turns');
+  // the five-argument call, with no TL on the page's globals, doesn't throw
+  assert.equal(tCardState(one, now, true, true, null), 'Sent.');
+  assert.equal(tCardState(one, now, true, true), 'Sent.');
 });
