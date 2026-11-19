@@ -18097,7 +18097,8 @@ async function bumpPins(pins, release) {
 // test/contracts/image-changes.md). A new image command adds its parts here; a change that bumps a
 // crossing's version is a minor whatever this list says. Anything not listed reaches the image at
 // the next minor: staleness, never breakage, since the image is always a whole release. The file's
-// rest (the imports, the Node check, the re-exec) always counts, so it isn't listed.
+// rest (the imports, the Node check, the re-exec) always counts, so it isn't listed. The classifier's
+// own parts are listed, so a change to the list is a minor.
 const IMAGE_RUNS = {
   // whole files, as globs relative to the kit repo
   files: ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md'],
@@ -18108,7 +18109,8 @@ const IMAGE_RUNS = {
     'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover', 'cmdBoxPins',
     // what they are built from that serves only the image: the hub
     'probeHello', 'HUB_BODY_MAX', 'hubTurnOk', 'HUB_ACTIONS', 'startHub', 'hubLogger', 'imageHub',
-    // recover --machine (the project's own recover is each project's kit, never the image's)
+    // recover --machine (a project's own recover runs from that project's kit, never the image's;
+    // its recoverOne is listed below as a crossing, since it writes supervisor-up.json)
     'siblingOf', 'isAdopted', 'machineProjects', 'projectKit', 'projectJson', 'kitHasRecover', 'notedPaneOf', 'tmuxName', 'readUpList', 'recoverMachine', 'LEGACY_RECOVER_MESSAGE', 'legacyRecover',
     // machine status, tell, alert, pane-state
     'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
@@ -18129,6 +18131,20 @@ const IMAGE_RUNS = {
     // the project-side parts the image relies on (the crossings): the presses the gateway signs and
     // a dashboard verifies, and the operator's role guard
     'gatewaySigned', 'termSigned', 'dashboardProofProblem', 'paneSigned', 'ownerSettingSigned', 'paneProofProblem', 'ownerSettingProofProblem', 'OPERATOR_READS', 'OPERATOR_SUBCOMMANDED',
+    // the dispatcher and the operator's role guard (region dispatch)
+    'dispatch',
+    // what keeps a project's kit read-only for the operator: no facts saved, no usage cache written, no host claim at a prompt
+    'factsSaveAtExit', 'usageCache', 'cmdPrompt',
+    // what the boot script calls in a project's kit: settings --get tmux_session, and the run/supervisor-pane record it reads and removes
+    'cmdSettings', 'tmuxSession', 'supervisorPaneFile', 'supervisorPaneMark', 'recordSupervisorPane',
+    // run/supervisor-up.json, which the boot script reads ("up": false) to choose whom to restore, and its writers, recover's own included
+    'SUPERVISOR_UP_FILE', 'writeSupervisorUp', 'noteSupervisorFromTick', 'noteSupervisorSelf', 'recoverOne',
+    // the ~/.devteam/repos-<port> records a project's kit writes and recover --machine reads
+    'registerOnMachine', 'machineRepoDir',
+    // a dashboard leaves the machine's hub to the image (dashboardHub)
+    'dashboardHub',
+    // the classifier itself, and the readers it is built from, so a change to the list is a minor
+    'IMAGE_RUNS', 'imageChanges', 'parts', 'globs',
   ],
 };
 // box-pins changed: the changes, sorted (image-changes@1 §5), between two commits of the cwd's repo
@@ -18865,6 +18881,12 @@ function termRoutes({ port, host, log }) {
   };
 }
 /* term-server end */
+// A dashboard's hub, unless the box image runs the machine's hub on this port (DEVTEAM_IMAGE_HUB):
+// then it is left to the image. The image relies on this check (IMAGE_RUNS).
+function dashboardHub(log) {
+  if (imageHub() === HUB_PORT) { log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); return null; }
+  return startHub(log, { kit: ownKitVersion() });
+}
 async function cmdDashboard() {
   // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
   // while it starts is then a change it sees
@@ -19884,7 +19906,7 @@ async function cmdDashboard() {
   trackRequests(server);
   // the hub, unless the box's image serves it; again after a respawn that failed
   let hubHandle = null;
-  const startHubOnce = () => { if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else hubHandle = startHub(log, { kit: ownKitVersion() }); };
+  const startHubOnce = () => { hubHandle = dashboardHub(log); };
   server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHubOnce(); every(accountsTick, accountsEveryMs()); });
   // ----- the kit watch (kit-288): a dashboard runs the kit it serves. Its kit's files are printed
   // every DEVTEAM_KIT_WATCH_MS; a print unlike the start's and the same two polls running (a sync
@@ -25136,6 +25158,7 @@ const COMMANDS = {
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard,
 };
+/* dispatch start */
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
 // A cloud box's operator (process/operator.md) looks after the machine and reads every repo. Any other
@@ -25158,3 +25181,4 @@ else {
   // a command that set a failing exit code (preview start when the app died) answers from its exit
   Promise.resolve(r).then(() => { if (!process.exitCode) replyNow(); deliverNudges(); }, (e) => die(e?.message ?? String(e)));
 }
+/* dispatch end */
