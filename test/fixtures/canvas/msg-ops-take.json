@@ -1,0 +1,24 @@
+{
+  "t": "ops",
+  "rev": 60,
+  "by": {
+    "id": "kit-651",
+    "name": "kit-651",
+    "via": "take"
+  },
+  "ack": null,
+  "ops": [
+    {
+      "op": "set",
+      "id": "card",
+      "prop": "size.w",
+      "value": 400
+    },
+    {
+      "op": "move",
+      "id": "p-parts",
+      "parent": null,
+      "after": null
+    }
+  ]
+}

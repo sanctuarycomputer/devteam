@@ -664,6 +664,207 @@ export function dataRewriteInit(fx) {
 })();`;
 }
 
+// kit-91: a script for Page.addScriptToEvaluateOnNewDocument, the dataRewriteInit pattern: /api/data
+// with each top-level key of patch put in place of the server's, except ooda, merged one level (and
+// its roadmap one level inside it), so the page keeps the rest of what it reads. window.__fx is read
+// on every answer, so a test can change it in the page; every error goes in window.__errors, and the
+// 10 s poll runs every 300 ms. throwStorage: Storage's getItem and setItem throw (localStorage and sessionStorage alike), from before the
+// page's own scripts run.
+export function dataPatchInit(patch, { throwStorage = false } = {}) {
+  return `(() => {
+  const si = window.setInterval;
+  window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
+  window.__fx = ${JSON.stringify(patch)};
+  window.__errors = [];
+  window.addEventListener('error', (e) => window.__errors.push(String(e.message || e.error || e)));
+  window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason && e.reason.message || e.reason)));
+  if (${JSON.stringify(!!throwStorage)}) {
+    const no = () => { throw new DOMException('storage is off', 'SecurityError'); };
+    Storage.prototype.getItem = no;
+    Storage.prototype.setItem = no;
+  }
+  const json = (r, body) => new Response(JSON.stringify(body), { status: r.status, statusText: r.statusText, headers: r.headers });
+  const real = window.fetch;
+  window.fetch = async (u, o) => {
+    const url = String(u && u.url ? u.url : u);
+    const method = String(o?.method || 'GET').toUpperCase();
+    const r = await real(u, o);
+    const fx = window.__fx;
+    if (method === 'GET' && r.ok && url.startsWith('/api/data')) {
+      const d = await r.json();
+      for (const [k, v] of Object.entries(fx)) {
+        if (k !== 'ooda') { d[k] = v; continue; }
+        const roadmap = v.roadmap ? { ...(d.ooda?.roadmap || {}), ...v.roadmap } : d.ooda?.roadmap;
+        d.ooda = { ...(d.ooda || {}), ...v, ...(roadmap ? { roadmap } : {}) };
+      }
+      return json(r, d);
+    }
+    return r;
+  };
+})();`;
+}
+
+// kit-91: deterministic /api/data parts for the Board and Progress tests, in the shapes the server
+// gives (dashboardDataRead, collectProgress, deriveStatus, plannersNow, collectRoadmap, goalView,
+// rankQuestions): { patch, ids }, patch for dataPatchInit. Two goals, a feature each and one in no goal
+// (with two stories per goal feature: v0.1.0 tagged, v0.2.0 ready to tag, v0.3.0 open); tickets in
+// every column of the Board, in two repos (home and devteam-kit), sized S (1 point) and M (2), in waves
+// 1 and 2, merged ones within the last 8 weeks; among the unmerged a building one at task T3, a high
+// risk one, a held one, one at a usage limit, one stuck on a prompt, one blocked by a question, one
+// blocked with none, and a plain one; a critical path of two; four planners (a usage limit, a prompt
+// with a question holding it, no window and waiting for the supervisor, waiting for 2 answers); and
+// the open questions those name. ids names each by its role.
+export function boardFixture({ now = Date.now() } = {}) {
+  const DAY = 864e5;
+  const iso = (daysAgo) => new Date(now - daysAgo * DAY).toISOString();
+  const goal1 = 'g-20261101-000000001-supervisor', goal2 = 'g-20261101-000000002-supervisor';
+  const featPay = 'pay', featReceipts = 'receipts', featNoGoal = 'no-goal-feat';
+  const qTicket = 'q-20261110-000000001-supervisor', qPlanner = 'q-20261110-000000002-supervisor';
+  const qAnswers = ['q-20261110-000000003-supervisor', 'q-20261110-000000004-supervisor'];
+  const ids = {
+    goal1, goal2, featPay, featReceipts, featNoGoal,
+    feat1: featPay, feat2: featReceipts,
+    relTagged: 'v0.1.0', relReady: 'v0.2.0', relOpen: 'v0.3.0',
+    stories: ['PAY-S1', 'PAY-S2', 'RECEIPTS-S1', 'RECEIPTS-S2'],
+    tReleased: 'pay-01-form', tMerged: 'pay-02-capture', tMergedReceipts: 'receipts-01-mail', tMergedKit: 'kit-01-hooks',
+    tBuilding: 'pay-03-refund', tLimit: 'pay-04-limits', tHighRisk: 'receipts-02-pdf', tPrompt: 'kit-02-prompt',
+    tBlockedQ: 'pay-05-wallet', tBlockedNoQ: 'receipts-03-csv', tPlain: 'kit-03-docs', tHeld: 'pay-06-coupons',
+    qTicket, qPlanner, qAnswers,
+    planLimit: 'pay', planPromptQ: 'receipts-export', planNoWindow: 'onboarding', planAnswers: 'pay-wallet',
+    msgSupervisor: 'm-20261110-000000001-plan-onboarding',
+  };
+  // the stories: PAY-S1 shipped in v0.1.0 (tagged), RECEIPTS-S1 done in v0.2.0 (ready to tag), the S2s open in v0.3.0
+  const stories = {
+    'PAY-S1': { feature: featPay, text: 'An admin pays by card on one page', release: 'v0.1.0' },
+    'PAY-S2': { feature: featPay, text: 'An admin refunds a payment', release: 'v0.3.0' },
+    'RECEIPTS-S1': { feature: featReceipts, text: 'Every payment mails a receipt', release: 'v0.2.0' },
+    'RECEIPTS-S2': { feature: featReceipts, text: 'A receipt downloads as a PDF', release: 'v0.3.0' },
+  };
+  // [id, title, feature, repo, size, risk, stage, phase, task, waiting, held, held_by, wave, serves, depends_on, added (days ago), merged (days ago), released_in]
+  const LIMIT = { kind: 'limit', line: 'You have hit your usage limit · resets 5pm' };
+  const PROMPT = { kind: 'prompt', line: 'Do you want to proceed? 1. Yes 2. No' };
+  const rows = [
+    [ids.tReleased, 'The card form', featPay, 'home', 'S', 'normal', 'released', null, null, null, null, null, 1, ['PAY-S1'], [], 40, 20, 'v0.1.0'],
+    [ids.tMerged, 'Card capture', featPay, 'home', 'M', 'normal', 'merged', null, null, null, null, null, 1, ['PAY-S1'], [], 38, 10, null],
+    [ids.tMergedReceipts, 'Mail the receipt', featReceipts, 'home', 'S', 'normal', 'merged', null, null, null, null, null, 1, ['RECEIPTS-S1'], [], 30, 5, null],
+    [ids.tMergedKit, 'Hooks for receipts', featReceipts, 'devteam-kit', 'M', 'normal', 'merged', null, null, null, null, null, 1, ['RECEIPTS-S1'], [], 30, 3, null],
+    [ids.tBuilding, 'Refund a payment', featPay, 'home', 'M', 'normal', 'building', 'build', 'T3', null, null, null, 2, ['PAY-S2'], [ids.tMerged], 25, null, null],
+    [ids.tLimit, 'Refund limits', featPay, 'home', 'S', 'normal', 'building', 'build', null, LIMIT, null, null, 2, ['PAY-S2'], [ids.tMerged], 24, null, null],
+    [ids.tHighRisk, 'A receipt as a PDF', featReceipts, 'home', 'M', 'high', 'in-review', 'final-review', null, null, null, null, 2, ['RECEIPTS-S2'], [ids.tMergedReceipts], 22, null, null],
+    [ids.tPrompt, 'PDF fonts in the kit', featReceipts, 'devteam-kit', 'S', 'normal', 'building', 'build', null, PROMPT, null, null, 2, ['RECEIPTS-S2'], [ids.tMergedKit], 20, null, null],
+    [ids.tBlockedQ, 'Pay from a wallet', featPay, 'home', 'S', 'normal', "spec'd", 'blocked', null, null, null, qTicket, 2, ['PAY-S2'], [ids.tMerged], 18, null, null],
+    [ids.tBlockedNoQ, 'Receipts as CSV', featReceipts, 'home', 'S', 'normal', 'ready', 'blocked', null, null, null, null, 1, ['RECEIPTS-S2'], [], 15, null, null],
+    [ids.tPlain, 'The kit\'s docs page', featNoGoal, 'devteam-kit', 'S', 'normal', 'ready', null, null, null, null, null, 1, [], [], 12, null, null],
+    [ids.tHeld, 'Coupons at checkout', featPay, 'home', 'S', 'normal', 'planned', null, null, null, 'until the processor is chosen', null, 2, ['PAY-S2'], [ids.tBlockedNoQ], 10, null, null],
+  ];
+  const component = (id) => id.split('-')[0];
+  const progressTickets = rows.map(([id, title, feature, repo, size, risk, stage, phase, task, waiting, held, , wave, serves, depends_on, added, merged, released_in]) => {
+    const targets = [...new Set(serves.map((s) => stories[s]?.release).filter(Boolean))].sort();
+    return {
+      id, title, feature, component: component(id), kind: 'build', size, risk, weight: size === 'M' ? 2 : 1, serves, depends_on,
+      wave, added_at: iso(added), merged_at: merged === null ? null : iso(merged), released_in, target_release: targets[0] ?? null,
+      stage, phase, task, held, waiting, repo,
+    };
+  });
+  const merged = new Set(progressTickets.filter((t) => t.merged_at).map((t) => t.id));
+  const tickets = rows.map(([id, title, feature, repo, size, risk, stage, phase, task, waiting, held, held_by, , serves, depends_on, , mergedAgo]) => ({
+    id, title, feature, component: component(id), kind: 'build', size, risk, serves, depends_on,
+    stage, merge_sha: mergedAgo === null ? null : 'a1b2c3d4'.repeat(5), branch: mergedAgo === null && ['building', 'in-review', "spec'd"].includes(stage) ? `ticket/${id}` : null,
+    deps_merged: depends_on.every((d) => merged.has(d)), held,
+    phase, task, note: null, minutes_silent: phase ? 4 : null, usd: phase ? 1.25 : null, waiting, repo, held_by,
+  }));
+  // the longest chain left: the CSV export, then the coupons that wait on it
+  const critical_path = [ids.tBlockedNoQ, ids.tHeld];
+  // the roadmap, as collectRoadmap counts it from the tickets
+  const featRow = (fid, title, goals) => {
+    const ts = progressTickets.filter((t) => t.feature === fid);
+    const left = ts.filter((t) => !t.merged_at);
+    const st = Object.entries(stories).filter(([, s]) => s.feature === fid);
+    const sdone = st.filter(([sid]) => { const x = ts.filter((t) => t.serves.includes(sid)); return x.length && x.every((t) => t.merged_at); }).length;
+    const pts = (xs) => xs.reduce((a, t) => a + t.weight, 0);
+    return {
+      feature: fid, title, status: ts.length && ts.every((t) => t.merged_at) ? 'done' : ts.some((t) => t.merged_at || t.phase) ? 'in progress' : 'planned', goals,
+      points_total: pts(ts), points_left: pts(left), stories: { done: sdone, total: st.length }, waves_left: left.length ? Math.max(...left.map((t) => t.wave)) - Math.min(...left.map((t) => t.wave)) + 1 : 0,
+      releases: [...new Set(st.map(([, s]) => s.release))].sort(), blocked_by_questions: fid === featPay ? [qTicket] : [], done: !left.length && ts.length > 0, eta: left.length ? new Date(now + 14 * DAY).toISOString().slice(0, 10) : null,
+    };
+  };
+  const roadmapFeatures = {
+    [featPay]: featRow(featPay, 'Pay by card', [goal1]),
+    [featReceipts]: featRow(featReceipts, 'Receipts', [goal2]),
+    [featNoGoal]: featRow(featNoGoal, 'The kit\'s docs', []),
+  };
+  const milestone = (title, fid) => {
+    const f = roadmapFeatures[fid];
+    return { n: 1, title, target: 80, by: null, status: 'current', features: [fid], estimate_tickets: 4, planned_points: f.points_total, points_left: f.points_left, waves_to_here: f.waves_left, eta: new Date(now + 14 * DAY).toISOString().slice(0, 10), late: false };
+  };
+  const goal = (id, title, priority, fid, msTitle) => {
+    const m = milestone(msTitle, fid);
+    const raw = [{ title: msTitle, target: 80, preconditions: [1, 2], tickets: 4 }];
+    return {
+      id, type: 'goal', status: 'ready', title, outcome: `${title}, for most admins`,
+      measure: { description: 'self-serve share', target: 80, unit: '%', direction: 'up', source: 'prod', check: 'echo 40' },
+      horizon: '2027-03-31', non_goals: ['enterprise invoicing'], preconditions: ['cards work', 'prices defined'], priority,
+      created_at: iso(60), created_by: 'supervisor',
+      updates: [{ at: iso(59), by: 'supervisor', milestones: raw }, { at: iso(58), by: 'owner', channel: 'cli', status: 'ready', decision: { verdict: 'approve', notes: 'go' } }],
+      milestones: raw, decision: { verdict: 'approve', notes: 'go' },
+      readings: [{ at: iso(59), value: 20, source: 'prod' }, { at: iso(1), value: 40, source: 'prod' }],
+      track: 'on track',
+      check: { definition: [], approval: [], coverage: [], features: [fid], unplanned: [], later: [], current_milestone: 1, design: `project/designs/${fid}.md` },
+      forecast: { milestones: [m], slots: 8, rate_points_per_day: 1.4, median_cycle_days: 2, eta: m.eta, past_horizon: false },
+      hold_view: { mode: 'run', state: 'running', running: [], reason: null, by: null, fleet: null, since: null },
+      impact: null, at_target: null,
+    };
+  };
+  const goals = [goal(goal1, 'Admins pay alone', 1, featPay, 'Most admins pay alone'), goal(goal2, 'Receipts for every payment', 2, featReceipts, 'Every payment has a receipt')];
+  const roadmapGoals = goals.map((g) => ({
+    id: g.id, title: g.title, priority: g.priority, status: 'ready', hold: 'run', unplanned: [], later: [], current_milestone: 1,
+    milestones: g.forecast.milestones, past_horizon: false, features: g.check.features, eta: g.forecast.eta, has_design: true,
+  }));
+  // the open questions, ranked, in /api/data's shape
+  const question = (id, n, o) => ({
+    id, kind: 'owner-decision', class: null, scope: null, ticket: null, re: null, sensor: null, thread: null,
+    asked_at: iso(8 - n), question: 'A question', context: '', options: [], choices: [{ label: 'Yes' }, { label: 'No' }], links: [],
+    goal: null, change: null, met: null, rule_scope: null, recommendation: '', confidence: null, default: null, deadline: null, blocks: [],
+    stake: 2, urgency: 2, settles: [], settles_if: null, settles_label: null,
+    rating_history: [{ at: iso(8 - n), by: 'supervisor', stake: 2, urgency: 2, asked: true }], approves: [], evidence: [], note: null, new_because: null,
+    why_asked: { reasons: [] }, secrets: [], secrets_posted: [], status: 'open', answer: null, answered_by: null, answered_at: null, matched: null,
+    hash: `0123456789abcde${n}`, rewritten: false, autonomy: null, standing_rule: null, channel: null, said: null, turn: null, review: null, result: null,
+    declined: null, allow_partial: null, result_status: null, links_moved: null, goal_hold: null,
+    rank: {
+      score: 10 - n, own: 10 - n, position: n, of: 4, top: n === 1, floor: null, chips: [], reason: null, sum: `score ${10 - n}`,
+      parts: { goal: o.goal ?? null, goal_title: null, goal_impact: 2, judged: false, impact_by: null, stake: 2, urgency: 2, urgency_given: 2, rated: true, held_up: 0, on_path: 0, behind: 0, unblock: 0, default: false, default_soon: false, parked: false, floor: null, age_days: n, settles: [], settled_by: [] },
+    },
+    class_name: null,
+    ...o,
+  });
+  const planLink = (feature) => [{ title: 'The draft design', path: `docs/devteam/project/designs/${feature}.md`, ref: `plan/${feature}` }];
+  const questions = [
+    question(qTicket, 1, { ticket: ids.tBlockedQ, blocks: [ids.tBlockedQ], question: 'Which wallet provider should Pay from a wallet use?', choices: [{ label: 'Apple Pay' }, { label: 'Google Pay' }] }),
+    question(qPlanner, 2, { goal: goal2, links: planLink(ids.planPromptQ), question: 'Should receipts export to the accounting tool?' }),
+    question(qAnswers[0], 3, { links: planLink(ids.planAnswers), question: 'Which wallets come first?' }),
+    question(qAnswers[1], 4, { links: planLink(ids.planAnswers), question: 'May a wallet payment be refunded to a card?' }),
+  ];
+  const planner = (feature, title, goals_, o) => ({
+    feature, title, goals: goals_, tickets: 0, branch: `plan/${feature}`, window: true, problem: null, waiting: null, parked: false,
+    last_seen: iso(0.01), minutes_silent: 14, waiting_on_supervisor: [], waiting_on_owner: [], held_by: null, ...o,
+  });
+  const planners = [
+    planner(ids.planLimit, 'Pay by card, the rest', [goal1], { tickets: 2, waiting: LIMIT }),
+    planner(ids.planPromptQ, 'Receipts export', [goal2], { waiting: PROMPT, waiting_on_owner: [qPlanner], held_by: qPlanner }),
+    planner(ids.planNoWindow, 'Onboarding', [], { window: false, problem: 'its tmux window is gone', waiting_on_supervisor: [{ id: ids.msgSupervisor, kind: 'blocked', text: 'The design needs the pricing page: may I read it?' }] }),
+    planner(ids.planAnswers, 'Pay from a wallet', [goal1], { tickets: 1, waiting_on_owner: [...qAnswers], held_by: qAnswers[0] }),
+  ];
+  const patch = {
+    tickets, critical_path, questions, planners,
+    progress: { now: new Date(now).toISOString(), features: [...new Set(progressTickets.map((t) => t.feature))], stories, tickets: progressTickets },
+    ooda: {
+      goals,
+      roadmap: { goals: roadmapGoals, features: roadmapFeatures, unassigned: [featNoGoal], rate_points_per_day: 1.4, median_cycle_days: 2 },
+    },
+  };
+  return { patch, ids };
+}
+
 
 // kit-88: a project with a record for every side peek, every "How it changes" case and every item of
 // the design's peek inventory ("Every detail and widget stays"), for test/dashboard-peek.test.mjs (and

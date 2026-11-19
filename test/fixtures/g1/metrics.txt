@@ -27,7 +27,8 @@ exit 0
         "first_passes": 1,
         "rejected": 0,
         "rejection_rate": 0,
-        "top_blocking_rules": []
+        "top_blocking_rules": [],
+        "top_blocking_categories": []
       }
     },
     "findings": 0,

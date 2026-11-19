@@ -46,6 +46,7 @@ exit 0
       "note": null,
       "usd": null,
       "waiting": null,
+      "repo": "home",
       "held_by": "q-<sha>-<sha>-supervisor"
     },
     {
@@ -73,6 +74,7 @@ exit 0
       "note": null,
       "usd": null,
       "waiting": null,
+      "repo": "home",
       "held_by": null
     }
   ],
@@ -124,6 +126,7 @@ exit 0
     "registry-attest": "Confirming the registry is complete",
     "new-dependency": "Adding a new dependency",
     "artifact-publish": "Publishing a page",
+    "recurring-edit": "Adding, changing or stopping a job",
     "pane-answer": "Answering the supervisor's terminal",
     "goal-order": "Putting the goals in order",
     "goal-approval": "Approving a goal",
@@ -198,6 +201,10 @@ exit 0
       "channel": null,
       "said": null,
       "turn": null,
+      "answer_seen": null,
+      "about_turn": null,
+      "seen": null,
+      "owner_said_turn": null,
       "review": null,
       "result": null,
       "declined": null,
@@ -269,7 +276,8 @@ exit 0
           "first_passes": 1,
           "rejected": 0,
           "rejection_rate": 0,
-          "top_blocking_rules": []
+          "top_blocking_rules": [],
+          "top_blocking_categories": []
         }
       },
       "findings": 0,
@@ -873,7 +881,8 @@ exit 0
         "phase": null,
         "task": null,
         "held": null,
-        "waiting": null
+        "waiting": null,
+        "repo": "home"
       },
       {
         "id": "g1-02-b",
@@ -898,11 +907,13 @@ exit 0
         "phase": null,
         "task": null,
         "held": null,
-        "waiting": null
+        "waiting": null,
+        "repo": "home"
       }
     ]
   },
   "planners": [],
+  "next_moves": [],
   "ooda": {
     "goals": [],
     "roadmap": {
@@ -2113,6 +2124,28 @@ exit 0
       "owner_only": "gate-change"
     },
     {
+      "key": "worktree_copy",
+      "group": "Agents and sessions",
+      "name": "Installed folders copied into new worktrees",
+      "description": "folders copied from the main checkout into a new session or chore worktree whose lockfile matches",
+      "shown": "count",
+      "value": 0,
+      "set": false,
+      "default": 0,
+      "owner_only": null
+    },
+    {
+      "key": "worktree_setup_always",
+      "group": "Agents and sessions",
+      "name": "Always run worktree setup",
+      "description": "run worktree_setup on every session start, even when nothing it installs from changed",
+      "shown": "value",
+      "value": false,
+      "set": false,
+      "default": false,
+      "owner_only": null
+    },
+    {
       "key": "worktree_files",
       "group": "Agents and sessions",
       "name": "Files copied into worktrees",
@@ -2437,6 +2470,17 @@ exit 0
       "value": 7,
       "set": false,
       "default": 7,
+      "owner_only": null
+    },
+    {
+      "key": "recurring",
+      "group": "Rhythm",
+      "name": "Jobs",
+      "description": "the jobs that run on a schedule under Upkeep: checks and chores",
+      "shown": "names",
+      "value": [],
+      "set": false,
+      "default": [],
       "owner_only": null
     },
     {
