@@ -1052,7 +1052,7 @@ export function peekFixture(base, name = 'peek') {
   ids.ticket = 'pay-01-card';
   dt(['ticket', 'add', ids.ticket, '--json', JSON.stringify({ title: 'card capture', feature: 'pay', component: 'pay', kind: 'build', size: 'S', risk: 'high', serves: ['PAY-S1'], depends_on: [ids.ticketMerged], touches: ['pay/**'], done_when: ['the card check passes in CI'],
     contracts: { provides: ['card-api@1'], consumes: [] }, links: ['docs-site'], one_way_doors: ['where card numbers are kept'], notes: 'keep the form on one page' })]);
-  dt(['ticket', 'set', ids.ticket, '--json', JSON.stringify({ held: 'until the processor is chosen' })]);
+  dt(['ticket', 'set', ids.ticket, '--json', JSON.stringify({ held: 'until the processor is chosen', held_for: ['external:the processor choice'], held_until: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10) })]);
   dt(['ticket', 'add', 'pay-02-receipt', '--json', JSON.stringify({ title: 'card receipt', feature: 'pay', component: 'pay', kind: 'build', size: 'M', risk: 'normal', serves: ['PAY-S1'], depends_on: [ids.ticket], touches: ['pay/receipt/**'], done_when: ['a receipt is sent'] })]);
   ids.ticketReplaced = 'pay-09-old-form';
   dt(['ticket', 'add', ids.ticketReplaced, '--json', JSON.stringify({ title: 'the old card form', feature: 'pay', component: 'pay', kind: 'build', size: 'S', risk: 'normal', serves: ['PAY-S1'], depends_on: [], touches: ['pay/old/**'], done_when: ['the old form still renders'], superseded_by: ids.ticket })]);
@@ -1124,7 +1124,7 @@ export function peekFixture(base, name = 'peek') {
     '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', ...RATE]);
   dt(['answer', ids.qGoalChange, 'Yes'], null);
   dt(['goal', 'set', ids.goal, '--approved', ids.qGoalChange]);
-  dt(['goal', 'hold', ids.goal, 'drain', '--reason', 'waiting on the processor']);
+  dt(['goal', 'hold', ids.goal, 'drain', '--reason', 'waiting on the processor', '--for', 'external:the processor', '--until', new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)]);
   // knowledge, observations, a recurring signal, a problem and an incident
   ids.observation = dt(['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', 'the checkout test is slow']);
   ids.lesson = dt(['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'payments time out under load', '--evidence', ids.observation]).match(/k-\S+/)[0];
