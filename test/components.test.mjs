@@ -262,3 +262,77 @@ test('components check reads a commit\'s tree: dotfiles, gitlinks, symlinks, spa
     ok(old, ['components', 'check', '--ref', 'HEAD~5']);
   } finally { F.done(); }
 });
+
+// kit-315: index.html's style, markup and renderOoda sections are named regions (devteam-dev PR #189),
+// so a ticket can claim index.html#<region>; read by the kit's own parts reader, as validate reads them.
+// Only their shape is held here: each ticket that claims a region changes its lines, and adds regions
+// of its own, without touching this file.
+function partsFns() {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const a = src.indexOf('/* parts start */'), b = src.indexOf('/* parts end */');
+  assert.ok(a >= 0 && b > a, 'devteam.mjs has a /* parts */ region');
+  return vm.runInContext(`${src.slice(a, b)}\n;({ fileParts })`, vm.createContext({}));
+}
+const INDEX_REGIONS = [
+  'css-base', 'css-shell', 'css-frame', 'css-settings', 'css-common', 'css-efficiency', 'css-progress',
+  'css-board', 'css-loop', 'css-inbox', 'css-loop-tabs', 'css-goals-old', 'css-chrome', 'css-planners',
+  'css-acts', 'css-peek', 'css-misc', 'css-review', 'css-library', 'css-viewer', 'css-viewer-bar',
+  'css-threads', 'css-goals', 'css-overview', 'html-side', 'html-pagebar', 'html-overview', 'html-goals',
+  'html-progress', 'html-board', 'html-library', 'html-loop', 'html-trust', 'html-efficiency', 'html-retros',
+  'html-health', 'html-sensors', 'html-settings', 'html-review', 'html-drawer', 'html-viewer',
+  'html-viewer-bar', 'html-tl', 'html-threads', 'ooda-learning', 'ooda-observe', 'ooda-orient', 'ooda-trust',
+  'ooda-decide', 'ooda-act',
+];
+test("index.html's regions (kit-315): each is one region, in its form and its place", () => {
+  const { fileParts } = partsFns();
+  const P = fileParts(fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8'), 'index.html');
+  const L = P.lines;
+  const at = (s, from = 0) => { const i = L.findIndex((l, k) => k >= from && l === s); assert.ok(i >= 0, `index.html has the line ${s}`); return i + 1; };
+  const styleEnd = at('</style>'), style = at('<style>'), script = at('<script>', styleEnd), mainEnd = at('</main>');
+  const R = new Map();
+  for (const name of INDEX_REGIONS) {
+    const pl = P.places.get(name);
+    assert.equal(pl?.length, 1, `${name}: one region`);
+    const { from, to } = pl[0];
+    R.set(name, { from, to });
+    const mark = name.startsWith('html-') ? (w) => `<!-- ${name} ${w} -->` : name.startsWith('ooda-') ? (w) => `  /* ${name} ${w} */` : (w) => `/* ${name} ${w} */`;
+    assert.equal(L[from - 1], mark('start'), `${name}: its start marker, in its form and column`);
+    assert.equal(L[to - 1], mark('end'), `${name}: its end marker, in its form and column`);
+    if (name.startsWith('css-')) assert.ok(style < from && to < styleEnd, `${name}: inside <style>`);
+    if (name.startsWith('html-')) assert.ok(styleEnd < from && to < script, `${name}: in the markup`);
+  }
+  // the viewer bars sit inside their viewers; no other two of these overlap
+  const inside = (x, y) => R.get(y).from < R.get(x).from && R.get(x).to < R.get(y).to;
+  assert.ok(inside('css-viewer-bar', 'css-viewer') && inside('html-viewer-bar', 'html-viewer'), 'the viewer bars sit inside their viewers');
+  const nested = new Set(['css-viewer-bar|css-viewer', 'html-viewer-bar|html-viewer']);
+  for (const x of INDEX_REGIONS) for (const y of INDEX_REGIONS) {
+    if (x >= y || nested.has(`${x}|${y}`) || nested.has(`${y}|${x}`)) continue;
+    assert.ok(R.get(x).to < R.get(y).from || R.get(y).to < R.get(x).from, `${x} and ${y} don't overlap`);
+  }
+  assert.ok(R.get('html-review').to < mainEnd, 'html-review ends before </main>');
+  // renderOoda's sub-regions, after renderGoals(), in order. renderOoda's own place ends above them, at the
+  // line before its first column-0 </div>; the indented markers (held above) keep it so
+  const fn = L.findIndex((l) => l.startsWith('function renderOoda(')) + 1;
+  const goals = at('  renderGoals();', fn);
+  const ooda = ['learning', 'observe', 'orient', 'trust', 'decide', 'act'].map((n) => R.get(`ooda-${n}`));
+  assert.ok(goals < ooda[0].from, 'the ooda regions follow renderGoals()');
+  for (let i = 1; i < ooda.length; i++) assert.ok(ooda[i - 1].to < ooda[i].from, 'the ooda regions in order');
+  const div = L.findIndex((l, k) => k >= fn && l.startsWith('</div>')) + 1;
+  assert.deepEqual(JSON.parse(JSON.stringify(P.places.get('renderOoda'))), [{ from: fn, to: div - 1 }], "renderOoda's place ends above its sub-regions");
+});
+
+// kit-315: the measure test's pages, one top-level list per page ticket, spread into PAGES, so
+// kit-92/93/96/97/99/171 each edit only their own; its fixtures come through one namespace import, so
+// adding one leaves the import alone. What each list holds is its ticket's, so only this shape is held.
+test("dashboard-measure's per-ticket page lists (kit-315)", () => {
+  const { fileParts } = partsFns();
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'dashboard-measure.test.mjs'), 'utf8');
+  const P = fileParts(src, 'dashboard-measure.test.mjs');
+  const LISTS = ['LIBRARY_PAGES', 'AUTONOMY_PAGES', 'LOOP_PAGES', 'THREAD_PAGES', 'TRUST_SUGG_PAGES', 'ATTACH_PAGES'];
+  for (const name of LISTS) assert.ok(P.places.has(name), `${name} is a part of its own`);
+  const pages = src.slice(src.indexOf('const PAGES = ['), src.indexOf('\n];', src.indexOf('const PAGES = [')));
+  for (const name of LISTS) assert.match(pages, new RegExp(`\\.\\.\\.${name}\\b`), `PAGES spreads ${name}`);
+  assert.ok(!src.includes("['library', 'trust', 'sensors', 'health', 'retros', 'loop']"), 'no shared frame row');
+  assert.ok(src.includes("import * as lib from './lib/kit.mjs';"), 'test/lib/kit.mjs comes in as a namespace');
+  assert.doesNotMatch(src, /import\s*\{[^}]*\}\s*from\s*'\.\/lib\/kit\.mjs'/, 'and by no named import');
+});

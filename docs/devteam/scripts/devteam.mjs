@@ -4444,6 +4444,38 @@ function ticketGoals(t) {
 }
 // A ticket whose feature names no goal (an old project) follows the fleet, like its session.
 const ticketMode = (t) => { const gs = ticketGoals(t); return gs.length ? modeOf(gs) : fleetMode() ?? 'run'; };
+// A ticket's own priority: the best (lowest) priority among the running goals it serves (not met,
+// abandoned or held), and which goal that is; null when none has one (a chore, an unprioritised goal).
+function ownPriority(t) {
+  const g = ticketGoals(t).filter((x) => !['met', 'abandoned'].includes(x.status) && goalMode(x) === 'run' && typeof x.priority === 'number').sort((a, b) => a.priority - b.priority)[0];
+  return g ? { priority: g.priority, goal: g.id } : null;
+}
+// Each live ticket's effective priority: the best of its own and that of every live ticket that
+// depends on it, directly or through others. Work a higher-priority goal waits on goes first,
+// whatever goal it serves, so the goal isn't left waiting on work nobody pushes (ready, idle
+// capacity). Priority orders the queue, never gates it. Live: active, unmerged, its goal running
+// (a drained, parked or let-go goal's ticket starts nothing, so pushes nothing).
+function effectivePriorities(ts) {
+  const live = new Map([...ts].filter(([, t]) => isActive(t) && !mergeShaFor(t.id) && ticketMode(t) === 'run'));
+  // over live tickets only: a chain through a held goal's ticket passes nothing on, and history costs nothing
+  const clos = closures(live);
+  const own = new Map([...live.values()].map((t) => [t.id, ownPriority(t)]));
+  const eff = new Map([...own].map(([id, p]) => [id, { own: p, priority: p?.priority ?? null, goal: p?.goal ?? null }]));
+  for (const [id, p] of own) {
+    if (!p) continue;
+    for (const d of clos.get(id) ?? []) { const e = eff.get(d); if (e && (e.priority == null || p.priority < e.priority)) Object.assign(e, { priority: p.priority, goal: p.goal }); }
+  }
+  return eff;
+}
+// What a ready row shows of it: its effective priority, and the goal it blocks when that is better
+// than its own.
+const inheritedPriority = (e) => (e && e.priority != null && (e.own == null || e.priority < e.own.priority) ? { priority: e.priority, goal: e.goal } : null);
+// Lower first; no priority last.
+const byPriority = (a, b) => (a ?? Infinity) === (b ?? Infinity) ? 0 : (a ?? Infinity) < (b ?? Infinity) ? -1 : 1;
+// ready's order, for anything that picks from it: fix tickets first, the most severe incident first
+// (incident_slots lets that many run past max_active_tickets), then by effective priority. Rows of
+// { kind, severity, priority }.
+const readyOrder = (a, b) => (b.kind === 'fix') - (a.kind === 'fix') || (b.severity ?? 0) - (a.severity ?? 0) || byPriority(a.priority, b.priority);
 // The goals that can hold anything: live goals and Upkeep.
 const holdableGoals = () => [upkeepOrVirtual(), ...logObjects('goal').filter((g) => !['met', 'abandoned'].includes(g.status))];
 // When every holdable goal is parked, or every one is draining or parked, the fleet is too.
@@ -4651,6 +4683,7 @@ function overlapsActive(t, activeIds, ts) {
 }
 function cmdReady() {
   const ts = tickets();
+  const prio = effectivePriorities(ts);
   const rows = [];
   const held = [];
   const waiting = [];
@@ -4665,12 +4698,13 @@ function cmdReady() {
     if (isHeld(t)) { if (depsMerged || flags['plan-ahead']) held.push({ id: t.id, held: t.held }); continue; }
     if (depsMerged || flags['plan-ahead']) {
       const inc = t.kind === 'fix' ? incidentOfTicket(t.id) : null;
-      rows.push({ id: t.id, component: t.component, kind: t.kind, size: t.size, risk: t.risk, mode: depsMerged ? 'build' : 'plan-ahead', ...(inc ? { incident: inc.id, severity: incidentSeverity(inc) } : {}) });
+      const e = prio.get(t.id);
+      const blocks = inheritedPriority(e);
+      rows.push({ id: t.id, component: t.component, kind: t.kind, size: t.size, risk: t.risk, mode: depsMerged ? 'build' : 'plan-ahead', priority: e?.priority ?? null, ...(blocks ? { blocks } : {}), ...(inc ? { incident: inc.id, severity: incidentSeverity(inc) } : {}) });
     }
   }
-  // fix tickets first, the most severe incident first; incident_slots lets that many run past
-  // max_active_tickets
-  rows.sort((a, b) => (b.kind === 'fix') - (a.kind === 'fix') || (b.severity ?? 0) - (a.severity ?? 0));
+  // a ticket a higher-priority goal waits on takes that goal's place
+  rows.sort(readyOrder);
   const s = loadSettings();
   const active = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
   const perComponent = {};
@@ -4690,7 +4724,7 @@ function cmdReady() {
   for (const h of held) out(`held       ${h.id}  (${h.held})`);
   for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
-  for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${r.overlaps_active ? `  (touches overlap ${r.overlaps_active.join(', ')}: start it once that merges)` : ''}${capped(r) ? '  (component at cap)' : ''}`);
+  for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${r.blocks ? `  (blocks p${r.blocks.priority})` : ''}${r.overlaps_active ? `  (touches overlap ${r.overlaps_active.join(', ')}: start it once that merges)` : ''}${capped(r) ? '  (component at cap)' : ''}`);
 }
 
 function cmdWaves() {
@@ -14539,7 +14573,10 @@ function collectMetrics(since) {
   }
   // what idle capacity offers: ready tickets that don't overlap a running one's touches (ready marks those)
   const activeIds = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
-  const startable = ready.filter((t) => !overlapsActive(t, activeIds, ts).length);
+  // in ready's order, so the workers it names first are fixes, then what a higher-priority goal waits on
+  const prio = effectivePriorities(ts);
+  const sevOf = (t) => { const inc = t.kind === 'fix' ? incidentOfTicket(t.id) : null; return inc ? incidentSeverity(inc) : 0; };
+  const startable = ready.filter((t) => !overlapsActive(t, activeIds, ts).length).map((t) => ({ t, kind: t.kind, severity: sevOf(t), priority: prio.get(t.id)?.priority })).sort(readyOrder).map((x) => x.t);
   // a ready fix ticket may use an incident slot past the cap
   const readyFix = startable.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
   if (!drained && readyFix.length && active >= capOf(settings.max_active_tickets) && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${capWords(settings.max_active_tickets)} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
