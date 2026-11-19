@@ -570,6 +570,9 @@ const SETTINGS_DEFAULTS = {
   // supervisor's own, like caps and timings. sensor_defaults overrides the built-in defaults for all of them.
   sensors: {},
   sensor_defaults: {},
+  // Jobs under Upkeep: { "<name>": { kind: 'check'|'chore', title, what, every, … } }, each as
+  // RECURRING_ENTRY_SHAPE holds it. Checks run commands on a schedule, chores are done on one.
+  recurring: {},
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
   // The forge's checks merge doesn't wait for (names, e.g. a broken optional one); owner-only.
@@ -689,6 +692,7 @@ const SETTINGS_WORDS = Object.freeze({
   secret_commands: ['Production', 'Commands a secret may be sent to', "command prefixes a secret's sink may run, as you", 'count'],
   retro_every_days: ['Rhythm', 'Retro every', 'days between retrospectives', 'value'],
   research_every_days: ['Rhythm', 'Research every', 'days between research spikes on new tools and practice', 'value'],
+  recurring: ['Rhythm', 'Jobs', 'the jobs that run on a schedule under Upkeep: checks and chores', 'names'],
   project: ['Project and links', 'Project name', "this project's name on the hub and in its public links", 'value'],
   components: ['Project and links', 'Components', 'the parts of the work, each with its own lines of files', 'names'],
   links: ['Project and links', 'Linked repos and resources', 'the repos and resources this project works in or reads', 'names'],
@@ -1448,6 +1452,7 @@ const CLASS_WORDS = Object.freeze({
   'registry-attest': 'Confirming the registry is complete',
   'new-dependency': 'Adding a new dependency',
   'artifact-publish': 'Publishing a page',
+  'recurring-edit': 'Adding, changing or stopping a job',
   'pane-answer': "Answering the supervisor's terminal",
   'goal-order': 'Putting the goals in order',
   'goal-approval': 'Approving a goal',
@@ -1736,22 +1741,33 @@ function fold(all) {
     // A goal's hold has its own rule (planning.md §1, holds): the owner's line always counts; the
     // supervisor's counts as a fleet op, the undo of a fleet op still in force on this goal, a drain
     // of a running goal, or the release of a drain it set itself. Anything else is ignored, with why.
+    // hold_for and hold_until (what the hold waits on, and when to look again) are part of the hold
+    // line: they apply with its hold, are refused with it, and a hold line without them leaves the
+    // hold with no cause. A line carrying them with no hold changes neither.
+    const holdKey = (k) => k === 'hold' || k === 'hold_for' || k === 'hold_until';
+    const onlyHold = () => Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || holdKey(k));
+    const holdWith = (h) => {
+      obj.hold = h;
+      obj.__holdBy = cls;
+      for (const k of ['hold_for', 'hold_until']) if (l[k] !== undefined && l[k] !== null) obj[k] = l[k]; else delete obj[k];
+      return { hold: h, ...(l.hold_for !== undefined ? { hold_for: l.hold_for } : {}), ...(l.hold_until !== undefined ? { hold_until: l.hold_until } : {}) };
+    };
     let holdLine = null;
+    if (obj.type === 'goal' && !l.hold && (l.hold_for !== undefined || l.hold_until !== undefined)) {
+      ignored.push({ line: l, why: 'hold_for and hold_until go with a hold' });
+      if (onlyHold()) continue;
+    }
     if (obj.type === 'goal' && l.hold) {
       const cur = obj.hold ?? { mode: 'run' };
       const why = holdRefusal(l.hold, cur, obj.__holdBy ?? null, cls);
       if (why) {
         ignored.push({ line: l, why });
-        if (Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold')) continue;
+        if (onlyHold()) continue;
       } else holdLine = l.hold;
     }
-    const holdOnly = obj.type === 'goal' && Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold');
+    const holdOnly = obj.type === 'goal' && onlyHold();
     if (holdOnly) {
-      if (holdLine) {
-        obj.hold = holdLine;
-        obj.__holdBy = cls;
-        obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), hold: holdLine });
-      }
+      if (holdLine) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...holdWith(holdLine) });
       continue;
     }
     // A supervisor's line under an answer to a goal-change --order question is that answer applied, on
@@ -1796,14 +1812,9 @@ function fold(all) {
       continue;
     }
     const rank = RANK[cls];
-    const changed = {};
-    if (holdLine) {
-      obj.hold = holdLine;
-      obj.__holdBy = cls;
-      changed.hold = holdLine;
-    }
+    const changed = holdLine ? holdWith(holdLine) : {};
     for (const [k, val] of Object.entries(l)) {
-      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (notOwnTag && k === 'kit_lesson')) continue;
+      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (obj.type === 'goal' && holdKey(k)) || (notOwnTag && k === 'kit_lesson')) continue;
       // an order line's priority is the owner's answer, at the owner's rank; its approved stays the
       // supervisor's, so a later answer's approved still lands and is seen as used
       const r = byOrder && k === 'priority' ? RANK.owner : rank;
@@ -4232,6 +4243,15 @@ function cmdValidate() {
     const s = loadSettings();
     const reg = registryProblems(s);
     errors.push(...reg.errors, ...sensorProblems(s));
+    // Jobs (recurring) as this checkout's settings.md writes them, not loadSettings': an owner's key
+    // reads as main has it there, and a branch's edit to the jobs is what must be checked.
+    {
+      const own = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
+      let jobs;
+      try { jobs = own == null ? undefined : JSON.parse(own).recurring; } catch { jobs = undefined; }
+      if (jobs !== undefined && !isObj(jobs)) errors.push('settings recurring: an object of { "<name>": { kind, title, what, every, … } }');
+      else for (const [n, e] of Object.entries(jobs ?? {})) errors.push(...recurringEntryProblems(n, e));
+    }
     { const p = memoryCeilingProblem(s.machine_memory_ceiling); if (p) errors.push(p); }
     warnings.push(...reg.warnings);
     // With lines, check-pr and merge judge the tree a PR would land, which takes git 2.38; say so
@@ -12584,7 +12604,7 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id), at_target: atTargetView(g) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id), at_target: atTargetView(g), next_move: nextMoveOf(`goal:${g.id}`) };
 }
 // A running goal at its target, as its card shows it: the reading, and the open goal-met question.
 function atTargetView(g) {
@@ -14401,6 +14421,145 @@ function cmdMetrics() {
   ].join('\n'));
 }
 
+// What a hold waits on, read from one entry of a ticket's held_for or a goal's hold_for (design
+// every-wait-names-its-cause-and-every-put, the cause table): { form, id, state, since, holder_subject },
+// or null for a string in no known form (until:<date> among them: the review date is held_until or
+// hold_until, never a cause). form is q | ticket | chore | goal | pr | run | external; id the question's,
+// ticket's or goal's id, the chore's slug, <link>#<n>, <link>:<run id>, or the external words. state is
+// open | resolved | failed and since when it became so (null while open); here every cause is open,
+// and kit-572 (the log's forms) and kit-573 (pr: and run:) read the rest. holder_subject is the
+// next-move subject a hold's move is copied from, its via (ticket:, chore:, goal:), null for a question (its
+// move is the owner's answer) and for pr:, run: and external:. Whether the kit can follow a cause, and
+// so whether it needs a date, is read from form (q, ticket, chore, goal), never from holder_subject.
+// Self-contained: its patterns copy the log schema's ids, LINK_ID and choreSlug's slug.
+function waitCause(ref) {
+  const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
+  const TICKET = /^[a-z][a-z0-9]*(-[a-z0-9]+)*-[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$/;
+  const LINK = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+  const SLUG = /^[a-z0-9]+([.-][a-z0-9]+)*$/;
+  if (typeof ref !== 'string') return null;
+  const cause = (form, id, holder_subject = null) => ({ form, id, state: 'open', since: null, holder_subject });
+  if (ID.test(ref)) return ref.startsWith('q-') ? cause('q', ref) : null;
+  // shaped like a log id (a letter, a date, a time) but not one: never read as a ticket id
+  if (/^[a-z]-\d{8}-\d{9}/.test(ref)) return null;
+  const i = ref.indexOf(':');
+  const [kind, rest] = i === -1 ? [null, ref] : [ref.slice(0, i), ref.slice(i + 1)];
+  if (kind === 'chore') return SLUG.test(rest) && !/\.lock$/.test(rest) ? cause('chore', rest, `chore:${rest}`) : null;
+  if (kind === 'goal') return ID.test(rest) && rest.startsWith('g-') ? cause('goal', rest, `goal:${rest}`) : null;
+  if (kind === 'pr') {
+    const m = rest.match(/^([^#]+)#([1-9]\d*)$/);
+    return m && LINK.test(m[1]) ? cause('pr', rest) : null;
+  }
+  if (kind === 'run') {
+    const m = rest.match(/^([^:]+):([1-9]\d*)$/);
+    return m && LINK.test(m[1]) ? cause('run', rest) : null;
+  }
+  if (kind === 'external') return rest.length <= 200 && /^\S(?:.*\S)?$/.test(rest) && !/[\r\n\v\f\u0085\u2028\u2029]/.test(rest) ? cause('external', rest) : null;
+  if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
+  return null;
+}
+/* next-moves start */
+// The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
+// one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
+// planners, C chores) are tried in order and the first that matches wins. The kit never makes a move
+// itself; it names it.
+//
+// The contract next-move@1. A move is one object:
+//   subject     "goal:<g-id>" | "ticket:<id>" | "planner:<feature>" | "chore:<slug>", and the waits goal's
+//               "follow-up:<o-id>" (a put-off note), "thread:<t-id>" (a thread bound to work),
+//               "answer:<q-id>" (an owner's answer to carry out), "duty:<name>" (a duty fallen due, e.g.
+//               duty:retro) and "record:<id>" (a loop record: a corrected act, a trial with no outcome)
+//   move        the row's key, kebab-case (e.g. ask-goal-met)
+//   words       a plain sentence for the owner (e.g. "Ask you whether it is met")
+//   holder      owner | supervisor | planner | worker | nobody
+//   ref         null, or { kind, id, url }: kind q | m | ticket | goal | chore | pr | o | t | a; id the
+//               question's, message's, ticket's, goal's or chore branch's id as a string, o a follow-up
+//               observation's id, t a thread's id, a an act's id, or for a pr the PR number as an
+//               integer; url the PR's URL on a pr ref, absent on every other kind
+//   title       the subject's own title: the goal's, the ticket's, the planner's feature's, a chore's
+//               --what or its tip commit's subject
+//   since       ISO time the move began (never stored: each row names its source)
+//   command     the supervisor's command for it, or null
+//   covered_by  [ { kind, subject } ]: the findings that already cover it, subject a finding subject or
+//               "*" (any subject); [] when none
+//   quiet       null | hold | drain | queue: it waits on purpose (a park or let-go hold, a drain, the
+//               queue for a slot or memory); shown, never raises a finding
+//   via         null, or "ticket:<id>" | "planner:<feature>" | "goal:<g-id>" | "chore:<slug>": a copied
+//               move (a goal's lead ticket's, planner's, chore's or plan_after goal's; a ticket's
+//               dependency's); it shows its source's flag, and findings are raised only on the source
+//   flag        null | owed | stalled | none, set by age and holder alone (a covering finding never
+//               clears it): owed when the supervisor holds it past next_move_owed_minutes; a chore with
+//               no PR yet (C4) is never owed, it goes straight to stalled; stalled when unchanged past
+//               next_move_stall_hours, whatever the holder; none for the rows with no next move (G20,
+//               T14), held by nobody; null otherwise, and always null when quiet
+//   rung        0 | 1 | 2 on the age ladder: 0 fresh, 1 owed, 2 stuck (stalled, or its finding or a
+//               covering finding acked three times on one subject since `since`); so an owed move is at
+//               rung 1 or 2, a stalled one at 2, a quiet one stays 0
+//   chore       on a chore: move only (absent on every other): { branch: "chore-<slug>", ahead: the
+//               commits main lacks, pr: null | { number, url }, for: [ the refs from chore start --for ] }
+//   wait        on a ticket move whose hold names its causes (held_for) only, absent on every other:
+//               { "causes": [ { "ref", "words", "state" } ], "until": null | "<YYYY-MM-DD>" }: each cause
+//               as held_for gives it (ref), in words, and its state open | resolved | failed
+//               (waitCause()); until the hold's held_until. A page shows what the hold waits on from it
+//               without a second read
+// Every field but chore and wait is always present; ref, command, quiet, via and flag carry null,
+// never go missing.
+//
+// Its five places:
+//   1. moves --json: { "next_move": 1, "moves": [ … ] }
+//   2. /api/data: next_moves, the same array
+//   3. each goal view (goal show, goal list --json, /api/data ooda.goals[]): next_move, its own move or null;
+//      goal show of the Upkeep goal isn't a goal view and has no next_move (chore moves carry its work)
+//   4. the hub's cache, run/cache/next-moves.json: { "next_move": 1, "at": "<ISO>", "moves": [ … ] }, the
+//      running goals' moves only (no chore moves)
+//   5. hello's pulse.next: one move (the top flagged, else top-priority, running goal's), or null
+// Additive changes keep @1; a renamed or removed field, or a changed meaning, bumps it. Fixtures:
+// test/fixtures/next-moves/, and for the waits goal's additions (its subjects, ref kinds o, t and a, and
+// wait) test/fixtures/waits/. via gains no values: the new rows copy moves from tickets and chores.
+// The closed lists, one per line (test/next-moves.test.mjs reads them):
+// values fields: subject | move | words | holder | ref | title | since | command | covered_by | quiet | via | flag | rung | chore | wait
+// values subject: goal: | ticket: | planner: | chore: | follow-up: | thread: | answer: | duty: | record:
+// values holder: owner | supervisor | planner | worker | nobody
+// values ref.kind: q | m | ticket | goal | chore | pr | o | t | a
+// values quiet: null | hold | drain | queue
+// values via: null | ticket: | planner: | goal: | chore:
+// values flag: null | owed | stalled | none
+// values rung: 0 | 1 | 2
+// values chore: branch | ahead | pr | for
+// values wait.state: open | resolved | failed
+function nextMoves() {
+  return [];
+}
+// The move whose subject is this one ("goal:<g-id>", …), or null.
+function nextMoveOf(subject) {
+  return nextMoves().find((m) => m.subject === subject) ?? null;
+}
+const MOVE_HOLDERS = ['owner', 'supervisor', 'planner', 'worker', 'nobody'];
+// A move's age in words: 45 min, 3 h, 2 d.
+const moveAge = (since) => {
+  const t = Date.parse(since);
+  if (Number.isNaN(t)) return 'since ?';
+  const min = Math.max(0, Math.floor((Date.now() - t) / 60000));
+  return min < 120 ? `${min} min` : min < 48 * 60 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`;
+};
+// moves [--json] [--holder h]: every move, grouped by holder, oldest first, owed and stalled marked.
+// It only reads.
+function cmdMoves() {
+  if (flags.holder !== undefined && !MOVE_HOLDERS.includes(flagStr('holder'))) die(`moves --holder takes one of: ${MOVE_HOLDERS.join(', ')}`);
+  const holder = flagStr('holder');
+  const moves = nextMoves().filter((m) => !holder || m.holder === holder);
+  if (flags.json) return out(JSON.stringify({ next_move: 1, moves }));
+  if (!moves.length) return out('No next moves.');
+  const L = [];
+  for (const h of MOVE_HOLDERS) {
+    const mine = moves.filter((m) => m.holder === h).sort((a, b) => (Date.parse(a.since) || 0) - (Date.parse(b.since) || 0));
+    if (!mine.length) continue;
+    L.push(`${h}:`);
+    for (const m of mine) L.push(`  ${m.subject}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`);
+  }
+  out(L.join('\n'));
+}
+/* next-moves end */
 // Per-ticket progress data for the burn-up, board and roadmap.
 function collectProgress() {
   const sub = activeTickets();
@@ -14549,6 +14708,8 @@ function dashboardDataRead() {
     awareness,
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
+    // next-move@1: every move the table names (the comment above nextMoves())
+    next_moves: nextMoves(),
     ooda: collectOoda(),
     autonomy,
     autonomy_score: autonomyScore(autonomy, efficiency, awareness),
@@ -15075,6 +15236,41 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
     // every connection closed with `code` (a hand-over to a new kit, the hub closing)
     closeAll(code = 1001) { for (const c of [...conns]) kill(c, code); },
   };
+}
+
+// ===== live presence: the log's changes (presence@1 changed, kit-633) =====
+// What a dashboard calls `onChange` for: its instance's live log folder (run/log/, append-only files),
+// as the names and sizes of its *.jsonl files, differing from the last look. fs.watch only prompts a
+// look, and tick() looks too (the dashboard runs it each second): where watching isn't reliable (a
+// network disk, a watch that died or never started because the folder didn't exist yet) a change is
+// still seen within a second. A difference is all that counts, so a lock file, or an event with
+// nothing new, is nothing. look() is also run by each /api/data read, so a change the watch hasn't
+// delivered yet still counts. Returns { look, tick, close }.
+function presenceChanged(dir, onChange) {
+  let seen = null;
+  let watcher = null;
+  const sig = () => {
+    let names;
+    try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort(); } catch { return ''; }
+    return names.map((f) => { try { return `${f}:${fs.statSync(path.join(dir, f)).size}`; } catch { return `${f}:-`; } }).join('|');
+  };
+  const look = () => {
+    const s = sig();
+    if (seen === null || s === seen) { seen = s; return; }
+    seen = s;
+    try { onChange(); } catch {}
+  };
+  const close = () => { try { watcher?.close(); } catch {} watcher = null; };
+  const watch = () => {
+    if (watcher) return;
+    try {
+      watcher = fs.watch(dir, { persistent: false }, () => look());
+      watcher.on('error', close);
+    } catch { watcher = null; }
+  };
+  look();
+  watch();
+  return { look, tick: () => { watch(); look(); }, close };
 }
 
 function startHub(log, { kit = null, image = false, standalone = false } = {}) {
@@ -18181,11 +18377,14 @@ async function imageChanges(since, to, { smoke = false } = {}) {
     }
   }
 }
-const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | changed --since <ref> [--to <ref>] [--smoke] [--json] | installed   (verify, check and bump take --dockerfile <path>)';
+const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | changed --since <ref> [--to <ref>] [--smoke] [--json] | installed   (verify, check and bump take --dockerfile <path>; a patch, vX.Y.Z with Z > 0, is stamped vX.Y.0 and bump takes only a minor)';
 // box-pins: verify, check and bump in the kit's own checkout (a KIT_VIEWS command; bump writes only
 // the Dockerfile's pins), and installed inside the box image, from anywhere.
 async function cmdBoxPins() {
   const mode = positional[0];
+  // the stamp a release needs (image-changes@1 §8): a patch (Z > 0) is stamped with the minor it
+  // builds on, vX.Y.0; a minor or major with its own tag. tag is a vX.Y.Z releaseFlag let through.
+  const stampFor = (tag) => { const [x, y, z] = tag.slice(1).split('.').map(Number); return z > 0 ? `v${x}.${y}.0` : tag; };
   if (mode === 'changed') {
     // image-changes@1: exit 0 patch, 3 minor, 2 can't tell (said on stderr, nothing on stdout)
     const usage = () => die(`usage: ${BOX_PINS_USAGE}`, 2);
@@ -18210,7 +18409,8 @@ async function cmdBoxPins() {
     const want = releaseFlag();
     const { text } = pinsFile();
     const pins = readPins(text);
-    if (want !== undefined && pins.release !== null && pins.release !== want) pins.problems.push(`DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}`);
+    const need = want === undefined ? undefined : stampFor(want);
+    if (need !== undefined && pins.release !== null && pins.release !== need) pins.problems.push(need === want ? `DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}` : `DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}'s minor, ${need} (a patch is stamped with the minor it builds on)`);
     for (const p of pins.problems) out(`box-pins verify: ${p}`);
     if (pins.problems.length) { process.exitCode = 1; return; }
     out(`box-pins verify: ok, ${pins.tools.length} tools, release ${pins.release}`);
@@ -18235,6 +18435,7 @@ async function cmdBoxPins() {
   if (mode === 'bump') {
     const release = releaseFlag();
     if (release === undefined) die(`box-pins bump needs --release vX.Y.Z\nusage: ${BOX_PINS_USAGE}`);
+    if (stampFor(release) !== release) die(`box-pins bump: --release ${release} is a patch; only a minor gets a release-prep PR (a patch keeps its minor's stamp, ${stampFor(release)}); nothing written`);
     const { file, text } = pinsFile();
     const pins = readPins(text);
     if (pins.problems.length) {
@@ -19123,13 +19324,42 @@ async function cmdDashboard() {
   // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes (a page
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
-  let dataRun = null;
+  // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
+  // served while it runs, and once finished while it is young (3 s since it finished, so the 10 s poll
+  // gets previews, settings and git at most about 3 s old) and current (dataEpoch, which the log's
+  // changes and every POST action move, is what it was when the build *started*: a change during a
+  // build makes it stale when it ends). A read that finds none waits for the next build, which starts
+  // once the running one has ended and 3 s have passed since the last start; every read waiting then
+  // shares it. A failed build is never kept.
+  const DATA_EVERY_MS = 3000;
+  let dataEpoch = 0;
+  let build = null;
+  let nextBuild = null;
+  let lastStart = -Infinity;
   let lastData = null;
-  const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-    dataRun = null;
-    if (!err && stdout) lastData = stdout;
-    resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
-  })));
+  const startBuild = () => {
+    lastStart = Date.now();
+    const b = { epoch: dataEpoch, finished: null, r: null };
+    b.done = new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+      if (!err && stdout) lastData = stdout;
+      b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
+      b.finished = Date.now();
+      resolve(b.r);
+    }));
+    build = b;
+    return b.done;
+  };
+  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_EVERY_MS));
+  const dashboardData = () => {
+    if (usable(build)) return build.done;
+    nextBuild ??= (async () => {
+      if (build && build.finished === null) await build.done;
+      await new Promise((w) => setTimeout(w, Math.max(0, lastStart + DATA_EVERY_MS - Date.now())));
+      nextBuild = null;
+      return startBuild();
+    })();
+    return nextBuild;
+  };
   // /api/threads: every thread, its turns and the questions asked in it, for the open card's 2 s poll
   // and the dock. dashboard-data is a slow child, and readLog() can't serve here: its cache is cleared
   // only by appendLog, which this process never calls, and it reads main's log through git. So this
@@ -19260,6 +19490,10 @@ async function cmdDashboard() {
   let draining = false;
   // live presence (presence@1): its /presence socket, on the same Host check as every route here
   const presence = presenceRelay({ okHost: (h) => [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(h ?? ''), ownerCwd: mainRoot, draining: () => draining });
+  // the log changed (presenceChanged): every page that said here is told (changed, at most each 500
+  // ms), and the kept /api/data build is stale (dataEpoch)
+  const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
+  every(logWatch.tick, 1000);
   const server = http.createServer(async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
@@ -19300,6 +19534,8 @@ async function cmdDashboard() {
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
+      // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
+      logWatch.look();
       // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
       // the run goes on and the next read has it, but no page waits minutes on a stuck child.
       let waited;
@@ -19570,6 +19806,10 @@ async function cmdDashboard() {
     const isOwnerSetting = name === 'owner-setting';
     const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
     if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
+    // an owner action, answered however it ends: the kept /api/data build is stale from its answer's
+    // head on, before a byte of it reaches the page, so the page's next read waits for a new build
+    const head = res.writeHead;
+    res.writeHead = function (...a) { dataEpoch += 1; return head.apply(this, a); };
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
     // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
@@ -19761,6 +20001,8 @@ async function cmdDashboard() {
     hubHandle?.close();
     hubHandle = null;
     presence.closeAll(1001);
+    // stopTimers stops its tick, not its fs.watch handle; a failed respawn's first tick starts it again
+    logWatch.close();
     for (const name of [...relays.keys()]) relayClose(name);
     server.close();
     await drained();
@@ -19800,7 +20042,7 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, a TL;DR that names the approach and matches the plan, a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -21597,6 +21839,146 @@ function fleetHost() {
   if (!w.wrote) die(`could not take the claim: ${w.offline ?? w.failed ?? 'another machine wrote it at the same moment; try again'}`);
   const from = r.claim && !r.claim.unreadable && r.claim.machine !== hostMachineId() ? r.claim : null;
   out(`${hostName()} now supervises this repo${from ? ` (taken from ${from.hostname}, last seen ${from.at}; if its supervisor is still running, it stops at its next tick)` : ''}`);
+}
+
+// A job under Upkeep (settings recurring, keyed by name): a check, a command run on a schedule in a
+// throwaway checkout of main and failing by its rule, or a chore, instructions the supervisor or a
+// worker carries out on a schedule. Contract RECURRING_ENTRY_SHAPE@1: the rules and defaults every
+// reader takes from here (validate, and the registry, the runner, merge and ask that build on it).
+// fields: which kinds carry each field (by: only a chore with that by), whether it must be set, its
+// default when unset, and its ceiling. A check runs at most hourly, a chore at most daily, neither
+// less often than 90 days, 12 weeks or 3 months; on is a weekday with w and a day 1..28 with mo
+// (every month has it); at is HH:MM UTC, never with h. A run command carries no credential: no word
+// with one (as a sensor URL or a link), and nothing the scrubber would hide but a host, a phone
+// number or an email, after each whole environment reference ($NAME, ${NAME}, after any Bearer,
+// Basic or token) is read as one, since a check runs in the supervisor's environment as a gate does.
+const RECURRING_ENTRY_SHAPE = Object.freeze({
+  version: 1,
+  name: /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/,
+  name_length: Object.freeze([2, 40]),
+  kinds: Object.freeze(['check', 'chore']),
+  every: /^([1-9][0-9]{0,3})(h|d|w|mo)$/,
+  every_min: Object.freeze({ check: 'h', chore: 'd' }),
+  every_max: Object.freeze({ h: 2160, d: 90, w: 12, mo: 3 }),
+  weekdays: Object.freeze(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
+  month_day_max: 28,
+  at: /^([01][0-9]|2[0-3]):[0-5][0-9]$/,
+  last_line_rules: Object.freeze(['above', 'below', 'is_not']),
+  by: Object.freeze(['supervisor', 'worker']),
+  fields: Object.freeze({
+    kind: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true }),
+    title: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true, max: 80 }),
+    what: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true, max: 160 }),
+    every: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true }),
+    on: Object.freeze({ kinds: Object.freeze(['check', 'chore']) }),
+    at: Object.freeze({ kinds: Object.freeze(['check', 'chore']) }),
+    run: Object.freeze({ kinds: Object.freeze(['check']), required: true, max: 500 }),
+    timeout_s: Object.freeze({ kinds: Object.freeze(['check']), default: 120, max: 1800 }),
+    fail: Object.freeze({ kinds: Object.freeze(['check']), default: Object.freeze({ exit: 'nonzero' }) }),
+    fail_after: Object.freeze({ kinds: Object.freeze(['check']), default: 1, max: 10 }),
+    severity: Object.freeze({ kinds: Object.freeze(['check']), default: 2, max: 3 }),
+    by: Object.freeze({ kinds: Object.freeze(['chore']), required: true }),
+    prompt: Object.freeze({ kinds: Object.freeze(['chore']), required: true, max: 2000 }),
+    component: Object.freeze({ kinds: Object.freeze(['chore']), by: 'worker', required: true }),
+    touches: Object.freeze({ kinds: Object.freeze(['chore']), by: 'worker', required: true }),
+    done_when: Object.freeze({ kinds: Object.freeze(['chore']), by: 'worker', required: true }),
+    grace_days: Object.freeze({ kinds: Object.freeze(['chore']), default: Object.freeze({ supervisor: 1, worker: 3 }), max: 30 }),
+  }),
+});
+// What is wrong with one job, each problem naming the entry and field ("settings recurring.<name>.<field>: …"),
+// empty when it holds. It reads no log and no other setting but sensor_scrub (a run its patterns
+// would scrub is refused), so any reader can check any entry.
+function recurringEntryProblems(name, entry) {
+  const R = RECURRING_ENTRY_SHAPE;
+  const UNITS = Object.keys(R.every_max); // h, d, w, mo: shortest first
+  // a whole environment reference: $NAME or ${NAME} (never ${X:-default} or ${X}more), after any scheme word
+  const REF = /(?:\b(?:bearer|basic|token)\s+)?\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})(?=$|[\s"';&|)])/gi;
+  const SCRUB_ALLOWED = ['[ip]', '[phone]', '[email]'];
+  const at = `settings recurring.${name}`;
+  const [lo, hi] = R.name_length;
+  if (typeof name !== 'string' || !R.name.test(name) || name.length < lo || name.length > hi) return [`${at}: a name is ${lo} to ${hi} lowercase letters and digits, in words joined by single hyphens (it becomes a chore slug and a ticket id)`];
+  if (!isObj(entry)) return [`${at}: an object { kind, title, what, every, … }`];
+  const errs = [];
+  const bad = (f, m) => errs.push(`${at}.${f}: ${m}`);
+  const kind = entry.kind;
+  if (!R.kinds.includes(kind)) return [`${at}.kind: check or chore`];
+  for (const [f, spec] of Object.entries(R.fields)) {
+    const carried = spec.kinds.includes(kind) && (!spec.by || entry.by === spec.by);
+    if (!carried && entry[f] !== undefined) bad(f, spec.kinds.includes(kind) ? `only a chore with by "${spec.by}" has ${f}` : `a ${spec.kinds[0]}'s field, not a ${kind}'s`);
+    else if (carried && spec.required && entry[f] === undefined) bad(f, 'required');
+  }
+  for (const f of Object.keys(entry)) if (!Object.hasOwn(R.fields, f)) bad(f, 'not a field of a job');
+  const has = (f) => entry[f] !== undefined && R.fields[f].kinds.includes(kind) && (!R.fields[f].by || entry.by === R.fields[f].by);
+  const whole = (f, lo2, hi2) => { if (has(f) && !(Number.isInteger(entry[f]) && entry[f] >= lo2 && entry[f] <= hi2)) bad(f, `a whole number from ${lo2} to ${hi2}`); };
+  for (const f of ['title', 'what']) if (has(f) && (typeof entry[f] !== 'string' || !entry[f].length || entry[f].length > R.fields[f].max || UNSAFE_TEXT.test(entry[f]))) bad(f, `one line of 1 to ${R.fields[f].max} characters`);
+  let unit = null;
+  if (has('every')) {
+    const m = typeof entry.every === 'string' ? R.every.exec(entry.every) : null;
+    if (!m) bad('every', '<n>h, <n>d, <n>w or <n>mo');
+    else if (UNITS.indexOf(m[2]) < UNITS.indexOf(R.every_min[kind])) bad('every', 'a chore runs at most daily: <n>d, <n>w or <n>mo');
+    else if (Number(m[1]) > R.every_max[m[2]]) bad('every', `at most ${R.every_max.d}d, ${R.every_max.w}w or ${R.every_max.mo}mo (${R.every_max.h}h)`);
+    else unit = m[2];
+  }
+  if (has('on') && unit) {
+    if (unit === 'w') { if (!R.weekdays.includes(entry.on)) bad('on', `with w, a weekday: ${R.weekdays.join(', ')}`); }
+    else if (unit === 'mo') { if (!(Number.isInteger(entry.on) && entry.on >= 1 && entry.on <= R.month_day_max)) bad('on', `with mo, a day of the month from 1 to ${R.month_day_max}, a number`); }
+    else bad('on', 'goes with w (a weekday) or mo (a day of the month), not h or d');
+  }
+  if (has('at')) {
+    if (typeof entry.at !== 'string' || !R.at.test(entry.at)) bad('at', 'HH:MM, UTC');
+    else if (unit === 'h') bad('at', 'goes with d, w or mo, not h');
+  }
+  if (has('run')) {
+    const r = entry.run;
+    if (typeof r !== 'string' || !r.length || r.length > R.fields.run.max || UNSAFE_TEXT.test(r)) bad('run', `one line of 1 to ${R.fields.run.max} characters`);
+    else {
+      // Each whole reference becomes one plain word (VAR), and a quote right after one joins what
+      // follows to it, as the shell joins $X"abc" into one value. Every built-in scrub rule then runs
+      // as scrubText runs them, and a value a rule would hide must be references alone (or a host, a
+      // phone number or an email): a literal glued, quoted or spaced after a reference hides as much
+      // as one with no reference. A second reading joins the words inside each quoted string, so a
+      // header or a JSON value ("Authorization: Bearer $X abc…") is judged whole. What an owner's
+      // sensor_scrub pattern would hide is refused whenever it matches at all, whatever it writes.
+      const VAR = 'zzvarzzz';
+      const glue = (t) => t.replace(new RegExp(`${VAR}["']`, 'g'), VAR);
+      const named = r.replace(REF, VAR);
+      const hidden = new Set();
+      for (const text of [glue(named), glue(named.replace(/"[^"]*"|'[^']*'/g, (q) => q.replace(/\s+/g, '_')))]) {
+        let t = text;
+        for (const [re, to] of [...SCRUB_RULES, ...SCRUB_RULES]) {
+          t = t.replace(re, (...a) => {
+            const m = a[0];
+            const out = typeof to === 'function' ? to(...a) : to.replace(/\$(\d)/g, (_, i) => a[Number(i)] ?? '');
+            if (out === m) return m;
+            let p = 0;
+            while (p < m.length && p < out.length && m[p] === out[p]) p++;
+            let s = 0;
+            while (s < m.length - p && s < out.length - p && m[m.length - 1 - s] === out[out.length - 1 - s]) s++;
+            const literal = m.slice(p, m.length - s).split(VAR).join('').replace(/["'\s_]/g, '');
+            if (literal) for (const x of out.slice(p, out.length - s).match(/\[[a-z-]+\]/g) ?? ['[scrubbed]']) if (!SCRUB_ALLOWED.includes(x)) hidden.add(x);
+            return out;
+          });
+        }
+      }
+      if (scrubExtra().some(([re]) => new RegExp(re.source, re.flags.replace('g', '')).test(named))) hidden.add('sensor_scrub');
+      if (r.split(/\s+/).some((w) => hasCredentials(w.replace(/^(["'])(.*)\1$/, '$2'))) || hidden.size) bad('run', `it carries a credential${hidden.size ? ` (${[...hidden].join(', ')})` : ''}; ${CREDENTIALS_REFUSED}. A check runs with the supervisor's environment: name a secret by reference ($NAME), never by value`);
+    }
+  }
+  whole('timeout_s', 1, R.fields.timeout_s.max);
+  if (has('fail')) {
+    const f = entry.fail;
+    const one = (o) => isObj(o) && Object.keys(o).length === 1;
+    const rule = one(f) && f.last_line !== undefined && one(f.last_line) ? Object.entries(f.last_line)[0] : null;
+    const ok = (one(f) && f.exit === 'nonzero') || (rule && ((['above', 'below'].includes(rule[0]) && typeof rule[1] === 'number' && Number.isFinite(rule[1])) || (rule[0] === 'is_not' && typeof rule[1] === 'string' && rule[1].length >= 1 && rule[1].length <= 200 && !UNSAFE_TEXT.test(rule[1]))));
+    if (!ok) bad('fail', '{ "exit": "nonzero" }, or { "last_line": { "above": n } }, { "below": n } or { "is_not": "<text, at most 200 characters>" }');
+  }
+  whole('fail_after', 1, R.fields.fail_after.max);
+  whole('severity', 1, R.fields.severity.max);
+  if (has('by') && !R.by.includes(entry.by)) bad('by', R.by.join(' or '));
+  if (has('prompt') && (typeof entry.prompt !== 'string' || !entry.prompt.length || entry.prompt.length > R.fields.prompt.max || UNSAFE_TEXT.test(entry.prompt.replace(/[\n\t]/g, '')))) bad('prompt', `1 to ${R.fields.prompt.max} characters: text, line breaks and tabs`);
+  for (const f of ['component', 'touches', 'done_when']) if (has(f)) for (const e of schemaErrors(SCHEMA.$defs.types.ticket.properties[f], entry[f], f)) bad(f, `as ticket add checks it: ${e}`);
+  whole('grace_days', 1, R.fields.grace_days.max);
+  return errs;
 }
 
 // ===== sensors: production signals into the loop =====
@@ -24540,7 +24922,7 @@ function cmdInit() {
   const claude = path.join(root, 'CLAUDE.md');
   if (fs.existsSync(claude) && !/@AGENTS\.md\b/.test(readText(claude))) { fs.appendFileSync(claude, `\n## devteam\n\n@AGENTS.md\n`); made.push('CLAUDE.md'); }
   out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
-  out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor: it drafts strategy.md with you before the first goal (the upstream README, Setup)');
+  out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor: it drafts strategy.md with you before the first goal, then keeps its loop: devteam.mjs wait in the background, a tick when it returns, never a turn ended without a wait running (the upstream README, Setup)');
 }
 
 /* browser-guard start */
@@ -24843,6 +25225,7 @@ The graph (planning.md)
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
+  moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
 
 Checks and merging (quality.md)
@@ -24948,11 +25331,11 @@ Dashboard and releases
 // recover, machine and operator-thread write, and are allowed by name below: bringing a supervisor
 // back, the machine's digest, word to a supervisor and alert, and its own replies to the owner are
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
-const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
+const OPERATOR_READS = new Set(['search', 'status', 'moves', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings', 'unread']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
-  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
