@@ -254,12 +254,15 @@ const GAP = 2700; // the spec's 3000 less room for one child's spawn to lag anot
 test('presence A13: one build, shared, young and fresh', { timeout: 300000 }, async () => {
   const S = await dash('s');
   setSleep(S, 0);
-  assert.equal(builds(S).length, 0, 'no build yet');
+  // the dashboard warms itself: one build when it starts, before any GET; aged, so (a) finds none young
+  await until(() => builds(S).length === 1 && builds(S)[0].end !== null, 'the warm build at start', 60000);
+  await aged(S);
+  const n0 = builds(S).length;
 
   // (a) ten GETs at once: one build
   const ten = await Promise.all(Array.from({ length: 10 }, () => data(S)));
   ten.forEach((r, i) => good(r, `GET ${i + 1} of 10`));
-  assert.equal(builds(S).length, 1, 'ten GETs at once start one build');
+  assert.equal(builds(S).length, n0 + 1, 'ten GETs at once start one build');
   assert.equal(new Set(ten.map((r) => r.body)).size, 1, 'and share it');
 
   // (b) young and fresh: served from it
@@ -267,8 +270,8 @@ test('presence A13: one build, shared, young and fresh', { timeout: 300000 }, as
   const b = await data(S);
   good(b, '(b)');
   assert.equal(sig(S), s0, 'nothing wrote run/log between');
-  assert.ok(b.at - builds(S)[0].end < 3000, `(b) asked within 3 s of the build (${b.at - builds(S)[0].end} ms)`);
-  assert.equal(builds(S).length, 1, 'a GET within 3 s of a fresh build is served from it');
+  assert.ok(b.at - builds(S)[n0].end < 3000, `(b) asked within 3 s of the build (${b.at - builds(S)[n0].end} ms)`);
+  assert.equal(builds(S).length, n0 + 1, 'a GET within 3 s of a fresh build is served from it');
   assert.equal(b.body, ten[0].body, 'the same data');
 
   // (c) an append during a build: a GET after it waits for the next build. B sleeps 1 s and the
