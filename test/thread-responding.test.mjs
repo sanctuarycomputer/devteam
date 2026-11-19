@@ -402,6 +402,16 @@ test('the card: each stage live and accessible, quiet between changes, and after
   assert.ok(grew >= 2, `the card polled meanwhile (${grew} reads)`);
   assert.equal(await p.ev(state), 'The supervisor is responding…');
 
+  // reduced motion slows the spinner as button.busy is, and the next draw undoes it when the preference goes
+  const dur = `getComputedStyle(document.getElementById('tl-c-spin')).animationDuration`;
+  const motion = async (value, want) => {
+    await p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+    await within(4000, async () => (await ev(dur)) === want, `the spinner at ${want}`);
+  };
+  assert.equal(await p.ev(dur), '0.9s', 'the spinner turns at 0.9 s');
+  await motion('reduce', '2.5s');
+  await motion('no-preference', '0.9s');
+
   await p.ev(`window.__beforeReload = true`);
   await p.send('Page.reload');
   await within(30000, () => ev(`!window.__beforeReload`), 'a new document');

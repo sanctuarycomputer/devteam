@@ -7338,7 +7338,8 @@ function tlCardBody(t) {
   // the spinner only adds to the words while a session is responding, slowed as button.busy is
   const spin = tlEl('tl-c-spin');
   spin.hidden = !/ is responding…$/.test(line);
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) spin.style.animationDuration = '2.5s';
+  // '0.9s', not '': clearing the longhand also drops the duration the inline shorthand set, leaving 0s
+  spin.style.animationDuration = matchMedia('(prefers-reduced-motion: reduce)').matches ? '2.5s' : '.9s';
 }
 // Beside its pin, in page coordinates so it scrolls with the page; a thread whose home is the Inbox tab
 // (in-threads, kit-100 spec §2.6) in the window's coordinates instead, fixed as the panel is; in the dock when
