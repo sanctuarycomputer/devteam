@@ -678,8 +678,19 @@ async function rowStep(p, [f, v, how]) {
   } else await fieldSet(p, f, v);
 }
 
+// Before final-1 F2's row: Ana adds the typography token type.lead (serif 24 700 1.2, none of them the
+// page's default font) and sets title's font to it; the panel then offers it selected.
+const LEAD = { $type: 'typography', $value: { fontFamily: 'serif', fontSize: { value: 24, unit: 'px' }, fontWeight: 700, letterSpacing: { value: 0, unit: 'px' }, lineHeight: 1.2 } };
+async function leadFont(p, fake, a) {
+  await a.edit([{ op: 'token', path: 'type.lead', value: LEAD }, setOp('title', 'font', { $ref: 'type.lead' })]);
+  assert.deepEqual(fake.doc('every').nodes.title.font, { $ref: 'type.lead' }, "Ana's font held by the fake");
+  const shown = () => p.ev("document.querySelector('#props [data-prop=\"font\"]')?.value ?? null");
+  await within(async () => (await shown()) === 'type.lead', "the Font field shows Ana's type.lead", shown, 5000);
+}
+
 // The C2 table (spec C2), in its order: the node, its page, the field changed (each step a fieldSet),
-// and the one set op sent (on `on`, else the node). The four rows on button's variants come before the
+// and the one set op sent (on `on`, else the node); `before`, when given, runs once the node is selected
+// (an edit of Ana's the row starts from). The four rows on button's variants come before the
 // last row, which stays last (the spec's order).
 const C2_ROWS = [
   { id: 'card', steps: [['layout.mode', 'row']], prop: 'layout.mode', value: 'row', after: drawnRow },
@@ -712,6 +723,10 @@ const C2_ROWS = [
   { id: 'title', steps: [['font#family', 'serif']], prop: 'font', value: { family: 'serif', size: 16, weight: 400, lineHeight: 1.4 } },
   { id: 'title', steps: [['font#size', '20']], prop: 'font', value: { family: 'serif', size: 20, weight: 400, lineHeight: 1.4 } },
   { id: 'title', steps: [['font', 'type.body']], prop: 'font', value: { $ref: 'type.body' } },
+  // final-1 F2: type.body's values are also the page's default font, so the row above would pass on a
+  // page that sent the defaults. Here Ana first adds a typography token of other values and sets title's
+  // font to it; Custom must send that token's values.
+  { id: 'title', before: leadFont, steps: [['font', '@custom']], prop: 'font', value: { family: 'serif', size: 24, weight: 700, lineHeight: 1.2 } },
   { id: 'title', steps: [['color', 'color.brand']], prop: 'color', value: { $ref: 'color.brand' } },
   { id: 'title', steps: [['align', 'center']], prop: 'align', value: 'center' },
   { id: 'photo', steps: [['fit', 'contain']], prop: 'fit', value: 'contain' },
@@ -725,13 +740,15 @@ const C2_ROWS = [
 ];
 
 test('every property sends one set op the fake accepts', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
-  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
   await live(p);
+  const a = await ana(fake, later);
   for (const row of C2_ROWS) {
     const on = row.on ?? row.id;
     const what = `${row.id} ${row.steps.map(([f, v]) => `${f} ${JSON.stringify(v)}`).join(', ')}`;
     await showPg(p, row.page ?? 'p-main');
     await selectRow(p, row.id);
+    if (row.before) await row.before(p, fake, a);
     const value = typeof row.value === 'function' ? await row.value(p) : row.value;
     assert.equal(holds(fake.doc('every').nodes[on], row.prop, value), false, `${what}: ${on} doesn't already hold ${JSON.stringify(value)}`);
     const n0 = edits(rec).length;
@@ -1827,6 +1844,42 @@ test('the Layers tree by keyboard', { skip: canDrive ? false : 'needs Chrome and
   assert.equal(after.stops.length, 1, `one tab stop after the delete (${after.stops.join(' ')})`);
   assert.equal(after.rest, true, 'every other row -1 after the delete');
   assert.equal(after.focused, after.stops[0], 'focus stays in the tree, on the tab stop');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+// final-1 F1: another person's edits leave the Pages list as it is. A link with focus keeps it (so the
+// arrow keys don't fall to the page and nudge the selected node), and the page select's options are the
+// same elements (an open picker isn't replaced under it). A renamed page rebuilds the list; focus stays
+// on the same page's link.
+test("the Pages list keeps focus through others' edits", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const a = await ana(fake, later);
+  await selectRow(p, 'loose');
+  const focusedPage = (pg) => pg.ev("(() => { const e = document.activeElement; return e instanceof Element && e.matches('#pages a[data-page]') ? e.dataset.page : (e ? e.localName : null); })()");
+  assert.equal(await p.ev("(() => { const e = document.querySelector('#pages a[data-page=\"p-main\"]'); e.focus(); return document.activeElement === e; })()"), true, "Checkout's link focused");
+  await p.ev("(() => { window.__mainLink = document.querySelector('#pages a[data-page=\"p-main\"]'); window.__firstOpt = document.querySelector('#pageSel option'); })()");
+  const n0 = edits(rec).length;
+  for (const [i, words] of [[1, 'From Ana'], [2, 'Again from Ana']]) {
+    await a.edit([setOp('title', 'text', words)]);
+    await within(async () => (await text(p, '#surface [data-id="title"]')) === words, `Ana's edit ${i} drawn`, async () => text(p, '#surface [data-id="title"]'), 5000);
+    assert.equal(await focusedPage(p), 'p-main', `Checkout's link keeps focus through Ana's edit ${i}`);
+    assert.equal(await p.ev("document.querySelector('#pages a[data-page=\"p-main\"]') === window.__mainLink"), true, `the Pages link not rebuilt by Ana's edit ${i}`);
+    assert.equal(await p.ev("document.querySelector('#pageSel option') === window.__firstOpt"), true, `the page select's options not replaced by Ana's edit ${i}`);
+  }
+  // the arrow keys on the link are the link's: nothing nudged, nothing sent
+  await arrow(p, 'ArrowDown');
+  await arrow(p, 'ArrowRight');
+  await sendsNothing(rec, n0, 'arrows on a Pages link');
+  assert.equal(await focusedPage(p), 'p-main', "Checkout's link still focused after the arrows");
+  // Ana renames the other page: the list shows it, and focus is still on Checkout's link
+  await a.edit([setOp('p-parts', 'name', 'Parts 2')]);
+  await within(async () => (await text(p, '#pages a[data-page="p-parts"]')) === 'Parts 2', 'the renamed page shown', async () => text(p, '#pages a[data-page="p-parts"]'), 5000);
+  assert.equal(await text(p, '#pageSel option[value="p-parts"]'), 'Parts 2', 'the page select shows the new name');
+  assert.equal(await focusedPage(p), 'p-main', "Checkout's link keeps focus through the rename");
+  assert.equal(await shownPage(p), 'p-main', 'Checkout still shown');
+  await sendsNothing(rec, n0, "Ana's edits");
   assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
   noExceptions(rec);
 });

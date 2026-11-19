@@ -309,9 +309,22 @@
   const pageById = (id) => pages().find((pg) => pg.id === id) || null;
   const pageName = (pg) => (typeof pg.name === 'string' ? pg.name : '');
 
-  // The Pages list: one link per page, by name, in order.
+  // The pages' ids and names, in order, as one string: the Pages list and the page select are rebuilt
+  // only when it changes, so another person's edit leaves a focused link focused and an open picker's
+  // options in place (redraw runs on every edit).
+  const pagesKey = () => JSON.stringify(pages().map((pg) => [typeof pg.id === 'string' ? pg.id : '', pageName(pg)]));
+  let pagesDrawn = null;
+  let pageSelDrawn = null;
+
+  // The Pages list: one link per page, by name, in order. A link that had focus has it again (its
+  // page's new link), when the pages changed under it.
   function renderPages() {
     const nav = $('pages');
+    const key = pagesKey();
+    if (key === pagesDrawn) return;
+    pagesDrawn = key;
+    const a = document.activeElement;
+    const focusPage = a instanceof Element && a.matches('#pages a[data-page]') ? a.dataset.page : null;
     const links = pages().map((pg) => {
       const a = document.createElement('a');
       const id = typeof pg.id === 'string' ? pg.id : '';
@@ -321,11 +334,16 @@
       return a;
     });
     nav.replaceChildren(...links);
+    const back = focusPage === null ? null : links.find((l) => l.dataset.page === focusPage) || links[0] || null;
+    if (back) back.focus({ preventScroll: true });
   }
 
   // The page <select> (the stage's page switch on a narrow screen): one option per page, by name.
   function renderPageSel() {
     const sel = $('pageSel');
+    const key = pagesKey();
+    if (key === pageSelDrawn) return;
+    pageSelDrawn = key;
     const opts = pages().map((pg) => {
       const o = document.createElement('option');
       o.value = typeof pg.id === 'string' ? pg.id : '';
@@ -1309,7 +1327,8 @@
     for (const a of $('pages').querySelectorAll('a[data-page]')) {
       if (a.dataset.page === pg.id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     }
-    $('pageSel').value = typeof pg.id === 'string' ? pg.id : '';
+    const id = typeof pg.id === 'string' ? pg.id : '';
+    if ($('pageSel').value !== id) $('pageSel').value = id;
   }
   function showPage(id) {
     const pg = pageById(id) || pages()[0];
@@ -1610,7 +1629,8 @@
     b.saved = state.saved === null ? '' : String(state.saved);
   }
   // Draw again from the two copies: the shown page, its layers, the selection and the properties (the
-  // view kept, not refitted). A row of the Layers tree that had focus has it again.
+  // view kept, not refitted). A row of the Layers tree that had focus has it again; the Pages list and
+  // the page select are rebuilt only when the pages changed.
   function redraw() {
     if (!state.base) return;
     state.doc = viewDoc();
