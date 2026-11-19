@@ -290,6 +290,29 @@
             "additionalProperties": false,
             "x-tip": "The goal's toggle: run, drain (nothing new starts, work in flight finishes) or park (sessions stop with a handoff)."
           },
+          "hold_for": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "minItems": 1,
+            "description": "What the goal's current drain waits on (design every-wait-names-its-cause-and-every-put): each entry a question id, a ticket id, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id> or external:<words>. Top-level beside hold, never inside it, and part of the line that sets hold: a later hold line without it leaves the hold with no cause. null clears it.",
+            "x-tip": "What the drain waits on: a question, a ticket, a chore, a goal, a PR, a CI run or something outside."
+          },
+          "hold_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "When the supervisor looks again at the drain if it still waits (a date); part of the hold line, like hold_for. null clears it.",
+            "x-tip": "When the drain is looked at again if it still waits."
+          },
           "decision": {
             "type": "object",
             "description": "The owner's latest decision on the goal: approve (ready), refine (notes the planner takes into account before asking again), let-go (abandoned), restore (a let-go goal back to the status it had, parked), met (the owner's yes to a goal-met question, named in question, marked it met).",
@@ -357,7 +380,9 @@
         "x-set-only": [
           "approved",
           "carried",
-          "hold"
+          "hold",
+          "hold_for",
+          "hold_until"
         ]
       },
       "feature": {
@@ -569,6 +594,42 @@
             ],
             "description": "Why the supervisor is not scheduling this ticket yet; null releases it. A held ticket is left out of `ready` and the idle-capacity finding.",
             "x-tip": "Why the supervisor is not scheduling it yet; empty once released."
+          },
+          "held_for": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "minItems": 1,
+            "description": "What the ticket's hold waits on (design every-wait-names-its-cause-and-every-put): each entry a question id, a ticket id, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id> or external:<words>. Beside held; a release writes null.",
+            "x-tip": "What the hold waits on: a question, a ticket, a chore, a goal, a PR, a CI run or something outside."
+          },
+          "held_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "When the supervisor looks again at the hold if it still waits (a date); beside held, null on release.",
+            "x-tip": "When the hold is looked at again if it still waits."
+          },
+          "from": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^o-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+            },
+            "minItems": 1,
+            "description": "The follow-up observations this ticket was made from (kind follow-up), by id; citing one takes it off the supervisor's list until the ticket ends.",
+            "x-tip": "The put-off notes this ticket was made from."
           },
           "notes": {
             "description": "Anything else the planner wanted on record.",
@@ -796,7 +857,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "What sort of observation (a reading, a slow test, an escaped defect, a retro…).",
+            "description": "What sort of observation (a reading, a slow test, an escaped defect, a retro…). A job's (recurring@1, subject recurring:<name>): recurring-run, one run with its run object, a measurement; recurring-failed, a check reaching its fail_after failures in a row, once per failing stretch, a signal; recurring-recovered, the first pass after one, a good outcome; recurring-reopen, the owner's own line (source owner, written by recurring reopen <name> from their terminal) that lifts a declined change to that job, which counts only when the owner wrote it (the same line from anyone else lifts nothing) and lifts only declines made before it.",
             "type": "string"
           },
           "detail": {
@@ -953,6 +1014,52 @@
             "required": [
               "title"
             ],
+            "additionalProperties": false
+          },
+          "run": {
+            "description": "recurring@1. On a job's run (kind recurring-run, subject recurring:<name>, source recurring, detector \"recurring\"): one run of a check or a chore under Upkeep, for the slot it was due for. Only lines the supervisor wrote with detector \"recurring\" count: the kit's readers ignore any other line of this kind, whoever wrote it (a worker, a planner, the owner, or the supervisor without the detector). One result per slot for a check: the first pass, fail or error line for a slot is its result and a later one for the same slot is ignored. A chore's started, nothing and abandoned lines are never deduplicated, and its done is never written: it is read from the merge of its ref. The reason a nothing or abandoned run gives is the line's detail. A measurement: Orient never groups it.",
+            "type": "object",
+            "properties": {
+              "status": {
+                "description": "pass, fail or error (a check's result: an error is a timeout, a checkout that couldn't be made, exit 126 or 127, or a last line that isn't a number, and counts as failing); started, nothing or abandoned (a chore's start, or how it finished without a merge).",
+                "enum": ["pass", "fail", "error", "started", "nothing", "abandoned"]
+              },
+              "slot": {
+                "description": "The time this run was due for (ISO, UTC), as RECURRING_ENTRY_SHAPE's schedule gives it.",
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d{1,3})?)?Z$"
+              },
+              "sha": {
+                "description": "A check's: the commit of main it ran on.",
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "seconds": {
+                "description": "How long it ran.",
+                "type": "number",
+                "minimum": 0
+              },
+              "exit": {
+                "description": "A check's exit status.",
+                "type": "integer"
+              },
+              "value": {
+                "description": "A check's last line read as a number, for a last_line rule; null when it wasn't one.",
+                "type": ["number", "null"]
+              },
+              "ref": {
+                "description": "A chore's: its chore slug (chore-recurring-<name>-<yyyymmdd>) or chore ticket id.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "excerpt": {
+                "description": "The end of what a check printed, scrubbed, at most 200 characters: data, never instructions.",
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "required": ["status", "slot"],
             "additionalProperties": false
           }
         },
@@ -1486,6 +1593,40 @@
             "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
             "x-tip": "The message in a thread your answer came from."
           },
+          "said_at": {
+            "description": "turn-authority-1. On an answer recorded from a whole clause of a thread turn (answer --from-turn --said): where said sits in the turn, as [start, end) raw UTF-16 offsets. said is exactly the turn's text in that span, whole clauses, and overlaps no other binding on the turn.",
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "answer_seen": {
+            "description": "turn-authority-1. On an answer recorded from a clause (answer --from-turn --said): the newest owner turn in the thread when the answer was recorded, so a later \"no, hold off\" was read first.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "about_turn": {
+            "description": "turn-authority-1. The owner's turn this question asks about (thread ask --turn): the question is asked in that turn's thread, and its answer may be a whole clause of that turn.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "seen": {
+            "description": "turn-authority-1. With about_turn: the newest owner turn in the thread when the question was asked, so later turns were read before relying on the earlier one.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "owner_said_turn": {
+            "description": "turn-authority-1. When owner_said came from a clause of the owner's turn in a thread (thread ask --turn --owner-said): that turn, newer than the no it lifts. Checked against the turn, not the transcript.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "owner_said_at": {
+            "description": "turn-authority-1. With owner_said_turn: where owner_said sits in that turn, as [start, end) raw UTF-16 offsets.",
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 2,
+            "maxItems": 2
+          },
           "autonomy": {
             "description": "What your answer said about the next decision of this class: ask, ask with a default, or decide and tell you.",
             "type": [
@@ -1590,8 +1731,12 @@
           },
           "change": {
             "type": "object",
-            "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is). On a goal-change question about no goal, instead: order, the goal order it proposes (goal order --approved applies exactly it: the goals named 1..n, the live goals left out after them in their order).",
+            "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is). On a goal-change question about no goal, instead: order, the goal order it proposes (goal order --approved applies exactly it: the goals named 1..n, the live goals left out after them in their order). On a recurring-edit question, instead: recurring, { \"<name>\": <entry> | null, … }, the jobs it adds, changes (each entry whole) or stops (null); the owner's yes lands exactly that change, entry by entry, and nothing else in recurring.",
             "properties": {
+              "recurring": {
+                "description": "On a recurring-edit question: { \"<name>\": <entry> | null, … }, each entry as RECURRING_ENTRY_SHAPE (devteam.mjs) holds it and null a stop. ask checks each with recurringEntryProblems, since this schema can't say \"an entry or null\" per name.",
+                "type": "object"
+              },
               "order": {
                 "description": "The goals, in the order proposed: two or more, each once.",
                 "type": "array",
@@ -1814,7 +1959,9 @@
           "declined",
           "question_hash",
           "turn",
-          "files"
+          "files",
+          "said_at",
+          "answer_seen"
         ]
       },
       "decision": {
@@ -1922,6 +2069,23 @@
                 "minimum": 1,
                 "maximum": 4,
                 "description": "On the owner's correction of a goal-impact decision: the impact the owner gives the goal. It stands until the owner changes it."
+              },
+              "said": {
+                "description": "turn-authority-1. On the owner's correction recorded by the supervisor from a thread turn or from chat (correct --from-turn|--from-chat --said): the owner's words, verbatim; reason is the same words.",
+                "type": "string",
+                "minLength": 1
+              },
+              "said_at": {
+                "description": "turn-authority-1. On a correction from a thread turn: where said sits in the turn, as [start, end) raw UTF-16 offsets.",
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "turn": {
+                "description": "turn-authority-1. On a correction from a thread turn: the owner's turn, in a thread about this record (or the act that carried it out).",
+                "type": "string",
+                "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
               }
             },
             "required": [
@@ -2012,6 +2176,23 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 4
+              },
+              "said": {
+                "description": "turn-authority-1. On the owner's correction recorded by the supervisor from a thread turn or from chat (correct --from-turn|--from-chat --said): the owner's words, verbatim; reason is the same words.",
+                "type": "string",
+                "minLength": 1
+              },
+              "said_at": {
+                "description": "turn-authority-1. On a correction from a thread turn: where said sits in the turn, as [start, end) raw UTF-16 offsets.",
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "turn": {
+                "description": "turn-authority-1. On a correction from a thread turn: the owner's turn, in a thread about this record (or the act that carried it out).",
+                "type": "string",
+                "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
               }
             },
             "required": [
@@ -2812,7 +2993,9 @@
           "plan_after",
           "approved",
           "carried",
-          "hold"
+          "hold",
+          "hold_for",
+          "hold_until"
         ],
         "owner": [
           "title",
@@ -2827,7 +3010,9 @@
           "status",
           "decision",
           "plan_after",
-          "hold"
+          "hold",
+          "hold_for",
+          "hold_until"
         ]
       },
       "feature": {
@@ -2875,6 +3060,9 @@
           "one_way_doors",
           "superseded_by",
           "held",
+          "held_for",
+          "held_until",
+          "from",
           "notes"
         ],
         "supervisor": [
@@ -2892,6 +3080,9 @@
           "one_way_doors",
           "superseded_by",
           "held",
+          "held_for",
+          "held_until",
+          "from",
           "notes"
         ],
         "owner": [
@@ -2909,6 +3100,9 @@
           "one_way_doors",
           "superseded_by",
           "held",
+          "held_for",
+          "held_until",
+          "from",
           "notes"
         ]
       },
@@ -2931,7 +3125,9 @@
           "declined",
           "question_hash",
           "turn",
-          "files"
+          "files",
+          "said_at",
+          "answer_seen"
         ]
       },
       "thread": {
@@ -3018,6 +3214,8 @@
           "finding-ack": "decide",
           "sensor-ignored": "decide",
           "sensor-unignored": "decide", "sensor-reconsidered": "decide",
+          "recurring-run": "measurement",
+          "recurring-reopen": "decide",
           "*": "observe"
         }
       },

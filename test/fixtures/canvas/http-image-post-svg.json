@@ -1,0 +1,22 @@
+{
+  "fake": {
+    "canvases": {
+      "board": "doc-minimal.json"
+    }
+  },
+  "request": {
+    "method": "POST",
+    "path": "/api/canvas/image?slug=board",
+    "headers": {
+      "Origin": "$origin",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "name": "x.svg",
+      "data": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIG9ubG9hZD0iYWxlcnQoMSkiLz4="
+    }
+  },
+  "status": 415,
+  "requestKind": "image-request",
+  "responseKind": null
+}

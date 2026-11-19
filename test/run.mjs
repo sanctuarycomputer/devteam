@@ -10,6 +10,11 @@
 //
 //   --concurrency n      files at once (default DEVTEAM_TEST_CONCURRENCY, else 2). Files in the
 //                        `alone` group run one at a time before any other.
+//   --chrome-concurrency n
+//                        files of the `chrome` group at once, within --concurrency: each starts a
+//                        headless Chrome, so off CI they run one at a time while other files run
+//                        beside them. Default DEVTEAM_TEST_CHROME_CONCURRENCY; else, when CI is set
+//                        (to anything but empty, 0 or false), --concurrency; else 1.
 //   --file-timeout s     every file's watchdog, in seconds. Without it: 600 for `chain` and for the
 //                        files in LONG below, 300 for the rest. A file past its timeout is stopped
 //                        and killed with its whole process tree, its tmux servers are killed and its
@@ -58,13 +63,17 @@ const relOf = (root, abs) => {
   return rel.startsWith('..') || path.isAbsolute(rel) ? abs : rel.split(path.sep).join('/');
 };
 
+// CI is a machine of its own: there the chrome group keeps the run's concurrency
+export const isCI = (env) => !!env.CI && !/^(0|false)$/i.test(env.CI);
+
 export function parseArgs(argv, env, root = ROOT) {
-  const o = { files: [], groups: null, shard: null, list: false, repeat: 1, timings: null, concurrency: null, fileTimeout: null };
+  const o = { files: [], groups: null, shard: null, list: false, repeat: 1, timings: null, concurrency: null, chromeConcurrency: null, fileTimeout: null };
   for (let k = 0; k < argv.length; k++) {
     const a = argv[k];
     const val = () => { if (k + 1 >= argv.length) throw new UsageError(`${a} wants a value`); return argv[++k]; };
     if (a === '--list') o.list = true;
     else if (a === '--concurrency') o.concurrency = posInt(a, val());
+    else if (a === '--chrome-concurrency') o.chromeConcurrency = posInt(a, val());
     // a day at most: setTimeout can't count past about 24.8 days, and no file needs a day
     else if (a === '--file-timeout') o.fileTimeout = posInt(a, val(), 1, 86400);
     else if (a === '--repeat') o.repeat = posInt(a, val());
@@ -88,6 +97,7 @@ export function parseArgs(argv, env, root = ROOT) {
     }
   }
   if (o.concurrency === null) o.concurrency = env.DEVTEAM_TEST_CONCURRENCY ? posInt('DEVTEAM_TEST_CONCURRENCY', env.DEVTEAM_TEST_CONCURRENCY) : 2;
+  if (o.chromeConcurrency === null) o.chromeConcurrency = env.DEVTEAM_TEST_CHROME_CONCURRENCY ? posInt('DEVTEAM_TEST_CHROME_CONCURRENCY', env.DEVTEAM_TEST_CHROME_CONCURRENCY) : isCI(env) ? o.concurrency : 1;
   return o;
 }
 
@@ -447,22 +457,51 @@ function startFile(p, run, ctx) {
   return entry;
 }
 
-async function runPool(items, limit, ctx) {
-  const results = [];
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length && !ctx.stopping) {
-      const [p, run] = items[next++];
-      results.push(await startFile(p, run, ctx).done);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+// The first file in the queue whose group is below its cap (a group with no cap always is), or -1.
+export function nextIndex(queue, running, caps) {
+  return queue.findIndex((p) => caps[p.group] === undefined || (running.get(p.group) ?? 0) < caps[p.group]);
 }
 
-// The steps of one run: the `alone` files one at a time, then every other file at the concurrency.
-export function schedule(plan, concurrency) {
-  return [{ files: plan.filter((p) => p.group === 'alone'), limit: 1 }, { files: plan.filter((p) => p.group !== 'alone'), limit: concurrency }].filter((st) => st.files.length);
+// Runs items ([plan entry, run]) up to limit at once, in order but for a file whose group is at its
+// cap, which waits while later files start. A place is filled when a file ends; the pool resolves with
+// the results in end order once nothing runs and nothing more will start, and rejects if a file can't
+// be started (runAll then cleans up what is running).
+export function runPool(items, limit, ctx, caps = {}, start = startFile) {
+  return new Promise((resolve, reject) => {
+    const queue = [...items];
+    const results = [];
+    const running = new Map();
+    let active = 0;
+    let failed = false;
+    const fail = (e) => { if (!failed) { failed = true; reject(e); } };
+    const fill = () => {
+      if (failed) return;
+      try {
+        while (!ctx.stopping && active < limit) {
+          const k = nextIndex(queue.map(([p]) => p), running, caps);
+          if (k < 0) break;
+          const [[p, run]] = queue.splice(k, 1);
+          const entry = start(p, run, ctx);
+          active++;
+          running.set(p.group, (running.get(p.group) ?? 0) + 1);
+          entry.done.then((res) => {
+            results.push(res);
+            active--;
+            running.set(p.group, running.get(p.group) - 1);
+            fill();
+          }, fail);
+        }
+      } catch (e) { return fail(e); }
+      if (active === 0) resolve(results);
+    };
+    fill();
+  });
+}
+
+// The steps of one run: the `alone` files one at a time, then every other file at the concurrency,
+// the `chrome` group's files at most chromeConcurrency at once among them.
+export function schedule(plan, concurrency, chromeConcurrency = concurrency) {
+  return [{ files: plan.filter((p) => p.group === 'alone'), limit: 1 }, { files: plan.filter((p) => p.group !== 'alone'), limit: concurrency, caps: { chrome: chromeConcurrency } }].filter((st) => st.files.length);
 }
 
 async function runAll(opts, plan) {
@@ -484,24 +523,34 @@ async function runAll(opts, plan) {
 async function runFiles(opts, plan, ctx) {
   // Children have process groups of their own, so a terminal's Ctrl-C reaches only this process,
   // and a dropped session's SIGHUP too: each running file is cleaned up before it exits.
-  const stopAll = async (code) => {
-    if (ctx.stopping) return;
+  // Its promise never settles: it ends in process.exit. Once it has begun, the run below waits on it
+  // rather than going on to the summary, whichever of the two a file's end reaches first.
+  const stopAll = (code) => {
+    if (ctx.stopping) return ctx.stopped;
     ctx.stopping = true;
-    const running = [...ctx.running];
-    // a file the watchdog already timed out stays `timed out`
-    for (const e of running) { e.result ??= 'interrupted'; cleanup(e); }
-    await Promise.all(running.map((e) => e.done));
-    say('interrupted\n');
-    process.stderr.write(`run.mjs: interrupted (${code === 141 ? 'its output closed' : `signal ${code - 128}`})\n`);
-    process.exit(code);
+    ctx.stopped = (async () => {
+      const running = [...ctx.running];
+      // a file the watchdog already timed out stays `timed out`
+      for (const e of running) { e.result ??= 'interrupted'; cleanup(e); }
+      await Promise.all(running.map((e) => e.done));
+      say('interrupted\n');
+      process.stderr.write(`run.mjs: interrupted (${code === 141 ? 'its output closed' : `signal ${code - 128}`})\n`);
+      process.exit(code);
+    })();
+    return ctx.stopped;
   };
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => stopAll(128 + os.constants.signals[sig]));
   // the reader of our output went away: stop as SIGPIPE would (128 + 13), cleaning up first
   process.stdout.on('error', (e) => { outClosed = true; if (e.code === 'EPIPE') stopAll(128 + os.constants.signals.SIGPIPE); });
   const results = [];
   for (let run = 1; run <= opts.repeat && !ctx.stopping; run++) {
-    for (const st of schedule(plan, opts.concurrency)) results.push(...await runPool(st.files.map((p) => [p, run]), st.limit, ctx));
+    for (const st of schedule(plan, opts.concurrency, opts.chromeConcurrency)) {
+      if (ctx.stopping) break;
+      results.push(...await runPool(st.files.map((p) => [p, run]), st.limit, ctx, st.caps));
+    }
   }
+  // interrupted: no summary and no timings, only what stopAll prints before it exits
+  if (ctx.stopped) await ctx.stopped;
   if (!plan.length) say('no files\n');
   else {
     say(`\nsummary: ${plan.length} file${plan.length === 1 ? '' : 's'}, concurrency ${opts.concurrency}\n`);
