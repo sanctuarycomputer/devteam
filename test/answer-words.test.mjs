@@ -13,7 +13,7 @@ const RATE = ['--stake', '1', '--urgency', '1'];
 const YN = JSON.stringify([{ label: 'Yes' }, { label: 'No' }]);
 const firstId = (s) => s.split('\n')[0].trim();
 // Distinct words for each question, so the kit's re-ask refusal never takes one for another.
-const TEXTS = ['Should checkout move to the new pricing page before launch?', 'Do invoices go out on the first business day of each month?', 'Can refunds skip the manual review queue under fifty dollars?', 'Will the mobile app share the web login cookie?', 'Must exports include archived customers by default?', 'Is dark mode worth shipping ahead of the holiday freeze?', 'Should trial accounts keep their data after ninety days?', 'May the support team see partial card numbers?', 'Does the onboarding tour replay after every major release?', 'Could weekly digests replace the daily summary email?', 'Ought the status page show maintenance windows a week ahead?', 'Should failed webhooks retry for a full day?', 'Are team invitations limited to verified domains?', 'Would a yearly plan discount of twenty percent hurt margins?', 'Shall the legacy API stay up until spring?', 'Should search index deleted projects for thirty days?', 'Can admins impersonate users without a ticket?', 'Do we localise receipts into French and German first?', 'Is single sign-on included on the starter tier?', 'Should usage alerts fire at eighty percent of quota?', 'Do contractors get read access to the billing dashboard?', 'Should the changelog email go to every workspace admin?', 'Can a workspace hold more than one custom domain?', 'Will the free tier keep its API rate limit next year?', 'Should archived boards stay searchable for a year?', 'Do guests see the comment history on shared docs?', 'Can billing contacts change the plan without an admin?', 'Should the desktop app update itself overnight?'];
+const TEXTS = ['Should checkout move to the new pricing page before launch?', 'Do invoices go out on the first business day of each month?', 'Can refunds skip the manual review queue under fifty dollars?', 'Will the mobile app share the web login cookie?', 'Must exports include archived customers by default?', 'Is dark mode worth shipping ahead of the holiday freeze?', 'Should trial accounts keep their data after ninety days?', 'May the support team see partial card numbers?', 'Does the onboarding tour replay after every major release?', 'Could weekly digests replace the daily summary email?', 'Ought the status page show maintenance windows a week ahead?', 'Should failed webhooks retry for a full day?', 'Are team invitations limited to verified domains?', 'Would a yearly plan discount of twenty percent hurt margins?', 'Shall the legacy API stay up until spring?', 'Should search index deleted projects for thirty days?', 'Can admins impersonate users without a ticket?', 'Do we localise receipts into French and German first?', 'Is single sign-on included on the starter tier?', 'Should usage alerts fire at eighty percent of quota?', 'Do contractors get read access to the billing dashboard?', 'Should the changelog email go to every workspace admin?', 'Can a workspace hold more than one custom domain?', 'Will the free tier keep its API rate limit next year?', 'Should archived boards stay searchable for a year?', 'Do guests see the comment history on shared docs?', 'Can billing contacts change the plan without an admin?', 'Should the desktop app update itself overnight?', 'Do shared links expire after thirty days?', 'Should the API return totals in cents?'];
 
 // A ready goal read from a repo check, approved by the owner (as goal-met.test.mjs's first test).
 function readyGoal(F) {
@@ -187,6 +187,20 @@ test('the answer line records the pick beside the words, and words alone wait fo
     assert.deepEqual(withdrawn.map((l) => [l.reading_void ?? null, l.reading_withdrawn ?? null, l.by]), [[A1, null, 'owner'], [null, A2, 'supervisor']], 'the owner voids A1, the supervisor withdraws A2');
     assert.deepEqual([view(Q7c).matched, view(Q7c).read_by], [false, null]);
     refused(['goal', 'set', F.goal, '--approved', Q7c], /not its recommendation|own words/, SUP);
+    // the owner's correction said in chat: the supervisor's process records it, so the supervisor withdraws (task-2 T2-1)
+    const Q7d = gc();
+    F.owner(['answer', Q7d, 'yes, fine', '--in-words']);
+    F.sup(['answer', Q7d, '--read', 'Yes', '--cite', 'yes', '--class', 'goal-change']);
+    const A3 = view(Q7d).reading.act;
+    F.sup(['correct', A3, '--from-chat', '--said', 'That is not what I meant.']);
+    const heard = lines().filter((l) => l.type === 'question' && l.id === Q7d && (l.reading_withdrawn !== undefined || l.reading_void !== undefined));
+    assert.deepEqual(heard.map((l) => [l.reading_void ?? null, l.reading_withdrawn ?? null, l.by]), [[null, A3, 'supervisor']], 'withdrawn by the supervisor, never an owner line it wrote');
+    assert.deepEqual([view(Q7d).matched, view(Q7d).read_by], [false, null]);
+    // correcting an act that is no reading writes no void (task-2 T2-3)
+    const Qn = gc();
+    const other = firstId(F.sup(['act', '--class', 'worker-slots', '--refs', Qn, '--', 'tidied']));
+    F.owner(['correct', other, '--reason', 'not this']);
+    assert.equal(lines().filter((l) => l.type === 'question' && l.id === Qn && (l.reading_withdrawn !== undefined || l.reading_void !== undefined)).length, 0, 'no void for an act that is no reading');
 
     // 13. everything the kit wrote checks
     assert.equal(run(['log-check']).status, 0, run(['log-check']).err);

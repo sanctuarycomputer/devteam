@@ -11218,9 +11218,14 @@ function cmdCorrect() {
   else corrected = { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact };
   appendLog({ type: act.type, op: 'set', id: actId, ...(heard ? { channel: flags['from-turn'] !== undefined ? 'thread' : 'chat' } : {}), corrected }, by);
   // the act of a supervisor's reading of the owner's words: the correction voids the reading (the
-  // owner's) or withdraws it (the supervisor's, at a retro), so it no longer counts from now on
+  // owner's, typed in their own terminal or Inbox) or withdraws it (the supervisor's: at a retro, or
+  // the owner's words it recorded from chat or a turn, which its own process writes), so it no
+  // longer counts from now on
   const read = act.type === 'act' ? logGet(act.refs?.[0]) : null;
-  if (read?.type === 'question' && read.updates.some((u) => u.reading?.act === actId)) appendLog({ type: 'question', op: 'set', id: read.id, [writerClass(by) === 'owner' ? 'reading_void' : 'reading_withdrawn']: actId }, by);
+  if (read?.type === 'question' && read.updates.some((u) => u.reading?.act === actId)) {
+    const own = by === 'owner' && !heard;
+    appendLog({ type: 'question', op: 'set', id: read.id, [own ? 'reading_void' : 'reading_withdrawn']: actId }, own ? 'owner' : 'supervisor');
+  }
   if (impact !== undefined) out(`${logGet(act.refs?.[0])?.title ?? act.refs?.[0]}: impact ${impact} (${IMPACT_WORDS[impact]}), set by the owner; it stands until the owner changes it`);
   if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
   // the supervisor wrote it from the owner's words: nobody to tell
