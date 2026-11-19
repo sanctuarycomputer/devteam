@@ -130,12 +130,26 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     T.jobsChore('stale', (j) => { j.recurring.dd = check({ every: '8h' }); });
     T.onMain((j) => { j.recurring.bb = chore({ every: '2w' }); });
     const qd = T.yes({ recurring: { dd: check({ every: '8h' }) } });
-    refused(T.dry('stale', qd), /main's jobs changed since this branch \(bb\): merge main into it/);
+    refused(T.dry('stale', qd), /main's settings changed since this branch: merge main into it, then check again/);
     const stale = path.join(T.old, '.worktrees/chore-stale');
     T.g(['fetch', '-q', 'origin'], stale);
     T.g(['merge', '-q', '--no-edit', 'origin/main'], stale);
     T.g(['push', '-q', 'origin', 'chore-stale'], stale);
     passes(T.dry('stale', qd));
+    // main reorders the jobs' text, the same value, with no answer needed: the text merge would keep
+    // a job this branch stops, so the settings file must be main's byte for byte (task-2-r3 F1-1a)
+    T.onMain((j) => { j.recurring = { ...j.recurring, ee: check({ every: '12h' }), ff: chore({ every: '1d' }) }; });
+    const qf = T.yes({ recurring: { ff: null } });
+    const late = T.jobsChore('stop-ff', (j) => { delete j.recurring.ff; });
+    T.onMain((j) => { const { ff, ...rest } = j.recurring; j.recurring = { ff, ...rest }; });
+    refused(T.dry('stop-ff', qf), /main's settings changed since this branch: merge main into it, then check again/);
+    T.g(['fetch', '-q', 'origin'], late);
+    T.g(['merge', '-q', '--no-edit', 'origin/main'], late);
+    // the merge keeps main's moved ff, so the branch stops it again on top
+    T.edit((j) => { delete j.recurring.ff; }, late);
+    T.g(['commit', '-q', '--allow-empty', '-am', 'stop ff again'], late);
+    T.g(['push', '-q', 'origin', 'chore-stop-ff'], late);
+    passes(T.dry('stop-ff', qf));
   } finally { T.done(); }
 });
 

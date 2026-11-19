@@ -23096,12 +23096,14 @@ const recurringRegistry = Object.freeze({
 // against the head, compared canonically). An answer of another class is the class check's to refuse.
 function recurringBindingFails(base, sha, approved) {
   const R = recurringRegistry;
-  // what lands is the head merged onto main as it is now: the base-to-head diff is that change
-  // only while main's jobs are still the merge base's (task-2 F1)
+  // What lands is git's text merge of the head onto main as it is now: the base-to-head diff is
+  // exactly that change only while main's settings file is the merge base's, byte for byte (its
+  // blob). A canonical compare misses a reorder, after which the text merge can keep a job this
+  // branch stops (task-2 F1, task-2-r3 F1-1a). A file missing on either side differs.
+  const blob = (ref) => (ref ? git(['rev-parse', '--verify', '-q', `${ref}:${projectRel}/settings.md`]) : null);
+  const [was, is] = [blob(base), blob(mainRef())];
+  if (!was || !is || was !== is) return ["main's settings changed since this branch: merge main into it, then check again"];
   const jobsAt = (ref) => { const s = settingsAt(ref, { orNull: true }); return s && s.recurring === undefined ? {} : s?.recurring; };
-  const [then, now] = mainRef() ? [jobsAt(base), jobsAt(mainRef())] : [null, null];
-  const moved = isObj(then) && isObj(now) ? Object.keys(R.changed(then, now)) : [];
-  if (moved.length) return [`main's jobs changed since this branch (${moved.join(', ')}): merge main into it, then check again`];
   const q = logGet(approved);
   if (q?.type !== 'question' || q.class !== 'recurring-edit') return [];
   const v = questionView(q);
