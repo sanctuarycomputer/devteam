@@ -123,3 +123,29 @@ test('a lower-priority ticket still starts while higher-priority work is blocked
     assert.equal(idle(), 'make workers for: bf-03-low');
   } finally { F.done(); }
 });
+
+// A goal waiting, directly or through others, on unstarted work of a goal 3 or more places below it
+// is a priority-inversion finding, one per blocked goal; it clears once the edge is gone.
+test('priority-inversion: a goal waiting on unstarted work well below it, until the edge goes', () => {
+  const { F, g, ticket, findings } = priorityFixture('metrics-priority-inversion');
+  try {
+    // a p2 ticket waits on two p9 ones, one through the other; a p3 one on a p5 one (a gap of 2)
+    ticket('pi-01-low', 9);
+    ticket('pi-02-link', 9, ['pi-01-low']);
+    ticket('pi-03-high', 2, ['pi-02-link']);
+    ticket('pi-04-fifth', 5);
+    ticket('pi-05-middle', 3, ['pi-04-fifth']);
+    const inversions = () => findings().filter((x) => x.kind === 'priority-inversion');
+    const f = inversions();
+    assert.equal(f.length, 1, JSON.stringify(f));
+    assert.equal(f[0].subject, g[2]);
+    assert.equal(f[0].severity, 'medium');
+    assert.equal(f[0].detail, 'p2 "High": 1 ticket waits on 2 unstarted tickets of lower-priority goals: pi-01-low (p9), pi-02-link (p9)');
+    assert.match(f[0].suggestion, /start them now .*reverse it so the lower-priority ticket waits/);
+    assert.match(F.sup(['metrics']), /\[medium\] priority-inversion: /);
+
+    // the edge cut: nothing of p2's waits on p9 work
+    F.sup(['ticket', 'set', 'pi-03-high', '--json', JSON.stringify({ depends_on: [] })]);
+    assert.deepEqual(inversions(), []);
+  } finally { F.done(); }
+});

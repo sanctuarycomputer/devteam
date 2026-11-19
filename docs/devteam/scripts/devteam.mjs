@@ -4428,7 +4428,7 @@ function ownPriority(t) {
 // Each live ticket's effective priority: the best of its own and that of every live ticket that
 // depends on it, directly or through others. Work a higher-priority goal waits on goes first,
 // whatever goal it serves, so the goal isn't left waiting on work nobody pushes (ready, idle
-// capacity). Priority orders the queue, never gates it. Live: active, unmerged, its goal not
+// capacity, priority-inversion). Priority orders the queue, never gates it. Live: active, unmerged, its goal not
 // parked or let go.
 function effectivePriorities(ts) {
   const live = new Map([...ts].filter(([, t]) => isActive(t) && !mergeShaFor(t.id) && !['park', 'let-go'].includes(ticketMode(t))));
@@ -14168,6 +14168,8 @@ function efficiencyData(m, now = Date.now()) {
     suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: W12[11].start, end: W12[11].end, POINTS }) };
 }
 
+// How many places below a goal's priority the unstarted work it waits on must be to be a finding.
+const PRIORITY_INVERSION_GAP = 3;
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -14476,6 +14478,30 @@ function collectMetrics(since) {
   let idlePlanning = 0;
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !(activeWorker(t.id) && !stoppedLaunch(t.id)) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
   holdFindings(add, settings);
+  // A goal's live ticket that waits, directly or through others, on unstarted work (no worker, not
+  // merged) of a goal PRIORITY_INVERSION_GAP or more places below it: nothing else pushes that work,
+  // and a dependency added only to keep footprints apart (planning.md D4) can point the wrong way.
+  // One finding per blocked goal; a blocker whose goal is held is blocked-by-goal-hold's.
+  {
+    const clos = closures(ts);
+    const blocked = new Map();
+    for (const g of logObjects('goal').filter((x) => !['met', 'abandoned'].includes(x.status) && typeof x.priority === 'number' && goalMode(x) === 'run')) {
+      for (const t of ts.values()) {
+        if (!live(t.id) || !ticketGoals(t).some((x) => x.id === g.id)) continue;
+        for (const d of clos.get(t.id) ?? []) {
+          const own = live(d) && !countsAsWorker(ts.get(d)) && ticketMode(ts.get(d)) === 'run' ? ownPriority(ts.get(d)) : null;
+          if (!own || own.priority - g.priority < PRIORITY_INVERSION_GAP) continue;
+          const b = blocked.get(g.id) ?? blocked.set(g.id, { g, waiting: new Set(), on: new Map() }).get(g.id);
+          b.waiting.add(t.id);
+          b.on.set(d, own.priority);
+        }
+      }
+    }
+    for (const { g, waiting, on } of blocked.values()) {
+      const list = [...on].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      add('medium', 'priority-inversion', g.id, `p${g.priority} "${g.title}": ${plural(waiting.size, 'ticket')} wait${waiting.size === 1 ? 's' : ''} on ${plural(on.size, 'unstarted ticket')} of lower-priority goals: ${list.slice(0, 5).map(([id, p]) => `${id} (p${p})`).join(', ')}${list.length > 5 ? `, and ${list.length - 5} more` : ''}`, `start them now (ready lists them first, marked "blocks p${g.priority}"); where an edge only keeps footprints apart (planning.md D4), reverse it so the lower-priority ticket waits, or cut it by narrowing touches`);
+    }
+  }
   // What matters most: the strategy, each goal's impact, and the ratings the Inbox is ordered by.
   {
     const goals = logObjects('goal');
