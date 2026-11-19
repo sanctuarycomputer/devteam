@@ -388,3 +388,141 @@ test('a $ref to a missing token', { skip: canDrive ? false : 'needs Chrome and W
   assert.equal(await css(p, '[data-id="card"]', 'display'), 'flex', 'the rest of the node drawn');
   assert.deepEqual(rec.exceptions, []);
 });
+
+// ---- pages, layers, selection and properties (C1.8, C1.10, and the review focus's fast switch) ----
+
+const rows = (p) => p.ev("[...document.querySelectorAll('#layers .layer[data-node]')].map((r) => ({ id: r.dataset.node, pad: parseFloat(getComputedStyle(r).paddingLeft), level: Number(r.getAttribute('aria-level')), sel: r.getAttribute('aria-selected'), name: r.querySelector('.nm')?.textContent ?? null, mark: r.querySelector('.ic')?.textContent ?? '' }))");
+const field = (p, f) => text(p, `#props [data-field="${f}"]`);
+const selectedRows = async (p) => (await rows(p)).filter((r) => r.sel === 'true').map((r) => r.id);
+const outlined = (p) => p.ev("[...document.querySelectorAll('#surface .sel')].map((e) => e.dataset.id ?? null)");
+const noSelection = async (p, what) => {
+  assert.deepEqual(await selectedRows(p), [], `${what}: no row selected`);
+  assert.deepEqual(await outlined(p), [], `${what}: nothing outlined`);
+  assert.equal(await text(p, '#props .note'), 'Select a layer to see what it is.', `${what}: the empty note`);
+  assert.equal(await count(p, '#props [data-field]'), 0, `${what}: no fields`);
+};
+
+test('layers and selection', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  assert.equal(await state(p), 'ready');
+  await noSelection(p, 'at load');
+
+  // the Checkout tree, nested by children order; an instance's inner nodes aren't listed
+  const r = await rows(p);
+  const want = [['card', 0], ['title', 1], ['rule', 1], ['dot', 1], ['icon', 1], ['photo', 1], ['actions', 1], ['buy', 2], ['loose', 0], ['badge', 1], ['tiles', 0]];
+  assert.deepEqual(r.map((x) => [x.id, x.level - 1]), want, 'rows in order, by depth');
+  const pad = new Map(r.map((x) => [x.level, x.pad]));
+  for (const x of r) assert.equal(x.pad, pad.get(x.level), `${x.id}: the padding of its depth`);
+  assert.ok(pad.get(1) < pad.get(2) && pad.get(2) < pad.get(3), `indent grows with depth: ${[...pad].join(' ')}`);
+  for (const x of r) {
+    assert.equal(x.name, EVERY.nodes[x.id].name, `${x.id}'s row shows its name`);
+    assert.ok(x.mark.trim().length > 0, `${x.id}'s row has a type mark`);
+  }
+  assert.equal(await count(p, '[data-node="button-bg"], [data-node="button-label"]'), 0, "buy's inner nodes have no rows");
+  assert.equal(await count(p, '#layers [data-id]'), 0, 'rows carry data-node, never data-id');
+
+  // a row selects its node: the row, the outline, the panel
+  await p.click('#layers .layer[data-node="title"]');
+  assert.deepEqual(await selectedRows(p), ['title']);
+  assert.deepEqual(await outlined(p), ['title'], 'the drawn title is outlined');
+  assert.equal(await css(p, '#surface [data-id="title"]', 'outline-style'), 'solid');
+  assert.equal(await field(p, 'name'), 'Title');
+  assert.equal(await field(p, 'type'), 'text');
+  assert.equal(await count(p, '#props [data-field="component"]'), 0, 'no component field on a text');
+
+  await p.click('#layers .layer[data-node="buy"]');
+  assert.deepEqual(await selectedRows(p), ['buy']);
+  assert.deepEqual(await outlined(p), ['buy']);
+  assert.equal(await field(p, 'name'), 'Buy');
+  assert.equal(await field(p, 'type'), 'instance');
+  assert.equal(await field(p, 'component'), 'Button');
+  assert.equal(await field(p, 'variant'), 'primary');
+
+  // a drawn node selects itself; inside an instance, the instance
+  await p.click('#surface [data-id="dot"]');
+  assert.deepEqual(await selectedRows(p), ['dot']);
+  assert.deepEqual(await outlined(p), ['dot']);
+  assert.equal(await field(p, 'name'), 'Dot');
+  assert.equal(await field(p, 'type'), 'ellipse');
+  await p.click('#surface [data-of="buy"][data-src="button-label"]');
+  assert.deepEqual(await selectedRows(p), ['buy']);
+  assert.deepEqual(await outlined(p), ['buy']);
+
+  // a click on empty stage clears it
+  const empty = await p.ev("(() => { const r = document.getElementById('stage').getBoundingClientRect(); return { x: r.right - 60, y: r.bottom - 60 }; })()");
+  assert.equal(await p.ev(`document.elementFromPoint(${empty.x}, ${empty.y})?.id`), 'stage', 'the point is empty stage');
+  await p.clickAt(empty.x, empty.y);
+  await noSelection(p, 'after a click on empty stage');
+
+  // Escape after a new selection clears it too
+  await p.click('#layers .layer[data-node="loose"]');
+  assert.deepEqual(await selectedRows(p), ['loose']);
+  assert.equal(await field(p, 'type'), 'frame');
+  await p.key('Escape');
+  await noSelection(p, 'after Escape');
+  assert.deepEqual(rec.exceptions, []);
+});
+
+test('pages', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, rec, load } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), path: '/view/canvas/every#page=p-parts' });
+  const current = () => p.ev("[...document.querySelectorAll('#pages a[aria-current=\"page\"]')].map((a) => a.textContent)");
+  const onParts = async (what) => {
+    assert.equal(await state(p), 'ready', what);
+    assert.deepEqual(await current(), ['Parts'], `${what}: Parts is current`);
+    assert.equal(await count(p, '#surface [data-id="button"]'), 1, `${what}: button drawn`);
+    assert.equal(await count(p, '#surface [data-id="card"]'), 0, `${what}: Checkout not drawn`);
+    assert.equal(await p.ev("document.getElementById('pageSel').value"), 'p-parts', `${what}: the page select follows`);
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('#layers .layer[data-node]')].map((r) => r.dataset.node)"), ['button', 'button-bg', 'button-label'], `${what}: Parts' layers`);
+  };
+  await onParts('loaded on #page=p-parts');
+
+  // C1.10 a reload stays on the page in the address
+  await p.ev('window.beforeReload = true');
+  await p.send('Page.reload', {});
+  await until(() => p.ev("!window.beforeReload && document.body && document.body.dataset.state === 'ready'").catch(() => false), 'reloaded and ready');
+  assert.equal(await p.ev('location.hash'), '#page=p-parts');
+  await onParts('after a reload');
+
+  // an unknown page id shows the first page
+  await load('/view/canvas/every#page=nope');
+  assert.equal(await state(p), 'ready');
+  assert.deepEqual(await current(), ['Checkout']);
+  assert.equal(await count(p, '#surface [data-id="card"]'), 1);
+  assert.equal(await p.ev("document.getElementById('pageSel').value"), 'p-main');
+
+  // the page select: one option per page, by name in order; a change shows that page and sets the hash
+  assert.deepEqual(await p.ev("[...document.querySelectorAll('#pageSel option')].map((o) => [o.value, o.textContent])"), EVERY.pages.map((x) => [x.id, x.name]));
+  await p.ev("(() => { const s = document.getElementById('pageSel'); s.value = 'p-parts'; s.dispatchEvent(new Event('change', { bubbles: true })); })()");
+  await until(() => p.ev("location.hash === '#page=p-parts' && document.body.dataset.state === 'ready' && !!document.querySelector('#surface [data-id=\"button\"]')"), 'Parts by the page select');
+  await onParts('after the page select');
+
+  // a selection doesn't outlive its page
+  await p.ev("location.hash = '#page=p-main'");
+  await until(() => p.ev("document.body.dataset.state === 'ready' && !!document.querySelector('#surface [data-id=\"card\"]')"), 'Checkout again');
+  await p.click('#layers .layer[data-node="title"]');
+  assert.equal(await field(p, 'name'), 'Title');
+  await p.click('#pages a[data-page="p-parts"]');
+  await until(() => p.ev("document.body.dataset.state === 'ready' && !!document.querySelector('#surface [data-id=\"button\"]')"), 'Parts by the Pages list');
+  assert.equal(await p.ev('location.hash'), '#page=p-parts');
+  await noSelection(p, 'after a page switch');
+
+  // the review focus: switching twice fast while Checkout's image is still loading
+  await rec.send('Network.enable');
+  await rec.send('Network.setCacheDisabled', { cacheDisabled: true });
+  await p.ev(`(async () => {
+    const go = (id) => new Promise((r) => { addEventListener('hashchange', r, { once: true }); location.hash = '#page=' + id; });
+    await go('p-main');
+    await go('p-parts');
+    await go('p-main');
+    await go('p-parts');
+    await go('p-main');
+  })()`);
+  await until(() => p.ev("document.body.dataset.state === 'ready'"), 'ready after the fast switches');
+  assert.deepEqual(await current(), ['Checkout']);
+  assert.equal(await count(p, '#surface [data-id="card"]'), 1);
+  assert.equal(await count(p, '#surface [data-id="button"]'), 0);
+  assert.equal(await count(p, '#surface img'), 1);
+  assert.equal(await p.ev("(() => { const i = document.querySelector('#surface img'); return i.complete && i.naturalWidth > 0; })()"), true, 'the image loaded');
+  assert.equal(await p.ev("document.getElementById('pageSel').value"), 'p-main');
+  assert.deepEqual(rec.exceptions, []);
+});

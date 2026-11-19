@@ -66,6 +66,9 @@
   .layer .ic { width: 14px; text-align: center; color: var(--muted); font-family: var(--mono); font-size: 10px; flex: none; }
   .layer .nm { overflow: hidden; text-overflow: ellipsis; }
   .props { padding: 0 12px 24px; }
+  .props .row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; align-items: baseline; margin: 8px 0; font-size: 12px; }
+  .props .row .k { color: var(--fg-2); }
+  .props .row .v { overflow-wrap: anywhere; max-width: var(--measure); }
   .note { font-size: 12px; color: var(--fg-2); margin: 8px 0; max-width: var(--measure); }
 
   /* the stage: the page surface is the one element zoom and pan move */
@@ -140,7 +143,10 @@
 
   // What the page holds: the slug, the response's session and rev (kit-662 and kit-668 use them), the
   // document, and the page shown.
-  const state = { slug: null, session: null, rev: null, doc: null, repo: null, pageId: null };
+  const state = { slug: null, session: null, rev: null, doc: null, repo: null, pageId: null, sel: null };
+  // The shown page's drawn nodes and Layers rows, by node id (Maps: an id is the document's string).
+  let drawn = new Map();
+  let layerRows = new Map();
 
   const setState = (s) => { document.body.dataset.state = s; };
   function showMsg(text) {
@@ -193,6 +199,18 @@
       return a;
     });
     nav.replaceChildren(...links);
+  }
+
+  // The page <select> (the stage's page switch on a narrow screen): one option per page, by name.
+  function renderPageSel() {
+    const sel = $('pageSel');
+    const opts = pages().map((pg) => {
+      const o = document.createElement('option');
+      o.value = typeof pg.id === 'string' ? pg.id : '';
+      o.textContent = pageName(pg);
+      return o;
+    });
+    sel.replaceChildren(...opts);
   }
 
   // The images drawn on the page, loaded or failed: the page is ready once none is still loading.
@@ -417,7 +435,7 @@
 
   function mark(el, id, inst) {
     el.classList.add('dnode');
-    if (inst) { el.dataset.of = inst.id; el.dataset.src = id; } else el.dataset.id = id;
+    if (inst) { el.dataset.of = inst.id; el.dataset.src = id; } else { el.dataset.id = id; drawing.byId.set(id, el); }
   }
 
   // One side's size: px, `hug` (the content's size) or `fill` (by the parent's layout).
@@ -676,7 +694,7 @@
   // The page's top-level nodes on #surface, each placed at its x, y.
   function drawPage(pageId) {
     const pg = pageById(pageId) || pages()[0];
-    drawing = { seen: new Set(), after: [], labels: [], anchors: 0 };
+    drawing = { seen: new Set(), after: [], labels: [], anchors: 0, byId: new Map() };
     const els = [];
     for (const id of kidsOf(pg)) {
       const el = drawNode(id, 'page', null);
@@ -684,19 +702,138 @@
     }
     $('surface').replaceChildren(...els, ...drawing.labels);
     for (const f of drawing.after) { try { f(); } catch { /* a size it can't measure stays 0 */ } }
+    drawn = drawing.byId;
     drawing = null;
   }
+
+  // ---- layers, selection and the properties panel ----
+
+  // A row's type mark: the page's own table (a frame's by its layout mode).
+  const MARK = { component: '◆', instance: '◇', text: 'T', rect: '▭', ellipse: '○', vector: '✎', image: '▣' };
+  const FRAME_MARK = { row: '→', column: '↓', grid: '▦', none: '#' };
+  const typeOf = (n) => (typeof n.type === 'string' ? n.type : '');
+  function markOf(n) {
+    if (n.type === 'frame') return FRAME_MARK[pick(MODE, getPath(n, 'layout.mode'), 'none')];
+    return own(MARK, typeOf(n)) ? MARK[n.type] : '?';
+  }
+  // A node's name, or its type when the name is empty.
+  const labelOf = (n) => (typeof n.name === 'string' && n.name ? n.name : typeOf(n) || 'node');
+
+  // The Layers tree: the shown page's nodes nested by children order, each listed once; an instance's
+  // inner nodes are the component's and aren't listed. Indent by depth, a number the page works out.
+  function renderLayers(pageId) {
+    const pg = pageById(pageId) || pages()[0];
+    const seen = new Set();
+    const out = [];
+    layerRows = new Map();
+    const stack = kidsOf(pg).reverse().map((id) => [id, 0]);
+    while (stack.length) {
+      const [id, depth] = stack.pop();
+      const n = nodeOf(id);
+      if (!n || seen.has(id)) continue;
+      seen.add(id);
+      const row = document.createElement('div');
+      row.className = 'layer';
+      row.dataset.node = id;
+      row.setAttribute('role', 'treeitem');
+      row.setAttribute('aria-level', String(depth + 1));
+      row.setAttribute('aria-selected', 'false');
+      row.tabIndex = -1;
+      row.style.paddingLeft = `${12 + Math.min(depth, 40) * 14}px`;
+      const ic = document.createElement('span');
+      ic.className = 'ic';
+      ic.textContent = markOf(n);
+      ic.title = typeOf(n);
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = labelOf(n);
+      row.append(ic, nm);
+      out.push(row);
+      layerRows.set(id, row);
+      if (CONTAINERS.has(n.type)) stack.push(...kidsOf(n).reverse().map((c) => [c, depth + 1]));
+    }
+    $('layers').replaceChildren(...out);
+  }
+
+  // One label and value row of the Properties panel; the value is text.
+  function propRow(label, field, value) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = label;
+    const v = document.createElement('span');
+    v.className = 'v';
+    v.dataset.field = field;
+    v.textContent = value;
+    row.append(k, v);
+    return row;
+  }
+
+  // The Properties panel, read-only: the selected node's name and type, and for an instance its
+  // component's name and variant; with nothing selected, a note.
+  function renderProps() {
+    const box = $('props');
+    const n = state.sel === null ? null : nodeOf(state.sel);
+    if (!n) {
+      const p = document.createElement('p');
+      p.className = 'note';
+      p.textContent = TEXT.noSelection;
+      box.replaceChildren(p);
+      return;
+    }
+    const out = [propRow('Name', 'name', typeof n.name === 'string' ? n.name : ''), propRow('Type', 'type', typeOf(n))];
+    if (n.type === 'instance') {
+      const comp = nodeOf(n.component);
+      const compName = comp && comp.type === 'component' ? (typeof comp.name === 'string' ? comp.name : '') : 'none';
+      out.push(propRow('Component', 'component', compName));
+      out.push(propRow('Variant', 'variant', typeof n.variant === 'string' && n.variant ? n.variant : 'none'));
+    }
+    box.replaceChildren(...out);
+  }
+
+  // Select a node of the shown page (its row and its drawn node marked), or nothing (null).
+  function select(id) {
+    const next = id !== null && layerRows.has(id) ? id : null;
+    for (const [rid, row] of layerRows) row.setAttribute('aria-selected', rid === next ? 'true' : 'false');
+    for (const el of $('surface').querySelectorAll('.sel')) el.classList.remove('sel');
+    if (next !== null && drawn.has(next)) drawn.get(next).classList.add('sel');
+    state.sel = next;
+    renderProps();
+  }
+
+  $('layers').addEventListener('click', (e) => {
+    const row = e.target instanceof Element ? e.target.closest('.layer[data-node]') : null;
+    if (row) select(row.dataset.node);
+  });
+  // A click on the stage: the nearest drawn node with a data-id (inside an instance, the instance), or
+  // on empty stage nothing. The stage's own controls are not the stage.
+  $('stage').addEventListener('click', (e) => {
+    if (!state.doc || e.button !== 0 || !(e.target instanceof Element)) return;
+    if (e.target.closest('.zoom, .stage-top')) return;
+    const hit = e.target.closest('#surface [data-id]');
+    select(hit ? hit.dataset.id : null);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state.sel !== null) select(null);
+  });
+
+  // ---- pages ----
 
   let shown = 0; // the count of showPage calls: a slower one finishing after a newer one doesn't mark it ready
   function showPage(id) {
     const pg = pageById(id) || pages()[0];
+    if (pg.id !== state.pageId) state.sel = null;
     state.pageId = pg.id;
     const n = ++shown;
     for (const a of $('pages').querySelectorAll('a[data-page]')) {
       if (a.dataset.page === pg.id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     }
+    $('pageSel').value = typeof pg.id === 'string' ? pg.id : '';
     setState('loading');
     drawPage(pg.id);
+    renderLayers(pg.id);
+    select(state.sel);
     if (kidsOf(pg).length === 0) showMsg(TEXT.empty); else hideMsg();
     imagesSettled().then(() => { if (n === shown) setState('ready'); });
   }
@@ -707,7 +844,13 @@
     if (!m) return null;
     try { return decodeURIComponent(m[1]); } catch { return null; }
   }
+  // Show a page by putting it in the address (a reload stays on it); the hashchange shows it.
+  function goPage(id) {
+    const h = `#page=${encodeURIComponent(id)}`;
+    if (location.hash === h) showPage(id); else location.hash = h;
+  }
   window.addEventListener('hashchange', () => { if (state.doc) showPage(hashPage()); });
+  $('pageSel').addEventListener('change', (e) => { if (state.doc) goPage(e.target.value); });
 
   async function start() {
     setState('loading');
@@ -735,6 +878,7 @@
     state.repo = body.repo;
     showRepo(body.repo);
     renderPages();
+    renderPageSel();
     showPage(hashPage());
   }
 
