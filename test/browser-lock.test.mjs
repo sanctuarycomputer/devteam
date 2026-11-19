@@ -315,17 +315,28 @@ for (const [name, script] of Object.entries(T5_3)) {
 }
 
 // S2 (A2): the seeded sweep. Each seed is one random schedule of 3 or 4 starters on one stale lock.
-// The fixed lists are T3's to tune (the seeds that catch the mutants, padded); until then each is
-// a plain range, long enough that main's lock fails on the dead-owner lock.
 const range = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
 const SEEDS_ENV = /^(\d+)-(\d+)$/.exec(process.env.DEVTEAM_TEST_LOCK_SEEDS ?? '');
 // A search over a range has no time cap: the fixed lists keep each test well inside its cap.
 const SWEEP_TIMEOUT = SEEDS_ENV ? Infinity : 120000;
 const seeds = (list) => (SEEDS_ENV ? range(Number(SEEDS_ENV[1]), Number(SEEDS_ENV[2])) : list);
+// The fixed lists (and KILL_SEEDS below) were chosen by searching seeds 1 to 400 against the
+// mutants of the ticket's mutants.mjs (home, tickets/kit-321-browser-lock-three-starters) and main's
+// lock (d7fc46e0); the rest is padding, and every seed passes at the head. The seeds there to catch:
+//   main (d7fc46e0): dead 3: 30 42; dead 4: 5 34; live 3: 1 5; live 4: 1; ownerless 3: 16; ownerless 4: 11
+//   M1 no claim: dead 3: 43 53; dead 4: 2 7; live 3: 43; live 4: 2; ownerless 3: 8; ownerless 4: 16
+//   M2 split look(), no look under the claim: dead 3: 21 22; dead 4: 4 65; live 3: 21; live 4: 4;
+//      ownerless 4: 162
+//   M3 rmdir's error code ignored: ownerless 3: 41 253; ownerless 4: 222 (its only seeds in 1 to 400
+//      that pass at the head)
+//   M4 the old put-back: dead 3, dead 4, live 3, live 4: 1; ownerless 3 and 4: 4
+// M5 (dead claims never passed over) is caught by KILL_SEEDS and S3; M6 (no token check under the
+// claim) by no seed in 1 to 2000 that passes at the head, only by S3's release race.
+const plus = (list, extra) => [...new Set([...list, ...extra])].sort((a, b) => a - b);
 const SWEEP = {
-  'dead-owner': { 3: range(1, 30), 4: range(1, 20) },
-  'old live-owner': { 3: range(1, 15), 4: range(1, 15) },
-  'old ownerless': { 3: range(1, 15), 4: range(1, 15) },
+  'dead-owner': { 3: plus(range(1, 20), [21, 22, 30, 42, 43, 53]), 4: plus(range(1, 15), [34, 65]) },
+  'old live-owner': { 3: plus(range(1, 12), [21, 43]), 4: range(1, 15) },
+  'old ownerless': { 3: plus(range(1, 10), [16, 41, 253]), 4: plus(range(1, 10), [11, 16, 162, 222]) },
 };
 
 // Runs every seed and returns one message naming each failing seed and its problems ('' when none
@@ -356,7 +367,8 @@ for (const [kind, lock] of Object.entries(LOCKS)) {
 // inside fn until it is killed. Its leftovers (a claim, a prepared folder) may stay, but no lock. At
 // least one seed must kill a starter while its claim stands, so the pass-over of a dead claim is
 // reached and not only the take of a dead owner's lock.
-const KILL_SEEDS = range(1, 20);
+// Catching: M5 10 14; M1 70 248; M2 21; M4 1 19; main 3 (search of 1 to 400, as for SWEEP above).
+const KILL_SEEDS = plus(range(1, 20), [21, 70, 248]);
 test('S2b: 3 starters on the dead-owner lock, one killed mid-way', { timeout: SWEEP_TIMEOUT }, async () => {
   let holding = 0;
   const bad = await sweep(seeds(KILL_SEEDS), async (seed, dir) => {
