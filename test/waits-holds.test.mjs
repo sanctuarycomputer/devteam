@@ -294,6 +294,17 @@ test('waits A4: a hold with no cause, a cause in no known form or not in the log
     accepted(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', `goal:${G2}`]);
   });
 
+  await t.test('a bare or blank --until on ticket hold, or a blank held_until on ticket set, is refused, nothing written', () => {
+    const { dir } = fixture('a4-bare-until');
+    const hold = (...rest) => ['ticket', 'hold', T, '--reason', 'r', '--for', 'kit-02-other', ...rest];
+    refused(dir, hold('--until'), '--until needs a date (YYYY-MM-DD)');
+    refused(dir, hold('--until', ' '), '--until needs a date (YYYY-MM-DD)');
+    refused(dir, hold('--until', ''), '--until needs a date (YYYY-MM-DD)');
+    const set = (body) => ['ticket', 'set', T, '--json', JSON.stringify(body)];
+    refused(dir, set({ held: 'x', held_for: ['kit-02-other'], held_until: '' }), '--until needs a date (YYYY-MM-DD)');
+    refused(dir, set({ held: 'x', held_for: ['kit-02-other'], held_until: '  ' }), '--until needs a date (YYYY-MM-DD)');
+  });
+
   await t.test('ticket set and ticket add with held are held to the same rule as ticket hold', () => {
     const { dir, G } = fixture('a4-set', { 'kit-03-third': { superseded_by: 'kit-02-other' } });
     const q = question(dir);

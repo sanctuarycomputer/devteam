@@ -4869,6 +4869,8 @@ function cmdTicket() {
   if (!reason) die('ticket hold needs --reason "<why>"');
   const causes = [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))];
   const until = flagStr('until')?.trim() || null;
+  // a bare or blank --until is a date given and lost: refused, as goal hold refuses it
+  if (flags.until !== undefined && until === null) die('--until needs a date (YYYY-MM-DD)');
   if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
   const whole = flagStr('whole')?.trim() || null;
   const why = holdCause({ kind: 'ticket', id, causes, until, whole, ticket: t });
@@ -4921,7 +4923,8 @@ function graphEdit(type, idRe) {
       if (mergeShaFor(id)) die(`${id} is merged: nothing to hold`);
       if (body.held_for !== undefined && body.held_for !== null && !Array.isArray(body.held_for)) die('held_for is a list of causes');
       body.held_for = [...new Set((body.held_for ?? []).map((c) => String(c).trim()).filter(Boolean))];
-      body.held_until = typeof body.held_until === 'string' ? body.held_until.trim() || null : body.held_until ?? null;
+      if (typeof body.held_until === 'string' && !body.held_until.trim()) die('--until needs a date (YYYY-MM-DD)');
+      body.held_until = typeof body.held_until === 'string' ? body.held_until.trim() : body.held_until ?? null;
       if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
       const whole = flagStr('whole')?.trim() || null;
       const why = holdCause({ kind: 'ticket', id, causes: body.held_for, until: body.held_until, whole, ticket: t });
@@ -26989,7 +26992,7 @@ Setup and roles
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
 
 Holds and the fleet (planning.md §1, holds; supervisor.md §12)
-  goal hold <g-id|upkeep> run|drain|park [--reason r] [--for <cause>… --until <date>] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason and --for, the cause it waits on) and releases only its own drain
+  goal hold <g-id|upkeep> run|drain|park [--reason r] [--for <cause>…] [--until <date>] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason and --for, the cause it waits on; its drain needs --for, the date is optional) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
@@ -27002,8 +27005,8 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
 The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
-  ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole "<why>"]   supervisor: hold a ticket, naming what it waits on (q-…, a ticket, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id>, external:<words>; the last three need --until, at most 30 days ahead)
-  ticket release <id> [--reason r]       supervisor: lift a ticket's hold
+  ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole "<why>"]   supervisor or planner: hold a ticket, naming what it waits on (q-…, a ticket, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id>, external:<words>; the last three need --until, at most 30 days ahead)
+  ticket release <id> [--reason r]       supervisor or planner: lift a ticket's hold
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
   moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
