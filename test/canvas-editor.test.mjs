@@ -1414,6 +1414,24 @@ test("the page's source holds no markup sinks", { skip: canDrive ? false : 'need
   assert.equal(src.includes('will-change') || src.includes('willChange'), false, 'no will-change');
 });
 
+// kit-312: the page's own free-text check takes exactly what canvas-doc@1's name and text classes take,
+// and every place that sends free text (the Name and Text fields, an upload's name) uses it.
+test("the page's free text: no control character but tab, line feed and carriage return", () => {
+  const js = pageScript();
+  const m = js.match(/const CONTROL_RE = \/(.+)\/;/);
+  assert.ok(m, 'the page defines CONTROL_RE');
+  const re = new RegExp(m[1]);
+  const refused = (c) => c <= 0x08 || c === 0x0b || c === 0x0c || (c >= 0x0e && c <= 0x1f) || (c >= 0x7f && c <= 0x9f);
+  for (const c of [...Array(0xa1).keys(), 0x2028, 0x2029]) {
+    assert.equal(re.test(`a${String.fromCodePoint(c)}b`), refused(c), `U+${c.toString(16).padStart(4, '0')}`);
+  }
+  assert.match(js, /const freeText = \(v\) => wellFormed\(v\) && !CONTROL_RE\.test\(v\);/, 'freeText is wellFormed and no control character');
+  assert.match(js, /length <= 10000 && freeText\(e\.value\)\) setProp\(id, 'text'/, 'the Text field sends only free text');
+  assert.match(js, /length <= 200 && freeText\(v\)\) setProp\(id, 'name'/, 'the Name field sends only free text');
+  assert.match(js, /cut\.trim\(\) && freeText\(cut\) \? cut : 'image'/, "an upload's name falls back to image unless free text");
+  assert.equal((js.match(/&& wellFormed\(/g) ?? []).length, 0, 'no free-text check left on wellFormed alone');
+});
+
 test('values outside their classes', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
   // out of class, so the recorder serves it; the fake holds the valid document (and its image) under the slug
   const bad = structuredClone(EVERY);
