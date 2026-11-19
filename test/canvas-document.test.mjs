@@ -182,7 +182,6 @@ test('canvas module: images as an array equal the Set', async () => {
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const FIXTURE_IMAGES = new Set(imageNames());
-const DOC_TOP = ['canvas', 'rev', 'tokens', 'pages', 'nodes'];
 
 // Every file under the fixtures folder in a named category: checked by the tests below, or holding no
 // document or edit (asserted so by `fixtureAccountProblems`). The first category whose pattern
@@ -229,7 +228,7 @@ export function fixtureAccountProblems(dir) {
       if (x === null || typeof x !== 'object') continue;
       if (isObj(x)) {
         if (own(x, 'ops') && Array.isArray(x.ops)) out.push(`${name}: an ops array at ${at || '(top)'}`);
-        const keys = DOC_TOP.filter((k) => own(x, k) && ['pages', 'nodes', 'tokens'].includes(k));
+        const keys = ['pages', 'nodes', 'tokens'].filter((k) => own(x, k));
         if (keys.length) out.push(`${name}: a document's ${keys.join(', ')} at ${at || '(top)'}`);
       }
       for (const k of Object.keys(x)) stack.push([x[k], `${at}.${k}`]);
@@ -333,6 +332,7 @@ function replayExchange(canvas, name, x) {
   const conns = new Map(); // live connection name -> level
   let tracking = true; // no replace or restart yet
   const res = { records: [], applied: 0, refused: 0, docs: 0, judged: 0 };
+  // an edit answered by the sender's close is never judged; no fixture's edit is answered so today
   const closes = (expect, cn) => {
     const l = expect[cn];
     return Array.isArray(l) && l.length > 0 && isObj(l[l.length - 1]) && own(l[l.length - 1], '$close');
@@ -375,9 +375,11 @@ function replayExchange(canvas, name, x) {
         res.records.push({ from: where, doc, ops: body.ops, opts, why: r.why });
         res.judged += 1;
         // a 409 limit after an applied judgement is the route's own 1 MB check: the fake alone decides it
+        // (no fixture reaches it today)
         const routeLimit = s.status === 409 && r.why === null;
         if (r.why === null && !routeLimit) {
           const counts = Object.values(expect).map((l) => (Array.isArray(l) ? l.filter((e) => isObj(e) && e.t === 'ops').length : 0));
+          // a local apply split into several ops messages raises rev by each (no fixture splits one today)
           const runs = Math.max(0, ...counts) || (isObj(s.body) && Number.isInteger(s.body.edits) ? s.body.edits : 1);
           const next = r.doc;
           next.rev = doc.rev + runs;
@@ -397,6 +399,7 @@ function replayExchange(canvas, name, x) {
       }
     } else if (own(s, 'do')) {
       if (s.do === 'replace') {
+        // the replaced document at the old rev + 1 (no fixture states a doc or an edit outcome after it today)
         doc = deepFreeze({ ...fixture(s.arg), rev: doc.rev + 1 });
         book = fake.makeSeqBook();
         tracking = false;
@@ -989,20 +992,20 @@ const BROKEN = {
 test('canvas module: fixtures: every document is valid', async (t) => {
   const canvas = await load();
   const docs = documentsInFixtures();
-  let withImage = 0;
+  let imageDocs = 0;
   for (const { label, doc } of docs) {
     const d = deepFreeze(clone(doc));
     assert.deepEqual(sameErrors(canvas, d, { images: FIXTURE_IMAGES }, label), [], `${label}: valid`);
     const none = sameErrors(canvas, d, { images: new Set() }, `${label}, no images`);
     if (isObj(d.nodes) && Object.values(d.nodes).some((n) => isObj(n) && n.type === 'image')) {
-      withImage += 1;
+      imageDocs += 1;
       assert.ok(none.some((e) => e.rule === 'refs'), `${label}: with no images, its image node has a refs entry`);
     }
   }
   const by = (k) => docs.filter((x) => x.kind === k).length;
-  t.diagnostic(`documents: ${by('fixture')} fixtures, ${by('http')} doc route responses, ${by('exchange')} stated by exchanges; ${withImage} hold an image`);
+  t.diagnostic(`documents: ${by('fixture')} fixtures, ${by('http')} doc route responses, ${by('exchange')} stated by exchanges; ${imageDocs} hold an image`);
   assert.ok(by('fixture') >= 3 && by('http') >= 1 && by('exchange') >= 1, 'documents of each source checked');
-  assert.ok(withImage >= 1, 'a document holding an image checked');
+  assert.ok(imageDocs >= 1, 'a document holding an image checked');
 });
 
 test('canvas module: fixtures: every message edit', async (t) => {
@@ -1026,9 +1029,10 @@ test("canvas module: fixtures: every exchange's edits", async (t) => {
   for (const p of per) t.diagnostic(`${p.file}: ${p.judged} judged, ${p.applied} applied and ${p.refused} refused as stated, ${p.docs} docs compared`);
   const sum = (k) => per.reduce((s, p) => s + p[k], 0);
   assert.ok(files.length >= 1, 'exchanges found');
-  assert.ok(sum('applied') >= 1, 'an applied edit matched to its exchange');
-  assert.ok(sum('refused') >= 1, 'a refused edit matched to its exchange');
-  assert.ok(sum('docs') >= 1, 'a stated doc compared');
+  // floors at today's fixtures' totals, so a replay that silently stops matching most outcomes fails
+  assert.ok(sum('applied') >= 37, `applied edits matched to their exchanges (${sum('applied')})`);
+  assert.ok(sum('refused') >= 46, `refused edits matched to their exchanges (${sum('refused')})`);
+  assert.ok(sum('docs') >= 27, `stated docs compared (${sum('docs')})`);
 });
 
 test('canvas module: fixtures: every file accounted for', () => {
