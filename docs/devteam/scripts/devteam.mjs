@@ -15731,6 +15731,23 @@ function paneBottom(target) {
   try { text = execFileSync('tmux', ['capture-pane', '-p', '-t', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: TMUX_TIMEOUT_MS }); } catch {}
   return text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-15);
 }
+// Whether a pane (the box's operator, which no project's dashboard looks after) is stopped at a usage
+// limit, and whether there is room to start it again: none (not stopped at a limit), unsafe (stopped,
+// but a person, a draft or another prompt is there: left alone), room (the machine's active cswap
+// account has room: relaunch it on the same conversation), no-room (every account is at its limit),
+// or unknown (no cswap, or its accounts can't be read). The box's minute loop acts on it.
+function limitState(target) {
+  const st = limitStop(paneBottom(target));
+  if (!st.limit) return 'none';
+  if (!paneStoppedAtLimit(target)) return 'unsafe';
+  const bin = findCswap();
+  const rows = bin ? cswapAccounts(bin) : null;
+  if (!rows) return 'unknown';
+  const active = rows.find((a) => a.active);
+  if (active && accountHasRoom(active)) return 'room';
+  const usable = rows.filter((a) => !a.disabled);
+  return usable.length && usable.every(accountKnownFull) ? 'no-room' : 'unknown';
+}
 // A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
 // starts a relaunch, and makeSession again right before it replaces the process (worktree_setup may
 // have run for a while in between). A split window could lose the wrong pane; a background shell's
@@ -16661,7 +16678,7 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
   if (plainText(dim === -1 ? text : text.slice(0, dim)).trim()) return 'typing';
   return busy ? 'busy' : 'ready';
 }
-const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine pane-state <pane>';
+const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine limit-state <pane> | machine pane-state <pane>';
 // tell and alert speak on the machine: the operator's, or the owner's at a terminal; never a session
 // in a fleet, which would be speaking as someone else.
 function machineSpeaker(what) {
@@ -16674,6 +16691,10 @@ function cmdMachine() {
   if (sub === 'pane-state') {
     if (!positional[1]) die(machineUsage, 2);
     return out(paneState(positional[1]));
+  }
+  if (sub === 'limit-state') {
+    if (!positional[1]) die(machineUsage, 2);
+    return out(limitState(positional[1]));
   }
   if (sub === 'alert') return machineAlert(words);
   if (sub === 'tell') return machineTell(words);
@@ -25355,7 +25376,7 @@ Setup and roles
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
   recover [--dry-run] [--force] [--here] | recover --machine [--dry-run] [--force] [--in <dir>…] [--was-up <list>] [--session s] [--only <repo>]   after a restart (a dead laptop, a redeploy): bring back this repo's supervisor, or every repo's on this machine, if it was up and its fleet isn't held, on its exact conversation where the harness can (Claude Code); --force also starts one the owner stopped or whose fleet is held; --here runs it in this terminal; safe to run twice. --in adds every adopted repo in a folder; --was-up names a list of roots that were up (a box's), used up as they come back; --session puts each in that tmux session as sup-<repo>
-  machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
+  machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane> | machine limit-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
   operator-thread new "<words>" [--title t] [--subject json] | say <ot-id> "<words>" | close <ot-id> | reopen <ot-id> ["<words>"] | start | reply <ot-id> "<words>" | list [--open | --waiting] [--json] | show <ot-id> | status   the owner's threads with the machine's operator, as the hub's Overview keeps them (beside the operator, in no repo): new, say, close, reopen and start are the owner's (start brings up a laptop's operator, once, in tmux session devteam-home); reply is the operator's; each owner turn is typed into the operator's pane as one line
   worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, or (a resume of one that ran aside) while the machine's memory is at its machine_memory_ceiling, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
