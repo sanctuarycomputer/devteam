@@ -4845,18 +4845,23 @@ function oneWayDoorsSection(body) {
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
 // changes both, so it voids the verdict; a clean merge of main does not.
 // A record edit that only fills in what the record lacked: a "- Reviewer:" line where there was
-// none, and Disposition cells that were empty or held no disposition yet, each given a disposition.
-// Verdicts, findings and dispositions already given can't change this way, so a dissent still
-// can't be edited away.
-function fillInOnly(before, after) {
+// none, a "- Records: <full sha>" line where there was none (only where `records` allows it:
+// verdictHolds allows it on a record written after the verdict's commit), and Disposition cells
+// that were empty or held no disposition yet, each given a disposition. Verdicts, findings and
+// dispositions already given can't change this way, so a dissent still can't be edited away.
+function fillInOnly(before, after, records = false) {
   if (before === null || after === null) return false;
   // blank lines carry nothing in a record, so they're left out of the comparison
   const a = before.split('\n').filter((l) => l.trim()), b = after.split('\n').filter((l) => l.trim());
-  const REVIEWER = /^-[ \t]*Reviewer:[ \t]*\S/;
-  if (b.length === a.length + 1 && !a.some((l) => REVIEWER.test(l))) {
+  // each added line one of these, at most once, where the record had no such line (the parser's own patterns)
+  const ADDED = [[/^-[ \t]*Reviewer:[ \t]*\S/, /^-[ \t]*Reviewer:[ \t]*\S/], ...(records ? [[/^-[ \t]*Records:[ \t]*[0-9a-f]{40}[ \t]*$/, /^-[ \t]*Records:/]] : [])];
+  const open = ADDED.filter(([, had]) => !a.some((l) => had.test(l)));
+  while (b.length > a.length) {
     const i = b.findIndex((l, k) => l !== a[k]);
-    if (i < 0 || !REVIEWER.test(b[i])) return false;
+    const k = open.findIndex(([line]) => line.test(b[i]));
+    if (i < 0 || k < 0) return false;
     b.splice(i, 1);
+    open.splice(k, 1);
   }
   if (b.length !== a.length) return false;
   let disp = -1;
