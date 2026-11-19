@@ -485,6 +485,11 @@ test('S1.3 a same-session reconnect resends only the unacked', { skip: canDrive 
 test('S1.4 a refused edit reloads and keeps the other unacked edits', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
   const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), path: '/view/canvas/every#page=p-parts' });
   await live(p);
+  // one acked edit kept (saving paused): the refusal's fetch is on the same session, so it stays kept
+  fake.pause('every');
+  const k0 = await rename(p, rec, 'button-bg', 'Bg');
+  await ackOf(rec, k0);
+  await within(async () => (await kept(p)) === '1', 'data-kept 1 once K0 is acked', async () => `kept ${await kept(p)}`);
   holdDocs(rec);
   await selectRow(p, 'button-label');
   const n0 = edits(rec).length;
@@ -502,13 +507,22 @@ test('S1.4 a refused edit reloads and keeps the other unacked edits', { skip: ca
   assert.equal(await body(p, 'pending'), '1', 'R2 waits in pending');
   await sleep(300);
   assert.equal(edits(rec).length, n1, 'nothing sent while the fetch runs');
+  assert.equal(await kept(p), '1', 'K0 still kept during the fetch');
+  const from = rec.sent.length;
   rec.hold = null;
   rec.release();
-  const r2 = await waitOps(rec, nameSet('button', 'Kept'), 0, 'R2 sent after the fetch');
+  const r2 = await waitOps(rec, nameSet('button', 'Kept'), from, 'R2 sent after the fetch');
   await ackOf(rec, r2);
   assert.equal(await count(p, '#surface [data-id="button-label"]'), 1, 'button-label drawn again');
-  await waitSaved(p);
-  assert.equal(await body(p, 'pending'), '0');
+  // K0 stays kept beside R2 (both acked, not saved) and is never resent on the same session
+  assert.equal(await kept(p), '2', 'K0 still kept, with R2');
+  await sleep(500);
+  assert.deepEqual(framesWithSeq(rec, k0.seq, from), [], 'K0 not resent after the same-session fetch');
+  assert.equal(await kept(p), '2', 'nothing dropped from kept before the saved');
+  fake.resume('every');
+  await allSaved(p);
+  assert.deepEqual(framesWithSeq(rec, k0.seq, from), [], 'K0 never resent');
+  assert.equal(fake.doc('every').nodes['button-bg'].name, 'Bg');
   assert.equal(fake.doc('every').nodes.button.name, 'Kept');
   assert.ok(fake.doc('every').nodes['button-label'], 'button-label kept on the server');
   assert.equal(refusedFrames(rec).length, 1, 'only the del refused');
@@ -642,6 +656,55 @@ test('S1.8 a reload during a fetch', { skip: canDrive ? false : 'needs Chrome an
   assert.equal(d.nodes.dot.name, 'K three');
   assert.equal(d.nodes.button.name, 'Held');
   assert.equal(d.nodes.title.name, 'Replaced');
+  assert.equal(refusedFrames(rec).length, 1, 'only the del refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('a saved that comes before its held ack keeps nothing', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  // review T1-1: on the same session a saved covering an own edit can arrive while that edit's ack is
+  // held by a fetch (here the fetch a refusal starts); once applied, the edit is on disk, not kept
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await ana(fake, later); // Ana keeps the session open
+  await p.click('#pages a[data-page="p-parts"]');
+  await within(async () => (await count(p, '#surface [data-id="button"]')) === 1, 'Parts shown');
+  holdDocs(rec);
+  await selectRow(p, 'button-label');
+  const session = fake.session('every');
+  // the del and E queued while down, sent back to back on the same-session reconnect
+  assert.equal(await closePageSocket(rec), 1, "the page's one socket closed");
+  await within(async () => (await body(p, 'live')) === 'off', 'data-live off', async () => body(p, 'live'), 5000);
+  const n0 = edits(rec).length;
+  await p.key('Delete');
+  await selectRow(p, 'button');
+  await fieldSet(p, 'name', 'Saved');
+  assert.equal(welcomeCount(rec), 1, 'both queued before the reconnect');
+  assert.equal(await body(p, 'pending'), '2', 'the del and E wait');
+  await within(async () => welcomeCount(rec) >= 2, 'a second welcome');
+  assert.equal(gotOf(rec, 'welcome')[1].m.session, session, 'the same session');
+  const del = await waitOps(rec, [{ op: 'del', id: 'button-label' }], n0, 'the del sent');
+  const e = await waitOps(rec, nameSet('button', 'Saved'), n0, 'E sent');
+  await within(async () => refusedFrames(rec).some((m) => m.seq === del.seq), 'the del refused', async () => JSON.stringify(rec.got.slice(-3)));
+  const ack = await ackOf(rec, e);
+  await within(async () => rec.held.length === 1, "the refusal's doc request held", async () => rec.requests.join(' '), 5000);
+  // the fake's saved (500 ms after E applied) reaches the page while E's ack is still held
+  await within(async () => gotOf(rec, 'saved').some((x) => x.m.rev >= ack.rev), "the saved covering E's ack", async () => JSON.stringify(rec.got.slice(-3)), 5000);
+  assert.equal(rec.held.length, 1, 'the fetch still held when the saved came');
+  await releaseAll(rec);
+  rec.hold = null;
+  await within(async () => (await body(p, 'pending')) === '0', 'pending 0 after the fetch', async () => body(p, 'pending'));
+  assert.equal(await kept(p), '0', 'E not kept: the saved already covered it');
+  // a restart then resends nothing of E
+  fake.restart('every');
+  await within(async () => welcomeCount(rec) >= 3, 'a third welcome');
+  await live(p);
+  await within(async () => docRequests(rec, 'every').length >= 3, 'the new session fetched', async () => rec.requests.join(' '));
+  await sleep(1000);
+  assert.deepEqual(framesWithSeq(rec, e.seq, afterWelcome(rec, 3)), [], 'E not resent after the restart');
+  assert.equal(await body(p, 'pending'), '0');
+  assert.equal(await kept(p), '0');
+  assert.equal(fake.doc('every').nodes.button.name, 'Saved');
   assert.equal(refusedFrames(rec).length, 1, 'only the del refused');
   noDialogs(rec);
   noExceptions(rec);

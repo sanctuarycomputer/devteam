@@ -252,11 +252,12 @@
   // `pending`, the page's own edits not yet acked ({ ops, seq, kind, entry }, seq null until sent), in
   // order; `doc` is base with pending applied over it, what is drawn. `kept` (kit-668) holds the page's
   // own edits acked but not yet saved, each with the `rev` of its ack and the socket's `session` then:
-  // a new session resends them. `saved` is the last `saved` rev; `locked` is null, 'view' (refused as a
-  // View person) or 'closed' (landed or removed): no more edits either way.
+  // a new session resends them. `saved` is the last `saved` rev and `savedOn` the socket's session it
+  // came on; `locked` is null, 'view' (refused as a View person) or 'closed' (landed or removed): no
+  // more edits either way.
   const state = {
     slug: null, session: null, rev: null, doc: null, repo: null, pageId: null, sel: null,
-    base: null, pending: [], kept: [], saved: null, locked: null, paused: false, closedText: null,
+    base: null, pending: [], kept: [], saved: null, savedOn: null, locked: null, paused: false, closedText: null,
     // Change in (spec §3): { comp, name }, the variant a component's nodes are edited in, or null (Base);
     // placing: the component Place instance adds an instance of at the next click, or null
     variantMode: null, placing: null,
@@ -2908,7 +2909,9 @@
     if (isObj(ack) && ack.client === CLIENT && Number.isSafeInteger(ack.seq)) {
       const acked = [];
       dropPending((e) => { const hit = e.seq !== null && e.seq <= ack.seq; if (hit) acked.push(e); return hit; });
-      for (const e of acked) { e.rev = m.rev; e.session = m.via; state.kept.push(e); }
+      // an ack held through a fetch can come after the saved that covers it: that edit is on disk already
+      const onDisk = state.savedOn === m.via && state.saved !== null && state.saved >= m.rev;
+      for (const e of acked) { e.rev = m.rev; e.session = m.via; if (!onDisk) state.kept.push(e); }
       if (state.kept.length > KEPT_MAX) {
         state.kept.splice(0, state.kept.length - KEPT_MAX);
         say(SAY.notSaved);
@@ -2918,6 +2921,7 @@
   // saved: the socket's session's kept edits at or below its rev are on disk; another session's stay.
   function saved(m) {
     state.saved = m.rev;
+    state.savedOn = sock.session;
     state.kept = state.kept.filter((e) => e.session !== sock.session || e.rev > m.rev);
     syncBody();
   }
