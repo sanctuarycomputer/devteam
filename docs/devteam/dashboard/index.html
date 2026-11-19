@@ -204,6 +204,7 @@ try {
   /* reduced motion: nothing slides, and the red dot doesn't pulse (last, and as specific as the pulse) */
   @media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } :where(.shell) .dot.red.pulse:not(:where(.no-shell, .no-shell *)) { animation: none; } }
   /* devteam-layout end */
+/* css-base start */
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; background: var(--bg); touch-action: manipulation; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
@@ -236,6 +237,8 @@ try {
   .loading { color: var(--muted); font-size: 12px; }
   [hidden] { display: none !important; }
 
+/* css-base end */
+/* css-shell start */
   /* shell */
   .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
   main.waiting > section { display: none; }
@@ -252,6 +255,8 @@ try {
   .nav .count.hot { color: var(--red-fg); }
   :where(.no-shell) .side .foot { margin-top: auto; padding: 12px 8px 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
   :where(.no-shell) main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
+/* css-shell end */
+/* css-frame start */
   /* the frame (kit-87): the grouped nav, the settings area at the sidebar's foot, one page shown at a time */
   .eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 14px 8px 4px; }
   .brand + .eyebrow { padding-top: 4px; }
@@ -280,6 +285,8 @@ try {
   .pagebar .tt .n.q { color: var(--red-fg); }
   main.page > section[data-page]:not(.on) { display: none; }
   main.page > section[data-page] { margin-top: 0; }
+/* css-frame end */
+/* css-settings start */
   /* the Settings page (kit-87 spec §8), as the mock at main draws it */
   .badge.amber { --c: var(--amber-fg); }
   button.mini { height: 22px; padding: 0 8px; margin: 0; }
@@ -316,6 +323,8 @@ try {
     main.page { overflow-wrap: anywhere; }
   }
 
+/* css-settings end */
+/* css-common start */
   /* sections */
   section { margin-top: 36px; scroll-margin-top: 16px; }
   section:first-of-type { margin-top: 0; }
@@ -381,6 +390,8 @@ try {
   .bars div span:last-child { text-align: right; color: var(--fg-2); font-variant-numeric: tabular-nums; }
   .bars span.b { height: 6px; background: var(--series-1); border-radius: 3px; min-width: 2px; }
 
+/* css-common end */
+/* css-efficiency start */
   /* the Efficiency Score card (kit-174), as the mock's: ruled sections; charts drawn at the width they get */
   .eff-card > .sec:first-of-type { border-top: 0; }
   .eff-card > .sec:last-child { border-bottom: 0; padding-bottom: 0; }
@@ -424,6 +435,8 @@ try {
   .sugg-w, .sugg-m { font-size: 12.5px; color: var(--fg-2); margin-top: 2px; overflow-wrap: anywhere; }
   .sugg-e { font-size: 12px; color: var(--green-fg); margin-top: 2px; }
 
+/* css-efficiency end */
+/* css-progress start */
   /* progress */
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
   /* a select is as wide as its longest option, unless its label can shrink too */
@@ -453,6 +466,8 @@ try {
   .throughput { display: flex; align-items: flex-end; gap: 4px; height: 56px; }
   .throughput span { flex: 1; background: var(--series-1); border-radius: 3px 3px 0 0; min-height: 2px; }
 
+/* css-progress end */
+/* css-board start */
   /* board */
   /* every column the same width, full or empty; the board scrolls sideways when they don't fit */
   .board { display: grid; grid-template-columns: repeat(7, minmax(132px, 1fr)); gap: 8px; overflow-x: auto; padding-bottom: 6px; }
@@ -507,6 +522,8 @@ try {
   .att-q i { flex: none; margin-top: 2px; }
   .att .badge { margin-right: 0; }
 
+/* css-board end */
+/* css-loop start */
   /* loop */
   .why { font-size: 12px; color: var(--fg-2); margin: 4px 0 8px; padding: 4px 10px; border-left: 2px solid var(--line-2); }
   .feed .card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; }
@@ -518,6 +535,8 @@ try {
   .qcard.trust { border-left-color: var(--green); }
   .qid { font-family: var(--mono); font-size: 11px; color: var(--muted); }
   .qcard.done { border-left-color: var(--green); opacity: .85; }
+/* css-loop end */
+/* css-inbox start */
   /* the Inbox is in the kit's order: the first card is the next best step, and each says why it is where it is */
   .qcard.top { border-left-width: 4px; }
   .top-why { font-size: 13px; margin: 0 0 8px; }
@@ -564,6 +583,8 @@ try {
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { button.busy::after { animation-duration: 2.5s; } }
 
+/* css-inbox end */
+/* css-loop-tabs start */
   /* loop tabs */
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; flex-wrap: wrap; }
   .tabs button { margin: 0; height: 30px; background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--fg-2); padding: 0 10px; }
@@ -572,6 +593,8 @@ try {
   .tabs .n { color: var(--muted); font-weight: 400; margin-left: 4px; }
   .loop-intro { color: var(--fg-2); max-width: var(--measure); margin: 0 0 12px; }
 
+/* css-loop-tabs end */
+/* css-goals-old start */
   /* goals */
   .goal h4 { font-size: 15px; font-weight: 600; margin: 6px 0 2px; }
   .goal-top { display: flex; gap: 8px; align-items: center; }
@@ -586,6 +609,8 @@ try {
   .rulebox { display: flex; gap: 8px; font-size: 12.5px; color: var(--fg-2); margin: 6px 0 0; align-items: flex-start; }
   .rulebox input { margin-top: 3px; }
 
+/* css-goals-old end */
+/* css-chrome start */
   /* icons, title bars, menus */
   [class^="icon-"], [class*=" icon-"] { line-height: 1; vertical-align: -2px; }
   .nav .nl { display: inline-flex; align-items: center; gap: 8px; }
@@ -608,6 +633,8 @@ try {
   .card h4 a.title-link { color: inherit; }
   .card h4 a.title-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 
+/* css-chrome end */
+/* css-planners start */
   /* the planners strip above the Board (kit-91): four across, two below 1100px, one below 560px; each card in the
      dashed outline, a flex column whose attention row sits at the bottom; stuck or held by a question, the dashed
      outline in red */
@@ -626,10 +653,14 @@ try {
   .plcard > .att { margin-top: auto; padding-top: 6px; min-width: 0; }
   .plcard b { font-size: 12.5px; }
 
+/* css-planners end */
+/* css-acts start */
   /* acts in plain words */
   .act-head { font-weight: 500; }
   .act-detail { color: var(--fg-2); font-size: 12.5px; margin-top: 2px; }
 
+/* css-acts end */
+/* css-peek start */
   /* the peek (kit-88): the block's frame (.scrim, .drawer, .drawer-head, .drawer-body) styles it; here only
      what the block leaves to the page. A dl the block's props() didn't draw keeps today's grid. */
   .drawer dl:not(.props) { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 6px 12px; font-size: 12.5px; margin: 10px 0 16px; }
@@ -658,6 +689,8 @@ try {
   .attrs { margin: 0 0 16px; }
   .attrs dd .links { margin: 0; }
   .attrs-h { margin: 6px 0 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+/* css-peek end */
+/* css-misc start */
   /* a key's tooltip on keyboard focus (the mouse has its title); Escape blurs it */
   .props dt[title] { position: relative; }
   .props dt[title]:focus-visible::after { content: attr(title); position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); white-space: normal; }
@@ -743,6 +776,8 @@ try {
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
   @media (max-width: 900px) { .drawer dl:not(.props) { grid-template-columns: 1fr; } }
 
+/* css-misc end */
+/* css-review start */
   /* review questions: three bands, the middle one the agent's (sandboxed) page */
   .qcard.review { border-left-color: var(--blue); }
   /* the review opens as a wide side panel over the page: a slim header, the agent's page filling
@@ -806,6 +841,8 @@ try {
   /* on a phone the panel follows the page instead of covering it */
   @media (max-width: 900px) { .rv-panel { position: static; grid-template-columns: minmax(0, 1fr); max-height: none; } #rv-preview { overflow: visible; } }
 
+/* css-review end */
+/* css-library start */
   /* the Library: artifacts (a landed one with its drafts beneath it), drafts of new ones, the link registry */
   #library h3 { margin: 18px 0 8px; }
   #library h3:first-of-type { margin-top: 4px; }
@@ -825,12 +862,15 @@ try {
   .lib-link .links { margin: 0; }
   .lib-link .loc { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
 
+/* css-library end */
+/* css-viewer start */
   /* the artifact viewer: a page the fleet drew, a modal over the scrim from under the page bar (--bar-h, so the Inbox button above it stays
      clear) to 16px from the window's sides and bottom; its right edge is --av-right, which the open Inbox panel moves left of itself (8px all
      round under 600px, below) */
   #artifact-view:not([hidden]) { position: fixed; inset: var(--bar-h, 49px) var(--av-right, 16px) 16px 16px; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
   /* a viewer opened over a review stays above it: the review sits above the panel (z 25, kit-100) */
   .app:has(main.reviewing) ~ #artifact-view:not([hidden]) { z-index: 26; }
+/* css-viewer-bar start */
   .av-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
   .av-bar > i { font-size: 15px; color: var(--muted); flex: none; }
   .av-head { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12px; }
@@ -841,6 +881,8 @@ try {
   .av-bar a.av-btn:hover { background: var(--hover); }
   /* the artifact changed since the frame loaded it; a keyboard's focus ring still shows over it */
   #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: 1px; }
+  @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
+/* css-viewer-bar end */
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
   @media (max-width: 600px) { #artifact-view:not([hidden]) { inset: 8px; } }
@@ -853,7 +895,8 @@ try {
      else of the dashboard shows */
   .viewer .app, .viewer .scrim, .viewer #av-close, .viewer #av-tab { display: none !important; }
   .viewer #artifact-view:not([hidden]) { inset: var(--bar-h) 0 0; border: 0; border-radius: 0; box-shadow: none; }
-  @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
+/* css-viewer end */
+/* css-threads start */
   /* threads: the layer over the page (Shift and point at anything), outside <main> */
   .tl-aiming, .tl-aiming * { cursor: none !important; }
   .tl-pinning { touch-action: none; }
@@ -982,6 +1025,8 @@ try {
   .tl-card .ask, #ask-threads .ask { margin: 6px 0; padding: 8px 10px; flex: none; }
   .tl-card .ask-q, #ask-threads .ask-q { max-height: 120px; }
   @media (pointer: coarse) { .threads-head .end .icon-btn { height: 36px; width: 36px; } }
+/* css-threads end */
+/* css-goals start */
   /* Goals (kit-90): the tabs, then the cards two across on the shell's grid; a card spans its columns, its
      running text keeps the measure */
   /* the tab bar is Goals' first content, inside its section: the shell's first-child tab bar rule (-8px, its
@@ -1000,6 +1045,8 @@ try {
   #goals .card.goal { max-width: none; }
   #goals .goal-next { max-width: var(--measure); }
   #goals > #unassigned { margin-top: 12px; }
+/* css-goals end */
+/* css-overview start */
   /* Overview (kit-90): a header with the status pill at its far right, then the shell's ruled sections */
   /* the header is Overview's first content, inside its section, where the shell's first-child header rule
      doesn't reach: its name's text --page-top below the bar (it sits 2px lower in its 27px line box) */
@@ -1030,10 +1077,12 @@ try {
   #overview .mosaic i.l3 { background: color-mix(in srgb, var(--green) 78%, var(--well)); } #overview .mosaic i.l4 { background: var(--green); }
   .card.goal.blk-full, .ov-goal.blk-full { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .card.goal.blk-partial, .ov-goal.blk-partial { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
+/* css-overview end */
 </style>
 </head>
 <body class="shell">
 <div class="app">
+<!-- html-side start -->
 <aside class="side" aria-label="Navigation">
   <div class="brand"><span class="dot"></span><b id="title">devteam</b><span class="badge kit" id="kit" hidden></span></div>
   <div class="eyebrow">Project</div>
@@ -1047,25 +1096,33 @@ try {
     <div class="foot"><span id="when"></span> <span id="saving" class="muted" role="status" hidden>· saving…</span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
   </div>
 </aside>
+<!-- html-side end -->
 <div class="main">
+<!-- html-pagebar start -->
 <header class="pagebar"><h1 id="page-title">Overview</h1><span class="extra"></span><button class="ghost tt" id="inbox-btn" type="button" title="Open questions"><i class="icon-inbox" aria-hidden="true"></i>Inbox <span class="n q" id="inbox-btn-n"></span></button></header>
+<!-- html-pagebar end -->
 <main class="page waiting">
   <div class="banner" id="banner" role="alert" hidden></div>
   <div class="banner updated" id="updated" role="status" hidden>The dashboard was updated since this tab opened, so some of what you see may be out of date. <button id="reload-page">Reload</button></div>
   <button class="held" id="held" type="button" tabindex="-1" hidden>New data. Click to refresh</button>
   <div class="stale-note" id="stale" role="status" hidden></div>
   <p class="loading" id="loading">Loading…</p>
+<!-- html-overview start -->
   <section id="overview" data-page="overview">
     <div id="ov-head" class="ov-head"></div>
     <div id="down-banner" class="down-banner" role="alert" hidden></div>
     <div id="ov-secs"></div>
   </section>
+<!-- html-overview end -->
 
+<!-- html-goals start -->
   <section id="goals" data-page="goals">
     <div id="goals-list"></div>
     <div id="unassigned" class="small dim"></div>
   </section>
+<!-- html-goals end -->
 
+<!-- html-progress start -->
   <section id="progress" data-page="progress">
     <div class="g12">
       <div class="c8 pg-col">
@@ -1085,12 +1142,16 @@ try {
       </div>
     </div>
   </section>
+<!-- html-progress end -->
 
+<!-- html-board start -->
   <section id="board" data-page="board">
     <div id="planners" class="planners"></div>
     <div class="board" id="board-cols"></div>
   </section>
+<!-- html-board end -->
 
+<!-- html-library start -->
   <section id="library" class="no-shell" data-page="library">
     <h2>Library <span class="sub">pages the fleet drew to show an idea, and the links it works from</span></h2>
     <div class="lib-list" id="previews"></div>
@@ -1099,7 +1160,9 @@ try {
     <h3>Links</h3>
     <div class="lib-list" id="lib-links"></div>
   </section>
+<!-- html-library end -->
 
+<!-- html-loop start -->
   <section id="loop" class="no-shell" data-page="loop">
     <h2>Loop <span class="sub">how the supervisor notices, makes sense of, decides and acts</span></h2>
     <div id="learning" class="learning" aria-label="Is the loop making the system smarter?"></div>
@@ -1141,6 +1204,8 @@ try {
     </div>
   </section>
 
+<!-- html-loop end -->
+<!-- html-trust start -->
   <section id="trust" class="no-shell" data-page="trust">
     <h2>Trust Ladder <span class="sub">which of your decisions the supervisor may make, and how it earned or lost that</span></h2>
     <p class="loop-intro">Some of your decisions can be handed to the supervisor one step at a time as it keeps recommending what you'd have chosen: first it asks, then it asks with a default, then it decides and tells you. A correction on one of its calls drops that kind back to asking. More trust is always your answer to a question in the Inbox.</p>
@@ -1148,16 +1213,22 @@ try {
     <h3 style="margin-top:14px">How the rungs moved</h3>
     <div class="feed" id="trust-history"></div>
   </section>
+<!-- html-trust end -->
 
+<!-- html-efficiency start -->
   <!-- kit-174: the Efficiency Score card, beside Trust, on the shell (render() draws it: renderEfficiency) -->
   <section id="efficiency" data-page="efficiency"></section>
+<!-- html-efficiency end -->
 
+<!-- html-retros start -->
   <section id="retros" class="no-shell" data-page="retros">
     <h2>Retros <span class="sub">the supervisor's look back at how the work went, across every goal: what merged, what was slow or rejected, what it changed</span></h2>
     <div id="retro-due"></div>
     <div id="retro-list"></div>
   </section>
 
+<!-- html-retros end -->
+<!-- html-health start -->
   <section id="health" class="no-shell" data-page="health">
     <h2>Health <span class="sub">what the supervisor is watching and working on; anything it needs from you comes to your Inbox</span></h2>
     <div id="findings"></div>
@@ -1166,6 +1237,8 @@ try {
     <div class="two" style="margin-top:14px" id="test-lists"></div>
   </section>
 
+<!-- html-health end -->
+<!-- html-sensors start -->
   <section id="monitoring" class="no-shell" data-page="sensors">
     <h2>Sensors <span class="sub">each one takes samples of production, kept here; a meaningful change becomes an observation in the log, for the supervisor's loop and Health to act on</span></h2>
     <div id="sensors"></div>
@@ -1177,8 +1250,12 @@ try {
     <div class="feed" id="sensor-feed"></div>
   </section>
 
+<!-- html-sensors end -->
+<!-- html-settings start -->
   <section id="settings" data-page="settings"></section>
+<!-- html-settings end -->
 
+<!-- html-review start -->
   <section id="review-view" class="no-shell" hidden>
     <div id="rv-head"></div>
     <div id="rv-link" class="banner stale rv-link" role="alert" hidden></div>
@@ -1188,10 +1265,12 @@ try {
       <div id="rv-actions"></div>
     </div>
   </section>
+<!-- html-review end -->
 
 </main>
 </div>
 </div>
+<!-- html-drawer start -->
 <div class="scrim" id="scrim" hidden></div>
 <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-bar-title" hidden>
   <div class="drawer-head"><h2 id="drawer-bar-title"></h2><span class="end"><button class="ghost icon-btn" id="drawer-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button></span></div>
@@ -1199,7 +1278,10 @@ try {
 </aside>
 <!-- the page bar's top-right button, mirrored above the scrim beside an open peek (kit-88 spec §2.1) -->
 <button class="ghost tt" id="tt-peek" type="button"></button>
+<!-- html-drawer end -->
+<!-- html-viewer start -->
 <div id="artifact-view" class="no-shell" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
+<!-- html-viewer-bar start -->
   <div class="av-bar">
     <i class="icon-library" aria-hidden="true"></i>
     <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
@@ -1207,6 +1289,7 @@ try {
     <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in a tab of its own, with its threads" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
     <button class="ghost icon-btn" id="av-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button>
   </div>
+<!-- html-viewer-bar end -->
   <!-- the stage: the page in its frame, the thread pins on it, and the overlay Shift raises over it (spec §4) -->
   <div id="av-stage">
     <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
@@ -1220,6 +1303,8 @@ try {
     <div id="av-over" class="av-over" hidden></div>
   </div>
 </div>
+<!-- html-viewer end -->
+<!-- html-tl start -->
 <!-- the thread layer: outside <main>, which the 10 s refresh rebuilds -->
 <div id="tl" class="no-shell">
   <div id="tl-pins" class="tl-pins"></div>
@@ -1228,6 +1313,8 @@ try {
   <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
   <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the supervisor" hidden></div>
 </div>
+<!-- html-tl end -->
+<!-- html-threads start -->
 <!-- the Threads panel (kit-89 spec §2.1): on <body>, outside .app, so the /view/ tab has it too. Its head: the
      tabs, then Pin, New thread and ×; its body: the selected tab's pane, the slot the in-panel card lives in, and
      the Inbox (kit-100 spec §2.1: the one element, its children and ids kept, shown only on the Inbox tab) -->
@@ -1239,6 +1326,7 @@ try {
     <details class="answered" id="answered-wrap"><summary id="answered-sum">Answered</summary><div id="answered"></div></details>
   </div></div>
 </aside>
+<!-- html-threads end -->
 <script>
 /* devteam-shell-js start */
 // dashboard-shell@1 (test/contracts/shell.md): the builders, binders and URL rules both
@@ -3947,14 +4035,19 @@ function renderOoda(o) {
   // Goals: where each stands, how the work and the measure are trending, what it waits on
   renderGoals();
 
+  /* ooda-learning start */
   // Is it learning: the chart above the tabs
   $('learning').innerHTML = learningSection(o);
 
+  /* ooda-learning end */
+  /* ooda-observe start */
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 40).map((x) => `
     <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)} role="button" tabindex="0" data-open="observation/${esc(encodeURIComponent(x.id))}">${cardMenu('observation', x.id)}${titled(peekFor('observation', x.id), `<span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}`)}
       <div>${linkify(x.detail)}</div>${x.place ? `<div class="place">${loopPlace(x.place)}</div>` : ''}<div class="meta">${esc(who(x.created_by))}, ${when(x.created_at)}</div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
 
+  /* ooda-observe end */
+  /* ooda-orient start */
   // Orient
   const debt = o.debt?.signals || [];
   const taught = o.debt?.incidents || [];
@@ -3973,6 +4066,8 @@ function renderOoda(o) {
     (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} role="button" tabindex="0" data-open="lesson/${esc(encodeURIComponent(k.id))}">${cardMenu('lesson', k.id)}${titled(peekFor('lesson', k.id), `<span class="badge good">${esc(k.kind)}</span>${linkify(k.statement)}`)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
     empty('None yet. Things noticed more than once become lessons: the supervisor keeps the ones about how the agents work, and sends you any that would change something you set.');
 
+  /* ooda-orient end */
+  /* ooda-trust start */
   // Trust Ladder
   $('trust-table').innerHTML = '<tr><th>Kind of decision</th><th>Now</th><th>At most</th><th>Agreed with you</th><th>Corrected</th></tr>' + o.trust.map((t) => `
     <tr><td>${esc(cap(t.about || words(t.class)))}<div class="muted small">${esc(t.class)}</div></td><td>${esc(RUNG_WORDS[t.rung])}</td><td>${esc(RUNG_WORDS[t.ceiling])}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}% of the last ${esc(t.agreement_questions.length)}`}${t.can_ask ? '<div><span class="badge good">ready to ask you for more trust</span></div>' : ''}</td><td>${t.corrections ? `${esc(t.corrections)} time${t.corrections > 1 ? 's' : ''}` : 'never'}</td></tr>`).join('');
@@ -3981,9 +4076,13 @@ function renderOoda(o) {
   $('trust-history').innerHTML = moves.length ? moves.map((e) => `<div class="card small${e.by === 'correction' ? ' corrected' : ''}"><div>${esc(cap(e.about || words(e.class)))}: <b>${esc(RUNG_WORDS[e.rung])}</b>
     <div class="meta">${esc(when(e.at))} · ${e.by === 'correction' ? `a correction on ${linkify(e.id)}: ${esc(e.why)}` : `your answer to ${qlink(e.id)}`}</div></div></div>`).join('') : empty('No moves yet. Every kind of decision is on its starting rung.');
 
+  /* ooda-trust end */
+  /* ooda-decide start */
   // Decide: every call, the supervisor's and yours
   renderDecisions(o);
 
+  /* ooda-decide end */
+  /* ooda-act start */
   // Act
   const feed = o.acts;
   $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
@@ -3996,6 +4095,7 @@ function renderOoda(o) {
       <div class="card-side">${a.correction || a.decision ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct</button>`}${cardMenu('act', a.id)}</div>
     </div>`; }).join('') : empty('None yet. Everything the supervisor does shows here.');
 }
+  /* ooda-act end */
 const DEC_KIND = { decision: 'Decided', act: 'Did, as its own call', answer: 'You answered', goal: 'Your call on a goal', rule: 'A standing rule you gave', correction: 'Corrected' };
 // The question's Matched row in words (kit-313): the owner's own pick, the supervisor's reading of
 // their words, or words not yet read; a reading matches, but it is not the owner's agreement

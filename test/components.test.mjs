@@ -262,3 +262,113 @@ test('components check reads a commit\'s tree: dotfiles, gitlinks, symlinks, spa
     ok(old, ['components', 'check', '--ref', 'HEAD~5']);
   } finally { F.done(); }
 });
+
+// kit-315: index.html's style, markup and renderOoda sections are named regions (devteam-dev PR #189),
+// so a ticket can claim index.html#<region>. Read by the kit's own parts reader, as validate reads them.
+function partsFns() {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const a = src.indexOf('/* parts start */'), b = src.indexOf('/* parts end */');
+  assert.ok(a >= 0 && b > a, 'devteam.mjs has a /* parts */ region');
+  return vm.runInContext(`${src.slice(a, b)}\n;({ fileParts })`, vm.createContext({}));
+}
+// [name, first content line, last content line (trimmed prefixes; '' a blank line), content line count]
+const INDEX_REGIONS = [
+  ["css-base", "* { box-sizing: border-box; }", "", 32],
+  ["css-shell", "/* shell */", ":where(.no-shell) main { max-width: 1120", 16],
+  ["css-frame", "/* the frame (kit-87): the grouped nav, ", "main.page > section[data-page] { margin-", 28],
+  ["css-settings", "/* the Settings page (kit-87 spec §8), a", "", 36],
+  ["css-common", "/* sections */", "", 65],
+  ["css-efficiency", "/* the Efficiency Score card (kit-174), ", "", 43],
+  ["css-progress", "/* progress */", "", 29],
+  ["css-board", "/* board */", "", 54],
+  ["css-loop", "/* loop */", ".qcard.done { border-left-color: var(--g", 11],
+  ["css-inbox", "/* the Inbox is in the kit's order: the ", "", 46],
+  ["css-loop-tabs", "/* loop tabs */", "", 8],
+  ["css-goals-old", "/* goals */", "", 14],
+  ["css-chrome", "/* icons, title bars, menus */", "", 22],
+  ["css-planners", "/* the planners strip above the Board (k", "", 18],
+  ["css-acts", "/* acts in plain words */", "", 4],
+  ["css-peek", "/* the peek (kit-88): the block's frame ", ".attrs-h { margin: 6px 0 0; font-size: 1", 28],
+  ["css-misc", "/* a key's tooltip on keyboard focus (th", "", 85],
+  ["css-review", "/* review questions: three bands, the mi", "", 63],
+  ["css-library", "/* the Library: artifacts (a landed one ", "", 19],
+  ["css-viewer", "/* the artifact viewer: a page the fleet", ".viewer #artifact-view:not([hidden]) { i", 29],
+  ["css-viewer-bar", ".av-bar { display: flex; align-items: ce", "@media (max-width: 600px) { .av-bar .av-", 11],
+  ["css-threads", "/* threads: the layer over the page (Shi", "@media (pointer: coarse) { .threads-head", 128],
+  ["css-goals", "/* Goals (kit-90): the tabs, then the ca", "#goals > #unassigned { margin-top: 12px;", 18],
+  ["css-overview", "/* Overview (kit-90): a header with the ", ".card.goal.blk-partial, .ov-goal.blk-par", 30],
+  ["html-side", "<aside class=\"side\" aria-label=\"Navigati", "</aside>", 13],
+  ["html-pagebar", "<header class=\"pagebar\"><h1 id=\"page-tit", "<header class=\"pagebar\"><h1 id=\"page-tit", 1],
+  ["html-overview", "<section id=\"overview\" data-page=\"overvi", "</section>", 5],
+  ["html-goals", "<section id=\"goals\" data-page=\"goals\">", "</section>", 4],
+  ["html-progress", "<section id=\"progress\" data-page=\"progre", "</section>", 19],
+  ["html-board", "<section id=\"board\" data-page=\"board\">", "</section>", 4],
+  ["html-library", "<section id=\"library\" class=\"no-shell\" d", "</section>", 8],
+  ["html-loop", "<section id=\"loop\" class=\"no-shell\" data", "", 41],
+  ["html-trust", "<section id=\"trust\" class=\"no-shell\" dat", "</section>", 7],
+  ["html-efficiency", "<!-- kit-174: the Efficiency Score card,", "<section id=\"efficiency\" data-page=\"effi", 2],
+  ["html-retros", "<section id=\"retros\" class=\"no-shell\" da", "", 6],
+  ["html-health", "<section id=\"health\" class=\"no-shell\" da", "", 8],
+  ["html-sensors", "<section id=\"monitoring\" class=\"no-shell", "", 11],
+  ["html-settings", "<section id=\"settings\" data-page=\"settin", "<section id=\"settings\" data-page=\"settin", 1],
+  ["html-review", "<section id=\"review-view\" class=\"no-shel", "</section>", 9],
+  ["html-drawer", "<div class=\"scrim\" id=\"scrim\" hidden></d", "<button class=\"ghost tt\" id=\"tt-peek\" ty", 7],
+  ["html-viewer", "<div id=\"artifact-view\" class=\"no-shell\"", "</div>", 21],
+  ["html-viewer-bar", "<div class=\"av-bar\">", "</div>", 7],
+  ["html-tl", "<!-- the thread layer: outside <main>, w", "</div>", 8],
+  ["html-threads", "<!-- the Threads panel (kit-89 spec §2.1", "</aside>", 11],
+  ["ooda-learning", "// Is it learning: the chart above the t", "", 3],
+  ["ooda-observe", "// Observe", "", 5],
+  ["ooda-orient", "// Orient", "", 18],
+  ["ooda-trust", "// Trust Ladder", "", 8],
+  ["ooda-decide", "// Decide: every call, the supervisor's ", "", 3],
+  ["ooda-act", "// Act", "}", 12],
+];
+const IS_REGION_MARK = /^\s*(?:\/\*|<!--) (?:css|html|ooda)-[a-z-]+ (?:start|end) (?:\*\/|-->)$/;
+test("index.html's regions (kit-315): each name is one region over exactly its lines, in its form", () => {
+  const { fileParts } = partsFns();
+  const P = fileParts(fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8'), 'index.html');
+  const L = P.lines;
+  const at = (s, from = 0) => { const i = L.findIndex((l, k) => k >= from && l === s); assert.ok(i >= 0, `index.html has the line ${s}`); return i + 1; };
+  const style = at('<style>'), styleEnd = at('</style>'), script = at('<script>', styleEnd), mainEnd = at('</main>');
+  const R = new Map();
+  for (const [name, first, last, count] of INDEX_REGIONS) {
+    const pl = P.places.get(name);
+    assert.equal(pl?.length, 1, `${name}: one region`);
+    const { from, to } = pl[0];
+    R.set(name, { from, to });
+    const mark = name.startsWith('html-') ? (w) => `<!-- ${name} ${w} -->` : name.startsWith('ooda-') ? (w) => `  /* ${name} ${w} */` : (w) => `/* ${name} ${w} */`;
+    assert.equal(L[from - 1], mark('start'), `${name}: its start marker, in its form and column`);
+    assert.equal(L[to - 1], mark('end'), `${name}: its end marker, in its form and column`);
+    const check = (got, want, what) => (want === '' ? assert.equal(got.trim(), '', `${name}: its ${what} line is blank`) : assert.ok(got.trim().startsWith(want), `${name}: its ${what} line starts ${JSON.stringify(want)}; got ${JSON.stringify(got.trim().slice(0, 60))}`));
+    check(L[from], first, 'first');
+    check(L[to - 2], last, 'last');
+    assert.equal(L.slice(from, to - 1).filter((l) => !IS_REGION_MARK.test(l)).length, count, `${name}: ${count} lines`);
+    if (name.startsWith('css-')) assert.ok(style < from && to < styleEnd, `${name}: inside <style>`);
+    if (name.startsWith('html-')) assert.ok(styleEnd < from && to < script, `${name}: in the markup`);
+  }
+  // nesting: only the two viewer bars sit inside another region; no other pair overlaps
+  const inside = (x, y) => R.get(y).from < R.get(x).from && R.get(x).to < R.get(y).to;
+  assert.ok(inside('css-viewer-bar', 'css-viewer') && inside('html-viewer-bar', 'html-viewer'), 'the viewer bars sit inside their viewers');
+  const names = [...R.keys()];
+  for (const x of names) for (const y of names) {
+    if (x >= y || ['css-viewer-bar|css-viewer', 'css-viewer|css-viewer-bar', 'html-viewer-bar|html-viewer', 'html-viewer|html-viewer-bar'].includes(`${x}|${y}`)) continue;
+    assert.ok(R.get(x).to < R.get(y).from || R.get(y).to < R.get(x).from, `${x} and ${y} don't overlap`);
+  }
+  // the 600px .av-bar rule moved up into css-viewer-bar, right after #av-reload.stale
+  const stale = L.findIndex((l) => l.trim().startsWith('#av-reload.stale'));
+  assert.ok(L[stale + 1].trim().startsWith('@media (max-width: 600px) { .av-bar .av-label'), 'the .av-bar media rule follows #av-reload.stale');
+  assert.equal(L[stale + 2], '/* css-viewer-bar end */', 'and closes css-viewer-bar');
+  assert.ok(R.get('html-review').to < mainEnd, 'html-review ends before </main>');
+  // renderOoda's sub-regions: after renderGoals(), in PR #189's order. renderOoda's own place is unchanged:
+  // it ends above them, at the line before its first column-0 </div> (the markers' indentation, held
+  // above, is what keeps a column-0 marker out of the body)
+  const fn = L.findIndex((l) => l.startsWith('function renderOoda(')) + 1;
+  const goals = at('  renderGoals();', fn);
+  const ooda = ['learning', 'observe', 'orient', 'trust', 'decide', 'act'].map((n) => R.get(`ooda-${n}`));
+  assert.ok(goals < ooda[0].from, 'the ooda regions follow renderGoals()');
+  for (let i = 1; i < ooda.length; i++) assert.ok(ooda[i - 1].to < ooda[i].from, 'the ooda regions in order');
+  const div = L.findIndex((l, k) => k >= fn && l.startsWith('</div>')) + 1;
+  const own = P.places.get('renderOoda');
+  assert.ok(own?.length === 1 && own[0].from <= fn && own[0].to === div - 1, "renderOoda's own place is as before");
+});
