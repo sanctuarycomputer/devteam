@@ -14486,6 +14486,8 @@ function collectMetrics(since) {
   // finding per blocked goal. The walk goes only through running goals' live tickets: work behind a
   // held goal is blocked-by-goal-hold's, and work behind a running worker waits on that worker.
   // Blockers with no priority (chores, unprioritised goals) are never lower, so never named.
+  // A held ticket that waits still counts as waiting, as it still passes its priority on in
+  // effectivePriorities: its hold is a pause, and the work it waits on is still behind when it lifts.
   // While the fleet drains or memory is full nothing starts, so it is quiet, as idle-capacity is.
   if (!drained && !memFull) {
     const run = new Map([...ts].filter(([id, t]) => live(id) && ticketMode(t) === 'run'));

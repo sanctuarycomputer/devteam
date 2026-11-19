@@ -165,9 +165,26 @@ test('priority-inversion: a goal waiting on unstarted work well below it, until 
     assert.deepEqual(inversions(), []);
     F.sup(['goal', 'hold', g[2], 'run', '--reason', 'resumed']);
 
+    // while the fleet drains nothing starts, so it is quiet (as idle-capacity is)
+    const snap = F.snapLog();
+    const stamp = (ago) => { const d = new Date(Date.now() - ago).toISOString(); return `${d.slice(0, 10).replace(/-/g, '')}-${d.slice(11, 23).replace(/[:.]/g, '')}`; };
+    F.hand('supervisor', { id: `a-${stamp(1000)}-supervisor`, type: 'act', class: 'drain', what: 'drained the fleet on here: a pause' }, 1000);
+    assert.equal(findings().find((x) => x.kind === 'idle-capacity'), undefined, 'the drain is in force');
+    assert.deepEqual(inversions(), []);
+    F.restoreLog(snap);
+
     // the edge cut: nothing of p2's waits on p9 work
     assert.equal(inversions().length, 1);
     F.sup(['ticket', 'set', 'pi-03-high', '--json', JSON.stringify({ depends_on: [] })]);
+    assert.deepEqual(inversions(), []);
+
+    // work behind a running worker waits on that worker: a p2 ticket on a p9 one whose worker runs
+    // raises nothing; unstarted, it would
+    ticket('pi-07-running', 9);
+    ticket('pi-08-behind', 2, ['pi-07-running']);
+    assert.equal(inversions()[0]?.detail, 'p2 "High": 1 ticket waits on lower-priority work nobody has started: pi-07-running (p9)');
+    // a running worker by hand, as kit.test.mjs does: its phase lines (no tmux needed)
+    for (const [from, to, ago] of [[null, 'starting', 60000], ['starting', 'build', 30000]]) F.hand('pi-07-running', { id: `h-${stamp(ago)}-pi-07-running`, type: 'phase', from, to }, ago, 'pi-07-running.jsonl');
     assert.deepEqual(inversions(), []);
   } finally { F.done(); }
 });
