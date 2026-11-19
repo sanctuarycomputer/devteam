@@ -72,7 +72,7 @@ function serve(req, res) {
 // A front for one person: every plain request to the canvas fake, `/presence` upgrades to the
 // presence fake and every other upgrade to the canvas fake; Host (and Origin, when sent) rewritten to
 // the target's, any person or level header dropped and the person's set. `drop()` ends every open
-// presence connection on both sides, as a dropped network would.
+// presence connection on both sides, as a dropped network would; `dropCanvas()` every canvas one.
 async function front(canvasPort, presencePort, person) {
   const headersFor = (raw, port) => {
     const out = [];
@@ -84,6 +84,7 @@ async function front(canvasPort, presencePort, person) {
     return [['Host', `127.0.0.1:${port}`], ...out, ['x-devteam-person', person]];
   };
   const presence = new Set(); // [browser socket, upstream socket]
+  const canvasSocks = new Set(); // the same, for canvas sockets
   const sockets = new Set();
   const server = http.createServer((req, res) => {
     const headers = {};
@@ -107,8 +108,8 @@ async function front(canvasPort, presencePort, person) {
       socket.pipe(up);
     });
     const pair = [socket, up];
-    if (isPresence) presence.add(pair);
-    const end = () => { presence.delete(pair); socket.destroy(); up.destroy(); };
+    (isPresence ? presence : canvasSocks).add(pair);
+    const end = () => { presence.delete(pair); canvasSocks.delete(pair); socket.destroy(); up.destroy(); };
     up.on('error', end);
     socket.on('error', end);
     up.on('close', end);
@@ -119,6 +120,7 @@ async function front(canvasPort, presencePort, person) {
   return {
     url: `http://127.0.0.1:${port}`,
     drop() { const n = presence.size; for (const [a, b] of [...presence]) { a.destroy(); b.destroy(); } presence.clear(); return n; },
+    dropCanvas() { const n = canvasSocks.size; for (const [a, b] of [...canvasSocks]) { a.destroy(); b.destroy(); } canvasSocks.clear(); return n; },
     close: () => new Promise((r) => { for (const s of sockets) s.destroy(); server.close(() => r()); }),
   };
 }
@@ -691,9 +693,10 @@ test('canvas cursors: the presence socket answers pings, reconnects when dropped
   // presence socket within 60 s (plus slack) and opens a new one when shown
   await ctx.hideA();
   await within(ctx, async () => (await A.ev('document.visibilityState')) === 'hidden', 'A hidden again');
-  await A.load(`/view/canvas/${SLUG}`);
   const l0 = A.rec.order();
-  await within(ctx, async () => ofKind(A.rec.psent, 'here').some((f) => f.m.visible === false), 'C1.11: the hidden load says here visible false');
+  await A.load(`/view/canvas/${SLUG}`);
+  await within(ctx, async () => ofKind(after(A.rec.psent, l0), 'here').some((f) => f.m.visible === false), 'C1.11: the hidden load says here visible false');
+  assert.ok(!ofKind(after(A.rec.psent, l0), 'here').some((f) => f.m.visible === true), 'C1.11: the hidden load never says visible true');
   const opened = Date.now();
   await within(ctx, async () => !pfake.stats().some((x) => x.id === 'ana'), "C1.11: A's presence socket closed while hidden", async () => JSON.stringify(pfake.stats()), 75000);
   assert.ok(Date.now() - opened >= 50000, `closed after ${Date.now() - opened} ms, not before 60 s`);
@@ -721,13 +724,16 @@ test("canvas cursors: the page reports its spot, draws others' selections and ma
   void h2;
   const s0 = B.rec.order();
   const two = await pointOn(A, 'n-two', 0.5, 0.5);
-  // counted before the first move (A's last move was long ago, so it goes at once; the next two share
-  // the following window): two sends, after which B would have had any relay
-  const mv0 = ofKind(A.rec.psent, 'move').length;
+  // A's moves on p-two: wait until the last one sent is its latest position (task-2-2 F2-1), after which
+  // B would have had any relay
+  const mv0 = A.rec.order();
   await A.move(two.pt.x, two.pt.y);
-  await A.move(two.pt.x + 5, two.pt.y + 5);
-  await A.move(two.pt.x + 9, two.pt.y + 9);
-  await within(ctx, async () => ofKind(A.rec.psent, 'move').length >= mv0 + 2, "A's moves on p-two sent");
+  const lastTwo = await pointOn(A, 'n-two', 0.7, 0.6);
+  await A.move(lastTwo.pt.x, lastTwo.pt.y);
+  await within(ctx, async () => {
+    const a = ofKind(after(A.rec.psent, mv0), 'move').at(-1)?.m.a;
+    return !!a && a.k === 'n-two' && Math.abs(a.x - lastTwo.fx) < 0.02 && Math.abs(a.y - lastTwo.fy) < 0.02;
+  }, "A's latest move on p-two sent", async () => JSON.stringify(ofKind(after(A.rec.psent, mv0), 'move').map((f) => f.m.a)));
   await sleep(300);
   assert.equal(await cursorCount(B, 'ana'), 0, "no Ana cursor on B's p-main while A is on p-two");
   assert.equal(ofKind(after(B.rec.pgot, s0), 'move').length, 0, 'B got no move from another spot');
@@ -751,6 +757,11 @@ test("canvas cursors: the page reports its spot, draws others' selections and ma
   await within(ctx, async () => { const b = await boxesOf(A, 'others-sel', 'ben'); return b.length === 1 && b[0].node === 'n-card' && b[0].tag === 'Ben' && await boxAround(A, b[0]); }, "C2.2: Ben's box on A around n-card, tagged Ben", async () => JSON.stringify(await boxesOf(A, 'others-sel', 'ben')));
   await within(ctx, async () => { const b = await boxesOf(B, 'others-sel', 'ana'); return b.length === 1 && b[0].node === 'n-side' && await boxAround(B, b[0]); }, "C2.2: Ana's box on B around n-side", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')));
   assert.deepEqual(await boxesOf(A, 'others-sel', 'ana'), [], 'A never draws its own selection');
+  // task-3 T3-3: B's canvas socket dropped: Ana's box goes at once (B retries after 1 s or more) and
+  // comes back with the new socket's selections
+  assert.ok(ctx.fb.dropCanvas() >= 1, "B's canvas connection dropped at the front");
+  await within(ctx, async () => (await boxesOf(B, 'others-sel', 'ana')).length === 0, "no Ana box on B while its canvas socket is down", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')), 900);
+  await within(ctx, async () => (await boxesOf(B, 'others-sel', 'ana')).map((b) => b.node).join(' ') === 'n-side', "Ana's box on B again once it reconnects", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')), 15000);
   await B.shiftClick('#layers .layer[data-node="n-side"]');
   await within(ctx, async () => { const b = await boxesOf(A, 'others-sel', 'ben'); return b.map((x) => x.node).sort().join(' ') === 'n-card n-side' && b.filter((x) => x.tag !== null).length === 1; }, "C2.2: two Ben boxes on A, one tag", async () => JSON.stringify(await boxesOf(A, 'others-sel', 'ben')));
   await B.key('Escape');
@@ -767,6 +778,24 @@ test("canvas cursors: the page reports its spot, draws others' selections and ma
   const gone = await goneAt(ctx, flashBen, "Ben's mark on A");
   const lasted = gone - benOps.at;
   assert.ok(lasted >= 2500 && lasted <= 4500, `C2.3: the mark lasted ${lasted} ms`);
+
+  // task-3 T3-1, T3-2: an edit by Ben from elsewhere (the local route, no ack of B's): B still marks
+  // nothing (by.id is its own); A marks the nodes its add, move and set name
+  const a2 = A.rec.order();
+  const b2 = B.rec.order();
+  const byBen = await request(`${ctx.fake.url}/api/canvas/local?slug=${SLUG}`, {
+    method: 'POST', headers: { 'x-devteam-canvas-token': ctx.fake.token, 'Content-Type': 'application/json' },
+    body: { by: 'ben', via: 'apply', ops: [
+      { op: 'add', node: { id: 'n-new', type: 'frame', parent: 'p-main', name: 'New', x: 640, y: 0, size: { w: 80, h: 80 } }, after: 'n-foot' },
+      { op: 'move', id: 'n-foot', parent: 'p-main', after: null },
+    ] },
+  });
+  assert.equal(byBen.status, 200, "Ben's local apply");
+  await opsBy(ctx, B, b2, 'ben', "Ben's local ops on B");
+  await opsBy(ctx, A, a2, 'ben', "Ben's local ops on A");
+  await within(ctx, async () => (await allBoxes(A, 'flash')).map((b) => b.node).sort().join(' ') === 'n-foot n-new', 'T3-2: A marks the added and the moved node', async () => JSON.stringify(await allBoxes(A, 'flash')), 2000);
+  assert.deepEqual(await allBoxes(B, 'flash'), [], "T3-1: B marks nothing for its own person's edit from elsewhere");
+  await goneAt(ctx, async () => (await allBoxes(A, 'flash')).length > 0, "the mark of Ben's local edit on A");
 
   // C2.4: Ben edits again; 1.5 to 2 s after its mark shows, the supervisor applies an op to n-side:
   // only n-side is marked, with "supervisor", for its own 3 s

@@ -4704,6 +4704,10 @@
   othersLayer.id = 'others';
   othersLayer.setAttribute('aria-hidden', 'true');
   $('stage').insertBefore(othersLayer, $('surface').nextSibling);
+  // boxes (others' selections and the last edit's mark) under cursors; each redrawn on its own
+  const boxLayer = document.createElement('div');
+  const cursorLayer = document.createElement('div');
+  othersLayer.append(boxLayer, cursorLayer);
   // A person's colour, by a hash of their id: each holds white text at 4.5:1 or more.
   const PALETTE = ['#c92a2a', '#a61e4d', '#862e9c', '#5f3dc4', '#364fc7', '#1864ab', '#0b7285', '#1f6f3f'];
   function colourOf(id) {
@@ -4789,7 +4793,7 @@
     pres.hereKey = null;
     pres.people.clear();
     pres.cursors.clear();
-    placeOthers();
+    placeCursors();
     if (!pres.parked) retryPresence();
   }
   function presenceSend(m) {
@@ -4837,7 +4841,7 @@
       const who = pres.people.get(conn);
       if (!who || !who.on) pres.cursors.delete(conn);
     }
-    placeOthers();
+    placeCursors();
   }
   const unit = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
   function takeMove(m) {
@@ -4847,7 +4851,7 @@
     if (a === null) pres.cursors.delete(m.conn);
     else if (isObj(a) && typeof a.k === 'string' && a.k && unit(a.x) && unit(a.y)) pres.cursors.set(m.conn, { id: who.id, name: who.name, k: a.k, x: a.x, y: a.y });
     else return;
-    placeOthers();
+    placeCursors();
   }
 
   // Our pointer: the drawn node under it and its fraction across that node's box, else `@<page id>`
@@ -4987,8 +4991,6 @@
     el.append(svg, name);
     return el;
   }
-  // Every other person's cursor placed again from its anchor (after every redraw, zoom, pan, resize and
-  // late image load). Cursors are rebuilt whole: there are few, and a name or person never goes stale.
   // A box around a drawn node of the shown page (grown by `grow` px), in stage px, or null.
   function boxEl(cls, person, id, st, grow) {
     const el = drawn.get(id);
@@ -5011,34 +5013,30 @@
     t.textContent = name;
     box.append(t);
   }
-  function placeOthers() {
-    const st = $('stage').getBoundingClientRect();
+  // Others' selection boxes and the last edit's mark, rebuilt from the drawn nodes; at most 1000 boxes
+  // in all, the mark's first so selections never crowd it out (task-3 T3-4).
+  function placeBoxes(st = $('stage').getBoundingClientRect()) {
     const els = [];
-    let boxes = 0;
     if (ready()) {
-      for (const p of seen.sels) {
+      const add = (cls, person, name, ids, grow) => {
         let first = true;
-        for (const id of p.ids) {
-          if (boxes >= BOXES_MAX) break;
-          const b = boxEl('others-sel', p.id, id, st, 2);
+        for (const id of ids) {
+          if (els.length >= BOXES_MAX) return;
+          const b = boxEl(cls, person, id, st, grow);
           if (!b) continue;
-          if (first) { tagged(b, p.name); first = false; }
+          if (first) { tagged(b, name); first = false; }
           els.push(b);
-          boxes += 1;
         }
-      }
-      if (seen.mark !== null) {
-        let first = true;
-        for (const id of seen.mark.ids) {
-          if (boxes >= BOXES_MAX) break;
-          const b = boxEl('flash', seen.mark.person, id, st, 0);
-          if (!b) continue;
-          if (first) { tagged(b, seen.mark.name); first = false; }
-          els.push(b);
-          boxes += 1;
-        }
-      }
+      };
+      if (seen.mark !== null) add('flash', seen.mark.person, seen.mark.name, seen.mark.ids, 0);
+      for (const p of seen.sels) add('others-sel', p.id, p.name, p.ids, 2);
     }
+    boxLayer.replaceChildren(...els);
+  }
+  // Every other person's cursor placed again from its anchor. Cursors are rebuilt whole: there are few,
+  // and a name or person never goes stale. A move or people frame redraws only these (task-3 T3-5).
+  function placeCursors(st = $('stage').getBoundingClientRect()) {
+    const els = [];
     for (const [conn, c] of pres.cursors) {
       const el = cursorEl(conn, c);
       el.dataset.k = c.k;
@@ -5047,7 +5045,13 @@
       else el.style.transform = `translate(${pt.x - st.left}px, ${pt.y - st.top}px)`;
       els.push(el);
     }
-    othersLayer.replaceChildren(...els);
+    cursorLayer.replaceChildren(...els);
+  }
+  // Both, after every redraw, zoom, pan, resize and late image load, and when selections or the mark change.
+  function placeOthers() {
+    const st = $('stage').getBoundingClientRect();
+    placeBoxes(st);
+    placeCursors(st);
   }
   window.addEventListener('resize', () => placeOthers());
 
