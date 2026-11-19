@@ -88,7 +88,7 @@ parentPort.on('message', async (m) => {
   const sleep = async () => { park('sleep', ''); };
   const die = (msg) => { throw new Error(msg); };
   try {
-    const lockFn = new Function('fs', 'path', 'crypto', 'process', 'browserTestEnv', 'browserAlive', 'browserSleep', 'die', m.src + '\\nreturn browserStartLock;')(pfs, path, crypto, proc, env, alive, sleep, die);
+    const lockFn = new Function('fs', 'path', 'crypto', 'process', 'browserTestEnv', 'browserAlive', 'browserSleep', 'die', "'use strict';\\n" + m.src + '\\nreturn browserStartLock;')(pfs, path, crypto, proc, env, alive, sleep, die);
     await lockFn(m.file, async () => { park('enter', ''); park('exit', ''); });
     finish(${DONE});
   } catch (e) {
@@ -204,7 +204,7 @@ async function run({ dir, n, env = {}, script = [], seed = null, kill = null, li
         grant(step.who);
         if (gone.has(step.who) || step.until === '*') break;
         const op = opOf(step.who);
-        if (op === step.until || op === 'enter' || op === 'sleep') break;
+        if ((op === step.until && (!step.note || step.note.test(noteOf(step.who)))) || op === 'enter' || op === 'sleep') break;
       }
     }
     while (parked().length) {
@@ -292,11 +292,11 @@ test('the function is cut from devteam.mjs', () => {
 // Either way A and C both run fn. The steps name events, not lines, so they run against any code.
 const T5_3 = {
   'S1a: the put-back fails ENOTEMPTY and removes the live lock': [
-    { who: 1, until: 'renameSync' }, { who: 0, until: 'enter' }, { who: 1, until: 'readFileSync' },
+    { who: 1, until: 'renameSync', note: /^start\.lock start\.lock\./ }, { who: 0, until: 'enter' }, { who: 1, until: 'readFileSync' },
     { who: 2, until: 'enter' }, { who: 1, until: 'sleep' },
   ],
   'S1b: the put-back replaces a third starter\'s empty lock': [
-    { who: 1, until: 'renameSync' }, { who: 0, until: 'enter' }, { who: 1, until: 'readFileSync' },
+    { who: 1, until: 'renameSync', note: /^start\.lock start\.lock\./ }, { who: 0, until: 'enter' }, { who: 1, until: 'readFileSync' },
     { who: 2, until: 'writeFileSync' }, { who: 1, until: 'sleep' }, { who: 2, until: 'enter' },
   ],
 };
@@ -314,6 +314,8 @@ for (const [name, script] of Object.entries(T5_3)) {
 // a plain range, long enough that main's lock fails on the dead-owner lock.
 const range = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
 const SEEDS_ENV = /^(\d+)-(\d+)$/.exec(process.env.DEVTEAM_TEST_LOCK_SEEDS ?? '');
+// A search over a range has no time cap: the fixed lists keep each test well inside its cap.
+const SWEEP_TIMEOUT = SEEDS_ENV ? Infinity : 120000;
 const seeds = (list) => (SEEDS_ENV ? range(Number(SEEDS_ENV[1]), Number(SEEDS_ENV[2])) : list);
 const SWEEP = {
   'dead-owner': { 3: range(1, 30), 4: range(1, 20) },
@@ -334,7 +336,7 @@ async function sweep(list, one) {
 
 for (const [kind, lock] of Object.entries(LOCKS)) {
   for (const n of [3, 4]) {
-    test(`S2: ${n} starters on the ${kind} lock, seeded sweep`, { timeout: 120000 }, async () => {
+    test(`S2: ${n} starters on the ${kind} lock, seeded sweep`, { timeout: SWEEP_TIMEOUT }, async () => {
       const bad = await sweep(seeds(SWEEP[kind][n]), async (seed, dir) => {
         lock.plant(path.join(dir, 'start.lock'));
         return problems(await run({ dir, n, seed, livePids: lock.live }));
@@ -350,7 +352,7 @@ for (const [kind, lock] of Object.entries(LOCKS)) {
 // least one seed must kill a starter while its claim stands, so the pass-over of a dead claim is
 // reached and not only the take of a dead owner's lock.
 const KILL_SEEDS = range(1, 20);
-test('S2b: 3 starters on the dead-owner lock, one killed mid-way', { timeout: 120000 }, async () => {
+test('S2b: 3 starters on the dead-owner lock, one killed mid-way', { timeout: SWEEP_TIMEOUT }, async () => {
   let holding = 0;
   const bad = await sweep(seeds(KILL_SEEDS), async (seed, dir) => {
     LOCKS['dead-owner'].plant(path.join(dir, 'start.lock'));
