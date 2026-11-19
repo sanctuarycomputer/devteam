@@ -165,3 +165,19 @@ test('B9: an edit, its revert and the revert of that leave the edit judged', () 
   revert();
   assert.equal(refused(), true);
 });
+
+test('B10: a commit already paired is never the match of a second one', () => {
+  from('case-10', V);
+  put(FINAL, record({ sha: V0, finding: 'fine really' }));
+  commit('X1: rewrite a finding');
+  put(FINAL, record({ sha: V0 }));
+  put('a.js', 'one\ntwo\nthree\n');
+  const w = commit('W: restore it, and change code');
+  put(FINAL, record({ sha: V0, finding: 'fine really' }));
+  commit('X2: rewrite it again');
+  revert();
+  g('revert', '--no-edit', w);
+  // X1 pairs with Y (X2's revert); W with W's revert; X2's rewrite is what stands at the head
+  assert.match(fs.readFileSync(path.join(dir, FINAL), 'utf8'), /fine really/);
+  assert.equal(refused(), true);
+});

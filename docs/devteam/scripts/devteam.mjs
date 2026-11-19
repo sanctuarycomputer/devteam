@@ -4898,7 +4898,7 @@ function verdictHolds(v, head, dir, R = repo('home')) {
     if (!paired) {
       paired = new Set();
       const list = (R.git(['rev-list', '--no-merges', '--reverse', ...range]) ?? '').split('\n').filter(Boolean);
-      const diff = (x, y) => R.git(['diff', '--binary', '--full-index', '--no-renames', x, y]);
+      const diff = (x, y) => R.git(['diff', '--binary', '--full-index', '--no-renames', '--no-ext-diff', '--no-textconv', x, y]);
       const addsOrDeletes = (x) => (R.git(['diff', '--name-status', '--no-renames', `${x}^`, x]) ?? 'x').split('\n').some((l) => { const [st, file] = l.split('\t'); return st !== 'M' && (st === 'x' || isRecord(file)); });
       const forward = list.map((x) => (addsOrDeletes(x) ? null : diff(`${x}^`, x)));
       const inverse = [];
