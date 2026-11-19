@@ -556,9 +556,14 @@ async function threads({ DASH, pane }) {
   await browser.click(dash, dash, '[data-tl-accept]');
   await until(() => JSON.parse(dt(['thread', 'show', T, '--json'])).status === 'resolved', 'resolved');
   await until(() => browser.evalIn(dash, `!document.querySelector('.tl-pin')`), 'the pin gone');
-  await browser.click(dash, dash, '#tl-pill');
-  await until(() => browser.evalIn(dash, `!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`), 'listed under Resolved');
-  stepOk('accepting the proposal resolved it: the pin went, and the dock lists it under Resolved');
+  await browser.click(dash, dash, '.pagebar .tt');
+  // the button opens the panel on its Inbox tab (kit-100): the threads are the Threads tab's, clicked once the panel is at rest
+  await until(() => browser.evalIn(dash, `document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`), 'the panel open, at rest', 10000);
+  await browser.click(dash, dash, '#th-tabs [role="tab"][data-tab="threads"]');
+  await until(() => browser.evalIn(dash, `location.hash.endsWith('th=open') && !!document.querySelector('#th-pane [data-thf="resolved"]')`), 'the panel on Threads', 10000);
+  await browser.click(dash, dash, '#th-pane [data-thf="resolved"]');
+  await until(() => browser.evalIn(dash, `!!document.querySelector('#tl-list [data-tl-open="${T}"]')`), 'listed under Resolved');
+  stepOk('accepting the proposal resolved it: the pin went, and the panel lists it under Resolved');
   return G;
 }
 

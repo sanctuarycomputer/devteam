@@ -1,0 +1,25 @@
+{
+  "fake": {
+    "canvases": {
+      "board": "doc-minimal.json"
+    },
+    "token": "fixture-token"
+  },
+  "request": {
+    "method": "POST",
+    "path": "/api/canvas/local?slug=board",
+    "headers": {
+      "x-devteam-canvas-token": "fixture-token",
+      "Content-Type": "application/json",
+      "Origin": "$origin"
+    },
+    "body": {
+      "by": "supervisor",
+      "via": "apply",
+      "ops": []
+    }
+  },
+  "status": 403,
+  "requestKind": "local-request",
+  "responseKind": null
+}

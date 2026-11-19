@@ -21,6 +21,66 @@
 // of the gateway's framing that project's viewer at the published version; everyone else, and any
 // doubt, gets the published bytes. The public name reads the cookie for that choice alone.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
+// project-hosts@1: where a project is on a box
+// This section is the definition the gateway moves to: the address of a project on a box. Until the
+// gateway follows it, the lines above describe today's names. A new reserved segment, or any change
+// to these rules, bumps the version.
+// A project is https://<project>.<box>/, its dashboard, behind the owner's sign-in. <project> is the
+// project's name (the name /api/hello gives: settings.md's `project`, else the folder's name) when
+// it passes the label rule.
+// A public page is https://<project>.<box>/<artifact>/..., for anyone, from the gateway's store (no
+// sign-in).
+// The label rule: a DNS label of a-z, 0-9 and -, no leading or trailing -, 1 to 63 characters, not
+// all digits, and not `term`, `public` or `www`:
+//   label: /^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+// A name two projects share gets no dashboard on its host; its stored pages still answer (the store
+// ties each page to the one project folder that published it). A preview whose generated name is a
+// project's is not served under it: the name is the project's. A host is known from the hub's list
+// (projects first, then previews) or the gateway's store (published pages).
+// Reserved first segments, the paths the dashboard and the gateway answer on a project's host: `api`,
+// `artifact`, `c`, `healthz`, `index.html`, `presence`, `public-manifest`, `review`, `upload`, `view`. They are
+// checked before the store, so a page stored under one never answers on a project's host, and
+// Publish refuses those names. The path decides first, in this order. A reserved segment is never a
+// published page: it is checked as on today's names (`healthz` is the gateway's own answer, a `c`
+// link keeps its own check, every other one needs the session) and, but for `healthz`, goes to the
+// project's port. Then a first segment that is not reserved and is a page that name published is
+// served to anyone. Anything else needs the session and goes to the project's port, for a name only
+// one listed project has.
+// Gone, and not redirected: <port>.<box> (all-digit labels) and public.<box>, both 421.
+// The box's own name keeps the hub, sign-in (/auth), passkeys, pushes and /dev/. Publish's pages name
+// the project: /public/publish?project=<project>&...; ?port= is still accepted from older dashboards.
+// /box.json becomes box: 2: `project`, https://{project}.<box>/, in place of `instance`
+// (https://{port}.<box>/); its other keys stay.
+// The cases are in test/fixtures/project-hosts.json, which the gateway's, the hub's and the
+// dashboard's tests read.
+// end project-hosts@1
+// people@1: who is on a box, in the gateway's state.json beside today's fields
+// Today's fields keep their meaning, the owner's: `passkeys` (the owner's passkeys), `sessions` (the
+// owner's sessions; each new one also names the passkey it was opened with as `method`), `pushSubs`
+// (the owner's devices), `claimHash`/`claimExpires`. "Claimed" stays `passkeys` not empty. So a gateway
+// older than this one, which reads only these, lets in the owner alone; it keeps the fields below
+// (it writes { ...load(), … }), unread, until a newer gateway returns.
+// people: [{ id, name, role, level, methods, pushSubs, added_at, last_seen, notices, rev }]
+//   id `p-` + 12 of [a-z2-7]; role 'owner' | 'admin' | 'member', exactly one owner; level 'full' |
+//   'view', an admin always full. The owner's row is named "Owner" when made (on the claim, or on
+//   the first start over a claimed box); its `methods` hold only the owner's non-passkey methods and
+//   its `pushSubs` stay [], since theirs are the top-level fields. `rev` starts at 1 and goes up on
+//   every change to the row's name, role, level or methods (not last_seen, nor a method's last_used).
+//   notices: [{ kind, at, … }]; kind 'people-reset' carries sessions_ended, invites_deleted and
+//   methods_deleted (below).
+// A method: { id, type, key, label, added_at, last_used, data }. id `m-` + 12 of [a-z2-7]. A passkey
+//   is type 'passkey', key its credential id (base64url), data { userId, jwk, alg, signCount, rp }.
+//   (type, key) is unique on the box, the owner's top-level passkeys counted as ('passkey', id).
+// peopleSessions: [{ hash, person, method, at, expires }], everyone's but the owner's, each live only
+//   while its person's row exists; dropped when expired, as `sessions` are.
+// invites: [{ hash, person, expires }].
+// peopleStamp: b64u(sha256("devteam-people-stamp-v1\n" + the owner's passkey ids, sorted, joined by
+//   "\n")), written with every change this gateway makes to `passkeys`. On start, a stamp that isn't
+//   that of `passkeys` means an older gateway reset the owner (a reclaim, a passkey removed or added):
+//   every peopleSessions entry and invite goes, and every method in the owner's row with the owner's
+//   sessions opened with one, in one write that adds a 'people-reset' notice to the owner's row.
+// A new method type adds values of `type` and its `data`; any other change bumps the version.
+// end people@1
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -140,6 +200,7 @@ function stateStore(dir) {
   const save = (s) => {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     s.sessions = s.sessions.filter((x) => x.expires > Date.now());
+    if (s.peopleSessions) s.peopleSessions = s.peopleSessions.filter((x) => x.expires > Date.now());
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(s, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, file);
@@ -148,6 +209,33 @@ function stateStore(dir) {
   };
   return { load, save };
 }
+
+// --- people@1 (the header block): the owner's row and the stamp of the owner's passkeys --------
+const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
+// 256 is a multiple of 32, so x & 31 is unbiased
+const newId = (prefix) => prefix + Array.from(crypto.randomBytes(12), (x) => B32[x & 31]).join('');
+const peopleStamp = (passkeys) => b64u(sha256(`devteam-people-stamp-v1\n${passkeys.map((p) => p.id).sort().join('\n')}`));
+const ownerRow = (s) => (s.people ?? []).find((p) => p.role === 'owner') ?? null;
+// Kept when there is one (a claim after a reclaim keeps the owner's row); added after every old key.
+const withOwner = (s, now = Date.now()) => (ownerRow(s) ? s : { ...s, people: [...(s.people ?? []), { id: newId('p-'), name: 'Owner', role: 'owner', level: 'full', methods: [], pushSubs: [], added_at: new Date(now).toISOString(), last_seen: null, notices: [], rev: 1 }] });
+// Every write that changes `passkeys` goes through this, so an older gateway's change shows on start.
+const stamped = (s) => ({ ...s, peopleStamp: peopleStamp(s.passkeys) });
+// An older gateway reset the owner (its reclaim, a passkey removed or added under it): whoever it
+// let in may not be the owner we knew, so nobody else's session or invite stands, nor any other way
+// in as the owner. Other people keep their methods: they sign in again. The counts go in a notice.
+const resetPeople = (s, now = Date.now()) => {
+  const owner = ownerRow(s);
+  const gone = new Set((owner?.methods ?? []).map((m) => m.id));
+  const live = (x) => x.expires > now;
+  const counts = {
+    sessions_ended: (s.peopleSessions ?? []).filter(live).length + s.sessions.filter((x) => live(x) && gone.has(x.method)).length,
+    invites_deleted: (s.invites ?? []).length,
+    methods_deleted: gone.size,
+  };
+  const notice = { kind: 'people-reset', at: new Date(now).toISOString(), ...counts };
+  const people = s.people.map((p) => (p === owner ? { ...p, methods: [], rev: p.rev + 1, notices: [...(p.notices ?? []), notice] } : p));
+  return { next: stamped({ ...s, people, peopleSessions: [], invites: [], sessions: s.sessions.filter((x) => !gone.has(x.method)) }), counts };
+};
 
 // The box's own address. Each instance is a subdomain of it, so its DNS needs the name and a
 // wildcard under it (box.example.com and *.box.example.com). http only for a *.localhost test.
@@ -485,7 +573,7 @@ export const PREVIEW_LENS = String.raw`<!doctype html>
   const onKey = (e) => {
     if (e.key !== 'Shift' && e.key !== 'Escape') return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
-    tell({ type: 'key', key: e.key, shift: shiftDown });
+    tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
   const onBlur = () => { if (shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
   const readyOf = (w) => (w ? { type: 'ready', route: routeOf(w), title: cap(oneLine(w.document.title), CAPS.text), viewport: { w: w.innerWidth, h: w.innerHeight } } : { type: 'ready', route: null, title: '', viewport: null });
@@ -836,6 +924,8 @@ const UPLOAD_FOLDER = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{24}$/;
 // five minutes by a timer of its own (BODY_MS). A stalled upload goes sooner (UPLOAD_STALL_MS).
 const REQUEST_MS = 3600 * 1000;
 const BODY_MS = 5 * 60 * 1000;
+// What the kit's own upload routes (devteam.mjs) share with this gateway; a test holds the two copies equal.
+export const UPLOAD_RULES = { max: UPLOAD_MAX, total: UPLOAD_TOTAL, free: UPLOAD_FREE, keepMs: UPLOAD_KEEP_MS, stallMs: UPLOAD_STALL_MS, name: UPLOAD_NAME, part: UPLOAD_PART, folder: UPLOAD_FOLDER };
 // The name a dropped file is stored under: its own, reduced to letters, digits, '.', '-' and '_',
 // so its path needs no quoting wherever it's pasted, and a program that recognises an image by its
 // path (Claude Code, which attaches it) sees a plain one. It can't leave its folder, or be hidden.
@@ -863,6 +953,13 @@ export function isDropImage(p) {
 }
 export function dropSpace(paths) {
   return paths.some((p) => !isDropImage(p));
+}
+// How a stored file is served back: these four as images, every other file (HTML and SVG among
+// them) as bytes to save, never to render. A .jpeg is saved too: the list is the design's.
+const UPLOAD_IMAGES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+function uploadType(name) {
+  const ext = path.extname(name);
+  return Object.hasOwn(UPLOAD_IMAGES, ext) ? { type: UPLOAD_IMAGES[ext], attachment: false } : { type: 'application/octet-stream', attachment: true };
 }
 // What the owner is told after a drop. The paths stay on screen: a paste can still go astray.
 export function dropNote(paths) {
@@ -930,7 +1027,16 @@ export function createGateway(opts = {}) {
   // Unclaimed: the token named in the environment, else one made now and printed once (whoever
   // reads the platform's logs can already open a shell on the box, the root of trust anyway).
   try {
-    const s = store.load();
+    let s = store.load();
+    // A box claimed before people: its passkeys, sessions and devices become the owner's where they
+    // are, so the write only adds the row and the stamp after the old keys. Once there, nothing.
+    if (s.passkeys.length && !s.people) store.save(s = stamped(withOwner(s)));
+    // Only an older gateway changes `passkeys` without the stamp, and none runs beside this one, so
+    // the check is here alone. A sign-in under it changes counters, never ids, and trips nothing.
+    else if (s.people && s.peopleStamp !== peopleStamp(s.passkeys)) {
+      store.save(s = resetPeople(s).next);
+      log('the owner\'s passkeys changed under an older gateway: every other person\'s session and every invite ended; they sign in again');
+    }
     // made before sign-in moved under /auth (or for another name): the browser won't offer them here
     if (s.passkeys.some((x) => x.rp !== RP_ID)) log(`passkeys made before sign-in moved to ${PUB}/auth (or for another name) can't sign in here: run devteam-reclaim in a shell on the box for a claim link, and claim it again`);
     if (!s.passkeys.length) {
@@ -982,20 +1088,41 @@ export function createGateway(opts = {}) {
     spent.set(c, Date.now() + CHALLENGE_MS);
   };
 
+  const isOwner = (person) => person?.role === 'owner';
+  // A claimed file with no owner row (one restored from before people, read while running): its
+  // top-level sessions are still the owner's, until the next start's upgrade writes the row.
+  const STAND_IN = { id: null, role: 'owner', level: 'full', name: 'Owner' };
+  // The one rule for who a session is, for pages, sockets and artifact links alike: a live top-level
+  // session is the owner's; a live peopleSessions entry is its person's, only while that row exists
+  // (so nobody outlives their removal, and an entry naming no one is never taken for the owner).
+  const liveSession = (s, test) => {
+    const now = Date.now();
+    const top = s.sessions.find((x) => x.expires > now && test(x));
+    if (top) return { session: top, person: ownerRow(s) ?? STAND_IN };
+    for (const x of s.peopleSessions ?? []) {
+      if (!(x.expires > now) || !test(x)) continue;
+      const person = (s.people ?? []).find((p) => p.id === x.person);
+      if (person) return { session: x, person };
+    }
+    return null;
+  };
   // Every devteam_session the browser sends: one set by something else can't shadow the real one.
   const sessionOf = (req) => {
-    const live = store.load().sessions.filter((x) => x.expires > Date.now());
+    const s = store.load();
     for (const part of String(req.headers.cookie ?? '').split(';')) {
       const k = part.indexOf('=');
       if (k < 0 || part.slice(0, k).trim() !== COOKIE) continue;
       const tok = unb64u(part.slice(k + 1).trim());
       if (!tok || tok.length !== 32) continue;
       const h = b64u(sha256(tok));
-      const found = live.find((x) => x.hash === h);
+      const found = liveSession(s, (x) => x.hash === h);
       if (found) return found;
     }
     return null;
   };
+  // A write that waited on a body (up to five minutes) asks again, of the state as it is now: a
+  // reclaim or a removal meanwhile must win, so a stolen session's request in flight lands nothing.
+  const stillHeld = (s, session) => (s.passkeys.length ? liveSession(s, (x) => x.hash === session.hash) : null);
   // Adding a passkey takes a sign-in in the last five minutes, not only a session.
   const fresh = (session) => Date.now() - (session.at ?? 0) < CHALLENGE_MS;
   // One cookie for the box and every instance's subdomain. SameSite=None: a review page or an
@@ -1003,10 +1130,16 @@ export function createGateway(opts = {}) {
   // (the kit's helpers, committed images) as cross-site, so a Lax cookie would not go with them.
   // Cross-site requests are refused below by their Origin, and by the kit's own checks.
   const cookie = (value, maxAge) => `${COOKIE}=${value}; Domain=${NAME}; Path=/; HttpOnly; Max-Age=${maxAge}${SECURE ? '; Secure; SameSite=None' : '; SameSite=Lax'}`;
-  const newSession = () => {
+  // `method`: the one it was opened with, so removing that method can end it. The owner's go in
+  // top-level `sessions`, where an older gateway reads them; anyone else's in `peopleSessions`.
+  const newSession = (person, methodId) => {
     const tok = crypto.randomBytes(32);
     const s = store.load();
-    store.save({ ...s, sessions: [...s.sessions, { hash: b64u(sha256(tok)), at: Date.now(), expires: Date.now() + SESSION_MS }] });
+    const hash = b64u(sha256(tok));
+    const at = Date.now();
+    store.save(isOwner(person)
+      ? { ...s, sessions: [...s.sessions, { hash, method: methodId, at, expires: at + SESSION_MS }] }
+      : { ...s, peopleSessions: [...(s.peopleSessions ?? []), { hash, person: person.id, method: methodId, at, expires: at + SESSION_MS }] });
     return cookie(b64u(tok), SESSION_MS / 1000);
   };
 
@@ -1032,14 +1165,52 @@ export function createGateway(opts = {}) {
     return `${PUB}/`;
   };
 
-  const creationOptions = (purpose) => {
+  // A person by id as it stands now; null is the stand-in owner's (a claimed file with no owner row).
+  const personOf = (s, id) => (id === null ? ownerRow(s) ?? STAND_IN : (s.people ?? []).find((p) => p.id === id) ?? null);
+  // A person's own sign-in methods, without key material: the owner's are the top-level passkeys and
+  // then their row's methods; anyone else's, their row's.
+  const ownMethods = (s, person) => {
+    const row = person.id === null ? null : (s.people ?? []).find((p) => p.id === person.id);
+    const methods = (row?.methods ?? []).map((m) => ({ id: m.id, type: m.type, label: m.label, added_at: m.added_at, last_used: m.last_used ?? null }));
+    return isOwner(person) ? [...s.passkeys.map((p) => ({ id: p.id, type: 'passkey', label: p.name, added_at: p.createdAt, last_used: p.usedAt ?? null })), ...methods] : methods;
+  };
+  // Every passkey on the box, everyone's: one credential belongs to one person.
+  const allCredentialIds = (s) => [...s.passkeys.map((p) => p.id), ...(s.people ?? []).flatMap((p) => (p.methods ?? []).filter((m) => m.type === 'passkey').map((m) => m.key))];
+  // A person's push devices: the owner's in top-level `pushSubs`, where an older gateway reads them;
+  // anyone else's in their row. Devices aren't what `rev` counts, so neither bumps it.
+  const subsOf = (s, person) => (isOwner(person) ? s.pushSubs ?? [] : (s.people ?? []).find((p) => p.id === person.id)?.pushSubs ?? []);
+  const withSubs = (s, person, subs) => (isOwner(person) ? { ...s, pushSubs: subs } : { ...s, people: (s.people ?? []).map((p) => (p.id === person.id ? { ...p, pushSubs: subs } : p)) });
+  const everySub = (s) => [...(s.pushSubs ?? []), ...(s.people ?? []).flatMap((p) => p.pushSubs ?? [])];
+  // Every list, everyone's, keeping only what `keep` passes.
+  const keepSubs = (s, keep) => ({ ...s, pushSubs: (s.pushSubs ?? []).filter(keep), ...(s.people ? { people: s.people.map((p) => ({ ...p, pushSubs: (p.pushSubs ?? []).filter(keep) })) } : {}) });
+  // "Yours" before "last", so nobody learns anything of anyone else's. On success: whoever held it
+  // may hold a session too, so every other session of yours ends, and the requester's as well when it
+  // was opened with this method; your devices' notifications go (each subscribes again when its hub
+  // next opens). Nobody else's sessions or devices change.
+  const removeMethod = (s, person, id, session) => {
+    const own = ownMethods(s, person);
+    if (!own.some((m) => m.id === id)) return { status: 404, error: 'no such sign-in method of yours' };
+    const owner = isOwner(person);
+    const top = owner && s.passkeys.some((p) => p.id === id);
+    // the owner's last top-level passkey is what keeps the box claimed, whatever else they hold
+    if (owner ? top && s.passkeys.length < 2 : own.length < 2) return { status: 400, error: owner ? 'the last passkey can\'t be removed; add another first' : 'your last sign-in method can\'t be removed; add another first' };
+    const keep = (x) => x.hash === session.hash && x.method !== id;
+    const people = s.people?.map((p) => (p.id === person.id && p.methods.some((m) => m.id === id) ? { ...p, methods: p.methods.filter((m) => m.id !== id), rev: p.rev + 1 } : p));
+    const next = owner
+      ? { ...s, ...(top ? { passkeys: s.passkeys.filter((p) => p.id !== id) } : {}), sessions: s.sessions.filter(keep), ...(people ? { people } : {}) }
+      : { ...s, people, peopleSessions: (s.peopleSessions ?? []).filter((x) => x.person !== person.id || keep(x)) };
+    const cleared = withSubs(next, person, []);
+    return { status: 200, next: top ? stamped(cleared) : cleared };
+  };
+  // The passkey's user names its person, so a password manager doesn't file anyone's as the owner's.
+  const creationOptions = (purpose, person = STAND_IN) => {
     const userId = b64u(crypto.randomBytes(16));
     return {
-      challenge: issue(purpose, { userId }), rp: { id: RP_ID, name: 'devteam' },
-      user: { id: userId, name: `owner@${RP_ID}`, displayName: `devteam owner (${RP_ID})` },
+      challenge: issue(purpose, { userId, person: person.id, role: person.role }), rp: { id: RP_ID, name: 'devteam' },
+      user: isOwner(person) ? { id: userId, name: `owner@${RP_ID}`, displayName: `devteam owner (${RP_ID})` } : { id: userId, name: `${person.name}@${RP_ID}`, displayName: `${person.name} (${RP_ID})` },
       pubKeyCredParams: [-7, -8, -257].map((alg) => ({ type: 'public-key', alg })),
       authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
-      attestation: 'none', timeout: CHALLENGE_MS, excludeCredentials: store.load().passkeys.map((p) => ({ type: 'public-key', id: p.id })),
+      attestation: 'none', timeout: CHALLENGE_MS, excludeCredentials: allCredentialIds(store.load()).map((id) => ({ type: 'public-key', id })),
     };
   };
   const clientData = (b64, type, purpose) => {
@@ -1071,14 +1242,33 @@ export function createGateway(opts = {}) {
     if (!rawId || !sameBytes(rawId, Buffer.from(ad.credentialId))) throw new Error('credential id mismatch');
     const { jwk, alg } = coseToJwk(ad.cose);
     const s = store.load();
-    if (s.passkeys.some((p) => p.id === b64u(rawId))) throw new Error('that passkey is already registered');
-    const name = typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${s.passkeys.length + 1}`;
-    return { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, rp: RP_ID, createdAt: new Date().toISOString() };
+    if (allCredentialIds(s).includes(b64u(rawId))) throw new Error('that passkey is already registered');
+    const who = personOf(s, issued.person ?? null);
+    const mine = who ? ownMethods(s, who).filter((m) => m.type === 'passkey').length : 0;
+    const name = typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${mine + 1}`;
+    return { cred: { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, rp: RP_ID, createdAt: new Date().toISOString() }, issued };
+  };
+  // Where the route places it: the owner's goes top-level, where an older gateway reads it; anyone
+  // else's becomes a passkey method in their row.
+  const asMethod = ({ id: key, userId, jwk, alg, signCount, rp, name, createdAt }) => ({ id: newId('m-'), type: 'passkey', key, label: name, added_at: createdAt, last_used: null, data: { userId, jwk, alg, signCount, rp } });
+  // A credential wherever it lives: the owner's top-level passkeys (`pk`), or a person's passkey
+  // methods (`method`), the owner's row's included.
+  const findCredential = (s, credId) => {
+    if (typeof credId !== 'string') return null;
+    const pk = s.passkeys.find((p) => p.id === credId);
+    if (pk) return { person: ownerRow(s) ?? STAND_IN, method: null, pk };
+    for (const person of s.people ?? []) {
+      const method = (person.methods ?? []).find((m) => m.type === 'passkey' && m.key === credId);
+      if (method) return { person, method, pk: null };
+    }
+    return null;
   };
   const verifyAssertion = (body) => {
     const s = store.load();
-    const pk = s.passkeys.find((p) => p.id === body?.rawId);
-    if (!pk) throw new Error('unknown passkey');
+    const found = findCredential(s, body?.rawId);
+    if (!found) throw new Error('unknown passkey');
+    const { person, method } = found;
+    const pk = found.pk ?? { id: method.key, ...method.data };
     const { raw, challenge } = clientData(body?.clientDataJSON, 'webauthn.get', 'login');
     const adBytes = unb64u(body?.authenticatorData);
     const sig = unb64u(body?.signature);
@@ -1090,7 +1280,11 @@ export function createGateway(opts = {}) {
     // A counter that stopped going up means a cloned authenticator; synced passkeys keep it at 0.
     if ((ad.signCount || pk.signCount) && ad.signCount <= pk.signCount) throw new Error('the passkey\'s counter went backwards');
     spend(challenge);
-    store.save({ ...s, passkeys: s.passkeys.map((p) => (p.id === pk.id ? { ...p, signCount: ad.signCount, usedAt: new Date().toISOString() } : p)) });
+    // the counter and last use where the credential lives, and last_seen (neither bumps rev)
+    const iso = new Date().toISOString();
+    const people = s.people?.map((p) => (p.id !== person.id ? p : { ...p, last_seen: iso, methods: method ? p.methods.map((m) => (m.id === method.id ? { ...m, last_used: iso, data: { ...m.data, signCount: ad.signCount } } : m)) : p.methods }));
+    store.save({ ...s, ...(found.pk ? { passkeys: s.passkeys.map((p) => (p.id === pk.id ? { ...p, signCount: ad.signCount, usedAt: iso } : p)) } : {}), ...(people ? { people } : {}) });
+    return { person, methodId: method ? method.id : pk.id };
   };
 
   // --- requests that look local to the kit, and its headers mapped back to the public names ---
@@ -1347,9 +1541,10 @@ export function createGateway(opts = {}) {
       const { seen, messages: inboxMessages, roots } = inboxNews(before.pushSeen ?? {}, list, BLOCK, new Set(lastSent.keys()));
       const alerts = alertNews(before.pushAlerts ?? {}, list, BLOCK, new Set(lastSent.keys()));
       const messages = [...inboxMessages, ...alerts.messages];
-      if (before.pushSubs?.length) for (const r of [...roots, ...alerts.keys]) lastSent.set(r, now);
+      const subs = everySub(before);
+      // a root rests after news to anyone's devices, not only the owner's
+      if (subs.length) for (const r of [...roots, ...alerts.keys]) lastSent.set(r, now);
       if (JSON.stringify(seen) !== JSON.stringify(before.pushSeen ?? {}) || JSON.stringify(alerts.seen) !== JSON.stringify(before.pushAlerts ?? {})) store.save({ ...before, pushSeen: seen, pushAlerts: alerts.seen });
-      const subs = before.pushSubs ?? [];
       const dead = new Set();
       const jobs = subs.flatMap((sub) => messages.map((message) => ({ sub, message })));
       const worker = async () => {
@@ -1363,7 +1558,8 @@ export function createGateway(opts = {}) {
         }
       };
       await Promise.all(Array.from({ length: PUSH_SENDS }, worker));
-      if (dead.size) { const now = store.load(); store.save({ ...now, pushSubs: (now.pushSubs ?? []).filter((x) => !dead.has(x.endpoint)) }); }
+      // whoever's list each is in, all in one write
+      if (dead.size) store.save(keepSubs(store.load(), (x) => !dead.has(x.endpoint)));
     } finally { polling = false; }
   };
 
@@ -1423,7 +1619,8 @@ export function createGateway(opts = {}) {
     if (!prefix || /\.\.|%2e|%5c|\\/i.test(inner) || Number(exp) < Date.now()) return false;
     const want = Buffer.from(capMac(port, prefix, exp, sid));
     const got = Buffer.from(given);
-    return sameBytes(got, want) && store.load().sessions.some((x) => x.hash.startsWith(sid) && x.expires > Date.now());
+    const s = store.load();
+    return sameBytes(got, want) && s.passkeys.length > 0 && liveSession(s, (x) => x.hash.startsWith(sid)) !== null;
   };
   const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self'; frame-src ${[TERM, ...BLOCK.map(instanceOrigin)].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   // ttyd's page has no OSC 52, how tmux and a program in it (Claude Code's fullscreen) put text on
@@ -1444,6 +1641,34 @@ export function createGateway(opts = {}) {
       return true;
     });
   }, 100);
+})();</script>`);
+  // A phone's swipe doesn't scroll tmux: xterm.js sends tmux a mouse wheel, but nothing for a touch, and
+  // tmux's history isn't in xterm's own scrollback. This turns a one-finger vertical swipe into wheel
+  // steps on the terminal, which tmux (mouse on) reads as scrolling its history. Taps are left alone.
+  const TERM_TOUCH = Buffer.from(`<script>(() => {
+  // y follows the finger; y0 is where it touched down, and every wheel step of the gesture goes there,
+  // kept off the last rows: tmux's status bar is the bottom row, and a wheel on it switches windows
+  let y = null, y0 = null, acc = 0;
+  const STEP = 18;
+  addEventListener('touchstart', (e) => { y = y0 = e.touches.length === 1 ? e.touches[0].clientY : null; acc = 0; }, { passive: true, capture: true });
+  addEventListener('touchmove', (e) => {
+    if (y === null || e.touches.length !== 1) return;
+    const t = document.querySelector('.xterm-screen');
+    if (!t) return;
+    const ny = e.touches[0].clientY;
+    acc += y - ny;
+    y = ny;
+    const r = t.getBoundingClientRect();
+    const row = document.querySelector('.xterm-rows > div')?.getBoundingClientRect().height || 20;
+    const at = Math.min(Math.max(y0, r.top + row / 2), r.bottom - 2 * row);
+    while (Math.abs(acc) >= STEP) {
+      const d = acc > 0 ? STEP : -STEP;
+      acc -= d;
+      t.dispatchEvent(new WheelEvent('wheel', { deltaY: d, deltaMode: 0, clientX: r.left + r.width / 2, clientY: at, bubbles: true, cancelable: true }));
+    }
+    e.preventDefault();
+  }, { passive: false, capture: true });
+  addEventListener('touchend', () => { y = null; }, { capture: true });
 })();</script>`);
   // ttyd's page drops what's typed or pasted while its socket is down, and gives no sign. So this
   // goes in ahead of its bundle, to note the socket it opens; a paste then waits for a live one.
@@ -1620,8 +1845,8 @@ export function createGateway(opts = {}) {
   // The page the terminal is served, and a name for it that changes only when its bytes do.
   const termPage = () => {
     const html = ttydPage();
-    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP]))).slice(0, 22);
-    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP]) };
+    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]))).slice(0, 22);
+    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]) };
   };
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
@@ -1907,13 +2132,42 @@ export function createGateway(opts = {}) {
       await fh?.close().catch(() => {});
       await fs.promises.rm(folder, { recursive: true, force: true }).catch(() => {});
       if (e.tooBig) return tooBig();
-      if (req.destroyed || res.destroyed) return;
+      // req.destroyed is true once a body is read whole, so it can't say the client has gone: the socket can
+      if (res.destroyed || req.socket?.destroyed) return;
       if (e.code === 'ENOSPC') return refuse(507, 'the box\'s disk is too full for this file', { connection: 'close' });
       log(`a dropped file could not be stored: ${e.message}`);
       return refuse(500, 'the box could not store this file', { connection: 'close' });
     } finally {
       clearTimeout(stall);
       receiving.delete(id);
+    }
+  };
+
+  // GET /upload/<folder>/<name>: a file dropped on an instance's page, back to that page (spec §5).
+  // Matched on the raw path, so nothing URL parsing folds (.., %2e, %2F) can name another file:
+  // only a name exactly as one is stored, in a folder named as ours, really inside the root.
+  const serveUpload = async (req, res, rawPath) => {
+    const none = () => send(res, 404, 'text/plain', 'not found');
+    const m = /^\/upload\/([^/]+)\/([^/]+)$/.exec(rawPath);
+    if (!m || !UPLOAD_FOLDER.test(m[1]) || m[2] === UPLOAD_PART || m[2] !== safeUploadName(m[2])) return none();
+    let fh = null;
+    try {
+      const root = await fs.promises.realpath(uploadsRoot);
+      const real = await fs.promises.realpath(path.join(uploadsRoot, m[1], m[2]));
+      // exactly the file named, not merely inside the root: a link in a folder to another stored file,
+      // or out to <root>-evil/…, names a file never dropped there (task review T3-1)
+      if (real !== path.join(root, m[1], m[2])) return none();
+      fh = await fs.promises.open(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      const st = await fh.stat();
+      if (!st.isFile()) { await fh.close(); return none(); }
+      const { type, attachment } = uploadType(m[2]);
+      res.writeHead(200, { 'content-type': type, ...(attachment ? { 'content-disposition': `attachment; filename="${m[2]}"` } : {}), 'content-length': st.size, 'x-content-type-options': 'nosniff', 'content-security-policy': 'sandbox', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', ...hsts });
+      if (req.method === 'HEAD') { await fh.close(); return res.end(); }
+      // pipeline: a reader who goes mid-file closes the file too
+      pipeline(fh.createReadStream(), res, () => {});
+    } catch {
+      await fh?.close().catch(() => {});
+      return res.headersSent ? res.destroy() : none();
     }
   };
 
@@ -1976,11 +2230,11 @@ export function createGateway(opts = {}) {
           const want = unb64u(live.claimHash ?? '');
           if (!want || !sameBytes(sha256(typeof body?.token === 'string' ? body.token : ''), want)) return json(res, 403, { error: 'that is not this box\'s claim token' });
           if (p === '/auth/claim/options') return json(res, 200, creationOptions('claim'));
-          const pk = register(body, 'claim');
+          const { cred: pk } = register(body, 'claim');
           if (store.load().passkeys.length) return json(res, 409, { error: 'this box is already claimed' });
-          store.save({ ...store.load(), passkeys: [pk], claimHash: null, claimExpires: null, sessions: [] });
+          store.save(stamped(withOwner({ ...store.load(), passkeys: [pk], claimHash: null, claimExpires: null, sessions: [], peopleSessions: [] })));
           log(`claimed with passkey "${pk.name}"`);
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession() });
+          return json(res, 200, { ok: true }, { 'set-cookie': newSession(ownerRow(store.load()) ?? STAND_IN, pk.id) });
         }
         if (p === '/auth/login' && req.method === 'GET') return page(res, claimed ? PAGES.login(safeNext(url.searchParams.get('next'))) : PAGES.unclaimed());
         if (p === '/auth/login/options' && req.method === 'POST') {
@@ -1988,27 +2242,34 @@ export function createGateway(opts = {}) {
           return json(res, 200, { challenge: loginChallenge(), rpId: RP_ID, userVerification: 'required', timeout: CHALLENGE_MS, allowCredentials: [] });
         }
         if (p === '/auth/login/verify' && req.method === 'POST') {
-          verifyAssertion(await readJson(req));
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession() });
+          const body = await readJson(req);
+          // as options: a challenge fetched before a reclaim must not open a session after it
+          if (!store.load().passkeys.length) return json(res, 409, { error: 'this box is not claimed yet' });
+          const { person, methodId } = verifyAssertion(body);
+          return json(res, 200, { ok: true }, { 'set-cookie': newSession(person, methodId) });
         }
       }
       // What installing the hub fetches. Public: a browser asks for the manifest without the cookie, and
       // refreshes the worker after a session has ended. Nothing here says anything about the box.
       const installed = isBox && req.method === 'GET' ? INSTALL[p] : null;
       if (installed) return send(res, 200, installed.type, installed.body());
-      const session = claimed ? sessionOf(req) : null;
-      if (!session) {
+      const who = claimed ? sessionOf(req) : null;
+      if (!who) {
         // a lens open in a tab of its own is no use after sign-in: the preview itself is
         const back = pv && p === '/.devteam/lens' ? `${own}/` : `${own}${req.url}`;
         if (navigating(req)) return redirect(res, claimed ? loginAt(back) : loginAt());
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
+      const { session, person } = who;
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
       if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': LENS_CSP, 'referrer-policy': 'no-referrer' });
       if (pv) return servePreview(req, res, pv, own);
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
       if (port) {
+        // dropped files, as on term. (receiveUpload, after the session and the Origin rule above), and served back
+        if (rawPath === '/upload' && req.method === 'POST') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
+        if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) return await serveUpload(req, res, rawPath);
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
         if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath]);
@@ -2030,28 +2291,37 @@ export function createGateway(opts = {}) {
       if (isAuth) {
         if (p === '/auth/logout' && req.method === 'POST') {
           const now = store.load();
-          store.save({ ...now, sessions: now.sessions.filter((x) => x.hash !== session.hash) });
+          store.save({ ...now, sessions: now.sessions.filter((x) => x.hash !== session.hash), ...(now.peopleSessions ? { peopleSessions: now.peopleSessions.filter((x) => x.hash !== session.hash) } : {}) });
           return json(res, 200, { ok: true }, { 'set-cookie': cookie('', 0) });
         }
-        if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(store.load().passkeys, PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
-        if (p.startsWith('/auth/passkeys/') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
-        if (p === '/auth/passkeys/options' && req.method === 'POST') return json(res, 200, creationOptions(`add:${session.hash}`));
+        // Each of these acts on the signed-in person's own methods only (ownMethods, removeMethod).
+        if (p === '/auth/method/list' && req.method === 'GET') return json(res, 200, { methods: ownMethods(store.load(), person) });
+        if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(ownMethods(store.load(), person).filter((m) => m.type === 'passkey').map((m) => ({ id: m.id, name: m.label, createdAt: m.added_at })), PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
+        if ((p.startsWith('/auth/passkeys/') || p === '/auth/method/remove') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
+        if (p === '/auth/passkeys/options' && req.method === 'POST') return json(res, 200, creationOptions(`add:${session.hash}`, person));
         if (p === '/auth/passkeys/verify' && req.method === 'POST') {
-          const pk = register(await readJson(req), `add:${session.hash}`);
+          const { cred, issued } = register(await readJson(req), `add:${session.hash}`);
           const now = store.load();
-          store.save({ ...now, passkeys: [...now.passkeys, pk] });
-          log(`passkey "${pk.name}" added`);
+          if (!stillHeld(now, session)) return json(res, 401, { error: 'your session ended; sign in again' });
+          // the person as they stand now: an add started before they were removed or their role
+          // changed must not land where they were
+          const who = personOf(now, issued.person);
+          if (!who || who.role !== issued.role) return json(res, 409, { error: 'your account changed since; start again' });
+          store.save(isOwner(who)
+            ? stamped({ ...now, passkeys: [...now.passkeys, cred] })
+            : { ...now, people: now.people.map((x) => (x.id === who.id ? { ...x, methods: [...x.methods, asMethod(cred)], rev: x.rev + 1 } : x)) });
+          log(`passkey "${cred.name}" added`);
           return json(res, 200, { ok: true });
         }
-        if (p === '/auth/passkeys/remove' && req.method === 'POST') {
+        if ((p === '/auth/method/remove' || p === '/auth/passkeys/remove') && req.method === 'POST') {
           const body = await readJson(req);
           const now = store.load();
-          if (now.passkeys.length < 2) return json(res, 400, { error: 'the last passkey can\'t be removed; add another first' });
-          if (!now.passkeys.some((x) => x.id === body?.id)) return json(res, 404, { error: 'no such passkey' });
-          // whoever held it may hold a session too: every other session ends, and every device's notifications
-          // (this one's subscribes again when its hub next opens)
-          store.save({ ...now, passkeys: now.passkeys.filter((x) => x.id !== body.id), sessions: now.sessions.filter((x) => x.hash === session.hash), pushSubs: [] });
-          log('a passkey was removed; every other session ended');
+          const held = stillHeld(now, session);
+          if (!held) return json(res, 401, { error: 'your session ended; sign in again' });
+          const out = removeMethod(now, held.person, body?.id, held.session);
+          if (!out.next) return json(res, out.status, { error: out.error });
+          store.save(out.next);
+          log('a sign-in method was removed; its person\'s other sessions ended');
           return json(res, 200, { ok: true });
         }
         return send(res, 404, 'text/plain', 'not found');
@@ -2069,14 +2339,22 @@ export function createGateway(opts = {}) {
       if (req.method === 'POST' && p === '/push/subscribe') {
         const sub = pushSubscription(await readJson(req));
         if (!sub) return json(res, 400, { error: 'that is not a push subscription this box can send to' });
+        // One device, one person: out of every list, then into the subscriber's, capped per person so
+        // nobody can push the owner's devices off.
         const now = store.load();
-        store.save({ ...now, pushSubs: [...(now.pushSubs ?? []).filter((x) => x.endpoint !== sub.endpoint), sub].slice(-PUSH_DEVICES) });
+        const held = stillHeld(now, session);
+        if (!held) return json(res, 401, { error: 'your session ended; sign in again' });
+        const freed = keepSubs(now, (x) => x.endpoint !== sub.endpoint);
+        store.save(withSubs(freed, held.person, [...subsOf(freed, held.person), sub].slice(-PUSH_DEVICES)));
         return json(res, 200, { ok: true });
       }
-      // The hub's "is this working?": one push, to the device that asked.
+      // The hub's "is this working?": one push, to the device that asked, if it is the asker's own.
       if (req.method === 'POST' && p === '/push/test') {
         const body = await readJson(req);
-        const sub = (store.load().pushSubs ?? []).find((x) => x.endpoint === body?.endpoint);
+        const now = store.load();
+        const held = stillHeld(now, session);
+        if (!held) return json(res, 401, { error: 'your session ended; sign in again' });
+        const sub = subsOf(now, held.person).find((x) => x.endpoint === body?.endpoint);
         if (!sub) return json(res, 404, { error: 'this device is not subscribed: reload the hub' });
         let status;
         try { status = await sendPush(sub, PUSH_TEST); } catch (e) { return json(res, 502, { error: e.message }); }
@@ -2475,8 +2753,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
       // shell on the box (Render's Shell tab, fly ssh console): that access is the root of trust.
       const pub = publicUrl();
       const store = stateStore(gatewayDir());
-      store.save({ ...store.load(), passkeys: [], sessions: [], pushSubs: [] });
+      // Everyone's sessions and every invite go too, and the owner's other methods, since whoever
+      // claims next is the owner; other people keep theirs, to be checked in People after the claim.
+      const s = store.load();
+      const people = s.people?.map((p) => (p.role === 'owner' ? { ...p, methods: [], rev: p.rev + 1 } : p));
+      store.save(stamped({ ...s, passkeys: [], sessions: [], pushSubs: [], peopleSessions: [], invites: [], ...(people ? { people } : {}) }));
       process.stdout.write(`every passkey and session is forgotten. Claim the box again: ${claimUrl(pub, newClaim(store))}\n`);
+      const n = (people ?? []).filter((p) => p.role !== 'owner' && p.methods.length).length;
+      if (n > 0) process.stdout.write(`${n} other ${n === 1 ? 'person' : 'people'} can still sign in: check who they are in the hub's Settings › People after claiming\n`);
     } else if (cmd === 'thread-key') {
       // The public half of the key that signs the owner's thread presses, for the boot to put where
       // only root can write and every user can read (cloud/Dockerfile, /etc/devteam/thread-key.pub).

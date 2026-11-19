@@ -138,7 +138,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     // repo: the kit runs the check on main and records main's sha; nobody types the number
     const Gr = must(['goal', 'add', '--title', 'Fewer scripts', '--outcome', 'one script', '--measure', 'files in scripts/', '--target', '0', '--unit', 'files', '--direction', 'down', '--source', 'repo', ...rest, '--priority', '42'], { role: 'sup' });
     assert.match(must(['goal', 'check', Gr]), /no check: the command whose last line is the number/);
-    must(['goal', 'set', Gr, '--check', 'echo counting; ls docs/devteam/scripts | wc -l'], { role: 'sup' });
+    must(['goal', 'set', Gr, '--check', 'echo counting; ls docs/devteam/scripts/devteam.mjs | wc -l'], { role: 'sup' });
     assert.match(dt(['goal', 'reading', Gr, '--value', '0'], { role: 'sup' }).err, /the kit runs its check \(goal reading .* --run\), nobody types the number/);
     const main = git(['rev-parse', 'origin/main']);
     assert.match(must(['goal', 'reading', Gr, '--run'], { role: 'sup' }), new RegExp(`recorded 1 for ${Gr} \\(main at ${main.slice(0, 12)}\\)`));
@@ -906,6 +906,9 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
       ['Authorization: Basic YWRtaW46c2VjcmV0', 'Authorization: [redacted] [token]'],
       ['Token validation failed; Basic authentication required', null],
       ['set address=12 Main St, then', 'set address=[redacted] Main St, then'],
+      ['deploy 3a1b1fc44309722f3961514907971e2eb6fc442a went out', null],
+      ['cc4242424242424242 end', 'cc[card] end'],
+      ['card_4242 4242 4242 4242', 'card_[card]'],
       // what stays: classes, paths, line numbers, timestamps, versions, ids, shas, hosts
       ['ActiveRecord::RecordNotFound in Admin::UsersController#show at app/models/user.rb:42', null],
       ['at 2026-11-05T12:34:56.789Z (12:30:00) v1.2.3 order 12345678 req 9f86d081-884c-4d63-a0e3-37b3f1d5e6a2', null],
@@ -4766,6 +4769,27 @@ http.createServer((req, res) => {
       assert.match((await died.json()).error, /exited before port/);
       fs.rmSync(path.join(PV_DIR(), 'dying-app.json'), { force: true });
       assert.ok(!pvWindows().some((w) => w.name === 'dev~start-mine'), 'Stop on a kit-started server closes its window');
+      // a stop inside the tick's look-then-write: it waits for the record's lock, and the record stays gone
+      pvClear();
+      await d.stop();
+      d = await pvDashboard({ DEVTEAM_PREVIEW_WRITE_DELAY_MS: '3000' });
+      pvMake('race-mine', { port: await freePort() });
+      const marker = path.join(PV_DIR(), 'race-mine.json.writing');
+      await until(() => fs.existsSync(marker), 'the tick to be inside its write');
+      pvOk(['preview', 'stop', 'race-mine']);
+      await until(() => !fs.existsSync(marker), 'the write to be done');
+      assert.deepEqual(pvFiles(), [], 'a stop that lands in the tick\'s write is never undone');
+      // the tick never waits on a held lock, and a stale one is taken
+      const lock = path.join(PV_DIR(), 'lock-mine.json.lock');
+      fs.mkdirSync(PV_DIR(), { recursive: true });
+      fs.mkdirSync(lock);
+      pvMake('lock-mine', { port: await freePort() });
+      await until(async () => (await pvHello(d.base)).find((p) => p.name === 'lock-mine')?.up === false, 'the tick to probe a locked record');
+      assert.equal(pvRec('lock-mine').down_since, undefined, 'a held lock is left alone: no write');
+      const old = new Date(Date.now() - 20000);
+      fs.utimesSync(lock, old, old);
+      await until(() => pvRec('lock-mine').down_since, 'a stale lock to be taken and the write to land');
+      await until(() => !fs.existsSync(lock), 'the lock to be released after the write');
     } finally { await d.stop(); for (const w of pvWindows().filter((x) => x.name.startsWith('dev~'))) spawnSync('tmux', ['kill-window', '-t', w.id]); pvClear(); }
     assert.ok(stale);
   });
@@ -4799,10 +4823,12 @@ http.createServer((req, res) => {
       assert.deepEqual([l.preview, l.port, l.state, l.url], [name, P, 'live', undefined]);
       await pvClose(lst);
       await until(async () => (await pvHello(d.base))[0]?.up === false, 'the tick to see it down');
-      assert.equal((await ofData()).state, 'down');
+      // the dashboard serves a build again for 3 s after it finished (kit-633), and a preview's state
+      // isn't in the log: the page's data shows it with a later read
+      await until(async () => (await ofData()).state === 'down', 'the data to see it down');
       pvClear();
       await until(async () => (await pvHello(d.base)).length === 0, 'the record to go');
-      l = await ofData();
+      l = await until(async () => { const x = await ofData(); return x.state === 'gone' ? x : null; }, 'the data to see it gone');
       assert.deepEqual([l.state, l.port], ['gone', null], 'a preview nobody offers any more');
       assert.equal(json(must(['questions', '--id', id, '--json']))[0].status, 'open', 'the question stands either way');
       assert.equal(json(must(['dashboard-data'])).questions.find((x) => x.id === id).links.find((x) => x.name === 'demo').state, 'gone', 'dashboard-data on its own: no tick, same record');

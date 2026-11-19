@@ -19,11 +19,20 @@ export const canDrive = !!chromePath && typeof WebSocket === 'function';
 const KEYS = { Tab: 9, Enter: 13, Escape: 27, ' ': 32, ArrowLeft: 37, ArrowRight: 39 };
 const CODES = { ' ': 'Space' };
 
+// What openChrome starts Chrome with. The second line keeps each browser small on a shared machine:
+// at most two renderer processes, no extensions, component updates or background requests, and a
+// 256 MB JavaScript heap per renderer.
+export const chromeArgs = (profile) => [
+  '--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, '--remote-debugging-port=0',
+  '--renderer-process-limit=2', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--js-flags=--max-old-space-size=256',
+  'about:blank',
+];
+
 export async function openChrome() {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-chrome-'));
   // Its own process group, so its helpers go with it: one left holding the stderr pipe open keeps this
   // test process (and the job) alive after every test has finished.
-  const proc = spawn(chromePath, ['--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+  const proc = spawn(chromePath, chromeArgs(profile), { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
   const signal = (sig) => { try { process.kill(-proc.pid, sig); } catch { try { proc.kill(sig); } catch {} } };
   const atExit = () => signal('SIGKILL');
   process.once('exit', atExit);
