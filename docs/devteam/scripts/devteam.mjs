@@ -25655,7 +25655,8 @@ async function browserWatchTabs(ctx) {
     if (type === 'BackForwardCacheRestore') tab.loaded?.();
   });
   cdp.on('Page.frameStartedLoading', ({ frameId }, sid) => { const tab = bySession(sid); if (tab && frameId === tab.targetId) tab.started?.(); });
-  cdp.on('Page.navigatedWithinDocument', ({ frameId, url }, sid) => { const tab = bySession(sid); if (tab && frameId === tab.targetId) tab.url = tab.frameUrl = url; });
+  // a same-document navigation (a fragment, pushState) loads nothing: back's wait takes it as its load
+  cdp.on('Page.navigatedWithinDocument', ({ frameId, url }, sid) => { const tab = bySession(sid); if (tab && frameId === tab.targetId) { tab.url = tab.frameUrl = url; tab.within?.(); } });
   cdp.on('Page.loadEventFired', (p, sid) => bySession(sid)?.loaded?.());
   cdp.on('Target.targetDestroyed', ({ targetId }) => {
     const i = ctx.tabs.findIndex((x) => x.targetId === targetId);
@@ -25719,12 +25720,22 @@ async function browserLanded(ctx, tab, r, asked, say) {
 }
 // A tab's title as printed: the document's own (page text, quoted where printed), read within 2 s.
 // Chrome's target title is never used: on a page without a title it is the raw URL. An empty title, or
-// one that is the tab's URL, prints as the masked URL.
+// one that is the tab's URL, or one holding a piece of it the mask hides (an image's title is its last
+// path segment), prints as the masked URL.
 async function browserTitle(ctx, tab) {
   let t = '';
   try { t = (await Promise.race([ctx.cdp.send('Runtime.evaluate', { expression: 'document.title', returnByValue: true }, tab.sessionId), browserSleep(2000)]))?.result?.value ?? ''; } catch {}
   t = String(t).slice(0, 2000);
-  return t && t !== tab.url && t !== tab.frameUrl ? t : browserMask(tab.url ?? 'about:blank', tab.opening);
+  return t && ![tab.url, tab.frameUrl].some((u) => u && (t === u || browserHidden(u).some((p) => t.includes(p)))) ? t : browserMask(tab.url ?? 'about:blank', tab.opening);
+}
+// The pieces of a URL the mask hides, raw and decoded, 4 or more characters each: masked path segments,
+// query values, the fragment, user:pass.
+function browserHidden(u) {
+  if (!browserHttp(u)) return [];
+  const x = new URL(u), dec = (p) => { try { return [p, decodeURIComponent(p)]; } catch { return [p]; } };
+  const segs = x.pathname.split('/').filter((p) => p.length >= 20 || (p.match(/\d/g) ?? []).length >= 4);
+  const q = x.search.slice(1).split('&').map((p) => p.slice(p.indexOf('=') + 1));
+  return [...segs, ...q, x.hash.slice(1), x.username, x.password].flatMap(dec).filter((p) => p.length >= 4);
 }
 // snapshot: the active tab's accessibility tree in document order, ignored nodes skipped. Interactive
 // roles get fresh refs (kept, ref → backendDOMNodeId, until the next snapshot); headings and text get
@@ -25830,24 +25841,57 @@ function browserKeyEvents(k) {
   const common = { key, ...(named ? { code: k } : {}), ...(vk ? { windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk } : {}) };
   return [{ type: text ? 'keyDown' : 'rawKeyDown', ...common, ...(text ? { text, unmodifiedText: text } : {}) }, { type: 'keyUp', ...common }];
 }
-// screenshot: password and code fields drawn with no glyphs (one <style>, removed in a finally), the
-// tab captured as PNG to run/browser/shots/<UTC stamp>.png or the client's absolute --out, 0600. Shots
-// older than a day go first.
-const BROWSER_HIDE = 'input[type=password i],[autocomplete*=one-time-code i],[autocomplete*=current-password i],[autocomplete*=new-password i]{color:transparent!important;-webkit-text-fill-color:transparent!important;caret-color:transparent!important;text-shadow:0 0 transparent!important}';
+// screenshot, failing closed (ruling on T5-1): every password field and every field whose
+// autocomplete names a code or a password, in every frame and shadow root (DOM.getDocument, pierce), is
+// made to draw no glyphs by an inspector edit of its inline style (CSS.setStyleTexts). That edit is
+// exempt from the page's CSP, where an injected <style> isn't, and it reaches into shadow roots, where a
+// document's sheet doesn't. Each field's computed style is then checked; a field not hidden, or a frame
+// whose document can't be reached (another site's, in another process), refuses the capture and writes
+// nothing. The inline styles are put back in a finally. Shots older than a day go first; the file is
+// written 0600 from its first byte (a tmp file, renamed over any existing one).
+const BROWSER_HIDE = ['color', '-webkit-text-fill-color', 'caret-color'];
+const BROWSER_SECRET_FIELD = /one-time-code|current-password|new-password/i;
+async function browserHide(ctx, tab) {
+  const send = (m, p) => ctx.cdp.send(m, p, tab.sessionId);
+  await send('DOM.enable');
+  await send('CSS.enable');
+  const { root } = await send('DOM.getDocument', { depth: -1, pierce: true });
+  const fields = [];
+  let unreachable = false;
+  const walk = (n) => {
+    const a = n.attributes ?? [], at = (k) => { for (let i = 0; i < a.length; i += 2) if (String(a[i]).toLowerCase() === k) return String(a[i + 1]); return ''; };
+    if ((n.nodeName === 'INPUT' && at('type').toLowerCase() === 'password') || BROWSER_SECRET_FIELD.test(at('autocomplete'))) fields.push(n.nodeId);
+    if (['IFRAME', 'FRAME'].includes(n.nodeName) && !n.contentDocument) unreachable = true;
+    for (const c of [...(n.children ?? []), ...(n.shadowRoots ?? []), ...(n.contentDocument ? [n.contentDocument] : [])]) walk(c);
+  };
+  walk(root);
+  if (unreachable) throw new Error("refused: the page holds a frame from another site, which can't be checked for password fields; nothing captured");
+  const undo = [];
+  const restore = async () => { for (const { nodeId, text } of undo) { try { const s = (await send('CSS.getInlineStylesForNode', { nodeId })).inlineStyle; await send('CSS.setStyleTexts', { edits: [{ styleSheetId: s.styleSheetId, range: s.range, text }] }); } catch {} } };
+  try {
+    for (const nodeId of fields) {
+      const s = (await send('CSS.getInlineStylesForNode', { nodeId })).inlineStyle;
+      await send('CSS.setStyleTexts', { edits: [{ styleSheetId: s.styleSheetId, range: s.range, text: `${s.cssText};${BROWSER_HIDE.map((p) => `${p}:transparent!important`).join(';')};text-shadow:none!important` }] });
+      undo.push({ nodeId, text: s.cssText });
+      const cs = Object.fromEntries((await send('CSS.getComputedStyleForNode', { nodeId })).computedStyle.map((p) => [p.name, p.value]));
+      if (!BROWSER_HIDE.every((p) => cs[p] === 'rgba(0, 0, 0, 0)') || cs['text-shadow'] !== 'none') throw new Error('not hidden');
+    }
+  } catch {
+    await restore();
+    throw new Error("refused: a password or code field on the page couldn't be hidden; nothing captured");
+  }
+  return restore;
+}
 async function browserShot(ctx, tab, to) {
   const dir = path.join(BROWSER_DIR(), 'shots');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   for (const n of fs.readdirSync(dir)) { try { const f = path.join(dir, n); if (Date.now() - fs.statSync(f).mtimeMs > 86400000) fs.rmSync(f, { force: true }); } catch {} }
-  const ev = (expression) => ctx.cdp.send('Runtime.evaluate', { expression, returnByValue: true }, tab.sessionId);
-  const id = `devteam-hide-${crypto.randomBytes(6).toString('hex')}`;
+  const restore = await browserHide(ctx, tab);
   let data;
-  try {
-    await ev(`(() => { const s = document.createElement('style'); s.id = ${JSON.stringify(id)}; s.textContent = ${JSON.stringify(BROWSER_HIDE)}; document.documentElement.appendChild(s); })()`);
-    ({ data } = await ctx.cdp.send('Page.captureScreenshot', { format: 'png' }, tab.sessionId));
-  } finally { await ev(`document.getElementById(${JSON.stringify(id)})?.remove()`).catch(() => {}); }
+  try { ({ data } = await ctx.cdp.send('Page.captureScreenshot', { format: 'png' }, tab.sessionId)); } finally { await restore(); }
   const file = to ?? path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}.png`);
-  fs.writeFileSync(file, Buffer.from(data, 'base64'), { mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try { fs.writeFileSync(tmp, Buffer.from(data, 'base64'), { mode: 0o600, flag: 'wx' }); fs.renameSync(tmp, file); } finally { fs.rmSync(tmp, { force: true }); }
   return file;
 }
 // An ordinary desktop Chrome user agent from `<chrome> --version` (dev-62), or null.
@@ -25977,7 +26021,7 @@ function browserVerbs(ctx) {
       const to = i > 0 ? entries[i - 1] : null;
       if (!to) return { code: 1, out: 'nothing to go back to' };
       Object.assign(tab, { opening: to.url, frameUrl: null, unreachable: null, refs: new Map() });
-      const r = await browserLoad(tab, async () => { await send('Page.navigateToHistoryEntry', { entryId: to.id }, tab); return { loaderId: 'history' }; });
+      const r = await browserLoad(tab, async () => { tab.within = tab.loaded; await send('Page.navigateToHistoryEntry', { entryId: to.id }, tab); return { loaderId: 'history' }; }).finally(() => { tab.within = null; });
       return browserLanded(ctx, tab, r, to.url, (u, title) => `back at ${u} (${title})`);
     }),
     tabs: async () => {
@@ -26138,7 +26182,10 @@ async function cmdBrowser() {
     open: () => ({ url: positional[1] }),
     snapshot: () => ({ json: !!flags.json }),
     click: () => (n === 2 ? { ref: ref() } : usage()),
-    type: () => (n >= 3 ? { ref: ref(), text: positional.slice(2).join(' ') } : usage()),
+    // a word starting with -- would be read as an option and dropped: refused (unnamed, it may be part
+    // of the text), and text after a bare -- is taken whole
+    type: () => (Object.keys(flags).length ? die("browser type: a word starting with -- can't be typed as it stands; put the text after a bare --: browser type <ref> -- <text>")
+      : rest !== null ? (n === 2 && rest.length ? { ref: ref(), text: rest.join(' ') } : usage()) : n >= 3 ? { ref: ref(), text: positional.slice(2).join(' ') } : usage()),
     press: () => (n === 2 && browserKeyOk(positional[1]) ? { key: positional[1] } : die(BROWSER_KEY_LIST)),
     scroll: () => (n === 2 && ['up', 'down'].includes(positional[1]) ? { dir: positional[1] } : usage()),
     back: () => (n === 1 ? {} : usage()),

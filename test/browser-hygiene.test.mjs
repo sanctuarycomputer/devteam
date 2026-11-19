@@ -8,14 +8,13 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 import { monoFixture, until, sessionOf } from './lib/kit.mjs';
 import { startSites } from './lib/sites.mjs';
 import { validate } from './fixtures/browser/check.mjs';
-
-void openChrome; // imported so CI's chrome group runs this file
 
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
@@ -25,13 +24,16 @@ if (mustRun && !canDrive) test('Chrome is needed on CI\'s Node 22+', () => asser
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-browser-hy-'));
 const homes = [];
 const newHome = () => { const h = fs.mkdtempSync(path.join(tmp, 'home-')); homes.push(h); return h; };
-let site;
+let site, own;
 const projects = [];
+// Every verb's stdout and stderr, and every control secret read, for the never-print sweep (T5-6).
+const seen = [];
+const secrets = new Set();
 
 // A fixture project whose CLI runs as the supervisor with a throwaway HOME (monoFixture sets none).
 function project(name, home) {
   const F = monoFixture(name);
-  const env = { ...F.env({ DEVTEAM_ROLE: 'supervisor' }), HOME: home, DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: `${site.port}` };
+  const env = { ...F.env({ DEVTEAM_ROLE: 'supervisor' }), HOME: home, DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: `${site.port},${own.port}` };
   const P = { ...F, name, home, env, key: `${name}-${crypto.createHash('sha1').update(fs.realpathSync(F.old)).digest('hex').slice(0, 12)}` };
   P.profile = path.join(home, '.devteam', 'browser', P.key);
   P.state = path.join(F.old, 'docs', 'devteam', 'run', 'browser', 'state.json');
@@ -49,9 +51,44 @@ function cli(P, args, extraEnv = {}) {
     child.stderr.on('data', (d) => { err += d; });
     const timer = setTimeout(() => child.kill('SIGKILL'), 90000);
     child.on('error', reject);
-    child.on('close', (status) => { clearTimeout(timer); resolve({ status, out: out.trim(), err: err.trim() }); });
+    child.on('close', (status) => { clearTimeout(timer); seen.push(out, err); resolve({ status, out: out.trim(), err: err.trim() }); });
   });
 }
+// The test's own pages for the screenshot's fail-closed checks (T5-1) and the review's minors: a page
+// whose CSP blocks any injected <style> (its own sheet is a file), a field in a closed shadow root, a
+// frame from another site (localhost against 127.0.0.1: another process), an image whose title is its
+// file name, and a fragment link.
+const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+const BOX = 'position:absolute;left:20px;width:300px;height:40px;font-size:32px;border:0;padding:0;margin:0;background:#fff;outline:none';
+function startOwn() {
+  const html = (body, head = '') => `<!doctype html><html lang="en"><head><meta charset="utf-8">${head}<title>Own</title></head><body>${body}</body></html>`;
+  let port;
+  const pages = {
+    '/strict': [html('<input id="pw" type="password" value="zqpwzqpw"><input id="code" type="text" autocomplete="one-time-code" value="ZQCODEZQ"><input id="plain" type="text" value="zqzqzq">', '<link rel="stylesheet" href="/strict.css">'), { 'content-security-policy': "default-src 'self'; style-src 'self'" }],
+    '/strict.css': [`html,body{margin:0;background:#fff} input{${BOX}} #pw{top:20px} #code{top:100px} #plain{top:180px}`, { 'content-type': 'text/css' }],
+    '/shadow': [html(`<div><template shadowrootmode="closed"><style>input{${BOX};top:20px}</style><input type="password" value="zqpwzqpw"></template></div><input type="text" value="zqzqzq" style="${BOX};top:100px">`, '<style>html,body{margin:0;background:#fff}</style>')],
+    '/framed': [null],
+    '/inner': [html('<input type="password" value="zqpwzqpw">')],
+    '/hash': [html('<h1>Hash</h1><p><a href="#part">Part</a></p><p id="part">Part</p>')],
+    '/img/zqimagetokenzqimagetoken.png': [PNG1, { 'content-type': 'image/png' }],
+  };
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const [body, headers] = u.pathname === '/framed' ? [html(`<iframe src="http://localhost:${port}/inner"></iframe>`)] : pages[u.pathname] ?? ['not found'];
+    res.writeHead(pages[u.pathname] ? 200 : 404, { 'content-type': 'text/html; charset=utf-8', ...headers });
+    res.end(body);
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => { port = server.address().port; resolve({ port, close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }) }); }));
+}
+// The distinct colours of a PNG in x 24 to 316 and each y range, read in the test's own Chrome.
+async function colours(file, ranges) {
+  const ch = await openChrome();
+  try {
+    const pg = await ch.newPage();
+    return await pg.ev(`new Promise((res, rej) => { const i = new Image(); i.onload = () => { const c = document.createElement('canvas'); c.width = i.width; c.height = i.height; const x = c.getContext('2d'); x.drawImage(i, 0, 0); res(${JSON.stringify(ranges)}.map(([y0, y1]) => { const d = x.getImageData(24, y0, 292, y1 - y0).data; const s = new Set(); for (let k = 0; k < d.length; k += 4) s.add(d[k] + ',' + d[k + 1] + ',' + d[k + 2] + ',' + d[k + 3]); return s.size; })); }; i.onerror = () => rej(new Error('not a PNG')); i.src = 'data:image/png;base64,${fs.readFileSync(file).toString('base64')}'; })`);
+  } finally { await ch.close(); }
+}
+
 // The pids of processes whose command line carries a profile under one of this file's HOMEs.
 function testBrowserPids() {
   if (!fs.existsSync('/proc')) return [];
@@ -67,7 +104,7 @@ function alive(pid) {
   try { process.kill(pid, 0); } catch (err) { if (err.code !== 'EPERM') return false; }
   try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return st.slice(st.lastIndexOf(')') + 2)[0] !== 'Z'; } catch { return false; }
 }
-const readState = (P) => JSON.parse(fs.readFileSync(P.state, 'utf8'));
+const readState = (P) => { const s = JSON.parse(fs.readFileSync(P.state, 'utf8')); if (/[1-9a-f]/.test(s.control_secret ?? '')) secrets.add(s.control_secret); return s; };
 const cmdline = (pid) => fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
 // Starts run one at a time across the file: the two chains run at once, and two projects' daemons
 // starting together can pick the same free view port before either binds it. ms is the start's own.
@@ -106,6 +143,7 @@ before(() => {
   if (skip) return;
   setup = (async () => {
     site = await startSites();
+    own = await startOwn();
     h = project('brw-h', newHome());
     g = project('brw-g', newHome());
   })();
@@ -123,6 +161,7 @@ after(async () => {
   for (const pid of testBrowserPids()) { try { process.kill(pid, 'SIGKILL'); } catch {} }
   for (const P of projects) P.done();
   await site?.close();
+  await own?.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -446,6 +485,68 @@ test('T4-1 a view port taken before the daemon binds it: start retries', { skip,
   await stopped(h);
 });
 
+test('T5-1 the screenshot fails closed; T5-2 an image title; T5-4 type and --; T5-7 back within a page', { skip, timeout: 120000 }, async () => {
+  await started(h);
+  const shots = path.join(h.old, 'docs', 'devteam', 'run', 'browser', 'shots');
+  const shot = async () => { const r = await cli(h, ['screenshot']); assert.equal(r.status, 0, `screenshot: ${r.err}`); return r.out; };
+  const o = `http://127.0.0.1:${own.port}`;
+  // a CSP that blocks an injected <style>: the password and the code field are still blank
+  await opened(h, `${o}/strict`);
+  const [pw, code, plain] = await colours(await shot(), [[24, 56], [104, 136], [184, 216]]);
+  assert.equal(pw, 1, 'the password box is one colour under a strict CSP');
+  assert.equal(code, 1, 'the code box is one colour under a strict CSP');
+  assert.ok(plain > 1, 'the control: a plain field draws its glyphs');
+  // a password field in a closed shadow root
+  await opened(h, `${o}/shadow`);
+  const [inShadow, outside] = await colours(await shot(), [[24, 56], [104, 136]]);
+  assert.equal(inShadow, 1, 'the shadow-root password box is one colour');
+  assert.ok(outside > 1, 'the control: the plain field draws its glyphs');
+  // a frame from another site, out of reach: refused, and no file written
+  await opened(h, `${o}/framed`);
+  const before = fs.readdirSync(shots).length, out = path.join(tmp, 'framed.png');
+  for (const args of [['screenshot'], ['screenshot', '--out', out]]) {
+    const r = await cli(h, args);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.err, /refused: the page holds a frame from another site/);
+  }
+  assert.equal(fs.readdirSync(shots).length, before, 'no shot written');
+  assert.equal(fs.existsSync(out), false, 'no --out file written');
+  // T5-3: --out over a file that is 0644 replaces it, 0600
+  const there = path.join(tmp, 'there.png');
+  fs.writeFileSync(there, 'x', { mode: 0o644 });
+  await opened(h, `${o}/hash`);
+  const r3 = await cli(h, ['screenshot', '--out', there]);
+  assert.equal(r3.status, 0, r3.err);
+  assert.equal(fs.statSync(there).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(there).subarray(1, 4).toString(), 'PNG');
+  // T5-7: back to an entry of the same page settles at once
+  const ref = /^(e\d+) link "Part"/m.exec((await cli(h, ['snapshot'])).out)?.[1];
+  assert.ok(ref, 'the Part link');
+  assert.equal((await cli(h, ['click', ref])).status, 0);
+  const t0 = Date.now();
+  const back = await cli(h, ['back']);
+  assert.equal(back.status, 0, back.err);
+  assert.ok(Date.now() - t0 < 10000, `back took ${Date.now() - t0} ms`);
+  // T5-2: an image's title is its file name: the masked URL instead
+  const img = await opened(h, `${o}/img/zqimagetokenzqimagetoken.png`);
+  const tabs = await cli(h, ['tabs']);
+  for (const x of [img.out, tabs.out]) assert.ok(!x.includes('zqimagetoken'), 'no raw path segment printed');
+  assert.equal(JSON.parse(tabs.out).tabs[0].title, `${o}/img/•••`);
+  // T5-4: a word starting with -- is refused, never dropped; after a bare -- it is typed
+  await opened(h, `${site.origin}/record`);
+  const field = /^(e\d+) textbox ""/m.exec((await cli(h, ['snapshot'])).out)?.[1];
+  assert.ok(field, "/record's field");
+  const dropped = await cli(h, ['type', field, 'use', '--force', 'now']);
+  assert.equal(dropped.status, 1, dropped.out);
+  assert.match(dropped.err, /bare --/);
+  assert.ok(!dropped.err.includes('force'), 'the word is not echoed');
+  const typed = await cli(h, ['type', field, '--', '--force', 'now']);
+  assert.equal(typed.status, 0, typed.err);
+  await until(() => site.events().some((x) => x.kind === 'input' && x.value === '--force now'), 'the whole text typed');
+  assert.ok(!site.events().some((x) => x.kind === 'input' && x.value === 'use'), 'nothing typed by the refused call');
+  await stopped(h);
+});
+
 test('E5 the idle timer', { skip, timeout: 120000 }, async () => {
   await started(h, { DEVTEAM_TEST_BROWSER_IDLE_MS: '1500' });
   const s = readState(h);
@@ -472,4 +573,13 @@ test('profile hygiene on every start and stop: F1 to F4, G1 to G3, H1 to H3, I1 
     for (const [name, fn] of hygiene.filter(([x]) => ids.test(x))) await c.test(name, { timeout: 120000 }, () => fn(P));
   });
   await Promise.all([chain(h, /^[FG]/), chain(g, /^[HI]/)]);
+});
+
+// Last in the file (T5-6, the spec's J2 for this file): everything every verb printed here.
+test('J2 nothing secret printed (hygiene)', { skip, timeout: 120000 }, async () => {
+  const all = seen.join('\n');
+  assert.ok(secrets.size >= 2, 'control secrets were read');
+  [...secrets].forEach((v, i) => assert.ok(!all.includes(v), `control secret ${i} printed`));
+  site.sessions().forEach((v, i) => assert.ok(!all.includes(v), `session ${i} printed`));
+  for (const [what, v] of [['the typed marker', 'zq-marker'], ['the typed text', '--force now'], ['the password', site.password], ['the code', site.code], ['a fixture field value', 'zqpwzqpw'], ['a fixture code value', 'ZQCODEZQ']]) assert.ok(!all.includes(v), `${what} printed`);
 });
