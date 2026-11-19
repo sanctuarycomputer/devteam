@@ -260,7 +260,8 @@ test('L2 a live owner\'s lock, or a garbage token, is not taken', opts, async ()
   await stopped(q);
   const sleep = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' });
   try {
-    for (const token of [`${sleep.pid}-0123456789abcdef`, 'abc']) {
+    // a live owner, a garbage token, and pid 0 (not a positive integer, so not a dead owner: T5-1)
+    for (const token of [`${sleep.pid}-0123456789abcdef`, 'abc', '0-0123456789abcdef']) {
       plantStartLock(q, token);
       const r = await startCli(q, { DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS: '2000' });
       assert.equal(r.status, 1, `start with owner ${token} exited ${r.status}`);
@@ -272,6 +273,65 @@ test('L2 a live owner\'s lock, or a garbage token, is not taken', opts, async ()
     try { sleep.kill('SIGKILL'); } catch {}
     fs.rmSync(startLock(q), { recursive: true, force: true });
   }
+  await stopped(q);
+});
+
+// The start locks and their asides under run/browser, made writable and removed.
+function clearStartLocks(P) {
+  const dir = path.dirname(P.state);
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => n === 'start.lock' || n.startsWith('start.lock.')); } catch {}
+  for (const n of names) {
+    try { fs.chmodSync(path.join(dir, n), 0o700); } catch {}
+    fs.rmSync(path.join(dir, n), { recursive: true, force: true });
+  }
+}
+
+test('L3 a dead owner\'s lock that can\'t be taken still times out; one that can\'t be removed is no crash', opts, async () => {
+  await stopped(q);
+  const token = `${deadPid()}-0123456789abcdef`;
+  try {
+    // the take fails (the hook refuses the rename): the wait still ends, never spins (T5-2)
+    plantStartLock(q, token);
+    const r = await startCli(q, { DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS: '2000', DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL: '1' });
+    assert.equal(r.status, 1, `start exited ${r.status}`);
+    assert.match(r.err, /timed out waiting/);
+    assert.ok(r.ms < 20000, `the refusal took ${r.ms} ms`);
+    assert.equal(fs.readFileSync(path.join(startLock(q), 'owner'), 'utf8'), token, 'the planted token is still in place');
+    clearStartLocks(q);
+    // a read-only lock folder: the rename takes it off its path, the removal fails, and the start goes
+    // on rather than throwing (as root the removal works, and this half proves only the start)
+    plantStartLock(q, token);
+    fs.chmodSync(startLock(q), 0o555);
+    const s = await startCli(q);
+    assert.equal(s.status, 0, `start: ${s.err || s.out}`);
+  } finally { clearStartLocks(q); }
+  await stopped(q);
+});
+
+// Both refusals that name a foreign lock's host print it cleaned and cut (T5-4): one with a same-uid
+// process holding the profile, one where the processes can't be listed (the hook).
+test('I5 a refused start names the lock\'s host cleaned and cut', opts, async () => {
+  await stopped(q);
+  fs.rmSync(q.state, { force: true });
+  const words = `evil?host${'h'.repeat(91)}…`;
+  const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', `--user-data-dir=${q.profile}`], { stdio: 'ignore' });
+  try {
+    await until(() => carries(holder.pid, q), 'the holder');
+    plantLock(q, `evil\nhost${'h'.repeat(400)}-1234`);
+    const held = await startCli(q);
+    assert.equal(held.status, 1, held.out);
+    assert.ok(held.err.includes(`locked by host ${words} and a process here (pid ${holder.pid})`), 'the held refusal names the host cleaned and cut');
+    assert.ok(!held.err.includes('evil\nhost'), 'no raw newline from the host');
+  } finally { holder.kill('SIGKILL'); }
+  await new Promise((r) => (holder.exitCode !== null || holder.signalCode !== null ? r() : holder.once('exit', r)));
+  try {
+    plantLock(q, `evil\nhost${'h'.repeat(400)}-1234`);
+    const unlisted = await startCli(q, { DEVTEAM_TEST_BROWSER_PROCS_UNLISTED: '1' });
+    assert.equal(unlisted.status, 1, unlisted.out);
+    assert.ok(unlisted.err.includes(`locked by host ${words}, and this machine's processes couldn't be listed`), 'the unlisted refusal names the host cleaned and cut');
+    assert.ok(!unlisted.err.includes('evil\nhost'), 'no raw newline from the host');
+  } finally { fs.rmSync(path.join(q.profile, 'SingletonLock'), { force: true }); }
   await stopped(q);
 });
 

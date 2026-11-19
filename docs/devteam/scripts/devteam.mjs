@@ -25505,11 +25505,13 @@ function browserIdleMs() {
   return (Number.isInteger(v) && v >= 1 && v <= 1440 ? v : SETTINGS_DEFAULTS.browser_idle_minutes) * 60000;
 }
 // The pids of this user's local processes whose command line carries this profile as --user-data-dir,
-// or null when they can't be listed (so nothing is removed on a guess). /proc, else ps (macOS). Only
+// or null when they can't be listed (so nothing is removed on a guess; DEVTEAM_TEST_BROWSER_PROCS_UNLISTED
+// stands in for that in tests). /proc, else ps (macOS). Only
 // this uid's count (kit-316 S4): another user can't read a 0700 profile, so it can't hold one. The uid
 // is /proc's real uid (status's Uid: line), not the /proc/<pid> owner, which reads as root for a
 // non-dumpable process; a status that can't be read isn't counted. DEVTEAM_TEST_BROWSER_UID in tests.
 function browserProcsOn(profile) {
+  if (browserTestEnv('DEVTEAM_TEST_BROWSER_PROCS_UNLISTED')) return null;
   const me = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_UID') ?? process.getuid());
   const want = new Set([profile, realPath(profile)].flatMap((p) => [p, `${p}${path.sep}`]));
   const carries = (args) => args.some((a, i) => (a.startsWith('--user-data-dir=') && want.has(a.slice('--user-data-dir='.length))) || (a === '--user-data-dir' && want.has(args[i + 1])));
@@ -25517,9 +25519,10 @@ function browserProcsOn(profile) {
     const pids = [];
     for (const d of fs.readdirSync('/proc')) {
       if (!/^\d+$/.test(d) || Number(d) === process.pid) continue;
-      let c, u; try { c = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8'); u = /^Uid:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${d}/status`, 'utf8'))?.[1]; } catch { continue; }
-      if (u === undefined || Number(u) !== me) continue;
-      if (carries(c.split('\0'))) pids.push(Number(d));
+      let c; try { c = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8'); } catch { continue; }
+      if (!carries(c.split('\0'))) continue;
+      let u; try { u = /^Uid:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${d}/status`, 'utf8'))?.[1]; } catch { continue; }
+      if (u !== undefined && Number(u) === me) pids.push(Number(d));
     }
     return pids;
   }
@@ -25611,23 +25614,29 @@ async function browserStartLock(file, fn) {
   const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
   const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS')) || 60000;
   const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
-  // Remove the lock if it still holds `seen`; a lock taken from under us is put back.
+  // Remove the lock if it still holds `seen`; a lock taken from under us is put back. True only when
+  // the lock was moved off its path: a waiter whose take fails (the rename refused, or the test hook
+  // DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL) goes on to the deadline and the sleep, never spins. An aside
+  // that can't be removed is left behind: the lock's path is free either way.
   const drop = (seen) => {
+    if (seen !== token && browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL')) return false;
     const aside = `${lock}.${token}.${crypto.randomBytes(4).toString('hex')}`;
-    try { fs.renameSync(lock, aside); } catch { return; }
-    if (read(path.join(aside, 'owner')) === seen) fs.rmSync(aside, { recursive: true, force: true });
-    else { try { fs.renameSync(aside, lock); } catch { fs.rmSync(aside, { recursive: true, force: true }); } }
+    try { fs.renameSync(lock, aside); } catch { return false; }
+    if (read(path.join(aside, 'owner')) === seen) { try { fs.rmSync(aside, { recursive: true, force: true }); } catch {} return true; }
+    try { fs.renameSync(aside, lock); } catch { fs.rmSync(aside, { recursive: true, force: true }); }
+    return false;
   };
   for (;;) {
     try { fs.mkdirSync(lock); fs.writeFileSync(owner, token); break; } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const st = fs.statSync(owner, { throwIfNoEntry: false }) ?? fs.statSync(lock, { throwIfNoEntry: false });
       const seen = read(owner);
-      if (st && Math.abs(Date.now() - st.mtimeMs) > 120000) { drop(seen); continue; }
-      // a well-formed token naming a dead pid that isn't ours: stale now. No owner file yet, a token
-      // that isn't one, or a live owner (EPERM counts as alive) keeps the 120 s rule.
-      const op = /^(\d+)-[0-9a-f]{16}$/.exec(seen ?? '')?.[1];
-      if (op && Number(op) !== process.pid && !browserAlive(Number(op))) { drop(seen); continue; }
+      if (st && Math.abs(Date.now() - st.mtimeMs) > 120000 && drop(seen)) continue;
+      // a well-formed token naming a dead pid (a positive integer) that isn't ours: stale now. No owner
+      // file yet, a token that isn't one (pid 0 too), or a live owner (EPERM counts as alive) keeps the
+      // 120 s rule.
+      const op = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(seen ?? '')?.[1];
+      if (op && Number(op) !== process.pid && !browserAlive(Number(op)) && drop(seen)) continue;
       if (Date.now() - start > wait) die(`browser: timed out waiting for ${lock}`);
       await browserSleep(100);
     }
