@@ -2012,6 +2012,17 @@ exit 0
       "owner_only": null
     },
     {
+      "key": "browser_idle_minutes",
+      "group": "Fleet and capacity",
+      "name": "Browser idle stop",
+      "description": "minutes without a browser command before the supervisor's browser stops",
+      "shown": "value",
+      "value": 30,
+      "set": false,
+      "default": 30,
+      "owner_only": null
+    },
+    {
       "key": "tick_minutes",
       "group": "Fleet and capacity",
       "name": "Supervisor tick",
