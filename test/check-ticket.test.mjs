@@ -48,6 +48,8 @@ test('A3: every other change to a record is still a change', () => {
     'a Records line that is no full sha': [record(), record({ records: 'abc123' })],
     'a Records line and another line': [record(), record({ records: SHA2 }).replace('- Reviewed:', 'Also fine.\n- Reviewed:')],
     'an edited finding': [record(), record({ finding: 'fine really' })],
+    'two Records lines added at once': [record(), record({ records: SHA }).replace(`- Records: ${SHA}\n`, `- Records: ${SHA}\n- Records: ${SHA2}\n`)],
+    'two Reviewer lines added at once': [record({ reviewer: null }), record().replace('- Reviewer: reviewer-a\n', '- Reviewer: reviewer-a\n- Reviewer: reviewer-b\n')],
     'a malformed Records line counts as present': [record().replace('- Reviewed:', '-Records: abc\n- Reviewed:'), record({ records: SHA2 }).replace('- Reviewed:', '-Records: abc\n- Reviewed:')],
   };
   for (const [what, [a, b]] of Object.entries(cases)) assert.equal(fillInOnly(a, b, true), false, what);

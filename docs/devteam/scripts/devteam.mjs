@@ -4839,7 +4839,8 @@ function oneWayDoorsSection(body) {
 }
 
 // A verdict at commit V holds at head H only if V is an ancestor of H, every non-merge commit V..H
-// just ADDS review-record files under `dir`, and any merge between only brought main in: each merge's
+// just ADDS review-record files under `dir` or fills one in (fillInOnly), save a commit and its exact
+// revert, which change nothing together, and any merge between only brought main in: each merge's
 // other parents are on main, and the branch's own change against main (three-dot, review records
 // aside) is byte-identical at H to what was reviewed at V, or, where main touched the same files,
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
@@ -4900,9 +4901,11 @@ function verdictHolds(v, head, dir, R = repo('home')) {
       const diff = (x, y) => R.git(['diff', '--binary', '--full-index', '--no-renames', x, y]);
       const addsOrDeletes = (x) => (R.git(['diff', '--name-status', '--no-renames', `${x}^`, x]) ?? 'x').split('\n').some((l) => { const [st, file] = l.split('\t'); return st !== 'M' && (st === 'x' || isRecord(file)); });
       const forward = list.map((x) => (addsOrDeletes(x) ? null : diff(`${x}^`, x)));
+      const inverse = [];
+      const inverseOf = (j) => (j in inverse ? inverse[j] : (inverse[j] = diff(list[j], `${list[j]}^`)));
       for (let i = 0; i < list.length; i++) {
         if (paired.has(list[i]) || !forward[i]) continue;
-        for (let j = i + 1; j < list.length; j++) if (!paired.has(list[j]) && forward[j] !== null && diff(list[j], `${list[j]}^`) === forward[i]) { paired.add(list[i]); paired.add(list[j]); break; }
+        for (let j = i + 1; j < list.length; j++) if (!paired.has(list[j]) && forward[j] !== null && inverseOf(j) === forward[i]) { paired.add(list[i]); paired.add(list[j]); break; }
       }
     }
     return !!c && paired.has(c);
