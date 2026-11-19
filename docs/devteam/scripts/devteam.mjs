@@ -3405,7 +3405,11 @@ function fileParts(text, file) {
     }
   }
   // the rest: lines no declaration or heading owns, by innermost region
-  const restKey = (i) => { let best = null; for (const r of regions) if (r.from <= i && i <= r.to && (!best || r.from >= best.from)) best = r; return best ? `r:${best.name}` : 'r:'; };
+  // keyed by the regions round it too, so a region moved into another is a different leaf
+  const restKey = (i) => {
+    const round = regions.filter((r) => r.from <= i && i <= r.to).sort((a, b) => a.from - b.from || b.to - a.to);
+    return round.length ? `r:${round.map((r) => r.name).join('/')}` : 'r:';
+  };
   for (let i = 1; i <= n; i++) if (!owner[i]) owner[i] = restKey(i);
   return { places, regions, owner, lines, n };
 }
@@ -3425,11 +3429,20 @@ function wholeLike(P, name) {
   }
   return P.wholeLike.get(name);
 }
-// Each leaf's text, trailing blank lines dropped.
+// Each leaf's text, trailing blank lines dropped. A rest (the file's, a region's) is in runs: its
+// blank lines left out, and a mark where another leaf's lines come between two of its lines, so a
+// part put in the middle of the rest (between two imports, into a region's body) changes it.
 function leafTexts(P) {
   const m = new Map();
-  for (let i = 1; i <= P.n; i++) { const k = P.owner[i]; m.set(k, m.has(k) ? `${m.get(k)}\n${P.lines[i - 1]}` : P.lines[i - 1]); }
-  for (const [k, v] of m) m.set(k, v.replace(/(?:\n[ \t]*)+$/, ''));
+  let last = null;
+  for (let i = 1; i <= P.n; i++) {
+    const k = P.owner[i], l = P.lines[i - 1], blank = !l.trim();
+    if (k.startsWith('r:') && blank) continue;
+    const cut = k.startsWith('r:') && m.has(k) && last !== k ? '\n\u241e' : '';
+    m.set(k, m.has(k) ? `${m.get(k)}${cut}\n${l}` : l);
+    if (!blank) last = k;
+  }
+  for (const [k, v] of m) m.set(k, v.replace(/(?:\n\s*)+$/, ''));
   return m;
 }
 // The leaves of a file that changed between two texts and that none of the named parts covers. A
@@ -3450,14 +3463,17 @@ function partsChanged(baseText, headText, file, named) {
   // part named every changed or new leaf is in the gap already.
   if (named.length) {
     const names = new Set(named.filter((x) => !x.added).map((x) => x.name));
-    // A place's children in order, blank lines skipped: a leaf by kind and name (its path and count
-    // dropped, so a place moved whole reads the same), repeats run together.
+    // A place's children in order, blank lines skipped: a leaf by kind, name and count (its path
+    // dropped, so a place moved whole reads the same), each run of one leaf's lines once.
     const children = (P, pl) => {
       const out = [];
+      let last = null;
       for (let i = pl.from; i <= pl.to; i++) {
         if (!P.lines[i - 1].trim()) continue;
-        const k = P.owner[i], c = k.startsWith('d:') ? `d:${k.slice(2).replace(/#\d+$/, '').split('/').pop()}` : k;
-        if (out[out.length - 1] !== c) out.push(c);
+        const k = P.owner[i];
+        if (k === last) continue;
+        last = k;
+        out.push(k.startsWith('d:') ? `d:${k.slice(2).split('/').pop()}` : `r:${k.slice(2).split('/').pop()}`);
       }
       return out.join('\n');
     };
@@ -3470,9 +3486,9 @@ function partsChanged(baseText, headText, file, named) {
       const hp = H.places.get(name) ?? [];
       pls.forEach((pl, i) => { if (hp[i] && children(B, pl) !== children(H, hp[i])) gap.add(`p:${name}`); });
     }
-    // The order of the leaves no named part covers, through the whole file: moving one's own parts
-    // is free, moving another ticket's is a change to it.
-    const keep = (k) => tb.has(k) && th.has(k) && !covB.has(k) && !covH.has(k);
+    // The order of the leaves no named part covers at the base, through the whole file: moving
+    // one's own parts is free, moving another ticket's (into a named part too) is a change to it.
+    const keep = (k) => tb.has(k) && th.has(k) && !covB.has(k);
     const order = (P) => { const out = []; for (let i = 1; i <= P.n; i++) { const k = P.owner[i]; if (P.lines[i - 1].trim() && keep(k) && out[out.length - 1] !== k) out.push(k); } return out; };
     const ob = order(B), oh = order(H);
     if (ob.join('\n') !== oh.join('\n') && ob.length * oh.length > 4e7) {

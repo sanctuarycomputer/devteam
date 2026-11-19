@@ -58,7 +58,7 @@ test('parts: declarations, their comments, regions and the rest of a .mjs file',
   const L = leafTexts(P);
   assert.equal(L.get('r:'), "import fs from 'node:fs';", "the file's rest, trailing blanks dropped");
   assert.equal(L.get('d:a#1'), '// says what a does\nfunction a() {\n  return 1;\n}');
-  assert.equal(L.get('r:r'), '/* r start */\n/* r end */');
+  assert.equal(L.get('r:r'), '/* r start */\n\u241e\n/* r end */', 'a rest in runs: a mark where other leaves come between');
 });
 
 test('parts: an .html file ends a declaration at a tag line; <!-- --> regions', () => {
@@ -67,7 +67,7 @@ test('parts: an .html file ends a declaration at a tag line; <!-- --> regions', 
   const P = fileParts(text, 'index.html');
   assert.deepEqual(range(P, 'page'), [{ from: 2, to: 4 }]);
   assert.deepEqual(range(P, 'draw'), [{ from: 6, to: 8 }], 'stops before </script>');
-  assert.equal(leafTexts(P).get('r:'), '<html>\n<script>\n</script>\n</html>');
+  assert.equal(leafTexts(P).get('r:'), '<html>\n\u241e\n<script>\n\u241e\n</script>\n</html>');
 });
 
 test('parts: .md headings by slug, holding their sub-headings; fences and duplicates', () => {
@@ -214,9 +214,9 @@ test('the gate: lines inserted inside another part are that part\'s, however the
   const py = ['import os', '# fetch start', 'def fetch():', '    return 1', '# fetch end', '# store start', 'def store(x):', '    db.write(x)', '    return 2', '# store end', ''].join('\n');
   const into = (lines) => py.replace('    db.write(x)\n', `    db.write(x)\n${lines.join('\n')}\n`);
   // a new region inside store's body (review: a +name inside another ticket's region)
-  assert.deepEqual(partsChanged(py, into(['    # audit start', '    os.remove(x)', '    # audit end']), 'tool.py', named('+audit')), ['p:store']);
+  assert.deepEqual(partsChanged(py, into(['    # audit start', '    os.remove(x)', '    # audit end']), 'tool.py', named('+audit')), ['r:store', 'p:store']);
   // a second fetch pair inside store's body
-  assert.deepEqual(partsChanged(py, into(['    # fetch start', '    os.remove(x)', '    # fetch end']), 'tool.py', named('fetch')), ['p:store']);
+  assert.deepEqual(partsChanged(py, into(['    # fetch start', '    os.remove(x)', '    # fetch end']), 'tool.py', named('fetch')), ['r:store', 'p:store']);
   // the same insertion is fine for the ticket that names store
   assert.deepEqual(partsChanged(py, into(['    # audit start', '    os.remove(x)', '    # audit end']), 'tool.py', named('store', '+audit')), []);
   // a new region at the end of the file, or between two regions, is the ticket's
@@ -255,7 +255,7 @@ test('the gate: lines inserted inside another part are that part\'s, however the
   assert.deepEqual(partsChanged(blank, blank.replace('  return 1;\n}\n\n', '  return 3;\n}\n'), 'x.mjs', named('s1')), [], 'its own blank line is the ticket\'s');
   // review round 3: a region round the whole file exempts nothing inside a part it holds
   const all = ['# all start', 'import os', '# fetch start', 'def fetch():', '    return 1', '# fetch end', '# store start', 'def store(x):', '    db.write(x)', '    return 2', '# store end', '# all end', ''].join('\n');
-  assert.deepEqual(partsChanged(all, all.replace('    db.write(x)\n', '    db.write(x)\n    # audit start\n    evil()\n    # audit end\n'), 't.py', named('+audit')), ['p:store']);
+  assert.deepEqual(partsChanged(all, all.replace('    db.write(x)\n', '    db.write(x)\n    # audit start\n    evil()\n    # audit end\n'), 't.py', named('+audit')), ['r:all/store', 'p:store']);
   assert.deepEqual(partsChanged(all, all.replace('# fetch end\n', '# fetch end\n# audit start\nx = 1\n# audit end\n'), 't.py', named('+audit')), [], 'between two regions inside it: the ticket\'s');
   const doc = ['# Doc', '## A', 'a text', '### A1', 't', '## B', 'b', ''].join('\n');
   assert.deepEqual(partsChanged(doc, doc.replace('### A1\n', '### X\nx\n### A1\n'), 'x.md', named('+x')), ['p:a'], 'before A1');
@@ -287,6 +287,19 @@ test('the gate: lines inserted inside another part are that part\'s, however the
   const inR = `/* r start */\n${fs3}/* r end */\nconst tail = 1;\n`;
   assert.deepEqual(partsChanged(inR, `/* r start */\n${yxz}/* r end */\nconst tail = 1;\n`, 'x.mjs', named('x')), ['p:r'], 'reordered inside region r');
   assert.deepEqual(partsChanged(inR, `/* r start */\n${yxz}/* r end */\nconst tail = 1;\n`, 'x.mjs', named('x', 'r')), []);
+  // review 2 rerun (fresh reviewer): a region with no declarations moved into a named one, or
+  // wrapped in a new one, is a different leaf (its key holds the regions round it); a part put in the
+  // middle of the rest, or of a region's body, splits that rest; a second same-named part under
+  // another's heading is a change to that heading
+  const py2 = ['import os', '# R start', 'x = 1', '# R end', '# G start', 'y = 2', '# G end', 'main()', ''].join('\n');
+  assert.deepEqual(partsChanged(py2, py2.replace('# R end\n# G start\ny = 2\n# G end\n', '# G start\ny = 2\n# G end\n# R end\n'), 'a.py', named('R')), ['r:G'], 'G moved into R');
+  assert.deepEqual(partsChanged(py2, py2.replace('# G start\ny = 2\n# G end\n', '# W start\n# G start\ny = 2\n# G end\n# W end\n'), 'a.py', named('+W')), ['r:G'], 'W wrapped round G');
+  const py3 = ['def main():', '    setup()', '    run()', '# H start', 'z = 3', '# H end', ''].join('\n');
+  assert.deepEqual(partsChanged(py3, py3.replace('    setup()\n', '    setup()\n    # X start\n    return\n    # X end\n'), 'a.py', named('+X')), ['r:'], 'X in the middle of the file\'s rest');
+  const py4 = ['import os', '# G start', 'def h():', '    a()', '    b()', '# G end', ''].join('\n');
+  assert.deepEqual(partsChanged(py4, py4.replace('    a()\n', '    a()\n    # X start\n    return\n    # X end\n'), 'a.py', named('+X')), ['r:G'], 'X in the body of G, though G holds the whole file');
+  const md2 = ['# T', '## a', 'text a', '### notes', 'mine', '## b', ''].join('\n');
+  assert.deepEqual(partsChanged(md2, md2.replace('mine\n', 'mine\n### notes\ninjected\n'), 'd.md', named('notes')), ['p:a'], 'a second notes under a');
 
   assert.deepEqual(partsChanged(doc, doc.replace('### A1\n', '### X\nx\n### A1\n'), 'x.md', named('a', '+x')), [], 'naming A');
 });
