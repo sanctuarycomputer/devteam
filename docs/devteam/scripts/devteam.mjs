@@ -14389,6 +14389,7 @@ function collectMetrics(since) {
   // (code-style.md §10): production decrypts its own file, or the default one when it has none.
   const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
   const accounts = accountsState();
+  if (!accounts?.exhausted && accounts?.capacity?.gap) add('medium', 'accounts-capacity-gap', 'cswap', `the accounts with room run out about ${accounts.capacity.runs_out_at}, before the first full one resets (${accounts.capacity.next_reset_at})`, 'tell the owner: add an account (cswap add), or slow the fleets until a reset');
   if (accounts?.exhausted) add('high', 'accounts-exhausted', 'cswap', 'every cswap account is at a usage limit', 'wait for a reset or add an account (cswap add)');
   for (const a of accounts?.needs_login ?? []) add('medium', 'account-needs-login', a, 'cswap can no longer refresh this account', 'log in with it in Claude Code, then cswap add');
   for (const a of accounts?.restart_gave_up ?? []) add('high', 'restart-gave-up', a, `this session keeps needing a restart (a usage limit, or its window gone after the machine stopped): restarted ${RESTART_MAX} times in 6 hours, so it is left alone until those attempts age out`, `look at why: ${a === 'supervisor' ? 'its pane' : `tmux capture-pane -p -t '${tmuxTarget(a)}'`}, its account's usage (cswap list) and what it was doing. It is retried by itself once an attempt is 6 hours old`);
@@ -15774,6 +15775,30 @@ function lastReadingFull(a) {
   });
 }
 const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
+// The fleet's Claude capacity across every cswap account, for the operator and the supervisors: how many
+// have room, the active one's use, and whether the room left lasts until a full account resets. cswap
+// projects each window (projectedExhaustionAt, willLastToReset); a gap is room that runs out first. An
+// account whose usage can't be read is neither room nor full: it's counted as unknown, never as none.
+function capacityOf(rows) {
+  const usable = rows.filter((a) => !a.disabled);
+  const room = usable.filter(accountHasRoom);
+  const full = usable.filter(accountKnownFull);
+  const unknown = usable.length - room.length - full.length;
+  const week = (a) => a?.usage?.sevenDay ?? a?.lastGoodUsage?.sevenDay ?? null;
+  const pct = (w) => (typeof w?.pct === 'number' ? Math.round(w.pct) : null);
+  const active = rows.find((a) => a.active);
+  const resets = full.map((a) => [a?.usage?.fiveHour, week(a)].filter((w) => w?.pct >= 100 && w.resetsAt).map((w) => w.resetsAt).sort().pop()).filter(Boolean).sort();
+  const lasts = room.some((a) => mainWindows(a).every((w) => w.willLastToReset !== false));
+  const outs = room.map((a) => mainWindows(a).map((w) => w.projectedExhaustionAt).filter(Boolean).sort()[0]).filter(Boolean).sort();
+  const runsOut = lasts || outs.length < room.length ? null : outs.pop() ?? null;
+  const nextReset = resets[0] ?? null;
+  return {
+    accounts: usable.length, room: room.length, unknown,
+    active_week_pct: pct(week(active)), active_5h_pct: pct(active?.usage?.fiveHour),
+    runs_out_at: runsOut, next_reset_at: nextReset,
+    gap: !!(room.length && runsOut && nextReset && Date.parse(runsOut) < Date.parse(nextReset)),
+  };
+}
 // One switch, and what it said, whatever the exit code: a switch that stays put is not a failure.
 function switchAccount(bin, args) {
   const r = runCswap(bin, ['switch', ...args, '--json']);
@@ -15829,6 +15854,23 @@ function paneBottom(target) {
   let text = '';
   try { text = execFileSync('tmux', ['capture-pane', '-p', '-t', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: TMUX_TIMEOUT_MS }); } catch {}
   return text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-15);
+}
+// Whether a pane (the box's operator, which no project's dashboard looks after) is stopped at a usage
+// limit, and whether there is room to start it again: none (not stopped at a limit), unsafe (stopped,
+// but a person, a draft or another prompt is there: left alone), room (the machine's active cswap
+// account has room: relaunch it on the same conversation), no-room (every account is at its limit),
+// or unknown (no cswap, or its accounts can't be read). The box's minute loop acts on it.
+function limitState(target) {
+  const st = limitStop(paneBottom(target));
+  if (!st.limit) return 'none';
+  if (!paneStoppedAtLimit(target)) return 'unsafe';
+  const bin = findCswap();
+  const rows = bin ? cswapAccounts(bin) : null;
+  if (!rows) return 'unknown';
+  const active = rows.find((a) => a.active);
+  if (active && accountHasRoom(active)) return 'room';
+  const usable = rows.filter((a) => !a.disabled);
+  return usable.length && usable.every(accountKnownFull) ? 'no-room' : 'unknown';
 }
 // A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
 // starts a relaunch, and makeSession again right before it replaces the process (worktree_setup may
@@ -16760,7 +16802,7 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
   if (plainText(dim === -1 ? text : text.slice(0, dim)).trim()) return 'typing';
   return busy ? 'busy' : 'ready';
 }
-const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine pane-state <pane>';
+const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine limit-state <pane> | machine pane-state <pane>';
 // tell and alert speak on the machine: the operator's, or the owner's at a terminal; never a session
 // in a fleet, which would be speaking as someone else.
 function machineSpeaker(what) {
@@ -16773,6 +16815,10 @@ function cmdMachine() {
   if (sub === 'pane-state') {
     if (!positional[1]) die(machineUsage, 2);
     return out(paneState(positional[1]));
+  }
+  if (sub === 'limit-state') {
+    if (!positional[1]) die(machineUsage, 2);
+    return out(limitState(positional[1]));
   }
   if (sub === 'alert') return machineAlert(words);
   if (sub === 'tell') return machineTell(words);
@@ -17916,6 +17962,14 @@ async function machineStatus() {
   // the freshest of each project's record of its accounts (accounts-tick writes it each minute); cswap itself is never run here
   const acc = roots.map((r) => { try { const a = readJson(path.join(r, 'docs', 'devteam', 'run', 'accounts.json')); return a && typeof a.at === 'string' ? a : null; } catch { return null; } }).filter(Boolean).sort((x, y) => y.at.localeCompare(x.at))[0];
   out(acc ? `machine: accounts ${acc.cswap ? 'cswap' : 'no-cswap'} active=${acc.active ?? '?'} exhausted=${acc.exhausted ?? false} no-room=${acc.active_no_room ?? false} needs-login=${(Array.isArray(acc.needs_login) ? acc.needs_login.join(',') : '') || '-'} as of ${acc.at}` : 'machine: accounts ? (no dashboard has recorded any)');
+  const cap = acc?.capacity;
+  if (cap && typeof cap.accounts === 'number') {
+    const when = (t) => (t ? t.slice(0, 16).replace('T', ' ') : '-');
+    // NONE only when every account is known to be full: usage that can't be read is unknown, not none
+    const unknown = typeof cap.unknown === 'number' ? cap.unknown : 0;
+    const flag = cap.room === 0 && unknown === 0 && cap.accounts > 0 ? ' NONE' : cap.gap ? ' GAP' : cap.room + unknown <= 1 && cap.accounts > 1 ? ' THIN' : '';
+    out(`machine: capacity ${cap.room} of ${cap.accounts} accounts with room${unknown ? `, ${unknown} unknown (usage unreadable)` : ''}${flag}; active ${cap.active_week_pct ?? '?'}% week, ${cap.active_5h_pct ?? '?'}% 5h; room runs out ${cap.runs_out_at ? when(cap.runs_out_at) : cap.room ? 'after the next reset' : unknown ? 'unknown' : 'now'}; next reset ${when(cap.next_reset_at)}`);
+  }
   // a hub that doesn't answer and each project's dashboard: nothing else says they went down
   const alert = readText(path.join(os.homedir(), '.box', 'alert'))?.trim();
   out(`machine: hub ${HUB_PORT} ${await hubLine(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
@@ -17960,7 +18014,9 @@ async function machineStatus() {
     const qs = openQuestionsOf(root);
     const q = qs ? qs.filter((x) => x?.id && !(notes && notes.includes(x.id))).length : '?';
     const ks = harvestOf(root, notes);
-    if (hello.alert) flagged.push(`attention: ${n}: ${hello.alert}`);
+    // the box's own alert has the hub line; only the project's part is this project's attention
+    const ownAlert = alertLessBox(hello.alert, hello.box_alert);
+    if (ownAlert) flagged.push(`attention: ${n}: ${ownAlert}`);
     const state = p ? paneState(p) : null;
     // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
     // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
@@ -18034,6 +18090,7 @@ function cmdAccountsTick() {
     const rows = cswapAccounts(bin);
     if (rows) {
       state.needs_login = rows.filter((a) => a.usageStatus === 'relogin_required').map((a) => String(a.alias ?? a.email ?? a.number));
+      state.capacity = capacityOf(rows);
       const usable = rows.filter((a) => !a.disabled);
       if (usable.length && usable.every(accountKnownFull)) state.exhausted = true;
       const active = rows.find((a) => a.active);
@@ -19302,7 +19359,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   every(refreshHello, 10000);
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -24056,6 +24113,12 @@ function boxAlert() {
     return readText(f)?.trim().slice(0, 200) || null;
   } catch { return null; }
 }
+// box_alert is the machine's, the same on every project's hello, so a hub or gateway on this kit
+// shows it once, on the Overview, and not as a "!" on every project's tab. alert still ends with it,
+// after " · ", so an older hub or gateway, which reads only alert, still shows and pushes it (hub: 1
+// stays: the change is additive); a reader on this kit takes it off again (alertLessBox).
+// The box's alert stays the LAST part of alert: alertLessBox, the hub's ownAlert and the gateway's
+// alertNews all take it off as a suffix.
 // Worked out once a process: cmdHello reads it twice.
 const helloAlert = (() => {
   let memo;
@@ -24067,6 +24130,15 @@ const helloAlert = (() => {
   };
   return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
 })();
+// A hello's alert, less the box's alert folded in at its end: the project's own part, or null. Matched
+// as the whole alert or a " · " suffix, never split, so a box alert holding " · " still comes off.
+function alertLessBox(alert, box) {
+  const a = typeof alert === 'string' ? alert.trim() : '';
+  const b = typeof box === 'string' ? box.trim() : '';
+  if (!a || !b) return a || null;
+  if (a === b) return null;
+  return a.endsWith(` · ${b}`) ? a.slice(0, -(b.length + 3)).trim() || null : a;
+}
 // The hub's Overview: is this project moving, and if not, why. From the log in one pass; from git,
 // only whether each ticket has merged (main's log and the refs, one call each under cmdHello's
 // read cache, never one per ticket), so hello stays cheap at every 10 s.
@@ -24186,7 +24258,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();
@@ -25463,7 +25535,7 @@ Setup and roles
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
   recover [--dry-run] [--force] [--here] | recover --machine [--dry-run] [--force] [--in <dir>…] [--was-up <list>] [--session s] [--only <repo>]   after a restart (a dead laptop, a redeploy): bring back this repo's supervisor, or every repo's on this machine, if it was up and its fleet isn't held, on its exact conversation where the harness can (Claude Code); --force also starts one the owner stopped or whose fleet is held; --here runs it in this terminal; safe to run twice. --in adds every adopted repo in a folder; --was-up names a list of roots that were up (a box's), used up as they come back; --session puts each in that tmux session as sup-<repo>
-  machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
+  machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane> | machine limit-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
   operator-thread new "<words>" [--title t] [--subject json] | say <ot-id> "<words>" | close <ot-id> | reopen <ot-id> ["<words>"] | start | reply <ot-id> "<words>" | list [--open | --waiting] [--json] | show <ot-id> | status   the owner's threads with the machine's operator, as the hub's Overview keeps them (beside the operator, in no repo): new, say, close, reopen and start are the owner's (start brings up a laptop's operator, once, in tmux session devteam-home); reply is the operator's; each owner turn is typed into the operator's pane as one line
   worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, or (a resume of one that ran aside) while the machine's memory is at its machine_memory_ceiling, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]

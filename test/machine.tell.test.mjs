@@ -171,3 +171,25 @@ test('status names the hub\'s kit, or says it is no hub, or down', async () => {
     if (open) srv.close();
   }
 });
+
+test('limit-state: whether the operator is stopped at a limit, and whether there is room to start it again', { skip: !hasTmux }, async () => {
+  const stub = path.join(tmp, 'cswap-limit');
+  const list = path.join(tmp, 'cswap-limit.json');
+  write(stub, `#!/bin/sh\n[ "$1" = list ] && cat ${JSON.stringify(list)}\n`);
+  fs.chmodSync(stub, 0o755);
+  const accounts = (...rows) => write(list, JSON.stringify({ schemaVersion: 1, accounts: rows }));
+  const state = (pane) => machine(['machine', 'limit-state', pane], { DEVTEAM_CSWAP: stub }).stdout.trim();
+  const menu = 'You\'ve hit your limit · resets 9pm\n❯ /rate-limit-options\n  What do you want to do?\n  ❯ 1. Stop and wait for limit to reset\n    2. Wait here, then continue automatically\n    3. Switch to usage credits\n  Enter to confirm · Esc to cancel\n';
+  const stopped = agent({ screens: [menu] });
+  await shown(stopped.pane, 'What do you want');
+  accounts({ number: 1, email: 'a@x', active: true, usageStatus: 'ok', usage: { fiveHour: { pct: 10 }, sevenDay: { pct: 20 } } });
+  assert.equal(state(stopped.pane), 'room', 'stopped at the menu, and the active account has room');
+  accounts({ number: 1, email: 'a@x', active: true, usageStatus: 'ok', usage: { fiveHour: { pct: 100 }, sevenDay: { pct: 20 } } }, { number: 2, email: 'b@x', usageStatus: 'ok', usage: { fiveHour: { pct: 5 }, sevenDay: { pct: 100 } } });
+  assert.equal(state(stopped.pane), 'no-room', 'every account is at a limit');
+  const fine = agent({ screens: [box(prompt)] });
+  await shown(fine.pane, 'status');
+  assert.equal(state(fine.pane), 'none', 'not stopped: nothing to do');
+  assert.equal(machine(['machine', 'limit-state']).status, 2);
+  // no key ever reaches the pane
+  assert.equal(stopped.keys(), '');
+});
