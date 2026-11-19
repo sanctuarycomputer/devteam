@@ -2208,6 +2208,7 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
         [400, 'no name', { body: { data: pngBody.data } }],
         [400, 'an empty name', { body: { ...pngBody, name: '' } }],
         [400, 'a name of 201 characters', { body: { ...pngBody, name: 'n'.repeat(201) } }],
+        [400, 'a name with a control character', { body: { ...pngBody, name: 'p\u0000.png' } }],
         [400, 'bad base64', { body: { name: 'p', data: '***' } }],
         [400, 'no data', { body: { name: 'p', data: '' } }],
         [403, 'a View person', { headers: PV('p-v') }],
