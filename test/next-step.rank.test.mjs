@@ -151,7 +151,7 @@ test('a new rating never reopens an answered question, and the hash the owner sa
     assert.equal(F.run(old, ['log-check']).status, 0, 'the rating fields are the supervisor\'s to set');
     // the schema: the four rating fields are the supervisor's to set on a question, and nobody else's
     const S = json(fs.readFileSync(path.join(kit, 'schema/log.schema.json'), 'utf8'));
-    assert.deepEqual(S['x-authority'].set.question.supervisor, ['status', 'reason', 'stake', 'urgency', 'settles', 'settles_if']);
+    assert.deepEqual(S['x-authority'].set.question.supervisor, ['status', 'reason', 'stake', 'urgency', 'settles', 'settles_if', 'reading', 'reading_withdrawn']);
     for (const k of ['stake', 'urgency', 'settles', 'settles_if']) assert.ok(S.$defs.types.question.properties[k].description && !S['x-authority'].set.question.owner.includes(k), k);
     assert.deepEqual(Object.keys(S.$defs.types.decision.properties.corrected.properties), ['reason', 'severity', 'impact', 'said', 'said_at', 'turn']);
     const L = json(/`{3}json devteam\s*\n([\s\S]*?)\n`{3}/.exec(fs.readFileSync(path.join(kit, 'governance/constitution.md'), 'utf8'))[1]);

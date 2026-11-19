@@ -2232,8 +2232,9 @@ function ratingHistory(q) {
 }
 // about_turn, seen, owner_said_turn and owner_said_at are written only when a question is asked and
 // nobody may set them after (x-authority), so they're left out too: an older kit, which drops them
-// as unknown, then hashes the question as this one does, and the owner's answer stands there.
-const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files', 'about_turn', 'seen', 'owner_said_turn', 'owner_said_at', 'said_at', 'answer_seen'];
+// as unknown, then hashes the question as this one does, and the owner's answer stands there. The
+// owner's pick and the supervisor's reading of words (and its void) come after the answer.
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files', 'about_turn', 'seen', 'owner_said_turn', 'owner_said_at', 'said_at', 'answer_seen', 'choice', 'reading', 'reading_void', 'reading_withdrawn'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
@@ -2262,10 +2263,41 @@ function questionView(q) {
   if (ans) [status, answer, answeredBy, answeredAt] = ['answered', ans.answer, 'owner', ans.at];
   else if (st?.status === 'defaulted') [status, answer, answeredBy, answeredAt] = ['defaulted', q.default, 'supervisor (default)', st.at];
   else if (st?.status === 'withdrawn') [status, answeredAt] = ['withdrawn', st.at];
+  const norm = (x) => String(x ?? '').trim().toLowerCase();
+  // The labels an answer may pick, as the dashboard draws them: the choices, else the options, and
+  // the recommendation when no label is it.
+  const drawn = (q.choices ?? []).length ? q.choices.map((c) => c?.label) : q.options ?? [];
+  const named = drawn.filter((l) => typeof l === 'string');
+  const labels = q.recommendation && !named.some((l) => norm(l) === norm(q.recommendation)) ? [q.recommendation, ...named] : named;
+  const inLabels = (x) => labels.find((l) => norm(l) === norm(x)) ?? null;
+  // An answer line with a choice key says what the owner picked (null: words alone); a line
+  // without one (older, or the terminal, chat or a turn) is read by its leading label.
+  const keyed = !!ans && Object.hasOwn(ans, 'choice');
+  const choice = keyed ? ans.choice : null;
+  const words = !keyed ? null : choice === null ? ans.answer : ans.answer.startsWith(`${choice} — `) ? ans.answer.slice(choice.length + 3) : '';
+  // Words alone count as a choice only through the supervisor's reading, which is checked here
+  // rather than trusted: of this answer, in the question's class, of a label in the set, resting on
+  // the owner's own words, and not voided by the owner or withdrawn by the supervisor. Only the
+  // question's own lines are read (this runs inside the fold), so a void takes effect from its time on.
+  const collapse = (x) => String(x).replace(/\s+/g, ' ').trim();
+  const wordChar = (c) => !!c && /[\p{L}\p{N}]/u.test(c);
+  const wholeWords = (cite, text) => {
+    const c = collapse(cite);
+    const t = collapse(text);
+    if (!c || [...c].length > 600) return false;
+    for (let i = t.indexOf(c); i >= 0; i = t.indexOf(c, i + 1)) if (!wordChar(t.slice(0, i).match(/.$/su)?.[0]) && !wordChar(t.slice(i + c.length).match(/^./su)?.[0])) return true;
+    return false;
+  };
+  const cancelled = (act) => q.updates.some((u) => (writerClass(u.by) === 'owner' && u.reading_void === act) || (writerClass(u.by) === 'supervisor' && u.reading_withdrawn === act));
+  const counts = (r) => isObj(r) && ['choice', 'cite', 'class', 'of', 'act'].every((k) => typeof r[k] === 'string') && r.of === ans.at && !!inLabels(r.choice) && wholeWords(r.cite, ans.answer) && r.class === (q.class ?? q.kind) && !cancelled(r.act);
+  const reading = keyed && choice === null ? q.updates.filter((u) => writerClass(u.by) === 'supervisor').map((u) => u.reading).find(counts) ?? null : null;
+  // The answer's label as the label-reading checks take it: the pick, else a reading that counts.
+  const label = keyed ? choice ?? (reading ? inLabels(reading.choice) : null) : answer === null ? null : String(answer).split(' — ')[0];
   // An answer agrees with the recommendation when it is that choice, with or without a note after
-  // " — " (the dashboard sends "<label> — <note>").
-  const norm = (x) => x.trim().toLowerCase();
-  let matched = ans ? !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation)) : null;
+  // " — " (the dashboard sends "<label> — <note>"); a line with a choice key, when its label is.
+  // Words alone never match until read, even when they say the recommendation.
+  const agrees = (l) => !!q.recommendation && l !== null && norm(l) === norm(q.recommendation);
+  let matched = !ans ? null : keyed ? agrees(label) : !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation));
   // A review's recommendation is its proposals: it agrees only when the owner kept every one of
   // them, decided every row, and the result still verifies. Only the owner's lines count here.
   let review = null;
@@ -2277,12 +2309,15 @@ function questionView(q) {
     review = { review: q.review, result: ans ? result : null, declined: ans ? declined : false, allow_partial: !!q.review.allow_partial, result_status: resultStatus };
     if (ans) matched = !review.declined && resultStatus === 'verified' && (result?.proposed ?? 0) > 0 && result.kept === result.proposed && result.undecided === 0;
   }
+  // the owner's own agreement, for trust: a reading is the supervisor's, never the owner's
+  const agreedByOwner = !ans ? null : keyed ? agrees(choice) : matched;
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: isObj(q.change) && Array.isArray(q.change.order) ? null : q.change ?? null, ...(isObj(q.change) && Array.isArray(q.change.order) ? { order: q.change.order } : {}), met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, no_default: q.no_default ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
+    labels, choice, words, in_words: keyed ? choice === null : null, label, reading, read_by: reading ? 'supervisor' : null, agreed_by_owner: agreedByOwner,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
     about_turn: q.about_turn ?? null, seen: q.seen ?? null, owner_said_turn: q.owner_said_turn ?? null, owner_said_at: q.owner_said_at ?? null,
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
@@ -6260,6 +6295,8 @@ function ownerAnswer(qid, what) {
   // An answer approves what it said yes to: the owner's answer must be the question's
   // recommendation (a review, its verified result). Answered any other way, the owner declined or
   // changed it, and the supervisor asks again; a secrets question approves by what was posted.
+  // Words alone approve nothing until the supervisor reads them as one choice, citing them.
+  if (v.in_words && !v.reading) die(`${what}: ${qid} was answered in the owner's own words ("${String(v.words).slice(0, 80)}"), not a choice: read them with answer ${qid} --read "<label>" --cite "<their words>" --class ${v.class ?? v.kind}, or ask back in its thread when they fit more than one choice`);
   if (!(v.secrets ?? []).length && v.kind !== 'review' && !v.matched) die(`${what}: ${qid} was answered "${String(v.answer ?? '').slice(0, 80)}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ' (it has none)'}: that approves nothing; ask again for what the owner wants`);
   return v;
 }
@@ -7665,10 +7702,47 @@ function cmdAnswer() {
   const [id, ...restWords] = positional;
   const reviewResult = flagStr('review-result');
   const decline = !!flags.decline;
+  // --read: the supervisor reads words the owner answered alone as one choice, citing the words it
+  // rests on. It is a call in the question's class, which the owner can correct: its act, then the
+  // reading, which questionView checks again itself.
+  const readWords = () => {
+    supervisorOnly('answer --read');
+    const [label, cite, cls] = ['read', 'cite', 'class'].map(flagStr);
+    if (!id || !label || !cite || !cls || restWords.length) die('usage: answer <qid> --read "<label>" --cite "<the owner\'s words it rests on>" --class <the question\'s class>   (supervisor)');
+    for (const f of ['choice', 'in-words', 'defaulted', 'from-chat', 'from-turn', 'review-result', 'decline', 'files', 'autonomy', 'rule']) if (flags[f] !== undefined) die(`answer --read records the supervisor's reading of the owner's words: not with --${f}`);
+    const q = logGet(id);
+    const v = q?.type === 'question' ? questionView(q) : null;
+    if (!v) die(`no question ${id}`);
+    if (v.status !== 'answered') die(`${id} is not answered by the owner (${v.status}): a reading reads the owner's own words, never silence or a default`);
+    if (v.in_words === null) die(`${id}'s answer carries no pick of its own (an older line, or one from the terminal, chat or a thread): its leading label is the answer; nothing to read`);
+    if (!v.in_words) die(`${id} was answered with a pick ("${v.choice}"): that is the owner's choice; nothing to read`);
+    if (v.reading) die(`${id} is already read as "${v.reading.choice}" (${v.reading.act}): a misreading is corrected (correct ${v.reading.act}), never read over`);
+    const picked = v.labels.find((l) => l.trim().toLowerCase() === label.trim().toLowerCase());
+    if (!picked) die(`--read "${label}" is not one of ${id}'s choices (${v.labels.join(', ') || 'it has none'})`);
+    if (cls !== (v.class ?? v.kind)) die(`--class ${cls}: ${id} was asked in ${v.class ?? v.kind}; a reading is a call in the question's class`);
+    if (OWNER_ACTS.includes(cls)) die(`${cls} acts are the owner's: ask back in its thread`);
+    // the cite as the view will check it: everything else here already passes, so only the cite can fail
+    const said = cite.replace(/\s+/g, ' ').trim();
+    const reading = { choice: picked, cite: said, class: cls, of: v.answered_at };
+    if (!questionView({ ...q, updates: [...q.updates, { at: nowIso(), by: 'supervisor', reading: { ...reading, act: '' } }] }).reading) die(`--cite "${said.slice(0, 80)}" is not the owner's words on ${id} as whole words: quote 1 to 600 characters of them exactly`);
+    const act = appendLog({ type: 'act', class: cls, what: `read the owner's words on ${id} ("${said}") as "${picked}"`, refs: [id], reversible: true }, 'supervisor');
+    appendLog({ type: 'question', op: 'set', id, reading: { ...reading, act: act.id } }, 'supervisor');
+    out(`read ${id} as "${picked}" (${act.id}); the owner can correct it with correct ${act.id}`);
+  };
+  if (flags.read !== undefined) return readWords();
+  // --choice records the owner's pick beside their words, --in-words their words alone: the owner's
+  // own answer only, never a default, a review's result or words the supervisor recorded
+  const picks = flags.choice !== undefined;
+  const inWords = flags['in-words'] !== undefined;
+  const pickFlag = picks ? 'choice' : inWords ? 'in-words' : null;
+  if (flags.choice === true) die('answer <qid> ["<words>"] --choice "<label>": name the choice picked');
+  if (picks && inWords) die('answer takes --choice or --in-words, not both: a pick (with any words), or words alone');
+  if (pickFlag) for (const f of ['defaulted', 'from-chat', 'from-turn', 'review-result', 'decline']) if (flags[f] !== undefined) die(`answer --${pickFlag} records the owner's own pick or words: not with --${f}`);
+  if (inWords && !restWords.join(' ').trim()) die('answer <qid> "<words>" --in-words: the words are the answer; give them');
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
   // dropped files go with the owner's own words, never with a default, a review's result or reason, or words the supervisor recorded
   if (flags.files !== undefined && (flags.defaulted || flags['review-result'] !== undefined || decline || flags['from-chat'] || flags['from-turn'] !== undefined)) die("--files go with the owner's own answer");
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]] [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline && !picks)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]] [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> ["<words>"] --choice "<label>"   |   answer <qid> "<words>" --in-words   |   answer <qid> --defaulted   (supervisor)   |   answer <qid> --read "<label>" --cite "<words>" --class <class>   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -7698,6 +7772,14 @@ function cmdAnswer() {
   const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
   const files = filesFlag();
   const v = openQuestion(id, ['open', 'defaulted']);
+  if (pickFlag) {
+    const own = v.kind === 'review' ? 'a review' : v.kind === 'goal-approval' ? 'a goal approval' : (v.secrets ?? []).length ? 'a secrets question' : null;
+    if (own) die(`answer --${pickFlag}: ${id} is ${own}, answered its own way, not by a pick or words alone`);
+  }
+  const picked = picks ? v.labels.find((l) => l.trim().toLowerCase() === flagStr('choice').trim().toLowerCase()) : undefined;
+  if (picks && !picked) die(`answer --choice "${flagStr('choice')}" is not one of ${id}'s choices (${v.labels.join(', ') || 'it has none'})`);
+  // a goal-met answer marks the goal met or not, so it is a pick, never words to read
+  if (inWords && v.class === 'goal-met') die(`${id} is a goal-met question: pick Yes or No (answer ${id} ["<words>"] --choice Yes|No)`);
   if (fromTurn && v.kind === 'review') die(`${id} is a review: its answer is the owner's result, which a turn can't carry`);
   const turn = fromTurn ? turnAnswer('answer', v) : null;
   // a credential question has two answers: the token posted, or don't use this sensor
@@ -7715,7 +7797,9 @@ function cmdAnswer() {
     if (reviewResult && restWords.length) die('answer --review-result takes no text: the result is the answer');
     if (decline && !restWords.join(' ').trim()) die(`answer ${id} "<why>" --decline: say why it goes back`);
   }
-  const answer = restWords.join(' ').trim();
+  const typed = restWords.join(' ').trim();
+  // a pick is written as the set spells it, with the owner's words after it
+  const answer = picked ? (typed ? `${picked} — ${typed}` : picked) : typed;
   let autonomy;
   if (flags.autonomy !== undefined) {
     const def = ladder().classes[v.class];
@@ -7728,7 +7812,7 @@ function cmdAnswer() {
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
   // a goal-met question is answered Yes or No, so a near-yes can't pass for a no
   if (v.class === 'goal-met' && v.met && !GOAL_MET_CHOICES.some((c) => sameAnswer(answer, c.label))) die(`${id} is answered Yes or No (a note may follow " — ")`);
-  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn, said_at: turn.said_at, answer_seen: turn.answer_seen } : {}), files };
+  const setLine = { type: 'question', op: 'set', id, answer, ...(pickFlag ? { choice: picked ?? null } : {}), autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn, said_at: turn.said_at, answer_seen: turn.answer_seen } : {}), files };
   if (files && !lineFits(setLine, by)) die(FILES_TOO_LONG);
   // a goal-met yes reads a repo or prod check again first: a failed check writes nothing
   const metPlan = v.class === 'goal-met' ? goalMetPlan(v, answer) : null;
@@ -7740,7 +7824,9 @@ function cmdAnswer() {
   // whole project.
   if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id], channel: fromChat ? 'chat' : turn ? 'thread' : undefined }, by);
   // The answer this question said would settle others: the supervisor withdraws each (its own act).
-  const settled = sameAnswer(answer, v.settles_if) ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
+  // with a pick recorded, the pick decides it: words alone settle nothing
+  const settles = pickFlag ? !!picked && sameAnswer(picked, v.settles_if) : sameAnswer(answer, v.settles_if);
+  const settled = settles ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
   const settledNote = settled.length ? `it settles ${plural(settled.length, 'open question')} (${settled.join(', ')}): withdraw each with withdraw <qid> --reason "settled by the owner's answer to ${id}"` : '';
   if (!fromChat && !turn) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${metNote ? `; ${metNote}` : ''}${settledNote ? `; ${settledNote}` : ''}${droppedWords(files)}`, droppedPaths(files));
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : turn ? ` (from ${turn.turn}; listed on the dashboard for the owner to check)` : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
