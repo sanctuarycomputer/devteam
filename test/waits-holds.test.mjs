@@ -241,7 +241,80 @@ test('waits A4: a hold with no cause, a cause in no known form or not in the log
     // a good cause first does not let a self-wait through
     refused(dir, hold(T, 'kit-09-elsewhere', V), `${V} waits on ${T} itself`);
     // U may still be held for something else, and V for an unrelated ticket of another goal
+    accepted(dir, hold(U, 'external:x', '--until', day(3)), {}, U);
     accepted(dir, hold(V, 'kit-09-elsewhere'), {}, V);
+  });
+
+  await t.test('a superseded or merged ticket is not the hold itself: its dependency and its hold are not followed', () => {
+    // kit-03-third (superseded) and kit-02-other (merged) each depend on T
+    const U = 'kit-02-other';
+    const V = 'kit-03-third';
+    const { dir } = fixture('a4-dead', { [U]: { depends_on: [T] }, [V]: { depends_on: [T], superseded_by: 'kit-09-elsewhere' } });
+    const hold = (...causes) => ['ticket', 'hold', T, '--reason', 'r', '--for', ...causes];
+    refused(dir, hold(U), `${U} waits on ${T} itself`);
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', `${U}: landed`], { cwd: dir, env: envFor(dir), stdio: 'pipe' });
+    accepted(dir, hold(V));
+    accepted(dir, hold(U));
+    // a stale hold on a superseded ticket that names T is not a hold in force
+    const W = 'kit-04-w';
+    logLine(dir, 'supervisor', ticketLine(W, 'fo', { superseded_by: 'kit-09-elsewhere' }));
+    logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: W, held: 'w', held_for: [T], held_until: null });
+    accepted(dir, hold(W));
+  });
+
+  await t.test('a draining goal\'s hold_for is followed while the drain is in force', () => {
+    const { dir, G2 } = fixture('a4-drain-chain');
+    // the supervisor's drain of G2 (feature fo, which does not own T) waits on T
+    logLine(dir, 'supervisor', { type: 'goal', op: 'set', id: G2, hold: { mode: 'drain', reason: 'waits on the probe' }, hold_for: [T], hold_until: null });
+    refused(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', `goal:${G2}`], `goal:${G2} waits on ${T} itself, through goal:${G2} -> ${T}`);
+    // the drain released: nothing to follow
+    logLine(dir, 'supervisor', { type: 'goal', op: 'set', id: G2, hold: { mode: 'run' } });
+    accepted(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', `goal:${G2}`]);
+  });
+
+  await t.test('ticket set and ticket add with held are held to the same rule as ticket hold', () => {
+    const { dir, G } = fixture('a4-set', { 'kit-03-third': { superseded_by: 'kit-02-other' } });
+    const q = question(dir);
+    const set = (id, body, ...rest) => ['ticket', 'set', id, '--json', JSON.stringify(body), ...rest];
+    // refused, nothing written
+    refused(dir, set(T, { held: 'x' }), 'a hold names what it waits on: --for <cause>');
+    refused(dir, set(T, { held: 'x' }), `ticket hold ${T} --for`);
+    refused(dir, set(T, { held: 'x', held_for: [] }), 'a hold names what it waits on: --for <cause>');
+    refused(dir, set(T, { held: '' }), 'release with null: {"held": null}');
+    refused(dir, set(T, { held: '  ', held_for: ['kit-02-other'] }), 'release with null: {"held": null}');
+    refused(dir, set(T, { held_for: ['kit-02-other'] }), 'held_for and held_until go with held');
+    refused(dir, set(T, { held: null, held_until: day(3) }), 'held_for and held_until go with held');
+    refused(dir, set(T, { held: 'x', held_for: ['kit-77-nothing'] }), 'kit-77-nothing is not in the log');
+    atDay(() => refused(dir, set(T, { held: 'x', held_for: ['external:x'], held_until: day(31) }), `--until ${day(31)} is more than 30 days ahead`));
+    refused(dir, set(T, { held: 'x', held_for: [`goal:${G}`] }), `goal:${G} waits on ${T} itself`);
+    refused(dir, set(T, { held: 'x', held_for: [q] }), `${T} waits on ${q}: hold only the part the answer gates`);
+    refused(dir, set(T, { held: 'x', held_for: [q] }, '--whole'), '--whole needs the reason no part can go ahead');
+    refused(dir, set('kit-03-third', { held: 'x', held_for: ['kit-02-other'] }), 'kit-03-third is superseded: nothing to hold', {}, 'kit-03-third');
+
+    // accepted: causes de-duplicated and trimmed, no held_until written as null
+    const line = accepted(dir, set(T, { held: 'x', held_for: ['kit-02-other', ' kit-02-other '] }));
+    assert.equal(line.held, 'x');
+    assert.deepEqual(line.held_for, ['kit-02-other']);
+    assert.equal(line.held_until, null);
+    const whole = accepted(dir, set(T, { held: 'x', held_for: [q] }, '--whole', 'w'));
+    assert.equal(whole.held, 'x (whole: w)');
+    assert.deepEqual(whole.held_for, [q]);
+    // a release through set carries the nulls
+    const rel = accepted(dir, set(T, { held: null }));
+    assert.deepEqual([rel.held, rel.held_for, rel.held_until], [null, null, null]);
+    assert.equal(show(dir, T).held, null);
+    // a set that does not touch the hold is untouched by the rule
+    const plain = accepted(dir, set(T, { title: 'Renamed' }));
+    assert.equal('held_for' in plain, false);
+
+    // ticket add with held: its own feature's goal is itself; another goal's ticket is not
+    const N = 'kit-07-new';
+    const add = (id, extra) => ['ticket', 'add', id, '--json', JSON.stringify({ ...ticketLine(id, 'fg'), id: undefined, type: undefined, ...extra })];
+    refused(dir, add(N, { held: 'x', held_for: [`goal:${G}`] }), `goal:${G} waits on ${N} itself`, {}, N);
+    refused(dir, add(N, { held: 'x' }), 'a hold names what it waits on: --for <cause>', {}, N);
+    const added = accepted(dir, add(N, { held: 'x', held_for: ['kit-09-elsewhere'] }), {}, N);
+    assert.equal(added.op, 'new');
+    assert.deepEqual(added.held_for, ['kit-09-elsewhere']);
   });
 
   await t.test('a hold whose cause\'s holds reach it is refused (one hop, two hops, to its goal)', () => {

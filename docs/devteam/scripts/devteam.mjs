@@ -4791,6 +4791,8 @@ function holdCause({ kind, id, causes, until, whole, ticket }) {
       for (const t of all) {
         if (seen.has(t.id) || !(t.depends_on ?? []).includes(at)) continue;
         seen.add(t.id);
+        // a superseded or merged dependent waits on nothing (kit-572 reads it resolved or failed)
+        if (!isActive(t) || mergeShaFor(t.id)) continue;
         queue.push(t.id);
         self.set(t.id, `${t.id} depends on it`);
       }
@@ -4803,8 +4805,9 @@ function holdCause({ kind, id, causes, until, whole, ticket }) {
   const subject = (c) => { const w = waitCause(c); return w?.form === 'ticket' ? w.id : w?.form === 'goal' ? `goal:${w.id}` : null; };
   const next = (s) => {
     if (s.startsWith('goal:')) { const g = logGet(s.slice(5)); return g?.type === 'goal' && goalMode(g) === 'drain' ? g.hold_for ?? [] : []; }
+    // only a hold in force: a superseded or merged ticket's stale held_for is not followed
     const t = tickets().get(s);
-    return t && isHeld(t) ? t.held_for ?? [] : [];
+    return t && isHeld(t) && isActive(t) && !mergeShaFor(t.id) ? t.held_for ?? [] : [];
   };
   for (const c of causes) {
     const start = subject(c);
@@ -4878,7 +4881,7 @@ function cmdFeature() { graphEdit('feature', SCHEMA['x-id'].keyed.feature); }
 function graphEdit(type, idRe) {
   const [sub, id] = positional;
   const by = logWriter();
-  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'   |   ${type} show <id>`);
+  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'${type === 'ticket' ? ' [--whole "<why>"]' : ''}   |   ${type} show <id>`);
   if (sub === 'show') return json(logGet(id) ?? die(`no ${type} ${id}`));
   if (!new RegExp(idRe).test(id)) die(`${type} id "${id}" must match ${idRe}`);
   if (!['supervisor', 'planner'].includes(writerClass(by))) die(`${type}s are written by the supervisor or a planner (plan-<feature>)`);
@@ -4903,6 +4906,28 @@ function graphEdit(type, idRe) {
   if (type === 'ticket' && RESERVED_LINKS.includes(body.component)) die(`component "${body.component}" is reserved (reserved: ${RESERVED_LINKS.join(', ')}): home is the repo that holds the kit, devteam the kit's own files; plan the ticket under another component`);
   // a mistyped feature can't be corrected afterwards (a ticket's feature is fixed), so it's caught here
   if (type === 'ticket' && sub === 'add' && by === 'supervisor' && body.feature !== CHORES && logGet(body.feature)?.type !== 'feature') die(`no feature "${body.feature}" (devteam.mjs feature add, or the feature's id as the log has it)`);
+  // a held body is held to ticket hold's rule (holdCause): a cause, a date in range, no wait on itself
+  if (type === 'ticket') {
+    if (typeof body.held === 'string' && !body.held.trim()) die('release with null: {"held": null} (a blank held reads released yet keeps its cause)');
+    if (typeof body.held === 'string') {
+      const t = sub === 'add' ? { ...body, id } : { ...logGet(id), ...body };
+      if (!isActive(t)) die(`${id} is superseded: nothing to hold`);
+      if (mergeShaFor(id)) die(`${id} is merged: nothing to hold`);
+      if (body.held_for !== undefined && body.held_for !== null && !Array.isArray(body.held_for)) die('held_for is a list of causes');
+      body.held_for = [...new Set((body.held_for ?? []).map((c) => String(c).trim()).filter(Boolean))];
+      body.held_until = typeof body.held_until === 'string' ? body.held_until.trim() || null : body.held_until ?? null;
+      if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
+      const whole = flagStr('whole')?.trim() || null;
+      const why = holdCause({ kind: 'ticket', id, causes: body.held_for, until: body.held_until, whole, ticket: t });
+      if (why) die(body.held_for.length ? why : `${why}; or ticket hold ${id} --for <cause>… --reason "<why>"`);
+      if (whole) body.held = `${body.held} (whole: ${whole})`;
+    } else if ((body.held_for ?? null) !== null || (body.held_until ?? null) !== null) {
+      die('held_for and held_until go with held: ticket hold <id> --reason "<why>" --for <cause>…');
+    } else if (body.held === null) {
+      body.held_for ??= null;
+      body.held_until ??= null;
+    }
+  }
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
