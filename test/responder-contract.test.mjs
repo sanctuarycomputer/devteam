@@ -108,7 +108,9 @@ test('responder-contract A1: the fake, its refusals by name, and readers droppin
         const nullThread = place({ ...cases['responder message blocked'].repaired, kind: 'handoff', thread: null }, cases['responder message blocked']);
         const discovery = place({ ...cases['responder observation finding-ack'].repaired, kind: 'discovery', subject: 'sensors' }, cases['responder observation finding-ack']);
         const detector = place({ ...cases['responder observation finding-ack'].repaired, kind: 'exception', detector: 'sensor' }, cases['responder observation finding-ack']);
-        for (const [what, id] of [['a handoff with thread null', nullThread], ['a responder discovery observation', discovery], ['a responder observation with a detector', detector]]) assert.ok(!found(id), `record finds no ${what}`);
+        // final-1 F1: metrics' line-pressure counts footprint-refusal observations by kind, from any writer
+        const footprint = place({ ...cases['responder observation finding-ack'].repaired, kind: 'footprint-refusal', subject: 'kit' }, cases['responder observation finding-ack']);
+        for (const [what, id] of [['a handoff with thread null', nullThread], ['a responder discovery observation', discovery], ['a responder observation with a detector', detector], ['a responder footprint-refusal observation', footprint]]) assert.ok(!found(id), `record finds no ${what}`);
         assert.ok(!open().includes(nullThread), 'the null-thread handoff is not open');
       } finally { F.restoreLog(snap); }
     });

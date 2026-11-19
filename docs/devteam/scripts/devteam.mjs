@@ -1571,7 +1571,7 @@ function integrity(o, file) {
       if (o.type === 'message' && !['handoff', 'info'].includes(o.kind)) return 'the responder sends handoff and info messages only';
       if (o.type === 'message' && o.re !== undefined && o.re !== null) return 'the responder replies to no message (re)';
       if (o.type === 'observation' && o.source !== 'responder') return "the responder's observations have source responder";
-      if (o.type === 'observation' && [...SET_ASIDE_KINDS, 'outcome', 'escaped-defect', 'discovery'].includes(o.kind)) return `the responder doesn't write ${o.kind} observations`;
+      if (o.type === 'observation' && [...SET_ASIDE_KINDS, 'outcome', 'escaped-defect', 'discovery', 'footprint-refusal'].includes(o.kind)) return `the responder doesn't write ${o.kind} observations`;
       // a detector line is the kit's own (sensor, findings), which readers act on by detector alone
       if (o.type === 'observation' && o.detector !== undefined && o.detector !== null) return "the responder's observations name no detector";
     }
@@ -8560,7 +8560,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s or the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -27039,7 +27039,7 @@ const HELP_CHECKS = `Checks and merging (quality.md)
 const HELP_SESSIONS = `Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
   gate <name> [--junit f] -- <cmd…>   run a gate and record it   |   gate --all: every settings gate here
-  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | messages [--open] [--to x] [--json]
+  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | send supervisor "<text>" --kind handoff --thread <t-id> (the responder's) | messages [--open] [--to x] [--json]
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line`;
 const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
@@ -27077,7 +27077,7 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
