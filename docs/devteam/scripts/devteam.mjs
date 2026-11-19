@@ -21468,15 +21468,36 @@ function recurringEntryProblems(name, entry) {
     const r = entry.run;
     if (typeof r !== 'string' || !r.length || r.length > R.fields.run.max || UNSAFE_TEXT.test(r)) bad('run', `one line of 1 to ${R.fields.run.max} characters`);
     else {
-      // what the built-in rules hide shows as a bracketed marker, counted before and after, so one
-      // typed in the command hides nothing; what an owner's sensor_scrub pattern would hide is refused
-      // whenever the pattern matches at all, whatever it writes in its place ("", "$1", "[ip]")
-      const count = (t) => { const c = new Map(); for (const x of t.match(/\[[^[\]\s]{1,60}\]/g) ?? []) c.set(x, (c.get(x) ?? 0) + 1); return c; };
-      const refs = r.replace(REF, '[var]');
-      const before = count(refs);
-      const hidden = [...count(scrubText(refs))].filter(([x, n]) => n > (before.get(x) ?? 0) && !SCRUB_ALLOWED.includes(x)).map(([x]) => x);
-      if (scrubExtra().some(([re]) => new RegExp(re.source, re.flags.replace('g', '')).test(refs))) hidden.push('sensor_scrub');
-      if (r.split(/\s+/).some((w) => hasCredentials(w.replace(/^(["'])(.*)\1$/, '$2'))) || hidden.length) bad('run', `it carries a credential${hidden.length ? ` (${hidden.join(', ')})` : ''}; ${CREDENTIALS_REFUSED}. A check runs with the supervisor's environment: name a secret by reference ($NAME), never by value`);
+      // Each whole reference becomes one plain word (VAR), and a quote right after one joins what
+      // follows to it, as the shell joins $X"abc" into one value. Every built-in scrub rule then runs
+      // as scrubText runs them, and a value a rule would hide must be references alone (or a host, a
+      // phone number or an email): a literal glued, quoted or spaced after a reference hides as much
+      // as one with no reference. A second reading joins the words inside each quoted string, so a
+      // header or a JSON value ("Authorization: Bearer $X abc…") is judged whole. What an owner's
+      // sensor_scrub pattern would hide is refused whenever it matches at all, whatever it writes.
+      const VAR = 'zzvarzzz';
+      const glue = (t) => t.replace(new RegExp(`${VAR}["']`, 'g'), VAR);
+      const named = r.replace(REF, VAR);
+      const hidden = new Set();
+      for (const text of [glue(named), glue(named.replace(/"[^"]*"|'[^']*'/g, (q) => q.replace(/\s+/g, '_')))]) {
+        let t = text;
+        for (const [re, to] of [...SCRUB_RULES, ...SCRUB_RULES]) {
+          t = t.replace(re, (...a) => {
+            const m = a[0];
+            const out = typeof to === 'function' ? to(...a) : to.replace(/\$(\d)/g, (_, i) => a[Number(i)] ?? '');
+            if (out === m) return m;
+            let p = 0;
+            while (p < m.length && p < out.length && m[p] === out[p]) p++;
+            let s = 0;
+            while (s < m.length - p && s < out.length - p && m[m.length - 1 - s] === out[out.length - 1 - s]) s++;
+            const literal = m.slice(p, m.length - s).split(VAR).join('').replace(/["'\s_]/g, '');
+            if (literal) for (const x of out.slice(p, out.length - s).match(/\[[a-z-]+\]/g) ?? ['[scrubbed]']) if (!SCRUB_ALLOWED.includes(x)) hidden.add(x);
+            return out;
+          });
+        }
+      }
+      if (scrubExtra().some(([re]) => new RegExp(re.source, re.flags.replace('g', '')).test(named))) hidden.add('sensor_scrub');
+      if (r.split(/\s+/).some((w) => hasCredentials(w.replace(/^(["'])(.*)\1$/, '$2'))) || hidden.size) bad('run', `it carries a credential${hidden.size ? ` (${[...hidden].join(', ')})` : ''}; ${CREDENTIALS_REFUSED}. A check runs with the supervisor's environment: name a secret by reference ($NAME), never by value`);
     }
   }
   whole('timeout_s', 1, R.fields.timeout_s.max);

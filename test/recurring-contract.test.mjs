@@ -66,6 +66,10 @@ test('validate accepts the design C1 examples', () => {
     health: check({ run: 'curl -s https://example.com/health && ping -c1 10.0.0.1' }),
     'api-bearer': check({ run: 'curl -H "Authorization: Bearer $TOKEN" https://example.com/api' }),
     'gh-runs': check({ run: 'GITHUB_TOKEN=${GH_TOKEN} gh run list' }),
+    // a value that is references alone, quoted or not, whole or in a header or JSON
+    'quoted-ref': check({ run: 'TOKEN="$X" cmd' }),
+    'json-ref': check({ run: `curl -d '{"password":"$PW"}' https://example.com` }),
+    'two-refs': check({ run: 'curl -u "$USER:$PASS" -H "Authorization: Bearer ${T}" https://example.com' }),
     'multi-line-prompt': chore({ prompt: 'Look at the branches.\n\tDelete the merged ones.' }),
     'quarterly-hours': check({ every: '2160h' }),
     'by-author': check({ run: 'git log --since=yesterday --author=bot@example.com' }),
@@ -110,6 +114,14 @@ const REFUSED = [
   ['run-fallback-secret', check({ run: 'API_KEY=${X:-abc123secret} cmd' }), 'run'],
   ['run-bearer-fallback', check({ run: 'curl -H "Authorization: Bearer ${TOKEN:-abc123secretvalue}" https://example.com' }), 'run'],
   ['run-suffix-secret', check({ run: 'TOKEN=${X}abc123secret cmd' }), 'run'],
+  // a literal after a whole reference, glued by a quote or spaced inside one (final-1b F1)
+  ['run-glued-dq', check({ run: 'TOKEN=$X"abc123secretvalue" cmd' }), 'run'],
+  ['run-glued-sq', check({ run: "TOKEN=$X'abc123secretvalue' cmd" }), 'run'],
+  ['run-braced-glued', check({ run: 'TOKEN=${X}"abc123secretvalue" cmd' }), 'run'],
+  ['run-spaced-quoted', check({ run: 'TOKEN="$X abc123secretvalue" cmd' }), 'run'],
+  ['run-json-spaced', check({ run: `cmd -d '{"password":"$X abc123secretvalue"}'` }), 'run'],
+  ['run-bearer-glued', check({ run: 'curl -H "Authorization: Bearer $X"abc123secretvalue h' }), 'run'],
+  ['run-bearer-spaced', check({ run: 'curl -H "Authorization: Bearer $X abc123secretvalue" h' }), 'run'],
   ['run-typed-marker', check({ run: 'echo [credentials]; curl --url=https://user:pw@host/x' }), 'run'],
   // what only the per-word credential check refuses (the scrubber leaves each as it is)
   ['run-quoted-sig', check({ run: 'curl "https://h/x?sig=abc"' }), 'run'],
@@ -491,5 +503,64 @@ test('dashboard.json is C5\'s upkeep.recurring', () => {
   for (const v of Object.values(peek)) {
     const { status, at, seconds, excerpt } = v.runs[0];
     assert.deepEqual(E.find((e) => e.name === v.name).last, { status, at, seconds, excerpt }, `${v.name}: last is the newest peek row`);
+  }
+});
+
+test('each dashboard state and signal is one the design\'s rules would give', () => {
+  const d = fixture('dashboard.json');
+  const peek = fixture('peek.json');
+  const snapshot = Date.parse(d.builtin.map((b) => b.last_at).filter(Boolean).sort().at(-1));
+  const DAY = 86400e3;
+  const at = (id) => { const m = /^o-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(id); return Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`); };
+  // a check's result line is written when its run ends (start + seconds, rounded up)
+  const line = (r) => `o-${isoOf(Date.parse(r.at) + Math.ceil(r.seconds) * 1000).replace(/[-:TZ]/g, '').replace(/^(\d{8})(\d{6})$/, '$1-$2')}000-supervisor`;
+  const notPassing = (r) => r.status !== 'pass';
+  for (const e of d.entries) {
+    const runs = peek[e.name]?.runs;
+    const grace = peek[e.name]?.entry.grace_days ?? (e.by === 'worker' ? 3 : 1);
+    // states (design "Chores", C5): a chore past grace_days after an unstarted slot is overdue, one
+    // started and not finished is started (never due again), held is due while Upkeep waits
+    if (e.kind === 'check') {
+      assert.ok(['passing', 'failing', 'never'].includes(e.state), `${e.name}: a check's state`);
+      if (e.state === 'never') assert.equal(e.last, null);
+      if (e.state === 'passing') assert.equal(e.last.status, 'pass', e.name);
+      if (e.state === 'failing') assert.ok(e.fails_in_a_row >= 1 && notPassing(e.last), e.name);
+    } else {
+      assert.ok(['due', 'overdue', 'started', 'held', 'never'].includes(e.state), `${e.name}: a chore's state`);
+      assert.equal(e.state === 'started', e.last?.status === 'started', `${e.name}: started exactly when its last run is unfinished`);
+      const late = snapshot - Date.parse(e.next_at);
+      if (e.state === 'due') assert.ok(late >= 0 && late < grace * DAY, `${e.name}: due within grace`);
+      if (e.state === 'overdue') assert.ok(late >= grace * DAY, `${e.name}: overdue past grace`);
+      if (e.state === 'held') assert.ok(late >= 0, `${e.name}: held while due`);
+    }
+    // signals (design "Jobs improving themselves")
+    for (const g of e.signals) {
+      const ev = g.evidence;
+      const where = `${e.name} ${g.kind}`;
+      assert.equal(['flapping', 'erroring', 'slow', 'failing-long', 'quiet'].includes(g.kind), e.kind === 'check', `${where}: a ${e.kind}'s signal`);
+      if (g.kind === 'erroring') {
+        assert.ok(ev.length >= 3, where);
+        if (runs) assert.deepEqual([...ev].sort(), runs.slice(0, 10).filter((r) => r.status === 'error').map(line).sort(), `${where}: 3 or more errors among its last 10`);
+      }
+      if (g.kind === 'flapping') {
+        assert.ok(ev.length >= 4 && ev.every((id) => snapshot - at(id) <= 30 * DAY), where);
+        if (runs) {
+          const c = [...runs].reverse().filter((r, i, a) => i > 0 && notPassing(r) !== notPassing(a[i - 1]));
+          assert.deepEqual([...ev].sort(), c.map(line).sort(), `${where}: 4 or more changes in 30 days`);
+        }
+      }
+      if (g.kind === 'slow') assert.equal(ev.length, 5, `${where}: the median of its last 5`);
+      if (g.kind === 'failing-long') assert.ok(e.state === 'failing' && e.ticket === null && snapshot - Date.parse(g.since) > 7 * DAY, `${where}: failing, no fix ticket, over 7 days`);
+      if (g.kind === 'quiet') {
+        const h = /^(\d+)h$/.exec(e.every);
+        assert.ok(h && Number(h[1]) <= 6, `${where}: every 6 hours or less`);
+        assert.ok(snapshot - Date.parse(e.registered.at) >= 90 * DAY && ev.length >= 100 && ev.every((id) => snapshot - at(id) <= 90 * DAY), `${where}: 100 passes in 90 days, landed 90 days ago`);
+      }
+      if (g.kind === 'idle') assert.ok(ev.length >= 3 && e.last.status === 'nothing', `${where}: its last 3 finished runs nothing`);
+      if (g.kind === 'overdue') {
+        assert.ok(ev.length >= 3, where);
+        if (runs) assert.ok(runs.slice(0, 3).every((r) => r.status === 'abandoned' || Date.parse(r.at) - Date.parse(r.slot) > grace * DAY), `${where}: its last 3 started past grace or abandoned`);
+      }
+    }
   }
 });

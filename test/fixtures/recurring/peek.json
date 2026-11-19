@@ -21,41 +21,81 @@
     "runs": [
       {
         "status": "error",
-        "at": "2026-11-19T06:27:06Z",
-        "slot": "2026-11-19T06:27:05Z",
+        "at": "2026-11-19T06:27:10Z",
+        "slot": "2026-11-19T06:27:09Z",
         "seconds": 1800,
         "excerpt": "timed out after 1800 s",
         "ref": null
       },
       {
         "status": "fail",
-        "at": "2026-11-19T00:27:05Z",
-        "slot": "2026-11-19T00:27:04Z",
+        "at": "2026-11-19T00:27:09Z",
+        "slot": "2026-11-19T00:27:08Z",
         "seconds": 241.6,
         "excerpt": "not ok 14 - merge keeps the queue order",
         "ref": null
       },
       {
+        "status": "error",
+        "at": "2026-11-18T18:27:08Z",
+        "slot": "2026-11-18T18:27:07Z",
+        "seconds": 1800,
+        "excerpt": "timed out after 1800 s",
+        "ref": null
+      },
+      {
+        "status": "pass",
+        "at": "2026-11-18T12:27:07Z",
+        "slot": "2026-11-18T12:27:06Z",
+        "seconds": 236.9,
+        "excerpt": "tests 412, pass 412",
+        "ref": null
+      },
+      {
+        "status": "error",
+        "at": "2026-11-18T06:27:06Z",
+        "slot": "2026-11-18T06:27:05Z",
+        "seconds": 1800,
+        "excerpt": "timed out after 1800 s",
+        "ref": null
+      },
+      {
+        "status": "pass",
+        "at": "2026-11-18T00:27:05Z",
+        "slot": "2026-11-18T00:27:04Z",
+        "seconds": 236.9,
+        "excerpt": "tests 412, pass 412",
+        "ref": null
+      },
+      {
         "status": "fail",
-        "at": "2026-11-18T18:27:04Z",
-        "slot": "2026-11-18T18:27:03Z",
-        "seconds": 238.2,
+        "at": "2026-11-17T18:27:04Z",
+        "slot": "2026-11-17T18:27:03Z",
+        "seconds": 241.6,
         "excerpt": "not ok 14 - merge keeps the queue order",
         "ref": null
       },
       {
         "status": "pass",
-        "at": "2026-11-18T12:27:03Z",
-        "slot": "2026-11-18T12:27:02Z",
+        "at": "2026-11-17T12:27:03Z",
+        "slot": "2026-11-17T12:27:02Z",
         "seconds": 236.9,
         "excerpt": "tests 412, pass 412",
         "ref": null
       },
       {
         "status": "pass",
-        "at": "2026-11-18T06:27:02Z",
-        "slot": "2026-11-18T06:27:00Z",
-        "seconds": 239.4,
+        "at": "2026-11-17T06:27:02Z",
+        "slot": "2026-11-17T06:27:01Z",
+        "seconds": 236.9,
+        "excerpt": "tests 412, pass 412",
+        "ref": null
+      },
+      {
+        "status": "pass",
+        "at": "2026-11-17T00:27:01Z",
+        "slot": "2026-11-17T00:27:00Z",
+        "seconds": 236.9,
         "excerpt": "tests 412, pass 412",
         "ref": null
       }
@@ -88,7 +128,7 @@
     "runs": [
       {
         "status": "started",
-        "at": "2026-11-16T00:04:00Z",
+        "at": "2026-11-19T08:00:00Z",
         "slot": "2026-11-16T00:00:00Z",
         "seconds": null,
         "excerpt": null,
@@ -96,14 +136,14 @@
       },
       {
         "status": "nothing",
-        "at": "2026-11-09T00:03:00Z",
+        "at": "2026-11-12T10:00:00Z",
         "slot": "2026-11-09T00:00:00Z",
         "seconds": null,
         "excerpt": null,
         "ref": "deps-06-recurring-deps-bump"
       },
       {
-        "status": "done",
+        "status": "abandoned",
         "at": "2026-11-02T00:05:00Z",
         "slot": "2026-11-02T00:00:00Z",
         "seconds": null,
@@ -111,8 +151,8 @@
         "ref": "deps-05-recurring-deps-bump"
       },
       {
-        "status": "abandoned",
-        "at": "2026-10-26T00:02:00Z",
+        "status": "done",
+        "at": "2026-10-26T00:05:00Z",
         "slot": "2026-10-26T00:00:00Z",
         "seconds": null,
         "excerpt": null,
