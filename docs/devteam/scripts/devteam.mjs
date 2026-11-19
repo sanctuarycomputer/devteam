@@ -15169,6 +15169,41 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
   };
 }
 
+// ===== live presence: the log's changes (presence@1 changed, kit-633) =====
+// What a dashboard calls `onChange` for: its instance's live log folder (run/log/, append-only files),
+// as the names and sizes of its *.jsonl files, differing from the last look. fs.watch only prompts a
+// look, and tick() looks too (the dashboard runs it each second): where watching isn't reliable (a
+// network disk, a watch that died or never started because the folder didn't exist yet) a change is
+// still seen within a second. A difference is all that counts, so a lock file, or an event with
+// nothing new, is nothing. look() is also run by each /api/data read, so a change the watch hasn't
+// delivered yet still counts. Returns { look, tick, close }.
+function presenceChanged(dir, onChange) {
+  let seen = null;
+  let watcher = null;
+  const sig = () => {
+    let names;
+    try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort(); } catch { return ''; }
+    return names.map((f) => { try { return `${f}:${fs.statSync(path.join(dir, f)).size}`; } catch { return `${f}:-`; } }).join('|');
+  };
+  const look = () => {
+    const s = sig();
+    if (seen === null || s === seen) { seen = s; return; }
+    seen = s;
+    try { onChange(); } catch {}
+  };
+  const close = () => { try { watcher?.close(); } catch {} watcher = null; };
+  const watch = () => {
+    if (watcher) return;
+    try {
+      watcher = fs.watch(dir, { persistent: false }, () => look());
+      watcher.on('error', close);
+    } catch { watcher = null; }
+  };
+  look();
+  watch();
+  return { look, tick: () => { watch(); look(); }, close };
+}
+
 function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
   // the hub alone runs its owner actions where it was started, as box-thread's run: on a box that is
@@ -18273,11 +18308,14 @@ async function imageChanges(since, to, { smoke = false } = {}) {
     }
   }
 }
-const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | changed --since <ref> [--to <ref>] [--smoke] [--json] | installed   (verify, check and bump take --dockerfile <path>)';
+const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | changed --since <ref> [--to <ref>] [--smoke] [--json] | installed   (verify, check and bump take --dockerfile <path>; a patch, vX.Y.Z with Z > 0, is stamped vX.Y.0 and bump takes only a minor)';
 // box-pins: verify, check and bump in the kit's own checkout (a KIT_VIEWS command; bump writes only
 // the Dockerfile's pins), and installed inside the box image, from anywhere.
 async function cmdBoxPins() {
   const mode = positional[0];
+  // the stamp a release needs (image-changes@1 §8): a patch (Z > 0) is stamped with the minor it
+  // builds on, vX.Y.0; a minor or major with its own tag. tag is a vX.Y.Z releaseFlag let through.
+  const stampFor = (tag) => { const [x, y, z] = tag.slice(1).split('.').map(Number); return z > 0 ? `v${x}.${y}.0` : tag; };
   if (mode === 'changed') {
     // image-changes@1: exit 0 patch, 3 minor, 2 can't tell (said on stderr, nothing on stdout)
     const usage = () => die(`usage: ${BOX_PINS_USAGE}`, 2);
@@ -18302,7 +18340,8 @@ async function cmdBoxPins() {
     const want = releaseFlag();
     const { text } = pinsFile();
     const pins = readPins(text);
-    if (want !== undefined && pins.release !== null && pins.release !== want) pins.problems.push(`DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}`);
+    const need = want === undefined ? undefined : stampFor(want);
+    if (need !== undefined && pins.release !== null && pins.release !== need) pins.problems.push(need === want ? `DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}` : `DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}'s minor, ${need} (a patch is stamped with the minor it builds on)`);
     for (const p of pins.problems) out(`box-pins verify: ${p}`);
     if (pins.problems.length) { process.exitCode = 1; return; }
     out(`box-pins verify: ok, ${pins.tools.length} tools, release ${pins.release}`);
@@ -18327,6 +18366,7 @@ async function cmdBoxPins() {
   if (mode === 'bump') {
     const release = releaseFlag();
     if (release === undefined) die(`box-pins bump needs --release vX.Y.Z\nusage: ${BOX_PINS_USAGE}`);
+    if (stampFor(release) !== release) die(`box-pins bump: --release ${release} is a patch; only a minor gets a release-prep PR (a patch keeps its minor's stamp, ${stampFor(release)}); nothing written`);
     const { file, text } = pinsFile();
     const pins = readPins(text);
     if (pins.problems.length) {
@@ -19215,13 +19255,42 @@ async function cmdDashboard() {
   // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes (a page
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
-  let dataRun = null;
+  // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
+  // served while it runs, and once finished while it is young (3 s since it finished, so the 10 s poll
+  // gets previews, settings and git at most about 3 s old) and current (dataEpoch, which the log's
+  // changes and every POST action move, is what it was when the build *started*: a change during a
+  // build makes it stale when it ends). A read that finds none waits for the next build, which starts
+  // once the running one has ended and 3 s have passed since the last start; every read waiting then
+  // shares it. A failed build is never kept.
+  const DATA_EVERY_MS = 3000;
+  let dataEpoch = 0;
+  let build = null;
+  let nextBuild = null;
+  let lastStart = -Infinity;
   let lastData = null;
-  const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-    dataRun = null;
-    if (!err && stdout) lastData = stdout;
-    resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
-  })));
+  const startBuild = () => {
+    lastStart = Date.now();
+    const b = { epoch: dataEpoch, finished: null, r: null };
+    b.done = new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+      if (!err && stdout) lastData = stdout;
+      b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
+      b.finished = Date.now();
+      resolve(b.r);
+    }));
+    build = b;
+    return b.done;
+  };
+  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_EVERY_MS));
+  const dashboardData = () => {
+    if (usable(build)) return build.done;
+    nextBuild ??= (async () => {
+      if (build && build.finished === null) await build.done;
+      await new Promise((w) => setTimeout(w, Math.max(0, lastStart + DATA_EVERY_MS - Date.now())));
+      nextBuild = null;
+      return startBuild();
+    })();
+    return nextBuild;
+  };
   // /api/threads: every thread, its turns and the questions asked in it, for the open card's 2 s poll
   // and the dock. dashboard-data is a slow child, and readLog() can't serve here: its cache is cleared
   // only by appendLog, which this process never calls, and it reads main's log through git. So this
@@ -19352,6 +19421,10 @@ async function cmdDashboard() {
   let draining = false;
   // live presence (presence@1): its /presence socket, on the same Host check as every route here
   const presence = presenceRelay({ okHost: (h) => [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(h ?? ''), ownerCwd: mainRoot, draining: () => draining });
+  // the log changed (presenceChanged): every page that said here is told (changed, at most each 500
+  // ms), and the kept /api/data build is stale (dataEpoch)
+  const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
+  every(logWatch.tick, 1000);
   const server = http.createServer(async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
@@ -19392,6 +19465,8 @@ async function cmdDashboard() {
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
+      // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
+      logWatch.look();
       // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
       // the run goes on and the next read has it, but no page waits minutes on a stuck child.
       let waited;
@@ -19662,6 +19737,10 @@ async function cmdDashboard() {
     const isOwnerSetting = name === 'owner-setting';
     const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
     if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
+    // an owner action, answered however it ends: the kept /api/data build is stale from its answer's
+    // head on, before a byte of it reaches the page, so the page's next read waits for a new build
+    const head = res.writeHead;
+    res.writeHead = function (...a) { dataEpoch += 1; return head.apply(this, a); };
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
     // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
@@ -19853,6 +19932,8 @@ async function cmdDashboard() {
     hubHandle?.close();
     hubHandle = null;
     presence.closeAll(1001);
+    // stopTimers stops its tick, not its fs.watch handle; a failed respawn's first tick starts it again
+    logWatch.close();
     for (const name of [...relays.keys()]) relayClose(name);
     server.close();
     await drained();
