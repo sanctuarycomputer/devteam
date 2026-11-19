@@ -14428,7 +14428,7 @@ function cmdMetrics() {
 // ticket's or goal's id, the chore's slug, <link>#<n>, <link>:<run id>, or the external words. state is
 // open | resolved | failed and since when it became so (null while open); here every cause is open,
 // and kit-572 (the log's forms) and kit-573 (pr: and run:) read the rest. holder_subject is the
-// next-move subject a hold's move is copied from (ticket:, chore:, goal:), null for a question (its
+// next-move subject a hold's move is copied from, its via (ticket:, chore:, goal:), null for a question (its
 // move is the owner's answer) and for pr:, run: and external:. Whether the kit can follow a cause, and
 // so whether it needs a date, is read from form (q, ticket, chore, goal), never from holder_subject.
 // Self-contained: its patterns copy the log schema's ids, LINK_ID and choreSlug's slug.
@@ -14440,6 +14440,8 @@ function waitCause(ref) {
   if (typeof ref !== 'string') return null;
   const cause = (form, id, holder_subject = null) => ({ form, id, state: 'open', since: null, holder_subject });
   if (ID.test(ref)) return ref.startsWith('q-') ? cause('q', ref) : null;
+  // shaped like a log id (a letter, a date, a time) but not one: never read as a ticket id
+  if (/^[a-z]-\d{8}-\d{9}/.test(ref)) return null;
   const i = ref.indexOf(':');
   const [kind, rest] = i === -1 ? [null, ref] : [ref.slice(0, i), ref.slice(i + 1)];
   if (kind === 'chore') return SLUG.test(rest) && !/\.lock$/.test(rest) ? cause('chore', rest, `chore:${rest}`) : null;
@@ -14449,10 +14451,10 @@ function waitCause(ref) {
     return m && LINK.test(m[1]) ? cause('pr', rest) : null;
   }
   if (kind === 'run') {
-    const m = rest.match(/^([^:]+):(\d+)$/);
+    const m = rest.match(/^([^:]+):([1-9]\d*)$/);
     return m && LINK.test(m[1]) ? cause('run', rest) : null;
   }
-  if (kind === 'external') return rest.length <= 200 && /^\S(?:[^\r\n]*\S)?$/.test(rest) ? cause('external', rest) : null;
+  if (kind === 'external') return rest.length <= 200 && /^\S(?:.*\S)?$/.test(rest) && !/[\r\n\v\f\u0085\u2028\u2029]/.test(rest) ? cause('external', rest) : null;
   if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
   return null;
 }

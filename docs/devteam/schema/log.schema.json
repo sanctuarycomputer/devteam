@@ -310,7 +310,7 @@
               "null"
             ],
             "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-            "description": "When the supervisor looks again at the drain if it still waits (a date, at most 30 days ahead when set); part of the hold line, like hold_for. null clears it.",
+            "description": "When the supervisor looks again at the drain if it still waits (a date); part of the hold line, like hold_for. null clears it.",
             "x-tip": "When the drain is looked at again if it still waits."
           },
           "decision": {

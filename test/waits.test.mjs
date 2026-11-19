@@ -93,11 +93,11 @@ test('waits A1: holds and follow-ups carry their fields in the log, and the fold
     const cases = [
       ['held_for', (dir) => { logLine(dir, 'supervisor', ticketNew()); logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: TICKET, held: 'x', held_for: Q }); }],
       ['hold_for', (dir) => { const g = readyGoal(dir); goalSet(dir, 'supervisor', g, { hold: DRAIN.hold, hold_for: TICKET }); }],
-      ['hold', (dir) => { const g = readyGoal(dir); goalSet(dir, 'supervisor', g, { hold: { ...DRAIN.hold, hold_for: [TICKET] } }); }],
+      ['hold\.hold_for', (dir) => { const g = readyGoal(dir); goalSet(dir, 'supervisor', g, { hold: { ...DRAIN.hold, hold_for: [TICKET] } }); }],
       ['held_until', (dir) => { logLine(dir, 'supervisor', ticketNew()); logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: TICKET, held: 'x', held_until: 'next week' }); }],
     ];
     for (const [field, write] of cases) {
-      const dir = project(`a1-refused-${field.replace('_', '-')}`);
+      const dir = project(`a1-refused-${field.replace(/\W+/g, '-')}`);
       write(dir);
       const r = logCheck(dir);
       assert.notEqual(r.status, 0, `${field}: log-check refuses it`);
@@ -110,6 +110,29 @@ test('waits A1: holds and follow-ups carry their fields in the log, and the fold
     assert.equal(hold.additionalProperties, false);
     assert.deepEqual(Object.keys(hold.properties), ['mode', 'reason', 'fleet', 'undoes', 'prior', 'host', 'move']);
     for (const t of ['ticket', 'goal']) for (const k of t === 'ticket' ? ['held_for', 'held_until', 'from'] : ['hold_for', 'hold_until']) assert.ok(SCHEMA.$defs.types[t].properties[k], `${t}.${k} is a top-level field`);
+  });
+
+  await t.test('who may set them: beside held and hold, and a goal\'s only with its hold, later', () => {
+    const set = SCHEMA['x-authority'].set;
+    for (const w of ['planner', 'supervisor', 'owner']) for (const k of ['held', 'held_for', 'held_until', 'from']) assert.ok(set.ticket[w].includes(k), `${w} may set ticket.${k}`);
+    for (const w of ['supervisor', 'owner']) for (const k of ['hold', 'hold_for', 'hold_until']) assert.ok(set.goal[w].includes(k), `${w} may set goal.${k}`);
+    for (const k of ['hold', 'hold_for', 'hold_until']) assert.ok(SCHEMA.$defs.types.goal['x-set-only'].includes(k), `goal.${k} is set later`);
+    for (const k of ['held_for', 'held_until', 'from']) assert.ok(!(SCHEMA.$defs.types.ticket['x-set-only'] ?? []).includes(k), `ticket.${k} may be set at creation`);
+    const cases = [
+      ['planner may set the ticket fields', (dir) => { logLine(dir, 'plan-waits', ticketNew()); logLine(dir, 'plan-waits', { type: 'ticket', op: 'set', id: TICKET, held: 'x', held_for: [Q], held_until: '2026-11-30', from: [O] }); }, true],
+      ['a goal cause is not set at creation', (dir) => { logLine(dir, 'owner', { type: 'goal', title: 'A goal to hold', status: 'ready', hold_for: [TICKET] }); }, false],
+      ['hold_until is a date', (dir) => { const g = readyGoal(dir); goalSet(dir, 'supervisor', g, { hold: DRAIN.hold, hold_for: [TICKET], hold_until: 'soon' }); }, false],
+      ['from names observations', (dir) => { logLine(dir, 'supervisor', ticketNew({ from: [Q] })); }, false],
+      ['an empty cause list is refused', (dir) => { logLine(dir, 'supervisor', ticketNew({ held: 'x', held_for: [] })); }, false],
+      ['an empty cause is refused', (dir) => { logLine(dir, 'supervisor', ticketNew({ held: 'x', held_for: [''] })); }, false],
+      ['a cause over 300 characters is refused', (dir) => { logLine(dir, 'supervisor', ticketNew({ held: 'x', held_for: [`external:${'a'.repeat(300)}`] })); }, false],
+    ];
+    for (const [what, write, passes] of cases) {
+      const dir = project('a1-who');
+      write(dir);
+      const r = logCheck(dir);
+      assert.equal(r.status === 0, passes, `${what}: ${r.out}${r.err}`);
+    }
   });
 
   // the fold: one project, the goal's hold changed line by line and read after each
@@ -145,6 +168,16 @@ test('waits A1: holds and follow-ups carry their fields in the log, and the fold
     noCause(v);
     const r = logCheck(dir);
     assert.equal(r.status, 0, r.out + r.err);
+    assert.ok(r.out.split('\n').some((l) => l.startsWith('ignored:') && l.includes(id) && l.includes('hold_for and hold_until go with a hold')), r.out);
+  });
+
+  await t.test('a cause with no hold beside another field: the field applies, the cause does not', () => {
+    const id = goalSet(dir, 'owner', g, { hold_for: [TICKET], hold_until: '2026-11-30', priority: 3 });
+    const v = show(dir, g);
+    assert.equal(v.priority, 3, 'the other field applies');
+    assert.equal(v.hold?.mode, 'run');
+    noCause(v);
+    const r = logCheck(dir);
     assert.ok(r.out.split('\n').some((l) => l.startsWith('ignored:') && l.includes(id) && l.includes('hold_for and hold_until go with a hold')), r.out);
   });
 
@@ -223,6 +256,8 @@ test('waits A2: waitCause() reads each cause form, the contract carries the new 
       'external:', 'external:   ', 'external: x', 'external:x ', 'external:a\nb', `external:${'a'.repeat(201)}`,
       'chore:', 'chore:Bad_Slug', 'chore:x.lock', 'goal:', 'goal:kit-1-x', 'goal:q-20261117-101010101-supervisor',
       '', ' kit-288-goal-moves', 'kit-288-goal-moves ', 'Kit-288-goal-moves', null, undefined, 42, ['kit-288-goal-moves'],
+      'g-20261117-101010101', 'q-20261117-101010101', 'run:home:0', 'run:home:007',
+      'external:a\u2028b', 'external:a\u2029b', 'external:a\u0085b', 'external:a\vb', 'external:a\fb', 'external:a\rb',
     ];
     for (const ref of refused) assert.equal(waitCause(ref), null, JSON.stringify(ref));
   });
@@ -234,6 +269,8 @@ test('waits A2: waitCause() reads each cause form, the contract carries the new 
     assert.equal(lit('TICKET'), SCHEMA['x-id'].keyed.ticket);
     assert.equal(lit('LINK'), SRC.match(/\nconst LINK_ID = \/(.+)\/;/)[1]);
     assert.equal(lit('SLUG'), SRC.match(/\nfunction choreSlug\(slugName\) \{\n {2}if \(!\/(.+?)\/\.test/)[1]);
+    const lock = '/\\.lock$/.test(';
+    assert.ok(SRC.match(/\nfunction choreSlug\(slugName\) \{\n.*\n/)[0].includes(lock) && body.includes(lock), "both refuse a slug ending in .lock");
   });
 
   await t.test('moves --json still carries next_move 1, and no row for the new subjects yet', () => {
@@ -281,7 +318,7 @@ test('waits A2: waitCause() reads each cause form, the contract carries the new 
     for (const k of ['follow-up:', 'thread:', 'answer:', 'duty:', 'record:']) assert.ok(kinds.has(k), `a ${k} move`);
     const refs = new Set(moves.filter((m) => m.ref).map((m) => m.ref.kind));
     for (const k of ['o', 't', 'a']) assert.ok(refs.has(k), `a ref of kind ${k}`);
-    assert.ok(moves.some((m) => kindOf(m.subject) === 'ticket:' && m.wait?.causes.some((c) => c.state === 'open') && m.wait.until), 'a ticket move with its wait');
+    assert.ok(moves.some((m) => kindOf(m.subject) === 'ticket:' && m.wait?.causes.some((c) => c.state === 'open') && m.wait.causes.some((c) => c.state === 'resolved') && m.wait.until), 'a ticket move with its wait: an open cause, a resolved one, and its date');
   });
 });
 
@@ -306,7 +343,14 @@ function valueLines(comment) {
 test("waits: the comment documents this goal's subjects, ref kinds and a ticket move's wait", () => {
   const c = contractComment();
   for (const s of ['follow-up:<o-id>', 'thread:<t-id>', 'answer:<q-id>', 'duty:<name>', 'record:<id>']) assert.ok(c.includes(s), `the comment names the subject ${s}`);
-  for (const [k, what] of [['o', 'follow-up'], ['t', 'thread'], ['a', 'act']]) assert.ok(c.split('\n').some((l) => new RegExp(`\\b${k}\\b`).test(l) && l.includes(what)), `the comment says ref kind ${k} is a ${what}`);
+  const lines = c.split('\n');
+  const r0 = lines.findIndex((l) => /^\/\/ {3}ref +\S/.test(l));
+  assert.ok(r0 >= 0, 'ref has its own definition line');
+  let r1 = r0 + 1;
+  while (r1 < lines.length && /^\/\/ {15}\S/.test(lines[r1])) r1++;
+  const ref = lines.slice(r0, r1).map((l) => l.replace(/^\/\/\s+/, '')).join(' ');
+  assert.match(ref, /kind q \| m \| ticket \| goal \| chore \| pr \| o \| t \| a;/, "ref's definition lists the kinds o, t and a");
+  for (const [k, what] of [['o', 'a follow-up observation\'s id'], ['t', 'a thread\'s id'], ['a', 'an act\'s id']]) assert.ok(ref.includes(`${k} ${what}`), `ref's definition says ${k} is ${what}`);
   assert.match(c, /^\/\/ {3}wait +\S.*/m, 'wait has its own definition line');
   assert.ok(c.includes('causes') && c.includes('until') && c.includes('{ "ref", "words", "state" }'), "wait's shape is given");
   assert.match(c, /always present/);
@@ -320,11 +364,16 @@ test('waits: each check name is one real test', () => {
   const found = [...self.matchAll(new RegExp(`${tag}(\\d+):`, 'g'))];
   assert.deepEqual(found.map((m) => Number(m[1])).sort(), [1, 2], 'the checks this ticket adds, once each');
   for (const m of found) {
-    const before = self.slice(Math.max(0, m.index - 6), m.index);
-    assert.equal(before, "test('", `${m[0]} is a test's own name`);
-    const line = self.slice(m.index, self.indexOf('\n', m.index));
-    assert.ok(!/\b(skip|todo)\b/.test(line), `${m[0]} is neither skipped nor todo`);
+    // a top-level test's own name: the call starts its line, and the name is followed by its function
+    // alone, with no options between
+    const start = self.lastIndexOf('\n', m.index) + 1;
+    assert.equal(self.slice(start, m.index), "test('", `${m[0]} is a top-level test's own name`);
+    const close = self.indexOf("', ", m.index);
+    assert.match(self.slice(close, close + 20), /^', (async )?\((t)?\) => \{/, `${m[0]} has no options: neither skipped nor todo`);
   }
+  // and nothing in the file skips or marks a test todo, in a call or an option
+  const no = ['.sk', 'ip(', '|.to', 'do(', '|sk', 'ip:', '|to', 'do:'].join('').split('|');
+  for (const x of no) assert.ok(!self.includes(x), `the file has no ${x}`);
   const fixtures = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? fixtures(path.join(d, e.name)) : [path.join(d, e.name)]));
   for (const f of [...fixtures(FIX), DT]) assert.ok(!new RegExp(`${tag}\\d+:`).test(fs.readFileSync(f, 'utf8')), `no check name in ${path.relative(here, f)}`);
 });
