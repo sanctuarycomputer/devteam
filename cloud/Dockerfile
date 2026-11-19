@@ -592,12 +592,15 @@ tick='Check on the box and your supervisors.'
 # the active account has room (machine limit-state): with room, its process is replaced and it starts
 # again on the same conversation, never a key sent to the menu (so nothing can pick usage credits), at
 # most once in 10 minutes; with every account at its limit, one alert says so, cleared once there is
-# room. A person, a draft or another prompt in the pane leaves it alone (unsafe).
+# room (room) or the operator is no longer stopped (none). A person, a draft or another prompt in the pane
+# leaves it alone (unsafe); unsafe and unknown (cswap unread, or a usage read that failed) change nothing,
+# and hold the alert: clearing on them would raise it again a minute later and push it to the owner again.
 ( last=0; raised=
   while :; do
     sleep "${DEVTEAM_OPERATOR_LIMIT_SECONDS:-60}"
     p=$(timeout 20 tmux display-message -p -t home:operator '#{pane_id}' 2>/dev/null) || continue
     ls=$(timeout 90 /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine limit-state "$p" 2>/dev/null) || continue
+    case $ls in room|none) if [ -n "$raised" ] && [ "$(cat "$HOME/.box/alert" 2>/dev/null)" = "$raised" ]; then box-alert --clear >/dev/null; fi; raised= ;; esac
     case $ls in
       room)
         now=$(date +%s)
@@ -615,9 +618,6 @@ tick='Check on the box and your supervisors.'
           raised="Every Claude account is at its usage limit, the operator's included. Fleets and the operator restart on their own once one resets or you add an account (cswap add)."
           box-alert "$raised" >/dev/null
         fi ;;
-      *)
-        if [ -n "$raised" ] && [ "$(cat "$HOME/.box/alert" 2>/dev/null)" = "$raised" ]; then box-alert --clear >/dev/null; fi
-        raised= ;;
     esac
   done ) &
 # The box's global tools, on the disk: edit the file to change them, and they come back each boot.

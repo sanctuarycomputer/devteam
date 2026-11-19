@@ -995,3 +995,69 @@ test('the minute loop brings back a lost tmux server as a boot does, from the li
   assert.deepEqual(c, []);
   assert.equal(recovers(), afterStop);
 });
+
+// The minute loop in cloud/Dockerfile's devteam-dev that brings the operator back from a usage limit,
+// run under sh with fakes first on PATH: machine limit-state answers from $STATES one line a minute (the
+// kit's path swapped for a fake), tmux notes each call, box-alert keeps ~/.box/alert as the real one does,
+// and sleep ends the loop once $STATES is used up (only the minute's sleep, 7 here: the 3 s one runs on).
+const limitLoop = () => {
+  const d = devteamDev();
+  const from = d.indexOf('( last=0; raised=');
+  assert.ok(from >= 0, 'the operator\'s limit loop');
+  const end = d.indexOf('  done ) &', from);
+  assert.ok(end > from, 'the end of the limit loop');
+  return [...d.slice(from, end), '  done )'].join('\n').replaceAll('/usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs', '"$FAKE_KIT"');
+};
+const limitFakes = path.join(tmp, 'limit-fakes');
+write(path.join(limitFakes, 'tmux'), '#!/bin/sh\n{ for a; do printf \'%s\\037\' "$a"; done; echo; } >> "$CALLS"\n[ "$1" = display-message ] && echo %9\nexit 0\n');
+write(path.join(limitFakes, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+write(path.join(limitFakes, 'sleep'), '#!/bin/sh\ncase $1 in 7) [ -s "$STATES" ] || kill -TERM "$PPID" ;; esac\nexit 0\n');
+write(path.join(limitFakes, 'box-alert'), '#!/bin/sh\necho "$*" >> "$ALERTS"\nmkdir -p "$HOME/.box"\nif [ "$1" = --clear ]; then rm -f "$HOME/.box/alert"; else printf \'%s\' "$1" > "$HOME/.box/alert"; fi\n');
+write(path.join(limitFakes, 'kit'), '#!/bin/sh\n[ "$1 $2 $3" = "machine limit-state %9" ] || exit 2\ns=$(head -n 1 "$STATES"); sed -i 1d "$STATES"\n[ "$s" = fail ] && exit 1\necho "$s"\n');
+for (const f of ['tmux', 'timeout', 'sleep', 'box-alert', 'kit']) fs.chmodSync(path.join(limitFakes, f), 0o755);
+const runLimitLoop = (states, env = {}) => {
+  const h = fs.mkdtempSync(path.join(tmp, 'limit-loop-'));
+  const f = (n) => path.join(h, n);
+  fs.writeFileSync(f('.states'), states.map((s) => `${s}\n`).join(''));
+  const r = spawnSync('sh', ['-c', [hubLine('note() {'), limitLoop()].join('\n')], { cwd: h, encoding: 'utf8', timeout: 30000, env: { PATH: `${limitFakes}:/usr/bin:/bin`, HOME: h, CALLS: f('.calls'), ALERTS: f('.alerts'), STATES: f('.states'), FAKE_KIT: path.join(limitFakes, 'kit'), DEVTEAM_OPERATOR_LIMIT_SECONDS: '7', ...env } });
+  const read = (n) => (fs.existsSync(f(n)) ? fs.readFileSync(f(n), 'utf8').split('\n').filter(Boolean) : []);
+  return { ...r, home: h, left: read('.states'), calls: read('.calls').map((l) => l.split('\x1f').slice(0, -1)).filter((c) => c[0] !== 'display-message'), alerts: read('.alerts'), alert: fs.existsSync(f('.box/alert')) ? fs.readFileSync(f('.box/alert'), 'utf8') : null, boxLog: read('box.log') };
+};
+
+test('the box\'s limit loop: one alert while every account is out, held through unknown and unsafe; a restart with room, at most once per cooldown', () => {
+  const r = runLimitLoop(['no-room', 'no-room', 'unknown', 'unsafe', 'fail', 'no-room', 'room', 'room', 'none']);
+  assert.ok(r.error === undefined, String(r.error));
+  assert.deepEqual(r.left, [], 'every minute was read');
+  assert.equal(r.alerts.length, 2, r.alerts.join('\n'));
+  assert.match(r.alerts[0], /^Every Claude account is at its usage limit/, 'raised once for the episode, not again after unknown, unsafe or a failed read');
+  assert.equal(r.alerts[1], '--clear', 'cleared once there was room');
+  assert.equal(r.alert, null);
+  const respawns = r.calls.filter((c) => c[0] === 'respawn-pane');
+  assert.deepEqual(respawns, [['respawn-pane', '-k', '-t', '%9', '-c', path.join(r.home, 'operator')]], 'one restart: the second room is inside the cooldown');
+  const keys = r.calls.filter((c) => c[0] === 'send-keys');
+  assert.equal(keys.length, 2, 'the launch line, then Enter');
+  assert.deepEqual(keys[0].slice(0, 4), ['send-keys', '-t', '%9', '-l']);
+  assert.match(keys[0][4], /^export DEVTEAM_ROLE=operator; claude --continue --dangerously-skip-permissions --append-system-prompt "\$\(cat \/opt\/devteam\/operator\.md\)" 'You were restarted after a usage limit/);
+  assert.deepEqual(keys[1], ['send-keys', '-t', '%9', 'Enter']);
+  assert.ok(r.calls.findIndex((c) => c[0] === 'respawn-pane') < r.calls.findIndex((c) => c[0] === 'send-keys'), 'no key before the stopped process is replaced: nothing reaches the limit menu');
+  assert.equal(r.boxLog.filter((l) => /restarting it on the same conversation/.test(l)).length, 1);
+
+  const again = runLimitLoop(['room', 'room'], { DEVTEAM_OPERATOR_LIMIT_COOLDOWN: '0' });
+  assert.equal(again.calls.filter((c) => c[0] === 'respawn-pane').length, 2, 'with the cooldown passed, a second restart');
+  assert.deepEqual(again.alerts, [], 'nothing raised, nothing to clear');
+
+  const back = runLimitLoop(['no-room', 'none', 'no-room']);
+  assert.deepEqual(back.alerts.map((a) => a.slice(0, 5)), ['Every', '--cle', 'Every'], 'none (no longer stopped) ends the episode; the next one raises again');
+  assert.deepEqual(back.calls.filter((c) => c[0] !== 'display-message'), [], 'no restart without room');
+
+  // someone else's alert in the slot is never cleared by this loop
+  const other = fs.mkdtempSync(path.join(tmp, 'limit-other-'));
+  fs.mkdirSync(path.join(other, '.box'));
+  const STATES = path.join(other, '.states');
+  fs.writeFileSync(STATES, 'none\n');
+  fs.writeFileSync(path.join(other, '.box', 'alert'), 'the operator\'s own');
+  const o = spawnSync('sh', ['-c', [hubLine('note() {'), limitLoop()].join('\n')], { cwd: other, encoding: 'utf8', timeout: 30000, env: { PATH: `${limitFakes}:/usr/bin:/bin`, HOME: other, CALLS: path.join(other, '.calls'), ALERTS: path.join(other, '.alerts'), STATES, FAKE_KIT: path.join(limitFakes, 'kit'), DEVTEAM_OPERATOR_LIMIT_SECONDS: '7' } });
+  assert.ok(o.error === undefined, String(o.error));
+  assert.equal(fs.readFileSync(path.join(other, '.box', 'alert'), 'utf8'), 'the operator\'s own');
+  assert.ok(!fs.existsSync(path.join(other, '.alerts')), 'box-alert never called');
+});

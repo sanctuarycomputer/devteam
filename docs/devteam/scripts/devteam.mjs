@@ -15631,12 +15631,6 @@ function paneBottom(target) {
   try { text = execFileSync('tmux', ['capture-pane', '-p', '-t', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: TMUX_TIMEOUT_MS }); } catch {}
   return text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-15);
 }
-// A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
-// starts a relaunch, and makeSession again right before it replaces the process (worktree_setup may
-// have run for a while in between). A split window could lose the wrong pane; a background shell's
-// work would die with the session. Nor is it replaced with a person at it: a half-typed line under
-// the banner, or a client on that pane that pressed a key lately (read from tmux each time, so it
-// can't outlive the client).
 // Whether a pane (the box's operator, which no project's dashboard looks after) is stopped at a usage
 // limit, and whether there is room to start it again: none (not stopped at a limit), unsafe (stopped,
 // but a person, a draft or another prompt is there: left alone), room (the machine's active cswap
@@ -15654,6 +15648,12 @@ function limitState(target) {
   const usable = rows.filter((a) => !a.disabled);
   return usable.length && usable.every(accountKnownFull) ? 'no-room' : 'unknown';
 }
+// A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
+// starts a relaunch, and makeSession again right before it replaces the process (worktree_setup may
+// have run for a while in between). A split window could lose the wrong pane; a background shell's
+// work would die with the session. Nor is it replaced with a person at it: a half-typed line under
+// the banner, or a client on that pane that pressed a key lately (read from tmux each time, so it
+// can't outlive the client).
 function paneStoppedAtLimit(target) {
   if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
   const st = limitStop(paneBottom(target));
