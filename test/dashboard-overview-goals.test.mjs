@@ -382,7 +382,7 @@ function goalsFixture(base, name = 'overview-goals') {
   ticket(ids.t1a, 'pay', 'the card form'); ticket(ids.t1b, 'pay', 'card capture');
   ticket(ids.t2a, 'receipts', 'mail the receipt'); ticket(ids.t2b, 'receipts', 'a receipt as a PDF');
   ticket(ids.t3a, 'invoices', 'the invoice button');
-  dt(['ticket', 'set', ids.t1b, '--json', JSON.stringify({ held: 'until the processor is chosen' })]);
+  dt(['ticket', 'set', ids.t1b, '--json', JSON.stringify({ held: 'until the processor is chosen', held_for: ['external:the processor choice'], held_until: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10) })]);
   // a worker's phase line, as the worker writes it (no command does): t1a and t2a are blocked
   const logDir = path.join(root, 'docs/devteam/run/log');
   fs.mkdirSync(logDir, { recursive: true });

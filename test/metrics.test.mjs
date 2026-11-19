@@ -58,3 +58,96 @@ test('the worker prompt names the author checks: each check seen failing, each c
     assert.match(first, /claim about code sourced with a file:line or a command/, first);
   } finally { F.done(); }
 });
+
+// A fixture of goals at priorities 2, 3, 5 and 9 (F.goal is 1), a feature for each, and ticket(id,
+// p, deps) to plan one under the goal at priority p.
+const priorityFixture = (name) => {
+  const F = threadsFixture(name);
+  const goal = (title, p) => F.sup(['goal', 'add', '--title', title, '--outcome', 'it ships', '--measure', 'share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'none', '--preconditions', 'a', '--priority', String(p)]);
+  const g = { 2: goal('High', 2), 3: goal('Middle', 3), 5: goal('Fifth', 5), 9: goal('Low', 9) };
+  for (const p of [2, 3, 5, 9]) F.sup(['feature', 'add', `fp${p}`, '--json', JSON.stringify({ title: `F${p}`, goals: [g[p]], stories: [{ id: `P${p}-S1`, text: 'it works', release: 'v1.0.0' }] })]);
+  const ticket = (id, p, deps = [], extra = {}) => F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: `fp${p}`, component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: [`P${p}-S1`], depends_on: deps, touches: [`src/${id}/**`], done_when: ['its test passes in CI'], ...extra })]);
+  const findings = () => JSON.parse(F.sup(['metrics', '--json'])).findings;
+  // what idle capacity offers (the fixture reads no machine, so memory never holds it back)
+  const idle = () => findings().find((x) => x.kind === 'idle-capacity' && /ready$/.test(x.subject))?.suggestion;
+  const rows = () => JSON.parse(F.sup(['ready', '--json'])).ready.map((r) => [r.id, r.priority, r.blocks?.priority ?? null]);
+  return { F, g, ticket, findings, idle, rows };
+};
+
+// Goal priority orders ready past fix tickets, and a ticket takes the best priority of the goals
+// that wait on it, directly or through other tickets.
+test('ready orders by effective goal priority: work a higher goal waits on goes first, marked blocks pN', () => {
+  const { F, g, ticket, idle, rows } = priorityFixture('ready-priority');
+  try {
+    // a p3 ticket waits on a p5 one; a p2 ticket waits on p9 work through another p9 ticket.
+    // Added in this order, so no order below is the order they were planned in.
+    ticket('pr-03-fifth', 5);
+    ticket('pr-04-middle', 3, ['pr-03-fifth']);
+    ticket('pr-01-low', 9);
+    ticket('pr-05-link', 9, ['pr-01-low']);
+    ticket('pr-02-high', 2, ['pr-05-link']);
+
+    assert.deepEqual(rows(), [['pr-01-low', 2, 2], ['pr-03-fifth', 3, 3]]);
+    assert.equal(JSON.parse(F.sup(['ready', '--json'])).ready[0].blocks.goal, g[2]);
+    const text = F.sup(['ready']).split('\n');
+    const at = (id) => text.findIndex((l) => l.includes(id));
+    assert.ok(at('pr-01-low') >= 0 && at('pr-01-low') < at('pr-03-fifth'), text.join('\n'));
+    assert.match(text[at('pr-01-low')], /\(blocks p2\)/);
+    assert.match(text[at('pr-03-fifth')], /\(blocks p3\)/);
+    // idle capacity names the workers to start in the same order
+    assert.equal(idle(), 'make workers for: pr-01-low, pr-03-fifth');
+
+    // the edge cut: the p9 tickets are their own priority again
+    F.sup(['ticket', 'set', 'pr-02-high', '--json', JSON.stringify({ depends_on: [] })]);
+    assert.deepEqual(rows(), [['pr-02-high', 2, null], ['pr-03-fifth', 3, 3], ['pr-01-low', 9, null]]);
+    assert.doesNotMatch(F.sup(['ready']), /blocks p2/);
+    assert.equal(idle(), 'make workers for: pr-02-high, pr-03-fifth, pr-01-low');
+
+    // a fix ticket (Upkeep's: no priority) still comes first, in ready and in what idle capacity names
+    F.hand('supervisor', { type: 'ticket', id: 'pr-06-fix', title: 'a fix', feature: 'chores', component: 'web', kind: 'fix', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['src/pr-06-fix/**'], done_when: ['it is fixed'] }, 1000);
+    assert.deepEqual(rows()[0], ['pr-06-fix', null, null]);
+    assert.equal(idle(), 'make workers for: pr-06-fix, pr-02-high, pr-03-fifth, pr-01-low');
+  } finally { F.done(); }
+});
+
+// Priority orders the queue and never gates it: while the only p2 work can't start (blocked on its
+// own goal's work, or held), a p9 ticket is ready and offered to idle capacity.
+test('a lower-priority ticket still starts while higher-priority work is blocked or held', () => {
+  const { F, ticket, idle, rows } = priorityFixture('ready-backfill');
+  try {
+    ticket('bf-01-first', 2, [], { held: 'waits on the owner', held_for: ['external:the owner'], held_until: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10) });
+    ticket('bf-02-then', 2, ['bf-01-first']);
+    ticket('bf-03-low', 9);
+    assert.deepEqual(rows(), [['bf-03-low', 9, null]]);
+    assert.deepEqual(JSON.parse(F.sup(['ready', '--json'])).held.map((h) => h.id), ['bf-01-first']);
+    assert.equal(idle(), 'make workers for: bf-03-low');
+  } finally { F.done(); }
+});
+
+// Only running goals give or pass on priority: a met goal's leftover ticket, a parked goal's ticket
+// (nor a chain through one), a drained goal's ticket (nor a chain through one), and a held goal a
+// ticket also serves push nothing.
+test('ready: met, parked and drained goals give no priority and pass none on', () => {
+  const { F, g, ticket, rows } = priorityFixture('ready-priority-live');
+  try {
+    F.sup(['feature', 'add', 'fp1', '--json', JSON.stringify({ title: 'F1', goals: [F.goal], stories: [{ id: 'P1-S1', text: 'it works', release: 'v1.0.0' }] })]);
+    F.sup(['feature', 'add', 'fp39', '--json', JSON.stringify({ title: 'F39', goals: [g[3], g[9]], stories: [{ id: 'P39-S1', text: 'it works', release: 'v1.0.0' }] })]);
+    ticket('lv-01-low', 9);
+    ticket('lv-02-met', 1, ['lv-01-low']);
+    ticket('lv-03-low', 9);
+    ticket('lv-04-parked', 3, ['lv-03-low']);
+    ticket('lv-05-high', 2, ['lv-04-parked']);
+    ticket('lv-06-low', 9);
+    ticket('lv-07-drained', 5, ['lv-06-low']);
+    ticket('lv-09-high', 2, ['lv-07-drained']);
+    ticket('lv-08-both', 39);
+    // while every goal runs, each low ticket takes the priority of what waits on it
+    assert.deepEqual(rows(), [['lv-01-low', 1, 1], ['lv-03-low', 2, 2], ['lv-06-low', 2, 2], ['lv-08-both', 3, null]]);
+    // the p1 goal met (the owner's word), p3 parked, p5 drained
+    F.hand('owner', { type: 'goal', op: 'set', id: F.goal, status: 'met' }, 1000);
+    F.owner(['goal', 'hold', g[3], 'park', '--owner', '--reason', 'later']);
+    F.sup(['goal', 'hold', g[5], 'drain', '--reason', 'paused', '--for', 'external:a pause', '--until', new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)]);
+    assert.deepEqual(rows(), [['lv-01-low', 9, null], ['lv-03-low', 9, null], ['lv-06-low', 9, null], ['lv-08-both', 9, null]]);
+    assert.doesNotMatch(F.sup(['ready']), /blocks p/);
+  } finally { F.done(); }
+});

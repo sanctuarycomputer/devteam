@@ -185,6 +185,7 @@ exit 0
       "evidence": [],
       "note": null,
       "new_because": null,
+      "no_default": null,
       "why_asked": {
         "reasons": []
       },
@@ -196,6 +197,17 @@ exit 0
       "matched": null,
       "hash": "<sha>",
       "rewritten": false,
+      "labels": [
+        "yes",
+        "no"
+      ],
+      "choice": null,
+      "words": null,
+      "in_words": null,
+      "label": null,
+      "reading": null,
+      "read_by": null,
+      "agreed_by_owner": null,
       "autonomy": null,
       "standing_rule": null,
       "channel": null,
@@ -2008,6 +2020,17 @@ exit 0
       "value": 0.8,
       "set": false,
       "default": 0.8,
+      "owner_only": null
+    },
+    {
+      "key": "browser_idle_minutes",
+      "group": "Fleet and capacity",
+      "name": "Browser idle stop",
+      "description": "minutes without a browser command before the supervisor's browser stops",
+      "shown": "value",
+      "value": 30,
+      "set": false,
+      "default": 30,
       "owner_only": null
     },
     {

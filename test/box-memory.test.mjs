@@ -263,7 +263,7 @@ test('check 6: the generator, imported, gives the committed bytes and writes not
 
 // The CLI's command names: the keys of COMMANDS, read from devteam.mjs's source.
 const commandKeys = () => {
-  const a = src.indexOf('const COMMANDS = {'), b = src.indexOf('\n};', a);
+  const a = src.indexOf('/* commandGroups start */'), b = src.indexOf('\n};', src.indexOf('const COMMANDS = {', a));
   assert.ok(a >= 0 && b > a, 'COMMANDS block in devteam.mjs');
   const keys = new Set();
   for (const m of src.slice(a, b).matchAll(/(?:^\s*|,\s*)(?:'([\w-]+)'|([A-Za-z]\w*)):\s/gm)) keys.add(m[1] || m[2]);

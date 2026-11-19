@@ -289,7 +289,7 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
   await t.test('the header names the kind: its icon, then its type chip', async () => {
     const hashes = { ticket: `#ticket/${T}`, goal: `#goal/${ids.goal}`, feature: '#feature/pay', story: '#story/PAY-S1', release: '#release/v0.2.0', wave: '#wave/pay/wave-1', milestone: `#milestone/${ids.goal}/M1`,
       act: '#act/a-none', decision: '#decision/d-none', retro: '#retro/r-none', lesson: '#lesson/k-none', problem: '#problem/p-none', thread: '#thread/m-none', planner: '#planner/pay',
-      q: `#q/${ids.long}`, file: '#file?path=docs%2Fdevteam%2FREADME.md', sensor: '#sensor/none', observation: '#observation/o-none', signal: '#signal/none', learning: '#learning/l-none' };
+      q: `#q/${ids.long}`, file: '#file?path=docs%2Fdevteam%2FREADME.md', sensor: '#sensor/none', observation: '#observation/o-none', signal: '#signal/none', learning: '#learning/l-none', lib: '#lib/artifact%3Aframe-mock' };
     const kinds = await p.ev('Object.keys(TYPE_META)');
     assert.deepEqual([...kinds].sort(), Object.keys(hashes).sort(), 'every TYPE_META kind has a hash here');
     for (const k of kinds) {
@@ -979,6 +979,14 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
   };
   await visit();
   const H = peekHashes(ids);
+  // lib: a Library item has no server record and no History section; its rows are tested in test/dashboard-library.test.mjs
+  const NOT_A_RECORD = ['lib'];
+  // TYPE_META's kinds less NOT_A_RECORD, each exception checked to be a TYPE_META kind (a stale one goes red)
+  const recordKinds = async () => {
+    const all = await p.ev('Object.keys(TYPE_META)');
+    for (const k of NOT_A_RECORD) assert.ok(all.includes(k), `NOT_A_RECORD: ${k} is a TYPE_META kind`);
+    return all.filter((k) => !NOT_A_RECORD.includes(k)).sort();
+  };
   const open = async (key) => {
     const [kind, hash] = H[key];
     if (await p.ev('window.__navn') > NAV_BUDGET) await visit();
@@ -997,7 +1005,7 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
 
   await t.test('the fixture draws every kind', async () => {
     const kinds = new Set(Object.values(H).map(([k]) => k));
-    assert.deepEqual([...kinds].sort(), (await p.ev('Object.keys(TYPE_META)')).sort(), 'every peek kind has a record');
+    assert.deepEqual([...kinds].sort(), await recordKinds(), 'every peek kind has a record');
     for (const key of Object.keys(H)) {
       const kind = await open(key);
       await soon(`!document.getElementById('drawer').hidden && DRAWER.kind === ${JSON.stringify(kind)} && !!document.querySelector('#drawer-body section.attrs')`, `${key}: its peek`);
@@ -1219,7 +1227,7 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     H.decisionRule = ['decision', `#decision/${encodeURIComponent(ids.decisionRule)}`];
     const rows = inventory(ids);
     const kinds = new Set(rows.map((r) => H[r.on]?.[0]));
-    assert.deepEqual([...kinds].sort(), (await p.ev('Object.keys(TYPE_META)')).sort(), 'the inventory covers every peek kind');
+    assert.deepEqual([...kinds].sort(), await recordKinds(), 'the inventory covers every peek kind');
     const groups = new Map();
     for (const r of rows) {
       assert.ok(H[r.on], `${r.item}: ${r.on} is a fixture record`);
@@ -1559,14 +1567,16 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
   });
 
   await t.test('peekFor: every opener kind\'s hash, opened through route()', async () => {
-    const ON = { ticket: 'ticket', goal: 'goal', feature: 'feature', story: 'story', release: 'release', wave: 'wave', milestone: 'milestone', act: 'act', decision: 'decision', retro: 'retro', lesson: 'lesson', problem: 'problem', thread: 'thread', planner: 'planner', q: 'qAnswered', file: 'file', sensor: 'sensorHttp', observation: 'observation', signal: 'signal', learning: 'learning' };
+    const ON = { ticket: 'ticket', goal: 'goal', feature: 'feature', story: 'story', release: 'release', wave: 'wave', milestone: 'milestone', act: 'act', decision: 'decision', retro: 'retro', lesson: 'lesson', problem: 'problem', thread: 'thread', planner: 'planner', q: 'qAnswered', file: 'file', sensor: 'sensorHttp', observation: 'observation', signal: 'signal', learning: 'learning', lib: 'lib' };
     assert.deepEqual((await p.ev('Object.keys(OPENERS())')).sort(), Object.keys(ON).sort(), 'a fixture record for every opener kind');
-    const H = peekHashes(ids);
+    // lib is NOT_A_RECORD, so not in peekHashes: its hash and id here, the fixture's artifact peek-mock
+    const H = { ...peekHashes(ids), lib: ['lib', `#lib/${encodeURIComponent(`artifact:${ids.artifact}`)}`] };
+    const idOf = { ...ids, lib: `artifact:${ids.artifact}` };
     for (const [k, key] of Object.entries(ON)) {
-      const h = await p.ev(`peekFor(${J(k)}, ${J(ids[key])})`);
+      const h = await p.ev(`peekFor(${J(k)}, ${J(idOf[key])})`);
       assert.equal(h, H[key][1], `${k}: the opener's hash`);
       await on('#board');
-      await p.ev(`location.hash = peekFor(${J(k)}, ${J(ids[key])}); void 0`);
+      await p.ev(`location.hash = peekFor(${J(k)}, ${J(idOf[key])}); void 0`);
       await soon(`DRAWER.kind === ${J(k)} && !document.getElementById('drawer').hidden`, `${k}: route() opens its peek`);
     }
     assert.equal(await p.ev("peekFor('file', 'docs/a b.md')"), '#file?path=docs%2Fa%20b.md');
