@@ -7794,6 +7794,10 @@ const TURN_UNDELIVERED_MS = 5 * 60000;
 // Those turns, machine-local as delivery is: { "<u-id>": { thread, at } }. Named at load, so every
 // process's loose-file check knows it.
 const UNDELIVERED_FILE = runPath('undelivered-turns.json');
+// Which session holds an owner's turn, and how far it got, machine-local as delivery is:
+// { "<t-id>": { by, stage, turn, at, beat, pid } } (markThreadWorking, threadWorking). Not the log:
+// the stage lasts seconds to minutes, and a line per pickup and heartbeat would be noise there.
+const THREAD_WORKING_FILE = runPath('thread-working.json');
 const THREAD_ID = /^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 const TURN_ID = /^u-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 // When a proposal was made, as the log stamps it: what the owner's accept names to bind to it.
@@ -8054,6 +8058,71 @@ function threadCounts() {
   for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready ? 'ready' : v.waiting === 'owner' ? 'you' : 'waiting']++;
   return r;
 }
+// A thread's stage set ({ by, stage, turn }) or, given null, dropped, in THREAD_WORKING_FILE under
+// its lock; entries not written for a day go on every write. True when the thread had an entry.
+// A pickup (thread show) never waits and never steps a stage back: a held lock skips it (withLock's
+// time-out would die past the show's catch), and so does an entry already naming that turn.
+function markThreadWorking(t, w, { pickup = false } = {}) {
+  // The agent's pid, so a session that died mid-turn stops showing: walk up to the tmux pane's root
+  // process (the one whose parent is tmux); a shell there ran the agent, which is its child on the
+  // chain, else the root is the agent. Chosen by where it sits, not by a list of wrappers to skip,
+  // so a sandbox or a timeout between the agent and this command is never taken for it.
+  const agentPid = () => {
+    try {
+      const chain = [];
+      const name = (c) => path.basename(c).replace(/^-/, '');
+      for (let pid = process.ppid, i = 0; i < 12 && pid > 0; i++) {
+        const r = spawnSync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 });
+        const m = r.status === 0 ? /^\s*(\d+)\s+(.+?)\s*$/.exec(r.stdout ?? '') : null;
+        if (!m) return null;
+        if (chain.length && name(m[2]).startsWith('tmux')) {
+          const root = chain.length - 1;
+          if (!/^(sh|bash|zsh|dash|fish)$/.test(name(chain[root].comm))) return chain[root].pid;
+          return root > 0 ? chain[root - 1].pid : null;
+        }
+        chain.push({ pid, comm: m[2] });
+        pid = Number(m[1]);
+      }
+    } catch {}
+    return null;
+  };
+  const change = () => {
+    let m;
+    try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
+    if (!isObj(m)) m = {};
+    const was = isObj(m[t]) ? m[t] : null;
+    if (pickup && was?.turn === w.turn) return !!was;
+    if (!w && !was) return false;
+    const now = Date.now();
+    for (const [k, v] of Object.entries(m)) if (!(now - Date.parse(v?.beat) <= 86400000)) delete m[k];
+    if (w) m[t] = { by: w.by, stage: w.stage, turn: w.turn, at: was?.by === w.by && was?.turn === w.turn && typeof was.at === 'string' ? was.at : new Date(now).toISOString(), beat: new Date(now).toISOString(), pid: agentPid() };
+    else delete m[t];
+    writeJsonAtomic(THREAD_WORKING_FILE, m);
+    return !!was;
+  };
+  // nothing to clear with no file: no lock taken, no file made
+  if (!w && !fs.existsSync(THREAD_WORKING_FILE)) return false;
+  fs.mkdirSync(path.dirname(THREAD_WORKING_FILE), { recursive: true });
+  return pickup ? tryLock(THREAD_WORKING_FILE, change) ?? false : withLock(THREAD_WORKING_FILE, change);
+}
+// The stages to show: { "<t-id>": { by, stage, turn, at, beat } }, each from a session still alive
+// (or one whose pid the walk couldn't find) that wrote it within 10 minutes.
+function threadWorking(now = Date.now()) {
+  let m;
+  try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
+  if (!isObj(m)) return {};
+  const alive = (pid) => {
+    if (pid === null) return true;
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+  };
+  const r = {};
+  for (const [k, v] of Object.entries(m)) {
+    if (!isObj(v) || !alive(v.pid) || !(now - Date.parse(v.beat) <= 10 * 60000)) continue;
+    r[k] = { by: v.by, stage: v.stage, turn: v.turn, at: v.at, beat: v.beat };
+  }
+  return r;
+}
 // The first line new, say and ask print is the id (the dashboard reads it); for an owner turn a
 // second says whether it was typed into the supervisor's pane.
 function cmdThread() {
@@ -8071,6 +8140,18 @@ function cmdThread() {
     });
     return deliveredWords(typed);
   };
+  // Who writes a reply from this session: the supervisor (a responder's replies are written as the
+  // supervisor's until kit-102 gives it its own), or null where supervisorOnly would refuse one. The
+  // one place both reply and working's own-turn rule ask, so the two stay in step.
+  const replyWriter = () => (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
+  // Who holds a turn, as the stage names it: null for the owner's terminal and the dashboard, which
+  // never hold one; the responder says so itself until kit-102 makes logWriter say it.
+  const sessionBy = () => {
+    if (!process.env.DEVTEAM_ROLE || process.env.DEVTEAM_CHANNEL === 'dashboard') return null;
+    return process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : logWriter();
+  };
+  // the holder spoke (or the owner closed the thread): its stage goes
+  const spoke = (t) => markThreadWorking(t.id, null);
   if (sub === 'new') {
     const { by } = threadOwner();
     const words = turnText(wordsFrom(1));
@@ -8099,7 +8180,7 @@ function cmdThread() {
   // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
   // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
   if (sub === 'say' || sub === 'reply') {
-    const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), 'supervisor');
+    const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), replyWriter());
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
@@ -8117,6 +8198,7 @@ function cmdThread() {
     const u = appendLog(line, by);
     out(u.id);
     if (by === 'owner') out(deliver(t, u, words, files));
+    else spoke(t);
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -8158,7 +8240,9 @@ function cmdThread() {
     if (encodedBytes(capBytes(`${lead}${flagStr('question') ?? ''}`, TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
     const q = askLine({ thread: t.id, about });
     appendLog({ type: 'turn', thread: t.id, text: capBytes(`${lead}${q.question}`, TURN_MAX), question: q.id }, 'supervisor');
-    return out(q.id);
+    out(q.id);
+    spoke(t);
+    return;
   }
   // The supervisor's proposal, for a one-click accept; the owner's next turn, resolve or reopen clears
   // it. With no DEVTEAM_ROLE this checkout's commands are the supervisor's (logWriter), as ask's are.
@@ -8170,7 +8254,9 @@ function cmdThread() {
     if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
     // a new proposal replaces a standing one: the newest ready line is the one the card shows
     appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() } }, 'supervisor');
-    return out(`proposed resolving ${t.id}: ${outcome}`);
+    out(`proposed resolving ${t.id}: ${outcome}`);
+    spoke(t);
+    return;
   }
   // Resolving is the owner's: their status and outcome (always written, null for none, so a reopened
   // thread resolved again keeps no old outcome), and an observation the loop reads with the rest.
@@ -8192,6 +8278,7 @@ function cmdThread() {
     out(`resolved ${t.id}${outcome ? `: ${outcome}` : ''}`);
     const open = v.questions.filter((q) => q.status === 'open');
     if (open.length) out(`${plural(open.length, 'question')} asked in it ${open.length === 1 ? 'is' : 'are'} still open in the Inbox: ${open.map((q) => q.id).join(', ')}`);
+    spoke(t);
     return nudgeSupervisor(`[devteam thread ${t.id} resolved by owner] devteam.mjs thread show ${t.id}`);
   }
   if (sub === 'reopen') {
@@ -8211,10 +8298,39 @@ function cmdThread() {
     if (words) return out(deliver(t, u, words));
     return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
+  // The session holding the owner's turn says it is on it; the card says so until it replies.
+  if (sub === 'working') {
+    const by = sessionBy();
+    if (!by) die('thread working: run by the agent session that holds the turn (DEVTEAM_ROLE set, not the dashboard); the owner\'s card shows it');
+    if (flags.done) {
+      const t = logGet(id ?? '');
+      if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'} (devteam.mjs thread list)`);
+      return out(markThreadWorking(t.id, null) ? `cleared: ${t.id}` : `cleared: ${t.id} (nothing was set)`);
+    }
+    const t = threadOpen(id, by);
+    // the log's own writers, not the view's (which names every non-owner turn supervisor)
+    const ts = [...readLog().objects.values()].filter((o) => o.type === 'turn' && o.thread === t.id).sort(byTime);
+    const turn = ts.filter((u) => u.created_by === 'owner').pop();
+    if (!turn) die(`${t.id} has no owner turn yet: nothing to respond to`);
+    // the owner's newest turn, or the caller's own reply after it (reply first, keep working); the
+    // supervisor takes any open thread the owner wrote in (a turn handed on to it)
+    const last = ts[ts.length - 1];
+    const mine = replyWriter();
+    if (last.created_by !== 'owner' && !(by === 'supervisor' && mine === 'supervisor') && last.created_by !== mine) die(`nothing to respond to: the last turn is ${last.created_by}'s`);
+    markThreadWorking(t.id, { by, stage: 'responding', turn: turn.id });
+    return out(`responding: ${t.id} (the owner's card says so until you reply; run this again every few minutes of longer work)`);
+  }
   if (sub === 'show') {
     const t = logGet(id ?? '');
     if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'}`);
     const v = threadViewOf(t.id);
+    // A session that may reply, reading an owner's newest turn, has picked it up; the show never
+    // fails for it (the pickup takes no lock it would wait on).
+    try {
+      const by = sessionBy();
+      const last = v.turns[v.turns.length - 1];
+      if (by && replyWriter() && ['supervisor', 'responder'].includes(process.env.DEVTEAM_ROLE) && v.status === 'open' && last?.by === 'owner') markThreadWorking(t.id, { by, stage: 'picked-up', turn: last.id }, { pickup: true });
+    } catch {}
     if (flags.json) return json(v);
     out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}`);
     out(threadDataFrame(v));
@@ -8242,7 +8358,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
