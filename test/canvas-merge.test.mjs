@@ -544,7 +544,7 @@ function extraOps(doc, rng, tag, counter) {
       if (!comps.length) return null;
       const c = pick(rng, comps), d = kidOf(c);
       if (!d) return null;
-      return rng() < 0.5 ? [set(c, `variants.vn${counter.n++}`, { [d]: { opacity: 0.25 } })] : [set(c, 'variants', { only: { [d]: { visible: false } } })];
+      return rng() < 0.5 ? [set(c, `variants.vn${counter.n++}`, { [d]: { opacity: 0.25 } })] : [set(c, 'variants', { solo: { [d]: { visible: false } } })];
     }
     case 9: { // an instance's override entry, or its whole overrides map
       const i = of('instance').filter((x) => doc.nodes[doc.nodes[x].component]);
