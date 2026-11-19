@@ -71,7 +71,7 @@ test('library-items: kinds, order, goals and keep', () => {
     if (x.kind === 'link') {
       const l = x.link;
       assert.equal(x.href, l.url ? l.url : l.path && !l.remote ? ctx.fileHref(l) : null, `${x.id} href`);
-      assert.equal(x.tab, x.href ?? remoteWeb(l.remote), `${x.id} tab: its href, else its remote's page`);
+      assert.equal(x.tab, x.href ?? remoteWeb(l.remote) ?? `#lib/link%3A${l.id}`, `${x.id} tab: its href, else its remote's page, else its peek`);
       assert.ok(x.tab, `${x.id}: a tab`);
       continue;
     }
@@ -145,8 +145,17 @@ test('library-items: kinds, order, goals and keep', () => {
   assert.equal(byId.get(`link:${ids.linkRemote}`).tab, 'https://github.com/sanctuarycomputer/devteam', 'a remote-only link\'s tab: its web page');
   // every item but a review has a tab
   for (const x of items) assert.equal(!!x.tab, x.kind !== 'review', `${x.id}: a tab unless a review`);
-  // remoteWeb: an https remote as given; scp and ssh forms as https://host/org/repo
-  assert.equal(remoteWeb('https://bitbucket.org/a/b.git'), 'https://bitbucket.org/a/b.git');
+  // a link whose remote has no web page (local, file://): its ↗ opens its own peek
+  const local = { library: { links: [{ id: 'local-repo', kind: 'repo', title: 'Local', url: null, remote: '/srv/repo.git', path: null }, { id: 'file-repo', kind: 'repo', title: 'File', url: null, remote: 'file:///srv/repo.git', path: 'x.md' }, { id: 'git-repo', kind: 'repo', title: 'Git', url: null, remote: 'git://host.example/a/b.git', path: null }] } };
+  assert.deepEqual(plain(libraryItems(local, now, ctx).map((x) => x.tab)), ['#lib/link%3Alocal-repo', '#lib/link%3Afile-repo', 'https://host.example/a/b']);
+  // remoteWeb: http(s) as given, git://, scp and ssh forms as https://host/..., each less a trailing .git;
+  // a local path or file:// none
+  assert.equal(remoteWeb('https://bitbucket.org/a/b.git'), 'https://bitbucket.org/a/b');
+  assert.equal(remoteWeb('https://github.com/a/b'), 'https://github.com/a/b');
+  assert.equal(remoteWeb('http://git.example.com/a/b.git'), 'http://git.example.com/a/b');
+  assert.equal(remoteWeb('git://git.kernel.org/pub/scm/git/git.git'), 'https://git.kernel.org/pub/scm/git/git');
+  assert.equal(remoteWeb('file:///srv/repo.git'), null);
+  assert.equal(remoteWeb('../other-repo'), null);
   assert.equal(remoteWeb('git@github.com:a/b.git'), 'https://github.com/a/b');
   assert.equal(remoteWeb('git@GitHub.com:a/b'), 'https://github.com/a/b');
   assert.equal(remoteWeb('ssh://git@gitlab.com/a/b.git'), 'https://gitlab.com/a/b');

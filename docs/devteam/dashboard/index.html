@@ -6289,12 +6289,13 @@ function linkHost(l) {
   if (scp) return scp[1].toLowerCase();
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(r) ? of(r) : null;
 }
-// A remote's web page: an https remote as given; git@host:org/repo(.git) and ssh://[user@]host/org/repo(.git)
-// as https://host/org/repo; else null.
+// A remote's web page: an http(s) remote as given; git://host/path, git@host:org/repo and
+// ssh://[user@]host[:port]/org/repo as https://host/...; each less a trailing .git. A local path or a
+// file:// remote has none (null).
 function remoteWeb(remote) {
-  const r = String(remote ?? '');
-  if (/^https:\/\//i.test(r)) return r;
-  const m = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(r) ?? /^ssh:\/\/(?:[^@/\s]+@)?([^:/\s]+)(?::\d+)?\/(.+)$/i.exec(r);
+  const r = String(remote ?? '').trim();
+  if (/^https?:\/\/[^/\s]/i.test(r)) return r.replace(/\.git$/, '');
+  const m = /^git:\/\/([^:/\s]+)(?::\d+)?\/(.+)$/i.exec(r) ?? /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(r) ?? /^ssh:\/\/(?:[^@/\s]+@)?([^:/\s]+)(?::\d+)?\/(.+)$/i.exec(r);
   return m ? `https://${m[1].toLowerCase()}/${m[2].replace(/\.git$/, '').replace(/^\/+/, '')}` : null;
 }
 function libraryItems(data, now, ctx) {
@@ -6337,11 +6338,11 @@ function libraryItems(data, now, ctx) {
     });
   }
   // a link opens its URL, or a path (with no remote) in the file peek, as linkOf does; in a new tab
-  // (its ↗) the same, or a remote's web page
+  // (its ↗) the same, or a remote's web page, else (a local or file:// remote) its own peek
   for (const l of lib.links ?? []) {
     const href = l.url || (l.path && !l.remote ? ctx.fileHref({ path: l.path, title: l.title }) : null);
     by.link.push({
-      id: `link:${l.id}`, kind: 'link', title: l.title || l.id, href, tab: href || remoteWeb(l.remote),
+      id: `link:${l.id}`, kind: 'link', title: l.title || l.id, href, tab: href || remoteWeb(l.remote) || `#lib/${encodeURIComponent(`link:${l.id}`)}`,
       summary: l.notes ?? null, goals: goals(l.for), at: null, art: null, landed: null, drafts: [],
       preview: null, pstate: null, review: null, link: l, host: linkHost(l), error: null,
     });
