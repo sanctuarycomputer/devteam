@@ -1284,7 +1284,7 @@ const CHECK = {
   }),
   'image-request': msg('image-request', ['name', 'data'], null, (e, m) => {
     const n = SIMPLE.name(m.name);
-    if (n || m.name.length === 0) e.push('image-request.name: not 1 to 200 characters');
+    if (n || m.name.length === 0) e.push('image-request.name: not 1 to 200 characters of the name class');
     if (typeof m.data !== 'string' || m.data.length === 0 || !base64Ok(m.data)) e.push('image-request.data: not base64');
     else if (Math.floor((m.data.length * 3) / 4) - (m.data.endsWith('==') ? 2 : m.data.endsWith('=') ? 1 : 0) > LIMITS.imageBytes) e.push(`image-request.data: over ${LIMITS.imageBytes} bytes`);
   }),

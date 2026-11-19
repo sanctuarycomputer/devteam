@@ -316,7 +316,7 @@ All on the dashboard server. The GETs are guarded as the dashboard's other data 
 | Kind | Shape |
 |---|---|
 | `doc-response` | `{ "session", "rev", "doc", "repo": { "name", "public" } }`: `session` 16 of `[0-9a-z]` or null, `rev` equal to `doc.rev`, `doc` a valid document, `repo.name` `"<owner>/<repo>"` or null, `repo.public` true, false or null (null when `name` is) |
-| `image-request` | `{ "name", "data" }`: `name` 1 to 200 characters, `data` base64 of at most 4 MB of image |
+| `image-request` | `{ "name", "data" }`: `name` 1 to 200 characters of the `name` class (§2: no control character but tab, line feed and carriage return), `data` base64 of at most 4 MB of image |
 | `image-response` | `{ "src" }`: `images/<16 hex>.<ext>` |
 | `local-request` | `{ "by", "via", "ops" }`: `by` 1 to 64 of `[A-Za-z0-9._-]`, `via` `apply` or `take`, `ops` an array |
 | `local-response` | `{ "rev", "edits", "saved" }`: `edits` the number of `ops` messages sent (at least 1), `saved` a bool |

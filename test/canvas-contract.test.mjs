@@ -1500,7 +1500,7 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     assert.deepEqual(errs(both), [{ rule: 'classes', code: 'value', where: 'nodes.t1.text', message: 'not text: a lone surrogate' }], 'a lone surrogate is judged first');
     const data = Buffer.from('not checked as an image here').toString('base64');
     assert.deepEqual(shapeErrors('image-request', { name: 'a.png', data }), [], 'an image name with no control character');
-    assert.ok(shapeErrors('image-request', { name: 'a\u0000.png', data }).length > 0, 'an image name with a control character breaks image-request');
+    assert.deepEqual(shapeErrors('image-request', { name: 'a\u0000.png', data }), ['image-request.name: not 1 to 200 characters of the name class'], 'an image name with a control character breaks image-request, saying why');
   });
 
   await t.test('rules: free texts', () => {
