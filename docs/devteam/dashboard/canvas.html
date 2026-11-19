@@ -266,7 +266,9 @@
   // came on; `locked` is null, 'view' (refused as a View person) or 'closed' (landed or removed): no
   // more edits either way.
   const state = {
-    slug: null, session: null, rev: null, doc: null, repo: null, pageId: null, sel: null,
+    // sels (kit-669 §2): the selected ids of the shown page, in layer order; sel: the one id when
+    // exactly one is selected, else null (every single-node tool reads it)
+    slug: null, session: null, rev: null, doc: null, repo: null, pageId: null, sel: null, sels: [],
     base: null, pending: [], kept: [], saved: null, savedOn: null, locked: null, paused: false, closedText: null,
     // Change in (spec §3): { comp, name }, the variant a component's nodes are edited in, or null (Base);
     // placing: the component Place instance adds an instance of at the next click, or null
@@ -1106,6 +1108,32 @@
     propsStale = false;
     const was = inProps(document.activeElement) ? controlKey(document.activeElement) : null;
     const box = $('props');
+    if (state.sels.length > 1) {
+      // several (kit-669 §2): how many, and Delete layers
+      const p = document.createElement('p');
+      p.className = 'note';
+      p.dataset.field = 'count';
+      p.textContent = `${state.sels.length} layers selected.`;
+      const out = [p];
+      if (state.session !== null) {
+        const foot = document.createElement('div');
+        foot.className = 'foot';
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.dataset.action = 'delete';
+        del.textContent = 'Delete layers';
+        del.disabled = !editable();
+        del.addEventListener('click', () => deleteSelection());
+        foot.append(del);
+        out.push(foot);
+      }
+      box.replaceChildren(...out);
+      if (was !== null && was !== '\u0000\u0000\u0000') {
+        const again = [...box.querySelectorAll('button')].find((e) => controlKey(e) === was);
+        if (again && !again.disabled) again.focus({ preventScroll: true });
+      }
+      return;
+    }
     const n = state.sel === null ? null : nodeOf(state.sel);
     if (!n) {
       const p = document.createElement('p');
@@ -1144,29 +1172,55 @@
     setTimeout(() => { if (propsStale && !holdProps()) buildProps(); }, 0);
   });
 
-  // Select a node of the shown page (its row and its drawn node marked), or nothing (null). The tree
-  // keeps one row in the tab order (the ARIA tree pattern): the selected row, else the first.
-  function select(id) {
-    const next = id !== null && layerRows.has(id) ? id : null;
-    const stop = next !== null ? next : (layerRows.keys().next().value ?? null);
+  // The shown page's ids in the Layers tree's order (its tree in pre-order, as renderLayers lists it).
+  const layerOrder = () => [...layerRows.keys()];
+  $('layers').setAttribute('aria-multiselectable', 'true');
+  // Select nodes of the shown page (kit-669 §2): the ids listed in Layers kept, in layer order, each one's
+  // row and drawn node marked; [] selects nothing. state.sel is the one id when exactly one is selected.
+  // The tree keeps one row in the tab order (the ARIA tree pattern): the first selected row, else the
+  // first. The server is told (queueSelect).
+  function selectIds(ids) {
+    const want = new Set(Array.isArray(ids) ? ids.filter((id) => layerRows.has(id)) : []);
+    const next = layerOrder().filter((id) => want.has(id));
+    const stop = next.length ? next[0] : (layerRows.keys().next().value ?? null);
     for (const [rid, row] of layerRows) {
-      row.setAttribute('aria-selected', rid === next ? 'true' : 'false');
+      row.setAttribute('aria-selected', want.has(rid) ? 'true' : 'false');
       row.tabIndex = rid === stop ? 0 : -1;
     }
     for (const el of $('surface').querySelectorAll('.sel')) el.classList.remove('sel');
-    if (next !== null && drawn.has(next)) drawn.get(next).classList.add('sel');
-    if (next !== state.sel) hexChosen.clear();
-    state.sel = next;
+    for (const id of next) if (drawn.has(id)) drawn.get(id).classList.add('sel');
+    if (next.length !== state.sels.length || next.some((id, i) => id !== state.sels[i])) hexChosen.clear();
+    state.sels = next;
+    state.sel = next.length === 1 ? next[0] : null;
     renderProps();
+    queueSelect();
+  }
+  // One node selected alone, or nothing (null).
+  const select = (id) => selectIds(id === null ? [] : [id]);
+  // Shift+click: a node added to the selection, or taken out of it when it is in it.
+  const toggleSel = (id) => selectIds(state.sels.includes(id) ? state.sels.filter((x) => x !== id) : [...state.sels, id]);
+  // The selection's roots: the selected ids not inside another selected one, in layer order.
+  function selRoots() {
+    const sel = new Set(state.sels);
+    return state.sels.filter((id) => {
+      let cur = nodeOf(id)?.parent;
+      for (let steps = 0; steps <= MAX_ELEMENTS && nodeOf(cur); steps++) {
+        if (sel.has(cur)) return false;
+        cur = nodeOf(cur).parent;
+      }
+      return true;
+    });
   }
 
   $('layers').addEventListener('click', (e) => {
     const row = e.target instanceof Element ? e.target.closest('.layer[data-node]') : null;
-    if (row) select(row.dataset.node);
+    if (!row) return;
+    if (e.shiftKey) toggleSel(row.dataset.node); else select(row.dataset.node);
   });
   // The tree by keyboard: ArrowDown and ArrowUp select the next and previous row, Home and End the first
   // and last, focus following (they are the tree's: they never nudge); Delete or Backspace deletes the
-  // focused row's node as the Delete key does elsewhere (same guard, same words), at 760 px and over.
+  // focused row's node as the Delete key does elsewhere (same guard, same words), at 760 px and over:
+  // the whole selection when that row is selected, else that row's node alone.
   $('layers').addEventListener('keydown', (e) => {
     if (!ready() || e.ctrlKey || e.metaKey || e.altKey) return;
     const row = e.target instanceof Element ? e.target.closest('.layer[data-node]') : null;
@@ -1174,7 +1228,7 @@
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       e.stopPropagation(); // the page's own Delete would delete the selection, which may be another row
-      if (editable()) deleteNode(row.dataset.node);
+      if (editable()) { if (state.sels.includes(row.dataset.node)) deleteSelection(); else deleteNode(row.dataset.node); }
       return;
     }
     const ids = [...layerRows.keys()];
@@ -1193,13 +1247,16 @@
     if (!state.doc || e.button !== 0 || !(e.target instanceof Element)) return;
     if (e.target.closest('.zoom, .stage-top, #tools')) return;
     const hit = e.target.closest('#surface [data-id]');
+    // Shift+click on a node adds it or takes it out (kit-669 §2); on empty stage it changes nothing
+    if (e.shiftKey) { if (hit) toggleSel(hit.dataset.id); return; }
     select(hit ? hit.dataset.id : null);
   });
-  // Escape ends a tool (a drag, a path) and returns to Move; with Move on, it clears the selection.
+  // Escape ends a tool (a drag, a path, the drag rectangle) and returns to Move; with Move on, it clears
+  // the selection.
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (tool !== 'move' || gesture !== null || pen !== null) { setTool('move'); return; }
-    if (state.sel !== null) select(null);
+    if (state.sels.length) select(null);
   });
 
   // ---- zoom and pan ----
@@ -1435,7 +1492,7 @@
   }
   function showPage(id) {
     const pg = pageById(id) || pages()[0];
-    if (pg.id !== state.pageId) state.sel = null;
+    if (pg.id !== state.pageId) { state.sel = null; state.sels = []; } // a page switch clears the selection
     state.pageId = pg.id;
     const n = ++shown;
     renderPages(); // the row buttons follow the shown page
@@ -1443,7 +1500,7 @@
     setState('loading');
     drawPage(pg.id);
     renderLayers(pg.id);
-    select(state.sel);
+    selectIds(state.sels);
     if (kidsOf(pg).length === 0) showMsg(TEXT.empty); else hideMsg();
     // fitted when shown, and again once its images have their sizes, unless the person has moved since
     fit();
@@ -1835,7 +1892,7 @@
     markPage(pg);
     drawPage(pg.id);
     renderLayers(pg.id);
-    select(state.sel);
+    selectIds(state.sels); // ids no longer on the shown page drop out
     // a focused row that is gone (deleted) leaves focus in the tree, on its tab stop
     const back = focusRow === null ? null : layerRows.get(focusRow) || [...layerRows.values()].find((r) => r.tabIndex === 0);
     if (back) back.focus({ preventScroll: true });
@@ -1889,19 +1946,22 @@
   // it, until then (performance.now() ms; a drag's throttle). The queued item, or false when nothing was.
   // A plain edit pushes its undo entry (§3; 'undo' is an undo's own edit, which pushes none); a plain
   // edit coalesced into the last one updates that one's own entry with what the new value leaves.
-  function edit(ops, { kind = 'plain', notBefore = 0 } = {}) {
+  // kit-669: `entry` given (one part of a split edit, editSplit): the item takes that entry and pushes
+  // none, and is never coalesced.
+  function edit(ops, { kind = 'plain', notBefore = 0, entry } = {}) {
     if (!editable() || !Array.isArray(ops) || ops.length === 0) return false;
     if (new TextEncoder().encode(JSON.stringify(ops)).length > OPS_BYTES) { say(SAY.tooBig); return false; }
     const last = state.pending[state.pending.length - 1];
     const oneSet = (o) => o.length === 1 && isObj(o[0]) && o[0].op === 'set';
     let item;
-    if (kind === 'plain' && last && last.kind === 'plain' && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) {
+    if (entry === undefined && kind === 'plain' && last && last.kind === 'plain' && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) {
       last.ops = ops;
       item = last;
       if (last.entry) coalesceEntry(last.entry, ops[0]);
     } else {
       item = { ops, seq: null, kind, entry: null, notBefore };
-      if (kind === 'plain') {
+      if (entry !== undefined) item.entry = entry;
+      else if (kind === 'plain') {
         item.entry = makeEntry(state.doc, ops);
         if (item.entry) pushEntry(item.entry);
       }
@@ -1910,6 +1970,140 @@
     redraw();
     pump();
     return item;
+  }
+  // ---- edits over 64 KB (kit-669 §5, as ruled): split in their own order ----
+  // An op's bytes as JSON (UTF-8); a list of ops is [ … ] with a comma between.
+  const jsonBytes = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
+  // The references a node holds (kit-669 §5): [id, kind] pairs, kind 'comp' for an instance's component
+  // (it must be a component on the canvas), 'node' for a component's prop targets and variant overrides'
+  // ids and an instance's overrides' ids (each must be a node on the canvas).
+  function refsHeld(n) {
+    const out = [];
+    if (!isObj(n)) return out;
+    if (n.type === 'instance') {
+      if (typeof n.component === 'string') out.push([n.component, 'comp']);
+      if (isObj(n.overrides)) for (const id of Object.keys(n.overrides)) out.push([id, 'node']);
+    } else if (n.type === 'component') {
+      if (isObj(n.props)) for (const pd of Object.values(n.props)) if (isObj(pd) && isObj(pd.target) && typeof pd.target.id === 'string') out.push([pd.target.id, 'node']);
+      if (isObj(n.variants)) for (const v of Object.values(n.variants)) if (isObj(v)) for (const id of Object.keys(v)) out.push([id, 'node']);
+    }
+    return out;
+  }
+  // `ops` cut, in their own order, into parts of at most OPS_BYTES as JSON, a cut allowed after an op
+  // only where applying the ops up to it to `doc` leaves no reference unresolved: no instance whose
+  // component is gone or not yet added, no component prop target or variant override, and no instance
+  // override, naming a node not on the canvas. The server judges the rest (an instance's variant and
+  // props ride on its own add, after its component's; whether a target is inside its component). One
+  // part when the whole fits; null when no allowed cut keeps every part within OPS_BYTES. Linear in the
+  // ops: one copy of `doc` each op is applied to in turn, the references held by its nodes indexed once
+  // (who names whom), and a running count of unresolved references updated per op.
+  function splitParts(ops, doc) {
+    if (!Array.isArray(ops) || ops.length === 0) return null;
+    const sizes = ops.map(jsonBytes);
+    const total = sizes.reduce((s, x) => s + x, 0) + ops.length + 1;
+    if (total <= OPS_BYTES) return [ops];
+    const d = structuredClone(doc);
+    const out = new Map(); // referrer -> Map(id -> Map(kind -> count))
+    const into = new Map(); // id -> Set(referrer)
+    const index = (r) => {
+      const was = out.get(r);
+      if (was) for (const id of was.keys()) into.get(id)?.delete(r);
+      out.delete(r);
+      const n = nodeIn(d, r);
+      const held = n ? refsHeld(n) : [];
+      if (held.length === 0) return;
+      const m = new Map();
+      for (const [id, kind] of held) {
+        if (!m.has(id)) m.set(id, new Map());
+        m.get(id).set(kind, (m.get(id).get(kind) ?? 0) + 1);
+        if (!into.has(id)) into.set(id, new Set());
+        into.get(id).add(r);
+      }
+      out.set(r, m);
+    };
+    for (const id of Object.keys(d.nodes)) index(id);
+    const ok = (id, kind) => { const n = nodeIn(d, id); return n !== null && (kind !== 'comp' || n.type === 'component'); };
+    // the unresolved references among the pairs held by `touched` ids or naming them
+    const unresolved = (touched) => {
+      let bad = 0;
+      const seen = new Set();
+      const pair = (r, id) => {
+        const k = `${r}\u0000${id}`;
+        if (seen.has(k)) return;
+        seen.add(k);
+        if (!nodeIn(d, r)) return;
+        const kinds = out.get(r)?.get(id);
+        if (kinds) for (const [kind, c] of kinds) if (!ok(id, kind)) bad += c;
+      };
+      for (const x of touched) {
+        const m = out.get(x);
+        if (m) for (const id of m.keys()) pair(x, id);
+        const by = into.get(x);
+        if (by) for (const r of by) pair(r, x);
+      }
+      return bad;
+    };
+    let bad = unresolved(Object.keys(d.nodes));
+    const start = bad;
+    const cuts = []; // the op counts after which a cut is allowed
+    for (let i = 0; i < ops.length; i++) {
+      const op = ops[i];
+      let touched = [];
+      if (isObj(op)) {
+        if (op.op === 'add' && isObj(op.node) && typeof op.node.id === 'string') touched = [op.node.id];
+        else if (op.op === 'del' && typeof op.id === 'string') touched = subtreeIds(d, op.id);
+        else if (op.op === 'set' && typeof op.id === 'string') touched = [op.id];
+      }
+      bad -= unresolved(touched);
+      applyOps(d, [op]);
+      for (const x of touched) index(x);
+      bad += unresolved(touched);
+      if (bad <= start) cuts.push(i + 1);
+    }
+    // greedy: from each part's start, the furthest allowed cut that keeps the part within OPS_BYTES
+    const parts = [];
+    let from = 0;
+    let c = 0;
+    while (from < ops.length) {
+      let bytes = 1; // '['
+      let best = -1;
+      let j = from;
+      while (c < cuts.length && cuts[c] <= from) c++;
+      for (let k = c; k < cuts.length; k++) {
+        while (j < cuts[k]) { bytes += sizes[j] + 1; j++; } // each op and its ',' or ']'
+        if (bytes > OPS_BYTES) break;
+        best = cuts[k];
+      }
+      if (best < 0) return null;
+      parts.push(ops.slice(from, best));
+      from = best;
+    }
+    return parts;
+  }
+  // An edit that may pass 64 KB (a delete, a nudge, a multi-node drag's release or restore): its parts
+  // (splitParts over the drawn document) queued in order, sharing one undo entry made before any is
+  // queued (each part's redraw changes state.doc); a plain edit pushes it once, a drag's kinds none
+  // (dragEntry makes the drag's). One part is one edit() as ever (a held key's set still coalesces). The
+  // queued items, or false: nothing queued (no allowed cut: "That change is too big to send.").
+  function editSplit(ops, opts = {}) {
+    if (!editable() || !Array.isArray(ops) || ops.length === 0) return false;
+    const parts = splitParts(ops, state.doc);
+    if (parts === null) { say(SAY.tooBig); return false; }
+    if (parts.length === 1 && opts.entry === undefined) {
+      const item = edit(parts[0], opts);
+      return item ? [item] : false;
+    }
+    let shared = opts.entry;
+    if (shared === undefined) {
+      shared = (opts.kind ?? 'plain') === 'plain' ? makeEntry(state.doc, ops) : null;
+      if (shared) pushEntry(shared);
+    }
+    const items = [];
+    for (const part of parts) {
+      const item = edit(part, { ...opts, entry: shared });
+      if (item) items.push(item);
+    }
+    return items.length ? items : false;
   }
   // One property of one node set: one edit of one set op.
   const setRaw = (id, prop, value) => edit([{ op: 'set', id, prop, value }]);
@@ -1949,17 +2143,37 @@
     const o = isObj(v) && own(v, id) && isObj(v[id]) ? v[id] : null;
     return o !== null && own(o, path) ? { held: true, value: o[path] } : { held: false };
   }
-  // Delete a node (Delete, Backspace, Delete layer); a component that still has instances is kept.
-  function deleteNode(id) {
-    if (!editable()) return;
-    const n = nodeOf(id);
-    if (!n) return;
-    if (n.type === 'component' && Object.values(state.doc.nodes).some((x) => isObj(x) && x.type === 'instance' && x.component === id)) {
-      say(SAY.instancesFirst);
-      return;
+  // Delete nodes (kit-669 §2): a del per root, in the order given, every root whose subtree holds a
+  // component after the rest (so an instance goes before its component); split over 64 KB (editSplit),
+  // one undo entry. Nothing sent, and kit-662's words, when a component deleted has an instance outside
+  // what is deleted.
+  function deleteIds(roots) {
+    if (!editable()) return false;
+    const d = state.doc;
+    const ids = roots.filter((id) => nodeOf(id));
+    if (ids.length === 0) return false;
+    const inside = new Set();
+    const holds = new Set();
+    for (const r of ids) {
+      for (const x of subtreeIds(d, r)) {
+        inside.add(x);
+        if (nodeIn(d, x)?.type === 'component') holds.add(r);
+      }
     }
-    edit([{ op: 'del', id }]);
+    if (holds.size > 0) {
+      const comps = new Set([...inside].filter((x) => nodeIn(d, x)?.type === 'component'));
+      if (Object.keys(d.nodes).some((x) => !inside.has(x) && nodeIn(d, x)?.type === 'instance' && comps.has(d.nodes[x].component))) {
+        say(SAY.instancesFirst);
+        return false;
+      }
+    }
+    const order = [...ids.filter((r) => !holds.has(r)), ...ids.filter((r) => holds.has(r))];
+    return editSplit(order.map((id) => ({ op: 'del', id })));
   }
+  // Delete a node (the tree's Delete on a row not selected); a component that still has instances is kept.
+  const deleteNode = (id) => deleteIds([id]);
+  // Delete the selection (Delete, Backspace, Delete layer, Delete layers): its roots.
+  const deleteSelection = () => deleteIds(selRoots());
   const wellFormed = (v) => typeof v.isWellFormed !== 'function' || v.isWellFormed();
   // Free text as canvas-doc@1's name and text classes take it (kit-312): well-formed, and no control
   // character but tab, line feed and carriage return; the server refuses anything else.
@@ -2510,7 +2724,7 @@
     del.type = 'button';
     del.dataset.action = 'delete';
     del.textContent = 'Delete layer';
-    del.addEventListener('click', () => deleteNode(id));
+    del.addEventListener('click', () => deleteSelection());
     foot.append(del);
     box.append(foot);
     if (!editable()) for (const c of box.querySelectorAll('input, select, textarea, button')) c.disabled = true;
@@ -2520,9 +2734,9 @@
   // Delete or Backspace deletes the selected node, while no field has focus, at 760 px and over.
   document.addEventListener('keydown', (e) => {
     if (!ready() || !editable() || narrow() || typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
-    if ((e.key === 'Delete' || e.key === 'Backspace') && state.sel !== null) {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && state.sels.length) {
       e.preventDefault();
-      deleteNode(state.sel);
+      deleteSelection();
     }
   });
 
@@ -2683,6 +2897,11 @@
       g.lastAt = performance.now(); // the throttle's first live edit goes 100 ms after this
       g.snapshot = structuredClone(state.doc); // the drag's one undo entry is walked from here (§3)
     }
+    if (g.tool === 'marquee' && !g.dragged) {
+      // the drag rectangle: the pointer kept, and the click that ends it (or Escape's) isn't a clear
+      try { $('stage').setPointerCapture(g.id); } catch { /* moves over the stage still arrive */ }
+      toolPress = true;
+    }
     g.dragged = true;
     if (g.tool === 'move') {
       if (g.live && g.timer === null) g.timer = setTimeout(() => liveSend(g), Math.max(0, 100 - (performance.now() - g.lastAt)));
@@ -2708,6 +2927,7 @@
     try { $('stage').releasePointerCapture(g.id); } catch { /* already released */ }
     if (g.draft) g.draft.remove();
     if (g.el) g.el.style.translate = '';
+    if (g.nodes) for (const m of g.nodes) if (m.el) m.el.style.translate = '';
     if (g.timer) { clearTimeout(g.timer); g.timer = null; }
     gesture = null;
     if (abort && g.tool === 'move') restore(g);
@@ -2715,8 +2935,11 @@
   $('stage').addEventListener('pointerup', (e) => {
     const g = gesture;
     if (!g || e.pointerId !== g.id) return;
+    g.shift = e.shiftKey;
     endGesture(g);
     if (!toolsOn()) return;
+    // a press on a member of several, released without a drag, selects that one alone
+    if (g.tool === 'move' && !g.dragged && g.collapseTo) select(g.collapseTo);
     make(g);
     if (g.tool === 'move') dragEntry(g);
   });
@@ -2726,6 +2949,7 @@
   // gives its top-left and its size, in page px.
   function make(g) {
     if (g.tool === 'move') { if (dropMove(g) === 'refused') restore(g); return; }
+    if (g.tool === 'marquee') { if (g.dragged) marqueeSelect(g); return; }
     const at = placeAt(g.sx, g.sy);
     const z = view.z;
     const box = g.dragged && g.tool !== 'text'
@@ -2777,10 +3001,18 @@
   // its drop after live edits went (Escape, a lost pointer, a refused drop, the node off the shown page)
   // sends x, y back to its start. A drag's queued items are kept in g.items (its one undo entry, T3).
 
+  // kit-669 §2: a press on empty stage starts the drag rectangle; a Shift press on a node starts nothing
+  // (its click toggles it); a press on a member of a selection of several keeps the selection and drags
+  // every root of it placed by numeric x, y (g.nodes; see pressSeveral).
   function pressMove(e) {
     const hit = e.target.closest('#surface [data-id]');
     const id = hit ? hit.dataset.id : null;
-    if (id === null || !nodeOf(id)) return;
+    if (id === null) {
+      gesture = { id: e.pointerId, tool: 'marquee', sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null, shift: false };
+      return;
+    }
+    if (!nodeOf(id) || e.shiftKey) return;
+    if (state.sels.length > 1 && state.sels.includes(id)) { pressSeveral(e, id); return; }
     select(id);
     if (state.sel !== id) return;
     const s = $('surface').getBoundingClientRect();
@@ -2803,12 +3035,62 @@
     gesture.live = placedByXY(nodeOf(id)) && finite(gesture.start.x) && finite(gesture.start.y);
     gesture.sent = { ...gesture.start };
   }
+  // A press on a member of several: the selection kept while pressed (released without a drag, the
+  // pressed node alone: collapseTo); g.nodes, every selection root placed by x, y with numeric x and y,
+  // each { id, start, sent, el }, moved by the pointer's movement within its own parent (never into
+  // another: a multi-node drag sends sets only). Live edits as one node's, of all their sets; none when
+  // one would pass 64 KB.
+  function pressSeveral(e, id) {
+    const s = $('surface').getBoundingClientRect();
+    const z = view.z;
+    const nodes = [];
+    for (const r of selRoots()) {
+      const n = nodeOf(r);
+      if (!n || !placedByXY(n)) continue;
+      const start = { x: baseOf(r, 'x'), y: baseOf(r, 'y') };
+      if (finite(start.x) && finite(start.y)) nodes.push({ id: r, start, sent: { ...start }, el: null });
+    }
+    gesture = {
+      id: e.pointerId, tool: 'move', sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null,
+      node: id, el: null, nodes, collapseTo: id,
+      px: (e.clientX - s.left) / z, py: (e.clientY - s.top) / z,
+      gx: 0, gy: 0, live: nodes.length > 0, start: null, sent: null, lastAt: null, timer: null,
+      liveSent: false, items: [], snapshot: null, restored: false,
+    };
+  }
+  // The selection's drag rectangle released: the shown page's top-level nodes drawn with a box that
+  // meets it (hidden ones have none), added to the selection when Shift is held at the release.
+  function marqueeSelect(g) {
+    const l = Math.min(g.sx, g.cx);
+    const r = Math.max(g.sx, g.cx);
+    const t = Math.min(g.sy, g.cy);
+    const b = Math.max(g.sy, g.cy);
+    const pg = pageById(state.pageId);
+    const hits = [];
+    for (const id of pg ? kidsOf(pg) : []) {
+      const el = drawn.get(id);
+      if (!el || el.getClientRects().length === 0) continue;
+      const box = el.getBoundingClientRect();
+      if (box.left <= r && box.right >= l && box.top <= b && box.bottom >= t) hits.push(id);
+    }
+    selectIds(g.shift ? [...state.sels, ...hits] : hits);
+  }
   // The pointer's movement since the press, in page px.
   function moveBy(g) {
     const s = $('surface').getBoundingClientRect();
     return { dx: (g.cx - s.left) / view.z - g.px, dy: (g.cy - s.top) / view.z - g.py };
   }
   function movePreview(g) {
+    if (g.nodes) {
+      const { dx, dy } = moveBy(g);
+      for (const m of g.nodes) {
+        const el = drawn.get(m.id);
+        if (m.el && m.el !== el) m.el.style.translate = '';
+        m.el = el ?? null;
+        if (m.el && Number.isFinite(dx) && Number.isFinite(dy)) m.el.style.translate = `${dx - (m.sent.x - m.start.x)}px ${dy - (m.sent.y - m.start.y)}px`;
+      }
+      return;
+    }
     const el = drawn.get(g.node);
     if (g.el && g.el !== el) g.el.style.translate = '';
     g.el = el ?? null;
@@ -2827,8 +3109,39 @@
   }
   // The throttle's timer: one live edit of the sets that changed since the last sent. g.sent moves to the
   // targets before edit() (whose redraw then previews from them); back when nothing was queued.
+  // Each of several's target now: its start moved by the pointer, whole px.
+  function severalTargets(g) {
+    const { dx, dy } = moveBy(g);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+    return g.nodes.map((m) => ({ m, x: clamp(Math.round(m.start.x + dx), -PX, PX), y: clamp(Math.round(m.start.y + dy), -PX, PX) }));
+  }
+  // Several's sets from what each last sent (or, `back`, to their starts), in g.nodes' order.
+  function severalOps(list, back = false) {
+    const ops = [];
+    for (const t of list) for (const k of ['x', 'y']) {
+      const to = back ? t.m.start[k] : t[k];
+      if (to !== t.m.sent[k]) ops.push({ op: 'set', id: t.m.id, prop: k, value: to });
+    }
+    return ops;
+  }
   function liveSend(g) {
     g.timer = null;
+    if (g.nodes) {
+      if (gesture !== g || !g.live || !editable()) return;
+      const list = severalTargets(g);
+      if (list === null) return;
+      const ops = severalOps(list);
+      if (ops.length === 0) return;
+      if (jsonBytes(ops) > OPS_BYTES) { g.live = false; return; } // only the release then, split
+      const prev = list.map((t) => t.m.sent);
+      for (const t of list) t.m.sent = { x: t.x, y: t.y };
+      const item = edit(ops, { kind: 'live' });
+      if (!item) { list.forEach((t, i) => { t.m.sent = prev[i]; }); return; }
+      g.lastAt = performance.now();
+      g.liveSent = true;
+      g.items.push(item);
+      return;
+    }
     if (gesture !== g || !g.live || !editable() || !nodeOf(g.node)) return;
     const to = liveTarget(g);
     if (to === null) return;
@@ -2847,6 +3160,16 @@
   // the last live edit moved), through the same throttle, drawn at once. Nothing when editing is no
   // longer allowed, or the node is gone.
   function restore(g) {
+    if (g.nodes) {
+      if (!g.liveSent || !editable()) return;
+      g.restored = true;
+      const ops = severalOps(g.nodes.filter((m) => nodeOf(m.id)).map((m) => ({ m })), true);
+      if (ops.length === 0) return;
+      for (const m of g.nodes) m.sent = { ...m.start };
+      const items = editSplit(ops, { kind: 'restore', notBefore: g.lastAt + 100 });
+      if (items) g.items.push(...items);
+      return;
+    }
     if (!g.liveSent || !editable() || !nodeOf(g.node)) return;
     g.restored = true;
     const ops = [];
@@ -2863,6 +3186,25 @@
   function keepDrag() {
     const g = gesture;
     if (!g || g.tool !== 'move' || !g.dragged) return;
+    if (g.nodes) {
+      // several: a node gone drops out; one off the shown page drops out, sent back to its start when
+      // live edits moved it; none left ends the drag with nothing sent
+      const gone = g.nodes.filter((m) => !nodeOf(m.id) || !drawn.has(m.id));
+      if (gone.length) {
+        g.nodes = g.nodes.filter((m) => !gone.includes(m));
+        for (const m of gone) if (m.el) { m.el.style.translate = ''; m.el = null; }
+        const back = severalOps(gone.filter((m) => nodeOf(m.id)).map((m) => ({ m })), true);
+        for (const m of gone) m.sent = { ...m.start };
+        if (g.nodes.length === 0) { endGesture(g); return; }
+        if (back.length && g.liveSent && editable()) {
+          const items = editSplit(back, { kind: 'restore', notBefore: g.lastAt + 100 });
+          if (items) g.items.push(...items);
+          return; // its redraw has previewed the rest
+        }
+      }
+      movePreview(g);
+      return;
+    }
     if (!nodeOf(g.node)) { endGesture(g); return; }
     if (!drawn.has(g.node)) { endGesture(g, { abort: true }); return; }
     movePreview(g);
@@ -2910,6 +3252,19 @@
   // refused drop, or the node off the shown page: the caller restores).
   function dropMove(g) {
     if (!g.dragged || !editable()) return 'none';
+    if (g.nodes) {
+      // several: the sets of what differs from the last live edit, split over 64 KB; never a move
+      const list = severalTargets(g);
+      if (list === null) return 'refused';
+      const live = list.filter((t) => nodeOf(t.m.id));
+      const ops = severalOps(live);
+      if (ops.length === 0) return 'none';
+      const items = editSplit(ops, { kind: 'release', notBefore: g.liveSent ? g.lastAt + 100 : 0 });
+      if (!items) return 'refused';
+      for (const t of live) t.m.sent = { x: t.x, y: t.y };
+      g.items.push(...items);
+      return 'sent';
+    }
     const id = g.node;
     const n = nodeOf(id);
     if (!n) return 'none'; // gone
@@ -2948,20 +3303,27 @@
   // coalesce in the sender while unsent (§1). Only while focus is on the page itself or the stage: in a
   // field the arrows are the field's, in the Layers tree they move between rows.
   const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  // kit-669 §2: every selection root placed by x, y (its x or y, the axis moved, a number), as one edit
+  // of their sets (split over 64 KB); one node's one set still coalesces with the last unsent one.
   function nudge(dx, dy) {
-    const id = state.sel;
-    const n = nodeOf(id);
-    if (!editable() || !n || !placedByXY(n)) return;
-    for (const [k, d] of [['x', dx], ['y', dy]]) {
-      const v = baseOf(id, k);
-      if (d !== 0 && finite(v)) setRaw(id, k, clamp(v + d, -PX, PX));
+    if (!editable()) return;
+    const ops = [];
+    for (const id of selRoots()) {
+      const n = nodeOf(id);
+      if (!n || !placedByXY(n)) continue;
+      // the axis moved must hold a number (a token there is left as it is, as kit-662's nudge did)
+      for (const [k, d] of [['x', dx], ['y', dy]]) {
+        const v = baseOf(id, k);
+        if (d !== 0 && finite(v)) ops.push({ op: 'set', id, prop: k, value: clamp(v + d, -PX, PX) });
+      }
     }
+    if (ops.length) editSplit(ops);
   }
   document.addEventListener('keydown', (e) => {
     if (!own(ARROWS, e.key) || !toolsOn() || e.ctrlKey || e.metaKey || e.altKey) return;
     const t = e.target;
     if (t !== document.body && t !== document.documentElement && t !== $('stage')) return;
-    if (state.sel === null || gesture !== null || pen !== null) return;
+    if (state.sels.length === 0 || gesture !== null || pen !== null) return;
     e.preventDefault();
     const step = e.shiftKey ? 10 : 1;
     const [dx, dy] = ARROWS[e.key];
@@ -3165,7 +3527,13 @@
       out.push(...ops);
     }
     if (out.length === 0) { say(UNDO_SAY.all); return; }
-    if (edit(out, { kind: 'undo' }) && skipped) say(UNDO_SAY.part);
+    // kit-669 §5 (as ruled): over 64 KB, cut in this order where no reference is left unresolved and
+    // sent as consecutive edits; with no such cut nothing is sent, said, and the entry is kept
+    const parts = splitParts(out, state.doc);
+    if (parts === null) { pushEntry(entry); say(SAY.tooBig); return; }
+    let sent = false;
+    for (const part of parts) if (edit(part, { kind: 'undo' })) sent = true;
+    if (sent && skipped) say(UNDO_SAY.part);
   }
   // Ctrl+Z (Cmd+Z on a Mac), no Shift, no Alt: only while no field has focus (there it is the field's),
   // at 760 px and over, while editing is allowed, and not during a drag (its throttled release or
@@ -3278,7 +3646,41 @@
   const sock = {
     ws: null, live: false, down: false, ended: false, tries: 0, cursor: 0, sentAt: [], pumpTimer: null, seq: 0,
     fetching: false, held: [], stale: false, again: false, session: null, highest: 0, epoch: 0, lowered: false,
+    // kit-669: the ids of the last `select` sent on this socket (as JSON), null since its welcome
+    lastSelect: null,
   };
+  // ---- the `select` sender (kit-669 §2, canvas@1 §5) ----
+  // Whenever the selection changes the server is told its ids in layer order, the first 100 (contract
+  // selectIds): at most one `select` per 250 ms, the first change at once, later ones within the window
+  // one at its end with the selection as it is then. It waits until the page has no edit unacked
+  // (pending empty: each ack or refusal that empties it lets it go), so it never names a node whose add
+  // the server hasn't applied. Nothing while the socket is down (every welcome sends the selection again
+  // when it isn't empty), on main's copy, or when it equals the last sent on this socket.
+  const SELECT_MS = 250;
+  const SELECT_IDS = 100;
+  const selq = { want: false, timer: null, lastAt: -Infinity };
+  function queueSelect() {
+    selq.want = true;
+    trySelect();
+  }
+  function trySelect() {
+    if (!selq.want || selq.timer !== null) return;
+    if (state.session === null || !sock.ws || !sock.live || state.pending.length > 0) return;
+    const now = performance.now();
+    const wait = selq.lastAt + SELECT_MS - now;
+    if (wait > 0) {
+      selq.timer = setTimeout(() => { selq.timer = null; trySelect(); }, Math.ceil(wait));
+      return;
+    }
+    selq.want = false;
+    const ids = state.sels.slice(0, SELECT_IDS);
+    const key = JSON.stringify(ids);
+    if (key === (sock.lastSelect ?? '[]')) return;
+    if (send({ t: 'select', ids })) {
+      sock.lastSelect = key;
+      selq.lastAt = now;
+    }
+  }
   function connect() {
     if (sock.ended || sock.ws) return;
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -3381,6 +3783,8 @@
     syncBody();
     if (!sock.stale && !sock.lowered && m.session === state.session && m.rev === state.base.rev) pump();
     else refetch();
+    sock.lastSelect = null; // a new socket: the selection is sent again (when it isn't empty)
+    queueSelect();
   }
   // ops: applied to base when it is the next rev (dropped at or below base's rev; one missed fetches
   // the document); this page's own ack drops that edit, and any earlier one, from pending.
@@ -3408,6 +3812,7 @@
         state.kept.splice(0, state.kept.length - KEPT_MAX);
         say(SAY.notSaved);
       }
+      if (state.pending.length === 0) queueSelect(); // a waiting select may go now
     }
   }
   // saved: the socket's session's kept edits at or below its rev are on disk; another session's stay.
@@ -3438,6 +3843,7 @@
     if (why === 'view') lock('view');
     redraw();
     refetch();
+    if (state.pending.length === 0) queueSelect(); // a waiting select may go now
   }
   const bySeq = (a, b) => a.seq - b.seq;
   // The document fetched again as base (its session too); the ops held meanwhile applied after it, in

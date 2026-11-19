@@ -819,3 +819,320 @@ test("S5.1 a restart during a running fetch drops the old session's held frames"
   noDialogs(rec);
   noExceptions(rec);
 });
+
+// ---- M: multi-select ----
+
+// PLACED: `every` with `tiles` at x 700, y 0, 100 × 100, clear of `card` and `loose`.
+const PLACED = docVariant(EVERY, (d) => { Object.assign(d.nodes.tiles, { x: 700, y: 0, size: { w: 100, h: 100 } }); });
+// A canvas of rects `<prefix><n>` named `Rect <n>`, `count` of them on the first page in a grid of
+// `cols` columns, each `side` px square, `step` px apart; `more` changes it further.
+function rectsCanvas(pagesList, { count, cols, side, step, prefix = 'r', parent = pagesList[0].id }, more = () => {}) {
+  const base = { canvas: 1, rev: 0, tokens: {}, pages: pagesList.map((pg) => ({ ...pg, children: [] })), nodes: {} };
+  return docVariant(base, (d) => {
+    const holder = d.pages.find((pg) => pg.id === parent);
+    for (let i = 1; i <= count; i++) {
+      const id = `${prefix}${i}`;
+      d.nodes[id] = { type: 'rect', parent, name: `Rect ${i}`, x: ((i - 1) % cols) * step, y: Math.floor((i - 1) / cols) * step, size: { w: side, h: side }, fill: '#d9d9d9' };
+      if (holder) holder.children.push(id);
+    }
+    more(d);
+  });
+}
+// MANY: one page, 120 rects r1…r120, a 12 × 10 grid of 10 × 10 px rects 20 px apart.
+const MANY = rectsCanvas([{ id: 'p1', name: 'Page 1' }], { count: 120, cols: 12, side: 10, step: 20 });
+// BIG: page `pa` with 3000 rects r1…r3000 (a 60 × 50 grid of 4 × 4 px, 6 px apart); page `pb` one rect.
+const BIG = rectsCanvas([{ id: 'pa', name: 'Page A' }, { id: 'pb', name: 'Page B' }], { count: 3000, cols: 60, side: 4, step: 6 }, (d) => {
+  d.nodes.q1 = { type: 'rect', parent: 'pb', name: 'Rect B', x: 0, y: 0, size: { w: 40, h: 40 }, fill: '#d9d9d9' };
+  d.pages[1].children.push('q1');
+});
+// BIGC: one page holding a component `bc` of 1500 rects c1…c1500, its variant `loud` naming the last.
+const BIGC = rectsCanvas([{ id: 'p1', name: 'Page 1' }], { count: 1500, cols: 40, side: 4, step: 10, prefix: 'c', parent: 'bc' }, (d) => {
+  d.nodes.bc = { type: 'component', parent: 'p1', name: 'Big', x: 0, y: 0, size: { w: 400, h: 400 }, layout: { mode: 'none' }, children: Array.from({ length: 1500 }, (_, i) => `c${i + 1}`), variants: { loud: { c1500: { visible: false } } } };
+  d.pages[0].children.push('bc');
+});
+const SAY_TOO_BIG = 'That change is too big to send.';
+const OPS_MAX = 65536;
+const bytesOf = (ops) => Buffer.byteLength(JSON.stringify(ops));
+// The page's `select` frames with the browser's time each was sent (ms).
+const selectsTimed = (rec, from = 0) => rec.sent.map((m, i) => ({ m, ts: rec.sentTs[i] * 1000, i })).slice(from).filter((x) => x.m && x.m.t === 'select');
+const lastSelect = (rec) => { const s = selectsTimed(rec); return s.length ? s[s.length - 1].m.ids : null; };
+const waitSelect = (rec, ids, what) => within(async () => JSON.stringify(lastSelect(rec)) === JSON.stringify(ids), what, async () => `last select ${JSON.stringify(lastSelect(rec))}`, 5000);
+const selectedRows = (p) => p.ev("[...document.querySelectorAll('#layers .layer[aria-selected=\"true\"]')].map((r) => r.dataset.node)");
+const outlined = (p) => p.ev("[...document.querySelectorAll('#surface .sel')].map((e) => e.dataset.id).sort()");
+const waitRows = (p, ids, what) => within(async () => JSON.stringify(await selectedRows(p)) === JSON.stringify(ids), what, async () => JSON.stringify(await selectedRows(p)), 5000);
+// A page point (page px) on screen.
+async function pagePt(p, x, y) {
+  const s = await box(p, '#surface');
+  const z = await zoomNow(p);
+  return { x: s.l + x * z, y: s.t + y * z };
+}
+// Focus on the page itself, so the arrows and Delete are the page's, not a row's.
+const blurAll = (p) => p.ev('(() => { const a = document.activeElement; if (a && a !== document.body && typeof a.blur === \'function\') a.blur(); return true; })()');
+const propsText = (p) => p.ev("document.getElementById('props').textContent");
+// The drag rectangle from page point a to page point b, in steps of at most 10 px.
+async function marquee(p, a, b) {
+  await dragPath(p, [await pagePt(p, a.x, a.y), await pagePt(p, b.x, b.y)]);
+}
+const docOf = (d) => ({ pages: d.pages, nodes: d.nodes, tokens: d.tokens });
+
+test('M1.1 shift-click selects several and sends select', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  assert.equal(await p.ev("document.getElementById('layers').getAttribute('aria-multiselectable')"), 'true', '#layers is multiselectable');
+  const s0 = rec.sent.length;
+  await p.click('#surface [data-id="title"]');
+  await waitRows(p, ['title'], 'title selected');
+  await shiftClick(p, '#surface [data-id="badge"]');
+  await waitRows(p, ['title', 'badge'], 'title and badge selected');
+  await shiftClick(p, '#layers .layer[data-node="dot"]');
+  await waitRows(p, ['title', 'dot', 'badge'], 'title, dot and badge selected');
+  assert.deepEqual(await outlined(p), ['badge', 'dot', 'title'], 'the three outlined');
+  await waitSelect(rec, ['title', 'dot', 'badge'], 'a select of the three, in layer order');
+  await shiftClick(p, '#layers .layer[data-node="dot"]');
+  await waitRows(p, ['title', 'badge'], 'dot toggled off');
+  assert.deepEqual(await outlined(p), ['badge', 'title'], 'two outlined');
+  await waitSelect(rec, ['title', 'badge'], 'a later select of title and badge');
+  await sleep(400);
+  const sel = selectsTimed(rec, s0);
+  for (let i = 1; i < sel.length; i++) assert.ok(sel[i].ts - sel[i - 1].ts >= 240, `select frames ${sel[i].ts - sel[i - 1].ts} ms apart`);
+  assert.deepEqual(sel[sel.length - 1].m, { t: 'select', ids: ['title', 'badge'] }, 'the last select frame');
+  assert.deepEqual(edits(rec), [], 'no edit');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('M1.2 the drag rectangle selects top-level nodes', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { placed: PLACED }, images: EVERY_IMAGES('placed') });
+  await live(p);
+  await marquee(p, { x: -40, y: -40 }, { x: 650, y: 250 });
+  await waitRows(p, ['card', 'loose'], 'card and loose selected, not tiles');
+  await sleep(300);
+  assert.deepEqual(await selectedRows(p), ['card', 'loose'], 'the click that ended it did not clear');
+  assert.deepEqual(await outlined(p), ['card', 'loose']);
+  assert.equal(await count(p, '.draft'), 0, 'the rectangle gone');
+  assert.ok((await propsText(p)).includes('2 layers selected.'), 'the panel says 2 layers selected.');
+  assert.equal(await text(p, '#props button[data-action="delete"]'), 'Delete layers');
+  await waitSelect(rec, ['card', 'loose'], 'a select of card and loose');
+  // Escape with the button down drops it, selecting nothing new
+  await p.click('#layers .layer[data-node="tiles"]');
+  await waitRows(p, ['tiles'], 'tiles selected');
+  await dragPath(p, [await pagePt(p, -40, -40), await pagePt(p, 650, 250)], async () => {
+    assert.equal(await count(p, '.draft'), 1, 'the rectangle drawn');
+    await p.key('Escape');
+  });
+  await sleep(300);
+  assert.deepEqual(await selectedRows(p), ['tiles'], 'Escape selected nothing new');
+  assert.deepEqual(edits(rec), [], 'no edit');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('M1.3 a move of the selection is one edit', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { placed: PLACED }, images: EVERY_IMAGES('placed') });
+  await live(p);
+  await p.click('#layers .layer[data-node="loose"]');
+  await shiftClick(p, '#layers .layer[data-node="tiles"]');
+  await waitRows(p, ['loose', 'tiles'], 'loose and tiles selected');
+  const z = await zoomNow(p);
+  const n0 = edits(rec).length;
+  // slowly (live edits go while the button is down), then released
+  const from = await pagePt(p, 500, 100);
+  await slowDrag(p, from, { x: from.x + 40, y: from.y + 30 }, 500);
+  await within(async () => edits(rec).length > n0 && (await body(p, 'pending')) === '0', 'the drag sent and acked');
+  await accepted(rec, n0);
+  assert.ok(edits(rec).length - n0 >= 2, `live edits went before the release (${edits(rec).length - n0} frames)`);
+  for (const e of edits(rec).slice(n0)) {
+    const of = (id) => e.ops.filter((o) => o.id === id).map((o) => [o.op, o.prop]).sort();
+    assert.ok(e.ops.every((o) => o.op === 'set' && ['loose', 'tiles'].includes(o.id) && ['x', 'y'].includes(o.prop)), 'sets of x, y only');
+    assert.deepEqual(of('loose'), of('tiles'), `the same properties of both: ${JSON.stringify(e.ops)}`);
+  }
+  const d = fake.doc('placed');
+  assert.deepEqual([d.nodes.loose.x, d.nodes.loose.y], [Math.round(400 + 40 / z), Math.round(0 + 30 / z)], 'loose moved');
+  assert.deepEqual([d.nodes.tiles.x, d.nodes.tiles.y], [Math.round(700 + 40 / z), Math.round(0 + 30 / z)], 'tiles moved');
+  const n1 = edits(rec).length;
+  await undoKey(p);
+  const back = await nextEdit(rec, n1);
+  assert.deepEqual(byProp(back.ops.filter((o) => o.id === 'loose')), [{ op: 'set', id: 'loose', prop: 'x', value: 400 }, { op: 'set', id: 'loose', prop: 'y', value: 0 }]);
+  assert.deepEqual(byProp(back.ops.filter((o) => o.id === 'tiles')), [{ op: 'set', id: 'tiles', prop: 'x', value: 700 }, { op: 'set', id: 'tiles', prop: 'y', value: 0 }]);
+  assert.equal(back.ops.length, 4, 'all four set back');
+  await accepted(rec, n1);
+  assert.equal(edits(rec).length, n1 + 1, 'one undo frame');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('M1.4 a delete of the selection is one edit', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await p.click('#surface [data-id="title"]');
+  await shiftClick(p, '#surface [data-id="badge"]');
+  await waitRows(p, ['title', 'badge'], 'title and badge selected');
+  await blurAll(p);
+  const n0 = edits(rec).length;
+  await p.key('Delete');
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'del', id: 'title' }, { op: 'del', id: 'badge' }]);
+  await accepted(rec, n0);
+  await sleep(300);
+  assert.equal(edits(rec).length, n0 + 1, 'one edit frame');
+  const d = fake.doc('every');
+  assert.equal(Object.hasOwn(d.nodes, 'title') || Object.hasOwn(d.nodes, 'badge'), false, 'both gone from the fake');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('M1.5 over 100 selected', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { many: MANY } });
+  await live(p);
+  await marquee(p, { x: -15, y: -15 }, { x: 250, y: 210 });
+  await within(async () => (await selectedRows(p)).length === 120, 'all 120 selected', async () => String((await selectedRows(p)).length), 5000);
+  const first100 = Array.from({ length: 100 }, (_, i) => `r${i + 1}`);
+  await waitSelect(rec, first100, 'a select of r1…r100');
+  assert.ok(selectsTimed(rec).every((x) => x.m.ids.length <= 100), 'no select of more than 100 ids');
+  await blurAll(p);
+  const n0 = edits(rec).length;
+  await p.key('Delete');
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, Array.from({ length: 120 }, (_, i) => ({ op: 'del', id: `r${i + 1}` })), '120 dels');
+  await accepted(rec, n0);
+  await sleep(300);
+  assert.equal(edits(rec).length, n0 + 1, 'one edit frame');
+  assert.deepEqual(fake.doc('many').pages[0].children, [], "the fake's page empty");
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('M1.6 several nudged at once, roots only', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await p.click('#layers .layer[data-node="card"]');
+  await shiftClick(p, '#layers .layer[data-node="badge"]');
+  await waitRows(p, ['card', 'badge'], 'card and badge selected');
+  await blurAll(p);
+  let n0 = edits(rec).length;
+  await arrow(p, 'ArrowRight');
+  let e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'set', id: 'card', prop: 'x', value: 1 }, { op: 'set', id: 'badge', prop: 'x', value: 13 }]);
+  await accepted(rec, n0);
+  // badge inside loose: loose alone
+  await p.click('#layers .layer[data-node="loose"]');
+  await shiftClick(p, '#layers .layer[data-node="badge"]');
+  await waitRows(p, ['loose', 'badge'], 'loose and badge selected');
+  await blurAll(p);
+  n0 = edits(rec).length;
+  await arrow(p, 'ArrowRight');
+  e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'set', id: 'loose', prop: 'x', value: 401 }]);
+  await accepted(rec, n0);
+  await sleep(300);
+  assert.equal(edits(rec).length, n0 + 1, 'one nudge frame');
+  // and a drag of loose: loose's sets only (badge at x 13 since the first nudge)
+  assert.deepEqual([fake.doc('every').nodes.badge.x, fake.doc('every').nodes.badge.y], [13, -8], 'badge before the drag');
+  const z = await zoomNow(p);
+  n0 = edits(rec).length;
+  await drag(p, await pagePt(p, 401 + 150, 150), 40, 30);
+  await within(async () => edits(rec).length > n0 && (await body(p, 'pending')) === '0', 'the drag sent and acked');
+  await accepted(rec, n0);
+  for (const f of edits(rec).slice(n0)) assert.ok(onlyXY(f, 'loose'), `loose's x, y only: ${JSON.stringify(f.ops)}`);
+  const d = fake.doc('every');
+  assert.deepEqual([d.nodes.loose.x, d.nodes.loose.y], [Math.round(401 + 40 / z), Math.round(30 / z)], 'loose moved');
+  assert.deepEqual([d.nodes.badge.x, d.nodes.badge.y], [13, -8], 'badge kept its x, y');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('M1.7 the select resent on reconnect', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await p.click('#surface [data-id="title"]');
+  await shiftClick(p, '#surface [data-id="badge"]');
+  await waitSelect(rec, ['title', 'badge'], 'a select of title and badge');
+  assert.ok(await closePageSocket(rec) >= 1, 'the socket closed');
+  await within(async () => welcomeCount(rec) >= 2, 'the second welcome', async () => `welcomes ${welcomeCount(rec)}`);
+  const from = afterWelcome(rec, 2);
+  await within(async () => selectsTimed(rec, from).length > 0, 'a select after the second welcome', async () => JSON.stringify(rec.sent.slice(from)));
+  assert.deepEqual(selectsTimed(rec, from)[0].m, { t: 'select', ids: ['title', 'badge'] }, 'the same ids again');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('M1.8 a delete over 64 KB is split, and its undo too', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  assert.equal(bytesOf(Array.from({ length: 3000 }, (_, i) => ({ op: 'del', id: `r${i + 1}` }))), 76894, "the 3000 dels' bytes");
+  const { p, fake, rec } = await open(t, { canvases: { big: BIG } });
+  await live(p);
+  await marquee(p, { x: -20, y: -20 }, { x: 380, y: 320 });
+  await within(async () => (await selectedRows(p)).length === 3000, 'all 3000 selected', async () => String((await selectedRows(p)).length), 10000);
+  await blurAll(p);
+  let n0 = edits(rec).length;
+  await p.key('Delete');
+  await within(async () => (await body(p, 'pending')) === '0' && edits(rec).length > n0, 'the delete sent and acked', async () => `pending ${await body(p, 'pending')}`, 30000);
+  await accepted(rec, n0, 30000);
+  const dels = edits(rec).slice(n0);
+  assert.ok(dels.length >= 2, `at least two edit frames (${dels.length})`);
+  for (const f of dels) assert.ok(bytesOf(f.ops) <= OPS_MAX, `a part of ${bytesOf(f.ops)} bytes`);
+  assert.deepEqual(dels.flatMap((f) => f.ops), Array.from({ length: 3000 }, (_, i) => ({ op: 'del', id: `r${i + 1}` })), 'the 3000 dels, in order');
+  assert.deepEqual(fake.doc('big').pages[0].children, [], "pa empty in the fake");
+  n0 = edits(rec).length;
+  await undoKey(p);
+  await within(async () => (await body(p, 'pending')) === '0' && edits(rec).length > n0, 'the undo sent and acked', async () => `pending ${await body(p, 'pending')}; ${await shownText(p, '#toast')}`, 30000);
+  await accepted(rec, n0, 30000);
+  const back = edits(rec).slice(n0);
+  assert.ok(back.length >= 2, `at least two undo frames (${back.length})`);
+  for (const f of back) assert.ok(bytesOf(f.ops) <= OPS_MAX, `an undo part of ${bytesOf(f.ops)} bytes`);
+  const d = fake.doc('big');
+  assert.deepEqual(d.pages, BIG.pages, "the fake's pages, children in order, are big's");
+  assert.deepEqual(docOf(d), docOf(BIG), "the fake's document is big's");
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test("M1.9 a page delete's undo over 64 KB", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { big: BIG } });
+  await live(p);
+  await within(async () => (await shownPage(p)) === 'pa', 'pa shown', async () => shownPage(p));
+  let n0 = edits(rec).length;
+  await p.click(rowButton('page-delete'));
+  const del = await nextEdit(rec, n0);
+  assert.deepEqual(del.ops, [{ op: 'del', id: 'pa' }], 'one del of pa');
+  await accepted(rec, n0);
+  n0 = edits(rec).length;
+  await undoKey(p);
+  await within(async () => (await body(p, 'pending')) === '0' && edits(rec).length > n0, 'the undo sent and acked', async () => `pending ${await body(p, 'pending')}; ${await shownText(p, '#toast')}`, 30000);
+  await accepted(rec, n0, 30000);
+  const back = edits(rec).slice(n0);
+  assert.ok(back.length >= 2, `at least two undo frames (${back.length})`);
+  for (const f of back) assert.ok(bytesOf(f.ops) <= OPS_MAX, `an undo part of ${bytesOf(f.ops)} bytes`);
+  assert.deepEqual(back[0].ops[0], { op: 'add', node: { id: 'pa', type: 'page', parent: null, name: 'Page A' }, after: null }, "the first op re-adds the page");
+  const d = fake.doc('big');
+  assert.deepEqual(d.pages, BIG.pages, "the fake's pages, children in order, are big's");
+  assert.deepEqual(docOf(d), docOf(BIG), "the fake's document is big's");
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('M1.10 an undo with no valid cut is refused', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { bigc: BIGC } });
+  await live(p);
+  await selectRow(p, 'bc');
+  await blurAll(p);
+  let n0 = edits(rec).length;
+  await p.key('Delete');
+  const del = await nextEdit(rec, n0);
+  assert.deepEqual(del.ops, [{ op: 'del', id: 'bc' }], 'one del of bc');
+  await accepted(rec, n0);
+  await allSaved(p);
+  const before = structuredClone(fake.doc('bigc'));
+  n0 = edits(rec).length;
+  await undoKey(p);
+  await toastSays(p, SAY_TOO_BIG);
+  await sendsNothing(rec, n0, 'the undo with no valid cut', 1000);
+  assert.deepEqual(fake.doc('bigc'), before, "the fake's document as it was (bc still gone)");
+  // the entry stays: the same words again, nothing sent
+  await hideToast(p);
+  await undoKey(p);
+  await toastSays(p, SAY_TOO_BIG);
+  await sendsNothing(rec, n0, 'the second Ctrl+Z', 1000);
+  assert.deepEqual(fake.doc('bigc'), before, "the fake's document unchanged");
+  noDialogs(rec);
+  noExceptions(rec);
+});
