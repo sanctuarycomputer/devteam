@@ -843,24 +843,43 @@ try {
 
 /* css-review end */
 /* css-library start */
-  /* the Library: artifacts (a landed one with its drafts beneath it), drafts of new ones, the link registry */
-  #library h3 { margin: 18px 0 8px; }
-  #library h3:first-of-type { margin-top: 4px; }
-  .lib-list { max-width: var(--measure); }
-  .art-card .art-t { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-  .art-card .art-t a { font-weight: 600; color: var(--fg); }
-  .art-card .art-t a:hover { text-decoration: underline; text-underline-offset: 3px; }
-  .art-card .art-t .badge { margin-right: 0; }
-  .art-card .art-s { color: var(--fg-2); margin-top: 2px; }
-  .art-card .meta { margin-top: 4px; }
-  .art-card .meta a, .lib-link .meta a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
-  .art-card.draft { margin-left: 20px; background: var(--well); box-shadow: none; }
-  .art-card .pub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 6px; }
-  .art-card .pub a.ghost, .lib-pub a.ghost { display: inline-block; padding: 2px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--fg); font-size: 12px; text-decoration: none; }
-  .art-card .pub a.ghost:hover, .lib-pub a.ghost:hover { background: var(--hover); }
-  .art-wt { font-size: 12px; color: var(--fg-2); margin: 10px 0 6px; }
-  .lib-link .links { margin: 0; }
-  .lib-link .loc { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
+  /* the Library: one .cards grid of every item in kind order; above it, only when there is something to say, #lib-top */
+  #lib-top { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--gap); }
+  #lib-top[hidden] { display: none; }
+  #lib-top p { margin: 0; }
+  .lib-pub a.ghost { display: inline-block; padding: 2px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--fg); font-size: 12px; text-decoration: none; }
+  .lib-pub a.ghost:hover { background: var(--hover); }
+  #lib-grid > .empty { grid-column: 1 / -1; margin: 0; }
+  /* a card: the head (icon, title truncated to one line, badges, then ↗ and ⋯ pinned right), the thumbnail, the body */
+  .lib-card .card-head .lib-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
+  .lib-card .card-head a.lib-title[href]:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .lib-card .card-head > :not(.lib-title) { flex: none; }
+  .lib-card .card-head .lib-tab { margin-left: auto; display: inline-flex; color: var(--fg-2); }
+  .lib-card .card-head .lib-tab:hover { color: var(--fg); }
+  /* a review has no ↗: its ⋯ pins right itself */
+  .lib-card .card-head > :not(.lib-tab) + details.menu { margin-left: auto; }
+  .lib-thumb { position: relative; aspect-ratio: 16 / 9; border: 1px solid var(--line); border-radius: 6px; background: var(--well); overflow: hidden; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+  .lib-thumb > i { font-size: 28px; }
+  .lib-body { margin-top: 8px; min-width: 0; }
+  .lib-body .lib-sum { color: var(--fg-2); max-width: var(--measure); }
+  /* the thumbnail opens what the title opens; Public's globe; publish details, drift in amber; the details and meta lines */
+  a.lib-thumb { text-decoration: none; } a.lib-thumb[href] { cursor: pointer; }
+  /* a draft's "in <worktree>" shrinks too, after the title has given way (its shrink is the title's thousandth); at most
+     40% of the head, so a long worktree never squeezes the title to nothing */
+  .lib-card .card-head > .lib-title { flex-shrink: 1000; }
+  .lib-card .card-head > .lib-wt { flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lib-card .card-head .badge > i { font-size: 11px; margin-right: 4px; }
+  .lib-body > .lib-pub, .lib-body > .lib-meta, .lib-body > .err { margin-top: 6px; max-width: var(--measure); }
+  .lib-body .lib-drift { color: var(--amber-fg); }
+  .lib-body .lib-meta .badge { margin-right: 6px; }
+  .lib-body .lib-pub a.ghost { padding: 0 8px; }
+  /* a thumbnail's frame fills its 16:9 box over the kind's icon, inert; a link's box: its site's icon over its host */
+  .lib-thumb { flex-direction: column; gap: 6px; }
+  .lib-thumb > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
+  .lib-thumb > img { width: 32px; height: 32px; object-fit: contain; }
+  /* a closed ⋯ menu's pop out of layout, as the Inbox's and Goals' (Chrome boxes a closed <details>' content at the
+     summary's 26px, so the pop's key column would stick out of it: the measure) */
+  #library details.menu:not([open]) > .pop { display: none; }
 
 /* css-library end */
 /* css-viewer start */
@@ -871,17 +890,49 @@ try {
   /* a viewer opened over a review stays above it: the review sits above the panel (z 25, kit-100) */
   .app:has(main.reviewing) ~ #artifact-view:not([hidden]) { z-index: 26; }
 /* css-viewer-bar start */
-  .av-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
+  /* --head-h tall, one line (kit-92): what the page says gives way first (the title truncates), the pills never wrap; above
+     the stage, so the version list and the tile's menu open over it */
+  .av-bar { position: relative; z-index: 3; flex: none; display: flex; align-items: center; gap: 8px; height: var(--head-h); box-sizing: border-box; padding: 0 10px 0 14px; border-bottom: 1px solid var(--line); min-width: 0; }
   .av-bar > i { font-size: 15px; color: var(--muted); flex: none; }
-  .av-head { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12px; }
-  .av-head b { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-  .av-head .badge { margin-right: 0; }
+  .av-head { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 12px; white-space: nowrap; }
+  .av-head b { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+  .av-head .badge { margin: 0; flex: none; }
+  .av-head > #av-project, .av-head > #av-hint, .av-head > #av-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
   .av-bar button, .av-bar a.av-btn { flex: none; margin: 0; display: inline-flex; align-items: center; gap: 6px; }
-  .av-bar a.av-btn { height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); }
-  .av-bar a.av-btn:hover { background: var(--hover); }
-  /* the artifact changed since the frame loaded it; a keyboard's focus ring still shows over it */
-  #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: 1px; }
-  @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
+  /* the version pill: a badge that is a button, its label #av-where; plain (no chevron, not pressable) on a preview */
+  .av-ver-wrap { position: relative; display: inline-flex; flex: 0 1 auto; min-width: 0; }
+  .av-bar .ver-pill { height: auto; max-width: 340px; min-width: 0; margin: 0; padding: 0 7px; gap: 3px; font: inherit; font-size: 11px; font-weight: 500; line-height: 18px; cursor: pointer; }
+  .av-bar .ver-pill:hover { opacity: 1; background: color-mix(in srgb, var(--c) 16%, transparent); }
+  .av-bar .ver-pill > i { font-size: 10px; flex: none; }
+  .av-bar .ver-pill.plain { cursor: default; opacity: 1; background: color-mix(in srgb, var(--c) 9%, transparent); }
+  .av-bar .ver-pill.plain > i { display: none; }
+  #av-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the version list and the tile's menu: a pop under their pill */
+  .av-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 5; min-width: 240px; max-height: 60vh; overflow: auto; display: flex; flex-direction: column; padding: 4px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+  #av-pub-menu { left: auto; right: 0; min-width: 200px; }
+  .av-bar .av-pop > button, .av-bar .av-pop > a { display: block; height: auto; margin: 0; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font-size: 12.5px; font-weight: 400; text-align: left; white-space: nowrap; text-decoration: none; cursor: pointer; }
+  .av-bar .av-pop > button:hover, .av-bar .av-pop > a:hover, .av-bar .av-pop > [aria-selected="true"] { background: var(--hover); opacity: 1; }
+  .av-bar .av-pop > [aria-selected="true"] { font-weight: 600; }
+  .av-pop > .av-pop-msg { margin: 0; padding: 6px 10px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+  /* the right group: 20px pills (a badge's height); Reload, the tile, Start and Stop with words, open-in-tab and close icons only */
+  .av-bar .av-pill { height: 20px; padding: 0 7px; gap: 4px; border-radius: 999px; font-size: 11px; font-weight: 500; line-height: 18px; text-decoration: none; }
+  .av-bar a.av-pill { flex: none; display: inline-flex; align-items: center; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); }
+  .av-bar a.av-pill:hover { background: var(--hover); }
+  .av-bar .av-pill > i { font-size: 11px; }
+  .av-bar .av-pill.good { color: var(--green-fg); border-color: color-mix(in srgb, var(--green-fg) 35%, transparent); }
+  .av-bar .av-pill.amber { color: var(--amber-fg); border-color: color-mix(in srgb, var(--amber-fg) 35%, transparent); }
+  .av-pub-wrap { position: relative; display: inline-flex; flex: none; }
+  .av-pub-wrap:empty, #av-run:empty, .av-run-err:empty { display: none; }
+  #av-run { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+  .av-bar .av-run-err { flex: 0 1 auto; min-width: 0; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  /* open in a tab and close: icon pills, one hover rule */
+  .av-bar #av-tab, .av-bar #av-close { height: 20px; width: 24px; padding: 0; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font-size: 14px; }
+  .av-bar #av-tab .av-label { display: none; }
+  .av-bar #av-tab:hover, .av-bar #av-close:hover { background: var(--hover); color: var(--fg); opacity: 1; }
+  /* the artifact changed since the frame loaded it (kit-206): an outline at the pill's border width, over its border; a
+     keyboard's focus ring still shows over it */
+  #av-reload.stale:not(:focus-visible) { outline: 1px solid var(--amber); outline-offset: -1px; }
+  @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar .av-pill { padding: 0 6px; } }
 /* css-viewer-bar end */
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
@@ -1152,13 +1203,9 @@ try {
 <!-- html-board end -->
 
 <!-- html-library start -->
-  <section id="library" class="no-shell" data-page="library">
-    <h2>Library <span class="sub">pages the fleet drew to show an idea, and the links it works from</span></h2>
-    <div class="lib-list" id="previews"></div>
-    <h3>Artifacts</h3>
-    <div class="lib-list" id="artifacts"></div>
-    <h3>Links</h3>
-    <div class="lib-list" id="lib-links"></div>
+  <section id="library" data-page="library">
+    <div id="lib-top" hidden></div>
+    <div class="cards" id="lib-grid"></div>
   </section>
 <!-- html-library end -->
 
@@ -1282,10 +1329,14 @@ try {
 <!-- html-viewer start -->
 <div id="artifact-view" class="no-shell" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
 <!-- html-viewer-bar start -->
+  <!-- --head-h tall: the kind, the title, the version pill (its list under it) and what the page says at the left; one group of
+       20px pills at the right (kit-92): Reload, the Public tile, a preview's Start and Stop with its error beside them, ↗, close -->
   <div class="av-bar">
-    <i class="icon-library" aria-hidden="true"></i>
-    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
-    <button class="ghost" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
+    <i class="av-kind icon-layout-dashboard" aria-hidden="true"></i>
+    <div class="av-head"><b id="av-title"></b><span class="badge" id="av-kind">Mock</span><span class="av-ver-wrap"><button type="button" class="badge ver-pill" id="av-ver" aria-haspopup="listbox" aria-expanded="false" title="Its versions"><span id="av-where"></span><i class="icon-chevron-down" aria-hidden="true"></i></button><div id="av-vers" class="av-pop" role="listbox" aria-label="Versions" hidden></div></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
+    <button class="ghost av-pill" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
+    <span class="av-pub-wrap"></span>
+    <span id="av-run"></span><span class="err av-run-err"></span>
     <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in a tab of its own, with its threads" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
     <button class="ghost icon-btn" id="av-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button>
   </div>
@@ -1615,7 +1666,7 @@ const SHELL_ROUTES = {
     goal: 'goals', q: 'overview', talk: 'overview',
     act: 'loop', decision: 'loop', lesson: 'loop', problem: 'loop', signal: 'loop', learning: 'loop', observation: 'loop',
     sensor: 'sensors', retro: 'retros',
-    artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library',
+    artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library', lib: 'library',
   },
   files: [[/(^|\/)docs\/devteam\/(governance|process)\//, 'governance'], [/(^|\/)strategy\.md$/, 'governance']],
   redirects: {
@@ -2204,7 +2255,7 @@ function boardCols(items, crit, { only = false, inert = false } = {}) {
 // ---- the Board's and Progress's header filters (kit-91): in the page bar's .extra, each in the URL ----
 // A page head's state is its filters (dashboard-shell@1's STATE_KEYS): Board goal, feat, repo, att; Progress goal,
 // narrow, show. Each change is a history entry (setFilters assigns the hash), so Back restores the earlier filter.
-const FILTER_PAGES = ['board', 'progress'];
+const FILTER_PAGES = ['board', 'progress', 'library'];
 const NARROW_GROUPS = ['Milestones', 'Features', 'Releases', 'Waves', 'Stories'];
 // the goals a filter can name: every goal not let go, by title
 const filterGoals = () => (DATA?.ooda?.goals || []).filter((g) => g.status !== 'abandoned').sort((a, b) => String(a.title ?? a.id).localeCompare(String(b.title ?? b.id)));
@@ -2235,11 +2286,12 @@ function filtersNow(page) {
     if (f.narrow && !(DATA && narrowViews(DATA.progress, f.goal).some(([k]) => k === f.narrow))) delete f.narrow;
     if (f.show && !['complete', 'all'].includes(f.show)) delete f.show;
   }
+  if (page === 'library' && f.kind && !LIB_KINDS.some(([k]) => k === f.kind)) delete f.kind;
   return f;
 }
 // A filter changed: the new state (a goal changed clears the feature and the narrow, which were the old goal's),
-// remembered (the shell's saveFilters: each page its own keys; a goal changed on Progress also drops the Board's
-// stored feature, so a later Board visit isn't emptied by it), then a new entry with the new head.
+// remembered (the shell's saveFilters: each page its own keys; a goal changed on Progress or Library also drops the
+// Board's stored feature, so a later Board visit isn't emptied by it), then a new entry with the new head.
 function setFilters(page, patch) {
   const h = pageHeadNow();
   const state = { ...filtersNow(page) };
@@ -2248,7 +2300,7 @@ function setFilters(page, patch) {
   for (const [k, v] of Object.entries(patch)) { if (v) state[k] = String(v); else delete state[k]; }
   if (goalChanged) { delete state.feat; delete state.narrow; }
   saveFilters(page, state);
-  if (page === 'progress' && goalChanged) saveFilters('board', { ...(storedFilters() || {}), goal: state.goal, feat: undefined });
+  if ((page === 'progress' || page === 'library') && goalChanged) saveFilters('board', { ...(storedFilters() || {}), goal: state.goal, feat: undefined });
   location.hash = headFor({ page, state });
 }
 // The page's filters drawn into the page bar's .extra; emptied on every other page. Written only when they
@@ -2265,6 +2317,7 @@ function filtersHtml(page) {
   const opt = (v, label, cur) => `<option value="${esc(v)}"${(cur || '') === v ? ' selected' : ''}>${esc(label)}</option>`;
   const sel = (k, label, inner) => `<select data-f="${k}" aria-label="${label}">${inner}</select>`;
   const goal = sel('goal', 'Goal', opt('', 'All goals', f.goal) + filterGoals().map((g) => opt(g.id, g.title || g.id, f.goal)).join(''));
+  if (page === 'library') return goal + sel('kind', 'Kind', opt('', 'All kinds', f.kind) + LIB_KINDS.map(([k, label]) => opt(k, label, f.kind)).join(''));
   if (page === 'board') {
     const p = DATA.progress;
     const gf = f.goal ? goalFeatures(f.goal) : null;
@@ -2289,7 +2342,7 @@ function drawFilterPage(page) {
   if (!DATA || !FILTER_PAGES.includes(page)) return void drawFilters(page);
   const m = focusMark();
   drawFilters(page);
-  if (page === 'board') renderBoard(); else renderProgress();
+  if (page === 'board') renderBoard(); else if (page === 'library') renderLibrary(DATA.library); else renderProgress();
   focusBack(m);
 }
 // Board and Progress on a route (in routeHead, once the entry is stamped): a fresh entry whose head has none of
@@ -4167,7 +4220,7 @@ const TYPE_META = {
   wave: ['waves', 'Wave'], milestone: ['milestone', 'Milestone'], act: ['zap', 'Act'], decision: ['scale', 'Decision'], retro: ['history', 'Retro'],
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
   q: ['circle-help', 'Question'], file: ['file-text', 'File'], sensor: ['activity', 'Sensor'],
-  observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'],
+  observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'], lib: ['library', 'Library item'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -4455,7 +4508,7 @@ let LAST_HTML = '';
 let AFTER = [];
 // The hash that opens a record's peek: #<kind>/<encoded id>; a file's is #file?path=<encoded path>.
 const peekFor = (kind, id) => (kind === 'file' ? `#file?path=${encodeURIComponent(id)}` : `#${kind}/${encodeURIComponent(id)}`);
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -5676,9 +5729,13 @@ function avFreshFrame(id) {
   return f;
 }
 function avHeader() {
-  const a = (DATA?.library?.artifacts ?? []).find((x) => x.slug === AV.slug && x.at === AV.at);
-  $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
-  $('av-where').innerHTML = AV.at === 'main' ? 'landed' : `draft in ${linkify(AV.at)}`;
+  const rows = (DATA?.library?.artifacts ?? []).filter((x) => x.slug === AV.slug);
+  const a = rows.find((x) => x.at === AV.at);
+  // a picked earlier version has no row (it is a tree): the title it has stays, so a poll never resets it to the slug
+  if (!AV.picked?.earlier) $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
+  avKindDraw(rows.length ? (a ?? rows[0]).kind ?? 'mock' : null);
+  avVerDraw();
+  avPubDraw();
 }
 // Where an artifact's page is served: main, a draft's worktree, or a published version by its tree.
 const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).startsWith('tree:') ? `tree/${String(at).slice(5)}` : `wt/${encodeURIComponent(at)}`}/${slug}/`;
@@ -5706,15 +5763,25 @@ function tsSet(kind, info = {}) {
 }
 // The stage, in the dashboard or as a viewer tab: the page in its frame, the bar, and the lens's
 // state for it. title: the viewer's (from /api/view); the dashboard's comes from its data.
-function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null } = {}) {
+// picked: a version picked from the bar's list ({ at, label, earlier }), which keeps the versions this open has read.
+function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null, picked = null } = {}) {
   const src = artSrc(slug, at);
-  AV = { at, slug };
+  const keep = picked && AV?.slug === slug ? AV : null;
+  AV = { at, slug, picked, vers: keep?.vers ?? null, known: keep?.known ?? null };
+  // the bar's lists closed, a preview's buttons and error span gone
+  avPopsClose();
+  avRunDraw();
+  avRunErr(null);
   if (title) {
     $('av-title').textContent = title;
-    $('av-where').innerHTML = at === 'main' ? 'landed' : String(at).startsWith('tree:') ? 'the published version' : `draft in ${linkify(at)}`;
+    avKindDraw(null);
+    avVerDraw();
+    avPubDraw();
   } else avHeader();
-  $('av-note').hidden = !note;
-  $('av-note').textContent = note ?? '';
+  // an earlier version picked from the list is read-only, and says so
+  const said = picked?.earlier ? `Showing ${picked.label}, read-only` : note;
+  $('av-note').hidden = !said;
+  $('av-note').textContent = said ?? '';
   $('av-tab').href = artViewer(slug, at);
   // fp and mainFp are what the frame loads now; on the stage already shown its frame isn't loaded
   // again, so what it loaded stays, and what is given is only the latest seen
@@ -5735,6 +5802,8 @@ function avHint() {
   const b = $('av-reload');
   b.classList.toggle('stale', stale);
   b.title = stale ? 'A newer version is ready: reload to see it' : 'Load the page again';
+  // a picked earlier version is read-only: nothing to reload
+  b.hidden = !!AV?.picked?.earlier;
 }
 // The fingerprints just seen for an artifact there (null: not known), taken only while the stage
 // shows it; a published tree never changes, so it is never checked.
@@ -5750,6 +5819,11 @@ const pvViewer = (name) => `/view/preview/${encodeURIComponent(name)}`;
 function tsBar() {
   if (TS.kind !== 'preview') return;
   $('av-where').textContent = [TS.session ? `from ${TS.session}` : '', TS.route || '', TS.up === true ? 'live' : TS.up === false ? 'not answering' : ''].filter(Boolean).join(' · ');
+  // a preview has no versions: the pill is plain, not pressable
+  const v = $('av-ver');
+  v.disabled = true;
+  v.classList.add('plain');
+  v.classList.remove('amber');
 }
 // The stage on a preview: its lens where it is served (info: /api/view's, null when it said nothing),
 // framing the app at its root. A relay this page's own ask just opened is missing from the policy the
@@ -5761,6 +5835,12 @@ function showPreview(name, info) {
   if (info?.opened && VIEWER) { try { if (!sessionStorage.getItem(seen)) { sessionStorage.setItem(seen, '1'); location.reload(); return 'reload'; } } catch {} }
   else { try { sessionStorage.removeItem(seen); } catch {} }
   AV = { preview: name };
+  // the bar: no versions to list, no tile; Start and Stop from the data, the error span named for this preview
+  avPopsClose();
+  avKindDraw('preview');
+  avPubDraw();
+  avRunErr(name);
+  avRunDraw();
   $('av-title').textContent = info?.label || name;
   $('av-tab').href = pvViewer(name);
   const note = !info ? 'This preview is not offered here now' : !info.lens ? "This box's gateway doesn't show previews in a viewer yet; open its link instead" : info.opened ? 'Reload to view this preview' : null;
@@ -6004,7 +6084,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // (at once: the card replaces the peek, with no slide)
   // (its own head first: a card on a framed page opens the viewer before this route ends)
   if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); LAST_HEAD = location.hash; return void tlRoute(h.slice(5)); }
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -6252,93 +6332,554 @@ const publicLinks = (me) => ({
   page: (slug) => `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`,
 });
 /* public-states end */
-// The Library: each landed artifact with its drafts beneath it, then drafts of slugs that haven't
-// landed (by worktree), then the link registry. A manifest that broke the rules shows its slug and
-// the error, never its title.
+/* library-items start */
+// The Library's items, pure: /api/data in, one card item per thing out, in kind order. Uses only its
+// arguments; the page passes its own href helpers and previewState in ctx, so none is copied here.
+// Each kind: [value, label, Lucide icon], in the grid's order.
+const LIB_KINDS = [['mock', 'Mock', 'layout-dashboard'], ['diagram', 'Diagram', 'workflow'], ['docs', 'Docs', 'book-open'], ['review', 'Review page', 'list-checks'], ['preview', 'Preview', 'monitor-play'], ['link', 'Link', 'link']];
+// A ref's goals: goal:<id> itself, ticket:<id> and a bare ticket id (a session) through its feature,
+// feature:<id> to the goals the roadmap gives it, plan-<feature> (a planner's session) by its feature
+// and its planner row; [] for anything else.
+function libraryGoalIndex(data) {
+  const rm = data?.ooda?.roadmap ?? {};
+  const featGoals = new Map();
+  const add = (f, g) => { if (f && g) featGoals.set(f, new Set([...(featGoals.get(f) ?? []), g])); };
+  for (const g of rm.goals ?? []) for (const f of g.features ?? []) add(f, g.id);
+  for (const [f, row] of Object.entries(rm.features ?? {})) for (const g of row?.goals ?? []) add(f, g);
+  for (const p of data?.planners ?? []) for (const g of p.goals ?? []) add(p.feature, g);
+  const ticketFeat = new Map();
+  for (const t of [...(data?.tickets ?? []), ...(data?.progress?.tickets ?? [])]) if (t?.id && t.feature) ticketFeat.set(t.id, t.feature);
+  const ofFeat = (f) => [...(featGoals.get(f) ?? [])];
+  return (ref) => {
+    const r = String(ref ?? '');
+    const m = /^(goal|ticket|feature):(.+)$/.exec(r);
+    if (m?.[1] === 'goal') return [m[2]];
+    if (m?.[1] === 'ticket') return ticketFeat.has(m[2]) ? ofFeat(ticketFeat.get(m[2])) : [];
+    if (m?.[1] === 'feature') return ofFeat(m[2]);
+    if (r.startsWith('plan-')) return ofFeat(r.slice(5));
+    return ticketFeat.has(r) ? ofFeat(ticketFeat.get(r)) : [];
+  };
+}
+// A link's host for its thumbnail: its url's, else its remote's (git@host:…, ssh://[user@]host/…,
+// https://host/…), else null.
+function linkHost(l) {
+  const of = (u) => { try { return new URL(u).host || null; } catch { return null; } };
+  if (l?.url) return of(l.url);
+  const r = String(l?.remote ?? '');
+  const scp = /^[^@/\s]+@([^:/\s]+):/.exec(r);
+  if (scp) return scp[1].toLowerCase();
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(r) ? of(r) : null;
+}
+// A remote's web page: an http(s) remote as given; git://host/path, git@host:org/repo and
+// ssh://[user@]host[:port]/org/repo as https://host/...; each less a trailing .git. A local path or a
+// file:// remote has none (null).
+function remoteWeb(remote) {
+  const r = String(remote ?? '').trim();
+  if (/^https?:\/\/[^/\s]/i.test(r)) return r.replace(/\.git$/, '');
+  const m = /^git:\/\/([^:/\s]+)(?::\d+)?\/(.+)$/i.exec(r) ?? /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(r) ?? /^ssh:\/\/(?:[^@/\s]+@)?([^:/\s]+)(?::\d+)?\/(.+)$/i.exec(r);
+  return m ? `https://${m[1].toLowerCase()}/${m[2].replace(/\.git$/, '').replace(/^\/+/, '')}` : null;
+}
+function libraryItems(data, now, ctx) {
+  const lib = data?.library ?? {};
+  const goalsOf = libraryGoalIndex(data);
+  const goals = (refs) => [...new Set((refs ?? []).flatMap(goalsOf))];
+  const by = Object.fromEntries(LIB_KINDS.map(([k]) => [k, []]));
+  // artifacts: one item per slug, in the server's order; the newest draft is what opens, the landed
+  // row (if any) gives the publish state
+  const slugs = new Map();
+  for (const a of lib.artifacts ?? []) slugs.set(a.slug, [...(slugs.get(a.slug) ?? []), a]);
+  for (const [slug, rows] of slugs) {
+    const landed = rows.find((a) => a.at === 'main') ?? null;
+    const drafts = rows.filter((a) => a.at !== 'main');
+    const newest = drafts.reduce((x, a) => (!x || (Date.parse(a.updated_at ?? '') || 0) > (Date.parse(x.updated_at ?? '') || 0) ? a : x), null);
+    const art = newest ?? landed;
+    const kind = ['mock', 'diagram', 'docs'].includes(art.kind) ? art.kind : 'mock';
+    // a broken manifest is shown by its slug and opens nothing here; its ↗ opens the viewer, which shows the error
+    by[kind].push({
+      id: `artifact:${slug}`, kind, title: art.error ? slug : art.title || slug,
+      href: art.error ? null : ctx.artHref(slug, art.at), tab: ctx.artViewer(slug, art.at),
+      summary: art.error ? null : art.summary ?? null, goals: goals(art.for), at: art.at, art, landed, drafts,
+      preview: null, pstate: null, review: null, link: null, host: null, error: art.error ?? null,
+    });
+  }
+  // a review page: each open review question, opened on its own page
+  for (const q of data?.questions ?? []) {
+    if (q?.kind !== 'review' || (q.status ?? 'open') !== 'open') continue;
+    by.review.push({
+      id: `review:${q.id}`, kind: 'review', title: q.review?.title ?? q.question, href: `#review/${encodeURIComponent(q.id)}`, tab: null,
+      summary: null, goals: q.goal ? [q.goal] : q.ticket ? goalsOf(`ticket:${q.ticket}`) : [], at: null, art: null, landed: null, drafts: [],
+      preview: null, pstate: null, review: q, link: null, host: null, error: null,
+    });
+  }
+  for (const p of lib.previews ?? []) {
+    by.preview.push({
+      id: `preview:${p.name}`, kind: 'preview', title: p.label || p.name, href: `#preview/${encodeURIComponent(p.name)}`, tab: ctx.pvViewer(p.name),
+      summary: null, goals: goals([p.session]), at: null, art: null, landed: null, drafts: [],
+      preview: p, pstate: ctx.previewState(p, now), review: null, link: null, host: null, error: null,
+    });
+  }
+  // a link opens its URL, or a path (with no remote) in the file peek, as linkOf does; in a new tab
+  // (its ↗) the same, or a remote's web page, else (a local or file:// remote) its own peek
+  for (const l of lib.links ?? []) {
+    const href = l.url || (l.path && !l.remote ? ctx.fileHref({ path: l.path, title: l.title }) : null);
+    by.link.push({
+      id: `link:${l.id}`, kind: 'link', title: l.title || l.id, href, tab: href || remoteWeb(l.remote) || `#lib/${encodeURIComponent(`link:${l.id}`)}`,
+      summary: l.notes ?? null, goals: goals(l.for), at: null, art: null, landed: null, drafts: [],
+      preview: null, pstate: null, review: null, link: l, host: linkHost(l), error: null,
+    });
+  }
+  return LIB_KINDS.flatMap(([k]) => by[k]);
+}
+// The Kind and Goal filters: an item with no goal is kept only when no goal is picked.
+const libraryKeep = (item, { kind, goal } = {}) => (!kind || item.kind === kind) && (!goal || item.goals.includes(goal));
+// An item's words as HTML, one copy for its card (renderLibrary) and its peek (openLib); these call the page's
+// helpers (esc, linkify, flink, ticketMap, when, artSrc, previewUrl) when called, so the block still loads alone.
+// a preview's state badge
+const LIB_PV_BADGE = { live: '<span class="badge good">live</span>', checking: '<span class="badge">checking</span>', 'not-running': '<span class="badge medium">not running</span>', 'not-answering': '<span class="badge medium">not answering</span>', expired: '<span class="badge">expired</span>' };
+// a for ref as a link, its kind prefix dropped: a feature to its peek (linkify knows no feature ids), a goal or
+// ticket as linkify makes it (its title), anything else as linkify leaves it
+const libForRef = (f) => { const m = /^(goal|ticket|feature):(.+)$/.exec(f ?? ''); return m?.[1] === 'feature' ? flink(m[2]) : linkify(m ? m[2] : f); };
+const libForRefs = (refs) => (refs ?? []).map(libForRef).join(', ');
+// a draft's worktree by its id, as the spec writes it: a link to its ticket (the title on hover), else the id
+const libWtLink = (at) => { const t = ticketMap().get(at); return t ? `<a class="linkish" href="#ticket/${esc(encodeURIComponent(at))}" title="${esc(t.title)}">${esc(at)}</a>` : esc(at); };
+// the publish state's badge (publicState's), and its details: where it is public, the record's date and channel
+// (a forged line can look the same), drift; the details only where there is a record
+const libPubBadge = (ps) => (ps?.state === 'public' ? '<span class="badge good"><i class="icon-globe" aria-hidden="true"></i>Public</span>' : ps?.state === 'published' ? '<span class="badge">published</span>' : ps?.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : '');
+const libPubWords = (ps) => [
+  ps.state === 'public' ? (ps.from ? `<span>from instance ${esc(ps.from)}</span>` : '<span>Public on this box</span>') : '',
+  `<span class="muted">recorded ${esc(when(ps.rec.at))} from the ${ps.rec.channel === 'dashboard' ? 'dashboard' : 'terminal'}</span>`,
+  ps.drift ? '<span class="lib-drift">changed on main since</span>' : '',
+];
+// a link's location: its URL, its remote and path, or its path
+const libLinkLoc = (l) => l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path || '');
+// what the title and the thumbnail open: the item's href; a link's URL in a new tab
+const libGo = (x) => `${x.href ? ` href="${esc(x.href)}"` : ''}${x.kind === 'link' && x.link?.url ? ' target="_blank" rel="noopener noreferrer"' : ''}`;
+// the thumbnail's box (an anchor opening what the title opens; data-thumb-src: the frame's src, or empty where only
+// the kind's icon shows); a link's: its site's icon (removed on error, thumbsWatch) and its host, with no host the kind's icon
+const libThumb = (x, pvHere) => {
+  const icon = LIB_KINDS.find(([k]) => k === x.kind)[2];
+  const src = x.art && !x.error ? artSrc(x.art.slug, x.art.at) : x.pstate?.state === 'live' ? previewUrl(pvHere, x.preview) : '';
+  return `<a class="lib-thumb"${libGo(x)} tabindex="-1" aria-hidden="true" data-thumb-src="${esc(src)}">${x.link && x.host ? `<img src="https://${esc(x.host)}/favicon.ico" referrerpolicy="no-referrer" alt=""><span class="lib-host small muted">${esc(x.host)}</span>` : `<i class="icon-${icon}" aria-hidden="true"></i>`}</a>`;
+};
+/* library-items end */
+// The Library (kit-92): one .cards grid of libraryItems kept by the page's Kind and Goal filters, in kind order;
+// above it, only when there is something to say, #lib-top: where publishing happens, or one confirm for every
+// published artifact not live on this box, and the notice for a box whose gateway doesn't serve previews.
 function renderLibrary(lib) {
-  const arts = lib?.artifacts ?? [];
-  const links = lib?.links ?? [];
-  const previews = lib?.previews ?? [];
-  $('n-library').textContent = arts.length + previews.length || '';
+  const items = libraryItems({ ...(DATA ?? {}), library: lib }, Date.now(), { previewState, artHref, artViewer, pvViewer, fileHref });
+  // one per artifact and preview card
+  $('n-library').textContent = items.filter((x) => x.art || x.preview).length || '';
   const pvHere = previewHere(location, PREVIEWS);
   const onBoxWithout = !PREVIEWS && /^\d{1,5}\.[a-z]/i.test(location.host);
-  // the running servers offered to the owner: what's live now, for this page's address
-  const pvBadge = { live: '<span class="badge good">live</span>', checking: '<span class="badge">checking</span>', 'not-running': '<span class="badge medium">not running</span>', 'not-answering': '<span class="badge medium">not answering</span>', expired: '<span class="badge">expired</span>' };
-  const pvCard = (p) => {
-    const s = previewState(p, Date.now());
-    const url = previewUrl(pvHere, p);
-    const act = {
-      open: () => `<a class="ghost av-open" href="${esc(pvViewer(p.name))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`,
-      copy: () => `<button class="ghost" data-copy="${esc(url)}">Copy link</button>`,
-      start: () => `<button class="ghost" data-preview-start="${esc(p.name)}">Start</button>`,
-      stop: () => `<button class="ghost" data-preview-stop="${esc(p.name)}"${p.run ? '' : ' title="Unregisters the link; the server stays up until its session stops it"'}>Stop</button>`,
-    };
-    const meta = [esc(p.project), linkify(p.session), p.label ? esc(p.label) : '', p.at ? `offered ${esc(when(p.at))}` : '', s.since ? `down since ${esc(when(s.since))}` : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card" data-preview="${esc(p.name)}"${subj('preview', p.name, p.label || p.name)}>
-      <div class="art-t"><a href="#preview/${esc(encodeURIComponent(p.name))}">${esc(p.label || p.name)}</a><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
-      <div class="meta">${meta}</div>
-      <div class="pub">${s.actions.map((a) => act[a]()).join('')}<span class="err" id="e-preview-${esc(p.name)}"></span></div>
-    </div>`;
-  };
-  $('previews').innerHTML = previews.length
-    ? `<h3>Previews <span class="dim">running servers, from a session</span></h3>${onBoxWithout ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : ''}${previews.map(pvCard).join('')}`
-    : '';
   const me = PUBLIC ? publicHere(location, lib) : null;
   const L = me ? publicLinks(me) : null;
   // the gateway's pages open in a new tab this page can't later redirect
   const tab = (href, label) => `<a class="ghost" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-  // a landed card's publish state, the record's date and channel beside it (a forged line can look the same)
-  const pubLine = (a) => {
-    const s = publicState(a, PUBLIC, me);
-    const badge = s.state === 'public' ? `<span class="badge good">public</span>${s.from ? `<span class="small muted">from instance ${esc(s.from)}</span>` : ''}`
-      : s.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : s.state === 'published' ? '<span class="badge">published</span>' : '';
-    const said = s.rec ? `<span class="small muted">recorded ${esc(when(s.rec.at))} from the ${s.rec.channel === 'dashboard' ? 'dashboard' : 'terminal'}</span>` : '';
-    const moved = !s.drift ? '' : `<span class="small err">${s.state === 'not-live' ? 'Changed on main since it was published: what goes up now is main\'s version, not the one recorded.' : s.state === 'public' ? 'Changed on main since it was published; the public still sees the published version.' : 'Changed on main since it was published.'}</span>`;
-    const act = {
-      publish: () => tab(L.publish([a.slug]), 'Publish'), update: () => tab(L.publish([a.slug]), 'Update'), restore: () => tab(L.publish([a.slug]), 'Restore'), review: () => tab(L.publish([a.slug]), 'Review main\'s version'),
-      unpublish: () => tab(L.unpublish(a.slug), 'Unpublish'), copy: () => `<button class="ghost" data-copy="${esc(L.page(a.slug))}">Copy link</button>`,
-      forget: () => `<button class="ghost" data-forget="${esc(a.slug)}">Forget</button>`,
-    };
-    const parts = [badge, said, moved, ...s.actions.map((x) => act[x]())].filter(Boolean);
-    return parts.length ? `<div class="pub">${parts.join('')}<span class="err" id="e-pub-${esc(a.slug)}"></span></div>` : '';
-  };
-  const card = (a, draft) => {
-    const name = a.error ? a.slug : a.title || a.slug;
-    const meta = [a.by ? `drawn by ${esc(who(a.by))}` : '', a.for?.length ? `for ${a.for.map((f) => linkify(f)).join(', ')}` : '', a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card${draft ? ' draft' : ''}"${subj('artifact', a.slug, a.title || a.slug)}>
-      <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : `<a class="av-open small" href="${esc(artViewer(a.slug, a.at))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`}</div>
-      ${a.error ? `<div class="err">${esc(a.error)}</div>` : a.summary ? `<div class="art-s">${esc(a.summary)}</div>` : ''}
-      ${meta ? `<div class="meta">${meta}</div>` : ''}
-      ${a.at === 'main' && !a.error ? pubLine(a) : ''}
-    </div>`;
-  };
-  const landed = arts.filter((a) => a.at === 'main');
-  const drafts = arts.filter((a) => a.at !== 'main');
-  const fresh = drafts.filter((d) => !landed.some((l) => l.slug === d.slug));
-  const byWt = new Map();
-  for (const d of fresh) byWt.set(d.at, [...(byWt.get(d.at) || []), d]);
-  // above the list: where publishing happens, or one confirm for everything not live on this box
-  const notLive = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live').map((a) => a.slug) : [];
-  const drifted = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live' && publicState(a, PUBLIC, me).drift).length : 0;
+  const landed = (lib?.artifacts ?? []).filter((a) => a.at === 'main' && !a.error);
+  const notLive = me ? landed.filter((a) => publicState(a, PUBLIC, me).state === 'not-live') : [];
+  const drifted = notLive.filter((a) => publicState(a, PUBLIC, me).drift).length;
+  // Restore all in both cases (R4): what goes up is main's version, and the sentence says so
   const pubHead = !landed.length ? ''
     : !PUBLIC ? '<p class="small muted lib-pub">Publishing happens on the cloud box: there, the Library can make a landed artifact readable by anyone.</p>'
     : !me?.project ? '<p class="small muted lib-pub">To publish from here, set <code>project</code> in settings.md: it is part of every public link.</p>'
-    : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50)), drifted ? 'Review all' : 'Restore all')}</p>` : '';
-  $('artifacts').innerHTML = arts.length
-    ? pubHead + landed.map((a) => card(a) + drafts.filter((d) => d.slug === a.slug).map((d) => card(d, true)).join('')).join('') +
-      (byWt.size ? `<h3>Drafts <span class="dim">not landed yet</span></h3>${[...byWt].map(([wt, ds]) => `<div class="art-wt">In ${linkify(wt)}</div>${ds.map((d) => card(d)).join('')}`).join('')}` : '')
-    : empty('No artifacts yet. Ask the supervisor to draw one (“draw me a mock of …”); it shows here as a draft, then lands.');
-  const loc = (l) => esc(l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path || ''));
-  $('lib-links').innerHTML = links.length
-    ? links.map((l) => `<div class="card small lib-link">
-      <div class="links">${linkOf({ title: l.title, url: l.url, path: l.remote ? null : l.path, remote: l.remote })}<span class="badge">${esc(l.kind)}</span></div>
-      ${l.notes ? `<div class="muted">${esc(l.notes)}</div>` : ''}
-      <div class="meta"><code>${esc(l.id)}</code>${loc(l) ? ` · <span class="loc">${loc(l)}</span>` : ''}${l.for?.length ? ` · for ${l.for.map((f) => linkify(f)).join(', ')}` : ''}</div>
-    </div>`).join('')
-    : empty('No links in the registry. The supervisor adds the docs, designs and dashboards the fleet works from.');
-  if (AV?.slug) avHeader();
+    : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50).map((a) => a.slug)), 'Restore all')}</p>` : '';
+  const pvNote = onBoxWithout && (lib?.previews ?? []).length ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : '';
+  const top = $('lib-top');
+  if (top.dataset.drawn !== pubHead + pvNote) { top.innerHTML = pubHead + pvNote; top.dataset.drawn = pubHead + pvNote; top.hidden = !(pubHead + pvNote); }
+  const KIND = Object.fromEntries(LIB_KINDS.map(([k, label, icon]) => [k, { label, icon }]));
+  // the worktree truncated in the head
+  const wtOf = (at) => `<span class="lib-wt small muted">in ${libWtLink(at)}</span>`;
+  const forOf = (refs) => (refs?.length ? `<span class="lib-for">for ${libForRefs(refs)}</span>` : '');
+  // a card: its head built in place (cardHead would put the trailing items in its grow span: kind icon, title,
+  // badges, a preview's Copy link, ↗, ⋯), the thumbnail's box (libThumb), the body (summary, details, meta)
+  const libraryCard = (x) => {
+    const k = KIND[x.kind];
+    const title = `<a class="lib-title"${libGo(x)}>${esc(x.title)}</a>`;
+    // the landed row gives the publish state, the shown row (the newest draft, else the landed) the rest
+    const ps = x.landed && !x.landed.error ? publicState(x.landed, PUBLIC, me) : null;
+    const badges = [
+      x.art && x.art.at !== 'main' ? `<span class="badge amber">draft</span>${wtOf(x.art.at)}` : '',
+      libPubBadge(ps),
+      x.pstate ? LIB_PV_BADGE[x.pstate.state] : '',
+      x.error ? '<span class="badge high">broken</span>' : '',
+    ].join('');
+    const copy = x.pstate?.actions.includes('copy') ? `<button class="ghost" data-copy="${esc(previewUrl(pvHere, x.preview))}">Copy link</button>` : '';
+    const open = x.kind !== 'review' && x.tab ? `<a class="lib-tab av-open" href="${esc(x.tab)}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own" aria-label="Open in a new tab"><i class="icon-external-link" aria-hidden="true"></i></a>` : '';
+    // ⋯: Copy public link on a public artifact, Forget on a not-live one (today's handler and its two steps)
+    const menuExtra = (ps?.state === 'public' ? `<button class="ghost" data-copy="${esc(L.page(x.landed.slug))}">Copy public link</button>` : '')
+      + (ps?.state === 'not-live' ? `<button class="ghost" data-forget="${esc(x.landed.slug)}">Forget</button>` : '');
+    const said = x.art ? subj('artifact', x.art.slug, x.art.title || x.art.slug) : x.preview ? subj('preview', x.preview.name, x.title) : '';
+    // publish details (libPubWords); on a not-live one Restore (main's version goes up, R4) and the span a refused
+    // Forget writes to
+    const pub = !ps?.rec ? '' : `<div class="lib-pub small">${[
+      ...libPubWords(ps),
+      ps.state === 'not-live' ? tab(L.publish([x.landed.slug]), 'Restore') : '',
+    ].filter(Boolean).join(' · ')}<span class="err" id="e-pub-${esc(x.landed.slug)}"></span></div>`;
+    const p = x.preview;
+    const details = x.error ? `<div class="err">${esc(x.error)}</div>`
+      : p ? `<div class="lib-meta small muted">${[`<code>${esc(p.name)}</code>`, esc(p.project), linkify(p.session), p.at ? `offered ${esc(when(p.at))}` : '', x.pstate.since ? `down since ${esc(when(x.pstate.since))}` : ''].filter(Boolean).join(' · ')}</div>`
+      : x.link ? (() => { const l = x.link, loc = libLinkLoc(l);
+        return `<div class="lib-meta small muted"><span class="badge">${esc(l.kind)}</span><code>${esc(l.id)}</code>${loc ? ` · <span class="loc">${esc(loc)}</span>` : ''}${l.for?.length ? ` · ${forOf(l.for)}` : ''}</div>`; })()
+      : '';
+    // an artifact's meta: the session that drew it (a link that opens it), what it is for, when
+    const a = x.art && !x.error ? x.art : null;
+    const meta = !a ? '' : [a.by ? `<span class="lib-by">drawn by ${linkify(a.by)}</span>` : '', forOf(a.for), a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
+    return `<div class="card lib-card" data-lib-id="${esc(x.id)}" data-kind="${esc(x.kind)}"${p ? ` data-preview="${esc(p.name)}"` : ''}${said}>`
+      + `<div class="card-head"><i class="icon-${k.icon}" aria-hidden="true"></i>${title}${badges}${copy}${open}${menuOf(x.id, [], `lib/${x.id}`, menuExtra)}</div>`
+      + libThumb(x, pvHere)
+      + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}${pub}${details}${meta ? `<div class="lib-meta small muted">${meta}</div>` : ''}</div></div>`;
+  };
+  const f = filtersNow('library');
+  const cards = items.filter((x) => libraryKeep(x, f)).map((x) => [x.id, libraryCard(x)]);
+  const grid = $('lib-grid');
+  const html = cards.map(([, h]) => h).join('');
+  // written only when it changes; then patched card by card, so an unchanged card keeps its node (its live frame,
+  // its open ⋯) and a changed one is replaced, its ⋯ opened again if it was open
+  if (grid._libHtml === html && grid.childElementCount) return void avBarPoll();
+  grid._libHtml = html;
+  if (!cards.length) grid.innerHTML = empty('None');
+  else {
+    const was = new Map([...grid.querySelectorAll(':scope > .lib-card')].map((el) => [el.dataset.libId, el]));
+    for (const el of [...grid.children]) if (!el.classList.contains('lib-card')) el.remove();
+    const want = new Set(cards.map(([id]) => id));
+    for (const [id, el] of was) if (!want.has(id)) el.remove();
+    const t = document.createElement('template');
+    let at = grid.firstElementChild;
+    for (const [id, h] of cards) {
+      let el = was.get(id);
+      if (!el || el._libHtml !== h) {
+        t.innerHTML = h;
+        const fresh = t.content.firstElementChild;
+        fresh._libHtml = h;
+        if (el?.querySelector('.card-head details.menu')?.open) fresh.querySelector('.card-head details.menu').open = true;
+        if (el) { if (at === el) at = fresh; el.replaceWith(fresh); }
+        el = fresh;
+      }
+      // in order: moveBefore keeps a moved frame alive where the browser has it (Chrome 133+)
+      if (el !== at) {
+        if (el.isConnected && typeof grid.moveBefore === 'function') grid.moveBefore(el, at); else grid.insertBefore(el, at);
+      }
+      at = el.nextElementSibling;
+    }
+  }
+  // new boxes watched; a box the patch removed frees its slot
+  thumbsWatch(grid);
+  avBarPoll();
 }
-
+/* library-thumbs start */
+// The Library's thumbnails (kit-92): a box with a frame source (data-thumb-src) gets a sandboxed, inert frame
+// while it is in view, at most THUMB_MAX at once in all (an open peek's box first, then the grid's, top first);
+// one whose load hasn't fired THUMB_WAIT ms after it went in, or that this page's policy refuses, is taken out
+// and the box keeps its icon until its card is drawn anew. data-thumb: icon | live | failed. Frames are only put
+// in and taken out here; a poll keeps the nodes.
+const THUMB_MAX = 12, THUMB_WAIT = 5000;
+// io: one IntersectionObserver; watched: the boxes it observes; seen: those in view; live: those holding a frame
+const THUMBS = { io: null, watched: new Set(), seen: new Set(), live: new Set() };
+// Watches every .lib-thumb under root once (a box seen before is left alone), then fills the free slots.
+function thumbsWatch(root) {
+  THUMBS.io ??= new IntersectionObserver((es) => {
+    for (const e of es) if (e.isIntersecting) THUMBS.seen.add(e.target); else THUMBS.seen.delete(e.target);
+    thumbsFill();
+  });
+  // a box no longer in the page (its card patched away), in view or not, framed or not: unobserved, so the
+  // observer doesn't keep the detached card alive; its frame's slot is freed
+  for (const b of THUMBS.watched) {
+    if (b.isConnected) continue;
+    THUMBS.io.unobserve(b);
+    THUMBS.watched.delete(b);
+    THUMBS.seen.delete(b);
+    if (THUMBS.live.has(b)) thumbOut(b, 'icon');
+  }
+  for (const b of root.querySelectorAll('.lib-thumb')) {
+    if (b._thumbs) continue;
+    b._thumbs = true;
+    b.dataset.thumb ||= 'icon';
+    // a link's site icon that fails goes, the link icon in its place
+    for (const img of b.querySelectorAll(':scope > img')) {
+      const gone = () => { const i = document.createElement('i'); i.className = 'icon-link'; i.setAttribute('aria-hidden', 'true'); img.replaceWith(i); };
+      if (img.complete && !img.naturalWidth && img.getAttribute('src')) gone(); else img.addEventListener('error', gone, { once: true });
+    }
+    if (b.dataset.thumbSrc) { THUMBS.io.observe(b); THUMBS.watched.add(b); }
+  }
+  thumbsFill();
+}
+// Frames out of boxes gone or out of view, then into the boxes in view, in page order, up to the cap. The large
+// viewer open over the page covers every box (the observer can't tell): no frame then, so none runs unseen, and no
+// copy of the page on the stage talks to this window beside the stage's own frame (a thumbnail's page says what the
+// stage's says, from a frame of another size).
+function thumbsFill() {
+  const covered = !$('artifact-view').hidden;
+  for (const b of THUMBS.seen) if (!b.isConnected) { THUMBS.seen.delete(b); THUMBS.io.unobserve(b); }
+  for (const b of THUMBS.live) if (covered || !b.isConnected || !THUMBS.seen.has(b)) thumbOut(b, 'icon');
+  if (covered) return;
+  const want = [...THUMBS.seen].filter((b) => !THUMBS.live.has(b) && b.dataset.thumb !== 'failed' && b.dataset.thumbSrc)
+    .sort((a, c) => (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+  // an open peek's box takes a slot first: with none free, the grid's frame farthest from the viewport's centre
+  // goes (its box stays seen, and takes a slot again once the peek's is freed)
+  const inPeek = (b) => !!b.closest('#drawer');
+  const far = (b) => { const r = b.getBoundingClientRect(); return Math.hypot((r.left + r.right - innerWidth) / 2, (r.top + r.bottom - innerHeight) / 2); };
+  for (const b of want.filter(inPeek)) {
+    if (THUMBS.live.size >= THUMB_MAX) {
+      const out = [...THUMBS.live].filter((x) => !inPeek(x)).sort((x, y) => far(y) - far(x))[0];
+      if (!out) break;
+      thumbOut(out, 'icon');
+    }
+    thumbIn(b);
+  }
+  for (const b of want) {
+    if (THUMBS.live.size >= THUMB_MAX) break;
+    if (!inPeek(b)) thumbIn(b);
+  }
+}
+function thumbIn(b) {
+  const f = document.createElement('iframe');
+  // scripts only: no same origin, so a frame of this dashboard's own origin can't reach the page
+  f.setAttribute('sandbox', 'allow-scripts');
+  f.setAttribute('loading', 'lazy');
+  f.setAttribute('tabindex', '-1');
+  f.setAttribute('aria-hidden', 'true');
+  f.src = b.dataset.thumbSrc;
+  let loaded = false;
+  f.addEventListener('load', () => { loaded = true; }, { once: true });
+  b._thumbFrame = f;
+  // when it went in (the page's clock), stamped before the wait starts
+  b.dataset.thumbAt = String(performance.now());
+  b._thumbTimer = setTimeout(() => { if (!loaded && b._thumbFrame === f) { thumbOut(b, 'failed'); thumbsFill(); } }, THUMB_WAIT);
+  b.append(f);
+  b.dataset.thumb = 'live';
+  THUMBS.live.add(b);
+}
+// A box's frame out; failed: not tried again (the box is no longer watched)
+function thumbOut(b, state) {
+  clearTimeout(b._thumbTimer);
+  b._thumbFrame?.remove();
+  b._thumbFrame = null;
+  THUMBS.live.delete(b);
+  b.dataset.thumb = state;
+  if (state === 'failed') { THUMBS.seen.delete(b); THUMBS.watched.delete(b); THUMBS.io?.unobserve(b); }
+}
+// a frame this page's frame-src refuses (on a laptop, a preview's own origin) goes at once, before Chrome's
+// error page shows in it: the blocked address's origin must be the frame's exactly
+document.addEventListener('securitypolicyviolation', (e) => {
+  if (!String(e.violatedDirective).startsWith('frame-src')) return;
+  let o;
+  try { o = new URL(e.blockedURI).origin; } catch { return; }
+  let out = false;
+  for (const b of [...THUMBS.live]) {
+    try { if (new URL(b.dataset.thumbSrc, location.href).origin === o) { thumbOut(b, 'failed'); out = true; } } catch {}
+  }
+  if (out) thumbsFill();
+});
+// the viewer opened or closed: its frames out, or back into the boxes in view
+new MutationObserver(() => { if (THUMBS.io) thumbsFill(); }).observe($('artifact-view'), { attributes: true, attributeFilter: ['hidden'] });
+/* library-thumbs end */
+/* library-peek start */
+// A Library item's side peek (kit-92): #lib/<id>, the item found by its id among libraryItems. Properties first, on
+// props/attrRow and not attrs (whose How it changes reads otherwise for a kind with no record, and which puts what is
+// computed under its own head): ID, Kind, Drawn by, For, Where, State, Published, Error, a link's Where, For and Notes,
+// Updated, How it changes; then the thumbnail's box at the peek's width (its frame, as on the card) and the summary.
+// An id no item has is not found.
+function openLib(id) {
+  drawerFor('lib', id);
+  // the server has no peek for an item (its words are all in /api/data): marked missing, so a refresh never asks it
+  PEEKS.set(peekKey('lib', id), { error: 'not a record', missing: true });
+  const lib = DATA?.library ?? {};
+  const x = libraryItems(DATA ?? {}, Date.now(), { previewState, artHref, artViewer, pvViewer, fileHref }).find((i) => i.id === id);
+  if (!x) return notFound('lib', id, null, 'No such item in the Library.', { noRecord: true });
+  const [, label, icon] = LIB_KINDS.find(([k]) => k === x.kind);
+  const me = PUBLIC ? publicHere(location, lib) : null;
+  // the shown row, a broken one too: a manifest that parsed but failed its checks still names by, for and its time
+  const a = x.art, p = x.preview, l = x.link, q = x.review;
+  const ps = x.landed && !x.landed.error ? publicState(x.landed, PUBLIC, me) : null;
+  // publish details: the card's badge and words (the actions stay on the card)
+  const pub = !ps?.rec ? '' : [libPubBadge(ps), ...libPubWords(ps)].filter(Boolean).join(' · ');
+  const where = a ? (a.at !== 'main' ? `<span class="badge amber">draft</span> in ${libWtLink(a.at)}${x.landed ? ' · Landed on main' : ''}` : 'Landed on main')
+    : l ? (() => { const loc = libLinkLoc(l); return loc ? `<code>${esc(loc)}</code>` : ''; })() : '';
+  const forRefs = a ? a.for : l ? l.for : q ? (q.goal ? [`goal:${q.goal}`] : q.ticket ? [`ticket:${q.ticket}`] : []) : [];
+  const updated = a?.updated_at ?? (p ? p.at : q ? q.asked_at : null);
+  const kindHtml = `<i class="icon-${esc(icon)}" aria-hidden="true"></i> ${esc(label)}${l?.kind ? ` · <span class="badge">${esc(l.kind)}</span>` : ''}`;
+  // a link's Where comes before its For, as on its card
+  const placed = l ? [attrRow('Where', where, 'Its URL, its remote and path, or its path in this repository.'), attrRow('For', libForRefs(forRefs), 'What it is for.')]
+    : [attrRow('For', libForRefs(forRefs), 'What it is for.'), attrRow('Where', where, 'Landed on main, or a draft in a worktree, the newest draft shown.')];
+  const rows = [
+    attrRow('ID', `<code>${esc(id)}</code>`, 'Its id in the Library: artifact:<slug>, review:<question>, preview:<name> or link:<id>. Copy ID copies exactly this.'),
+    attrRow('Kind', kindHtml, 'What sort of item it is.'),
+    attrRow('Drawn by', a?.by ? linkify(a.by) : p?.session ? linkify(p.session) : '', 'The session that drew it; open it to see that session.'),
+    ...placed,
+    attrRow('State', p ? `${LIB_PV_BADGE[x.pstate.state] ?? ''}${x.pstate.since ? ` down since ${esc(when(x.pstate.since))}` : ''}` : '', 'Whether the preview answers now.'),
+    attrRow('Published', pub, 'Its public record: where it is public, when it was recorded and from where.'),
+    attrRow('Error', x.error ? esc(x.error) : '', 'Why it can\'t be shown.'),
+    attrRow('Notes', l?.notes ? esc(l.notes) : '', 'What the link\'s author wrote about it.'),
+    attrRow('Updated', updated ? esc(when(updated)) : '', 'When it last changed.'),
+    attrRow('How it changes', 'Shift+click it and say so in a thread'),
+  ].filter(Boolean);
+  // the card's box, its frame within the cap of 12, ahead of the grid's (thumbsFill)
+  AFTER.push(() => thumbsWatch($('drawer-body')));
+  showDrawer(`<h2 id="drawer-title">${esc(x.title)}</h2><section class="attrs">${props(rows)}</section>${libThumb(x, previewHere(location, PREVIEWS))}${x.summary ? `<p class="measure lib-sum">${esc(x.summary)}</p>` : ''}`);
+}
+/* library-peek end */
+/* library-versions start */
+// The viewer bar's versions and actions (kit-92): the version pill (#av-ver, its label #av-where) and its list (#av-vers,
+// kit-172's /api/artifact-versions, read once per open), the Public tile (#av-pub), a preview's Start and Stop (#av-run).
+// A version picked from the list is AV.picked ({ at, label, earlier }); one earlier than main's is read-only: no Reload,
+// no tile, and the note says so. Read-only is the picked state, never keyed on tree: (a tree a link opens is "the
+// published version", and its threads work as ever).
+const avDay = (t) => { const d = new Date(t); return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); };
+// a version's words, as the pill and the list say them
+function avVersionLabel(v) {
+  if (v.kind === 'draft') return `Draft · live in ${v.worktree ?? v.at}`;
+  if (v.kind === 'landed') return `Landed on main${v.time ? ` · ${avDay(v.time)}` : ''}`;
+  return [avDay(v.time), String(v.commit ?? '').slice(0, 7)].filter(Boolean).join(' · ');
+}
+// where a version is shown: its draft's worktree, main, or its tree
+const avVersionAt = (v) => (v.kind === 'draft' ? v.worktree ?? v.at : v.kind === 'landed' ? 'main' : v.at);
+// the versions of the artifact on the stage, read once per open (a pick keeps them): { versions }, or null when the read
+// failed; AV.known keeps the list once read, for the pill's "Landed on main · <date>"
+function avVersions(slug) {
+  if (!AV || AV.slug !== slug) return Promise.resolve(null);
+  if (!AV.vers) {
+    const pr = (async () => {
+      try { const r = await fetch(`/api/artifact-versions?${new URLSearchParams({ slug })}`); const d = r.ok ? await r.json() : null; return Array.isArray(d?.versions) ? d : null; } catch { return null; }
+    })();
+    AV.vers = pr;
+    pr.then((d) => { if (AV?.vers === pr) AV.known = d?.versions ?? null; });
+  }
+  return AV.vers;
+}
+// the kind's icon and badge: an artifact's (R1: anything but diagram or docs reads as Mock), or a preview's; null when
+// it isn't known (a viewer tab has no Library row): the Library's icon and no badge, never a guess
+function avKindDraw(kind) {
+  const k = kind === null ? null : LIB_KINDS.find(([v]) => v === kind && ['mock', 'diagram', 'docs', 'preview'].includes(v)) ?? LIB_KINDS[0];
+  document.querySelector('.av-bar > i.av-kind').className = `av-kind icon-${k ? k[2] : 'library'}`;
+  $('av-kind').textContent = k ? k[1] : '';
+  $('av-kind').hidden = !k;
+}
+// the pill on an artifact: the version shown in full, amber on a draft; pressable in the dashboard only (a viewer tab
+// has no Library to show a pick against)
+function avVerDraw() {
+  const b = $('av-ver'), at = String(AV.at), p = AV.picked, tree = at.startsWith('tree:');
+  const landed = AV.known?.find((v) => v.kind === 'landed');
+  $('av-where').textContent = p?.earlier ? p.label : at === 'main' ? (landed ? avVersionLabel(landed) : 'Landed on main') : tree ? 'the published version' : `Draft · live in ${at}`;
+  b.classList.toggle('amber', !p?.earlier && at !== 'main' && !tree);
+  b.classList.toggle('plain', !!VIEWER);
+  b.disabled = !!VIEWER;
+}
+// a pop (the version list, the tile's menu) opened or closed, its pill saying so
+function avPop(el, open) {
+  el.hidden = !open;
+  (el.id === 'av-vers' ? $('av-ver') : $('av-pub'))?.setAttribute('aria-expanded', String(open));
+}
+function avPopsClose() { for (const id of ['av-vers', 'av-pub-menu']) { const el = $(id); if (el && !el.hidden) avPop(el, false); } }
+// the list: loading, then the versions in kit-172's order (drafts, landed, earlier), the shown one selected
+async function avVersOpen() {
+  const list = $('av-vers'), slug = AV?.slug;
+  if (!slug) return;
+  list.innerHTML = '<p class="av-pop-msg">Loading…</p>';
+  avPop(list, true);
+  const d = await avVersions(slug);
+  if (AV?.slug !== slug || list.hidden) return;
+  list.innerHTML = !d ? '<p class="av-pop-msg">Versions could not be read</p>'
+    : d.versions.map((v) => { const at = avVersionAt(v); return `<button type="button" role="option" data-at="${esc(at)}" data-earlier="${v.kind === 'earlier' ? '1' : ''}" aria-selected="${at === AV.at}">${esc(avVersionLabel(v))}</button>`; }).join('');
+  avVerDraw();
+}
+// a version picked: shown on the stage (showArtifact), its fingerprints from the Library's rows where it has one
+function avPick(o) {
+  const slug = AV.slug, at = o.dataset.at, earlier = o.dataset.earlier === '1';
+  avPop($('av-vers'), false);
+  if (at === AV.at) return;
+  const arts = DATA?.library?.artifacts ?? [];
+  const fp = earlier ? null : arts.find((x) => x.slug === slug && x.at === at)?.fp ?? null;
+  showArtifact(slug, at, { fp, mainFp: arts.find((x) => x.slug === slug && x.at === 'main')?.fp ?? null, picked: { at, label: o.textContent, earlier } });
+}
+// The Public tile (an artifact, its landed version shown, in the dashboard): publicState's word and the gateway's page
+// for it, in a new tab (its owner-only confirm page); with an update, a menu of Update and Unpublish (so Unpublish stays
+// reachable). Off a box or with no project: the recorded state, disabled, saying why. '' where it is hidden.
+function avPublicTile() {
+  if (VIEWER || !AV?.slug || AV.at !== 'main' || AV.picked?.earlier) return '';
+  const lib = DATA?.library;
+  const a = (lib?.artifacts ?? []).find((x) => x.slug === AV.slug && x.at === 'main' && !x.error);
+  if (!a) return '';
+  const me = PUBLIC ? publicHere(location, lib) : null;
+  const ps = publicState(a, PUBLIC, me);
+  const globe = '<i class="icon-globe" aria-hidden="true"></i>';
+  if (!me?.project) {
+    const why = !PUBLIC ? 'Publishing happens on the cloud box: there, the Library can make a landed artifact readable by anyone.' : 'To publish from here, set project in settings.md: it is part of every public link.';
+    return `<button type="button" class="ghost av-pill" id="av-pub" disabled title="${esc(why)}">${globe}${ps.rec ? 'Public' : 'Not public'}</button>`;
+  }
+  const L = publicLinks(me), slug = a.slug;
+  const go = (href, words) => `<a role="menuitem" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${words}</a>`;
+  if (ps.state === 'public' && ps.actions.includes('update')) {
+    return `<button type="button" class="ghost av-pill amber" id="av-pub" aria-haspopup="menu" aria-expanded="false" title="Main has changed since it was published">${globe}Public · update available</button>`
+      + `<div id="av-pub-menu" class="av-pop" role="menu" hidden>${go(L.publish([slug]), 'Update to main\'s version')}${go(L.unpublish(slug), 'Unpublish')}</div>`;
+  }
+  const tile = (cls, href, words, title) => `<a class="av-pill${cls}" id="av-pub" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${globe}${words}</a>`;
+  if (ps.state === 'public') return tile(' good', L.unpublish(slug), 'Public', 'Public: click to unpublish (the gateway asks you to confirm)');
+  if (ps.state === 'not-live') return tile(' amber', L.publish([slug]), 'Not public', 'Published, but not live on this box: click to publish main\'s version again');
+  return tile('', L.publish([slug]), 'Not public', 'Click to publish (the gateway shows what goes public and asks you to confirm)');
+}
+// drawn only when it changes, so a poll leaves an open menu alone
+function avPubDraw() {
+  const w = document.querySelector('.av-pub-wrap'), h = avPublicTile();
+  if (w._html === h) return;
+  w._html = h;
+  w.innerHTML = h;
+}
+// a preview's Start and Stop (today's data-preview-start|stop buttons, so the page's handler presses them), from
+// previewState's actions on this poll's row; none in a viewer tab (no row)
+function avRunButtons() {
+  if (VIEWER || !AV?.preview) return '';
+  const p = (DATA?.library?.previews ?? []).find((x) => x.name === AV.preview);
+  if (!p) return '';
+  const { actions } = previewState(p, Date.now()), n = esc(p.name);
+  return `${actions.includes('start') ? `<button type="button" class="ghost av-pill" data-preview-start="${n}">Start</button>` : ''}${actions.includes('stop') ? `<button type="button" class="ghost av-pill" data-preview-stop="${n}">Stop</button>` : ''}`;
+}
+// rewritten only when its HTML changes: a press's "Starting…" stays until the preview's state does
+function avRunDraw() {
+  const el = $('av-run'), h = avRunButtons();
+  if (el._html === h) return;
+  el._html = h;
+  el.innerHTML = h;
+}
+// the span beside Start and Stop that press writes a refusal to (e-preview-<name>, the page's only one): named and
+// emptied on every opening (showPreview, showArtifact), the same preview's too, never by a poll, so a refusal stays
+// while that preview is shown
+function avRunErr(name) {
+  const el = document.querySelector('.av-run-err');
+  if (name) el.id = `e-preview-${name}`; else el.removeAttribute('id');
+  el.textContent = '';
+}
+// each poll: the bar drawn again from the data (renderLibrary calls it)
+function avBarPoll() { if (AV?.slug) avHeader(); else if (AV?.preview) avRunDraw(); }
+// the pill opens its list, an option shows its version, the tile opens its menu; a click anywhere else closes them
+document.addEventListener('click', (e) => {
+  const t = e.target instanceof Element ? e.target : null;
+  if (!t) return;
+  const o = t.closest('#av-vers [role="option"]');
+  if (o) return void avPick(o);
+  const list = $('av-vers'), menu = $('av-pub-menu');
+  if (t.closest('#av-ver')) {
+    if (menu && !menu.hidden) avPop(menu, false);
+    return void (list.hidden ? avVersOpen() : avPop(list, false));
+  }
+  if (menu && t.closest('button#av-pub')) {
+    if (!list.hidden) avPop(list, false);
+    return void avPop(menu, menu.hidden);
+  }
+  if (!t.closest('.av-pop') || t.closest('#av-pub-menu a')) avPopsClose();
+});
+// Escape with a list open over the shown viewer closes only the list, never the viewer: ahead of every other Escape
+// (capture, on window); with the viewer hidden it holds nothing
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || $('artifact-view').hidden) return;
+  const open = ['av-vers', 'av-pub-menu'].map((id) => $(id)).filter((el) => el && !el.hidden);
+  if (!open.length) return;
+  e.stopImmediatePropagation();
+  e.preventDefault();
+  for (const el of open) avPop(el, false);
+}, true);
+// the viewer closed (however: X, Back, Escape, a route): its lists close with it
+new MutationObserver(() => { if ($('artifact-view').hidden) avPopsClose(); }).observe($('artifact-view'), { attributes: true, attributeFilter: ['hidden'] });
+/* library-versions end */
 /* score-of start */
 // The Overview's Autonomy row (kit-90): each tile's label, the path of its score record in /api/data,
 // and where in that record its % sits. The place is named per tile, never guessed: autonomy_score
