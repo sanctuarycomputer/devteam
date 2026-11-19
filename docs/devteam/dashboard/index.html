@@ -843,24 +843,26 @@ try {
 
 /* css-review end */
 /* css-library start */
-  /* the Library: artifacts (a landed one with its drafts beneath it), drafts of new ones, the link registry */
-  #library h3 { margin: 18px 0 8px; }
-  #library h3:first-of-type { margin-top: 4px; }
-  .lib-list { max-width: var(--measure); }
-  .art-card .art-t { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-  .art-card .art-t a { font-weight: 600; color: var(--fg); }
-  .art-card .art-t a:hover { text-decoration: underline; text-underline-offset: 3px; }
-  .art-card .art-t .badge { margin-right: 0; }
-  .art-card .art-s { color: var(--fg-2); margin-top: 2px; }
-  .art-card .meta { margin-top: 4px; }
-  .art-card .meta a, .lib-link .meta a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
-  .art-card.draft { margin-left: 20px; background: var(--well); box-shadow: none; }
-  .art-card .pub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 6px; }
-  .art-card .pub a.ghost, .lib-pub a.ghost { display: inline-block; padding: 2px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--fg); font-size: 12px; text-decoration: none; }
-  .art-card .pub a.ghost:hover, .lib-pub a.ghost:hover { background: var(--hover); }
-  .art-wt { font-size: 12px; color: var(--fg-2); margin: 10px 0 6px; }
-  .lib-link .links { margin: 0; }
-  .lib-link .loc { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
+  /* the Library: one .cards grid of every item in kind order; above it, only when there is something to say, #lib-top */
+  #lib-top { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--gap); }
+  #lib-top[hidden] { display: none; }
+  #lib-top p { margin: 0; }
+  .lib-pub a.ghost { display: inline-block; padding: 2px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--fg); font-size: 12px; text-decoration: none; }
+  .lib-pub a.ghost:hover { background: var(--hover); }
+  #lib-grid > .empty { grid-column: 1 / -1; margin: 0; }
+  /* a card: the head (icon, title truncated to one line, badges, then ↗ and ⋯ pinned right), the thumbnail, the body */
+  .lib-card .card-head .lib-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
+  .lib-card .card-head a.lib-title[href]:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .lib-card .card-head > * { flex: none; }
+  .lib-card .card-head > .lib-title { flex: 0 1 auto; }
+  .lib-card .card-head .lib-tab { margin-left: auto; display: inline-flex; color: var(--fg-2); }
+  .lib-card .card-head .lib-tab:hover { color: var(--fg); }
+  /* a review has no ↗: its ⋯ pins right itself */
+  .lib-card .card-head > :not(.lib-tab) + details.menu { margin-left: auto; }
+  .lib-thumb { position: relative; aspect-ratio: 16 / 9; border: 1px solid var(--line); border-radius: 6px; background: var(--well); overflow: hidden; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+  .lib-thumb > i { font-size: 28px; }
+  .lib-body { margin-top: 8px; min-width: 0; }
+  .lib-body .lib-sum { color: var(--fg-2); max-width: var(--measure); }
 
 /* css-library end */
 /* css-viewer start */
@@ -1152,13 +1154,9 @@ try {
 <!-- html-board end -->
 
 <!-- html-library start -->
-  <section id="library" class="no-shell" data-page="library">
-    <h2>Library <span class="sub">pages the fleet drew to show an idea, and the links it works from</span></h2>
-    <div class="lib-list" id="previews"></div>
-    <h3>Artifacts</h3>
-    <div class="lib-list" id="artifacts"></div>
-    <h3>Links</h3>
-    <div class="lib-list" id="lib-links"></div>
+  <section id="library" data-page="library">
+    <div id="lib-top" hidden></div>
+    <div class="cards" id="lib-grid"></div>
   </section>
 <!-- html-library end -->
 
@@ -2204,7 +2202,7 @@ function boardCols(items, crit, { only = false, inert = false } = {}) {
 // ---- the Board's and Progress's header filters (kit-91): in the page bar's .extra, each in the URL ----
 // A page head's state is its filters (dashboard-shell@1's STATE_KEYS): Board goal, feat, repo, att; Progress goal,
 // narrow, show. Each change is a history entry (setFilters assigns the hash), so Back restores the earlier filter.
-const FILTER_PAGES = ['board', 'progress'];
+const FILTER_PAGES = ['board', 'progress', 'library'];
 const NARROW_GROUPS = ['Milestones', 'Features', 'Releases', 'Waves', 'Stories'];
 // the goals a filter can name: every goal not let go, by title
 const filterGoals = () => (DATA?.ooda?.goals || []).filter((g) => g.status !== 'abandoned').sort((a, b) => String(a.title ?? a.id).localeCompare(String(b.title ?? b.id)));
@@ -2235,11 +2233,12 @@ function filtersNow(page) {
     if (f.narrow && !(DATA && narrowViews(DATA.progress, f.goal).some(([k]) => k === f.narrow))) delete f.narrow;
     if (f.show && !['complete', 'all'].includes(f.show)) delete f.show;
   }
+  if (page === 'library' && f.kind && !LIB_KINDS.some(([k]) => k === f.kind)) delete f.kind;
   return f;
 }
 // A filter changed: the new state (a goal changed clears the feature and the narrow, which were the old goal's),
-// remembered (the shell's saveFilters: each page its own keys; a goal changed on Progress also drops the Board's
-// stored feature, so a later Board visit isn't emptied by it), then a new entry with the new head.
+// remembered (the shell's saveFilters: each page its own keys; a goal changed on Progress or Library also drops the
+// Board's stored feature, so a later Board visit isn't emptied by it), then a new entry with the new head.
 function setFilters(page, patch) {
   const h = pageHeadNow();
   const state = { ...filtersNow(page) };
@@ -2248,7 +2247,7 @@ function setFilters(page, patch) {
   for (const [k, v] of Object.entries(patch)) { if (v) state[k] = String(v); else delete state[k]; }
   if (goalChanged) { delete state.feat; delete state.narrow; }
   saveFilters(page, state);
-  if (page === 'progress' && goalChanged) saveFilters('board', { ...(storedFilters() || {}), goal: state.goal, feat: undefined });
+  if ((page === 'progress' || page === 'library') && goalChanged) saveFilters('board', { ...(storedFilters() || {}), goal: state.goal, feat: undefined });
   location.hash = headFor({ page, state });
 }
 // The page's filters drawn into the page bar's .extra; emptied on every other page. Written only when they
@@ -2265,6 +2264,7 @@ function filtersHtml(page) {
   const opt = (v, label, cur) => `<option value="${esc(v)}"${(cur || '') === v ? ' selected' : ''}>${esc(label)}</option>`;
   const sel = (k, label, inner) => `<select data-f="${k}" aria-label="${label}">${inner}</select>`;
   const goal = sel('goal', 'Goal', opt('', 'All goals', f.goal) + filterGoals().map((g) => opt(g.id, g.title || g.id, f.goal)).join(''));
+  if (page === 'library') return goal + sel('kind', 'Kind', opt('', 'All kinds', f.kind) + LIB_KINDS.map(([k, label]) => opt(k, label, f.kind)).join(''));
   if (page === 'board') {
     const p = DATA.progress;
     const gf = f.goal ? goalFeatures(f.goal) : null;
@@ -2289,7 +2289,7 @@ function drawFilterPage(page) {
   if (!DATA || !FILTER_PAGES.includes(page)) return void drawFilters(page);
   const m = focusMark();
   drawFilters(page);
-  if (page === 'board') renderBoard(); else renderProgress();
+  if (page === 'board') renderBoard(); else if (page === 'library') renderLibrary(DATA.library); else renderProgress();
   focusBack(m);
 }
 // Board and Progress on a route (in routeHead, once the entry is stamped): a fresh entry whose head has none of
@@ -6342,90 +6342,79 @@ function libraryItems(data, now, ctx) {
 // The Kind and Goal filters: an item with no goal is kept only when no goal is picked.
 const libraryKeep = (item, { kind, goal } = {}) => (!kind || item.kind === kind) && (!goal || item.goals.includes(goal));
 /* library-items end */
-// The Library: each landed artifact with its drafts beneath it, then drafts of slugs that haven't
-// landed (by worktree), then the link registry. A manifest that broke the rules shows its slug and
-// the error, never its title.
+// The Library (kit-92): one .cards grid of libraryItems kept by the page's Kind and Goal filters, in kind order;
+// above it, only when there is something to say, #lib-top: where publishing happens, or one confirm for every
+// published artifact not live on this box, and the notice for a box whose gateway doesn't serve previews.
 function renderLibrary(lib) {
-  const arts = lib?.artifacts ?? [];
-  const links = lib?.links ?? [];
-  const previews = lib?.previews ?? [];
-  $('n-library').textContent = arts.length + previews.length || '';
+  const items = libraryItems({ ...(DATA ?? {}), library: lib }, Date.now(), { previewState, artHref, artViewer, pvViewer, fileHref });
+  // one per artifact and preview card
+  $('n-library').textContent = items.filter((x) => x.art || x.preview).length || '';
   const pvHere = previewHere(location, PREVIEWS);
   const onBoxWithout = !PREVIEWS && /^\d{1,5}\.[a-z]/i.test(location.host);
-  // the running servers offered to the owner: what's live now, for this page's address
-  const pvBadge = { live: '<span class="badge good">live</span>', checking: '<span class="badge">checking</span>', 'not-running': '<span class="badge medium">not running</span>', 'not-answering': '<span class="badge medium">not answering</span>', expired: '<span class="badge">expired</span>' };
-  const pvCard = (p) => {
-    const s = previewState(p, Date.now());
-    const url = previewUrl(pvHere, p);
-    const act = {
-      open: () => `<a class="ghost av-open" href="${esc(pvViewer(p.name))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`,
-      copy: () => `<button class="ghost" data-copy="${esc(url)}">Copy link</button>`,
-      start: () => `<button class="ghost" data-preview-start="${esc(p.name)}">Start</button>`,
-      stop: () => `<button class="ghost" data-preview-stop="${esc(p.name)}"${p.run ? '' : ' title="Unregisters the link; the server stays up until its session stops it"'}>Stop</button>`,
-    };
-    const meta = [esc(p.project), linkify(p.session), p.label ? esc(p.label) : '', p.at ? `offered ${esc(when(p.at))}` : '', s.since ? `down since ${esc(when(s.since))}` : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card" data-preview="${esc(p.name)}"${subj('preview', p.name, p.label || p.name)}>
-      <div class="art-t"><a href="#preview/${esc(encodeURIComponent(p.name))}">${esc(p.label || p.name)}</a><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
-      <div class="meta">${meta}</div>
-      <div class="pub">${s.actions.map((a) => act[a]()).join('')}<span class="err" id="e-preview-${esc(p.name)}"></span></div>
-    </div>`;
-  };
-  $('previews').innerHTML = previews.length
-    ? `<h3>Previews <span class="dim">running servers, from a session</span></h3>${onBoxWithout ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : ''}${previews.map(pvCard).join('')}`
-    : '';
   const me = PUBLIC ? publicHere(location, lib) : null;
   const L = me ? publicLinks(me) : null;
   // the gateway's pages open in a new tab this page can't later redirect
   const tab = (href, label) => `<a class="ghost" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-  // a landed card's publish state, the record's date and channel beside it (a forged line can look the same)
-  const pubLine = (a) => {
-    const s = publicState(a, PUBLIC, me);
-    const badge = s.state === 'public' ? `<span class="badge good">public</span>${s.from ? `<span class="small muted">from instance ${esc(s.from)}</span>` : ''}`
-      : s.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : s.state === 'published' ? '<span class="badge">published</span>' : '';
-    const said = s.rec ? `<span class="small muted">recorded ${esc(when(s.rec.at))} from the ${s.rec.channel === 'dashboard' ? 'dashboard' : 'terminal'}</span>` : '';
-    const moved = !s.drift ? '' : `<span class="small err">${s.state === 'not-live' ? 'Changed on main since it was published: what goes up now is main\'s version, not the one recorded.' : s.state === 'public' ? 'Changed on main since it was published; the public still sees the published version.' : 'Changed on main since it was published.'}</span>`;
-    const act = {
-      publish: () => tab(L.publish([a.slug]), 'Publish'), update: () => tab(L.publish([a.slug]), 'Update'), restore: () => tab(L.publish([a.slug]), 'Restore'), review: () => tab(L.publish([a.slug]), 'Review main\'s version'),
-      unpublish: () => tab(L.unpublish(a.slug), 'Unpublish'), copy: () => `<button class="ghost" data-copy="${esc(L.page(a.slug))}">Copy link</button>`,
-      forget: () => `<button class="ghost" data-forget="${esc(a.slug)}">Forget</button>`,
-    };
-    const parts = [badge, said, moved, ...s.actions.map((x) => act[x]())].filter(Boolean);
-    return parts.length ? `<div class="pub">${parts.join('')}<span class="err" id="e-pub-${esc(a.slug)}"></span></div>` : '';
-  };
-  const card = (a, draft) => {
-    const name = a.error ? a.slug : a.title || a.slug;
-    const meta = [a.by ? `drawn by ${esc(who(a.by))}` : '', a.for?.length ? `for ${a.for.map((f) => linkify(f)).join(', ')}` : '', a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card${draft ? ' draft' : ''}"${subj('artifact', a.slug, a.title || a.slug)}>
-      <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : `<a class="av-open small" href="${esc(artViewer(a.slug, a.at))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`}</div>
-      ${a.error ? `<div class="err">${esc(a.error)}</div>` : a.summary ? `<div class="art-s">${esc(a.summary)}</div>` : ''}
-      ${meta ? `<div class="meta">${meta}</div>` : ''}
-      ${a.at === 'main' && !a.error ? pubLine(a) : ''}
-    </div>`;
-  };
-  const landed = arts.filter((a) => a.at === 'main');
-  const drafts = arts.filter((a) => a.at !== 'main');
-  const fresh = drafts.filter((d) => !landed.some((l) => l.slug === d.slug));
-  const byWt = new Map();
-  for (const d of fresh) byWt.set(d.at, [...(byWt.get(d.at) || []), d]);
-  // above the list: where publishing happens, or one confirm for everything not live on this box
-  const notLive = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live').map((a) => a.slug) : [];
-  const drifted = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live' && publicState(a, PUBLIC, me).drift).length : 0;
+  const landed = (lib?.artifacts ?? []).filter((a) => a.at === 'main' && !a.error);
+  const notLive = me ? landed.filter((a) => publicState(a, PUBLIC, me).state === 'not-live') : [];
+  const drifted = notLive.filter((a) => publicState(a, PUBLIC, me).drift).length;
+  // Restore all in both cases (R4): what goes up is main's version, and the sentence says so
   const pubHead = !landed.length ? ''
     : !PUBLIC ? '<p class="small muted lib-pub">Publishing happens on the cloud box: there, the Library can make a landed artifact readable by anyone.</p>'
     : !me?.project ? '<p class="small muted lib-pub">To publish from here, set <code>project</code> in settings.md: it is part of every public link.</p>'
-    : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50)), drifted ? 'Review all' : 'Restore all')}</p>` : '';
-  $('artifacts').innerHTML = arts.length
-    ? pubHead + landed.map((a) => card(a) + drafts.filter((d) => d.slug === a.slug).map((d) => card(d, true)).join('')).join('') +
-      (byWt.size ? `<h3>Drafts <span class="dim">not landed yet</span></h3>${[...byWt].map(([wt, ds]) => `<div class="art-wt">In ${linkify(wt)}</div>${ds.map((d) => card(d)).join('')}`).join('')}` : '')
-    : empty('No artifacts yet. Ask the supervisor to draw one (“draw me a mock of …”); it shows here as a draft, then lands.');
-  const loc = (l) => esc(l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path || ''));
-  $('lib-links').innerHTML = links.length
-    ? links.map((l) => `<div class="card small lib-link">
-      <div class="links">${linkOf({ title: l.title, url: l.url, path: l.remote ? null : l.path, remote: l.remote })}<span class="badge">${esc(l.kind)}</span></div>
-      ${l.notes ? `<div class="muted">${esc(l.notes)}</div>` : ''}
-      <div class="meta"><code>${esc(l.id)}</code>${loc(l) ? ` · <span class="loc">${loc(l)}</span>` : ''}${l.for?.length ? ` · for ${l.for.map((f) => linkify(f)).join(', ')}` : ''}</div>
-    </div>`).join('')
-    : empty('No links in the registry. The supervisor adds the docs, designs and dashboards the fleet works from.');
+    : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50).map((a) => a.slug)), 'Restore all')}</p>` : '';
+  const pvNote = onBoxWithout && (lib?.previews ?? []).length ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : '';
+  const top = $('lib-top');
+  if (top.dataset.drawn !== pubHead + pvNote) { top.innerHTML = pubHead + pvNote; top.dataset.drawn = pubHead + pvNote; top.hidden = !(pubHead + pvNote); }
+  const KIND = Object.fromEntries(LIB_KINDS.map(([k, label, icon]) => [k, { label, icon }]));
+  // a card: its head built in place (cardHead would put the trailing items in its grow span), the thumbnail's box
+  // (data-thumb-src: the frame's src, or empty where only the kind's icon shows), the body
+  const libraryCard = (x) => {
+    const k = KIND[x.kind];
+    const own = x.kind === 'link' && x.link?.url;
+    const title = `<a class="lib-title"${x.href ? ` href="${esc(x.href)}"` : ''}${own ? ' target="_blank" rel="noopener noreferrer"' : ''}>${esc(x.title)}</a>`;
+    const copy = x.pstate?.actions.includes('copy') ? `<button class="ghost" data-copy="${esc(previewUrl(pvHere, x.preview))}">Copy link</button>` : '';
+    const open = x.kind !== 'review' && x.tab ? `<a class="lib-tab av-open" href="${esc(x.tab)}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own" aria-label="Open in a new tab"><i class="icon-external-link" aria-hidden="true"></i></a>` : '';
+    const src = x.art && !x.error ? artSrc(x.art.slug, x.art.at) : x.pstate?.state === 'live' ? previewUrl(pvHere, x.preview) : '';
+    const said = x.art ? subj('artifact', x.art.slug, x.art.title || x.art.slug) : x.preview ? subj('preview', x.preview.name, x.title) : '';
+    return `<div class="card lib-card" data-lib-id="${esc(x.id)}" data-kind="${esc(x.kind)}"${said}>`
+      + `<div class="card-head"><i class="icon-${k.icon}" aria-hidden="true"></i>${title}${copy}${open}${menuOf(x.id, [], `lib/${x.id}`, '')}</div>`
+      + `<div class="lib-thumb" data-thumb-src="${esc(src)}"><i class="icon-${k.icon}" aria-hidden="true"></i></div>`
+      + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}</div></div>`;
+  };
+  const f = filtersNow('library');
+  const cards = items.filter((x) => libraryKeep(x, f)).map((x) => [x.id, libraryCard(x)]);
+  const grid = $('lib-grid');
+  const html = cards.map(([, h]) => h).join('');
+  // written only when it changes; then patched card by card, so an unchanged card keeps its node (its live frame,
+  // its open ⋯) and a changed one is replaced, its ⋯ opened again if it was open
+  if (grid._libHtml === html && grid.childElementCount) return void (AV?.slug && avHeader());
+  grid._libHtml = html;
+  if (!cards.length) grid.innerHTML = empty('None');
+  else {
+    const was = new Map([...grid.querySelectorAll(':scope > .lib-card')].map((el) => [el.dataset.libId, el]));
+    for (const el of [...grid.children]) if (!el.classList.contains('lib-card')) el.remove();
+    const want = new Set(cards.map(([id]) => id));
+    for (const [id, el] of was) if (!want.has(id)) el.remove();
+    const t = document.createElement('template');
+    let at = grid.firstElementChild;
+    for (const [id, h] of cards) {
+      let el = was.get(id);
+      if (!el || el._libHtml !== h) {
+        t.innerHTML = h;
+        const fresh = t.content.firstElementChild;
+        fresh._libHtml = h;
+        if (el?.querySelector('.card-head details.menu')?.open) fresh.querySelector('.card-head details.menu').open = true;
+        if (el) { if (at === el) at = fresh; el.replaceWith(fresh); }
+        el = fresh;
+      }
+      // in order: moveBefore keeps a moved frame alive where the browser has it (Chrome 133+)
+      if (el !== at) {
+        if (el.isConnected && typeof grid.moveBefore === 'function') grid.moveBefore(el, at); else grid.insertBefore(el, at);
+      }
+      at = el.nextElementSibling;
+    }
+  }
   if (AV?.slug) avHeader();
 }
 
