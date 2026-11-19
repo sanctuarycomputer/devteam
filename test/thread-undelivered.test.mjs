@@ -24,6 +24,9 @@ test('an undelivered turn: the words, the last check, and the record', async (t)
   const record = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   const hhmm = (ms) => new Date(ms).toISOString().slice(11, 16);
   const [T, first] = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout']).split('\n');
+  // thread new records its first turn too (task-1 T1-1)
+  const firstTurn = JSON.parse(F.owner(['thread', 'show', T, '--json'])).turns[0].id;
+  assert.equal(record()[firstTurn]?.thread, T, 'thread new: the first turn recorded');
   clear();
 
   await t.test('no pane: not delivered, and when the supervisor last checked', () => {
