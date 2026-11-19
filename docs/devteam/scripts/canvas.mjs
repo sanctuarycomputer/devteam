@@ -1258,7 +1258,19 @@ export function merge(base, copy, now, { images = null, folderBytes = 0 } = {}) 
   const depth = (p) => p.split('.').length;
   const removals = [...tb.keys()].filter((p) => !tc.has(p)).sort((x, y) => depth(y) - depth(x) || (x < y ? -1 : x > y ? 1 : 0));
   const additions = [...tc.keys()].filter((p) => !tb.has(p) || !same(tb.get(p), tc.get(p))).sort();
+  // What the model holds at a path: 'token', 'group', or undefined (nothing, or a token on the way).
+  const tokenAt = (path) => {
+    let g = tmodel.tokens;
+    for (const seg of path.split('.')) {
+      if (!isObj(g) || isTokenNode(g) || !own(g, seg)) return undefined;
+      g = g[seg];
+    }
+    return isTokenNode(g) ? 'token' : isObj(g) ? 'group' : undefined;
+  };
   for (const [p, value] of [...removals.map((p) => [p, null]), ...additions.map((p) => [p, tc.get(p)])]) {
+    // a removal of a token that isn't there (a person removed it or made it a group, or a second
+    // `take` after the copy made it a group) is nothing to do
+    if (value === null && tokenAt(p) !== 'token') continue;
     const op = { op: 'token', path: p, value: value === null ? null : structuredClone(value) };
     if (APPLY.token(tmodel, op)) skip('path', p, 'token-conflict');
     else ops.push(op);
@@ -1339,7 +1351,12 @@ export function merge(base, copy, now, { images = null, folderBytes = 0 } = {}) 
     }
     return false;
   };
-  const emitMove = (id, parent, at) => { ops.push({ op: 'move', id, parent: parent === PAGES ? null : parent, after: at }); modelMove(id, parent, at); };
+  // A move, unless the id is already there (as on a second `take`), which would be an op that changes nothing.
+  const emitMove = (id, parent, at) => {
+    if (parentOf.get(id) === parent && (prev.get(id) === at || at === id)) return;
+    ops.push({ op: 'move', id, parent: parent === PAGES ? null : parent, after: at });
+    modelMove(id, parent, at);
+  };
 
   const bPage = new Map(nb.pages.map((pg) => [pg.id, pg]));
   const cPage = new Map(nc.pages.map((pg) => [pg.id, pg]));

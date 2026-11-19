@@ -467,7 +467,7 @@ const POOL = new Map();
 function poolAdd(p, v) { if (v === undefined) return; if (!POOL.has(p)) POOL.set(p, []); POOL.get(p).push(v); }
 for (const type of Object.keys(PROPS)) for (const [p, def] of Object.entries(PROPS[type])) if (!p.includes('<')) poolAdd(p, def.default);
 for (const n of Object.values(EVERY.nodes)) {
-  for (const type of [n.type]) for (const p of Object.keys(PROPS[type])) {
+  for (const p of Object.keys(PROPS[n.type])) {
     if (p.includes('<')) continue;
     let v = n;
     for (const k of p.split('.')) v = v && typeof v === 'object' ? v[k] : undefined;
@@ -485,7 +485,84 @@ const TOKEN_VALUES = [
 ];
 const TOKEN_PATHS = ['t.a', 't.b', 't.g.x', 't.g.y', 't.g', 'u', 'space.xl', 'ratio.loose', 'constructor.k'];
 
-// One random op that `apply` applies to `doc`, or null after many tries. `tag` prefixes new ids.
+// Every token path in a token tree, leaves and groups: [path, isToken].
+function tokenPaths(tokens) {
+  const out = [];
+  const stack = [[tokens, '']];
+  while (stack.length) {
+    const [g, prefix] = stack.pop();
+    for (const k of Object.keys(g)) {
+      const p = prefix ? `${prefix}.${k}` : k;
+      const isToken = Object.keys(g[k]).some((x) => x.startsWith('$'));
+      out.push([p, isToken]);
+      if (!isToken) stack.push([g[k], p]);
+    }
+  }
+  return out;
+}
+const SRC = EVERY.nodes.photo.src;
+// The forms the plain draw below rarely reaches (task-3 review T3-1): a token made a group and back,
+// components, vectors and images added, `path`, `src` and `component` set, variant and override
+// entries, new variants, whole maps with content, an empty group. An op list, or null.
+function extraOps(doc, rng, tag, counter) {
+  const nodeIds = Object.keys(doc.nodes);
+  const of = (type) => nodeIds.filter((id) => doc.nodes[id].type === type);
+  const pageIds = doc.pages.map((p) => p.id);
+  const frames = [...pageIds, ...of('frame')];
+  const comps = of('component');
+  const kidOf = (c) => (doc.nodes[c].children.length ? pick(rng, doc.nodes[c].children) : null);
+  const newId = () => `${tag}x${counter.n++}`;
+  const tok = () => structuredClone(pick(rng, TOKEN_VALUES));
+  switch (Math.floor(rng() * 12)) {
+    case 0: { // a token made a group, or a group made a token
+      const paths = tokenPaths(doc.tokens);
+      if (!paths.length) return null;
+      const [p, isToken] = pick(rng, paths);
+      if (isToken) return [{ op: 'token', path: p, value: null }, { op: 'token', path: `${p}.sub`, value: tok() }];
+      const leaves = paths.filter(([q, t]) => t && q.startsWith(`${p}.`)).map(([q]) => q).sort((a, b) => b.split('.').length - a.split('.').length);
+      return [...leaves.map((q) => ({ op: 'token', path: q, value: null })), { op: 'token', path: p, value: tok() }];
+    }
+    case 1: { // a component with a child, a prop and a variant
+      const c = newId(), t = `${c}t`;
+      return [add(c, 'component', pick(rng, pageIds), null), add(t, 'text', c, null, { text: 'C' }),
+        set(c, 'props.label', { type: 'text', default: 'Go', target: { id: t, prop: 'text' } }), set(c, 'variants.hot', { [t]: { color: '#ff0000' } })];
+    }
+    case 2: return [add(newId(), 'vector', pick(rng, frames), null, { path: pick(rng, ['M0 0 L10 10', 'M1 1 H5 V5 Z']) })];
+    case 3: return [add(newId(), 'image', pick(rng, frames), null, { src: SRC, fit: 'contain' })];
+    case 4: { const v = of('vector'); return v.length ? [set(pick(rng, v), 'path', pick(rng, ['M2 2 L3 3', 'm0 0 c1 1 2 2 3 3'])) ] : null; }
+    case 5: { const v = of('image'); return v.length ? [set(pick(rng, v), 'src', SRC), set(pick(rng, v), 'fit', pick(rng, ['cover', 'fill']))] : null; }
+    case 6: { // an instance pointed at another component
+      const i = of('instance');
+      return i.length && comps.length ? [set(pick(rng, i), 'variant', null), set(pick(rng, i), 'component', pick(rng, comps))] : null;
+    }
+    case 7: { // a variant's entry
+      if (!comps.length) return null;
+      const c = pick(rng, comps), d = kidOf(c);
+      return d ? [set(c, `variants.${pick(rng, ['primary', 'quiet', 'v1', 'hot', 'vnew'])}.${d}.${pick(rng, ['opacity', 'visible'])}`, pick(rng, [0.5, false, null]))] : null;
+    }
+    case 8: { // a new variant, or a whole variants map
+      if (!comps.length) return null;
+      const c = pick(rng, comps), d = kidOf(c);
+      if (!d) return null;
+      return rng() < 0.5 ? [set(c, `variants.vn${counter.n++}`, { [d]: { opacity: 0.25 } })] : [set(c, 'variants', { only: { [d]: { visible: false } } })];
+    }
+    case 9: { // an instance's override entry, or its whole overrides map
+      const i = of('instance').filter((x) => doc.nodes[doc.nodes[x].component]);
+      if (!i.length) return null;
+      const x = pick(rng, i), d = kidOf(doc.nodes[x].component);
+      if (!d) return null;
+      return rng() < 0.5 ? [set(x, `overrides.${d}.${pick(rng, ['opacity', 'visible'])}`, pick(rng, [0.75, false, null]))] : [set(x, 'overrides', { [d]: { visible: false } })];
+    }
+    case 10: { // a whole props map with content
+      if (!comps.length) return null;
+      const c = pick(rng, comps), d = kidOf(c);
+      return d ? [set(c, 'props', { shown: { type: 'bool', default: true, target: { id: d, prop: 'visible' } } })] : null;
+    }
+    default: return [add(newId(), 'frame', pick(rng, frames), null, { layout: {} })]; // an empty group
+  }
+}
+
+// One random edit (an op list) that `apply` applies to `doc`, or null after many tries. `tag` prefixes new ids.
 function randomOp(doc, rng, tag, counter) {
   const nodeIds = Object.keys(doc.nodes);
   const pageIds = doc.pages.map((p) => p.id);
@@ -493,6 +570,13 @@ function randomOp(doc, rng, tag, counter) {
   const listOf = (id) => (doc.nodes[id] ? doc.nodes[id].children : doc.pages.find((p) => p.id === id).children);
   const afterIn = (id) => { const l = listOf(id); return rng() < 0.3 || l.length === 0 ? null : pick(rng, l); };
   for (let tries = 0; tries < 60; tries++) {
+    if (rng() < 0.3) {
+      const extra = extraOps(doc, rng, tag, counter);
+      if (!extra) continue;
+      const r = apply(doc, extra, { maxOpsBytes: null });
+      if (r.why === null) return { ops: extra, doc: r.doc };
+      continue;
+    }
     const k = rng();
     let op;
     if (k < 0.32 && nodeIds.length) {
@@ -543,14 +627,14 @@ function randomOp(doc, rng, tag, counter) {
       op = del(pick(rng, pageIds));
     } else if (k < 0.85 && nodeIds.length) {
       const parent = pick(rng, containers);
-      op = mv(pick(rng, nodeIds), doc.nodes[parent] || pageIds.includes(parent) ? parent : parent, afterIn(parent));
+      op = mv(pick(rng, nodeIds), parent, afterIn(parent));
     } else if (k < 0.88) {
       op = mv(pick(rng, pageIds), null, rng() < 0.5 ? null : pick(rng, pageIds));
     } else {
       op = { op: 'token', path: pick(rng, TOKEN_PATHS), value: rng() < 0.3 ? null : structuredClone(pick(rng, TOKEN_VALUES)) };
     }
     const r = apply(doc, [op], { maxOpsBytes: null });
-    if (r.why === null) return { op, doc: r.doc };
+    if (r.why === null) return { ops: [op], doc: r.doc };
   }
   return null;
 }
@@ -560,7 +644,7 @@ function randomEdit(doc, rng, n, tag, counter) {
   for (let i = 0; i < n; i++) {
     const r = randomOp(d, rng, tag, counter);
     if (!r) break;
-    ops.push(r.op);
+    ops.push(...r.ops);
     d = r.doc;
   }
   return { ops, doc: d };
@@ -587,7 +671,9 @@ function wideBase() {
   ops.push(set('cmp', 'props.label', { type: 'text', default: 'Go', target: { id: 'cmp-t', prop: 'text' } }));
   ops.push(set('cmp', 'variants.v1', { 'cmp-b': { fill: '#ff0000' } }));
   ops.push(add('i1', 'instance', 'p1f1', null, { component: 'cmp', variant: 'v1' }), add('i2', 'instance', 'p2f2', null, { component: 'cmp', props: { label: 'Hi' } }));
-  for (let t = 0; t < 12; t++) ops.push({ op: 'token', path: `w.g${t % 3}.k${t}`, value: TOKEN_VALUES[t % TOKEN_VALUES.length] });
+  for (let t = 0; t < 10; t++) ops.push({ op: 'token', path: `w.g${t % 3}.k${t}`, value: TOKEN_VALUES[t % TOKEN_VALUES.length] });
+  ops.push({ op: 'token', path: 'w.font.family', value: { $type: 'fontFamily', $value: 'mono' } });
+  ops.push({ op: 'token', path: 'w.font.body', value: { $type: 'typography', $value: { fontFamily: 'serif', fontSize: { value: 14, unit: 'px' }, fontWeight: 400, letterSpacing: { value: 0, unit: 'px' }, lineHeight: 1.5 } } });
   return edit(MINIMAL, ops);
 }
 const BASES = [['doc-every-type', EVERY], ['wide', wideBase()]];
@@ -628,19 +714,49 @@ function disjoint(a, b) {
 }
 
 // Running twice is safe (C12): the ops again change nothing; a second merge against the result changes nothing.
+// Replayed, a token removal whose path the same ops made run through a token (a token made a group, or
+// a group a token) is refused by apply (contract §4: a path inside a token is `value`), so the replay
+// leaves out removals of tokens the result doesn't hold; the second merge, which is what `take` run
+// again does, gets no such exception.
+const hasToken = (doc, p) => {
+  let g = doc.tokens;
+  for (const seg of p.split('.')) { if (!g || typeof g !== 'object' || !Object.hasOwn(g, seg)) return false; g = g[seg]; }
+  return Object.keys(g).some((k) => k.startsWith('$'));
+};
 function twice(base, copy, result, ops, msg) {
-  const again = after(result, ops);
+  const replay = ops.filter((o) => !(o.op === 'token' && o.value === null && !hasToken(result, o.path)));
+  const again = after(result, replay);
   assert.deepEqual(normalDoc(again), normalDoc(result), `${msg}: ops applied twice`);
   const r2 = opsOf(base, copy, result);
+  assert.deepEqual(r2.skipped, [], `${msg}: a second merge skipped`);
   assert.deepEqual(normalDoc(after(result, r2.ops)), normalDoc(result), `${msg}: a second merge`);
 }
 
+// What the generated copies did, by form, so C7's coverage is checked, not hoped for (task-3 review T3-1).
+const FORMS = {
+  'token to group': (o, i, all) => o.op === 'token' && o.value === null && all.some((q) => q.op === 'token' && q.value && q.path.startsWith(`${o.path}.`)),
+  'group to token': (o, i, all) => o.op === 'token' && o.value && all.some((q) => q.op === 'token' && q.value === null && q.path.startsWith(`${o.path}.`)),
+  'token set': (o) => o.op === 'token' && o.value !== null,
+  'token removed': (o) => o.op === 'token' && o.value === null,
+  ...Object.fromEntries(['frame', 'text', 'rect', 'ellipse', 'vector', 'image', 'component', 'instance', 'page'].map((t) => [`add ${t}`, (o) => o.op === 'add' && o.node.type === t])),
+  'add with an empty group': (o) => o.op === 'add' && o.node.layout && Object.keys(o.node.layout).length === 0,
+  ...Object.fromEntries(['path', 'src', 'component', 'name', 'layout.gap', 'fill', 'font', 'variant'].map((p) => [`set ${p}`, (o) => o.op === 'set' && o.prop === p])),
+  'set a variant entry': (o) => o.op === 'set' && /^variants\.[^.]+\.[^.]+\./.test(o.prop),
+  'set a new variant': (o) => o.op === 'set' && /^variants\.[^.]+$/.test(o.prop) && o.value !== null,
+  'set an override entry': (o) => o.op === 'set' && o.prop.startsWith('overrides.'),
+  'set a prop entry': (o) => o.op === 'set' && o.prop.startsWith('props.'),
+  'set a whole map with content': (o) => o.op === 'set' && ['props', 'variants', 'overrides'].includes(o.prop) && Object.keys(o.value).length > 0,
+  'del': (o) => o.op === 'del', 'move': (o) => o.op === 'move' && o.parent !== null, 'move a page': (o) => o.op === 'move' && o.parent === null,
+  'a prototype-like id': (o) => o.op === 'add' && ['constructor', 'toString', '__proto__'].includes(o.node.id),
+};
 test('canvas merge: merging a generated copy against its own base gives the copy (C7, C12)', () => {
+  const seen = Object.fromEntries(Object.keys(FORMS).map((k) => [k, 0]));
   for (const [name, base] of BASES) {
     const rng = prng(name.length * 1000 + 11);
     for (let i = 0; i < 200; i++) {
       const counter = { n: 0 };
       const { ops: did, doc: copy } = randomEdit(base, rng, 1 + Math.floor(rng() * 12), 's', counter);
+      did.forEach((o, j) => { for (const [k, is] of Object.entries(FORMS)) if (is(o, j, did)) seen[k]++; });
       const msg = `${name} case ${i}: ${JSON.stringify(did).slice(0, 1500)}`;
       const r = opsOf(base, copy, base);
       assert.deepEqual(r.skipped, [], msg);
@@ -649,6 +765,7 @@ test('canvas merge: merging a generated copy against its own base gives the copy
       twice(base, copy, out, r.ops, msg);
     }
   }
+  for (const [k, n] of Object.entries(seen)) assert.ok(n > 0, `no generated copy did: ${k} (${JSON.stringify(seen)})`);
 });
 
 test('canvas merge: a person\'s edit to what the copy didn\'t change survives (C8, C12)', () => {
@@ -700,6 +817,19 @@ test('canvas merge: subtrees, nested rescue, dropped children, ids already there
   out = after(now, r.ops);
   assert.deepEqual(kids(out, 'f'), ['a', 'b', 'x', 'c', 'd']);
   assert.deepEqual(kids(out, 'g'), []);
+  // run again on its own result, a list whose right anchor's predecessor is still to be placed writes no move
+  const b2 = edit(MINIMAL, [add('f', 'frame', 'p1'), add('r', 'rect', 'f'), add('y', 'rect', 'f', 'r')]);
+  const c2 = edit(b2, [add('x', 'rect', 'f'), mv('y', 'f', 'x')]);
+  assert.deepEqual(kids(c2, 'f'), ['x', 'y', 'r']);
+  const first = opsOf(b2, c2);
+  const res = after(b2, first.ops);
+  assert.deepEqual(kids(res, 'f'), ['x', 'y', 'r']);
+  assert.ok(opsOf(b2, c2, res).ops.every((o) => o.op !== 'move'));
+  // and a right anchor's predecessor that step 6 deletes is passed over
+  const b3 = edit(MINIMAL, [add('f', 'frame', 'p1'), add('t', 'rect', 'f'), add('r', 'rect', 'f', 't'), add('d', 'rect', 'f', 'r')]);
+  const c3 = edit(b3, [del('t'), mv('d', 'f', null)]);
+  const r3 = opsOf(b3, c3);
+  assert.deepEqual(r3.ops[0], mv('d', 'f', null));
   // already in place: nothing moves
   r = opsOf(LISTS, copy, copy);
   assert.ok(r.ops.every((o) => o.op !== 'move'), JSON.stringify(r.ops));
