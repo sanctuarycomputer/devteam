@@ -19425,6 +19425,86 @@ function dashboardHub(log) {
   if (imageHub() === HUB_PORT) { log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); return null; }
   return startHub(log, { kit: ownKitVersion() });
 }
+/* cmdDashboard start */
+/* dashboardRoutes start */
+// What a route group returns when none of its routes matched the request.
+const DASH_NEXT = Symbol('next route');
+// The routes' context: a name a group reads from it that cmdDashboard did not pass throws, not undefined.
+// Symbols and then fall through, so logging or awaiting it never trips.
+function dashContext(o) {
+  return new Proxy(o, { get(t, k, r) { if (typeof k === 'string' && k !== 'then' && !(k in t)) throw new Error(`dashboard route context has no ${k}`); return Reflect.get(t, k, r); } });
+}
+// The owner actions the dashboard takes at POST /api/<name>, each a body check that gives the argv or
+// null, with what they share. A new owner action is an entry here.
+function dashboardActions() {
+    const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
+    // no string an action puts in argv holds a NUL: no process can be given one
+    const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max && !x.includes('\0');
+    const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? [`--scope=${b.scope.trim()}`] : [])] : []);
+    const turnOk = (x) => typeof x === 'string' && !!x.trim() && !x.includes('\0') && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
+    const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
+    // The files dropped with an answer or a turn, passed on whole: only the list's shape is checked
+    // here, the command checks everything (attachedFiles). None, or an empty list, is no files; any
+    // other value is no action (null).
+    const filesArgs = (b) => (b.files === undefined || (Array.isArray(b.files) && !b.files.length) ? [] : Array.isArray(b.files) && b.files.length <= FILES_MAX ? [`--files=${JSON.stringify(b.files)}`] : null);
+    const ACTIONS = {
+      answer: (b) => {
+        // choice, from a card with choices (kit-313): the label picked, the words in answer optional, or
+        // null for the words alone. Without the key (an older page, a goal or owner-action card) the
+        // answer is the text as typed.
+        const picked = Object.hasOwn(b, 'choice');
+        if (!ID.test(b.id ?? '')) return null;
+        if (picked && (b.decline !== undefined || (b.choice !== null && !text(b.choice, 300)))) return null;
+        const words = text(b.answer) ? b.answer.trim() : '';
+        if (!words && !(typeof b.choice === 'string' && (b.answer === undefined || (typeof b.answer === 'string' && !b.answer.trim())))) return null;
+        if (b.decline !== undefined && b.decline !== true) return null;
+        const files = filesArgs(b);
+        if (!files) return null;
+        // the owner's words, and a label, go as values no flag can be read from: the words after "--",
+        // the label and the rule inside their flag (--choice=<label>), so "--rule=…" typed is words
+        const args = ['answer', b.id, ...(!picked ? [] : b.choice === null ? ['--in-words'] : [`--choice=${b.choice.trim()}`]), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
+        // "Send it back" on a review: the owner's reason, no result
+        if (b.decline === true) args.push('--decline');
+        else if (text(b.rule, 600)) args.push(`--rule=${b.rule.trim()}`);
+        return [...args, ...(words ? ['--', words] : [])];
+      },
+      correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) && (b.impact === undefined || [1, 2, 3, 4].includes(b.impact)) ? ['correct', b.id, '--reason', b.reason.trim(), ...(b.impact !== undefined ? ['--impact', String(b.impact)] : [])] : null),
+      'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
+      fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) && (b.move === undefined || typeof b.move === 'boolean') ? ['fleet', b.op, '--owner', ...(b.move === true && ['drain', 'park'].includes(b.op) ? ['--move'] : []), ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
+      // the card's Mark met: goal status met, which reads a repo or prod check again first
+      'goal-met': (b) => (ID.test(b.id ?? '') ? ['goal', 'status', b.id, 'met'] : null),
+      // the owner's goal order (kit-234's drag to reorder): the goals named, first to last
+      'goal-order': (b) => (Array.isArray(b.ids) && b.ids.length >= 1 && b.ids.length <= 50 && b.ids.every((x) => typeof x === 'string' && ID.test(x)) ? ['goal', 'order', ...b.ids] : null),
+      'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
+      knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) && (b.note === undefined || b.note === '' || (text(b.note, 600) && !/[\r\n]/.test(b.note))) ? ['knowledge', 'set', b.id, '--status', b.status, ...(b.note?.trim() ? ['--note', b.note.trim()] : []), '--owner'] : null),
+      ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
+      // Only the cloud gateway calls it, after the owner confirmed on its own page (and the Library's
+      // Forget, for a record the owner doesn't want restored); the Library has no button that publishes.
+      // Like every owner action here it can't tell who asks: anything on the box can reach it, so a
+      // line it writes is a claim, and the gateway's confirm page never takes it for the owner's click.
+      'artifact-publish': (b) => (LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE_ID.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null),
+      'preview-stop': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'stop', b.name] : null),
+      'preview-start': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'start', b.name] : null),
+      // Threads, from the layer. The owner's words always go after --, so words that start with -- stay
+      // words; the title, subject and outcome as --key=value, kept whole whatever they hold. A subject
+      // is checked here before anything is spawned (any kind the log takes: an item or a spot on the
+      // dashboard, a spot on an artifact or a preview from a viewer), and thread new checks it again.
+      // A capability is cut from the title and subject first, so not even the argv holds one.
+      'thread-new': (b) => {
+        const [title, subject, files] = [uncapped(b.title), uncapped(b.subject), filesArgs(b)];
+        return files && lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...files, '--', b.text.trim()] : null;
+      },
+      'thread-say': (b) => { const files = filesArgs(b); return files && (typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, ...files, '--', b.text.trim()] : null; },
+      'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
+      'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
+      // bound to the proposal the card showed: a newer one is refused, so the owner reads it first
+      'thread-accept': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && typeof b.at === 'string' && READY_AT.test(b.at) ? ['thread', 'resolve', b.id, '--accept', `--at=${b.at}`] : null),
+    };
+    // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
+    const ACTION_MS = { 'artifact-publish': 12000 };
+  return { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS };
+}
+/* dashboardRoutes end */
 async function cmdDashboard() {
   // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
   // while it starts is then a change it sees
@@ -19463,71 +19543,7 @@ async function cmdDashboard() {
   // /api/artifact-versions runs in flight, by slug: one child process however many ask at once
   const versioning = new Map();
   const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
-  const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
-  // no string an action puts in argv holds a NUL: no process can be given one
-  const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max && !x.includes('\0');
-  const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? [`--scope=${b.scope.trim()}`] : [])] : []);
-  const turnOk = (x) => typeof x === 'string' && !!x.trim() && !x.includes('\0') && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
-  const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
-  // The files dropped with an answer or a turn, passed on whole: only the list's shape is checked
-  // here, the command checks everything (attachedFiles). None, or an empty list, is no files; any
-  // other value is no action (null).
-  const filesArgs = (b) => (b.files === undefined || (Array.isArray(b.files) && !b.files.length) ? [] : Array.isArray(b.files) && b.files.length <= FILES_MAX ? [`--files=${JSON.stringify(b.files)}`] : null);
-  const ACTIONS = {
-    answer: (b) => {
-      // choice, from a card with choices (kit-313): the label picked, the words in answer optional, or
-      // null for the words alone. Without the key (an older page, a goal or owner-action card) the
-      // answer is the text as typed.
-      const picked = Object.hasOwn(b, 'choice');
-      if (!ID.test(b.id ?? '')) return null;
-      if (picked && (b.decline !== undefined || (b.choice !== null && !text(b.choice, 300)))) return null;
-      const words = text(b.answer) ? b.answer.trim() : '';
-      if (!words && !(typeof b.choice === 'string' && (b.answer === undefined || (typeof b.answer === 'string' && !b.answer.trim())))) return null;
-      if (b.decline !== undefined && b.decline !== true) return null;
-      const files = filesArgs(b);
-      if (!files) return null;
-      // the owner's words, and a label, go as values no flag can be read from: the words after "--",
-      // the label and the rule inside their flag (--choice=<label>), so "--rule=…" typed is words
-      const args = ['answer', b.id, ...(!picked ? [] : b.choice === null ? ['--in-words'] : [`--choice=${b.choice.trim()}`]), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
-      // "Send it back" on a review: the owner's reason, no result
-      if (b.decline === true) args.push('--decline');
-      else if (text(b.rule, 600)) args.push(`--rule=${b.rule.trim()}`);
-      return [...args, ...(words ? ['--', words] : [])];
-    },
-    correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) && (b.impact === undefined || [1, 2, 3, 4].includes(b.impact)) ? ['correct', b.id, '--reason', b.reason.trim(), ...(b.impact !== undefined ? ['--impact', String(b.impact)] : [])] : null),
-    'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
-    fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) && (b.move === undefined || typeof b.move === 'boolean') ? ['fleet', b.op, '--owner', ...(b.move === true && ['drain', 'park'].includes(b.op) ? ['--move'] : []), ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
-    // the card's Mark met: goal status met, which reads a repo or prod check again first
-    'goal-met': (b) => (ID.test(b.id ?? '') ? ['goal', 'status', b.id, 'met'] : null),
-    // the owner's goal order (kit-234's drag to reorder): the goals named, first to last
-    'goal-order': (b) => (Array.isArray(b.ids) && b.ids.length >= 1 && b.ids.length <= 50 && b.ids.every((x) => typeof x === 'string' && ID.test(x)) ? ['goal', 'order', ...b.ids] : null),
-    'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
-    knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) && (b.note === undefined || b.note === '' || (text(b.note, 600) && !/[\r\n]/.test(b.note))) ? ['knowledge', 'set', b.id, '--status', b.status, ...(b.note?.trim() ? ['--note', b.note.trim()] : []), '--owner'] : null),
-    ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
-    // Only the cloud gateway calls it, after the owner confirmed on its own page (and the Library's
-    // Forget, for a record the owner doesn't want restored); the Library has no button that publishes.
-    // Like every owner action here it can't tell who asks: anything on the box can reach it, so a
-    // line it writes is a claim, and the gateway's confirm page never takes it for the owner's click.
-    'artifact-publish': (b) => (LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE_ID.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null),
-    'preview-stop': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'stop', b.name] : null),
-    'preview-start': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'start', b.name] : null),
-    // Threads, from the layer. The owner's words always go after --, so words that start with -- stay
-    // words; the title, subject and outcome as --key=value, kept whole whatever they hold. A subject
-    // is checked here before anything is spawned (any kind the log takes: an item or a spot on the
-    // dashboard, a spot on an artifact or a preview from a viewer), and thread new checks it again.
-    // A capability is cut from the title and subject first, so not even the argv holds one.
-    'thread-new': (b) => {
-      const [title, subject, files] = [uncapped(b.title), uncapped(b.subject), filesArgs(b)];
-      return files && lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...files, '--', b.text.trim()] : null;
-    },
-    'thread-say': (b) => { const files = filesArgs(b); return files && (typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, ...files, '--', b.text.trim()] : null; },
-    'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
-    'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
-    // bound to the proposal the card showed: a newer one is refused, so the owner reads it first
-    'thread-accept': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && typeof b.at === 'string' && READY_AT.test(b.at) ? ['thread', 'resolve', b.id, '--accept', `--at=${b.at}`] : null),
-  };
-  // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
-  const ACTION_MS = { 'artifact-publish': 12000 };
+  const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS } = dashboardActions();
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
@@ -20548,6 +20564,7 @@ async function cmdDashboard() {
 
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
+/* cmdDashboard end */
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
