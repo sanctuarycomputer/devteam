@@ -632,6 +632,7 @@ test('S1 help and prompt', opts, async () => {
   const p = run('prompt', 'supervisor');
   assert.equal(p.status, 0, p.stderr);
   assert.ok(p.stdout.includes('browser type <ref> --stdin'), 'the supervisor prompt says to pipe a secret in');
+  assert.ok(p.stdout.includes('pipe it in from a variable or a 0600 file') && p.stdout.includes('never as an argument or a literal in the command'), 'the supervisor prompt says where the piped secret comes from (final-1b S2)');
 });
 
 test('B4 the dashboard is refused', opts, async () => {

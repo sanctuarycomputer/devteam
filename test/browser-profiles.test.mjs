@@ -356,6 +356,38 @@ test('I4 a lock\'s host is cleaned and cut in what is printed', opts, async () =
   await stopped(q);
 });
 
+// final-1b S1: a start whose first daemon fails its view-port bind (another preview took the port) is
+// relaunched; the daemon that comes up still reports what the start did. The hook makes the first
+// daemon's bind fail once (T4-1).
+test('G1b-relaunch a leftover killed by a start that relaunched still says restarted', opts, async () => {
+  await stopped(q);
+  fs.rmSync(q.state, { force: true });
+  const marker = path.join(tmp, 'bind-failed-g1b');
+  const c = spawn(chromePath, ['--headless=new', `--user-data-dir=${q.profile}`, '--proxy-server=127.0.0.1:9', '--disable-background-networking', '--no-first-run', '--no-sandbox', 'about:blank'], { detached: true, stdio: 'ignore' });
+  ownGroups.add(c.pid);
+  try {
+    await until(() => carries(c.pid, q), 'the leftover Chrome up');
+    plantState(q, c.pid);
+    await started(q, { DEVTEAM_TEST_BROWSER_BIND_FAIL: marker });
+    assert.ok(fs.existsSync(marker), 'the first daemon failed its bind: the start relaunched');
+    assert.equal(alive(c.pid), false, 'the leftover Chrome is gone');
+    assert.equal((await statusJson(q)).restarted, true);
+    await stopped(q);
+  } finally { await killGroup(c.pid); }
+});
+
+test('I4-relaunch a stale lock cleared by a start that relaunched is still noted', opts, async () => {
+  await stopped(q);
+  fs.rmSync(q.state, { force: true });
+  const marker = path.join(tmp, 'bind-failed-i4');
+  plantLock(q, 'a-b-c-1234');
+  await started(q, { DEVTEAM_TEST_BROWSER_BIND_FAIL: marker });
+  assert.ok(fs.existsSync(marker), 'the first daemon failed its bind: the start relaunched');
+  const s = await statusJson(q);
+  assert.ok(s.notes.includes('Cleared a stale SingletonLock left by host a-b-c.'), JSON.stringify(s.notes));
+  await stopped(q);
+});
+
 test('K1 run.env reaches the daemon', opts, async () => {
   const other = newHome();
   const env = { ...k.env, HOME: other };
