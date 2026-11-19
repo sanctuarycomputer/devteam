@@ -939,9 +939,10 @@ function linkAnswerCovers(qid, c) {
 }
 Object.assign(linkAnswerCovers, {
   HEADER: 'This answer approves exactly these repo link changes, and no other:',
-  // the owner's own yes, as recommended: a question asked with recommendation yes, answered yes
-  // (a note after " — " aside), never a review, a secrets question, a default or another choice
-  yes: (v) => v.status === 'answered' && v.answered_by === 'owner' && !!v.matched && v.kind !== 'review' && !(v.secrets ?? []).length && ['governance-edit', 'gate-change'].includes(v.class) && String(v.answer ?? '').split(' — ')[0].trim().toLowerCase() === 'yes',
+  // the owner's own yes, as recommended: a question asked with recommendation yes, whose label is
+  // yes (the pick, a reading that counts, or an older line's leading label), never a review, a
+  // secrets question, a default or another choice
+  yes: (v) => v.status === 'answered' && v.answered_by === 'owner' && !!v.matched && v.kind !== 'review' && !(v.secrets ?? []).length && ['governance-edit', 'gate-change'].includes(v.class) && String(v.label ?? '').trim().toLowerCase() === 'yes',
   // the lines of a context's approves section, or null when it has none
   section: (context) => {
     const ls = String(context ?? '').split('\n');
@@ -2236,8 +2237,9 @@ function ratingHistory(q) {
 }
 // about_turn, seen, owner_said_turn and owner_said_at are written only when a question is asked and
 // nobody may set them after (x-authority), so they're left out too: an older kit, which drops them
-// as unknown, then hashes the question as this one does, and the owner's answer stands there.
-const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files', 'about_turn', 'seen', 'owner_said_turn', 'owner_said_at', 'said_at', 'answer_seen'];
+// as unknown, then hashes the question as this one does, and the owner's answer stands there. The
+// owner's pick and the supervisor's reading of words (and its void) come after the answer.
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files', 'about_turn', 'seen', 'owner_said_turn', 'owner_said_at', 'said_at', 'answer_seen', 'choice', 'reading', 'reading_void', 'reading_withdrawn'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
@@ -2266,10 +2268,41 @@ function questionView(q) {
   if (ans) [status, answer, answeredBy, answeredAt] = ['answered', ans.answer, 'owner', ans.at];
   else if (st?.status === 'defaulted') [status, answer, answeredBy, answeredAt] = ['defaulted', q.default, 'supervisor (default)', st.at];
   else if (st?.status === 'withdrawn') [status, answeredAt] = ['withdrawn', st.at];
+  const norm = (x) => String(x ?? '').trim().toLowerCase();
+  // The labels an answer may pick, as the dashboard draws them: the choices, else the options, and
+  // the recommendation when no label is it.
+  const drawn = (q.choices ?? []).length ? q.choices.map((c) => c?.label) : q.options ?? [];
+  const named = drawn.filter((l) => typeof l === 'string');
+  const labels = q.recommendation && !named.some((l) => norm(l) === norm(q.recommendation)) ? [q.recommendation, ...named] : named;
+  const inLabels = (x) => labels.find((l) => norm(l) === norm(x)) ?? null;
+  // An answer line with a choice key says what the owner picked (null: words alone); a line
+  // without one (older, or the terminal, chat or a turn) is read by its leading label.
+  const keyed = !!ans && Object.hasOwn(ans, 'choice');
+  const choice = keyed ? ans.choice : null;
+  const words = !keyed ? null : choice === null ? ans.answer : ans.answer.startsWith(`${choice} — `) ? ans.answer.slice(choice.length + 3) : '';
+  // Words alone count as a choice only through the supervisor's reading, which is checked here
+  // rather than trusted: of this answer, in the question's class, of a label in the set, resting on
+  // the owner's own words, and not voided by the owner or withdrawn by the supervisor. Only the
+  // question's own lines are read (this runs inside the fold), so a void takes effect from its time on.
+  const collapse = (x) => String(x).replace(/\s+/g, ' ').trim();
+  const wordChar = (c) => !!c && /[\p{L}\p{N}]/u.test(c);
+  const wholeWords = (cite, text) => {
+    const c = collapse(cite);
+    const t = collapse(text);
+    if (!c || [...c].length > 600) return false;
+    for (let i = t.indexOf(c); i >= 0; i = t.indexOf(c, i + 1)) if (!wordChar(t.slice(0, i).match(/.$/su)?.[0]) && !wordChar(t.slice(i + c.length).match(/^./su)?.[0])) return true;
+    return false;
+  };
+  const cancelled = (act) => q.updates.some((u) => (writerClass(u.by) === 'owner' && u.reading_void === act) || (writerClass(u.by) === 'supervisor' && u.reading_withdrawn === act));
+  const counts = (r) => isObj(r) && ['choice', 'cite', 'class', 'of', 'act'].every((k) => typeof r[k] === 'string') && r.of === ans.at && !!inLabels(r.choice) && wholeWords(r.cite, ans.answer) && r.class === (q.class ?? q.kind) && !cancelled(r.act);
+  const reading = keyed && choice === null ? q.updates.filter((u) => writerClass(u.by) === 'supervisor').map((u) => u.reading).find(counts) ?? null : null;
+  // The answer's label as the label-reading checks take it: the pick, else a reading that counts.
+  const label = keyed ? choice ?? (reading ? inLabels(reading.choice) : null) : answer === null ? null : String(answer).split(' — ')[0];
   // An answer agrees with the recommendation when it is that choice, with or without a note after
-  // " — " (the dashboard sends "<label> — <note>").
-  const norm = (x) => x.trim().toLowerCase();
-  let matched = ans ? !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation)) : null;
+  // " — " (the dashboard sends "<label> — <note>"); a line with a choice key, when its label is.
+  // Words alone never match until read, even when they say the recommendation.
+  const agrees = (l) => !!q.recommendation && l !== null && norm(l) === norm(q.recommendation);
+  let matched = !ans ? null : keyed ? agrees(label) : !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation));
   // A review's recommendation is its proposals: it agrees only when the owner kept every one of
   // them, decided every row, and the result still verifies. Only the owner's lines count here.
   let review = null;
@@ -2281,12 +2314,15 @@ function questionView(q) {
     review = { review: q.review, result: ans ? result : null, declined: ans ? declined : false, allow_partial: !!q.review.allow_partial, result_status: resultStatus };
     if (ans) matched = !review.declined && resultStatus === 'verified' && (result?.proposed ?? 0) > 0 && result.kept === result.proposed && result.undecided === 0;
   }
+  // the owner's own agreement, for trust: a reading is the supervisor's, never the owner's
+  const agreedByOwner = !ans ? null : keyed ? agrees(choice) : matched;
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: isObj(q.change) && Array.isArray(q.change.order) ? null : q.change ?? null, ...(isObj(q.change) && Array.isArray(q.change.order) ? { order: q.change.order } : {}), met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, no_default: q.no_default ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
+    labels, choice, words, in_words: keyed ? choice === null : null, label, reading, read_by: reading ? 'supervisor' : null, agreed_by_owner: agreedByOwner,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
     about_turn: q.about_turn ?? null, seen: q.seen ?? null, owner_said_turn: q.owner_said_turn ?? null, owner_said_at: q.owner_said_at ?? null,
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
@@ -4839,24 +4875,30 @@ function oneWayDoorsSection(body) {
 }
 
 // A verdict at commit V holds at head H only if V is an ancestor of H, every non-merge commit V..H
-// just ADDS review-record files under `dir`, and any merge between only brought main in: each merge's
+// just ADDS review-record files under `dir` or fills one in (fillInOnly), save a commit and its exact
+// revert, which change nothing together, and any merge between only brought main in: each merge's
 // other parents are on main, and the branch's own change against main (three-dot, review records
 // aside) is byte-identical at H to what was reviewed at V, or, where main touched the same files,
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
 // changes both, so it voids the verdict; a clean merge of main does not.
 // A record edit that only fills in what the record lacked: a "- Reviewer:" line where there was
-// none, and Disposition cells that were empty or held no disposition yet, each given a disposition.
-// Verdicts, findings and dispositions already given can't change this way, so a dissent still
-// can't be edited away.
-function fillInOnly(before, after) {
+// none, a "- Records: <full sha>" line where there was none (only where `records` allows it:
+// verdictHolds allows it on a record written after the verdict's commit), and Disposition cells
+// that were empty or held no disposition yet, each given a disposition. Verdicts, findings and
+// dispositions already given can't change this way, so a dissent still can't be edited away.
+function fillInOnly(before, after, records = false) {
   if (before === null || after === null) return false;
   // blank lines carry nothing in a record, so they're left out of the comparison
   const a = before.split('\n').filter((l) => l.trim()), b = after.split('\n').filter((l) => l.trim());
-  const REVIEWER = /^-[ \t]*Reviewer:[ \t]*\S/;
-  if (b.length === a.length + 1 && !a.some((l) => REVIEWER.test(l))) {
+  // each added line one of these, at most once, where the record had no such line (the parser's own patterns)
+  const ADDED = [[/^-[ \t]*Reviewer:[ \t]*\S/, /^-[ \t]*Reviewer:[ \t]*\S/], ...(records ? [[/^-[ \t]*Records:[ \t]*[0-9a-f]{40}[ \t]*$/, /^-[ \t]*Records:/]] : [])];
+  const open = ADDED.filter(([, had]) => !a.some((l) => had.test(l)));
+  while (b.length > a.length) {
     const i = b.findIndex((l, k) => l !== a[k]);
-    if (i < 0 || !REVIEWER.test(b[i])) return false;
+    const k = open.findIndex(([line]) => line.test(b[i]));
+    if (i < 0 || k < 0) return false;
     b.splice(i, 1);
+    open.splice(k, 1);
   }
   if (b.length !== a.length) return false;
   let disp = -1;
@@ -4877,18 +4919,41 @@ function verdictHolds(v, head, dir, R = repo('home')) {
   const main = R.mainRef();
   // the branch's own commits since V: what a merge brought in from main is main's, not the branch's.
   // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
-  // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
+  // filled, a missing "- Reviewer:" line added, a missing "- Records:" line added to a record written
+  // after V. Nothing else in a record may change, except by a commit its exact revert undoes.
   let commit = null;
+  const range = [`${v}..${head}`, ...(main ? [`^${main}`] : [])];
   // <stage>-<pass>[<track>].md, or a task's later pass, task-<n>-<pass>[<track>].md
   const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+(?:-\d+)?[a-z]?\.md$/.test(file.slice(dir.length));
-  const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
+  // A commit and a later one whose diff is its exact inverse change nothing together: both are left
+  // out. Each pairs once, with the oldest later match, so an edit reverted and redone is still judged;
+  // a commit adding or deleting a record never pairs, so a dissent added and reverted still voids.
+  // Worked out only once a commit would otherwise be refused; a diff git can't make never pairs.
+  let paired = null;
+  const undone = (c) => {
+    if (!paired) {
+      paired = new Set();
+      const list = (R.git(['rev-list', '--no-merges', '--reverse', ...range]) ?? '').split('\n').filter(Boolean);
+      const diff = (x, y) => R.git(['diff', '--binary', '--full-index', '--no-renames', '--no-ext-diff', '--no-textconv', x, y]);
+      const addsOrDeletes = (x) => (R.git(['diff', '--name-status', '--no-renames', `${x}^`, x]) ?? 'x').split('\n').some((l) => { const [st, file] = l.split('\t'); return st !== 'M' && (st === 'x' || isRecord(file)); });
+      const forward = list.map((x) => (addsOrDeletes(x) ? null : diff(`${x}^`, x)));
+      const inverse = [];
+      const inverseOf = (j) => (j in inverse ? inverse[j] : (inverse[j] = diff(list[j], `${list[j]}^`)));
+      for (let i = 0; i < list.length; i++) {
+        if (paired.has(list[i]) || !forward[i]) continue;
+        for (let j = i + 1; j < list.length; j++) if (!paired.has(list[j]) && forward[j] !== null && inverseOf(j) === forward[i]) { paired.add(list[i]); paired.add(list[j]); break; }
+      }
+    }
+    return !!c && paired.has(c);
+  };
+  const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', ...range]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
     // a drained session's handoff note is prose about the session, not the work (supervisor.md, Moving the fleet)
-    if (isHandoffFile(file)) return st === 'A' || st === 'M';
-    if (!isRecord(file)) return false;
-    if (st === 'A') return true;
-    return st === 'M' && !!commit && fillInOnly(R.git(['show', `${commit}^:${file}`]), R.git(['show', `${commit}:${file}`]));
+    if (isHandoffFile(file) && (st === 'A' || st === 'M')) return true;
+    if (isRecord(file) && st === 'A') return true;
+    if (isRecord(file) && st === 'M' && !!commit && fillInOnly(R.git(['show', `${commit}^:${file}`]), R.git(['show', `${commit}:${file}`]), R.git(['cat-file', '-e', `${v}:${file}`]) === null)) return true;
+    return undone(commit);
   });
   if (!onlyRecords) return false;
   const merges = (R.git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').split('\n').filter(Boolean);
@@ -6264,6 +6329,8 @@ function ownerAnswer(qid, what) {
   // An answer approves what it said yes to: the owner's answer must be the question's
   // recommendation (a review, its verified result). Answered any other way, the owner declined or
   // changed it, and the supervisor asks again; a secrets question approves by what was posted.
+  // Words alone approve nothing until the supervisor reads them as one choice, citing them.
+  if (v.in_words && !v.reading) die(`${what}: ${qid} was answered in the owner's own words ("${String(v.words).slice(0, 80)}"), not a choice: read them with answer ${qid} --read "<label>" --cite "<their words>" --class ${v.class ?? v.kind}, or ask back in its thread when they fit more than one choice`);
   if (!(v.secrets ?? []).length && v.kind !== 'review' && !v.matched) die(`${what}: ${qid} was answered "${String(v.answer ?? '').slice(0, 80)}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ' (it has none)'}: that approves nothing; ask again for what the owner wants`);
   return v;
 }
@@ -6824,16 +6891,17 @@ function rungFor(cls, scope = null) {
   return r;
 }
 // Evidence for a trust question: how often the owner went with the supervisor's recommendation on
-// the last N answered questions of the class (defaulted answers don't count), and calls in the
-// class since it last dropped (decisions, and acts that were their own), none corrected.
+// the last N answered questions of the class (defaulted answers don't count, nor words alone, read
+// or not: a reading is the supervisor's, not the owner's agreement), and calls in the class since it
+// last dropped (decisions, and acts that were their own), none corrected.
 function trustEvidence(cls) {
   const promo = ladder().promotion;
   const acts = calls().filter((a) => a.class === cls).sort(byTime);
   const drops = acts.map(correctionOf).filter(Boolean).map((c) => c.at).sort();
   const since = drops[drops.length - 1] ?? '';
   const after = acts.filter((a) => a.created_at > since);
-  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
-  const agree = answered.filter((q) => q.matched).length;
+  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && !q.in_words && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
+  const agree = answered.filter((q) => q.agreed_by_owner).length;
   return {
     acts_since_drop: after.length, uncorrected_acts: after.filter((a) => !correctionOf(a)).map((a) => a.id), corrections: drops.length,
     agreement: answered.length ? +(agree / answered.length).toFixed(2) : null, agreement_questions: answered.map((q) => q.id),
@@ -7076,7 +7144,7 @@ function answerSpent(v) {
 }
 function reaskWords(v) {
   const door = isDoorQuestion(v);
-  const cite = v.recommendation && v.matched === false && !door ? `they answered other than your recommendation, and that is their decision; act on it, and use it in your recommendations` : `cite the answer instead (--approved ${v.id} on decide or act${door ? `; for a plan under it, act --class approve-plan --approved ${v.id}, and when it was asked for the goal, "- Goal-level door: ${v.id} covers this plan" in the plan review` : ''})`;
+  const cite = v.in_words && !v.reading ? `they answered in their own words; read them (answer ${v.id} --read "<label>" --cite "<their words>" --class ${v.class ?? v.kind}) or ask back in its thread` : v.recommendation && v.matched === false && !door ? `they answered other than your recommendation, and that is their decision; act on it, and use it in your recommendations` : `cite the answer instead (--approved ${v.id} on decide or act${door ? `; for a plan under it, act --class approve-plan --approved ${v.id}, and when it was asked for the goal, "- Goal-level door: ${v.id} covers this plan" in the plan review` : ''})`;
   return `the owner already decided this: ${v.id} ${quoteData(capBytes300(v.question))} (answered ${quoteData(capBytes300(v.answer))} on ${String(v.answered_at).slice(0, 10)}). Never ask the owner a decision they have made: ${cite}. If something material changed since, ask again with --new-because "<what changed>", which the owner reads first (supervisor.md §6)`;
 }
 // Returns the --new-because to record: left off when nothing the owner answered is like this.
@@ -7666,13 +7734,51 @@ function turnAnswer(what, v) {
 // The owner answers (terminal, dashboard or, through the supervisor, chat). The supervisor may only
 // apply a default or withdraw.
 function cmdAnswer() {
-  const [id, ...restWords] = positional;
+  // the words: after the qid, or after "--" (the dashboard's form, so words that start with "--" stay words)
+  const [id, ...restWords] = [...positional, ...(rest ?? [])];
   const reviewResult = flagStr('review-result');
   const decline = !!flags.decline;
+  // --read: the supervisor reads words the owner answered alone as one choice, citing the words it
+  // rests on. It is a call in the question's class, which the owner can correct: its act, then the
+  // reading, which questionView checks again itself.
+  const readWords = () => {
+    supervisorOnly('answer --read');
+    const [label, cite, cls] = ['read', 'cite', 'class'].map(flagStr);
+    if (!id || !label || !cite || !cls || restWords.length) die('usage: answer <qid> --read "<label>" --cite "<the owner\'s words it rests on>" --class <the question\'s class>   (supervisor)');
+    for (const f of ['choice', 'in-words', 'defaulted', 'from-chat', 'from-turn', 'review-result', 'decline', 'files', 'autonomy', 'rule']) if (flags[f] !== undefined) die(`answer --read records the supervisor's reading of the owner's words: not with --${f}`);
+    const q = logGet(id);
+    const v = q?.type === 'question' ? questionView(q) : null;
+    if (!v) die(`no question ${id}`);
+    if (v.status !== 'answered') die(`${id} is not answered by the owner (${v.status}): a reading reads the owner's own words, never silence or a default`);
+    if (v.in_words === null) die(`${id}'s answer carries no pick of its own (an older line, or one from the terminal, chat or a thread): its leading label is the answer; nothing to read`);
+    if (!v.in_words) die(`${id} was answered with a pick ("${v.choice}"): that is the owner's choice; nothing to read`);
+    if (v.reading) die(`${id} is already read as "${v.reading.choice}" (${v.reading.act}): a misreading is corrected (correct ${v.reading.act}), never read over`);
+    const picked = v.labels.find((l) => l.trim().toLowerCase() === label.trim().toLowerCase());
+    if (!picked) die(`--read "${label}" is not one of ${id}'s choices (${v.labels.join(', ') || 'it has none'})`);
+    if (cls !== (v.class ?? v.kind)) die(`--class ${cls}: ${id} was asked in ${v.class ?? v.kind}; a reading is a call in the question's class`);
+    if (OWNER_ACTS.includes(cls)) die(`${cls} acts are the owner's: ask back in its thread`);
+    // the cite as the view will check it: everything else here already passes, so only the cite can fail
+    const said = cite.replace(/\s+/g, ' ').trim();
+    const reading = { choice: picked, cite: said, class: cls, of: v.answered_at };
+    if (!questionView({ ...q, updates: [...q.updates, { at: nowIso(), by: 'supervisor', reading: { ...reading, act: '' } }] }).reading) die(`--cite "${said.slice(0, 80)}" is not the owner's words on ${id} as whole words: quote 1 to 600 characters of them exactly`);
+    const act = appendLog({ type: 'act', class: cls, what: `read the owner's words on ${id} ("${said}") as "${picked}"`, refs: [id], reversible: true }, 'supervisor');
+    appendLog({ type: 'question', op: 'set', id, reading: { ...reading, act: act.id } }, 'supervisor');
+    out(`read ${id} as "${picked}" (${act.id}); the owner can correct it with correct ${act.id}`);
+  };
+  if (flags.read !== undefined) return readWords();
+  // --choice records the owner's pick beside their words, --in-words their words alone: the owner's
+  // own answer only, never a default, a review's result or words the supervisor recorded
+  const picks = flags.choice !== undefined;
+  const inWords = flags['in-words'] !== undefined;
+  const pickFlag = picks ? 'choice' : inWords ? 'in-words' : null;
+  if (flags.choice === true) die('answer <qid> ["<words>"] --choice "<label>": name the choice picked');
+  if (picks && inWords) die('answer takes --choice or --in-words, not both: a pick (with any words), or words alone');
+  if (pickFlag) for (const f of ['defaulted', 'from-chat', 'from-turn', 'review-result', 'decline']) if (flags[f] !== undefined) die(`answer --${pickFlag} records the owner's own pick or words: not with --${f}`);
+  if (inWords && !restWords.join(' ').trim()) die('answer <qid> "<words>" --in-words: the words are the answer; give them');
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
   // dropped files go with the owner's own words, never with a default, a review's result or reason, or words the supervisor recorded
   if (flags.files !== undefined && (flags.defaulted || flags['review-result'] !== undefined || decline || flags['from-chat'] || flags['from-turn'] !== undefined)) die("--files go with the owner's own answer");
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]] [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline && !picks)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]] [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> ["<words>"] --choice "<label>"   |   answer <qid> "<words>" --in-words   |   answer <qid> --defaulted   (supervisor)   |   answer <qid> --read "<label>" --cite "<words>" --class <class>   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -7702,6 +7808,14 @@ function cmdAnswer() {
   const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
   const files = filesFlag();
   const v = openQuestion(id, ['open', 'defaulted']);
+  if (pickFlag) {
+    const own = v.kind === 'review' ? 'a review' : v.kind === 'goal-approval' ? 'a goal approval' : (v.secrets ?? []).length ? 'a secrets question' : null;
+    if (own) die(`answer --${pickFlag}: ${id} is ${own}, answered its own way, not by a pick or words alone`);
+  }
+  const picked = picks ? v.labels.find((l) => l.trim().toLowerCase() === flagStr('choice').trim().toLowerCase()) : undefined;
+  if (picks && !picked) die(`answer --choice "${flagStr('choice')}" is not one of ${id}'s choices (${v.labels.join(', ') || 'it has none'})`);
+  // a goal-met answer marks the goal met or not, so it is a pick, never words to read
+  if (inWords && v.class === 'goal-met') die(`${id} is a goal-met question: pick Yes or No (answer ${id} ["<words>"] --choice Yes|No)`);
   if (fromTurn && v.kind === 'review') die(`${id} is a review: its answer is the owner's result, which a turn can't carry`);
   const turn = fromTurn ? turnAnswer('answer', v) : null;
   // a credential question has two answers: the token posted, or don't use this sensor
@@ -7719,7 +7833,9 @@ function cmdAnswer() {
     if (reviewResult && restWords.length) die('answer --review-result takes no text: the result is the answer');
     if (decline && !restWords.join(' ').trim()) die(`answer ${id} "<why>" --decline: say why it goes back`);
   }
-  const answer = restWords.join(' ').trim();
+  const typed = restWords.join(' ').trim();
+  // a pick is written as the set spells it, with the owner's words after it
+  const answer = picked ? (typed ? `${picked} — ${typed}` : picked) : typed;
   let autonomy;
   if (flags.autonomy !== undefined) {
     const def = ladder().classes[v.class];
@@ -7732,7 +7848,7 @@ function cmdAnswer() {
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
   // a goal-met question is answered Yes or No, so a near-yes can't pass for a no
   if (v.class === 'goal-met' && v.met && !GOAL_MET_CHOICES.some((c) => sameAnswer(answer, c.label))) die(`${id} is answered Yes or No (a note may follow " — ")`);
-  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn, said_at: turn.said_at, answer_seen: turn.answer_seen } : {}), files };
+  const setLine = { type: 'question', op: 'set', id, answer, ...(pickFlag ? { choice: picked ?? null } : {}), autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn, said_at: turn.said_at, answer_seen: turn.answer_seen } : {}), files };
   if (files && !lineFits(setLine, by)) die(FILES_TOO_LONG);
   // a goal-met yes reads a repo or prod check again first: a failed check writes nothing
   const metPlan = v.class === 'goal-met' ? goalMetPlan(v, answer) : null;
@@ -7744,7 +7860,9 @@ function cmdAnswer() {
   // whole project.
   if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id], channel: fromChat ? 'chat' : turn ? 'thread' : undefined }, by);
   // The answer this question said would settle others: the supervisor withdraws each (its own act).
-  const settled = sameAnswer(answer, v.settles_if) ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
+  // with a pick recorded, the pick decides it: words alone settle nothing
+  const settles = pickFlag ? !!picked && sameAnswer(picked, v.settles_if) : sameAnswer(answer, v.settles_if);
+  const settled = settles ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
   const settledNote = settled.length ? `it settles ${plural(settled.length, 'open question')} (${settled.join(', ')}): withdraw each with withdraw <qid> --reason "settled by the owner's answer to ${id}"` : '';
   if (!fromChat && !turn) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${metNote ? `; ${metNote}` : ''}${settledNote ? `; ${settledNote}` : ''}${droppedWords(files)}`, droppedPaths(files));
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : turn ? ` (from ${turn.turn}; listed on the dashboard for the owner to check)` : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
@@ -7813,6 +7931,10 @@ const TURN_UNDELIVERED_MS = 5 * 60000;
 // Those turns, machine-local as delivery is: { "<u-id>": { thread, at } }. Named at load, so every
 // process's loose-file check knows it.
 const UNDELIVERED_FILE = runPath('undelivered-turns.json');
+// Which session holds an owner's turn, and how far it got, machine-local as delivery is:
+// { "<t-id>": { by, stage, turn, at, beat, pid } } (markThreadWorking, threadWorking). Not the log:
+// the stage lasts seconds to minutes, and a line per pickup and heartbeat would be noise there.
+const THREAD_WORKING_FILE = runPath('thread-working.json');
 const THREAD_ID = /^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 const TURN_ID = /^u-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 // When a proposal was made, as the log stamps it: what the owner's accept names to bind to it.
@@ -8073,6 +8195,74 @@ function threadCounts() {
   for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready ? 'ready' : v.waiting === 'owner' ? 'you' : 'waiting']++;
   return r;
 }
+// A thread's stage set ({ by, stage, turn }) or, given null, dropped, in THREAD_WORKING_FILE under
+// its lock; entries not written for a day go on every write. True when the thread had an entry.
+// A pickup (thread show) never waits and never steps a stage back: a held lock skips it (withLock's
+// time-out would die past the show's catch), and so does an entry already naming that turn.
+function markThreadWorking(t, w, { pickup = false } = {}) {
+  // The agent's pid, so a session that died mid-turn stops showing: walk up to the tmux pane's root
+  // process (the one whose parent is tmux); a shell there ran the agent, which is its child on the
+  // chain, else the root is the agent. Chosen by where it sits, not by a list of wrappers to skip,
+  // so a sandbox or a timeout between the agent and this command is never taken for it.
+  const agentPid = () => {
+    try {
+      const chain = [];
+      const name = (c) => path.basename(c).replace(/^-/, '');
+      for (let pid = process.ppid, i = 0; i < 12 && pid > 0; i++) {
+        const r = spawnSync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 });
+        const m = r.status === 0 ? /^\s*(\d+)\s+(.+?)\s*$/.exec(r.stdout ?? '') : null;
+        if (!m) return null;
+        if (chain.length && name(m[2]).startsWith('tmux')) {
+          const root = chain.length - 1;
+          if (!/^(sh|bash|zsh|dash|fish)$/.test(name(chain[root].comm))) return chain[root].pid;
+          return root > 0 ? chain[root - 1].pid : null;
+        }
+        chain.push({ pid, comm: m[2] });
+        pid = Number(m[1]);
+      }
+    } catch {}
+    return null;
+  };
+  // found before the lock: up to 12 `ps` calls must not run while it is held (a slow one would outlast its stale time)
+  const pid = w ? agentPid() : null;
+  const change = () => {
+    let m;
+    try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
+    if (!isObj(m)) m = {};
+    const was = isObj(m[t]) ? m[t] : null;
+    if (pickup && was?.turn === w.turn) return !!was;
+    if (!w && !was) return false;
+    const now = Date.now();
+    for (const [k, v] of Object.entries(m)) if (!(now - Date.parse(v?.beat) <= 86400000)) delete m[k];
+    if (w) m[t] = { by: w.by, stage: w.stage, turn: w.turn, at: was?.by === w.by && was?.turn === w.turn && typeof was.at === 'string' ? was.at : new Date(now).toISOString(), beat: new Date(now).toISOString(), pid };
+    else delete m[t];
+    writeJsonAtomic(THREAD_WORKING_FILE, m);
+    return !!was;
+  };
+  // nothing to clear with no file: no lock taken, no file made
+  if (!w && !fs.existsSync(THREAD_WORKING_FILE)) return false;
+  fs.mkdirSync(path.dirname(THREAD_WORKING_FILE), { recursive: true });
+  return pickup ? tryLock(THREAD_WORKING_FILE, change) ?? false : withLock(THREAD_WORKING_FILE, change);
+}
+// The stages to show: { "<t-id>": { by, stage, turn, at, beat } }, each from a session still alive
+// (or one whose pid the walk couldn't find) that wrote it within 10 minutes.
+function threadWorking(now = Date.now()) {
+  let m;
+  try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
+  if (!isObj(m)) return {};
+  const THREAD_WORKING_STALE_MS = 10 * 60000;
+  const alive = (pid) => {
+    if (pid === null) return true;
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+  };
+  const r = {};
+  for (const [k, v] of Object.entries(m)) {
+    if (!isObj(v) || !alive(v.pid) || !(now - Date.parse(v.beat) <= THREAD_WORKING_STALE_MS)) continue;
+    r[k] = { by: v.by, stage: v.stage, turn: v.turn, at: v.at, beat: v.beat };
+  }
+  return r;
+}
 // The first line new, say and ask print is the id (the dashboard reads it); for an owner turn a
 // second says whether it was typed into the supervisor's pane.
 function cmdThread() {
@@ -8090,6 +8280,19 @@ function cmdThread() {
     });
     return deliveredWords(typed);
   };
+  // Who writes a reply from this session: the supervisor (a responder's replies are written as the
+  // supervisor's until kit-102 gives it its own), or null where supervisorOnly would refuse one. The
+  // one place both reply and working's own-turn rule ask, so the two stay in step.
+  const replyWriter = () => (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
+  // Who holds a turn, as the stage names it: null for the owner's terminal and the dashboard, which
+  // never hold one; the responder says so itself until kit-102 makes logWriter say it.
+  const sessionBy = () => {
+    if (!process.env.DEVTEAM_ROLE || process.env.DEVTEAM_CHANNEL === 'dashboard') return null;
+    return process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : logWriter();
+  };
+  // the holder spoke (or the owner closed the thread): its stage goes
+  // a failed clear never fails a command already written (a retry would post twice): the card ignores a record older than the reply anyway
+  const spoke = (t) => { try { markThreadWorking(t.id, null); } catch {} };
   if (sub === 'new') {
     const { by } = threadOwner();
     const words = turnText(wordsFrom(1));
@@ -8118,7 +8321,7 @@ function cmdThread() {
   // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
   // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
   if (sub === 'say' || sub === 'reply') {
-    const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), 'supervisor');
+    const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), replyWriter());
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
@@ -8136,6 +8339,7 @@ function cmdThread() {
     const u = appendLog(line, by);
     out(u.id);
     if (by === 'owner') out(deliver(t, u, words, files));
+    else spoke(t);
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -8177,7 +8381,9 @@ function cmdThread() {
     if (encodedBytes(capBytes(`${lead}${flagStr('question') ?? ''}`, TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
     const q = askLine({ thread: t.id, about });
     appendLog({ type: 'turn', thread: t.id, text: capBytes(`${lead}${q.question}`, TURN_MAX), question: q.id }, 'supervisor');
-    return out(q.id);
+    out(q.id);
+    spoke(t);
+    return;
   }
   // The supervisor's proposal, for a one-click accept; the owner's next turn, resolve or reopen clears
   // it. With no DEVTEAM_ROLE this checkout's commands are the supervisor's (logWriter), as ask's are.
@@ -8189,7 +8395,9 @@ function cmdThread() {
     if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
     // a new proposal replaces a standing one: the newest ready line is the one the card shows
     appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() } }, 'supervisor');
-    return out(`proposed resolving ${t.id}: ${outcome}`);
+    out(`proposed resolving ${t.id}: ${outcome}`);
+    spoke(t);
+    return;
   }
   // Resolving is the owner's: their status and outcome (always written, null for none, so a reopened
   // thread resolved again keeps no old outcome), and an observation the loop reads with the rest.
@@ -8211,6 +8419,7 @@ function cmdThread() {
     out(`resolved ${t.id}${outcome ? `: ${outcome}` : ''}`);
     const open = v.questions.filter((q) => q.status === 'open');
     if (open.length) out(`${plural(open.length, 'question')} asked in it ${open.length === 1 ? 'is' : 'are'} still open in the Inbox: ${open.map((q) => q.id).join(', ')}`);
+    spoke(t);
     return nudgeSupervisor(`[devteam thread ${t.id} resolved by owner] devteam.mjs thread show ${t.id}`);
   }
   if (sub === 'reopen') {
@@ -8230,10 +8439,39 @@ function cmdThread() {
     if (words) return out(deliver(t, u, words));
     return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
+  // The session holding the owner's turn says it is on it; the card says so until it replies.
+  if (sub === 'working') {
+    const by = sessionBy();
+    if (!by) die('thread working: run by the agent session that holds the turn (DEVTEAM_ROLE set, not the dashboard); the owner\'s card shows it');
+    if (flags.done) {
+      const t = logGet(id ?? '');
+      if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'} (devteam.mjs thread list)`);
+      return out(markThreadWorking(t.id, null) ? `cleared: ${t.id}` : `cleared: ${t.id} (nothing was set)`);
+    }
+    const t = threadOpen(id, by);
+    // the log's own writers, not the view's (which names every non-owner turn supervisor)
+    const ts = [...readLog().objects.values()].filter((o) => o.type === 'turn' && o.thread === t.id).sort(byTime);
+    const turn = ts.filter((u) => u.created_by === 'owner').pop();
+    if (!turn) die(`${t.id} has no owner turn yet: nothing to respond to`);
+    // the owner's newest turn, or the caller's own reply after it (reply first, keep working); the
+    // supervisor takes any open thread the owner wrote in (a turn handed on to it)
+    const last = ts[ts.length - 1];
+    const mine = replyWriter();
+    if (last.created_by !== 'owner' && !(by === 'supervisor' && mine === 'supervisor') && last.created_by !== mine) die(`nothing to respond to: the last turn is ${last.created_by}'s`);
+    markThreadWorking(t.id, { by, stage: 'responding', turn: turn.id });
+    return out(`responding: ${t.id} (the owner's card says so until you reply; run this again every few minutes of longer work)`);
+  }
   if (sub === 'show') {
     const t = logGet(id ?? '');
     if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'}`);
     const v = threadViewOf(t.id);
+    // A session that may reply, reading an owner's newest turn, has picked it up; the show never
+    // fails for it (the pickup takes no lock it would wait on).
+    try {
+      const by = sessionBy();
+      const last = v.turns[v.turns.length - 1];
+      if (by && replyWriter() && ['supervisor', 'responder'].includes(process.env.DEVTEAM_ROLE) && v.status === 'open' && last?.by === 'owner') markThreadWorking(t.id, { by, stage: 'picked-up', turn: last.id }, { pickup: true });
+    } catch {}
     if (flags.json) return json(v);
     out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}`);
     out(threadDataFrame(v));
@@ -8261,7 +8499,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -10953,7 +11191,7 @@ function cmdDecide() {
     if (approved?.startsWith('q-')) {
       const q = questionView(logGet(approved) ?? die(`no question ${approved}`));
       for (const ref of [rs[0], ...rel]) if (!(q.blocks ?? []).includes(ref)) die(`${approved} was asked about ${(q.blocks ?? []).join(', ') || 'nothing in particular'}, not ${ref}`);
-      if (q.status === 'answered' && (!q.matched || !answerIsRun(logGet(approved), q.answer))) die(`${approved}'s answer ("${q.answer}") isn't a yes to running it (recommended: "${q.recommendation}"): a remediation runs only on a yes`);
+      if (q.status === 'answered' && (!q.matched || !answerIsRun(logGet(approved), q.label ?? q.answer))) die(`${approved}'s answer ("${q.answer}") isn't a yes to running it (recommended: "${q.recommendation}"): a remediation runs only on a yes`);
       if (q.status === 'defaulted' && !saysRun(q.default)) die(`${approved} defaulted to "${q.default}": a remediation runs only on a yes`);
       const denied = remediationDenied(q, rs[0], rel[0] ?? null);
       if (denied) die(remediationDeniedWords(r.name, rel[0] ?? null, denied));
@@ -11137,6 +11375,15 @@ function cmdCorrect() {
   } else if (heard) corrected = { reason: flagStr('said').trim(), said: flagStr('said').trim() };
   else corrected = { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact };
   appendLog({ type: act.type, op: 'set', id: actId, ...(heard ? { channel: flags['from-turn'] !== undefined ? 'thread' : 'chat' } : {}), corrected }, by);
+  // the act of a supervisor's reading of the owner's words: the correction voids the reading (the
+  // owner's, typed in their own terminal or Inbox) or withdraws it (the supervisor's: at a retro, or
+  // the owner's words it recorded from chat or a turn, which its own process writes), so it no
+  // longer counts from now on
+  const read = act.type === 'act' ? logGet(act.refs?.[0]) : null;
+  if (read?.type === 'question' && read.updates.some((u) => u.reading?.act === actId)) {
+    const own = by === 'owner' && !heard;
+    appendLog({ type: 'question', op: 'set', id: read.id, [own ? 'reading_void' : 'reading_withdrawn']: actId }, own ? 'owner' : 'supervisor');
+  }
   if (impact !== undefined) out(`${logGet(act.refs?.[0])?.title ?? act.refs?.[0]}: impact ${impact} (${IMPACT_WORDS[impact]}), set by the owner; it stands until the owner changes it`);
   if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
   // the supervisor wrote it from the owner's words: nobody to tell
@@ -11951,8 +12198,9 @@ function learningFigures(week, merges = mergeTimes()) {
     const ladderCalls = weekCalls.filter((c) => L.classes[c.class]).map((c) => ({ id: c.id, class: c.class, authority: authorityOfCall(c) }));
     const qs = questions();
     const asked = qs.filter((q) => inW(q.asked_at) && DECISION_KINDS.includes(q.kind)).map((q) => q.id);
-    // trustEvidence's filter: answered by the owner, with a recommendation (a review's proposals)
-    const answered = qs.filter((q) => q.status === 'answered' && inW(q.answered_at) && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).map((q) => ({ id: q.id, matched: !!q.matched }));
+    // trustEvidence's filter: answered by the owner, with a recommendation (a review's proposals),
+    // not in words alone; matched is the owner's own agreement
+    const answered = qs.filter((q) => q.status === 'answered' && !q.in_words && inW(q.answered_at) && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).map((q) => ({ id: q.id, matched: !!q.agreed_by_owner }));
     const corrections = all.filter((c) => inW(correctionOf(c)?.at)).map((c) => c.id);
     const merged = merges.filter(([, at]) => at >= from && at < from + WEEK).map(([id]) => id);
     const figures = {
@@ -12483,7 +12731,7 @@ function readinessGoal(refs) {
 }
 function registryAttestGap(goalId) {
   const qs = questions().filter((q) => q.class === 'registry-attest' && q.goal === goalId);
-  if (qs.some((q) => q.status === 'answered' && q.matched && q.answer.trim().toLowerCase().split(' — ')[0] === 'yes')) return null;
+  if (qs.some((q) => q.status === 'answered' && q.matched && String(q.label ?? '').trim().toLowerCase() === 'yes')) return null;
   const last = qs.sort((a, b) => (a.asked_at < b.asked_at ? -1 : 1)).pop();
   if (!last) return 'none asked yet';
   if (last.status !== 'answered') return `${last.id} is not answered by the owner (${last.status})`;
@@ -14233,7 +14481,10 @@ function collectMetrics(since) {
       const top = rated.filter((q) => q[k] === 3).length;
       if (rated.length >= 5 && top * 2 > rated.length) add('medium', 'rating-inflated', k, `${top} of ${rated.length} open questions are ${k} 3`, `a rating that is always 3 orders nothing: read the ${k} test again (supervisor.md §6) and rate the ones that aren't 3 (rate <qid> --${k} n)`);
     }
-    for (const q of all.filter((x) => x.status === 'answered' && x.settles.length && sameAnswer(x.answer, x.settles_if))) {
+    // the settling answer as answer's own note reads it (kit-313): the pick, never words alone; an
+    // older line without the key by its text
+    const settled = (x) => (x.in_words === null ? sameAnswer(x.answer, x.settles_if) : !!x.choice && sameAnswer(x.choice, x.settles_if));
+    for (const q of all.filter((x) => x.status === 'answered' && x.settles.length && settled(x))) {
       const left = q.settles.filter((s) => open.some((o) => o.id === s));
       if (left.length) add('medium', 'settled-not-withdrawn', q.id, `the owner answered "${String(q.answer).slice(0, 60)}", which settles ${left.join(', ')}; ${left.length > 1 ? 'they are' : 'it is'} still in the Inbox`, `withdraw ${left.length > 1 ? 'each' : 'it'}: withdraw <qid> --reason "settled by the owner's answer to ${q.id}"`);
     }
@@ -19178,7 +19429,7 @@ async function cmdDashboard() {
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   // no string an action puts in argv holds a NUL: no process can be given one
   const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max && !x.includes('\0');
-  const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
+  const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? [`--scope=${b.scope.trim()}`] : [])] : []);
   const turnOk = (x) => typeof x === 'string' && !!x.trim() && !x.includes('\0') && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
   const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
   // The files dropped with an answer or a turn, passed on whole: only the list's shape is checked
@@ -19187,15 +19438,24 @@ async function cmdDashboard() {
   const filesArgs = (b) => (b.files === undefined || (Array.isArray(b.files) && !b.files.length) ? [] : Array.isArray(b.files) && b.files.length <= FILES_MAX ? [`--files=${JSON.stringify(b.files)}`] : null);
   const ACTIONS = {
     answer: (b) => {
-      if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
+      // choice, from a card with choices (kit-313): the label picked, the words in answer optional, or
+      // null for the words alone. Without the key (an older page, a goal or owner-action card) the
+      // answer is the text as typed.
+      const picked = Object.hasOwn(b, 'choice');
+      if (!ID.test(b.id ?? '')) return null;
+      if (picked && (b.decline !== undefined || (b.choice !== null && !text(b.choice, 300)))) return null;
+      const words = text(b.answer) ? b.answer.trim() : '';
+      if (!words && !(typeof b.choice === 'string' && (b.answer === undefined || (typeof b.answer === 'string' && !b.answer.trim())))) return null;
       if (b.decline !== undefined && b.decline !== true) return null;
       const files = filesArgs(b);
       if (!files) return null;
-      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
+      // the owner's words, and a label, go as values no flag can be read from: the words after "--",
+      // the label and the rule inside their flag (--choice=<label>), so "--rule=…" typed is words
+      const args = ['answer', b.id, ...(!picked ? [] : b.choice === null ? ['--in-words'] : [`--choice=${b.choice.trim()}`]), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
       // "Send it back" on a review: the owner's reason, no result
-      if (b.decline === true) return [...args, '--decline'];
-      if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
-      return args;
+      if (b.decline === true) args.push('--decline');
+      else if (text(b.rule, 600)) args.push(`--rule=${b.rule.trim()}`);
+      return [...args, ...(words ? ['--', words] : [])];
     },
     correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) && (b.impact === undefined || [1, 2, 3, 4].includes(b.impact)) ? ['correct', b.id, '--reason', b.reason.trim(), ...(b.impact !== undefined ? ['--impact', String(b.impact)] : [])] : null),
     'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
@@ -19828,16 +20088,19 @@ async function cmdDashboard() {
       // (two small run files, read here: no child, no tmux)
       const undelivered = Object.keys(undeliveredTurns(Date.now(), { entries: true }));
       const checked = supervisorCheckedAt();
+      // which session holds each owner's turn and how far it got (kit-314): one small run file and a
+      // kill(0) per entry, so a session that died mid-turn drops out here on the next read
+      const working = threadWorking(Date.now());
       // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
       // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
       // this process's work is saved.
       // the token for an answer goes only to this page's own read, said so by the browser
       if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
-      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}`).slice(0, 20)}"`;
+      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}`).slice(0, 20)}"`;
       const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
       if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
       res.writeHead(200, { 'content-type': 'application/json', ...head });
-      return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"threads":${r.body}}`);
+      return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
     }
     // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
     if (req.method === 'GET' && u.pathname === '/api/fleet') {
@@ -20249,7 +20512,7 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -23702,7 +23965,7 @@ async function cmdRemediate() {
     if (!q.deadline || !st || Date.parse(st.at) < Date.parse(q.deadline)) die(`${q.id}'s default was applied before its deadline (${q.deadline ?? 'none'}): it approves nothing; ask again`);
   }
   if (!['answered', 'defaulted'].includes(q.status)) die(`${q.id} is ${q.status}: ask, and wait for the answer or the deadline`);
-  if (q.status === 'answered' && !answerIsRun(logGet(q.id), q.answer)) die(`${q.id}'s answer ("${String(q.answer ?? '').slice(0, 80)}") isn't a yes to running it: a remediation runs only on a yes`);
+  if (q.status === 'answered' && !answerIsRun(logGet(q.id), q.label ?? q.answer)) die(`${q.id}'s answer ("${String(q.answer ?? '').slice(0, 80)}") isn't a yes to running it: a remediation runs only on a yes`);
   if (q.status === 'defaulted' && !saysRun(q.default)) die(`${q.id} defaulted to "${q.default}": a remediation runs only on a yes`);
   const denied = remediationDenied(q, remediationRef(action), qrel);
   if (denied) die(remediationDeniedWords(action, qrel, denied));
@@ -25432,7 +25695,7 @@ async function cmdBrowserGuard() {
 // devteam.mjs browser (browser@1; design supervisors-can-use-a-browser-with-the-o, §2 and §3): the
 // supervisor's own Chrome, driven from its shell. One private profile per project (the owner's
 // answer to q-20261114-203933946-supervisor), at ~/.devteam/browser/<key>/, used by nobody else.
-const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>]';
+const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | type <ref> --stdin | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>]';
 // The instance key, the contract's instance pattern: <project slug>-<12 hex>. A path is built from a
 // key only once it matches, so no key can climb out of browserHome().
 const BROWSER_KEY = /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$/;
@@ -25504,9 +25767,15 @@ function browserIdleMs() {
   const v = loadSettings().browser_idle_minutes;
   return (Number.isInteger(v) && v >= 1 && v <= 1440 ? v : SETTINGS_DEFAULTS.browser_idle_minutes) * 60000;
 }
-// The pids of local processes whose command line carries this profile as --user-data-dir, or null
-// when they can't be listed (so nothing is removed on a guess). /proc, else ps (macOS).
+// The pids of this user's local processes whose command line carries this profile as --user-data-dir,
+// or null when they can't be listed (so nothing is removed on a guess; DEVTEAM_TEST_BROWSER_PROCS_UNLISTED
+// stands in for that in tests). /proc, else ps (macOS). Only
+// this uid's count (kit-316 S4): another user can't read a 0700 profile, so it can't hold one. The uid
+// is /proc's real uid (status's Uid: line), not the /proc/<pid> owner, which reads as root for a
+// non-dumpable process; a status that can't be read isn't counted. DEVTEAM_TEST_BROWSER_UID in tests.
 function browserProcsOn(profile) {
+  if (browserTestEnv('DEVTEAM_TEST_BROWSER_PROCS_UNLISTED')) return null;
+  const me = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_UID') ?? process.getuid());
   const want = new Set([profile, realPath(profile)].flatMap((p) => [p, `${p}${path.sep}`]));
   const carries = (args) => args.some((a, i) => (a.startsWith('--user-data-dir=') && want.has(a.slice('--user-data-dir='.length))) || (a === '--user-data-dir' && want.has(args[i + 1])));
   if (fs.existsSync('/proc/self/cmdline')) {
@@ -25514,13 +25783,15 @@ function browserProcsOn(profile) {
     for (const d of fs.readdirSync('/proc')) {
       if (!/^\d+$/.test(d) || Number(d) === process.pid) continue;
       let c; try { c = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8'); } catch { continue; }
-      if (carries(c.split('\0'))) pids.push(Number(d));
+      if (!carries(c.split('\0'))) continue;
+      let u; try { u = /^Uid:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${d}/status`, 'utf8'))?.[1]; } catch { continue; }
+      if (u !== undefined && Number(u) === me) pids.push(Number(d));
     }
     return pids;
   }
-  const r = spawnSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8' });
+  const r = spawnSync('ps', ['-axww', '-o', 'pid=,uid=,command='], { encoding: 'utf8' });
   if (r.status !== 0) return null;
-  return r.stdout.split('\n').map((l) => /^\s*(\d+)\s+(.*)$/.exec(l)).filter((m) => m && Number(m[1]) !== process.pid && [...want].some((w) => ` ${m[2]} `.includes(` --user-data-dir=${w} `))).map((m) => Number(m[1]));
+  return r.stdout.split('\n').map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter((m) => m && Number(m[1]) !== process.pid && Number(m[2]) === me && [...want].some((w) => ` ${m[3]} `.includes(` --user-data-dir=${w} `))).map((m) => Number(m[1]));
 }
 function browserProfiles() {
   const mine = browserKey();
@@ -25558,11 +25829,13 @@ const browserStateFile = () => path.join(BROWSER_DIR(), 'state.json');
 const browserDirMade = () => { fs.mkdirSync(BROWSER_DIR(), { recursive: true, mode: 0o700 }); fs.chmodSync(BROWSER_DIR(), 0o700); };
 // state.json as written, whatever it says (a new daemon reads a dead one's chrome_pid from it), or null.
 function browserRawState() { try { const s = JSON.parse(fs.readFileSync(browserStateFile(), 'utf8')); return isObj(s) ? s : null; } catch { return null; } }
-// The state of a daemon that is alive (its file holds together and its pid lives), or null.
+// The state of a daemon that is alive (its file holds together and its pid lives), or null. cdp_port
+// is written only by a daemon from before kit-316 (DevTools now goes over a pipe); one present must be
+// a port, so this version still reaches such a daemon.
 function browserState() {
   const s = browserRawState();
   const port = (v) => Number.isInteger(v) && v >= 1 && v <= 65535;
-  if (!s || s.browser !== 1 || !['control_port', 'cdp_port', 'guard_port', 'view_port'].every((k) => port(s[k])) || !/^[0-9a-f]{64}$/.test(s.control_secret ?? '') || typeof s.preview !== 'string' || !Number.isInteger(s.chrome_pid)) return null;
+  if (!s || s.browser !== 1 || !['control_port', 'guard_port', 'view_port'].every((k) => port(s[k])) || ('cdp_port' in s && !port(s.cdp_port)) || !/^[0-9a-f]{64}$/.test(s.control_secret ?? '') || typeof s.preview !== 'string' || !Number.isInteger(s.chrome_pid)) return null;
   return browserAlive(s.daemon_pid) ? s : null;
 }
 function browserWriteState(s) {
@@ -25595,27 +25868,39 @@ async function browserLive() {
   try { return (await browserCall('ping', {}, { state: s, ms: 5000 })).code === 0 ? s : null; } catch { return null; }
 }
 // The region's own lock, held across awaits (withLock is synchronous): mkdir <file>.lock holding its
-// owner's token, stale after 120 s, waited on up to 60 s. A lock is only ever removed by first renaming
+// owner's token, stale after 120 s, or at once when the token's pid is dead (kit-316 F1), waited on up
+// to 60 s (DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS in tests). A lock is only ever removed by first renaming
 // it to a name of the remover's own, and only when it still holds the token seen: so of two waiters
 // on one stale lock only one takes it, and release removes only its own. A die() inside lets it go.
 async function browserStartLock(file, fn) {
   const lock = `${file}.lock`, owner = path.join(lock, 'owner'), start = Date.now();
   const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS')) || 60000;
   const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
-  // Remove the lock if it still holds `seen`; a lock taken from under us is put back.
+  // Remove the lock if it still holds `seen`; a lock taken from under us is put back. True only when
+  // the lock was moved off its path: a waiter whose take fails (the rename refused, or the test hook
+  // DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL) goes on to the deadline and the sleep, never spins. An aside
+  // that can't be removed is left behind: the lock's path is free either way.
   const drop = (seen) => {
+    if (seen !== token && browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL')) return false;
     const aside = `${lock}.${token}.${crypto.randomBytes(4).toString('hex')}`;
-    try { fs.renameSync(lock, aside); } catch { return; }
-    if (read(path.join(aside, 'owner')) === seen) fs.rmSync(aside, { recursive: true, force: true });
-    else { try { fs.renameSync(aside, lock); } catch { fs.rmSync(aside, { recursive: true, force: true }); } }
+    try { fs.renameSync(lock, aside); } catch { return false; }
+    if (read(path.join(aside, 'owner')) === seen) { try { fs.rmSync(aside, { recursive: true, force: true }); } catch {} return true; }
+    try { fs.renameSync(aside, lock); } catch { fs.rmSync(aside, { recursive: true, force: true }); }
+    return false;
   };
   for (;;) {
     try { fs.mkdirSync(lock); fs.writeFileSync(owner, token); break; } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const st = fs.statSync(owner, { throwIfNoEntry: false }) ?? fs.statSync(lock, { throwIfNoEntry: false });
       const seen = read(owner);
-      if (st && Math.abs(Date.now() - st.mtimeMs) > 120000) { drop(seen); continue; }
-      if (Date.now() - start > 60000) die(`browser: timed out waiting for ${lock}`);
+      if (st && Math.abs(Date.now() - st.mtimeMs) > 120000 && drop(seen)) continue;
+      // a well-formed token naming a dead pid (a positive integer) that isn't ours: stale now. No owner
+      // file yet, a token that isn't one (pid 0 too), or a live owner (EPERM counts as alive) keeps the
+      // 120 s rule.
+      const op = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(seen ?? '')?.[1];
+      if (op && Number(op) !== process.pid && !browserAlive(Number(op)) && drop(seen)) continue;
+      if (Date.now() - start > wait) die(`browser: timed out waiting for ${lock}`);
       await browserSleep(100);
     }
   }
@@ -25683,6 +25968,13 @@ function browserSingleton(profile) {
   try { t = fs.readlinkSync(path.join(profile, 'SingletonLock')); } catch { return null; }
   const i = t.lastIndexOf('-'), pid = Number(t.slice(i + 1));
   return i > 0 && Number.isInteger(pid) && pid > 0 ? { host: t.slice(0, i), pid } : null;
+}
+// A SingletonLock's host as printed (kit-316 F4): each character outside printable ASCII (U+0021 to
+// U+007E) becomes ?, so no newline starts a forged line, and past 100 characters it is cut, with …
+// added. Comparisons use the raw host.
+function browserHostWords(host) {
+  const w = String(host).replace(/[^\x21-\x7e]/gu, '?');
+  return w.length > 100 ? `${w.slice(0, 100)}…` : w;
 }
 // The proof: one argument of pid's command line is exactly --user-data-dir=<profile>. /proc's cmdline
 // split at NUL, else ps (macOS), matched as a word.
@@ -25756,9 +26048,9 @@ async function browserPrepareProfile(profile, notes) {
   const { killed } = await browserKillChrome(profile, browserCandidates(profile));
   const lock = browserSingleton(profile), procs = browserProcsOn(profile);
   if (lock && lock.host !== browserHostname()) {
-    if (procs === null) throw new Error(`browser: the profile is locked by host ${lock.host}, and this machine's processes couldn't be listed to see whether one here has it open`);
-    if (procs.length) throw new Error(`browser: the profile is locked by host ${lock.host} and a process here (pid ${procs[0]}) has it open`);
-    notes.push(`Cleared a stale SingletonLock left by host ${lock.host}.`);
+    if (procs === null) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)}, and this machine's processes couldn't be listed to see whether one here has it open`);
+    if (procs.length) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)} and a process here (pid ${procs[0]}) has it open`);
+    notes.push(`Cleared a stale SingletonLock left by host ${browserHostWords(lock.host)}.`);
   }
   if (procs?.length === 0) for (const n of fs.readdirSync(profile).filter((x) => x.startsWith('Singleton'))) fs.rmSync(path.join(profile, n), { force: true });
   browserDeleteSession(profile);
@@ -25771,16 +26063,20 @@ function browserLeads(pid) {
   try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) === pid; } catch {}
   return Number(spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).stdout?.trim()) === pid;
 }
-// The CDP client: one browser-level WebSocket, ids from 1, each call rejected on an error or after
-// 30 s, every pending one rejected when the socket closes. on(method, fn) gets (params, sessionId).
-async function cdpBrowser(wsUrl) {
-  const ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => { ws.addEventListener('open', resolve, { once: true }); ws.addEventListener('error', () => reject(new Error("couldn't connect to Chrome's DevTools")), { once: true }); });
-  let id = 0, closed = false;
+// The CDP client, over Chrome's DevTools pipe (--remote-debugging-pipe, kit-316 S2): the daemon
+// writes fd 3 and reads fd 4, each message JSON ended by a NUL byte. There is no port, so nothing
+// else can connect. Reads are kept as chunks and joined only at a NUL; a message that isn't JSON is
+// dropped. Ids from 1, each call rejected on an error or after 30 s, every pending one rejected when
+// the pipe closes: fd 4 ending or erroring, a write to fd 3 failing (EPIPE), or Chrome exiting.
+// on(method, fn) gets (params, sessionId). It resolves once Browser.getVersion answers.
+async function cdpBrowser(chrome) {
+  const writer = chrome.stdio[3], reader = chrome.stdio[4];
+  let id = 0, closed = false, parts = [];
   const pending = new Map(), handlers = new Map(), closers = [];
-  ws.addEventListener('message', (ev) => {
+  const dispatch = (buf) => {
     let m;
-    try { m = JSON.parse(String(ev.data)); } catch { return; }
+    try { m = JSON.parse(buf.toString('utf8')); } catch { return; }
+    if (!isObj(m)) return;
     if (m.id !== undefined) {
       const p = pending.get(m.id);
       if (!p) return;
@@ -25788,26 +26084,44 @@ async function cdpBrowser(wsUrl) {
       clearTimeout(p.timer);
       if (m.error) p.reject(new Error(`${p.method}: ${m.error.message ?? 'failed'}`)); else p.resolve(m.result ?? {});
     } else if (m.method) for (const fn of handlers.get(m.method) ?? []) { try { fn(m.params ?? {}, m.sessionId); } catch {} }
-  });
-  ws.addEventListener('close', () => {
+  };
+  const close = () => {
+    if (closed) return;
     closed = true;
     for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error(`${p.method}: Chrome's DevTools closed`)); }
     pending.clear();
+    parts = [];
     for (const fn of closers) { try { fn(); } catch {} }
+  };
+  reader.on('data', (c) => {
+    let at = 0;
+    for (let nul = c.indexOf(0); nul !== -1; nul = c.indexOf(0, at)) {
+      parts.push(c.subarray(at, nul));
+      const msg = parts.length === 1 ? parts[0] : Buffer.concat(parts);
+      parts = [];
+      at = nul + 1;
+      dispatch(msg);
+    }
+    if (at < c.length) parts.push(c.subarray(at));
   });
-  return {
+  for (const ev of ['end', 'close', 'error']) reader.on(ev, close);
+  writer.on('error', close);
+  chrome.once('exit', close);
+  const cdp = {
     send(method, params = {}, sessionId) {
       if (closed) return Promise.reject(new Error(`${method}: Chrome's DevTools closed`));
       const i = ++id;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => { pending.delete(i); reject(new Error(`${method}: Chrome didn't answer in 30 s`)); }, 30000);
         pending.set(i, { resolve, reject, timer, method });
-        ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
+        try { writer.write(`${JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) })}\0`); } catch { close(); }
       });
     },
     on(method, fn) { if (method === 'close') closers.push(fn); else handlers.set(method, [...(handlers.get(method) ?? []), fn]); },
-    close() { try { ws.close(); } catch {} },
+    close() { try { writer.end(); } catch {} },
   };
+  await cdp.send('Browser.getVersion');
+  return cdp;
 }
 // The tabs: page targets in the order they appeared, each attached flat with Page enabled. A page
 // opened by another (a popup) becomes active; a sixth is closed at once, with a note.
@@ -26098,38 +26412,44 @@ function browserUserAgent(bin) {
   const v = /(\d+\.\d+\.\d+\.\d+)/.exec(spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] }).stdout ?? '')?.[1];
   return v ? `Mozilla/5.0 (${process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64'}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${v} Safari/537.36` : null;
 }
-// Chrome, detached in its own group, its DevTools port read only from its own stderr within 30 s
-// (DevToolsActivePort is never read). No usable sandbox: once more with --no-sandbox, and a note.
-// After the port line its stderr is drained and dropped: Chrome's log lines can carry page URLs.
+// Chrome, detached in its own group, its DevTools on a pipe (fds 3 and 4, kit-316 S2: no port, and no
+// DevToolsActivePort), up once it answers Browser.getVersion there within 30 s. No usable sandbox: once
+// more with --no-sandbox, and a note. Its stderr is kept (the last 64 KiB) only until then, for the
+// sandbox check; after, it is drained and dropped: Chrome's log lines can carry page URLs.
 async function browserLaunchChrome(ctx, { headed }) {
   const ua = browserUserAgent(ctx.bin);
   const args = [
-    ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-pipe',
     `--proxy-server=127.0.0.1:${ctx.guard.port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync',
     ...(process.platform === 'linux' ? ['--password-store=basic'] : []), ...(ua ? [`--user-agent=${ua}`] : []),
   ];
   for (let tries = 0; ; tries++) {
-    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
     ctx.chrome = chrome;
     const r = await new Promise((resolve) => {
-      let buf = '';
-      const timer = setTimeout(() => resolve({ late: true }), 30000);
-      const done = (v) => { clearTimeout(timer); chrome.stderr.removeListener('data', read); chrome.stderr.on('data', () => {}); resolve(v); };
-      const read = (c) => {
-        buf = (buf + c).slice(-65536);
-        const m = /DevTools listening on (ws:\/\/127\.0\.0\.1:(\d+)\/\S+)/.exec(buf);
-        if (m) done({ wsUrl: m[1], cdpPort: Number(m[2]) });
-      };
+      let buf = '', over = false;
+      const timer = setTimeout(() => done({ late: true }), 30000);
+      const read = (c) => { buf = (buf + c).slice(-65536); };
+      function done(v) {
+        if (over) return;
+        over = true;
+        clearTimeout(timer);
+        chrome.stderr.removeListener('data', read);
+        chrome.stderr.on('data', () => {});
+        resolve(v);
+      }
       chrome.stderr.setEncoding('utf8');
       chrome.stderr.on('data', read);
       chrome.once('error', () => done({ exited: true, buf: '' }));
       chrome.once('exit', () => done({ exited: true, buf }));
+      // a pipe that fails before Chrome exits is left to the exit (its stderr says why) or the timer
+      cdpBrowser(chrome).then((cdp) => done({ cdp }), () => {});
     });
-    if (r.wsUrl) return r;
+    if (r.cdp) return { cdp: r.cdp };
     try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
     if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) { ctx.notes.push("Chrome's sandbox isn't available on this machine; it runs without it."); continue; }
-    throw new Error(r.late ? "browser: Chrome didn't open its DevTools port in 30 s" : 'browser: Chrome exited before its DevTools port opened');
+    throw new Error(r.late ? "browser: Chrome didn't open its DevTools pipe in 30 s" : 'browser: Chrome exited before its DevTools pipe opened');
   }
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
@@ -26278,9 +26598,11 @@ function browserControl(ctx, secret) {
   return { server, arm };
 }
 const browserListen = (server, port) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(server.address().port); }); });
-// browser serve, in the preview's window: the profile and its start steps, the guard, the 503 view
-// placeholder, Chrome, the CDP tabs, the control server, then state.json. It writes nothing to its
-// window once it is up.
+// browser serve, in the preview's window: the 503 view placeholder bound first, then the profile and
+// its start steps, the guard, Chrome, the CDP tabs, the control server, then state.json. It writes
+// nothing to its window once it is up. The bind comes before the start steps (kit-316 final-1b S1): a
+// port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
+// got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
   const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
@@ -26290,17 +26612,17 @@ async function browserServe({ chrome: bin }) {
   ctx.preview = rec.name;
   ctx.profile = browserProfile();
   try {
-    ctx.restarted = (await browserPrepareProfile(ctx.profile, ctx.notes)).restarted;
-    ctx.guard = await startBrowserGuard();
     ctx.view = http.createServer((req, res) => { req.resume(); res.on('error', () => {}); res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' }); res.end("The supervisor's browser runs here; its live view comes with a later release.\n"); });
     // test hook: the first daemon to find this file missing makes it and fails its bind (T4-1)
     const failOnce = browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL');
     if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
     await browserListen(ctx.view, viewPort);
-    const { wsUrl, cdpPort } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    ctx.restarted = (await browserPrepareProfile(ctx.profile, ctx.notes)).restarted;
+    ctx.guard = await startBrowserGuard();
+    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
     ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
-    ctx.cdp = await cdpBrowser(wsUrl);
+    ctx.cdp = cdp;
     ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
@@ -26309,12 +26631,13 @@ async function browserServe({ chrome: bin }) {
     const { server, arm } = browserControl(ctx, secret);
     ctx.control = server;
     const controlPort = await browserListen(server, 0);
-    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, cdp_port: cdpPort, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
+    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
     arm();
     process.on('uncaughtException', () => browserShutdown(ctx, 'error'));
     process.on('unhandledRejection', () => browserShutdown(ctx, 'error'));
   } catch (e) {
     if (ctx.chrome?.pid) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} }
+    try { ctx.view?.close(); } catch {} // bound before the start steps: a refused start frees its port
     const m = String(e?.message ?? e);
     die(m.startsWith('browser') ? m : `browser: ${m}`);
   }
@@ -26348,6 +26671,32 @@ async function browserStatus() {
   if (r) { process.exitCode = r.code; return out(r.out); }
   return out(flags.json ? JSON.stringify(off) : `browser isn't running (profile ${off.instance})`);
 }
+// browser type --stdin's text: stdin read to its end, bounded in bytes (stops once past max + 2, room
+// for a \r\n) and in time, decoded once at the end so a character split across reads stays whole,
+// with one trailing \n or \r\n dropped and then held to max. A refusal never echoes the text.
+function browserReadStdin({ max, ms }) {
+  if (process.stdin.isTTY || browserTestEnv('DEVTEAM_TEST_BROWSER_STDIN_TTY') === '1') die('browser type --stdin reads the text from a pipe: printf %s "$SECRET" | devteam.mjs browser type <ref> --stdin');
+  const over = `browser type --stdin: the text is over ${max} bytes`;
+  return new Promise((resolve) => {
+    const chunks = [];
+    let size = 0;
+    const timer = setTimeout(() => die(`browser type --stdin: stdin didn't close in ${ms / 1000} s`), ms);
+    process.stdin.on('data', (d) => {
+      size += d.length;
+      if (size > max + 2) { clearTimeout(timer); die(over); }
+      chunks.push(d);
+    });
+    process.stdin.on('error', (e) => { clearTimeout(timer); die(`browser type --stdin: stdin unreadable (${e.code ?? 'error'})`); });
+    process.stdin.on('end', () => {
+      clearTimeout(timer);
+      let b = Buffer.concat(chunks);
+      if (b.length >= 2 && b[b.length - 2] === 0x0d && b[b.length - 1] === 0x0a) b = b.subarray(0, -2);
+      else if (b.length >= 1 && b[b.length - 1] === 0x0a) b = b.subarray(0, -1);
+      if (b.length > max) die(over);
+      resolve(b.toString('utf8'));
+    });
+  });
+}
 // Which gates each verb runs: status, profiles and stop skip Chrome; the memory check is browserEnsure's.
 const BROWSER_VERBS = {
   ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve'].map((v) => [v, { chrome: true }])),
@@ -26377,13 +26726,16 @@ async function cmdBrowser() {
   // value or a key.
   const usage = () => die(`usage: ${BROWSER_USAGE}`);
   const n = positional.length, ref = () => (/^e[1-9]\d{0,5}$/.test(positional[1] ?? '') ? positional[1] : usage());
-  const send = {
+  let send = {
     open: () => ({ url: positional[1] }),
     snapshot: () => ({ json: !!flags.json }),
     click: () => (n === 2 ? { ref: ref() } : usage()),
-    // a word starting with -- would be read as an option and dropped: refused (unnamed, it may be part
-    // of the text), and text after a bare -- is taken whole
-    type: () => (Object.keys(flags).length ? die("browser type: a word starting with -- can't be typed as it stands; put the text after a bare --: browser type <ref> -- <text>")
+    // --stdin alone takes the text from stdin (read below, before any daemon is touched); with a value,
+    // text words or text after -- it is a usage error. Any other word starting with -- would be read as
+    // an option and dropped: refused (unnamed, it may be part of the text), and text after a bare -- is
+    // taken whole
+    type: () => (Object.hasOwn(flags, 'stdin') && Object.keys(flags).length === 1 ? (flags.stdin === true && n === 2 && rest === null ? { ref: ref(), stdin: true } : usage())
+      : Object.keys(flags).length ? die("browser type: a word starting with -- can't be typed as it stands; put the text after a bare --: browser type <ref> -- <text>")
       : rest !== null ? (n === 2 && rest.length ? { ref: ref(), text: rest.join(' ') } : usage()) : n >= 3 ? { ref: ref(), text: positional.slice(2).join(' ') } : usage()),
     press: () => (n === 2 && browserKeyOk(positional[1]) ? { key: positional[1] } : die(BROWSER_KEY_LIST)),
     scroll: () => (n === 2 && ['up', 'down'].includes(positional[1]) ? { dir: positional[1] } : usage()),
@@ -26392,6 +26744,11 @@ async function cmdBrowser() {
     tab: () => (n === 2 && /^[1-9]\d{0,2}$/.test(positional[1]) ? { n: Number(positional[1]) } : die('browser tab takes a tab number (browser tabs lists them)')),
     screenshot: () => (n === 1 && flags.out !== true ? { out: flagStr('out') === undefined ? undefined : path.resolve(flagStr('out')) } : usage()),
   }[verb]();
+  if (send.stdin) {
+    const text = await browserReadStdin({ max: 65536, ms: Number(browserTestEnv('DEVTEAM_TEST_BROWSER_STDIN_MS')) || 30000 });
+    if (!text) usage();
+    send = { ref: send.ref, text };
+  }
   const s = await browserEnsure();
   let r;
   try { r = await browserCall(verb, send, { state: s }); } catch (e) { die(`browser ${verb}: ${e.message}`); }
@@ -26463,7 +26820,7 @@ Decide and act (supervisor.md, constitution.md)
   preview url [<name>]            the link, as the owner will open it
   preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
   browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
-  ${BROWSER_USAGE}   supervisor: the supervisor's own Chrome (Node 22+), in a tmux window beside yours, with one private profile per project under ~/.devteam/browser/; profiles lists them as JSON, and forget removes one (every site in it signed out)
+  ${BROWSER_USAGE}   supervisor: the supervisor's own Chrome (Node 22+), in a tmux window beside yours, with one private profile per project under ~/.devteam/browser/; profiles lists them as JSON, and forget removes one (every site in it signed out); a password or one-time code goes in on stdin, never as an argument (other local users can read a command line): browser type <ref> --stdin
   preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
@@ -26482,6 +26839,7 @@ Decide and act (supervisor.md, constitution.md)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
   thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
+  thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
   ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)
