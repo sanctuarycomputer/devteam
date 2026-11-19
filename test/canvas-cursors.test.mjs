@@ -24,7 +24,6 @@ import { until } from './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PAGE_FILE = path.join(here, '..', 'docs', 'devteam', 'dashboard', 'canvas.html');
-const SKIP = canDrive ? false : 'needs Chrome and WebSocket';
 
 // ---- the canvas ----
 
@@ -389,7 +388,7 @@ async function goneAt(ctx, f, what, ms = 8000) {
 
 // ---- kit-669 F2: a select waits for a document fetch (spec §6, S6.1, S6.2) ----
 
-test('canvas cursors: a select made while the document is fetched after a restart or a reload waits for the fetch and the re-sent edits', { skip: SKIP, timeout: 240000 }, async (t) => {
+test('canvas cursors: a select made while the document is fetched after a restart or a reload waits for the fetch and the re-sent edits', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 240000 }, async (t) => {
   const ctx = await twoPages(t);
   const { A, B, fake } = ctx;
   // S6.1: an unsaved X selected, then the server restarts without it
@@ -540,7 +539,7 @@ const showPageOf = async (ctx, p, id) => {
 
 // ---- done-when 1: cursors anchored so every screen agrees (spec §2, §3) ----
 
-test("canvas A3: two pages of different sizes and zooms show each other's cursor on the same node and at the same fraction of empty canvas, within 2 px", { skip: SKIP, timeout: 240000 }, async (t) => {
+test("canvas A3: two pages of different sizes and zooms show each other's cursor on the same node and at the same fraction of empty canvas, within 2 px", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 240000 }, async (t) => {
   const ctx = await twoPages(t);
   const { A, B } = ctx;
   const z0 = (await view(B)).z;
@@ -644,7 +643,7 @@ test("canvas A3: two pages of different sizes and zooms show each other's cursor
 
 // ---- the presence duties (spec §1, §3; presence@1 §6–§9) ----
 
-test('canvas cursors: the presence socket answers pings, reconnects when dropped and reports a hidden page', { skip: SKIP, timeout: 360000 }, async (t) => {
+test('canvas cursors: the presence socket answers pings, reconnects when dropped and reports a hidden page', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 360000 }, async (t) => {
   const ctx = await twoPages(t, { presenceClock: 'manual' });
   const { A, B, pfake, fa } = ctx;
   await waitSpot(ctx, A, 'ben', 'A');
@@ -711,7 +710,7 @@ test('canvas cursors: the presence socket answers pings, reconnects when dropped
 
 const wantAt = (tab, slug = SLUG) => ({ page: 'canvas', tab, peek: null, art: `${slug}@canvas`, thread: null });
 
-test("canvas cursors: the page reports its spot, draws others' selections and marks another person's last edit for 3 s", { skip: SKIP, timeout: 240000 }, async (t) => {
+test("canvas cursors: the page reports its spot, draws others' selections and marks another person's last edit for 3 s", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 240000 }, async (t) => {
   const ctx = await twoPages(t);
   const { A, B } = ctx;
   await waitSpot(ctx, B, 'ana', 'B');
@@ -822,7 +821,7 @@ test("canvas cursors: the page reports its spot, draws others' selections and ma
   noExceptions(B, 'B');
 });
 
-test('canvas cursors: a canvas with a 120-character slug reports its art hashed and still shows cursors', { skip: SKIP, timeout: 240000 }, async (t) => {
+test('canvas cursors: a canvas with a 120-character slug reports its art hashed and still shows cursors', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 240000 }, async (t) => {
   const ctx = await twoPages(t, { canvases: { [LONG_SLUG]: CANVAS }, slug: LONG_SLUG });
   const { A, B } = ctx;
   assert.equal(LONG_SLUG.length, 120);
