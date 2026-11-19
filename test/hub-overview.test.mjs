@@ -281,8 +281,9 @@ test('Settings draws the box line from box.json and the latest list; the Overvie
 test("the box's alert: once, from any project's box_alert; a project's alert less the box's folded at its end", () => {
   const html = hubHtml();
   const fn = (name) => { const i = html.indexOf(`function ${name}(`); assert.ok(i > 0, name); const rest = html.slice(i); return rest.slice(0, rest.indexOf('\n}\n') + 2); };
-  const ctx = vm.createContext({ items: new Map() });
-  vm.runInContext(`${fn('boxAlertNow')}\n${fn('ownAlert')}\n;globalThis.api = { boxAlertNow, ownAlert };`, ctx);
+  assert.match(html, /\nconst BOXMEM = \{ now: null, was: null \};\n/, 'what the box text was, kept beside them');
+  const ctx = vm.createContext({ items: new Map(), BOXMEM: { now: null, was: null } });
+  vm.runInContext(`${fn('lessBox')}\n${fn('boxAlertNow')}\n${fn('ownAlert')}\n;globalThis.api = { boxAlertNow, ownAlert };`, ctx);
   const { boxAlertNow, ownAlert } = ctx.api;
   assert.equal(boxAlertNow(), null);
   assert.equal(ownAlert({ alert: 'at a usage limit' }), 'at a usage limit');
@@ -294,6 +295,23 @@ test("the box's alert: once, from any project's box_alert; a project's alert les
   assert.equal(ownAlert({ alert: 'at a usage limit · disk · full', box_alert: 'disk · full' }), 'at a usage limit', 'a box alert holding " · " comes off whole');
   assert.equal(ownAlert({ alert: 'at a usage limit · disk · full' }), 'at a usage limit', 'an older kit without box_alert: the box text another project carries');
   assert.equal(ownAlert({ alert: 'disk · full is not mine' }), 'disk · full is not mine', 'only a trailing copy');
+  // cleared (or changed): this kit drops box_alert a refresh before an older kit drops its folded copy
+  ctx.items.set('/b', { x: { alert: 'disk · full' } });
+  ctx.items.set('/c', { x: { alert: 'at a usage limit · disk · full' } });
+  ctx.items.set('/a', { x: {} });
+  assert.equal(boxAlertNow(), null, 'cleared');
+  assert.equal(ownAlert(ctx.items.get('/b').x), null, "an older kit's lagging copy is still the box's: no \"!\" on its tab");
+  assert.equal(ownAlert(ctx.items.get('/c').x), 'at a usage limit', 'and its own part stays');
+  ctx.items.set('/a', { x: { box_alert: 'memory high', alert: 'memory high' } });
+  assert.equal(boxAlertNow(), 'memory high', 'changed');
+  assert.equal(ownAlert(ctx.items.get('/b').x), null, 'the old text, still lagging, comes off too');
+  ctx.items.set('/b', { x: {} });
+  ctx.items.set('/c', { x: { alert: 'at a usage limit' } });
+  ctx.items.set('/a', { x: {} });
+  boxAlertNow();
+  assert.equal(ctx.BOXMEM.was, null, 'once no tab folds the old text, it is forgotten');
+  ctx.items.set('/b', { x: { alert: 'disk · full' } });
+  assert.equal(ownAlert(ctx.items.get('/b').x), 'disk · full', 'so the same text raised later on older kits alone shows on their tabs again');
   // where they are used: the Overview tab and the line under its header, and each tab and card's own
   const body = (start) => { const i = html.indexOf(start); assert.ok(i > 0, start); const rest = html.slice(i + start.length); const j = rest.search(/\n(async )?function /); return rest.slice(0, j < 0 ? undefined : j); };
   assert.match(body('function paintOverview('), /const box = boxAlertNow\(\)/);

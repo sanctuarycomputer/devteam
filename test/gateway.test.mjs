@@ -624,6 +624,43 @@ test("the box's own alert is one push named for the box, and left out of each pr
   assert.deepEqual(notSuffix.messages.map((m) => m.body).sort(), ['disk', 'disk is fine · own'], 'only a trailing copy comes off');
 });
 
+test("a box alert that clears or changes is not pushed again from an older kit's lagging copy", () => {
+  const ports = [P, P + 1];
+  const r = (root, name, port, extra = {}) => ({ root, name, port, ...extra });
+  const X = 'Every Claude account is at its usage limit.';
+  const pushed = (s) => s.messages.map((m) => [m.title, m.body]);
+  // steady: a (this kit) carries box_alert and folds it; b (an older kit) folds it only
+  const up = G.alertNews({}, [r('/a', 'a', P, { alert: X, box_alert: X }), r('/b', 'b', P + 1, { alert: X })], ports);
+  assert.deepEqual(pushed(up), [['Box alert', X]]);
+  // cleared: a drops it a refresh before b does; b's copy is the box text the gateway last knew
+  const lag = G.alertNews(up.seen, [r('/a', 'a', P), r('/b', 'b', P + 1, { alert: X })], ports);
+  assert.deepEqual(pushed(lag), [], 'the alert just cleared is not pushed as b\'s own');
+  const lag2 = G.alertNews(lag.seen, [r('/a', 'a', P), r('/b', 'b', P + 1, { alert: X })], ports);
+  assert.deepEqual(pushed(lag2), [], 'nor on the next poll, while b still lags');
+  const gone = G.alertNews(lag2.seen, [r('/a', 'a', P), r('/b', 'b', P + 1)], ports);
+  assert.deepEqual([pushed(gone), gone.seen], [[], {}], 'once b drops it too, it is forgotten');
+  assert.deepEqual(pushed(G.alertNews(gone.seen, [r('/a', 'a', P, { alert: X, box_alert: X }), r('/b', 'b', P + 1, { alert: X })], ports)), [['Box alert', X]], 'and raised again, it is news again');
+  // changed: a carries the new text, b still folds the old one
+  const moved = G.alertNews(up.seen, [r('/a', 'a', P, { alert: 'disk full', box_alert: 'disk full' }), r('/b', 'b', P + 1, { alert: X })], ports);
+  assert.deepEqual(pushed(moved), [['Box alert', 'disk full']]);
+  assert.deepEqual(pushed(G.alertNews(moved.seen, [r('/a', 'a', P, { alert: 'disk full', box_alert: 'disk full' }), r('/b', 'b', P + 1, { alert: X })], ports)), [], 'the old text still lagging on b');
+  // b's own part stays its own while the box's lags on it
+  const own = G.alertNews({}, [r('/a', 'a', P, { alert: X, box_alert: X }), r('/b', 'b', P + 1, { alert: `at a usage limit · ${X}` })], ports);
+  const ownLag = G.alertNews(own.seen, [r('/a', 'a', P), r('/b', 'b', P + 1, { alert: `at a usage limit · ${X}` })], ports);
+  assert.deepEqual([pushed(ownLag), ownLag.seen['/b']], [[], 'at a usage limit']);
+});
+
+test('a gateway upgraded while a box alert is up does not push it again', () => {
+  const ports = [P, P + 1];
+  const r = (root, name, port, extra = {}) => ({ root, name, port, ...extra });
+  // what a gateway from before box_alert stored: each project's whole alert, the box's folded in
+  const before = { '/a': 'disk full', '/b': 'at a usage limit · disk full' };
+  const after = G.alertNews(before, [r('/a', 'a', P, { alert: 'disk full', box_alert: 'disk full' }), r('/b', 'b', P + 1, { alert: 'at a usage limit · disk full' })], ports);
+  assert.deepEqual(after.messages, [], 'the box alert and b\'s own were both pushed already');
+  assert.deepEqual(after.seen, { '\u0000box': 'disk full', '/b': 'at a usage limit' });
+  assert.deepEqual(G.alertNews({ '/a': 'something else' }, [r('/a', 'a', P, { alert: 'disk full', box_alert: 'disk full' })], ports).messages.map((m) => m.title), ['Box alert'], 'a box alert not seen before is still news');
+});
+
 test('an alert on the hub is pushed once, when it turns up or changes', () => {
   const ports = [P, P + 1];
   const r = (root, name, port, alert) => ({ root, name, port, ...(alert === undefined ? {} : { alert }) });

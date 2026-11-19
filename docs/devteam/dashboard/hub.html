@@ -2312,17 +2312,28 @@ function tlDock() {
 // box_alert, so it shows once, on the Overview tab and at the top of the Overview. Its alert still
 // ends with it after " · " (for older hubs), as a kit from before box_alert's does: that part comes
 // off, matched as the whole alert or a suffix, never split (a box alert may hold " · " itself).
+// The box text last seen, and the one before it while an older kit's tab still folds it: each
+// dashboard refreshes on its own timer, so an older kit can drop the box's copy a refresh after this
+// kit drops box_alert (or changes it), and that copy is still the box's, not the project's.
+const BOXMEM = { now: null, was: null };
+function lessBox(a, box) {
+  if (!a || !box) return a || null;
+  if (a === box) return null;
+  return a.endsWith(` · ${box}`) ? a.slice(0, -(box.length + 3)).trim() || null : a;
+}
 function boxAlertNow() {
-  for (const it of items.values()) if (typeof it.x.box_alert === 'string' && it.x.box_alert.trim()) return it.x.box_alert.trim();
-  return null;
+  let now = null;
+  for (const it of items.values()) if (typeof it.x.box_alert === 'string' && it.x.box_alert.trim()) { now = it.x.box_alert.trim(); break; }
+  if (now !== BOXMEM.now) { if (BOXMEM.now) BOXMEM.was = BOXMEM.now; BOXMEM.now = now; }
+  const was = BOXMEM.was;
+  if (was && (was === now || ![...items.values()].some((it) => typeof it.x.alert === 'string' && lessBox(it.x.alert.trim(), was) !== it.x.alert.trim()))) BOXMEM.was = null;
+  return now;
 }
 function ownAlert(x) {
   if (typeof x.alert !== 'string' || !x.alert.trim()) return null;
-  const a = x.alert.trim();
   const box = typeof x.box_alert === 'string' && x.box_alert.trim() ? x.box_alert.trim() : boxAlertNow();
-  if (!box) return a;
-  if (a === box) return null;
-  return a.endsWith(` · ${box}`) ? a.slice(0, -(box.length + 3)).trim() || null : a;
+  const own = lessBox(x.alert.trim(), box);
+  return BOXMEM.was ? lessBox(own, BOXMEM.was) : own;
 }
 function paintOvTab() {
   if (!ovTab) return;
