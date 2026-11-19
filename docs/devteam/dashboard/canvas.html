@@ -156,6 +156,12 @@
   .draft.round { border-radius: 50%; }
   .pen { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 2; }
   .pen polyline { fill: none; stroke: var(--sel); stroke-width: 1.5px; stroke-dasharray: 4 3; }
+  /* the one selected node's resize handles (kit-669 §3): stage chrome on its box's corners and edges */
+  .handle { position: absolute; box-sizing: border-box; width: 8px; height: 8px; margin: -4px 0 0 -4px; background: var(--surface); border: 1px solid var(--sel); z-index: 3; touch-action: none; }
+  .handle[data-handle="nw"], .handle[data-handle="se"] { cursor: nwse-resize; }
+  .handle[data-handle="ne"], .handle[data-handle="sw"] { cursor: nesw-resize; }
+  .handle[data-handle="n"], .handle[data-handle="s"] { cursor: ns-resize; }
+  .handle[data-handle="e"], .handle[data-handle="w"] { cursor: ew-resize; }
   body[data-state="error"] #surface, body[data-state="error"] .zoom { display: none; }
 
   /* under 760 px, watch and comment: no panels, the stage the full width under the bar, the bar's
@@ -1194,6 +1200,7 @@
     state.sel = next.length === 1 ? next[0] : null;
     renderProps();
     queueSelect();
+    drawHandles();
   }
   // One node selected alone, or nothing (null).
   const select = (id) => selectIds(id === null ? [] : [id]);
@@ -1275,6 +1282,7 @@
     $('surface').style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
     $('zoomPct').textContent = `${Math.round(view.z * 100)}%`;
     drawPen(); // a path being drawn follows the view
+    drawHandles(); // and the resize handles
   }
   // Zoom by `factor` around the stage point (sx, sy), which stays put; z kept to [0.1, 8], so at a
   // bound the view doesn't change at all.
@@ -1334,6 +1342,7 @@
     // across 760 px the panel's fields are built again, usable or not
     if (narrow() !== wasNarrow) { wasNarrow = narrow(); if (ready()) { renderProps(); renderPages(); } }
     if (ready() && !moved) fit();
+    drawHandles(); // shown only at 760 px and over, and on the box where the resize left it
   });
 
   // The wheel pans; with Ctrl or ⌘ (a trackpad's pinch comes as Ctrl+wheel) it zooms around the pointer.
@@ -1507,6 +1516,7 @@
     imagesSettled().then(() => {
       if (n !== shown) return;
       if (!moved) fit();
+      drawHandles();
       setState('ready');
     });
   }
@@ -1899,6 +1909,7 @@
     if (document.body.dataset.state !== 'error') { if (kidsOf(pg).length === 0) showMsg(TEXT.empty); else hideMsg(); }
     syncBody();
     keepDrag();
+    drawHandles();
   }
 
   // The message line (#toast) for 6 s, and the banner (#banner; null hides it).
@@ -1935,6 +1946,7 @@
     setTool('move');
     placing = null;
     for (const c of document.querySelectorAll('#tools button, #props input, #props select, #props textarea, #props button, #pageAdd, #pages button')) c.disabled = true;
+    drawHandles(); // no editing, no handles
     showBanner();
   }
 
@@ -2879,12 +2891,31 @@
     toolPress = false;
     if (!toolsOn() || isTouch(e) || e.button !== 0 || spaceHeld || pan || gesture) return;
     if (!(e.target instanceof Element) || e.target.closest('.zoom, .stage-top, #tools')) return;
-    if (tool === 'move') { pressMove(e); return; }
+    const h = e.target.closest('.handle[data-handle]');
+    // a handle's press resizes: never a select, a move or a rectangle; but on a node under 16 px a side
+    // the handles cover it, so there a press inside its drawn box is the node's (it moves, kit-662)
+    const onSmall = h !== null && insideSmall(e.clientX, e.clientY);
+    if (h && !onSmall) { pressResize(e, h.dataset.handle); return; }
+    if (tool === 'move') {
+      pressMove(e, onSmall ? drawn.get(state.sel) : e.target.closest('#surface [data-id]'));
+      if (onSmall) toolPress = true; // its click (its target the stage, the handle gone) keeps the selection
+      return;
+    }
     toolPress = true;
     if (tool === 'vector') { penPoint(e.clientX, e.clientY); return; }
     gesture = { id: e.pointerId, tool, sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null };
     try { $('stage').setPointerCapture(e.pointerId); } catch { /* moves over the stage still arrive */ }
   });
+  // the handles go while a press is followed (back when it ends): a release never lands on one the
+  // press itself put under the pointer, so a click on a node stays that node's
+  $('stage').addEventListener('pointerdown', () => { if (gesture !== null) drawHandles(); });
+  // Is (cx, cy) inside the one selected node's drawn box, that box under 16 px on a side?
+  function insideSmall(cx, cy) {
+    const id = state.sel;
+    if (id === null || !hasBox(id)) return false;
+    const r = drawn.get(id).getBoundingClientRect();
+    return (r.width < 16 || r.height < 16) && cx > r.left && cx < r.right && cy > r.top && cy < r.bottom;
+  }
   $('stage').addEventListener('pointermove', (e) => {
     if (pen !== null && tool === 'vector') drawPen(e.clientX, e.clientY);
     const g = gesture;
@@ -2892,9 +2923,9 @@
     g.cx = e.clientX;
     g.cy = e.clientY;
     if (!g.dragged && Math.hypot(g.cx - g.sx, g.cy - g.sy) <= DRAG_SLOP) return;
-    if (g.tool === 'move' && !g.dragged) {
+    if ((g.tool === 'move' || g.tool === 'resize') && !g.dragged) {
       // past 3 px a Move press is a drag: the pointer kept (a release outside the stage still ends
-      // it), and the click that ends it isn't a selection
+      // it), and the click that ends it isn't a selection; a resize likewise (kit-669 §3)
       try { $('stage').setPointerCapture(g.id); } catch { /* moves over the stage still arrive */ }
       toolPress = true;
       g.lastAt = performance.now(); // the throttle's first live edit goes 100 ms after this
@@ -2905,7 +2936,14 @@
       try { $('stage').setPointerCapture(g.id); } catch { /* moves over the stage still arrive */ }
       toolPress = true;
     }
+    const first = !g.dragged;
     g.dragged = true;
+    if (first) drawHandles(); // none while a drag, a resize or the rectangle is under way
+    if (g.tool === 'resize') {
+      // no preview: the drawing follows the live edits, each drawn at once
+      if (g.timer === null) g.timer = setTimeout(() => liveSend(g), Math.max(0, 100 - (performance.now() - g.lastAt)));
+      return;
+    }
     if (g.tool === 'move') {
       if (g.live && g.timer === null) g.timer = setTimeout(() => liveSend(g), Math.max(0, 100 - (performance.now() - g.lastAt)));
       movePreview(g);
@@ -2933,7 +2971,8 @@
     if (g.nodes) for (const m of g.nodes) if (m.el) m.el.style.translate = '';
     if (g.timer) { clearTimeout(g.timer); g.timer = null; }
     gesture = null;
-    if (abort && g.tool === 'move') restore(g);
+    if (abort && (g.tool === 'move' || g.tool === 'resize')) restore(g);
+    drawHandles();
   }
   $('stage').addEventListener('pointerup', (e) => {
     const g = gesture;
@@ -2944,7 +2983,7 @@
     // a press on a member of several, released without a drag, selects that one alone
     if (g.tool === 'move' && !g.dragged && g.collapseTo) select(g.collapseTo);
     make(g);
-    if (g.tool === 'move') dragEntry(g);
+    if (g.tool === 'move' || g.tool === 'resize') dragEntry(g);
   });
   $('stage').addEventListener('pointercancel', (e) => { if (gesture && e.pointerId === gesture.id) endGesture(gesture, { abort: true }); });
 
@@ -2952,6 +2991,7 @@
   // gives its top-left and its size, in page px.
   function make(g) {
     if (g.tool === 'move') { if (dropMove(g) === 'refused') restore(g); return; }
+    if (g.tool === 'resize') { dropResize(g); return; }
     if (g.tool === 'marquee') { if (g.dragged) marqueeSelect(g); return; }
     const at = placeAt(g.sx, g.sy);
     const z = view.z;
@@ -3007,8 +3047,7 @@
   // kit-669 §2: a press on empty stage starts the drag rectangle; a Shift press on a node starts nothing
   // (its click toggles it); a press on a member of a selection of several keeps the selection and drags
   // every root of it placed by numeric x, y (g.nodes; see pressSeveral).
-  function pressMove(e) {
-    const hit = e.target.closest('#surface [data-id]');
+  function pressMove(e, hit) {
     const id = hit ? hit.dataset.id : null;
     if (id === null) {
       gesture = { id: e.pointerId, tool: 'marquee', sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null, shift: false };
@@ -3078,6 +3117,108 @@
     }
     selectIds(g.shift ? [...state.sels, ...hits] : hits);
   }
+  // ---- resize handles (kit-669 §3) ----
+  // With exactly one node selected, editing allowed (760 px and over), the node drawn with a box, and
+  // no drag, resize, rectangle or path under way: 8 × 8 px handles (stage chrome) centred on its drawn
+  // box's corners and edge middles, in stage px. A node placed by x, y gets all eight; one in an
+  // auto-layout frame e, s and se only (the layout places its left and top edges). Drawn again after
+  // every redraw, selection change, view change, window resize and image load.
+  const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+  const hasBox = (id) => drawn.has(id) && drawn.get(id).getClientRects().length > 0;
+  function drawHandles() {
+    for (const h of $('stage').querySelectorAll('.handle')) h.remove();
+    const id = state.sel;
+    if (id === null || !ready() || !editable() || gesture !== null || pen !== null) return;
+    const n = nodeOf(id);
+    if (!n || !hasBox(id)) return;
+    const st = $('stage').getBoundingClientRect();
+    const r = drawn.get(id).getBoundingClientRect();
+    const xs = { w: r.left - st.left, m: (r.left + r.right) / 2 - st.left, e: r.right - st.left };
+    const ys = { n: r.top - st.top, m: (r.top + r.bottom) / 2 - st.top, s: r.bottom - st.top };
+    for (const name of placedByXY(n) ? HANDLES : ['e', 's', 'se']) {
+      const el = document.createElement('div');
+      el.className = 'handle';
+      el.dataset.handle = name;
+      el.setAttribute('aria-hidden', 'true');
+      el.style.left = `${xs[name.includes('w') ? 'w' : name.includes('e') ? 'e' : 'm']}px`;
+      el.style.top = `${ys[name.includes('n') ? 'n' : name.includes('s') ? 's' : 'm']}px`;
+      $('stage').append(el);
+    }
+  }
+  // an image loaded later (load doesn't bubble: caught on the way down) moves the box
+  $('surface').addEventListener('load', () => drawHandles(), true);
+  $('surface').addEventListener('error', () => drawHandles(), true);
+  // A press on a handle: the resize of the one selected node, followed as kit-668's drag (gesture fields
+  // as pressMove's). start: the stored x, y, size.w, size.h where they are numbers, else as drawn (in
+  // the parent's page px, whole px; hug, fill and a token become fixed); loose: placed by x, y (its left
+  // and top handles move x, y too).
+  function pressResize(e, handle) {
+    const id = state.sel;
+    toolPress = true; // the click that ends it is the resize's, never a selection
+    if (id === null || !HANDLES.includes(handle) || !nodeOf(id) || !hasBox(id)) return;
+    const n = nodeOf(id);
+    const z = view.z;
+    const s = $('surface').getBoundingClientRect();
+    const r = drawn.get(id).getBoundingClientRect();
+    const pel = drawn.get(n.parent);
+    const o = (pel ?? $('surface')).getBoundingClientRect();
+    const stored = (path, drawnPx) => {
+      const v = getPath(n, path);
+      return finite(v) ? v : Math.round(drawnPx);
+    };
+    const start = {
+      x: stored('x', (r.left - o.left) / z), y: stored('y', (r.top - o.top) / z),
+      w: stored('size.w', r.width / z), h: stored('size.h', r.height / z),
+    };
+    const loose = placedByXY(n);
+    if (!loose && !['e', 's', 'se'].includes(handle)) return;
+    gesture = {
+      id: e.pointerId, tool: 'resize', sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null,
+      handle, node: id, loose, px: (e.clientX - s.left) / z, py: (e.clientY - s.top) / z,
+      live: true, start, sent: { ...start }, lastAt: null, timer: null, liveSent: false, items: [], snapshot: null, restored: false,
+    };
+    try { $('stage').setPointerCapture(e.pointerId); } catch { /* moves over the stage still arrive */ }
+  }
+  // The resize's values now, only those its handle moves: e and w move size.w (w, loose only, x too,
+  // so the right edge stays), s and n size.h (n: y); whole px, sizes 1..100000, x, y within ±100000.
+  function resizeTarget(g) {
+    const { dx, dy } = moveBy(g);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+    const to = {};
+    const h = g.handle;
+    if (h.includes('e')) to.w = clamp(Math.round(g.start.w + dx), 1, PX);
+    if (h.includes('w') && g.loose) {
+      to.w = clamp(Math.round(g.start.w - dx), 1, PX);
+      to.x = clamp(Math.round(g.start.x + (g.start.w - to.w)), -PX, PX);
+    }
+    if (h.includes('s')) to.h = clamp(Math.round(g.start.h + dy), 1, PX);
+    if (h.includes('n') && g.loose) {
+      to.h = clamp(Math.round(g.start.h - dy), 1, PX);
+      to.y = clamp(Math.round(g.start.y + (g.start.h - to.h)), -PX, PX);
+    }
+    return to;
+  }
+  const RESIZE_PROP = { w: 'size.w', h: 'size.h', x: 'x', y: 'y' };
+  // The sets of what `to` holds that differs from what the resize last sent.
+  function resizeOps(g, to) {
+    const ops = [];
+    for (const k of ['w', 'h', 'x', 'y']) if (own(to, k) && to[k] !== g.sent[k]) ops.push({ op: 'set', id: g.node, prop: RESIZE_PROP[k], value: to[k] });
+    return ops;
+  }
+  // The release: one edit of the sets that differ from the last live edit, held by the sender until
+  // 100 ms after it (notBefore), never coalesced.
+  function dropResize(g) {
+    if (!g.dragged || !editable() || !nodeOf(g.node)) return;
+    const to = resizeTarget(g);
+    if (to === null) return;
+    const ops = resizeOps(g, to);
+    if (ops.length === 0) return;
+    const item = edit(ops, { kind: 'release', notBefore: g.liveSent ? g.lastAt + 100 : 0 });
+    if (!item) return;
+    g.sent = { ...g.sent, ...to };
+    g.items.push(item);
+  }
+
   // The pointer's movement since the press, in page px.
   function moveBy(g) {
     const s = $('surface').getBoundingClientRect();
@@ -3129,6 +3270,21 @@
   }
   function liveSend(g) {
     g.timer = null;
+    if (g.tool === 'resize') {
+      if (gesture !== g || !editable() || !nodeOf(g.node)) return;
+      const to = resizeTarget(g);
+      if (to === null) return;
+      const ops = resizeOps(g, to);
+      if (ops.length === 0) return;
+      const prev = g.sent;
+      g.sent = { ...g.sent, ...to };
+      const item = edit(ops, { kind: 'live' });
+      if (!item) { g.sent = prev; return; }
+      g.lastAt = performance.now();
+      g.liveSent = true;
+      g.items.push(item);
+      return;
+    }
     if (g.nodes) {
       if (gesture !== g || !g.live || !editable()) return;
       const list = severalTargets(g);
@@ -3163,6 +3319,16 @@
   // the last live edit moved), through the same throttle, drawn at once. Nothing when editing is no
   // longer allowed, or the node is gone.
   function restore(g) {
+    if (g.tool === 'resize') {
+      if (!g.liveSent || !editable() || !nodeOf(g.node)) return;
+      g.restored = true;
+      const ops = resizeOps(g, g.start);
+      if (ops.length === 0) return;
+      g.sent = { ...g.start };
+      const item = edit(ops, { kind: 'restore', notBefore: g.lastAt + 100 });
+      if (item) g.items.push(item);
+      return;
+    }
     if (g.nodes) {
       if (!g.liveSent || !editable()) return;
       g.restored = true;
@@ -3188,6 +3354,13 @@
   // the drag with nothing sent, one no longer on the shown page ends it with a restore.
   function keepDrag() {
     const g = gesture;
+    if (g && g.tool === 'resize') {
+      // a resize: its node gone ends it with nothing sent; no longer drawn (another page, hidden), with
+      // a restore when live edits went
+      if (!nodeOf(g.node)) endGesture(g);
+      else if (!hasBox(g.node)) endGesture(g, { abort: true });
+      return;
+    }
     if (!g || g.tool !== 'move' || !g.dragged) return;
     if (g.nodes) {
       // several: a node gone drops out; one off the shown page drops out, sent back to its start when
@@ -3612,7 +3785,7 @@
   function penPoint(cx, cy) {
     const s = $('surface').getBoundingClientRect();
     const pt = [(cx - s.left) / view.z, (cy - s.top) / view.z];
-    if (pen === null) pen = { pts: [], el: null, line: null };
+    if (pen === null) { pen = { pts: [], el: null, line: null }; drawHandles(); }
     const last = pen.pts[pen.pts.length - 1];
     // a double-click's second press, or a click on the last point, adds none
     if (last && Math.hypot(pt[0] - last[0], pt[1] - last[1]) * view.z < 2) return;
@@ -3638,7 +3811,9 @@
   }
   function dropPen() {
     if (pen !== null && pen.el !== null) pen.el.remove();
+    const had = pen !== null;
     pen = null;
+    if (had) drawHandles();
   }
   // The path made a vector: placed by its first point; x, y its points' top-left (whole px), the path
   // `M x y L x y …` from there, numbers to 0.1; at least two points, else nothing.
