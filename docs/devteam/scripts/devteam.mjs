@@ -4727,16 +4727,20 @@ function parseReview(file, text) {
   let dispIdx = -1;
   let sevIdx = 1;
   let ruleIdx = -1;
+  let findIdx = -1;
   let width = 0;
+  // the category word a Finding opens with (quality.md §3), markup stripped; any other word is none
+  const CATEGORIES = ['weak-check', 'code-fact', 'undecided', 'defect', 'contradicts', 'coverage', 'harness', 'untraced', 'tldr', 'touches', 'other'];
+  const category = (cell) => { const w = String(cell ?? '').replace(/[`*]/g, '').match(/^\s*([A-Za-z-]+)\s*:/)?.[1]?.toLowerCase(); return CATEGORIES.includes(w) ? w : 'none'; };
   for (const row of text.split('\n')) {
     if (!row.trim().startsWith('|')) continue;
     const cells = tableCells(row);
     const lower = cells.map((c) => c.toLowerCase());
-    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); ruleIdx = lower.indexOf('rule'); width = cells.length; continue; }
+    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); ruleIdx = lower.indexOf('rule'); findIdx = lower.indexOf('finding'); width = cells.length; continue; }
     // A row wider than its header (a stray empty cell before the disposition) still has its
     // disposition: the first non-empty cell from the Disposition column on.
     const disposition = dispIdx < 0 ? '' : cells.length > width ? (cells.slice(dispIdx).find((c) => c) ?? '') : (cells[dispIdx] ?? '');
-    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(ruleIdx > 0 && cells[ruleIdx] ? { rule: cells[ruleIdx] } : {}), ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
+    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, category: findIdx < 0 ? 'none' : category(cells[findIdx]), ...(ruleIdx > 0 && cells[ruleIdx] ? { rule: cells[ruleIdx] } : {}), ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
   }
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
@@ -4792,17 +4796,21 @@ function reviewStats() {
   for (const r of all) {
     for (const f of r.findings) { findings++; if (/^wrong/i.test(f.disposition)) wrong++; }
     if (r.pass !== 1 || r.variant || !r.verdict) continue;
-    byStage[r.stage] ??= { first_passes: 0, rejected: 0, rules: {} };
+    byStage[r.stage] ??= { first_passes: 0, rejected: 0, rules: {}, categories: {} };
     byStage[r.stage].first_passes++;
     if (r.verdict === 'CHANGES') byStage[r.stage].rejected++;
     // what first passes keep blocking on, by the rule each blocking finding cites: what a new
     // session's prompt, or the stage's template, should have said from the start (supervisor.md §10)
     for (const f of r.findings) if (blocking(f.severity) && f.rule) { const k = ruleKey(f.rule); byStage[r.stage].rules[k] = (byStage[r.stage].rules[k] ?? 0) + 1; }
+    // and by the category word each opens with (quality.md §3): every blocking finding, none without one
+    for (const f of r.findings) if (blocking(f.severity)) { const k = f.category ?? 'none'; byStage[r.stage].categories[k] = (byStage[r.stage].categories[k] ?? 0) + 1; }
   }
   for (const s of Object.values(byStage)) {
     s.rejection_rate = s.first_passes ? +(s.rejected / s.first_passes).toFixed(2) : null;
     s.top_blocking_rules = Object.entries(s.rules).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([rule, count]) => ({ rule, count }));
+    s.top_blocking_categories = Object.entries(s.categories).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([category, count]) => ({ category, count }));
     delete s.rules;
+    delete s.categories;
   }
   return { by_stage: byStage, findings, false_positive_rate: findings ? +(wrong / findings).toFixed(2) : null };
 }
@@ -14404,6 +14412,10 @@ function cmdMetrics() {
   const m = collectMetrics(since);
   if (flags.json) return json(m);
   const kv = (o, unit = '') => Object.entries(o).map(([k, v]) => `${k} ${unit}${v}`).join(', ') || '-';
+  // stages in the order work meets them: by_stage's own order follows an unsorted folder listing
+  const STAGE_ORDER = ['design', 'graph', 'spec', 'plan', 'contract', 'task', 'final'];
+  const rank = (s) => (STAGE_ORDER.includes(s) ? STAGE_ORDER.indexOf(s) : STAGE_ORDER.length);
+  const categoryStages = Object.entries(m.reviews.by_stage).filter(([, v]) => v.top_blocking_categories?.length).sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b));
   out([
     `since: ${m.since ?? 'the beginning'}`,
     `tickets merged: ${m.tickets_merged}; median cycle ${m.cycle_hours.median ?? '-'}h; slowest ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
@@ -14412,6 +14424,7 @@ function cmdMetrics() {
     `cost by phase: ${kv(m.phase_usd, '$')}; total $${m.cost.usd_total}; per merged ticket ${m.cost.usd_per_merged_ticket === null ? '-' : `$${m.cost.usd_per_merged_ticket}`}`,
     `gates (median): ${m.gates.gates.map((g) => `${g.gate} ${g.median_seconds}s (fail ${Math.round(g.fail_rate * 100)}%)`).join(', ') || '-'}`,
     `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
+    `blocking categories (first passes): ${categoryStages.map(([k, v]) => `${k} ${v.top_blocking_categories.slice(0, 3).map((c) => `${c.category} ${c.count}`).join(', ')}`).join('; ') || '-'}`,
     `messages: ${m.messages.still_open} of ${m.messages.expecting_reply} awaiting reply; median reply ${m.messages.median_reply_minutes ?? '-'} min`,
     `owner questions: ${m.owner_questions.open} open of ${m.owner_questions.asked}; median answer ${m.owner_questions.median_answer_hours ?? '-'}h; answer rate (14d) ${m.owner_questions.answer_rate_14d ?? '-'}`,
     `escaped defects: ${m.escaped_defects}`,
