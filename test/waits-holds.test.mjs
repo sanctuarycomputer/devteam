@@ -255,6 +255,9 @@ test('waits A4: a hold with no cause, a cause in no known form or not in the log
     execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', `${U}: landed`], { cwd: dir, env: envFor(dir), stdio: 'pipe' });
     accepted(dir, hold(V));
     accepted(dir, hold(U));
+    // a stale hold on a merged ticket that names T is not a hold in force (T3-1)
+    logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: U, held: 'u', held_for: [T], held_until: null });
+    accepted(dir, hold(U));
     // a stale hold on a superseded ticket that names T is not a hold in force
     const W = 'kit-04-w';
     logLine(dir, 'supervisor', ticketLine(W, 'fo', { superseded_by: 'kit-09-elsewhere' }));
@@ -382,6 +385,9 @@ test('waits A4: a hold with no cause, a cause in no known form or not in the log
     const words = `${T}'s hold was set by the supervisor: a planner may not change it`;
     refused(dir, ['ticket', 'hold', T, '--reason', 'mine', '--for', 'kit-02-other'], words, PLANNER);
     refused(dir, ['ticket', 'release', T], words, PLANNER);
+    // the same through ticket set (T3-2): a new held, or a release with null
+    refused(dir, ['ticket', 'set', T, '--json', JSON.stringify({ held: 'x', held_for: ['kit-02-other'] })], words, PLANNER);
+    refused(dir, ['ticket', 'set', T, '--json', JSON.stringify({ held: null })], words, PLANNER);
     assert.equal(show(dir, T).held, 'r', 'the supervisor\'s hold stands');
 
     // an unheld fg ticket: the planner's hold is one line in its own file, with no act
@@ -402,5 +408,110 @@ test('waits A4: a hold with no cause, a cause in no known form or not in the log
 
     // another feature's ticket
     refused(dir, ['ticket', 'hold', 'kit-09-elsewhere', '--reason', 'p', '--for', 'kit-02-other'], 'plan-fg may only change the feature "fg" and its tickets', PLANNER, 'kit-09-elsewhere');
+  });
+
+  await t.test('a goal drain: no cause on Upkeep, a cause only with a drain, and a drain that waits on its goal is refused', () => {
+    const { dir, G } = fixture('a4-goal');
+    const OWNER = {}; // envFor strips DEVTEAM_* and TMUX: an owner's terminal
+    const goalLines = () => allLines(dir).filter((l) => l.type === 'goal').length;
+    // refused: nonzero, the words on stderr, no goal line and no act written
+    const goalRefused = (args, words, extra = {}) => {
+      const before = goalLines();
+      const actsBefore = acts(dir).length;
+      const r = cli(dir, args, extra);
+      assert.notEqual(r.status, 0, `${args.join(' ')} is refused: ${r.out}`);
+      assert.ok(r.err.includes(words), `${args.join(' ')}: stderr names "${words}": ${r.err}`);
+      assert.equal(goalLines(), before, `${args.join(' ')}: nothing written`);
+      assert.equal(acts(dir).length, actsBefore, `${args.join(' ')}: no act written`);
+    };
+    atDay(() => goalRefused(['goal', 'hold', 'upkeep', 'drain', '--reason', 'r', '--for', 'external:x', '--until', day(1)], 'Upkeep\'s hold takes no cause (--for, --until)'));
+    atDay(() => goalRefused(['goal', 'hold', 'upkeep', 'drain', '--reason', 'r', '--until', day(1)], '--until goes with --for'));
+    goalRefused(['goal', 'hold', 'upkeep', 'drain', '--owner', '--for', 'external:x'], 'Upkeep\'s hold takes no cause (--for, --until)', OWNER);
+    goalRefused(['goal', 'hold', G, 'run', '--owner', '--for', 'kit-09-elsewhere'], '--for goes with a drain', OWNER);
+    goalRefused(['goal', 'hold', G, 'park', '--owner', '--for', 'kit-09-elsewhere'], '--for goes with a drain', OWNER);
+    // the supervisor's drain that waits on its goal: the goal itself, one of its tickets, a hold that reaches it
+    goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', '--for', `goal:${G}`], `goal:${G} waits on ${G} itself`);
+    goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', '--for', T], `${T} waits on ${G} itself (${T} is one of its tickets)`);
+    logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: 'kit-09-elsewhere', held: 'e', held_for: [`goal:${G}`], held_until: null });
+    goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', '--for', 'kit-09-elsewhere'], `kit-09-elsewhere waits on ${G} itself, through kit-09-elsewhere -> goal:${G}`);
+    // the owner's date with no cause is written as given, hold_until alone
+    const before = linesFor(dir, 'goal', G);
+    const until = atDay(() => { ok(dir, ['goal', 'hold', G, 'drain', '--owner', '--until', day(1)], OWNER); return day(1); });
+    assert.equal(linesFor(dir, 'goal', G), before + 1, 'one goal line');
+    const line = lastFor(dir, 'goal', G);
+    assert.equal(line.by, 'owner');
+    assert.equal(line.hold.mode, 'drain');
+    assert.equal(line.hold_until, until);
+    assert.equal('hold_for' in line, false);
+  });
+});
+
+test('waits A5: a supervisor\'s goal drain names its cause (goal hold <g> drain --for … --until …)', async (t) => {
+  await t.test('the supervisor\'s drain with --for and --until is one goal line with hold_for and hold_until beside hold', () => {
+    const { dir, G } = fixture('a5-drain');
+    const before = linesFor(dir, 'goal', G);
+    const until = atDay(() => { ok(dir, ['goal', 'hold', G, 'drain', '--reason', 'waits on elsewhere', '--for', 'kit-09-elsewhere', '--until', day(5)]); return day(5); });
+    assert.equal(linesFor(dir, 'goal', G), before + 1, 'one goal line');
+    const line = lastFor(dir, 'goal', G);
+    assert.equal(line.by, 'supervisor');
+    assert.deepEqual(line.hold, { mode: 'drain', reason: 'waits on elsewhere' });
+    assert.deepEqual(line.hold_for, ['kit-09-elsewhere']);
+    assert.equal(line.hold_until, until);
+    assert.equal('hold_for' in line.hold, false);
+    const g = JSON.parse(ok(dir, ['goal', 'show', G]));
+    assert.equal(g.hold.mode, 'drain', 'the fold applies the drain');
+    assert.deepEqual(g.hold_for, ['kit-09-elsewhere']);
+    assert.equal(g.hold_until, until);
+    const act = acts(dir).pop();
+    assert.equal(act.class, 'goal-hold');
+    assert.ok(act.what.endsWith(' (for kit-09-elsewhere)'), `the act names the cause: ${act.what}`);
+  });
+
+  await t.test('no --until writes hold_until null', () => {
+    const { dir, G } = fixture('a5-nodate');
+    ok(dir, ['goal', 'hold', G, 'drain', '--reason', 'r', '--for', 'kit-09-elsewhere']);
+    const line = lastFor(dir, 'goal', G);
+    assert.deepEqual(line.hold_for, ['kit-09-elsewhere']);
+    assert.equal(line.hold_until, null);
+  });
+
+  await t.test('the supervisor\'s drain needs --for; with neither --for nor --reason it fails on --reason first', () => {
+    const { dir, G } = fixture('a5-refused');
+    const before = linesFor(dir, 'goal', G);
+    const actsBefore = acts(dir).length;
+    const none = cli(dir, ['goal', 'hold', G, 'drain', '--reason', 'r']);
+    assert.notEqual(none.status, 0, `a drain with no --for is refused: ${none.out}`);
+    assert.ok(none.err.includes('a hold names what it waits on: --for <cause>'), none.err);
+    const neither = cli(dir, ['goal', 'hold', G, 'drain']);
+    assert.notEqual(neither.status, 0);
+    assert.match(neither.err, /--reason/);
+    const ext = cli(dir, ['goal', 'hold', G, 'drain', '--reason', 'r', '--for', 'external:x']);
+    assert.notEqual(ext.status, 0);
+    assert.ok(ext.err.includes('the kit can\'t follow external:x: give it --until <date>'), ext.err);
+    assert.equal(linesFor(dir, 'goal', G), before, 'nothing written');
+    assert.equal(acts(dir).length, actsBefore, 'no act written');
+    // the supervisor's Upkeep drain takes no cause, as before
+    ok(dir, ['goal', 'hold', 'upkeep', 'drain', '--reason', 'r']);
+  });
+
+  await t.test('the owner\'s drain is never refused by the rule: none, its own ticket, an external cause with no date', () => {
+    const OWNER = {}; // envFor strips DEVTEAM_* and TMUX: an owner's terminal
+    for (const [name, causes] of [['none', []], ['own', [T]], ['ext', ['external:x']]]) {
+      const { dir, G } = fixture(`a5-owner-${name}`);
+      const before = linesFor(dir, 'goal', G);
+      ok(dir, ['goal', 'hold', G, 'drain', '--owner', ...(causes.length ? ['--for', ...causes] : [])], OWNER);
+      assert.equal(linesFor(dir, 'goal', G), before + 1, `${name}: one goal line`);
+      const line = lastFor(dir, 'goal', G);
+      assert.equal(line.by, 'owner');
+      assert.equal(line.hold.mode, 'drain');
+      if (causes.length) {
+        assert.deepEqual(line.hold_for, causes);
+        assert.equal(line.hold_until, null);
+      } else {
+        assert.equal('hold_for' in line, false, 'no cause, no hold_for');
+        assert.equal('hold_until' in line, false, 'no date, no hold_until');
+      }
+      assert.equal(JSON.parse(ok(dir, ['goal', 'show', G])).hold.mode, 'drain');
+    }
   });
 });

@@ -4553,11 +4553,12 @@ function restartCommands(filter = () => true) {
   const windows = new Set((sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']) ?? '').split('\n').filter(Boolean));
   return liveSessions().filter((s) => lastPhaseOf(s.name)?.to === 'parked' && ['run', 'drain'].includes(sessionMode(s.name)) && filter(s)).map((s) => ({ name: s.name, cmd: `${s.role} ${s.id}${windows.has(s.name) && fs.existsSync(s.wt) ? ' --resume' : ''}`, handoff: !!handoffFor(s.name) }));
 }
-// Write one goal's hold, creating Upkeep's line the first time it is held.
-function writeHold(g, hold, by) {
+// Write one goal's hold, creating Upkeep's line the first time it is held. extra: top-level fields of
+// the hold line beside hold (a drain's hold_for and hold_until).
+function writeHold(g, hold, by, extra = {}) {
   let target = g;
   if (isUpkeep(g) && !upkeepGoal()) target = appendLog({ type: 'goal', kind: 'upkeep', title: 'Upkeep' }, by);
-  return appendLog({ type: 'goal', op: 'set', id: target.id, hold }, by);
+  return appendLog({ type: 'goal', op: 'set', id: target.id, hold, ...extra }, by);
 }
 const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', 'let-go': 'let go' }[m] ?? m);
 // The mode label a goal shows: drain splits into draining (work still running) and drained.
@@ -4908,6 +4909,11 @@ function graphEdit(type, idRe) {
   if (type === 'ticket' && sub === 'add' && by === 'supervisor' && body.feature !== CHORES && logGet(body.feature)?.type !== 'feature') die(`no feature "${body.feature}" (devteam.mjs feature add, or the feature's id as the log has it)`);
   // a held body is held to ticket hold's rule (holdCause): a cause, a date in range, no wait on itself
   if (type === 'ticket') {
+    // the fold ranks a planner's held below the supervisor's and the owner's, as ticket hold refuses
+    if (writerClass(by) === 'planner' && sub === 'set' && 'held' in body) {
+      const over = readLog().lines.find((l) => l.type === 'ticket' && l.id === id && 'held' in l && ['supervisor', 'owner'].includes(writerClass(l.by)));
+      if (over) die(`${id}'s hold was set by the ${writerClass(over.by)}: a planner may not change it`);
+    }
     if (typeof body.held === 'string' && !body.held.trim()) die('release with null: {"held": null} (a blank held reads released yet keeps its cause)');
     if (typeof body.held === 'string') {
       const t = sub === 'add' ? { ...body, id } : { ...logGet(id), ...body };
@@ -13282,9 +13288,9 @@ function cmdGoal() {
   // The goal's toggle (planning.md §1, holds): run, drain or park. The owner sets any; the
   // supervisor drains a running goal (with a reason) and releases only its own drain.
   if (sub === 'hold') {
-    const g = goalArg(id) ?? die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    const g = goalArg(id) ?? die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--for <cause>…] [--until <YYYY-MM-DD>] [--owner]');
     const mode = positional[2];
-    if (!['run', 'drain', 'park'].includes(mode)) die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    if (!['run', 'drain', 'park'].includes(mode)) die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--for <cause>…] [--until <YYYY-MM-DD>] [--owner]');
     const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal hold'), 'supervisor');
     if (g.status === 'met') die(`${g.id} is met; there is no work to hold`);
     if (g.status === 'abandoned') die(`${g.id} is let go: goal decide ${g.id} restore brings it back, parked`);
@@ -13292,12 +13298,23 @@ function cmdGoal() {
     if (why) die(`goal hold: ${why}`);
     const reason = flagStr('reason')?.trim();
     if (by === 'supervisor' && !reason) die('the supervisor says why: --reason "…"');
+    // a drain names what it waits on (holdCause): the supervisor's is checked, the owner's written as given
+    const causes = flags.for !== undefined ? [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))] : [];
+    const until = flagStr('until') ?? null;
+    if (until !== null && !causes.length && by === 'supervisor') die('--until goes with --for: name what the hold waits on');
+    if ((causes.length || until !== null || flags.for !== undefined) && isUpkeep(g)) die("Upkeep's hold takes no cause (--for, --until)");
+    if ((causes.length || until !== null || flags.for !== undefined) && mode !== 'drain') die('--for goes with a drain');
+    if (by === 'supervisor' && mode === 'drain' && !isUpkeep(g)) {
+      const refusal = holdCause({ kind: 'goal', id: g.id, causes, until, whole: null });
+      if (refusal) die(refusal);
+    }
+    const extra = { ...(causes.length ? { hold_for: causes } : {}), ...(causes.length || until !== null ? { hold_until: until } : {}) };
     const before = goalMode(g);
-    const line = writeHold(g, { mode, ...(reason ? { reason: reason.slice(0, 300) } : {}) }, by);
+    const line = writeHold(g, { mode, ...(reason ? { reason: reason.slice(0, 300) } : {}) }, by, extra);
     logCache = null;
     const name = isUpkeep(g) ? 'upkeep' : g.id;
     const now = goalArg(isUpkeep(g) ? 'upkeep' : g.id);
-    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}`, refs: [now.id], reversible: true }, 'supervisor');
+    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}${causes.length ? ` (for ${causes.join(', ')})` : ''}`, refs: [now.id], reversible: true }, 'supervisor');
     out(`${isUpkeep(g) ? 'Upkeep' : g.id} is ${holdWords(mode)} (${line.id})`);
     if (mode === 'park') {
       if (by === 'supervisor') { const sent = sendParkRulings({ goal: now }); out(sent.length ? `told ${sent.join(', ')} to commit, push, write a handoff and park` : 'no running session of it to tell'); }
