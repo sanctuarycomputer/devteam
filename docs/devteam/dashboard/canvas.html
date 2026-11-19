@@ -1946,18 +1946,21 @@
   // it, until then (performance.now() ms; a drag's throttle). The queued item, or false when nothing was.
   // A plain edit pushes its undo entry (§3; 'undo' is an undo's own edit, which pushes none); a plain
   // edit coalesced into the last one updates that one's own entry with what the new value leaves.
-  // kit-669: `entry` given (one part of a split edit, editSplit): the item takes that entry and pushes
-  // none, and is never coalesced.
+  // kit-669: sets of the same nodes and properties, in the same order, coalesce as one set does (a held
+  // arrow with several selected sends the latest values too). `entry` given (a part of a split edit,
+  // or a held arrow's repeat, editSplit): the item takes that entry and pushes none; it coalesces only
+  // into an unsent edit of that same entry.
   function edit(ops, { kind = 'plain', notBefore = 0, entry } = {}) {
     if (!editable() || !Array.isArray(ops) || ops.length === 0) return false;
     if (new TextEncoder().encode(JSON.stringify(ops)).length > OPS_BYTES) { say(SAY.tooBig); return false; }
     const last = state.pending[state.pending.length - 1];
-    const oneSet = (o) => o.length === 1 && isObj(o[0]) && o[0].op === 'set';
+    const isSet = (o) => isObj(o) && o.op === 'set';
+    const sameSets = (a, b) => a.length === b.length && a.every((o, i) => isSet(o) && isSet(b[i]) && o.id === b[i].id && o.prop === b[i].prop);
     let item;
-    if (entry === undefined && kind === 'plain' && last && last.kind === 'plain' && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) {
+    if ((entry === undefined || entry === last?.entry) && kind === 'plain' && last && last.kind === 'plain' && last.seq === null && sameSets(last.ops, ops)) {
       last.ops = ops;
       item = last;
-      if (last.entry) coalesceEntry(last.entry, ops[0]);
+      if (last.entry) for (const op of ops) coalesceEntry(last.entry, op);
     } else {
       item = { ops, seq: null, kind, entry: null, notBefore };
       if (entry !== undefined) item.entry = entry;
@@ -3195,12 +3198,15 @@
         for (const m of gone) if (m.el) { m.el.style.translate = ''; m.el = null; }
         const back = severalOps(gone.filter((m) => nodeOf(m.id)).map((m) => ({ m })), true);
         for (const m of gone) m.sent = { ...m.start };
-        if (g.nodes.length === 0) { endGesture(g); return; }
-        if (back.length && g.liveSent && editable()) {
+        // those still on the canvas sent back first (T2-1), even when none is left to drag; then a drag
+        // with no node left ends (nothing more sent when every node is gone)
+        const restoring = back.length > 0 && g.liveSent && editable();
+        if (restoring) {
           const items = editSplit(back, { kind: 'restore', notBefore: g.lastAt + 100 });
           if (items) g.items.push(...items);
-          return; // its redraw has previewed the rest
         }
+        if (g.nodes.length === 0) { if (restoring) g.restored = true; endGesture(g); return; }
+        if (restoring) return; // its redraw has previewed the rest
       }
       movePreview(g);
       return;
@@ -3305,7 +3311,13 @@
   const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
   // kit-669 §2: every selection root placed by x, y (its x or y, the axis moved, a number), as one edit
   // of their sets (split over 64 KB); one node's one set still coalesces with the last unsent one.
-  function nudge(dx, dy) {
+  // A held arrow (kit-669 T2-2): its repeats extend the undo entry its first press pushed (what each set
+  // left moves on, its before stays), so one Ctrl+Z takes back the whole hold; with that entry they also
+  // coalesce into the last unsent nudge (edit()), so the latest values go, never a burst. { key, entry,
+  // keys }, or null; a new press or the key's release ends it.
+  let heldNudge = null;
+  const opKeys = (ops) => ops.map((o) => `${o.id}\u0000${o.prop}`).join('\u0001');
+  function nudge(dx, dy, key = null, repeat = false) {
     if (!editable()) return;
     const ops = [];
     for (const id of selRoots()) {
@@ -3317,7 +3329,18 @@
         if (d !== 0 && finite(v)) ops.push({ op: 'set', id, prop: k, value: clamp(v + d, -PX, PX) });
       }
     }
-    if (ops.length) editSplit(ops);
+    if (ops.length === 0) return;
+    const h = heldNudge;
+    const same = repeat && h !== null && h.key === key && h.keys === opKeys(ops) && undos[undos.length - 1] === h.entry
+      && ops.every((op) => h.entry.reverts.some((r) => r.t === 'set' && r.id === op.id && r.prop === op.prop));
+    if (same) {
+      for (const op of ops) coalesceEntry(h.entry, op);
+      editSplit(ops, { entry: h.entry });
+      return;
+    }
+    const items = editSplit(ops);
+    const entry = items ? items[items.length - 1].entry : null;
+    heldNudge = key !== null && entry ? { key, entry, keys: opKeys(ops) } : null;
   }
   document.addEventListener('keydown', (e) => {
     if (!own(ARROWS, e.key) || !toolsOn() || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -3327,8 +3350,9 @@
     e.preventDefault();
     const step = e.shiftKey ? 10 : 1;
     const [dx, dy] = ARROWS[e.key];
-    nudge(dx * step, dy * step);
+    nudge(dx * step, dy * step, e.key, e.repeat);
   });
+  document.addEventListener('keyup', (e) => { if (heldNudge !== null && e.key === heldNudge.key) heldNudge = null; });
 
   // ---- undo (kit-668 §3) ----
   // Each page undoes its own edits. Every plain edit (a tool, a field, a key, a drop, a button) pushes

@@ -1136,3 +1136,110 @@ test('M1.10 an undo with no valid cut is refused', { skip: canDrive ? false : 'n
   noDialogs(rec);
   noExceptions(rec);
 });
+
+test('M1.11 a multi-drag whose nodes all leave the shown page sends them back', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { placed: PLACED }, images: EVERY_IMAGES('placed') });
+  await live(p);
+  const a = await ana(fake, later, 'placed');
+  await p.click('#layers .layer[data-node="loose"]');
+  await shiftClick(p, '#layers .layer[data-node="tiles"]');
+  await waitRows(p, ['loose', 'tiles'], 'loose and tiles selected');
+  const n0 = edits(rec).length;
+  const from = await pagePt(p, 500, 100);
+  await slowDrag(p, from, { x: from.x + 60, y: from.y + 40 }, 1000, null, {
+    half: async () => {
+      await within(async () => edits(rec).length > n0, 'a live edit before Ana moves them');
+      // Ana moves both to Parts: off the shown page, still on the canvas
+      await a.edit([{ op: 'move', id: 'loose', parent: 'p-parts', after: 'button' }, { op: 'move', id: 'tiles', parent: 'p-parts', after: 'loose' }]);
+      await within(async () => (await count(p, '#layers .layer[data-node="loose"]')) === 0, "Ana's move drawn: loose off Checkout");
+    },
+  });
+  await within(async () => (await body(p, 'pending')) === '0' && (await kept(p)) !== null, 'every edit acked', async () => `pending ${await body(p, 'pending')}`);
+  await accepted(rec, n0);
+  const d = fake.doc('placed');
+  assert.deepEqual([d.nodes.loose.parent, d.nodes.loose.x, d.nodes.loose.y], ['p-parts', 400, 0], 'loose sent back to its start');
+  assert.deepEqual([d.nodes.tiles.parent, d.nodes.tiles.x, d.nodes.tiles.y], ['p-parts', 700, 0], 'tiles sent back to its start');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('M1.12 a held arrow with several selected merges, one undo', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await p.click('#layers .layer[data-node="card"]');
+  await shiftClick(p, '#layers .layer[data-node="badge"]');
+  await waitRows(p, ['card', 'badge'], 'card and badge selected');
+  await blurAll(p);
+  await sleep(1100); // the sender's last second clear
+  const n0 = edits(rec).length;
+  const k = { key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 };
+  // held: 30 keydowns (the later ones auto-repeats), then the keyup, as kit-662's held-key test
+  const presses = [];
+  for (let i = 0; i < 30; i++) presses.push(p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...k, autoRepeat: i > 0 }));
+  await Promise.all(presses);
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k });
+  await within(async () => { const s = edits(rec).slice(n0); return s.length > 0 && s[s.length - 1].ops[0].value === 30; }, 'the last nudge sent', async () => JSON.stringify(edits(rec).slice(n0).map((x) => x.ops)), 10000);
+  await waitSaved(p);
+  await sleep(300);
+  const burst = edits(rec).slice(n0);
+  const at = rec.sentAt.filter((_, i) => rec.sent[i] && rec.sent[i].t === 'edit').slice(n0);
+  assert.ok(burst.length < 30, `fewer than 30 edit frames (${burst.length})`);
+  for (const f of burst) assert.deepEqual(f.ops.map((o) => [o.op, o.id, o.prop]), [['set', 'card', 'x'], ['set', 'badge', 'x']], 'each sets card x and badge x');
+  const vals = burst.map((f) => f.ops[0].value);
+  for (let i = 1; i < vals.length; i++) assert.ok(vals[i] > vals[i - 1], `rising: ${vals.join(' ')}`);
+  assert.ok(vals.some((v, i) => (i === 0 ? v : v - vals[i - 1]) > 1), `at least one jump over 1 (coalesced): ${vals.join(' ')}`);
+  for (const f of burst) assert.equal(f.ops[1].value, f.ops[0].value + 12, 'badge moves with card');
+  for (let i = 0; i < at.length; i++) assert.ok(at.filter((x) => x >= at[i] && x < at[i] + 1000).length <= 21, 'at most 21 in any second');
+  let d = fake.doc('every');
+  assert.deepEqual([d.nodes.card.x, d.nodes.badge.x], [30, 42], 'the final positions');
+  // one Ctrl+Z takes back the whole hold
+  const n1 = edits(rec).length;
+  await undoKey(p);
+  const back = await nextEdit(rec, n1);
+  assert.deepEqual(byProp(back.ops).map((o) => [o.id, o.prop, o.value]).sort(), [['badge', 'x', 12], ['card', 'x', 0]], 'both set back to their starts');
+  await accepted(rec, n1);
+  await sleep(300);
+  assert.equal(edits(rec).length, n1 + 1, 'one undo frame');
+  d = fake.doc('every');
+  assert.deepEqual([d.nodes.card.x, d.nodes.badge.x], [0, 12], 'restored in the fake');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test("M1.13 a select naming a new node waits for its add's ack", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  // the acks held: a refused del starts a fetch, held by the recorder; frames that come meanwhile
+  // (the add's ack) wait in the page, and its edits wait unsent
+  holdDocs(rec);
+  await showPageLink(p, 'p-parts', { row: false });
+  await selectRow(p, 'button-label');
+  await blurAll(p);
+  await p.key('Delete');
+  await within(async () => refusedFrames(rec).some((m) => m.why === 'ref'), 'the del refused ref', async () => JSON.stringify(rec.got.slice(-3)));
+  await within(async () => rec.held.length === 1, "the refusal's doc request held", async () => rec.requests.join(' '), 5000);
+  await showPageLink(p, 'p-main', { row: false });
+  // a rectangle drawn on empty stage: added and selected
+  await blurAll(p);
+  await p.key('r');
+  const at = await pagePt(p, -150, -150);
+  await p.clickAt(at.x, at.y);
+  await within(async () => (await selectedRows(p)).length === 1 && !['card', 'loose', 'tiles'].includes((await selectedRows(p))[0]), 'the new rect selected', async () => JSON.stringify(await selectedRows(p)));
+  const [id] = await selectedRows(p);
+  const naming = () => rec.sent.map((m, i) => ({ m, i })).filter((x) => x.m && x.m.t === 'select' && x.m.ids.includes(id));
+  await sleep(1000);
+  assert.deepEqual(naming(), [], 'no select naming it while its add is unacked');
+  rec.release();
+  rec.hold = null;
+  await within(async () => naming().length > 0, 'a select naming it', async () => JSON.stringify(rec.sent.slice(-4)), 10000);
+  const add = edits(rec).find((e) => e.ops.some((o) => o.op === 'add' && o.node && o.node.id === id));
+  assert.ok(add, 'its add sent');
+  const ack = await ackOf(rec, add);
+  const ackAt = rec.gotAt[rec.got.indexOf(ack)];
+  const sel = naming()[0];
+  assert.ok(rec.sentAt[sel.i] >= ackAt, `the select (${rec.sentAt[sel.i]}) after the ack (${ackAt})`);
+  assert.ok(sel.i > rec.sent.indexOf(add), 'the select after the add');
+  noDialogs(rec);
+  noExceptions(rec);
+});
