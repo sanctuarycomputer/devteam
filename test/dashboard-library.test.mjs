@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PORTS, bareProject, dashboardOnFreePort, dataPatchInit, libraryFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
@@ -300,8 +301,9 @@ const ERRORS = "window.__errors.filter((e) => !/presence|websocket/i.test(e))";
 // A bare project (every Library record comes from the patch), its env with its own HOME and every
 // DEVTEAM_* but the ports unset; the dashboard on it and Chrome with init: { p, soon, port, go }. box: the
 // gateway's served map, and the page is at http://4321.box.localhost:<port>/ through boxPage. page: a
-// function (chrome, port) giving the page instead (tapPage).
-async function libraryOn(t, { width = 1440, height = 900, init, box = null, page = null } = {}) {
+// function (chrome, port) giving the page instead (tapPage). setup(root, env): run on the bare project before
+// the dashboard starts, its result given back as made; box may then be a function (made, port) giving the header.
+async function libraryOn(t, { width = 1440, height = 900, init, box = null, page = null, setup = null } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-library-'));
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
@@ -309,10 +311,12 @@ async function libraryOn(t, { width = 1440, height = 900, init, box = null, page
   const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 66), DEVTEAM_PORT_BASE: String(PORTS + 67), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE'].includes(k)) delete env[k];
   for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
+  const made = setup ? setup(root, env) : null;
   const { dash, port } = await dashboardOnFreePort(root, env);
   later(() => dash.stop());
   const chrome = await openChrome();
   later(() => chrome.close());
+  if (typeof box === 'function') box = box(made, port);
   const p = page ? await page(chrome, port) : box ? await boxPage(chrome, port, { header: box }) : await chrome.newPage();
   later(() => p.close());
   const at = box ? p.origin : `http://127.0.0.1:${port}`;
@@ -329,7 +333,7 @@ async function libraryOn(t, { width = 1440, height = 900, init, box = null, page
     await p.send('Page.navigate', { url: `${at}/${hash}` });
     await soon(loaded, 'the page with its data');
   };
-  return { p, soon, port, go, at };
+  return { p, soon, port, go, at, made, box };
 }
 
 const CHROME = { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' };
@@ -1239,5 +1243,297 @@ test('a cold link opens over the Library', { ...CHROME, timeout: 300000 }, async
   await soon(`!document.getElementById('drawer').hidden && ${PEEK}.rows[0]?.[1] === ${JSON.stringify(`artifact:${ids.drafted}`)}`, 'the peek on a cold load');
   assert.equal(await p.ev('history.state.page'), '#library', 'over the Library');
   assert.equal(await p.ev("document.getElementById('library').classList.contains('on')"), true, 'the Library under it');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+// ---- in Chrome (kit-92 T6): the viewer bar: the version pill, Reload, the Public tile, Start and Stop ----
+
+const VERS = 'vers-mock', VERS_WT = 'demo-01-draft', VERS_TITLE = 'Vers mock';
+const versFiles = (n) => ({
+  'artifact.json': JSON.stringify({ v: 1, title: VERS_TITLE, summary: 'A page with versions', by: 'supervisor', for: [] }),
+  'index.html': `<!doctype html><html><head><meta charset="utf-8"><title>v${n}</title></head><body><p>v${n}</p></body></html>\n`,
+});
+const putFiles = (dir, files) => { fs.mkdirSync(dir, { recursive: true }); for (const [rel, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, rel), text); };
+// libraryOn's setup: settings.md's project set (kit92, edited in place as peekFixture edits it), vers-mock landed on
+// main in three commits and drafted in a worktree's folder under .worktrees/ (as artifact-versions.test.mjs builds
+// one); its versions as the CLI lists them, the realpath of the project, the draft's folder
+function versProject(root, env) {
+  const sf = path.join(root, 'docs/devteam/project/settings.md');
+  const s = fs.readFileSync(sf, 'utf8');
+  assert.ok(s.includes('"gates": {}'), 'settings.md as init writes it');
+  fs.writeFileSync(sf, s.replace('"gates": {}', '"project": "kit92", "gates": {}'));
+  const dir = path.join(root, 'docs/devteam/project/artifacts', VERS);
+  const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: root, encoding: 'utf8' }).trim();
+  for (const n of [1, 2, 3]) { putFiles(dir, versFiles(n)); git('add', '-A', dir); git('commit', '-qm', `${VERS} v${n}`); }
+  const draft = path.join(root, '.worktrees', VERS_WT, 'docs/devteam/project/artifacts', VERS);
+  putFiles(draft, versFiles('d'));
+  const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'artifact', 'versions', VERS, '--json'], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const versions = JSON.parse(r.stdout).versions;
+  assert.deepEqual(versions.map((v) => v.kind), ['draft', 'landed', 'earlier', 'earlier'], 'a draft, main\'s and two earlier');
+  return { root: fs.realpathSync(root), versions, draft };
+}
+// the dataPatchInit pattern, merging instead of replacing (so the served vers-mock stays): window.__fx.previews
+// appended to the served library.previews, and window.__fx.published (when the key is there) put on vers-mock's
+// landed row; read on every answer, so a test changes it in the page
+const libraryMergeInit = ({ previews = [], published } = {}) => `(() => {
+  const si = window.setInterval;
+  window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
+  window.__fx = ${JSON.stringify({ previews, ...(published !== undefined ? { published } : {}) })};
+  window.__errors = [];
+  window.addEventListener('error', (e) => window.__errors.push(String(e.message || e.error || e)));
+  window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason && e.reason.message || e.reason)));
+  const real = window.fetch;
+  window.fetch = async (u, o) => {
+    const url = String(u && u.url ? u.url : u);
+    const method = String(o?.method || 'GET').toUpperCase();
+    const r = await real(u, o);
+    const fx = window.__fx;
+    if (method !== 'GET' || !r.ok || !url.startsWith('/api/data')) return r;
+    const d = await r.json();
+    const lib = d.library || {};
+    d.library = { ...lib, previews: [...(lib.previews || []), ...(fx.previews || [])] };
+    if ('published' in fx) d.library.artifacts = (lib.artifacts || []).map((a) => (a.slug === ${JSON.stringify(VERS)} && a.at === 'main' ? { ...a, published: fx.published } : a));
+    return new Response(JSON.stringify(d), { status: r.status, statusText: r.statusText, headers: r.headers });
+  };
+})();`;
+// /api/artifact-versions asks counted (window.__versReads); window.__versFail answers them 500
+const VERS_INIT = `(() => {
+  window.__versReads = 0;
+  window.__versFail = false;
+  const f = window.fetch;
+  window.fetch = (u, o) => {
+    if (String(u && u.url ? u.url : u).startsWith('/api/artifact-versions')) {
+      window.__versReads++;
+      if (window.__versFail) return Promise.resolve(new Response('{"error":"down"}', { status: 500, headers: { 'content-type': 'application/json' } }));
+    }
+    return f(u, o);
+  };
+})();`;
+// /api/preview-start answered by the page: window.__start's status (400 refuses with "no", 200 takes it)
+const START_INIT = `(() => {
+  window.__start = 400;
+  window.__starts = 0;
+  const f = window.fetch;
+  window.fetch = (u, o) => {
+    if (!String(u && u.url ? u.url : u).startsWith('/api/preview-start')) return f(u, o);
+    window.__starts++;
+    return Promise.resolve(new Response(JSON.stringify(window.__start === 200 ? { ok: true } : { error: 'no' }), { status: window.__start, headers: { 'content-type': 'application/json' } }));
+  };
+})();`;
+async function versOn(t, { previews = [], published, init = '', ...rest } = {}) {
+  return libraryOn(t, { ...rest, setup: versProject, init: `${libraryMergeInit({ previews, published })}\n${READS_INIT}\n${VERS_INIT}${init ? `\n${init}` : ''}` });
+}
+// whether an element by id is there and drawn
+const shown = (id) => `(() => { const e = document.getElementById(${JSON.stringify(id)}); return !!e && e.getClientRects().length > 0; })()`;
+const VIEWING = "!document.getElementById('artifact-view').hidden";
+const frameIs = (src) => `${VIEWING} && document.getElementById('av-frame').getAttribute('src') === ${JSON.stringify(src)}`;
+// the version list's options
+const OPTS = "[...document.querySelectorAll('#av-vers [role=option]')].map((o) => ({ at: o.dataset.at, text: o.textContent.trim() }))";
+const LIST_OPEN = "!document.getElementById('av-vers').hidden";
+const BAR = `(() => { const g = (id) => document.getElementById(id); return { title: g('av-title').textContent, where: g('av-where').textContent, note: g('av-note').hidden ? null : g('av-note').textContent,
+  reload: ${shown('av-reload')}, pub: ${shown('av-pub')}, list: !g('av-vers').hidden }; })()`;
+// a colour token as this scheme resolves it
+const tokenColor = (p, token) => p.ev(`(() => { const e = document.createElement('span'); e.style.color = 'var(${token})'; document.getElementById('artifact-view').append(e); const c = getComputedStyle(e).color; e.remove(); return c; })()`);
+const polls = async (p, soon, n = 2) => { const k = await p.ev('window.__dataReads'); await soon(`window.__dataReads >= ${k + n}`, `${n} polls`); };
+const cardTitle = (slug) => `[data-lib-id="artifact:${slug}"] .lib-title`;
+
+test('the viewer bar: its sizes and order', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, go } = await versOn(t);
+  await go(`#artifact/main/${VERS}`);
+  await soon(`${frameIs(`/artifact/main/${VERS}/`)} && document.getElementById('av-title').textContent === ${JSON.stringify(VERS_TITLE)} && ${shown('av-pub')}`, 'the landed version in the viewer, with its tile');
+  const m = await p.ev(`(() => { const r = (s) => document.querySelector(s).getBoundingClientRect(), bar = r('.av-bar');
+    return { bar: bar.height, ver: r('#av-ver').height, badge: r('#av-kind').height, kind: document.getElementById('av-kind').matches('span.badge'), icon: !!document.querySelector('.av-bar > i.av-kind.icon-layout-dashboard:first-child'),
+      pills: ['#av-reload', '#av-pub', '#av-tab', '#av-close'].map((s) => ({ s, h: r(s).height, x: r(s).left })), edge: bar.right - r('#av-close').right, title: r('#av-title').right, ver2: r('#av-ver').left }; })()`);
+  assert.equal(m.bar, 41, '.av-bar is --head-h tall');
+  assert.equal(m.kind, true, 'the kind badge');
+  assert.equal(m.icon, true, 'the kind\'s icon first');
+  assert.equal(m.ver, m.badge, '#av-ver is a badge\'s height');
+  for (const x of m.pills) assert.equal(x.h, 20, `${x.s} is 20 tall`);
+  assert.deepEqual([...m.pills].sort((a, b) => a.x - b.x).map((x) => x.s), ['#av-reload', '#av-pub', '#av-tab', '#av-close'], 'Reload, the tile, open in a tab, close');
+  assert.ok(m.edge >= 0 && m.edge <= 16, `close at the bar's right (${m.edge}px in)`);
+  assert.ok(m.ver2 >= m.title, 'the pill after the title');
+  // off a box: the recorded state, disabled, saying why
+  assert.deepEqual(await p.ev("(() => { const b = document.getElementById('av-pub'); return [b.tagName, b.disabled, b.textContent.trim(), /cloud box/.test(b.title)]; })()"), ['BUTTON', true, 'Not public', true]);
+  // open in a tab and close: one hover rule
+  await p.send('DOM.enable');
+  await p.send('CSS.enable');
+  const { root } = await p.send('DOM.getDocument', { depth: 0 });
+  const hover = async (sel) => {
+    const { nodeId } = await p.send('DOM.querySelector', { nodeId: root.nodeId, selector: sel });
+    await p.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['hover'] });
+    // a button's background has a .12s transition
+    await sleep(400);
+    return p.ev(`getComputedStyle(document.querySelector(${JSON.stringify(sel)})).backgroundColor`);
+  };
+  const [tab, close] = [await hover('#av-tab'), await hover('#av-close')];
+  assert.equal(tab, close, 'the same background under :hover');
+  assert.notEqual(tab, 'rgba(0, 0, 0, 0)', 'a hover background');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('the version pill: the versions, an earlier one read-only, Escape closes only the list', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, go, made } = await versOn(t);
+  const [, , mid, oldest] = made.versions;
+  await go('#library');
+  await soon(`!!document.querySelector(${JSON.stringify(cardTitle(VERS))})`, 'the card');
+  await p.click(cardTitle(VERS));
+  await soon(frameIs(`/artifact/wt/${VERS_WT}/${VERS}/`), 'the draft in the viewer');
+  assert.equal(await p.ev("document.getElementById('av-where').textContent"), `Draft · live in ${VERS_WT}`);
+  assert.equal(await p.ev("getComputedStyle(document.getElementById('av-ver')).color"), await tokenColor(p, '--amber-fg'), 'amber');
+  assert.equal(await p.ev("document.querySelector('#av-ver > #av-where') !== null && document.getElementById('av-ver').matches('button.badge.ver-pill')"), true);
+  assert.equal(await p.ev("document.getElementById('av-vers').getAttribute('role')"), 'listbox');
+  assert.equal(await p.ev(LIST_OPEN), false, 'the list closed at first');
+  await p.click('#av-ver');
+  await soon(`${LIST_OPEN} && ${OPTS}.length === 4`, 'the versions listed');
+  const opts = await p.ev(OPTS);
+  assert.deepEqual(opts.map((o) => o.at), [VERS_WT, 'main', mid.at, oldest.at], 'drafts, landed, earlier');
+  assert.equal(opts[0].text, `Draft · live in ${VERS_WT}`);
+  assert.match(opts[1].text, /^Landed on main · \S/);
+  assert.ok(opts[3].text.endsWith(` · ${oldest.commit.slice(0, 7)}`), `an earlier one by its date and short commit: ${opts[3].text}`);
+  // the oldest: read-only
+  await p.click(`#av-vers [data-at="${oldest.at}"]`);
+  await soon(frameIs(`/artifact/tree/${oldest.tree}/${VERS}/`), 'the oldest in the frame');
+  const ro = { title: VERS_TITLE, where: opts[3].text, note: `Showing ${opts[3].text}, read-only`, reload: false, pub: false, list: false };
+  assert.deepEqual(await p.ev(BAR), ro, 'read-only: the note, no Reload, no tile');
+  await polls(p, soon);
+  assert.deepEqual(await p.ev(BAR), ro, 'two polls on, the title is still the artifact\'s');
+  // the landed one: Reload again
+  await p.click('#av-ver');
+  await soon(`${LIST_OPEN} && ${OPTS}.length === 4`, 'the list again');
+  await p.click('#av-vers [data-at="main"]');
+  await soon(frameIs(`/artifact/main/${VERS}/`), 'main\'s in the frame');
+  const b = await p.ev(BAR);
+  assert.deepEqual([b.title, b.note, b.reload, b.pub, b.list], [VERS_TITLE, null, true, true, false], 'Reload and the tile back, no note');
+  assert.equal(b.where, opts[1].text, 'Landed on main, with its date');
+  assert.equal(await p.ev('window.__versReads'), 1, 'the versions read once per open');
+  // Escape with the list open closes the list, never the viewer
+  await p.click('#av-ver');
+  await soon(LIST_OPEN, 'the list open');
+  await p.key('Escape');
+  await soon(`!${LIST_OPEN}`, 'Escape closed the list');
+  await sleep(500);
+  assert.equal(await p.ev(VIEWING), true, 'the viewer stays');
+  // a click outside closes it too
+  await p.click('#av-ver');
+  await soon(LIST_OPEN, 'the list open');
+  await p.click('#av-title');
+  await soon(`!${LIST_OPEN}`, 'a click outside closed the list');
+  assert.equal(await p.ev(VIEWING), true);
+  // a versions read that fails says so
+  await p.click('#av-close');
+  await soon(`!${VIEWING}`, 'closed');
+  await p.ev('window.__versFail = true');
+  await p.click(cardTitle(VERS));
+  await soon(frameIs(`/artifact/wt/${VERS_WT}/${VERS}/`), 'the draft again');
+  await p.click('#av-ver');
+  await soon(`${LIST_OPEN} && document.getElementById('av-vers').textContent.includes('Versions could not be read')`, 'the failure said');
+  assert.equal(await p.ev('window.__versReads'), 2, 'a new open reads them again');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a tree opened by a link is the published version', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, go, made } = await versOn(t);
+  const mid = made.versions[2];
+  await go('#library');
+  await p.ev(`showArtifact(${JSON.stringify(VERS)}, ${JSON.stringify(mid.at)})`);
+  await soon(frameIs(`/artifact/tree/${mid.tree}/${VERS}/`), 'the tree in the frame');
+  const b = await p.ev(BAR);
+  assert.deepEqual([b.where, b.note, b.reload], ['the published version', null, true], 'no read-only note: read-only is the picked state');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('Reload: its stale outline on the pill', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, go, made } = await versOn(t);
+  await go('#library');
+  await soon(`!!document.querySelector(${JSON.stringify(cardTitle(VERS))})`, 'the card');
+  await p.click(cardTitle(VERS));
+  await soon(`${frameIs(`/artifact/wt/${VERS_WT}/${VERS}/`)} && /^[0-9a-f]{64}$/.test(TS.fp ?? '')`, 'the draft in the viewer, with its fingerprint');
+  const button = () => p.ev("(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle, h: b.getBoundingClientRect().height }; })()");
+  assert.equal((await button()).stale, false, 'nothing newer at open');
+  putFiles(made.draft, versFiles('d2'));
+  await soonIn(p, 60000)("document.getElementById('av-reload').classList.contains('stale')", 'the outline once a newer fingerprint is seen');
+  const b = await button();
+  assert.deepEqual([b.color, b.width, b.style, b.h], [await tokenColor(p, '--amber'), '2px', 'solid', 20], 'the --amber outline on the 20px pill');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('the Public tile (box)', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, go, made, port, box: header } = await versOn(t, { box: (m, port) => ({ kit92: { root: m.root, port, artifacts: {} } }) });
+  const [, landed, mid] = made.versions;
+  const publish = `http://box.localhost:${port}/public/publish?port=4321&slug=${VERS}`;
+  const unpublish = `http://box.localhost:${port}/public/unpublish?port=4321&project=kit92&slug=${VERS}`;
+  const rec = (tree) => ({ tree, at: new Date(Date.now() - 3600e3).toISOString(), channel: 'dashboard' });
+  const TILE = `(() => { const e = document.getElementById('av-pub'); if (!e || !e.getClientRects().length) return null;
+    return { tag: e.tagName, text: e.textContent.trim(), href: e.getAttribute('href'), target: e.getAttribute('target'), disabled: !!e.disabled, h: e.getBoundingClientRect().height }; })()`;
+  const tileColor = "getComputedStyle(document.getElementById('av-pub')).color";
+  await go(`#artifact/main/${VERS}`);
+  await soon(`${frameIs(`/artifact/main/${VERS}/`)} && ${shown('av-pub')}`, 'the landed version, with its tile');
+  const set = async (served, published) => { header.kit92.artifacts = served; await p.ev(`window.__fx.published = ${JSON.stringify(published)}`); };
+  const link = (text, href) => ({ tag: 'A', text, href, target: '_blank', disabled: false, h: 20 });
+  // public, nothing to update: Public (green), the unpublish page
+  await set({ [VERS]: landed.tree }, rec(landed.tree));
+  await soon(`JSON.stringify(${TILE}) === ${JSON.stringify(JSON.stringify(link('Public', unpublish)))}`, 'public');
+  assert.equal(await p.ev(tileColor), await tokenColor(p, '--green-fg'), 'green');
+  assert.equal(await p.ev("!!document.querySelector('#av-pub i.icon-globe')"), true, 'with a globe');
+  // public, main moved on: the update menu
+  await set({ [VERS]: mid.tree }, rec(landed.tree));
+  await soon(`${TILE}?.text === 'Public · update available'`, 'public with an update');
+  assert.deepEqual(await p.ev(TILE), { tag: 'BUTTON', text: 'Public · update available', href: null, target: null, disabled: false, h: 20 });
+  assert.equal(await p.ev(tileColor), await tokenColor(p, '--amber-fg'), 'amber');
+  assert.equal(await p.ev(shown('av-pub-menu')), false, 'its menu closed');
+  await p.click('#av-pub');
+  await soon(shown('av-pub-menu'), 'its menu');
+  const entries = "[...document.querySelectorAll('#av-pub-menu a')].map((a) => [a.textContent.trim(), a.getAttribute('href'), a.target])";
+  assert.deepEqual(await p.ev(entries), [['Update to main\'s version', publish, '_blank'], ['Unpublish', unpublish, '_blank']]);
+  await polls(p, soon);
+  assert.equal(await p.ev(shown('av-pub-menu')), true, 'a poll leaves the open menu');
+  await p.click('#av-title');
+  await soon(`!${shown('av-pub-menu')}`, 'a click outside closes it');
+  // recorded but not served: Not public (amber), the publish page
+  await set({}, rec(landed.tree));
+  await soon(`JSON.stringify(${TILE}) === ${JSON.stringify(JSON.stringify(link('Not public', publish)))}`, 'not live');
+  assert.equal(await p.ev(tileColor), await tokenColor(p, '--amber-fg'), 'amber');
+  // never published: Not public, the publish page
+  await set({}, null);
+  await soon(`JSON.stringify(${TILE}) === ${JSON.stringify(JSON.stringify(link('Not public', publish)))} && ${tileColor} !== ${JSON.stringify(await tokenColor(p, '--amber-fg'))}`, 'none');
+  // a draft has none
+  await go(`#artifact/wt/${VERS_WT}/${VERS}`);
+  await soon(`${frameIs(`/artifact/wt/${VERS_WT}/${VERS}/`)} && document.getElementById('av-title').textContent === ${JSON.stringify(VERS_TITLE)}`, 'the draft');
+  await polls(p, soon);
+  assert.equal(await p.ev(TILE), null, 'no tile on a draft');
+  assert.deepEqual(await p.ev(ERRORS), []);
+});
+
+test('a preview\'s Start and Stop', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { patch, ids } = libraryFixture();
+  const { p, soon, go } = await libraryOn(t, { init: `${libraryMergeInit({ previews: patch.library.previews })}\n${READS_INIT}\n${START_INIT}` });
+  const RUN = `(() => { const g = (id) => document.getElementById(id), r = (id) => g(id).getBoundingClientRect();
+    return { run: [...g('av-run').querySelectorAll('button')].map((b) => b.textContent.trim()), pub: ${shown('av-pub')}, ver: g('av-ver').disabled, plain: g('av-ver').classList.contains('plain'),
+      order: r('av-reload').right <= r('av-run').left && r('av-run').right <= r('av-tab').left && r('av-tab').right <= r('av-close').left }; })()`;
+  for (const [name, run] of [[ids.pvNotRunning, ['Start', 'Stop']], [ids.pvLive, ['Stop']], [ids.pvChecking, ['Stop']], [ids.pvDown, ['Stop']], [ids.pvExpired, ['Stop']]]) {
+    await go(`#preview/${name}`);
+    await soon(`${VIEWING} && document.querySelectorAll('#av-run button').length > 0`, `${name}'s bar`);
+    assert.deepEqual(await p.ev(RUN), { run, pub: false, ver: true, plain: true, order: true }, `${name}: its buttons, after Reload and before open in a tab and close; no tile; the pill plain`);
+  }
+  const name = ids.pvNotRunning;
+  const start = `#av-run [data-preview-start="${name}"]`;
+  await go(`#preview/${name}`);
+  await soon(`document.querySelectorAll('#av-run button').length === 2`, 'Start and Stop');
+  // refused: the error beside the buttons, the page's only element with that id, kept through polls
+  await p.click(start);
+  await soon(`document.getElementById('e-preview-${name}')?.textContent === 'Not saved: no'`, 'the refusal in the bar');
+  assert.deepEqual(await p.ev(`[document.querySelectorAll('[id="e-preview-${name}"]').length, !!document.getElementById('e-preview-${name}').closest('.av-bar'), !!document.getElementById('e-preview-${name}').closest('#av-run')]`), [1, true, false]);
+  await polls(p, soon);
+  assert.equal(await p.ev(`document.getElementById('e-preview-${name}').textContent`), 'Not saved: no', 'a poll leaves it');
+  assert.deepEqual((await p.ev(RUN)).run, ['Start', 'Stop'], 'Start back as it was');
+  // taken: once the preview reads live, Stop alone, within two polls, the viewer still open
+  await p.ev('window.__start = 200');
+  await p.click(start);
+  await soon('window.__starts === 2', 'the second Start sent');
+  await p.ev(`window.__fx.previews.find((x) => x.name === ${JSON.stringify(name)}).up = true`);
+  await polls(p, soon);
+  assert.deepEqual((await p.ev(RUN)).run, ['Stop'], 'Stop alone, never Starting…');
+  assert.equal(await p.ev(VIEWING), true, 'the viewer stays open');
   assert.deepEqual(await p.ev('window.__errors'), []);
 });

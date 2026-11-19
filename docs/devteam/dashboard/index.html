@@ -887,17 +887,49 @@ try {
   /* a viewer opened over a review stays above it: the review sits above the panel (z 25, kit-100) */
   .app:has(main.reviewing) ~ #artifact-view:not([hidden]) { z-index: 26; }
 /* css-viewer-bar start */
-  .av-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
+  /* --head-h tall, one line (kit-92): what the page says gives way first (the title truncates), the pills never wrap; above
+     the stage, so the version list and the tile's menu open over it */
+  .av-bar { position: relative; z-index: 3; flex: none; display: flex; align-items: center; gap: 8px; height: var(--head-h); box-sizing: border-box; padding: 0 10px 0 14px; border-bottom: 1px solid var(--line); min-width: 0; }
   .av-bar > i { font-size: 15px; color: var(--muted); flex: none; }
-  .av-head { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12px; }
-  .av-head b { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-  .av-head .badge { margin-right: 0; }
+  .av-head { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 12px; white-space: nowrap; }
+  .av-head b { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+  .av-head .badge { margin: 0; flex: none; }
+  .av-head > #av-project, .av-head > #av-hint, .av-head > #av-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
   .av-bar button, .av-bar a.av-btn { flex: none; margin: 0; display: inline-flex; align-items: center; gap: 6px; }
-  .av-bar a.av-btn { height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); }
-  .av-bar a.av-btn:hover { background: var(--hover); }
-  /* the artifact changed since the frame loaded it; a keyboard's focus ring still shows over it */
-  #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: 1px; }
-  @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
+  /* the version pill: a badge that is a button, its label #av-where; plain (no chevron, not pressable) on a preview */
+  .av-ver-wrap { position: relative; display: inline-flex; flex: 0 1 auto; min-width: 0; }
+  .av-bar .ver-pill { height: auto; max-width: 340px; min-width: 0; margin: 0; padding: 0 7px; gap: 3px; font: inherit; font-size: 11px; font-weight: 500; line-height: 18px; cursor: pointer; }
+  .av-bar .ver-pill:hover { opacity: 1; background: color-mix(in srgb, var(--c) 16%, transparent); }
+  .av-bar .ver-pill > i { font-size: 10px; flex: none; }
+  .av-bar .ver-pill.plain { cursor: default; opacity: 1; background: color-mix(in srgb, var(--c) 9%, transparent); }
+  .av-bar .ver-pill.plain > i { display: none; }
+  #av-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the version list and the tile's menu: a pop under their pill */
+  .av-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 5; min-width: 240px; max-height: 60vh; overflow: auto; display: flex; flex-direction: column; padding: 4px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+  #av-pub-menu { left: auto; right: 0; min-width: 200px; }
+  .av-bar .av-pop > button, .av-bar .av-pop > a { display: block; height: auto; margin: 0; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font-size: 12.5px; font-weight: 400; text-align: left; white-space: nowrap; text-decoration: none; cursor: pointer; }
+  .av-bar .av-pop > button:hover, .av-bar .av-pop > a:hover, .av-bar .av-pop > [aria-selected="true"] { background: var(--hover); opacity: 1; }
+  .av-bar .av-pop > [aria-selected="true"] { font-weight: 600; }
+  .av-pop > .av-pop-msg { margin: 0; padding: 6px 10px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+  /* the right group: 20px pills (a badge's height); Reload, the tile, Start and Stop with words, open-in-tab and close icons only */
+  .av-bar .av-pill { height: 20px; padding: 0 7px; gap: 4px; border-radius: 999px; font-size: 11px; font-weight: 500; line-height: 18px; text-decoration: none; }
+  .av-bar a.av-pill { flex: none; display: inline-flex; align-items: center; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); }
+  .av-bar a.av-pill:hover { background: var(--hover); }
+  .av-bar .av-pill > i { font-size: 11px; }
+  .av-bar .av-pill.good { color: var(--green-fg); border-color: color-mix(in srgb, var(--green-fg) 35%, transparent); }
+  .av-bar .av-pill.amber { color: var(--amber-fg); border-color: color-mix(in srgb, var(--amber-fg) 35%, transparent); }
+  .av-pub-wrap { position: relative; display: inline-flex; flex: none; }
+  .av-pub-wrap:empty, #av-run:empty, .av-run-err:empty { display: none; }
+  #av-run { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+  .av-bar .av-run-err { flex: 0 1 auto; min-width: 0; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  /* open in a tab and close: icon pills, one hover rule */
+  .av-bar #av-tab, .av-bar #av-close { height: 20px; width: 24px; padding: 0; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font-size: 14px; }
+  .av-bar #av-tab .av-label { display: none; }
+  .av-bar #av-tab:hover, .av-bar #av-close:hover { background: var(--hover); color: var(--fg); opacity: 1; }
+  /* the artifact changed since the frame loaded it: today's 2px outline (kit-206), over the pill's own border; a keyboard's
+     focus ring still shows over it */
+  #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: -1px; }
+  @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar .av-pill { padding: 0 6px; } }
 /* css-viewer-bar end */
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
@@ -1294,10 +1326,14 @@ try {
 <!-- html-viewer start -->
 <div id="artifact-view" class="no-shell" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
 <!-- html-viewer-bar start -->
+  <!-- --head-h tall: the kind, the title, the version pill (its list under it) and what the page says at the left; one group of
+       20px pills at the right (kit-92): Reload, the Public tile, a preview's Start and Stop with its error beside them, ↗, close -->
   <div class="av-bar">
-    <i class="icon-library" aria-hidden="true"></i>
-    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
-    <button class="ghost" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
+    <i class="av-kind icon-layout-dashboard" aria-hidden="true"></i>
+    <div class="av-head"><b id="av-title"></b><span class="badge" id="av-kind">Mock</span><span class="av-ver-wrap"><button type="button" class="badge ver-pill" id="av-ver" aria-haspopup="listbox" aria-expanded="false" title="Its versions"><span id="av-where"></span><i class="icon-chevron-down" aria-hidden="true"></i></button><div id="av-vers" class="av-pop" role="listbox" aria-label="Versions" hidden></div></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
+    <button class="ghost av-pill" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
+    <span class="av-pub-wrap"></span>
+    <span id="av-run"></span><span class="err av-run-err"></span>
     <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in a tab of its own, with its threads" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
     <button class="ghost icon-btn" id="av-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button>
   </div>
@@ -5690,9 +5726,13 @@ function avFreshFrame(id) {
   return f;
 }
 function avHeader() {
-  const a = (DATA?.library?.artifacts ?? []).find((x) => x.slug === AV.slug && x.at === AV.at);
-  $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
-  $('av-where').innerHTML = AV.at === 'main' ? 'landed' : `draft in ${linkify(AV.at)}`;
+  const rows = (DATA?.library?.artifacts ?? []).filter((x) => x.slug === AV.slug);
+  const a = rows.find((x) => x.at === AV.at);
+  // a picked earlier version has no row (it is a tree): the title it has stays, so a poll never resets it to the slug
+  if (!AV.picked?.earlier) $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
+  avKindDraw((a ?? rows[0])?.kind);
+  avVerDraw();
+  avPubDraw();
 }
 // Where an artifact's page is served: main, a draft's worktree, or a published version by its tree.
 const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).startsWith('tree:') ? `tree/${String(at).slice(5)}` : `wt/${encodeURIComponent(at)}`}/${slug}/`;
@@ -5720,15 +5760,25 @@ function tsSet(kind, info = {}) {
 }
 // The stage, in the dashboard or as a viewer tab: the page in its frame, the bar, and the lens's
 // state for it. title: the viewer's (from /api/view); the dashboard's comes from its data.
-function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null } = {}) {
+// picked: a version picked from the bar's list ({ at, label, earlier }), which keeps the versions this open has read.
+function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null, picked = null } = {}) {
   const src = artSrc(slug, at);
-  AV = { at, slug };
+  const keep = picked && AV?.slug === slug ? AV : null;
+  AV = { at, slug, picked, vers: keep?.vers ?? null, known: keep?.known ?? null };
+  // the bar's lists closed, a preview's buttons and error span gone
+  avPopsClose();
+  avRunDraw();
+  avRunErr(null);
   if (title) {
     $('av-title').textContent = title;
-    $('av-where').innerHTML = at === 'main' ? 'landed' : String(at).startsWith('tree:') ? 'the published version' : `draft in ${linkify(at)}`;
+    avKindDraw(null);
+    avVerDraw();
+    avPubDraw();
   } else avHeader();
-  $('av-note').hidden = !note;
-  $('av-note').textContent = note ?? '';
+  // an earlier version picked from the list is read-only, and says so
+  const said = picked?.earlier ? `Showing ${picked.label}, read-only` : note;
+  $('av-note').hidden = !said;
+  $('av-note').textContent = said ?? '';
   $('av-tab').href = artViewer(slug, at);
   // fp and mainFp are what the frame loads now; on the stage already shown its frame isn't loaded
   // again, so what it loaded stays, and what is given is only the latest seen
@@ -5749,6 +5799,8 @@ function avHint() {
   const b = $('av-reload');
   b.classList.toggle('stale', stale);
   b.title = stale ? 'A newer version is ready: reload to see it' : 'Load the page again';
+  // a picked earlier version is read-only: nothing to reload
+  b.hidden = !!AV?.picked?.earlier;
 }
 // The fingerprints just seen for an artifact there (null: not known), taken only while the stage
 // shows it; a published tree never changes, so it is never checked.
@@ -5764,6 +5816,11 @@ const pvViewer = (name) => `/view/preview/${encodeURIComponent(name)}`;
 function tsBar() {
   if (TS.kind !== 'preview') return;
   $('av-where').textContent = [TS.session ? `from ${TS.session}` : '', TS.route || '', TS.up === true ? 'live' : TS.up === false ? 'not answering' : ''].filter(Boolean).join(' · ');
+  // a preview has no versions: the pill is plain, not pressable
+  const v = $('av-ver');
+  v.disabled = true;
+  v.classList.add('plain');
+  v.classList.remove('amber');
 }
 // The stage on a preview: its lens where it is served (info: /api/view's, null when it said nothing),
 // framing the app at its root. A relay this page's own ask just opened is missing from the policy the
@@ -5775,6 +5832,12 @@ function showPreview(name, info) {
   if (info?.opened && VIEWER) { try { if (!sessionStorage.getItem(seen)) { sessionStorage.setItem(seen, '1'); location.reload(); return 'reload'; } } catch {} }
   else { try { sessionStorage.removeItem(seen); } catch {} }
   AV = { preview: name };
+  // the bar: no versions to list, no tile; Start and Stop from the data, the error span named for this preview
+  avPopsClose();
+  avKindDraw('preview');
+  avPubDraw();
+  avRunErr(name);
+  avRunDraw();
   $('av-title').textContent = info?.label || name;
   $('av-tab').href = pvViewer(name);
   const note = !info ? 'This preview is not offered here now' : !info.lens ? "This box's gateway doesn't show previews in a viewer yet; open its link instead" : info.opened ? 'Reload to view this preview' : null;
@@ -6469,7 +6532,7 @@ function renderLibrary(lib) {
   const html = cards.map(([, h]) => h).join('');
   // written only when it changes; then patched card by card, so an unchanged card keeps its node (its live frame,
   // its open ⋯) and a changed one is replaced, its ⋯ opened again if it was open
-  if (grid._libHtml === html && grid.childElementCount) return void (AV?.slug && avHeader());
+  if (grid._libHtml === html && grid.childElementCount) return void avBarPoll();
   grid._libHtml = html;
   if (!cards.length) grid.innerHTML = empty('None');
   else {
@@ -6498,7 +6561,7 @@ function renderLibrary(lib) {
   }
   // new boxes watched; a box the patch removed frees its slot
   thumbsWatch(grid);
-  if (AV?.slug) avHeader();
+  avBarPoll();
 }
 /* library-thumbs start */
 // The Library's thumbnails (kit-92): a box with a frame source (data-thumb-src) gets a sandboxed, inert frame
@@ -6645,6 +6708,163 @@ function openLib(id) {
   showDrawer(`<h2 id="drawer-title">${esc(x.title)}</h2><section class="attrs">${props(rows)}</section>${libThumb(x, previewHere(location, PREVIEWS))}${x.summary ? `<p class="measure lib-sum">${esc(x.summary)}</p>` : ''}`);
 }
 /* library-peek end */
+/* library-versions start */
+// The viewer bar's versions and actions (kit-92): the version pill (#av-ver, its label #av-where) and its list (#av-vers,
+// kit-172's /api/artifact-versions, read once per open), the Public tile (#av-pub), a preview's Start and Stop (#av-run).
+// A version picked from the list is AV.picked ({ at, label, earlier }); one earlier than main's is read-only: no Reload,
+// no tile, and the note says so. Read-only is the picked state, never keyed on tree: (a tree a link opens is "the
+// published version", and its threads work as ever).
+const avDay = (t) => { const d = new Date(t); return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); };
+// a version's words, as the pill and the list say them
+function avVersionLabel(v) {
+  if (v.kind === 'draft') return `Draft · live in ${v.worktree ?? v.at}`;
+  if (v.kind === 'landed') return `Landed on main${v.time ? ` · ${avDay(v.time)}` : ''}`;
+  return [avDay(v.time), String(v.commit ?? '').slice(0, 7)].filter(Boolean).join(' · ');
+}
+// where a version is shown: its draft's worktree, main, or its tree
+const avVersionAt = (v) => (v.kind === 'draft' ? v.worktree ?? v.at : v.kind === 'landed' ? 'main' : v.at);
+// the versions of the artifact on the stage, read once per open (a pick keeps them): { versions }, or null when the read
+// failed; AV.known keeps the list once read, for the pill's "Landed on main · <date>"
+function avVersions(slug) {
+  if (!AV || AV.slug !== slug) return Promise.resolve(null);
+  if (!AV.vers) {
+    const pr = (async () => {
+      try { const r = await fetch(`/api/artifact-versions?${new URLSearchParams({ slug })}`); const d = r.ok ? await r.json() : null; return Array.isArray(d?.versions) ? d : null; } catch { return null; }
+    })();
+    AV.vers = pr;
+    pr.then((d) => { if (AV?.vers === pr) AV.known = d?.versions ?? null; });
+  }
+  return AV.vers;
+}
+// the kind's icon and badge: an artifact's (R1: anything but diagram or docs reads as Mock), or a preview's
+function avKindDraw(kind) {
+  const k = LIB_KINDS.find(([v]) => v === kind && ['mock', 'diagram', 'docs', 'preview'].includes(v)) ?? LIB_KINDS[0];
+  document.querySelector('.av-bar > i.av-kind').className = `av-kind icon-${k[2]}`;
+  $('av-kind').textContent = k[1];
+}
+// the pill on an artifact: the version shown in full, amber on a draft; pressable in the dashboard only (a viewer tab
+// has no Library to show a pick against)
+function avVerDraw() {
+  const b = $('av-ver'), at = String(AV.at), p = AV.picked, tree = at.startsWith('tree:');
+  const landed = AV.known?.find((v) => v.kind === 'landed');
+  $('av-where').textContent = p?.earlier ? p.label : at === 'main' ? (landed ? avVersionLabel(landed) : 'Landed on main') : tree ? 'the published version' : `Draft · live in ${at}`;
+  b.classList.toggle('amber', !p?.earlier && at !== 'main' && !tree);
+  b.classList.toggle('plain', !!VIEWER);
+  b.disabled = !!VIEWER;
+}
+// a pop (the version list, the tile's menu) opened or closed, its pill saying so
+function avPop(el, open) {
+  el.hidden = !open;
+  (el.id === 'av-vers' ? $('av-ver') : $('av-pub'))?.setAttribute('aria-expanded', String(open));
+}
+function avPopsClose() { for (const id of ['av-vers', 'av-pub-menu']) { const el = $(id); if (el && !el.hidden) avPop(el, false); } }
+// the list: loading, then the versions in kit-172's order (drafts, landed, earlier), the shown one selected
+async function avVersOpen() {
+  const list = $('av-vers'), slug = AV?.slug;
+  if (!slug) return;
+  list.innerHTML = '<p class="av-pop-msg">Loading…</p>';
+  avPop(list, true);
+  const d = await avVersions(slug);
+  if (AV?.slug !== slug || list.hidden) return;
+  list.innerHTML = !d ? '<p class="av-pop-msg">Versions could not be read</p>'
+    : d.versions.map((v) => { const at = avVersionAt(v); return `<button type="button" role="option" data-at="${esc(at)}" data-earlier="${v.kind === 'earlier' ? '1' : ''}" aria-selected="${at === AV.at}">${esc(avVersionLabel(v))}</button>`; }).join('');
+  avVerDraw();
+}
+// a version picked: shown on the stage (showArtifact), its fingerprints from the Library's rows where it has one
+function avPick(o) {
+  const slug = AV.slug, at = o.dataset.at, earlier = o.dataset.earlier === '1';
+  avPop($('av-vers'), false);
+  if (at === AV.at) return;
+  const arts = DATA?.library?.artifacts ?? [];
+  const fp = earlier ? null : arts.find((x) => x.slug === slug && x.at === at)?.fp ?? null;
+  showArtifact(slug, at, { fp, mainFp: arts.find((x) => x.slug === slug && x.at === 'main')?.fp ?? null, picked: { at, label: o.textContent, earlier } });
+}
+// The Public tile (an artifact, its landed version shown, in the dashboard): publicState's word and the gateway's page
+// for it, in a new tab (its owner-only confirm page); with an update, a menu of Update and Unpublish (so Unpublish stays
+// reachable). Off a box or with no project: the recorded state, disabled, saying why. '' where it is hidden.
+function avPublicTile() {
+  if (VIEWER || !AV?.slug || AV.at !== 'main' || AV.picked?.earlier) return '';
+  const lib = DATA?.library;
+  const a = (lib?.artifacts ?? []).find((x) => x.slug === AV.slug && x.at === 'main' && !x.error);
+  if (!a) return '';
+  const me = PUBLIC ? publicHere(location, lib) : null;
+  const ps = publicState(a, PUBLIC, me);
+  const globe = '<i class="icon-globe" aria-hidden="true"></i>';
+  if (!me?.project) {
+    const why = !PUBLIC ? 'Publishing happens on the cloud box: there, the Library can make a landed artifact readable by anyone.' : 'To publish from here, set project in settings.md: it is part of every public link.';
+    return `<button type="button" class="ghost av-pill" id="av-pub" disabled title="${esc(why)}">${globe}${ps.rec ? 'Public' : 'Not public'}</button>`;
+  }
+  const L = publicLinks(me), slug = a.slug;
+  const go = (href, words) => `<a role="menuitem" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${words}</a>`;
+  if (ps.state === 'public' && ps.actions.includes('update')) {
+    return `<button type="button" class="ghost av-pill amber" id="av-pub" aria-haspopup="menu" aria-expanded="false" title="Main has changed since it was published">${globe}Public · update available</button>`
+      + `<div id="av-pub-menu" class="av-pop" role="menu" hidden>${go(L.publish([slug]), 'Update to main\'s version')}${go(L.unpublish(slug), 'Unpublish')}</div>`;
+  }
+  const tile = (cls, href, words, title) => `<a class="av-pill${cls}" id="av-pub" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${globe}${words}</a>`;
+  if (ps.state === 'public') return tile(' good', L.unpublish(slug), 'Public', 'Public: click to unpublish (the gateway asks you to confirm)');
+  if (ps.state === 'not-live') return tile(' amber', L.publish([slug]), 'Not public', 'Published, but not live on this box: click to publish main\'s version again');
+  return tile('', L.publish([slug]), 'Not public', 'Click to publish (the gateway shows what goes public and asks you to confirm)');
+}
+// drawn only when it changes, so a poll leaves an open menu alone
+function avPubDraw() {
+  const w = document.querySelector('.av-pub-wrap'), h = avPublicTile();
+  if (w._html === h) return;
+  w._html = h;
+  w.innerHTML = h;
+}
+// a preview's Start and Stop (today's data-preview-start|stop buttons, so the page's handler presses them), from
+// previewState's actions on this poll's row; none in a viewer tab (no row)
+function avRunButtons() {
+  if (VIEWER || !AV?.preview) return '';
+  const p = (DATA?.library?.previews ?? []).find((x) => x.name === AV.preview);
+  if (!p) return '';
+  const { actions } = previewState(p, Date.now()), n = esc(p.name);
+  return `${actions.includes('start') ? `<button type="button" class="ghost av-pill" data-preview-start="${n}">Start</button>` : ''}${actions.includes('stop') ? `<button type="button" class="ghost av-pill" data-preview-stop="${n}">Stop</button>` : ''}`;
+}
+// rewritten only when its HTML changes: a press's "Starting…" stays until the preview's state does
+function avRunDraw() {
+  const el = $('av-run'), h = avRunButtons();
+  if (el._html === h) return;
+  el._html = h;
+  el.innerHTML = h;
+}
+// the span beside Start and Stop that press writes a refusal to (e-preview-<name>, the page's only one): named and
+// emptied once per preview opened, never by a poll, so a refusal stays
+function avRunErr(name) {
+  const el = document.querySelector('.av-run-err'), id = name ? `e-preview-${name}` : '';
+  if (el.id === id) return;
+  if (id) el.id = id; else el.removeAttribute('id');
+  el.textContent = '';
+}
+// each poll: the bar drawn again from the data (renderLibrary calls it)
+function avBarPoll() { if (AV?.slug) avHeader(); else if (AV?.preview) avRunDraw(); }
+// the pill opens its list, an option shows its version, the tile opens its menu; a click anywhere else closes them
+document.addEventListener('click', (e) => {
+  const t = e.target instanceof Element ? e.target : null;
+  if (!t) return;
+  const o = t.closest('#av-vers [role="option"]');
+  if (o) return void avPick(o);
+  const list = $('av-vers'), menu = $('av-pub-menu');
+  if (t.closest('#av-ver')) {
+    if (menu && !menu.hidden) avPop(menu, false);
+    return void (list.hidden ? avVersOpen() : avPop(list, false));
+  }
+  if (menu && t.closest('button#av-pub')) {
+    if (!list.hidden) avPop(list, false);
+    return void avPop(menu, menu.hidden);
+  }
+  if (!t.closest('.av-pop') || t.closest('#av-pub-menu a')) avPopsClose();
+});
+// Escape with a list open closes only the list, never the viewer: ahead of every other Escape (capture, on window)
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const open = ['av-vers', 'av-pub-menu'].map((id) => $(id)).filter((el) => el && !el.hidden);
+  if (!open.length) return;
+  e.stopImmediatePropagation();
+  e.preventDefault();
+  for (const el of open) avPop(el, false);
+}, true);
+/* library-versions end */
 
 /* score-of start */
 // The Overview's Autonomy row (kit-90): each tile's label, the path of its score record in /api/data,
