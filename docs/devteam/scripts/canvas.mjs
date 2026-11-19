@@ -7,7 +7,10 @@
 // `opErrors(op)` (an op's own shape, nothing that needs a document) and `NODE_ID_RE`, kit-internal
 // helpers for the merge and the CLI, held to the fake through `apply`. `resolve(doc, instanceId)` gives
 // an instance's descendants with their effective values (§2's resolution order), a port of the fake's
-// held to it by test/canvas-static-page.test.mjs.
+// held to it by test/canvas-static-page.test.mjs. `merge(base, copy, now)` merges the supervisor's
+// working copy three ways against the base it checked out, into ops that apply to the canvas as it is
+// now (`canvas take`), and `normalDoc(doc)` gives a document by effective value; both held by
+// test/canvas-merge.test.mjs.
 //
 // A port of the rules half of test/lib/canvas-fake.mjs, the contract's executable form: the fake is
 // the reference, and test/canvas-document.test.mjs holds this module to it (the same errors, the same
@@ -1087,6 +1090,183 @@ export function resolve(doc, instanceId) {
     }
   }
   return out;
+}
+
+// ---- merge: a copy three ways against its base (kit-653) ----
+
+// A value as canonical JSON (object keys sorted), so two values compare equal whatever their key order.
+// Only ever called on values of a validated document, whose nesting is bounded by its classes.
+function canon(v) {
+  return JSON.stringify(v, (_k, x) => (isObj(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
+}
+const same = (a, b) => (a === undefined || b === undefined ? a === b : canon(a) === canon(b));
+const MAPS = ['props', 'variants', 'overrides'];
+
+function deletePath(n, path) {
+  const keys = path.split('.');
+  let at = n;
+  for (const k of keys.slice(0, -1)) { if (!isObj(ownGet(at, k))) return; at = at[k]; }
+  delete at[keys[keys.length - 1]];
+}
+
+// The document by effective value (spec "The normal form"): `rev` 0; on every node each stored
+// property equal to its default dropped, then each group (`layout`, `size`), override id map
+// (`overrides.<id>`, `variants.<name>.<id>`) and map (`props`, `variants`, `overrides`) left empty.
+// Two documents with the same normal form show the same canvas, and ops can't tell them apart (a
+// `set` can't remove a property that has a default). Takes a document that passes the shape rules.
+export function normalDoc(doc) {
+  const d = structuredClone(doc);
+  d.rev = 0;
+  for (const id of Object.keys(d.nodes)) {
+    const n = d.nodes[id];
+    for (const p of PLAIN[n.type]) {
+      const def = PROPS[n.type][p].default;
+      if (def === undefined) continue;
+      const v = getPath(n, p);
+      if (v !== undefined && same(v, def)) deletePath(n, p);
+    }
+    for (const g of GROUPS[n.type]) if (isObj(ownGet(n, g)) && Object.keys(n[g]).length === 0) delete n[g];
+    const idMaps = [];
+    if (isObj(ownGet(n, 'overrides')) && n.type === 'instance') idMaps.push(n.overrides);
+    if (isObj(ownGet(n, 'variants')) && n.type === 'component') for (const v of Object.values(n.variants)) if (isObj(v)) idMaps.push(v);
+    for (const m of idMaps) for (const k of Object.keys(m)) if (isObj(m[k]) && Object.keys(m[k]).length === 0) delete m[k];
+    for (const m of MAPS) if (isObj(ownGet(n, m)) && Object.keys(n[m]).length === 0 && PROPS[n.type][m]) delete n[m];
+  }
+  return d;
+}
+
+// The `set`s that make node `b` into node `c` (both of `type`, from normal forms): plain properties at
+// their paths, map entries never a whole map (spec step 5). A property `c` lacks gets its default, or
+// null when it has none (which removes it).
+function propDiffs(type, b, c) {
+  const out = [];
+  const T = PROPS[type];
+  const fill = (p, cv, def) => (cv !== undefined ? cv : def !== undefined ? def : null);
+  for (const p of PLAIN[type]) {
+    if (MAPS.includes(p)) continue;
+    const bv = getPath(b, p), cv = getPath(c, p);
+    if (!same(bv, cv)) out.push([p, fill(p, cv, T[p].default)]);
+  }
+  const mapOf = (n, k) => (isObj(ownGet(n, k)) ? n[k] : {});
+  const keysOf = (...objs) => [...new Set(objs.flatMap((o) => (isObj(o) ? Object.keys(o) : [])))];
+  if (own(T, 'props.<name>')) {
+    const bm = mapOf(b, 'props'), cm = mapOf(c, 'props');
+    for (const k of keysOf(bm, cm)) if (!same(ownGet(bm, k), ownGet(cm, k))) out.push([`props.${k}`, fill(null, ownGet(cm, k))]);
+  }
+  // { id: { prop: value } } entries under `prefix`
+  const idEntries = (prefix, bm, cm) => {
+    for (const id of keysOf(bm, cm)) {
+      const bo = ownGet(bm, id), co = ownGet(cm, id);
+      for (const p of keysOf(bo, co)) if (!same(ownGet(bo, p), ownGet(co, p))) out.push([`${prefix}${id}.${p}`, fill(null, ownGet(co, p))]);
+    }
+  };
+  if (own(T, 'overrides.<id>.<prop>')) idEntries('overrides.', mapOf(b, 'overrides'), mapOf(c, 'overrides'));
+  if (own(T, 'variants.<name>')) {
+    const bm = mapOf(b, 'variants'), cm = mapOf(c, 'variants');
+    for (const name of keysOf(bm, cm)) {
+      const bv = ownGet(bm, name), cv = ownGet(cm, name);
+      if (cv === undefined) out.push([`variants.${name}`, null]);
+      else if (bv === undefined) out.push([`variants.${name}`, cv]);
+      else idEntries(`variants.${name}.`, bv, cv);
+    }
+  }
+  return out;
+}
+
+// Token path → token, for every token in a token tree (own keys, an explicit stack).
+function tokenLeaves(tokens) {
+  const out = new Map();
+  const stack = [[tokens, '']];
+  while (stack.length) {
+    const [g, prefix] = stack.pop();
+    for (const k of Object.keys(g)) {
+      const p = prefix ? `${prefix}.${k}` : k;
+      if (isTokenNode(g[k])) out.set(p, g[k]);
+      else if (isObj(g[k])) stack.push([g[k], p]);
+    }
+  }
+  return out;
+}
+
+function parseDoc(x, who) {
+  if (typeof x !== 'string') return { doc: x };
+  try { return { doc: JSON.parse(x) }; } catch (e) { return { why: `the ${who} does not parse: ${e.message}` }; }
+}
+// An id's kind in a shape-valid document: 'page', a node type, or undefined.
+function kindOf(doc, id) {
+  if (doc.pages.some((pg) => pg.id === id)) return 'page';
+  return isObj(ownGet(doc.nodes, id)) ? doc.nodes[id].type : undefined;
+}
+
+// The supervisor's working copy merged three ways (spec project/tickets/kit-653-canvas-merge/spec.md):
+// what `copy` changed from `base` (by normal form), as canvas@1 ops that apply to `now`, the canvas as
+// it is now, so a person's edit to anything the copy didn't change survives. `base` and `copy` may be
+// JSON text. → { ops, skipped, refused }: refused null and the ops, with `skipped` the copy's changes a
+// person's edit since made impossible ({ id | path, why }); or ops [] and refused { reason, errors }.
+// `images`, `folderBytes`: as validate's, for judging the copy. Pure; never throws for any base or copy.
+export function merge(base, copy, now, { images = null, folderBytes = 0 } = {}) {
+  const refuse = (reason, errors = []) => ({ ops: [], skipped: [], refused: { reason, errors } });
+  const judged = (x, who, opts) => {
+    const p = parseDoc(x, who);
+    if (p.why) return { why: refuse(p.why) };
+    const errors = validate(p.doc, opts);
+    if (errors.length) {
+      const e = errors[0];
+      return { why: refuse(`the ${who} breaks canvas-doc@1: ${e.rule} at ${e.where}: ${e.message}`, errors) };
+    }
+    return { doc: p.doc };
+  };
+  const jb = judged(base, 'base', { images: null, folderBytes: 0 });
+  if (jb.why) return jb.why;
+  const jc = judged(copy, 'copy', { images, folderBytes });
+  if (jc.why) return jc.why;
+  if (!shapeOk(now)) return refuse('the live canvas is malformed');
+  const b = jb.doc, c = jc.doc;
+  for (const id of [...b.pages.map((pg) => pg.id), ...Object.keys(b.nodes)]) {
+    const kb = kindOf(b, id), kc = kindOf(c, id);
+    if (kc !== undefined && kc !== kb) return refuse(`node ${id} changed type from ${kb} to ${kc}: give the new node a new id`);
+  }
+  const nb = normalDoc(b), nc = normalDoc(c);
+
+  const ops = [];
+  const skipped = [];
+  const seenSkip = new Set();
+  const skip = (key, value, why) => {
+    const k = `${key}:${value}:${why}`;
+    if (!seenSkip.has(k)) { seenSkip.add(k); skipped.push({ [key]: value, why }); }
+  };
+  const nowHas = (id) => kindOf(now, id) !== undefined;
+
+  // 1. tokens: removals deepest first, then additions and changes in path order, each judged on a
+  // model of now's tokens as APPLY.token judges it
+  const tb = tokenLeaves(nb.tokens), tc = tokenLeaves(nc.tokens);
+  const tmodel = { tokens: structuredClone(now.tokens) };
+  const depth = (p) => p.split('.').length;
+  const removals = [...tb.keys()].filter((p) => !tc.has(p)).sort((x, y) => depth(y) - depth(x) || (x < y ? -1 : x > y ? 1 : 0));
+  const additions = [...tc.keys()].filter((p) => !tb.has(p) || !same(tb.get(p), tc.get(p))).sort();
+  for (const [p, value] of [...removals.map((p) => [p, null]), ...additions.map((p) => [p, tc.get(p)])]) {
+    const op = { op: 'token', path: p, value: value === null ? null : structuredClone(value) };
+    if (APPLY.token(tmodel, op)) skip('path', p, 'token-conflict');
+    else ops.push(op);
+  }
+
+  // 2. page names
+  for (const pg of nc.pages) {
+    const bp = nb.pages.find((x) => x.id === pg.id);
+    if (!bp || bp.name === pg.name) continue;
+    if (nowHas(pg.id)) ops.push({ op: 'set', id: pg.id, prop: 'name', value: pg.name });
+    else skip('id', pg.id, 'deleted');
+  }
+
+  // 5. properties
+  for (const id of Object.keys(nc.nodes)) {
+    if (!own(nb.nodes, id)) continue;
+    const diffs = propDiffs(nc.nodes[id].type, nb.nodes[id], nc.nodes[id]);
+    if (!diffs.length) continue;
+    if (!nowHas(id)) { skip('id', id, 'deleted'); continue; }
+    for (const [prop, value] of diffs) ops.push({ op: 'set', id, prop, value: structuredClone(value) });
+  }
+  return { ops, skipped, refused: null };
 }
 
 // ---- staticPage: the first page as a static, escaped HTML page ----
