@@ -853,8 +853,7 @@ try {
   /* a card: the head (icon, title truncated to one line, badges, then ↗ and ⋯ pinned right), the thumbnail, the body */
   .lib-card .card-head .lib-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
   .lib-card .card-head a.lib-title[href]:hover { text-decoration: underline; text-underline-offset: 3px; }
-  .lib-card .card-head > * { flex: none; }
-  .lib-card .card-head > .lib-title { flex: 0 1 auto; }
+  .lib-card .card-head > :not(.lib-title) { flex: none; }
   .lib-card .card-head .lib-tab { margin-left: auto; display: inline-flex; color: var(--fg-2); }
   .lib-card .card-head .lib-tab:hover { color: var(--fg); }
   /* a review has no ↗: its ⋯ pins right itself */
@@ -6290,6 +6289,14 @@ function linkHost(l) {
   if (scp) return scp[1].toLowerCase();
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(r) ? of(r) : null;
 }
+// A remote's web page: an https remote as given; git@host:org/repo(.git) and ssh://[user@]host/org/repo(.git)
+// as https://host/org/repo; else null.
+function remoteWeb(remote) {
+  const r = String(remote ?? '');
+  if (/^https:\/\//i.test(r)) return r;
+  const m = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(r) ?? /^ssh:\/\/(?:[^@/\s]+@)?([^:/\s]+)(?::\d+)?\/(.+)$/i.exec(r);
+  return m ? `https://${m[1].toLowerCase()}/${m[2].replace(/\.git$/, '').replace(/^\/+/, '')}` : null;
+}
 function libraryItems(data, now, ctx) {
   const lib = data?.library ?? {};
   const goalsOf = libraryGoalIndex(data);
@@ -6305,10 +6312,10 @@ function libraryItems(data, now, ctx) {
     const newest = drafts.reduce((x, a) => (!x || (Date.parse(a.updated_at ?? '') || 0) > (Date.parse(x.updated_at ?? '') || 0) ? a : x), null);
     const art = newest ?? landed;
     const kind = ['mock', 'diagram', 'docs'].includes(art.kind) ? art.kind : 'mock';
-    // a broken manifest is shown by its slug, and opens nothing
+    // a broken manifest is shown by its slug and opens nothing here; its ↗ opens the viewer, which shows the error
     by[kind].push({
       id: `artifact:${slug}`, kind, title: art.error ? slug : art.title || slug,
-      href: art.error ? null : ctx.artHref(slug, art.at), tab: art.error ? null : ctx.artViewer(slug, art.at),
+      href: art.error ? null : ctx.artHref(slug, art.at), tab: ctx.artViewer(slug, art.at),
       summary: art.error ? null : art.summary ?? null, goals: goals(art.for), at: art.at, art, landed, drafts,
       preview: null, pstate: null, review: null, link: null, host: null, error: art.error ?? null,
     });
@@ -6329,10 +6336,12 @@ function libraryItems(data, now, ctx) {
       preview: p, pstate: ctx.previewState(p, now), review: null, link: null, host: null, error: null,
     });
   }
-  // a link opens its URL, or a path (with no remote) in the file peek, as linkOf does
+  // a link opens its URL, or a path (with no remote) in the file peek, as linkOf does; in a new tab
+  // (its ↗) the same, or a remote's web page
   for (const l of lib.links ?? []) {
+    const href = l.url || (l.path && !l.remote ? ctx.fileHref({ path: l.path, title: l.title }) : null);
     by.link.push({
-      id: `link:${l.id}`, kind: 'link', title: l.title || l.id, href: l.url || (l.path && !l.remote ? ctx.fileHref({ path: l.path, title: l.title }) : null), tab: l.url || null,
+      id: `link:${l.id}`, kind: 'link', title: l.title || l.id, href, tab: href || remoteWeb(l.remote),
       summary: l.notes ?? null, goals: goals(l.for), at: null, art: null, landed: null, drafts: [],
       preview: null, pstate: null, review: null, link: l, host: linkHost(l), error: null,
     });

@@ -25,8 +25,8 @@ const block = (src, name) => {
 test('library-items: kinds, order, goals and keep', () => {
   // the two blocks alone, with no page globals but URL and URLSearchParams
   const vctx = vm.createContext({ URL, URLSearchParams });
-  vm.runInContext(`${block(INDEX, 'preview-cards')}\n${block(INDEX, 'library-items')}\nthis.previewState = previewState; this.LIB_KINDS = LIB_KINDS; this.libraryGoalIndex = libraryGoalIndex; this.linkHost = linkHost; this.libraryItems = libraryItems; this.libraryKeep = libraryKeep;`, vctx);
-  const { previewState, LIB_KINDS, libraryGoalIndex, linkHost, libraryItems, libraryKeep } = vctx;
+  vm.runInContext(`${block(INDEX, 'preview-cards')}\n${block(INDEX, 'library-items')}\nthis.previewState = previewState; this.LIB_KINDS = LIB_KINDS; this.libraryGoalIndex = libraryGoalIndex; this.linkHost = linkHost; this.remoteWeb = remoteWeb; this.libraryItems = libraryItems; this.libraryKeep = libraryKeep;`, vctx);
+  const { previewState, LIB_KINDS, libraryGoalIndex, linkHost, remoteWeb, libraryItems, libraryKeep } = vctx;
   // stubs for the page's href helpers, so an href that isn't theirs shows
   const ctx = {
     previewState,
@@ -71,10 +71,11 @@ test('library-items: kinds, order, goals and keep', () => {
     if (x.kind === 'link') {
       const l = x.link;
       assert.equal(x.href, l.url ? l.url : l.path && !l.remote ? ctx.fileHref(l) : null, `${x.id} href`);
-      assert.equal(x.tab, l.url || null, `${x.id} tab`);
+      assert.equal(x.tab, x.href ?? remoteWeb(l.remote), `${x.id} tab: its href, else its remote's page`);
+      assert.ok(x.tab, `${x.id}: a tab`);
       continue;
     }
-    if (x.error) { assert.equal(x.href, null, `${x.id}: a broken row opens nothing`); assert.equal(x.tab, null); continue; }
+    if (x.error) { assert.equal(x.href, null, `${x.id}: a broken row opens nothing here`); assert.equal(x.tab, ctx.artViewer(x.art.slug, x.art.at), `${x.id}: its tab, the viewer`); continue; }
     assert.equal(x.href, ctx.artHref(x.art.slug, x.art.at), `${x.id} href`);
     assert.equal(x.tab, ctx.artViewer(x.art.slug, x.art.at), `${x.id} tab`);
   }
@@ -140,7 +141,18 @@ test('library-items: kinds, order, goals and keep', () => {
   const urlLink = byId.get(`link:${ids.linkUrl}`);
   assert.equal(urlLink.href, 'https://www.figma.com/file/pay-flow');
   assert.equal(urlLink.tab, 'https://www.figma.com/file/pay-flow');
-  assert.equal(byId.get(`link:${ids.linkPath}`).tab, null);
+  assert.equal(byId.get(`link:${ids.linkPath}`).tab, '#file?path=docs/devteam/project/designs/pay.md', 'a path link\'s tab: the file peek');
+  assert.equal(byId.get(`link:${ids.linkRemote}`).tab, 'https://github.com/sanctuarycomputer/devteam', 'a remote-only link\'s tab: its web page');
+  // every item but a review has a tab
+  for (const x of items) assert.equal(!!x.tab, x.kind !== 'review', `${x.id}: a tab unless a review`);
+  // remoteWeb: an https remote as given; scp and ssh forms as https://host/org/repo
+  assert.equal(remoteWeb('https://bitbucket.org/a/b.git'), 'https://bitbucket.org/a/b.git');
+  assert.equal(remoteWeb('git@github.com:a/b.git'), 'https://github.com/a/b');
+  assert.equal(remoteWeb('git@GitHub.com:a/b'), 'https://github.com/a/b');
+  assert.equal(remoteWeb('ssh://git@gitlab.com/a/b.git'), 'https://gitlab.com/a/b');
+  assert.equal(remoteWeb('ssh://gitlab.com:2222/a/b'), 'https://gitlab.com/a/b');
+  assert.equal(remoteWeb('/srv/repo.git'), null);
+  assert.equal(remoteWeb(null), null);
 
   // goals: a ref's goals
   const goalsOf = libraryGoalIndex(data);
@@ -261,10 +273,19 @@ const HEAD = "(() => { const h = location.hash, i = h.indexOf('?'); return { pag
 // the grid's cards by id, in order
 const IDS = "[...document.querySelectorAll('#lib-grid > .lib-card')].map((c) => c.dataset.libId)";
 const idsAre = (xs) => `JSON.stringify(${IDS}) === ${JSON.stringify(JSON.stringify(xs))}`;
+// an init (after dataPatchInit) that counts the page's /api/data reads
+const READS_INIT = `(() => {
+  window.__dataReads = 0;
+  const f = window.fetch;
+  window.fetch = (u, o) => { if (String(u && u.url ? u.url : u).startsWith('/api/data')) window.__dataReads++; return f(u, o); };
+})();`;
 const card = (id) => `document.querySelector('#lib-grid > .lib-card[data-lib-id="${id}"]')`;
 
 test('the Library is one grid in kind order with no headers', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { patch } = libraryFixture();
+  const { patch, ids } = libraryFixture();
+  // one title far longer than a card is wide
+  const LONG = `The pay flow, ${'every screen the checkout shows and every state it can be in, '.repeat(4)}end`;
+  patch.library.artifacts.find((a) => a.slug === ids.noKind).title = LONG;
   const { items } = itemsOf(patch);
   const { p, soon, go } = await libraryOn(t, { init: dataPatchInit(patch) });
   await go('#library');
@@ -279,7 +300,18 @@ test('the Library is one grid in kind order with no headers', { ...CHROME, timeo
   assert.deepEqual(await p.ev(`(() => { const L = document.getElementById('library'); return { headers: L.querySelectorAll('h1, h2, h3, h4, hr').length, noShell: L.classList.contains('no-shell') || !!L.querySelector('.no-shell'), grid: document.getElementById('lib-grid').classList.contains('cards'), grids: L.querySelectorAll('.cards').length, top: !!document.getElementById('lib-top'), old: !!L.querySelector('#artifacts, #previews, #lib-links') }; })()`),
     { headers: 0, noShell: false, grid: true, grids: 1, top: true, old: false }, 'one .cards grid on the shell, no section header');
   // each card's head: the kind's icon and the title first, ↗ (none on a review) and ⋯ last
-  const heads = await p.ev(`[...document.querySelectorAll('#lib-grid > .lib-card')].map((c) => { const h = c.firstElementChild; const k = [...h.children]; return { id: c.dataset.libId, head: h.classList.contains('card-head'), icon: k[0].className, title: k[1].classList.contains('lib-title') ? k[1].textContent : null, last: k.at(-1).matches('details.menu'), tab: !!h.querySelector(':scope > a.lib-tab.av-open > i.icon-external-link'), beforeMenu: k.at(-2).className, thumb: !!c.querySelector(':scope > .lib-thumb[data-thumb-src]'), body: !!c.querySelector(':scope > .lib-body') }; })`);
+  const heads = await p.ev(`[...document.querySelectorAll('#lib-grid > .lib-card')].map((c) => { const h = c.firstElementChild; const k = [...h.children]; return { id: c.dataset.libId, head: h.classList.contains('card-head'), icon: k[0].className, title: k[1].classList.contains('lib-title') ? k[1].textContent : null, last: k.at(-1).matches('details.menu'), tab: !!h.querySelector(':scope > a.lib-tab.av-open > i.icon-external-link'), beforeMenu: k.at(-2).matches('a.lib-tab.av-open') && !!k.at(-2).querySelector(':scope > i.icon-external-link'), href: h.querySelector(':scope > a.lib-tab')?.getAttribute('href') ?? null, thumb: !!c.querySelector(':scope > .lib-thumb[data-thumb-src]'), body: !!c.querySelector(':scope > .lib-body') }; })`);
+  // each ↗'s target, written out per kind: an artifact's viewer (a broken one too), a preview's, a url link's url,
+  // a path link's file peek, a remote-only link's web page
+  const tabOf = {};
+  for (const x of items) {
+    if (x.art) tabOf[x.id] = `/view/artifact/${x.art.slug}${x.art.at === 'main' ? '' : `?at=${x.art.at}`}`;
+    if (x.preview) tabOf[x.id] = `/view/preview/${x.preview.name}`;
+  }
+  tabOf[`link:${ids.linkUrl}`] = 'https://www.figma.com/file/pay-flow';
+  tabOf[`link:${ids.linkPath}`] = `#file?${new URLSearchParams({ path: 'docs/devteam/project/designs/pay.md', title: 'The pay design' })}`;
+  tabOf[`link:${ids.linkRemote}`] = 'https://github.com/sanctuarycomputer/devteam';
+  assert.ok(tabOf[`artifact:${ids.broken}`] && tabOf[`artifact:${ids.drafted}`].includes('?at='), 'a broken and a drafted artifact among them');
   const icons = { mock: 'layout-dashboard', diagram: 'workflow', docs: 'book-open', review: 'list-checks', preview: 'monitor-play', link: 'link' };
   for (const [i, x] of items.entries()) {
     const h = heads[i];
@@ -288,11 +320,15 @@ test('the Library is one grid in kind order with no headers', { ...CHROME, timeo
     assert.equal(h.title, x.title, `${x.id}: the title in the head`);
     assert.equal(h.last, true, `${x.id}: ⋯ last`);
     assert.equal(h.thumb && h.body, true, `${x.id}: a thumbnail box and a body`);
-    if (x.kind === 'review') assert.equal(h.tab, false, `${x.id}: a review has no ↗`);
-    else if (x.tab) assert.equal(h.beforeMenu, 'lib-tab av-open', `${x.id}: ↗ just before ⋯`);
+    if (x.kind === 'review') { assert.equal(h.tab, false, `${x.id}: a review has no ↗`); continue; }
+    assert.equal(h.beforeMenu, true, `${x.id}: ↗ (icon-external-link) just before ⋯`);
+    assert.equal(h.href, tabOf[x.id], `${x.id}: ↗'s target`);
   }
   // the title one line, truncated
   assert.deepEqual(await p.ev("(() => { const s = getComputedStyle(document.querySelector('#lib-grid .lib-title')); return [s.overflow, s.textOverflow, s.whiteSpace, s.minWidth]; })()"), ['hidden', 'ellipsis', 'nowrap', '0px']);
+  // the long title is cut short, its ↗ and ⋯ still inside the card
+  assert.deepEqual(await p.ev(`(() => { const c = ${card(`artifact:${ids.noKind}`)}, t = c.querySelector('.lib-title'), r = c.getBoundingClientRect().right; return { title: t.textContent.length, cut: t.scrollWidth > t.clientWidth, tab: c.querySelector('.card-head > .lib-tab').getBoundingClientRect().right <= r, menu: c.querySelector('.card-head > details.menu').getBoundingClientRect().right <= r, oneLine: t.getBoundingClientRect().height < 30 }; })()`),
+    { title: LONG.length, cut: true, tab: true, menu: true, oneLine: true }, 'a long title truncated on one line');
   // a frame source for a working artifact and a live preview, none for a review, a broken one or a link
   const srcs = await p.ev("Object.fromEntries([...document.querySelectorAll('#lib-grid > .lib-card')].map((c) => [c.dataset.libId, c.querySelector('.lib-thumb').dataset.thumbSrc]))");
   for (const x of items) {
@@ -428,14 +464,16 @@ test('Kind is remembered by Library alone', { ...CHROME, timeout: 300000 }, asyn
 test('a poll leaves the grid alone; a changed card is replaced, its ⋯ open again', { ...CHROME, timeout: 300000 }, async (t) => {
   const { patch, ids } = libraryFixture();
   const { items } = itemsOf(patch);
-  const { p, soon, go } = await libraryOn(t, { init: dataPatchInit(patch) });
+  const { p, soon, go } = await libraryOn(t, { init: `${dataPatchInit(patch)}\n${READS_INIT}` });
   await go('#library');
   await p.ev('localStorage.clear()');
   await go('#library');
   await soon(idsAre(items.map((x) => x.id)), 'every card');
   const target = `artifact:${ids.docs}`, other = `artifact:${ids.diagram}`;
   await p.ev(`(() => { const c = ${card(target)}, d = c.querySelector('.card-head details.menu'); d.open = true; d.__mark = 'kept'; c.__mark = 'kept'; ${card(other)}.__mark = 'other'; })()`);
-  await new Promise((r) => setTimeout(r, 1200)); // four polls at the patch's 300 ms
+  // polls, not a fixed wait: three more reads of /api/data begun (the page's 300 ms poll), the earlier ones read and drawn
+  const reads = await p.ev('window.__dataReads');
+  await soon(`window.__dataReads >= ${reads + 3}`, 'two more polls');
   assert.deepEqual(await p.ev(`(() => { const c = ${card(target)}, d = c.querySelector('.card-head details.menu'); return { card: c.__mark, menu: d.__mark, open: d.open, other: ${card(other)}.__mark }; })()`),
     { card: 'kept', menu: 'kept', open: true, other: 'other' }, 'the same nodes, the menu still open');
   // the card's summary changes: that card is drawn anew, its menu opened again; the others are kept
@@ -444,5 +482,10 @@ test('a poll leaves the grid alone; a changed card is replaced, its ⋯ open aga
   assert.deepEqual(await p.ev(`(() => { const c = ${card(target)}, d = c.querySelector('.card-head details.menu'); return { card: c.__mark ?? null, menu: d.__mark ?? null, open: d.open, other: ${card(other)}.__mark }; })()`),
     { card: null, menu: null, open: true, other: 'other' }, 'a new node for the changed card, its menu open; the other kept');
   assert.equal(await p.ev(idsAre(items.map((x) => x.id))), true, 'the order kept');
+  // an empty Library (no artifact, preview, review page or link): None
+  await p.ev("window.__fx.library = { ...window.__fx.library, artifacts: [], previews: [], links: [] }; window.__fx.questions = window.__fx.questions.filter((q) => q.kind !== 'review')");
+  await soon("document.getElementById('lib-grid').textContent.trim() === 'None'", 'None for an empty Library');
+  assert.equal(await p.ev(`${IDS}.length`), 0);
+  assert.equal(await p.ev("document.getElementById('n-library').textContent"), '', 'no count');
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
