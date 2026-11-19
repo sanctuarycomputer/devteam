@@ -25976,43 +25976,99 @@ async function browserLive() {
   if (!s) return null;
   try { return (await browserCall('ping', {}, { state: s, ms: 5000 })).code === 0 ? s : null; } catch { return null; }
 }
-// The region's own lock, held across awaits (withLock is synchronous): mkdir <file>.lock holding its
-// owner's token, stale after 120 s, or at once when the token's pid is dead (kit-316 F1), waited on up
-// to 60 s (DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS in tests). A lock is only ever removed by first renaming
-// it to a name of the remover's own, and only when it still holds the token seen: so of two waiters
-// on one stale lock only one takes it, and release removes only its own. A die() inside lets it go.
+// The region's own lock, held across awaits (withLock is synchronous): the folder <file>.lock holding
+// its owner's token, stale after 120 s, or at once when the token's pid is dead (kit-316 F1), waited on
+// up to 60 s (DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS in tests). A starter renames a prepared folder, its
+// owner already written, onto the path, so a lock on the path never lacks its owner. A lock holding S
+// leaves its path only by a rename made under a claim on S, after a look under that claim still shows
+// S, stale (release: its own). Tokens are never reused and an owner is never rewritten on the path, so
+// while the claim stands the lock can't change: other removers of S fail to claim, removers of other
+// tokens find S, and no starter can rename onto a non-empty folder. So the lock moved is always the
+// one judged, a live lock is never moved, and nothing ever needs putting back (kit-321). A die() inside
+// lets it go.
 async function browserStartLock(file, fn) {
   const lock = `${file}.lock`, owner = path.join(lock, 'owner'), start = Date.now();
   const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
   const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS')) || 60000;
+  const prep = `${lock}.new.${token}`;
   const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
-  // Remove the lock if it still holds `seen`; a lock taken from under us is put back. True only when
-  // the lock was moved off its path: a waiter whose take fails (the rename refused, or the test hook
-  // DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL) goes on to the deadline and the sleep, never spins. An aside
-  // that can't be removed is left behind: the lock's path is free either way.
+  const link = (f) => { try { return fs.readlinkSync(f); } catch { return null; } };
+  // a well-formed token naming a dead pid (a positive integer) that isn't ours. No token, one that
+  // isn't one (pid 0 too), or a live owner (EPERM counts as alive) isn't dead.
+  const dead = (t) => { const p = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(t ?? '')?.[1]; return !!p && Number(p) !== process.pid && !browserAlive(Number(p)); };
+  // The lock's token and mtime from one open of its owner, so both are one file's (a stat and then a
+  // read can pair an old lock's mtime with a new lock's token). No readable owner: a null token and the
+  // folder's mtime. No lock: null.
+  const look = () => {
+    let fd;
+    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch {
+      const st = fs.statSync(lock, { throwIfNoEntry: false });
+      return st ? { token: null, mtime: st.mtimeMs } : null;
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
+  };
+  const stale = (l) => Math.abs(Date.now() - l.mtime) > 120000 || dead(l.token);
+  // Remove the lock holding `seen` (null: a folder with no owner) under a claim on it: the symlink
+  // <lock>.take.<k>.<n> (k from seen's hash) pointing at the claimant's token. A dead claimant's claim
+  // is passed over to n + 1, not removed while seen may still be on the path; any other means another
+  // remover holds seen, and we yield. Claims have no age rule: passing over a hung holder could let it
+  // wake and move a live lock. True only when the lock was moved off its path: a waiter whose take
+  // fails (no claim, the lock changed, or the test hook DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL) goes on to
+  // the deadline and the sleep, never spins. An aside that can't be removed is left behind: the lock's
+  // path is free either way.
   const drop = (seen) => {
     if (seen !== token && browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL')) return false;
-    const aside = `${lock}.${token}.${crypto.randomBytes(4).toString('hex')}`;
-    try { fs.renameSync(lock, aside); } catch { return false; }
-    if (read(path.join(aside, 'owner')) === seen) { try { fs.rmSync(aside, { recursive: true, force: true }); } catch {} return true; }
-    try { fs.renameSync(aside, lock); } catch { fs.rmSync(aside, { recursive: true, force: true }); }
-    return false;
+    const key = `${lock}.take.${crypto.createHash('sha256').update(seen ?? '').digest('hex').slice(0, 16)}.`;
+    let n = 0, claim = null, took = false;
+    for (let tries = 0; tries < 64 && !claim; tries++) {
+      try { fs.symlinkSync(token, key + n); claim = key + n; } catch (e) {
+        if (e.code !== 'EEXIST') return false;
+        const t = link(key + n);
+        if (t === null) continue; // the claim went between the two calls: try n again
+        if (!dead(t)) return false;
+        n++;
+      }
+    }
+    if (!claim) return false;
+    try {
+      if (seen === null) {
+        // an empty folder goes at once; ENOENT is a free path, not a take. A non-empty folder is owned
+        // first: an exclusive write of our token as its owner works only on a folder with none (a live
+        // lock has one, a free path has no folder), and then it holds a live token, ours, which no one
+        // else removes and no starter can rename over, so the rename below moves exactly it. Reading
+        // "no owner" instead can't tell an ownerless folder from a path a release just freed (kit-321
+        // design-change-1).
+        try { fs.rmdirSync(lock); return (took = true); } catch (e) {
+          if (e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST') return false;
+          try { fs.writeFileSync(owner, token, { flag: 'wx' }); } catch { return false; }
+        }
+      } else {
+        const l = look();
+        if (l?.token !== seen || (seen !== token && !stale(l))) return false;
+      }
+      const aside = `${lock}.${token}.${crypto.randomBytes(4).toString('hex')}`;
+      try { fs.renameSync(lock, aside); } catch { return false; }
+      try { fs.rmSync(aside, { recursive: true, force: true }); } catch {}
+      return (took = true);
+    } finally {
+      // seen is gone for good now, so its dead claims can go; our own goes last
+      if (took) for (let m = 0; m < n; m++) if (dead(link(key + m))) try { fs.unlinkSync(key + m); } catch {}
+      try { fs.unlinkSync(claim); } catch {}
+    }
   };
-  for (;;) {
-    try { fs.mkdirSync(lock); fs.writeFileSync(owner, token); break; } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      const st = fs.statSync(owner, { throwIfNoEntry: false }) ?? fs.statSync(lock, { throwIfNoEntry: false });
-      const seen = read(owner);
-      if (st && Math.abs(Date.now() - st.mtimeMs) > 120000 && drop(seen)) continue;
-      // a well-formed token naming a dead pid (a positive integer) that isn't ours: stale now. No owner
-      // file yet, a token that isn't one (pid 0 too), or a live owner (EPERM counts as alive) keeps the
-      // 120 s rule.
-      const op = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(seen ?? '')?.[1];
-      if (op && Number(op) !== process.pid && !browserAlive(Number(op)) && drop(seen)) continue;
-      if (Date.now() - start > wait) die(`browser: timed out waiting for ${lock}`);
+  // Each attempt rewrites the prepared owner (its mtime is the lock's age) and renames the folder onto
+  // the path: EEXIST or ENOTEMPTY while a lock is held, and an empty leftover folder is replaced at
+  // once. The prepared folder goes before a die() or a throw.
+  try {
+    fs.mkdirSync(prep);
+    for (;;) {
+      fs.writeFileSync(path.join(prep, 'owner'), token);
+      try { fs.renameSync(prep, lock); break; } catch (e) { if (e.code !== 'EEXIST' && e.code !== 'ENOTEMPTY') throw e; }
+      const l = look();
+      if (!l || (stale(l) && drop(l.token))) continue;
+      if (Date.now() - start > wait) { fs.rmSync(prep, { recursive: true, force: true }); die(`browser: timed out waiting for ${lock}`); }
       await browserSleep(100);
     }
-  }
+  } catch (e) { try { fs.rmSync(prep, { recursive: true, force: true }); } catch {} throw e; }
   const release = () => { if (read(owner) === token) drop(token); };
   process.on('exit', release);
   try { return await fn(); } finally { process.off('exit', release); release(); }
