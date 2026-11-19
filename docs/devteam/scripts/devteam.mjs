@@ -4314,6 +4314,7 @@ function cmdValidate() {
     // reads as main has it there, and a branch's edit to the jobs is what must be checked.
     {
       const own = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
+      errors.push(...recurringRegistry.duplicateKeys(own).map(recurringRegistry.duplicateProblem));
       let jobs;
       try { jobs = own == null ? undefined : JSON.parse(own).recurring; } catch { jobs = undefined; }
       if (jobs !== undefined && !isObj(jobs)) errors.push('settings recurring: an object of { "<name>": { kind, title, what, every, … } }');
@@ -5702,6 +5703,8 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   if (R.name === 'home' && base0) {
     const [a, b] = [settingsAt(base0, { orNull: true }), settingsAt(sha, { orNull: true })];
     if (a && b && ['sensors', 'sensor_defaults'].some((k) => canonical(a[k]) !== canonical(b[k]))) fails.push(...sensorProblems(b).map((e) => `settings at landing: ${e}`));
+    // the head's settings text holds no key twice in one object (task-2-r2 F1-1)
+    fails.push(...recurringRegistry.duplicateKeys(settingsBlockAt(sha)).map(recurringRegistry.duplicateProblem));
     // the jobs that would land (kit-162): each head entry's shape, and the cap counted on main's
     // jobs as they are now with this PR's changes over them
     // a head with no recurring key has no jobs, as validate reads it (task-2 F2)
@@ -23013,6 +23016,12 @@ const recurringRegistry = Object.freeze({
     const names = [...new Set([...Object.keys(A), ...Object.keys(B)])];
     return Object.fromEntries(names.filter((n) => Object.hasOwn(A, n) !== Object.hasOwn(B, n) || canonical(A[n]) !== canonical(B[n])).map((n) => [n, Object.hasOwn(B, n) ? B[n] : null]));
   },
+  // The keys a settings block's text repeats inside one object, at any depth, as [{ key, path }]
+  // (jsonDuplicateKeys' walk; none for text that isn't JSON, whose own error is reported). JSON.parse
+  // keeps the last of two, so the text reads canonically equal to one without the first while git
+  // merges the text it has: validate and check-pr refuse any (task-2-r2 F1-1).
+  duplicateKeys: (text) => (typeof text === 'string' ? jsonDuplicateKeys(text) ?? [] : []).map((p) => ({ key: String(p[p.length - 1]), path: p.join('.') })),
+  duplicateProblem: ({ key, path: at }) => `settings: "${key}" appears twice in one object (${at}): JSON keeps only the last, so the file would say one thing and the kit read another`,
   // settings.md's text with only the top-level "recurring" value of its json devteam block set to
   // value, as { text, problem }: a string-aware walk finds the value's span and it alone is
   // replaced; without the key, it goes after the last value, before the block's closing }. The

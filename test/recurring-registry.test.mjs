@@ -365,6 +365,32 @@ test('A11: merge refuses a job that breaks the shape; validate and merge refuse 
   } finally { T.done(); }
 });
 
+test('A11b: a settings block with a key twice in one object is refused by validate and at landing', () => {
+  // JSON.parse keeps the last of two equal keys, so a hidden first one reads as nothing while git
+  // merges its text (task-2-r2 F1-1)
+  const T = setup('dup-keys');
+  try {
+    const evil = JSON.stringify(check({ every: '1h', run: 'gh run list --limit 9' }));
+    const hide = (text, name) => text.replace(/"recurring": \{\n/, `"recurring": {\n    "${name}": ${evil},\n`);
+    T.onMain((j) => { j.recurring = { mm: check() }; });
+    // a chore whose head adds aa visibly, with a second aa above it that the parse hides
+    const wt = T.choreBranch('dup', (w) => {
+      T.edit((j) => { j.recurring.aa = check(); }, w);
+      const f = path.join(w, 'docs/devteam/project/settings.md');
+      fs.writeFileSync(f, hide(fs.readFileSync(f, 'utf8'), 'aa'));
+    });
+    assert.match(fs.readFileSync(path.join(wt, 'docs/devteam/project/settings.md'), 'utf8'), /"aa": \{"kind"/);
+    const q = T.yes({ recurring: { aa: check() } });
+    refused(T.dry('dup', q), /settings: "aa" appears twice in one object \(recurring\.aa\): JSON keeps only the last/);
+    // main itself with zz twice: validate refuses it
+    fs.writeFileSync(T.settingsFile, hide(fs.readFileSync(T.settingsFile, 'utf8').replace(/"recurring": \{\n/, `"recurring": {\n    "zz": ${JSON.stringify(check())},\n`), 'zz'));
+    T.g(['commit', '-qam', 'main hides a job'], T.old);
+    T.g(['push', '-q', 'origin', 'main'], T.old);
+    const v = T.run(['validate']);
+    refused({ status: v.status, text: T.text(v) }, /settings: "zz" appears twice in one object \(recurring\.zz\)/);
+  } finally { T.done(); }
+});
+
 test('A12: recurring apply writes exactly the answered change and leaves every other byte alone', () => {
   const T = setup('apply');
   try {
