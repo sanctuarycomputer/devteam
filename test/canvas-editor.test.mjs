@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startCanvasFake } from './lib/canvas-fake.mjs';
+import { resolve, startCanvasFake } from './lib/canvas-fake.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { until } from './lib/kit.mjs';
 
@@ -197,4 +197,194 @@ test('loading states', { skip: canDrive ? false : 'needs Chrome and WebSocket', 
     assert.deepEqual(await p.ev("[...document.querySelectorAll('#pages a[data-page]')].map((a) => a.textContent)"), ['Page 1']);
     assert.deepEqual(rec.exceptions, []);
   });
+});
+
+
+// ---- drawing (C1.2 to C1.7, C1.12, and the review focus's odd trees and missing $ref) ----
+
+const EVERY_IMAGES = (slug) => ({ [slug]: { [IMG_FILE]: IMG } });
+const isDocUrl = (u) => u.includes('/api/canvas/doc');
+const docAnswer = (doc) => (u) => (isDocUrl(u) ? { status: 200, body: { session: null, rev: doc.rev, doc, repo: { name: null, public: null } } } : null);
+const q = (sel) => `document.querySelector(${JSON.stringify(sel)})`;
+const css = (p, sel, prop) => p.ev(`(() => { const e = ${q(sel)}; return e ? getComputedStyle(e).getPropertyValue(${JSON.stringify(prop)}) : null; })()`);
+const count = (p, sel) => p.ev(`document.querySelectorAll(${JSON.stringify(sel)}).length`);
+// A drawn element's box in the page's own (unscaled) px, from the page surface's top-left corner: the
+// on-screen rectangle divided by the scale of #surface's transform.
+const RECT = `(sel) => {
+  const s = document.getElementById('surface');
+  const tr = getComputedStyle(s).transform;
+  const z = tr === 'none' ? 1 : new DOMMatrixReadOnly(tr).a;
+  const o = s.getBoundingClientRect();
+  const e = document.querySelector(sel);
+  if (!e) return null;
+  const r = e.getBoundingClientRect();
+  return { l: (r.left - o.left) / z, t: (r.top - o.top) / z, r: (r.right - o.left) / z, b: (r.bottom - o.top) / z, w: r.width / z, h: r.height / z };
+}`;
+const rect = (p, sel) => p.ev(`(${RECT})(${JSON.stringify(sel)})`);
+const near = (a, b, tol, what) => assert.ok(Math.abs(a - b) <= tol, `${what}: ${a} vs ${b} (±${tol})`);
+const CHECKOUT_IDS = ['card', 'title', 'rule', 'dot', 'icon', 'photo', 'actions', 'buy', 'loose', 'badge', 'tiles'];
+
+test('every node type', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, origin, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  assert.equal(await state(p), 'ready');
+  for (const id of CHECKOUT_IDS) assert.equal(await count(p, `#surface [data-id="${id}"]`), 1, `${id} drawn once`);
+  assert.equal(await count(p, '[data-id]'), CHECKOUT_IDS.length, 'only drawn nodes carry data-id');
+
+  // C1.2 frames, real layout
+  assert.equal(await css(p, '[data-id="card"]', 'display'), 'flex');
+  assert.equal(await css(p, '[data-id="card"]', 'flex-direction'), 'column');
+  assert.equal(await css(p, '[data-id="card"]', 'row-gap'), '16px');
+  for (const side of ['top', 'right', 'bottom', 'left']) assert.equal(await css(p, '[data-id="card"]', `padding-${side}`), '16px', `card padding-${side}`);
+  assert.equal(await css(p, '[data-id="card"]', 'justify-content'), 'space-between');
+  assert.equal(await css(p, '[data-id="card"]', 'align-items'), 'stretch');
+  const title = await rect(p, '[data-id="title"]');
+  const rule = await rect(p, '[data-id="rule"]');
+  near(rule.t, title.b + 16, 0.5, "rule's top is title's bottom + 16");
+  assert.equal(await css(p, '[data-id="actions"]', 'display'), 'flex');
+  assert.equal(await css(p, '[data-id="tiles"]', 'display'), 'grid');
+  const cols = (await css(p, '[data-id="tiles"]', 'grid-template-columns')).split(' ');
+  assert.equal(cols.length, 2, `two column tracks: ${cols.join(' ')}`);
+  assert.equal(cols[0], cols[1], 'equal column tracks');
+  assert.ok((await css(p, '[data-id="tiles"]', 'grid-template-rows')).startsWith('80px'), 'rows start 80px');
+  assert.ok(!['flex', 'grid'].includes(await css(p, '[data-id="loose"]', 'display')), 'loose is neither flex nor grid');
+  assert.equal(await css(p, '[data-id="badge"]', 'position'), 'absolute');
+  assert.equal(await css(p, '[data-id="badge"]', 'left'), '12px');
+  assert.equal(await css(p, '[data-id="badge"]', 'top'), '-8px');
+  const loose = await rect(p, '[data-id="loose"]');
+  const badge = await rect(p, '[data-id="badge"]');
+  near(badge.l - loose.l, 12, 0.5, 'badge left within loose');
+  near(badge.t - loose.t, -8, 0.5, 'badge top within loose');
+  near(loose.l, 400, 0.5, 'loose at x 400 on the page');
+
+  // C1.3 text
+  assert.equal(await text(p, '[data-id="title"]'), 'Order summary');
+  assert.equal(await css(p, '[data-id="title"]', 'font-size'), '16px');
+  assert.equal(await css(p, '[data-id="title"]', 'color'), 'rgb(17, 17, 17)');
+
+  // C1.4 rect and ellipse
+  assert.equal(await css(p, '[data-id="rule"]', 'background-color'), 'rgb(229, 231, 235)');
+  near(rule.h, 1, 0.01, 'rule height');
+  assert.equal(await css(p, '[data-id="dot"]', 'border-radius'), '50%');
+  const dot = await rect(p, '[data-id="dot"]');
+  near(dot.w, 8, 0.01, 'dot width');
+  near(dot.h, 8, 0.01, 'dot height');
+
+  // C1.5 vector
+  assert.equal(await p.ev(`${q('[data-id="icon"]')}.localName`), 'svg');
+  assert.equal(await count(p, '[data-id="icon"] path'), 1);
+  assert.equal(await p.ev(`${q('[data-id="icon"] path')}.getAttribute('d')`), 'M2 8 L6 12 L14 4');
+  assert.equal(await css(p, '[data-id="icon"] path', 'fill'), 'none');
+  assert.equal(await css(p, '[data-id="icon"] path', 'stroke-width'), '2px');
+
+  // C1.6 image
+  assert.equal(await p.ev(`${q('[data-id="photo"]')}.localName`), 'img');
+  assert.equal(await p.ev(`${q('[data-id="photo"]')}.src`), `${origin}/api/canvas/image/every/${IMG_FILE}`);
+  assert.equal(await p.ev(`(() => { const i = ${q('[data-id="photo"]')}; return i.complete && i.naturalWidth > 0; })()`), true, 'the image loaded');
+  assert.equal(await css(p, '[data-id="photo"]', 'object-fit'), 'cover');
+  near((await rect(p, '[data-id="photo"]')).h, 120, 0.01, 'photo height');
+  assert.equal(await p.ev(`${q('[data-id="photo"]')}.alt`), 'Photo');
+
+  // C1.7 instance: the five-level conflict, as the fake resolves it
+  const label = '[data-of="buy"][data-src="button-label"]';
+  assert.equal(await count(p, label), 1);
+  assert.equal(await text(p, label), resolve(EVERY, 'buy')['button-label'].text);
+  assert.notEqual(await css(p, '[data-of="buy"][data-src="button-bg"]', 'display'), 'none', "buy's background is displayed");
+  assert.equal(await count(p, '#surface [data-id="button-label"], #surface [data-id="button-bg"]'), 0, "an instance's inner nodes carry no data-id");
+  assert.equal(await count(p, '.clabel'), 0, 'no component on Checkout');
+
+  // C1.7 component, on Parts (clicked in the Pages list)
+  await p.click('#pages a[data-page="p-parts"]');
+  await until(() => p.ev(`document.body.dataset.state === 'ready' && !!${q('#surface [data-id="button"]')}`), 'Parts drawn');
+  assert.equal(await p.ev('location.hash'), '#page=p-parts');
+  assert.equal(await css(p, '[data-id="button"]', 'display'), 'flex');
+  assert.equal(await css(p, '[data-id="button"]', 'flex-direction'), 'row');
+  assert.equal(await text(p, '[data-id="button-label"]'), 'Base label');
+  const bg = await rect(p, '[data-id="button-bg"]');
+  const lab = await rect(p, '[data-id="button-label"]');
+  near(lab.l, bg.r + 16, 0.5, "button-label's left is button-bg's right + 16");
+  near(lab.t, bg.t, 0.5, 'button-bg and button-label share a top');
+  assert.equal(await count(p, '#surface .clabel'), 1, "the component's label");
+  const btn = await rect(p, '[data-id="button"]');
+  const clabel = await rect(p, '#surface .clabel');
+  assert.ok(clabel.b <= btn.t + 0.5, `the label sits above the component: ${clabel.b} vs ${btn.t}`);
+  near(clabel.l, btn.l, 0.5, "the label starts at the component's left");
+  assert.equal(await count(p, '[data-id="card"]'), 0, 'Checkout is gone');
+  assert.deepEqual(rec.exceptions, []);
+
+  await t.test('C1.7 a bool prop beats every earlier level', async (st) => {
+    const off = structuredClone(EVERY);
+    off.nodes.buy.props.enabled = false;
+    const o = await open(st, { canvases: { 'every-off': off }, images: EVERY_IMAGES('every-off') });
+    assert.equal(await state(o.p), 'ready');
+    assert.equal(await css(o.p, '[data-of="buy"][data-src="button-bg"]', 'display'), 'none');
+    assert.notEqual(await css(o.p, '[data-of="buy"][data-src="button-label"]', 'display'), 'none');
+    assert.deepEqual(o.rec.exceptions, []);
+  });
+});
+
+// 22 components, each holding an instance of the next, and an instance of the first on the page.
+function chainDoc() {
+  const nodes = {};
+  const comps = [];
+  for (let k = 0; k < 22; k++) {
+    comps.push(`c${k}`);
+    nodes[`c${k}`] = { type: 'component', parent: 'p-comps', name: `C${k}`, x: 0, y: k * 100, layout: { mode: 'row', padding: [2, 2, 2, 2] }, children: [k < 21 ? `i${k + 1}` : 'leaf'] };
+    if (k < 21) nodes[`i${k + 1}`] = { type: 'instance', parent: `c${k}`, name: `I${k + 1}`, component: `c${k + 1}` };
+  }
+  nodes.leaf = { type: 'rect', parent: 'c21', name: 'Leaf', size: { w: 4, h: 4 }, fill: '#ff0000' };
+  nodes.i0 = { type: 'instance', parent: 'p-main', name: 'I0', component: 'c0' };
+  return { canvas: 1, rev: 0, tokens: {}, pages: [{ id: 'p-main', name: 'Main', children: ['i0'] }, { id: 'p-comps', name: 'Components', children: comps }], nodes };
+}
+
+test('nested instances', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { chain: chainDoc() } });
+  assert.equal(await state(p), 'ready');
+  assert.equal(await count(p, '#surface [data-id="i0"]'), 1, 'the page instance, level 1');
+  assert.equal(await count(p, '#surface [data-id="i0"].placeholder'), 0);
+  let parent = '[data-id="i0"]';
+  for (let k = 1; k <= 19; k++) {
+    const sel = `${parent} [data-src="i${k}"]`;
+    assert.equal(await count(p, sel), 1, `level ${k + 1} drawn inside level ${k}`);
+    assert.equal(await count(p, `[data-src="i${k}"].placeholder`), 0, `level ${k + 1} is no placeholder`);
+    parent = `[data-src="i${k}"]`;
+  }
+  assert.equal(await count(p, `${parent} [data-src="i20"].placeholder`), 1, 'level 21 is a placeholder');
+  assert.equal(await text(p, '[data-src="i20"]'), 'I20', "the placeholder shows the instance's name");
+  assert.equal(await count(p, '[data-src="i20"] [data-src]'), 0, 'nothing drawn inside the placeholder');
+  assert.equal(await count(p, '[data-src="i21"], [data-src="leaf"]'), 0);
+  assert.equal(await count(p, '.placeholder'), 1);
+  assert.deepEqual(rec.exceptions, []);
+});
+
+test('odd trees', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  // invalid, so the recorder serves it; the fake holds the valid document (and its image) under the slug
+  const odd = structuredClone(EVERY);
+  odd.pages[0].children = ['card', 'loose', 'card', 'nope', 'tiles', 'loose'];
+  odd.nodes.card.children = ['title', 'title', 'nope', 'rule', 'dot', 'icon', 'photo', 'actions'];
+  odd.nodes.actions.children = ['buy', 'card', 'buy'];
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), answer: docAnswer(odd) });
+  assert.equal(await state(p), 'ready');
+  for (const id of CHECKOUT_IDS) assert.equal(await count(p, `[data-id="${id}"]`), 1, `${id} drawn once`);
+  assert.equal(await count(p, '[data-id="nope"]'), 0);
+  assert.equal(await count(p, '.placeholder'), 0);
+  const title = await rect(p, '[data-id="title"]');
+  const rule = await rect(p, '[data-id="rule"]');
+  near(rule.t, title.b + 16, 0.5, 'the repeat and the missing child take no room');
+  assert.deepEqual(rec.exceptions, []);
+});
+
+test('a $ref to a missing token', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const odd = structuredClone(EVERY);
+  odd.nodes.card.fill = { $ref: 'color.nope' };
+  odd.nodes.card.layout.gap = { $ref: 'space' };
+  odd.nodes.title.color = { $ref: 'nope.ink' };
+  odd.nodes.rule.fill = { $ref: 'space.m' };
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), answer: docAnswer(odd) });
+  assert.equal(await state(p), 'ready');
+  assert.equal(await css(p, '[data-id="card"]', 'background-color'), 'rgba(0, 0, 0, 0)', 'fill: its default, none');
+  assert.ok(['normal', '0px'].includes(await css(p, '[data-id="card"]', 'row-gap')), 'gap: its default, 0');
+  assert.equal(await css(p, '[data-id="title"]', 'color'), 'rgb(0, 0, 0)', 'colour: its default');
+  assert.equal(await css(p, '[data-id="rule"]', 'background-color'), 'rgba(0, 0, 0, 0)', 'a ref to a token of another type');
+  assert.equal(await css(p, '[data-id="card"]', 'display'), 'flex', 'the rest of the node drawn');
+  assert.deepEqual(rec.exceptions, []);
 });

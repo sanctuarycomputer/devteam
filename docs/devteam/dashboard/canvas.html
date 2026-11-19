@@ -80,7 +80,13 @@
   body[data-state="error"] #surface, body[data-state="error"] .zoom { display: none; }
 
   /* the design being drawn keeps its own colours, light or dark */
+  .dnode { margin: 0; }
+  img.dnode, svg.dnode { display: block; }
   .dnode.sel { outline: 2px solid var(--sel); }
+  /* a node that can't be drawn: a dashed box with its name */
+  .placeholder { border: 1px dashed #8f8f8f; color: #666666; font: 11px/1.4 var(--sans); padding: 2px 6px; min-width: 24px; min-height: 18px; white-space: nowrap; background: transparent; }
+  /* a component's label: stage chrome above its box, placed by CSS anchor positioning */
+  .clabel { position: absolute; left: anchor(left); bottom: anchor(top); margin-bottom: 4px; font: 500 11px/1 var(--sans); color: var(--sel); white-space: nowrap; pointer-events: none; }
 </style>
 </head>
 <body data-state="loading">
@@ -198,6 +204,489 @@
     })));
   }
 
+  // ---- checkers: every style value comes from one of these, never a document string passed through ----
+
+  const HEX_RE = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+  const HEX6_RE = /^#[0-9a-f]{6}$/i;
+  const SRC_RE = /^images\/([0-9a-f]{16}\.(?:png|jpg|webp|gif))$/;
+  const FR_RE = /^([1-9][0-9]{0,2})fr$/;
+  const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+  const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+  const isRef = (v) => isObj(v) && Object.keys(v).length === 1 && typeof v.$ref === 'string';
+  // The page's own tables: a document word is looked up here, never passed through.
+  const FAMILY = {
+    sans: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif",
+    serif: "ui-serif, Georgia, Cambria, 'Times New Roman', serif",
+    mono: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  };
+  const MODE = { none: 'none', row: 'row', column: 'column', grid: 'grid' };
+  const ALIGN = { start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch' };
+  const JUSTIFY = { start: 'flex-start', center: 'center', end: 'flex-end', between: 'space-between' };
+  const TEXT_ALIGN = { left: 'left', center: 'center', right: 'right', justify: 'justify' };
+  const FIT = { cover: 'cover', contain: 'contain', fill: 'fill' };
+  const pick = (table, v, dflt) => (typeof v === 'string' && own(table, v) ? table[v] : table[dflt]);
+
+  // The token a $ref names ({ $type, $value }), or null: one step, no aliases (contract §2 Tokens).
+  function token(v) {
+    if (!isRef(v)) return null;
+    let at = isObj(state.doc.tokens) ? state.doc.tokens : null;
+    for (const seg of v.$ref.split('.')) {
+      if (!isObj(at) || !own(at, seg)) return null;
+      at = at[seg];
+    }
+    return isObj(at) && own(at, '$type') && own(at, '$value') ? at : null;
+  }
+  // A colour token's value as CSS the page builds: its hex, or else rgb() from its components and alpha.
+  function colorToken(x) {
+    if (!isObj(x)) return null;
+    if (typeof x.hex === 'string' && HEX6_RE.test(x.hex)) return x.hex;
+    const c = x.components;
+    if (!Array.isArray(c) || c.length !== 3 || !c.every((n) => finite(n) && n >= 0 && n <= 1)) return null;
+    const a = own(x, 'alpha') ? x.alpha : 1;
+    if (!finite(a) || a < 0 || a > 1) return null;
+    const [r, g, b] = c.map((n) => Math.round(n * 255));
+    return `rgb(${r} ${g} ${b} / ${a})`;
+  }
+  // A $ref's literal value (of `type` when given), or undefined when it doesn't resolve.
+  function ref(v, type) {
+    const tk = token(v);
+    if (!tk || (type && tk.$type !== type)) return undefined;
+    const x = tk.$value;
+    switch (tk.$type) {
+      case 'color': return colorToken(x) ?? undefined;
+      case 'dimension': return isObj(x) && x.unit === 'px' && finite(x.value) ? x.value : undefined;
+      case 'fontFamily': case 'fontWeight': case 'number': return x;
+      case 'typography': return isObj(x) ? x : undefined;
+      default: return undefined;
+    }
+  }
+  // A colour (a hex, or a colour token), or null.
+  function color(v) {
+    if (isRef(v)) return ref(v, 'color') ?? null;
+    return typeof v === 'string' && HEX_RE.test(v) ? v : null;
+  }
+  // A finite number (or, with `type`, a token of that type) clamped to [min, max], or null.
+  function num(v, min, max, type = 'dimension') {
+    const x = isRef(v) ? (type ? ref(v, type) : undefined) : v;
+    return finite(x) ? clamp(x, min, max) : null;
+  }
+  // 'hug', 'fill' or a fixed px size; anything else is the default, 'hug'.
+  function sizing(v) {
+    if (v === 'hug' || v === 'fill') return v;
+    const n = num(v, 0, 100000);
+    return n === null ? 'hug' : n;
+  }
+  // A CSS track list rebuilt from px, `auto` and `<n>fr`; '' for an empty list or one out of its class.
+  function tracks(v) {
+    if (!Array.isArray(v) || v.length > 64) return '';
+    const out = [];
+    for (const t of v) {
+      if (finite(t) && t >= 0 && t <= 100000) out.push(`${t}px`);
+      else if (t === 'auto') out.push('auto');
+      else if (typeof t === 'string' && FR_RE.test(t)) out.push(`${Number(FR_RE.exec(t)[1])}fr`);
+      else return '';
+    }
+    return out.join(' ');
+  }
+  // A whole font: a typography token, or the four fields each a literal or a token; each field that
+  // fails its check takes its default.
+  function font(v) {
+    const out = { family: FAMILY.sans, size: 16, weight: 400, lineHeight: 1.4 };
+    let fam; let size; let weight; let lh;
+    if (isRef(v)) {
+      const t = ref(v, 'typography');
+      if (!t) return out;
+      fam = t.fontFamily;
+      size = isObj(t.fontSize) && t.fontSize.unit === 'px' ? t.fontSize.value : undefined;
+      weight = t.fontWeight;
+      lh = t.lineHeight;
+    } else if (isObj(v)) {
+      fam = isRef(v.family) ? ref(v.family, 'fontFamily') : v.family;
+      size = isRef(v.size) ? ref(v.size, 'dimension') : v.size;
+      weight = isRef(v.weight) ? ref(v.weight, 'fontWeight') : v.weight;
+      lh = isRef(v.lineHeight) ? ref(v.lineHeight, 'number') : v.lineHeight;
+    } else return out;
+    if (typeof fam === 'string' && own(FAMILY, fam)) out.family = FAMILY[fam];
+    if (finite(size) && size >= 1 && size <= 1000) out.size = size;
+    if (finite(weight) && weight >= 100 && weight <= 900 && weight % 100 === 0) out.weight = weight;
+    if (finite(lh) && lh >= 0.5 && lh <= 10) out.lineHeight = lh;
+    return out;
+  }
+  // The contract's pathData grammar: optional whitespace, a move, then commands and numbers separated
+  // by whitespace and at most one comma (none leading, none trailing, never two in a row); at most
+  // 65536 bytes. A scan with a sticky number pattern, so a long path costs linear time and no regular
+  // expression backtracks over the whole string.
+  const PATH_NUM = /[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/y;
+  const PATH_CMD = 'MLHVCSQTAZmlhvcsqtaz';
+  const PATH_WS = ' \t\n\r\f';
+  function pathOk(s) {
+    if (typeof s !== 'string' || s.length > 65536) return false;
+    let i = 0;
+    const n = s.length;
+    const ws = () => { while (i < n && PATH_WS.includes(s[i])) i++; };
+    ws();
+    if (s[i] !== 'M' && s[i] !== 'm') return false;
+    i++;
+    for (;;) {
+      ws();
+      let comma = false;
+      if (s[i] === ',') { comma = true; i++; ws(); }
+      if (i >= n) return !comma;
+      if (PATH_CMD.includes(s[i])) { i++; continue; }
+      PATH_NUM.lastIndex = i;
+      if (!PATH_NUM.test(s)) return false;
+      i = PATH_NUM.lastIndex;
+    }
+  }
+  // The image route's file for an `images/<16 hex>.<ext>` src, or null.
+  function imageFile(src) {
+    const m = typeof src === 'string' ? SRC_RE.exec(src) : null;
+    return m ? m[1] : null;
+  }
+
+  // ---- the document's nodes ----
+
+  const COMMON = ['name', 'visible', 'opacity', 'x', 'y', 'size.w', 'size.h'];
+  const STROKE = ['fill', 'stroke', 'strokeWidth'];
+  const BOX = [...STROKE, 'radius', 'clip', 'layout.mode', 'layout.gap', 'layout.padding', 'layout.align',
+    'layout.justify', 'layout.wrap', 'layout.columns', 'layout.rows'];
+  // Per type, the plain properties an instance resolves (contract §2 Properties).
+  const PATHS = {
+    frame: [...COMMON, ...BOX], component: [...COMMON, ...BOX],
+    text: [...COMMON, 'text', 'font', 'color', 'align'],
+    rect: [...COMMON, ...STROKE, 'radius'], ellipse: [...COMMON, ...STROKE],
+    vector: [...COMMON, 'path', ...STROKE], image: [...COMMON, 'src', 'fit', 'radius'],
+    instance: [...COMMON, 'component', 'variant'],
+  };
+  // An instance's own stored properties, over its component root's.
+  const INSTANCE_OWN = new Set(COMMON);
+  const CONTAINERS = new Set(['frame', 'component']);
+  const MAX_DEPTH = 20;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  const nodeOf = (id) => (typeof id === 'string' && own(state.doc.nodes, id) && isObj(state.doc.nodes[id]) ? state.doc.nodes[id] : null);
+  const kidsOf = (x) => (Array.isArray(x.children) ? x.children.filter((c) => typeof c === 'string') : []);
+  function getPath(o, path) {
+    let at = o;
+    for (const k of path.split('.')) {
+      if (!isObj(at) || !own(at, k)) return undefined;
+      at = at[k];
+    }
+    return at;
+  }
+
+  // An instance's component tree, resolved (contract §2 "Resolution order", as the fake's resolve):
+  // per descendant, its stored values, then a prop's default aimed at it, then the chosen variant's
+  // override, then the instance's override, then the instance's prop value; the last present wins.
+  // A value not stored anywhere stays absent, so it takes its default when drawn.
+  function resolveInstance(inst, comp) {
+    const out = new Map();
+    const stack = kidsOf(comp).reverse();
+    while (stack.length) {
+      const id = stack.pop();
+      if (out.has(id)) continue;
+      const n = nodeOf(id);
+      if (!n || !own(PATHS, n.type)) continue;
+      const vals = Object.create(null);
+      for (const path of PATHS[n.type]) {
+        const v = getPath(n, path);
+        if (v !== undefined) vals[path] = v;
+      }
+      out.set(id, vals);
+      if (CONTAINERS.has(n.type)) stack.push(...kidsOf(n).reverse());
+    }
+    const set = (id, prop, v) => { if (typeof id === 'string' && out.has(id) && typeof prop === 'string') out.get(id)[prop] = v; };
+    const each = (m, f) => { if (isObj(m)) for (const k of Object.keys(m)) f(k, m[k]); };
+    const props = isObj(comp.props) ? comp.props : {};
+    each(props, (_, pd) => { if (isObj(pd) && isObj(pd.target)) set(pd.target.id, pd.target.prop, pd.default); });
+    const variant = typeof inst.variant === 'string' && isObj(comp.variants) && own(comp.variants, inst.variant) ? comp.variants[inst.variant] : null;
+    each(variant, (id, o) => each(o, (prop, v) => set(id, prop, v)));
+    each(inst.overrides, (id, o) => each(o, (prop, v) => set(id, prop, v)));
+    each(inst.props, (name, v) => {
+      const pd = own(props, name) ? props[name] : null;
+      if (isObj(pd) && isObj(pd.target)) set(pd.target.id, pd.target.prop, v);
+    });
+    return out;
+  }
+
+  // ---- drawing ----
+
+  // One drawing of a page: the ids drawn (per instance), work to do once the tree is attached, and the
+  // components' labels.
+  let drawing = null;
+
+  function mark(el, id, inst) {
+    el.classList.add('dnode');
+    if (inst) { el.dataset.of = inst.id; el.dataset.src = id; } else el.dataset.id = id;
+  }
+
+  // One side's size: px, `hug` (the content's size) or `fill` (by the parent's layout).
+  function size(el, axis, s, parentMode) {
+    const prop = axis === 'w' ? 'width' : 'height';
+    const flex = parentMode === 'row' || parentMode === 'column';
+    const mainAxis = flex && (parentMode === 'row') === (axis === 'w');
+    if (typeof s === 'number') {
+      el.style[prop] = `${s}px`;
+      if (mainAxis) el.style.flexShrink = '0';
+      return;
+    }
+    if (s === 'fill') {
+      if (flex) {
+        if (mainAxis) el.style.flex = '1 1 0px'; else el.style.alignSelf = 'stretch';
+        return;
+      }
+      if (parentMode === 'none') { el.style[prop] = '100%'; return; }
+      if (parentMode === 'grid') { el.style[axis === 'w' ? 'justifySelf' : 'alignSelf'] = 'stretch'; return; }
+      // at a page's top level, fill acts as hug
+    }
+    if (flex) return;
+    if (parentMode === 'grid') { el.style[axis === 'w' ? 'justifySelf' : 'alignSelf'] = 'start'; return; }
+    el.style[prop] = 'max-content';
+  }
+
+  // What every type has: visibility, opacity, placement under a `none` parent, size.
+  function common(el, g, parentMode, { hugLater = false } = {}) {
+    const o = num(g('opacity'), 0, 1, null);
+    if (o !== null && o !== 1) el.style.opacity = String(o);
+    if (parentMode === 'none' || parentMode === 'page') {
+      el.style.position = 'absolute';
+      el.style.left = `${num(g('x'), -100000, 100000) ?? 0}px`;
+      el.style.top = `${num(g('y'), -100000, 100000) ?? 0}px`;
+    }
+    const sides = [];
+    for (const axis of ['w', 'h']) {
+      const s = sizing(g(`size.${axis}`));
+      if (hugLater && (s === 'hug' || (s === 'fill' && parentMode === 'page'))) {
+        el.style[axis === 'w' ? 'width' : 'height'] = '0px';
+        sides.push(axis);
+      } else size(el, axis, s, parentMode);
+    }
+    return sides;
+  }
+  function hide(el, g) { if (g('visible') === false) el.style.display = 'none'; }
+
+  function paint(el, g) {
+    const f = color(g('fill'));
+    if (f) el.style.backgroundColor = f;
+    const s = color(g('stroke'));
+    const w = num(g('strokeWidth'), 0, 100000);
+    if (s && w) el.style.boxShadow = `inset 0 0 0 ${w}px ${s}`;
+  }
+  function radius(el, g) {
+    const r = num(g('radius'), 0, 100000);
+    if (r) el.style.borderRadius = `${r}px`;
+  }
+
+  // A frame's or a component's box and layout; returns its children's layout mode.
+  function layout(el, g) {
+    const mode = pick(MODE, g('layout.mode'), 'none');
+    if (mode === 'row' || mode === 'column') {
+      el.style.display = 'flex';
+      el.style.flexDirection = mode;
+      if (g('layout.wrap') === true) el.style.flexWrap = 'wrap';
+    } else if (mode === 'grid') {
+      el.style.display = 'grid';
+      el.style.gridTemplateColumns = tracks(g('layout.columns')) || 'auto';
+      const rows = tracks(g('layout.rows'));
+      if (rows) el.style.gridTemplateRows = rows;
+    } else if (el.style.position !== 'absolute') el.style.position = 'relative';
+    if (mode !== 'none') {
+      const gap = num(g('layout.gap'), 0, 100000);
+      if (gap) el.style.gap = `${gap}px`;
+      el.style.alignItems = pick(ALIGN, g('layout.align'), 'start');
+      el.style.justifyContent = pick(JUSTIFY, g('layout.justify'), 'start');
+    }
+    const pad = g('layout.padding');
+    if (Array.isArray(pad) && pad.length === 4) {
+      const [t, r, b, l] = pad.map((v) => num(v, 0, 100000) ?? 0);
+      el.style.padding = `${t}px ${r}px ${b}px ${l}px`;
+    }
+    paint(el, g);
+    radius(el, g);
+    if (g('clip') === true) el.style.overflow = 'hidden';
+    return mode;
+  }
+
+  function placeholder(id, g, parentMode, inst) {
+    const el = document.createElement('div');
+    mark(el, id, inst);
+    el.classList.add('placeholder');
+    const name = g('name');
+    el.textContent = typeof name === 'string' ? name : '';
+    try { common(el, g, parentMode); } catch { /* a placeholder needs no size */ }
+    return el;
+  }
+
+  // The getter of one node's values: inside an instance, its resolved values; else what it stores.
+  function getter(id, n, inst) {
+    if (inst && inst.values.has(id)) {
+      const vals = inst.values.get(id);
+      return (p) => vals[p];
+    }
+    return (p) => getPath(n, p);
+  }
+
+  // One node as DOM, or null when it is missing or already drawn on this page (in this instance).
+  // inst: null, or { id, values, key, depth } for the instance whose component's tree this is in.
+  function drawNode(id, parentMode, inst) {
+    const key = `${inst ? inst.key : ''}/${id}`;
+    if (drawing.seen.has(key)) return null;
+    const n = nodeOf(id);
+    if (!n) return null;
+    drawing.seen.add(key);
+    const g = getter(id, n, inst);
+    try {
+      return drawOne(id, n, g, parentMode, inst);
+    } catch {
+      return placeholder(id, g, parentMode, inst);
+    }
+  }
+
+  function drawChildren(el, kids, mode, inst) {
+    for (const c of kids) {
+      const child = drawNode(c, mode, inst);
+      if (child) el.append(child);
+    }
+  }
+
+  function drawOne(id, n, g, parentMode, inst) {
+    let el;
+    switch (n.type) {
+      case 'frame':
+      case 'component': {
+        el = document.createElement('div');
+        mark(el, id, inst);
+        common(el, g, parentMode);
+        const mode = layout(el, g);
+        drawChildren(el, kidsOf(n), mode, inst);
+        if (n.type === 'component' && !inst && g('visible') !== false) {
+          const anchor = `--canvas-component-${++drawing.anchors}`;
+          el.style.anchorName = anchor;
+          const lab = document.createElement('div');
+          lab.className = 'clabel';
+          const name = g('name');
+          lab.textContent = typeof name === 'string' && name ? name : 'Component';
+          lab.style.positionAnchor = anchor;
+          drawing.labels.push(lab);
+        }
+        break;
+      }
+      case 'text': {
+        el = document.createElement('div');
+        mark(el, id, inst);
+        common(el, g, parentMode);
+        const t = g('text');
+        el.textContent = typeof t === 'string' ? t : '';
+        el.style.whiteSpace = 'pre-wrap';
+        const f = font(g('font'));
+        el.style.fontFamily = f.family;
+        el.style.fontSize = `${f.size}px`;
+        el.style.fontWeight = String(f.weight);
+        el.style.lineHeight = String(f.lineHeight);
+        el.style.color = color(g('color')) ?? '#000000';
+        el.style.textAlign = pick(TEXT_ALIGN, g('align'), 'left');
+        break;
+      }
+      case 'rect':
+      case 'ellipse':
+        el = document.createElement('div');
+        mark(el, id, inst);
+        common(el, g, parentMode);
+        paint(el, g);
+        if (n.type === 'ellipse') el.style.borderRadius = '50%'; else radius(el, g);
+        break;
+      case 'vector': {
+        el = document.createElementNS(SVG_NS, 'svg');
+        mark(el, id, inst);
+        el.style.overflow = 'visible';
+        const hug = common(el, g, parentMode, { hugLater: true });
+        let path = null;
+        const d = g('path');
+        if (pathOk(d)) {
+          path = document.createElementNS(SVG_NS, 'path');
+          path.setAttribute('d', d);
+          path.style.fill = color(g('fill')) ?? 'none';
+          path.style.stroke = color(g('stroke')) ?? 'none';
+          path.style.strokeWidth = `${num(g('strokeWidth'), 0, 100000) ?? 0}px`;
+          el.append(path);
+        }
+        if (hug.length && path) {
+          const svg = el;
+          drawing.after.push(() => {
+            const b = path.getBBox();
+            if (hug.includes('w')) svg.style.width = `${Math.max(0, b.x + b.width)}px`;
+            if (hug.includes('h')) svg.style.height = `${Math.max(0, b.y + b.height)}px`;
+          });
+        }
+        break;
+      }
+      case 'image': {
+        const file = imageFile(g('src'));
+        if (file === null) {
+          // anything but an images/ file: an empty box of the node's size
+          el = document.createElement('div');
+          mark(el, id, inst);
+          common(el, g, parentMode);
+          break;
+        }
+        el = document.createElement('img');
+        mark(el, id, inst);
+        common(el, g, parentMode);
+        const name = g('name');
+        el.alt = typeof name === 'string' ? name : '';
+        el.draggable = false;
+        el.style.objectFit = pick(FIT, g('fit'), 'cover');
+        radius(el, g);
+        el.src = `/api/canvas/image/${encodeURIComponent(state.slug)}/${file}`;
+        break;
+      }
+      case 'instance':
+        return drawInstance(id, n, g, parentMode, inst);
+      default:
+        return placeholder(id, g, parentMode, inst);
+    }
+    hide(el, g);
+    return el;
+  }
+
+  // An instance: its component's tree, resolved; its root the component root's properties with the
+  // instance's own name, visible, opacity, x, y and size over them. Nested to a depth of 20; deeper, or
+  // a component that doesn't resolve, is a placeholder.
+  function drawInstance(id, n, g, parentMode, inst) {
+    const depth = inst ? inst.depth + 1 : 1;
+    const comp = nodeOf(g('component'));
+    if (depth > MAX_DEPTH || !comp || comp.type !== 'component') return placeholder(id, g, parentMode, inst);
+    const rootG = (p) => {
+      if (INSTANCE_OWN.has(p)) {
+        const v = g(p);
+        if (v !== undefined) return v;
+      }
+      return getPath(comp, p);
+    };
+    const inner = { id, values: resolveInstance(n, comp), key: `${inst ? inst.key : ''}/${id}`, depth };
+    const el = document.createElement('div');
+    mark(el, id, inst);
+    common(el, rootG, parentMode);
+    const mode = layout(el, rootG);
+    drawChildren(el, kidsOf(comp), mode, inner);
+    hide(el, rootG);
+    return el;
+  }
+
+  // The page's top-level nodes on #surface, each placed at its x, y.
+  function drawPage(pageId) {
+    const pg = pageById(pageId) || pages()[0];
+    drawing = { seen: new Set(), after: [], labels: [], anchors: 0 };
+    const els = [];
+    for (const id of kidsOf(pg)) {
+      const el = drawNode(id, 'page', null);
+      if (el) els.push(el);
+    }
+    $('surface').replaceChildren(...els, ...drawing.labels);
+    for (const f of drawing.after) { try { f(); } catch { /* a size it can't measure stays 0 */ } }
+    drawing = null;
+  }
+
   let shown = 0; // the count of showPage calls: a slower one finishing after a newer one doesn't mark it ready
   function showPage(id) {
     const pg = pageById(id) || pages()[0];
@@ -206,13 +695,19 @@
     for (const a of $('pages').querySelectorAll('a[data-page]')) {
       if (a.dataset.page === pg.id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     }
-    const surface = $('surface');
-    surface.replaceChildren();
-    const kids = Array.isArray(pg.children) ? pg.children : [];
-    if (kids.length === 0) showMsg(TEXT.empty); else hideMsg();
     setState('loading');
+    drawPage(pg.id);
+    if (kidsOf(pg).length === 0) showMsg(TEXT.empty); else hideMsg();
     imagesSettled().then(() => { if (n === shown) setState('ready'); });
   }
+
+  // The shown page from the address (#page=<id>), or null.
+  function hashPage() {
+    const m = /^#page=(.*)$/.exec(location.hash);
+    if (!m) return null;
+    try { return decodeURIComponent(m[1]); } catch { return null; }
+  }
+  window.addEventListener('hashchange', () => { if (state.doc) showPage(hashPage()); });
 
   async function start() {
     setState('loading');
@@ -240,7 +735,7 @@
     state.repo = body.repo;
     showRepo(body.repo);
     renderPages();
-    showPage(pages()[0].id);
+    showPage(hashPage());
   }
 
   start().catch(() => fail(TEXT.notLoaded));
