@@ -48,7 +48,11 @@
   .bar h1 { font-size: 14px; margin: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .bar .where { color: var(--muted); font-size: 12px; white-space: nowrap; }
   .bar .grow { flex: 1; }
-  .chip { font-size: 11px; height: 24px; padding: 0 8px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg-2); display: inline-flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .chip { font-size: 11px; height: 24px; padding: 0 8px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg-2); display: inline-flex; align-items: center; white-space: nowrap; overflow: hidden; min-width: 0; }
+  /* the chip's two parts: the repo name may be cut with an ellipsis (a block, so one is drawn), the
+     visibility never is */
+  .chip .repo-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+  .chip .repo-vis { display: block; white-space: nowrap; flex: none; margin-left: .3em; }
   .chip.public { color: var(--amber-fg); border-color: var(--amber-fg); background: var(--amber-bg); }
 
   /* the three columns */
@@ -95,8 +99,11 @@
     .bar { gap: 8px; }
     .bar > * { min-width: 0; }
     .bar .where { display: none; }
-    .bar h1, .bar .chip, .bar .back { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar h1, .bar .back { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .bar .back { flex: none; }
+    /* the title gives way first (shrink weighs by size, so a factor this large cuts it before the chip) */
+    .bar h1 { flex: 0 1000 auto; }
+    .bar .chip { flex: 0 1 auto; }
     .stage-top { top: auto; bottom: 12px; }
     #pageSel { display: block; max-width: 100%; }
     #narrowNote { display: block; }
@@ -200,7 +207,14 @@
     const pub = name === null ? null : repo.public;
     const how = pub === true ? 'public' : pub === false ? 'private' : 'may be public';
     const chip = $('repoChip');
-    chip.textContent = `Saved to ${where} · ${how}`;
+    const nameEl = document.createElement('span');
+    nameEl.className = 'repo-name';
+    nameEl.textContent = `Saved to ${where}`;
+    const visEl = document.createElement('span');
+    visEl.className = 'repo-vis';
+    visEl.textContent = `· ${how}`;
+    // the space between is text, so the chip's whole text reads `Saved to <where> · <how>`
+    chip.replaceChildren(nameEl, ' ', visEl);
     chip.title = `Every edit is committed and pushed to ${where}.`;
     chip.classList.toggle('public', pub !== false);
     chip.hidden = false;
@@ -981,9 +995,41 @@
   }, { passive: false });
 
   // Dragging with the middle button, or with Space held, pans; the stage keeps the pointer meanwhile.
+  // By touch (or a pen), one finger dragging pans and two pinch to zoom about their centre; a touch
+  // that doesn't move (a tap) stays a click, so it selects or clears as one does.
+  const TAP_SLOP = 6; // px a touch may wander and still be a tap
+  const touches = new Map(); // pointerId -> { x, y } of each touch or pen pointer down on the stage
+  let pinch = null;
+  const isTouch = (e) => e.pointerType === 'touch' || e.pointerType === 'pen';
+  const stagePoint = (pt) => { const r = $('stage').getBoundingClientRect(); return { x: pt.x - r.left, y: pt.y - r.top }; };
+  // (Re)start the touch gesture from the pointers now down: one pans, two pinch.
+  function startTouch() {
+    const pts = [...touches.entries()];
+    pan = null;
+    pinch = null;
+    if (pts.length === 1) {
+      const [id, at] = pts[0];
+      pan = { id, cx: at.x, cy: at.y, x: view.x, y: view.y, touch: true };
+    } else if (pts.length >= 2) {
+      const [[ia, a], [ib, b]] = pts;
+      const d = Math.hypot(b.x - a.x, b.y - a.y);
+      const mid = stagePoint({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+      // the page point under the pinch centre, which follows the centre as the fingers move
+      if (d > 0) pinch = { ia, ib, d, z: view.z, px: (mid.x - view.x) / view.z, py: (mid.y - view.y) / view.z };
+    }
+  }
   $('stage').addEventListener('pointerdown', (e) => {
-    panned = false;
-    if (!ready() || pan || !(e.target instanceof Element) || e.target.closest('.zoom, .stage-top')) return;
+    if (touches.size === 0) panned = false;
+    if (!ready() || !(e.target instanceof Element) || e.target.closest('.zoom, .stage-top')) return;
+    if (isTouch(e)) {
+      if (e.button !== 0 || (pan && !pan.touch)) return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { $('stage').setPointerCapture(e.pointerId); } catch { /* moves over the stage still arrive */ }
+      if (touches.size > 1) panned = true; // a second finger makes it a pinch, never a tap
+      startTouch();
+      return;
+    }
+    if (pan) return;
     if (!(e.button === 1 || (e.button === 0 && spaceHeld))) return;
     e.preventDefault();
     pan = { id: e.pointerId, cx: e.clientX, cy: e.clientY, x: view.x, y: view.y };
@@ -992,6 +1038,34 @@
     $('stage').classList.add('panning');
   });
   $('stage').addEventListener('pointermove', (e) => {
+    if (touches.has(e.pointerId)) {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pinch) {
+        const a = touches.get(pinch.ia);
+        const b = touches.get(pinch.ib);
+        if (!a || !b) return;
+        const z = Math.min(ZMAX, Math.max(ZMIN, pinch.z * (Math.hypot(b.x - a.x, b.y - a.y) / pinch.d)));
+        const mid = stagePoint({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+        if (!Number.isFinite(z)) return;
+        view.z = z;
+        view.x = mid.x - pinch.px * z;
+        view.y = mid.y - pinch.py * z;
+        moved = true;
+        applyView();
+        return;
+      }
+      // one finger: a pan once it has gone past a tap's slop
+      if (!pan || e.pointerId !== pan.id) return;
+      const dx = e.clientX - pan.cx;
+      const dy = e.clientY - pan.cy;
+      if (!panned && Math.hypot(dx, dy) < TAP_SLOP) return;
+      panned = true;
+      view.x = pan.x + dx;
+      view.y = pan.y + dy;
+      moved = true;
+      applyView();
+      return;
+    }
     if (!pan || e.pointerId !== pan.id) return;
     view.x = pan.x + e.clientX - pan.cx;
     view.y = pan.y + e.clientY - pan.cy;
@@ -999,6 +1073,11 @@
     applyView();
   });
   const endPan = (e) => {
+    if (touches.has(e.pointerId)) {
+      touches.delete(e.pointerId);
+      startTouch(); // a finger lifted from a pinch: the other one pans on from where it is
+      return;
+    }
     if (!pan || e.pointerId !== pan.id) return;
     pan = null;
     $('stage').classList.remove('panning');

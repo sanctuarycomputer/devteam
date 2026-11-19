@@ -980,8 +980,33 @@ async function barChecks(p, barH, what) {
     assert.ok(r.w >= 8, `${what}: ${sel} keeps some width (${r.w})`);
     assert.ok(r.l >= bar.l - 0.5 && r.r <= bar.r + 0.5 && r.t >= bar.t - 0.5 && r.b <= bar.b + 0.5, `${what}: ${sel} ${JSON.stringify(r)} inside the bar ${JSON.stringify(bar)}`);
     assert.equal(await css(p, sel, 'text-wrap-mode'), 'nowrap', `${what}: ${sel} never wraps`);
-    assert.equal(await css(p, sel, 'text-overflow'), 'ellipsis', `${what}: ${sel} ends in an ellipsis when cut`);
   }
+  // the title's ellipsis: text-overflow draws one only on a block container (h1 is one)
+  assert.equal(await css(p, '#title', 'text-overflow'), 'ellipsis', `${what}: #title ends in an ellipsis when cut`);
+  assert.ok(['block', 'inline-block', 'flow-root'].includes(await css(p, '#title', 'display')), `${what}: #title a block container`);
+  // the chip: its repo name may be cut with an ellipsis, its visibility (the chip's whole point) never is
+  const chip = await p.ev(`(() => {
+    const c = document.getElementById('repoChip');
+    const nm = c.querySelector('.repo-name');
+    const vis = c.querySelector('.repo-vis');
+    if (!nm || !vis) return null;
+    const box = (e) => { const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width }; };
+    const ns = getComputedStyle(nm);
+    return { text: c.textContent, name: nm.textContent, vis: vis.textContent, chip: box(c), v: box(vis), vsw: vis.scrollWidth, vcw: vis.clientWidth,
+      nDisplay: ns.display, nOverflow: ns.textOverflow, nClip: ns.overflowX, nWrap: ns.textWrapMode, nsw: nm.scrollWidth, ncw: nm.clientWidth };
+  })()`);
+  assert.ok(chip, `${what}: the chip holds a .repo-name and a .repo-vis span`);
+  assert.match(chip.vis, /^· (public|private|may be public)$/, `${what}: the visibility span`);
+  assert.match(chip.name, /^Saved to ./, `${what}: the name span`);
+  assert.equal(chip.text, `${chip.name} ${chip.vis}`, `${what}: the chip's whole text`);
+  assert.ok(chip.vcw > 0 && chip.vsw <= chip.vcw + 0.5, `${what}: the visibility fully shown (scrollWidth ${chip.vsw}, clientWidth ${chip.vcw})`);
+  assert.ok(chip.v.l >= bar.l - 0.5 && chip.v.r <= bar.r + 0.5 && chip.v.t >= bar.t - 0.5 && chip.v.b <= bar.b + 0.5, `${what}: the visibility ${JSON.stringify(chip.v)} inside the bar ${JSON.stringify(bar)}`);
+  assert.ok(chip.v.l >= -0.5 && chip.v.r <= width + 0.5, `${what}: the visibility ${JSON.stringify(chip.v)} inside the viewport`);
+  assert.ok(chip.v.l >= chip.chip.l - 0.5 && chip.v.r <= chip.chip.r + 0.5, `${what}: the visibility ${JSON.stringify(chip.v)} inside the chip ${JSON.stringify(chip.chip)}, not clipped by it`);
+  assert.ok(['block', 'inline-block', 'flow-root'].includes(chip.nDisplay), `${what}: the name span a block container (${chip.nDisplay}), so its ellipsis draws`);
+  assert.equal(chip.nOverflow, 'ellipsis', `${what}: the name span ends in an ellipsis when cut`);
+  assert.equal(chip.nClip, 'hidden', `${what}: the name span clips`);
+  assert.equal(chip.nWrap, 'nowrap', `${what}: the name span never wraps`);
   const items = await p.ev("[...document.querySelector('.bar').children].filter((e) => e.getClientRects().length).map((e) => { const r = e.getBoundingClientRect(); return { name: e.className || e.id, l: r.left, r: r.right, t: r.top, b: r.bottom, h: r.height }; })");
   for (const it of items) {
     assert.ok(it.l >= bar.l - 0.5 && it.r <= bar.r + 0.5, `${what}: bar item ${it.name} ${JSON.stringify(it)} inside the bar across`);
@@ -1015,6 +1040,7 @@ test('watch and comment at 390', { skip: canDrive ? false : 'needs Chrome and We
   // the note, and the page select, on the stage and clear of the zoom controls
   assert.equal(await shown(p, '#narrowNote'), true, 'the narrow note shown');
   assert.equal(await text(p, '#narrowNote'), 'Watching: editing needs a wider screen.');
+  assert.match(await css(p, '#narrowNote', 'max-width'), /^(min\()?560px\b/, 'the narrow note capped at the measure');
   assert.equal(await shown(p, '#pageSel'), true, 'the page select shown');
   const zoomBox = await screenRect(p, '.zoom');
   for (const sel of ['#narrowNote', '#pageSel']) {
@@ -1066,5 +1092,96 @@ test('a hostile document and a long title in the bar at 390', { skip: canDrive ?
       assert.ok(!overlap(sel, await screenRect(p, '.zoom')), 'the page select clear of the zoom controls');
     }
   }
+  noExceptions(rec);
+});
+
+// ---- touch at 390, and the refit on a resize ----
+
+const frames = (p) => p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))');
+
+test('touch at 390: one finger pans, two pinch, a tap selects', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), size: [390, 844] });
+  assert.equal(await state(p), 'ready');
+  await p.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  assert.equal(await css(p, '#stage', 'touch-action'), 'none', 'the browser neither scrolls nor zooms the stage itself');
+  const stage = await screenRect(p, '#stage');
+  const card = () => screenRect(p, '#surface [data-id="card"]');
+  const touch = (type, pts) => p.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y], id) => ({ x, y, id })) });
+  const tap = async (at) => { await touch('touchStart', [[at.x, at.y]]); await touch('touchEnd', []); };
+
+  // a tap on the drawn dot selects it
+  const dotAt = centre(await screenRect(p, '#surface [data-id="dot"]'));
+  assert.equal(await p.ev(`document.elementFromPoint(${dotAt.x}, ${dotAt.y})?.closest('[data-id]')?.dataset.id`), 'dot', 'the dot is under the tap');
+  await tap(dotAt);
+  await until(async () => (await selectedRows(p)).includes('dot'), 'a tap selects the dot');
+  assert.deepEqual(await selectedRows(p), ['dot']);
+  assert.deepEqual(await outlined(p), ['dot']);
+
+  // a one-finger drag of (40, 30), from on the card, moves it by (40, 30) and neither selects nor clears
+  let c0 = await card();
+  const from = centre(c0);
+  await touch('touchStart', [[from.x, from.y]]);
+  await touch('touchMove', [[from.x + 20, from.y + 15]]);
+  await touch('touchMove', [[from.x + 40, from.y + 30]]);
+  await touch('touchEnd', []);
+  await frames(p);
+  let c1 = await card();
+  near(c1.l, c0.l + 40, 1, 'a one-finger drag, x');
+  near(c1.t, c0.t + 30, 1, 'a one-finger drag, y');
+  assert.deepEqual(await selectedRows(p), ['dot'], 'a drag keeps the selection as it was');
+
+  // a two-finger pinch spreading the fingers to twice as far apart doubles the zoom about its centre
+  const z0 = await zoomOf(p);
+  c0 = await card();
+  const pc = { x: c0.l + c0.w * 0.4, y: c0.t + c0.h * 0.5 };
+  const fx = (pc.x - c0.l) / c0.w;
+  const fy = (pc.y - c0.t) / c0.h;
+  const fingers = (d) => [[pc.x - d, pc.y - d / 2], [pc.x + d, pc.y + d / 2]];
+  await touch('touchStart', [fingers(30)[0]]);
+  await touch('touchStart', fingers(30));
+  for (const d of [36, 45, 52, 60]) await touch('touchMove', fingers(d));
+  await touch('touchEnd', [fingers(60)[0]]);
+  await touch('touchEnd', []);
+  await frames(p);
+  const z1 = await zoomOf(p);
+  assert.ok(Math.abs(z1 / z0 - 2) <= 0.1, `a pinch to twice the spread doubles the zoom: ${z0} to ${z1}`);
+  c1 = await card();
+  near(c1.l + c1.w * fx, pc.x, 2, 'the pinch centre stays, x');
+  near(c1.t + c1.h * fy, pc.y, 2, 'the pinch centre stays, y');
+  assert.equal(await text(p, '#zoomPct'), `${Math.round(z1 * 100)}%`);
+  assert.deepEqual(await selectedRows(p), ['dot'], 'a pinch keeps the selection as it was');
+
+  // a tap on empty stage clears, as a click does
+  const empty = { x: stage.r - 30, y: stage.b - 30 };
+  assert.equal(await p.ev(`document.elementFromPoint(${empty.x}, ${empty.y})?.id`), 'stage', 'the point is empty stage');
+  await tap(empty);
+  await until(async () => (await selectedRows(p)).length === 0, 'a tap on empty stage clears');
+  assert.deepEqual(await outlined(p), []);
+  assert.ok(await p.ev('document.documentElement.scrollWidth') <= 390, 'no sideways scroll');
+  noExceptions(rec);
+});
+
+test('a resize refits, unless the view was moved', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, rec, size } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  assert.equal(await state(p), 'ready');
+  const view = () => p.ev("(() => { const t = getComputedStyle(document.getElementById('surface')).transform; const m = t === 'none' ? new DOMMatrixReadOnly() : new DOMMatrixReadOnly(t); return { z: m.a, x: m.e, y: m.f }; })()");
+  // 1440 to 390: the loaded page refits to the narrow stage
+  await size(390, 844);
+  await until(() => p.ev('innerWidth === 390'), 'the window at 390');
+  await frames(p);
+  const stage = await screenRect(p, '#stage');
+  near(stage.w, 390, 0.5, "the stage's width at 390");
+  const b = await contentBounds(p);
+  assert.ok(b.l >= stage.l - 1 && b.r <= stage.r + 1 && b.t >= stage.t - 1 && b.b <= stage.b + 1, `content bounds ${JSON.stringify(b)} inside the stage ${JSON.stringify(stage)} after the resize`);
+  assert.equal(await text(p, '#zoomPct'), `${Math.round((await zoomOf(p)) * 100)}%`);
+  // zoomed with +, then back to 1440: the view as it was
+  const zi = centre(await screenRect(p, '#zoomIn'));
+  await p.clickAt(zi.x, zi.y);
+  const v0 = await view();
+  await size(1440, 900);
+  await until(() => p.ev('innerWidth === 1440'), 'the window at 1440');
+  await frames(p);
+  const v1 = await view();
+  assert.deepEqual(v1, v0, 'a moved view is not refitted on a resize');
   noExceptions(rec);
 });
