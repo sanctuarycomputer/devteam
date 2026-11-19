@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "devteam/browser.schema.json",
   "title": "devteam browser@1",
-  "description": "The browser@1 contract (the supervisor's browser; design supervisors-can-use-a-browser-with-the-o, Contracts): the JSON devteam.mjs browser prints (status --json, snapshot --json, tabs, profiles, wait), run/browser/state.json and run/browser/resets.json, the egress guard's refusal, and the live view's socket messages. Each JSON shape is $defs.shapes.<name> and carries browser: 1; each socket message is $defs.view.from_server.<t> or $defs.view.from_page.<t>, chosen by its t, and a t with no entry is not in the contract. Every shape uses only the JSON Schema keywords the kit's own checker reads (schemaErrors in devteam.mjs: type, enum, const, pattern, minLength, maxLength, minimum, maximum, minItems, maxItems, items, properties, required, additionalProperties), so devteam.mjs and test/fixtures/browser/check.mjs validate it with no dependency; every object is closed (additionalProperties false), so no cookie, value or lock field can appear unnoticed. Adding an optional field keeps browser: 1; any other change bumps browser and this file's @ version. Fixtures: test/fixtures/browser/. The fixture site every browser test browses: test/lib/sites.mjs. A validation error repeats up to 40 characters of the value it refused (schemaErrors' form), which can be an unmasked URL or the control secret: a consumer reports such an error by its field, never by printing the error text to the agent, the log or a tmux window.",
+  "description": "The browser@1 contract (the supervisor's browser; design supervisors-can-use-a-browser-with-the-o, Contracts): the JSON devteam.mjs browser prints (status --json, snapshot --json, tabs, profiles, wait), run/browser/state.json and run/browser/resets.json, the egress guard's refusal, and the live view's socket messages. Each JSON shape is $defs.shapes.<name> and carries browser: 1; each socket message is $defs.view.from_server.<t> or $defs.view.from_page.<t>, chosen by its t, and a t with no entry is not in the contract. Every shape uses only the JSON Schema keywords the kit's own checker reads (schemaErrors in devteam.mjs: type, enum, const, pattern, minLength, maxLength, minimum, maximum, minItems, maxItems, items, properties, required, additionalProperties), so devteam.mjs and test/fixtures/browser/check.mjs validate it with no dependency; every object is closed (additionalProperties false), so no cookie, value or lock field can appear unnoticed. Adding an optional field keeps browser: 1, as does making a field of state (run/browser/state.json) optional when no reader but devteam.mjs browser itself needs it and its description says so; any other change bumps browser and this file's @ version. Fixtures: test/fixtures/browser/. The fixture site every browser test browses: test/lib/sites.mjs. A validation error repeats up to 40 characters of the value it refused (schemaErrors' form), which can be an unmasked URL or the control secret: a consumer reports such an error by its field, never by printing the error text to the agent, the log or a tmux window.",
   "x-masked-url": "^(?:about:blank|https?://[^/?#@\\s]+(?:/(?:•••|(?=(?:[^/?#\\s\\d]*\\d){0,3}[^/?#\\s\\d]*(?:[/?]|$))[^/?#\\s]{0,19}(?=[/?]|$)))*(?:\\?(?:(?:[^=&#\\s•]+=•••|•••)(?:&(?:[^=&#\\s•]+=•••|•••))*)?)?)$",
   "x-masked-url-notes": "The browser mask (design, Security) as a pattern: about:blank, or http(s):// with a host holding no @, path segments each ••• or at most 19 characters with at most 3 digits, a query whose items are each name=••• or ••• (a bare key is masked whole, since it can be a token), and no fragment. Left unmasked, by design: host names (a token in a subdomain passes), query names of any length, and a path token under 20 characters with at most 3 digits. A tab on an error page (chrome-error://, a refused CONNECT, a network error) is printed as the URL it was opening, masked; no other scheme is ever printed.",
   "x-masked-fields": [
@@ -327,7 +327,6 @@
           "chrome_pid",
           "control_port",
           "control_secret",
-          "cdp_port",
           "guard_port",
           "view_port",
           "preview"
@@ -360,7 +359,7 @@
             "pattern": "^[0-9a-f]{64}$"
           },
           "cdp_port": {
-            "description": "Chrome's DevTools port, read from its own stderr, bound to 127.0.0.1 (loopback).",
+            "description": "Chrome's DevTools port, written only by a daemon from before kit-316. The daemon now reaches Chrome over --remote-debugging-pipe and writes none; no reader needs it.",
             "type": "integer",
             "minimum": 1,
             "maximum": 65535

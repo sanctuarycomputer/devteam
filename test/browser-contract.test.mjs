@@ -490,3 +490,13 @@ test('every bound in the contract refuses what it should', () => {
     assert.ok(errs[0].startsWith(start), `${start}: got ${errs[0]}`);
   }
 });
+
+test('P5 state without cdp_port validates; cdp_port 0 is still refused', () => {
+  const st = json('state.json');
+  const { cdp_port: _, ...pipe } = st;
+  assert.deepEqual(check(S.$defs.shapes.state, pipe, 'state'), []);
+  assert.deepEqual(json('state-pipe.json'), pipe);
+  const errs = check(S.$defs.shapes.state, { ...st, cdp_port: 0 }, 'state');
+  assert.equal(errs.length, 1, JSON.stringify(errs));
+  assert.ok(errs[0].startsWith('state.cdp_port'), errs[0]);
+});
