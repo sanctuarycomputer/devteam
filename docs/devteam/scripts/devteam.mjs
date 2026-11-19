@@ -25999,12 +25999,13 @@ async function browserStartLock(file, fn) {
   const dead = (t) => { const p = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(t ?? '')?.[1]; return !!p && Number(p) !== process.pid && !browserAlive(Number(p)); };
   // The lock's token and mtime from one open of its owner, so both are one file's (a stat and then a
   // read can pair an old lock's mtime with a new lock's token). No readable owner: a null token and the
-  // folder's mtime. No lock: null.
+  // folder's mtime, and why the owner couldn't be read (`code`: ENOENT for a folder with none). No
+  // lock: null.
   const look = () => {
     let fd;
-    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch {
+    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch (e) {
       const st = fs.statSync(lock, { throwIfNoEntry: false });
-      return st ? { token: null, mtime: st.mtimeMs } : null;
+      return st ? { token: null, mtime: st.mtimeMs, code: e?.code } : null;
     } finally { if (fd !== undefined) fs.closeSync(fd); }
   };
   const stale = (l) => Math.abs(Date.now() - l.mtime) > 120000 || dead(l.token);
@@ -26076,6 +26077,8 @@ async function browserStartLock(file, fn) {
     let names;
     try { names = fs.readdirSync(dir); } catch { return; }
     const l = look(), held = l ? keyOf(l.token) : null;
+    // an owner that is there but unreadable (EMFILE, EIO, EACCES…) may hold a token: no claim goes
+    const claims = !l || l.token !== null || l.code === 'ENOENT';
     for (const name of names) {
       if (!name.startsWith(base)) continue;
       const rest = name.slice(base.length), f = path.join(dir, name);
@@ -26085,7 +26088,7 @@ async function browserStartLock(file, fn) {
         continue;
       }
       const k = /^take\.([0-9a-f]{16})\.\d+$/.exec(rest)?.[1];
-      if (k !== undefined && k !== held && dead(link(f))) try { fs.unlinkSync(f); } catch {}
+      if (k !== undefined && claims && k !== held && dead(link(f))) try { fs.unlinkSync(f); } catch {}
     }
   };
   sweep();

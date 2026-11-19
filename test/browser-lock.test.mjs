@@ -396,10 +396,12 @@ test('S2b: 3 starters on the dead-owner lock, one killed mid-way', { timeout: SW
     const next = await run({ dir, n: 1, pidBase: 2001 });
     return problems(next).map((x) => `the next start: ${x}`);
   });
+  // The coverage lines hold for the fixed list; a search over a range (DEVTEAM_TEST_LOCK_SEEDS) may
+  // have no seed that leaves a claim, so there only the first is kept (final-2 F3).
   const none = [
     holding ? '' : 'no seed killed a starter while its claim (start.lock.take.*) stood',
-    prepLeft ? '' : 'no seed left a prepared folder (start.lock.new.*) for the next start to sweep',
-    claimLeft ? '' : 'no seed left a claim (start.lock.take.*) for the next start to sweep',
+    prepLeft || SEEDS_ENV ? '' : 'no seed left a prepared folder (start.lock.new.*) for the next start to sweep',
+    claimLeft || SEEDS_ENV ? '' : 'no seed left a claim (start.lock.take.*) for the next start to sweep',
   ].filter(Boolean).join('\n');
   const msg = [bad, none].filter(Boolean).join('\n');
   assert.ok(!msg, msg);
@@ -573,6 +575,17 @@ sweepCase('an ownerless folder is owned with a fresh token, not the lock\'s', as
   assert.ok(seen?.prep, 'the starter had no prepared folder at its take');
   assert.match(seen.owner ?? '', new RegExp(`^${STARTER_PID}-[0-9a-f]{16}$`));
   assert.notEqual(`start.lock.new.${seen.owner}`, seen.prep);
+});
+
+// An owner that can't be read for a reason other than its absence may hold a token (final-2 F1): here
+// it is a folder, so the open works and the read fails EISDIR. No claim goes, on any key; the dead
+// prepared folder still does.
+sweepCase('no claim is swept while the lock\'s owner is there but unreadable', async (dir) => {
+  const lock = path.join(dir, 'start.lock');
+  fs.mkdirSync(path.join(lock, 'owner'), { recursive: true });
+  prepOf(dir, DEAD);
+  const left = ['start.lock', claimOf(dir, null, DEAD_CLAIM), claimOf(dir, tok(2147483640, 'a1'), DEAD_CLAIM)];
+  check(await run({ dir, n: 1, env: quick }), { entries: 0, errors: /timed out/, left });
 });
 
 sweepCase('a start that times out names start.lock and says to remove it when no browser start runs', async (dir) => {
