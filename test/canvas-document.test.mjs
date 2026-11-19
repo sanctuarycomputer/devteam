@@ -207,6 +207,7 @@ export const FIXTURE_CATEGORIES = Object.freeze([
   { name: 'local apply', re: /^http-local-[^/]*\.json$/, checked: true },
   { name: 'edit route', re: /^http-edit-[^/]*\.json$/, checked: true },
   { name: 'doc route', re: /^http-doc-[^/]*\.json$/, checked: true },
+  { name: 'refused document', re: /^refused-[^/]*\.json$/, checked: true },
   { name: 'exchange', re: /^exchange-[^/]*\.json$/, checked: true },
   { name: 'other message', re: /^msg-[^/]*\.json$/, checked: false },
   { name: 'other route', re: /^http-[^/]*\.json$/, checked: false },
@@ -991,9 +992,9 @@ const BROKEN = {
   'id-form': [(d) => { d.pages[1].id = 'bad id'; }],
   'id-unique': [(d) => { d.pages[1].id = 'p-main'; }],
   tree: [(d) => { d.nodes.badge.parent = 'card'; }, (d) => { d.nodes.card.children.push('card'); }],
-  keys: [(d) => { d.nodes.card.bogus = 1; }, (d) => { d.nodes.buy.overrides['button-label'].name = 'X'; }],
+  keys: [(d) => { d.nodes.card.bogus = 1; }, (d) => { d.nodes.buy.overrides['button-label'].name = 'X'; }, (d) => { d.nodes.card['layout.mode'] = 'row'; }],
   required: [(d) => { delete d.nodes.icon.path; }],
-  classes: [(d) => { d.nodes.card.opacity = 2; }, (d) => { d.pages[0].name = 'n'.repeat(201); }],
+  classes: [(d) => { d.nodes.card.opacity = 2; }, (d) => { d.pages[0].name = 'n'.repeat(201); }, (d) => { d.nodes.title.text = 'a\u0000b'; }],
   tokens: [(d) => { d.tokens.space.s.$value = { value: 1, unit: 'em' }; }, (d) => { d.tokens.bad = 5; }],
   refs: [(d) => { d.nodes.title.color = { $ref: 'color.nope' }; }, (d) => { d.nodes.buy.variant = 'nope'; }],
   components: [(d) => { d.nodes.inner = { type: 'component', parent: 'button', children: [] }; d.nodes.button.children.push('inner'); }],
@@ -1081,6 +1082,68 @@ test('canvas module: rules: each broken copy', async () => {
       assert.ok(errs.some((e) => e.rule === rule), `${rule} copy ${i + 1}: the rule is listed (${errs.map((e) => e.rule).join(', ')})`);
     });
   }
+});
+
+test('canvas module: fixtures: every refused document', async (t) => {
+  const canvas = await load();
+  const files = fixturesIn(FIXTURES, 'refused document');
+  t.diagnostic(`${files.length} refused documents`);
+  assert.ok(files.length >= 2, 'refused documents found');
+  for (const f of files) {
+    const fx = fixture(f);
+    assert.ok(Array.isArray(fx.errors) && fx.errors.length >= 1, `${f}: states a non-empty errors list`);
+    const doc = deepFreeze(fx.doc);
+    assert.deepStrictEqual(sameErrors(canvas, doc, { images: FIXTURE_IMAGES }, f), fx.errors, `${f}: validate gives exactly its errors`);
+  }
+});
+
+// kit-312: a node key holding a dot is refused (a property is stored nested), and free text refuses
+// every control character but tab, line feed and carriage return. The refused code points are the
+// test's own list, written as numbers, not the module's pattern.
+const DOTTED_MESSAGE = 'a dotted key (a property is stored nested: "layout": { "mode": … })';
+const REFUSED_CONTROLS = new Set();
+for (const [lo, hi] of [[0x00, 0x08], [0x0b, 0x0c], [0x0e, 0x1f], [0x7f, 0x9f]]) for (let c = lo; c <= hi; c++) REFUSED_CONTROLS.add(c);
+
+test('canvas module: rules: dotted keys and control characters', async () => {
+  const canvas = await load();
+  const base = fixture('doc-every-type.json');
+  const every = { images: FIXTURE_IMAGES };
+  const hostile = fixture('refused-dotted-key.json').doc.nodes.card['layout.mode'];
+  assert.deepEqual(sameErrors(canvas, deepFreeze(clone(base)), every, 'doc-every-type'), [], 'doc-every-type (nested layout.mode, flat override keys) is valid');
+  const dotted = [
+    ['card', 'layout.mode', hostile],
+    ['title', 'layout.mode', 'row'],
+    ['card', 'foo.bar', 1],
+    ['card', 'layout.', 'row'],
+  ];
+  for (const [id, key, value] of dotted) {
+    const d = clone(base);
+    d.nodes[id][key] = value;
+    deepFreeze(d);
+    const label = `${id}[${JSON.stringify(key)}]`;
+    assert.deepStrictEqual(sameErrors(canvas, d, every, label), [{ rule: 'keys', code: 'prop', where: `nodes.${id}.${key}`, message: DOTTED_MESSAGE }], `${label}: exactly one keys entry`);
+  }
+  const nested = clone(fixture('refused-dotted-key.json').doc);
+  delete nested.nodes.card['layout.mode'];
+  assert.deepEqual(sameErrors(canvas, deepFreeze(nested), every, 'the refused fixture, its flat key deleted'), [], 'nested only: valid');
+
+  const points = [];
+  for (let c = 0x00; c <= 0xa0; c++) points.push(c);
+  points.push(0x2028, 0x2029);
+  let refused = 0;
+  for (const c of points) {
+    const hex = `U+${c.toString(16).toUpperCase().padStart(4, '0')}`;
+    const d = clone(base);
+    d.nodes.title.text = `a${String.fromCodePoint(c)}b`;
+    deepFreeze(d);
+    const errs = sameErrors(canvas, d, every, `title.text holding ${hex}`);
+    if (REFUSED_CONTROLS.has(c)) {
+      refused += 1;
+      assert.ok(errs.length >= 1, `${hex}: refused`);
+      assert.ok(errs.every((e) => e.rule === 'classes' && e.code === 'value' && e.message.endsWith('a control character')), `${hex}: a classes entry for a control character (${JSON.stringify(errs)})`);
+    } else assert.deepEqual(errs, [], `${hex}: allowed`);
+  }
+  assert.equal(refused, 62, 'every refused code point swept');
 });
 
 // ---- the done-when tests (C8 to C12) ----

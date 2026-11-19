@@ -290,12 +290,13 @@ const MAGIC = {
   gif: (b) => b.subarray(0, 4).toString('latin1') === 'GIF8',
   webp: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP',
 };
-// { kind: 'doc' | 'http' | 'exchange' | 'image' | 'message', shape? } or null for an unknown file.
+// { kind: 'doc' | 'refused' | 'http' | 'exchange' | 'image' | 'message', shape? } or null for an unknown file.
 function fixtureKind(rel) {
   if (rel.startsWith('images/')) return IMAGE_FILE_RE.test(rel.slice('images/'.length)) ? { kind: 'image' } : null;
   if (rel.includes('/') || !rel.endsWith('.json')) return null;
   const base = rel.slice(0, -'.json'.length);
   if (base === 'hostile' || /^doc-[a-z0-9-]+$/.test(base)) return { kind: 'doc' };
+  if (/^refused-[a-z0-9-]+$/.test(base)) return { kind: 'refused' };
   if (/^http-[a-z0-9-]+$/.test(base)) return { kind: 'http' };
   if (/^exchange-[a-z0-9-]+$/.test(base)) return { kind: 'exchange' };
   const hits = NAMED.filter(([pre]) => base === pre || (base.startsWith(`${pre}-`) && /^[a-z0-9-]+$/.test(base))).sort((a, b) => b[0].length - a[0].length);
@@ -1433,6 +1434,75 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     assert.ok(shapeErrors('note-anchor', { node: long(64, '\u{1F600}') }).length === 0, 'an anchor counts code points');
   });
 
+  await t.test('rules: dotted node keys', () => {
+    const DOTTED = 'a dotted key (a property is stored nested: "layout": { "mode": … })';
+    const io = imagesOf();
+    const base = readFix('doc-every-type.json');
+    assert.deepEqual(docErrors(base, io), [], 'doc-every-type (card.layout.mode stored nested) is valid');
+    assert.equal(base.nodes.card.layout.mode, 'column', 'card holds layout.mode nested');
+    assert.ok(Object.hasOwn(base.nodes.buy.overrides['button-bg'], 'size.w'), "buy's override holds a flat size.w");
+    assert.ok(Object.hasOwn(base.nodes.button.variants.quiet['button-bg'], 'layout.gap'), "button's variant holds a flat layout.gap");
+    const hostile = readFix('refused-dotted-key.json').doc.nodes.card['layout.mode'];
+    for (const [id, key, value] of [
+      ['card', 'layout.mode', hostile], // a property's own path, on a frame: the hostile case
+      ['title', 'layout.mode', 'row'], // a text node, which has no layout group
+      ['card', 'foo.bar', 'row'], // no group of that name at all
+      ['card', 'layout.', 'row'], // ending in a dot
+      ['card', '.', 'row'], // only a dot
+      ['card', 'id.x', 'row'], // not the structural id
+      ['card', 'layout.x', { mode: 'row' }], // an object value
+    ]) {
+      const d = clone(base);
+      d.nodes[id][key] = value;
+      assert.deepEqual(docErrors(d, io), [{ rule: 'keys', code: 'prop', where: `nodes.${id}.${key}`, message: DOTTED }], `${id}[${JSON.stringify(key)}] is one keys entry`);
+    }
+    const fx = readFix('refused-dotted-key.json');
+    delete fx.doc.nodes.card['layout.mode'];
+    assert.deepEqual(docErrors(fx.doc, io), [], "the refused fixture's doc with its flat key deleted is valid");
+    // ops store a dotted path nested, never flat
+    let d = applied(small(), [{ op: 'set', id: 'f1', prop: 'layout.mode', value: 'column' }]);
+    assert.equal(valueAt(d.nodes.f1, 'layout.mode'), 'column', 'a set of layout.mode is stored nested');
+    assert.ok(!Object.hasOwn(d.nodes.f1, 'layout.mode'), 'and never flat');
+    d = applied(small(), [{ op: 'add', node: { id: 'f2', type: 'frame', parent: 'p2', 'layout.mode': 'row' }, after: null }]);
+    assert.equal(valueAt(d.nodes.f2, 'layout.mode'), 'row', "an add's layout.mode is stored nested");
+    assert.ok(!Object.hasOwn(d.nodes.f2, 'layout.mode'), 'and never flat');
+  });
+
+  await t.test('rules: control characters in free text', () => {
+    // the refused set, written as numbers here (not the code's regex): U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+007F-U+009F
+    const REFUSED_POINTS = new Set();
+    for (const [lo, hi] of [[0x00, 0x08], [0x0b, 0x0c], [0x0e, 0x1f], [0x7f, 0x9f]]) for (let c = lo; c <= hi; c++) REFUSED_POINTS.add(c);
+    assert.equal(REFUSED_POINTS.size, 9 + 2 + 18 + 33);
+    const points = [];
+    for (let c = 0; c <= 0xa0; c++) points.push(c);
+    points.push(0x2028, 0x2029);
+    const d = small();
+    for (const c of points) {
+      const v = `a${String.fromCodePoint(c)}b`;
+      for (const [id, prop] of [['r1', 'name'], ['t1', 'text'], ['p1', 'name']]) {
+        const ops = [{ op: 'set', id, prop, value: v }];
+        if (REFUSED_POINTS.has(c)) refused(d, ops, 'value');
+        else {
+          const got = applied(d, ops);
+          assert.equal(id === 'p1' ? got.pages[0].name : got.nodes[id][prop], v, `U+${c.toString(16).padStart(4, '0')} in ${id}.${prop} is applied`);
+        }
+      }
+    }
+    const e = small();
+    e.nodes.t1.text = 'a\u001bb';
+    e.pages[1].name = 'a\u007f';
+    assert.deepEqual(errs(e), [
+      { rule: 'classes', code: 'value', where: 'pages[1].name', message: 'not name: a control character' },
+      { rule: 'classes', code: 'value', where: 'nodes.t1.text', message: 'not text: a control character' },
+    ], 'docErrors names a control character');
+    const both = small();
+    both.nodes.t1.text = 'a\ud800\u0000';
+    assert.deepEqual(errs(both), [{ rule: 'classes', code: 'value', where: 'nodes.t1.text', message: 'not text: a lone surrogate' }], 'a lone surrogate is judged first');
+    const data = Buffer.from('not checked as an image here').toString('base64');
+    assert.deepEqual(shapeErrors('image-request', { name: 'a.png', data }), [], 'an image name with no control character');
+    assert.deepEqual(shapeErrors('image-request', { name: 'a\u0000.png', data }), ['image-request.name: not 1 to 200 characters of the name class'], 'an image name with a control character breaks image-request, saying why');
+  });
+
   await t.test('rules: free texts', () => {
     const got = freeTexts(small());
     const kinds = new Set(got.map((f) => f.kind));
@@ -1793,6 +1863,22 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     ]);
   });
 
+  await t.test("contract: kit-312's refusals are stated", () => {
+    const md = contract();
+    const keysRow = table(md, 'Document rules', ['Rule', 'Code', 'What']).find((r) => first(r[0], 'rule') === 'keys');
+    has(keysRow[2], 'no dotted key', 'the Document rules keys row');
+    const classes = table(md, 'Value classes', ['Class', 'Rule']);
+    for (const cls of ['name', 'text']) has(classes.find((r) => first(r[0], 'Value classes') === cls)[1], 'control character', `the ${cls} class row`);
+    has(section(md, 'The document: canvas-doc@1'), 'never holds a dotted key', '§2');
+    const version = section(md, 'Consumers and providers').split('\n').filter((l) => l.startsWith('Version:'));
+    assert.equal(version.length, 1, "§1's version paragraph");
+    has(version[0], 'kit-312', "§1's version paragraph");
+    const imageRoute = section(md, 'HTTP routes').split('\n').filter((l) => l.startsWith('- **`POST /api/canvas/image'));
+    assert.equal(imageRoute.length, 1, '§8 the image route');
+    has(imageRoute[0], 'control character', '§8 the image route');
+    has(section(md, 'The fake'), '`refused-*.json`', '§14 the fixtures');
+  });
+
   await t.test('fixtures: every file is known', () => {
     const files = fixtureFiles();
     assert.ok(files.length > 0);
@@ -1808,6 +1894,11 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
         assert.ok(MAGIC[ext](bytes), `${rel} is a ${ext} by its first bytes`);
       } else if (k.kind === 'doc') {
         assert.deepEqual(docErrors(readFix(rel), { images, folderBytes }), [], `${rel} is a valid document`);
+      } else if (k.kind === 'refused') {
+        const fx = readFix(rel);
+        assert.deepEqual(Object.keys(fx).sort(), ['doc', 'errors'], `${rel} is exactly { doc, errors }`);
+        assert.ok(Array.isArray(fx.errors) && fx.errors.length > 0, `${rel} states a non-empty list of errors`);
+        assert.deepEqual(docErrors(fx.doc, { images, folderBytes }), fx.errors, `${rel}: docErrors gives exactly its errors`);
       } else if (k.kind === 'message') {
         assert.deepEqual(shapeErrors(k.shape, readFix(rel)), [], `${rel} holds to ${k.shape}`);
       } else {
@@ -1816,9 +1907,10 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       }
     }
     // the rule itself: unknown names are unknown
-    for (const bad of ['notes.json', 'msg-nope.json', 'doc.json', 'images/0123456789ABCDEF.png', 'images/x.png', 'golden/a.html', 'doc-a.txt', 'msg-ops_x.json']) {
+    for (const bad of ['notes.json', 'msg-nope.json', 'doc.json', 'images/0123456789ABCDEF.png', 'images/x.png', 'golden/a.html', 'doc-a.txt', 'msg-ops_x.json', 'refused.json', 'refused-A.json']) {
       assert.equal(fixtureKind(bad), null, `${bad} is unknown`);
     }
+    assert.deepEqual(fixtureKind('refused-dotted-key.json'), { kind: 'refused' });
     assert.deepEqual(fixtureKind('msg-ops-local.json'), { kind: 'message', shape: 'ops' });
     assert.deepEqual(fixtureKind('presence-move-empty.json'), { kind: 'message', shape: 'presence-move' });
   });
@@ -1846,6 +1938,13 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     for (const kind of ['presence-here', 'presence-move', 'note-anchor']) assert.ok(files.some((f) => (fixtureKind(f) || {}).shape === kind), `a fixture of ${kind}`);
     assert.ok(files.includes('presence-move-empty.json'), 'a cursor over empty canvas');
     assert.ok(readFix('presence-move-empty.json').a.k.startsWith('@'), 'anchored to @<page id>');
+    // refused documents (kit-312): one refused by the keys rule, one by the classes rule; the dotted key carries markup
+    const refusedFx = files.filter((f) => (fixtureKind(f) || {}).kind === 'refused').map(readFix);
+    assert.ok(refusedFx.some((fx) => fx.errors.some((e) => e.rule === 'keys')), 'a refused- fixture with a keys entry');
+    assert.ok(refusedFx.some((fx) => fx.errors.some((e) => e.rule === 'classes')), 'a refused- fixture with a classes entry');
+    const flat = readFix('refused-dotted-key.json').doc.nodes.card['layout.mode'];
+    assert.equal(typeof flat, 'string', "refused-dotted-key.json's card holds a flat layout.mode string");
+    for (const m of HOSTILE_MARKERS) assert.ok(flat.includes(m), `refused-dotted-key.json's flat value holds ${JSON.stringify(m)}`);
   });
 
   await t.test('fixtures: resolve on doc-every-type', () => {
@@ -2109,6 +2208,7 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
         [400, 'no name', { body: { data: pngBody.data } }],
         [400, 'an empty name', { body: { ...pngBody, name: '' } }],
         [400, 'a name of 201 characters', { body: { ...pngBody, name: 'n'.repeat(201) } }],
+        [400, 'a name with a control character', { body: { ...pngBody, name: 'p\u0000.png' } }],
         [400, 'bad base64', { body: { name: 'p', data: '***' } }],
         [400, 'no data', { body: { name: 'p', data: '' } }],
         [403, 'a View person', { headers: PV('p-v') }],
