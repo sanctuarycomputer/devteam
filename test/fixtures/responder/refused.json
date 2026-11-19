@@ -18,7 +18,7 @@
    "why": "the responder's turns ask nothing",
    "repaired": {
     "v": 1,
-    "id": "u-20260110-130000000-responder",
+    "id": "u-20260110-130000001-responder",
     "at": "2026-01-10T13:00:00.000Z",
     "by": "responder",
     "type": "turn",
@@ -47,7 +47,7 @@
    "why": "a handoff names its thread",
    "repaired": {
     "v": 1,
-    "id": "m-20260110-130100000-responder",
+    "id": "m-20260110-130100001-responder",
     "at": "2026-01-10T13:01:00.000Z",
     "by": "responder",
     "type": "message",
@@ -81,7 +81,7 @@
    "why": "the responder sends handoff and info messages only",
    "repaired": {
     "v": 1,
-    "id": "m-20260110-130200000-responder",
+    "id": "m-20260110-130200001-responder",
     "at": "2026-01-10T13:02:00.000Z",
     "by": "responder",
     "type": "message",
@@ -114,7 +114,7 @@
    "why": "the responder sends handoff and info messages only",
    "repaired": {
     "v": 1,
-    "id": "m-20260110-130210000-responder",
+    "id": "m-20260110-130210001-responder",
     "at": "2026-01-10T13:02:10.000Z",
     "by": "responder",
     "type": "message",
@@ -147,7 +147,7 @@
    "why": "the responder sends handoff and info messages only",
    "repaired": {
     "v": 1,
-    "id": "m-20260110-130220000-responder",
+    "id": "m-20260110-130220001-responder",
     "at": "2026-01-10T13:02:20.000Z",
     "by": "responder",
     "type": "message",
@@ -180,7 +180,7 @@
    "why": "the responder replies to no message \\(re\\)",
    "repaired": {
     "v": 1,
-    "id": "m-20260110-130300000-responder",
+    "id": "m-20260110-130300001-responder",
     "at": "2026-01-10T13:03:00.000Z",
     "by": "responder",
     "type": "message",
@@ -211,7 +211,7 @@
    "why": "the responder's observations have source responder",
    "repaired": {
     "v": 1,
-    "id": "o-20260110-130400000-responder",
+    "id": "o-20260110-130400001-responder",
     "at": "2026-01-10T13:04:00.000Z",
     "by": "responder",
     "type": "observation",
@@ -240,7 +240,7 @@
    "why": "the responder's observations have source responder",
    "repaired": {
     "v": 1,
-    "id": "o-20260110-130410000-responder",
+    "id": "o-20260110-130410001-responder",
     "at": "2026-01-10T13:04:10.000Z",
     "by": "responder",
     "type": "observation",
@@ -268,7 +268,7 @@
    "why": "the responder's observations have source responder",
    "repaired": {
     "v": 1,
-    "id": "o-20260110-130420000-responder",
+    "id": "o-20260110-130420001-responder",
     "at": "2026-01-10T13:04:20.000Z",
     "by": "responder",
     "type": "observation",
@@ -297,7 +297,7 @@
    "why": "the responder doesn't write finding-ack observations",
    "repaired": {
     "v": 1,
-    "id": "o-20260110-130500000-responder",
+    "id": "o-20260110-130500001-responder",
     "at": "2026-01-10T13:05:00.000Z",
     "by": "responder",
     "type": "observation",
@@ -326,7 +326,7 @@
    "why": "the responder doesn't write sensor-ignored observations",
    "repaired": {
     "v": 1,
-    "id": "o-20260110-130510000-responder",
+    "id": "o-20260110-130510001-responder",
     "at": "2026-01-10T13:05:10.000Z",
     "by": "responder",
     "type": "observation",
@@ -355,7 +355,7 @@
    "why": "the responder doesn't write outcome observations",
    "repaired": {
     "v": 1,
-    "id": "o-20260110-130520000-responder",
+    "id": "o-20260110-130520001-responder",
     "at": "2026-01-10T13:05:20.000Z",
     "by": "responder",
     "type": "observation",
@@ -384,7 +384,7 @@
    "why": "the responder doesn't write escaped-defect observations",
    "repaired": {
     "v": 1,
-    "id": "o-20260110-130530000-responder",
+    "id": "o-20260110-130530001-responder",
     "at": "2026-01-10T13:05:30.000Z",
     "by": "responder",
     "type": "observation",
@@ -436,6 +436,7 @@
     "type": "decision",
     "class": "merge",
     "what": "Merge it.",
+    "authority": "rung",
     "op": "new"
    },
    "why": "responder may not create decision lines",
@@ -517,7 +518,8 @@
     "type": "knowledge",
     "kind": "lesson",
     "statement": "A lesson.",
-    "scope": "kit",
+    "scope": "project",
+    "status": "candidate",
     "confidence": 0.5,
     "op": "new"
    },
@@ -546,6 +548,20 @@
     "type": "ticket",
     "title": "A forged ticket",
     "feature": "fast-threads",
+    "component": "kit",
+    "kind": "build",
+    "size": "S",
+    "risk": "normal",
+    "serves": [
+     "FT-S1"
+    ],
+    "depends_on": [],
+    "touches": [
+     "docs/x.md"
+    ],
+    "done_when": [
+     "a forged ticket the responder may not create"
+    ],
     "op": "new"
    },
    "why": "responder may not create ticket lines",
@@ -577,7 +593,7 @@
    "why": "responder may not change thread lines",
    "repaired": {
     "v": 1,
-    "id": "o-20260110-130800000-responder",
+    "id": "o-20260110-130800001-responder",
     "at": "2026-01-10T13:08:00.000Z",
     "by": "responder",
     "type": "observation",
@@ -605,7 +621,7 @@
    "why": "routed_to and delivered are on the owner's turns",
    "repaired": {
     "v": 1,
-    "id": "u-20260110-130900000-supervisor",
+    "id": "u-20260110-130900001-supervisor",
     "at": "2026-01-10T13:09:00.000Z",
     "by": "supervisor",
     "type": "turn",
@@ -633,7 +649,7 @@
    "why": "delivered goes with routed_to responder",
    "repaired": {
     "v": 1,
-    "id": "u-20260110-131000000-owner",
+    "id": "u-20260110-131000001-owner",
     "at": "2026-01-10T13:10:00.000Z",
     "by": "owner",
     "channel": "cli",
@@ -641,6 +657,60 @@
     "thread": "t-20260110-100000000-owner",
     "text": "And the footer?",
     "routed_to": "supervisor",
+    "op": "new"
+   }
+  },
+  {
+   "name": "delivered on a responder turn",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "u-20260110-131200000-responder",
+    "at": "2026-01-10T13:12:00.000Z",
+    "by": "responder",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "Noted.",
+    "delivered": "typed",
+    "op": "new"
+   },
+   "why": "routed_to and delivered are on the owner's turns",
+   "repaired": {
+    "v": 1,
+    "id": "u-20260110-131200001-responder",
+    "at": "2026-01-10T13:12:00.000Z",
+    "by": "responder",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "Noted.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "delivered without routed_to",
+   "file": "owner-2026-01.jsonl",
+   "line": {
+    "v": 1,
+    "id": "u-20260110-131300000-owner",
+    "at": "2026-01-10T13:13:00.000Z",
+    "by": "owner",
+    "channel": "cli",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "And the menu?",
+    "delivered": "queued",
+    "op": "new"
+   },
+   "why": "delivered goes with routed_to responder",
+   "repaired": {
+    "v": 1,
+    "id": "u-20260110-131300001-owner",
+    "at": "2026-01-10T13:13:00.000Z",
+    "by": "owner",
+    "channel": "cli",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "And the menu?",
     "op": "new"
    }
   },
@@ -662,7 +732,7 @@
    "why": "pending is on a reply, never the owner's turn",
    "repaired": {
     "v": 1,
-    "id": "u-20260110-131100000-owner",
+    "id": "u-20260110-131100001-owner",
     "at": "2026-01-10T13:11:00.000Z",
     "by": "owner",
     "channel": "cli",

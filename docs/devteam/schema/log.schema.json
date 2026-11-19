@@ -56,8 +56,8 @@
     },
     "by": {
       "type": "string",
-      "description": "owner, supervisor, a ticket id, or plan-<feature>; must match the file's writer (owner-<yyyy-mm>, supervisor-<yyyy-mm>, <ticket-id>, plan-<feature>)",
-      "x-tip": "Who wrote the line: you, the supervisor, a ticket's agent or a planner."
+      "description": "owner, supervisor, a ticket id, plan-<feature>, or (responder-1) responder; must match the file's writer (owner-<yyyy-mm>, supervisor-<yyyy-mm>, <ticket-id>, plan-<feature>, responder)",
+      "x-tip": "Who wrote the line: you, the supervisor, a ticket's agent, a planner or the responder."
     },
     "channel": {
       "enum": [
