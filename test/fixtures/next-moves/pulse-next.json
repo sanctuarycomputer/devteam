@@ -1,0 +1,15 @@
+{
+  "subject": "goal:g-20261117-055206684-supervisor",
+  "move": "ask-goal-met",
+  "words": "Ask you whether it is met",
+  "holder": "supervisor",
+  "ref": null,
+  "title": "Every goal always has a next move",
+  "since": "2026-11-18T09:12:40.118Z",
+  "command": "ask --class goal-met --goal g-20261117-055206684-supervisor --recommendation yes",
+  "covered_by": [{ "kind": "goal-work-merged", "subject": "g-20261117-055206684-supervisor" }],
+  "quiet": null,
+  "via": null,
+  "flag": "owed",
+  "rung": 1
+}

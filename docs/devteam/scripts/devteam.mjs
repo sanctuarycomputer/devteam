@@ -14401,6 +14401,70 @@ function cmdMetrics() {
   ].join('\n'));
 }
 
+/* next-moves start */
+// The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
+// one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
+// planners, C chores) are tried in order and the first that matches wins. The kit never makes a move
+// itself; it names it.
+//
+// The contract next-move@1. A move is one object:
+//   subject     "goal:<g-id>" | "ticket:<id>" | "planner:<feature>" | "chore:<slug>"
+//   move        the row's key, kebab-case (e.g. ask-goal-met)
+//   words       a plain sentence for the owner (e.g. "Ask you whether it is met")
+//   holder      owner | supervisor | planner | worker | nobody
+//   ref         null, or { kind, id, url }: kind q | m | ticket | goal | chore | pr; id the question's,
+//               message's, ticket's, goal's or chore branch's id as a string, or for a pr the PR number
+//               as an integer; url the PR's URL on a pr ref, absent on every other kind
+//   title       the subject's own title: the goal's, the ticket's, the planner's feature's, a chore's
+//               --what or its tip commit's subject
+//   since       ISO time the move began (never stored: each row names its source)
+//   command     the supervisor's command for it, or null
+//   covered_by  [ { kind, subject } ]: the findings that already cover it, subject a finding subject or
+//               "*" (any subject); [] when none
+//   quiet       null | hold | drain | queue: it waits on purpose (a park or let-go hold, a drain, the
+//               queue for a slot or memory); shown, never raises a finding
+//   via         null, or "ticket:<id>" | "planner:<feature>" | "goal:<g-id>" | "chore:<slug>": a copied
+//               move (a goal's lead ticket's, planner's, chore's or plan_after goal's; a ticket's
+//               dependency's); it shows its source's flag, and findings are raised only on the source
+//   flag        null | owed | stalled | none, set by age and holder alone (a covering finding never
+//               clears it): owed when the supervisor holds it past next_move_owed_minutes; a chore with
+//               no PR yet (C4) is never owed, it goes straight to stalled; stalled when unchanged past
+//               next_move_stall_hours, whatever the holder; none for the rows with no next move (G20,
+//               T14), held by nobody; null otherwise, and always null when quiet
+//   rung        0 | 1 | 2 on the age ladder: 0 fresh, 1 owed, 2 stuck (stalled, or its finding or a
+//               covering finding acked three times on one subject since `since`); so an owed move is at
+//               rung 1 or 2, a stalled one at 2, a quiet one stays 0
+//   chore       on a chore: move only (absent on every other): { branch: "chore-<slug>", ahead: the
+//               commits main lacks, pr: null | { number, url }, for: [ the refs from chore start --for ] }
+// Every field but chore is always present; ref, command, quiet, via and flag carry null, never go
+// missing.
+//
+// Its five places:
+//   1. moves --json: { "next_move": 1, "moves": [ … ] }
+//   2. /api/data: next_moves, the same array
+//   3. each goal view (goal show, goal list --json, /api/data ooda.goals[]): next_move, its own move or null
+//   4. the hub's cache, run/cache/next-moves.json: { "next_move": 1, "at": "<ISO>", "moves": [ … ] }, the
+//      running goals' moves only (no chore moves)
+//   5. hello's pulse.next: one move (the top flagged, else top-priority, running goal's), or null
+// Additive changes keep @1; a renamed or removed field, or a changed meaning, bumps it. Fixtures:
+// test/fixtures/next-moves/. The closed lists, one per line (test/next-moves.test.mjs reads them):
+// values fields: subject | move | words | holder | ref | title | since | command | covered_by | quiet | via | flag | rung | chore
+// values subject: goal: | ticket: | planner: | chore:
+// values holder: owner | supervisor | planner | worker | nobody
+// values ref.kind: q | m | ticket | goal | chore | pr
+// values quiet: null | hold | drain | queue
+// values via: null | ticket: | planner: | goal: | chore:
+// values flag: null | owed | stalled | none
+// values rung: 0 | 1 | 2
+// values chore: branch | ahead | pr | for
+function nextMoves() {
+  return [];
+}
+// The move whose subject is this one ("goal:<g-id>", …), or null.
+function nextMoveOf(subject) {
+  return nextMoves().find((m) => m.subject === subject) ?? null;
+}
+/* next-moves end */
 // Per-ticket progress data for the burn-up, board and roadmap.
 function collectProgress() {
   const sub = activeTickets();
