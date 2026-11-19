@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { resolve, startCanvasFake } from './lib/canvas-fake.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { until } from './lib/kit.mjs';
@@ -43,11 +44,11 @@ const DOM_GONE = /navigated or closed|Cannot find context|context was destroyed|
 // events). Fetch for every URL: recorded, then answered by `answer`, continued when same-origin, failed
 // otherwise; dialogs recorded and dismissed; exceptions recorded. `answer` may return { fail: true }
 // to fail the request (a network error); a test may set `rec.hold` to a URL test, and the requests it
-// matches wait in `rec.held` until `rec.release()`.
+// matches wait in `rec.held` (their URLs in `rec.heldUrl`) until `rec.release()`.
 async function recorder(ws, origin, answer) {
   let seq = 0;
   const waiting = new Map();
-  const rec = { urls: new Set(), dialogs: [], exceptions: [], send: null, hold: null, held: [], release: null };
+  const rec = { urls: new Set(), dialogs: [], exceptions: [], send: null, hold: null, held: [], heldUrl: new Map(), release: null };
   const raw = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++seq;
     const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`recorder ${method}: no answer in 30 s`)); }, 30000);
@@ -77,7 +78,10 @@ async function recorder(ws, origin, answer) {
       else if (a) {
         const body = Buffer.from(typeof a.body === 'string' ? a.body : JSON.stringify(a.body ?? null)).toString('base64');
         quiet('Fetch.fulfillRequest', { requestId, responseCode: a.status, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }], body });
-      } else if ((url === origin || url.startsWith(`${origin}/`)) && rec.hold && rec.hold(url)) rec.held.push(requestId);
+      } else if ((url === origin || url.startsWith(`${origin}/`)) && rec.hold && rec.hold(url)) {
+        rec.held.push(requestId);
+        rec.heldUrl.set(requestId, url);
+      }
       else if (url === origin || url.startsWith(`${origin}/`)) quiet('Fetch.continueRequest', { requestId });
       else quiet('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
     } else if (o.method === 'Page.javascriptDialogOpening') {
@@ -136,6 +140,17 @@ async function open(t, { canvases = {}, images = {}, repo, size = [1440, 900], p
 const text = (p, sel) => p.ev(`document.querySelector(${JSON.stringify(sel)})?.textContent ?? null`);
 const shown = (p, sel) => p.ev(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden'; })()`);
 const state = (p) => p.ev('document.body.dataset.state');
+// `until` with a shorter bound, and what was last seen (`why()`) in its failure.
+async function within(f, what, why = async () => '', ms = 20000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    if (await f()) return;
+    if (Date.now() > end) assert.fail(`timed out waiting for ${what} (${await why()})`);
+    await sleep(100);
+  }
+}
+// Two animation frames: what the page does on an event (a refit, a load handler) has run.
+const frames = (p) => p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))');
 // Nothing the page ran threw (Runtime.exceptionThrown on the recorder's connection): every test ends on it.
 const noExceptions = (rec, what = 'the page') => assert.deepEqual(rec.exceptions.map((e) => e.exception?.description ?? e.text), [], `${what}: no exception`);
 
@@ -431,6 +446,22 @@ test('C1.13 an instance takes its own position, opacity and visibility', { skip:
   near(button.l, 300, 0.5, 'button itself at its own x');
   assert.equal(await css(p, '[data-id="button"]', 'opacity'), '0.5', 'button itself at its own opacity');
   noExceptions(rec);
+
+  await t.test("C1.13 an instance's size is its own when stored, else the component's; visible its own", async (st) => {
+    // button stores a fixed width and visible: false; bare stores neither, narrow stores its own width
+    const doc2 = structuredClone(EVERY);
+    Object.assign(doc2.nodes.button, { size: { w: 240, h: 'hug' }, visible: false });
+    doc2.nodes.bare = { type: 'instance', parent: 'p-main', name: 'Bare', component: 'button' };
+    doc2.nodes.narrow = { type: 'instance', parent: 'p-main', name: 'Narrow', component: 'button', x: 0, y: 700, size: { w: 100, h: 'hug' } };
+    doc2.pages[0].children.unshift('bare', 'narrow');
+    const o = await open(st, { canvases: { sized: doc2 }, images: EVERY_IMAGES('sized') });
+    assert.equal(await state(o.p), 'ready');
+    assert.notEqual(await css(o.p, '#surface [data-id="bare"]', 'display'), 'none', 'bare shown: its own visible (the default), not the component\'s false');
+    assert.notEqual(await css(o.p, '#surface [data-id="narrow"]', 'display'), 'none', 'narrow shown');
+    near((await rect(o.p, '#surface [data-id="bare"]')).w, 240, 0.5, "bare, storing no size, is the component's 240 wide");
+    near((await rect(o.p, '#surface [data-id="narrow"]')).w, 100, 0.5, 'narrow, storing size.w 100, is 100 wide');
+    noExceptions(o.rec);
+  });
 });
 
 // 20 components, each holding 3 instances of the next (the last a rect), and one instance of the
@@ -451,7 +482,10 @@ function fanDoc() {
 const CAP_NOTE = "Some components weren't drawn: this page holds too many.";
 const capNote = (p) => p.ev(`(() => { const e = [...document.querySelectorAll('#stage *')].find((x) => !x.closest('#surface') && x.textContent === ${JSON.stringify(CAP_NOTE)}); if (!e) return null; const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return { shown: r.width > 0 && r.height > 0 && cs.visibility === 'visible', maxWidth: cs.maxWidth, l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width }; })()`);
 
-test('C1.14 a page draws at most 50000 elements and says so', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 280000 }, async (t) => {
+// The plan's 120000 ms: the cap bounds the draw at about 50000 elements, and the whole test (the
+// 390 px resize and the subtest included) took about 3 s on the box (kit-661 Task 6 run). A page
+// without the cap never reaches ready and fails on that timeout.
+test('C1.14 a page draws at most 50000 elements and says so', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
   const { p, rec, size } = await open(t, { canvases: { fan: fanDoc() } });
   assert.equal(await state(p), 'ready');
   const n = await count(p, '#surface *');
@@ -679,6 +713,51 @@ test('pages', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 
   assert.equal(await p.ev("(() => { const i = document.querySelector('#surface img'); return i.complete && i.naturalWidth > 0; })()"), true, 'the image loaded');
   assert.equal(await p.ev("document.getElementById('pageSel').value"), 'p-main');
   noExceptions(rec);
+
+  await t.test("a fast switch: an older drawing's image loading first doesn't mark the page ready", async (st) => {
+    // Parts holds an image of its own file, so its request is told apart from Checkout's (the browser
+    // shares one request among drawings of the same URL, cache disabled or not)
+    const IMG_B = '0b0b0b0b0b0b0b0b.png';
+    const doc = structuredClone(EVERY);
+    doc.nodes.pimg = { type: 'image', parent: 'p-parts', name: 'Parts photo', x: 0, y: 300, size: { w: 40, h: 40 }, src: `images/${IMG_B}` };
+    doc.pages[1].children.push('pimg');
+    const o = await open(st, { canvases: { fast: doc }, images: { fast: { [IMG_FILE]: IMG, [IMG_B]: IMG } } });
+    assert.equal(await state(o.p), 'ready');
+    const urlA = `${o.origin}/api/canvas/image/fast/${IMG_FILE}`;
+    const urlB = `${o.origin}/api/canvas/image/fast/${IMG_B}`;
+    await o.rec.send('Network.enable');
+    await o.rec.send('Network.setCacheDisabled', { cacheDisabled: true });
+    o.rec.hold = (u) => u.includes('/api/canvas/image/');
+    const heldFor = (u) => o.rec.held.filter((id) => o.rec.heldUrl.get(id) === u);
+    const doneFor = (u) => o.p.ev(`performance.getEntriesByType('resource').filter((e) => e.name === ${JSON.stringify(u)}).length`);
+    const doneB0 = await doneFor(urlB);
+    await o.p.ev(`(async () => {
+      const go = (id) => new Promise((r) => { addEventListener('hashchange', r, { once: true }); location.hash = '#page=' + id; });
+      await go('p-parts');
+      await go('p-main');
+      await go('p-parts');
+      await go('p-main');
+    })()`);
+    await within(() => heldFor(urlA).length > 0 && heldFor(urlB).length > 0, "both pages' image requests held", async () => [...o.rec.heldUrl.values()].join(' '));
+    assert.equal(await state(o.p), 'loading');
+    assert.deepEqual(await o.p.ev("[...document.querySelectorAll('#pages a[aria-current=\"page\"]')].map((a) => a.textContent)"), ['Checkout']);
+    o.rec.hold = null;
+    // the detached Parts drawings' image first: it loads, and the page stays loading
+    const idsB = heldFor(urlB);
+    o.rec.held = o.rec.held.filter((id) => !idsB.includes(id));
+    for (const requestId of idsB) await o.rec.send('Fetch.continueRequest', { requestId });
+    await within(async () => (await doneFor(urlB)) > doneB0, "Parts' image loaded", async () => `state ${await state(o.p)}`);
+    await frames(o.p);
+    assert.equal(await state(o.p), 'loading', "still loading once only the detached drawing's image has loaded");
+    assert.equal(await o.p.ev("document.querySelector('#surface img').complete"), false, "Checkout's image not loaded yet");
+    // then the live page's image: ready
+    o.rec.release();
+    await within(() => o.p.ev("document.body.dataset.state === 'ready'"), 'ready once the live image loaded', async () => `state ${await state(o.p)}`);
+    assert.equal(await count(o.p, '#surface [data-id="card"]'), 1);
+    assert.equal(await count(o.p, '#surface [data-id="pimg"]'), 0);
+    assert.equal(await o.p.ev("(() => { const i = document.querySelector('#surface img'); return i.complete && i.naturalWidth > 0; })()"), true, 'the live image loaded');
+    noExceptions(o.rec);
+  });
 });
 
 // ---- zoom and pan (C1.9, and the review focus's zoom at its bounds) ----
@@ -908,6 +987,34 @@ test('zoom and pan', { skip: canDrive ? false : 'needs Chrome and WebSocket', ti
   noExceptions(rec);
 });
 
+test('Space with the pointer off the stage does not pan', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  assert.equal(await state(p), 'ready');
+  const stage = await screenRect(p, '#stage');
+  const card = () => screenRect(p, '#surface [data-id="card"]');
+  // whether the last Space keydown was taken by the page (window's listener runs after the page's)
+  await p.ev("addEventListener('keydown', (e) => { if (e.code === 'Space') window.spaceTaken = e.defaultPrevented; })");
+  // the pointer over the Layers panel, focus on the body: Space is not the page's
+  const panelAt = centre(await screenRect(p, '#layers .layer[data-node="tiles"]'));
+  await mouse(p, 'mouseMoved', panelAt.x, panelAt.y);
+  assert.equal(await p.ev(`document.elementFromPoint(${panelAt.x}, ${panelAt.y})?.closest('#stage') ?? null`), null, 'the pointer is off the stage');
+  assert.equal(await p.ev('document.activeElement === document.body'), true, 'focus on the body');
+  await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+  assert.equal(await p.ev('window.spaceTaken'), false, 'the Space keydown is not default-prevented');
+  assert.equal(await p.ev("document.getElementById('stage').classList.contains('space')"), false, 'the stage is not in its Space state');
+  // with Space still held, a left drag on the panel, then one on empty stage: neither moves the design
+  const c0 = await card();
+  await drag(p, panelAt, 40, 30, 'left', 1);
+  const empty = { x: stage.r - 120, y: stage.b - 120 };
+  assert.equal(await p.ev(`document.elementFromPoint(${empty.x}, ${empty.y})?.id`), 'stage', 'the point is empty stage');
+  await drag(p, empty, 40, 30, 'left', 1);
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+  const c1 = await card();
+  near(c1.l, c0.l, 0.5, 'the card stays, x');
+  near(c1.t, c0.t, 0.5, 'the card stays, y');
+  noExceptions(rec);
+});
+
 // ---- width rules (C4, and the review focus's long hostile title at 390 px) ----
 
 // Every visible element outside the drawn design (#surface) that directly holds a non-blank text node
@@ -981,6 +1088,9 @@ async function barChecks(p, barH, what) {
     assert.ok(r.l >= bar.l - 0.5 && r.r <= bar.r + 0.5 && r.t >= bar.t - 0.5 && r.b <= bar.b + 0.5, `${what}: ${sel} ${JSON.stringify(r)} inside the bar ${JSON.stringify(bar)}`);
     assert.equal(await css(p, sel, 'text-wrap-mode'), 'nowrap', `${what}: ${sel} never wraps`);
   }
+  // the title keeps a floor: its whole text, or 5em of it when longer (a long repo name gives way first)
+  const tw = await p.ev("(() => { const h = document.getElementById('title'); return { w: h.getBoundingClientRect().width, full: h.scrollWidth, em5: 5 * parseFloat(getComputedStyle(h).fontSize) }; })()");
+  assert.ok(tw.w >= Math.min(tw.full, tw.em5) - 1, `${what}: #title keeps min(its text, 5em) of width (${JSON.stringify(tw)})`);
   // the title's ellipsis: text-overflow draws one only on a block container (h1 is one)
   assert.equal(await css(p, '#title', 'text-overflow'), 'ellipsis', `${what}: #title ends in an ellipsis when cut`);
   assert.ok(['block', 'inline-block', 'flow-root'].includes(await css(p, '#title', 'display')), `${what}: #title a block container`);
@@ -1095,9 +1205,236 @@ test('a hostile document and a long title in the bar at 390', { skip: canDrive ?
   noExceptions(rec);
 });
 
-// ---- touch at 390, and the refit on a resize ----
+test('a long repo name at 390: the title stays, the name gives way', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const repo = { name: 'sanctuarycomputer/a-forty-character-repo-name-xx', public: true };
+  const { p, rec, load, size } = await open(t, { canvases: { every: EVERY, [LONG_SLUG]: HOSTILE }, images: { every: { [IMG_FILE]: IMG }, [LONG_SLUG]: { [IMG_FILE]: IMG } }, repo });
+  assert.equal(await state(p), 'ready');
+  const barH = (await screenRect(p, '.bar')).h;
+  await size(390, 844);
+  for (const slug of ['every', LONG_SLUG]) {
+    await load(`/view/canvas/${slug}`);
+    assert.equal(await state(p), 'ready', slug);
+    assert.equal(await text(p, '#repoChip'), `Saved to ${repo.name} · public`);
+    await barChecks(p, barH, `${slug.slice(0, 20)} with a long repo name at 390`);
+    const nm = await p.ev("(() => { const n = document.querySelector('#repoChip .repo-name'); return { sw: n.scrollWidth, cw: n.clientWidth }; })()");
+    assert.ok(nm.sw > nm.cw, `${slug.slice(0, 20)}: the repo name is cut (scrollWidth ${nm.sw}, clientWidth ${nm.cw})`);
+  }
+  noExceptions(rec);
+});
 
-const frames = (p) => p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))');
+// ---- nothing a document holds runs or loads (C2) ----
+
+// Before the page loads: alert, confirm, prompt and print replaced by recorders (window.dialogTraps).
+const DIALOG_TRAPS = `(() => {
+  const calls = [];
+  Object.defineProperty(window, 'dialogTraps', { value: calls });
+  for (const name of ['alert', 'confirm', 'prompt', 'print']) {
+    const trap = function () { calls.push([name, ...[...arguments].map(String)]); return name === 'confirm' ? false : name === 'prompt' ? null : undefined; };
+    Object.defineProperty(window, name, { value: trap, writable: false, configurable: false });
+  }
+})();`;
+const addTraps = (rec) => rec.send('Page.addScriptToEvaluateOnNewDocument', { source: DIALOG_TRAPS });
+// The DOM's census for C2.2: the elements a document's markup would add, and every on* attribute.
+const CENSUS = `(() => ({
+  traps: Array.isArray(window.dialogTraps) && ['alert', 'confirm', 'prompt', 'print'].every((k) => String(window[k]).includes('calls.push')),
+  calls: window.dialogTraps ?? null,
+  script: document.querySelectorAll('script').length,
+  style: document.querySelectorAll('style').length,
+  foreign: [...document.querySelectorAll('iframe, object, embed, link, b')].map((e) => e.localName),
+  meta: [...document.querySelectorAll('meta')].map((m) => (m.hasAttribute('charset') ? 'charset' : m.name)),
+  on: [...document.querySelectorAll('*')].flatMap((e) => [...e.attributes].filter((a) => /^on/i.test(a.name)).map((a) => e.localName + ' ' + a.name)),
+}))()`;
+const HOSTILE_IMG = `/api/canvas/image/hostile/${IMG_FILE}`;
+// C2.1: the distinct URLs seen are a subset of the page, its doc, its image and /favicon.ico, and hold the first three.
+function onlyOwnRequests(rec, origin, what) {
+  const allowed = [`${origin}/view/canvas/hostile`, `${origin}/api/canvas/doc?slug=hostile`, `${origin}${HOSTILE_IMG}`, `${origin}/favicon.ico`];
+  const seen = [...rec.urls];
+  assert.deepEqual(seen.filter((u) => !allowed.includes(u)), [], `${what}: C2.1 no request but the page's own (saw ${seen.join(' ')})`);
+  for (const u of allowed.slice(0, 3)) assert.ok(rec.urls.has(u), `${what}: C2.1 the request for ${u}`);
+}
+// C2.2: no dialog opened, no trap called, and the DOM holds only the page's own markup.
+async function ranNothing(p, rec, what, taken = null) {
+  assert.deepEqual(rec.dialogs, [], `${what}: C2.2 no dialog opened`);
+  const c = taken ?? await p.ev(CENSUS);
+  assert.equal(c.traps, true, `${what}: C2.2 the dialog traps are in place`);
+  assert.deepEqual(c.calls, [], `${what}: C2.2 no dialog function called`);
+  assert.equal(c.script, 1, `${what}: C2.2 one script element`);
+  assert.equal(c.style, 1, `${what}: C2.2 one style element`);
+  assert.deepEqual(c.foreign, [], `${what}: C2.2 no iframe, object, embed, link or b`);
+  assert.deepEqual(c.meta, ['charset', 'viewport'], `${what}: C2.2 only the page's own meta`);
+  assert.deepEqual(c.on, [], `${what}: C2.2 no on* attribute anywhere`);
+}
+
+test('the hostile document runs nothing', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const H = HOSTILE;
+  const { p, origin, rec } = await open(t, { canvases: { hostile: H }, images: { hostile: { [IMG_FILE]: IMG } }, path: '/view/canvas/hostile#page=h1', beforeLoad: addTraps });
+  assert.equal(await state(p), 'ready');
+  const rowNames = () => p.ev("[...document.querySelectorAll('#layers .layer[data-node]')].map((r) => [r.dataset.node, r.querySelector('.nm').textContent])");
+  // the walk: every node of h1 selected by its Layers row, then h2 and he
+  const props = [];
+  const layers = [];
+  layers.push(...await rowNames());
+  for (const id of ['hf', 'ht', 'hr', 'hv', 'him', 'hc', 'hct', 'hi']) {
+    await p.click(`#layers .layer[data-node="${id}"]`);
+    assert.deepEqual(await selectedRows(p), [id], `${id} selected`);
+    props.push([id, await field(p, 'name'), id === 'hi' ? await field(p, 'component') : null]);
+  }
+  const drawnText = await text(p, '#surface [data-id="ht"]');
+  // the census while h1 (its drawn nodes, Layers and Properties) is shown, as well as at the end on h2
+  await sleep(500);
+  const censusH1 = await p.ev(CENSUS);
+  await p.click('#pages a[data-page="h2"]');
+  await until(() => p.ev("document.body.dataset.state === 'ready' && !!document.querySelector('#surface [data-id=\"he\"]')"), 'h2 drawn');
+  layers.push(...await rowNames());
+  await p.click('#layers .layer[data-node="he"]');
+  assert.deepEqual(await selectedRows(p), ['he'], 'he selected');
+  props.push(['he', await field(p, 'name'), null]);
+  await sleep(500);
+
+  await t.test('C2.1 nothing loads from elsewhere, at 1440', () => onlyOwnRequests(rec, origin, 'at 1440'));
+  await t.test('C2.2 no script from the document ran, at 1440', async () => {
+    await ranNothing(p, rec, 'at 1440, h1 shown', censusH1);
+    await ranNothing(p, rec, 'at 1440, at the end');
+  });
+  await t.test('C2.3 the hostile strings are shown as text, exactly', async () => {
+    assert.equal(drawnText, H.nodes.ht.text, "the drawn ht's textContent");
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('#pages a[data-page]')].map((a) => a.textContent)"), H.pages.map((x) => x.name), 'the Pages list');
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('#pageSel option')].map((o) => o.textContent)"), H.pages.map((x) => x.name), 'the page select');
+    assert.deepEqual(layers.map(([id]) => id), ['hf', 'ht', 'hr', 'hv', 'him', 'hc', 'hct', 'hi', 'he'], 'every node has its row');
+    for (const [id, name] of layers) assert.equal(name, H.nodes[id].name, `${id}'s Layers row`);
+    assert.equal(props.length, 9);
+    for (const [id, name, comp] of props) {
+      assert.equal(name, H.nodes[id].name, `${id}'s Properties name`);
+      if (id === 'hi') assert.equal(comp, H.nodes.hc.name, "hi's Properties component: hc's name");
+    }
+  });
+  noExceptions(rec);
+
+  await t.test('at 390, pages switched by the page select', async (st) => {
+    const o = await open(st, { canvases: { hostile: H }, images: { hostile: { [IMG_FILE]: IMG } }, size: [390, 844], beforeLoad: addTraps });
+    assert.equal(await state(o.p), 'ready');
+    assert.equal(await css(o.p, '.panel.left', 'display'), 'none', 'the panels hidden');
+    assert.equal(await css(o.p, '.panel.right', 'display'), 'none', 'the panels hidden');
+    const choose = async (id, node) => {
+      await o.p.ev(`(() => { const s = document.getElementById('pageSel'); s.value = ${JSON.stringify(id)}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      await until(() => o.p.ev(`document.body.dataset.state === 'ready' && !!document.querySelector('#surface [data-id="${node}"]')`), `${id} by the page select`);
+    };
+    await choose('h2', 'he');
+    await choose('h1', 'hf');
+    await sleep(500);
+    await st.test('C2.1 at 390', () => onlyOwnRequests(o.rec, o.origin, 'at 390'));
+    await st.test('C2.2 at 390', () => ranNothing(o.p, o.rec, 'at 390'));
+    await st.test('C2.3 the page select at 390', async () => {
+      assert.deepEqual(await o.p.ev("[...document.querySelectorAll('#pageSel option')].map((x) => x.textContent)"), H.pages.map((x) => x.name), 'C2.3 the page select at 390');
+    });
+    noExceptions(o.rec);
+  });
+});
+
+// The script between the page's <script> and </script>.
+const pageScript = () => {
+  const src = fs.readFileSync(PAGE_FILE, 'utf8');
+  const m = /<script>([\s\S]*?)<\/script>/.exec(src);
+  assert.ok(m, 'the page has an inline script');
+  return m[1];
+};
+
+test("the page's source holds no markup sinks", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  const src = fs.readFileSync(PAGE_FILE, 'utf8');
+  assert.equal((src.match(/<script\b/g) ?? []).length, 1, 'one script element in the page');
+  const js = pageScript();
+  for (const token of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'createContextualFragment', 'DOMParser', 'setHTMLUnsafe', 'parseHTMLUnsafe', 'srcdoc', 'cssText', "setAttribute('style'", 'setAttribute("style"', 'eval(', 'new Function', 'import(']) {
+    assert.equal(js.includes(token), false, `the script holds no ${token}`);
+  }
+  assert.doesNotMatch(js, /\bset(Timeout|Interval)\s*\(\s*['"`]/, 'no setTimeout or setInterval given a string');
+  // and no will-change anywhere in the page (the supervisor's note from dev-650)
+  assert.equal(src.includes('will-change') || src.includes('willChange'), false, 'no will-change');
+});
+
+test('values outside their classes', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  // out of class, so the recorder serves it; the fake holds the valid document (and its image) under the slug
+  const bad = structuredClone(EVERY);
+  const N = bad.nodes;
+  N.card.fill = 'rgb(255, 0, 0)';
+  N.rule.fill = 'url(https://evil.example/b)';
+  N.card.layout.gap = '2em';
+  N.card.layout.mode = 'block';
+  N.tiles.layout.columns = ['repeat(3, 10px)'];
+  N.title.font = { family: 'fantasy', size: '20px', weight: 400, lineHeight: 1.4 };
+  N.title.color = 'red';
+  N.icon.path = 'M0 0" onload="alert(5)';
+  N.photo.src = 'https://evil.example/f.png';
+  N.dot.size.w = '50%';
+  N.ghost = { type: 'instance', parent: 'actions', name: 'Ghost', component: 'nope' };
+  N.actions.children.push('ghost');
+  const { p, origin, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), answer: docAnswer(bad), beforeLoad: addTraps });
+  assert.equal(await state(p), 'ready');
+  await sleep(500);
+
+  await t.test('C2.5 nothing requested off the origin', () => {
+    const seen = [...rec.urls];
+    assert.deepEqual(seen.filter((u) => u !== origin && !u.startsWith(`${origin}/`)), [], `no request off the origin (saw ${seen.join(' ')})`);
+    assert.deepEqual(seen.filter((u) => u.includes('evil.example')), [], 'no request for evil.example');
+  });
+  await t.test('C2.5 card: no fill, no gap, neither flex nor grid', async () => {
+    assert.equal(await css(p, '[data-id="card"]', 'background-color'), 'rgba(0, 0, 0, 0)');
+    assert.ok(['normal', '0px'].includes(await css(p, '[data-id="card"]', 'row-gap')), 'no gap');
+    assert.ok(!['flex', 'grid'].includes(await css(p, '[data-id="card"]', 'display')), 'mode: the default, none');
+    assert.equal(await css(p, '[data-id="title"]', 'position'), 'absolute', "under a none frame its children are absolute");
+  });
+  await t.test('C2.5 rule: no background image', async () => {
+    assert.equal(await css(p, '[data-id="rule"]', 'background-image'), 'none');
+    assert.equal(await css(p, '[data-id="rule"]', 'background-color'), 'rgba(0, 0, 0, 0)');
+  });
+  await t.test('C2.5 tiles: one column track', async () => {
+    const cols = await css(p, '[data-id="tiles"]', 'grid-template-columns');
+    assert.equal(cols.trim().split(/\s+/).length, 1, `a single track: ${cols}`);
+  });
+  await t.test('C2.5 title: the default font and colour', async () => {
+    assert.equal(await css(p, '[data-id="title"]', 'font-family'), await p.ev('getComputedStyle(document.body).fontFamily'), "the page's sans stack");
+    assert.equal(await css(p, '[data-id="title"]', 'font-size'), '16px');
+    assert.equal(await css(p, '[data-id="title"]', 'font-weight'), '400');
+    near(parseFloat(await css(p, '[data-id="title"]', 'line-height')), 1.4 * 16, 0.05, 'line height 1.4');
+    assert.equal(await css(p, '[data-id="title"]', 'color'), 'rgb(0, 0, 0)');
+  });
+  await t.test('C2.5 icon: an svg with no path', async () => {
+    assert.equal(await p.ev(`${q('[data-id="icon"]')}.localName`), 'svg');
+    assert.equal(await count(p, '[data-id="icon"] path'), 0);
+  });
+  await t.test('C2.5 photo: an empty box of its size, no img, no src', async () => {
+    assert.equal(await p.ev(`${q('[data-id="photo"]')}.localName`), 'div');
+    assert.equal(await count(p, '[data-id="photo"] img, img[data-id="photo"]'), 0);
+    assert.equal(await p.ev(`(() => { const e = ${q('[data-id="photo"]')}; return e.hasAttribute('src') || e.querySelectorAll('[src]').length > 0; })()`), false, 'no src anywhere in it');
+    assert.equal(await count(p, '#surface img'), 0, 'no img drawn at all');
+    near((await rect(p, '[data-id="photo"]')).h, 120, 0.01, "the photo's height");
+    near((await rect(p, '[data-id="photo"]')).w, 360, 0.5, "the photo's width (fill under the card)");
+  });
+  await t.test('C2.5 dot: 0 px wide', async () => {
+    near((await rect(p, '[data-id="dot"]')).w, 0, 0.01, "dot's width: hug of an empty ellipse");
+    near((await rect(p, '[data-id="dot"]')).h, 8, 0.01, "dot's height as stored");
+  });
+  await t.test('C2.5 ghost: a dashed placeholder', async () => {
+    assert.equal(await count(p, '#surface [data-id="ghost"].placeholder'), 1);
+    assert.equal(await css(p, '[data-id="ghost"]', 'border-top-style'), 'dashed');
+    assert.equal(await text(p, '[data-id="ghost"]'), 'Ghost');
+  });
+  await t.test('C2.5 every other node drawn as in C1, and nothing ran', async () => {
+    for (const id of CHECKOUT_IDS) assert.equal(await count(p, `#surface [data-id="${id}"]`), 1, `${id} drawn once`);
+    assert.equal(await count(p, '#surface .placeholder'), 1, 'ghost the only placeholder');
+    assert.equal(await css(p, '[data-id="actions"]', 'display'), 'flex');
+    assert.equal(await css(p, '[data-id="tiles"]', 'display'), 'grid');
+    assert.equal(await text(p, '[data-of="buy"][data-src="button-label"]'), resolve(EVERY, 'buy')['button-label'].text);
+    assert.equal(await css(p, '[data-id="badge"]', 'left'), '12px');
+    assert.equal(await css(p, '[data-id="badge"]', 'top'), '-8px');
+    near((await rect(p, '[data-id="rule"]')).h, 1, 0.01, 'rule height');
+    near((await rect(p, '[data-id="loose"]')).l, 400, 0.5, 'loose at x 400');
+    assert.deepEqual(rec.dialogs, [], 'no dialog');
+    assert.deepEqual(await p.ev('window.dialogTraps'), [], 'no dialog function called');
+  });
+  noExceptions(rec);
+});
+
+// ---- touch at 390, and the refit on a resize ----
 
 test('touch at 390: one finger pans, two pinch, a tap selects', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
   const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), size: [390, 844] });
@@ -1158,6 +1495,34 @@ test('touch at 390: one finger pans, two pinch, a tap selects', { skip: canDrive
   await until(async () => (await selectedRows(p)).length === 0, 'a tap on empty stage clears');
   assert.deepEqual(await outlined(p), []);
   assert.ok(await p.ev('document.documentElement.scrollWidth') <= 390, 'no sideways scroll');
+
+  // a finger that wiggles 3 px on the dot (within the 6 px slop) is a tap: it selects, the view stays
+  c0 = await card();
+  const dot2 = centre(await screenRect(p, '#surface [data-id="dot"]'));
+  await touch('touchStart', [[dot2.x, dot2.y]]);
+  await touch('touchMove', [[dot2.x + 3, dot2.y]]);
+  await touch('touchEnd', []);
+  await within(async () => (await selectedRows(p)).includes('dot'), 'a 3 px wiggle selects the dot', async () => `selected ${JSON.stringify(await selectedRows(p))}, the card moved by ${(await card()).l - c0.l} px`, 5000);
+  await frames(p);
+  c1 = await card();
+  near(c1.l, c0.l, 0.01, 'a 3 px wiggle keeps the view, x');
+  near(c1.t, c0.t, 0.01, 'a 3 px wiggle keeps the view, y');
+
+  // a 10 px drag starting on the title (past the page's slop, under the browser's own) pans by 10 px
+  // and neither selects the title nor clears the dot
+  c0 = await card();
+  const tAt = centre(await screenRect(p, '#surface [data-id="title"]'));
+  assert.equal(await p.ev(`document.elementFromPoint(${tAt.x}, ${tAt.y})?.closest('[data-id]')?.dataset.id`), 'title', 'the drag starts on the title');
+  await touch('touchStart', [[tAt.x, tAt.y]]);
+  await touch('touchMove', [[tAt.x + 5, tAt.y]]);
+  await touch('touchMove', [[tAt.x + 10, tAt.y]]);
+  await touch('touchEnd', []);
+  await frames(p);
+  await sleep(300); // a click Chrome may send after the touch has arrived
+  c1 = await card();
+  near(c1.l, c0.l + 10, 1, 'a 10 px drag moves the view, x');
+  near(c1.t, c0.t, 1, 'a 10 px drag moves the view, y');
+  assert.deepEqual(await selectedRows(p), ['dot'], 'a 10 px drag neither selects nor clears');
   noExceptions(rec);
 });
 

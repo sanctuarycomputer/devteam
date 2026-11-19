@@ -101,8 +101,10 @@
     .bar .where { display: none; }
     .bar h1, .bar .back { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .bar .back { flex: none; }
-    /* the title gives way first (shrink weighs by size, so a factor this large cuts it before the chip) */
-    .bar h1 { flex: 0 1000 auto; }
+    /* the title gives way first (shrink weighs by size, so a factor this large cuts it before the chip),
+       down to a floor of its whole text or 5em, whichever is less; then the chip's repo name gives way.
+       (min() takes no intrinsic size, so calc-size; without it, a 5em floor.) */
+    .bar h1 { flex: 0 1000 auto; min-width: 5em; min-width: calc-size(max-content, min(size, 5em)); }
     .bar .chip { flex: 0 1 auto; }
     .stage-top { top: auto; bottom: 12px; }
     #pageSel { display: block; max-width: 100%; }
@@ -501,7 +503,11 @@
 
   function mark(el, id, inst) {
     el.classList.add('dnode');
-    if (inst) { el.dataset.of = inst.id; el.dataset.src = id; } else { el.dataset.id = id; drawing.byId.set(id, el); }
+    if (inst) { el.dataset.of = inst.id; el.dataset.src = id; } else {
+      el.dataset.id = id;
+      drawing.byId.set(id, el);
+      drawing.marked.push(id);
+    }
   }
 
   // One side's size: px, `hug` (the content's size) or `fill` (by the parent's layout).
@@ -621,12 +627,16 @@
     const g = getter(id, n, inst);
     const labels = drawing.labels.length;
     const after = drawing.after.length;
+    const marked = drawing.marked.length;
     try {
       return drawOne(id, n, g, parentMode, inst);
     } catch {
-      // nothing of the discarded element is kept: no label, no later measuring
+      // nothing of the discarded element is kept: no label, no later measuring, and no drawn-node
+      // entry (its nodes' Layers rows then select nothing drawn, rather than a detached element); an
+      // id is drawn at most once per page, so each entry removed was added by this attempt
       drawing.labels.length = labels;
       drawing.after.length = after;
+      for (const k of drawing.marked.splice(marked)) drawing.byId.delete(k);
       return placeholder(id, g, parentMode, inst);
     }
   }
@@ -778,7 +788,7 @@
   function drawPage(pageId) {
     const pg = pageById(pageId) || pages()[0];
     // the page's own tree, instances as one element each, counts against the budget first
-    drawing = { seen: new Set(), after: [], labels: [], anchors: 0, byId: new Map(), hidden: 0, sizes: new Map(), used: 0, capped: false };
+    drawing = { seen: new Set(), after: [], labels: [], anchors: 0, byId: new Map(), marked: [], hidden: 0, sizes: new Map(), used: 0, capped: false };
     drawing.used = treeElements(kidsOf(pg));
     const els = [];
     for (const id of kidsOf(pg)) {
