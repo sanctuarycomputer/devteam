@@ -246,3 +246,108 @@ test('responder-contract C2: the reply guard, the responder\'s reply and refs, i
     });
   } finally { F.done(); }
 });
+
+test('responder-contract A3: the handoff, sent, open and settled; writer on thread views', async (t) => {
+  const F = threadsFixture('responder-a3');
+  try {
+    const R = (args) => F.run(F.old, args, RESPONDER);
+    const raw = (id) => fs.readdirSync(F.logDir).flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))).find((l) => l.id === id);
+    const open = () => JSON.parse(F.sup(['messages', '--open', '--to', 'supervisor', '--json'])).map((m) => m.id);
+    const newThread = (title) => F.owner(['thread', 'new', '--title', title, '--', 'Make the header darker.']).split('\n')[0];
+    const handoff = (T, text = 'merge it') => {
+      const r = R(['send', 'supervisor', text, '--kind', 'handoff', '--thread', T]);
+      assert.equal(r.status, 0, `the responder's handoff: ${r.err || r.out}`);
+      const id = r.out.split('\n')[0];
+      assert.match(id, /^m-\S+-responder$/, r.out);
+      return id;
+    };
+    const T = newThread('Header colour');
+
+    await t.test('A3a: a handoff stays open through a responder turn, and closes on the supervisor\'s turn after it', () => {
+      const U = JSON.parse(F.owner(['thread', 'show', T, '--json'])).turns[0].id;
+      const H = handoff(T, `merge it (owner's turn ${U})`);
+      assert.ok(open().includes(H), 'the handoff is open');
+      const l = raw(H);
+      assert.equal(l?.thread, T, JSON.stringify(l));
+      assert.equal(l.kind, 'handoff');
+      const r = R(['thread', 'reply', T, 'Passed to the supervisor']);
+      assert.equal(r.status, 0, r.err);
+      assert.ok(open().includes(H), "a responder turn doesn't settle it");
+      F.sup(['thread', 'reply', T, 'Merged']);
+      assert.ok(!open().includes(H), "the supervisor's turn after it settles it");
+    });
+
+    await t.test("A3b: a supervisor turn before the handoff doesn't settle it", () => {
+      const Tb = newThread('Footer colour');
+      F.sup(['thread', 'reply', Tb, 'Looking']);
+      const H = handoff(Tb);
+      assert.ok(open().includes(H), 'still open');
+    });
+
+    await t.test("A3c: send's refusals write nothing", () => {
+      const Tc = newThread('Resolved one');
+      F.owner(['thread', 'resolve', Tc]);
+      const Topen = newThread('Open one');
+      const worker = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'kit-9-probe' };
+      const M = handoff(Topen);
+      const cases = [
+        ['a handoff without --thread', ['send', 'supervisor', 'x', '--kind', 'handoff'], RESPONDER, /a handoff names its thread/],
+        ['a t- id naming no thread', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', 't-20990101-000000000-owner'], RESPONDER, /no thread t-20990101-000000000-owner/],
+        ['a resolved thread', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Tc], RESPONDER, /the owner closed it.*reopen.*--kind info/],
+        ['--thread with --kind info', ['send', 'supervisor', 'x', '--kind', 'info', '--thread', Topen], RESPONDER, /--thread goes with --kind handoff/],
+        ['a handoff from the supervisor', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen], F.SUP, /the responder hands threads to the supervisor/],
+        ['a handoff from a worker', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen], worker, /the responder hands threads to the supervisor/],
+        ['a handoff to a ticket', ['send', 'kit-9-probe', 'x', '--kind', 'handoff', '--thread', Topen], RESPONDER, /the responder hands threads to the supervisor/],
+        ["the responder's info with --re", ['send', 'supervisor', 'x', '--re', M], RESPONDER, /the responder replies to no message \(re\)/],
+        ["the responder's handoff with --re", ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen, '--re', M], RESPONDER, /the responder replies to no message \(re\)/],
+      ];
+      for (const [what, args, role, why] of cases) {
+        const before = hashDirs([F.logDir]);
+        const r = F.run(F.old, args, role);
+        assert.notEqual(r.status, 0, `${what} should be refused: ${r.out}`);
+        assert.match(r.err, why, `${what}: ${r.err}`);
+        assert.deepEqual(hashDirs([F.logDir]), before, `${what} writes nothing`);
+      }
+    });
+
+    await t.test("A3d: a resolve doesn't settle a handoff; the supervisor's --re does", () => {
+      const Td = newThread('Resolved later');
+      const H = handoff(Td);
+      F.owner(['thread', 'resolve', Td]);
+      assert.ok(open().includes(H), 'a resolve leaves it open');
+      const r = F.run(F.old, ['send', 'responder', 'done', '--re', H], F.SUP);
+      assert.equal(r.status, 0, r.err);
+      assert.ok(!open().includes(H), "the supervisor's --re settles it");
+    });
+
+    await t.test('A3e: thread show gives each turn writer, its line\'s by, and keeps by', () => {
+      const v = JSON.parse(F.owner(['thread', 'show', T, '--json']));
+      const writers = v.turns.map((u) => u.writer);
+      assert.deepEqual(writers, v.turns.map((u) => raw(u.id).by));
+      assert.deepEqual(writers, ['owner', 'responder', 'supervisor']);
+      assert.deepEqual(v.turns.map((u) => u.by), ['owner', 'supervisor', 'supervisor']);
+    });
+
+    await t.test('A3f: metrics and messages --open agree on a handoff a later supervisor turn settled', () => {
+      const snap = F.snapLog();
+      try {
+        const T2 = newThread('Settled handoff');
+        const T3 = newThread('Unsettled handoff');
+        const mid = (ago, n) => { const d = new Date(Date.now() - ago - n); return `m-${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}-responder`; };
+        const H1 = mid(40 * 60000, 0);
+        const H2 = mid(40 * 60000, 1);
+        F.hand('responder', { id: H1, type: 'message', to: 'supervisor', kind: 'handoff', text: 'merge it', re: null, sha: null, ticket: null, thread: T2 }, 40 * 60000, 'responder.jsonl');
+        F.hand('responder', { id: H2, type: 'message', to: 'supervisor', kind: 'handoff', text: 'merge that', re: null, sha: null, ticket: null, thread: T3 }, 40 * 60000 + 1, 'responder.jsonl');
+        F.hand('supervisor', { type: 'turn', thread: T2, text: 'Done.' }, 35 * 60000);
+        const m = F.run(F.old, ['metrics', '--json'], F.SUP);
+        assert.equal(m.status, 0, m.err);
+        const unanswered = (JSON.parse(m.out).findings ?? []).filter((x) => x.kind === 'unanswered-message').map((x) => x.subject);
+        assert.ok(!unanswered.includes(H1), `metrics raises no unanswered-message for the settled handoff: ${unanswered.join(', ')}`);
+        assert.ok(unanswered.includes(H2), `metrics raises unanswered-message for the open handoff: ${unanswered.join(', ')}`);
+        const o = open();
+        assert.ok(!o.includes(H1), 'messages --open leaves out the settled handoff');
+        assert.ok(o.includes(H2), 'messages --open lists the open handoff');
+      } finally { F.restoreLog(snap); }
+    });
+  } finally { F.done(); }
+});

@@ -8100,7 +8100,8 @@ function threadViews(objects) {
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
 function threadView(t, ts, qs) {
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null }));
+  // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null }));
   const status = t.status === 'resolved' ? 'resolved' : 'open';
   const last = turns[turns.length - 1] ?? null;
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
@@ -20942,20 +20943,33 @@ function cmdPane() {
 function cmdSend() {
   const [to, ...words] = positional;
   const text = words.join(' ').replace(/\s+/g, ' ').trim();
-  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s]');
+  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s] [--thread t-… (handoff)]');
   const kind = flagStr('kind') ?? 'info';
+  const thread = flagStr('thread') ?? null;
+  if (thread && kind !== 'handoff') die('--thread goes with --kind handoff only: a handoff names the thread it hands over');
   // --owner: the owner, in their own terminal, telling a session something. Logged as the owner's.
   const from = flags.owner ? ownerWriter().by : myAddress();
   if (from === 'owner' && kind !== 'info') die('the owner sends info messages; answers go through answer <qid>, rulings come from the supervisor');
   if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages`);
   const sha = flagStr('sha') ?? (kind === 'merge-request' ? cwdGit(['rev-parse', 'HEAD']) : null);
   const re = flagStr('re') ?? null;
+  // responder-1: a reply's re closes what it names in every reader of open messages, so the
+  // responder's never carries one (integrity refuses the line too; this says so before it is built)
+  if (re && from === 'responder') die('the responder replies to no message (re): a reply would close what it names; send info, or hand the thread over with --kind handoff --thread <t-id>');
+  if (kind === 'handoff') {
+    if (from !== 'responder' || to !== 'supervisor') die('a handoff is the responder\'s: the responder hands threads to the supervisor (send supervisor "…" --kind handoff --thread <t-id>, run as the responder)');
+    if (!thread) die('a handoff names its thread: --thread <t-id>');
+    const t = logGet(thread);
+    if (t?.type !== 'thread') die(`no thread ${thread} (devteam.mjs thread list)`);
+    // a resolved thread takes no supervisor turn, so its handoff could never settle
+    if (t.status === 'resolved') die(`${thread} is resolved: the owner closed it, so a handoff on it could never be answered there; ask the owner to reopen it, or send --kind info`);
+  }
   if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
-  out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()) }).id);
+  out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()), thread }).id);
 }
 // Log one message and type it into the recipient's pane. The log is the record; the pane is
 // delivery. A recipient whose pane is gone catches up with `messages`.
-function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }) {
+function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, thread = null }) {
   const target = to === 'supervisor' ? supervisorTarget() : tmuxTarget(to);
   const resolved = resolvePane(target);
   const { target: exact } = resolved;
@@ -20963,7 +20977,8 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }
   // never into the machine's operator, by its name or a window number (on a box a fleet's session
   // can be home): only the owner's threads reach it from the kit
   if (!problem && sh('tmux', ['display-message', '-p', '-t', exact, '#{window_name}']) === OPERATOR_WINDOW) problem = 'that is the machine\'s operator, which takes no messages from a fleet';
-  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null) }, from);
+  // thread only on a handoff's line, so every other message's line is as before
+  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null), ...(thread ? { thread } : {}) }, from);
   const typed = problem ? false : typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`);
   if (!typed) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   else if (typed !== true) warn(`${line.id} ${heldWords(typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`);
@@ -20972,7 +20987,14 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }
 // A request is settled when the work it is about has landed: a ticket's once it merged, a
 // planner's once its plan file is on main, a ticket's review request once it was approved. The
 // merge or the approval is the answer even if nobody replied.
+//
+// Every reader of open messages calls this (messages --open, metrics' unanswered-message and
+// messages.still_open, /api/data's open_messages, idsAwaitingReply), so the handoff rule lives here
+// and they all agree: a handoff is settled by a supervisor turn in its thread after it, and by
+// nothing else here (a responder turn or the owner's resolve never settles it; a reply citing it
+// with --re closes it through each reader's replied set, as for any message).
 function settledByLanding(m) {
+  if (m.kind === 'handoff') return logObjects('turn').some((u) => u.thread === m.thread && u.created_by === 'supervisor' && u.created_at > m.created_at);
   const by = m.created_by ?? m.by;
   if (!by) return false;
   const cls = writerClass(by);
