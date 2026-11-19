@@ -9838,7 +9838,7 @@ const ARTIFACTS_REL = `${projectRel}/artifacts`;
 const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99})$/;
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
-const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for'];
+const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for', 'kind'];
 const artifactPathOk = (p) => /^[A-Za-z0-9._/-]+$/.test(p) && p.split('/').every((s) => s && !s.startsWith('.'));
 const ARTIFACT_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net', 'https://unpkg.com'];
 const ARTIFACT_FONT_HOSTS = ['https://fonts.googleapis.com', 'https://fonts.gstatic.com'];
@@ -9906,6 +9906,8 @@ function parseArtifactManifest(buf) {
   }
   if (typeof m.by !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(m.by)) errs.push('by is who drew it: supervisor, a ticket id, or plan-<feature>');
   if (m.for !== undefined && !(Array.isArray(m.for) && m.for.every((s) => scopeValid(s, 'artifact')))) errs.push(`for is a list of scopes (${SCOPE_HELP.artifact})`);
+  // what the Library files it under; with none it is a mock
+  if (m.kind !== undefined && !['mock', 'diagram', 'docs'].includes(m.kind)) errs.push('kind is mock, diagram or docs (or leave it out: a mock)');
   return errs.length ? { error: errs.join('; ') } : { manifest: { ...m, for: m.for ?? [] } };
 }
 // One artifact judged the same whether its entries come from disk or from a commit: errors refuse
@@ -10081,7 +10083,7 @@ function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
   const mtime = Math.max(0, ...src.entries.map((e) => e.mtime ?? 0));
   const m = p.manifest;
-  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], error: p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
+  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], kind: m?.kind ?? null, error: p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
 }
 function landedArtifacts() {
   const ref = mainRef();
@@ -10096,7 +10098,9 @@ function landedArtifacts() {
   // the cache holds what the tree says (describeArtifact); the row adds the tree id itself, for
   // publishing, and nothing that changes without the tree changing goes in the cache
   const res = rows.map(([, tree, slug]) => {
-    let d = cache[tree]?.slug === slug ? cache[tree] : null;
+    // a row with no kind key was written by a kit from before kinds, which calls a kinded manifest
+    // broken: describe it again rather than serve that (kit-319)
+    let d = cache[tree]?.slug === slug && 'kind' in cache[tree] ? cache[tree] : null;
     if (!d) { const src = artifactSource('main', slug); d = src ? describeArtifact(slug, 'main', src) : null; }
     if (!d) return null;
     next[tree] = d;
@@ -10199,13 +10203,13 @@ function artifactSubjectNow(s) {
   if (fingerprint(src.entries) === s.fp) return null;
   return tree ? `main has changed ${s.slug} since this published version` : `the artifact ${s.slug} has changed since this thread began`;
 }
-// artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
+// artifact new <slug> --title --summary [--for '[…]'] [--kind mock|diagram|docs]: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
   const [sub, ...args] = positional;
   const here = path.join(repoRoot, ARTIFACTS_REL);
   if (sub === 'new') {
-    const slugName = args[0] ?? die('usage: artifact new <slug> --title "…" --summary "…" [--for \'["goal:g"]\']');
+    const slugName = args[0] ?? die('usage: artifact new <slug> --title "…" --summary "…" [--for \'["goal:g"]\'] [--kind mock|diagram|docs]');
     if (!LINK_ID.test(slugName)) die(`${slugName}: a slug is lowercase words joined by - (mock-checkout)`);
     if (!commonDir || fs.realpathSync(repoRoot) === fs.realpathSync(mainRoot)) die('artifact new: draw an artifact in a worktree (a ticket\'s, a plan\'s, or devteam.mjs chore start artifact-<slug>), never on the main checkout');
     if (landedArtifacts().some((a) => a.slug === slugName)) die(`${slugName} has landed; edit ${ARTIFACTS_REL}/${slugName}/ in this worktree instead`);
@@ -10213,7 +10217,10 @@ function cmdArtifact() {
     const other = draftArtifacts().filter((a) => a.slug === slugName).map((a) => a.at);
     if (other.length) warn(`${slugName} is also being drawn in ${other.join(', ')}`);
     const by = process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
-    const manifest = { v: 1, title: flagStr('title') ?? die('artifact new needs --title'), summary: flagStr('summary') ?? die('artifact new needs --summary'), by, for: jsonFlag('for') ?? [] };
+    // flags keep a repeated flag's last value; a kind given twice is refused rather than guessed
+    const own = argv.indexOf('--') < 0 ? argv : argv.slice(0, argv.indexOf('--'));
+    if (own.filter((a) => a === '--kind' || a.startsWith('--kind=')).length > 1) die('artifact new: give --kind once; kind is mock, diagram or docs');
+    const manifest = { v: 1, title: flagStr('title') ?? die('artifact new needs --title'), summary: flagStr('summary') ?? die('artifact new needs --summary'), by, for: jsonFlag('for') ?? [], ...(flags.kind !== undefined ? { kind: flagStr('kind') ?? '' } : {}) };
     const m = parseArtifactManifest(Buffer.from(JSON.stringify(manifest)));
     if (m.error) die(`artifact new: ${m.error}`);
     fs.mkdirSync(path.join(here, slugName), { recursive: true });
@@ -10282,7 +10289,7 @@ function cmdArtifact() {
     if (flags.json) return json(r);
     return out(r.versions.map((v) => (v.kind === 'draft' ? `draft ${v.worktree} ${v.time}` : `${v.kind} ${v.tree.slice(0, 12)} ${v.commit.slice(0, 12)} ${v.time}`)).join('\n'));
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
