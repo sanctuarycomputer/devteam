@@ -25995,9 +25995,10 @@ async function browserStartLock(file, fn) {
   // live claimants, and drop removes it once the token is gone. A claim on any other token is
   // removable, since its claimant read that token on the path before the listing, and a token that has
   // left the path never comes back: each is minted fresh and put on the path once (null's claims need
-  // no order: the exclusive owner write keeps two takers of an ownerless folder apart). What can't be
-  // read or removed is left. Like the dead-owner rule, it takes every starter to share one pid
-  // namespace.
+  // no order: the exclusive owner write keeps two takers of an ownerless folder apart). A claim is
+  // judged and then unlinked by name, so one made anew at that name in between can go too: harmless
+  // for the same reason, and drop's cleanup has the same gap. What can't be read or removed is left.
+  // Like the dead-owner rule, it takes every starter to share one pid namespace.
   const sweep = () => {
     const dir = path.dirname(lock), base = `${path.basename(lock)}.`;
     let names;
