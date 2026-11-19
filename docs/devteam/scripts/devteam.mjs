@@ -14467,7 +14467,9 @@ function nextMoveOf(subject) {
 const MOVE_HOLDERS = ['owner', 'supervisor', 'planner', 'worker', 'nobody'];
 // A move's age in words: 45 min, 3 h, 2 d.
 const moveAge = (since) => {
-  const min = Math.max(0, Math.floor((Date.now() - Date.parse(since)) / 60000));
+  const t = Date.parse(since);
+  if (Number.isNaN(t)) return 'since ?';
+  const min = Math.max(0, Math.floor((Date.now() - t) / 60000));
   return min < 120 ? `${min} min` : min < 48 * 60 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`;
 };
 // moves [--json] [--holder h]: every move, grouped by holder, oldest first, owed and stalled marked.
@@ -14480,7 +14482,7 @@ function cmdMoves() {
   if (!moves.length) return out('No next moves.');
   const L = [];
   for (const h of MOVE_HOLDERS) {
-    const mine = moves.filter((m) => m.holder === h).sort((a, b) => a.since.localeCompare(b.since));
+    const mine = moves.filter((m) => m.holder === h).sort((a, b) => (Date.parse(a.since) || 0) - (Date.parse(b.since) || 0));
     if (!mine.length) continue;
     L.push(`${h}:`);
     for (const m of mine) L.push(`  ${m.subject}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`);
