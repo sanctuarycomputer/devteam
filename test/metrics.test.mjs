@@ -123,3 +123,31 @@ test('a lower-priority ticket still starts while higher-priority work is blocked
     assert.equal(idle(), 'make workers for: bf-03-low');
   } finally { F.done(); }
 });
+
+// Only running goals give or pass on priority: a met goal's leftover ticket, a parked goal's ticket
+// (nor a chain through one), a drained goal's ticket (nor a chain through one), and a held goal a
+// ticket also serves push nothing.
+test('ready: met, parked and drained goals give no priority and pass none on', () => {
+  const { F, g, ticket, rows } = priorityFixture('ready-priority-live');
+  try {
+    F.sup(['feature', 'add', 'fp1', '--json', JSON.stringify({ title: 'F1', goals: [F.goal], stories: [{ id: 'P1-S1', text: 'it works', release: 'v1.0.0' }] })]);
+    F.sup(['feature', 'add', 'fp39', '--json', JSON.stringify({ title: 'F39', goals: [g[3], g[9]], stories: [{ id: 'P39-S1', text: 'it works', release: 'v1.0.0' }] })]);
+    ticket('lv-01-low', 9);
+    ticket('lv-02-met', 1, ['lv-01-low']);
+    ticket('lv-03-low', 9);
+    ticket('lv-04-parked', 3, ['lv-03-low']);
+    ticket('lv-05-high', 2, ['lv-04-parked']);
+    ticket('lv-06-low', 9);
+    ticket('lv-07-drained', 5, ['lv-06-low']);
+    ticket('lv-09-high', 2, ['lv-07-drained']);
+    ticket('lv-08-both', 39);
+    // while every goal runs, each low ticket takes the priority of what waits on it
+    assert.deepEqual(rows(), [['lv-01-low', 1, 1], ['lv-03-low', 2, 2], ['lv-06-low', 2, 2], ['lv-08-both', 3, null]]);
+    // the p1 goal met (the owner's word), p3 parked, p5 drained
+    F.hand('owner', { type: 'goal', op: 'set', id: F.goal, status: 'met' }, 1000);
+    F.owner(['goal', 'hold', g[3], 'park', '--owner', '--reason', 'later']);
+    F.sup(['goal', 'hold', g[5], 'drain', '--reason', 'paused']);
+    assert.deepEqual(rows(), [['lv-01-low', 9, null], ['lv-03-low', 9, null], ['lv-06-low', 9, null], ['lv-08-both', 9, null]]);
+    assert.doesNotMatch(F.sup(['ready']), /blocks p/);
+  } finally { F.done(); }
+});

@@ -4419,20 +4419,20 @@ function ticketGoals(t) {
 }
 // A ticket whose feature names no goal (an old project) follows the fleet, like its session.
 const ticketMode = (t) => { const gs = ticketGoals(t); return gs.length ? modeOf(gs) : fleetMode() ?? 'run'; };
-// A ticket's own priority: the best (lowest) priority among the live goals it serves, and which goal
-// that is; null when none has one (a chore, an unprioritised goal).
+// A ticket's own priority: the best (lowest) priority among the running goals it serves (not met,
+// abandoned or held), and which goal that is; null when none has one (a chore, an unprioritised goal).
 function ownPriority(t) {
-  const g = ticketGoals(t).filter((x) => !['met', 'abandoned'].includes(x.status) && typeof x.priority === 'number').sort((a, b) => a.priority - b.priority)[0];
+  const g = ticketGoals(t).filter((x) => !['met', 'abandoned'].includes(x.status) && goalMode(x) === 'run' && typeof x.priority === 'number').sort((a, b) => a.priority - b.priority)[0];
   return g ? { priority: g.priority, goal: g.id } : null;
 }
 // Each live ticket's effective priority: the best of its own and that of every live ticket that
 // depends on it, directly or through others. Work a higher-priority goal waits on goes first,
 // whatever goal it serves, so the goal isn't left waiting on work nobody pushes (ready, idle
-// capacity). Priority orders the queue, never gates it. Live: active, unmerged, its goal not
-// parked or let go.
+// capacity). Priority orders the queue, never gates it. Live: active, unmerged, its goal running
+// (a drained, parked or let-go goal's ticket starts nothing, so pushes nothing).
 function effectivePriorities(ts) {
-  const live = new Map([...ts].filter(([, t]) => isActive(t) && !mergeShaFor(t.id) && !['park', 'let-go'].includes(ticketMode(t))));
-  // over live tickets only: a chain through a parked ticket passes nothing on, and history costs nothing
+  const live = new Map([...ts].filter(([, t]) => isActive(t) && !mergeShaFor(t.id) && ticketMode(t) === 'run'));
+  // over live tickets only: a chain through a held goal's ticket passes nothing on, and history costs nothing
   const clos = closures(live);
   const own = new Map([...live.values()].map((t) => [t.id, ownPriority(t)]));
   const eff = new Map([...own].map(([id, p]) => [id, { own: p, priority: p?.priority ?? null, goal: p?.goal ?? null }]));
