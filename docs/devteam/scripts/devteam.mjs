@@ -1525,9 +1525,9 @@ function schemaErrors(schema, value, where) {
 // The writer a log file belongs to, from its name alone: owner-<yyyy-mm>, supervisor-<yyyy-mm>,
 // plan-<feature> (a planner's graph, landed by its plan PR), plan-<feature>-<yyyy-mm> (the same
 // planner's messages and observations, live), or a ticket id. Anything else counts for nothing.
+const MONTHLY = /^(owner|supervisor|plan-[a-z0-9]+(?:-[a-z0-9]+)*?)-\d{4}-\d{2}$/;
 // responder.jsonl is the responder's (responder-1): it falls to the last rule, and no ticket id can be
 // "responder", since a keyed ticket id carries a -NN- number.
-const MONTHLY = /^(owner|supervisor|plan-[a-z0-9]+(?:-[a-z0-9]+)*?)-\d{4}-\d{2}$/;
 function writerOfFile(name) {
   const base = name.replace(/\.jsonl$/, '');
   const m = MONTHLY.exec(base);
