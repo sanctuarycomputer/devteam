@@ -182,3 +182,57 @@ test('waits A1: holds and follow-ups carry their fields in the log, and the fold
     noCause(v);
   });
 });
+
+// waitCause(), cut out of devteam.mjs and run with nothing in scope: a body that reaches outside
+// itself throws. Its results are compared through structuredClone, since a vm context's objects have
+// that context's Object.prototype.
+const waitCauseSrc = () => {
+  const a = SRC.indexOf('\nfunction waitCause(');
+  assert.ok(a >= 0, 'waitCause is a top-level function in devteam.mjs');
+  const b = SRC.indexOf('\n}\n', a);
+  return SRC.slice(a + 1, b + 2);
+};
+const liftWaitCause = () => { const f = vm.runInContext(`${waitCauseSrc()}\n;waitCause`, vm.createContext({})); return (ref) => structuredClone(f(ref)); };
+
+test('waits A2: waitCause() reads each cause form, the contract carries the new subjects, and the fixtures fit it', async (t) => {
+  const waitCause = liftWaitCause();
+  const open = (form, id, holder_subject) => ({ form, id, state: 'open', since: null, holder_subject });
+
+  await t.test('each form in the cause table', () => {
+    const G = 'g-20261117-212746754-supervisor';
+    const cases = [
+      ['q-20261117-101010101-supervisor', open('q', 'q-20261117-101010101-supervisor', null)],
+      ['kit-288-goal-moves', open('ticket', 'kit-288-goal-moves', 'ticket:kit-288-goal-moves')],
+      ['dev-62-browser-headless-spike', open('ticket', 'dev-62-browser-headless-spike', 'ticket:dev-62-browser-headless-spike')],
+      ['chore:design-system', open('chore', 'design-system', 'chore:design-system')],
+      ['chore:devteam-sync-v1.2.0', open('chore', 'devteam-sync-v1.2.0', 'chore:devteam-sync-v1.2.0')],
+      [`goal:${G}`, open('goal', G, `goal:${G}`)],
+      ['pr:home#412', open('pr', 'home#412', null)],
+      ['pr:devteam-kit#7', open('pr', 'devteam-kit#7', null)],
+      ['run:devteam-kit:44103283384', open('run', 'devteam-kit:44103283384', null)],
+      ['external:stacksbot inbox jobs', open('external', 'stacksbot inbox jobs', null)],
+      [`external:${'a'.repeat(200)}`, open('external', 'a'.repeat(200), null)],
+    ];
+    for (const [ref, want] of cases) assert.deepEqual(waitCause(ref), want, ref);
+  });
+
+  await t.test('anything else is refused, the review date among them', () => {
+    const refused = [
+      'until:2026-11-24', 'g-20261117-212746754-supervisor', 'o-20261117-101010101-kit-01-x', 'foo:bar',
+      'pr:home#0', 'pr:home#012', 'pr:home#x', 'pr:Home#1', 'pr:#1', 'pr:home', 'run:home:abc', 'run:home:', 'run:Bad_Link:1', 'run:home',
+      'external:', 'external:   ', 'external: x', 'external:x ', 'external:a\nb', `external:${'a'.repeat(201)}`,
+      'chore:', 'chore:Bad_Slug', 'chore:x.lock', 'goal:', 'goal:kit-1-x', 'goal:q-20261117-101010101-supervisor',
+      '', ' kit-288-goal-moves', 'kit-288-goal-moves ', 'Kit-288-goal-moves', null, undefined, 42, ['kit-288-goal-moves'],
+    ];
+    for (const ref of refused) assert.equal(waitCause(ref), null, JSON.stringify(ref));
+  });
+
+  await t.test('the patterns it copies are the ones it copies them from', () => {
+    const body = waitCauseSrc();
+    const lit = (name) => { const m = body.match(new RegExp(`const ${name} = /(.+)/;`)); assert.ok(m, `waitCause declares ${name}`); return m[1]; };
+    assert.equal(lit('ID'), SCHEMA['x-id'].pattern);
+    assert.equal(lit('TICKET'), SCHEMA['x-id'].keyed.ticket);
+    assert.equal(lit('LINK'), SRC.match(/\nconst LINK_ID = \/(.+)\/;/)[1]);
+    assert.equal(lit('SLUG'), SRC.match(/\nfunction choreSlug\(slugName\) \{\n {2}if \(!\/(.+?)\/\.test/)[1]);
+  });
+});

@@ -14421,6 +14421,41 @@ function cmdMetrics() {
   ].join('\n'));
 }
 
+// What a hold waits on, read from one entry of a ticket's held_for or a goal's hold_for (design
+// every-wait-names-its-cause-and-every-put, the cause table): { form, id, state, since, holder_subject },
+// or null for a string in no known form (until:<date> among them: the review date is held_until or
+// hold_until, never a cause). form is q | ticket | chore | goal | pr | run | external; id the question's,
+// ticket's or goal's id, the chore's slug, <link>#<n>, <link>:<run id>, or the external words. state is
+// open | resolved | failed and since when it became so (null while open); here every cause is open,
+// and kit-572 (the log's forms) and kit-573 (pr: and run:) read the rest. holder_subject is the
+// next-move subject a hold's move is copied from (ticket:, chore:, goal:), null for a question (its
+// move is the owner's answer) and for pr:, run: and external:. Whether the kit can follow a cause, and
+// so whether it needs a date, is read from form (q, ticket, chore, goal), never from holder_subject.
+// Self-contained: its patterns copy the log schema's ids, LINK_ID and choreSlug's slug.
+function waitCause(ref) {
+  const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
+  const TICKET = /^[a-z][a-z0-9]*(-[a-z0-9]+)*-[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$/;
+  const LINK = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+  const SLUG = /^[a-z0-9]+([.-][a-z0-9]+)*$/;
+  if (typeof ref !== 'string') return null;
+  const cause = (form, id, holder_subject = null) => ({ form, id, state: 'open', since: null, holder_subject });
+  if (ID.test(ref)) return ref.startsWith('q-') ? cause('q', ref) : null;
+  const i = ref.indexOf(':');
+  const [kind, rest] = i === -1 ? [null, ref] : [ref.slice(0, i), ref.slice(i + 1)];
+  if (kind === 'chore') return SLUG.test(rest) && !/\.lock$/.test(rest) ? cause('chore', rest, `chore:${rest}`) : null;
+  if (kind === 'goal') return ID.test(rest) && rest.startsWith('g-') ? cause('goal', rest, `goal:${rest}`) : null;
+  if (kind === 'pr') {
+    const m = rest.match(/^([^#]+)#([1-9]\d*)$/);
+    return m && LINK.test(m[1]) ? cause('pr', rest) : null;
+  }
+  if (kind === 'run') {
+    const m = rest.match(/^([^:]+):(\d+)$/);
+    return m && LINK.test(m[1]) ? cause('run', rest) : null;
+  }
+  if (kind === 'external') return rest.length <= 200 && /^\S(?:[^\r\n]*\S)?$/.test(rest) ? cause('external', rest) : null;
+  if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
+  return null;
+}
 /* next-moves start */
 // The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
 // one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
