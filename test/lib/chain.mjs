@@ -4823,10 +4823,12 @@ http.createServer((req, res) => {
       assert.deepEqual([l.preview, l.port, l.state, l.url], [name, P, 'live', undefined]);
       await pvClose(lst);
       await until(async () => (await pvHello(d.base))[0]?.up === false, 'the tick to see it down');
-      assert.equal((await ofData()).state, 'down');
+      // the dashboard serves a build again for 3 s after it finished (kit-633), and a preview's state
+      // isn't in the log: the page's data shows it with a later read
+      await until(async () => (await ofData()).state === 'down', 'the data to see it down');
       pvClear();
       await until(async () => (await pvHello(d.base)).length === 0, 'the record to go');
-      l = await ofData();
+      l = await until(async () => { const x = await ofData(); return x.state === 'gone' ? x : null; }, 'the data to see it gone');
       assert.deepEqual([l.state, l.port], ['gone', null], 'a preview nobody offers any more');
       assert.equal(json(must(['questions', '--id', id, '--json']))[0].status, 'open', 'the question stands either way');
       assert.equal(json(must(['dashboard-data'])).questions.find((x) => x.id === id).links.find((x) => x.name === 'demo').state, 'gone', 'dashboard-data on its own: no tick, same record');
