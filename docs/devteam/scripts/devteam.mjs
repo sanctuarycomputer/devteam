@@ -14442,7 +14442,8 @@ function cmdMetrics() {
 // Its five places:
 //   1. moves --json: { "next_move": 1, "moves": [ … ] }
 //   2. /api/data: next_moves, the same array
-//   3. each goal view (goal show, goal list --json, /api/data ooda.goals[]): next_move, its own move or null
+//   3. each goal view (goal show, goal list --json, /api/data ooda.goals[]): next_move, its own move or null;
+//      goal show of the Upkeep goal isn't a goal view and has no next_move (chore moves carry its work)
 //   4. the hub's cache, run/cache/next-moves.json: { "next_move": 1, "at": "<ISO>", "moves": [ … ] }, the
 //      running goals' moves only (no chore moves)
 //   5. hello's pulse.next: one move (the top flagged, else top-priority, running goal's), or null
