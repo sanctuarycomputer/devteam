@@ -457,6 +457,12 @@ try {
   .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   @media (max-width: 900px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 560px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: minmax(0, 1fr); } }
+  /* Governance: one flush card, its three sections inset as a card's body is; each table scrolls inside its section */
+  .gov-card > .sec { padding: 14px 16px; }
+  .gov-card > .sec:first-of-type { border-top: 0; }
+  .gov-card > .sec:last-child { border-bottom: 0; }
+  .gov-card .sec-b { min-width: 0; }
+  .gov-card > .err, .gov-card > .loading { margin: 14px 16px; }
 
 /* css-autonomy-pages end */
 /* css-progress start */
@@ -2231,6 +2237,59 @@ function renderAwareness(d) {
   for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
   el.innerHTML = html;
   fitCharts();
+}
+// ---- Governance (kit-93): /api/governance's files in three ruled sections, each opening the read-only file peek ----
+// GOV: the last listing's files (kept through a failed read: C8's "the last listing"), when it was read, its error,
+// and a read in flight. Read when the page is shown, again at most once a minute while it is (render, showHead).
+const GOV = { at: 0, files: null, error: null, pending: false };
+async function loadGovernance(force = false) {
+  if (GOV.pending || (!force && GOV.at && Date.now() - GOV.at < 60000)) return;
+  GOV.pending = true;
+  try {
+    const r = await fetch('/api/governance');
+    const j = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(j?.error || `${r.status} ${r.statusText}`.trim());
+    GOV.files = Array.isArray(j?.files) ? j.files : [];
+    GOV.error = null;
+  } catch (e) { GOV.error = String(e?.message ?? e); }
+  finally { GOV.at = Date.now(); GOV.pending = false; }
+  renderGovernance();
+}
+const GOV_GROUPS = [['governance', 'Governance'], ['process', 'Process'], ['project', 'Project']];
+// A group's rows: File (its title, a badge from its state), Path, Last change (a date, else "—"); a written
+// file opens its peek, a not-written one nothing (C4)
+const GOV_BADGE = { 'changed here': 'amber', 'not written yet': 'low' };
+function governanceRows(files, group) {
+  return (files || []).filter((f) => f?.group === group).map((f) => {
+    const at = typeof f.last_change === 'string' && !Number.isNaN(Date.parse(f.last_change)) ? f.last_change : null;
+    const title = f.title || f.path || '';
+    return {
+      cells: [`${esc(title)}${f.state ? ` <span class="badge ${GOV_BADGE[f.state] || 'low'}">${esc(f.state)}</span>` : ''}`, `<code>${esc(f.path ?? '')}</code>`, at ? esc(fmtDay(at)) : '—'],
+      sort: [title, f.path ?? '', at],
+      open: f.written && f.path ? `#file?path=${encodeURIComponent(f.path)}&title=${encodeURIComponent(title)}` : null,
+    };
+  });
+}
+// The page, written into #governance only when its HTML changed, so a redraw keeps focus and a pin's element
+function renderGovernance() {
+  const body = GOV.error ? `<p class="err">The governance files didn't load: ${esc(GOV.error)}</p>`
+    : !GOV.files ? '<p class="loading">Loading…</p>'
+    : GOV_GROUPS.map(([g, l]) => effSection(l, pageTable(`gov:${g}`, ['File', 'Path', 'Last change'], governanceRows(GOV.files, g)))).join('');
+  const html = `<div class="card flush gov-card">${cardHead('scale', 'Files')}${body}</div>`;
+  const el = $('governance');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  el.innerHTML = html;
+  bindPageTables(el, renderGovernance);
+}
+// A file peek is about a governance file when the last listing named its path (C8: any group; none before a listing)
+const govListed = (path) => typeof path === 'string' && !!GOV.files?.some((f) => f?.path === path);
+// The block of a governance file's rendered Markdown under el (a paragraph, an item, a heading, a quote, code), else
+// null; a file of another repo (its peek's repo) is not this project's governance file
+function govBlockAt(el) {
+  if (DRAWER.kind !== 'file' || !govListed(DRAWER.id) || DRAWER.arg?.get?.('repo')) return null;
+  const b = el?.closest?.('p, li, h1, h2, h3, h4, h5, h6, blockquote, pre');
+  return b && b.closest('#drawer-body .md') ? b : null;
 }
 /* autonomy-pages end */
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
@@ -6258,6 +6317,8 @@ function showHead(p, opts) {
   showPage(p.page, opts);
   if (p.page === 'loop') { showTab(LOOP_TABS.includes(p.state?.lt) ? p.state.lt : 'observe'); tlPins(); }
   if (p.page === 'goals') { GOALS_TAB = GOALS_TABS.includes(p.state?.gt) ? p.state.gt : 'active'; renderGoals(); }
+  // Governance (kit-93): its listing read on arriving (unless read in the last minute), drawn meanwhile
+  if (p.page === 'governance') { renderGovernance(); loadGovernance(); }
   drawFilterPage(p.page);
 }
 // A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
@@ -7357,6 +7418,9 @@ function render(d) {
   renderEfficiency(d);
   renderTrust(d);
   renderAwareness(d);
+  // Governance's listing is its own read (kit-93): read again at most once a minute while the page is shown
+  renderGovernance();
+  if (PAGE_NOW === 'governance') loadGovernance();
 
   // The configured checks, one plain line each, trouble first; one-off checks a worker ran by hand
   // are counted, not listed.
@@ -7468,6 +7532,15 @@ function tSubjectAt(el, x, y, sec) {
   if (row && parseSettingView(`#settings?key=${key}`)) {
     const name = tLine(row.querySelector?.('.set-name')?.textContent, 300) || key;
     return { subject: { kind: 'page', view: `#settings?key=${key}`, quote: tCut(name, 300) }, title: tLine(`Setting · ${name} (${key})`, T_TITLE_MAX), el: row };
+  }
+  // a block of a governance file's rendered text, in its peek (kit-93 C5, C8): a page subject on the file (on
+  // #governance when that view is over the log's 200 bytes), the block its spot, its text the quote
+  const block = govBlockAt(el);
+  if (block) {
+    const path = DRAWER.id, view = `#file?path=${encodeURIComponent(path)}`;
+    const said = tLine(block.innerText ?? block.textContent, 300);
+    const name = GOV.files.find((f) => f?.path === path)?.title || path;
+    return { subject: { kind: 'page', view: tBytes(view) <= T_CAPS.view ? view : '#governance', quote: tCut(said, 300) }, title: tLine(`${name} · ${said.split(' ').slice(0, 6).join(' ')}`, T_TITLE_MAX), el: block };
   }
   const s = sec(el);
   if (!s) return null;
@@ -7769,7 +7842,7 @@ function tlShow(x, y) {
   // nothing the layer can name here (the drawer, the sidebar, a bar): no pin, and the click is the page's
   if (!hit) { tlHide(); return; }
   tlCursor(x, y);
-  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view) || parseSuggView(hit.subject.view) !== null;
+  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view) || parseSuggView(hit.subject.view) !== null || (!!hit.el && govBlockAt(hit.el) === hit.el);
   const r = whole ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
   tlMark(r, !whole, hit.title, x, y);
 }

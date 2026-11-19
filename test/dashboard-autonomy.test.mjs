@@ -404,4 +404,136 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await polls(2);
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
+
+  // ---- Governance (T5): the files in three sections, each a read-only file peek; a paragraph is a thread's subject ----
+  const GOV_TBL = (g) => `#governance [data-tbl="gov:${g}"]`;
+  const govDrawn = () => soon("!!document.querySelector('#governance .card .sec tbody tr')", 'the Governance page drawn');
+  const govSec = (label) => p.ev(`(() => { const s = [...document.querySelectorAll('#governance .card .sec')].find((x) => x.querySelector('.lbl')?.textContent.trim() === ${JSON.stringify(label)}); return s ? [...s.querySelectorAll('tbody tr')].map((r) => [...r.cells].map((c) => c.textContent.replace(/\\s+/g, ' ').trim())) : null; })()`);
+  const fileView = (path) => `#file?path=${encodeURIComponent(path)}`;
+  const PEEK_MD = "!!document.querySelector('#drawer-body .md p')";
+  // the peek rendered and done redrawing (its history arrives after the file and redraws it): the same .md for 1 s
+  const peekSettled = async (what) => {
+    await soon(PEEK_MD, what);
+    const end = Date.now() + 15000;
+    for (;;) {
+      await p.ev("window.__md = document.querySelector('#drawer-body .md'); void 0");
+      await new Promise((r) => setTimeout(r, 1000));
+      if (await p.ev("window.__md === document.querySelector('#drawer-body .md') && !!window.__md?.isConnected")) return;
+      assert.ok(Date.now() < end, `${what}: the peek never settled`);
+    }
+  };
+  // Shift held and the pointer moved over the i-th of the peek's rendered blocks matching sel (kept as window.__blk)
+  const pointAt = async (sel, i) => {
+    const at = await p.ev(`(() => { const e = document.querySelectorAll(${JSON.stringify(sel)})[${i}]; if (!e) return null; window.__blk = e; e.scrollIntoView({ block: 'center', behavior: 'instant' }); const r = e.getBoundingClientRect(); return { x: Math.round(r.left + Math.min(40, r.width / 2)), y: Math.round(r.top + r.height / 2) }; })()`);
+    assert.ok(at, `no ${sel} [${i}] in the peek`);
+    await p.hold('Shift', true);
+    await p.move(at.x, at.y, 8);
+    return at;
+  };
+  // a paragraph pinned, outlined, Shift+clicked into a draft, sent: the POST's subject and its Threads-panel row
+  const pinParagraph = async (path) => {
+    await peekSettled('the rendered file');
+    const at = await pointAt('#drawer-body .md p', 1);
+    await soon('TL.hit?.el === window.__blk', 'the paragraph pointed at');
+    const off = await p.ev("(() => { const h = document.getElementById('tl-hl').getBoundingClientRect(), r = window.__blk.getBoundingClientRect(); return [h.left - (r.left - 3), h.top - (r.top - 3), h.width - (r.width + 6), h.height - (r.height + 6)]; })()");
+    assert.ok(off.every((d) => Math.abs(d) <= 1), `the outline is the paragraph grown by 3px: ${off}`);
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon('!!TL.draft', 'a draft on the paragraph');
+    const quote = await p.ev("window.__blk.textContent.replace(/\\s+/g, ' ').trim()");
+    assert.ok(Buffer.byteLength(quote) <= 300, 'a paragraph under the quote cap');
+    const subject = { kind: 'page', view: fileView(path), quote };
+    assert.deepEqual(await p.ev('TL.draft.subject'), subject);
+    await p.ev('window.__writes.length = 0; void 0');
+    await p.click('#tl-c-text');
+    await p.type('reword this');
+    await p.click('[data-tl-send]');
+    await soon("window.__writes.some((w) => w.url === '/api/thread-new')", 'the thread posted');
+    const w = await p.ev("window.__writes.filter((x) => x.url === '/api/thread-new')");
+    assert.equal(w.length, 1);
+    assert.equal(w[0].method, 'POST');
+    assert.deepEqual(JSON.parse(w[0].body).subject, subject);
+    const id = await soon(`TL.threads.find((t) => t.subject?.view === ${JSON.stringify(subject.view)} && t.subject?.quote === ${JSON.stringify(quote)} && !String(t.id).startsWith('pending-'))?.id`, 'the thread read back');
+    assert.equal(await p.ev(`thInPanelId(${JSON.stringify(id)})`), true, 'a Threads-panel thread');
+    await p.ev("tlClose(); thGo({ th: 'open' }); void 0");
+    await soon(`!!document.querySelector('#th-pane [data-tl-open="${id}"]')`, 'listed in the Threads panel');
+    await p.ev('thGo({}); void 0');
+  };
+
+  await t.test('Governance in three sections', async () => {
+    const fx = autonomyFixture();
+    await load(fx, '#governance');
+    await govDrawn();
+    assert.equal(await p.ev("document.querySelectorAll('#governance .card').length"), 1);
+    assert.equal(await p.ev("[...document.querySelector('#governance .card .card-head').childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim()"), 'Files');
+    assert.deepEqual(await texts('#governance .card .sec .lbl'), ['Governance', 'Process', 'Project']);
+    for (const [g, label] of [['governance', 'Governance'], ['process', 'Process'], ['project', 'Project']]) {
+      const want = fx.governance.files.filter((f) => f.group === g);
+      const rows = await govSec(label);
+      assert.deepEqual(rows.map((r) => r.slice(0, 2)), want.map((f) => [f.state ? `${f.title} ${f.state}` : f.title, f.path]), `${label}'s rows`);
+      rows.forEach((r, i) => (want[i].written ? assert.notEqual(r[2], '—') : assert.equal(r[2], '—')));
+    }
+    assert.equal(await p.ev(`[...document.querySelectorAll('#governance .badge')].find((b) => b.textContent.trim() === 'changed here')?.closest('tr').textContent.includes(${JSON.stringify(fx.ids.governance.changed)})`), true);
+    assert.equal(await p.ev(`[...document.querySelectorAll('#governance .badge')].find((b) => b.textContent.trim() === 'not written yet')?.closest('tr').textContent.includes(${JSON.stringify(fx.ids.governance.notWritten)})`), true);
+  });
+
+  await t.test('a file opens read-only', async () => {
+    const fx = autonomyFixture();
+    const g = fx.ids.governance;
+    await load(fx, '#governance');
+    await govDrawn();
+    for (const [sel, i, how, id] of [[GOV_TBL('governance'), 1, 'click', g.changed], [GOV_TBL('process'), 0, 'enter', g.process], [GOV_TBL('project'), 1, 'click', g.written], [GOV_TBL('governance'), 0, 'enter', g.constitution]]) {
+      assert.deepEqual(await openRow(sel, i, how), { kind: 'file', id }, `${id} by ${how}`);
+      await soon(PEEK_MD, `${id} rendered`);
+      assert.equal(await p.ev("document.getElementById('drawer-body').firstElementChild?.matches('section.attrs')"), true, 'properties first');
+      assert.equal(await p.ev("document.querySelectorAll('#drawer-body textarea, #drawer-body form, #drawer-body input, #drawer-body [contenteditable]').length"), 0, 'no editor');
+      assert.deepEqual(await p.ev("[...document.querySelectorAll('#drawer-body button')].filter((b) => !b.matches('[data-mdview]')).map((b) => b.outerHTML)"), [], 'no button but the view toggle');
+      await closePeek();
+    }
+    // the not-written file: nothing to open
+    assert.equal(await openRow(GOV_TBL('project'), 0, 'click'), null);
+    assert.equal(await openRow(GOV_TBL('project'), 0, 'enter'), null);
+    assert.deepEqual(await p.ev('window.__writes'), []);
+  });
+
+  await t.test('Shift+click pins a paragraph', async () => {
+    const fx = autonomyFixture();
+    const g = fx.ids.governance;
+    await load(fx, '#governance');
+    await govDrawn();
+    assert.deepEqual(await openRow(GOV_TBL('governance'), 1, 'click'), { kind: 'file', id: g.changed });
+    await pinParagraph(g.changed);
+    assert.equal(fileView(g.changed), '#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md');
+    // the Project group's file, opened from the page
+    await load(fx, '#governance');
+    await govDrawn();
+    assert.deepEqual(await openRow(GOV_TBL('project'), 1, 'click'), { kind: 'file', id: g.written });
+    await pinParagraph(g.written);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test("a peek outside Governance's list", async () => {
+    await load(autonomyFixture(), '#governance');
+    await govDrawn();
+    // a kit file the listing doesn't name (the bare project has no README): its router home is Governance, but
+    // the listing decides (C8)
+    await p.ev("location.hash = '#file?path=docs%2Fdevteam%2Fprocess%2Fplanning.md&title=Planning'; void 0");
+    await soon(`DRAWER.kind === 'file' && DRAWER.id === 'docs/devteam/process/planning.md' && ${PEEK_MD}`, 'planning.md rendered');
+    await peekSettled('planning.md settled');
+    assert.equal(await p.ev("govListed('docs/devteam/process/planning.md') || !GOV.files?.length"), false, 'a listing without it');
+    await pointAt('#drawer-body .md p', 0);
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await p.ev('TL.hit'), null);
+    await p.hold('Shift', false);
+  });
+
+  await t.test('governance unreachable', async () => {
+    const fx = autonomyFixture();
+    fx.governance = 500;
+    await load(fx, '#governance');
+    await soon("/boom/.test(document.getElementById('governance').textContent)", 'the error shown');
+    assert.equal(await p.ev("!!document.querySelector('#governance .err')"), true);
+    await polls(2);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
 });
