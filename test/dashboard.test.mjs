@@ -577,12 +577,19 @@ test('an answer posts the pick and the words on the first press, with no which-c
   const D2 = door('Open the box?');
   const D3 = door('Turn it on?');
   const D4 = door('Paint it blue?');
+  const D6 = door('Lock the door?');
   // a defaulted question, overruled in words from its answered card
   const Q5 = dt(['ask', '--question', 'Lights on?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', '--default', 'No'], SUP);
   pastDeadline(root, Q5);
   dt(['answer', Q5, '--defaulted'], SUP);
   const { dash, port } = await dashboardOnFreePort(root, env);
   later(() => dash.stop());
+  // a page loaded before the upgrade posts the old shape, the pick inside the text and no choice key:
+  // still taken, as a line judged by its leading label
+  const old = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: D6, answer: 'Yes — fine' }), signal: AbortSignal.timeout(60000) });
+  assert.equal(old.status, 200, await old.clone().text());
+  const d6 = JSON.parse(dt(['questions', '--id', D6, '--json']))[0];
+  assert.deepEqual([d6.status, d6.answer, d6.choice, d6.matched], ['answered', 'Yes — fine', null, true], 'an old-shaped body still answers');
   const chrome = await openChrome();
   later(() => chrome.close());
   const p = await chrome.newPage();
