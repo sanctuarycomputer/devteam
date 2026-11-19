@@ -1261,6 +1261,7 @@ function lastSent(frames, id) {
 }
 const SIZES = ['size.w', 'size.h'];
 const XYWH = ['x', 'y', 'size.w', 'size.h'];
+const HANDLES8 = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 
 test("R1.1 a loose node's corner resizes live, at most every 100 ms", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
   const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
@@ -1447,6 +1448,67 @@ test('R1.5 no handles for several, none watching', { skip: canDrive ? false : 'n
   await waitHandles(p, ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'], 'eight again');
   await size(700, 900);
   await waitHandles(p, [], 'no handle at 700 px wide');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+// `every` with the 8 × 8 `dot` moved out of the column `card` into the `none` frame `loose` at (100, 100),
+// so it is placed by x, y and gets all eight handles.
+const SMALL = docVariant(EVERY, (d) => {
+  d.nodes.card.children = d.nodes.card.children.filter((k) => k !== 'dot');
+  d.nodes.loose.children.push('dot');
+  Object.assign(d.nodes.dot, { parent: 'loose', x: 100, y: 100 });
+});
+
+test('R1.6 a small node moves from inside and resizes from outside its box', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { small: SMALL }, images: EVERY_IMAGES('small') });
+  await live(p);
+  const z = await zoomNow(p);
+  await p.click('#layers .layer[data-node="dot"]');
+  await waitRows(p, ['dot'], 'dot selected');
+  await waitHandles(p, HANDLES8, 'eight handles on dot');
+  // a press at its centre (under the handles) and a drag: a move, x and y only
+  const c = centre(await box(p, '#surface [data-id="dot"]'));
+  assert.equal(await p.ev(`document.elementFromPoint(${c.x}, ${c.y})?.classList.contains('handle') ?? false`), true, "dot's centre is under a handle");
+  const n0 = edits(rec).length;
+  await drag(p, c, 30, 20);
+  await within(async () => edits(rec).length > n0, 'the move sent');
+  await allSaved(p);
+  await accepted(rec, n0);
+  for (const f of edits(rec).slice(n0)) assert.ok(setsOnly(f, 'dot', ['x', 'y']), `x, y of dot only: ${JSON.stringify(f.ops)}`);
+  let d = fake.doc('small').nodes.dot;
+  assert.deepEqual([d.parent, d.x, d.y, d.size], ['loose', Math.round(100 + 30 / z), Math.round(100 + 20 / z), { w: 8, h: 8 }], "the fake's dot moved, not resized");
+  assert.deepEqual(await selectedRows(p), ['dot'], 'still dot selected');
+  // a press on the outer half of se (outside dot's box) and a drag: a resize, sizes only
+  await waitHandles(p, HANDLES8, 'the handles back');
+  const b = await box(p, '#surface [data-id="dot"]');
+  const hb = await box(p, handleSel('se'));
+  const out = { x: Math.round(hb.r - 2), y: Math.round(hb.b - 2) };
+  assert.ok(out.x > b.r && out.y > b.b, `the press (${out.x}, ${out.y}) outside dot's box (${b.r}, ${b.b})`);
+  assert.equal(await p.ev(`document.elementFromPoint(${out.x}, ${out.y})?.dataset.handle ?? null`), 'se', 'the press is on se');
+  const n1 = edits(rec).length;
+  await drag(p, out, 20, 10);
+  await within(async () => edits(rec).length > n1, 'the resize sent');
+  await allSaved(p);
+  await accepted(rec, n1);
+  for (const f of edits(rec).slice(n1)) assert.ok(setsOnly(f, 'dot', SIZES), `size.w, size.h of dot only: ${JSON.stringify(f.ops)}`);
+  d = fake.doc('small').nodes.dot;
+  assert.deepEqual([d.x, d.y, d.size], [Math.round(100 + 30 / z), Math.round(100 + 20 / z), { w: Math.round(8 + 20 / z), h: Math.round(8 + 10 / z) }], "the fake's dot resized, not moved");
+  // back to 8 × 8 by Ctrl+Z, then Shift+click on its centre (under the handles) takes it out
+  await blurAll(p);
+  const n2 = edits(rec).length;
+  await undoKey(p);
+  await nextEdit(rec, n2);
+  await allSaved(p);
+  assert.deepEqual(fake.doc('small').nodes.dot.size, { w: 8, h: 8 }, 'dot 8 × 8 again');
+  await waitHandles(p, HANDLES8, 'the handles on the small dot');
+  const c2 = centre(await box(p, '#surface [data-id="dot"]'));
+  assert.equal(await p.ev(`document.elementFromPoint(${c2.x}, ${c2.y})?.classList.contains('handle') ?? false`), true, "dot's centre is under a handle");
+  const n3 = edits(rec).length;
+  await shiftClick(p, '#surface [data-id="dot"]');
+  await waitRows(p, [], 'Shift+click took dot out of the selection');
+  await waitHandles(p, [], 'no handles');
+  await sendsNothing(rec, n3, 'the Shift+click');
   noDialogs(rec);
   noExceptions(rec);
 });

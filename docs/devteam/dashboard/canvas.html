@@ -157,7 +157,7 @@
   .pen { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 2; }
   .pen polyline { fill: none; stroke: var(--sel); stroke-width: 1.5px; stroke-dasharray: 4 3; }
   /* the one selected node's resize handles (kit-669 §3): stage chrome on its box's corners and edges */
-  .handle { position: absolute; box-sizing: border-box; width: 8px; height: 8px; margin: -4px 0 0 -4px; background: var(--surface); border: 1px solid var(--sel); z-index: 3; touch-action: none; }
+  .handle { position: absolute; box-sizing: border-box; width: 8px; height: 8px; margin: -4px 0 0 -4px; background: var(--surface); border: 1px solid var(--sel); z-index: 2; touch-action: none; }
   .handle[data-handle="nw"], .handle[data-handle="se"] { cursor: nwse-resize; }
   .handle[data-handle="ne"], .handle[data-handle="sw"] { cursor: nesw-resize; }
   .handle[data-handle="n"], .handle[data-handle="s"] { cursor: ns-resize; }
@@ -2897,8 +2897,11 @@
     const onSmall = h !== null && insideSmall(e.clientX, e.clientY);
     if (h && !onSmall) { pressResize(e, h.dataset.handle); return; }
     if (tool === 'move') {
+      // the click of a press there has the stage for its target (the handle is gone by its release), so
+      // the press does what that click would on the node: Shift toggles it out, else it is pressed
+      if (onSmall && e.shiftKey) { toggleSel(state.sel); toolPress = true; return; }
       pressMove(e, onSmall ? drawn.get(state.sel) : e.target.closest('#surface [data-id]'));
-      if (onSmall) toolPress = true; // its click (its target the stage, the handle gone) keeps the selection
+      if (onSmall && gesture !== null) toolPress = true; // its click keeps the selection
       return;
     }
     toolPress = true;
