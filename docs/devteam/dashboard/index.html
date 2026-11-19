@@ -552,11 +552,6 @@ try {
   .choice.rec { border-color: color-mix(in srgb, var(--blue) 45%, var(--line-2)); }
   .choice.picked { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 15%, transparent); }
   .choice .tag { display: inline-flex; margin-left: 6px; font-size: 11px; font-weight: 500; color: var(--blue-fg); }
-  /* words with no pick: the card asks which choice they mean before posting */
-  .which { margin: 10px 0 4px; padding: 10px 12px; border-radius: 8px; background: color-mix(in srgb, var(--blue) 6%, transparent); }
-  .which p { margin: 0 0 6px; font-weight: 600; font-size: 13.5px; }
-  .which .choices { margin: 0; }
-  .which .choice { grid-template-columns: minmax(0, 1fr); width: 100%; }
   .links { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
   .links a, .linkish, .qref a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   .meta { font-size: 12px; color: var(--muted); margin-top: 8px; }
@@ -2512,11 +2507,6 @@ function oaPaint() {
 // for the thread card's signature: what the rows show, so a copy redraws when it changes
 const oaSig = (q) => (isOa(q) ? [oaRecords(q).map((id) => { const s = oaState(q, id); return [id, s.done, !!s.missing, !!s.loading, oaConfirming(id), PRESSES.has(`${id.startsWith('g-') ? 'g' : 'k'}:${id}`)]; }), NOT_DONE.get(q.id) ?? null] : null);
 const picks = {};
-// Words typed with no choice picked, on a question with choices and a recommendation: the card asks
-// which choice they mean before anything is posted, so the owner, never the supervisor, says whether
-// their words were the recommendation. ASKS[id] is the copy that asked: 'q' the Inbox's, 't' a thread's.
-const ASKS = {};
-const needsWhich = (q) => !!q && q.kind !== 'owner-action' && !!q.recommendation && choicesOf(q).length > 0 && !['goal-approval', 'review'].includes(q.kind) && !(q.secrets || []).length;
 // A question whose linked page moved since it was asked: the sentence that says so (plain text, so
 // callers escape it), or '' when nothing moved. The links counted are the ones the server counts
 // (pinnedArtifact): an artifact link pinned to a hash. The server's own reason when none is flagged.
@@ -2531,15 +2521,6 @@ function movedText(q) {
 }
 // a moved question's buttons that would post an answer: disabled, saying why
 const movedOff = (q) => { const m = movedText(q); return m ? ` disabled title="${esc(m)}"` : ''; };
-const whichAsk = (q, list) => `
-      <div class="which" data-which-for="${esc(q.id)}" role="group" aria-label="Which choice">
-        <p>Which choice do your words mean?</p>
-        <div class="choices">${list.map((c) => `
-          <button type="button" class="choice${c.rec ? ' rec' : ''}" data-which="${esc(q.id)}" value="${esc(c.label)}"${movedOff(q)}><span><b>${esc(c.label)}</b>${c.rec ? '<span class="tag">Recommended</span>' : ''}</span></button>`).join('')}
-          <button type="button" class="choice" data-which="${esc(q.id)}" data-which-none value=""${movedOff(q)}><span><b>None of them</b><div class="d">Post my words as they are.</div></span></button>
-        </div>
-      </div>`;
-const dropAsk = (id, card = null) => { delete ASKS[id]; for (const el of (card || document).querySelectorAll(`[data-which-for="${CSS.escape(id)}"]`)) el.remove(); };
 // Secrets typed or chosen but not yet posted live only in memory, never in storage, and survive a
 // refresh. Each goes straight from the browser to the owner's process and on to its sink.
 const SECRET_DRAFTS = new Map();
@@ -2634,7 +2615,6 @@ function questionCard(q, o, reasonText, copy = false) {
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
-      ${ASKS[q.id] === (copy ? 't' : 'q') ? whichAsk(q, list) : ''}
       ${REFUSED.has(q.id) ? `<p class="err refused" data-refused="${esc(q.id)}"><span>Not saved: ${esc(REFUSED.get(q.id).reason)}</span><button class="ghost" data-dismiss-refused="${esc(q.id)}">Dismiss</button></p>` : ''}
       ${isOa(q) ? oaAnyway(q) : ''}
       <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : `<button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>`}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}${movedOff(q)}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${pre}${esc(q.id)}"></span></div>
@@ -4017,10 +3997,20 @@ function renderOoda(o) {
     </div>`; }).join('') : empty('None yet. Everything the supervisor does shows here.');
 }
 const DEC_KIND = { decision: 'Decided', act: 'Did, as its own call', answer: 'You answered', goal: 'Your call on a goal', rule: 'A standing rule you gave', correction: 'Corrected' };
+// The question's Matched row in words (kit-313): the owner's own pick, the supervisor's reading of
+// their words, or words not yet read; a reading matches, but it is not the owner's agreement
+function matchedWords(q) {
+  if (q.matched == null) return '';
+  if (q.read_by) return `${q.matched ? 'yes' : 'no'}: the supervisor read your words as “${esc(q.label)}”; not counted as your agreement`;
+  if (q.in_words) return 'not yet: you answered in your own words, which the supervisor reads';
+  return q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise';
+}
 function decisionUnder(r) {
   if (r.who === 'supervisor' && ['decision', 'act'].includes(r.kind)) return authorityWords(r.under);
   const u = r.under || {};
-  if (r.kind === 'answer') return [u.recommendation ? (u.matched ? 'went with its recommendation' : `its recommendation was “${esc(u.recommendation)}”`) : '', u.autonomy ? `moved ${esc(words(u.autonomy.class))} to ${esc(RUNG_WORDS[u.autonomy.rung])}` : '', u.standing_rule ? `and gave a standing rule: “${esc(u.standing_rule)}”` : '', u.channel === 'chat' ? 'said in the supervisor chat' : u.channel === 'thread' ? 'said in a thread' : ''].filter(Boolean).join(' · ');
+  // in the owner's own words (kit-313): the supervisor's reading, or none yet, never "went with" it
+  const aq = r.kind === 'answer' ? (DATA.questions || []).find((x) => x.id === r.id) : null;
+  if (r.kind === 'answer') return [aq?.read_by ? `in your own words, read by the supervisor as “${esc(aq.label)}”` : aq?.in_words ? 'in your own words, not yet read' : '', !aq?.in_words && u.recommendation ? (u.matched ? 'went with its recommendation' : `its recommendation was “${esc(u.recommendation)}”`) : '', u.autonomy ? `moved ${esc(words(u.autonomy.class))} to ${esc(RUNG_WORDS[u.autonomy.rung])}` : '', u.standing_rule ? `and gave a standing rule: “${esc(u.standing_rule)}”` : '', u.channel === 'chat' ? 'said in the supervisor chat' : u.channel === 'thread' ? 'said in a thread' : ''].filter(Boolean).join(' · ');
   if (r.kind === 'correction') return [u.severity != null ? `severity ${esc(u.severity)}` : '', u.repaired ? `repaired: ${esc(u.repaired)}` : 'not repaired yet'].filter(Boolean).join(' · ');
   if (r.kind === 'rule') return u.status === 'accepted' ? '' : esc(u.status);
   return '';
@@ -5469,7 +5459,7 @@ function openQuestion(id) {
       ['Status', esc(q.status), 'open, answered, defaulted or withdrawn.'],
       ['Settled', q.answered_at ? `${esc(when(q.answered_at))}${q.answered_by ? ` by ${esc(q.answered_by === 'owner' ? 'you' : q.answered_by)}` : ''}` : '', 'When it was answered, defaulted or withdrawn, and by whom.'],
       ['Took', took != null && ['answered', 'defaulted'].includes(q.status) ? esc(took < 3600e3 ? `${Math.max(1, Math.round(took / 60e3))} minutes` : took < 2 * DAY ? `${(took / 3600e3).toFixed(1)} hours` : `${(took / DAY).toFixed(1)} days`) : '', 'From asking to the answer.'],
-      ['Matched', q.matched == null ? '' : q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise', 'Whether your answer was its recommendation; this is the evidence for more trust.'],
+      ['Matched', matchedWords(q), 'Whether your answer was its recommendation; only your own pick is evidence for more trust, never the supervisor’s reading of your words.'],
     ] })}
     ${q.context ? `<div class="ctx measure">${qblock(q.context, q.links)}</div>` : ''}
     ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? (/\n/.test(c.detail) ? `<div class="ctx">${qblock(c.detail, q.links)}</div>` : ` · ${qinline(c.detail, q.links)}`) : ''}${c.effect ? (/\n/.test(c.effect) ? `<div class="ctx">For users:${qblock(c.effect, q.links)}</div>` : ` · For users: ${qinline(c.effect, q.links)}`) : ''}</li>`).join('')}</ul>` : ''}
@@ -6672,11 +6662,30 @@ function tFit(s) {
 // Else: "Sent." when the POST that sent it said a pane took it; "Not delivered" when no terminal took
 // it (sup: /api/threads' record of such turns and the supervisor's last check, as tlRefresh keeps
 // it); "will read it when it next checks" when nobody knows (a reload); after 10 minutes with the
-// supervisor running (a pane, as /api/threads says), that it hasn't replied.
-function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.sup ?? null : null) {
-  const last = t.turns[t.turns.length - 1];
-  if (!last || last.by !== 'owner') return null;
+// supervisor running (a pane, as /api/threads says), that it hasn't replied. A session that has the
+// newest owner turn (working: /api/threads' records, as tlRefresh keeps them) says it picked it up or
+// is responding, even after its own first reply, and over held or not delivered for that turn.
+function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.sup ?? null : null, working = typeof TL !== 'undefined' ? TL.working ?? null : null) {
+  const turns = t.turns;
+  const last = turns[turns.length - 1];
+  if (!last) return null;
+  // a record counts only for the newest owner turn, and only while every turn after it is a non-owner
+  // one written before the record began; the view names every non-owner turn supervisor, so this
+  // compares times, not writers. A record for an older turn never speaks for a newer one.
+  const w = working && typeof working === 'object' && Object.hasOwn(working, t.id) ? working[t.id] : null;
+  const o = turns.findLastIndex((x) => x.by === 'owner');
+  const wAt = Date.parse(w?.at ?? '');
+  const has = !!w && (w.stage === 'picked-up' || w.stage === 'responding') && o >= 0 && !!turns[o].id && w.turn === turns[o].id
+    && turns.slice(o + 1).every((x) => x.by !== 'owner' && Date.parse(x.at) < wAt);
+  if (last.by !== 'owner' && !has) return null;
   if (last.pending) return 'Sending…';
+  if (has) {
+    // plain words for who: ticket ids have no fixed shape, so any other name is a session on it
+    const b = w.by;
+    const plan = typeof b === 'string' ? /^plan-(.+)$/.exec(b) : null;
+    const who = typeof b !== 'string' || !b ? 'A session' : b === 'supervisor' ? 'The supervisor' : b === 'responder' ? 'The responder' : plan ? `The planner for ${plan[1]}` : `The session on ${b}`;
+    return w.stage === 'responding' ? `${who} is responding…` : `${who} picked it up.`;
+  }
   // its terminal is asking a question: these words wait, and are never the answer to it
   if (typed === 'held' && pane) return "Held: the supervisor's terminal is asking something, and these words must not answer it. They reach the supervisor once it is answered (see the card).";
   // missed: a turn in the log is the server's record's to say (typed is the thread's last send, and
@@ -7235,7 +7244,7 @@ function tArtFpNow(s) {
   return (DATA?.library?.artifacts ?? []).find((a) => a.slug === s.slug && a.at === (tree ? 'main' : s.at))?.fp ?? null;
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
-  <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
+  <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted"><span id="tl-c-spin" aria-hidden="true" hidden style="display:inline-block;width:10px;height:10px;margin-right:6px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;vertical-align:-1px;animation:spin .9s linear infinite"></span><span id="tl-c-state" role="status" aria-live="polite"></span></div>
   <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Shift+Enter sends; Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
 // The subject as one tight line (an icon, its name, where it is), opening to what was captured.
 // Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
@@ -7313,7 +7322,15 @@ function tlCardBody(t) {
     turns.innerHTML = t ? tlTurns(t) : '<p class="small muted">Say what you want done about it. Nothing is sent until you do.</p>';
     turns.scrollTop = turns.scrollHeight;
   }
-  tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  const line = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  // a live region: written only when the words change, so a poll with the same stage announces nothing
+  const state = tlEl('tl-c-state');
+  if (state.textContent !== line) state.textContent = line;
+  // the spinner only adds to the words while a session is responding, slowed as button.busy is
+  const spin = tlEl('tl-c-spin');
+  spin.hidden = !/ is responding…$/.test(line);
+  // '0.9s', not '': clearing the longhand also drops the duration the inline shorthand set, leaving 0s
+  spin.style.animationDuration = matchMedia('(prefers-reduced-motion: reduce)').matches ? '2.5s' : '.9s';
 }
 // Beside its pin, in page coordinates so it scrolls with the page; a thread whose home is the Inbox tab
 // (in-threads, kit-100 spec §2.6) in the window's coordinates instead, fixed as the panel is; in the dock when
@@ -7512,6 +7529,8 @@ async function tlRefresh() {
     tlRelay();
     TL.pane = !!j.supervisor?.pane;
     TL.sup = { checked: typeof j.supervisor?.checked === 'string' ? j.supervisor.checked : null, undelivered: Array.isArray(j.supervisor?.undelivered) ? j.supervisor.undelivered : [] };
+    // the sessions holding a thread's newest turn, for the card's line: a map, else none
+    TL.working = j.working && typeof j.working === 'object' && !Array.isArray(j.working) ? j.working : {};
     askSet(j.supervisor?.question);
     const first = !TL.have;
     TL.have = n;
@@ -7642,8 +7661,8 @@ document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') ret
 function submitOf(el) {
   if (el?.id === 'tl-c-text') return tlSend;
   if (!el?.matches?.('textarea[data-q]')) return null;
-  // a question card's box presses its card's own button, so Answer still asks which choice typed
-  // words mean: a review's note is sent back, a secret card's is its Reply, a sensor's has none
+  // a question card's box presses its card's own button, as a click would: Answer posts the pick and
+  // the words, a review's note is sent back, a secret card's is its Reply, a sensor's has none
   const card = el.closest('[data-qcard]');
   const btn = el.closest('[data-decline-form]')?.querySelector('[data-decline]') ?? card?.querySelector('[data-answer]') ?? card?.querySelector('[data-reply]');
   return btn ? () => btn.click() : null;
@@ -8658,7 +8677,6 @@ document.addEventListener('click', async (ev) => {
   const pick = ev.target.closest('input[data-pick]');
   if (pick) {
     picks[pick.dataset.pick] = pick.value;
-    dropAsk(pick.dataset.pick);
     // one pick per question, made in whichever copy: the Inbox's card and the thread's show it alike
     for (const el of document.querySelectorAll(`input[data-pick="${CSS.escape(pick.dataset.pick)}"]`)) { el.checked = el.value === pick.value; el.closest('.choice')?.classList.toggle('picked', el.checked); }
     if (pick.value === '__other') pick.closest('[data-qcard]')?.querySelector('textarea[data-q]')?.focus();
@@ -8783,29 +8801,23 @@ document.addEventListener('click', async (ev) => {
     });
     return;
   }
-  // Answer, or a choice in the card's ask (which choice the words mean; None posts them as they are)
-  const btn = ev.target.closest('[data-answer], button[data-which]');
+  // Answer: the pick and the words, posted on the first press (kit-313)
+  const btn = ev.target.closest('[data-answer]');
   if (btn) {
-    const id = btn.dataset.answer ?? btn.dataset.which;
-    const chose = btn.dataset.which !== undefined ? btn.value : null;
+    const id = btn.dataset.answer;
     const { card, errId } = qcardOf(btn);
     const note = (card?.querySelector('textarea[data-q]')?.value ?? '').trim();
-    const picked = chose ?? (picks[id] && picks[id] !== '__other' ? picks[id] : '');
+    // "Something else" is no pick: the words alone
+    const picked = picks[id] && picks[id] !== '__other' ? picks[id] : '';
     const answer = picked ? (note ? `${picked} — ${note}` : picked) : note;
     const err = $(`e-${errId}`);
-    // the words went while the ask was up: nothing to say which choice they mean
-    if (chose !== null && !note) { dropAsk(id, card); if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
     if (!answer) { if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
     if (err) err.textContent = '';
     const goalId = btn.dataset.goalAsk;
     const qv = DATA.questions.find((x) => x.id === id);
-    if (chose === null && !picked && !goalId && needsWhich(qv)) {
-      // on this copy only: an ask the other copy raised goes
-      if (!card?.querySelector('[data-which-for]')) { dropAsk(id); card?.querySelector('.row-inline')?.insertAdjacentHTML('beforebegin', whichAsk(qv, choicesOf(qv))); }
-      ASKS[id] = card?.id.startsWith('t-') ? 't' : 'q';
-      return;
-    }
-    dropAsk(id);
+    // a card with choices sends the owner's words and their pick apart, the pick null for words alone, so
+    // the kit never reads words as a choice; a goal approval and an owner-action keep their own answers
+    const apart = !!qv && choicesOf(qv).length > 0 && !['goal-approval', 'owner-action', 'review'].includes(qv.kind) && !(qv.secrets || []).length;
     // Done on an owner-action whose named records aren't all done: never an answer, however often it is
     // pressed. Each unchanged record says so, and the line above Send says what to do instead.
     if (isOa(qv) && picked === 'Done') {
@@ -8824,7 +8836,7 @@ document.addEventListener('click', async (ev) => {
     const seen = seenHash(id);
     answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer, () => (goalId
       ? { action: 'goal-decide', body: { id: goalId, verdict: GOAL_VERDICTS[picked], notes: note || undefined } }
-      : { action: 'answer', body: { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }), goalId ? { plain: GOAL_REFUSAL } : {});
+      : { action: 'answer', body: { id, answer: apart ? note : answer, ...(apart ? { choice: picked || null } : {}), autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }), goalId ? { plain: GOAL_REFUSAL } : {});
     return;
   }
   // Keep it / Retire it on the Inbox's lesson card (a peek's Retire it starts a thread: kit-88 spec §2.3)
@@ -8863,7 +8875,8 @@ document.addEventListener('click', async (ev) => {
     const was = row?.innerHTML;
     // the answered card keeps its place; the row says what was sent, and comes back if refused
     press(`q:${id}`, {
-      build: () => ({ action: 'answer', body: { id, answer, ...(seen ? { seen } : {}) } }),
+      // typed text with no picker: the owner's words alone, never read as a choice
+      build: () => ({ action: 'answer', body: { id, answer, choice: null, ...(seen ? { seen } : {}) } }),
       apply: () => { if (row) row.innerHTML = `<span class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Overruled: <b>${esc(answer)}</b></span><span class="err" id="e-${esc(id)}"></span>`; },
       restore: () => { const f = document.querySelector(`input[data-overrule="${CSS.escape(id)}"]`); if (f) f.value = answer; else if (row && was) row.innerHTML = was; },
       errId: id,

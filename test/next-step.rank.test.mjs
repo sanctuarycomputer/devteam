@@ -120,6 +120,15 @@ test('the owner gives the settling answer: a finding until the supervisor withdr
     const other = ask('Build the export at all?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', a, '--settles-if', "Don't build it");
     ok(old, ['answer', other, 'Build it']);
     assert.deepEqual(findings('settled-not-withdrawn'), [], 'another answer settles nothing');
+    // words alone that say the settling choice settle nothing until read; a pick of it does (kit-313)
+    const said = ask('Build the import at all?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', a, '--settles-if', "Don't build it");
+    ok(old, ['answer', said, "Don't build it", '--in-words']);
+    assert.deepEqual(findings('settled-not-withdrawn'), [], 'words alone settle nothing');
+    const c = ask('Detail 3?', '--goal', G, '--stake', '1', '--urgency', '1');
+    const picked = ask('Build the archive at all?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', c, '--settles-if', "Don't build it");
+    ok(old, ['answer', picked, 'maybe next year', "--choice=Don't build it"]);
+    assert.deepEqual(findings('settled-not-withdrawn').map((f) => f.subject), [picked], 'a pick settles');
+    ok(old, ['withdraw', c, '--reason', `settled by the owner's answer to ${picked}`], SUP);
     ok(old, ['answer', gate, "Don't build it — not this year"]);
     const [f] = findings('settled-not-withdrawn');
     assert.equal(f.subject, gate);
@@ -151,7 +160,7 @@ test('a new rating never reopens an answered question, and the hash the owner sa
     assert.equal(F.run(old, ['log-check']).status, 0, 'the rating fields are the supervisor\'s to set');
     // the schema: the four rating fields are the supervisor's to set on a question, and nobody else's
     const S = json(fs.readFileSync(path.join(kit, 'schema/log.schema.json'), 'utf8'));
-    assert.deepEqual(S['x-authority'].set.question.supervisor, ['status', 'reason', 'stake', 'urgency', 'settles', 'settles_if']);
+    assert.deepEqual(S['x-authority'].set.question.supervisor, ['status', 'reason', 'stake', 'urgency', 'settles', 'settles_if', 'reading', 'reading_withdrawn']);
     for (const k of ['stake', 'urgency', 'settles', 'settles_if']) assert.ok(S.$defs.types.question.properties[k].description && !S['x-authority'].set.question.owner.includes(k), k);
     assert.deepEqual(Object.keys(S.$defs.types.decision.properties.corrected.properties), ['reason', 'severity', 'impact', 'said', 'said_at', 'turn']);
     const L = json(/`{3}json devteam\s*\n([\s\S]*?)\n`{3}/.exec(fs.readFileSync(path.join(kit, 'governance/constitution.md'), 'utf8'))[1]);
