@@ -100,4 +100,20 @@ test('dashboard-data carries each artifact\'s kind, landed and drafted, and the 
   assert.deepEqual(items.filter((x) => L.keep(x, { kind: 'diagram' })).map((x) => x.id), ['artifact:land-diagram'], 'the Kind filter keeps the diagram');
   assert.deepEqual(items.filter((x) => L.keep(x, { kind: 'docs' })).map((x) => x.id), ['artifact:draft-docs'], 'and the docs');
   assert.deepEqual(items.map((x) => x.kind), ['mock', 'mock', 'mock', 'diagram', 'docs'], 'sorted in kind order');
+
+  // the heal (spec-1 S1): a devteam.mjs from before kinds, run from a worktree branched before they
+  // landed, caches the kinded landed tree as broken (unknown key) and with no kind; that row is
+  // described again, never served
+  const cacheFile = path.join(F.old, 'docs/devteam/run/cache/artifacts-landed.json');
+  const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  const tree = Object.keys(cache).find((k) => cache[k].slug === 'land-diagram') ?? assert.fail('the landed diagram is cached');
+  const { kind, ...rest } = cache[tree];
+  assert.equal(kind, 'diagram', 'the cache holds the kind');
+  cache[tree] = { ...rest, title: null, summary: null, by: null, for: [], error: 'land-diagram/artifact.json: unknown key "kind" (v, title, summary, by, for)' };
+  fs.writeFileSync(cacheFile, JSON.stringify(cache));
+  const healed = JSON.parse(F.ok(F.old, ['dashboard-data'])).library.artifacts.find((a) => a.slug === 'land-diagram');
+  assert.equal(healed.error, null, 'the old row is not served');
+  assert.equal(healed.kind, 'diagram');
+  assert.equal(healed.title, 'land-diagram');
+  assert.equal('kind' in JSON.parse(fs.readFileSync(cacheFile, 'utf8'))[tree], true, 'and the cache holds the new row');
 });
