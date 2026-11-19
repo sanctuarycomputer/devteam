@@ -81,6 +81,7 @@
   .zoom .pct { font-size: 12px; width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
   .stage-top { position: absolute; left: 12px; top: 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; z-index: 3; max-width: calc(100% - 24px); }
   #pageSel, #narrowNote { display: none; }
+  #capNote { font-size: 12px; color: var(--fg-2); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin: 0; max-width: var(--measure); }
   #narrowNote { font-size: 12px; color: var(--fg-2); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin: 0; max-width: var(--measure); }
   #msg { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); margin: 0; padding: 0 16px; width: max-content; max-width: min(var(--measure), 100%); color: var(--fg-2); text-align: center; z-index: 2; }
   body[data-state="error"] #surface, body[data-state="error"] .zoom { display: none; }
@@ -109,6 +110,8 @@
   .placeholder { border: 1px dashed #8f8f8f; color: #666666; font: 11px/1.4 var(--sans); padding: 2px 6px; min-width: 24px; min-height: 18px; white-space: nowrap; background: transparent; }
   /* a component's label: stage chrome above its box, placed by CSS anchor positioning */
   .clabel { position: absolute; left: anchor(left); bottom: anchor(top); margin-bottom: 4px; font: 500 11px/1 var(--sans); color: var(--sel); white-space: nowrap; pointer-events: none; }
+  /* without anchor positioning a label would sit at the surface's corner, over the design: none then */
+  @supports not (anchor-name: --a) { .clabel { display: none; } }
 </style>
 </head>
 <body data-state="loading">
@@ -131,6 +134,7 @@
     <div class="stage-top">
       <select id="pageSel" aria-label="Page"></select>
       <p id="narrowNote">Watching: editing needs a wider screen.</p>
+      <p id="capNote" role="status" hidden>Some components weren't drawn: this page holds too many.</p>
     </div>
     <div class="zoom">
       <button id="zoomOut" type="button" aria-label="Zoom out">&minus;</button>
@@ -325,8 +329,9 @@
     }
     return out.join(' ');
   }
-  // A whole font: a typography token, or the four fields each a literal or a token; each field that
-  // fails its check takes its default.
+  // A whole font: a typography token, or the four fields each a literal or a token. A size or line
+  // height that is a number is clamped to its range (as a length is); a field that is no number, or a
+  // weight off the 100 steps, takes its default.
   function font(v) {
     const out = { family: FAMILY.sans, size: 16, weight: 400, lineHeight: 1.4 };
     let fam; let size; let weight; let lh;
@@ -344,9 +349,9 @@
       lh = isRef(v.lineHeight) ? ref(v.lineHeight, 'number') : v.lineHeight;
     } else return out;
     if (typeof fam === 'string' && own(FAMILY, fam)) out.family = FAMILY[fam];
-    if (finite(size) && size >= 1 && size <= 1000) out.size = size;
+    if (finite(size)) out.size = clamp(size, 1, 1000);
     if (finite(weight) && weight >= 100 && weight <= 900 && weight % 100 === 0) out.weight = weight;
-    if (finite(lh) && lh >= 0.5 && lh <= 10) out.lineHeight = lh;
+    if (finite(lh)) out.lineHeight = clamp(lh, 0.5, 10);
     return out;
   }
   // The contract's pathData grammar: optional whitespace, a move, then commands and numbers separated
@@ -395,10 +400,14 @@
     vector: [...COMMON, 'path', ...STROKE], image: [...COMMON, 'src', 'fit', 'radius'],
     instance: [...COMMON, 'component', 'variant'],
   };
-  // An instance's own stored properties, over its component root's.
-  const INSTANCE_OWN = new Set(COMMON);
+  // An instance root's own properties (stored, else the contract's default), and the sides it takes
+  // from its component root when it doesn't store them; everything else is the component root's.
+  const INSTANCE_OWN = new Set(['name', 'visible', 'opacity', 'x', 'y']);
+  const INSTANCE_SIZE = new Set(['size.w', 'size.h']);
   const CONTAINERS = new Set(['frame', 'component']);
   const MAX_DEPTH = 20;
+  // The most elements a page draws; past it every further instance is a placeholder and the stage says so.
+  const MAX_ELEMENTS = 50000;
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   const nodeOf = (id) => (typeof id === 'string' && own(state.doc.nodes, id) && isObj(state.doc.nodes[id]) ? state.doc.nodes[id] : null);
@@ -448,9 +457,33 @@
 
   // ---- drawing ----
 
-  // One drawing of a page: the ids drawn (per instance), work to do once the tree is attached, and the
-  // components' labels.
+  // One drawing of a page: the ids drawn (per instance), work to do once the tree is attached, the
+  // components' labels, the hidden frames now open, and the element budget: `used` counts every element
+  // the page's own tree and the instances drawn so far may make, worked out before each is drawn.
   let drawing = null;
+
+  // The most elements the tree under `ids` makes, instances counted as one each (not expanded): a
+  // vector is two (its path), a component two (its label), anything else one.
+  function treeElements(ids) {
+    const seen = new Set();
+    const stack = [...ids];
+    let total = 0;
+    while (stack.length) {
+      const id = stack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const n = nodeOf(id);
+      if (!n) continue;
+      total += n.type === 'vector' || n.type === 'component' ? 2 : 1;
+      if (CONTAINERS.has(n.type)) stack.push(...kidsOf(n));
+    }
+    return total;
+  }
+  // What one instance of a component adds below its own element (memoised per drawing).
+  function compElements(compId, comp) {
+    if (!drawing.sizes.has(compId)) drawing.sizes.set(compId, treeElements(kidsOf(comp)));
+    return drawing.sizes.get(compId);
+  }
 
   function mark(el, id, inst) {
     el.classList.add('dnode');
@@ -572,9 +605,14 @@
     if (!n) return null;
     drawing.seen.add(key);
     const g = getter(id, n, inst);
+    const labels = drawing.labels.length;
+    const after = drawing.after.length;
     try {
       return drawOne(id, n, g, parentMode, inst);
     } catch {
+      // nothing of the discarded element is kept: no label, no later measuring
+      drawing.labels.length = labels;
+      drawing.after.length = after;
       return placeholder(id, g, parentMode, inst);
     }
   }
@@ -595,8 +633,11 @@
         mark(el, id, inst);
         common(el, g, parentMode);
         const mode = layout(el, g);
-        drawChildren(el, kidsOf(n), mode, inst);
-        if (n.type === 'component' && !inst && g('visible') !== false) {
+        const hidden = g('visible') === false;
+        if (hidden) drawing.hidden++;
+        try { drawChildren(el, kidsOf(n), mode, inst); } finally { if (hidden) drawing.hidden--; }
+        // a label only for a component that is shown: not hidden itself, nor inside a hidden frame
+        if (n.type === 'component' && !inst && !hidden && drawing.hidden === 0) {
           const anchor = `--canvas-component-${++drawing.anchors}`;
           el.style.anchorName = anchor;
           const lab = document.createElement('div');
@@ -686,15 +727,24 @@
     return el;
   }
 
-  // An instance: its component's tree, resolved; its root the component root's properties with the
-  // instance's own name, visible, opacity, x, y and size over them. Nested to a depth of 20; deeper, or
-  // a component that doesn't resolve, is a placeholder.
+  // An instance: its component's tree, resolved. Its root takes the instance's own name, visible,
+  // opacity, x and y (stored, else their defaults), its own size.w and size.h when stored (else the
+  // component root's), and everything else from the component root. Nested to a depth of 20; deeper,
+  // or a component that doesn't resolve, is a placeholder; so is every instance once the page's
+  // element budget is spent.
   function drawInstance(id, n, g, parentMode, inst) {
     const depth = inst ? inst.depth + 1 : 1;
-    const comp = nodeOf(g('component'));
+    const compId = g('component');
+    const comp = nodeOf(compId);
     if (depth > MAX_DEPTH || !comp || comp.type !== 'component') return placeholder(id, g, parentMode, inst);
+    if (drawing.capped || drawing.used + compElements(compId, comp) > MAX_ELEMENTS) {
+      drawing.capped = true;
+      return placeholder(id, g, parentMode, inst);
+    }
+    drawing.used += compElements(compId, comp);
     const rootG = (p) => {
-      if (INSTANCE_OWN.has(p)) {
+      if (INSTANCE_OWN.has(p)) return g(p);
+      if (INSTANCE_SIZE.has(p)) {
         const v = g(p);
         if (v !== undefined) return v;
       }
@@ -713,7 +763,9 @@
   // The page's top-level nodes on #surface, each placed at its x, y.
   function drawPage(pageId) {
     const pg = pageById(pageId) || pages()[0];
-    drawing = { seen: new Set(), after: [], labels: [], anchors: 0, byId: new Map() };
+    // the page's own tree, instances as one element each, counts against the budget first
+    drawing = { seen: new Set(), after: [], labels: [], anchors: 0, byId: new Map(), hidden: 0, sizes: new Map(), used: 0, capped: false };
+    drawing.used = treeElements(kidsOf(pg));
     const els = [];
     for (const id of kidsOf(pg)) {
       const el = drawNode(id, 'page', null);
@@ -722,6 +774,7 @@
     $('surface').replaceChildren(...els, ...drawing.labels);
     for (const f of drawing.after) { try { f(); } catch { /* a size it can't measure stays 0 */ } }
     drawn = drawing.byId;
+    $('capNote').hidden = !drawing.capped;
     drawing = null;
   }
 
@@ -957,12 +1010,18 @@
   $('stage').addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 
   // Keys: +/= zoom in, - zoom out, 0 sets 100%, Shift+1 fits (by its code, so any layout's Shift+1);
-  // Space held makes a drag pan. None of them while typing in a field.
+  // Space held, with the pointer over the stage, makes a drag pan. None of them while typing in a
+  // field, and Space is left to a focused button or link (it presses it).
   const typing = (t) => t instanceof Element && (t.closest('input, select, textarea') !== null || (t instanceof HTMLElement && t.isContentEditable));
+  const pressable = (t) => t instanceof Element && t.closest('button, a, summary, [role="button"], [role="link"]') !== null;
+  let overStage = false;
+  document.addEventListener('pointerover', (e) => { overStage = e.target instanceof Element && e.target.closest('#stage') !== null; });
+  document.documentElement.addEventListener('pointerleave', () => { overStage = false; });
   document.addEventListener('keydown', (e) => {
     if (!ready() || typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.code === 'Space' || e.key === ' ') {
-      e.preventDefault(); // nor a focused button pressed, nor anything scrolled
+      if (!overStage || pressable(e.target)) return;
+      e.preventDefault(); // nothing scrolled
       spaceHeld = true;
       $('stage').classList.add('space');
       return;

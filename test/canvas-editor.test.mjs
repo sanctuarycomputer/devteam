@@ -41,11 +41,13 @@ const DOM_GONE = /navigated or closed|Cannot find context|context was destroyed|
 
 // The request recorder: a second DevTools connection to the page's target (the helper's own drops
 // events). Fetch for every URL: recorded, then answered by `answer`, continued when same-origin, failed
-// otherwise; dialogs recorded and dismissed; exceptions recorded.
+// otherwise; dialogs recorded and dismissed; exceptions recorded. `answer` may return { fail: true }
+// to fail the request (a network error); a test may set `rec.hold` to a URL test, and the requests it
+// matches wait in `rec.held` until `rec.release()`.
 async function recorder(ws, origin, answer) {
   let seq = 0;
   const waiting = new Map();
-  const rec = { urls: new Set(), dialogs: [], exceptions: [], send: null };
+  const rec = { urls: new Set(), dialogs: [], exceptions: [], send: null, hold: null, held: [], release: null };
   const raw = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++seq;
     const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`recorder ${method}: no answer in 30 s`)); }, 30000);
@@ -56,6 +58,7 @@ async function recorder(ws, origin, answer) {
   rec.send = raw;
   // a request answered after its page has gone fails; nothing waits on those answers
   const quiet = (method, params) => { raw(method, params).catch(() => {}); };
+  rec.release = () => { for (const requestId of rec.held.splice(0)) quiet('Fetch.continueRequest', { requestId }); };
   ws.onmessage = (m) => {
     const o = JSON.parse(m.data);
     if (o.id !== undefined) {
@@ -70,10 +73,12 @@ async function recorder(ws, origin, answer) {
       const url = request.url;
       rec.urls.add(url);
       const a = answer ? answer(url) : null;
-      if (a) {
+      if (a && a.fail) quiet('Fetch.failRequest', { requestId, errorReason: 'Failed' });
+      else if (a) {
         const body = Buffer.from(typeof a.body === 'string' ? a.body : JSON.stringify(a.body ?? null)).toString('base64');
         quiet('Fetch.fulfillRequest', { requestId, responseCode: a.status, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }], body });
-      } else if (url === origin || url.startsWith(`${origin}/`)) quiet('Fetch.continueRequest', { requestId });
+      } else if ((url === origin || url.startsWith(`${origin}/`)) && rec.hold && rec.hold(url)) rec.held.push(requestId);
+      else if (url === origin || url.startsWith(`${origin}/`)) quiet('Fetch.continueRequest', { requestId });
       else quiet('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
     } else if (o.method === 'Page.javascriptDialogOpening') {
       rec.dialogs.push(o.params);
@@ -131,6 +136,8 @@ async function open(t, { canvases = {}, images = {}, repo, size = [1440, 900], p
 const text = (p, sel) => p.ev(`document.querySelector(${JSON.stringify(sel)})?.textContent ?? null`);
 const shown = (p, sel) => p.ev(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden'; })()`);
 const state = (p) => p.ev('document.body.dataset.state');
+// Nothing the page ran threw (Runtime.exceptionThrown on the recorder's connection): every test ends on it.
+const noExceptions = (rec, what = 'the page') => assert.deepEqual(rec.exceptions.map((e) => e.exception?.description ?? e.text), [], `${what}: no exception`);
 
 test('loads the document and lists the pages', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
   const { p, origin, rec } = await open(t, { canvases: { every: EVERY }, images: { every: { [IMG_FILE]: IMG } } });
@@ -141,7 +148,7 @@ test('loads the document and lists the pages', { skip: canDrive ? false : 'needs
   assert.equal(await p.ev("document.querySelector('#pages a[aria-current=\"page\"]')?.textContent"), 'Checkout');
   assert.equal(await text(p, '#title'), 'every');
   assert.equal(await shown(p, '#msg'), false, 'no stage message on a page with nodes');
-  assert.deepEqual(rec.exceptions, []);
+  noExceptions(rec);
 });
 
 test('the repo chip, four ways', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
@@ -153,12 +160,13 @@ test('the repo chip, four ways', { skip: canDrive ? false : 'needs Chrome and We
   ];
   for (const [name, repo, chip, amber] of cases) {
     await t.test(name, async (st) => {
-      const { p } = await open(st, { canvases: { minimal: MINIMAL }, repo });
+      const { p, rec } = await open(st, { canvases: { minimal: MINIMAL }, repo });
       assert.equal(await state(p), 'ready');
       assert.equal(await text(p, '#repoChip'), chip);
       assert.equal(await p.ev("document.getElementById('repoChip').classList.contains('public')"), amber);
       assert.equal(await shown(p, '#repoChip'), true);
       assert.equal(await p.ev("document.getElementById('repoChip').title"), `Every edit is committed and pushed to ${repo.name ?? "this project's repo"}.`);
+      noExceptions(rec);
     });
   }
 });
@@ -171,23 +179,34 @@ test('loading states', { skip: canDrive ? false : 'needs Chrome and WebSocket', 
     assert.equal(await state(p), 'error');
     assert.equal(await msg(p), "This isn't a canvas address.");
     assert.deepEqual([...rec.urls].filter(isDoc), []);
+    noExceptions(rec);
   });
   await t.test('C1.11 a slug the server does not have', async (st) => {
     const { p, origin, rec } = await open(st, { canvases: { every: EVERY }, images: { every: { [IMG_FILE]: IMG } }, path: '/view/canvas/nope' });
     assert.equal(await state(p), 'error');
     assert.equal(await msg(p), "This canvas isn't open for editing.");
     assert.ok(rec.urls.has(`${origin}/api/canvas/doc?slug=nope`));
+    noExceptions(rec);
   });
   await t.test('C1.11 a 500', async (st) => {
-    const { p } = await open(st, { canvases: { every: EVERY }, images: { every: { [IMG_FILE]: IMG } }, answer: (u) => (isDoc(u) ? { status: 500, body: '{"why":"boom"}' } : null) });
+    const { p, rec } = await open(st, { canvases: { every: EVERY }, images: { every: { [IMG_FILE]: IMG } }, answer: (u) => (isDoc(u) ? { status: 500, body: '{"why":"boom"}' } : null) });
     assert.equal(await state(p), 'error');
     assert.equal(await msg(p), "This canvas couldn't be loaded. (500)");
+    noExceptions(rec);
   });
   await t.test('C1.11 a 200 that is not a doc-response', async (st) => {
-    const { p } = await open(st, { canvases: { every: EVERY }, images: { every: { [IMG_FILE]: IMG } }, answer: (u) => (isDoc(u) ? { status: 200, body: {} } : null) });
+    const { p, rec } = await open(st, { canvases: { every: EVERY }, images: { every: { [IMG_FILE]: IMG } }, answer: (u) => (isDoc(u) ? { status: 200, body: {} } : null) });
     assert.equal(await state(p), 'error');
     assert.equal(await msg(p), "This canvas couldn't be loaded. (200)");
     assert.deepEqual(await p.ev("[...document.querySelectorAll('#pages a')].length"), 0);
+    noExceptions(rec);
+  });
+  await t.test('a doc request that fails on the network: no status', async (st) => {
+    const { p, origin, rec } = await open(st, { canvases: { every: EVERY }, images: { every: { [IMG_FILE]: IMG } }, answer: (u) => (isDoc(u) ? { fail: true } : null) });
+    assert.ok(rec.urls.has(`${origin}/api/canvas/doc?slug=every`));
+    assert.equal(await state(p), 'error');
+    assert.equal(await msg(p), "This canvas couldn't be loaded.");
+    noExceptions(rec);
   });
   await t.test('C1.11 an empty page', async (st) => {
     const { p, rec } = await open(st, { canvases: { minimal: MINIMAL } });
@@ -195,7 +214,7 @@ test('loading states', { skip: canDrive ? false : 'needs Chrome and WebSocket', 
     assert.equal(await msg(p), 'This page is empty.');
     assert.equal(await p.ev("!!document.getElementById('surface')"), true);
     assert.deepEqual(await p.ev("[...document.querySelectorAll('#pages a[data-page]')].map((a) => a.textContent)"), ['Page 1']);
-    assert.deepEqual(rec.exceptions, []);
+    noExceptions(rec);
   });
 });
 
@@ -309,7 +328,7 @@ test('every node type', { skip: canDrive ? false : 'needs Chrome and WebSocket',
   assert.ok(clabel.b <= btn.t + 0.5, `the label sits above the component: ${clabel.b} vs ${btn.t}`);
   near(clabel.l, btn.l, 0.5, "the label starts at the component's left");
   assert.equal(await count(p, '[data-id="card"]'), 0, 'Checkout is gone');
-  assert.deepEqual(rec.exceptions, []);
+  noExceptions(rec);
 
   await t.test('C1.7 a bool prop beats every earlier level', async (st) => {
     const off = structuredClone(EVERY);
@@ -318,7 +337,7 @@ test('every node type', { skip: canDrive ? false : 'needs Chrome and WebSocket',
     assert.equal(await state(o.p), 'ready');
     assert.equal(await css(o.p, '[data-of="buy"][data-src="button-bg"]', 'display'), 'none');
     assert.notEqual(await css(o.p, '[data-of="buy"][data-src="button-label"]', 'display'), 'none');
-    assert.deepEqual(o.rec.exceptions, []);
+    noExceptions(o.rec);
   });
 });
 
@@ -353,7 +372,7 @@ test('nested instances', { skip: canDrive ? false : 'needs Chrome and WebSocket'
   assert.equal(await count(p, '[data-src="i20"] [data-src]'), 0, 'nothing drawn inside the placeholder');
   assert.equal(await count(p, '[data-src="i21"], [data-src="leaf"]'), 0);
   assert.equal(await count(p, '.placeholder'), 1);
-  assert.deepEqual(rec.exceptions, []);
+  noExceptions(rec);
 });
 
 test('odd trees', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
@@ -370,7 +389,7 @@ test('odd trees', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeo
   const title = await rect(p, '[data-id="title"]');
   const rule = await rect(p, '[data-id="rule"]');
   near(rule.t, title.b + 16, 0.5, 'the repeat and the missing child take no room');
-  assert.deepEqual(rec.exceptions, []);
+  noExceptions(rec);
 });
 
 test('a $ref to a missing token', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
@@ -386,7 +405,123 @@ test('a $ref to a missing token', { skip: canDrive ? false : 'needs Chrome and W
   assert.equal(await css(p, '[data-id="title"]', 'color'), 'rgb(0, 0, 0)', 'colour: its default');
   assert.equal(await css(p, '[data-id="rule"]', 'background-color'), 'rgba(0, 0, 0, 0)', 'a ref to a token of another type');
   assert.equal(await css(p, '[data-id="card"]', 'display'), 'flex', 'the rest of the node drawn');
-  assert.deepEqual(rec.exceptions, []);
+  noExceptions(rec);
+});
+
+test('C1.13 an instance takes its own position, opacity and visibility', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  // button placed and faded on its own page; bare stores no x, y, opacity or size (its label prop gives
+  // it button's own base text, so the two are drawn the same size)
+  const doc = structuredClone(EVERY);
+  Object.assign(doc.nodes.button, { x: 300, y: 200, opacity: 0.5 });
+  doc.nodes.bare = { type: 'instance', parent: 'p-main', name: 'Bare', component: 'button', props: { label: 'Base label' } };
+  doc.pages[0].children.unshift('bare');
+  const { p, rec } = await open(t, { canvases: { own: doc }, images: EVERY_IMAGES('own') });
+  assert.equal(await state(p), 'ready');
+  const bare = await rect(p, '#surface [data-id="bare"]');
+  near(bare.l, 0, 0.5, "bare's left: the default x, not the component's");
+  near(bare.t, 0, 0.5, "bare's top: the default y, not the component's");
+  assert.equal(await css(p, '[data-id="bare"]', 'opacity'), '1', "bare's opacity: the default, not the component's");
+  assert.notEqual(await css(p, '[data-id="bare"]', 'display'), 'none');
+  assert.equal(await text(p, '[data-of="bare"][data-src="button-label"]'), 'Base label');
+  await p.click('#pages a[data-page="p-parts"]');
+  await until(() => p.ev(`document.body.dataset.state === 'ready' && !!${q('#surface [data-id="button"]')}`), 'Parts drawn');
+  const button = await rect(p, '#surface [data-id="button"]');
+  near(bare.w, button.w, 0.5, 'bare is as wide as button is drawn');
+  near(bare.h, button.h, 0.5, 'bare is as tall as button is drawn');
+  near(button.l, 300, 0.5, 'button itself at its own x');
+  assert.equal(await css(p, '[data-id="button"]', 'opacity'), '0.5', 'button itself at its own opacity');
+  noExceptions(rec);
+});
+
+// 20 components, each holding 3 instances of the next (the last a rect), and one instance of the
+// first on the page: 3^19 elements if nothing stopped it.
+function fanDoc() {
+  const nodes = {};
+  const comps = [];
+  for (let k = 0; k < 20; k++) {
+    comps.push(`c${k}`);
+    const kids = k < 19 ? [0, 1, 2].map((j) => `i${k + 1}-${j}`) : ['leaf'];
+    nodes[`c${k}`] = { type: 'component', parent: 'p-comps', name: `C${k}`, x: 0, y: k * 100, layout: { mode: 'row', gap: 1 }, children: kids };
+    if (k < 19) for (const id of kids) nodes[id] = { type: 'instance', parent: `c${k}`, name: `I${k + 1}`, component: `c${k + 1}` };
+  }
+  nodes.leaf = { type: 'rect', parent: 'c19', name: 'Leaf', size: { w: 1, h: 1 }, fill: '#ff0000' };
+  nodes.i0 = { type: 'instance', parent: 'p-main', name: 'I0', component: 'c0' };
+  return { canvas: 1, rev: 0, tokens: {}, pages: [{ id: 'p-main', name: 'Main', children: ['i0'] }, { id: 'p-comps', name: 'Components', children: comps }], nodes };
+}
+const CAP_NOTE = "Some components weren't drawn: this page holds too many.";
+const capNote = (p) => p.ev(`(() => { const e = [...document.querySelectorAll('#stage *')].find((x) => !x.closest('#surface') && x.textContent === ${JSON.stringify(CAP_NOTE)}); if (!e) return null; const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return { shown: r.width > 0 && r.height > 0 && cs.visibility === 'visible', maxWidth: cs.maxWidth, l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width }; })()`);
+
+test('C1.14 a page draws at most 50000 elements and says so', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 280000 }, async (t) => {
+  const { p, rec, size } = await open(t, { canvases: { fan: fanDoc() } });
+  assert.equal(await state(p), 'ready');
+  const n = await count(p, '#surface *');
+  assert.ok(n <= 50000, `at most 50000 elements drawn: ${n}`);
+  assert.ok(n > 1000, `the page draws up to the cap: ${n}`);
+  assert.ok(await count(p, '#surface .placeholder') >= 1, 'at least one placeholder');
+  assert.equal(await count(p, '#surface [data-id="i0"]'), 1);
+  const check = async (what) => {
+    const note = await capNote(p);
+    assert.ok(note && note.shown, `${what}: the note shown`);
+    assert.ok(/^(min\()?560px\b/.test(note.maxWidth), `${what}: the note capped at the measure (${note.maxWidth})`);
+    const stage = await screenRect(p, '#stage');
+    assert.ok(note.l >= stage.l && note.r <= stage.r && note.t >= stage.t && note.b <= stage.b, `${what}: the note ${JSON.stringify(note)} on the stage ${JSON.stringify(stage)}`);
+    for (const sel of ['.zoom', '#pageSel', '#narrowNote']) {
+      if (!(await shown(p, sel))) continue;
+      assert.ok(!overlap(note, await screenRect(p, sel)), `${what}: the note clear of ${sel}`);
+    }
+  };
+  await check('at 1440');
+  await size(390, 844);
+  await until(() => p.ev('innerWidth === 390'), 'the window at 390');
+  assert.equal(await shown(p, '#narrowNote'), true);
+  await check('at 390');
+  noExceptions(rec);
+
+  await t.test('no note on a page under the cap', async (st) => {
+    const o = await open(st, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+    assert.equal(await state(o.p), 'ready');
+    const note = await capNote(o.p);
+    assert.ok(note === null || !note.shown, 'the note is not shown on doc-every-type.json');
+    assert.equal(await count(o.p, '#surface .placeholder'), 0);
+    noExceptions(o.rec);
+  });
+});
+
+test('font numbers out of range clamp to their range', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  // out of class, so the recorder serves it: numbers clamp as lengths do, a non-number takes its default
+  const odd = structuredClone(EVERY);
+  const add = (id, x, f) => {
+    odd.nodes[id] = { type: 'text', parent: 'p-main', name: id, x, y: 600, text: 'Aa', font: { family: 'sans', weight: 400, ...f } };
+    odd.pages[0].children.push(id);
+  };
+  add('big', 0, { size: 2000, lineHeight: 20 });
+  add('small', 100, { size: 0.25, lineHeight: 0.1 });
+  add('words', 200, { size: '20px', lineHeight: '2' });
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), answer: docAnswer(odd) });
+  assert.equal(await state(p), 'ready');
+  const px = async (id, prop) => parseFloat(await css(p, `[data-id="${id}"]`, prop));
+  near(await px('big', 'font-size'), 1000, 0.01, 'size 2000 clamps to 1000');
+  near(await px('big', 'line-height'), 10 * 1000, 0.5, 'lineHeight 20 clamps to 10');
+  near(await px('small', 'font-size'), 1, 0.01, 'size 0.25 clamps to 1');
+  near(await px('small', 'line-height'), 0.5, 0.05, 'lineHeight 0.1 clamps to 0.5');
+  near(await px('words', 'font-size'), 16, 0.01, 'a size that is no number: the default');
+  near(await px('words', 'line-height'), 1.4 * 16, 0.05, 'a lineHeight that is no number: the default');
+  noExceptions(rec);
+});
+
+test("a component's label", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+  // no label for a component that isn't shown: button inside a hidden frame
+  const doc = structuredClone(EVERY);
+  doc.nodes.wrap = { type: 'frame', parent: 'p-parts', name: 'Wrap', visible: false, layout: { mode: 'none' }, children: ['button'] };
+  doc.nodes.button.parent = 'wrap';
+  doc.pages[1].children = ['wrap'];
+  const { p, rec } = await open(t, { canvases: { hid: doc }, images: EVERY_IMAGES('hid'), path: '/view/canvas/hid#page=p-parts' });
+  assert.equal(await state(p), 'ready');
+  assert.equal(await count(p, '#surface [data-id="button"]'), 1, 'button drawn (hidden)');
+  assert.equal(await count(p, '#surface .clabel'), 0, 'no label for a component in a hidden frame');
+  // where anchor positioning isn't supported the labels are hidden, not stacked at the surface's corner
+  assert.equal(await p.ev(`[...document.styleSheets].flatMap((s) => [...s.cssRules]).some((r) => r instanceof CSSSupportsRule && /not\\s*\\(\\s*anchor-name:\\s*--[\\w-]+\\s*\\)/.test(r.conditionText) && [...r.cssRules].some((x) => x.selectorText === '.clabel' && x.style.display === 'none'))`), true, '@supports not (anchor-name) hides .clabel');
+  noExceptions(rec);
 });
 
 // ---- pages, layers, selection and properties (C1.8, C1.10, and the review focus's fast switch) ----
@@ -460,7 +595,17 @@ test('layers and selection', { skip: canDrive ? false : 'needs Chrome and WebSoc
   assert.equal(await field(p, 'type'), 'frame');
   await p.key('Escape');
   await noSelection(p, 'after Escape');
-  assert.deepEqual(rec.exceptions, []);
+  noExceptions(rec);
+
+  await t.test('a node with no name shows its type in its row', async (st) => {
+    const doc = structuredClone(EVERY);
+    doc.nodes.dot.name = '';
+    const o = await open(st, { canvases: { unnamed: doc }, images: EVERY_IMAGES('unnamed') });
+    assert.equal(await state(o.p), 'ready');
+    assert.equal(await text(o.p, '#layers .layer[data-node="dot"] .nm'), 'ellipse');
+    assert.equal(await text(o.p, '#layers .layer[data-node="rule"] .nm'), 'Rule', 'a named node keeps its name');
+    noExceptions(o.rec);
+  });
 });
 
 test('pages', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
@@ -507,8 +652,11 @@ test('pages', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 
   await noSelection(p, 'after a page switch');
 
   // the review focus: switching twice fast while Checkout's image is still loading
+  // (the recorder holds every image request until the switches are done, so the image is certainly
+  // still loading while the page moves on)
   await rec.send('Network.enable');
   await rec.send('Network.setCacheDisabled', { cacheDisabled: true });
+  rec.hold = (u) => u.includes('/api/canvas/image/');
   await p.ev(`(async () => {
     const go = (id) => new Promise((r) => { addEventListener('hashchange', r, { once: true }); location.hash = '#page=' + id; });
     await go('p-main');
@@ -517,6 +665,12 @@ test('pages', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 
     await go('p-parts');
     await go('p-main');
   })()`);
+  await until(() => rec.held.length > 0, 'an image request held');
+  assert.equal(await state(p), 'loading', 'still loading while the image is held');
+  assert.deepEqual(await current(), ['Checkout']);
+  assert.equal(await p.ev("document.querySelector('#surface img').complete"), false, 'the image not loaded yet');
+  rec.hold = null;
+  rec.release();
   await until(() => p.ev("document.body.dataset.state === 'ready'"), 'ready after the fast switches');
   assert.deepEqual(await current(), ['Checkout']);
   assert.equal(await count(p, '#surface [data-id="card"]'), 1);
@@ -524,7 +678,7 @@ test('pages', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 
   assert.equal(await count(p, '#surface img'), 1);
   assert.equal(await p.ev("(() => { const i = document.querySelector('#surface img'); return i.complete && i.naturalWidth > 0; })()"), true, 'the image loaded');
   assert.equal(await p.ev("document.getElementById('pageSel').value"), 'p-main');
-  assert.deepEqual(rec.exceptions, []);
+  noExceptions(rec);
 });
 
 // ---- zoom and pan (C1.9, and the review focus's zoom at its bounds) ----
@@ -576,6 +730,21 @@ test('zoom and pan', { skip: canDrive ? false : 'needs Chrome and WebSocket', ti
       assert.ok(cmp(b[k]), `${what}: content bounds ${k} ${b[k]} inside the stage ${JSON.stringify(stage)}`);
     }
   };
+  const centred = (b, what) => {
+    near((b.l + b.r) / 2, (stage.l + stage.r) / 2, 1, `${what}: the content bounds centred across`);
+    near((b.t + b.b) / 2, (stage.t + stage.b) / 2, 1, `${what}: the content bounds centred down`);
+  };
+  // the page point at the stage's centre stays put through `act` (a zoom about the stage centre)
+  const keepsCentre = async (act, what) => {
+    const sc = { x: (stage.l + stage.r) / 2, y: (stage.t + stage.b) / 2 };
+    const a = await card();
+    const fx = (sc.x - a.l) / a.w;
+    const fy = (sc.y - a.t) / a.h;
+    await act();
+    const b = await card();
+    near(b.l + b.w * fx, sc.x, 1, `${what}: the stage centre's point stays, x`);
+    near(b.t + b.h * fy, sc.y, 1, `${what}: the stage centre's point stays, y`);
+  };
   // fitted when first shown
   inside(await contentBounds(p), 'at load');
   const zLoad = await zoomOf(p);
@@ -586,21 +755,22 @@ test('zoom and pan', { skip: canDrive ? false : 'needs Chrome and WebSocket', ti
   const zFit = await zoomOf(p);
   const fitted = await contentBounds(p);
   inside(fitted, 'after Fit');
+  centred(fitted, 'after Fit');
   assert.ok(zFit === 1 || Math.abs((fitted.r - fitted.l) - stage.w) <= 1 || Math.abs((fitted.b - fitted.t) - stage.h) <= 1, `Fit fills the stage on one axis: ${JSON.stringify(fitted)}`);
   assert.equal(await pct(), `${Math.round(zFit * 100)}%`);
 
   // + (the button): 1.25 times the zoom, and the card 1.25 times as wide on screen
   const w0 = (await card()).w;
-  await clickButton('#zoomIn');
+  await keepsCentre(() => clickButton('#zoomIn'), 'the + button');
   near(await zoomOf(p), zFit * 1.25, 1e-4, '+ zooms by 1.25');
   near((await card()).w, w0 * 1.25, 1, "the card's on-screen width after +");
   assert.equal(await pct(), `${Math.round(zFit * 125)}%`);
   // the + key does the same again
-  await plusKey(p);
+  await keepsCentre(() => plusKey(p), 'the + key');
   near(await zoomOf(p), zFit * 1.25 * 1.25, 1e-4, 'the + key zooms by 1.25');
   near((await card()).w, w0 * 1.25 * 1.25, 1, "the card's on-screen width after the + key");
   // - divides by 1.25
-  await minusKey(p);
+  await keepsCentre(() => minusKey(p), 'the - key');
   near(await zoomOf(p), zFit * 1.25, 1e-4, 'the - key divides by 1.25');
   near((await card()).w, w0 * 1.25, 1, "the card's on-screen width after -");
   // 0 returns to 100%
@@ -623,23 +793,30 @@ test('zoom and pan', { skip: canDrive ? false : 'needs Chrome and WebSocket', ti
   near(c1.l, c0.l, 1, 'the wheel keeps the card across');
   assert.equal(await zoomOf(p), zFit, 'the wheel alone does not zoom');
 
-  // a middle-button drag of (40, 30), from on the card, moves it by (40, 30) and selects nothing
+  // a middle-button drag of (40, 30), from on the card, moves it by (40, 30); it neither selects the
+  // card nor clears the selection
+  await p.click('#layers .layer[data-node="title"]');
+  assert.deepEqual(await selectedRows(p), ['title']);
   c0 = await card();
   await drag(p, centre(c0), 40, 30, 'middle', 4);
   c1 = await card();
   near(c1.l, c0.l + 40, 1, 'middle drag x');
   near(c1.t, c0.t + 30, 1, 'middle drag y');
-  assert.deepEqual(await selectedRows(p), [], 'a middle drag selects nothing');
+  assert.deepEqual(await selectedRows(p), ['title'], 'a middle drag keeps the selection as it was');
 
-  // a drag with Space held does the same; the left button's click that ends it selects nothing
+  // a drag with Space held (the pointer over the stage) does the same; the left button's click that
+  // ends it neither selects nor clears
+  await p.click('#layers .layer[data-node="title"]');
+  assert.deepEqual(await selectedRows(p), ['title']);
   c0 = await card();
+  await mouse(p, 'mouseMoved', centre(c0).x, centre(c0).y);
   await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
   await drag(p, centre(c0), 40, 30, 'left', 1);
   await p.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
   c1 = await card();
   near(c1.l, c0.l + 40, 1, 'Space drag x');
   near(c1.t, c0.t + 30, 1, 'Space drag y');
-  assert.deepEqual(await selectedRows(p), [], 'a Space drag selects nothing');
+  assert.deepEqual(await selectedRows(p), ['title'], 'a Space drag keeps the selection as it was');
   assert.equal(await zoomOf(p), zFit, 'panning does not zoom');
 
   // a click on empty stage after a pan still clears a selection, and a plain click still selects
@@ -686,7 +863,49 @@ test('zoom and pan', { skip: canDrive ? false : 'needs Chrome and WebSocket', ti
   c1 = await card();
   near(c1.l, c0.l, 0.01, '- at 10% keeps the card, x');
   near(c1.t, c0.t, 0.01, '- at 10% keeps the card, y');
-  assert.deepEqual(rec.exceptions, []);
+
+  // Space on a focused button presses it (once), the pointer over the stage or not
+  await mouse(p, 'mouseMoved', stage.r - 60, stage.b - 60);
+  await p.ev("document.getElementById('zoomIn').focus()");
+  assert.equal(await p.ev('document.activeElement.id'), 'zoomIn');
+  await p.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' });
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+  await until(async () => Math.abs(await zoomOf(p) - 0.125) < 1e-4, 'Space on the + button zooms in');
+  near(await zoomOf(p), 0.1 * 1.25, 1e-4, 'Space on the + button: once');
+  await p.ev('document.activeElement.blur()');
+
+  // keys with Ctrl held are not the page's
+  const zNow = await zoomOf(p);
+  await press(p, '+', 'Equal', 187, 2 | 8);
+  await press(p, '-', 'Minus', 189, 2);
+  await press(p, '0', 'Digit0', 48, 2);
+  assert.equal(await zoomOf(p), zNow, 'Ctrl with + - 0: the zoom unchanged');
+
+  // a page switch refits: Parts fitted, then Checkout fitted as at Fit
+  await p.click('#pages a[data-page="p-parts"]');
+  await until(() => p.ev("document.body.dataset.state === 'ready' && !!document.querySelector('#surface [data-id=\"button\"]')"), 'Parts');
+  inside(await contentBounds(p), 'Parts when shown');
+  centred(await contentBounds(p), 'Parts when shown');
+  assert.ok(await zoomOf(p) <= 1);
+  await p.click('#pages a[data-page="p-main"]');
+  await until(() => p.ev("document.body.dataset.state === 'ready' && !!document.querySelector('#surface [data-id=\"card\"]')"), 'Checkout');
+  near(await zoomOf(p), zFit, 1e-4, 'Checkout refitted when shown again');
+  centred(await contentBounds(p), 'Checkout when shown again');
+
+  // keys while the page select has focus are the select's (it is shown under 760 px)
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+  await until(() => p.ev("innerWidth === 390 && getComputedStyle(document.getElementById('pageSel')).display !== 'none'"), 'the page select at 390');
+  await p.ev("document.getElementById('pageSel').focus()");
+  assert.equal(await p.ev('document.activeElement.id'), 'pageSel');
+  await p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))'); // the resize's refit done
+  const zSel = await zoomOf(p);
+  await plusKey(p);
+  await minusKey(p);
+  await zeroKey(p);
+  await shiftOne(p);
+  assert.equal(await zoomOf(p), zSel, 'keys in the page select: the zoom unchanged');
+  assert.equal(await p.ev("document.getElementById('pageSel').value"), 'p-main');
+  noExceptions(rec);
 });
 
 // ---- width rules (C4, and the review focus's long hostile title at 390 px) ----
@@ -721,7 +940,7 @@ const MEASURE_PROBE = `(() => {
 })()`;
 
 test('running text within six columns at 1440', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
-  const { p, load } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  const { p, rec, load } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
   near(await p.ev(MEASURE_PROBE), 560, 0.01, 'a probe width: var(--measure)');
   const check = async (what, mustHold) => {
     const found = await p.ev(RUNNING_TEXT);
@@ -743,6 +962,7 @@ test('running text within six columns at 1440', { skip: canDrive ? false : 'need
   assert.equal(await shown(p, '#msg'), true);
   await check('a slug the server does not have', ['p#msg']);
   near(await p.ev(MEASURE_PROBE), 560, 0.01, 'a probe width: var(--measure), on the error page');
+  noExceptions(rec);
 });
 
 // The bar at the current width: its height, and every shown item of it (the title and the repo chip
@@ -823,7 +1043,7 @@ test('watch and comment at 390', { skip: canDrive ? false : 'needs Chrome and We
   near(await zoomOf(p), zb * 1.25, 1e-4, '+ at 390');
   assert.notEqual(await text(p, '#zoomPct'), before, '+ changes the percentage');
   assert.ok(await p.ev('document.documentElement.scrollWidth') <= 390, 'still no sideways scroll');
-  assert.deepEqual(rec.exceptions, []);
+  noExceptions(rec);
 });
 
 const HOSTILE = fixture('hostile.json');
@@ -846,5 +1066,5 @@ test('a hostile document and a long title in the bar at 390', { skip: canDrive ?
       assert.ok(!overlap(sel, await screenRect(p, '.zoom')), 'the page select clear of the zoom controls');
     }
   }
-  assert.deepEqual(rec.exceptions, []);
+  noExceptions(rec);
 });
