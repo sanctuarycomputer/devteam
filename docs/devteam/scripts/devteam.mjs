@@ -25268,7 +25268,9 @@ function browserChrome() {
 // Who may run it, and on what, in this order, before anything else; each refusal exits 1 and changes
 // nothing. The role check is the kit's supervisor guard loosened to let an empty role through (the
 // owner's own terminal on main), so a worker shell that lost its role is still refused by its writer.
-function browserGates({ chrome = true, memory = true } = {}) {
+// The memory check runs only where a daemon is about to start (browserEnsure's cold path): a verb a
+// live daemon answers is never refused for memory.
+function browserGates({ chrome = true, memory = false } = {}) {
   const role = process.env.DEVTEAM_ROLE;
   if ((role && role !== 'supervisor') || logWriter() !== 'supervisor') die("browser: the supervisor's browser; workers ask the supervisor");
   const hook = browserTestEnv('DEVTEAM_TEST_BROWSER_NODE');
@@ -25288,12 +25290,16 @@ function browserRootOf(dir) {
 }
 // This checkout's profile folder (0700, its parent too), with root.json naming this checkout: a
 // profile naming another root is a copied or moved checkout's, refused; a missing root.json is written.
+// One that is there but can't be read as a root (unparsable, relative, too long) is refused the same
+// way, never overwritten. Only the start path calls this: a verb a live daemon answers makes nothing.
 function browserProfile() {
-  const key = browserKey(), here = realPath(mainRoot), dir = path.join(browserHome(), key);
+  const key = browserKey(), here = realPath(mainRoot), dir = path.join(browserHome(), key), file = path.join(dir, 'root.json');
   for (const d of [browserHome(), dir]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fs.chmodSync(d, 0o700); }
+  const forget = 'Forget it (devteam.mjs browser forget) to start signed out';
+  if (!fs.lstatSync(file, { throwIfNoEntry: false })) fs.writeFileSync(file, `${JSON.stringify({ root: here })}\n`, { mode: 0o600, flag: 'wx' });
   const root = browserRootOf(dir);
-  if (root !== null && root !== here) die(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. Forget it (devteam.mjs browser forget) to start signed out`);
-  if (root === null) fs.writeFileSync(path.join(dir, 'root.json'), `${JSON.stringify({ root: here })}\n`, { mode: 0o600 });
+  if (root === null) die(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
+  if (root !== here) die(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
   return dir;
 }
 // browser_idle_minutes in ms, read like machine_memory_ceiling: anything but a whole number from 1 to
@@ -25340,24 +25346,439 @@ function browserForgetOther(key) {
   fs.rmSync(path.join(browserHome(), key), { recursive: true, force: true });
   out(`forgot profile ${key}: every site in it is signed out`);
 }
-// Which gates each verb runs: status, profiles and stop skip Chrome and memory; forget skips memory.
+// Alive: kill(pid, 0) works and the process isn't a zombie (a killed one its parent hasn't reaped yet
+// counts as gone). /proc's state field, else ps (macOS).
+function browserAlive(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); } catch (e) { if (e.code !== 'EPERM') return false; }
+  try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return st.slice(st.lastIndexOf(')') + 2)[0] !== 'Z'; } catch {}
+  if (fs.existsSync('/proc/self/stat')) return false;
+  const r = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 && !!r.stdout.trim() && !r.stdout.includes('Z');
+}
+const browserSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function browserGone(pid, ms) { const end = Date.now() + ms; while (browserAlive(pid)) { if (Date.now() > end) return false; await browserSleep(50); } return true; }
+// run/browser (0700): state.json, the start lock, shots/.
+const BROWSER_DIR = () => runPath('browser');
+const browserStateFile = () => path.join(BROWSER_DIR(), 'state.json');
+const browserDirMade = () => { fs.mkdirSync(BROWSER_DIR(), { recursive: true, mode: 0o700 }); fs.chmodSync(BROWSER_DIR(), 0o700); };
+// state.json as written, whatever it says (a new daemon reads a dead one's chrome_pid from it), or null.
+function browserRawState() { try { const s = JSON.parse(fs.readFileSync(browserStateFile(), 'utf8')); return isObj(s) ? s : null; } catch { return null; } }
+// The state of a daemon that is alive (its file holds together and its pid lives), or null.
+function browserState() {
+  const s = browserRawState();
+  const port = (v) => Number.isInteger(v) && v >= 1 && v <= 65535;
+  if (!s || s.browser !== 1 || !['control_port', 'cdp_port', 'guard_port', 'view_port'].every((k) => port(s[k])) || !/^[0-9a-f]{64}$/.test(s.control_secret ?? '') || typeof s.preview !== 'string' || !Number.isInteger(s.chrome_pid)) return null;
+  return browserAlive(s.daemon_pid) ? s : null;
+}
+function browserWriteState(s) {
+  browserDirMade();
+  const tmp = path.join(BROWSER_DIR(), `state.json.${process.pid}.tmp`);
+  fs.rmSync(tmp, { force: true });
+  fs.writeFileSync(tmp, `${JSON.stringify(s)}\n`, { mode: 0o600, flag: 'wx' });
+  fs.renameSync(tmp, browserStateFile());
+}
+// The daemon's answer to one verb: { code, out }. Rejects when nothing answers in ms.
+function browserCall(verb, args = {}, { state = browserState(), ms = 60000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!state) return reject(new Error('the browser is not running'));
+    const body = JSON.stringify({ verb, args });
+    const req = http.request({ host: '127.0.0.1', port: state.control_port, method: 'POST', path: '/', timeout: ms, headers: { host: `127.0.0.1:${state.control_port}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-devteam-browser': state.control_secret } }, (res) => {
+      let b = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { b += c; });
+      res.on('end', () => { try { const r = JSON.parse(b); if (res.statusCode === 200 && Number.isInteger(r?.code) && typeof r.out === 'string') return resolve(r); } catch {} reject(new Error(`the daemon answered ${res.statusCode}`)); });
+    });
+    req.on('timeout', () => req.destroy(new Error(`the daemon didn't answer in ${Math.round(ms / 1000)} s`)));
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+// A live daemon's state (its pid alive and its control server answering a ping), or null.
+async function browserLive() {
+  const s = browserState();
+  if (!s) return null;
+  try { return (await browserCall('ping', {}, { state: s, ms: 5000 })).code === 0 ? s : null; } catch { return null; }
+}
+// The region's own lock, held across awaits (withLock is synchronous): mkdir <file>.lock, stale after
+// 120 s, waited on up to 60 s. A die() inside still lets it go, on exit.
+async function browserStartLock(file, fn) {
+  const lock = `${file}.lock`, start = Date.now();
+  for (;;) {
+    try { fs.mkdirSync(lock); break; } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const at = fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs;
+      if (at !== undefined && Math.abs(Date.now() - at) > 120000) { fs.rmSync(lock, { recursive: true, force: true }); continue; }
+      if (Date.now() - start > 60000) die(`browser: timed out waiting for ${lock}`);
+      await browserSleep(100);
+    }
+  }
+  const release = () => fs.rmSync(lock, { recursive: true, force: true });
+  process.on('exit', release);
+  try { return await fn(); } finally { process.off('exit', release); release(); }
+}
+// The daemon's environment, an allow-list stored in the preview record and put on its window's env
+// line: several other variables hold secrets (DEVTEAM_CLAIM_TOKEN, DEVTEAM_SECRET_*), and none of
+// them is passed.
+const BROWSER_ENV = ['CHROME_PATH', 'DEVTEAM_ROLE', 'DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_PROJECT', 'DEVTEAM_PUBLIC_URL', 'DEVTEAM_PREVIEWS', 'DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_TTYD_PORT', 'DEVTEAM_RELAY_PORTS', 'DEVTEAM_BOX', 'DEVTEAM_CGROUP', 'DEVTEAM_MEMINFO', 'DEVTEAM_MEMORY_COUNTS_CACHE'];
+function browserRunEnv({ headed }) {
+  const env = { HOME: os.homedir() };
+  for (const k of BROWSER_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
+  if (process.env.DEVTEAM_TEST) for (const k of Object.keys(process.env)) if (k === 'DEVTEAM_TEST' || k.startsWith('DEVTEAM_TEST_BROWSER_')) env[k] = process.env[k];
+  env.DEVTEAM_BROWSER_SERVE = '1';
+  if (headed) env.DEVTEAM_BROWSER_HEADED = '1';
+  return env;
+}
+// This checkout's browser preview record (label browser), or undefined.
+const browserPreviewRec = () => readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser');
+// A live daemon, or one started: in the browser preview's window, under the start lock, the memory
+// check and the profile first (so a refused start claims nothing).
+async function browserEnsure({ headed = false } = {}) {
+  const live = await browserLive();
+  if (live) return live;
+  browserGates({ chrome: false, memory: true });
+  browserProfile();
+  browserDirMade();
+  return browserStartLock(path.join(BROWSER_DIR(), 'start'), async () => {
+    const again = await browserLive();
+    if (again) return again;
+    const session = logWriter();
+    const { name, had } = await previewClaim(session, 'browser');
+    if (had?.run) killPreviewWindow(had);
+    const port = had && PREVIEW_PICK.includes(had.port) && (await previewPortQuiet(had.port)) && (await portFree(had.port)) ? had.port : await previewPickPort(name);
+    const cmd = `${shq(process.execPath)} ${shq(fileURLToPath(import.meta.url))} browser serve`;
+    const rec = launchPreviewWindow(previewFresh({ v: 1, name, project: previewProject(), session, label: 'browser', port, cwd: mainRoot, run: { cmd, window: null, env: browserRunEnv({ headed }) } }));
+    if (!rec) die('browser: could not open a tmux window for its daemon (is tmux installed?)');
+    const end = Date.now() + 45000;
+    for (;;) {
+      const s = browserState();
+      if (s?.preview === name && (await browserLive())) return s;
+      const text = sh('tmux', ['capture-pane', '-p', '-t', rec.run.window]);
+      if (text === null || text.includes(PREVIEW_EXITED)) {
+        const tail = (text ?? '').split('\n').filter((l) => !l.includes(PREVIEW_EXITED)).join('\n').trimEnd().split('\n').slice(-20).join('\n');
+        process.stderr.write(`devteam: browser: the daemon stopped before it was up:\n${tail}\n`);
+        process.exit(1);
+      }
+      if (Date.now() > end) die(`browser: the daemon didn't come up in 45 s; see tmux window ${tmuxSession()}:dev~${name}`);
+      await browserSleep(200);
+    }
+  });
+}
+// Chrome's session files: every Default/ entry named Sessions*, and the four old ones. A delete that
+// fails (but ENOENT) throws the refusal: Chrome would bring the tabs back.
+const BROWSER_SESSION_FILES = ['Current Session', 'Current Tabs', 'Last Session', 'Last Tabs'];
+function browserDeleteSessions(profile) {
+  const d = path.join(profile, 'Default');
+  let names = [];
+  try { names = fs.readdirSync(d).filter((n) => n.startsWith('Sessions')); } catch {}
+  for (const n of [...names, ...BROWSER_SESSION_FILES]) {
+    const f = path.join(d, n);
+    try {
+      if (browserTestEnv('DEVTEAM_TEST_BROWSER_DELETE_FAILS') && fs.lstatSync(f, { throwIfNoEntry: false })) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      fs.rmSync(f, { recursive: true });
+    } catch (e) { if (e.code !== 'ENOENT') throw new Error(`browser: couldn't delete ${f} (${e.code ?? 'error'}): Chrome would bring its tabs back`); }
+  }
+}
+// Default/Preferences: passwords and autofill off, and restore_on_startup 1 (session cookies kept,
+// no tabs: the session files are gone). Every other key kept; tmp, then rename.
+function browserWritePrefs(profile) {
+  const d = path.join(profile, 'Default'), f = path.join(d, 'Preferences');
+  fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+  let p;
+  try { p = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+  if (!isObj(p)) p = {};
+  const set = (keys, v) => { let o = p; for (const k of keys.slice(0, -1)) { if (!isObj(o[k])) o[k] = {}; o = o[k]; } o[keys.at(-1)] = v; };
+  set(['credentials_enable_service'], false);
+  set(['profile', 'password_manager_enabled'], false);
+  set(['autofill', 'profile_enabled'], false);
+  set(['autofill', 'credit_card_enabled'], false);
+  set(['session', 'restore_on_startup'], 1);
+  const tmp = `${f}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(p), { mode: 0o600 });
+  fs.renameSync(tmp, f);
+}
+// Every start step before Chrome launches. T3 adds the leftover-Chrome kill and the lock steps.
+async function browserPrepareProfile(profile, notes) {
+  void notes;
+  browserDeleteSessions(profile);
+  browserWritePrefs(profile);
+  return { restarted: false };
+}
+// A local process proven to carry the profile: SIGTERM to it (its group when it leads one), then
+// SIGKILL 2 s later. The stop path's fallback for a daemon that died and left its Chrome.
+async function browserKillOn(profile) {
+  for (const pid of browserProcsOn(profile) ?? []) {
+    const sig = (s) => { try { process.kill(-pid, s); } catch { try { process.kill(pid, s); } catch {} } };
+    sig('SIGTERM');
+    if (!(await browserGone(pid, 2000))) { sig('SIGKILL'); await browserGone(pid, 3000); }
+  }
+}
+// The CDP client: one browser-level WebSocket, ids from 1, each call rejected on an error or after
+// 30 s, every pending one rejected when the socket closes. on(method, fn) gets (params, sessionId).
+async function cdpBrowser(wsUrl) {
+  const ws = new WebSocket(wsUrl);
+  await new Promise((resolve, reject) => { ws.addEventListener('open', resolve, { once: true }); ws.addEventListener('error', () => reject(new Error("couldn't connect to Chrome's DevTools")), { once: true }); });
+  let id = 0, closed = false;
+  const pending = new Map(), handlers = new Map(), closers = [];
+  ws.addEventListener('message', (ev) => {
+    let m;
+    try { m = JSON.parse(String(ev.data)); } catch { return; }
+    if (m.id !== undefined) {
+      const p = pending.get(m.id);
+      if (!p) return;
+      pending.delete(m.id);
+      clearTimeout(p.timer);
+      if (m.error) p.reject(new Error(`${p.method}: ${m.error.message ?? 'failed'}`)); else p.resolve(m.result ?? {});
+    } else if (m.method) for (const fn of handlers.get(m.method) ?? []) { try { fn(m.params ?? {}, m.sessionId); } catch {} }
+  });
+  ws.addEventListener('close', () => {
+    closed = true;
+    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error(`${p.method}: Chrome's DevTools closed`)); }
+    pending.clear();
+    for (const fn of closers) { try { fn(); } catch {} }
+  });
+  return {
+    send(method, params = {}, sessionId) {
+      if (closed) return Promise.reject(new Error(`${method}: Chrome's DevTools closed`));
+      const i = ++id;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { pending.delete(i); reject(new Error(`${method}: Chrome didn't answer in 30 s`)); }, 30000);
+        pending.set(i, { resolve, reject, timer, method });
+        ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
+      });
+    },
+    on(method, fn) { if (method === 'close') closers.push(fn); else handlers.set(method, [...(handlers.get(method) ?? []), fn]); },
+    close() { try { ws.close(); } catch {} },
+  };
+}
+// The tabs: page targets in the order they appeared, each attached flat with Page enabled. A page
+// opened by another (a popup) becomes active; a sixth is closed at once, with a note.
+const BROWSER_TAB_CAP = 5;
+async function browserWatchTabs(ctx) {
+  const { cdp } = ctx;
+  cdp.on('Target.targetCreated', async ({ targetInfo: t }) => {
+    if (t?.type !== 'page' || ctx.tabs.some((x) => x.targetId === t.targetId)) return;
+    if (ctx.tabs.length >= BROWSER_TAB_CAP) {
+      if (!ctx.notes.includes(`Closed a tab past the cap of ${BROWSER_TAB_CAP}.`)) ctx.notes.push(`Closed a tab past the cap of ${BROWSER_TAB_CAP}.`);
+      return void cdp.send('Target.closeTarget', { targetId: t.targetId }).catch(() => {});
+    }
+    const tab = { targetId: t.targetId, sessionId: null, url: t.url, title: t.title, opening: null, refs: new Map() };
+    ctx.tabs.push(tab);
+    if (t.openerId || !ctx.active) ctx.active = tab;
+    try {
+      tab.sessionId = (await cdp.send('Target.attachToTarget', { targetId: t.targetId, flatten: true })).sessionId;
+      await cdp.send('Page.enable', {}, tab.sessionId);
+    } catch {}
+  });
+  cdp.on('Target.targetInfoChanged', ({ targetInfo: t }) => { const tab = ctx.tabs.find((x) => x.targetId === t?.targetId); if (tab) { tab.url = t.url; tab.title = t.title; } });
+  cdp.on('Target.targetDestroyed', ({ targetId }) => {
+    const i = ctx.tabs.findIndex((x) => x.targetId === targetId);
+    if (i < 0) return;
+    const [gone] = ctx.tabs.splice(i, 1);
+    if (ctx.active === gone) ctx.active = ctx.tabs.at(-1) ?? null;
+  });
+  await cdp.send('Target.setDiscoverTargets', { discover: true });
+}
+// The URL as printed. T4 brings the mask; until then nothing but about:blank is ever printed.
+const browserMask = (u) => (u === 'about:blank' ? u : 'about:blank');
+// An ordinary desktop Chrome user agent from `<chrome> --version` (dev-62), or null.
+function browserUserAgent(bin) {
+  const v = /(\d+\.\d+\.\d+\.\d+)/.exec(spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] }).stdout ?? '')?.[1];
+  return v ? `Mozilla/5.0 (${process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64'}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${v} Safari/537.36` : null;
+}
+// Chrome, detached in its own group, its DevTools port read only from its own stderr within 30 s
+// (DevToolsActivePort is never read). No usable sandbox: once more with --no-sandbox, and a note.
+// After the port line its stderr is drained and dropped: Chrome's log lines can carry page URLs.
+async function browserLaunchChrome(ctx, { headed }) {
+  const ua = browserUserAgent(ctx.bin);
+  const args = [
+    ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    `--proxy-server=127.0.0.1:${ctx.guard.port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
+    '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync',
+    ...(process.platform === 'linux' ? ['--password-store=basic'] : []), ...(ua ? [`--user-agent=${ua}`] : []),
+  ];
+  for (let tries = 0; ; tries++) {
+    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    ctx.chrome = chrome;
+    const r = await new Promise((resolve) => {
+      let buf = '';
+      const timer = setTimeout(() => resolve({ late: true }), 30000);
+      const done = (v) => { clearTimeout(timer); chrome.stderr.removeListener('data', read); chrome.stderr.on('data', () => {}); resolve(v); };
+      const read = (c) => {
+        buf = (buf + c).slice(-65536);
+        const m = /DevTools listening on (ws:\/\/127\.0\.0\.1:(\d+)\/\S+)/.exec(buf);
+        if (m) done({ wsUrl: m[1], cdpPort: Number(m[2]) });
+      };
+      chrome.stderr.setEncoding('utf8');
+      chrome.stderr.on('data', read);
+      chrome.once('error', () => done({ exited: true, buf: '' }));
+      chrome.once('exit', () => done({ exited: true, buf }));
+    });
+    if (r.wsUrl) return r;
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
+    if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) { ctx.notes.push("Chrome's sandbox isn't available on this machine; it runs without it."); continue; }
+    throw new Error(r.late ? "browser: Chrome didn't open its DevTools port in 30 s" : 'browser: Chrome exited before its DevTools port opened');
+  }
+}
+// The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
+// hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
+// guard and servers closed; exit. Once a signal came, a dead pty can't end it early.
+function browserShutdown(ctx, why) {
+  if (ctx.stopping) return ctx.stopping;
+  if (why === 'signal') for (const s of [process.stdout, process.stderr]) { s.on('error', () => {}); }
+  ctx.stopping = (async () => {
+    clearTimeout(ctx.idle);
+    const pid = ctx.chrome?.pid;
+    if (pid && browserAlive(pid)) {
+      await Promise.race([ctx.cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
+      if (!(await browserGone(pid, 5000))) {
+        try { process.kill(-pid, 'SIGTERM'); } catch {}
+        if (!(await browserGone(pid, 2000))) { try { process.kill(-pid, 'SIGKILL'); } catch {} await browserGone(pid, 3000); }
+      }
+    }
+    if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
+    ctx.cdp?.close();
+    try { browserDeleteSessions(ctx.profile); } catch {}
+    if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
+    for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
+    await Promise.race([ctx.guard?.close(), browserSleep(2000)]).catch(() => {});
+    process.exit(0);
+  })();
+  return ctx.stopping;
+}
+// The verbs the daemon serves, each async (args) → { code, out }. T4 and T5 add to the table.
+function browserVerbs(ctx) {
+  return {
+    ping: async () => ({ code: 0, out: 'pong' }),
+    status: async (args) => {
+      const s = { browser: 1, instance: browserKey(), running: true, held: null, preview: ctx.preview, url: browserMask(ctx.active?.url ?? 'about:blank'), tabs: ctx.tabs.length, restarted: ctx.restarted, notes: ctx.notes };
+      if (args?.json) return { code: 0, out: JSON.stringify(s) };
+      return { code: 0, out: [`browser running (preview ${s.preview}, profile ${s.instance})`, `url: ${s.url}`, `tabs: ${s.tabs}`, `restarted: ${s.restarted ? 'yes' : 'no'}`, ...s.notes.map((n) => `note: ${n}`)].join('\n') };
+    },
+    stop: async () => { ctx.after = () => browserShutdown(ctx, 'stop'); return { code: 0, out: 'browser stopped' }; },
+  };
+}
+// The control server: POST / only, Host 127.0.0.1:<port>, JSON, and the secret (timingSafeEqual);
+// anything else 403 and nothing run. Verbs run one at a time, each re-arming the idle timer (ping
+// doesn't).
+function browserControl(ctx, secret) {
+  const want = Buffer.from(secret);
+  let queue = Promise.resolve();
+  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => browserShutdown(ctx, 'idle'), browserIdleMs()); };
+  const server = http.createServer((req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
+    const given = Buffer.from(String(req.headers['x-devteam-browser'] ?? ''));
+    const ok = req.method === 'POST' && req.url === '/' && req.headers.host === `127.0.0.1:${server.address().port}` && /^application\/json\b/.test(req.headers['content-type'] ?? '') && given.length === want.length && crypto.timingSafeEqual(given, want);
+    if (!ok) { req.resume(); res.writeHead(403, { 'content-type': 'text/plain', connection: 'close' }); return void res.end('forbidden\n'); }
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (c) => { body += c; if (body.length > 1048576) req.destroy(); });
+    req.on('end', () => {
+      let m;
+      try { m = JSON.parse(body); } catch {}
+      const verb = typeof m?.verb === 'string' && Object.hasOwn(ctx.verbs, m.verb) ? m.verb : null;
+      queue = queue.then(async () => {
+        if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
+        if (!verb) return { code: 1, out: `usage: ${BROWSER_USAGE}` };
+        if (verb !== 'ping') arm();
+        try { return await ctx.verbs[verb](isObj(m.args) ? m.args : {}); } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
+      }).then((r) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(r));
+        const after = ctx.after;
+        ctx.after = null;
+        if (after) res.once('finish', after);
+      });
+    });
+  });
+  return { server, arm };
+}
+const browserListen = (server, port) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(server.address().port); }); });
+// browser serve, in the preview's window: the profile and its start steps, the guard, the 503 view
+// placeholder, Chrome, the CDP tabs, the control server, then state.json. It writes nothing to its
+// window once it is up.
+async function browserServe({ chrome: bin }) {
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null };
+  for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
+  const viewPort = Number(process.env.PORT);
+  const rec = readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser' && r.port === viewPort);
+  if (!rec) die(`browser serve: no browser preview record on port ${process.env.PORT}`);
+  ctx.preview = rec.name;
+  ctx.profile = browserProfile();
+  try {
+    ctx.restarted = (await browserPrepareProfile(ctx.profile, ctx.notes)).restarted;
+    ctx.guard = await startBrowserGuard();
+    ctx.view = http.createServer((req, res) => { req.resume(); res.on('error', () => {}); res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' }); res.end("The supervisor's browser runs here; its live view comes with a later release.\n"); });
+    await browserListen(ctx.view, viewPort);
+    const { wsUrl, cdpPort } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
+    ctx.cdp = await cdpBrowser(wsUrl);
+    ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
+    await browserWatchTabs(ctx);
+    for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
+    ctx.verbs = browserVerbs(ctx);
+    const secret = crypto.randomBytes(32).toString('hex');
+    const { server, arm } = browserControl(ctx, secret);
+    ctx.control = server;
+    const controlPort = await browserListen(server, 0);
+    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, cdp_port: cdpPort, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
+    arm();
+    process.on('uncaughtException', () => browserShutdown(ctx, 'error'));
+    process.on('unhandledRejection', () => browserShutdown(ctx, 'error'));
+  } catch (e) {
+    if (ctx.chrome?.pid) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} }
+    const m = String(e?.message ?? e);
+    die(m.startsWith('browser') ? m : `browser: ${m}`);
+  }
+}
+// browser stop: the daemon told to stop, and up to 10 s for it to go. A dead daemon's Chrome is killed
+// here (only one proven by its --user-data-dir); then the session files, the window, the preview
+// record and state.json. It makes nothing: no profile, no run/browser.
+async function browserStop() {
+  const s = browserState();
+  if (s) {
+    try { await browserCall('stop', {}, { state: s, ms: 15000 }); } catch {}
+    await browserGone(s.daemon_pid, 10000);
+  }
+  const profile = path.join(browserHome(), browserKey());
+  if (fs.existsSync(profile)) {
+    await browserKillOn(profile);
+    try { browserDeleteSessions(profile); } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); }
+  }
+  const rec = browserPreviewRec();
+  if (rec) { killPreviewWindow(rec); removePreview(rec.name); }
+  fs.rmSync(browserStateFile(), { force: true });
+  out(s ? 'browser stopped' : "browser wasn't running");
+}
+async function browserStatus() {
+  const off = { browser: 1, instance: browserKey(), running: false, held: null };
+  const s = browserState();
+  let r = null;
+  if (s) { try { r = await browserCall('status', { json: !!flags.json }, { state: s }); } catch {} }
+  if (r) { process.exitCode = r.code; return out(r.out); }
+  return out(flags.json ? JSON.stringify(off) : `browser isn't running (profile ${off.instance})`);
+}
+// Which gates each verb runs: status, profiles and stop skip Chrome; the memory check is browserEnsure's.
 const BROWSER_VERBS = {
-  ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot'].map((v) => [v, { chrome: true, memory: true }])),
-  status: { chrome: false, memory: false }, stop: { chrome: false, memory: false }, profiles: { chrome: false, memory: false },
-  forget: { chrome: true, memory: false }, serve: { chrome: true, memory: false },
+  ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve'].map((v) => [v, { chrome: true }])),
+  status: { chrome: false }, stop: { chrome: false }, profiles: { chrome: false },
 };
 async function cmdBrowser() {
   const verb = positional[0];
   if (!Object.hasOwn(BROWSER_VERBS, verb ?? '')) die(`usage: ${BROWSER_USAGE}`);
   if (verb === 'serve' && process.env.DEVTEAM_BROWSER_SERVE !== '1') die('browser serve is internal: browser start runs it in its own window');
-  browserGates(BROWSER_VERBS[verb]);
+  const { chrome } = browserGates(BROWSER_VERBS[verb]);
   if (verb === 'profiles') return out(JSON.stringify({ browser: 1, profiles: browserProfiles() }));
   if (verb === 'forget') {
     if (flags.profile === true) die(`usage: ${BROWSER_USAGE}`);
     const key = flagStr('profile');
     if (key !== undefined && key !== browserKey()) return browserForgetOther(key);
   }
-  if (BROWSER_VERBS[verb].memory) browserProfile();
+  if (verb === 'serve') return browserServe({ chrome });
+  if (verb === 'status') return browserStatus();
+  if (verb === 'stop') return browserStop();
+  if (verb === 'start') { const s = await browserEnsure({ headed: !!flags.headed }); return out(`browser running (preview ${s.preview}, profile ${browserKey()})`); }
   die(`browser ${verb}: not in this build yet`);
 }
 /* browser end */

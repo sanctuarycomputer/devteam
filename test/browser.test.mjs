@@ -438,6 +438,7 @@ test('Review Focus 5: a stale state.json starts afresh', opts, async () => {
 
 test('G3 DevToolsActivePort is never read', opts, async () => {
   const d = path.join(h.profile, 'DevToolsActivePort');
+  fs.rmSync(d, { recursive: true, force: true }); // the file an earlier Chrome wrote
   fs.mkdirSync(d, { recursive: true });
   fs.writeFileSync(path.join(d, 'x'), 'x');
   try {
