@@ -4441,7 +4441,8 @@
   }
   function trySelect() {
     if (!selq.want || selq.timer !== null) return;
-    if (state.session === null || !sock.ws || !sock.live || state.pending.length > 0) return;
+    // kit-663 §6: nor while the document is fetched (refetch queues one when it lands)
+    if (state.session === null || !sock.ws || !sock.live || sock.fetching || state.pending.length > 0) return;
     const now = performance.now();
     const wait = selq.lastAt + SELECT_MS - now;
     if (wait > 0) {
@@ -4667,6 +4668,11 @@
     if (sock.again && !sock.fetching) refetch();
     redraw();
     pump();
+    // kit-663 §6 (kit-669 F2): the selection is sent again once the fetch lands, after the re-sent
+    // edits are acked, even when it equals the last one sent: a restart or a reload may have taken
+    // those ids out of the server's selection
+    sock.lastSelect = null;
+    queueSelect();
   }
 
   async function start() {
