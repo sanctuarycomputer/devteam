@@ -17915,7 +17915,9 @@ async function machineStatus() {
     const qs = openQuestionsOf(root);
     const q = qs ? qs.filter((x) => x?.id && !(notes && notes.includes(x.id))).length : '?';
     const ks = harvestOf(root, notes);
-    if (hello.alert) flagged.push(`attention: ${n}: ${hello.alert}`);
+    // the box's own alert has the hub line; only the project's part is this project's attention
+    const ownAlert = alertLessBox(hello.alert, hello.box_alert);
+    if (ownAlert) flagged.push(`attention: ${n}: ${ownAlert}`);
     const state = p ? paneState(p) : null;
     // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
     // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
@@ -19249,7 +19251,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   every(refreshHello, 10000);
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -24003,6 +24005,12 @@ function boxAlert() {
     return readText(f)?.trim().slice(0, 200) || null;
   } catch { return null; }
 }
+// box_alert is the machine's, the same on every project's hello, so a hub or gateway on this kit
+// shows it once, on the Overview, and not as a "!" on every project's tab. alert still ends with it,
+// after " · ", so an older hub or gateway, which reads only alert, still shows and pushes it (hub: 1
+// stays: the change is additive); a reader on this kit takes it off again (alertLessBox).
+// The box's alert stays the LAST part of alert: alertLessBox, the hub's ownAlert and the gateway's
+// alertNews all take it off as a suffix.
 // Worked out once a process: cmdHello reads it twice.
 const helloAlert = (() => {
   let memo;
@@ -24014,6 +24022,15 @@ const helloAlert = (() => {
   };
   return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
 })();
+// A hello's alert, less the box's alert folded in at its end: the project's own part, or null. Matched
+// as the whole alert or a " · " suffix, never split, so a box alert holding " · " still comes off.
+function alertLessBox(alert, box) {
+  const a = typeof alert === 'string' ? alert.trim() : '';
+  const b = typeof box === 'string' ? box.trim() : '';
+  if (!a || !b) return a || null;
+  if (a === b) return null;
+  return a.endsWith(` · ${b}`) ? a.slice(0, -(b.length + 3)).trim() || null : a;
+}
 // The hub's Overview: is this project moving, and if not, why. From the log in one pass; from git,
 // only whether each ticket has merged (main's log and the refs, one call each under cmdHello's
 // read cache, never one per ticket), so hello stays cheap at every 10 s.
@@ -24133,7 +24150,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();

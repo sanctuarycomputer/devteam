@@ -12,11 +12,15 @@ test('alert reaches the hub, by hello, and clears', () => {
   const alert = path.join(home, '.box/alert');
   const raise = (...w) => machine(['machine', 'alert', '--', ...w]);
   fs.rmSync(alert, { force: true });
-  assert.equal(JSON.parse(dtIn(r, ['hello', '--json']).stdout).alert, undefined);
+  const hello = () => JSON.parse(dtIn(r, ['hello', '--json']).stdout);
+  assert.equal(hello().box_alert, undefined);
   assert.match(raise('disk\nnearly full').stdout, /alert raised: disk nearly full/);
-  assert.equal(JSON.parse(dtIn(r, ['hello', '--json']).stdout).alert, 'disk nearly full');
+  // the box's alert is the machine's: box_alert, which a hub and gateway on this kit show once; alert
+  // still ends with it, so an older hub or gateway (which reads only alert) still shows and pushes it
+  assert.equal(hello().box_alert, 'disk nearly full');
+  assert.equal(hello().alert, 'disk nearly full', 'folded in for older readers');
   fs.utimesSync(alert, new Date(Date.now() - 25 * 3600000), new Date(Date.now() - 25 * 3600000));
-  assert.equal(JSON.parse(dtIn(r, ['hello', '--json']).stdout).alert, undefined, 'a day old, it has been seen or forgotten');
+  assert.equal(hello().box_alert, undefined, 'a day old, it has been seen or forgotten');
   raise(`${'x'.repeat(199)}é and more`);
   assert.equal(fs.readFileSync(alert, 'utf8'), `${'x'.repeat(199)}\n`, 'cut at 200 bytes, never half a character');
   raise(`${'x'.repeat(198)}€ and more`);
@@ -140,6 +144,7 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     assert.match(st3.stdout, /^statused .*dash=9\/DOWN/m);
     assert.doesNotMatch(st3.stdout, /behind=/);
     assert.match(st3.stdout, /^machine: hub \d+ DOWN; alert: look at the disk$/m);
+    assert.doesNotMatch(st3.stdout, /^attention: statused: /m, "the box's alert, folded into hello's alert, is not repeated as the repo's");
     machine(['machine', 'alert', '--', '--clear']);
     // a supervisor up, idle at its prompt, its fleet running, and no tick or wait for 45 minutes: it
     // stopped its loop, and the check-in says so; its host check is the sign, as each tick and wait make one
