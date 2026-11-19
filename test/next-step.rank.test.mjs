@@ -120,6 +120,15 @@ test('the owner gives the settling answer: a finding until the supervisor withdr
     const other = ask('Build the export at all?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', a, '--settles-if', "Don't build it");
     ok(old, ['answer', other, 'Build it']);
     assert.deepEqual(findings('settled-not-withdrawn'), [], 'another answer settles nothing');
+    // words alone that say the settling choice settle nothing until read; a pick of it does (kit-313)
+    const said = ask('Build the import at all?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', a, '--settles-if', "Don't build it");
+    ok(old, ['answer', said, "Don't build it", '--in-words']);
+    assert.deepEqual(findings('settled-not-withdrawn'), [], 'words alone settle nothing');
+    const c = ask('Detail 3?', '--goal', G, '--stake', '1', '--urgency', '1');
+    const picked = ask('Build the archive at all?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', c, '--settles-if', "Don't build it");
+    ok(old, ['answer', picked, 'maybe next year', "--choice=Don't build it"]);
+    assert.deepEqual(findings('settled-not-withdrawn').map((f) => f.subject), [picked], 'a pick settles');
+    ok(old, ['withdraw', c, '--reason', `settled by the owner's answer to ${picked}`], SUP);
     ok(old, ['answer', gate, "Don't build it — not this year"]);
     const [f] = findings('settled-not-withdrawn');
     assert.equal(f.subject, gate);

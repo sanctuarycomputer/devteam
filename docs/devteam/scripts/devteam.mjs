@@ -14324,7 +14324,10 @@ function collectMetrics(since) {
       const top = rated.filter((q) => q[k] === 3).length;
       if (rated.length >= 5 && top * 2 > rated.length) add('medium', 'rating-inflated', k, `${top} of ${rated.length} open questions are ${k} 3`, `a rating that is always 3 orders nothing: read the ${k} test again (supervisor.md §6) and rate the ones that aren't 3 (rate <qid> --${k} n)`);
     }
-    for (const q of all.filter((x) => x.status === 'answered' && x.settles.length && sameAnswer(x.answer, x.settles_if))) {
+    // the settling answer as answer's own note reads it (kit-313): the pick, never words alone; an
+    // older line without the key by its text
+    const settled = (x) => (x.in_words === null ? sameAnswer(x.answer, x.settles_if) : !!x.choice && sameAnswer(x.choice, x.settles_if));
+    for (const q of all.filter((x) => x.status === 'answered' && x.settles.length && settled(x))) {
       const left = q.settles.filter((s) => open.some((o) => o.id === s));
       if (left.length) add('medium', 'settled-not-withdrawn', q.id, `the owner answered "${String(q.answer).slice(0, 60)}", which settles ${left.join(', ')}; ${left.length > 1 ? 'they are' : 'it is'} still in the Inbox`, `withdraw ${left.length > 1 ? 'each' : 'it'}: withdraw <qid> --reason "settled by the owner's answer to ${q.id}"`);
     }
