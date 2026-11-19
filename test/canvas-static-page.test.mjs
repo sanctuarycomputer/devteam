@@ -339,6 +339,7 @@ function render(doc, what = 'the document') {
   return { html: r.html, tree: scan(r.html, canvas.STATIC_COMMENT) };
 }
 const nodeOf = (el) => el.attrs['data-node']?.value;
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 // Elements not inside an instance's element (an instance's own element is one), in document order.
 function topLevel(root) {
   const out = [];
@@ -642,4 +643,83 @@ test('canvas static page: a nested instance takes the enclosing instance\'s valu
   const t = inside(inner, 'chip-t');
   assert.equal(t.attrs['data-type'].value, 'text');
   assert.equal(textOf(t), 'From the chip');
+});
+
+test('canvas static page: data-name is left out for an empty name', () => {
+  const doc = fixture('doc-every-type.json');
+  doc.nodes.card.name = '';
+  assert.deepEqual(canvas.validate(doc), []);
+  const card = topEl(render(doc).tree, 'card');
+  assert.equal(own(card.attrs, 'data-name'), false, `card: ${JSON.stringify(Object.keys(card.attrs))}`);
+});
+
+test('canvas static page: zero-width stroke and fill sizing under none', () => {
+  const doc = fixture('doc-every-type.json');
+  doc.nodes.card.strokeWidth = 0;
+  doc.nodes.badge.size.w = 'fill';
+  assert.deepEqual(canvas.validate(doc), []);
+  const { tree } = render(doc);
+  const card = styleOf(topEl(tree, 'card'));
+  assert.equal(card.has('border'), false, `card: border ${card.get('border')}`);
+  holds(topEl(tree, 'badge'), { width: '100%' }, 'badge');
+});
+
+// ---- the cap on instance expansion (T3, C7) ----
+
+// A valid document: page p1 holds one instance of c0; page p2 holds components c0…c(n-1), each ci
+// (i < n-1) holding two instances of c(i+1), and c(n-1) holding one rect. Expanded, the top instance
+// holds 3 × 2^(n-1) - 2 elements.
+function chain(n) {
+  const nodes = {};
+  nodes.top = { type: 'instance', parent: 'p1', name: 'Top', component: 'c0' };
+  const comps = [];
+  for (let i = 0; i < n; i++) {
+    const id = `c${i}`;
+    comps.push(id);
+    if (i === n - 1) {
+      nodes[id] = { type: 'component', parent: 'p2', name: `C${i}`, children: [`r${i}`] };
+      nodes[`r${i}`] = { type: 'rect', parent: id, name: 'Leaf', size: { w: 4, h: 4 }, fill: '#111111' };
+    } else {
+      nodes[id] = { type: 'component', parent: 'p2', name: `C${i}`, children: [`c${i}-a`, `c${i}-b`] };
+      for (const s of ['a', 'b']) nodes[`c${i}-${s}`] = { type: 'instance', parent: id, name: `C${i} ${s}`, component: `c${i + 1}` };
+    }
+  }
+  return {
+    canvas: 1,
+    rev: 0,
+    tokens: {},
+    pages: [{ id: 'p1', name: 'Page 1', children: ['top'] }, { id: 'p2', name: 'Parts', children: comps }],
+    nodes,
+  };
+}
+
+test('canvas static page: instance expansion is capped', { timeout: 60000 }, () => {
+  const big = chain(20);
+  assert.deepEqual(canvas.validate(big), []);
+  const t0 = Date.now();
+  const r1 = canvas.staticPage(big);
+  const ms = Date.now() - t0;
+  assert.equal(r1.ok, true, JSON.stringify(r1.errors));
+  // An uncapped page fails here, before the scanner reads a million elements.
+  assert.ok(r1.html.length < 64 * 1024 * 1024, `the page is ${r1.html.length} bytes`);
+  const tree = scan(r1.html, canvas.STATIC_COMMENT);
+  const els = all(tree.root);
+  const limit = canvas.STATIC_MAX_ELEMENTS + Object.keys(big.nodes).length;
+  assert.ok(els.length <= limit, `${els.length} elements, more than ${limit}`);
+  assert.ok(els.some((el) => el.attrs['data-cut']?.value === 'true'), 'no data-cut="true"');
+  assert.equal(canvas.staticPage(big).html, r1.html, 'two runs differ');
+  assert.ok(ms < 30000, `the render took ${ms} ms`);
+
+  const small = chain(3);
+  assert.deepEqual(canvas.validate(small), []);
+  const s = render(small, 'chain(3)');
+  assert.ok(all(s.tree.root).every((el) => !own(el.attrs, 'data-cut')), 'a data-cut in chain(3)');
+  const top = topEl(s.tree, 'top');
+  const within = all(top).filter((el) => el !== top);
+  // c2 = 1 rect; c1 = 2 boxes each holding c2 = 4; c0 = 2 boxes each holding c1 = 10.
+  assert.equal(within.length, 10, `${within.length} elements inside the top instance`);
+  const boxes = within.filter((el) => /^c[01]-[ab]$/.test(nodeOf(el)));
+  assert.equal(boxes.length, 6);
+  for (const el of boxes) assert.equal(el.attrs['data-type'].value, 'instance', nodeOf(el));
+  assert.equal(within.filter((el) => nodeOf(el) === 'r2' && el.attrs['data-type'].value === 'rect').length, 4);
 });

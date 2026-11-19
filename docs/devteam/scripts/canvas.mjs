@@ -1202,6 +1202,58 @@ function textDecls(css, v) {
 const styleAttr = (decls) => (decls.length ? attr('style', decls.map(([k, x]) => `${k}:${x}`).join(';')) : '');
 const nodeAttrs = (id, type, name) => `${attr('data-node', id)}${attr('data-type', type)}${name !== '' ? attr('data-name', name) : ''}`;
 
+// The elements a node writes itself: a vector its <svg> and <path>, any other node one.
+const ownElements = (n) => (n.type === 'vector' ? 2 : 1);
+
+// Each component's expanded element count: the elements its descendants write (its root is the
+// instance's box, so not counted), each instance among them counting 1 plus its own component's count.
+// Worked in dependency order (Kahn's algorithm over component -> the components it instances, acyclic
+// by the instance-cycle rule), no recursion, saturating at STATIC_MAX_ELEMENTS + 1. A component left
+// over (none in a valid document) counts as over the cap.
+function expandedSizes(nodes) {
+  const over = STATIC_MAX_ELEMENTS + 1;
+  const base = new Map(); // component -> elements of its non-instance descendants and instance boxes
+  const uses = new Map(); // component -> component ids it instances, once per instance
+  for (const [id, n] of Object.entries(nodes)) {
+    if (n.type !== 'component') continue;
+    let count = 0;
+    const used = [];
+    const stack = [...n.children];
+    while (stack.length) {
+      const d = nodes[stack.pop()];
+      count += ownElements(d);
+      if (d.type === 'instance') used.push(d.component);
+      else if (Array.isArray(d.children)) stack.push(...d.children);
+    }
+    base.set(id, count);
+    uses.set(id, used);
+  }
+  const waiting = new Map(); // component -> how many distinct components it instances are not yet sized
+  const usedBy = new Map(); // component -> the components that instance it
+  for (const [id, used] of uses) {
+    const distinct = new Set(used);
+    waiting.set(id, distinct.size);
+    for (const c of distinct) {
+      if (!usedBy.has(c)) usedBy.set(c, []);
+      usedBy.get(c).push(id);
+    }
+  }
+  const size = new Map();
+  const ready = [...waiting].filter(([, w]) => w === 0).map(([id]) => id);
+  while (ready.length) {
+    const id = ready.pop();
+    let s = base.get(id);
+    for (const c of uses.get(id)) s = Math.min(over, s + size.get(c));
+    size.set(id, Math.min(over, s));
+    for (const p of usedBy.get(id) || []) {
+      waiting.set(p, waiting.get(p) - 1);
+      if (waiting.get(p) === 0) ready.push(p);
+    }
+  }
+  for (const id of uses.keys()) if (!size.has(id)) size.set(id, over);
+  return size;
+}
+
 // The first page of a valid canvas-doc@1 document as a static HTML page: no script, every free text
 // escaped, every style from checked values. `{ ok: true, html }`, or `{ ok: false, errors }` (the
 // `validate` list, file check skipped) for a document that isn't valid. The same document gives the
@@ -1209,6 +1261,9 @@ const nodeAttrs = (id, type, name) => `${attr('data-node', id)}${attr('data-type
 // instance it shows inside (null outside one) and its parent's layout mode) and close items
 // ({ close: tag }); an instance opens as its component root's box and pushes its component's children
 // with its own `resolve` map. A node's values are its entry in `inst`, or its own outside an instance.
+// Elements outside instances are counted as written; an instance there whose expansion would pass
+// STATIC_MAX_ELEMENTS is cut (its own empty box, `data-cut="true"`), so a page holds at most
+// STATIC_MAX_ELEMENTS + the node count elements.
 export function staticPage(doc) {
   const errors = validate(doc, { images: null });
   if (errors.length) return { ok: false, errors };
@@ -1225,12 +1280,15 @@ export function staticPage(doc) {
   const pushChildren = (ids, inst, pm) => {
     for (let i = ids.length - 1; i >= 0; i--) stack.push({ id: ids[i], inst, pm });
   };
+  const sizes = expandedSizes(nodes);
+  let written = 0; // elements written so far, counted as each node is opened
   pushChildren(page.children, null, 'page');
   while (stack.length) {
     const item = stack.pop();
     if (own(item, 'close')) { parts.push(`</${item.close}>`); continue; }
     const { id, inst, pm } = item;
     const n = nodes[id];
+    if (!inst) written += ownElements(n); // inside an instance, counted when the instance was let in
     const v = inst ? inst[id] : ownValues(n);
     const head = nodeAttrs(id, n.type, v.name);
     const common = commonDecls(css, v, pm, n.type === 'vector');
@@ -1246,9 +1304,20 @@ export function staticPage(doc) {
       case 'instance': {
         // Its own common values (from the enclosing instance's resolve inside one), its component
         // root's box, its component's children with its own resolve.
+        // The cap, outside instances only (an instance let in holds its whole expansion, already
+        // counted): when its box and expansion would take the count past STATIC_MAX_ELEMENTS, its own
+        // box with data-cut="true" and nothing in it.
         const comp = nodes[n.component];
         const cv = ownValues(comp);
-        parts.push(`<div${head}${styleAttr([...common, ...boxDecls(css, cv, absolute, hidden)])}>`);
+        const box = `<div${head}${styleAttr([...common, ...boxDecls(css, cv, absolute, hidden)])}`;
+        if (!inst) {
+          if (written + sizes.get(n.component) > STATIC_MAX_ELEMENTS) {
+            parts.push(`${box}${attr('data-cut', 'true')}></div>`);
+            break;
+          }
+          written += sizes.get(n.component);
+        }
+        parts.push(`${box}>`);
         stack.push({ close: 'div' });
         pushChildren(comp.children, resolveOf(id), cv['layout.mode']);
         break;
