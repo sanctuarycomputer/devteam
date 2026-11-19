@@ -65,16 +65,19 @@ function startOwn() {
   let port;
   const pages = {
     '/strict': [html('<input id="pw" type="password" value="zqpwzqpw"><input id="code" type="text" autocomplete="one-time-code" value="ZQCODEZQ"><input id="plain" type="text" value="zqzqzq">', '<link rel="stylesheet" href="/strict.css">'), { 'content-security-policy': "default-src 'self'; style-src 'self'" }],
-    '/strict.css': [`html,body{margin:0;background:#fff} input{${BOX}} #pw{top:20px} #code{top:100px} #plain{top:180px}`, { 'content-type': 'text/css' }],
+    '/strict.css': [`html,body{margin:0;background:#fff} input{${BOX}} #pw{top:20px;background:linear-gradient(#000,#000);-webkit-background-clip:text;background-clip:text} #code{top:100px;-webkit-text-stroke:2px #000} #plain{top:180px}`, { 'content-type': 'text/css' }],
     '/shadow': [html(`<div><template shadowrootmode="closed"><style>input{${BOX};top:20px}</style><input type="password" value="zqpwzqpw"></template></div><input type="text" value="zqzqzq" style="${BOX};top:100px">`, '<style>html,body{margin:0;background:#fff}</style>')],
     '/framed': [null],
+    // T5b-1: once the hide has edited the first field's style, the page adds a second password field
+    '/late': [html(`<input id="a" type="password" value="zqpwzqpw" style="${BOX};top:20px"><script>const a = document.getElementById('a'); let done = false; new MutationObserver(() => { if (done || !/transparent/.test(a.getAttribute('style') ?? '')) return; done = true; const b = document.createElement('input'); b.type = 'password'; b.value = 'zqlatezq'; b.style.cssText = ${JSON.stringify(`${BOX};top:100px`)}; document.body.appendChild(b); }).observe(a, { attributes: true });</script>`)],
+    '/object': [null],
     '/inner': [html('<input type="password" value="zqpwzqpw">')],
     '/hash': [html('<h1>Hash</h1><p><a href="#part">Part</a></p><p id="part">Part</p>')],
     '/img/zqimagetokenzqimagetoken.png': [PNG1, { 'content-type': 'image/png' }],
   };
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
-    const [body, headers] = u.pathname === '/framed' ? [html(`<iframe src="http://localhost:${port}/inner"></iframe>`)] : pages[u.pathname] ?? ['not found'];
+    const [body, headers] = u.pathname === '/framed' ? [html(`<iframe src="http://localhost:${port}/inner"></iframe>`)] : u.pathname === '/object' ? [html(`<object data="http://localhost:${port}/inner" type="text/html"></object>`)] : pages[u.pathname] ?? ['not found'];
     res.writeHead(pages[u.pathname] ? 200 : 404, { 'content-type': 'text/html; charset=utf-8', ...headers });
     res.end(body);
   });
@@ -486,7 +489,8 @@ test('T4-1 a view port taken before the daemon binds it: start retries', { skip,
 });
 
 test('T5-1 the screenshot fails closed; T5-2 an image title; T5-4 type and --; T5-7 back within a page', { skip, timeout: 120000 }, async () => {
-  await started(h);
+  // T5b-1: every capture waits 1 s after the check, so a page can change in between
+  await started(h, { DEVTEAM_TEST_BROWSER_SHOT_DELAY_MS: '1000' });
   const shots = path.join(h.old, 'docs', 'devteam', 'run', 'browser', 'shots');
   const shot = async () => { const r = await cli(h, ['screenshot']); assert.equal(r.status, 0, `screenshot: ${r.err}`); return r.out; };
   const o = `http://127.0.0.1:${own.port}`;
@@ -501,13 +505,23 @@ test('T5-1 the screenshot fails closed; T5-2 an image title; T5-4 type and --; T
   const [inShadow, outside] = await colours(await shot(), [[24, 56], [104, 136]]);
   assert.equal(inShadow, 1, 'the shadow-root password box is one colour');
   assert.ok(outside > 1, 'the control: the plain field draws its glyphs');
-  // a frame from another site, out of reach: refused, and no file written
-  await opened(h, `${o}/framed`);
+  // a frame from another site (an iframe, an object), out of reach: refused, and no file written
   const before = fs.readdirSync(shots).length, out = path.join(tmp, 'framed.png');
+  for (const page of ['framed', 'object']) {
+    await opened(h, `${o}/${page}`);
+    for (const args of [['screenshot'], ['screenshot', '--out', out]]) {
+      const r = await cli(h, args);
+      assert.equal(r.status, 1, `${page}: ${r.out}`);
+      assert.match(r.err, /refused: the page holds a frame from another site/, page);
+    }
+  }
+  // T5b-1: a password field added between the check and the capture: refused after it, nothing written
+  await opened(h, `${o}/late`);
   for (const args of [['screenshot'], ['screenshot', '--out', out]]) {
     const r = await cli(h, args);
-    assert.equal(r.status, 1, r.out);
-    assert.match(r.err, /refused: the page holds a frame from another site/);
+    assert.equal(r.status, 1, `late: ${r.out}`);
+    assert.match(r.err, /refused: the page changed its password or code fields while it was captured/);
+    await opened(h, `${o}/late`); // afresh: the page adds its field once
   }
   assert.equal(fs.readdirSync(shots).length, before, 'no shot written');
   assert.equal(fs.existsSync(out), false, 'no --out file written');
@@ -581,5 +595,5 @@ test('J2 nothing secret printed (hygiene)', { skip, timeout: 120000 }, async () 
   assert.ok(secrets.size >= 2, 'control secrets were read');
   [...secrets].forEach((v, i) => assert.ok(!all.includes(v), `control secret ${i} printed`));
   site.sessions().forEach((v, i) => assert.ok(!all.includes(v), `session ${i} printed`));
-  for (const [what, v] of [['the typed marker', 'zq-marker'], ['the typed text', '--force now'], ['the password', site.password], ['the code', site.code], ['a fixture field value', 'zqpwzqpw'], ['a fixture code value', 'ZQCODEZQ']]) assert.ok(!all.includes(v), `${what} printed`);
+  for (const [what, v] of [['the typed marker', 'zq-marker'], ['the typed text', '--force now'], ['the password', site.password], ['the code', site.code], ['a fixture field value', 'zqpwzqpw'], ['a fixture code value', 'ZQCODEZQ'], ['the late field value', 'zqlatezq']]) assert.ok(!all.includes(v), `${what} printed`);
 });

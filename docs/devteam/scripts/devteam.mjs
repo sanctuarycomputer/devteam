@@ -25841,54 +25841,67 @@ function browserKeyEvents(k) {
   const common = { key, ...(named ? { code: k } : {}), ...(vk ? { windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk } : {}) };
   return [{ type: text ? 'keyDown' : 'rawKeyDown', ...common, ...(text ? { text, unmodifiedText: text } : {}) }, { type: 'keyUp', ...common }];
 }
-// screenshot, failing closed (ruling on T5-1): every password field and every field whose
+// screenshot, failing closed (rulings on T5-1 and T5b-1): every password field and every field whose
 // autocomplete names a code or a password, in every frame and shadow root (DOM.getDocument, pierce), is
 // made to draw no glyphs by an inspector edit of its inline style (CSS.setStyleTexts). That edit is
 // exempt from the page's CSP, where an injected <style> isn't, and it reaches into shadow roots, where a
-// document's sheet doesn't. Each field's computed style is then checked; a field not hidden, or a frame
-// whose document can't be reached (another site's, in another process), refuses the capture and writes
-// nothing. The inline styles are put back in a finally. Shots older than a day go first; the file is
-// written 0600 from its first byte (a tmp file, renamed over any existing one).
-const BROWSER_HIDE = ['color', '-webkit-text-fill-color', 'caret-color'];
+// document's sheet doesn't. Each field's computed style is checked before the capture, and the whole
+// walk runs again after it: a field added, removed or no longer hidden, or a frame whose document can't
+// be reached (another site's, in another process: iframe, frame, object, embed, fencedframe), refuses
+// and writes nothing. The inline styles are put back in a finally. Shots older than a day go first; the
+// file is written 0600 from its first byte (a tmp file, renamed over any existing one).
+const BROWSER_HIDE = { color: 'transparent', '-webkit-text-fill-color': 'transparent', 'caret-color': 'transparent', 'text-shadow': 'none', '-webkit-text-stroke': '0', 'background-clip': 'border-box', '-webkit-background-clip': 'border-box' };
+const BROWSER_HIDDEN = { color: 'rgba(0, 0, 0, 0)', '-webkit-text-fill-color': 'rgba(0, 0, 0, 0)', 'caret-color': 'rgba(0, 0, 0, 0)', 'text-shadow': 'none', '-webkit-text-stroke-width': '0px', 'background-clip': 'border-box' };
 const BROWSER_SECRET_FIELD = /one-time-code|current-password|new-password/i;
-async function browserHide(ctx, tab) {
-  const send = (m, p) => ctx.cdp.send(m, p, tab.sessionId);
-  await send('DOM.enable');
-  await send('CSS.enable');
+const BROWSER_FRAMES = new Set(['IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'FENCEDFRAME']);
+// The page's secret fields (backendNodeId → nodeId) and whether a frame's document is out of reach.
+async function browserScan(send) {
   const { root } = await send('DOM.getDocument', { depth: -1, pierce: true });
-  const fields = [];
+  const fields = new Map();
   let unreachable = false;
   const walk = (n) => {
     const a = n.attributes ?? [], at = (k) => { for (let i = 0; i < a.length; i += 2) if (String(a[i]).toLowerCase() === k) return String(a[i + 1]); return ''; };
-    if ((n.nodeName === 'INPUT' && at('type').toLowerCase() === 'password') || BROWSER_SECRET_FIELD.test(at('autocomplete'))) fields.push(n.nodeId);
-    if (['IFRAME', 'FRAME'].includes(n.nodeName) && !n.contentDocument) unreachable = true;
+    if ((n.nodeName === 'INPUT' && at('type').toLowerCase() === 'password') || BROWSER_SECRET_FIELD.test(at('autocomplete'))) fields.set(n.backendNodeId, n.nodeId);
+    if (BROWSER_FRAMES.has(n.nodeName) && !n.contentDocument) unreachable = true;
     for (const c of [...(n.children ?? []), ...(n.shadowRoots ?? []), ...(n.contentDocument ? [n.contentDocument] : [])]) walk(c);
   };
   walk(root);
-  if (unreachable) throw new Error("refused: the page holds a frame from another site, which can't be checked for password fields; nothing captured");
-  const undo = [];
-  const restore = async () => { for (const { nodeId, text } of undo) { try { const s = (await send('CSS.getInlineStylesForNode', { nodeId })).inlineStyle; await send('CSS.setStyleTexts', { edits: [{ styleSheetId: s.styleSheetId, range: s.range, text }] }); } catch {} } };
-  try {
-    for (const nodeId of fields) {
-      const s = (await send('CSS.getInlineStylesForNode', { nodeId })).inlineStyle;
-      await send('CSS.setStyleTexts', { edits: [{ styleSheetId: s.styleSheetId, range: s.range, text: `${s.cssText};${BROWSER_HIDE.map((p) => `${p}:transparent!important`).join(';')};text-shadow:none!important` }] });
-      undo.push({ nodeId, text: s.cssText });
-      const cs = Object.fromEntries((await send('CSS.getComputedStyleForNode', { nodeId })).computedStyle.map((p) => [p.name, p.value]));
-      if (!BROWSER_HIDE.every((p) => cs[p] === 'rgba(0, 0, 0, 0)') || cs['text-shadow'] !== 'none') throw new Error('not hidden');
-    }
-  } catch {
-    await restore();
-    throw new Error("refused: a password or code field on the page couldn't be hidden; nothing captured");
-  }
-  return restore;
+  return { fields, unreachable };
 }
 async function browserShot(ctx, tab, to) {
   const dir = path.join(BROWSER_DIR(), 'shots');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   for (const n of fs.readdirSync(dir)) { try { const f = path.join(dir, n); if (Date.now() - fs.statSync(f).mtimeMs > 86400000) fs.rmSync(f, { force: true }); } catch {} }
-  const restore = await browserHide(ctx, tab);
+  const send = (m, p) => ctx.cdp.send(m, p, tab.sessionId);
+  const refuse = (why) => { throw Object.assign(new Error(`refused: ${why}; nothing captured`), { refusal: true }); };
+  const hidden = async (nodeId) => { const cs = Object.fromEntries((await send('CSS.getComputedStyleForNode', { nodeId })).computedStyle.map((p) => [p.name, p.value])); return Object.entries(BROWSER_HIDDEN).every(([k, v]) => cs[k] === v); };
+  await send('DOM.enable');
+  await send('CSS.enable');
+  let scan = await browserScan(send);
+  if (scan.unreachable) refuse("the page holds a frame from another site, which can't be checked for password fields");
+  const undo = new Map(), was = new Set(scan.fields.keys());
   let data;
-  try { ({ data } = await ctx.cdp.send('Page.captureScreenshot', { format: 'png' }, tab.sessionId)); } finally { await restore(); }
+  try {
+    for (const [id, nodeId] of scan.fields) {
+      const st = (await send('CSS.getInlineStylesForNode', { nodeId })).inlineStyle;
+      await send('CSS.setStyleTexts', { edits: [{ styleSheetId: st.styleSheetId, range: st.range, text: `${st.cssText};${Object.entries(BROWSER_HIDE).map(([k, v]) => `${k}:${v}!important`).join(';')}` }] });
+      undo.set(id, st.cssText);
+      if (!(await hidden(nodeId))) refuse("a password or code field on the page couldn't be hidden");
+    }
+    const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_SHOT_DELAY_MS'));
+    if (wait > 0) await browserSleep(wait); // test hook: the page gets time to change between check and capture
+    ({ data } = await send('Page.captureScreenshot', { format: 'png' }));
+    // the same check again, on what the capture saw: the same fields, every one still hidden
+    scan = await browserScan(send);
+    const same = !scan.unreachable && scan.fields.size === was.size && [...scan.fields.keys()].every((id) => was.has(id));
+    if (!same || !(await Promise.all([...scan.fields.values()].map(hidden))).every(Boolean)) { data = null; refuse('the page changed its password or code fields while it was captured'); }
+  } catch (e) {
+    data = null;
+    if (e.refusal) throw e;
+    refuse("a password or code field on the page couldn't be hidden");
+  } finally {
+    for (const [id, text] of undo) { try { const nodeId = scan.fields.get(id); const st = (await send('CSS.getInlineStylesForNode', { nodeId })).inlineStyle; await send('CSS.setStyleTexts', { edits: [{ styleSheetId: st.styleSheetId, range: st.range, text }] }); } catch {} }
+  }
   const file = to ?? path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}.png`);
   const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try { fs.writeFileSync(tmp, Buffer.from(data, 'base64'), { mode: 0o600, flag: 'wx' }); fs.renameSync(tmp, file); } finally { fs.rmSync(tmp, { force: true }); }
