@@ -1267,7 +1267,8 @@ function overviewCard(it, newest) {
   }
 
   // what needs the owner: its alert, a dashboard that stopped answering, the pulse's lines
-  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: `Its dashboard stopped answering at ${new Date(it.goneAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`, red: true }] : []), ...((Array.isArray(p?.attention) ? p.attention : []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
+  const own = ownAlert(x);
+  const notes = [...(own ? [{ t: own, red: true }] : []), ...(it.goneAt ? [{ t: `Its dashboard stopped answering at ${new Date(it.goneAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`, red: true }] : []), ...((Array.isArray(p?.attention) ? p.attention : []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
   if (notes.length) {
     const ul = el('ul', 'ov-att');
     for (const n of notes.slice(0, 5)) ul.append(pinOn(el('li', n.red ? 'red' : '', n.t), 'attention', tLine(n.t, 200)));
@@ -1612,9 +1613,13 @@ function paintOverview() {
   // the page is redrawn whole every 10 s and on each press: whatever had the keyboard keeps it, so
   // Park and then Confirm park are two presses of one key
   const at = ovBody.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+  // the box's alert, once, under the header: it is every project's, so no card repeats it
+  const box = boxAlertNow();
+  const boxUl = box ? el('ul', 'ov-att') : null;
+  if (boxUl) boxUl.append(el('li', 'red', box));
   // the machine's memory under the head, when the hub has a reading (kit-593)
   const mem = memoryEl();
-  ovBody.replaceChildren(head, ...(mem ? [mem] : []), ...(all.length ? [grid] : []));
+  ovBody.replaceChildren(head, ...(boxUl ? [boxUl] : []), ...(mem ? [mem] : []), ...(all.length ? [grid] : []));
   if (at) [...ovEl.querySelectorAll('[data-k]')].find((e) => e.dataset.k === at && !e.disabled)?.focus({ preventScroll: true });
   else if (fromMenu !== null) [...ovBody.querySelectorAll('.menu-btn')].find((b) => b.dataset.k === `${fromMenu}:menu`)?.focus({ preventScroll: true });
   // every card is new: the pins, the dock's "not on the Overview now" and an open card find their places again
@@ -2303,6 +2308,39 @@ function tlDock() {
   list.replaceChildren(...(shown.length ? shown.map(row) : can ? [el('p', 'empty', 'No open threads. Hold Shift and click anything on the Overview, or start one here.')] : []));
   if (closed.length) { const d = el('details', 'tl-closed'); d.open = !!wasOpen; d.append(el('summary', '', `Closed (${closed.length})`), ...closed.map(row)); list.append(d); }
 }
+// The box's alert (box-alert) is the machine's, not a project's: each project's hello carries it as
+// box_alert, so it shows once, on the Overview tab and at the top of the Overview. Its alert still
+// ends with it after " · " (for older hubs), as a kit from before box_alert's does: that part comes
+// off, matched as the whole alert or a suffix, never split (a box alert may hold " · " itself).
+// The box text last seen, and the one before it while an older kit's tab still folds it: each
+// dashboard refreshes on its own timer, so an older kit can drop the box's copy a refresh after this
+// kit drops box_alert (or changes it), and that copy is still the box's, not the project's.
+const BOXMEM = { now: null, was: null };
+function lessBox(a, box) {
+  if (!a || !box) return a || null;
+  if (a === box) return null;
+  return a.endsWith(` · ${box}`) ? a.slice(0, -(box.length + 3)).trim() || null : a;
+}
+function boxAlertNow() {
+  let now = null;
+  for (const it of items.values()) if (typeof it.x.box_alert === 'string' && it.x.box_alert.trim()) { now = it.x.box_alert.trim(); break; }
+  if (now !== BOXMEM.now) { if (BOXMEM.now) BOXMEM.was = BOXMEM.now; BOXMEM.now = now; }
+  const was = BOXMEM.was;
+  if (was && (was === now || ![...items.values()].some((it) => typeof it.x.alert === 'string' && lessBox(it.x.alert.trim(), was) !== it.x.alert.trim()))) BOXMEM.was = null;
+  return now;
+}
+function ownAlert(x) {
+  if (typeof x.alert !== 'string' || !x.alert.trim()) return null;
+  const box = typeof x.box_alert === 'string' && x.box_alert.trim() ? x.box_alert.trim() : boxAlertNow();
+  const own = lessBox(x.alert.trim(), box);
+  return BOXMEM.was ? lessBox(own, BOXMEM.was) : own;
+}
+function paintOvTab() {
+  if (!ovTab) return;
+  const box = boxAlertNow();
+  ovTab.replaceChildren('Overview');
+  if (box) { const a = el('span', 'badge', '!'); a.setAttribute('aria-label', box); ovTab.append(a); }
+}
 function paintTab(it) {
   const { x, tab } = it;
   const S = STATES[stateOf(it)];
@@ -2311,9 +2349,10 @@ function paintTab(it) {
   tab.append(el('span', `dot${S.tone ? ` ${S.tone}` : ''}${S.tone === 'red' ? ' pulse' : ''}`), el('span', '', x.name));
   const c = countsEl(x);
   if (c) tab.append(c);
-  if (x.alert) {
+  const own = ownAlert(x);
+  if (own) {
     const a = el('span', 'badge', '!');
-    a.setAttribute('aria-label', String(x.alert));
+    a.setAttribute('aria-label', own);
     tab.append(a);
   }
   tab.title = S.label;
@@ -2455,6 +2494,7 @@ async function draw() {
   if (ovTab) tabsEl.prepend(ovTab);
   if (term) tabsEl.prepend(term.tab);
   for (const it of items.values()) paintTab(it);
+  paintOvTab();
   empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW || selected === SETTINGS;
   if (!items.size) empty.textContent = 'No devteam dashboards are running on this machine.';
   if (!selected || (selected !== TERM && selected !== OVERVIEW && selected !== SETTINGS && !items.has(selected))) {

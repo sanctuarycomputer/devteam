@@ -249,12 +249,15 @@
 
   // What the page holds: the slug, the response's session and rev, the document drawn, and the page
   // shown. Editing (kit-662) keeps two copies: `base`, the document as the server has applied it, and
-  // `pending`, the page's own edits not yet acked ({ ops, seq }, seq null until sent), in order; `doc`
-  // is base with pending applied over it, what is drawn. `saved` is the last `saved` rev; `locked` is
-  // null, 'view' (refused as a View person) or 'closed' (landed or removed): no more edits either way.
+  // `pending`, the page's own edits not yet acked ({ ops, seq, kind, entry }, seq null until sent), in
+  // order; `doc` is base with pending applied over it, what is drawn. `kept` (kit-668) holds the page's
+  // own edits acked but not yet saved, each with the `rev` of its ack and the socket's `session` then:
+  // a new session resends them. `saved` is the last `saved` rev and `savedOn` the socket's session it
+  // came on; `locked` is null, 'view' (refused as a View person) or 'closed' (landed or removed): no
+  // more edits either way.
   const state = {
     slug: null, session: null, rev: null, doc: null, repo: null, pageId: null, sel: null,
-    base: null, pending: [], saved: null, locked: null, paused: false, closedText: null,
+    base: null, pending: [], kept: [], saved: null, savedOn: null, locked: null, paused: false, closedText: null,
     // Change in (spec §3): { comp, name }, the variant a component's nodes are edited in, or null (Base);
     // placing: the component Place instance adds an instance of at the next click, or null
     variantMode: null, placing: null,
@@ -1379,6 +1382,7 @@
   const NOT_VALID = "That change wasn't valid, so it wasn't kept.";
   const SAY = {
     tooBig: 'That change is too big to send.',
+    notSaved: 'Some of your edits may not have been saved.',
     instancesFirst: "Delete this component's instances first.",
   };
   const BANNER = {
@@ -1387,6 +1391,7 @@
     removed: 'This canvas was closed for editing.',
     down: 'Reconnecting… your edits are kept here.',
   };
+  const KEPT_MAX = 2000; // kept edits at most (canvas@1 refusedMemory's bound); the oldest go past it
   const RATE = 20; // edits sent a second at most (canvas@1 §7 allows 30 messages, pongs included)
   const OPS_BYTES = 65536; // an edit's ops as JSON (canvas@1 §7 editOpsBytes)
 
@@ -1618,14 +1623,17 @@
     state.rev = d.rev;
     state.session = own(b, 'session') && typeof b.session === 'string' ? b.session : null;
     state.repo = b.repo;
+    sock.highest = Math.max(sock.highest, d.rev);
     $('tools').hidden = state.session === null; // main's copy is watched, never edited: no tools
   }
-  // For tests and the bar: data-live, data-rev (base's), data-pending (its count) and data-saved.
+  // For tests and the bar: data-live, data-rev (base's), data-pending and data-kept (their counts) and
+  // data-saved.
   function syncBody() {
     const b = document.body.dataset;
     b.live = sock.live ? 'on' : 'off';
     b.rev = state.base ? String(state.base.rev) : '';
     b.pending = String(state.pending.length);
+    b.kept = String(state.kept.length);
     b.saved = state.saved === null ? '' : String(state.saved);
   }
   // Draw again from the two copies: the shown page, its layers, the selection and the properties (the
@@ -1692,17 +1700,33 @@
 
   // One edit: queued in pending, drawn at once, sent when the socket and the rate allow. A single set of
   // the same node and property as the last unsent edit replaces it (so a held key sends the latest
-  // value, never a burst). False when nothing was queued.
-  function edit(ops) {
+  // value, never a burst). kit-668: each edit has a kind: 'plain' (a person's), 'live' (a drag's while
+  // the pointer is down), 'release' (a drag's drop), 'restore' (a drag ended without its drop, back to
+  // its start); only two plain edits coalesce. notBefore: the sender holds it, and everything behind
+  // it, until then (performance.now() ms; a drag's throttle). The queued item, or false when nothing was.
+  // A plain edit pushes its undo entry (§3; 'undo' is an undo's own edit, which pushes none); a plain
+  // edit coalesced into the last one updates that one's own entry with what the new value leaves.
+  function edit(ops, { kind = 'plain', notBefore = 0 } = {}) {
     if (!editable() || !Array.isArray(ops) || ops.length === 0) return false;
     if (new TextEncoder().encode(JSON.stringify(ops)).length > OPS_BYTES) { say(SAY.tooBig); return false; }
     const last = state.pending[state.pending.length - 1];
     const oneSet = (o) => o.length === 1 && isObj(o[0]) && o[0].op === 'set';
-    if (last && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) last.ops = ops;
-    else state.pending.push({ ops, seq: null });
+    let item;
+    if (kind === 'plain' && last && last.kind === 'plain' && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) {
+      last.ops = ops;
+      item = last;
+      if (last.entry) coalesceEntry(last.entry, ops[0]);
+    } else {
+      item = { ops, seq: null, kind, entry: null, notBefore };
+      if (kind === 'plain') {
+        item.entry = makeEntry(state.doc, ops);
+        if (item.entry) pushEntry(item.entry);
+      }
+      state.pending.push(item);
+    }
     redraw();
     pump();
-    return true;
+    return item;
   }
   // One property of one node set: one edit of one set op.
   const setRaw = (id, prop, value) => edit([{ op: 'set', id, prop, value }]);
@@ -1754,6 +1778,10 @@
     edit([{ op: 'del', id }]);
   }
   const wellFormed = (v) => typeof v.isWellFormed !== 'function' || v.isWellFormed();
+  // Free text as canvas-doc@1's name and text classes take it (kit-312): well-formed, and no control
+  // character but tab, line feed and carriage return; the server refuses anything else.
+  const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
+  const freeText = (v) => wellFormed(v) && !CONTROL_RE.test(v);
 
   // ---- the Properties panel's fields (spec §4) ----
   // Each field shows the node's value as drawn and sends one edit of one set (setProp) of a value
@@ -1774,6 +1802,7 @@
     radius: 0, clip: false, 'layout.mode': 'none', 'layout.gap': 0, 'layout.padding': [0, 0, 0, 0], 'layout.align': 'start',
     'layout.justify': 'start', 'layout.wrap': false, 'layout.columns': [], 'layout.rows': [], text: '',
     font: { family: 'sans', size: 16, weight: 400, lineHeight: 1.4 }, color: '#000000', align: 'left', fit: 'cover', variant: null,
+    name: '',
   };
   const PAINTED = new Set(['frame', 'component', 'rect', 'ellipse', 'vector']);
   const ROUNDED = new Set(['frame', 'component', 'rect', 'image']);
@@ -2095,7 +2124,7 @@
     e.spellcheck = false;
     e.value = typeof v === 'string' ? v : '';
     e.addEventListener('change', () => {
-      if ([...e.value].length <= 10000 && wellFormed(e.value)) setProp(id, 'text', e.value);
+      if ([...e.value].length <= 10000 && freeText(e.value)) setProp(id, 'text', e.value);
     });
     return fieldRow('Text', e);
   }
@@ -2274,7 +2303,7 @@
       name.maxLength = 200;
       name.addEventListener('change', () => {
         const v = name.value;
-        if (v.length <= 200 && wellFormed(v)) setProp(id, 'name', v);
+        if (v.length <= 200 && freeText(v)) setProp(id, 'name', v);
       });
       box.append(fieldRow('Name', name));
     }
@@ -2344,7 +2373,7 @@
 
   function setTool(name) {
     if (!TOOLS.includes(name)) return;
-    endGesture();
+    endGesture(gesture, { abort: true }); // Escape, a lock, a narrow screen: a drag dropped, not dropped in
     dropPen();
     tool = name;
     if (name !== 'instance') state.placing = null;
@@ -2468,9 +2497,15 @@
       // it), and the click that ends it isn't a selection
       try { $('stage').setPointerCapture(g.id); } catch { /* moves over the stage still arrive */ }
       toolPress = true;
+      g.lastAt = performance.now(); // the throttle's first live edit goes 100 ms after this
+      g.snapshot = structuredClone(state.doc); // the drag's one undo entry is walked from here (§3)
     }
     g.dragged = true;
-    if (g.tool === 'move') { movePreview(g); return; }
+    if (g.tool === 'move') {
+      if (g.live && g.timer === null) g.timer = setTimeout(() => liveSend(g), Math.max(0, 100 - (performance.now() - g.lastAt)));
+      movePreview(g);
+      return;
+    }
     if (g.tool === 'text') return; // a text is placed where it was pressed
     if (!g.draft) {
       g.draft = document.createElement('div');
@@ -2483,26 +2518,31 @@
     g.draft.style.width = `${Math.abs(g.cx - g.sx)}px`;
     g.draft.style.height = `${Math.abs(g.cy - g.sy)}px`;
   });
-  function endGesture() {
-    if (!gesture) return;
-    try { $('stage').releasePointerCapture(gesture.id); } catch { /* already released */ }
-    if (gesture.draft) gesture.draft.remove();
-    if (gesture.el) gesture.el.style.translate = '';
+  // A gesture ended: its pointer released, its draft and preview gone, a drag's throttle timer cleared.
+  // An abort (Escape, a lost pointer, a lock) of a Move drag after live edits went sends it back (restore).
+  function endGesture(g = gesture, { abort = false } = {}) {
+    if (!g || g !== gesture) return;
+    try { $('stage').releasePointerCapture(g.id); } catch { /* already released */ }
+    if (g.draft) g.draft.remove();
+    if (g.el) g.el.style.translate = '';
+    if (g.timer) { clearTimeout(g.timer); g.timer = null; }
     gesture = null;
+    if (abort && g.tool === 'move') restore(g);
   }
   $('stage').addEventListener('pointerup', (e) => {
     const g = gesture;
     if (!g || e.pointerId !== g.id) return;
-    endGesture();
+    endGesture(g);
     if (!toolsOn()) return;
     make(g);
+    if (g.tool === 'move') dragEntry(g);
   });
-  $('stage').addEventListener('pointercancel', (e) => { if (gesture && e.pointerId === gesture.id) endGesture(); });
+  $('stage').addEventListener('pointercancel', (e) => { if (gesture && e.pointerId === gesture.id) endGesture(gesture, { abort: true }); });
 
   // What a press made: placed by where it was pressed; a drag's box (frame, rectangle, ellipse, image)
   // gives its top-left and its size, in page px.
   function make(g) {
-    if (g.tool === 'move') { dropMove(g); return; }
+    if (g.tool === 'move') { if (dropMove(g) === 'refused') restore(g); return; }
     const at = placeAt(g.sx, g.sy);
     const z = view.z;
     const box = g.dragged && g.tool !== 'text'
@@ -2547,6 +2587,12 @@
   // drags it, the node previewed under the pointer by a translate on its element; the release sends one
   // edit. Escape (setTool) or a lost pointer drops the drag. The press, the grab and the movement are
   // kept in page px, so the grab point stays under the pointer whatever the view does meanwhile.
+  // kit-668 §2: a node placed by x, y sends live edits while dragged (set x, set y as if dropped in its
+  // own parent at the pointer), at most one per 100 ms: the first 100 ms after the drag passes its slop,
+  // then 100 ms after the last while the position has changed, each with the latest values. The release's
+  // edit and a restore wait (notBefore) until 100 ms after the last live edit. A drag that ends without
+  // its drop after live edits went (Escape, a lost pointer, a refused drop, the node off the shown page)
+  // sends x, y back to its start. A drag's queued items are kept in g.items (its one undo entry, T3).
 
   function pressMove(e) {
     const hit = e.target.closest('#surface [data-id]');
@@ -2562,7 +2608,17 @@
       node: id, el: null,
       px: (e.clientX - s.left) / z, py: (e.clientY - s.top) / z, // the press, in page px
       gx: (e.clientX - r.left) / z, gy: (e.clientY - r.top) / z, // the grab, from the node's top-left
+      // live: sends live edits (placed by x, y, both stored as numbers: a token-valued x or y sends none,
+      // its drop falls back to the pointer's position); start: x, y as drawn at the press; sent: x, y as
+      // the last live edit (or restore) left them; lastAt: when the last live edit went (performance.now);
+      // timer: the throttle's; liveSent: a live edit went; items: the drag's queued edits; snapshot: the
+      // drawn document when it passed its slop (its one undo entry is walked from it); restored: the
+      // drag ended in a restore (pushes no undo entry)
+      live: false, start: { x: baseOf(id, 'x'), y: baseOf(id, 'y') }, sent: null, lastAt: null, timer: null,
+      liveSent: false, items: [], snapshot: null, restored: false,
     };
+    gesture.live = placedByXY(nodeOf(id)) && finite(gesture.start.x) && finite(gesture.start.y);
+    gesture.sent = { ...gesture.start };
   }
   // The pointer's movement since the press, in page px.
   function moveBy(g) {
@@ -2574,15 +2630,58 @@
     if (g.el && g.el !== el) g.el.style.translate = '';
     g.el = el ?? null;
     if (!g.el) return;
+    // less what the live edits have already moved it in the drawing (no doubled step after a redraw)
     const { dx, dy } = moveBy(g);
-    if (Number.isFinite(dx) && Number.isFinite(dy)) g.el.style.translate = `${dx}px ${dy}px`;
+    const ox = g.live ? g.sent.x - g.start.x : 0;
+    const oy = g.live ? g.sent.y - g.start.y : 0;
+    if (Number.isFinite(dx) && Number.isFinite(dy)) g.el.style.translate = `${dx - ox}px ${dy - oy}px`;
   }
-  // After a redraw (someone's edit) the dragged node's new element takes the preview; a node gone or
-  // no longer on the shown page ends the drag.
+  // The drag's position now in its own parent, whole px: the start moved by the pointer.
+  function liveTarget(g) {
+    const { dx, dy } = moveBy(g);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+    return { x: clamp(Math.round(g.start.x + dx), -PX, PX), y: clamp(Math.round(g.start.y + dy), -PX, PX) };
+  }
+  // The throttle's timer: one live edit of the sets that changed since the last sent. g.sent moves to the
+  // targets before edit() (whose redraw then previews from them); back when nothing was queued.
+  function liveSend(g) {
+    g.timer = null;
+    if (gesture !== g || !g.live || !editable() || !nodeOf(g.node)) return;
+    const to = liveTarget(g);
+    if (to === null) return;
+    const ops = [];
+    for (const k of ['x', 'y']) if (to[k] !== g.sent[k]) ops.push({ op: 'set', id: g.node, prop: k, value: to[k] });
+    if (ops.length === 0) return;
+    const prev = g.sent;
+    g.sent = to;
+    const item = edit(ops, { kind: 'live' });
+    if (!item) { g.sent = prev; return; }
+    g.lastAt = performance.now();
+    g.liveSent = true;
+    g.items.push(item);
+  }
+  // A drag ended without its drop after live edits went: one edit setting x, y back to the start (those
+  // the last live edit moved), through the same throttle, drawn at once. Nothing when editing is no
+  // longer allowed, or the node is gone.
+  function restore(g) {
+    if (!g.liveSent || !editable() || !nodeOf(g.node)) return;
+    g.restored = true;
+    const ops = [];
+    for (const k of ['x', 'y']) if (g.sent[k] !== g.start[k]) ops.push({ op: 'set', id: g.node, prop: k, value: g.start[k] });
+    if (ops.length === 0) return;
+    g.sent = { ...g.start };
+    const item = edit(ops, { kind: 'restore', notBefore: g.lastAt + 100 });
+    if (item) g.items.push(item);
+  }
+  // A Move drag or its release or restore waiting for the throttle (T3: Ctrl+Z is ignored meanwhile).
+  const dragWaiting = () => state.pending.some((e) => e.notBefore > performance.now());
+  // After a redraw (someone's edit) the dragged node's new element takes the preview; a node gone ends
+  // the drag with nothing sent, one no longer on the shown page ends it with a restore.
   function keepDrag() {
     const g = gesture;
     if (!g || g.tool !== 'move' || !g.dragged) return;
-    if (!nodeOf(g.node) || !drawn.has(g.node)) { endGesture(); return; }
+    if (!nodeOf(g.node)) { endGesture(g); return; }
+    if (!drawn.has(g.node)) { endGesture(g, { abort: true }); return; }
     movePreview(g);
   }
   // Every node of a subtree (the root first), bounded.
@@ -2622,36 +2721,44 @@
   // `none` frame or page: set x, set y, only those that changed. Elsewhere, or within an auto-layout
   // frame: a move with its `after` (nothing when that is where it already is), plus set x, set y (its
   // top-left as previewed, whole px) when the new parent places by x, y. A drop the canvas would
-  // refuse sends nothing and says so.
+  // refuse sends nothing and says so. kit-668: under the same parent the sets are computed from the
+  // drag's start and hold only those that differ from the last live edit; the edit waits for the
+  // throttle (notBefore) and is never coalesced. 'sent', 'none' (nothing more to send) or 'refused' (a
+  // refused drop, or the node off the shown page: the caller restores).
   function dropMove(g) {
-    if (!g.dragged || !editable()) return;
+    if (!g.dragged || !editable()) return 'none';
     const id = g.node;
     const n = nodeOf(id);
-    if (!n || !layerRows.has(id)) return; // gone, or no longer on the shown page
+    if (!n) return 'none'; // gone
+    if (!layerRows.has(id)) return 'refused'; // no longer on the shown page
     const at = placeAt(g.cx, g.cy, id);
     const no = goRefusal(id, at.parent);
-    if (no !== null) { say(no); return; }
+    if (no !== null) { say(no); return 'refused'; }
     const { dx, dy } = moveBy(g);
-    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return 'refused';
     const left = clamp(Math.round(at.x - g.gx), -PX, PX);
     const top = clamp(Math.round(at.y - g.gy), -PX, PX);
     const ops = [];
     if (at.parent === n.parent && at.free) {
       for (const [k, d, drop] of [['x', dx, left], ['y', dy, top]]) {
-        const v = baseOf(id, k);
+        const v = g.start[k];
         const next = finite(v) ? clamp(Math.round(v + d), -PX, PX) : drop;
-        if (next !== v) ops.push({ op: 'set', id, prop: k, value: next });
+        if (next !== g.sent[k]) ops.push({ op: 'set', id, prop: k, value: next });
       }
     } else {
       if (at.parent === n.parent) {
         const sibs = kidsOf(nodeOf(n.parent) ?? pageById(n.parent) ?? { children: [] });
         const i = sibs.indexOf(id);
-        if (i >= 0 && at.after === (i > 0 ? sibs[i - 1] : null)) return; // dropped where it was
+        if (i >= 0 && at.after === (i > 0 ? sibs[i - 1] : null)) return 'none'; // dropped where it was
       }
       ops.push({ op: 'move', id, parent: at.parent, after: at.after });
       if (at.free) ops.push({ op: 'set', id, prop: 'x', value: left }, { op: 'set', id, prop: 'y', value: top });
     }
-    if (ops.length) edit(ops);
+    if (ops.length === 0) return 'none';
+    const item = edit(ops, { kind: 'release', notBefore: g.liveSent ? g.lastAt + 100 : 0 });
+    if (!item) return 'none';
+    g.items.push(item);
+    return 'sent';
   }
 
   // Arrow keys nudge the selected node placed by x, y: 1 px, 10 with Shift; one set each, so held keys
@@ -2678,6 +2785,214 @@
     nudge(dx * step, dy * step);
   });
 
+  // ---- undo (kit-668 §3) ----
+  // Each page undoes its own edits. Every plain edit (a tool, a field, a key, a drop, a button) pushes
+  // one entry on `undos`; a whole Move drag (its live edits and its release) one entry at its end, none
+  // when it ended in a restore; an undo's own edit none. At most UNDO_MAX, the oldest goes; an entry
+  // goes when any of its edits is refused (dropEntryOf). An entry holds one revert per op, walked over
+  // a copy of the drawn document when the edit was made, each with what its op left; an undo reverts
+  // only what is still as its edit left it, so someone else's change since is skipped, and said.
+  const UNDO_MAX = 100;
+  const UNDO_SAY = {
+    none: 'Nothing to undo.',
+    all: "Someone else changed that since, so it wasn't undone.",
+    part: 'Part of that was changed by someone else since, so only the rest was undone.',
+  };
+  const undos = [];
+  const NONE = Symbol('nothing stored');
+  // A path whose default is absent: a null there removes it (contract §4), so that is its "before".
+  const ABSENT_DEFAULT = removing;
+  // The value stored at a property path of a node (own keys only; a page has only its name), or NONE.
+  function stored(d, id, path) {
+    const pi = pageAt(d, id);
+    if (pi >= 0) return path === 'name' && own(d.pages[pi], 'name') ? d.pages[pi].name : NONE;
+    let at = nodeIn(d, id);
+    if (at === null) return NONE;
+    for (const k of pathKeys(path)) {
+      if (!isObj(at) || !own(at, k)) return NONE;
+      at = at[k];
+    }
+    return at;
+  }
+  // Stored values compared deep-equal (objects by their keys, whatever the order); NONE equals only NONE.
+  function same(a, b) {
+    if (a === b) return true;
+    if (a === NONE || b === NONE) return false;
+    if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((x, i) => same(x, b[i]));
+    if (isObj(a)) {
+      if (!isObj(b)) return false;
+      const ka = Object.keys(a);
+      return ka.length === Object.keys(b).length && ka.every((k) => own(b, k) && same(a[k], b[k]));
+    }
+    return false;
+  }
+  const copy = (v) => (v === NONE ? NONE : structuredClone(v));
+  const onCanvas = (d, id) => pageAt(d, id) >= 0 || nodeIn(d, id) !== null;
+  const parentIn = (d, id) => (pageAt(d, id) >= 0 ? null : nodeIn(d, id)?.parent);
+  // A page's or node's subtree, its ids in pre-order (the root first), bounded.
+  function subtreeIds(d, id) {
+    const out = [];
+    const seen = new Set();
+    const stack = [id];
+    while (stack.length && out.length <= MAX_ELEMENTS) {
+      const x = stack.pop();
+      if (seen.has(x)) continue;
+      const pi = pageAt(d, x);
+      const n = pi >= 0 ? d.pages[pi] : nodeIn(d, x);
+      if (!n) continue;
+      seen.add(x);
+      out.push(x);
+      stack.push(...kidsOf(n).reverse());
+    }
+    return out;
+  }
+  // The sibling before `id` in its parent's children (a page's: the pages), null for first.
+  function prevOf(d, id) {
+    const pi = pageAt(d, id);
+    if (pi >= 0) return pi > 0 && isObj(d.pages[pi - 1]) ? d.pages[pi - 1].id : null;
+    const list = childrenOf(d, nodeIn(d, id)?.parent);
+    const i = list ? list.indexOf(id) : -1;
+    return i > 0 ? list[i - 1] : null;
+  }
+  // A node as an add puts it back: its properties as stored, no children key; a page by its name.
+  function addBack(d, id) {
+    const pi = pageAt(d, id);
+    if (pi >= 0) return { op: 'add', node: { id, type: 'page', name: d.pages[pi].name }, after: prevOf(d, id) };
+    const n = nodeIn(d, id);
+    const node = { id };
+    for (const k of Object.keys(n)) if (k !== 'children' && k !== 'id') put(node, k, structuredClone(n[k]));
+    return { op: 'add', node, after: prevOf(d, id) };
+  }
+  // One op's revert, read from `d` before the op is applied (spec §3's table); what it left is read
+  // after (makeEntry). null when the op changes nothing undoable here; `entry.partial` when it changes
+  // something with no revert (a set of a path with no default, a token, an add over an id already there).
+  function revertOf(d, op, entry) {
+    if (op.op === 'set') {
+      if (typeof op.prop !== 'string' || !onCanvas(d, op.id)) return null;
+      if (pageAt(d, op.id) >= 0 && op.prop !== 'name') return null;
+      let before = stored(d, op.id, op.prop);
+      if (before === NONE) {
+        if (ABSENT_DEFAULT(pathKeys(op.prop))) before = null;
+        else if (own(DEFAULT, op.prop)) before = DEFAULT[op.prop];
+        else { entry.partial = true; return null; }
+      }
+      return { t: 'set', id: op.id, prop: op.prop, before: structuredClone(before), left: NONE };
+    }
+    if (op.op === 'add') {
+      const id = isObj(op.node) ? op.node.id : null;
+      if (typeof id !== 'string') return null;
+      if (onCanvas(d, id)) { entry.partial = true; return null; }
+      return { t: 'add', id, ids: [] };
+    }
+    if (op.op === 'del') {
+      if (!onCanvas(d, op.id)) return null;
+      const ids = subtreeIds(d, op.id);
+      return { t: 'del', id: op.id, parent: parentIn(d, op.id), ids, adds: ids.map((x) => addBack(d, x)) };
+    }
+    if (op.op === 'move') {
+      if (!onCanvas(d, op.id)) return null;
+      return { t: 'move', id: op.id, parent: parentIn(d, op.id), after: prevOf(d, op.id), left: null };
+    }
+    entry.partial = true;
+    return null;
+  }
+  // An edit's entry: its ops walked one by one over a copy of `doc`, each giving a revert with what it
+  // left; several sets of one path keep the earliest before and the latest left. null when no op gave one.
+  function makeEntry(doc, ops) {
+    const d = structuredClone(doc);
+    const entry = { reverts: [], partial: false };
+    for (const op of ops) {
+      if (!isObj(op)) continue;
+      const r = revertOf(d, op, entry);
+      applyOps(d, [op]);
+      if (r === null) continue;
+      if (r.t === 'set') {
+        r.left = copy(stored(d, r.id, r.prop));
+        const prior = entry.reverts.find((x) => x.t === 'set' && x.id === r.id && x.prop === r.prop);
+        if (prior) { prior.left = r.left; continue; }
+      } else if (r.t === 'add') {
+        if (!onCanvas(d, r.id)) continue; // it didn't apply here: nothing to take back
+        r.ids = subtreeIds(d, r.id);
+      } else if (r.t === 'move') {
+        r.left = parentIn(d, r.id);
+      }
+      entry.reverts.push(r);
+    }
+    return entry.reverts.length > 0 ? entry : null;
+  }
+  // A coalesced set (kit-662's held key): the replaced edit's entry takes what the new value leaves.
+  function coalesceEntry(entry, op) {
+    const r = entry.reverts.find((x) => x.t === 'set' && x.id === op.id && x.prop === op.prop);
+    if (r) r.left = op.value === null && ABSENT_DEFAULT(pathKeys(op.prop)) ? NONE : structuredClone(op.value);
+  }
+  function pushEntry(entry) {
+    undos.push(entry);
+    if (undos.length > UNDO_MAX) undos.splice(0, undos.length - UNDO_MAX);
+  }
+  // A Move drag's end: one entry for all its edits, from where the node was when it passed its slop
+  // (g.snapshot) to where it ended; none when it ended in a restore, sent nothing, or an edit of it was
+  // refused already.
+  function dragEntry(g) {
+    if (g.restored || g.snapshot === null || g.items.length === 0 || g.items.some((i) => i.dropped)) return;
+    const entry = makeEntry(g.snapshot, g.items.flatMap((i) => i.ops));
+    if (entry === null) return;
+    for (const i of g.items) i.entry = entry;
+    pushEntry(entry);
+  }
+  // One revert judged against `c` (the drawn document, with the reverts kept so far applied): its ops,
+  // or null when someone else changed it since (spec §3's skip column). A move back whose old parent is
+  // gone is skipped too: the server would refuse it, and with it the rest of the undo.
+  function judge(c, r) {
+    if (r.t === 'set') {
+      if (!onCanvas(c, r.id) || !same(stored(c, r.id, r.prop), r.left)) return null;
+      return [{ op: 'set', id: r.id, prop: r.prop, value: structuredClone(r.before) }];
+    }
+    if (r.t === 'add') {
+      if (!onCanvas(c, r.id)) return null;
+      const was = new Set(r.ids);
+      if (subtreeIds(c, r.id).some((x) => !was.has(x))) return null;
+      return [{ op: 'del', id: r.id }];
+    }
+    if (r.t === 'del') {
+      if (r.ids.some((x) => onCanvas(c, x))) return null;
+      if (r.parent !== null && !onCanvas(c, r.parent)) return null;
+      return structuredClone(r.adds);
+    }
+    if (r.t === 'move') {
+      if (!onCanvas(c, r.id) || parentIn(c, r.id) !== r.left) return null;
+      if (r.parent !== null && !onCanvas(c, r.parent)) return null;
+      return [{ op: 'move', id: r.id, parent: r.parent, after: r.after }];
+    }
+    return null;
+  }
+  // Ctrl+Z: the top entry taken off, its reverts judged in reverse op order over a copy of the drawn
+  // document (each kept one applied to it, so later ones are judged against what earlier ones did);
+  // the kept ones go as one edit, and the person is told what was skipped.
+  function undo() {
+    const entry = undos.pop();
+    if (!entry) { say(UNDO_SAY.none); return; }
+    const c = structuredClone(state.doc);
+    const out = [];
+    let skipped = entry.partial;
+    for (const r of [...entry.reverts].reverse()) {
+      const ops = judge(c, r);
+      if (ops === null) { skipped = true; continue; }
+      applyOps(c, ops);
+      out.push(...ops);
+    }
+    if (out.length === 0) { say(UNDO_SAY.all); return; }
+    if (edit(out, { kind: 'undo' }) && skipped) say(UNDO_SAY.part);
+  }
+  // Ctrl+Z (Cmd+Z on a Mac), no Shift, no Alt: only while no field has focus (there it is the field's),
+  // at 760 px and over, while editing is allowed, and not during a drag (its throttled release or
+  // restore included) or a path being drawn.
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || typeof e.key !== 'string' || e.key.toLowerCase() !== 'z') return;
+    if (!toolsOn() || typing(e.target) || gesture !== null || pen !== null || dragWaiting()) return;
+    e.preventDefault();
+    undo();
+  });
+
   // ---- the image: posted, then added under the src the server answers ----
   $('imageFile').addEventListener('cancel', () => { placing = null; });
   $('imageFile').addEventListener('change', () => {
@@ -2688,10 +3003,10 @@
     $('imageFile').value = '';
     if (file && place && editable()) uploadImage(file, place);
   });
-  // The upload's name: the file's, cut to 200 characters, or "image".
+  // The upload's name: the file's, cut to 200 characters, or "image" when that isn't free text.
   function uploadName(s) {
     const cut = [...(typeof s === 'string' ? s : '')].slice(0, 200).join('');
-    return cut.trim() && wellFormed(cut) ? cut : 'image';
+    return cut.trim() && freeText(cut) ? cut : 'image';
   }
   async function uploadImage(file, place) {
     if (file.size > IMAGE_BYTES) { say(IMAGE_SAY.tooBig); return; }
@@ -2772,10 +3087,13 @@
   // tries: reconnects since the last welcome; cursor: pending[cursor] is the next edit to send on this
   // socket; sentAt: when the edits of the last second went; seq: the last seq given; fetching: the
   // document being fetched again, the ops that arrive meanwhile waiting in held; stale: fetch at the next
-  // welcome whatever it says; again: fetch once more when this fetch ends.
+  // welcome whatever it says; again: fetch once more when this fetch ends. kit-668: session: the session
+  // the socket is on now (every welcome's and reload's; state.session is base's); highest: the highest
+  // rev seen in it; epoch: counts reloads, so a fetch asked for before one is thrown away; lowered: a
+  // welcome on base's session came at a rev below the highest seen (the edits above it are gone).
   const sock = {
     ws: null, live: false, down: false, ended: false, tries: 0, cursor: 0, sentAt: [], pumpTimer: null, seq: 0,
-    fetching: false, held: [], stale: false, again: false,
+    fetching: false, held: [], stale: false, again: false, session: null, highest: 0, epoch: 0, lowered: false,
   };
   function connect() {
     if (sock.ended || sock.ws) return;
@@ -2817,6 +3135,11 @@
         return;
       }
       const e = state.pending[sock.cursor];
+      // a drag's throttle: this edit, and everything behind it, waits until its notBefore
+      if (e.notBefore > now) {
+        sock.pumpTimer = setTimeout(() => { sock.pumpTimer = null; pump(); }, Math.ceil(e.notBefore - now));
+        return;
+      }
       if (e.seq === null) e.seq = ++sock.seq;
       if (!send({ t: 'edit', client: CLIENT, seq: e.seq, ops: e.ops })) return;
       sock.sentAt.push(now);
@@ -2837,32 +3160,42 @@
     try { m = JSON.parse(data); } catch { return; }
     if (!isObj(m) || typeof m.t !== 'string' || !state.base) return;
     if (m.t === 'welcome') welcome(m);
-    else if (m.t === 'ops') { if (Number.isSafeInteger(m.rev)) ops(m); }
+    else if (m.t === 'ops') { if (Number.isSafeInteger(m.rev)) { m.via = sock.session; ops(m); } }
     else if (m.t === 'refused') refused(m);
-    else if (m.t === 'saved') { if (Number.isSafeInteger(m.rev)) { state.saved = m.rev; syncBody(); } }
+    else if (m.t === 'saved') { if (Number.isSafeInteger(m.rev)) saved(m); }
     else if (m.t === 'ping') send({ t: 'pong' });
     else if (m.t === 'paused') { state.paused = true; showBanner(); }
     else if (m.t === 'resumed') { state.paused = false; showBanner(); }
     else if (m.t === 'closed') lock('closed', m.why === 'landed' ? BANNER.landed : BANNER.removed);
     else if (m.t === 'reload') {
-      // the document replaced whole: taken again over HTTP with its session; the old session's unacked
-      // edits go with it (kit-668 adds the resend)
-      dropPending(() => true);
+      // the document replaced whole, a new session on this socket: the frames held from before it are
+      // the old session's (their acks no longer count, so those edits stay pending and are resent), and
+      // the document is fetched again; a fetch already running is superseded (its answer thrown away)
+      if (typeof m.session !== 'string') return;
+      sock.session = m.session;
+      sock.held = [];
+      sock.epoch += 1;
       refetch();
     }
     // any other kind is ignored
   }
   // welcome: on the session loaded and at base's rev, send again what was sent and not acked, then the
-  // rest; on any other (a new session, or edits made while away, which the socket doesn't replay), fetch
-  // the document first.
+  // rest; on any other (a new session, a rev below the highest seen, or edits made while away, which the
+  // socket doesn't replay), fetch the document first (the fetch then resends kept on a new session).
   function welcome(m) {
+    sock.session = m.session;
+    if (m.session === state.session && Number.isSafeInteger(m.rev) && m.rev < sock.highest) {
+      sock.lowered = true;
+      sock.held = []; // their revs are gone
+    }
+    if (Number.isSafeInteger(m.rev)) sock.highest = Math.max(sock.highest, m.rev);
     sock.live = true;
     sock.down = false;
     sock.tries = 0;
     sock.cursor = 0;
     showBanner();
     syncBody();
-    if (!sock.stale && m.session === state.session && m.rev === state.base.rev) pump();
+    if (!sock.stale && !sock.lowered && m.session === state.session && m.rev === state.base.rev) pump();
     else refetch();
   }
   // ops: applied to base when it is the next rev (dropped at or below base's rev; one missed fetches
@@ -2875,28 +3208,66 @@
   }
   function takeOps(m) {
     if (m.rev > state.base.rev + 1) { sock.held.push(m); refetch(); return; }
+    if (m.via === sock.session) sock.highest = Math.max(sock.highest, m.rev);
     if (m.rev === state.base.rev + 1) {
       applyOps(state.base, m.ops);
       state.base.rev = m.rev;
     }
     const ack = m.ack;
-    if (isObj(ack) && ack.client === CLIENT && Number.isSafeInteger(ack.seq)) dropPending((e) => e.seq !== null && e.seq <= ack.seq);
+    if (isObj(ack) && ack.client === CLIENT && Number.isSafeInteger(ack.seq)) {
+      const acked = [];
+      dropPending((e) => { const hit = e.seq !== null && e.seq <= ack.seq; if (hit) acked.push(e); return hit; });
+      // an ack held through a fetch can come after the saved that covers it: that edit is on disk already
+      const onDisk = state.savedOn === m.via && state.saved !== null && state.saved >= m.rev;
+      for (const e of acked) { e.rev = m.rev; e.session = m.via; if (!onDisk) state.kept.push(e); }
+      if (state.kept.length > KEPT_MAX) {
+        state.kept.splice(0, state.kept.length - KEPT_MAX);
+        say(SAY.notSaved);
+      }
+    }
   }
-  // refused, for this page: that edit dropped (so undone on screen), and why said in plain words.
+  // saved: the socket's session's kept edits at or below its rev are on disk; another session's stay.
+  function saved(m) {
+    state.saved = m.rev;
+    state.savedOn = sock.session;
+    state.kept = state.kept.filter((e) => e.session !== sock.session || e.rev > m.rev);
+    syncBody();
+  }
+  // A refused edit's undo entry goes with it (kit-668 §3); a drag's edit refused before the drag ends
+  // keeps the drag from pushing one (dropped).
+  function dropEntryOf(item) {
+    item.dropped = true;
+    const i = item.entry ? undos.indexOf(item.entry) : -1;
+    if (i >= 0) undos.splice(i, 1);
+  }
+  // refused, for this page: that edit dropped (from pending, or kept should a resent one be refused) and
+  // why said in plain words; then the document fetched again (canvas@1 §5), the other pending edits
+  // drawn over it and sent after it.
   function refused(m) {
     if (m.client !== CLIENT || !Number.isSafeInteger(m.seq)) return;
-    dropPending((e) => e.seq === m.seq);
+    const gone = [];
+    dropPending((e) => { const hit = e.seq === m.seq; if (hit) gone.push(e); return hit; });
+    state.kept = state.kept.filter((e) => { const hit = e.seq === m.seq; if (hit) gone.push(e); return !hit; });
+    for (const e of gone) dropEntryOf(e);
     const why = typeof m.why === 'string' && own(REFUSED, m.why) ? m.why : null;
     say(why === null ? NOT_VALID : REFUSED[why]);
     if (why === 'view') lock('view');
     redraw();
+    refetch();
   }
+  const bySeq = (a, b) => a.seq - b.seq;
   // The document fetched again as base (its session too); the ops held meanwhile applied after it, in
-  // order, those above its rev. A fetch that fails closes the socket, and the next welcome fetches.
+  // order, those above its rev. A fetch that fails closes the socket, and the next welcome fetches. When
+  // the fetched session isn't the one base had (a restart or a replace), or a welcome came at a lower
+  // rev, kept goes back in front of pending, in seq order; pending is then sent from the start either way
+  // (a same-session resend is re-acked). A fetch a reload came during is thrown away, failed or not, and
+  // asked again at once.
   async function refetch() {
     if (sock.fetching) { sock.again = true; return; }
     sock.fetching = true;
     sock.again = false;
+    const epoch = sock.epoch;
+    const before = state.session;
     let b = null;
     try {
       const res = await fetch(`/api/canvas/doc?slug=${encodeURIComponent(state.slug)}`, { credentials: 'same-origin', cache: 'no-store' });
@@ -2906,6 +3277,7 @@
       }
     } catch { b = null; }
     sock.fetching = false;
+    if (epoch !== sock.epoch) { refetch(); return; }
     if (b === null) {
       sock.held = [];
       sock.stale = true;
@@ -2914,7 +3286,16 @@
     }
     sock.stale = false;
     takeDoc(b);
+    if (state.session !== before || sock.lowered) {
+      state.pending = [...state.kept.sort(bySeq), ...state.pending];
+      state.kept = [];
+      sock.lowered = false;
+      sock.highest = state.base.rev;
+    }
+    sock.cursor = 0;
+    // frames of another session than the one fetched are dropped: their acks don't count there
     for (const m of sock.held.splice(0)) {
+      if (m.via !== state.session) continue;
       if (sock.fetching) sock.held.push(m); else takeOps(m);
     }
     if (sock.again && !sock.fetching) refetch();

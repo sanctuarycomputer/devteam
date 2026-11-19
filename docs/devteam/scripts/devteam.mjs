@@ -2284,7 +2284,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: isObj(q.change) && Array.isArray(q.change.order) ? null : q.change ?? null, ...(isObj(q.change) && Array.isArray(q.change.order) ? { order: q.change.order } : {}), met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, no_default: q.no_default ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
@@ -7430,6 +7430,21 @@ function askLine({ thread, about } = {}) {
       if (k.type === 'stdin' && !allowedCommand(k.argv)) die(`secret ${x.name}: \`${k.argv.join(' ')}\` is not in settings.secret_commands, the commands the owner lets a secret be piped to`);
     }
   }
+  // A question with no default stops the work behind it until the owner answers (supervisor.md §6,
+  // Ask with a default where you can). Where a default is allowed, a clarification and an
+  // owner-decision in a ladder class on rung 2 or above carry one, or say with --no-default why
+  // silence can't go ahead. Not where silence is never a yes (a one-way door, the owner's alone, an
+  // answer after the owner's no, a secret), below rung 2, nor on the kit's own wordings; the kinds
+  // whose job is to ask (trust, proposal, goal-definition, goal-approval, owner-action, review) never.
+  let noDefault = flagStr('no-default');
+  if (flags['no-default'] !== undefined && !noDefault?.trim()) die('--no-default says why this can\'t go ahead on the owner\'s silence; it can\'t be blank');
+  noDefault = noDefault?.trim();
+  if (noDefault && def !== null) die('--default or --no-default, not both');
+  const rungNow = onLadder ? rungFor(cls, scope) : null;
+  const silenceNeverYes = kind === 'one-way-door' || reasons.includes('one-way-door') || reasons.includes('owner-only') || (L.owner_only ?? []).includes(cls) || flagStr('owner-said') !== undefined || secrets !== undefined || KIT_WORDED(cls, kind);
+  const wantsDefault = !silenceNeverYes && (kind === 'clarification' ? !onLadder || rungNow >= 2 : kind === 'owner-decision' && onLadder && rungNow >= 2);
+  if (wantsDefault && def === null && !noDefault) die(`${kind === 'clarification' ? 'a clarification' : `${cls}${scope ? ` (${scope})` : ''} is on rung ${rungNow} (${RUNG[rungNow]}), so this question`} needs --default: the choice you would act on if the owner hasn't answered by the deadline, so the work goes on. If silence can't be a yes here, say why: --no-default "<why it can't go ahead without the owner>" (supervisor.md §6)`);
+  if (noDefault && !wantsDefault) { warn('--no-default is for a question that would otherwise need a --default; this one doesn\'t, so it is left off'); noDefault = undefined; }
   // Each link is one thing to look at: a repo path, a url, a registry link or an artifact. A name
   // lets the question's text point at it inline ([[name]]). An artifact is pinned to where it was
   // and what it held when asked, in this one line: the question's hash covers its links, so
@@ -7497,7 +7512,7 @@ function askLine({ thread, about } = {}) {
   try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : orderAsked ? [context, goalOrderText(orderAsked)].filter(Boolean).join('\n\n') : context,
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined, no_default: noDefault,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
@@ -7792,6 +7807,12 @@ const SUBJECT_MAX = 2500; // bytes, as encoded in the line
 const OUTCOME_MAX = 300; // bytes
 const THREAD_TITLE_MAX = 120; // characters
 const THREAD_WAIT_MS = 10 * 60000;
+// An owner's turn no supervisor terminal took, unseen this long (no check since), is a high finding;
+// unanswered three times this long, whatever the checks (undeliveredTurns).
+const TURN_UNDELIVERED_MS = 5 * 60000;
+// Those turns, machine-local as delivery is: { "<u-id>": { thread, at } }. Named at load, so every
+// process's loose-file check knows it.
+const UNDELIVERED_FILE = runPath('undelivered-turns.json');
 const THREAD_ID = /^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 const TURN_ID = /^u-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 // When a proposal was made, as the log stamps it: what the owner's accept names to bind to it.
@@ -7972,7 +7993,52 @@ function deliverOwnerTurn(t, text, files) {
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
   return typeInto(target, `[devteam thread ${t.id} from owner${subjectWords(t.subject)}] ${said} — devteam.mjs thread show ${t.id}${droppedWords(files)}`, droppedPaths(files));
 }
-const deliveredWords = (typed) => (typed === true ? "sent to the supervisor's pane" : typed ? heldWords(typed, "the supervisor's") : 'recorded; the supervisor reads it when it next checks (thread list --waiting)');
+// Never "supervisor's pane" (the page reads that as typed) nor "recorded and held" for a turn no
+// terminal took: it says so, and when the supervisor last checked.
+const deliveredWords = (typed) => {
+  if (typed === true) return "sent to the supervisor's pane";
+  if (typed) return heldWords(typed, "the supervisor's");
+  const at = supervisorCheckedAt();
+  const when = at ? `it last checked ${Math.floor(Math.max(0, Date.now() - Date.parse(at)) / 60000)} min ago (${at.slice(11, 16)} UTC)` : 'it has not checked yet';
+  return `not delivered: no supervisor terminal took it, so the supervisor sees it only when it next checks; ${when}`;
+};
+// When the supervisor last checked, as ISO, or null: the newest of its host check (every tick's,
+// and a wait's every HOST_REFRESH_MS) and wait-since (a wait woke it for a tick). A claim refused
+// (another machine holds the repo) is no check by this one.
+function supervisorCheckedAt() {
+  const h = hostState();
+  const times = [Number(readText(runPath('wait-since'))) || 0];
+  if (h.refused !== true) times.push(Number(h.checked) || 0, Date.parse(h.at) || 0);
+  const t = Math.max(...times);
+  return t > 0 ? new Date(t).toISOString() : null;
+}
+// The owner's turns no terminal took (UNDELIVERED_FILE), read once and guarded: a missing,
+// unreadable or non-map file is none. entries: the map itself. Else the open threads waiting on the
+// supervisor whose every owner turn since its last word was missed, the first of them unseen past
+// TURN_UNDELIVERED_MS (no check since) or unanswered past three times that, whatever the checks:
+// [{ id, waited_min, checked }] (checked: the last check in words), oldest first. An empty file folds no threads (hello runs often).
+function undeliveredTurns(now = Date.now(), { entries = false } = {}) {
+  let m = null;
+  try { m = JSON.parse(readText(UNDELIVERED_FILE) ?? 'null'); } catch {}
+  if (!isObj(m)) m = {};
+  if (entries) return m;
+  if (!Object.keys(m).length) return [];
+  const at = supervisorCheckedAt();
+  const checkedMs = at ? Date.parse(at) : 0;
+  const checked = at ? `last checked ${Math.floor(Math.max(0, now - checkedMs) / 60000)} min ago` : 'has no record of checking';
+  const found = [];
+  for (const v of threadViews(readLog().objects)) {
+    if (v.status !== 'open' || v.waiting !== 'supervisor') continue;
+    let i = v.turns.length;
+    while (i > 0 && v.turns[i - 1].by === 'owner') i--;
+    const mine = v.turns.slice(i);
+    if (!mine.length || !mine.every((u) => Object.hasOwn(m, u.id))) continue;
+    const firstMs = Date.parse(mine[0].at);
+    const waited = now - firstMs;
+    if ((waited > TURN_UNDELIVERED_MS && !(checkedMs > firstMs)) || waited > 3 * TURN_UNDELIVERED_MS) found.push({ id: v.id, waited_min: Math.floor(waited / 60000), checked, first_at: mine[0].at });
+  }
+  return found.sort((a, b) => a.first_at.localeCompare(b.first_at)).map(({ first_at, ...x }) => x);
+}
 // The title and subject as the supervisor reads them: inside a frame that says they are data, every
 // value quoted (quoteData), in the pattern the prompt's knowledge and link blocks use.
 function threadDataFrame(v) {
@@ -8011,6 +8077,19 @@ function threadCounts() {
 // second says whether it was typed into the supervisor's pane.
 function cmdThread() {
   const [sub, id] = positional;
+  // An owner's turn typed into the supervisor's pane, or held for it; one no terminal took is
+  // recorded (UNDELIVERED_FILE, under its lock; entries over 7 days dropped) for the card and
+  // undeliveredTurns. The words say which.
+  const deliver = (t, u, words, files) => {
+    const typed = deliverOwnerTurn(t, words, files);
+    if (typed === false) withLock(UNDELIVERED_FILE, () => {
+      const m = undeliveredTurns(Date.now(), { entries: true });
+      for (const [k, v] of Object.entries(m)) if (!(Date.now() - Date.parse(v?.at) <= 7 * 86400000)) delete m[k];
+      m[u.id] = { thread: t.id, at: u.at };
+      writeJsonAtomic(UNDELIVERED_FILE, m);
+    });
+    return deliveredWords(typed);
+  };
   if (sub === 'new') {
     const { by } = threadOwner();
     const words = turnText(wordsFrom(1));
@@ -8032,9 +8111,9 @@ function cmdThread() {
     // both lines checked before the thread's is written: a refused first turn leaves no thread with none
     if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
-    appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
+    const u = appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
     out(t.id);
-    return out(deliveredWords(deliverOwnerTurn(t, words, files)));
+    return out(deliver(t, u, words, files));
   }
   // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
   // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
@@ -8056,7 +8135,7 @@ function cmdThread() {
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
     const u = appendLog(line, by);
     out(u.id);
-    if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words, files)));
+    if (by === 'owner') out(deliver(t, u, words, files));
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -8146,9 +8225,9 @@ function cmdThread() {
     const n = openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
     appendLog({ type: 'thread', op: 'set', id: t.id, status: 'open' }, by);
-    if (words) appendLog({ type: 'turn', thread: t.id, text: words }, by);
+    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words }, by) : null;
     out(`reopened ${t.id}`);
-    if (words) return out(deliveredWords(deliverOwnerTurn(t, words)));
+    if (words) return out(deliver(t, u, words));
     return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
   if (sub === 'show') {
@@ -8376,8 +8455,21 @@ const ARTIFACT_LENS = String.raw`(() => {
   let shiftDown = false;
   // no key is told before the page that frames it has said hello, as the preview lens tells nothing first
   let heard = false;
+  // A Shift pressed while typing in one of the page's own fields is a capital letter, not a point: it
+  // is never told, as the viewer never raises its overlay for a Shift typed in its own fields. Told,
+  // it raised the overlay over a page being typed in, and only the pointer moving lowered it again,
+  // so a click made without moving the pointer was the overlay's, never the page's.
+  const NOT_TYPED = ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'];
+  const typingIn = (el) => {
+    // the field itself, inside any open shadow roots
+    for (let n = 0; el && el.shadowRoot && el.shadowRoot.activeElement && n < 32; n++) el = el.shadowRoot.activeElement;
+    if (!el || el.nodeType !== 1) return false;
+    const tag = String(el.localName || '').toLowerCase();
+    return !!el.isContentEditable || tag === 'textarea' || (tag === 'input' && !NOT_TYPED.includes(String(el.type || 'text').toLowerCase()));
+  };
   const onKey = (e) => {
     if (!heard || (e.key !== 'Shift' && e.key !== 'Escape')) return;
+    if (e.type === 'keydown' && e.key === 'Shift' && typingIn(e.target && e.target.nodeType === 1 ? e.target : document.activeElement)) return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
     tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
@@ -9381,6 +9473,10 @@ function artifactProblems(slug, entries) {
     if (!host) { warnings.push(`${slug}: ${redactUrl(url)} is not on an allowed CDN (${ARTIFACT_CDNS.join(', ')}); it won't load`); continue; }
     if (ARTIFACT_CDNS.includes(host) && !/@\d+\.\d+\.\d+/.test(url) && !/\/ajax\/libs\/[^/]+\/\d+\.\d+\.\d+\//.test(url)) warnings.push(`${slug}: ${redactUrl(url)} has no exact version (name@x.y.z); pin it so the page renders the same tomorrow`);
   }
+  // Images and media load from its own folder, data: and blob: alone, never a CDN or any other host.
+  const media = new Set();
+  for (const [, url] of html.matchAll(/<(?:img|source|video|audio|track|input)\b[^>]*?\b(?:src|poster)\s*=\s*["'](https?:[^"']+)["']/gi)) media.add(url);
+  for (const url of media) warnings.push(`${slug}: ${redactUrl(url)} is an image or media from another host; it won't load (copy it into the artifact's folder)`);
   if (/<meta\b[^>]*http-equiv\s*=\s*["']?refresh/i.test(html)) warnings.push(`${slug}: a meta refresh; an artifact doesn't navigate itself`);
   return { errors, warnings, manifest: m.manifest ?? null };
 }
@@ -10648,6 +10744,7 @@ function cmdQuestions() {
     for (const l of q.links) out(`  see: ${l.title} (${l.url ?? (l.remote ? `repo ${l.remote}` : `${l.ref ? `${l.ref}:` : ''}${l.path}`)})`);
     if (q.review) out(`  review: ${q.review.page?.path} at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${q.review.data ? `, ${q.review.data.rows} rows` : ''}; ${q.result_status} (devteam.mjs review show ${q.id})`);
     if (q.recommendation) out(`  recommend: ${q.recommendation}${q.confidence != null ? ` (${Math.round(q.confidence * 100)}%)` : ''}`);
+    if (q.no_default) out(`  no default, because: ${q.no_default}`);
     if (q.why_asked?.reasons?.length) out(`  why asked: ${q.why_asked.reasons.join(', ')}${q.class ? ` (${q.class}, rung ${q.why_asked.rung ?? '-'} of ${q.why_asked.ceiling ?? '-'})` : ''}`);
     if (q.answer) out(`  answer (${q.answered_by}): ${q.answer}`);
     if (q.autonomy) out(`  next time: ${q.autonomy.class} at rung ${q.autonomy.rung} (${RUNG[q.autonomy.rung]})${q.autonomy.scope ? ` for ${q.autonomy.scope}` : ''}`);
@@ -14191,6 +14288,9 @@ function collectMetrics(since) {
     const ago = now - Date.parse(x.turns[x.turns.length - 1].at);
     if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
   }
+  // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
+  // it reaches past the stalled supervisor (hello's alert: machine status, the hub). By id only.
+  for (const x of undeliveredTurns(now)) add('high', 'thread-undelivered', x.id, `the owner wrote ${x.waited_min} min ago and no supervisor terminal took it; the supervisor ${x.checked}`, `the supervisor is not checking: resume it (inside tmux, so turns reach it at once) and answer thread show ${x.id}`);
   // A harness's runtime file committed by accident: it churns in every worktree and means nothing elsewhere.
   const trackedRuntime = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => f && isHarnessRuntime(f));
   if (trackedRuntime.length) add('medium', 'tracked-runtime-file', trackedRuntime.slice(0, 3).join(', '), `${trackedRuntime.length} agent-harness runtime file(s) are tracked in git (${trackedRuntime.slice(0, 5).join(', ')}): machine-local state that changes in every worktree`, `a chore (it changes .gitignore, so it needs the owner's answer): git rm --cached ${trackedRuntime.map((f) => `'${f}'`).join(' ')}, and add ${RUNTIME_RES.filter(([, re]) => trackedRuntime.some((f) => re.test(f))).map(([pat]) => pat).join(' ')} to .gitignore`);
@@ -14198,6 +14298,7 @@ function collectMetrics(since) {
   // (code-style.md §10): production decrypts its own file, or the default one when it has none.
   const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
   const accounts = accountsState();
+  if (!accounts?.exhausted && accounts?.capacity?.gap) add('medium', 'accounts-capacity-gap', 'cswap', `the accounts with room run out about ${accounts.capacity.runs_out_at}, before the first full one resets (${accounts.capacity.next_reset_at})`, 'tell the owner: add an account (cswap add), or slow the fleets until a reset');
   if (accounts?.exhausted) add('high', 'accounts-exhausted', 'cswap', 'every cswap account is at a usage limit', 'wait for a reset or add an account (cswap add)');
   for (const a of accounts?.needs_login ?? []) add('medium', 'account-needs-login', a, 'cswap can no longer refresh this account', 'log in with it in Claude Code, then cswap add');
   for (const a of accounts?.restart_gave_up ?? []) add('high', 'restart-gave-up', a, `this session keeps needing a restart (a usage limit, or its window gone after the machine stopped): restarted ${RESTART_MAX} times in 6 hours, so it is left alone until those attempts age out`, `look at why: ${a === 'supervisor' ? 'its pane' : `tmux capture-pane -p -t '${tmuxTarget(a)}'`}, its account's usage (cswap list) and what it was doing. It is retried by itself once an attempt is 6 hours old`);
@@ -15583,6 +15684,30 @@ function lastReadingFull(a) {
   });
 }
 const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
+// The fleet's Claude capacity across every cswap account, for the operator and the supervisors: how many
+// have room, the active one's use, and whether the room left lasts until a full account resets. cswap
+// projects each window (projectedExhaustionAt, willLastToReset); a gap is room that runs out first. An
+// account whose usage can't be read is neither room nor full: it's counted as unknown, never as none.
+function capacityOf(rows) {
+  const usable = rows.filter((a) => !a.disabled);
+  const room = usable.filter(accountHasRoom);
+  const full = usable.filter(accountKnownFull);
+  const unknown = usable.length - room.length - full.length;
+  const week = (a) => a?.usage?.sevenDay ?? a?.lastGoodUsage?.sevenDay ?? null;
+  const pct = (w) => (typeof w?.pct === 'number' ? Math.round(w.pct) : null);
+  const active = rows.find((a) => a.active);
+  const resets = full.map((a) => [a?.usage?.fiveHour, week(a)].filter((w) => w?.pct >= 100 && w.resetsAt).map((w) => w.resetsAt).sort().pop()).filter(Boolean).sort();
+  const lasts = room.some((a) => mainWindows(a).every((w) => w.willLastToReset !== false));
+  const outs = room.map((a) => mainWindows(a).map((w) => w.projectedExhaustionAt).filter(Boolean).sort()[0]).filter(Boolean).sort();
+  const runsOut = lasts || outs.length < room.length ? null : outs.pop() ?? null;
+  const nextReset = resets[0] ?? null;
+  return {
+    accounts: usable.length, room: room.length, unknown,
+    active_week_pct: pct(week(active)), active_5h_pct: pct(active?.usage?.fiveHour),
+    runs_out_at: runsOut, next_reset_at: nextReset,
+    gap: !!(room.length && runsOut && nextReset && Date.parse(runsOut) < Date.parse(nextReset)),
+  };
+}
 // One switch, and what it said, whatever the exit code: a switch that stays put is not a failure.
 function switchAccount(bin, args) {
   const r = runCswap(bin, ['switch', ...args, '--json']);
@@ -15638,6 +15763,23 @@ function paneBottom(target) {
   let text = '';
   try { text = execFileSync('tmux', ['capture-pane', '-p', '-t', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: TMUX_TIMEOUT_MS }); } catch {}
   return text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-15);
+}
+// Whether a pane (the box's operator, which no project's dashboard looks after) is stopped at a usage
+// limit, and whether there is room to start it again: none (not stopped at a limit), unsafe (stopped,
+// but a person, a draft or another prompt is there: left alone), room (the machine's active cswap
+// account has room: relaunch it on the same conversation), no-room (every account is at its limit),
+// or unknown (no cswap, or its accounts can't be read). The box's minute loop acts on it.
+function limitState(target) {
+  const st = limitStop(paneBottom(target));
+  if (!st.limit) return 'none';
+  if (!paneStoppedAtLimit(target)) return 'unsafe';
+  const bin = findCswap();
+  const rows = bin ? cswapAccounts(bin) : null;
+  if (!rows) return 'unknown';
+  const active = rows.find((a) => a.active);
+  if (active && accountHasRoom(active)) return 'room';
+  const usable = rows.filter((a) => !a.disabled);
+  return usable.length && usable.every(accountKnownFull) ? 'no-room' : 'unknown';
 }
 // A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
 // starts a relaunch, and makeSession again right before it replaces the process (worktree_setup may
@@ -16569,7 +16711,7 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
   if (plainText(dim === -1 ? text : text.slice(0, dim)).trim()) return 'typing';
   return busy ? 'busy' : 'ready';
 }
-const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine pane-state <pane>';
+const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine limit-state <pane> | machine pane-state <pane>';
 // tell and alert speak on the machine: the operator's, or the owner's at a terminal; never a session
 // in a fleet, which would be speaking as someone else.
 function machineSpeaker(what) {
@@ -16582,6 +16724,10 @@ function cmdMachine() {
   if (sub === 'pane-state') {
     if (!positional[1]) die(machineUsage, 2);
     return out(paneState(positional[1]));
+  }
+  if (sub === 'limit-state') {
+    if (!positional[1]) die(machineUsage, 2);
+    return out(limitState(positional[1]));
   }
   if (sub === 'alert') return machineAlert(words);
   if (sub === 'tell') return machineTell(words);
@@ -17725,6 +17871,14 @@ async function machineStatus() {
   // the freshest of each project's record of its accounts (accounts-tick writes it each minute); cswap itself is never run here
   const acc = roots.map((r) => { try { const a = readJson(path.join(r, 'docs', 'devteam', 'run', 'accounts.json')); return a && typeof a.at === 'string' ? a : null; } catch { return null; } }).filter(Boolean).sort((x, y) => y.at.localeCompare(x.at))[0];
   out(acc ? `machine: accounts ${acc.cswap ? 'cswap' : 'no-cswap'} active=${acc.active ?? '?'} exhausted=${acc.exhausted ?? false} no-room=${acc.active_no_room ?? false} needs-login=${(Array.isArray(acc.needs_login) ? acc.needs_login.join(',') : '') || '-'} as of ${acc.at}` : 'machine: accounts ? (no dashboard has recorded any)');
+  const cap = acc?.capacity;
+  if (cap && typeof cap.accounts === 'number') {
+    const when = (t) => (t ? t.slice(0, 16).replace('T', ' ') : '-');
+    // NONE only when every account is known to be full: usage that can't be read is unknown, not none
+    const unknown = typeof cap.unknown === 'number' ? cap.unknown : 0;
+    const flag = cap.room === 0 && unknown === 0 && cap.accounts > 0 ? ' NONE' : cap.gap ? ' GAP' : cap.room + unknown <= 1 && cap.accounts > 1 ? ' THIN' : '';
+    out(`machine: capacity ${cap.room} of ${cap.accounts} accounts with room${unknown ? `, ${unknown} unknown (usage unreadable)` : ''}${flag}; active ${cap.active_week_pct ?? '?'}% week, ${cap.active_5h_pct ?? '?'}% 5h; room runs out ${cap.runs_out_at ? when(cap.runs_out_at) : cap.room ? 'after the next reset' : unknown ? 'unknown' : 'now'}; next reset ${when(cap.next_reset_at)}`);
+  }
   // a hub that doesn't answer and each project's dashboard: nothing else says they went down
   const alert = readText(path.join(os.homedir(), '.box', 'alert'))?.trim();
   out(`machine: hub ${HUB_PORT} ${await hubLine(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
@@ -17769,7 +17923,9 @@ async function machineStatus() {
     const qs = openQuestionsOf(root);
     const q = qs ? qs.filter((x) => x?.id && !(notes && notes.includes(x.id))).length : '?';
     const ks = harvestOf(root, notes);
-    if (hello.alert) flagged.push(`attention: ${n}: ${hello.alert}`);
+    // the box's own alert has the hub line; only the project's part is this project's attention
+    const ownAlert = alertLessBox(hello.alert, hello.box_alert);
+    if (ownAlert) flagged.push(`attention: ${n}: ${ownAlert}`);
     const state = p ? paneState(p) : null;
     // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
     // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
@@ -17843,6 +17999,7 @@ function cmdAccountsTick() {
     const rows = cswapAccounts(bin);
     if (rows) {
       state.needs_login = rows.filter((a) => a.usageStatus === 'relogin_required').map((a) => String(a.alias ?? a.email ?? a.number));
+      state.capacity = capacityOf(rows);
       const usable = rows.filter((a) => !a.disabled);
       if (usable.length && usable.every(accountKnownFull)) state.exhausted = true;
       const active = rows.find((a) => a.active);
@@ -19102,7 +19259,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   every(refreshHello, 10000);
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -19667,16 +19824,20 @@ async function cmdDashboard() {
       try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
       const pane = supervisorPane();
       const asks = supervisorAsks();
+      // the card's "not delivered": the turns no terminal took, and when the supervisor last checked
+      // (two small run files, read here: no child, no tmux)
+      const undelivered = Object.keys(undeliveredTurns(Date.now(), { entries: true }));
+      const checked = supervisorCheckedAt();
       // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
       // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
       // this process's work is saved.
       // the token for an answer goes only to this page's own read, said so by the browser
       if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
-      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}`).slice(0, 20)}"`;
+      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}`).slice(0, 20)}"`;
       const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
       if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
       res.writeHead(200, { 'content-type': 'application/json', ...head });
-      return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks })},"threads":${r.body}}`);
+      return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"threads":${r.body}}`);
     }
     // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
     if (req.method === 'GET' && u.pathname === '/api/fleet') {
@@ -23852,7 +24013,32 @@ function boxAlert() {
     return readText(f)?.trim().slice(0, 200) || null;
   } catch { return null; }
 }
-const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
+// box_alert is the machine's, the same on every project's hello, so a hub or gateway on this kit
+// shows it once, on the Overview, and not as a "!" on every project's tab. alert still ends with it,
+// after " · ", so an older hub or gateway, which reads only alert, still shows and pushes it (hub: 1
+// stays: the change is additive); a reader on this kit takes it off again (alertLessBox).
+// The box's alert stays the LAST part of alert: alertLessBox, the hub's ownAlert and the gateway's
+// alertNews all take it off as a suffix.
+// Worked out once a process: cmdHello reads it twice.
+const helloAlert = (() => {
+  let memo;
+  const undelivered = () => {
+    const xs = undeliveredTurns();
+    if (!xs.length) return null;
+    const [x] = xs;
+    return `A message in a thread reached no supervisor and has waited ${x.waited_min} min (thread ${x.id}${xs.length > 1 ? `, and ${xs.length - 1} more` : ''}); the supervisor ${x.checked}: resume it`;
+  };
+  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
+})();
+// A hello's alert, less the box's alert folded in at its end: the project's own part, or null. Matched
+// as the whole alert or a " · " suffix, never split, so a box alert holding " · " still comes off.
+function alertLessBox(alert, box) {
+  const a = typeof alert === 'string' ? alert.trim() : '';
+  const b = typeof box === 'string' ? box.trim() : '';
+  if (!a || !b) return a || null;
+  if (a === b) return null;
+  return a.endsWith(` · ${b}`) ? a.slice(0, -(b.length + 3)).trim() || null : a;
+}
 // The hub's Overview: is this project moving, and if not, why. From the log in one pass; from git,
 // only whether each ticket has merged (main's log and the refs, one call each under cmdHello's
 // read cache, never one per ticket), so hello stays cheap at every 10 s.
@@ -23972,7 +24158,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();
@@ -26222,7 +26408,7 @@ Setup and roles
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
   recover [--dry-run] [--force] [--here] | recover --machine [--dry-run] [--force] [--in <dir>…] [--was-up <list>] [--session s] [--only <repo>]   after a restart (a dead laptop, a redeploy): bring back this repo's supervisor, or every repo's on this machine, if it was up and its fleet isn't held, on its exact conversation where the harness can (Claude Code); --force also starts one the owner stopped or whose fleet is held; --here runs it in this terminal; safe to run twice. --in adds every adopted repo in a folder; --was-up names a list of roots that were up (a box's), used up as they come back; --session puts each in that tmux session as sup-<repo>
-  machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
+  machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane> | machine limit-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
   operator-thread new "<words>" [--title t] [--subject json] | say <ot-id> "<words>" | close <ot-id> | reopen <ot-id> ["<words>"] | start | reply <ot-id> "<words>" | list [--open | --waiting] [--json] | show <ot-id> | status   the owner's threads with the machine's operator, as the hub's Overview keeps them (beside the operator, in no repo): new, say, close, reopen and start are the owner's (start brings up a laptop's operator, once, in tmux session devteam-home); reply is the operator's; each owner turn is typed into the operator's pane as one line
   worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, or (a resume of one that ran aside) while the machine's memory is at its machine_memory_ceiling, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]

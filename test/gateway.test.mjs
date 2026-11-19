@@ -602,13 +602,72 @@ test('a push is encrypted as RFC 8291 says, and signed so a push service believe
   assert.ok(crypto.verify('sha256', Buffer.from(`${head}.${claims}`), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')));
 });
 
+test("the box's own alert is one push named for the box, and left out of each project's", () => {
+  const ports = [P, P + 1];
+  const r = (root, name, port, extra = {}) => ({ root, name, port, ...extra });
+  const box = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'memory at the limit' }), r('/b', 'b', P + 1, { box_alert: 'memory at the limit' })], ports);
+  assert.equal(box.messages.length, 1, 'one push for the box, not one per project');
+  assert.equal(box.messages[0].title, 'Box alert');
+  assert.equal(box.messages[0].body, 'memory at the limit');
+  assert.deepEqual(G.alertNews(box.seen, [r('/a', 'a', P, { box_alert: 'memory at the limit' })], ports).messages, [], 'not news twice');
+  // an older kit folds the box's alert into its own: only the project's part is its own news
+  const mixed = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'memory at the limit' }), r('/b', 'b', P + 1, { alert: 'at a usage limit · memory at the limit' })], ports);
+  assert.deepEqual(mixed.messages.map((m) => [m.title, m.body]).sort(), [['Alert (b)', 'at a usage limit'], ['Box alert', 'memory at the limit']]);
+  const onlyBox = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'memory at the limit' }), r('/b', 'b', P + 1, { alert: 'memory at the limit' })], ports);
+  assert.deepEqual(onlyBox.messages.map((m) => m.title), ['Box alert'], "an older kit's copy of the box's alert is not a project's own");
+  // this kit folds it in too, for older readers: still one push, and a box alert holding " · " comes off whole
+  const folded = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'disk · full', alert: 'disk · full' }), r('/b', 'b', P + 1, { box_alert: 'disk · full', alert: 'at a usage limit · disk · full' })], ports);
+  assert.deepEqual(folded.messages.map((m) => [m.title, m.body]).sort(), [['Alert (b)', 'at a usage limit'], ['Box alert', 'disk · full']]);
+  const olderKit = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'disk · full' }), r('/b', 'b', P + 1, { alert: 'at a usage limit · disk · full' })], ports);
+  assert.deepEqual(olderKit.messages.map((m) => [m.title, m.body]).sort(), [['Alert (b)', 'at a usage limit'], ['Box alert', 'disk · full']], 'an older kit without box_alert: matched against the box text another project carries');
+  const notSuffix = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'disk', alert: 'disk is fine · own' })], ports);
+  assert.deepEqual(notSuffix.messages.map((m) => m.body).sort(), ['disk', 'disk is fine · own'], 'only a trailing copy comes off');
+});
+
+test("a box alert that clears or changes is not pushed again from an older kit's lagging copy", () => {
+  const ports = [P, P + 1];
+  const r = (root, name, port, extra = {}) => ({ root, name, port, ...extra });
+  const X = 'Every Claude account is at its usage limit.';
+  const pushed = (s) => s.messages.map((m) => [m.title, m.body]);
+  // steady: a (this kit) carries box_alert and folds it; b (an older kit) folds it only
+  const up = G.alertNews({}, [r('/a', 'a', P, { alert: X, box_alert: X }), r('/b', 'b', P + 1, { alert: X })], ports);
+  assert.deepEqual(pushed(up), [['Box alert', X]]);
+  // cleared: a drops it a refresh before b does; b's copy is the box text the gateway last knew
+  const lag = G.alertNews(up.seen, [r('/a', 'a', P), r('/b', 'b', P + 1, { alert: X })], ports);
+  assert.deepEqual(pushed(lag), [], 'the alert just cleared is not pushed as b\'s own');
+  const lag2 = G.alertNews(lag.seen, [r('/a', 'a', P), r('/b', 'b', P + 1, { alert: X })], ports);
+  assert.deepEqual(pushed(lag2), [], 'nor on the next poll, while b still lags');
+  const gone = G.alertNews(lag2.seen, [r('/a', 'a', P), r('/b', 'b', P + 1)], ports);
+  assert.deepEqual([pushed(gone), gone.seen], [[], {}], 'once b drops it too, it is forgotten');
+  assert.deepEqual(pushed(G.alertNews(gone.seen, [r('/a', 'a', P, { alert: X, box_alert: X }), r('/b', 'b', P + 1, { alert: X })], ports)), [['Box alert', X]], 'and raised again, it is news again');
+  // changed: a carries the new text, b still folds the old one
+  const moved = G.alertNews(up.seen, [r('/a', 'a', P, { alert: 'disk full', box_alert: 'disk full' }), r('/b', 'b', P + 1, { alert: X })], ports);
+  assert.deepEqual(pushed(moved), [['Box alert', 'disk full']]);
+  assert.deepEqual(pushed(G.alertNews(moved.seen, [r('/a', 'a', P, { alert: 'disk full', box_alert: 'disk full' }), r('/b', 'b', P + 1, { alert: X })], ports)), [], 'the old text still lagging on b');
+  // b's own part stays its own while the box's lags on it
+  const own = G.alertNews({}, [r('/a', 'a', P, { alert: X, box_alert: X }), r('/b', 'b', P + 1, { alert: `at a usage limit · ${X}` })], ports);
+  const ownLag = G.alertNews(own.seen, [r('/a', 'a', P), r('/b', 'b', P + 1, { alert: `at a usage limit · ${X}` })], ports);
+  assert.deepEqual([pushed(ownLag), ownLag.seen['/b']], [[], 'at a usage limit']);
+});
+
+test('a gateway upgraded while a box alert is up does not push it again', () => {
+  const ports = [P, P + 1];
+  const r = (root, name, port, extra = {}) => ({ root, name, port, ...extra });
+  // what a gateway from before box_alert stored: each project's whole alert, the box's folded in
+  const before = { '/a': 'disk full', '/b': 'at a usage limit · disk full' };
+  const after = G.alertNews(before, [r('/a', 'a', P, { alert: 'disk full', box_alert: 'disk full' }), r('/b', 'b', P + 1, { alert: 'at a usage limit · disk full' })], ports);
+  assert.deepEqual(after.messages, [], 'the box alert and b\'s own were both pushed already');
+  assert.deepEqual(after.seen, { '\u0000box': 'disk full', '/b': 'at a usage limit' });
+  assert.deepEqual(G.alertNews({ '/a': 'something else' }, [r('/a', 'a', P, { alert: 'disk full', box_alert: 'disk full' })], ports).messages.map((m) => m.title), ['Box alert'], 'a box alert not seen before is still news');
+});
+
 test('an alert on the hub is pushed once, when it turns up or changes', () => {
   const ports = [P, P + 1];
   const r = (root, name, port, alert) => ({ root, name, port, ...(alert === undefined ? {} : { alert }) });
   assert.deepEqual(G.alertNews({}, [r('/a', 'a', P)], ports).messages, [], 'no alert, no news');
   const one = G.alertNews({}, [r('/a', 'a', P, 'disk is full')], ports);
   assert.equal(one.messages.length, 1);
-  assert.equal(one.messages[0].title, 'Box alert (a)');
+  assert.equal(one.messages[0].title, 'Alert (a)');
   assert.equal(one.messages[0].body, 'disk is full');
   assert.deepEqual(one.seen, { '/a': 'disk is full' });
   assert.deepEqual(G.alertNews(one.seen, [r('/a', 'a', P, 'disk is full')], ports).messages, [], 'the same alert is not news twice');
@@ -617,7 +676,7 @@ test('an alert on the hub is pushed once, when it turns up or changes', () => {
   // one box-wide alert across every repo's tab is one push, however many tabs carry it
   const both = G.alertNews({}, [r('/a', 'a', P, 'same'), r('/b', 'b', P + 1, 'same')], ports);
   assert.equal(both.messages.length, 1);
-  assert.equal(both.messages[0].title, 'Box alert (a, b)');
+  assert.equal(both.messages[0].title, 'Alert (a, b)');
   assert.deepEqual(both.keys, ['alert:same'], 'resting is by text');
   assert.equal(G.alertNews({}, [r('/a', 'a', P, 'same')], ports, new Set(['alert:same'])).messages.length, 0, 'at rest it waits');
   const long = G.alertNews({}, [r('/a', 'a', P, 'x'.repeat(500))], ports);
@@ -1833,6 +1892,69 @@ test('dropped files: the root must be the gateway\'s own; old ones go, and only 
     assert.ok(fs.existsSync(path.join(victim, 'keep')));
     assert.equal((await upload(gw, 'b.txt', Buffer.from('y'))).status, 200, 'what it freed counts');
   } finally { await gw.close(); }
+});
+
+// ⌘⌥←/→ (Ctrl+Alt+←/→ off a Mac) in the terminal type Ctrl+Alt+Shift+←/→, which the box's tmux binds to
+// the previous and next window; any other chord passes through untouched.
+test('the terminal\'s page sends ⌘⌥←/→ to tmux as previous and next window', async () => {
+  const gw = await signedIn('keys-page');
+  try {
+    const tp = await gw.req('GET', '/', { on: 'term' });
+    assert.equal(tp.status, 200);
+    const keys = [...tp.body.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((x) => x.includes("addEventListener('keydown'") && x.includes('1;8D'));
+    assert.ok(keys, 'the page carries the key handler');
+    const run = (platform) => {
+      let on = null;
+      const typed = [];
+      const win = { term: { input: (d) => typed.push(d) } };
+      new Function('addEventListener', 'navigator', 'window', keys)((ev, f) => { if (ev === 'keydown') on = f; }, { platform }, win);
+      // caught means both: preventDefault for the browser, and stopPropagation for xterm, whose own
+      // keydown listener on its textarea never reads defaultPrevented and would type the chord too
+      const press = (key, mods) => {
+        let prevented = false, stopped = false;
+        on({ key, altKey: false, shiftKey: false, metaKey: false, ctrlKey: false, ...mods, preventDefault: () => { prevented = true; }, stopPropagation: () => { stopped = true; } });
+        assert.equal(prevented, stopped, `${key} ${JSON.stringify(mods)}: caught means both preventDefault and stopPropagation`);
+        return prevented;
+      };
+      return { typed, press };
+    };
+    const mac = run('MacIntel');
+    assert.ok(mac.press('ArrowLeft', { metaKey: true, altKey: true }));
+    assert.ok(mac.press('ArrowRight', { metaKey: true, altKey: true }));
+    assert.deepEqual(mac.typed, ['\x1b[1;8D', '\x1b[1;8C'], 'previous, then next window');
+    assert.ok(!mac.press('ArrowLeft', { altKey: true }), '⌥← alone is word movement, left to the shell');
+    assert.ok(!mac.press('ArrowLeft', { metaKey: true }), '⌘← alone passes through');
+    assert.ok(!mac.press('ArrowLeft', { metaKey: true, altKey: true, shiftKey: true }), 'with Shift too, not ours');
+    assert.ok(!mac.press('ArrowLeft', { ctrlKey: true, metaKey: true, altKey: true }), '⌃⌘⌥← on a Mac is not ours');
+    assert.ok(!mac.press('ArrowLeft', { ctrlKey: true, altKey: true }), 'Ctrl+Alt on a Mac is not ours');
+    assert.equal(mac.typed.length, 2);
+    const pc = run('Linux x86_64');
+    assert.ok(pc.press('ArrowRight', { ctrlKey: true, altKey: true }));
+    assert.ok(!pc.press('ArrowRight', { metaKey: true, altKey: true }));
+    assert.ok(!pc.press('ArrowRight', { ctrlKey: true, metaKey: true, altKey: true }), 'Ctrl with ⌘ off a Mac is not ours');
+    assert.ok(!pc.press('ArrowRight', { ctrlKey: true }), 'Ctrl+→ alone is word movement');
+    assert.deepEqual(pc.typed, ['\x1b[1;8C']);
+  } finally { await gw.close(); }
+});
+
+// the tmux half: the box's .tmux.conf seeding binds both chords, each line on its own guard, so a
+// conf that has one of them gets the other and neither twice
+test('the box seeds tmux with Ctrl+Alt+Shift+←/→ as previous and next window', () => {
+  const lines = fs.readFileSync(path.join(here, '..', 'cloud', 'Dockerfile'), 'utf8').split('\n').filter((l) => /^grep -q 'C-M-S-(Left|Right)' \.tmux\.conf \|\| /.test(l));
+  assert.equal(lines.length, 2, 'one seeding line per chord');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmux-keys-'));
+  try {
+    const conf = path.join(dir, '.tmux.conf');
+    const seed = () => execFileSync('sh', ['-c', lines.join('\n')], { cwd: dir, timeout: 10000 });
+    fs.writeFileSync(conf, '');
+    seed();
+    assert.equal(fs.readFileSync(conf, 'utf8'), 'bind -n C-M-S-Left previous-window\nbind -n C-M-S-Right next-window\n');
+    seed();
+    assert.equal(fs.readFileSync(conf, 'utf8').split('\n').filter(Boolean).length, 2, 'seeding again adds nothing');
+    fs.writeFileSync(conf, 'bind -n C-M-S-Left previous-window\n');
+    seed();
+    assert.equal(fs.readFileSync(conf, 'utf8'), 'bind -n C-M-S-Left previous-window\nbind -n C-M-S-Right next-window\n', 'a conf with only Left still gets Right');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // A phone has no wheel: the terminal's page turns a one-finger swipe into the wheel events xterm

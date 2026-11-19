@@ -676,18 +676,50 @@ export const previewLensCsp = (ancestors) => `default-src 'none'; script-src ${l
 // when it turns up or changes, so it needs no page open. The list is checked as the Inbox counts are,
 // and capped; one alert on every repo's tab is one push.
 const ALERT_MAX = 200;
+const BOX_KEY = '\u0000box';
+// an earlier box text still folded on a lagging older kit's alert (each dashboard refreshes on its
+// own timer, so an older kit can drop the box's copy a poll after this kit drops box_alert)
+const BOX_WAS = '\u0000box-was';
+// the box's text folded at the end (every kit folds it, for older readers): matched whole or as a
+// " · " suffix against the untouched text, never split, so one holding " · " still comes off
+const lessBox = (a, b) => (!a || !b ? a : a === b ? '' : a.endsWith(` · ${b}`) ? a.slice(0, -(b.length + 3)).trim() : a);
 export function alertNews(seen, instances, ports, resting = new Set()) {
   const list = listedByRoot(instances, ports);
   const next = {};
   const fresh = new Map();
+  // the box's own alert (box_alert, the same on every hello) is one push named for the box; a
+  // project's alert is its own, less the box's, which every kit folds in at its end for older readers
+  const boxRaw = list.map((x) => (typeof x.box_alert === 'string' ? x.box_alert.trim() : '')).find(Boolean) || '';
+  const boxText = boxRaw ? wellFormed(boxRaw.slice(0, ALERT_MAX)) : '';
+  // a gateway from before box_alert stored each project's whole alert, the box's folded in: that
+  // copy was pushed already, so it counts as the box's seen and comes off each project's
+  if (boxText && !Object.hasOwn(seen, BOX_KEY) && Object.entries(seen).some(([k, v]) => k !== BOX_WAS && typeof v === 'string' && lessBox(v, boxText) !== v)) {
+    seen = Object.fromEntries(Object.entries(seen).map(([k, v]) => [k, typeof v === 'string' ? lessBox(v, boxText) : v]));
+    seen[BOX_KEY] = boxText;
+  }
+  if (boxText) {
+    next[BOX_KEY] = boxText;
+    if (seen[BOX_KEY] !== boxText && !resting.has(`alert:${boxText}`)) fresh.set(boxText, ['the box']);
+  }
+  // the box texts this gateway knew before this poll, other than the current one
+  const was = [seen[BOX_KEY], seen[BOX_WAS]].filter((t) => typeof t === 'string' && t && t !== boxText);
   for (const x of list) {
-    if (typeof x.alert !== 'string' || !x.alert) continue;
-    const text = wellFormed(x.alert.trim().slice(0, ALERT_MAX));
+    const a = typeof x.alert === 'string' ? x.alert.trim() : '';
+    const b = typeof x.box_alert === 'string' && x.box_alert.trim() ? x.box_alert.trim() : boxRaw;
+    let own = lessBox(a, b);
+    // an older kit still folding a box text that has since cleared or changed: it comes off too, and
+    // is remembered while any project still carries it
+    for (const t of was) {
+      const less = lessBox(own, t);
+      if (less !== own) { next[BOX_WAS] = t; own = less; }
+    }
+    if (!own) continue;
+    const text = wellFormed(own.slice(0, ALERT_MAX));
     if (!text) continue;
     next[x.root] = text;
     if (seen[x.root] !== text && !resting.has(`alert:${text}`)) (fresh.get(text) ?? fresh.set(text, []).get(text)).push(wellFormed(String(x.name ?? x.root).slice(0, 80)));
   }
-  let messages = [...fresh.entries()].map(([text, names]) => ({ title: `Box alert (${names.join(', ').slice(0, 80)})`, body: text, tag: wellFormed(`devteam-alert-${crypto.createHash('sha1').update(text).digest('hex').slice(0, 12)}`), url: '/' }));
+  let messages = [...fresh.entries()].map(([text, names]) => ({ title: names.length === 1 && names[0] === 'the box' ? 'Box alert' : `Alert (${names.join(', ').slice(0, 80)})`, body: text, tag: wellFormed(`devteam-alert-${crypto.createHash('sha1').update(text).digest('hex').slice(0, 12)}`), url: '/' }));
   const keys = [...fresh.keys()].map((t) => `alert:${t}`);
   if (messages.length > PUSH_BURST) messages = [{ title: `${messages.length} alerts on this box`, body: [...fresh.keys()].join(' · ').slice(0, ALERT_MAX), tag: 'devteam-alerts', url: '/' }];
   return { seen: next, messages, keys };
@@ -1729,6 +1761,26 @@ export function createGateway(opts = {}) {
   // there. So does this: each file goes to the box first, and then its path goes in by term.paste,
   // bracketed like any paste when the program in the pane has asked for that, to the focused pane.
   // No Enter, so the owner can add to the message. The drop is the owner's own act, on their page.
+  // ⌘⌥← and ⌘⌥→ (on a Mac; Ctrl+Alt+←/→ elsewhere) move to the previous or next tmux window, as they
+  // move between tabs elsewhere. The terminal types them as Ctrl+Alt+Shift+←/→ (xterm's \e[1;8D and
+  // \e[1;8C), which the box's .tmux.conf binds to previous-window and next-window: no shell or agent
+  // uses that chord, and tmux needs no prefix for it. On a Mac nothing is lost: terminal programs don't
+  // use ⌘⌥←/→. Off a Mac, Ctrl+Alt+←/→ is taken from the pane: emacs -nw's C-M-left/right (sexp
+  // movement) and any readline or vim binding of \e[1;7D/\e[1;7C no longer reach it, and on Windows
+  // AltGr+←/→ (which reports Ctrl+Alt) is caught too; Ctrl+Alt+Shift+←/→ itself still reaches tmux.
+  // A browser or desktop that keeps the chord for its own tabs or workspaces takes it before the page,
+  // and is left to; nothing else is caught.
+  const TERM_KEYS = Buffer.from(`<script>(() => {
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+  addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    if (!e.altKey || e.shiftKey || !(mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) return;
+    if (!window.term || typeof window.term.input !== 'function') return;
+    e.preventDefault();
+    e.stopPropagation();
+    window.term.input(e.key === 'ArrowLeft' ? '\\x1b[1;8D' : '\\x1b[1;8C');
+  }, { capture: true });
+})();</script>`);
   const TERM_DROP = Buffer.from(`<script>(() => {
   const MAX = ${uploadMax};
   const shellQuote = ${shellQuote};
@@ -1845,8 +1897,8 @@ export function createGateway(opts = {}) {
   // The page the terminal is served, and a name for it that changes only when its bytes do.
   const termPage = () => {
     const html = ttydPage();
-    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]))).slice(0, 22);
-    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]) };
+    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH, TERM_KEYS]))).slice(0, 22);
+    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH, TERM_KEYS]) };
   };
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 

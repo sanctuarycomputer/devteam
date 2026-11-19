@@ -1675,6 +1675,10 @@
             "type": "string",
             "description": "What materially changed since the owner answered the same decision, when a question asks it again (ask --new-because). The owner reads it first: \"Asked again because: …\"."
           },
+          "no_default": {
+            "type": "string",
+            "description": "Why a question that would otherwise carry a default can't go ahead on the owner's silence (ask --no-default). The owner reads it with the question."
+          },
           "owner_said": {
             "type": "string",
             "description": "The owner's words, verbatim, when a question asks again after their no. Checked against the transcript like a chat answer's said."

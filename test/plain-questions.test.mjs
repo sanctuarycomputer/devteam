@@ -166,3 +166,46 @@ test('defaults: only at the deadline, only from rung 2 as asked, never on a door
     refused(['ask', '--class', 'gate-change', '--question', 'Drop the lint check on generated files?', '--recommendation', 'yes', '--default', 'yes'], /gate-change is the owner's .*no --default/, 'an owner-only class');
   } finally { F.done(); }
 });
+
+// A question with no default stops the work behind it until the owner answers (supervisor.md §6):
+// ask refuses a clarification, or an owner-decision on a rung-2 class, without --default, unless
+// --no-default says why silence can't go ahead; never where a default isn't allowed anyway.
+test('ask: a default where one is allowed, or --no-default with the reason', () => {
+  const F = fleetFixture('needs-default');
+  const { old, ok, run } = F;
+  try {
+    const refused = (args, re, why) => { const r = run(old, ['ask', ...args], SUP); assert.notEqual(r.status, 0, why); assert.match(r.err, re, why); };
+    const asked = (args, why) => { const r = run(old, ['ask', ...args], SUP); assert.equal(r.status, 0, `${why}: ${r.err}`); return json(ok(old, ['log', '--id', r.out.trim(), '--json']))[0]; };
+    // refused, with what to do
+    refused(['--kind', 'clarification', '--question', 'Do refunds go back to the original card?', '--recommendation', 'yes'], /a clarification needs --default: the choice you would act on .*--no-default "<why/, 'a clarification');
+    refused(['--class', 'release-scope', '--reasons', 'below-rung', '--question', 'Move the reports story to the next release?', '--recommendation', 'yes'], /release-scope is on rung 2 \(ask with a default\), so this question needs --default/, 'an owner-decision on rung 2');
+    refused(['--kind', 'clarification', '--class', 'priority-change', '--question', 'Does search matter more than export?', '--recommendation', 'yes'], /needs --default/, 'a clarification in a rung-2 class');
+    // with a default it goes, and the default gets its deadline
+    const d = asked(['--kind', 'clarification', '--question', 'Do refunds go back to the original card?', '--recommendation', 'yes', '--default', 'yes'], 'with a default');
+    assert.equal(d.default, 'yes');
+    assert.ok(d.deadline, 'a default has a deadline');
+    // the escape hatch: recorded on the question and shown with it
+    const n = asked(['--class', 'release-scope', '--reasons', 'below-rung', '--question', 'Move the reports story to the next release?', '--recommendation', 'yes', '--no-default', 'the worker is holding for a person'], '--no-default');
+    assert.equal(n.no_default, 'the worker is holding for a person');
+    assert.equal(json(ok(old, ['questions', '--id', n.id, '--json']))[0].no_default, 'the worker is holding for a person');
+    assert.match(ok(old, ['questions', '--id', n.id]), /no default, because: the worker is holding for a person/);
+    refused(['--kind', 'clarification', '--question', 'Are refunds partial?', '--no-default', '  '], /--no-default says why .*can't be blank/, 'a blank reason');
+    refused(['--kind', 'clarification', '--question', 'Are refunds partial?', '--default', 'no', '--no-default', 'because'], /--default or --no-default, not both/, 'both');
+    // exempt: silence is never a yes, the class is below rung 2, the kinds whose job is to ask, a plain owner-decision
+    const none = (args, why) => { const q = asked(args, why); assert.equal(q.default, undefined, why); assert.equal(q.no_default, undefined, why); };
+    none(['--kind', 'clarification', '--reasons', 'owner-only', '--question', 'Do you want card refunds at all?', '--recommendation', 'yes'], 'reason owner-only');
+    none(['--kind', 'clarification', '--reasons', 'one-way-door', '--question', 'Can the card data leave the vault?', '--recommendation', 'no'], 'reason one-way-door');
+    none(['--class', 'gate-change', '--question', 'Drop the lint check on generated files?', '--recommendation', 'yes'], 'an owner-only class');
+    none(['--class', 'release-production', '--reasons', 'below-rung', '--question', 'Ship version 2 to production?', '--recommendation', 'yes'], 'a class on rung 1');
+    none(['--kind', 'clarification', '--class', 'release-production', '--question', 'Is version 2 meant for every customer?', '--recommendation', 'yes'], 'a clarification in a class on rung 1');
+    none(['--kind', 'one-way-door', '--question', 'Switch the database to Postgres?', '--recommendation', 'yes'], 'a one-way door');
+    none(['--kind', 'owner-action', '--question', 'Please renew the certificate'], 'an owner-action');
+    none(['--question', 'Should the billing page ship this week?', '--recommendation', 'yes'], 'an owner-decision in no ladder class');
+    // where nothing needs one, --no-default is left off, with a warning
+    const r = run(old, ['ask', '--question', 'Should the invoices page ship this week?', '--recommendation', 'yes', '--no-default', 'because'], SUP);
+    assert.equal(r.status, 0, r.err);
+    assert.match(r.err, /--no-default is for a question that would otherwise need a --default; this one doesn't, so it is left off/);
+    assert.equal(json(ok(old, ['log', '--id', r.out.trim(), '--json']))[0].no_default, undefined);
+    assert.equal(run(old, ['log-check']).status, 0, 'the lines it wrote pass log-check');
+  } finally { F.done(); }
+});
