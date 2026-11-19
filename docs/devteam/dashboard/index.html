@@ -2463,7 +2463,7 @@ function linkify(text) {
   // branch or a filename (ticket/<id>, <id>/x.md, docs/<id>.md).
   const h = esc(text ?? '');
   const ids = [...ticketMap().keys()].sort((a, b) => b.length - a.length);
-  const DOC = String.raw`(?<![^\s(\[\x7b,;>])(?<!&amp;)(?:\.\.\/)?[A-Za-z_.][\w.-]*(?:\/[\w.-]+)*\/[\w.-]*\.[A-Za-z][A-Za-z0-9]*(?![\w\/-])(?: (?:on (?:(?:ticket|plan)\/[\w.-]*[A-Za-z0-9]|main)|at [0-9a-f]{40})(?![\w\/-]|\.\w))?`;
+  const DOC = String.raw`(?<![^\s(\[\x7b,;>])(?<!&amp;|\w&#39;)(?:\.\.\/)?[A-Za-z_.][\w.-]*(?:\/[\w.-]+)*\/[\w.-]*\.[A-Za-z][A-Za-z0-9]*(?![\w\/-]|\.\w)(?: (?:on (?:(?:ticket|plan)\/[\w.-]*[A-Za-z0-9]|main)|at [0-9a-f]{40})(?![\w\/-]|\.\w))?`;
   const parts = [
     String.raw`\bq-\d{8}-\d{9}-[a-z0-9-]+`,
     String.raw`\b[gkapmodt]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
@@ -2808,6 +2808,7 @@ function repoDocHref(path, ref) {
   const name = (r) => String(r ?? '').replace(/\/+$/, '').replace(/\.git$/, '').split(/[/:]/).pop().toLowerCase();
   const link = (DATA?.library?.links || []).find((x) => x?.kind === 'repo' && (String(x.id).toLowerCase() === dir.toLowerCase() || (x.remote && name(x.remote) === dir.toLowerCase())));
   if (!link) return null;
+  if (ref != null && (typeof ref !== 'string' || ref.split('/').some((s) => !s || s === '.' || s === '..'))) return null;
   const tid = /^ticket\/(.+)$/.exec(ref ?? '')?.[1];
   const t = tid ? ticketMap().get(tid) : null;
   const at = t?.merge_sha && t.repo === link.id ? t.merge_sha : ref || null;

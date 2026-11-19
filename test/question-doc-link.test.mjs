@@ -133,7 +133,7 @@ test('what linkify did before stays: a bare path is text, other ids still link, 
   assert.equal(linkify(`at ${SHA_C}`), `at <code>${SHA_C.slice(0, 12)}</code>`);
   assert.equal(linkify('<b>x</b> & docs/x.md'), '&lt;b&gt;x&lt;/b&gt; &amp; docs/x.md');
   // a path inside a URL's query, an address, or numbers is not a doc
-  for (const s of ['https://x.example/?a=1&b=console/docs/x.md', 'see ?a=1&console/docs/x.md on main', 'mail ops@console/x.md', 'about 1/2.5 on main', 'see console/docs/x.md-old']) assert.equal(anchors(linkify(s)).length, 0, `no link in "${s}": ${linkify(s)}`);
+  for (const s of ['https://x.example/?a=1&b=console/docs/x.md', 'see ?a=1&console/docs/x.md on main', 'mail ops@console/x.md', 'about 1/2.5 on main', 'see console/docs/x.md-old', 'see console/notes.md.2 and console/x.md.bak-old', "it's/x.md on main"]) assert.equal(anchors(linkify(s)).length, 0, `no link in "${s}": ${linkify(s)}`);
   // a path left as text keeps the ids inside it that link today
   assert.match(linkify('see q-20261119-143912078-supervisor/notes.md'), /href="#q\/q-20261119-143912078-supervisor"/);
 });
@@ -165,6 +165,14 @@ test('fileHref: a link into a GitHub repo link is its blob URL; every other link
   assert.equal(fileHref({ title: 'The design', path: 'docs/devteam/project/designs/x.md' }), '#file?path=docs%2Fdevteam%2Fproject%2Fdesigns%2Fx.md&title=The+design');
   assert.equal(fileHref({ title: 'Spec', path: 'docs/spec.md', ref: 'ticket/c-1', repo: 'console' }), '#file?path=docs%2Fspec.md&ref=ticket%2Fc-1&repo=console&title=Spec');
   assert.equal(fileHref({ path: 'docs/x.md', ref: 'ticket/kit-12' }), '#file?path=docs%2Fx.md&ref=ticket%2Fkit-12&title=docs%2Fx.md');
+  // every GitHub remote form the spec names
+  for (const remote of ['https://github.com/acme/web.git', 'https://github.com/acme/web', 'ssh://git@github.com/acme/web.git', 'git@github.com:acme/web']) {
+    const d = dashboard({ ...DATA, library: { links: [{ id: 'web', kind: 'repo', remote }] } });
+    assert.equal(d.fileHref({ path: 'web/x.md', ref: 'main' }), 'https://github.com/acme/web/blob/main/x.md', remote);
+  }
+  // a ref that is no ref (not a string, or a . or .. segment) is never put in a URL: the peek, as before
+  assert.equal(fileHref({ path: 'console/x.md', ref: 42 }), '#file?path=console%2Fx.md&ref=42&title=console%2Fx.md');
+  assert.equal(fileHref({ path: 'console/x.md', ref: '../../other/repo/blob/main' }), '#file?path=console%2Fx.md&ref=..%2F..%2Fother%2Frepo%2Fblob%2Fmain&title=console%2Fx.md');
   // no DATA yet (the first paint): as before
   const bare = dashboard({});
   assert.equal(bare.fileHref({ path: 'console/README.md' }), '#file?path=console%2FREADME.md&title=console%2FREADME.md');
