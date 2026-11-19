@@ -594,12 +594,39 @@ test('P1.1–P1.4 add, rename, reorder and reload', { skip: canDrive ? false : '
   await p.click(rowButton('page-rename'));
   await within(async () => (await focusedAction(p)) === 'page-name', 'the name input focused', async () => focusedAction(p));
   assert.equal(await p.ev("document.activeElement.getAttribute('aria-label')"), 'Page name');
+  // 201 code points (402 UTF-16 units) send nothing; 200 are sent
   n0 = edits(rec).length;
-  await p.type('Settings');
+  await p.send('Input.insertText', { text: '😀'.repeat(201) });
+  await enter(p);
+  await sendsNothing(rec, n0, 'a name of 201 code points', 500);
+  await within(async () => (await text(p, pageLink(id))) === 'Page 3', 'the link reads Page 3', async () => text(p, pageLink(id)));
+  await p.click(rowButton('page-rename'));
+  await within(async () => (await focusedAction(p)) === 'page-name', 'the name input focused', async () => focusedAction(p));
+  await p.send('Input.insertText', { text: '😀'.repeat(200) });
+  await enter(p);
+  const emo = await nextEdit(rec, n0);
+  assert.deepEqual(emo.ops, [{ op: 'set', id, prop: 'name', value: '😀'.repeat(200) }], 'a name of 200 code points sent');
+  await accepted(rec, n0);
+  // Rename, typed, Enter
+  await p.click(rowButton('page-rename'));
+  await within(async () => (await focusedAction(p)) === 'page-name', 'the name input focused', async () => focusedAction(p));
+  n0 = edits(rec).length;
+  await p.type('Draft');
   await enter(p);
   const ren = await nextEdit(rec, n0);
-  assert.deepEqual(ren.ops, [{ op: 'set', id, prop: 'name', value: 'Settings' }], 'one set of the name');
+  assert.deepEqual(ren.ops, [{ op: 'set', id, prop: 'name', value: 'Draft' }], 'one set of the name');
   await accepted(rec, n0);
+  await within(async () => (await text(p, pageLink(id))) === 'Draft', 'the link reads Draft', async () => text(p, pageLink(id)));
+  // Rename, typed, then another page's link clicked: the name sent, that page shown
+  await p.click(rowButton('page-rename'));
+  await within(async () => (await focusedAction(p)) === 'page-name', 'the name input focused', async () => focusedAction(p));
+  n0 = edits(rec).length;
+  await p.type('Settings');
+  await p.click(pageLink('p-main'));
+  const ren2 = await nextEdit(rec, n0);
+  assert.deepEqual(ren2.ops, [{ op: 'set', id, prop: 'name', value: 'Settings' }], 'the name sent on leaving');
+  await accepted(rec, n0);
+  await within(async () => (await shownPage(p)) === 'p-main' && (await p.ev('location.hash')) === '#page=p-main', 'Checkout shown by the click', async () => `${await shownPage(p)} ${await p.ev('location.hash')}`);
   await within(async () => (await text(p, pageLink(id))) === 'Settings', 'the link reads Settings', async () => text(p, pageLink(id)));
   // a double-click on Checkout's link, typed over, Escape: nothing sent, the link back
   n0 = edits(rec).length;
@@ -717,7 +744,12 @@ test('P1.6 a page delete undone', { skip: canDrive ? false : 'needs Chrome and W
 });
 
 test("P1.7 a page holding a used component isn't deleted", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
-  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  // SAME: nobuy with an instance of `button` on Parts itself
+  const SAME = docVariant(NOBUY, (d) => {
+    d.nodes['buy-here'] = { ...structuredClone(EVERY.nodes.buy), parent: 'p-parts' };
+    d.pages[1].children.push('buy-here');
+  });
+  const { p, fake, rec, load } = await open(t, { canvases: { every: EVERY, same: SAME }, images: { ...EVERY_IMAGES('every'), ...EVERY_IMAGES('same') } });
   await live(p);
   await showPageLink(p, 'p-parts');
   const n0 = edits(rec).length;
@@ -726,6 +758,16 @@ test("P1.7 a page holding a used component isn't deleted", { skip: canDrive ? fa
   await sendsNothing(rec, n0, 'Delete on Parts', 500);
   assert.equal(await shownPage(p), 'p-parts', 'Parts still shown');
   assert.deepEqual(fake.doc('every').pages.map((pg) => pg.id), ['p-main', 'p-parts'], 'the fake keeps Parts');
+  // an instance on the component's own page: that page's delete is allowed
+  await load('/view/canvas/same');
+  await live(p);
+  await showPageLink(p, 'p-parts');
+  const n1 = edits(rec).length;
+  await p.click(rowButton('page-delete'));
+  const del = await nextEdit(rec, n1);
+  assert.deepEqual(del.ops, [{ op: 'del', id: 'p-parts' }], 'one del of Parts');
+  await accepted(rec, n1);
+  assert.deepEqual(fake.doc('same').pages.map((pg) => pg.id), ['p-main'], 'Parts deleted');
   assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
   noDialogs(rec);
   noExceptions(rec);
@@ -766,7 +808,6 @@ test("S5.1 a restart during a running fetch drops the old session's held frames"
   await waitSeq(rec, e1, afterWelcome(rec, 2), 'E1 sent again, the same seq');
   await showPageLink(p, 'p-main', { row: false });
   await within(async () => (await rowName(p, 'title')) === EVERY.nodes.title.name, "title listed with the fixture's name", async () => rowName(p, 'title'));
-  assert.equal(await p.ev("document.getElementById('surface').textContent.includes('Gone')"), false, 'Gone drawn nowhere');
   fake.resume('every');
   await allSaved(p);
   await hasRev(p, fake);

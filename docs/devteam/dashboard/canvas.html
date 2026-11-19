@@ -431,7 +431,13 @@
       if (e.key === 'Enter') { e.preventDefault(); close(true); }
       else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(false); }
     });
-    inp.addEventListener('blur', () => close(true));
+    // left for a page's link: the rebuild replaces that link under the click, so its page is shown here
+    inp.addEventListener('blur', (e) => {
+      const to = e.relatedTarget instanceof Element ? e.relatedTarget.closest('#pages a[data-page]') : null;
+      const go = to ? to.dataset.page : null;
+      close(true);
+      if (go !== null && pageById(go)) goPage(go);
+    });
     return inp;
   }
 
