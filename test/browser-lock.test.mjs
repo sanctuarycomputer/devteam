@@ -86,7 +86,12 @@ parentPort.on('message', async (m) => {
   const env = (n) => (Object.prototype.hasOwnProperty.call(m.env, n) ? m.env[n] : undefined);
   const alive = (pid) => { if (!(pid > 0)) return false; for (let i = 0; i < live.length; i++) if (Atomics.load(live, i) === pid) return true; return false; };
   const sleep = async () => { park('sleep', ''); };
-  const die = (msg) => { throw new Error(msg); };
+  // die throws here, where devteam.mjs's exits: so a prepared folder of this starter's still present
+  // when it dies is reported, since in production nothing after die would remove it (task-2 T2-2).
+  const die = (msg) => {
+    const mine = fs.readdirSync(path.dirname(m.file)).filter((n) => n.startsWith(\`\${path.basename(m.file)}.lock.new.\${m.pid}-\`));
+    throw new Error(mine.length ? \`died with its prepared folder still present: \${mine.join(' ')}\` : msg);
+  };
   try {
     const lockFn = new Function('fs', 'path', 'crypto', 'process', 'browserTestEnv', 'browserAlive', 'browserSleep', 'die', "'use strict';\\n" + m.src + '\\nreturn browserStartLock;')(pfs, path, crypto, proc, env, alive, sleep, die);
     await lockFn(m.file, async () => { park('enter', ''); park('exit', ''); });
@@ -406,6 +411,22 @@ unit('a release leaves a lock whose owner changed', async (dir) => {
   const script = [{ who: 0, until: 'enter' }, { who: 0, until: '*' }, (c) => fs.writeFileSync(path.join(c.lock, 'owner'), other)];
   check(await run({ dir, n: 1, script, livePids: [LIVE_OWNER] }), { left: ['start.lock'] });
   assert.equal(ownerOf(dir), other);
+});
+
+// A's lock ages past 120 s inside fn; A's release reads its own token and stops before its claim; B
+// takes the stale lock and enters fn; A's release then claims and looks again: it must find B's token
+// and leave B's lock where it is, or C gets in beside B (task-2 T2-1).
+unit('a release whose lock was taken while it reached its claim leaves the taker\'s lock', async (dir) => {
+  const script = [
+    { who: 0, until: 'enter' },
+    (c) => back(path.join(c.lock, 'owner')),
+    { who: 0, until: '*' }, { who: 0, until: '*' },
+    { who: 0, until: 'symlinkSync' },
+    { who: 1, until: 'enter' },
+    { who: 0, until: 'sleep' },
+    { who: 2, until: 'enter' },
+  ];
+  check(await run({ dir, n: 3, script }), {});
 });
 
 unit('an ownerless lock over 120 s old with other files in it is taken', async (dir) => {
