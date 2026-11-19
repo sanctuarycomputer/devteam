@@ -189,6 +189,12 @@ hygiene.push(['F1 the prefs are rewritten', async (h) => {
 hygiene.push(['F2 the session files go', async (h) => {
   await started(h);
   await opened(h, `${site.origin}/record`);
+  // the spec's real form: a marker typed into the page's field, so the session holds a form state
+  const snap = await cli(h, ['snapshot']);
+  const ref = /^(e\d+) textbox ""/m.exec(snap.out)?.[1];
+  assert.ok(ref, "/record's field has a ref");
+  const typed = await cli(h, ['type', ref, 'zq-marker']);
+  assert.equal(typed.status, 0, typed.err);
   await until(() => sessionsWritten(h), 'Chrome writes a session file');
   await crash(h, { chrome: true });
   const d = path.join(h.profile, 'Default');
@@ -421,6 +427,22 @@ test('Review Focus 5: a stale state.json starts afresh', { skip, timeout: 120000
   assert.equal(s.running, false);
   await started(h);
   assert.deepEqual(validate('state', readState(h)), []);
+  await stopped(h);
+});
+
+// T4-1: the hook names a file; the first daemon to find it missing makes it and fails its view-port
+// bind with EADDRINUSE, as when another project's preview takes the port first. start retries.
+test('T4-1 a view port taken before the daemon binds it: start retries', { skip, timeout: 120000 }, async () => {
+  const marker = path.join(tmp, 'bind-failed');
+  await started(h, { DEVTEAM_TEST_BROWSER_BIND_FAIL: marker });
+  assert.ok(fs.existsSync(marker), 'the first daemon failed its bind');
+  assert.equal(devWindows(h).length, 1, 'one dev~ window');
+  const recs = fs.readdirSync(path.join(h.old, 'docs', 'devteam', 'run', 'previews')).filter((n) => n.endsWith('.json')).map((n) => JSON.parse(fs.readFileSync(path.join(h.old, 'docs', 'devteam', 'run', 'previews', n), 'utf8'))).filter((r) => r.label === 'browser');
+  assert.equal(recs.length, 1, 'one browser preview record');
+  const s = readState(h);
+  assert.equal(recs[0].port, s.view_port);
+  assert.equal((await statusJson(h)).running, true, 'the daemon answers');
+  assert.equal((await fetch(`http://127.0.0.1:${s.view_port}/`)).status, 503, 'the daemon listens on the view port');
   await stopped(h);
 });
 

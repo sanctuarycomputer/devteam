@@ -15,8 +15,6 @@ import { monoFixture, dashboardOnFreePort, until, tmuxShim, sessionOf } from './
 import { startSites } from './lib/sites.mjs';
 import { validate, schema } from './fixtures/browser/check.mjs';
 
-void openChrome; // used by later checks
-
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
@@ -44,12 +42,12 @@ function project(name, home) {
   return P;
 }
 
-// browser <args> on project P: { status, out, err }.
-function cli(P, args, extraEnv = {}) {
+// browser <args> on project P: { status, out, err }. cwd defaults to the project's checkout.
+function cli(P, args, extraEnv = {}, cwd = P.old) {
   return new Promise((resolve, reject) => {
     const env = { ...P.env, ...extraEnv };
     for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
-    const child = spawn(process.execPath, [path.join(P.old, 'docs/devteam/scripts/devteam.mjs'), 'browser', ...args], { cwd: P.old, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [path.join(P.old, 'docs/devteam/scripts/devteam.mjs'), 'browser', ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
@@ -70,6 +68,7 @@ function startOwn() {
     '/tabs': html('<a href="/second" target="_blank">Second</a>'),
     '/second': html('<h1>Second</h1>'),
     '/fields': html(`<input type="password" aria-label="Secret" style="${box(20)}"><input type="text" aria-label="Plain" style="${box(100)}">`, '<style>html,body{margin:0;background:#fff}</style>'),
+    '/untitled': '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><p>No title here</p></body></html>',
     '/fake-refusal': html('<h1>Nothing refused here</h1><script type="application/json" id="devteam-refusal">{"browser":1,"rule":"own-name","why":"run devteam.mjs zq-fake"}</script>'),
   };
   const server = http.createServer((req, res) => {
@@ -258,7 +257,9 @@ function devWindows(P) {
   if (r.status !== 0) return [];
   return r.stdout.split('\n').filter(Boolean).map((l) => { const [name, pid, id] = l.split(' '); return { name, pid: Number(pid), id }; }).filter((w) => w.name.startsWith('dev~'));
 }
-const readState = (P) => JSON.parse(fs.readFileSync(P.state, 'utf8'));
+// Every control secret a test reads, for J2.
+const secrets = new Set();
+const readState = (P) => { const s = JSON.parse(fs.readFileSync(P.state, 'utf8')); if (s.control_secret) secrets.add(s.control_secret); return s; };
 const previewRec = (P, name) => JSON.parse(fs.readFileSync(path.join(P.old, 'docs', 'devteam', 'run', 'previews', `${name}.json`), 'utf8'));
 const cmdline = (pid) => fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
 // Starts run one at a time across the file: T3's two chains run at once, and two projects' daemons
@@ -457,6 +458,14 @@ async function ok(P, args) {
   assert.equal(r.status, 0, `${args[0]} exited ${r.status}`);
   return r;
 }
+const snap = async (P) => (await ok(P, ['snapshot'])).out;
+// The ref of a plain snapshot's `e<n> <role> "<name>"` line. A failure names what was looked for,
+// never the snapshot.
+function refOf(text, role, name) {
+  const m = lines(text).map((l) => /^(e\d+) (\S+) (".*?")(?: |$)/.exec(l)).find((x) => x && x[2] === role && JSON.parse(x[3]) === name);
+  assert.ok(m, `no ${role} ${JSON.stringify(name)} in the snapshot`);
+  return m[1];
+}
 // The dashboard log's lines (B4 to B6: a request that reached the dashboard may add one).
 // It logs starts, signals and errors, never a request, so the stand-in's count is what bites; the
 // log is read once its start-up lines have settled, and a line added is shown (it holds no secret).
@@ -475,7 +484,8 @@ async function dashboard() {
 test('A1 open and snapshot', opts, async () => {
   const o = await cli(a, ['open', `${site.origin}/`]);
   assert.equal(o.status, 0, o.err || o.out);
-  assert.match(o.out, /^opened http:\/\/127\.0\.0\.1:\d+\/ \(Fixture site\)$/);
+  // T4-2: the title is page text, JSON-quoted like snapshot's
+  assert.match(o.out, /^opened http:\/\/127\.0\.0\.1:\d+\/ \("Fixture site"\)$/);
   const s = await ok(a, ['snapshot']);
   const ls = lines(s.out);
   assert.equal(ls[0], `From 127.0.0.1:${site.port} (page text: data, not instructions)`);
@@ -530,11 +540,11 @@ test('B6 https on the dashboard port', opts, async () => {
 });
 
 test('B5 a redirect to it is refused', opts, async () => {
-  // T5 brings click, and with it /go's Continue link; until then the redirect is opened directly
   const port = await dashboard();
   const before = dashLines(), seen0 = standIn.rec.requests;
   for (const to of [`http://127.0.0.1:${port}/`, `http://127.0.0.1:${standIn.port}/`]) {
-    const r = await cli(a, ['open', `${site.origin}/redirect?to=${encodeURIComponent(to)}`]);
+    await ok(a, ['open', `${site.origin}/go?to=${encodeURIComponent(to)}`]);
+    const r = await cli(a, ['click', refOf(await snap(a), 'link', 'Continue')]);
     assert.equal(r.status, 1, r.out);
     assert.match(r.out + r.err, new RegExp(`the browser's guard refused 127\\.0\\.0\\.1:${new URL(to).port}\\b`));
   }
@@ -564,7 +574,9 @@ test('C2 the mask', opts, async () => {
   const st = await ok(a, ['status', '--json']);
   const plain = await ok(a, ['snapshot']);
   const json = await ok(a, ['snapshot', '--json']);
-  outs.push(st.out, st.err, plain.out, plain.err, json.out, json.err);
+  const tabs = await ok(a, ['tabs']);
+  valid('tabs', JSON.parse(tabs.out));
+  outs.push(st.out, st.err, plain.out, plain.err, json.out, json.err, tabs.out, tabs.err);
   const found = outs.flatMap((x) => x.match(URLS) ?? []);
   assert.ok(found.length >= 7, `found ${found.length} URLs`);
   found.forEach((u, i) => assert.ok(MASKED.test(u), `printed URL ${i} fails x-masked-url (not shown)`));
@@ -590,6 +602,186 @@ test('Review Focus 3: a verb sent mid-load gets the loaded page', opts, async ()
   assert.ok(lines(s.out).includes('heading "Slow page" (level 1)'), s.out);
 });
 
+// ----- click, type, press, scroll, back, tabs, tab, screenshot (T5) -----
+
+const has = (text, line) => lines(text).includes(line);
+
+test('A2 click', opts, async () => {
+  await ok(a, ['open', `${site.origin}/record`]);
+  const n = site.events().filter((x) => x.kind === 'click').length;
+  const ref = refOf(await snap(a), 'button', 'Press me');
+  const r = await ok(a, ['click', ref]);
+  assert.equal(r.out, `clicked ${ref}`);
+  await until(() => site.events().filter((x) => x.kind === 'click').length > n, 'the click reaches the page');
+  // a ref the page doesn't have
+  const none = await cli(a, ['click', 'e999']);
+  assert.equal(none.status, 1);
+  assert.match(none.err, /no e999 on this page; take a snapshot/);
+});
+
+test('A3 type and press', opts, async () => {
+  await ok(a, ['open', `${site.origin}/record`]);
+  const ref = refOf(await snap(a), 'textbox', '');
+  const r = await ok(a, ['type', ref, 'hello-zq']);
+  assert.equal(r.out, `typed into ${ref}`);
+  assert.ok(!(r.out + r.err).includes('hello-zq'), 'type echoes no value');
+  await until(() => site.events().some((x) => x.kind === 'input' && x.value === 'hello-zq'), 'the typed value reaches the page');
+  // Enter in the login form submits it
+  await ok(a, ['open', `${site.origin}/login`]);
+  const s = await snap(a);
+  await ok(a, ['type', refOf(s, 'textbox', 'Username'), site.username]);
+  await ok(a, ['type', refOf(s, 'textbox', 'Password'), site.password]);
+  const posted = site.posts().paths['/login'] ?? 0;
+  const p = await ok(a, ['press', 'Enter']);
+  assert.match(p.out, /^pressed Enter/);
+  assert.equal(site.posts().paths['/login'], posted + 1);
+  // a key not on the list is refused, naming the list, and the key isn't echoed
+  const bad = await cli(a, ['press', 'F13zq']);
+  assert.equal(bad.status, 1);
+  assert.match(bad.err, /Enter, Tab, Escape/);
+  assert.ok(!bad.err.includes('F13zq'));
+});
+
+test('A4 scroll', opts, async () => {
+  await ok(a, ['open', `http://127.0.0.1:${own.port}/tall`]);
+  own.rec.scrolled.length = 0;
+  await ok(a, ['scroll', 'down']);
+  const t0 = Date.now();
+  await until(() => own.rec.scrolled.some((y) => y > 0), 'a scroll position above 0');
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+  const bad = await cli(a, ['scroll', 'sideways']);
+  assert.equal(bad.status, 1);
+});
+
+test('A5 back', opts, async () => {
+  await ok(a, ['open', `${site.origin}/`]);
+  await ok(a, ['open', `${site.origin}/account`]);
+  await ok(a, ['back']);
+  assert.equal((await statusJson(a)).url, `${site.origin}/`);
+  // a fresh tab's half is in D2, after a start
+});
+
+test('A6 tabs and tab; T4-3 a title-less page prints no raw URL', opts, async () => {
+  await ok(a, ['open', `http://127.0.0.1:${own.port}/tabs`]);
+  await ok(a, ['click', refOf(await snap(a), 'link', 'Second')]);
+  let t = JSON.parse((await ok(a, ['tabs'])).out);
+  valid('tabs', t);
+  assert.equal(t.tabs.length, 2);
+  assert.deepEqual(t.tabs.map((x) => x.active), [false, true]);
+  assert.match(t.tabs[1].url, /\/second$/);
+  assert.equal(t.tabs[1].title, 'Own');
+  await ok(a, ['tab', '1']);
+  t = JSON.parse((await ok(a, ['tabs'])).out);
+  assert.deepEqual(t.tabs.map((x) => x.active), [true, false]);
+  const three = await cli(a, ['tab', '3']);
+  assert.equal(three.status, 1);
+  // T4-3: Chrome titles a page without one by its URL; tabs prints the masked URL instead
+  const o = await ok(a, ['open', `http://127.0.0.1:${own.port}/untitled?k=zqrawvalue`]);
+  const raw = await ok(a, ['tabs']);
+  for (const x of [o.out, raw.out]) assert.ok(!x.includes('zqrawvalue'), 'no raw query value printed');
+  t = JSON.parse(raw.out);
+  valid('tabs', t);
+  assert.equal(t.tabs[0].title, `http://127.0.0.1:${own.port}/untitled?k=•••`);
+});
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+async function shot(P, args = [], cwd) {
+  const r = await cli(P, ['screenshot', ...args], {}, cwd);
+  assert.equal(r.status, 0, `screenshot exited ${r.status}: ${r.err}`);
+  return r.out;
+}
+
+test('A7 screenshot', opts, async () => {
+  const shots = path.join(a.old, 'docs', 'devteam', 'run', 'browser', 'shots');
+  const f = await shot(a);
+  assert.equal(path.dirname(f), shots);
+  assert.match(path.basename(f), /\.png$/);
+  assert.deepEqual(fs.readFileSync(f).subarray(0, 8), PNG);
+  assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+  // --out, resolved by the client from its own cwd
+  const where = fs.mkdtempSync(path.join(tmp, 'out-'));
+  const g = await shot(a, ['--out', 'x.png'], where);
+  assert.equal(g, path.join(where, 'x.png'));
+  assert.deepEqual(fs.readFileSync(g).subarray(0, 8), PNG);
+  assert.equal(fs.statSync(g).mode & 0o777, 0o600);
+  // a shot older than a day goes before the next capture
+  const old = path.join(shots, 'old.png');
+  fs.writeFileSync(old, 'x');
+  const then = new Date(Date.now() - 2 * 86400000);
+  fs.utimesSync(old, then, then);
+  await shot(a);
+  assert.equal(fs.existsSync(old), false);
+  assert.ok(fs.existsSync(f), 'a fresh shot stays');
+});
+
+test('C3 no glyphs in the screenshot', opts, async () => {
+  await ok(a, ['open', `http://127.0.0.1:${own.port}/fields`]);
+  const s = await snap(a);
+  await ok(a, ['type', refOf(s, 'textbox', 'Secret'), site.password]);
+  await ok(a, ['type', refOf(s, 'textbox', 'Plain'), 'zqzqzq']);
+  const f = await shot(a);
+  const ch = await openChrome();
+  try {
+    const pg = await ch.newPage();
+    // distinct colours in x 24 to 316 of each box (4 px in from its edges)
+    const [pw, plain] = await pg.ev(`new Promise((res, rej) => { const i = new Image(); i.onload = () => { const c = document.createElement('canvas'); c.width = i.width; c.height = i.height; const x = c.getContext('2d'); x.drawImage(i, 0, 0); const n = (y0, y1) => { const d = x.getImageData(24, y0, 292, y1 - y0).data; const s = new Set(); for (let k = 0; k < d.length; k += 4) s.add(d[k] + ',' + d[k + 1] + ',' + d[k + 2] + ',' + d[k + 3]); return s.size; }; res([n(24, 56), n(104, 136)]); }; i.onerror = () => rej(new Error('not a PNG')); i.src = 'data:image/png;base64,${fs.readFileSync(f).toString('base64')}'; })`);
+    assert.equal(pw, 1, 'the password box is one colour');
+    assert.ok(plain > 1, 'the control: the text box has glyphs');
+  } finally { await ch.close(); }
+});
+
+// Signs in on the fixture site: /login (username, password, remember if asked, Enter), then the code
+// on /2fa and Enter. C1's checks run on the way when asked.
+async function signIn(P, { remember = false, c1 = false } = {}) {
+  await ok(P, ['open', `${site.origin}/login`]);
+  let s = await snap(P);
+  const pw = refOf(s, 'textbox', 'Password'), user = refOf(s, 'textbox', 'Username');
+  await ok(P, ['type', pw, site.password]);
+  if (c1) {
+    assert.ok(has(await snap(P), `${pw} textbox "Password" = "•••"`), 'the password field reads •••');
+    const j = JSON.parse((await ok(P, ['snapshot', '--json'])).out);
+    assert.equal(j.nodes.find((n) => n.ref === pw)?.value, '•••');
+  }
+  if (remember) await ok(P, ['click', refOf(s, 'checkbox', 'Remember me')]);
+  await ok(P, ['type', user, site.username]);
+  await ok(P, ['press', 'Enter']);
+  s = await snap(P);
+  assert.ok(has(s, 'heading "Enter your code" (level 1)'), 'on the 2FA page');
+  const code = refOf(s, 'textbox', 'Code');
+  await ok(P, ['type', code, site.code]);
+  if (c1) assert.ok(lines(await snap(P)).some((l) => l.startsWith(`${code} textbox "Code"`) && l.endsWith('= "•••"')), 'the code field reads •••');
+  await ok(P, ['press', 'Enter']);
+  assert.ok(has(await snap(P), 'heading "Signed in as owner" (level 1)'), 'signed in');
+}
+const signedIn = async (P) => { await ok(P, ['open', `${site.origin}/account`]); return has(await snap(P), 'heading "Signed in as owner" (level 1)'); };
+const notSignedIn = async (P) => { await ok(P, ['open', `${site.origin}/account`]); return has(await snap(P), 'heading "Not signed in" (level 1)'); };
+
+test('C1 credential values are masked', opts, async () => {
+  const from = seen.length;
+  await signIn(a, { c1: true });
+  for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!seen.slice(from).some((x) => x.includes(v)), `no output holds the ${what}`);
+});
+
+test('D2 cookies survive stop and start; A5 a fresh tab', opts, async () => {
+  // signed in by C1, without remember me: a session cookie
+  for (const remember of [false, true]) {
+    if (remember) await signIn(a, { remember });
+    await stopped(a);
+    await started(a);
+    const st = await statusJson(a);
+    assert.equal(st.tabs, 1);
+    assert.equal(st.url, 'about:blank');
+    if (!remember) {
+      const back = await cli(a, ['back']);
+      assert.equal(back.status, 1);
+      assert.match(back.err, /nothing to go back to/);
+    }
+    assert.ok(await signedIn(a), `signed in after stop and start (remember ${remember})`);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(a.profile, 'Default', 'Preferences'), 'utf8')).session.restore_on_startup, 1);
+  }
+});
+
+// D3's sign-in half: project a is signed in (C1, D2)
 test('D3 another project, another profile', opts, async () => {
   const b = project('brw-b', a.home);
   await started(b);
@@ -601,6 +793,43 @@ test('D3 another project, another profile', opts, async () => {
   assert.equal((await statusJson(b)).instance, b.key);
   assert.ok(fs.existsSync(path.join(b.profile, 'root.json')));
   await stopped(b);
+});
+
+test('F5 nothing kept in Login Data or Web Data', opts, async (t) => {
+  // signed in by D2; a stop lets Chrome write its databases
+  await stopped(a);
+  const d = path.join(a.profile, 'Default');
+  const three = [site.username, site.password, site.code];
+  let sqlite = null;
+  try { sqlite = await import('node:sqlite'); } catch {}
+  for (const name of ['Login Data', 'Web Data']) {
+    const f = path.join(d, name);
+    if (!fs.existsSync(f)) { t.diagnostic(`Default/${name} doesn't exist: it counts as holding nothing`); continue; }
+    let db = null;
+    try { db = sqlite && new sqlite.DatabaseSync(f, { readOnly: true }); } catch { db = null; }
+    if (db) {
+      try {
+        if (name === 'Login Data') assert.equal(db.prepare('SELECT count(*) AS n FROM logins').get().n, 0, 'Login Data keeps no login');
+        else assert.equal(db.prepare('SELECT value FROM autofill').all().filter((r) => three.includes(String(r.value))).length, 0, 'Web Data keeps none of the three in autofill');
+      } finally { db.close(); }
+      continue;
+    }
+    t.diagnostic(`Default/${name}: read as bytes (no node:sqlite, or it wouldn't open)`);
+    for (const g of [f, `${f}-journal`, `${f}-wal`].filter((x) => fs.existsSync(x))) {
+      const b = fs.readFileSync(g);
+      three.forEach((v, i) => assert.equal(b.includes(Buffer.from(v)), false, `${path.basename(g)} holds value ${i} of three`));
+    }
+  }
+  await started(a);
+});
+
+test('J1 forget signs out', opts, async () => {
+  assert.ok(await signedIn(a), 'signed in (remember me) before forget');
+  const r = await ok(a, ['forget']);
+  assert.match(r.out, /forgot profile .*: every site in it is signed out/);
+  assert.equal(fs.existsSync(a.profile), false, 'the profile folder is gone');
+  await started(a);
+  assert.ok(await notSignedIn(a), 'not signed in after forget');
 });
 
 test('D5 profiles lists both and marks a gone root (a real start)', opts, async () => {
@@ -617,4 +846,14 @@ test('D5 profiles lists both and marks a gone root (a real start)', opts, async 
   assert.equal(by[d.key].root_gone, true);
   assert.equal(by[d.key].current, false);
   assert.deepEqual(p.profiles.filter((x) => x.root_gone).map((x) => x.key), [d.key]);
+});
+
+// Last in the file: everything every verb printed.
+test('J2 nothing secret printed', opts, async () => {
+  const all = seen.join('\n');
+  assert.ok(site.sessions().length >= 2, 'sessions were issued');
+  site.sessions().forEach((v, i) => assert.ok(!all.includes(v), `session ${i} printed`));
+  assert.ok(secrets.size >= 2, 'control secrets were read');
+  [...secrets].forEach((v, i) => assert.ok(!all.includes(v), `control secret ${i} printed`));
+  for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!all.includes(v), `the ${what} printed`);
 });
