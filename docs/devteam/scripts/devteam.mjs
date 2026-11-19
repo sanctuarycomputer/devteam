@@ -616,12 +616,14 @@ const SETTINGS_DEFAULTS = {
 // commands and what every gate checkout is seeded with decide what "passes"; the agent command
 // and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts,
 // upstream_sync whether syncs need the owner at all;
-// release is how a tag reaches production; project names every public link and the gateway's binding.
+// release is how a tag reaches production; project names every public link and the gateway's binding;
+// recurring is the jobs under Upkeep: every change is the owner's, entry by entry (recurringBindingFails).
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
+  recurring: 'recurring-edit',
 };
 // The supervisor's own settings the owner may ask for from the dashboard (an owner-setting act the
 // supervisor lands with settings set in its settings chore). Like OWNER_SETTINGS they apply as main
@@ -4315,7 +4317,13 @@ function cmdValidate() {
       let jobs;
       try { jobs = own == null ? undefined : JSON.parse(own).recurring; } catch { jobs = undefined; }
       if (jobs !== undefined && !isObj(jobs)) errors.push('settings recurring: an object of { "<name>": { kind, title, what, every, … } }');
-      else for (const [n, e] of Object.entries(jobs ?? {})) errors.push(...recurringEntryProblems(n, e));
+      else {
+        const probs = Object.entries(jobs ?? {}).flatMap(([n, e]) => recurringEntryProblems(n, e));
+        errors.push(...probs);
+        // the 100-runs-a-day cap, once every entry holds
+        const over = probs.length ? null : recurringRegistry.capProblem(jobs ?? {}, 'a check every n hours runs 24/n times, anything daily or slower once');
+        if (over) errors.push(over);
+      }
     }
     { const p = memoryCeilingProblem(s.machine_memory_ceiling); if (p) errors.push(p); }
     warnings.push(...reg.warnings);
@@ -7505,6 +7513,56 @@ function askLine({ thread, about } = {}) {
   if (kind === 'goal-definition' && cls) die('a goal-definition question has no --class: defining a goal is never delegated (reason goal-ambiguity)');
   // goal-change --order: one question proposing a whole goal order, applied by goal order --approved
   const orderAsked = goalOrderFlag(cls);
+  // recurring-edit: the exact job change only the owner's Yes approves, entry by entry
+  // (recurringBindingFails). --change is read here, before goalChangeFlag (which takes it only on a
+  // goal-change). The kit writes the approval lines into the context, and the Yes and No choices.
+  let recurringChange;
+  let recurringText;
+  if (cls === 'recurring-edit') {
+    const R = recurringRegistry;
+    const c = jsonFlag('change');
+    if (c === undefined) die('a recurring-edit question shows the exact change: --change \'{"recurring":{"<name>":{…} | null}}\'');
+    const extra = isObj(c) ? Object.keys(c).filter((k) => k !== 'recurring') : [];
+    if (extra.length) die(`--change for recurring-edit has only "recurring"; not ${extra.join(', ')}`);
+    if (!isObj(c) || !isObj(c.recurring) || !Object.keys(c.recurring).length) die('--change for recurring-edit is {"recurring":{"<name>":{…} | null}}, with at least one job');
+    const change = c.recurring;
+    // a stop's name is checked as an entry's is; an entry, whole
+    const probs = Object.entries(change).flatMap(([n, e]) => (e === null ? recurringEntryProblems(n, null).filter((p) => !p.startsWith(`settings recurring.${n}: an object`)) : recurringEntryProblems(n, e)));
+    if (probs.length) die(`--change for recurring-edit:\n  - ${probs.join('\n  - ')}`);
+    const main = mainSettings(null)?.recurring;
+    const onMain = isObj(main) ? main : {};
+    for (const [n, e] of Object.entries(change)) {
+      if (e === null && !Object.hasOwn(onMain, n)) die(`recurring.${n}: main has no such job; there is nothing to stop`);
+      if (e !== null && Object.hasOwn(onMain, n) && canonical(onMain[n]) === canonical(e)) die(`recurring.${n}: main already has exactly this`);
+    }
+    // a plain yes or no: only the owner's Yes approves (no default: the class is owner-only, below)
+    if (flagStr('recommendation')?.trim().toLowerCase() !== 'yes') die('a recurring-edit question recommends Yes (--recommendation Yes): only the owner\'s Yes approves a job change');
+    if (flags.choices !== undefined || flags.options !== undefined) die('a recurring-edit question is a plain yes or no: the kit writes its choices (Yes, No); leave out --choices and --options');
+    if (kind !== 'owner-decision' || flags.secrets !== undefined) die('a recurring-edit question is a plain yes or no: --kind owner-decision and no --secrets (only the owner\'s Yes approves a job change)');
+    // one pending question per job
+    for (const p of R.pending()) {
+      const n = Object.keys(change).find((x) => Object.hasOwn(p.change, x));
+      if (n) die(`recurring.${n} already has ${p.qid} (${p.status === 'open' ? 'open' : 'answered Yes, not landed yet'}): one question per job at a time; withdraw it or land it first`);
+    }
+    // the cap, worst case: each job at the most it could run, whichever way the counted questions go
+    const most = new Map();
+    const take = (n, e) => most.set(n, Math.max(most.get(n) ?? 0, R.runsADay(e)));
+    for (const [n, e] of Object.entries(onMain)) take(n, e);
+    for (const p of R.counted()) for (const [n, e] of Object.entries(p.change)) take(n, e);
+    for (const [n, e] of Object.entries(change)) take(n, e);
+    const total = [...most.values()].reduce((t, r) => t + r, 0);
+    if (total > R.CAP) die(`this change could take the jobs to ${R.runsWords(total)} runs a day, over the cap of ${R.CAP}, counting each job at the most it could run whichever way the pending questions are answered (a stop frees nothing until it lands): ${R.tally([...most].filter(([, r]) => r > 0))}`);
+    // the approval lines are the kit's alone
+    if (`${q}\n${ownerText(flagStr('context')) ?? ''}`.split(/\r\n|\r|\n/).some((l) => l.includes(R.HEADER) || /^\s*recurring\.[^\s:]*:/.test(l))) die('--question and --context may not hold a job approval line ("recurring.<name>: …") or its header: the kit writes them, from --change');
+    recurringChange = { recurring: change };
+    const lines = Object.entries(change).map(([n, e]) => (e === null ? `recurring.${n}: stop it (main has ${JSON.stringify(onMain[n])})` : Object.hasOwn(onMain, n) ? `recurring.${n}: main has ${JSON.stringify(onMain[n])}; would be ${JSON.stringify(e)}` : `recurring.${n}: add ${JSON.stringify(e)}`));
+    const kinds = new Set(Object.values(change).filter((e) => e !== null).map((e) => e.kind));
+    const plain = [
+      ...(kinds.has('check') ? ['A check only looks: it never changes production. Any file in this repo its command runs is run as it is on main each time.'] : []),
+      ...(kinds.has('chore') ? ['A chore changes only what a chore PR or chore ticket may change, never production.'] : []),
+    ];
+    recurringText = [[R.HEADER, ...lines].join('\n'), plain.join(' ')].filter(Boolean).join('\n\n');
+  }
   // goal-met: the owner's yes that a running goal is met (planning.md §1), for every source. Owner
   // only and never defaulted. The kit writes the words and the choices, and the question carries the
   // goal as asked (met.basis) and the reading it shows, so the owner's yes applies to that goal as it
@@ -7627,6 +7685,7 @@ function askLine({ thread, about } = {}) {
   if (ownerSaid) context = [context, `The owner said: ${ownerSaid}`].filter(Boolean).join('\n\n');
   if (goalMet) context = [context, goalMet.words].filter(Boolean).join('\n\n');
   if (goalMet) recommendation = GOAL_MET_CHOICES[0].label;
+  if (recurringText) [context, recommendation] = [[context, recurringText].filter(Boolean).join('\n\n'), 'Yes'];
   if (cls === 'incident-fix' && !['trust', 'proposal'].includes(kind)) {
     upkeepAllows('an incident fix');
     const incs = blocks.map((b) => logGet(b)).filter(isIncident);
@@ -7798,10 +7857,12 @@ function askLine({ thread, about } = {}) {
   // and a decision they already made is refused, unless something material changed (--new-because)
   let newBecause = flagStr('new-because');
   if (newBecause !== undefined && !newBecause.trim()) die('--new-because says what materially changed since the owner answered; it can\'t be blank');
-  try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
+  // a recurring-edit question is its exact change, not its words: one pending question per job
+  // and "main already has exactly this" (above) say when it may be asked again
+  if (cls !== 'recurring-edit') try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : orderAsked ? [context, goalOrderText(orderAsked)].filter(Boolean).join('\n\n') : context,
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined, no_default: noDefault,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : recurringChange ?? goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : cls === 'recurring-edit' ? [{ label: 'Yes' }, { label: 'No' }] : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined, no_default: noDefault,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
@@ -22821,6 +22882,150 @@ function recurringEntryProblems(name, entry) {
   whole('grace_days', 1, R.fields.grace_days.max);
   return errs;
 }
+
+// The job registry's helpers (kit-162), which ask, validate, check-pr, merge and recurring share:
+// the cap on runs a day, the recurring-edit questions as they bear on asking and landing, and
+// settings.md's recurring value rewritten in place. A question is landed once an act cites it
+// (approved_by), superseded once a later recurring-edit question names any of its names, and live
+// (it can approve) when the owner answered it as recommended (matched, read here directly, never
+// through ownerAnswer) and it is neither landed nor superseded.
+const recurringRegistry = Object.freeze({
+  CAP: 100,
+  HEADER: 'This answer approves exactly these job changes, and no other:',
+  // A check every <n>h with n under 24 runs 24/n times a day; anything else once (daily or slower).
+  // An every that doesn't parse counts 0: its shape problem is reported anyway.
+  runsADay(entry) {
+    const m = isObj(entry) && typeof entry.every === 'string' ? RECURRING_ENTRY_SHAPE.every.exec(entry.every) : null;
+    if (!m) return 0;
+    return m[2] === 'h' && Number(m[1]) < 24 ? 24 / Number(m[1]) : 1;
+  },
+  // a number of runs as a message prints it: at most two decimals
+  runsWords: (n) => String(Math.round(n * 100) / 100),
+  // [[name, runs], …] as "<name> <n>, …", largest first
+  tally: (rows) => [...rows].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([n, r]) => `${n} ${recurringRegistry.runsWords(r)}`).join(', '),
+  // null at the cap or under; over it, one line naming every entry, largest first
+  capProblem(registry, why) {
+    const rows = Object.entries(isObj(registry) ? registry : {}).map(([n, e]) => [n, recurringRegistry.runsADay(e)]);
+    const total = rows.reduce((t, [, r]) => t + r, 0);
+    if (!(total > recurringRegistry.CAP)) return null;
+    return `settings recurring: ${recurringRegistry.runsWords(total)} runs a day, over the cap of ${recurringRegistry.CAP} (${why}): ${recurringRegistry.tally(rows)}`;
+  },
+  // the recurring-edit questions, folded (questionView), oldest first
+  questions: () => logObjects('question').filter((q) => q.class === 'recurring-edit').map(questionView).sort((a, b) => (a.asked_at < b.asked_at ? -1 : a.asked_at > b.asked_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  // a folded question's change.recurring, or null when it shows none
+  shown: (v) => (isObj(v?.change) && isObj(v.change.recurring) ? v.change.recurring : null),
+  // the act that cites this answer (approved_by), or null
+  landed: (qid) => logObjects('act').find((a) => a.approved_by === qid) ?? null,
+  // the later recurring-edit question (by when it was asked) naming any of v's names, as { qid, name }, or null
+  superseded(v) {
+    const mine = Object.keys(recurringRegistry.shown(v) ?? {});
+    for (const o of recurringRegistry.questions()) {
+      if (o.id === v.id || !(o.asked_at > v.asked_at || (o.asked_at === v.asked_at && o.id > v.id))) continue;
+      const name = mine.find((n) => Object.hasOwn(recurringRegistry.shown(o) ?? {}, n));
+      if (name) return { qid: o.id, name };
+    }
+    return null;
+  },
+  // the question can approve its change: answered by the owner, as recommended, not landed, not superseded
+  live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
+  // The questions that block another question for their names: open ones, and live ones
+  // (registering an addition or edit, stopping when every value is null), as { qid, status, change }.
+  pending() {
+    const rows = [];
+    for (const v of recurringRegistry.questions()) {
+      const change = recurringRegistry.shown(v);
+      if (!change) continue;
+      const status = v.status === 'open' ? 'open' : recurringRegistry.live(v) ? (Object.values(change).every((e) => e === null) ? 'stopping' : 'registering') : null;
+      if (status) rows.push({ qid: v.id, status, change });
+    }
+    return rows;
+  },
+  // What the cap counts when asking: pending(), and every answer in words not read yet that is
+  // neither landed nor superseded, since a reading could still make it a Yes. A picked or typed No
+  // can never become one, so it frees its room.
+  counted() {
+    const rows = recurringRegistry.pending();
+    for (const v of recurringRegistry.questions()) {
+      const change = recurringRegistry.shown(v);
+      if (change && v.status === 'answered' && v.in_words === true && !v.reading && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v)) rows.push({ qid: v.id, status: 'in words', change });
+    }
+    return rows;
+  },
+  // the names whose entry differs between two recurring objects (canonical), each the second's entry or null
+  changed(a, b) {
+    const A = isObj(a) ? a : {};
+    const B = isObj(b) ? b : {};
+    const names = [...new Set([...Object.keys(A), ...Object.keys(B)])];
+    return Object.fromEntries(names.filter((n) => Object.hasOwn(A, n) !== Object.hasOwn(B, n) || canonical(A[n]) !== canonical(B[n])).map((n) => [n, Object.hasOwn(B, n) ? B[n] : null]));
+  },
+  // settings.md's text with only the top-level "recurring" value of its json devteam block set to
+  // value, as { text, problem }: a string-aware walk finds the value's span and it alone is
+  // replaced; without the key, it goes after the last value, before the block's closing }. The
+  // result is checked before it is returned: it parses, its recurring is value, every other key is
+  // as it was, and every byte outside the span is unchanged.
+  applied(text, value) {
+    const fail = (problem) => ({ text: null, problem });
+    if (!isObj(value)) return fail('recurring is an object of jobs');
+    const BLOCK = /```json devteam\s*\n([\s\S]*?)\n```/;
+    const m = BLOCK.exec(String(text));
+    if (!m) return fail('settings.md has no json devteam block');
+    const body = m[1];
+    const base = m.index + m[0].length - 4 - body.length;
+    let before;
+    try { before = JSON.parse(body); } catch (e) { return fail(`settings.md: the json devteam block is not valid JSON: ${e.message}`); }
+    if (!isObj(before)) return fail('settings.md: the json devteam block is not an object');
+    let i = 0;
+    const space = () => { while (i < body.length && /\s/.test(body[i])) i++; };
+    const string = () => { const s = i++; while (i < body.length && body[i] !== '"') i += body[i] === '\\' ? 2 : 1; i++; return JSON.parse(body.slice(s, i)); };
+    const skip = () => {
+      const s = i;
+      let depth = 0;
+      while (i < body.length) {
+        const c = body[i];
+        if (c === '"') string();
+        else if (c === '{' || c === '[') { depth++; i++; }
+        else if (c === '}' || c === ']') { if (!depth) break; depth--; i++; if (!depth) break; }
+        else if (c === ',' && !depth) break;
+        else i++;
+      }
+      let e = i;
+      while (e > s && /\s/.test(body[e - 1])) e--;
+      return [s, e];
+    };
+    const keys = [];
+    space();
+    if (body[i] !== '{') return fail('settings.md: the json devteam block is not an object');
+    const open = i++;
+    space();
+    if (body[i] !== '}') for (;;) {
+      space();
+      if (body[i] !== '"') return fail('settings.md: the json devteam block could not be read');
+      const key = string();
+      space();
+      if (body[i] !== ':') return fail('settings.md: the json devteam block could not be read');
+      i++;
+      space();
+      const [s, e] = skip();
+      keys.push({ key, s, e });
+      space();
+      if (body[i] === ',') { i++; continue; }
+      if (body[i] === '}') break;
+      return fail('settings.md: the json devteam block could not be read');
+    }
+    const own = keys.filter((k) => k.key === 'recurring');
+    if (own.length > 1) return fail('settings.md: the json devteam block has "recurring" twice; fix it by hand first');
+    const json = JSON.stringify(value, null, 2).replace(/\n/g, '\n  ');
+    const last = keys[keys.length - 1];
+    const [s, e, put] = own.length ? [own[0].s, own[0].e, json] : last ? [last.e, last.e, `,\n  "recurring": ${json}`] : [open + 1, open + 1, `\n  "recurring": ${json}`];
+    const out = `${text.slice(0, base + s)}${put}${text.slice(base + e)}`;
+    // the check: parsed, recurring as given, the rest as it was, and only the span rewritten
+    let after;
+    try { after = JSON.parse(BLOCK.exec(out)?.[1] ?? ''); } catch { after = null; }
+    const rest = (o) => canonical(Object.fromEntries(Object.entries(o).filter(([k]) => k !== 'recurring')));
+    if (!isObj(after) || canonical(after.recurring) !== canonical(value) || rest(after) !== rest(before) || out.slice(0, base + s) !== text.slice(0, base + s) || out.slice(base + s + put.length) !== text.slice(base + e)) return fail('settings.md: the rewritten json devteam block did not check out; nothing was written');
+    return { text: out, problem: null };
+  },
+});
 
 // ===== sensors: production signals into the loop =====
 // A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
