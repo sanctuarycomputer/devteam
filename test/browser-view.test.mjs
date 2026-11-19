@@ -47,7 +47,7 @@ const sockets = [];
 function project(name) {
   const F = monoFixture(name);
   const home = fs.mkdtempSync(path.join(tmp, 'home-'));
-  const env = { ...F.env({ DEVTEAM_ROLE: 'supervisor' }), HOME: home, DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: `${site.port}`, DEVTEAM_TEST_BROWSER_RENEW_MS: '1000', DEVTEAM_PREVIEW_TICK_MS: '200', DEVTEAM_RELAY_PORTS: RELAYS };
+  const env = { ...F.env({ DEVTEAM_ROLE: 'supervisor' }), HOME: home, DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: `${site.port}`, DEVTEAM_TEST_BROWSER_RENEW_MS: '1000', DEVTEAM_TEST_BROWSER_CAST_MAX: '400', DEVTEAM_PREVIEW_TICK_MS: '200', DEVTEAM_RELAY_PORTS: RELAYS };
   const key = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}-${crypto.createHash('sha1').update(fs.realpathSync(F.old)).digest('hex').slice(0, 12)}`;
   return { ...F, name, home, env, key, profile: path.join(home, '.devteam', 'browser', key), run: path.join(F.old, 'docs', 'devteam', 'run'), state: path.join(F.old, 'docs', 'devteam', 'run', 'browser', 'state.json') };
 }
@@ -110,13 +110,14 @@ function frameOf(op, payload, { masked = true, fin = true, rsv = 0 } = {}) {
   const m = crypto.randomBytes(4);
   return Buffer.concat([hdr, m, Buffer.from(payload).map((b, i) => b ^ m[i % 4])]);
 }
-// { status, head, msgs, bad, closed, send(obj), raw(buf), wait(pred, ms, from), closedIn(ms), close() }.
+// { status, head, msgs, bad, closed, pings, send(obj), raw(buf), wait(pred, ms, from), closedIn(ms), close() }.
+// It answers each ping with a pong unless pong is false.
 // Each message from the server is checked against browser@1 as it comes (bad holds what failed); a
 // frame's data is kept only as its length and its first 64 characters, so a long test holds little.
-function ws(port, { host = `127.0.0.1:${port}`, origin = `http://${host}`, route = '/socket', cookie, headers = {} } = {}) {
+function ws(port, { host = `127.0.0.1:${port}`, origin = `http://${host}`, route = '/socket', cookie, headers = {}, pong = true } = {}) {
   return new Promise((resolve) => {
     const sock = net.connect(port, '127.0.0.1');
-    const c = { status: 0, head: '', msgs: [], bad: [], closed: null, sock };
+    const c = { status: 0, head: '', msgs: [], bad: [], closed: null, pings: 0, sock };
     let buf = Buffer.alloc(0), shaken = false, parts = [];
     const waiters = new Set();
     const poke = () => { for (const w of [...waiters]) w(); };
@@ -130,7 +131,8 @@ function ws(port, { host = `127.0.0.1:${port}`, origin = `http://${host}`, route
         const op = buf[0] & 15, fin = !!(buf[0] & 0x80), body = buf.subarray(at, at + len);
         buf = buf.subarray(at + len);
         if (op === 8) { c.closed = body.length >= 2 ? body.readUInt16BE(0) : 1005; poke(); continue; }
-        if (op === 9 || op === 10) continue;
+        if (op === 9) { c.pings++; if (pong) sock.write(frameOf(10, body)); continue; }
+        if (op === 10) continue;
         parts.push(body);
         if (!fin) continue;
         const text = Buffer.concat(parts).toString('utf8');
@@ -211,8 +213,10 @@ async function claimedGateway() {
   const uploadsDir = path.join(tmp, 'uploads');
   fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o750 });
   const logs = [];
-  const g = G.createGateway({ publicUrl, dir: path.join(tmp, 'gw'), ttydPort: 1, ttydPage, uploadsDir, log: (m) => logs.push(m) });
+  const g = G.createGateway({ publicUrl, dir: fs.mkdtempSync(path.join(tmp, 'gw-')), ttydPort: 1, ttydPage, uploadsDir, log: (m) => logs.push(m) });
   await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
+  const close = () => new Promise((r) => { g.server.closeAllConnections?.(); g.server.close(r); });
+  try {
   const token = /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   assert.ok(token, 'the gateway printed a claim link');
   const post = (route, body) => new Promise((resolve, reject) => {
@@ -229,21 +233,38 @@ async function claimedGateway() {
   const v = await post('/auth/claim/verify', { token, ...authenticator().create(o.json, publicUrl) });
   assert.equal(v.status, 200, JSON.stringify(v.json));
   assert.ok(v.cookie, 'a session cookie');
-  return { g, port, cookie: v.cookie, close: () => new Promise((r) => { g.server.closeAllConnections?.(); g.server.close(r); }) };
+  return { g, port, cookie: v.cookie, close };
+  } catch (e) { await close(); throw e; }
 }
 
 // The /record page's layout in headless Chrome: the button (200 x 80) under the h1. Its centre, in
 // CSS pixels of the viewport, which the frames are in.
 const BUTTON = { x: 108, y: 120 };
 
-let view; // { name, port }: a's view
-let s1; // the first viewer's socket (V6 on)
+// fn's first truthy value within ms (polled every 25 ms), or a failure naming what and how long.
+async function within(ms, fn, what) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() > end) return assert.fail(`${what}: not within ${ms} ms`);
+    await sleep(25);
+  }
+}
+
+let view = null; // { name, port }: a's view
+let s1 = null; // the viewer's socket, while one is open
+let standIn = null; // I3: a loopback server whose port isn't allowed, counting what reaches it
 let setup = Promise.resolve();
 before(() => {
   if (skip) return;
   setup = (async () => {
     site = await startSites();
     a = project('bview-a');
+    standIn = { requests: 0 };
+    standIn.server = http.createServer((q, s) => { standIn.requests++; s.end('stand-in'); });
+    await new Promise((r) => standIn.server.listen(0, '127.0.0.1', r));
+    standIn.port = standIn.server.address().port;
   })();
   return setup;
 });
@@ -257,14 +278,44 @@ after(async () => {
     a.done();
   }
   await site?.close();
+  if (standIn?.server) await new Promise((r) => { standIn.server.closeAllConnections?.(); standIn.server.close(r); });
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('V1 the view is a preview labelled browser, in its own window, listed in hello', opts, async () => {
-  const r = await browser(a, ['start']);
-  assert.equal(r.status, 0, r.err || r.out);
-  const s = readState(a);
+// Each check sets up what it needs, so it runs, and is seen red, on its own: the browser running (and
+// view naming it), a dashboard on a's fixture, a viewer's socket with a frame drawn.
+const liveState = () => { try { const s = readState(a); return alive(s.daemon_pid) ? s : null; } catch { return null; } };
+async function running(env) {
+  let s = liveState();
+  // a daemon still going after a stop (its record already gone) is waited out, then started again
+  if (s && !fs.existsSync(recFile(a, s.preview))) { await until(() => !alive(s.daemon_pid), 'the stopping daemon gone'); s = null; }
+  if (!s) {
+    const r = await browser(a, ['start'], env);
+    assert.equal(r.status, 0, `start: ${r.err || r.out}`);
+    s = readState(a);
+  }
   view = { name: s.preview, port: s.view_port };
+  return s;
+}
+async function dashboard() {
+  if (!dash) dash = await dashboardOnFreePort(a.old, a.env);
+  return dash.port;
+}
+async function viewer() {
+  await running();
+  if (s1 && s1.status === 101 && s1.closed === null) return s1;
+  s1 = await ws(view.port);
+  assert.equal(s1.status, 101, s1.head.split('\r\n')[0]);
+  await s1.wait(isFrame, 2000);
+  return s1;
+}
+async function onRecord() {
+  await running();
+  await ok(a, ['open', `${site.origin}/record`]);
+}
+
+test('V1 the view is a preview labelled browser, in its own window, listed in hello', opts, async () => {
+  const s = await running();
   const rec = readRec(a, view.name);
   assert.equal(rec.label, 'browser');
   assert.equal(rec.port, view.port);
@@ -274,12 +325,12 @@ test('V1 the view is a preview labelled browser, in its own window, listed in he
   let p = s.daemon_pid;
   for (let i = 0; i < 20 && p > 1 && p !== w.pid; i++) p = ppid(p);
   assert.equal(p, w.pid, 'the daemon descends from the pane');
-  dash = await dashboardOnFreePort(a.old, a.env);
-  const hello = await until(async () => { const h = await (await fetch(`http://127.0.0.1:${dash.port}/api/hello`)).json(); return h.previews?.some((x) => x.name === view.name) ? h : null; }, 'hello to list the view');
-  assert.ok(hello.previews.find((x) => x.name === view.name).up !== false);
+  const port = await dashboard();
+  await until(async () => (await (await fetch(`http://127.0.0.1:${port}/api/hello`)).json()).previews?.some((x) => x.name === view.name), 'hello to list the view');
 });
 
 test('V5 the view serves browser.html', opts, async () => {
+  await running();
   for (const host of [`127.0.0.1:${view.port}`, `localhost:${view.port}`]) {
     const r = await get(view.port, '/', host);
     assert.equal(r.status, 200, `${host}: ${r.body.toString().slice(0, 200)}`);
@@ -293,73 +344,100 @@ test('V5 the view serves browser.html', opts, async () => {
 });
 
 test('V6 a socket on either loopback form gets held, url and frames of the page within 2 s', opts, async () => {
-  await ok(a, ['open', `${site.origin}/record`]);
+  await onRecord();
+  s1?.close();
+  await sleep(300);
   for (const host of [`localhost:${view.port}`, `127.0.0.1:${view.port}`]) {
     const t0 = Date.now();
     const c = await ws(view.port, { host });
-    assert.equal(c.status, 101, `${host}: ${c.head}`);
-    await c.wait(isFrame, 2000);
-    assert.ok(Date.now() - t0 <= 2500, `a frame within 2 s (${Date.now() - t0} ms)`);
+    assert.equal(c.status, 101, `${host}: ${c.head.split('\r\n')[0]}`);
+    await c.wait(isFrame, Math.max(1, 2000 - (Date.now() - t0)));
     assert.deepEqual(c.msgs.find((m) => m.t === 'held'), { t: 'held', qid: null });
     assert.equal(c.msgs.find((m) => m.t === 'url')?.url, `${site.origin}/record`);
     assert.deepEqual(c.bad, [], 'every message is browser@1');
-    if (host.startsWith('localhost')) { c.close(); await sleep(300); } else s1 = c;
+    c.close();
+    await sleep(300);
   }
 });
 
 test('R2 a second viewer gets bye; the first keeps its frames', opts, async () => {
+  const first = await viewer();
   const c2 = await ws(view.port);
-  assert.equal(c2.status, 101);
+  assert.equal(c2.status, 101, c2.head.split('\r\n')[0]);
   const bye = await c2.wait((m) => m.t === 'bye', 2000);
   assert.match(bye.why, /another window/);
   assert.ok((await c2.closedIn(3000)) !== null, 'the server closes it');
   assert.equal(c2.msgs.filter(isFrame).length, 0, 'no frame to the second');
-  const n = s1.msgs.length;
+  const n = first.msgs.length;
   await ok(a, ['open', `${site.origin}/`]);
-  await s1.wait(isFrame, 3000, n);
-  await ok(a, ['open', `${site.origin}/record`]);
+  await first.wait(isFrame, 3000, n);
 });
 
-test('I1 a click reaches the page at the same point', opts, async () => {
+test('I1 a click reaches the page at the same point, within 2 s', opts, async () => {
+  await onRecord();
+  const c = await viewer();
   const before = site.events().length;
-  s1.send({ t: 'mouse', type: 'click', x: BUTTON.x, y: BUTTON.y, button: 'left', clicks: 1 });
-  const e = await until(() => site.events().slice(before).find((x) => x.kind === 'click'), 'the click');
+  c.send({ t: 'mouse', type: 'click', x: BUTTON.x, y: BUTTON.y, button: 'left', clicks: 1 });
+  const e = await within(2000, () => site.events().slice(before).find((x) => x.kind === 'click'), 'the click');
   assert.ok(Math.abs(e.x - BUTTON.x) <= 2 && Math.abs(e.y - BUTTON.y) <= 2, JSON.stringify(e));
 });
 
 const typed = { key: MARK(), paste: MARK(), nav: MARK() };
-test('I2 keys and a paste reach the page', opts, async () => {
+test('I2 keys, a paste and a 60 KB paste in two frames reach the page, within 2 s', opts, async () => {
+  await onRecord();
+  const c = await viewer();
+  // focus the input: a click on the button, then Tab
+  c.send({ t: 'mouse', type: 'click', x: BUTTON.x, y: BUTTON.y, button: 'left', clicks: 1 });
+  await sleep(200);
   const before = site.events().length;
-  s1.send({ t: 'key', type: 'down', key: 'Tab', code: 'Tab' });
-  s1.send({ t: 'key', type: 'up', key: 'Tab', code: 'Tab' });
-  for (const ch of typed.key) s1.send({ t: 'key', type: 'press', key: ch, code: `Key${ch.toUpperCase()}`, text: ch });
-  s1.send({ t: 'paste', text: typed.paste });
-  const t0 = Date.now();
-  await until(() => site.events().slice(before).some((x) => x.kind === 'input' && x.value === typed.key + typed.paste), 'the input to hold both markers');
-  assert.ok(Date.now() - t0 < 2500, `within 2 s (${Date.now() - t0} ms)`);
+  c.send({ t: 'key', type: 'down', key: 'Tab', code: 'Tab' });
+  c.send({ t: 'key', type: 'up', key: 'Tab', code: 'Tab' });
+  for (const ch of typed.key) c.send({ t: 'key', type: 'press', key: ch, code: `Key${ch.toUpperCase()}`, text: ch });
+  c.send({ t: 'paste', text: typed.paste });
+  // 10 000 characters, each a \u escape: over 60 KB of JSON, sent as a text frame and a continuation
+  const big = Buffer.from(`{"t":"paste","text":"${'\\u0062'.repeat(10000)}"}`);
+  assert.ok(big.length > 60000);
+  const cut = Math.floor(big.length / 2);
+  c.raw(frameOf(1, big.subarray(0, cut), { fin: false }));
+  c.raw(frameOf(0, big.subarray(cut)));
+  const want = typed.key + typed.paste + 'b'.repeat(10000);
+  await within(2000, () => site.events().slice(before).some((x) => x.kind === 'input' && x.value === want), 'the input to hold the keys and both pastes');
+  assert.equal(c.closed, null, 'the socket stays open');
 });
 
-test('I5 Back; I3 nav to the dashboard shows the guard\'s refusal; I4 file: is refused', opts, async () => {
-  s1.send({ t: 'nav', url: `${site.origin}/account?m=${typed.nav}` });
-  await until(async () => (await statusJson(a)).url === `${site.origin}/account?m=•••`, 'the nav');
-  s1.send({ t: 'back' });
-  await until(async () => (await statusJson(a)).url === `${site.origin}/record`, 'back at /record');
-  // I3
-  const dashLog = () => { try { return fs.readFileSync(path.join(a.run, 'dashboard.log'), 'utf8'); } catch { return ''; } };
-  const logBefore = dashLog();
-  s1.send({ t: 'nav', url: `http://127.0.0.1:${dash.port}/` });
-  const snap = await until(async () => { const r = await browser(a, ['snapshot']); return /This page is blocked/.test(r.out) ? r.out : null; }, 'the refusal page');
-  assert.match(snap, /can't open 127\.0\.0\.1/);
-  assert.equal(dashLog(), logBefore, 'nothing reached the dashboard');
-  // I4
-  await ok(a, ['open', `${site.origin}/record`]);
-  s1.send({ t: 'nav', url: 'file:///etc/passwd' });
+test('I5 Back returns to the page before', opts, async () => {
+  await onRecord();
+  const c = await viewer();
+  c.send({ t: 'nav', url: `${site.origin}/account?m=${typed.nav}` });
+  await within(5000, async () => (await statusJson(a)).url === `${site.origin}/account?m=•••`, 'the nav');
+  c.send({ t: 'back' });
+  await within(5000, async () => (await statusJson(a)).url === `${site.origin}/record`, 'back at /record');
+});
+
+test('I3 a nav to the dashboard, or any loopback port, shows the guard\'s refusal', opts, async () => {
+  const port = await dashboard();
+  const c = await viewer();
+  const seen0 = standIn.requests;
+  for (const p of [port, standIn.port]) {
+    c.send({ t: 'nav', url: `http://127.0.0.1:${p}/` });
+    const snap = await within(5000, async () => { const r = await browser(a, ['snapshot']); return /This page is blocked/.test(r.out) && r.out.includes(`can't open 127.0.0.1:${p}`) ? r.out : null; }, `the refusal page for port ${p}`);
+    assert.ok(snap);
+    await ok(a, ['open', `${site.origin}/`]);
+  }
+  assert.equal(standIn.requests, seen0, 'nothing reached the stand-in');
+});
+
+test('I4 a nav to file: is refused', opts, async () => {
+  await onRecord();
+  const c = await viewer();
+  c.send({ t: 'nav', url: 'file:///etc/passwd' });
   await sleep(2000);
   assert.equal((await statusJson(a)).url, `${site.origin}/record`);
   assert.doesNotMatch(await ok(a, ['snapshot']), /root:/);
 });
 
-test('R3 nothing the owner typed is in run/, a log or the window', opts, async () => {
+test('R3 nothing the owner typed is in run/, project/, the dashboard\'s output or the window', opts, async () => {
+  await running();
   const files = [];
   const walk = (d) => { for (const n of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, n.name); if (n.isDirectory()) walk(f); else if (n.isFile()) files.push(f); } };
   walk(a.run);
@@ -369,11 +447,12 @@ test('R3 nothing the owner typed is in run/, a log or the window', opts, async (
   for (const [what, m] of Object.entries(typed)) {
     for (const f of files) assert.ok(!fs.readFileSync(f).includes(m), `the ${what} marker in ${path.relative(a.old, f)}`);
     assert.ok(!pane.includes(m), `the ${what} marker in the window`);
-    assert.ok(!dash.dash.out().includes(m), `the ${what} marker in the dashboard's output`);
+    assert.ok(!(dash?.dash.out() ?? '').includes(m), `the ${what} marker in the dashboard's output`);
   }
 });
 
 test('R1 a socket with a missing or foreign Origin, or another Host, is refused with 403', opts, async () => {
+  const c0 = await viewer();
   const p = view.port, other = p === 65535 ? p - 1 : p + 1;
   const cases = [
     { origin: null },
@@ -391,26 +470,57 @@ test('R1 a socket with a missing or foreign Origin, or another Host, is refused 
     assert.equal(c.msgs.length, 0);
   }
   assert.equal((await ws(p, { route: '/other' })).status, 404);
-  // the first viewer is untouched
-  const n = s1.msgs.length;
+  const n = c0.msgs.length;
   await ok(a, ['open', `${site.origin}/`]);
-  await s1.wait(isFrame, 3000, n);
+  await c0.wait(isFrame, 3000, n);
 });
 
-test('R4 a binary or an unmasked frame closes the socket; the daemon serves the next', opts, async () => {
-  s1.raw(frameOf(2, Buffer.from('bin')));
-  assert.equal(await s1.closedIn(3000), 1003);
-  const c = await ws(view.port);
-  assert.equal(c.status, 101, c.head);
-  await c.wait(isFrame, 2000);
+test('R4 a binary, an unmasked or an oversized frame closes the socket; the daemon serves the next', opts, async () => {
+  let c = await viewer();
+  c.raw(frameOf(2, Buffer.from('bin')));
+  assert.equal(await c.closedIn(3000), 1003);
+  c = await viewer();
   c.raw(frameOf(1, Buffer.from('{"t":"back"}'), { masked: false }));
   assert.equal(await c.closedIn(3000), 1002);
-  s1 = await ws(view.port);
-  assert.equal(s1.status, 101, s1.head);
-  await s1.wait(isFrame, 2000);
+  c = await viewer();
+  // a header declaring 300 KiB, and no payload: refused on the header
+  const h = Buffer.alloc(14);
+  h[0] = 0x81; h[1] = 0x80 | 127; h.writeBigUInt64BE(300n * 1024n, 2); crypto.randomBytes(4).copy(h, 10);
+  c.raw(h);
+  assert.equal(await c.closedIn(2000), 1009);
+  await viewer();
 });
 
-// The fixture's login through the agent's verbs: { e<n> } refs read from a snapshot.
+test('R5 a viewer that answers no ping is closed, and the next one gets in', opts, async () => {
+  s1?.close();
+  await browser(a, ['stop']);
+  await running({ DEVTEAM_TEST_BROWSER_PING_MS: '500' });
+  try {
+    const live = await ws(view.port);
+    assert.equal(live.status, 101);
+    await sleep(2500);
+    assert.equal(live.closed, null, 'one that answers pings stays');
+    assert.ok(live.pings >= 2, `pinged (${live.pings})`);
+    live.close();
+    await sleep(300);
+    const silent = await ws(view.port, { pong: false });
+    assert.equal(silent.status, 101);
+    await silent.wait(isFrame, 2000);
+    const t0 = Date.now();
+    assert.notEqual(await silent.closedIn(2500), null, 'the silent one is closed');
+    assert.ok(Date.now() - t0 <= 2500);
+    const next = await ws(view.port);
+    assert.equal(next.status, 101);
+    await next.wait(isFrame, 2000);
+    assert.ok(!next.msgs.some((m) => m.t === 'bye'), 'no bye for the next one');
+    next.close();
+  } finally {
+    await browser(a, ['stop']);
+    await running();
+  }
+});
+
+// The fixture's login through the agent's verbs: refs read from a snapshot.
 const refOf = (snap, role, name) => new RegExp(`^(e\\d+) ${role} "${name}"`, 'm').exec(snap)?.[1] ?? assert.fail(`no ${role} "${name}" in ${snap}`);
 async function signIn(P) {
   await ok(P, ['open', `${site.origin}/login`]);
@@ -427,31 +537,41 @@ async function signIn(P) {
 }
 
 test('I6 forget signs the browser out and restarts it on an empty profile', opts, async () => {
+  await running();
   await signIn(a);
+  const c = await viewer();
   const old = readState(a);
   const marker = path.join(a.profile, 'kit-66-marker');
   fs.writeFileSync(marker, 'x');
-  const n = s1.msgs.length;
-  s1.send({ t: 'forget' });
-  await until(() => { try { const s = readState(a); return s.chrome_pid !== old.chrome_pid && s.daemon_pid === old.daemon_pid; } catch { return false; } }, 'a new Chrome in state.json');
-  await until(() => !alive(old.chrome_pid), 'the old Chrome gone');
+  await sleep(500);
+  const n = c.msgs.length, top = Math.max(-1, ...c.msgs.filter(isFrame).map((m) => m.seq));
+  c.send({ t: 'forget' });
+  await within(20000, () => { try { const s = readState(a); return s.chrome_pid !== old.chrome_pid; } catch { return false; } }, 'a new Chrome in state.json');
+  assert.equal(readState(a).daemon_pid, old.daemon_pid, 'the same daemon');
+  await within(20000, () => !alive(old.chrome_pid), 'the old Chrome gone');
   assert.ok(alive(old.daemon_pid), 'the daemon stays');
   assert.equal(fs.existsSync(marker), false, 'the profile was emptied');
   assert.equal(JSON.parse(fs.readFileSync(path.join(a.profile, 'root.json'), 'utf8')).root, fs.realpathSync(a.old));
-  await s1.wait(isFrame, 10000, n);
-  assert.equal(s1.closed, null, 'the socket stayed open');
+  const f = await c.wait((m) => isFrame(m) && m.seq > top, 10000, n);
+  assert.ok(f.seq > top, 'the frame count keeps rising');
+  assert.equal(c.closed, null, 'the socket stayed open');
   await ok(a, ['open', `${site.origin}/account`]);
   assert.match(await ok(a, ['snapshot']), /Not signed in/);
   assert.equal(readState(a).preview, view.name);
 });
 
-test('V3 the record is renewed with the same window id; V2 it survives the sweep', opts, async () => {
+test('V3 the record is renewed within 5 s, with the same window id', opts, async () => {
+  await running();
   const r0 = readRec(a, view.name);
-  const r1 = await until(() => { const r = readRec(a, view.name); return r.at !== r0.at ? r : null; }, 'a renewal');
+  const r1 = await within(5000, () => { const r = readRec(a, view.name); return r.at !== r0.at ? r : null; }, 'a renewal');
   assert.ok(Date.parse(r1.expires) > Date.parse(r0.expires));
   assert.equal(r1.run.window, r0.run.window, 'the same window id');
-  // V2: the dashboard ticks every 200 ms; 3 s is at least 10 ticks
-  const s = readState(a);
+});
+
+test('V2 it survives the dashboard\'s sweep and the renewals', opts, async () => {
+  await dashboard();
+  const s = await running();
+  // the dashboard ticks every 200 ms and the record renews every second: 3 s is at least 10 ticks
   await sleep(3000);
   const w = devWindows(a).find((x) => x.name === `dev~${view.name}`);
   assert.ok(w, 'the window is still there');
@@ -460,76 +580,117 @@ test('V3 the record is renewed with the same window id; V2 it survives the sweep
 });
 
 test('V4 the Library labels it Supervisor\'s browser', opts, async () => {
-  const h = await (await fetch(`http://127.0.0.1:${dash.port}/api/hello`)).json();
-  assert.equal(h.previews.find((x) => x.name === view.name)?.label, "Supervisor's browser");
+  const port = await dashboard();
+  await running();
+  const row = await until(async () => (await (await fetch(`http://127.0.0.1:${port}/api/hello`)).json()).previews?.find((x) => x.name === view.name), 'hello to list the view');
+  assert.equal(row.label, "Supervisor's browser");
   assert.match((await kitCli(a, ['preview', 'list'])).out, new RegExp(`${view.name} .*Supervisor's browser`));
 });
 
 test('L1 on a laptop, through the dashboard\'s relay', opts, async () => {
-  const r = await (await fetch(`http://127.0.0.1:${dash.port}/api/view?kind=preview&name=${view.name}`)).json();
+  const port = await dashboard();
+  await onRecord();
+  const r = await (await fetch(`http://127.0.0.1:${port}/api/view?kind=preview&name=${view.name}`)).json();
   assert.match(r.origin ?? '', /^http:\/\/127\.0\.0\.1:\d+$/, JSON.stringify(r));
   const relay = Number(new URL(r.origin).port);
   const page = await get(relay, '/', `127.0.0.1:${relay}`);
-  assert.equal(page.status, 200);
+  assert.equal(page.status, 200, page.body.toString().slice(0, 200));
   assert.ok(page.body.equals(PAGE), 'browser.html through the relay');
-  s1.close();
+  s1?.close();
   await sleep(300);
-  await ok(a, ['open', `${site.origin}/record`]);
+  const t0 = Date.now();
   const c = await ws(relay);
-  assert.equal(c.status, 101, c.head);
-  await c.wait(isFrame, 2000);
+  assert.equal(c.status, 101, c.head.split('\r\n')[0]);
+  await c.wait(isFrame, Math.max(1, 2000 - (Date.now() - t0)));
   const before = site.events().length;
   c.send({ t: 'mouse', type: 'click', x: BUTTON.x, y: BUTTON.y, button: 'left', clicks: 1 });
-  await until(() => site.events().slice(before).some((x) => x.kind === 'click'), 'the click through the relay');
+  await within(2000, () => site.events().slice(before).some((x) => x.kind === 'click'), 'the click through the relay');
   c.close();
   await sleep(300);
 });
 
-test('G1 through the real gateway with a passkey session; G2 refused without one', opts, async () => {
-  const row = (await (await fetch(`http://127.0.0.1:${dash.port}/api/hello`)).json()).previews.find((x) => x.name === view.name);
+// The real gateway, a stand-in hub listing a's hello row for the view under a's root.
+async function gatewayOnView() {
+  const port = await dashboard();
+  await running();
+  const row = await until(async () => (await (await fetch(`http://127.0.0.1:${port}/api/hello`)).json()).previews?.find((x) => x.name === view.name), 'hello to list the view');
   const hub = http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify({ hub: 1, instances: [{ devteam: 1, root: fs.realpathSync(a.old), port: GW_BASE, name: 'bview-a', previews: [row] }] })); });
   await new Promise((r) => hub.listen(GW_HUB, '127.0.0.1', r));
-  const gw = await claimedGateway();
+  const hubClose = () => new Promise((r) => { hub.closeAllConnections?.(); hub.close(r); });
+  let gw;
+  try { gw = await claimedGateway(); await gw.g.pollPush(); } catch (e) { await gw?.close(); await hubClose(); throw e; }
+  return { gw, host: `${view.name}.box.localhost:${gw.port}`, close: async () => { await gw.close(); await hubClose(); } };
+}
+
+test('G1 through the real gateway with a passkey session', opts, async () => {
+  await onRecord();
+  s1?.close();
+  await sleep(300);
+  const { gw, host, close } = await gatewayOnView();
   try {
-    await gw.g.pollPush();
-    const host = `${view.name}.box.localhost:${gw.port}`;
     const page = await get(gw.port, '/', host, { cookie: gw.cookie, 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' });
     assert.equal(page.status, 200, page.body.toString().slice(0, 300));
     assert.ok(page.body.equals(PAGE), 'browser.html through the gateway');
+    const t0 = Date.now();
     const c = await ws(gw.port, { host, origin: `http://${host}`, cookie: gw.cookie });
-    assert.equal(c.status, 101, c.head);
-    await c.wait(isFrame, 2000);
+    assert.equal(c.status, 101, c.head.split('\r\n')[0]);
+    await c.wait(isFrame, Math.max(1, 2000 - (Date.now() - t0)));
     c.close();
     await sleep(300);
-    // G2
-    assert.equal((await ws(gw.port, { host, origin: `http://${host}` })).status, 401, 'a socket without a session');
-    assert.equal((await get(gw.port, '/', host, { 'sec-fetch-mode': 'cors' })).status, 401, 'a GET without a session');
-  } finally { await gw.close(); await new Promise((r) => { hub.closeAllConnections?.(); hub.close(r); }); }
+  } finally { await close(); }
 });
 
-test('V7 preview stop on it stops the browser; V8 the name is kept across a stop and start', opts, async () => {
-  const s = readState(a);
-  const r = await kitCli(a, ['preview', 'stop', view.name], { DEVTEAM_ROLE: undefined });
+test('G2 without a session the gateway refuses the view', opts, async () => {
+  const { gw, host, close } = await gatewayOnView();
+  try {
+    assert.equal((await ws(gw.port, { host, origin: `http://${host}` })).status, 401, 'a socket without a session');
+    assert.equal((await get(gw.port, '/', host, { 'sec-fetch-mode': 'cors' })).status, 401, 'a GET without a session');
+  } finally { await close(); }
+});
+
+test('V7 preview stop on it stops the browser, whoever runs it; V8 the name is kept across stops and starts', opts, async () => {
+  s1?.close();
+  const s = await running();
+  const r = await kitCli(a, ['preview', 'stop', view.name], { DEVTEAM_ROLE: undefined, DEVTEAM_TICKET: 'kit-1-x' });
   assert.equal(r.status, 0, r.err || r.out);
   assert.match(r.out, /supervisor's browser/);
   await until(() => !alive(s.daemon_pid) && !alive(s.chrome_pid), 'the daemon and Chrome gone');
   assert.equal(fs.existsSync(recFile(a, view.name)), false, 'the record');
   assert.equal(fs.existsSync(a.state), false, 'state.json');
   assert.ok(!devWindows(a).some((x) => x.name === `dev~${view.name}`), 'the window');
-  const again = await browser(a, ['start']);
-  assert.equal(again.status, 0, again.err || again.out);
-  assert.equal(readState(a).preview, view.name, 'the same name');
+  const name = view.name;
+  await running();
+  assert.equal(view.name, name, 'the same name after preview stop and browser start');
   await ok(a, ['stop']);
-  const back = await browser(a, ['start']);
-  assert.equal(back.status, 0, back.err);
-  assert.equal(readState(a).preview, view.name, 'the same name after browser stop and start');
+  await running();
+  assert.equal(view.name, name, 'the same name after browser stop and start');
+});
+
+test('V9 preview start on it is browser start: a worker is refused', opts, async () => {
+  const s = await running();
+  // stopped with its record kept: the daemon signalled, as a crash or a sweep would leave it
+  process.kill(s.daemon_pid, 'SIGTERM');
+  await until(() => !alive(s.daemon_pid) && !alive(s.chrome_pid), 'the daemon gone');
+  assert.ok(fs.existsSync(recFile(a, view.name)), 'the record is kept');
+  const w = await kitCli(a, ['preview', 'start', view.name], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'kit-1-x' });
+  assert.equal(w.status, 1, w.out);
+  assert.match(w.err, /workers ask the supervisor/);
+  await sleep(1500);
+  assert.equal(liveState(), null, 'no daemon started');
+  const sup = await kitCli(a, ['preview', 'start', view.name]);
+  assert.equal(sup.status, 0, sup.err || sup.out);
+  assert.match(sup.out, /browser running \(preview /);
+  const now = await within(10000, liveState, 'the browser up');
+  assert.equal(now.preview, view.name);
 });
 
 test('the label browser is the browser\'s own', opts, async () => {
+  const s = await running();
   for (const args of [['preview', '45999', '--label', 'browser'], ['preview', '--run', 'true', '--label', 'browser']]) {
     const r = await kitCli(a, args);
     assert.equal(r.status, 1, r.out);
     assert.match(r.err, /the label browser is the supervisor's browser's/);
   }
-  assert.ok(alive(readState(a).daemon_pid), 'the browser untouched');
+  assert.ok(alive(s.daemon_pid), 'the browser untouched');
+  assert.equal(readRec(a, view.name).run.window, devWindows(a).find((x) => x.name === `dev~${view.name}`)?.id);
 });
