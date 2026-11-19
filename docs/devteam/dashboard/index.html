@@ -7253,7 +7253,7 @@ function tArtFpNow(s) {
   return (DATA?.library?.artifacts ?? []).find((a) => a.slug === s.slug && a.at === (tree ? 'main' : s.at))?.fp ?? null;
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
-  <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
+  <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted"><span id="tl-c-spin" aria-hidden="true" hidden style="display:inline-block;width:10px;height:10px;margin-right:6px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;vertical-align:-1px;animation:spin .9s linear infinite"></span><span id="tl-c-state" role="status" aria-live="polite"></span></div>
   <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Shift+Enter sends; Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
 // The subject as one tight line (an icon, its name, where it is), opening to what was captured.
 // Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
@@ -7331,7 +7331,14 @@ function tlCardBody(t) {
     turns.innerHTML = t ? tlTurns(t) : '<p class="small muted">Say what you want done about it. Nothing is sent until you do.</p>';
     turns.scrollTop = turns.scrollHeight;
   }
-  tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  const line = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  // a live region: written only when the words change, so a poll with the same stage announces nothing
+  const state = tlEl('tl-c-state');
+  if (state.textContent !== line) state.textContent = line;
+  // the spinner only adds to the words while a session is responding, slowed as button.busy is
+  const spin = tlEl('tl-c-spin');
+  spin.hidden = !/ is responding…$/.test(line);
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) spin.style.animationDuration = '2.5s';
 }
 // Beside its pin, in page coordinates so it scrolls with the page; a thread whose home is the Inbox tab
 // (in-threads, kit-100 spec §2.6) in the window's coordinates instead, fixed as the panel is; in the dock when

@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { dashboardOnFreePort, hasTmux, kit, threadsFixture } from './lib/kit.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const WORKER = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'kit-9' };
 const RESPONDER = { DEVTEAM_ROLE: 'responder' };
@@ -349,4 +350,66 @@ test('each stage shows for the right signal, and never hides the words for a new
   // the five-argument call, with no TL on the page's globals, doesn't throw
   assert.equal(tCardState(one, now, true, true, null), 'Sent.');
   assert.equal(tCardState(one, now, true, true), 'Sent.');
+});
+
+// The page end to end: each stage reaches the open card by its own poll, no reload; the line is a
+// polite live region written only when it changes, so a poll with the same stage announces nothing;
+// a reload finds the stage again on the server; the reply clears it.
+test('the card: each stage live and accessible, quiet between changes, and after a reload', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const later = cleanup(t);
+  const F = threadsFixture('responding-page');
+  later(() => F.done());
+  const T = F.owner(['thread', 'new', 'Can you look at the checkout copy?', '--title', 'Checkout copy']).split('\n')[0];
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  const state = `document.getElementById('tl-c-state')?.textContent`;
+  const spinOn = `(() => { const s = document.getElementById('tl-c-spin'); return !!s && !s.hidden && getComputedStyle(s).display !== 'none'; })()`;
+  const ev = async (x) => { try { return await p.ev(x); } catch { return undefined; } };
+  const opened = (what) => within(30000, () => ev(`typeof TL !== 'undefined' && TL.have > 0 && !document.getElementById('tl-card').hidden && document.getElementById('tl-card').dataset.key === '${T}' && !!document.querySelector('#tl-c-turns .tl-turn.owner')`), what);
+  const reads = async (words, what) => {
+    let last;
+    try { await within(4000, async () => (last = await ev(state)) === words, `${what}: ${JSON.stringify(words)}`); } catch (e) { e.message += `; it read ${JSON.stringify(last)}`; throw e; }
+  };
+
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#talk/${T}` });
+  await opened('the card on the thread');
+  assert.notEqual(await p.ev(state), 'The supervisor picked it up.', 'not before the pickup');
+  assert.equal(await p.ev(spinOn), false, 'no spinner before the session responds');
+
+  F.sup(['thread', 'show', T]);
+  await reads('The supervisor picked it up.', 'picked up, with no reload');
+  assert.equal(await p.ev(spinOn), false, 'no spinner for a pickup');
+
+  F.sup(['thread', 'working', T]);
+  await reads('The supervisor is responding…', 'responding, with no reload');
+  assert.equal(await p.ev(spinOn), true, 'the spinner while it responds');
+  assert.deepEqual(await p.ev(`(() => { const e = document.getElementById('tl-c-state'); return [e.getAttribute('role'), e.getAttribute('aria-live')]; })()`), ['status', 'polite']);
+  assert.equal(await p.ev(`document.getElementById('tl-c-spin').getAttribute('aria-hidden')`), 'true', 'the words carry it, not the spinner');
+
+  // S4: 6 s of polls with the same stage change nothing in the region (P9: the polls did run)
+  await p.ev(`(() => { const e = document.getElementById('tl-c-state'); window.__mut = 0; window.__obs = e; window.__seq0 = TL.seq; new MutationObserver((m) => { window.__mut += m.length; }).observe(e, { childList: true, characterData: true, subtree: true }); })()`);
+  await new Promise((r) => setTimeout(r, 6000));
+  const [muts, same, grew] = await p.ev(`[window.__mut, document.getElementById('tl-c-state') === window.__obs, TL.seq - window.__seq0]`);
+  assert.equal(muts, 0, 'no mutation of the live region between changes');
+  assert.equal(same, true, 'the same node: the region was not redrawn');
+  assert.ok(grew >= 2, `the card polled meanwhile (${grew} reads)`);
+  assert.equal(await p.ev(state), 'The supervisor is responding…');
+
+  await p.ev(`window.__beforeReload = true`);
+  await p.send('Page.reload');
+  await within(30000, () => ev(`!window.__beforeReload`), 'a new document');
+  await opened('the card again, after a reload');
+  await reads('The supervisor is responding…', 'still responding after a reload');
+  assert.equal(await p.ev(spinOn), true, 'the spinner after a reload');
+
+  F.sup(['thread', 'reply', T, 'done']);
+  await within(4000, async () => (await ev(state)) === '' && (await ev(`document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('done')`)), 'the line empty and the reply in the turns');
+  assert.equal(await p.ev(spinOn), false, 'the spinner gone with the reply');
 });
