@@ -84,6 +84,16 @@ async function open(t, hash) {
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: paneInit(paneMenu()) });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
   const soon = soonIn(p, 30000, () => dash.out());
+  // A step a redraw can undo: with the poll at 300 ms, each read inside the dashboard's 3 s reuse is
+  // answered at once (kit-633), so the page redraws its cards every 300 ms, which closes an open ⋯ menu
+  // or swaps the card under a Shift+click. The step runs again while its state doesn't hold, at most
+  // `tries` times, so a step that never works still fails.
+  const again = async (step, holds, what, tries = 5) => {
+    for (let i = 1; ; i++) {
+      await step();
+      try { return await soonIn(p, 5000)(holds, what); } catch (e) { if (i >= tries) throw new Error(`${e.message} (${tries} tries)`); }
+    }
+  };
   await soon('typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page and its threads read');
   // a reload: the old document marked, then a new one (without the mark) with its data and threads read
   const reload = async () => {
@@ -91,7 +101,7 @@ async function open(t, hash) {
     await p.send('Page.reload');
     await soon('!window.__old && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page reloaded and read');
   };
-  return { p, soon, size, reload, fx, root, env, port, dash, chrome, later };
+  return { p, soon, again, size, reload, fx, root, env, port, dash, chrome, later };
 }
 
 const IS_OPEN = "document.body.classList.contains('threads-open')";
@@ -108,7 +118,7 @@ const STEADY = (sel) => `(() => { const e = document.querySelector(${JSON.string
 const ON_PAGE = (id) => `!!document.querySelector('main.page > section[data-page="${id}"]')?.classList.contains('on')`;
 
 test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
-  const { p, soon, size, reload, fx, chrome, later, port } = await open(t, '#overview');
+  const { p, soon, again, size, reload, fx, chrome, later, port } = await open(t, '#overview');
   const { Q } = fx;
   const len = () => p.ev('history.length');
   const back = () => p.ev('history.back(); void 0');
@@ -417,15 +427,18 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.move(tab.x + 3, tab.y + 1, 8);
     await p.ev(FRAMES);
     assert.equal(await p.ev("document.getElementById('tl-cursor').hidden"), true, 'no pin over the tab bar');
-    await p.ev(`document.getElementById('q-${q2}').scrollIntoView({ block: 'center' }); void 0`);
-    await p.ev(FRAMES);
-    const c2 = await p.ev(`(() => { const r = document.getElementById('q-${q2}').getBoundingClientRect(); return { x: Math.round(r.left + 40), y: Math.round(r.top + 20) }; })()`);
-    await p.move(c2.x, c2.y, 8);
-    await p.move(c2.x + 2, c2.y + 2, 8);
-    await soon("!document.getElementById('tl-cursor').hidden", 'the pin over q2\'s card');
-    await p.clickAt(c2.x + 2, c2.y + 2, 8);
-    await p.hold('Shift', false);
-    await soon(`TL.draft?.subject?.ref === 'question:${q2}' && ${CARD}.parentElement?.id === 'tl' && ${SHOWN(CARD)} && ${BESIDE} && document.activeElement?.id === 'tl-c-text'`, 'a draft beside q2\'s card');
+    let shifted = true;
+    await again(async () => {
+      if (!shifted) { await p.hold('Shift', true); shifted = true; }
+      await p.ev(`document.getElementById('q-${q2}').scrollIntoView({ block: 'center' }); void 0`);
+      await p.ev(FRAMES);
+      const c2 = await p.ev(`(() => { const r = document.getElementById('q-${q2}').getBoundingClientRect(); return { x: Math.round(r.left + 40), y: Math.round(r.top + 20) }; })()`);
+      await p.move(c2.x, c2.y, 8);
+      await p.move(c2.x + 2, c2.y + 2, 8);
+      await soon("!document.getElementById('tl-cursor').hidden", 'the pin over q2\'s card');
+      await p.clickAt(c2.x + 2, c2.y + 2, 8);
+      await p.hold('Shift', false); shifted = false;
+    }, `TL.draft?.subject?.ref === 'question:${q2}' && ${CARD}.parentElement?.id === 'tl' && ${SHOWN(CARD)} && ${BESIDE} && document.activeElement?.id === 'tl-c-text'`, 'a draft beside q2\'s card');
     await p.type('hello');
     await p.key('Enter', 8);
     const N = await soon(`TL.threads.find((x) => x.subject?.ref === 'question:${q2}' && !String(x.id).startsWith('pending-') && !x.pending)?.id`, 'the new thread read');
@@ -504,14 +517,14 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.equal(await has(card(q1) + ' .card-head details.menu summary'), true, "q1's ⋯ menu");
     await p.ev(`document.querySelector(${JSON.stringify(card(q1) + ' details.menu summary')}).scrollIntoView({ block: 'center' }); void 0`);
     await soon(STEADY(card(q1) + ' details.menu summary'), 'the menu button at rest');
-    await p.click(card(q1) + ' details.menu summary');
-    await soon(`document.querySelector(${JSON.stringify(card(q1) + ' details.menu')}).open`, "q1's menu open");
+    const MENU_OPEN = `!!document.querySelector(${JSON.stringify(card(q1) + ' details.menu')})?.open`;
+    // a click only when it is shut: a late open is not clicked shut again
+    await again(async () => { if (!(await p.ev(MENU_OPEN))) await p.click(card(q1) + ' details.menu summary'); }, MENU_OPEN, "q1's menu open");
     const kv = await p.ev(`[...document.querySelectorAll(${JSON.stringify(card(q1) + ' details.menu .kv > *')})].map((e) => e.textContent)`);
     assert.deepEqual(kv.filter((x, i) => i % 2 === 0), ['ID', 'Asked', 'Kind', 'Order', 'Rated'], `the menu's rows: ${JSON.stringify(kv)}`);
     assert.equal(kv[1], q1, 'the ID');
     assert.equal(await has(card(q1) + ' details.menu [data-copy]'), true, 'Copy ID');
-    await p.click(card(q1) + ' details.menu summary');
-    await soon(`!document.querySelector(${JSON.stringify(card(q1) + ' details.menu')}).open`, "q1's menu closed again");
+    await again(async () => { if (await p.ev(MENU_OPEN)) await p.click(card(q1) + ' details.menu summary'); }, `!${MENU_OPEN}`, "q1's menu closed again");
     assert.ok((await texts(card(q1) + ' .why span')).some((c) => /Launch checkout/.test(c)), 'the why-ranked chips');
     assert.match(await text(card(q1) + ' .card-head .badge'), /Decision/);
     assert.match(await text(card(q1) + ' .tag'), /^Recommended · 80% sure$/, 'Recommended with the sure percentage');
@@ -952,6 +965,8 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
       assert.doesNotMatch(await p.ev(`document.querySelector('#ask-inbox [data-ask="${m.digest}"]').textContent`), /or Esc/, `the copy as today for "${hint}"`);
     }
     await p.ev('window.__pane = null; void 0');
+    // the terminal's card goes before the next press, or the cards below it move up under the pointer
+    await soon("!document.querySelector('#ask-inbox [data-ask]')", "the terminal's card gone");
 
     // the review: opened full size over the panel; closed, back to the page with the panel on Inbox
     await press(IN(`[data-open-review="${fx.r}"]`), 'Open the review');

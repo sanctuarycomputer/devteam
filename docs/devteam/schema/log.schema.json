@@ -290,6 +290,29 @@
             "additionalProperties": false,
             "x-tip": "The goal's toggle: run, drain (nothing new starts, work in flight finishes) or park (sessions stop with a handoff)."
           },
+          "hold_for": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "minItems": 1,
+            "description": "What the goal's current drain waits on (design every-wait-names-its-cause-and-every-put): each entry a question id, a ticket id, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id> or external:<words>. Top-level beside hold, never inside it, and part of the line that sets hold: a later hold line without it leaves the hold with no cause. null clears it.",
+            "x-tip": "What the drain waits on: a question, a ticket, a chore, a goal, a PR, a CI run or something outside."
+          },
+          "hold_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "When the supervisor looks again at the drain if it still waits (a date); part of the hold line, like hold_for. null clears it.",
+            "x-tip": "When the drain is looked at again if it still waits."
+          },
           "decision": {
             "type": "object",
             "description": "The owner's latest decision on the goal: approve (ready), refine (notes the planner takes into account before asking again), let-go (abandoned), restore (a let-go goal back to the status it had, parked), met (the owner's yes to a goal-met question, named in question, marked it met).",
@@ -357,7 +380,9 @@
         "x-set-only": [
           "approved",
           "carried",
-          "hold"
+          "hold",
+          "hold_for",
+          "hold_until"
         ]
       },
       "feature": {
@@ -515,7 +540,7 @@
             "additionalProperties": false
           },
           "touches": {
-            "description": "The files and folders it may change; two tickets in flight never overlap.",
+            "description": "The files and folders it may change; two tickets in flight never overlap. In a file settings.split_files lists, path#name names one part of it (a top-level declaration, a heading slug or a marked region) and path#+name a part the ticket adds (planning.md D4).",
             "type": "array",
             "items": {
               "type": "string",
@@ -569,6 +594,42 @@
             ],
             "description": "Why the supervisor is not scheduling this ticket yet; null releases it. A held ticket is left out of `ready` and the idle-capacity finding.",
             "x-tip": "Why the supervisor is not scheduling it yet; empty once released."
+          },
+          "held_for": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "minItems": 1,
+            "description": "What the ticket's hold waits on (design every-wait-names-its-cause-and-every-put): each entry a question id, a ticket id, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id> or external:<words>. Beside held; a release writes null.",
+            "x-tip": "What the hold waits on: a question, a ticket, a chore, a goal, a PR, a CI run or something outside."
+          },
+          "held_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "When the supervisor looks again at the hold if it still waits (a date); beside held, null on release.",
+            "x-tip": "When the hold is looked at again if it still waits."
+          },
+          "from": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^o-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+            },
+            "minItems": 1,
+            "description": "The follow-up observations this ticket was made from (kind follow-up), by id; citing one takes it off the supervisor's list until the ticket ends.",
+            "x-tip": "The put-off notes this ticket was made from."
           },
           "notes": {
             "description": "Anything else the planner wanted on record.",
@@ -796,7 +857,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "What sort of observation (a reading, a slow test, an escaped defect, a retro…).",
+            "description": "What sort of observation (a reading, a slow test, an escaped defect, a retro…). A job's (recurring@1, subject recurring:<name>): recurring-run, one run with its run object, a measurement; recurring-failed, a check reaching its fail_after failures in a row, once per failing stretch, a signal; recurring-recovered, the first pass after one, a good outcome; recurring-reopen, the owner's own line (source owner, written by recurring reopen <name> from their terminal) that lifts a declined change to that job, which counts only when the owner wrote it (the same line from anyone else lifts nothing) and lifts only declines made before it.",
             "type": "string"
           },
           "detail": {
@@ -953,6 +1014,52 @@
             "required": [
               "title"
             ],
+            "additionalProperties": false
+          },
+          "run": {
+            "description": "recurring@1. On a job's run (kind recurring-run, subject recurring:<name>, source recurring, detector \"recurring\"): one run of a check or a chore under Upkeep, for the slot it was due for. Only lines the supervisor wrote with detector \"recurring\" count: the kit's readers ignore any other line of this kind, whoever wrote it (a worker, a planner, the owner, or the supervisor without the detector). One result per slot for a check: the first pass, fail or error line for a slot is its result and a later one for the same slot is ignored. A chore's started, nothing and abandoned lines are never deduplicated, and its done is never written: it is read from the merge of its ref. The reason a nothing or abandoned run gives is the line's detail. A measurement: Orient never groups it.",
+            "type": "object",
+            "properties": {
+              "status": {
+                "description": "pass, fail or error (a check's result: an error is a timeout, a checkout that couldn't be made, exit 126 or 127, or a last line that isn't a number, and counts as failing); started, nothing or abandoned (a chore's start, or how it finished without a merge).",
+                "enum": ["pass", "fail", "error", "started", "nothing", "abandoned"]
+              },
+              "slot": {
+                "description": "The time this run was due for (ISO, UTC), as RECURRING_ENTRY_SHAPE's schedule gives it.",
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d{1,3})?)?Z$"
+              },
+              "sha": {
+                "description": "A check's: the commit of main it ran on.",
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "seconds": {
+                "description": "How long it ran.",
+                "type": "number",
+                "minimum": 0
+              },
+              "exit": {
+                "description": "A check's exit status.",
+                "type": "integer"
+              },
+              "value": {
+                "description": "A check's last line read as a number, for a last_line rule; null when it wasn't one.",
+                "type": ["number", "null"]
+              },
+              "ref": {
+                "description": "A chore's: its chore slug (chore-recurring-<name>-<yyyymmdd>) or chore ticket id.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "excerpt": {
+                "description": "The end of what a check printed, scrubbed, at most 200 characters: data, never instructions.",
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "required": ["status", "slot"],
             "additionalProperties": false
           }
         },
@@ -1486,6 +1593,40 @@
             "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
             "x-tip": "The message in a thread your answer came from."
           },
+          "said_at": {
+            "description": "turn-authority-1. On an answer recorded from a whole clause of a thread turn (answer --from-turn --said): where said sits in the turn, as [start, end) raw UTF-16 offsets. said is exactly the turn's text in that span, whole clauses, and overlaps no other binding on the turn.",
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "answer_seen": {
+            "description": "turn-authority-1. On an answer recorded from a clause (answer --from-turn --said): the newest owner turn in the thread when the answer was recorded, so a later \"no, hold off\" was read first.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "about_turn": {
+            "description": "turn-authority-1. The owner's turn this question asks about (thread ask --turn): the question is asked in that turn's thread, and its answer may be a whole clause of that turn.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "seen": {
+            "description": "turn-authority-1. With about_turn: the newest owner turn in the thread when the question was asked, so later turns were read before relying on the earlier one.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "owner_said_turn": {
+            "description": "turn-authority-1. When owner_said came from a clause of the owner's turn in a thread (thread ask --turn --owner-said): that turn, newer than the no it lifts. Checked against the turn, not the transcript.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "owner_said_at": {
+            "description": "turn-authority-1. With owner_said_turn: where owner_said sits in that turn, as [start, end) raw UTF-16 offsets.",
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 2,
+            "maxItems": 2
+          },
           "autonomy": {
             "description": "What your answer said about the next decision of this class: ask, ask with a default, or decide and tell you.",
             "type": [
@@ -1590,8 +1731,12 @@
           },
           "change": {
             "type": "object",
-            "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is). On a goal-change question about no goal, instead: order, the goal order it proposes (goal order --approved applies exactly it: the goals named 1..n, the live goals left out after them in their order).",
+            "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is). On a goal-change question about no goal, instead: order, the goal order it proposes (goal order --approved applies exactly it: the goals named 1..n, the live goals left out after them in their order). On a recurring-edit question, instead: recurring, { \"<name>\": <entry> | null, … }, the jobs it adds, changes (each entry whole) or stops (null); the owner's yes lands exactly that change, entry by entry, and nothing else in recurring.",
             "properties": {
+              "recurring": {
+                "description": "On a recurring-edit question: { \"<name>\": <entry> | null, … }, each entry as RECURRING_ENTRY_SHAPE (devteam.mjs) holds it and null a stop. ask checks each with recurringEntryProblems, since this schema can't say \"an entry or null\" per name.",
+                "type": "object"
+              },
               "order": {
                 "description": "The goals, in the order proposed: two or more, each once.",
                 "type": "array",
@@ -1814,7 +1959,9 @@
           "declined",
           "question_hash",
           "turn",
-          "files"
+          "files",
+          "said_at",
+          "answer_seen"
         ]
       },
       "decision": {
@@ -1922,6 +2069,23 @@
                 "minimum": 1,
                 "maximum": 4,
                 "description": "On the owner's correction of a goal-impact decision: the impact the owner gives the goal. It stands until the owner changes it."
+              },
+              "said": {
+                "description": "turn-authority-1. On the owner's correction recorded by the supervisor from a thread turn or from chat (correct --from-turn|--from-chat --said): the owner's words, verbatim; reason is the same words.",
+                "type": "string",
+                "minLength": 1
+              },
+              "said_at": {
+                "description": "turn-authority-1. On a correction from a thread turn: where said sits in the turn, as [start, end) raw UTF-16 offsets.",
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "turn": {
+                "description": "turn-authority-1. On a correction from a thread turn: the owner's turn, in a thread about this record (or the act that carried it out).",
+                "type": "string",
+                "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
               }
             },
             "required": [
@@ -2012,6 +2176,23 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 4
+              },
+              "said": {
+                "description": "turn-authority-1. On the owner's correction recorded by the supervisor from a thread turn or from chat (correct --from-turn|--from-chat --said): the owner's words, verbatim; reason is the same words.",
+                "type": "string",
+                "minLength": 1
+              },
+              "said_at": {
+                "description": "turn-authority-1. On a correction from a thread turn: where said sits in the turn, as [start, end) raw UTF-16 offsets.",
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "turn": {
+                "description": "turn-authority-1. On a correction from a thread turn: the owner's turn, in a thread about this record (or the act that carried it out).",
+                "type": "string",
+                "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
               }
             },
             "required": [
@@ -2329,6 +2510,402 @@
         "additionalProperties": false,
         "x-required-new": ["thread", "text"]
       }
+    },
+    "self": {
+      "description": "self@1: the shape of project/self.md, what the project is. The file is markdown: a title and prose the owner reads, and exactly one fenced block with the info string self holding JSON, which the kit parses (block). dashboard is that block as dashboard data. Fields are only ever added; self: 2 is refused by an older kit with \"newer kit\". The reference checker is test/fixtures/world/check.mjs.",
+      "block": {
+        "description": "The JSON in self.md's one self block.",
+        "type": "object",
+        "properties": {
+          "self": {
+            "description": "The contract's version: 1.",
+            "type": "integer",
+            "const": 1
+          },
+          "what": {
+            "description": "What the project is, in one plain sentence.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "makes": {
+            "description": "What the project makes or does, in one plain sentence.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "parts": {
+            "description": "The project's parts, at least one.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 40,
+            "items": {
+              "description": "A part of the project: an id, a name, what it is, and the paths that hold it.",
+              "type": "object",
+              "properties": {
+                "id": {
+                  "description": "The part's id, unique among every id in self.md.",
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                },
+                "name": {
+                  "description": "The part's name.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "what": {
+                  "description": "What the part is, in one plain sentence.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "code": {
+                  "description": "The repo-relative paths that hold the part (kit-139 checks they exist at the draft; on main a missing one raises self-drift).",
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "items": {
+                    "description": "A repo-relative path: no leading /, no .. segment.",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "^(?!/)(?!(.*/)?\\.\\.(/|$)).+$"
+                  }
+                }
+              },
+              "required": ["id", "name", "what", "code"],
+              "additionalProperties": false
+            }
+          },
+          "controls": {
+            "description": "Its boundary: what the project controls (its code, its releases, its pages).",
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "description": "One thing it controls.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "not": {
+            "description": "Its boundary: what the project touches but does not control (a vendor's API, a store's listing).",
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "description": "One thing it touches but does not control.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        },
+        "required": ["self", "what", "makes", "parts", "controls", "not"],
+        "additionalProperties": false
+      },
+      "dashboard": {
+        "description": "The dashboard-data self block, drawn from main's self.md: the block without its version. Where dashboard data carries it, it is null when main has no self.md or one that fails its check, never a missing key or an empty object.",
+        "type": "object",
+        "properties": {
+          "what": {
+            "description": "What the project is, in one plain sentence.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "makes": {
+            "description": "What the project makes or does, in one plain sentence.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "parts": {
+            "description": "The project's parts, at least one.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 40,
+            "items": {
+              "description": "A part of the project, as the dashboard shows it.",
+              "type": "object",
+              "properties": {
+                "id": {
+                  "description": "The part's id, unique among every id in self.md.",
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                },
+                "name": {
+                  "description": "The part's name.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "what": {
+                  "description": "What the part is, in one plain sentence.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "code": {
+                  "description": "The repo-relative paths that hold the part (kit-139 checks they exist at the draft; on main a missing one raises self-drift).",
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "items": {
+                    "description": "A repo-relative path: no leading /, no .. segment.",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "^(?!/)(?!(.*/)?\\.\\.(/|$)).+$"
+                  }
+                }
+              },
+              "required": ["id", "name", "what", "code"],
+              "additionalProperties": false
+            }
+          },
+          "controls": {
+            "description": "Its boundary: what the project controls (its code, its releases, its pages).",
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "description": "One thing it controls.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "not": {
+            "description": "Its boundary: what the project touches but does not control (a vendor's API, a store's listing).",
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "description": "One thing it touches but does not control.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        },
+        "required": ["what", "makes", "parts", "controls", "not"],
+        "additionalProperties": false
+      }
+    },
+    "exterior": {
+      "description": "exterior@1: the shape of project/exterior.md, what the project relates to, by relation to the Self in self.md. The file is markdown: a title and prose the owner reads, naming each entity outside the block, and exactly one fenced block with the info string exterior holding JSON, which the kit parses (block); a self block in it is refused. A signal names what would show an entity, in words, and no sensor or pages: senses are the supervisor's (project/senses.md). dashboard is the block as dashboard data. Fields are only ever added; exterior: 2 is refused by an older kit with \"newer kit\". The reference checker is test/fixtures/world/check.mjs.",
+      "block": {
+        "description": "The JSON in exterior.md's one exterior block.",
+        "type": "object",
+        "properties": {
+          "exterior": {
+            "description": "The contract's version: 1.",
+            "type": "integer",
+            "const": 1
+          },
+          "strategy_blob": {
+            "description": "The git blob of project/strategy.md it was drawn from.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          },
+          "self_blob": {
+            "description": "The git blob of project/self.md it was drawn against.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          },
+          "entities": {
+            "description": "What the project relates to; empty while none is drawn yet.",
+            "type": "array",
+            "maxItems": 60,
+            "items": {
+              "description": "An organisation, group or work the project relates to.",
+              "type": "object",
+              "properties": {
+                "id": {
+                  "description": "The entity's id, unique among every id in exterior.md.",
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                },
+                "name": {
+                  "description": "The entity's name, as the prose outside the block names it.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "relation": {
+                  "description": "How the entity relates to the Self in self.md. Business roles are examples, not the scheme: a client is something it serves, a vendor something it depends on, a competitor an alternative.",
+                  "type": "string",
+                  "enum": ["serves", "depends_on", "builds_on_it", "alternative", "collaborates", "governs", "affects", "other"]
+                },
+                "relation_word": {
+                  "description": "For relation other only, and required there: the relation in one lowercase word.",
+                  "type": "string",
+                  "maxLength": 40,
+                  "pattern": "^[a-z]+$"
+                },
+                "kind": {
+                  "description": "organisation, group, or work (another project, library, service or standard). There is no person: one person is modelled as the group they belong to.",
+                  "type": "string",
+                  "enum": ["organisation", "group", "work"]
+                },
+                "matters": {
+                  "description": "What matters about the entity to this project, in one plain sentence.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "weight": {
+                  "description": "Its value to the strategy, 1 to 4, on the scale goal impact uses (4: the project depends on it).",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4
+                },
+                "strategy": {
+                  "description": "The strategy lines it serves: quotes of strategy.md, each found verbatim at strategy_blob.",
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 5,
+                  "items": {
+                    "description": "A quote of strategy.md.",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "signals": {
+                  "description": "What would show the entity, in words.",
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "description": "A signal: what would show the entity, and how much it says. No sensor, no pages.",
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "description": "The signal's id, unique among every id in exterior.md.",
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                      },
+                      "what": {
+                        "description": "What would show the entity, in one plain sentence (\"their prices\").",
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "value": {
+                        "description": "How much the signal says about the entity, 1 to 4.",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4
+                      }
+                    },
+                    "required": ["id", "what", "value"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": ["id", "name", "relation", "kind", "matters", "weight", "strategy", "signals"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["exterior", "strategy_blob", "self_blob", "entities"],
+        "additionalProperties": false
+      },
+      "dashboard": {
+        "description": "The dashboard-data exterior block, drawn from main's exterior.md, entities and signals in the file's order. Where dashboard data carries it, it is null when main has no exterior.md or one that fails its check, never a missing key or an empty object.",
+        "type": "object",
+        "properties": {
+          "entities": {
+            "description": "The entities.",
+            "type": "array",
+            "maxItems": 60,
+            "items": {
+              "description": "An entity as the dashboard shows it.",
+              "type": "object",
+              "properties": {
+                "entity": {
+                  "description": "The entity's id.",
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                },
+                "relation": {
+                  "description": "How the entity relates to the Self in self.md. Business roles are examples, not the scheme: a client is something it serves, a vendor something it depends on, a competitor an alternative.",
+                  "type": "string",
+                  "enum": ["serves", "depends_on", "builds_on_it", "alternative", "collaborates", "governs", "affects", "other"]
+                },
+                "relation_word": {
+                  "description": "The relation in one word for relation other, else null.",
+                  "type": ["string", "null"],
+                  "maxLength": 40,
+                  "pattern": "^[a-z]+$"
+                },
+                "kind": {
+                  "description": "organisation, group, or work (another project, library, service or standard). There is no person: one person is modelled as the group they belong to.",
+                  "type": "string",
+                  "enum": ["organisation", "group", "work"]
+                },
+                "name": {
+                  "description": "The entity's name.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "matters": {
+                  "description": "What matters about the entity to this project, in one plain sentence.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "weight": {
+                  "description": "Its value to the strategy, 1 to 4, on the scale goal impact uses (4: the project depends on it).",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4
+                },
+                "signals": {
+                  "description": "Its signals.",
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "description": "A signal as the dashboard shows it.",
+                    "type": "object",
+                    "properties": {
+                      "signal": {
+                        "description": "The signal's id.",
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                      },
+                      "what": {
+                        "description": "What would show the entity.",
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "value": {
+                        "description": "How much the signal says, 1 to 4.",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4
+                      },
+                      "score": {
+                        "description": "The entity's weight times the signal's value, 1 to 16: the order the supervisor asks in.",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 16
+                      }
+                    },
+                    "required": ["signal", "what", "value", "score"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": ["entity", "relation", "relation_word", "kind", "name", "matters", "weight", "signals"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["entities"],
+        "additionalProperties": false
+      }
     }
   },
   "x-id": {
@@ -2416,7 +2993,9 @@
           "plan_after",
           "approved",
           "carried",
-          "hold"
+          "hold",
+          "hold_for",
+          "hold_until"
         ],
         "owner": [
           "title",
@@ -2431,7 +3010,9 @@
           "status",
           "decision",
           "plan_after",
-          "hold"
+          "hold",
+          "hold_for",
+          "hold_until"
         ]
       },
       "feature": {
@@ -2479,6 +3060,9 @@
           "one_way_doors",
           "superseded_by",
           "held",
+          "held_for",
+          "held_until",
+          "from",
           "notes"
         ],
         "supervisor": [
@@ -2496,6 +3080,9 @@
           "one_way_doors",
           "superseded_by",
           "held",
+          "held_for",
+          "held_until",
+          "from",
           "notes"
         ],
         "owner": [
@@ -2513,6 +3100,9 @@
           "one_way_doors",
           "superseded_by",
           "held",
+          "held_for",
+          "held_until",
+          "from",
           "notes"
         ]
       },
@@ -2535,7 +3125,9 @@
           "declined",
           "question_hash",
           "turn",
-          "files"
+          "files",
+          "said_at",
+          "answer_seen"
         ]
       },
       "thread": {
@@ -2622,6 +3214,8 @@
           "finding-ack": "decide",
           "sensor-ignored": "decide",
           "sensor-unignored": "decide", "sensor-reconsidered": "decide",
+          "recurring-run": "measurement",
+          "recurring-reopen": "decide",
           "*": "observe"
         }
       },

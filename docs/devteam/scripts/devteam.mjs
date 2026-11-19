@@ -488,7 +488,7 @@ if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operat
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'owner-cursor.json', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'owner-cursor.json', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', 'held', 'held-locks', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
@@ -520,6 +520,10 @@ const SETTINGS_DEFAULTS = {
   // (often the owner's own gh login, which opens every fleet PR) can't give; merge's own checks still run first.
   // Home only: a repo link doesn't inherit it.
   merge_admin: false,
+  // Big files whose tickets may name parts of them in touches (path#name, planning.md D4): two tickets
+  // naming different parts of one listed file can run at once. Globs; every other file is touched
+  // whole. The supervisor's own setting; the merge gate reads it as main has it.
+  split_files: [],
   // Where PRs live: 'github' (gh pr view / gh pr merge --match-head-commit) or 'git' (no forge CLI:
   // merge takes --title and --body-file, merges the exact head on main and pushes; a moved main
   // makes the push fail, which is the same check).
@@ -566,6 +570,9 @@ const SETTINGS_DEFAULTS = {
   // supervisor's own, like caps and timings. sensor_defaults overrides the built-in defaults for all of them.
   sensors: {},
   sensor_defaults: {},
+  // Jobs under Upkeep: { "<name>": { kind: 'check'|'chore', title, what, every, … } }, each as
+  // RECURRING_ENTRY_SHAPE holds it. Checks run commands on a schedule, chores are done on one.
+  recurring: {},
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
   // The forge's checks merge doesn't wait for (names, e.g. a broken optional one); owner-only.
@@ -583,6 +590,10 @@ const SETTINGS_DEFAULTS = {
   // A shell command run in every new worker, planner and gate worktree, and a chore worktree from
   // `chore start`, after worktree_files are copied (install dependencies, link env files). Empty for none.
   worktree_setup: '',
+  // Installed folders a new session or chore worktree copies from the main checkout when the lockfile matches: [{ path, key }]. Never gate checkouts.
+  worktree_copy: [],
+  // Run worktree_setup on every session start, even when nothing it installs from changed. Session and chore worktrees only; gate checkouts never.
+  worktree_setup_always: false,
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
   dashboard_port: null,
   upstream_repo: KIT_UPSTREAM,
@@ -650,12 +661,15 @@ const SETTINGS_WORDS = Object.freeze({
   agent_trust_command: ['Agents and sessions', 'Folder-trust answer', 'a command run before each agent starts so it trusts its worktree; empty runs nothing', 'hidden'],
   worker_denied_commands: ['Agents and sessions', 'Commands workers may not run', 'patterns refused in every worker and planner', 'value'],
   worktree_setup: ['Agents and sessions', 'Worktree setup', "a command run in each new worktree after its files are copied", 'hidden'],
+  worktree_copy: ['Agents and sessions', 'Installed folders copied into new worktrees', 'folders copied from the main checkout into a new session or chore worktree whose lockfile matches', 'count'],
+  worktree_setup_always: ['Agents and sessions', 'Always run worktree setup', 'run worktree_setup on every session start, even when nothing it installs from changed', 'value'],
   worktree_files: ['Agents and sessions', 'Files copied into worktrees', 'untracked files each worktree needs, copied from the main checkout', 'value'],
   usage_command: ['Agents and sessions', 'Usage command', "a command that reports spend for a harness the kit can't read", 'hidden'],
   usage_sources: ['Agents and sessions', 'Usage sources', "which agents' own logs spend is read from", 'value'],
   model_prices: ['Agents and sessions', 'Model prices', 'prices for models the kit has none for, or overrides', 'names'],
   gates: ['Merging and checks', 'Checks before merge', "the commands that must pass at a ticket's head before it merges", 'names'],
   ignored_checks: ['Merging and checks', 'Ignored forge checks', "forge checks merge doesn't wait for", 'value'],
+  split_files: ['Merging and checks', 'Files split by part', 'big files whose tickets may name parts of them in touches; every other file is touched whole', 'value'],
   slow_gate_minutes: ['Merging and checks', 'Slow check after', "minutes a check may take before it's flagged slow", 'value'],
   main_branch: ['Merging and checks', 'Main branch', 'the branch work merges into', 'value'],
   merge_method: ['Merging and checks', 'Merge method', 'how PRs land: a merge commit, squash or rebase', 'value'],
@@ -678,6 +692,7 @@ const SETTINGS_WORDS = Object.freeze({
   secret_commands: ['Production', 'Commands a secret may be sent to', "command prefixes a secret's sink may run, as you", 'count'],
   retro_every_days: ['Rhythm', 'Retro every', 'days between retrospectives', 'value'],
   research_every_days: ['Rhythm', 'Research every', 'days between research spikes on new tools and practice', 'value'],
+  recurring: ['Rhythm', 'Jobs', 'the jobs that run on a schedule under Upkeep: checks and chores', 'names'],
   project: ['Project and links', 'Project name', "this project's name on the hub and in its public links", 'value'],
   components: ['Project and links', 'Components', 'the parts of the work, each with its own lines of files', 'names'],
   links: ['Project and links', 'Linked repos and resources', 'the repos and resources this project works in or reads', 'names'],
@@ -689,13 +704,14 @@ const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'str
 const SETTING_SHAPES = Object.freeze({
   ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
+  worktree_setup_always: (v) => typeof v === 'boolean',
   forge: (v) => ['github', 'git'].includes(v),
   merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),
   upstream_sync: (v) => ['adopt', 'ask'].includes(v),
   release: (v) => v !== undefined && releaseProblem(v) === null,
   upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
   main_branch: settingName, tmux_session: settingName, project: settingName,
-  usage_sources: settingLines, ignored_checks: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
+  usage_sources: settingLines, ignored_checks: settingLines, split_files: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
   autonomy_ceilings: (v) => isObj(v) && Object.entries(v).every(([k, n]) => /^[a-z0-9-]{1,60}$/.test(k) && [1, 2, 3].includes(n)),
 });
 // The hidden settings whose kit default is the kit's own constant, so the page may show it.
@@ -872,6 +888,110 @@ function linkOwnerChanges(a = {}, b = {}) {
   }
   return out;
 }
+// The owner-kind link changes from links map a to b, with their values: one per changed field of an
+// entry of an owner's kind on both sides with the same kind (a field no one's class guards, like a
+// repo link's path, left out), and one for the whole entry on an add, a removal or a kind flip
+// (field null, from/to the entries or null). An owner's answer approves these one by one
+// (linkAnswerCovers), so a field the owner already said yes to is never asked about again, and
+// another field landing on main spends nothing.
+function linkFieldChanges(a = {}, b = {}) {
+  const out = [];
+  for (const id of [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].sort()) {
+    const x = ownEntry(a, id) ?? null, y = ownEntry(b, id) ?? null;
+    if (!ownersKind(x) && !ownersKind(y)) continue;
+    if (!x || !y || x.kind !== y.kind) { if (canonical(x) !== canonical(y)) out.push({ id, field: null, from: x, to: y }); continue; }
+    for (const f of [...new Set([...Object.keys(x), ...Object.keys(y)])].sort()) {
+      if (canonical(x[f] ?? null) !== canonical(y[f] ?? null) && LINK_KINDS[x.kind].ownerClass(f)) out.push({ id, field: f, from: x[f] ?? null, to: y[f] ?? null });
+    }
+  }
+  return out;
+}
+// The line a question shows the owner for one change, and binds by: a field line for a field, an
+// entry line for the whole entry.
+linkFieldChanges.key = (c) => `links.${c.id}${c.field === null ? '' : `.${c.field}`}`;
+linkFieldChanges.line = (c) => `${linkFieldChanges.key(c)}: main has ${canonical(c.from ?? null)}; would be ${canonical(c.to ?? null)}`;
+// Whether question qid approves change c ({ id, field, from, to }): the owner answered it, with its
+// recommendation, unchanged since; a line it binds by shows the change; and it was answered after
+// main last changed what it approves (so an old yes never undoes a revert on main). A question the
+// kit worded from now on binds only by the lines of its approves section (HEADER up to a blank
+// line); an older one by its entry lines, each approving every field it shows changing. Either
+// class of the owner's link questions covers: the owner read the exact line and said yes to it.
+function linkAnswerCovers(qid, c) {
+  const q = logGet(qid);
+  if (q?.type !== 'question') return false;
+  const v = questionView(q);
+  if (!linkAnswerCovers.yes(v)) return false;
+  if (linkAnswerCovers.why(qid)) return false;
+  const lines = linkAnswerCovers.lines(qid);
+  const shown = lines.includes(linkFieldChanges.line(c)) || (c.field !== null && lines.some((l) => {
+    const e = linkAnswerCovers.entryLine(l, c.id);
+    return !!e && isObj(e.from) && isObj(e.to) && e.from.kind === e.to.kind && canonical(e.from[c.field] ?? null) === canonical(c.from ?? null) && canonical(e.to[c.field] ?? null) === canonical(c.to ?? null);
+  }));
+  if (!shown) return false;
+  // the owner's later answer to the same line, if not a yes, takes this one back
+  if (questions().some((o) => o.id !== qid && o.status === 'answered' && o.answered_by === 'owner' && String(o.answered_at) > String(v.answered_at) && !linkAnswerCovers.yes(o) && linkAnswerCovers.lines(o.id).includes(linkFieldChanges.line(c)))) return false;
+  const at = c.field === null ? linkChangedOnMain(c.id) : linkAnswerCovers.fieldChangedAt(c.id, c.field);
+  return at === null || Date.parse(v.answered_at) >= at;
+}
+Object.assign(linkAnswerCovers, {
+  HEADER: 'This answer approves exactly these repo link changes, and no other:',
+  // the owner's own yes, as recommended: a question asked with recommendation yes, answered yes
+  // (a note after " — " aside), never a review, a secrets question, a default or another choice
+  yes: (v) => v.status === 'answered' && v.answered_by === 'owner' && !!v.matched && v.kind !== 'review' && !(v.secrets ?? []).length && ['governance-edit', 'gate-change'].includes(v.class) && String(v.answer ?? '').split(' — ')[0].trim().toLowerCase() === 'yes',
+  // the lines of a context's approves section, or null when it has none
+  section: (context) => {
+    const ls = String(context ?? '').split('\n');
+    const i = ls.indexOf(linkAnswerCovers.HEADER);
+    if (i < 0) return null;
+    const end = ls.findIndex((l, k) => k > i && !l.trim());
+    return ls.slice(i + 1, end < 0 ? ls.length : end);
+  },
+  // the lines question qid binds by: its approves section, or (asked before it had one) its entry lines
+  lines: (qid) => {
+    const ctx = String(logGet(qid)?.context ?? '');
+    return linkAnswerCovers.section(ctx) ?? ctx.split('\n').filter((l) => /^links\.[a-z0-9-]+: main has /.test(l));
+  },
+  // an entry line's two entries for link id ({ from, to }), or null; the split is the one where both sides parse
+  entryLine: (l, id) => {
+    const pre = `links.${id}: main has `;
+    if (!l.startsWith(pre)) return null;
+    const body = l.slice(pre.length);
+    for (let i = body.indexOf('; would be '); i >= 0; i = body.indexOf('; would be ', i + 1)) {
+      try { return { from: JSON.parse(body.slice(0, i)), to: JSON.parse(body.slice(i + '; would be '.length)) }; } catch {}
+    }
+    return null;
+  },
+  // why question qid approves nothing it shows, whatever it shows: changed after the owner answered it
+  why: (qid) => {
+    const ups = logGet(qid)?.updates ?? [];
+    const ansAt = ups.findLastIndex((u) => u.answer !== undefined && writerClass(u.by) === 'owner');
+    return ansAt >= 0 && ups.slice(ansAt + 1).some((u) => u.context !== undefined || u.question !== undefined) ? `${qid}'s question was changed after the owner answered it: that answer approves only what it showed then; ask again` : null;
+  },
+  // when main's first-parent line last changed links.<id>.<field> (ms), over the commits linkChangedOnMain reads; null when none did
+  history: new Map(),
+  fieldChangedAt: (id, field) => {
+    const ref = mainRef();
+    const head = ref ? git(['rev-parse', ref]) : null;
+    const key = `${head}\0${id}\0${field}`;
+    if (linkAnswerCovers.history.has(key)) return linkAnswerCovers.history.get(key);
+    const rows = head ? (git(['log', '--first-parent', '-n', String(LINK_HISTORY_DEPTH), '--format=%H %ct', head, '--', `${projectRel}/settings.md`]) ?? '').split('\n').filter(Boolean) : [];
+    const valueAt = (rev) => {
+      if (!linkEntryAtCache.has(rev)) linkEntryAtCache.set(rev, settingsAt(rev, { orNull: true })?.links ?? {});
+      return canonical(ownEntry(linkEntryAtCache.get(rev), id)?.[field] ?? null);
+    };
+    let at = null;
+    for (const row of rows) {
+      const [sha, ct] = row.split(' ');
+      // a shallow clone's history ends here: what came before is unknown, so nothing is known to have changed
+      if (git(['rev-parse', '--verify', '--quiet', `${sha}^`]) === null) break;
+      if (valueAt(sha) !== valueAt(`${sha}^`)) { at = Number(ct) * 1000; break; }
+    }
+    linkAnswerCovers.history.set(key, at);
+    return at;
+  },
+  // the newest answered question that covers change c, or null
+  any: (c) => questions().filter((q) => q.status === 'answered' && String(q.context ?? '').includes(`links.${c.id}`)).sort((a, b) => String(b.answered_at).localeCompare(String(a.answered_at))).find((q) => linkAnswerCovers(q.id, c))?.id ?? null,
+});
 let settingsCache;
 function loadSettings() {
   if (settingsCache) return settingsCache;
@@ -938,13 +1058,13 @@ const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-sett
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
-const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records'];
+const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records', 'worktree_copy', 'worktree_setup_always'];
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
 // records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
 // "repo", in its own project folder, landing with its code; or "home", on home's ticket/<id> in
 // home's project folder, so nothing of the project lands in the linked repo (recordsInHome).
-const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], ignored_checks: [], project: 'docs/devteam/project', records: 'repo' };
+const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], ignored_checks: [], project: 'docs/devteam/project', records: 'repo', worktree_copy: [], worktree_setup_always: false };
 const RECORDS_WHERE = ['repo', 'home'];
 // what a gate run sees is the owner's gate-change, as for home's own keys (OWNER_SETTINGS)
 const REPO_GATE_KEYS = ['gates', 'worktree_setup', 'worktree_files', 'ignored_checks'];
@@ -970,6 +1090,7 @@ const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
   gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string', records: 'string',
+  worktree_copy: 'any', worktree_setup_always: 'boolean',
 });
 const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
@@ -1331,6 +1452,7 @@ const CLASS_WORDS = Object.freeze({
   'registry-attest': 'Confirming the registry is complete',
   'new-dependency': 'Adding a new dependency',
   'artifact-publish': 'Publishing a page',
+  'recurring-edit': 'Adding, changing or stopping a job',
   'pane-answer': "Answering the supervisor's terminal",
   'goal-order': 'Putting the goals in order',
   'goal-approval': 'Approving a goal',
@@ -1482,7 +1604,30 @@ function checkLine(o, file) {
   // A chat or thread line is an answer, with the owner's words in said, or what that answer
   // carried: its standing rule (knowledge citing the question), or its verdict on a goal (goal
   // decide). A thread answer names the owner's turn its words come from (answer --from-turn).
-  if (['chat', 'thread'].includes(o.channel) && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision))) errs.push(`a ${o.channel} line is an answer to a question with the owner's words in said, or the standing rule or goal verdict that answer carried`);
+  // A correction the supervisor recorded from the owner's words (correct --from-turn|--from-chat --said) is one too.
+  if (['chat', 'thread'].includes(o.channel) && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision) || (['decision', 'act'].includes(o.type) && o.op === 'set' && isObj(o.corrected) && typeof o.corrected.said === 'string'))) errs.push(`a ${o.channel} line is an answer to a question with the owner's words in said, the standing rule or goal verdict that answer carried, or a correction with the owner's words in corrected.said`);
+  // turn-authority-1: what a clause binding carries, and only where it can be
+  const offsetsBad = (x) => Array.isArray(x) && x.length === 2 && Number.isInteger(x[0]) && Number.isInteger(x[1]) && !(x[0] < x[1]);
+  if (['decision', 'act'].includes(o.type) && isObj(o.corrected)) {
+    const c = o.corrected;
+    const bound = c.said !== undefined || c.said_at !== undefined || c.turn !== undefined;
+    if (bound && (o.by !== 'owner' || !['chat', 'thread'].includes(o.channel))) errs.push("corrected.said, said_at and turn are on the owner's correction recorded from a thread or chat only");
+    else if (o.channel === 'chat' && (c.said_at !== undefined || c.turn !== undefined)) errs.push('a correction recorded from chat has no turn or said_at');
+    else if (o.channel === 'thread' && (c.turn === undefined || c.said_at === undefined)) errs.push("a correction recorded from a thread names the owner's turn and where in it the words are (corrected.turn, corrected.said_at)");
+    if (['chat', 'thread'].includes(o.channel) && typeof c.said === 'string') {
+      if (c.reason !== c.said) errs.push("a correction recorded from the owner's words gives them as its reason (corrected.reason is corrected.said)");
+      if (c.severity !== undefined || c.impact !== undefined) errs.push("a correction recorded from the owner's words carries no severity or impact");
+    }
+    if (offsetsBad(c.said_at)) errs.push('corrected.said_at is [start, end] with start before end');
+  }
+  if (o.type === 'question') {
+    if ((o.said_at !== undefined || o.answer_seen !== undefined) && !(o.channel === 'thread' && o.said_at !== undefined && o.answer_seen !== undefined)) errs.push('said_at and answer_seen go together, on an answer recorded from a clause of a thread turn (channel thread)');
+    if ((o.owner_said_turn !== undefined || o.owner_said_at !== undefined) && !(o.owner_said_turn !== undefined && o.owner_said_at !== undefined && typeof o.owner_said === 'string')) errs.push('owner_said_turn and owner_said_at go together, with owner_said');
+    if (o.seen !== undefined && o.about_turn === undefined) errs.push('seen goes with about_turn');
+    if (o.about_turn !== undefined && o.thread === undefined) errs.push('about_turn is on a question asked in a thread (thread ask --turn)');
+    if (offsetsBad(o.said_at)) errs.push('said_at is [start, end] with start before end');
+    if (offsetsBad(o.owner_said_at)) errs.push('owner_said_at is [start, end] with start before end');
+  }
   // dropped files go with the owner's own answer, never words the supervisor recorded for them
   if (o.type === 'question' && ['chat', 'thread'].includes(o.channel) && o.files !== undefined) errs.push(`files are on the owner's own answer, never one recorded from ${o.channel}`);
   if (o.type === 'question' && (o.channel === 'thread') !== (o.turn !== undefined)) errs.push(o.turn === undefined ? "a thread answer names the owner's turn its words come from (turn)" : 'turn is on an answer recorded from a thread (channel thread) only');
@@ -1596,22 +1741,33 @@ function fold(all) {
     // A goal's hold has its own rule (planning.md §1, holds): the owner's line always counts; the
     // supervisor's counts as a fleet op, the undo of a fleet op still in force on this goal, a drain
     // of a running goal, or the release of a drain it set itself. Anything else is ignored, with why.
+    // hold_for and hold_until (what the hold waits on, and when to look again) are part of the hold
+    // line: they apply with its hold, are refused with it, and a hold line without them leaves the
+    // hold with no cause. A line carrying them with no hold changes neither.
+    const holdKey = (k) => k === 'hold' || k === 'hold_for' || k === 'hold_until';
+    const onlyHold = () => Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || holdKey(k));
+    const holdWith = (h) => {
+      obj.hold = h;
+      obj.__holdBy = cls;
+      for (const k of ['hold_for', 'hold_until']) if (l[k] !== undefined && l[k] !== null) obj[k] = l[k]; else delete obj[k];
+      return { hold: h, ...(l.hold_for !== undefined ? { hold_for: l.hold_for } : {}), ...(l.hold_until !== undefined ? { hold_until: l.hold_until } : {}) };
+    };
     let holdLine = null;
+    if (obj.type === 'goal' && !l.hold && (l.hold_for !== undefined || l.hold_until !== undefined)) {
+      ignored.push({ line: l, why: 'hold_for and hold_until go with a hold' });
+      if (onlyHold()) continue;
+    }
     if (obj.type === 'goal' && l.hold) {
       const cur = obj.hold ?? { mode: 'run' };
       const why = holdRefusal(l.hold, cur, obj.__holdBy ?? null, cls);
       if (why) {
         ignored.push({ line: l, why });
-        if (Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold')) continue;
+        if (onlyHold()) continue;
       } else holdLine = l.hold;
     }
-    const holdOnly = obj.type === 'goal' && Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold');
+    const holdOnly = obj.type === 'goal' && onlyHold();
     if (holdOnly) {
-      if (holdLine) {
-        obj.hold = holdLine;
-        obj.__holdBy = cls;
-        obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), hold: holdLine });
-      }
+      if (holdLine) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...holdWith(holdLine) });
       continue;
     }
     // A supervisor's line under an answer to a goal-change --order question is that answer applied, on
@@ -1656,14 +1812,9 @@ function fold(all) {
       continue;
     }
     const rank = RANK[cls];
-    const changed = {};
-    if (holdLine) {
-      obj.hold = holdLine;
-      obj.__holdBy = cls;
-      changed.hold = holdLine;
-    }
+    const changed = holdLine ? holdWith(holdLine) : {};
     for (const [k, val] of Object.entries(l)) {
-      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (notOwnTag && k === 'kit_lesson')) continue;
+      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (obj.type === 'goal' && holdKey(k)) || (notOwnTag && k === 'kit_lesson')) continue;
       // an order line's priority is the owner's answer, at the owner's rank; its approved stays the
       // supervisor's, so a later answer's approved still lands and is seen as used
       const r = byOrder && k === 'priority' ? RANK.owner : rank;
@@ -1813,6 +1964,27 @@ function withLock(file, fn, { staleMs = 10000, waitMs = 15000 } = {}) {
       }
       if (Date.now() - start > waitMs) die(`timed out waiting for ${lock}`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+// withLock's lock, for a caller that must never wait (the dashboard's tick): a lock held and fresh
+// is undefined back, and fn never runs; a stale one (either way) is taken, once.
+function tryLock(file, fn, { staleMs = 10000 } = {}) {
+  const lock = `${file}.lock`;
+  for (let tries = 0; ; tries++) {
+    try {
+      fs.mkdirSync(lock, { recursive: false });
+      break;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const at = fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs;
+      if (tries || (at !== undefined && Math.abs(Date.now() - at) <= staleMs)) return undefined;
+      fs.rmSync(lock, { recursive: true, force: true });
     }
   }
   try {
@@ -1995,6 +2167,8 @@ function logFileText(file) {
 let logCache = null;
 function readLog() {
   if (logCache) return logCache;
+  // folds, not calls: wait's trace counts them (kit-594)
+  readLog.reads = (readLog.reads ?? 0) + 1;
   const names = new Set();
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
   const lines = [];
@@ -2013,6 +2187,19 @@ function readLog() {
   const byType = new Map();
   for (const o of objects.values()) { if (!byType.has(o.type)) byType.set(o.type, []); byType.get(o.type).push(o); }
   return (logCache = { lines, objects, errors, ignored, unknown, byType });
+}
+// What readLog folds, as one string: main's sha (the durable log is read at it, so a merge or a fetch
+// that moves main changes it with no file in the checkout changed) and each log file's name, size and
+// mtime under run/log and project/log. Equal means a fold would read the same lines.
+function logKey() {
+  mainRefCache = undefined;
+  const parts = [`main ${mainSha() ?? '-'}`];
+  for (const [tag, d] of [['run', liveLogDir()], ['project', durableLogDir()]]) {
+    let names = [];
+    try { names = fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).sort(); } catch {}
+    for (const f of names) { try { const st = fs.statSync(path.join(d, f)); parts.push(`${tag}/${f} ${st.size} ${st.mtimeMs}`); } catch {} }
+  }
+  return parts.join('\n');
 }
 const logObjects = (type) => (readLog().byType.get(type) ?? []).filter((o) => !(type === 'goal' && o.kind === 'upkeep'));
 // The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
@@ -2043,7 +2230,10 @@ function ratingHistory(q) {
   const has = (e) => e.stake || e.urgency || e.settles !== undefined;
   return [{ ...entry(q.created_at, q.created_by, asked), asked: true }, ...q.updates.map((u) => entry(u.at, u.by, u))].filter(has);
 }
-const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files'];
+// about_turn, seen, owner_said_turn and owner_said_at are written only when a question is asked and
+// nobody may set them after (x-authority), so they're left out too: an older kit, which drops them
+// as unknown, then hashes the question as this one does, and the owner's answer stands there.
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files', 'about_turn', 'seen', 'owner_said_turn', 'owner_said_at', 'said_at', 'answer_seen'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
@@ -2093,7 +2283,8 @@ function questionView(q) {
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
-    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null,
+    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
+    about_turn: q.about_turn ?? null, seen: q.seen ?? null, owner_said_turn: q.owner_said_turn ?? null, owner_said_at: q.owner_said_at ?? null,
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
   };
 }
@@ -2287,7 +2478,9 @@ const isTidyAct = (a) => a.class === 'worker-slots' && String(a.what ?? '').star
 const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision && a.created_by !== 'owner' && !isTidyAct(a))];
 const correctionOf = (a) => {
   const u = a.updates.filter((x) => x.corrected !== undefined).pop();
-  return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
+  // a repair answers the correction before it: one newer than the latest repair is unrepaired
+  const r = a.updates.filter((x) => x.repaired !== undefined).pop();
+  return u ? { ...u.corrected, by: u.by, at: u.at, channel: u.channel ?? null, repaired: r && r.at >= u.at ? a.repaired ?? null : null } : null;
 };
 // How much a goal matters to the project, 1 to 4: the supervisor's judgment against
 // project/strategy.md (a goal-impact decision whose first ref is the goal; the latest one), or the
@@ -3064,6 +3257,154 @@ function prefixOwners(entry, components, devteamLine) {
   return [...new Set(probes.flatMap((p) => ownersOf(p, components, devteamLine)))];
 }
 /* coverage end */
+/* parts start */
+// Parts of a file, read by line (spec: what a part is). A touches entry may name one: path#name, or
+// path#+name for a part the ticket adds; only files settings.split_files lists split this way.
+const PART_NAME = /^[A-Za-z0-9_$.-]+$/;
+const touchPath = (entry) => { const i = entry.indexOf('#'); return i === -1 ? entry : entry.slice(0, i); };
+const touchPart = (entry) => { const i = entry.indexOf('#'); if (i === -1) return null; const p = entry.slice(i + 1); return { name: p.replace(/^\+/, ''), added: p.startsWith('+') }; };
+const PART_MARK = /^\s*(?:\/\*|<!--)\s*([A-Za-z0-9_$.-]+)\s+(start|end)\s*(?:\*\/|-->)\s*$/;
+const PART_DECL = /^(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function(?:\s*\*\s*|\s+)([A-Za-z_$][\w$]*)|(?:const|let|var|class)\s+([A-Za-z_$][\w$]*))/;
+const PART_COMMENT = /^(?:\/\/|\/\*| ?\*)/;
+const headingSlug = (s) => s.trim().toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, '').replace(/ /g, '-');
+// { places: Map name -> [{from, to}] (1-based, inclusive), owner: line -> leaf key, lines, n }. The
+// leaves partition the file: each declaration's or heading's own lines, and the rest by region. A
+// leaf is keyed by its path (a heading's ancestor headings; a declaration's enclosing regions), its
+// name and its count among places with that path and name, so a same-named place added elsewhere
+// never renumbers it: d:<path/>name#k, r:<region> for a region's rest, r: for the file's.
+function fileParts(text, file) {
+  const lines = text.split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const n = lines.length;
+  const places = new Map();
+  const add = (name, from, to) => { if (!places.has(name)) places.set(name, []); places.get(name).push({ from, to }); };
+  const owner = new Array(n + 1).fill(null); // line -> own leaf key (declaration or heading), else null
+  const count = new Map();
+  const own = (path, name, from, to) => { const id = `${path.length ? `${path.join('/')}/` : ''}${name}`; const k = (count.get(id) ?? 0) + 1; count.set(id, k); const key = `d:${id}#${k}`; for (let i = from; i <= to; i++) owner[i] = key; return key; };
+  // regions
+  const open = new Map();
+  const regions = [];
+  for (let i = 1; i <= n; i++) {
+    const m = lines[i - 1].match(PART_MARK);
+    if (!m) continue;
+    if (m[2] === 'start') { if (!open.has(m[1])) open.set(m[1], i); }
+    else if (open.has(m[1])) { regions.push({ name: m[1], from: open.get(m[1]), to: i }); add(m[1], open.get(m[1]), i); open.delete(m[1]); }
+  }
+  const isMark = (i) => PART_MARK.test(lines[i - 1]);
+  // only a marker at column 0 ends a declaration; an indented one sits inside a body
+  const isMark0 = (i) => isMark(i) && !/^\s/.test(lines[i - 1]);
+  if (/\.md$/i.test(file)) {
+    const heads = [];
+    let fence = null;
+    for (let i = 1; i <= n; i++) {
+      const l = lines[i - 1];
+      const f = l.match(/^\s{0,3}(`{3,}|~{3,})/);
+      if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; continue; }
+      if (fence) continue;
+      const h = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+      if (h) heads.push({ i, level: h[1].length, name: headingSlug(h[2]) });
+    }
+    const above = [];
+    for (let j = 0; j < heads.length; j++) {
+      const h = heads[j];
+      while (above.length && above[above.length - 1].level >= h.level) above.pop();
+      let to = n;
+      for (let k = j + 1; k < heads.length; k++) if (heads[k].level <= h.level) { to = heads[k].i - 1; break; }
+      add(h.name, h.i, to);
+      const ownTo = j + 1 < heads.length ? heads[j + 1].i - 1 : n;
+      own(above.map((a) => a.name), h.name, h.i, ownTo);
+      above.push(h);
+    }
+  } else {
+    const html = /\.html?$/i.test(file);
+    const decls = [];
+    for (let i = 1; i <= n; i++) { const m = lines[i - 1].match(PART_DECL); if (m) decls.push({ i, name: m[1] ?? m[2] }); }
+    // a declaration starts at the comment lines directly above it
+    for (const d of decls) { d.from = d.i; while (d.from > 1 && PART_COMMENT.test(lines[d.from - 2]) && !isMark(d.from - 1) && !PART_DECL.test(lines[d.from - 2])) d.from--; }
+    for (let j = 0; j < decls.length; j++) {
+      const d = decls[j];
+      const stop = j + 1 < decls.length ? Math.max(decls[j + 1].from, d.i + 1) : n + 1;
+      let to = d.i;
+      while (to + 1 < stop && !isMark0(to + 1) && !(html && lines[to].startsWith('<'))) to++;
+      const from = Math.max(d.from, j ? decls[j - 1].i + 1 : 1);
+      add(d.name, from, to);
+      own(regions.filter((r) => r.from < d.i && d.i < r.to).sort((a, b) => a.from - b.from).map((r) => r.name), d.name, from, to);
+    }
+  }
+  // the rest: lines no declaration or heading owns, by innermost region
+  const restKey = (i) => { let best = null; for (const r of regions) if (r.from <= i && i <= r.to && (!best || r.from >= best.from)) best = r; return best ? `r:${best.name}` : 'r:'; };
+  for (let i = 1; i <= n; i++) if (!owner[i]) owner[i] = restKey(i);
+  return { places, regions, owner, lines, n };
+}
+// The leaf keys a named part covers in these parts: every leaf with a line inside one of its places.
+function partLeaves(P, name) {
+  const s = new Set();
+  for (const pl of P.places.get(name) ?? []) for (let i = pl.from; i <= pl.to; i++) s.add(P.owner[i]);
+  return s;
+}
+// Each leaf's text, trailing blank lines dropped.
+function leafTexts(P) {
+  const m = new Map();
+  for (let i = 1; i <= P.n; i++) { const k = P.owner[i]; m.set(k, m.has(k) ? `${m.get(k)}\n${P.lines[i - 1]}` : P.lines[i - 1]); }
+  for (const [k, v] of m) m.set(k, v.replace(/(?:\n[ \t]*)+$/, ''));
+  return m;
+}
+// The leaves of a file that changed between two texts and that none of the named parts covers. A
+// leaf the base has is judged by the base: only a part named there covers it, so widening a part at
+// the head (a region moved round a function, a heading demoted under a named one) covers nothing
+// more. A leaf only the head has is judged by the head: a function added inside a named region is
+// the region's, and a part the ticket adds (+name) covers its own leaves, unless the base has it.
+function partsChanged(baseText, headText, file, named) {
+  const B = fileParts(baseText ?? '', file), H = fileParts(headText ?? '', file);
+  const tb = leafTexts(B), th = leafTexts(H);
+  const covB = new Set(), covH = new Set();
+  for (const x of named) {
+    if (!x.added) for (const k of partLeaves(B, x.name)) covB.add(k);
+    if (!x.added || !B.places.has(x.name)) for (const k of partLeaves(H, x.name)) covH.add(k);
+  }
+  return [...new Set([...tb.keys(), ...th.keys()])].filter((k) => tb.get(k) !== th.get(k) && !(tb.has(k) ? covB : covH).has(k));
+}
+// A leaf key in words: a declaration's or heading's name, or whose rest it is.
+const leafWords = (k) => (k === 'r:' ? "the file's rest" : k.startsWith('r:') ? `region ${k.slice(2)}'s rest` : k.slice(2).replace(/#\d+$/, ''));
+/* parts end */
+// Parts of a file at a repo's main, read once per process: null when this machine can't read the
+// repo or its main has no such file.
+const partsAtMainCache = new Map();
+function partsAtMain(repoName, file) {
+  const k = `${repoName}\0${file}`;
+  if (!partsAtMainCache.has(k)) {
+    let P = null;
+    if (repoReadable(repoName)) {
+      const R = repo(repoName);
+      const ref = R.mainRef();
+      const text = ref ? R.git(['show', `${ref}:${file}`]) : null;
+      if (text !== null) P = fileParts(text, file);
+    }
+    partsAtMainCache.set(k, P);
+  }
+  return partsAtMainCache.get(k);
+}
+// Whether settings.split_files lists a file (its tickets may name parts of it).
+const isSplitFile = (file, s = loadSettings()) => Array.isArray(s.split_files) && s.split_files.some((g) => typeof g === 'string' && pathMatches(g, file));
+// Whether two touches entries of tickets in one repo can collide (D4, ready). Paths that don't
+// overlap never do; a whole file, a glob, or a file split_files doesn't list overlaps as before.
+// Two parts of a listed file: names that exist at main collide when they cover a common leaf there;
+// a name not there yet (path#+name, or one a dependency adds) is compared by name, and never
+// collides with a part main has. A repo this machine can't read, or a file main lacks, collides.
+function touchesOverlap(a, b, repoName, s = loadSettings()) {
+  const pa = touchPath(a), pb = touchPath(b);
+  if (!globsOverlap(pa, pb)) return false;
+  const xa = touchPart(a), xb = touchPart(b);
+  if (!xa || !xb || trimSlash(pa) !== trimSlash(pb) || hasWild(pa) || !isSplitFile(pa, s)) return true;
+  const P = partsAtMain(repoName, trimSlash(pa));
+  if (!P) return true;
+  const ma = !xa.added && P.places.has(xa.name), mb = !xb.added && P.places.has(xb.name);
+  if (!ma && !mb) return xa.name === xb.name;
+  if (ma !== mb) return false;
+  const la = partLeaves(P, xa.name);
+  for (const k of partLeaves(P, xb.name)) if (la.has(k)) return true;
+  return false;
+}
 
 // Live state of a ticket's worker: its last phase line, and its last line of any kind.
 function workerState(id) {
@@ -3507,12 +3848,20 @@ function holdLine(key, target, line, paste = null) {
     return path.join(dir, `${name}.json`);
   } catch { return null; }
 }
+// A window's own short lock, for the steps a late line could slip between: a sender's look at what
+// is held and its hold, a flusher's claim, a put-back. Only renames and reads run under it: nothing typed.
+function heldLock(key, fn) {
+  fs.mkdirSync(path.join(runDir, 'held-locks'), { recursive: true });
+  return withLock(path.join(runDir, 'held-locks', encodeURIComponent(key)), fn);
+}
 // Lines back into the window's folder, under their own names: older than anything held since.
-function unclaimHeld(claimed, dir) {
-  const names = heldFiles(claimed);
-  if (names.length) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
-  for (const n of names) { try { fs.renameSync(path.join(claimed, n), path.join(dir, n)); } catch {} }
-  try { fs.rmSync(claimed, { recursive: true, force: true }); } catch {}
+function unclaimHeld(key, claimed, dir) {
+  heldLock(key, () => {
+    const names = heldFiles(claimed);
+    if (names.length) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
+    for (const n of names) { try { fs.renameSync(path.join(claimed, n), path.join(dir, n)); } catch {} }
+    try { fs.rmSync(claimed, { recursive: true, force: true }); } catch {}
+  });
 }
 // A line let go, said in the log by whoever writes as the supervisor (its tick, accounts-tick): any
 // other process leaves it for them.
@@ -3530,11 +3879,26 @@ function dropHeld(key, file, why) {
 // Stale claims back, and what is a day old let go: whoever looks, whatever else holds the window.
 function tidyHeld(key) {
   const dir = heldDir(key);
-  for (const c of heldClaims(key)) if (c.stale && c.pid !== process.pid) unclaimHeld(c.dir, dir);
+  for (const c of heldClaims(key)) if (c.stale && c.pid !== process.pid) unclaimHeld(key, c.dir, dir);
   for (const n of heldFiles(dir)) if (!(heldAge(n) < HELD_MAX_MS)) dropHeld(key, path.join(dir, n), 'held for over a day');
 }
-// a line still worth typing waits, or someone is typing them now
-const heldPending = (key) => heldFiles(heldDir(key)).some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+// a line still worth typing waits, or someone is typing them now. Tests only
+// (DEVTEAM_HELD_CHECK_DELAY_MS): held open between the two reads, with a held-locks/<k>.checking
+// marker, so a put-back can be tried inside that window.
+function heldPending(key) {
+  const files = heldFiles(heldDir(key));
+  const delay = Number(process.env.DEVTEAM_HELD_CHECK_DELAY_MS ?? 0);
+  if (!(delay > 0)) return files.some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+  const marker = path.join(runDir, 'held-locks', `${encodeURIComponent(key)}.checking`);
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, '');
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    return files.some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+  } finally {
+    fs.rmSync(marker, { force: true });
+  }
+}
 // Types a window's held lines, oldest first, each only into a pane that is ready for it. The number typed.
 function flushHeld(key) {
   const dir = heldDir(key);
@@ -3544,11 +3908,14 @@ function flushHeld(key) {
   if (heldClaims(key).length) return 0;
   for (let stopped = false; !stopped && heldFiles(dir).length;) {
     const claimed = `${dir}.claim-${process.pid}-${Date.now()}`;
-    try { fs.renameSync(dir, claimed); } catch { break; }
+    // taken only while nobody else holds a claim: another flusher's lines go first, in order
+    let took = false;
+    try { took = heldLock(key, () => { if (heldClaims(key).length) return false; fs.renameSync(dir, claimed); return true; }); } catch {}
+    if (!took) break;
     const names = heldFiles(claimed);
     const live = names.filter((n) => heldAge(n) < HELD_MAX_MS);
     // only lines nobody here may let go: left where they are for the supervisor's next look
-    if (!live.length && !heldLogs()) { unclaimHeld(claimed, dir); break; }
+    if (!live.length && !heldLogs()) { unclaimHeld(key, claimed, dir); break; }
     for (const n of names) {
       const f = path.join(claimed, n);
       if (!(heldAge(n) < HELD_MAX_MS)) { dropHeld(key, f, 'held for over a day'); continue; }
@@ -3568,7 +3935,7 @@ function flushHeld(key) {
       try { const now = new Date(); fs.utimesSync(claimed, now, now); } catch {}
       typed++;
     }
-    unclaimHeld(claimed, dir);
+    unclaimHeld(key, claimed, dir);
   }
   return typed;
 }
@@ -3694,10 +4061,11 @@ function cmdValidate() {
   // Each ticket against its own repo's lines; another repo's kit line is its project folder, read
   // from settings alone (no checkout needed, so a missing one never stops validate).
   const S0 = loadSettings(); const lined = linesDeclared(S0);
+  let validateClosures = null;
   const linesOf = (link) => ({ comps: componentsOn(S0, link), dev: link === 'home' ? devteamLine() : [`${projectRelOf(link)}/**`] });
   for (const [id, t] of ts) {
     if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
-    for (const g of t.touches ?? []) if (unbalanced(g)) err(id, `touches entry "${g}" has unbalanced braces`);
+    for (const g of t.touches ?? []) if (unbalanced(touchPath(g))) err(id, `touches entry "${g}" has unbalanced braces`);
     // Component lines: the component is declared, and every touches entry lies in its
     // line (or a touches_components member's) and no other, so a ticket's footprint is one line.
     if (lined && isActive(t)) {
@@ -3709,15 +4077,40 @@ function cmdValidate() {
       else if (componentLink(c, S0) !== componentLink(t.component, S0)) err(id, `touches_components "${c}" is in another repo; a ticket changes one repo (split it per repo)`);
       const mine = new Set([t.component, ...tc]);
       const L0 = linesOf(componentLink(t.component, S0));
+      // The ticket's own folder (or a file under it) is its to write, when its records are in its
+      // own repo (check-pr's `own`); matched on text, so no empty, . or .. segment may walk out.
+      const ownDir = `${projectRelOf(componentLink(t.component, S0))}/tickets/${id}`;
+      const ownFolder = !recordsHomeSetting(t);
       for (const entry of t.touches ?? []) {
-        const owners = prefixOwners(entry, L0.comps, L0.dev);
+        const p = trimSlash(touchPath(entry));
+        if (ownFolder && p.split('/').every((x) => x && x !== '.' && x !== '..') && (p === ownDir || p.startsWith(`${ownDir}/`))) continue;
+        const owners = prefixOwners(touchPath(entry), L0.comps, L0.dev);
         if (owners === null) err(id, `touches "${entry}" has no static prefix, so it could be in any line; start it with a folder`);
-        else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${projectRel}/tickets/${id}/ is its to write, and kit upgrades are chores`);
+        else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${ownDir}/ may be named from it, and kit upgrades are chores`);
         else if (!owners.length) err(id, `touches "${entry}" lies in no component's line`);
         else if (owners.some((o) => !mine.has(o))) err(id, `touches "${entry}" lies in ${owners.filter((o) => !mine.has(o)).join(' and ')}'s line, not ${t.component}'s (list ${owners.filter((o) => !mine.has(o)).join(', ')} in touches_components on a contract or integration ticket, or split the ticket)`);
       }
     }
     if (isActive(t) && !mergeShaFor(id)) for (const l of t.links ?? []) if (!ownEntry(loadSettings().links, l)) err(id, `links "${l}" is not in settings links`);
+    // Parts (path#name): of a file split_files lists, named as main has them, or added (path#+name)
+    // by this ticket or one it depends on. Written "<id>: …", so another ticket's gate only warns.
+    if (isActive(t) && !mergeShaFor(id)) for (const entry of t.touches ?? []) {
+      const x = touchPart(entry);
+      if (!x) continue;
+      const f = trimSlash(touchPath(entry));
+      const rn = repoOfTicketLink(t);
+      if (hasWild(f)) err(id, `touches "${entry}": a part names one file, not a glob`);
+      else if (!x.name || !PART_NAME.test(x.name)) err(id, `touches "${entry}": a part's name is letters, digits and _ $ . - (path#name, or path#+name for a part the ticket adds)`);
+      else if (!isSplitFile(f, S0)) err(id, `touches "${entry}": ${f} is not in settings.split_files, so it is touched whole; name it without #${x.added ? '+' : ''}${x.name}`);
+      else if (!repoReadable(rn)) warnings.push(`${id}: touches "${entry}": its part is not checked, since repo ${rn} can't be read here`);
+      else {
+        const P = partsAtMain(rn, f);
+        const added = () => [...(validateClosures ??= closures(ts)).get(id) ?? []].some((d) => { const o = ts.get(d); return o && isActive(o) && !mergeShaFor(d) && (o.touches ?? []).some((e) => { const y = touchPart(e); return y?.added && y.name === x.name && trimSlash(touchPath(e)) === f; }); });
+        if (!P) err(id, `touches "${entry}": ${f} is not on main; a ticket that creates a file names it whole`);
+        else if (x.added && P.places.has(x.name)) err(id, `touches "${entry}": ${f} already has a part ${x.name} at main; name it without +`);
+        else if (!x.added && !P.places.has(x.name) && !added()) err(id, `touches "${entry}": ${f} has no part ${x.name} at main (a part is a top-level function, const, let, var or class, a Markdown heading's slug, or a /* name start */ … /* name end */ region); one this ticket adds is #+${x.name}`);
+      }
+    }
     for (const d of t.depends_on ?? []) {
       if (d === id) err(id, 'depends on itself');
       else if (!ts.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
@@ -3841,7 +4234,7 @@ function cmdValidate() {
       if (clos.get(a.id)?.has(b.id) || clos.get(b.id)?.has(a.id)) continue;
       // the same path in two repos is two files (by name: validate never needs a checkout)
       if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
-      outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (globsOverlap(ga, gb)) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
+      outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (touchesOverlap(ga, gb, repoOfTicketLink(a))) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
   }
 
@@ -3850,6 +4243,15 @@ function cmdValidate() {
     const s = loadSettings();
     const reg = registryProblems(s);
     errors.push(...reg.errors, ...sensorProblems(s));
+    // Jobs (recurring) as this checkout's settings.md writes them, not loadSettings': an owner's key
+    // reads as main has it there, and a branch's edit to the jobs is what must be checked.
+    {
+      const own = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
+      let jobs;
+      try { jobs = own == null ? undefined : JSON.parse(own).recurring; } catch { jobs = undefined; }
+      if (jobs !== undefined && !isObj(jobs)) errors.push('settings recurring: an object of { "<name>": { kind, title, what, every, … } }');
+      else for (const [n, e] of Object.entries(jobs ?? {})) errors.push(...recurringEntryProblems(n, e));
+    }
     { const p = memoryCeilingProblem(s.machine_memory_ceiling); if (p) errors.push(p); }
     warnings.push(...reg.warnings);
     // With lines, check-pr and merge judge the tree a PR would land, which takes git 2.38; say so
@@ -4180,7 +4582,7 @@ const capWords = (v) => (Number.isFinite(capOf(v)) ? String(v) : 'no cap');
 function overlapsActive(t, activeIds, ts) {
   const repo = repoOfTicketLink(t);
   const mine = t.touches ?? [];
-  return activeIds.filter((id) => { const a = ts.get(id); return a && a.id !== t.id && repoOfTicketLink(a) === repo && (a.touches ?? []).some((ga) => mine.some((gb) => globsOverlap(ga, gb))); });
+  return activeIds.filter((id) => { const a = ts.get(id); return a && a.id !== t.id && repoOfTicketLink(a) === repo && (a.touches ?? []).some((ga) => mine.some((gb) => touchesOverlap(ga, gb, repo))); });
 }
 function cmdReady() {
   const ts = tickets();
@@ -4325,16 +4727,20 @@ function parseReview(file, text) {
   let dispIdx = -1;
   let sevIdx = 1;
   let ruleIdx = -1;
+  let findIdx = -1;
   let width = 0;
+  // the category word a Finding opens with (quality.md §3), markup stripped; any other word is none
+  const CATEGORIES = ['weak-check', 'code-fact', 'undecided', 'defect', 'contradicts', 'coverage', 'harness', 'untraced', 'tldr', 'touches', 'other'];
+  const category = (cell) => { const w = String(cell ?? '').replace(/[`*]/g, '').match(/^\s*([A-Za-z-]+)\s*:/)?.[1]?.toLowerCase(); return CATEGORIES.includes(w) ? w : 'none'; };
   for (const row of text.split('\n')) {
     if (!row.trim().startsWith('|')) continue;
     const cells = tableCells(row);
     const lower = cells.map((c) => c.toLowerCase());
-    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); ruleIdx = lower.indexOf('rule'); width = cells.length; continue; }
+    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); ruleIdx = lower.indexOf('rule'); findIdx = lower.indexOf('finding'); width = cells.length; continue; }
     // A row wider than its header (a stray empty cell before the disposition) still has its
     // disposition: the first non-empty cell from the Disposition column on.
     const disposition = dispIdx < 0 ? '' : cells.length > width ? (cells.slice(dispIdx).find((c) => c) ?? '') : (cells[dispIdx] ?? '');
-    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(ruleIdx > 0 && cells[ruleIdx] ? { rule: cells[ruleIdx] } : {}), ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
+    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, category: findIdx < 0 ? 'none' : category(cells[findIdx]), ...(ruleIdx > 0 && cells[ruleIdx] ? { rule: cells[ruleIdx] } : {}), ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
   }
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
@@ -4390,17 +4796,21 @@ function reviewStats() {
   for (const r of all) {
     for (const f of r.findings) { findings++; if (/^wrong/i.test(f.disposition)) wrong++; }
     if (r.pass !== 1 || r.variant || !r.verdict) continue;
-    byStage[r.stage] ??= { first_passes: 0, rejected: 0, rules: {} };
+    byStage[r.stage] ??= { first_passes: 0, rejected: 0, rules: {}, categories: {} };
     byStage[r.stage].first_passes++;
     if (r.verdict === 'CHANGES') byStage[r.stage].rejected++;
     // what first passes keep blocking on, by the rule each blocking finding cites: what a new
     // session's prompt, or the stage's template, should have said from the start (supervisor.md §10)
     for (const f of r.findings) if (blocking(f.severity) && f.rule) { const k = ruleKey(f.rule); byStage[r.stage].rules[k] = (byStage[r.stage].rules[k] ?? 0) + 1; }
+    // and by the category word each opens with (quality.md §3): every blocking finding, none without one
+    for (const f of r.findings) if (blocking(f.severity)) { const k = f.category ?? 'none'; byStage[r.stage].categories[k] = (byStage[r.stage].categories[k] ?? 0) + 1; }
   }
   for (const s of Object.values(byStage)) {
     s.rejection_rate = s.first_passes ? +(s.rejected / s.first_passes).toFixed(2) : null;
     s.top_blocking_rules = Object.entries(s.rules).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([rule, count]) => ({ rule, count }));
+    s.top_blocking_categories = Object.entries(s.categories).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([category, count]) => ({ category, count }));
     delete s.rules;
+    delete s.categories;
   }
   return { by_stage: byStage, findings, false_positive_rate: findings ? +(wrong / findings).toFixed(2) : null };
 }
@@ -4726,7 +5136,19 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: 
     // records in home: nothing of the project's in the link, its own folder included
     const own = R.projectInRepo && !H ? `${R.projectRel}/tickets/${id}/` : null;
     const mineOwn = (f) => !!own && f.startsWith(own);
-    const outside = changed.filter((f) => !mineOwn(f) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
+    // A whole entry (no #part) covers a file as before; a file main's split_files lists is also inside
+    // touches when an entry names a part of it, and then only the parts named may change.
+    const entries = t.touches ?? [];
+    const sSplit = mainSettings() ?? {};
+    const whole = (f) => entries.some((g) => !touchPart(g) && pathMatches(g, f));
+    const partsNamed = (f) => (isSplitFile(f, sSplit) ? entries.filter((g) => touchPart(g) && trimSlash(touchPath(g)) === f && !hasWild(touchPath(g))).map(touchPart) : []);
+    const outside = changed.filter((f) => !mineOwn(f) && !whole(f) && !partsNamed(f).length);
+    for (const f of changed) {
+      if (mineOwn(f) || whole(f) || !partsNamed(f).length) continue;
+      const show = (at) => R.git(['show', `${at}:${f}`]);
+      const gap = partsChanged(show(base), show(sha), f, partsNamed(f));
+      if (gap.length) fails.push(`changes parts of ${f} the ticket doesn't name: ${[...new Set(gap.map(leafWords))].slice(0, 10).join(', ')}${gap.length > 10 ? ` (+${gap.length - 10} more)` : ''} (the file's rest is the lines outside every declaration, heading and region); a part not named is a design-change to the supervisor (worker.md §3)`);
+    }
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}; if the supervisor widened touches with ticket set since the log last landed, land the log first (log-sync, then merge --chore log) and check again`);
     // Component lines: a changed file is also inside the ticket's component's line or
     // a touches_components member's; the kit's own line is closed but for the ticket's own folder.
@@ -4924,19 +5346,24 @@ function remediationBindingFails(base, sha, approved) {
   for (const r of named) if (!changed.includes(r.name)) fails.push(`${approved} names remediations.${r.name}, which this PR doesn't change: ask again, naming only what it changes`);
   return fails;
 }
+// Each repo link change a merge lands (linkFieldChanges, main against the head) needs an owner's
+// answer whose question showed exactly that change (linkAnswerCovers): the --approved one, or an
+// earlier yes for a field it never asked again about; and the --approved answer must cover one of
+// them. A question changed after its answer approves nothing.
 function ownerLinkActFails(changed, sha, approved) {
   const keys = changed.filter((c) => c.key.startsWith('links.'));
   if (!keys.length) return [];
-  const q = logGet(approved);
-  const ups = q?.updates ?? [];
-  const ansAt = ups.findLastIndex((u) => u.answer !== undefined && writerClass(u.by) === 'owner');
-  if (ansAt >= 0 && ups.slice(ansAt + 1).some((u) => u.context !== undefined || u.question !== undefined)) return [`${approved}'s question was changed after the owner answered it: that answer approves only what it showed then; ask again`];
-  const shown = String(q?.context ?? '');
+  const why = linkAnswerCovers.why(approved);
+  if (why) return [why];
   const lands = settingsAt(sha, { orNull: true })?.links ?? {};
   const onMain = mainSettings(null)?.links ?? {};
-  const saw = (l) => shown.split('\n').includes(`links.${l}: main has ${canonical(ownEntry(onMain, l) ?? null)}; would be ${canonical(ownEntry(lands, l) ?? null)}`);
-  const bare = [...new Set(keys.map((c) => c.key.split('.')[1]))].filter((l) => !saw(l)).map((l) => keys.filter((c) => c.key.split('.')[1] === l).map((c) => c.key)).flat();
-  return bare.length ? [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the entries its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question shows every repo link change waiting to land), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`] : [];
+  const key = linkFieldChanges.key;
+  const cs = linkFieldChanges(onMain, lands);
+  const mine = cs.filter((c) => linkAnswerCovers(approved, c));
+  const bare = cs.filter((c) => !mine.includes(c) && !linkAnswerCovers.any(c)).map(key);
+  if (bare.length) return [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the changes its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question asks about every repo link change no answer covers yet), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`];
+  if (cs.length && !mine.length) return [`${approved} approves none of the repo link changes this lands (${cs.map(key).join(', ')}): cite an answer that approved one of them`];
+  return [];
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
@@ -5068,14 +5495,406 @@ function missingPins(root = mainRoot) {
   return [];
 }
 const pinsHint = (miss = missingPins(), root = mainRoot) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${root}, then try again` : null);
+// The setup marker (kit-596): <git dir>/devteam-setup in a session or chore worktree says its
+// worktree_setup passed for this setup string and these lockfiles ({ v: 1, setup, files }, each a
+// sha256), so a resume skips it unless one changed or worktree_setup_always. Only in a checkout of
+// its own: a plain folder inside another checkout would share that one's git dir, and always runs
+// its setup. s is the repo's effective settings. Runtime state, safe to delete.
+const setupMarker = Object.freeze({
+  FILE: 'devteam-setup',
+  LOCKFILES: ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Gemfile.lock', 'uv.lock', 'poetry.lock', 'Pipfile.lock', 'Cargo.lock', 'go.sum', 'composer.lock'],
+  gitDir(wt) {
+    const top = sh('git', ['rev-parse', '--show-toplevel'], { cwd: wt });
+    if (!top || realPath(top) !== realPath(wt)) return null;
+    return sh('git', ['rev-parse', '--absolute-git-dir'], { cwd: wt }) || null;
+  },
+  // the lockfiles at the root and one folder down (dot-folders and symlinks left out), and each
+  // worktree_copy key there
+  state(wt, s) {
+    const files = {};
+    const add = (rel) => { try { const f = path.join(wt, rel); if (fs.lstatSync(f).isFile()) files[rel.split(path.sep).join('/')] = sha256(fs.readFileSync(f)); } catch {} };
+    for (const l of setupMarker.LOCKFILES) add(l);
+    let tops = [];
+    try { tops = fs.readdirSync(wt, { withFileTypes: true }); } catch {}
+    for (const d of tops) if (d.isDirectory() && !d.name.startsWith('.')) for (const l of setupMarker.LOCKFILES) add(path.join(d.name, l));
+    for (const e of Array.isArray(s.worktree_copy) ? s.worktree_copy : []) if (isObj(e) && typeof e.key === 'string' && e.key && !path.isAbsolute(e.key) && !path.normalize(e.key).split(/[\\/]/).includes('..')) add(path.normalize(e.key));
+    return { v: 1, setup: sha256(String(s.worktree_setup ?? '')), files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))) };
+  },
+  // root (the repo's main checkout): a worktree_copy folder main has, whose key matches main's, but
+  // that is missing here (deleted since: rm -rf node_modules) needs the setup, whatever the marker says
+  needed(wt, s, root = null) {
+    if (s.worktree_setup_always === true) return true;
+    const g = setupMarker.gitDir(wt);
+    if (!g) return true;
+    let m;
+    try { m = JSON.parse(fs.readFileSync(path.join(g, setupMarker.FILE), 'utf8')); } catch { return true; }
+    const now = setupMarker.state(wt, s);
+    if (!isObj(m) || m.v !== 1 || m.setup !== now.setup || !isObj(m.files)) return true;
+    const keys = Object.keys(now.files);
+    if (keys.length !== Object.keys(m.files).length || keys.some((k) => m.files[k] !== now.files[k])) return true;
+    const ok = (p) => typeof p === 'string' && p !== '' && !path.isAbsolute(p) && !path.normalize(p).split(/[\\/]/).includes('..');
+    const has = (p, link = true) => { try { const st = fs.lstatSync(p); return link || !st.isSymbolicLink(); } catch { return false; } };
+    const same = (a, b) => { try { return fs.readFileSync(a).equals(fs.readFileSync(b)); } catch { return false; } };
+    return !!root && (Array.isArray(s.worktree_copy) ? s.worktree_copy : []).some((e) => isObj(e) && ok(e.path) && ok(e.key) && !has(path.join(wt, e.path)) && has(path.join(root, e.path), false) && same(path.join(root, e.key), path.join(wt, e.key)));
+  },
+  write(wt, s) {
+    const g = setupMarker.gitDir(wt);
+    if (!g) return;
+    try { fs.writeFileSync(path.join(g, setupMarker.FILE), `${JSON.stringify(setupMarker.state(wt, s))}\n`); } catch (e) { warn(`could not write the setup marker in ${g}: ${e.message}`); }
+  },
+  clear(wt) {
+    const g = setupMarker.gitDir(wt);
+    if (g) try { fs.rmSync(path.join(g, setupMarker.FILE), { force: true }); } catch {}
+  },
+});
+// Machine-wide setup slots (kit-596): on one machine at most N worktree_setups of session and chore
+// worktrees run at once, each through a runner (setupRunner) that holds a slot for its run. A slot is
+// the folder ~/.devteam/setup-slots/<n> holding holder.json ({ id, pid, start, at }, then pgid and
+// leader_start once the setup runs). Every step is a rename, so two takers never both get <n>, and a
+// waiter frees a slot only when it is still the one it judged. lib is run as text on its own
+// (node -e, beside setupRunner), so it closes over nothing here and requires what it uses.
+const setupSlots = Object.freeze({
+  SLOT_WAIT: 75,
+  PAST_DEADLINE: 124,
+  DEFAULT: 2,
+  MAX: 8,
+  dir: () => path.join(os.homedir(), '.devteam', 'setup-slots'),
+  lib: function () {
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    const cp = require('child_process');
+    // DEFAULT and MAX as above (this text can't read them)
+    const DEFAULT = 2;
+    const MAX = 8;
+    const UNREADABLE_MS = 10000;
+    const LEFTOVER_MS = 60000;
+    const OLD_MS = 15 * 60000;
+    const RECHECK_MS = 60000;
+    let attempts = 0;
+    const rand = () => `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+    const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+    // a slot entry is a real folder or nothing the protocol made (a file, a symlink: a hand edit),
+    // which holds no holder and is judged by its own (lstat) age
+    const isDir = (p) => { try { return fs.lstatSync(p).isDirectory(); } catch { return false; } };
+    const holderOf = (p) => (isDir(p) ? readJson(path.join(p, 'holder.json')) : null);
+    const atMs = (h) => (typeof h?.at === 'number' ? h.at : Date.parse(h?.at));
+    // a holder the protocol wrote whole: an id, a numeric pid and a readable at
+    const whole = (h) => !!h && typeof h === 'object' && typeof h.id === 'string' && h.id !== '' && Number.isInteger(h.pid) && h.pid > 0 && Number.isFinite(atMs(h));
+    // a pid (or, negative, a group) that exists; EPERM is someone else's, still alive
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+    // field 22 of /proc/<pid>/stat on Linux (after the command's closing paren), ps lstart elsewhere;
+    // null when it can't be read, which never matches
+    const proc = os.platform() === 'linux' && fs.existsSync('/proc/self/stat');
+    function startTime(pid) {
+      if (proc) {
+        try { const t = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return t.slice(t.lastIndexOf(')') + 2).split(' ')[19] ?? null; } catch { return null; }
+      }
+      // one locale and zone, so runners started from different environments read the same text
+      const r = cp.spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 10000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } });
+      return (r.status === 0 && r.stdout.trim()) || null;
+    }
+    const same = (pid, start) => { const s = startTime(pid); return s !== null && s === start; };
+    function count(env, warn) {
+      const v = env.DEVTEAM_SETUP_SLOTS;
+      if (v === undefined) return DEFAULT;
+      if (/^[0-9]+$/.test(v) && Number(v) >= 1 && Number(v) <= MAX) return Number(v);
+      warn(`DEVTEAM_SETUP_SLOTS "${v}" is not a whole number from 1 to ${MAX}; using ${DEFAULT}`);
+      return DEFAULT;
+    }
+    // The first free slot (or only slot `only`), taken: holder.json written and fsynced in a private
+    // folder, then that folder renamed to <n>, which succeeds only where <n> is missing (or an empty
+    // folder). A failure other than <n> being occupied (a read-only or full disk) is thrown: the
+    // slots folder is broken, not busy.
+    function take(dir, n, me, only = null) {
+      for (let slot = only ?? 0; slot < (only === null ? n : only + 1); slot++) {
+        const to = path.join(dir, String(slot));
+        try { if (!fs.lstatSync(to).isDirectory() || fs.readdirSync(to).length) continue; } catch {}
+        const tmp = path.join(dir, `.take-${me.id}-${++attempts}`);
+        try {
+          fs.mkdirSync(tmp);
+          const fd = fs.openSync(path.join(tmp, 'holder.json'), 'w');
+          try { fs.writeSync(fd, JSON.stringify({ ...me, at: new Date().toISOString() })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          fs.renameSync(tmp, to);
+          return slot;
+        } catch (e) {
+          try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+          if (!(e.syscall === 'rename' && ['ENOTEMPTY', 'EEXIST', 'ENOTDIR'].includes(e.code))) throw e;
+        }
+      }
+      return null;
+    }
+    // 'gone' (free it now), 'old' (held past 15 minutes: take it over) or 'held'. The id judged is
+    // left in memo.judged[slot] (null: an unreadable holder) for free to compare against. A holder
+    // already seen alive with the same start times is checked with kill(…, 0) only, and its start
+    // times read again once a minute.
+    function judge(dir, slot, memo, now = Date.now()) {
+      memo.seen ??= new Map();
+      memo.judged ??= {};
+      const at = path.join(dir, String(slot));
+      const h = holderOf(at);
+      if (!whole(h)) {
+        memo.judged[slot] = null;
+        let st;
+        try { st = fs.lstatSync(at); } catch { memo.judged[slot] = undefined; return 'gone'; }
+        // younger, it may be a rewrite in flight
+        return now - st.mtimeMs > UNREADABLE_MS ? 'gone' : 'held';
+      }
+      memo.judged[slot] = h.id;
+      const key = `${h.id} ${h.pgid ?? ''}`;
+      const hasGroup = Number.isInteger(h.pgid) && h.pgid > 0;
+      let up;
+      const seen = memo.seen.get(key);
+      if (seen !== undefined && now - seen < RECHECK_MS) up = alive(h.pid) || (hasGroup && alive(-h.pgid));
+      else {
+        const runner = alive(h.pid) && same(h.pid, h.start);
+        // the group lives unless its leader is alive with another start (a reused group id)
+        const group = hasGroup && alive(-h.pgid) && !(alive(h.pgid) && !same(h.pgid, h.leader_start));
+        up = runner || group;
+        if (up) memo.seen.set(key, now);
+      }
+      if (!up) { memo.seen.delete(key); return 'gone'; }
+      return now - atMs(h) > OLD_MS ? 'old' : 'held';
+    }
+    // Move <n> away, then remove it only if it still holds the holder judged (judgedId null: one
+    // still unreadable); otherwise put it back untouched. True when it was removed.
+    function free(dir, slot, judgedId) {
+      const at = path.join(dir, String(slot));
+      const away = path.join(dir, `.free-${Date.now()}-${rand()}`);
+      try { fs.renameSync(at, away); } catch { return false; }
+      const h = holderOf(away);
+      const judged = judgedId === null ? !whole(h) : whole(h) && h.id === judgedId;
+      if (judged) { try { if (isDir(away)) fs.rmSync(away, { recursive: true, force: true }); else fs.unlinkSync(away); } catch {} return true; }
+      // <n> taken again meanwhile: the leftover is swept in a minute (the protocol's one gap)
+      try { fs.renameSync(away, at); } catch {}
+      return false;
+    }
+    // a runner's own slot, freed at its end; one taken over (another id at <n>) is left alone
+    function release(dir, slot, myId) { free(dir, slot, myId); }
+    // .take-* and .free-* folders a killed process left, removed past a minute (a .free-'s time is
+    // in its name: renaming a folder keeps its old mtime)
+    function sweep(dir, now = Date.now()) {
+      let names;
+      try { names = fs.readdirSync(dir); } catch { return; }
+      for (const e of names) {
+        if (!/^\.(take|free)-/.test(e)) continue;
+        const p = path.join(dir, e);
+        let t = Number(/^\.free-(\d+)-/.exec(e)?.[1]);
+        if (!t) { try { t = fs.statSync(p).mtimeMs; } catch { continue; } }
+        if (now - t > LEFTOVER_MS) try { fs.rmSync(p, { recursive: true, force: true }); } catch {}
+      }
+    }
+    return { count, take, judge, free, release, sweep, startTime };
+  },
+});
+// The setup runner's main (kit-596), run as text by seedWorktree (node -e, with setupSlots.lib as
+// slots), so self-contained. It takes a slot (waiting 1 s between rounds until config.deadline, or
+// config.maxWaitMs with none), runs `sh -c config.cmd` as the leader of its own process group,
+// forwards SIGINT, SIGTERM and SIGHUP to that group, kills the group at the deadline, releases the
+// slot, and writes its report as one JSON line to fd 3: { outcome: 'ran' | 'no-slot' |
+// 'waited-deadline' | 'deadline', code, signal, took_over }. Exit 0 (ran, the setup exited 0), 75 (no
+// slot; or killed at the deadline after waiting for its slot, so the time lost was a slot wait), 124
+// (killed at the deadline with its slot got at once), else 1.
+async function setupRunner(config, slots) {
+  const fs = require('fs');
+  const path = require('path');
+  const { spawn } = require('child_process');
+  const crypto = require('crypto');
+  const say = (s) => process.stderr.write(`devteam: ${s}\n`);
+  const warn = (s) => say(`warning: ${s}`);
+  const tookOver = [];
+  const report = (outcome, code = null, signal = null) => { try { fs.writeSync(3, `${JSON.stringify({ outcome, code, signal, took_over: tookOver })}\n`); } catch {} };
+  const me = { id: crypto.randomBytes(8).toString('hex'), pid: process.pid, start: slots.startTime(process.pid) };
+  const n = slots.count(process.env, warn);
+  const dir = config.dir;
+  let child = null;
+  let finished = false;
+  // While the setup runs a signal goes to its group. While waiting it ends the wait: handlers run
+  // between whole steps, so nothing is half-taken; no report, so seedWorktree says the setup failed.
+  const onSignal = (sig) => {
+    if (finished) return;
+    if (child) { try { process.kill(-child.pid, sig); } catch {} return; }
+    process.exit(1);
+  };
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, onSignal);
+  let slot = null;
+  // at least one wait round (1 s) passed before the take
+  let waited = false;
+  // a slots folder that can't be made or written to stops no install: the setup runs without a slot
+  let haveDir = true;
+  const broken = (e) => {
+    haveDir = false;
+    warn(`no usable setup slots folder (${dir}: ${e.code ?? e.message}); running worktree_setup without a slot`);
+    return null;
+  };
+  const take = (only) => { try { return slots.take(dir, n, me, only); } catch (e) { return broken(e); } };
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { broken(e); }
+  if (haveDir) {
+    const limit = config.deadline ?? Date.now() + config.maxWaitMs;
+    const memo = {};
+    let told = 0;
+    for (;; waited = true) {
+      const now = Date.now();
+      slots.sweep(dir, now);
+      slot = take();
+      if (slot !== null || !haveDir) break;
+      // gone ones are freed for anyone; an old one is freed and taken at once, at most one a round,
+      // so a takeover never frees a slot for another waiter
+      let freed = false;
+      const old = [];
+      for (let s = 0; s < n; s++) {
+        const verdict = slots.judge(dir, s, memo, now);
+        if (verdict === 'old') old.push([s, memo.judged[s]]);
+        else if (verdict === 'gone' && slots.free(dir, s, memo.judged[s])) freed = true;
+      }
+      if (freed) { slot = take(); if (slot !== null || !haveDir) break; }
+      if (old.length) {
+        const [s, id] = old[0];
+        let h = null;
+        try { h = JSON.parse(fs.readFileSync(path.join(dir, String(s), 'holder.json'), 'utf8')); } catch {}
+        if (h?.id === id && slots.free(dir, s, id)) {
+          slot = take(s);
+          if (slot !== null) {
+            warn(`took over setup slot ${s}, held since ${h.at} by pid ${h.pid}`);
+            tookOver.push({ slot: s, pid: h.pid, since: h.at });
+            break;
+          }
+          if (!haveDir) break;
+        }
+      }
+      if (!told || Date.now() - told >= 60000) {
+        let inUse = 0;
+        for (let s = 0; s < n; s++) try { fs.lstatSync(path.join(dir, String(s))); inUse++; } catch {}
+        say(`waiting for a setup slot (${inUse} of ${n} in use on this machine)`);
+        told = Date.now();
+      }
+      if (Date.now() >= limit) { report('no-slot'); process.exit(75); }
+      await new Promise((r) => setTimeout(r, Math.max(0, Math.min(1000, limit - Date.now()))));
+    }
+  }
+  child = spawn('sh', ['-c', config.cmd], { detached: true, stdio: 'inherit' });
+  if (slot !== null && child.pid) {
+    // the setup's group into the holder (temp file, fsync, rename), so a waiter sees it alive even
+    // after this runner is gone
+    try {
+      const f = path.join(dir, String(slot), 'holder.json');
+      const h = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (h.id === me.id) {
+        const tmp = `${f}.${me.id}.tmp`;
+        const fd = fs.openSync(tmp, 'w');
+        try { fs.writeSync(fd, JSON.stringify({ ...h, pgid: child.pid, leader_start: slots.startTime(child.pid) })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+        fs.renameSync(tmp, f);
+      }
+    } catch {}
+  }
+  let timer = null;
+  let hit = false;
+  const arm = () => {
+    if (config.deadline === null) return;
+    const wait = config.deadline - Date.now();
+    if (wait > 0) { timer = setTimeout(arm, Math.min(wait, 2147483647)); return; }
+    hit = true;
+    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+  };
+  if (child.pid) arm();
+  const [code, signal] = await new Promise((resolve) => {
+    child.once('exit', (c, s) => resolve([c, s]));
+    child.once('error', (e) => { warn(`could not start worktree_setup: ${e.message}`); resolve([null, null]); });
+  });
+  clearTimeout(timer);
+  finished = true;
+  if (slot !== null) slots.release(dir, slot, me.id);
+  if (hit && waited) { report('waited-deadline', code, signal); process.exit(75); }
+  if (hit) { report('deadline', code, signal); process.exit(124); }
+  report('ran', code, signal);
+  process.exit(code === 0 ? 0 : 1);
+}
 // A worktree of repo R is seeded from R's own settings and main checkout, never home's.
-function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
+// A session or chore worktree (session) runs its setup through the setup runner, in a machine-wide
+// slot and before DEVTEAM_SETUP_DEADLINE; a gate checkout runs it inline, as it always has.
+function seedWorktree(wt, { setup = true, repo: R = repo('home'), session = false } = {}) {
   const s = R.settings;
   for (const rel of s.worktree_files ?? []) {
     const from = path.join(R.root, rel);
     if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in ${R.name === 'home' ? 'the main checkout' : `${R.name}'s checkout (${R.root})`}`); continue; }
     fs.mkdirSync(path.dirname(path.join(wt, rel)), { recursive: true });
     fs.copyFileSync(from, path.join(wt, rel));
+  }
+  if (setup && s.worktree_setup && session) {
+    // a resume whose setup already passed for this setup string and these lockfiles skips it
+    if (!setupMarker.needed(wt, s, R.root)) return;
+    setupMarker.clear(wt);
+    const d = process.env.DEVTEAM_SETUP_DEADLINE;
+    const deadline = d && Number.isFinite(Number(d)) ? Number(d) : null;
+    // worktree_copy: main's installed folder into a worktree whose key file is byte-identical to
+    // main's, through a temp sibling renamed into place, under the same deadline; any failure warns
+    // and the setup runs without it
+    const filesOf = (s.worktree_files ?? []).map((f) => path.normalize(String(f)).replace(/\/+$/, ''));
+    const okRel = (p) => typeof p === 'string' && p !== '' && !path.isAbsolute(p) && !path.normalize(p).split(/[\\/]/).includes('..');
+    for (const e of Array.isArray(s.worktree_copy) ? s.worktree_copy : []) {
+      if (!isObj(e) || !okRel(e.path) || !okRel(e.key)) { warn(`worktree_copy: ${JSON.stringify(e)} is not { "path": "<dir>", "key": "<file>" } with both relative paths; skipped`); continue; }
+      const rel = path.normalize(e.path).replace(/\/+$/, '');
+      if (filesOf.some((f) => f === rel || f.startsWith(`${rel}/`) || rel.startsWith(`${f}/`))) { warn(`worktree_copy: ${e.path} is or holds a worktree_files entry, which stays the owner's to name; not copied`); continue; }
+      const from = path.join(R.root, rel);
+      const to = path.join(wt, rel);
+      const tmp = `${to}.devteam-copy-${process.pid}`;
+      // inside root once links are resolved (a missing path resolves as far as it exists)
+      const inside = (p, root) => { const r = realPath(root); const q = realPathMade(p); return q === r || q.startsWith(`${r}${path.sep}`); };
+      const skip = (why) => warn(`worktree_copy: ${e.path} not copied: ${why}`);
+      try {
+        // a copy a killed process left (its pid gone), and one of this pid's from before: swept
+        // whatever the entry's state now, and only where the folder is the worktree's own
+        const parent = path.dirname(to);
+        if (fs.existsSync(parent) && inside(parent, wt)) {
+          const prefix = `${path.basename(to)}.devteam-copy-`;
+          for (const x of fs.readdirSync(parent)) {
+            const pid = x.startsWith(prefix) ? Number(x.slice(prefix.length)) : NaN;
+            if (Number.isInteger(pid) && (pid === process.pid || !pidAlive(pid))) fs.rmSync(path.join(parent, x), { recursive: true, force: true });
+          }
+        }
+        const mainKey = path.join(R.root, e.key);
+        const wtKey = path.join(wt, e.key);
+        if (!fs.existsSync(mainKey) || !fs.existsSync(wtKey)) continue;
+        if (!inside(mainKey, R.root) || !inside(wtKey, wt)) { skip(`its key ${e.key} resolves outside the checkout`); continue; }
+        if (!fs.readFileSync(mainKey).equals(fs.readFileSync(wtKey))) continue;
+        let st;
+        try { st = fs.lstatSync(from); } catch { continue; }
+        // a link (to a shared store, say) would be copied as the link, and the worktree's install
+        // would write through it into main's
+        if (st.isSymbolicLink()) { skip(`${from} is a symlink, and a copy of it would write into what it points to`); continue; }
+        if (!inside(from, R.root)) { skip(`${from} resolves outside ${R.root}`); continue; }
+        try { fs.lstatSync(to); continue; } catch {}
+        if (!inside(parent, wt)) { skip(`${parent} resolves outside the worktree`); continue; }
+        fs.mkdirSync(parent, { recursive: true });
+        const timeLeft = () => (deadline === null ? undefined : deadline - Date.now());
+        const cp = (args) => {
+          const left = timeLeft();
+          if (left !== undefined && left <= 0) return { status: null, error: { code: 'ETIMEDOUT' } };
+          return spawnSync('cp', [...args, from, tmp], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', timeout: left, killSignal: 'SIGKILL' });
+        };
+        let r = os.platform() === 'darwin' ? cp(['-cR']) : os.platform() === 'linux' ? cp(['-a', '--reflink=auto']) : cp(['-R']);
+        if (os.platform() === 'darwin' && r.status !== 0 && !r.error) { fs.rmSync(tmp, { recursive: true, force: true }); r = cp(['-R']); }
+        if (r.status !== 0) throw new Error(r.error?.code === 'ETIMEDOUT' ? 'cut short at the deadline' : (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200));
+        fs.renameSync(tmp, to);
+      } catch (err) {
+        try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+        warn(`worktree_copy: could not copy ${e.path} from ${R.root} (${err.message}); worktree_setup runs without it`);
+      }
+    }
+    const config = { cmd: s.worktree_setup, dir: setupSlots.dir(), deadline, maxWaitMs: 900000 };
+    const r = spawnSync(process.execPath, ['-e', `const lib = (${setupSlots.lib})(); (${setupRunner})(JSON.parse(process.argv[1]), lib)`, JSON.stringify(config)], { cwd: wt, env: gateEnv(null, R), stdio: ['ignore', 'inherit', 'inherit', 'pipe'] });
+    // decided from the report, never the exit code alone; none at all is a runner that crashed
+    let rep = null;
+    try { rep = JSON.parse(String(r.output?.[3] ?? '').trim().split('\n').pop()); } catch {}
+    for (const t of rep?.took_over ?? []) {
+      try { appendLog({ type: 'observation', source: 'kit', kind: 'setup-slot-taken-over', subject: `setup-slot-${t.slot}`, detail: `a worktree_setup for ${wt} took over setup slot ${t.slot}, held since ${t.since} by pid ${t.pid} (past 15 minutes)`, detector: 'kit', severity: 2, valence: -1, source_key: `setup-slot-taken-over ${t.slot} ${t.pid} ${t.since}` }); } catch {}
+    }
+    if (rep?.outcome === 'ran' && rep.code === 0) { setupMarker.write(wt, s); return; }
+    if (rep?.outcome === 'no-slot') die('setup-slot-wait: no setup slot free before the deadline', setupSlots.SLOT_WAIT);
+    if (rep?.outcome === 'waited-deadline') die(`setup-slot-wait: a setup slot came free too late for worktree_setup to finish before the deadline in ${wt}`, setupSlots.SLOT_WAIT);
+    if (rep?.outcome === 'deadline') die(`worktree_setup ran past its deadline in ${wt}`, setupSlots.PAST_DEADLINE);
+    const hint = pinsHint(missingPins(R.root), R.root);
+    die(`worktree_setup failed in ${wt}${hint ? `; ${hint}` : ''}`);
   }
   if (setup && s.worktree_setup) {
     try {
@@ -5693,6 +6512,10 @@ function cmdMerge() {
   // gates this PR adds as the supervisor's own call (gateAdditions): run at its head below, and
   // logged as their own gate-add act once it lands
   let gateAdds = null;
+  // owner-classed settings changes (home only) and a chore's files outside project/, for the
+  // link-landing rule under --approved below
+  let ownerChanged = null;
+  let choreOutside = [];
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
   if (R.name === 'home') {
@@ -5703,6 +6526,7 @@ function cmdMerge() {
     const gateAdd = classed?.some((c) => c.key === 'gates') ? (chore ? gateAdditions(base, sha) : { problem: 'only the supervisor\'s own chore PR adds a gate without the owner' }) : null;
     if (gateAdd?.added?.length) { gateAdds = gateAdd.added.map((n) => [n, settingsAt(sha).gates[n]]); out(`adds gate${gateAdds.length > 1 ? 's' : ''} ${gateAdd.added.join(', ')} and leaves main's as they are: a new check is the supervisor's call (constitution.md §4), to be logged as a gate-add act when it lands`); }
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls) && !(c.key === 'gates' && gateAdds)) ?? null;
+    ownerChanged = changed;
     fails.push(...registryActFails(base, sha));
     fails.push(...strategyFails(base, sha, approved));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
@@ -5717,7 +6541,9 @@ function cmdMerge() {
       else if (!approved) fails.push(`changes owner settings: ${what}${gatesWhy}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
       else {
         const q = ownerAnswer(approved, 'merge --approved');
-        if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+        // a landing of repo link changes only: either class of the owner's link questions (each change is bound to the line its answer showed, ownerLinkActFails)
+        const linksOnly = changed.every((c) => c.key.startsWith('links.')) && ['governance-edit', 'gate-change'].includes(q.class);
+        if (!classes.includes(q.class) && !linksOnly) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
         fails.push(...ownerLinkActFails(changed, sha, approved));
         fails.push(...remediationBindingFails(base, sha, approved));
       }
@@ -5764,6 +6590,7 @@ function cmdMerge() {
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const outside = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    choreOutside = outside;
     const kitFiles = outside.filter(isKitFile);
     const kitAnswer = approved && kitFiles.length ? ownerAnswer(approved, 'merge --approved') : null;
     // A secret chore isn't a kit change: the encrypted stores its answer posted (a sops file can
@@ -5801,10 +6628,23 @@ function cmdMerge() {
     // Every earlier use counts, merges that cited a decision included; only the decision this merge
     // carries out (--decision) is the call the answer approved, not a prior one.
     const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
-    // a bundle's link acts (one per entry its question showed) are one landing too
+    // A bundle's link acts (one per entry its question showed) are one landing too. A link act binds
+    // the change, not a slug: its entry hashes and its question's diff (ownerLinkActFails), so it
+    // lands on a chore of any name that changes those links and nothing else outside project/. Old
+    // acts that also carry chore-registry follow the same rule.
     const linkAct = (a) => Object.hasOwn(a, 'entry_hash') && (a.refs ?? []).some((r) => r.startsWith('link:'));
-    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target));
-    if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
+    const linkIds = new Set(prior.filter(linkAct).flatMap((a) => a.refs.filter((r) => r.startsWith('link:')).map((r) => r.slice(5))));
+    const allLinks = prior.length >= 1 && prior.every(linkAct) && prior.every((a) => a.class === av.class);
+    let landing;
+    if (allLinks) {
+      const extras = [...choreOutside, ...(ownerChanged ?? []).filter((c) => !c.key.startsWith('links.') || !linkIds.has(c.key.split('.')[1])).map((c) => c.key)];
+      const linksLanded = (ownerChanged ?? []).some((c) => c.key.startsWith('links.'));
+      landing = !!chore && !extras.length && linksLanded;
+      if (!landing) fails.push(`${approved} approved repo link entries only (${[...linkIds].map((l) => `links.${l}`).join(', ')}), landing on a chore; this ${chore ? 'chore' : 'merge'} ${extras.length ? `also changes ${extras.slice(0, 6).join(', ')}` : 'lands none of them'}: ask again for this one, or take the rest out`);
+    } else {
+      landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
+      if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
+    }
   }
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
   // worktree of that repo seeded from that repo's settings.
@@ -6316,8 +7156,31 @@ function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, r
   // only when low confidence is the whole reason: a question asked for another reason too stands on that
   if (reasons.length && reasons.every((r) => r === 'low-confidence') && confidence != null && confidence >= 0.7) die(`--reasons low-confidence with --confidence ${confidence}: at 0.7 or more you are sure enough. Decide it yourself if it is yours (constitution.md §1), or give the real reason`);
 }
-function askLine({ thread } = {}) {
+function asksGoalApproval({ goal, kind, question, choices, options, recommendation, def }) {
+  // A yes that would approve a draft goal goes through goal decide, which takes only a goal-approval
+  // answer: an approval asked as another kind wastes the owner's yes. These kinds name a draft goal
+  // for reasons of their own (defining it, a door in its design, something only the owner can do).
+  if (['goal-approval', 'goal-definition', 'one-way-door', 'owner-action'].includes(kind)) return false;
+  const g = goal ? logGet(goal) : null;
+  if (g?.type !== 'goal' || (g.status ?? 'draft') !== 'draft') return false;
+  const lit = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const title = lit(String(g.title ?? '').trim()).replace(/\s+/g, '\\s+');
+  const aim = `(?:${title ? `${title}|` : ''}goal|design|approach|plan)(?!\\w)`;
+  const text = String(question ?? '');
+  // approval words aimed at the goal: "Approve <title>?", "Do you approve the design?"
+  if (new RegExp(`\\b(?:approve|approval\\s+of|sign\\s+off\\s+on|green-?light)\\s+(?:(?:the|this|its|your|our)\\s+)?${aim}`, 'i').test(text)) return true;
+  // a bare Approve answer, on a question that names the goal or its design (a sub-decision of the
+  // design with an Approve choice is the owner's to settle before the approval, so it stays askable)
+  if (!new RegExp(`\\b(?:${title ? `${title}|` : ''}goal|design(?:ed)?|approach|plan)(?!\\w)`, 'i').test(text)) return false;
+  const bare = new RegExp(`^\\s*approv(?:e|ed|al)(?:\\s+(?:it|this|the\\s+${aim}))?\\s*[.!]?\\s*$`, 'i');
+  const labels = Array.isArray(choices) ? choices.map((c) => c?.label) : [];
+  return [...labels, ...[].concat(options ?? []), recommendation, def].some((a) => typeof a === 'string' && bare.test(a));
+}
+// about (thread ask --turn): the owner's turn it asks about, the newest owner turn read, and a hold's
+// lift from a clause of that turn (owner_said as the raw slice), all checked by cmdThread first.
+function askLine({ thread, about } = {}) {
   supervisorOnly('ask');
+  if (!about) for (const k of ['turn', 'seen-turn', 'at']) if (flags[k] !== undefined) die(`ask --${k}: a question about the owner's turn is asked in its thread: thread ask <t-id> --turn <u-id>`);
   // a goal-met question's words are the kit's (below)
   let q = ownerText(flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question')));
   const cls = flagStr('class') ?? null;
@@ -6328,6 +7191,7 @@ function askLine({ thread } = {}) {
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  if (asksGoalApproval({ goal: flagStr('goal'), kind, question: q, choices: jsonFlag('choices'), options: asList(flags.options), recommendation: flagStr('recommendation'), def: flagStr('default') })) die(`this asks the owner to approve ${flagStr('goal')} (a draft goal), but goal decide uses only a goal-approval answer, so a yes to a ${kind} question is wasted: ask it with ask --kind goal-approval --goal ${flagStr('goal')} --links '<the design>' (planning.md §1). If it decides one part of the design instead, ask that part in its own words, with choices that say what each does`);
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
   if (kind === 'goal-approval') {
@@ -6436,7 +7300,7 @@ function askLine({ thread } = {}) {
     // after the owner's no, not again for the same remediation and target, whichever incident is named
     const hold = remediationHold(rs[0], rel[0] ?? null, r.valid_minutes);
     if (hold && !flagStr('owner-said')) die(remediationHoldWords(r.name, rel[0] ?? null, hold, r.valid_minutes));
-    ownerSaid = flagStr('owner-said')?.trim() || null;
+    ownerSaid = about?.owner_said ?? (flagStr('owner-said')?.trim() || null);
   }
   if (!orderAsked && !flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
@@ -6503,6 +7367,47 @@ function askLine({ thread } = {}) {
     });
     // what the owner reads in the Inbox says exactly what approving this lands
     context = [context, `Approving this lands: ${remediationEntries.map((e) => (e.sha ? `${e.name} (${e.script} at blob ${e.sha})` : `the removal of ${e.name}`)).join('; ')}`].filter(Boolean).join('\n\n');
+  }
+  // A repo link change asked in the supervisor's own words (--link-change): the kit writes the lines
+  // the owner's answer binds by (linkAnswerCovers), from main's settings, and nobody else may: a
+  // binding line typed or quoted in the question's own words is refused, so it never approves by accident.
+  // checked as stored (ownerText turns a typed \n into a line), line by line, on any line break, and
+  // broadly: whatever the binder could read as a line (linkAnswerCovers.lines) is refused
+  const typed = `${q}\n${context ?? ''}`.split(/\r\n|\r|\n/);
+  if (typed.some((l) => l.includes(linkAnswerCovers.HEADER) || (/^\s*links\./.test(l) && /main\s+has/.test(l)))) die('--question and --context may not hold a repo link approval line ("links.<id>[.<field>]: main has …; would be …") or its header: the kit writes them, from --link-change');
+  if (flagStr('change') !== undefined && ['governance-edit', 'gate-change'].includes(cls)) die('--change belongs on a goal-change question; a repo link change is --link-change \'{"link":"<id>","field":"<field>","value":<value>}\' (or "entry" for an add or a removal)');
+  const linkChange = jsonFlag('link-change');
+  if (linkChange !== undefined) {
+    if (!['governance-edit', 'gate-change'].includes(cls)) die('--link-change goes with --class governance-edit or gate-change: a repo link change is the owner\'s');
+    // its answer approves the change only as a yes: the question recommends yes and offers no other choice
+    if (recommendation.trim().toLowerCase() !== 'yes' || flags.choices !== undefined || flags.options !== undefined) die('--link-change asks yes or no: --recommendation yes, and no --choices or --options (only the owner\'s yes approves the change)');
+    const shape = '--link-change: each item is {"link":"<id>","field":"<field>","value":<value>} or {"link":"<id>","entry":{…} | null}';
+    const items = Array.isArray(linkChange) ? linkChange : [linkChange];
+    if (!items.length) die(shape);
+    const mainLinks = mainSettings(null)?.links ?? {};
+    const after = Object.assign(Object.create(null), structuredClone(mainLinks));
+    for (const it of items) {
+      if (!isObj(it) || typeof it.link !== 'string' || Object.hasOwn(it, 'entry') === (Object.hasOwn(it, 'field') || Object.hasOwn(it, 'value'))) die(shape);
+      const onMain = ownEntry(mainLinks, it.link);
+      if (Object.hasOwn(it, 'field')) {
+        if (!onMain) die(`--link-change: ${it.link} is not a link on main; ask about it whole: {"link":"${it.link}","entry":{…}}`);
+        if (!ownersKind(onMain)) die(`--link-change: ${it.link} is a ${onMain.kind} link, the supervisor's (link set)`);
+        if (!linkFields(onMain.kind).includes(it.field) || !LINK_KINDS[onMain.kind].ownerClass(it.field) || !Object.hasOwn(it, 'value')) die(`--link-change: "${it.field}" is not a field of a ${onMain.kind} link the owner approves, with its value`);
+        after[it.link] = { ...ownEntry(after, it.link), [it.field]: it.value };
+      } else if (it.entry === null) {
+        if (!onMain) die(`--link-change: ${it.link} is not a link on main; there is nothing to remove`);
+        delete after[it.link];
+      } else {
+        if (!isObj(it.entry) || !ownersKind(it.entry) && !ownersKind(onMain)) die('--link-change: an entry is a repo link\'s ({"kind":"repo",…})');
+        after[it.link] = it.entry;
+      }
+    }
+    const { errors } = registryProblems({ ...loadSettings(), links: after });
+    if (errors.length) die(`--link-change: not a valid registry:\n  - ${errors.join('\n  - ')}`);
+    const named = new Set(items.map((it) => it.link));
+    const changes = linkFieldChanges(mainLinks, after).filter((c) => named.has(c.id));
+    if (!changes.length) die('--link-change: main already has that; there is nothing to approve');
+    context = [context, [linkAnswerCovers.HEADER, ...changes.map(linkFieldChanges.line)].join('\n')].filter(Boolean).join('\n\n');
   }
   const secrets = jsonFlag('secrets');
   if (secrets !== undefined) {
@@ -6592,10 +7497,108 @@ function askLine({ thread } = {}) {
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
+    about_turn: about?.about_turn, seen: about?.seen, owner_said_turn: about?.owner_said_turn, owner_said_at: about?.owner_said_at,
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
   }, 'supervisor');
 }
 
+/* turnClause start */
+// Turn authority (turn-authority-1): the owner's words in a thread settle a question, lift a hold or
+// correct a call through whole clauses of their turn, bound one span to one thing. These are the
+// rules every writer and metrics share.
+//
+// Whether [start, end) of a turn is whole clauses. A clause starts at the turn's start, a line start,
+// or after . ! ? or ; and whitespace; it ends at the turn's end, a line end, or one of those marks
+// followed by whitespace or the end. A span may leave out a closing . or ;, never ? or !: "Ship it"
+// is no clause of "Ship it? Or wait for CI?". A mark inside a word ("3.5") is no boundary.
+function clauseBounds(text, start, end) {
+  const s = String(text);
+  let k = start - 1;
+  let gap = false;
+  let line = false;
+  while (k >= 0 && /\s/.test(s[k])) { gap = true; if (s[k] === '\n' || s[k] === '\r') line = true; k--; }
+  const startOk = k < 0 || line || (gap && /[.!?;]/.test(s[k]));
+  if (!startOk) return false;
+  if (end >= s.length) return true;
+  if (/[.!?;]/.test(s[end - 1]) && /\s/.test(s[end])) return true;
+  let j = end;
+  while (j < s.length && /[ \t]/.test(s[j])) j++;
+  if (j >= s.length || s[j] === '\n' || s[j] === '\r') return true;
+  return /[.;]/.test(s[end]) && (end + 1 >= s.length || /\s/.test(s[end + 1]));
+}
+// The clause around raw offset i, for a refusal to name: from the boundary before it to the mark
+// (or line end) after it.
+function clauseAround(text, i) {
+  const s = String(text);
+  let a = i;
+  while (a > 0 && !(s[a - 1] === '\n' || (/\s/.test(s[a - 1]) && a > 1 && /[.!?;]/.test(s[a - 2])))) a--;
+  let b = i;
+  while (b < s.length && s[b] !== '\n' && !(/[.!?;]/.test(s[b]) && (b + 1 >= s.length || /\s/.test(s[b + 1])))) b++;
+  return s.slice(a, Math.min(b + 1, s.length)).trim();
+}
+// --said "<words>" as whole clauses of a turn: matched on whitespace-collapsed text, mapped back to
+// raw UTF-16 offsets. { said, said_at } (said is the raw slice), or { why }.
+function turnClause(text, said, at = null) {
+  const s = String(text);
+  const want = String(said ?? '').replace(/\s+/g, ' ').trim();
+  if (!want) return { why: 'say which words: --said "<whole clauses of the turn>"' };
+  let flat = '';
+  const map = [];
+  for (let i = 0; i < s.length;) {
+    if (/\s/.test(s[i])) { map.push(i); flat += ' '; while (i < s.length && /\s/.test(s[i])) i++; } else { map.push(i); flat += s[i]; i++; }
+  }
+  const found = [];
+  for (let i = flat.indexOf(want); i !== -1; i = flat.indexOf(want, i + 1)) {
+    const start = map[i];
+    const end = map[i + want.length - 1] + 1;
+    found.push({ start, end, whole: clauseBounds(s, start, end) });
+  }
+  if (!found.length) return { why: `"${want}" isn't in the turn` };
+  const part = (m) => ({ why: `"${want}" is part of a clause; give the whole clause: "${clauseAround(s, m.start)}"` });
+  let m;
+  if (at !== null) {
+    m = found.find((x) => x.start === at);
+    if (!m) return { why: `no match of "${want}" starts at offset ${at}; matches start at ${found.map((x) => x.start).join(', ')}` };
+    if (!m.whole) return part(m);
+  } else {
+    const whole = found.filter((x) => x.whole);
+    if (!whole.length) return part(found[0]);
+    if (whole.length > 1) return { why: `"${want}" is in the turn ${whole.length} times, at offsets ${whole.map((x) => x.start).join(', ')}; pick one with --at <offset>` };
+    [m] = whole;
+  }
+  return { said: s.slice(m.start, m.end), said_at: [m.start, m.end] };
+}
+// --at <offset>: which match of a repeated clause, as a refusal lists them. null when not given.
+function clauseAt() {
+  if (flags.at === undefined) return null;
+  const n = Number(flagStr('at'));
+  if (!Number.isInteger(n) || n < 0) die('--at <offset>: where the clause starts in the turn, a whole number (a refusal lists them)');
+  return n;
+}
+// What is already bound to an owner's turn: answers (a clause, or the whole turn when said_at is
+// absent) and corrections. A lifted hold (owner_said_turn) binds nothing. Spans overlap when they
+// share an offset; the whole turn overlaps everything.
+const turnBindings = (lines, uid) => lines.flatMap((l) => (l.op !== 'set' ? []
+  : l.type === 'question' && l.turn === uid ? [{ id: l.id, at: l.at, kind: 'answer', span: Array.isArray(l.said_at) ? l.said_at : null, line: l }]
+    : ['decision', 'act'].includes(l.type) && isObj(l.corrected) && l.corrected.turn === uid ? [{ id: l.id, at: l.at, kind: 'correction', span: Array.isArray(l.corrected.said_at) ? l.corrected.said_at : null, line: l }]
+      : []));
+const spansOverlap = (a, b) => !a || !b || (a[0] < b[1] && b[0] < a[1]);
+// The owner's turns in a thread, oldest first, from the fold's created_by (never a view's display by).
+const ownerTurnsIn = (threadId) => logObjects('turn').filter((x) => x.thread === threadId && x.created_by === 'owner').sort(byTime);
+// The owner's newest turn in a thread, once everything after `after` has been read: refused, with
+// those turns printed, unless --seen-turn names the newest. Returns its id.
+function ownerTurnsRead(threadId, after) {
+  const all = ownerTurnsIn(threadId);
+  const newest = all[all.length - 1]?.id ?? null;
+  // by the log's order, not the clock: a turn stamped in the same millisecond is still after it
+  const at = all.findIndex((x) => x.id === after.id);
+  const later = at >= 0 ? all.slice(at + 1) : all.filter((x) => x.created_at > after.created_at);
+  const seen = flagStr('seen-turn');
+  if (later.length && seen !== newest) die(`the owner wrote in ${threadId} after ${after.id}; read it first, then run this again with --seen-turn ${newest}:\n${later.map((x) => `  ${x.id} ${x.created_at}: ${String(x.text ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim()}`).join('\n')}`);
+  if (!later.length && seen !== undefined && seen !== newest) die(`--seen-turn ${seen}: the newest owner turn in ${threadId} is ${newest}`);
+  return newest;
+}
+/* turnClause end */
 // The checks every record of the owner's word in chat shares: only the supervisor records it, and
 // only with the owner's words verbatim. What they said, ready for the line.
 function chatAnswer(what) {
@@ -6620,7 +7623,21 @@ function turnAnswer(what, v) {
   const u = logGet(uid);
   if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
   if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words settle a question`);
-  const used = readLog().lines.find((l) => l.type === 'question' && l.op === 'set' && l.turn === uid);
+  // --said: whole clauses of the turn the question was asked about (thread ask --turn), a span no
+  // other binding on the turn overlaps, with what the owner wrote since the question read first
+  if (flags.said !== undefined) {
+    if (v.about_turn !== uid) die(`--from-turn ${uid}: ${v.id} wasn't asked about that turn${v.about_turn ? ` (it's about ${v.about_turn})` : ''}; a clause binds only to the turn its question is about: thread ask ${u.thread} --turn ${uid} …, then answer that`);
+    if (v.thread !== u.thread) die(`--from-turn ${uid}: ${v.id} was asked in ${v.thread}, and that turn is in ${u.thread}`);
+    const c = turnClause(u.text, flagStr('said'), clauseAt());
+    if (c.why) die(`--said: ${c.why}`);
+    const clash = turnBindings(readLog().lines, uid).find((b) => spansOverlap(b.span, c.said_at));
+    if (clash) die(clash.span ? `--said: those words overlap what already ${clash.kind === 'answer' ? 'settled' : 'corrected'} ${clash.id} (offsets ${clash.span[0]} to ${clash.span[1]}); one span settles one thing` : `--from-turn ${uid}: that turn already settled ${clash.id} whole; it takes no more`);
+    const answerSeen = ownerTurnsRead(u.thread, logGet(v.seen ?? '')?.type === 'turn' ? logGet(v.seen) : u);
+    return { said: c.said, said_at: c.said_at, turn: uid, answer_seen: answerSeen };
+  }
+  for (const k of ['at', 'seen-turn']) if (flags[k] !== undefined) die(`${what} --${k} goes with --said`);
+  // the whole turn: refused once anything is bound to it (an answer, whole or a clause, or a correction)
+  const used = turnBindings(readLog().lines, uid)[0];
   if (used) die(`--from-turn ${uid}: that turn already settled ${used.id}; one turn settles one question (the owner answers the other in the card, or says it again)`);
   if (v.thread && u.thread !== v.thread) die(`--from-turn ${uid}: ${v.id} was asked in ${v.thread}, and that turn is in ${u.thread}`);
   if (u.created_at <= v.asked_at) die(`--from-turn ${uid}: the turn is older than ${v.id}; words said before the question was asked don't answer it`);
@@ -6636,7 +7653,7 @@ function cmdAnswer() {
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
   // dropped files go with the owner's own words, never with a default, a review's result or reason, or words the supervisor recorded
   if (flags.files !== undefined && (flags.defaulted || flags['review-result'] !== undefined || decline || flags['from-chat'] || flags['from-turn'] !== undefined)) die("--files go with the owner's own answer");
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]] [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -6661,6 +7678,8 @@ function cmdAnswer() {
   const fromChat = !!flags['from-chat'];
   if (fromChat) chatAnswer('answer');
   const fromTurn = flags['from-turn'] !== undefined;
+  // --at and --seen-turn pick and read a turn's clause: only with --from-turn --said (final-1 F2)
+  if (!fromTurn) for (const k of ['at', 'seen-turn']) if (flags[k] !== undefined) die(`answer --${k} goes with --from-turn <u-id> --said`);
   const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
   const files = filesFlag();
   const v = openQuestion(id, ['open', 'defaulted']);
@@ -6694,7 +7713,7 @@ function cmdAnswer() {
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
   // a goal-met question is answered Yes or No, so a near-yes can't pass for a no
   if (v.class === 'goal-met' && v.met && !GOAL_MET_CHOICES.some((c) => sameAnswer(answer, c.label))) die(`${id} is answered Yes or No (a note may follow " — ")`);
-  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}), files };
+  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn, said_at: turn.said_at, answer_seen: turn.answer_seen } : {}), files };
   if (files && !lineFits(setLine, by)) die(FILES_TOO_LONG);
   // a goal-met yes reads a repo or prod check again first: a failed check writes nothing
   const metPlan = v.class === 'goal-met' ? goalMetPlan(v, answer) : null;
@@ -7044,9 +8063,37 @@ function cmdThread() {
     // The question is written first (the turn names its id), so the turn's words are checked before
     // it: a question the log took and a turn it then refused would leave a question no turn shows.
     // askLine writes the question as given, so its first TURN_MAX bytes are the turn's words.
-    if (encodedBytes(capBytes(flagStr('question') ?? '', TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
-    const q = askLine({ thread: t.id });
-    appendLog({ type: 'turn', thread: t.id, text: capBytes(q.question, TURN_MAX), question: q.id }, 'supervisor');
+    // --turn: a question about the owner's turn (turn authority). The turn is the owner's and in this
+    // thread, what they wrote after it is read first (seen), and the thread's turn opens by quoting it.
+    // --owner-said with it lifts a held remediation with a whole clause of that turn, said after the no.
+    let about = null;
+    let lead = '';
+    if (flags.turn !== undefined) {
+      const uid = flagStr('turn');
+      if (!TURN_ID.test(uid ?? '')) die("thread ask --turn <u-id>: the owner's turn the question is about");
+      const u = logGet(uid);
+      if (u?.type !== 'turn') die(`--turn ${uid}: no such turn`);
+      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the supervisor's; a question is about the owner's words`);
+      if (u.thread !== t.id) die(`--turn ${uid}: that turn is in ${u.thread}, not ${t.id}; ask in its own thread`);
+      if (flags.at !== undefined && flags['owner-said'] === undefined) die('--at goes with --owner-said: which match of a repeated clause');
+      about = { about_turn: uid };
+      if (flags['owner-said'] !== undefined) {
+        if (flagStr('class') !== 'production-remediation' || ['trust', 'proposal'].includes(flagStr('kind'))) die("--owner-said with --turn lifts the owner's no on a production-remediation question (not a trust or proposal one); this one has no hold to lift");
+        const c = turnClause(u.text, flagStr('owner-said'), clauseAt());
+        if (c.why) die(`--owner-said: ${c.why}`);
+        const blocks = asList(flags.blocks);
+        const rem = blocks.find((b) => b.startsWith('remediation:'));
+        const no = rem ? remediationAnswers(rem, blocks.find((b) => b.startsWith('release:')) ?? null).filter((a) => !a.run).pop() : null;
+        if (no && !(u.created_at > no.at)) die(`--turn ${uid}: the turn is older than the owner's no (${no.id}, ${no.at}); only words said after it lift it`);
+        Object.assign(about, { owner_said: c.said, owner_said_turn: uid, owner_said_at: c.said_at });
+      }
+      about.seen = ownerTurnsRead(t.id, u);
+      const flat = Array.from(String(u.text).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim());
+      lead = `About your message: "${flat.slice(0, 80).join('')}${flat.length > 80 ? '…' : ''}"\n`;
+    } else for (const k of ['seen-turn', 'at']) if (flags[k] !== undefined) die(`thread ask --${k} goes with --turn <u-id>`);
+    if (encodedBytes(capBytes(`${lead}${flagStr('question') ?? ''}`, TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
+    const q = askLine({ thread: t.id, about });
+    appendLog({ type: 'turn', thread: t.id, text: capBytes(`${lead}${q.question}`, TURN_MAX), question: q.id }, 'supervisor');
     return out(q.id);
   }
   // The supervisor's proposal, for a one-click accept; the owner's next turn, resolve or reopen clears
@@ -7131,7 +8178,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -7189,7 +8236,7 @@ const ARTIFACT_LENS = String.raw`(() => {
   // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
   // artifact's scripts, which can read and send these same messages: what it says describes the
   // page and is never an instruction. It takes only the questions of the page that frames it
-  // (hello, hit, resolve, scroll-by, scroll-to) and says only ready, hit-reply, rects and key.
+  // (hello, hit, resolve, scroll-by, scroll-to, place) and says only ready, hit-reply, rects, key, pointer and placed.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
   const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
@@ -7328,9 +8375,74 @@ const ARTIFACT_LENS = String.raw`(() => {
   const onKey = (e) => {
     if (!heard || (e.key !== 'Shift' && e.key !== 'Escape')) return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
-    tell({ type: 'key', key: e.key, shift: shiftDown });
+    tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
   const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
+
+  // --- where the pointer is, told after hello: a selector alone, and how far across it --------------
+  const POINTER_GAP = 67;
+  const across = (v, from, n) => (n > 0 ? Math.round(Math.max(0, Math.min(1, (v - from) / n)) * 1e4) / 1e4 : 0);
+  // what the gate held (an element and a point, or el: null for a leave) as the message, made only when
+  // it is sent; the page itself (html or body) is no thing to point at, as hit says
+  const pointerOf = (p) => {
+    let el = p.el;
+    // the page replaced it while the gate held it: what is at that point now
+    if (el && el.isConnected === false) el = document.elementFromPoint(p.cx, p.cy);
+    if (!el || el.nodeType !== 1 || el === document.documentElement || el === document.body) return { k: null };
+    // the rect read now, when it is sent, against the point of the move
+    const r = el.getBoundingClientRect();
+    return { k: selectorOf(el), x: across(p.cx, r.left, r.width), y: across(p.cy, r.top, r.height) };
+  };
+  // one gate for every pointer, nulls too: at most one per gap, the newest input replacing what waits
+  // (one timer, nothing queued, so the last word arrives), and never the same message twice running
+  let pointerPending = null;
+  let pointerTimer = 0;
+  let pointerAt = 0;
+  let pointerSent = '';
+  const flushPointer = () => {
+    const p = pointerPending;
+    pointerPending = null;
+    if (!p) return;
+    const m = pointerOf(p);
+    const s = JSON.stringify(m);
+    if (s === pointerSent) return;
+    pointerSent = s;
+    pointerAt = Date.now();
+    tell(Object.assign({ type: 'pointer' }, m));
+  };
+  const sayPointer = (p) => {
+    pointerPending = p;
+    if (pointerTimer) return;
+    // never longer than one gap, whatever the wall clock did since the last send
+    const wait = Math.min(POINTER_GAP, POINTER_GAP - (Date.now() - pointerAt));
+    if (wait <= 0) flushPointer();
+    else pointerTimer = setTimeout(() => { pointerTimer = 0; flushPointer(); }, wait);
+  };
+
+  // --- where others' pointers are: by selector alone, apart from the pins' watch list ----------------
+  const PLACE_MAX = 8;
+  // querySelector only, never find's text search; null for nothing there, a bad selector, or not shown
+  const shownRect = (k) => {
+    let el = null;
+    try { el = document.querySelector(k); } catch (e) { el = null; }
+    if (!el) return null;
+    const hidden = el.checkVisibility ? !el.checkVisibility({ visibilityProperty: true }) : (!el.getClientRects().length || /^(hidden|collapse)$/.test(window.getComputedStyle(el).visibility));
+    return hidden ? null : rectOf(el);
+  };
+  let placing = [];
+  let placedSent = '';
+  let placeLoop = false;
+  const placedNow = () => placing.map((x) => ({ id: x.id, rect: shownRect(x.k) }));
+  // once a frame while there is a list, sent only when a rect changed; an empty list ends it
+  const placeFrame = () => {
+    if (!placing.length) { placeLoop = false; return; }
+    // the next frame is asked for whatever this one's measuring did
+    try {
+      const rects = placedNow();
+      const now = JSON.stringify(rects);
+      if (now !== placedSent) { placedSent = now; tell({ type: 'placed', rects }); }
+    } finally { requestAnimationFrame(placeFrame); }
+  };
 
   // --- the viewer's questions ------------------------------------------------------------------------
   // the page's path from its artifact segment on: what is before it (a box's capability) is gone, and
@@ -7373,6 +8485,15 @@ const ARTIFACT_LENS = String.raw`(() => {
       const f = find(a);
       if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
     },
+    // the newest list stands until the next; one that is no list is ignored
+    place: (m) => {
+      if (!Array.isArray(m.anchors)) return;
+      placing = m.anchors.slice(0, PLACE_MAX).filter((x) => x && idOk(x.id) && typeof x.k === 'string' && x.k.length > 0 && size(x.k) <= CAPS.selector).map((x) => ({ id: x.id, k: x.k }));
+      const rects = placedNow();
+      placedSent = JSON.stringify(rects);
+      tell({ type: 'placed', rects });
+      if (placing.length && !placeLoop) { placeLoop = true; requestAnimationFrame(placeFrame); }
+    },
   };
   addEventListener('message', (e) => {
     if (!e.isTrusted || e.source !== parent) return;
@@ -7385,6 +8506,9 @@ const ARTIFACT_LENS = String.raw`(() => {
   addEventListener('keydown', onKey, true);
   addEventListener('keyup', onKey, true);
   addEventListener('blur', onBlur);
+  addEventListener('mousemove', (e) => { if (heard) sayPointer({ el: e.target, cx: e.clientX, cy: e.clientY }); }, true);
+  // no relatedTarget: the pointer left the frame
+  addEventListener('mouseout', (e) => { if (heard && !e.relatedTarget) sayPointer({ el: null }); }, true);
   addEventListener('scroll', soon, true);
   addEventListener('resize', soon);
   try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
@@ -7512,14 +8636,25 @@ function readPreviews() {
   }
   return recs;
 }
-function writePreview(rec) {
+// The raw writers, for a caller that already holds the record's lock (the tick, under tryLock).
+function writePreviewFile(rec) {
   const { mtimeMs, ...r } = rec;
   fs.mkdirSync(previewsDir(), { recursive: true });
   const tmp = `${previewFile(r.name)}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(r, null, 2)}\n`);
   fs.renameSync(tmp, previewFile(r.name));
 }
-const removePreview = (name) => fs.rmSync(previewFile(name), { force: true });
+const removePreviewFile = (name) => fs.rmSync(previewFile(name), { force: true });
+// Everyone else's: under the record's lock, so the tick's look-then-write can't land between
+// them and undo a stop (withLock isn't re-entrant: never call these from inside one).
+function writePreview(rec) {
+  fs.mkdirSync(previewsDir(), { recursive: true });
+  return withLock(previewFile(rec.name), () => writePreviewFile(rec));
+}
+function removePreview(name) {
+  fs.mkdirSync(previewsDir(), { recursive: true });
+  return withLock(previewFile(name), () => removePreviewFile(name));
+}
 // What this project calls itself, and who is asking.
 const previewProject = () => loadSettings().project ?? path.basename(mainRoot);
 function previewLabel() {
@@ -7846,7 +8981,7 @@ const PREVIEW_LENS = String.raw`<!doctype html>
   const onKey = (e) => {
     if (e.key !== 'Shift' && e.key !== 'Escape') return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
-    tell({ type: 'key', key: e.key, shift: shiftDown });
+    tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
   const onBlur = () => { if (shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
   const readyOf = (w) => (w ? { type: 'ready', route: routeOf(w), title: cap(oneLine(w.document.title), CAPS.text), viewport: { w: w.innerWidth, h: w.innerHeight } } : { type: 'ready', route: null, title: '', viewport: null });
@@ -7965,6 +9100,21 @@ const previewUp = new Map();
 const previewUpHere = () => { if (previewUpHere.seen === undefined) { try { previewUpHere.seen = JSON.parse(process.env.DEVTEAM_PREVIEW_UP ?? '{}'); } catch { previewUpHere.seen = {}; } } return previewUpHere.seen; };
 const tmuxAsync = (args) => new Promise((resolve) => execFile('tmux', args, { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' }, (err, stdout) => resolve(err ? null : stdout)));
 const previewAsIRead = (r) => { try { return fs.statSync(previewFile(r.name)).mtimeMs === r.mtimeMs; } catch { return false; } };
+// The tick's write, held open for a test (DEVTEAM_PREVIEW_WRITE_DELAY_MS) so a stop can be put
+// inside the window it guards: a <name>.json.writing marker, the wait, the write, and the marker
+// gone only once the write is done. Unset, it is just the write.
+function previewWriteHook(name, write) {
+  const delay = Number(process.env.DEVTEAM_PREVIEW_WRITE_DELAY_MS ?? 0);
+  if (!(delay > 0)) return write();
+  const marker = `${previewFile(name)}.writing`;
+  fs.writeFileSync(marker, '');
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    return write();
+  } finally {
+    fs.rmSync(marker, { force: true });
+  }
+}
 // The dashboard's housekeeping, every 10 s, and nowhere else (hello is a read: the operator runs
 // it). Probes each port, keeps the answers for hello and the Library, and finishes what any crash
 // left: expiry, a server gone for a day, a dev~ window with no record. It writes a record only when
@@ -7987,16 +9137,23 @@ async function previewTick() {
     const since = Date.parse(r.down_since ?? '');
     // an expiry that doesn't parse is past: a file nobody wrote through the kit never lives forever
     if (!(Date.parse(r.expires) > now) || (!r.run && !up && since && now - since > DAY)) {
-      if (!previewAsIRead(r)) return;
+      // the look and the removal under the record's lock, never waiting on it: a held one is next tick's
+      fs.mkdirSync(previewsDir(), { recursive: true });
+      const gone = tryLock(previewFile(r.name), () => previewAsIRead(r) && (removePreviewFile(r.name), true));
+      if (!gone) return;
       await kill(r);
-      removePreview(r.name);
       previewUp.delete(r.name);
       return;
     }
     const want = up ? null : (Number.isNaN(since) ? nowIso() : r.down_since);
     if ((r.down_since ?? null) === want || !previewAsIRead(r)) return;
     const { down_since, ...rest } = r;
-    writePreview(want ? { ...rest, down_since: want } : rest);
+    // the look again and the write, under the lock a preview command takes: a stop can't land between them
+    fs.mkdirSync(previewsDir(), { recursive: true });
+    tryLock(previewFile(r.name), () => {
+      if (!previewAsIRead(r)) return;
+      previewWriteHook(r.name, () => writePreviewFile(want ? { ...rest, down_since: want } : rest));
+    });
   }));
   for (const n of previewUp.keys()) if (!names.has(n)) previewUp.delete(n);
   // The windows were listed before these records are read, so a window opened since has its id in
@@ -9810,15 +10967,17 @@ function cmdAct() {
   out(line.id);
 }
 // A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
-// Returns what is wrong, or null.
+// Header fields written as bullets (Goal, Architecture, Tech stack, Spec, then a colon; bold,
+// underscored or plain, any case) don't count: only the body bullets do. Returns what is wrong, or null.
 function tldrGap(text) {
+  const HEADER_FIELD = /^\s{0,3}[-*+]\s+(?:\*\*|__)?(?:goal|architecture|tech[\s-]?stack|spec)(?:\*\*|__)?\s*:/i;
   const lines = text.split('\n');
   const at = lines.findIndex((l) => /^##\s+TL;?DR\b/i.test(l.trim()));
   if (at < 0) return 'has no "## TL;DR" section';
   if (lines.slice(0, at).some((l) => /^##\s/.test(l.trim()))) return 'has its TL;DR after another section; it comes first, under the title';
   const body = [];
   for (const l of lines.slice(at + 1)) { if (/^#{1,2}\s/.test(l.trim())) break; body.push(l); }
-  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l)).length;
+  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l) && !HEADER_FIELD.test(l)).length;
   if (!bullets) return 'has a TL;DR with no bullets';
   if (bullets > 7) return `has a TL;DR of ${bullets} bullets; seven at most, the rest belongs in the plan`;
   return null;
@@ -9828,8 +10987,18 @@ function tldrGap(text) {
 // act went wrong, that is a problem (or an escaped defect), not a trust drop (constitution.md §2).
 function cmdCorrect() {
   const [actId] = positional;
-  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4] [--impact 1-4 (a goal-impact decision: the impact you give the goal)]   (owner; the supervisor at a retro adds --retro)');
-  const by = flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
+  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4] [--impact 1-4 (a goal-impact decision: the impact you give the goal)]   (owner; the supervisor at a retro adds --retro; the supervisor records the owner\'s words with --from-turn <u-id> --said "<whole clauses>" [--at <n>] or --from-chat --said "<words>")');
+  // the owner's correction, said in a thread or in the supervisor's session: the supervisor records it,
+  // the line is the owner's, and the reason is the owner's words, nothing else
+  const heard = flags['from-turn'] !== undefined || flags['from-chat'] !== undefined;
+  if (heard) {
+    if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die('correct --from-turn or --from-chat: the supervisor records what the owner said; in your own terminal, correct directly');
+    if (flags['from-turn'] !== undefined && flags['from-chat'] !== undefined) die('correct: --from-turn or --from-chat, not both');
+    for (const k of ['severity', 'impact', 'reason', 'retro']) if (flags[k] !== undefined) die(`correct --${flags['from-turn'] !== undefined ? 'from-turn' : 'from-chat'}: --${k} isn't taken; the reason is the owner's words (--said), and the rest is the owner's own correct`);
+    if (!flagStr('said')?.trim()) die('correct --from-turn or --from-chat needs --said "<the owner\'s words>"');
+    if (flags['from-chat'] !== undefined && flags.at !== undefined) die('correct --at goes with --from-turn: which match of a repeated clause');
+  } else for (const k of ['said', 'at']) if (flags[k] !== undefined) die(`correct --${k} goes with --from-turn or --from-chat`);
+  const by = heard ? 'owner' : flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);
   if (!['act', 'decision'].includes(act?.type)) die(`no decision or act ${actId}`);
   if (act.type === 'act' && act.created_by === 'owner') die(`${actId} is the owner's own record (${act.class}), not a call; nothing to correct`);
@@ -9842,11 +11011,31 @@ function cmdCorrect() {
     if (by !== 'owner') die('--impact is the owner\'s: only the owner sets a goal\'s impact when correcting it');
     if (!impactOf(impact)) die('--impact is 1 (housekeeping), 2 (worth having), 3 (moves a number the project watches) or 4 (the project depends on it)');
   }
-  if (correctionOf(act) && impact === undefined) die(`${actId} is already corrected`);
-  appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact } }, by);
+  // the supervisor's retro alone doesn't stand in the owner's way: the owner corrects it after (spec §5)
+  const prior = correctionOf(act);
+  if (prior && impact === undefined && !(by === 'owner' && writerClass(prior.by) === 'supervisor' && !act.updates.some((x) => x.corrected !== undefined && writerClass(x.by) === 'owner'))) die(`${actId} is already corrected`);
+  let corrected;
+  if (flags['from-turn'] !== undefined) {
+    const uid = flagStr('from-turn');
+    if (!TURN_ID.test(uid ?? '')) die("correct --from-turn <u-id>: the owner's turn whose words correct it");
+    const u = logGet(uid);
+    if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
+    if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words correct a call`);
+    const ref = logGet(u.thread)?.subject?.ref ?? null;
+    const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
+    if (ref !== `${act.type}:${actId}` && !(via?.type === 'act' && via.decision === actId)) die(`--from-turn ${uid}: that thread is about ${ref ?? 'nothing in particular'}, not ${actId}; the owner's words correct the record the thread is on`);
+    const c = turnClause(u.text, flagStr('said'), clauseAt());
+    if (c.why) die(`--said: ${c.why}`);
+    const clash = turnBindings(readLog().lines, uid).find((b) => spansOverlap(b.span, c.said_at));
+    if (clash) die(clash.span ? `--said: those words overlap what already ${clash.kind === 'answer' ? 'settled' : 'corrected'} ${clash.id} (offsets ${clash.span[0]} to ${clash.span[1]}); one span settles one thing` : `--from-turn ${uid}: that turn already settled ${clash.id} whole; it takes no more`);
+    corrected = { reason: c.said, said: c.said, said_at: c.said_at, turn: uid };
+  } else if (heard) corrected = { reason: flagStr('said').trim(), said: flagStr('said').trim() };
+  else corrected = { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact };
+  appendLog({ type: act.type, op: 'set', id: actId, ...(heard ? { channel: flags['from-turn'] !== undefined ? 'thread' : 'chat' } : {}), corrected }, by);
   if (impact !== undefined) out(`${logGet(act.refs?.[0])?.title ?? act.refs?.[0]}: impact ${impact} (${IMPACT_WORDS[impact]}), set by the owner; it stands until the owner changes it`);
   if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
-  if (by === 'owner') nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
+  // the supervisor wrote it from the owner's words: nobody to tell
+  if (by === 'owner' && !heard) nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
   out(`corrected ${actId}`);
 }
 // The supervisor records how it repaired a corrected act.
@@ -11423,7 +12612,7 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id), at_target: atTargetView(g) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id), at_target: atTargetView(g), next_move: nextMoveOf(`goal:${g.id}`) };
 }
 // A running goal at its target, as its card shows it: the reading, and the open goal-met question.
 function atTargetView(g) {
@@ -11511,6 +12700,9 @@ function cmdGoal() {
   if (sub === 'approve' || sub === 'decide') {
     const said = flags['from-chat'] ? chatAnswer('goal decide') : null;
     const fromTurn = flags['from-turn'] !== undefined;
+    // a goal is approved on its design, never on words said before it: the whole turn, newer than the question
+    if (fromTurn && flags['from-chat'] !== undefined) die('goal decide: --from-turn or --from-chat, not both');
+    if (fromTurn && ['said', 'at', 'seen-turn'].some((k) => flags[k] !== undefined)) die('goal decide --from-turn takes the whole turn: a goal is approved on its design, so --said, --at and --seen-turn aren\'t accepted there');
     const { by } = said || fromTurn ? { by: 'owner' } : ownerWriter();
     const chat = said ? { channel: 'chat' } : fromTurn ? { channel: 'thread' } : {};
     const g = logGet(id);
@@ -11787,10 +12979,16 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   const main = loadSettings().main_branch;
   if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
-  if (!fs.existsSync(wt)) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup }); }
+  const existed = fs.existsSync(wt);
+  if (!existed) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
   else if (reset) gitOrDie(['checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
   else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
+  // one there already whose setup never passed (cut short at the deadline, held for a slot, failed:
+  // the marker is cleared before a setup and written only after one passes) is seeded now; never a
+  // secret post's (secret-…), whose posting never waits for a setup
+  const home = repo('home');
+  if (existed && setup && !/^secret-/.test(slugName) && home.settings.worktree_setup && setupMarker.needed(wt, home.settings, home.root)) seedWorktree(wt, { setup, session: true });
   return wt;
 }
 function openPr(wt, branch, title, bodyText) {
@@ -12292,7 +13490,10 @@ const spendByWho = () => { if (spendWhoMemo) return spendWhoMemo; const m = new 
 const CHAT_QUOTE_WINDOW_MS = 7 * 24 * 3600000;
 function chatQuotesNotFound() {
   if (!/^claude(\s|$)/.test(loadSettings().resume_command)) return [];
-  const recent = [...questions().filter((q) => q.channel === 'chat' && q.said && Date.now() - Date.parse(q.answered_at) < CHAT_QUOTE_WINDOW_MS), ...logObjects('question').filter((q) => q.owner_said && Date.now() - Date.parse(q.created_at) < CHAT_QUOTE_WINDOW_MS).map((q) => ({ id: q.id, said: q.owner_said, answered_at: q.created_at }))];
+  const recent = [...questions().filter((q) => q.channel === 'chat' && q.said && Date.now() - Date.parse(q.answered_at) < CHAT_QUOTE_WINDOW_MS), ...logObjects('question').filter((q) => q.owner_said && !q.owner_said_turn && Date.now() - Date.parse(q.created_at) < CHAT_QUOTE_WINDOW_MS).map((q) => ({ id: q.id, said: q.owner_said, answered_at: q.created_at })),
+    // the owner's correction recorded from chat (correct --from-chat): its words, as an answer's (a hold
+    // lifted from a turn is checked against its turn instead, in threadAnswersUnbound)
+    ...[...logObjects('decision'), ...logObjects('act')].map((o) => ({ o, x: correctionOf(o) })).filter(({ x }) => x?.channel === 'chat' && typeof x.said === 'string' && writerClass(x.by) === 'owner' && Date.now() - Date.parse(x.at) < CHAT_QUOTE_WINDOW_MS).map(({ o, x }) => ({ id: o.id, said: x.said, answered_at: x.at }))];
   const t = recent.length ? supervisorTranscript() : null;
   if (!t) return [];
   const from = Date.parse(t.entries.find((o) => o?.timestamp)?.timestamp);
@@ -12304,29 +13505,72 @@ function chatQuotesNotFound() {
   const owners = typed.filter((x) => !x.startsWith('from the operator ('));
   return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !owners.some((x) => x.includes(said)); });
 }
-// A thread answer (answer --from-turn) cites the owner's turn it was recorded from. checkLine only
-// checks its shape, so this checks the binding turnAnswer enforced, for lines written some other
-// way: the turn is the owner's, its words are what the line says, it is in the question's thread,
-// it is newer than the question, an Inbox question was named in the turn's thread before it
-// (questionNamed), and no other question line cites it. One reason per answer.
+// Everything the owner's words in a thread bound, checked after the fact for lines written some other
+// way than the writers (checkLine checks only their shape). Each line gives its first failing reason.
+// A whole-turn answer (answer --from-turn): the turn is the owner's, its words are what the line says,
+// it is in the question's thread, newer than the question, an Inbox question was named in the turn's
+// thread before it (questionNamed), the turn has no clause binding before it, and no whole-turn answer
+// cites it before. A clause answer (said_at), a hold lifted from a turn (owner_said_turn) and a
+// correction from a thread (corrected.turn): the turn is the owner's, in the right thread, its raw
+// slice is the words and whole clauses (clauseBounds), and no binding before it on the turn overlaps
+// it; then a clause answer's answer_seen is the newest owner turn at the answer, a lifted hold's turn
+// is newer than the no, and a correction's thread is about its record or the act that carried it out.
 function threadAnswersUnbound() {
   const { objects, lines: all } = readLog();
-  const lines = all.filter((l) => l.type === 'question' && l.op === 'set' && l.channel === 'thread').sort((a, b) => String(a.at).localeCompare(String(b.at)));
-  const first = new Map();
-  return lines.map((l) => {
-    const u = typeof l.turn === 'string' ? logGet(l.turn) : null;
-    const q = logGet(l.id);
-    const firstId = first.get(l.turn);
-    if (l.turn !== undefined && !firstId) first.set(l.turn, l.id);
-    const why = u?.type !== 'turn' ? `names no turn that exists (${l.turn ?? 'none'})`
-      : u.created_by !== 'owner' ? "cites a turn that is the supervisor's, not the owner's"
-      : l.said !== u.text ? "gives words that aren't what the turn says"
-      : q?.thread && u.thread !== q.thread ? 'cites a turn from another thread than the one the question was asked in'
-      : q && u.created_at <= q.created_at ? 'cites a turn from before the question was asked'
-      : q && !q.thread && !questionNamed(objects, u.thread, q.id, u.created_at) ? "cites a turn in a thread where the supervisor hadn't named the question before it"
-      : firstId ? `cites a turn that already settled ${firstId}` : null;
-    return why ? { id: l.id, why } : null;
-  }).filter(Boolean);
+  const order = new Map(all.map((l, i) => [l, i]));
+  const sorted = [...all].sort((a, b) => String(a.at).localeCompare(String(b.at)) || order.get(a) - order.get(b));
+  const before = (a, b) => String(a.at) < String(b.at) || (a.at === b.at && order.get(a) < order.get(b));
+  const bindings = new Map();
+  const boundBefore = (l, uid) => (bindings.get(uid) ?? (bindings.set(uid, turnBindings(sorted, uid)), bindings.get(uid))).filter((b) => before(b.line, l));
+  // slice clamps, so the span must also lie inside the turn (final-1b F2)
+  const sliceWhy = (u, said, at, what) => (!Array.isArray(at) || typeof said !== 'string' || at[1] > u.text.length || u.text.slice(at[0], at[1]) !== said ? `gives words that aren't what the turn says${what}`
+    : !clauseBounds(u.text, at[0], at[1]) ? `binds part of a clause${what}, not whole clauses` : null);
+  const overlapWhy = (l, uid, span) => { const b = boundBefore(l, uid).find((x) => spansOverlap(x.span, span)); return b ? `overlaps words of the turn that already bound ${b.id}` : null; };
+  const turnWhy = (uid) => { const u = typeof uid === 'string' ? logGet(uid) : null; return u?.type !== 'turn' ? [null, `names no turn that exists (${uid ?? 'none'})`] : u.created_by !== 'owner' ? [u, "cites a turn that is the supervisor's, not the owner's"] : [u, null]; };
+  // the newest owner turn in the thread before the line, by the log's order (a turn in the same
+  // millisecond, appended after it, wasn't there to read)
+  const newestOwnerTurn = (thread, l) => sorted.filter((x) => x.type === 'turn' && x.op === 'new' && x.thread === thread && writerClass(x.by) === 'owner' && before(x, l)).pop()?.id ?? null;
+  const afterWhy = (u, l) => (u.created_at > l.at ? `cites a turn written after it (${u.id})` : null);
+  const found = [];
+  for (const l of sorted) {
+    let why = null;
+    if (l.type === 'question' && l.op === 'set' && l.channel === 'thread' && Array.isArray(l.said_at)) {
+      const q = logGet(l.id);
+      const [u, w] = turnWhy(l.turn);
+      why = w ?? (q?.thread !== u.thread ? 'cites a turn from another thread than the one the question was asked in'
+        : q.about_turn !== u.id ? `answers a question asked about another turn (${q.about_turn ?? 'none'})`
+          : afterWhy(u, l) ?? sliceWhy(u, l.said, l.said_at, '') ?? overlapWhy(l, u.id, l.said_at)
+            ?? (l.answer_seen !== newestOwnerTurn(u.thread, l) ? `gives answer_seen ${l.answer_seen ?? 'none'}, not the newest owner turn the answer should have read (${newestOwnerTurn(u.thread, l)})` : null));
+    } else if (l.type === 'question' && l.op === 'set' && l.channel === 'thread') {
+      const q = logGet(l.id);
+      const [u, w] = turnWhy(l.turn);
+      const earlier = w ? [] : boundBefore(l, u.id);
+      const clause = earlier.find((b) => b.span);
+      const whole = earlier.find((b) => !b.span && b.kind === 'answer');
+      why = w ?? (l.said !== u.text ? "gives words that aren't what the turn says"
+        : q?.thread && u.thread !== q.thread ? 'cites a turn from another thread than the one the question was asked in'
+          : q && u.created_at <= q.created_at ? 'cites a turn from before the question was asked'
+            : q && !q.thread && !questionNamed(objects, u.thread, q.id, u.created_at) ? "cites a turn in a thread where the supervisor hadn't named the question before it"
+              : clause ? `settles a whole turn that also has a clause binding (${clause.id})`
+                : whole ? `cites a turn that already settled ${whole.id}` : null);
+    } else if (l.type === 'question' && l.op === 'new' && l.owner_said_turn !== undefined) {
+      const [u, w] = turnWhy(l.owner_said_turn);
+      const rem = asList(l.blocks).find((b) => String(b).startsWith('remediation:'));
+      const no = !w && rem ? remediationAnswers(rem, asList(l.blocks).find((b) => String(b).startsWith('release:')) ?? null).filter((a) => !a.run && a.at < l.at).pop() : null;
+      why = w ?? (u.thread !== l.thread ? 'lifts a hold with a turn from another thread than the question\'s'
+        : afterWhy(u, l) ?? sliceWhy(u, l.owner_said, l.owner_said_at, ' to lift a hold')
+          ?? (no && !(u.created_at > no.at) ? `lifts a hold with a turn older than the no it lifts (the owner's, ${no.id})` : null));
+    } else if (['decision', 'act'].includes(l.type) && l.op === 'set' && l.channel === 'thread' && isObj(l.corrected) && l.corrected.turn !== undefined) {
+      const [u, w] = turnWhy(l.corrected.turn);
+      const ref = w ? null : logGet(u.thread)?.subject?.ref ?? null;
+      const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
+      why = w ?? (ref !== `${l.type}:${l.id}` && !(via?.type === 'act' && via.decision === l.id) ? `corrects from a thread about another record (${ref ?? 'nothing in particular'})`
+        : l.type === 'act' && logGet(l.id)?.decision ? `corrects an act that carried out ${logGet(l.id).decision}; the decision is what's corrected`
+          : afterWhy(u, l) ?? sliceWhy(u, l.corrected.said, l.corrected.said_at, '') ?? overlapWhy(l, u.id, l.corrected.said_at));
+    }
+    if (why) found.push({ id: l.id, why });
+  }
+  return found;
 }
 // ===== the Efficiency Score's data (the dashboard design's Efficiency section; kit-173) =====
 
@@ -12949,6 +14193,11 @@ function collectMetrics(since) {
   if (accounts?.exhausted) add('high', 'accounts-exhausted', 'cswap', 'every cswap account is at a usage limit', 'wait for a reset or add an account (cswap add)');
   for (const a of accounts?.needs_login ?? []) add('medium', 'account-needs-login', a, 'cswap can no longer refresh this account', 'log in with it in Claude Code, then cswap add');
   for (const a of accounts?.restart_gave_up ?? []) add('high', 'restart-gave-up', a, `this session keeps needing a restart (a usage limit, or its window gone after the machine stopped): restarted ${RESTART_MAX} times in 6 hours, so it is left alone until those attempts age out`, `look at why: ${a === 'supervisor' ? 'its pane' : `tmux capture-pane -p -t '${tmuxTarget(a)}'`}, its account's usage (cswap list) and what it was doing. It is retried by itself once an attempt is 6 hours old`);
+  if (accounts?.slot_held) {
+    const since = accounts.slot_held_since ? Date.parse(accounts.slot_held_since) : Date.parse(accounts.at);
+    const mins = Math.max(0, Math.round((Date.now() - since) / 60000));
+    add(mins > 30 ? 'high' : 'medium', 'setup-slot-wait', 'setup-slots', `${plural(accounts.slot_held, 'gone session')} ${accounts.slot_held === 1 ? 'has' : 'have'} waited ${mins} min for a machine-wide setup slot to relaunch (each wait costs no attempt, so none of them ever gives up)`, 'a shorter worktree_setup (worktree_copy with npm install --prefer-offline), or more DEVTEAM_SETUP_SLOTS on this machine; ls ~/.devteam/setup-slots (each holder.json names its pid) shows what holds them');
+  }
   if (accounts?.supervisor_limit) {
     // the id is read back from a file any agent could write: only one that could be an id is shown
     const id = SESSION_ID.test(accounts.supervisor_limit.session ?? '') ? accounts.supervisor_limit.session : null;
@@ -13163,6 +14412,10 @@ function cmdMetrics() {
   const m = collectMetrics(since);
   if (flags.json) return json(m);
   const kv = (o, unit = '') => Object.entries(o).map(([k, v]) => `${k} ${unit}${v}`).join(', ') || '-';
+  // stages in the order work meets them: by_stage's own order follows an unsorted folder listing
+  const STAGE_ORDER = ['design', 'graph', 'spec', 'plan', 'contract', 'task', 'final'];
+  const rank = (s) => (STAGE_ORDER.includes(s) ? STAGE_ORDER.indexOf(s) : STAGE_ORDER.length);
+  const categoryStages = Object.entries(m.reviews.by_stage).filter(([, v]) => v.top_blocking_categories?.length).sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b));
   out([
     `since: ${m.since ?? 'the beginning'}`,
     `tickets merged: ${m.tickets_merged}; median cycle ${m.cycle_hours.median ?? '-'}h; slowest ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
@@ -13171,6 +14424,7 @@ function cmdMetrics() {
     `cost by phase: ${kv(m.phase_usd, '$')}; total $${m.cost.usd_total}; per merged ticket ${m.cost.usd_per_merged_ticket === null ? '-' : `$${m.cost.usd_per_merged_ticket}`}`,
     `gates (median): ${m.gates.gates.map((g) => `${g.gate} ${g.median_seconds}s (fail ${Math.round(g.fail_rate * 100)}%)`).join(', ') || '-'}`,
     `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
+    `blocking categories (first passes): ${categoryStages.map(([k, v]) => `${k} ${v.top_blocking_categories.slice(0, 3).map((c) => `${c.category} ${c.count}`).join(', ')}`).join('; ') || '-'}`,
     `messages: ${m.messages.still_open} of ${m.messages.expecting_reply} awaiting reply; median reply ${m.messages.median_reply_minutes ?? '-'} min`,
     `owner questions: ${m.owner_questions.open} open of ${m.owner_questions.asked}; median answer ${m.owner_questions.median_answer_hours ?? '-'}h; answer rate (14d) ${m.owner_questions.answer_rate_14d ?? '-'}`,
     `escaped defects: ${m.escaped_defects}`,
@@ -13180,6 +14434,145 @@ function cmdMetrics() {
   ].join('\n'));
 }
 
+// What a hold waits on, read from one entry of a ticket's held_for or a goal's hold_for (design
+// every-wait-names-its-cause-and-every-put, the cause table): { form, id, state, since, holder_subject },
+// or null for a string in no known form (until:<date> among them: the review date is held_until or
+// hold_until, never a cause). form is q | ticket | chore | goal | pr | run | external; id the question's,
+// ticket's or goal's id, the chore's slug, <link>#<n>, <link>:<run id>, or the external words. state is
+// open | resolved | failed and since when it became so (null while open); here every cause is open,
+// and kit-572 (the log's forms) and kit-573 (pr: and run:) read the rest. holder_subject is the
+// next-move subject a hold's move is copied from, its via (ticket:, chore:, goal:), null for a question (its
+// move is the owner's answer) and for pr:, run: and external:. Whether the kit can follow a cause, and
+// so whether it needs a date, is read from form (q, ticket, chore, goal), never from holder_subject.
+// Self-contained: its patterns copy the log schema's ids, LINK_ID and choreSlug's slug.
+function waitCause(ref) {
+  const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
+  const TICKET = /^[a-z][a-z0-9]*(-[a-z0-9]+)*-[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$/;
+  const LINK = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+  const SLUG = /^[a-z0-9]+([.-][a-z0-9]+)*$/;
+  if (typeof ref !== 'string') return null;
+  const cause = (form, id, holder_subject = null) => ({ form, id, state: 'open', since: null, holder_subject });
+  if (ID.test(ref)) return ref.startsWith('q-') ? cause('q', ref) : null;
+  // shaped like a log id (a letter, a date, a time) but not one: never read as a ticket id
+  if (/^[a-z]-\d{8}-\d{9}/.test(ref)) return null;
+  const i = ref.indexOf(':');
+  const [kind, rest] = i === -1 ? [null, ref] : [ref.slice(0, i), ref.slice(i + 1)];
+  if (kind === 'chore') return SLUG.test(rest) && !/\.lock$/.test(rest) ? cause('chore', rest, `chore:${rest}`) : null;
+  if (kind === 'goal') return ID.test(rest) && rest.startsWith('g-') ? cause('goal', rest, `goal:${rest}`) : null;
+  if (kind === 'pr') {
+    const m = rest.match(/^([^#]+)#([1-9]\d*)$/);
+    return m && LINK.test(m[1]) ? cause('pr', rest) : null;
+  }
+  if (kind === 'run') {
+    const m = rest.match(/^([^:]+):([1-9]\d*)$/);
+    return m && LINK.test(m[1]) ? cause('run', rest) : null;
+  }
+  if (kind === 'external') return rest.length <= 200 && /^\S(?:.*\S)?$/.test(rest) && !/[\r\n\v\f\u0085\u2028\u2029]/.test(rest) ? cause('external', rest) : null;
+  if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
+  return null;
+}
+/* next-moves start */
+// The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
+// one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
+// planners, C chores) are tried in order and the first that matches wins. The kit never makes a move
+// itself; it names it.
+//
+// The contract next-move@1. A move is one object:
+//   subject     "goal:<g-id>" | "ticket:<id>" | "planner:<feature>" | "chore:<slug>", and the waits goal's
+//               "follow-up:<o-id>" (a put-off note), "thread:<t-id>" (a thread bound to work),
+//               "answer:<q-id>" (an owner's answer to carry out), "duty:<name>" (a duty fallen due, e.g.
+//               duty:retro) and "record:<id>" (a loop record: a corrected act, a trial with no outcome)
+//   move        the row's key, kebab-case (e.g. ask-goal-met)
+//   words       a plain sentence for the owner (e.g. "Ask you whether it is met")
+//   holder      owner | supervisor | planner | worker | nobody
+//   ref         null, or { kind, id, url }: kind q | m | ticket | goal | chore | pr | o | t | a; id the
+//               question's, message's, ticket's, goal's or chore branch's id as a string, o a follow-up
+//               observation's id, t a thread's id, a an act's id, or for a pr the PR number as an
+//               integer; url the PR's URL on a pr ref, absent on every other kind
+//   title       the subject's own title: the goal's, the ticket's, the planner's feature's, a chore's
+//               --what or its tip commit's subject
+//   since       ISO time the move began (never stored: each row names its source)
+//   command     the supervisor's command for it, or null
+//   covered_by  [ { kind, subject } ]: the findings that already cover it, subject a finding subject or
+//               "*" (any subject); [] when none
+//   quiet       null | hold | drain | queue: it waits on purpose (a park or let-go hold, a drain, the
+//               queue for a slot or memory); shown, never raises a finding
+//   via         null, or "ticket:<id>" | "planner:<feature>" | "goal:<g-id>" | "chore:<slug>": a copied
+//               move (a goal's lead ticket's, planner's, chore's or plan_after goal's; a ticket's
+//               dependency's); it shows its source's flag, and findings are raised only on the source
+//   flag        null | owed | stalled | none, set by age and holder alone (a covering finding never
+//               clears it): owed when the supervisor holds it past next_move_owed_minutes; a chore with
+//               no PR yet (C4) is never owed, it goes straight to stalled; stalled when unchanged past
+//               next_move_stall_hours, whatever the holder; none for the rows with no next move (G20,
+//               T14), held by nobody; null otherwise, and always null when quiet
+//   rung        0 | 1 | 2 on the age ladder: 0 fresh, 1 owed, 2 stuck (stalled, or its finding or a
+//               covering finding acked three times on one subject since `since`); so an owed move is at
+//               rung 1 or 2, a stalled one at 2, a quiet one stays 0
+//   chore       on a chore: move only (absent on every other): { branch: "chore-<slug>", ahead: the
+//               commits main lacks, pr: null | { number, url }, for: [ the refs from chore start --for ] }
+//   wait        on a ticket move whose hold names its causes (held_for) only, absent on every other:
+//               { "causes": [ { "ref", "words", "state" } ], "until": null | "<YYYY-MM-DD>" }: each cause
+//               as held_for gives it (ref), in words, and its state open | resolved | failed
+//               (waitCause()); until the hold's held_until. A page shows what the hold waits on from it
+//               without a second read
+// Every field but chore and wait is always present; ref, command, quiet, via and flag carry null,
+// never go missing.
+//
+// Its five places:
+//   1. moves --json: { "next_move": 1, "moves": [ … ] }
+//   2. /api/data: next_moves, the same array
+//   3. each goal view (goal show, goal list --json, /api/data ooda.goals[]): next_move, its own move or null;
+//      goal show of the Upkeep goal isn't a goal view and has no next_move (chore moves carry its work)
+//   4. the hub's cache, run/cache/next-moves.json: { "next_move": 1, "at": "<ISO>", "moves": [ … ] }, the
+//      running goals' moves only (no chore moves)
+//   5. hello's pulse.next: one move (the top flagged, else top-priority, running goal's), or null
+// Additive changes keep @1; a renamed or removed field, or a changed meaning, bumps it. Fixtures:
+// test/fixtures/next-moves/, and for the waits goal's additions (its subjects, ref kinds o, t and a, and
+// wait) test/fixtures/waits/. via gains no values: the new rows copy moves from tickets and chores.
+// The closed lists, one per line (test/next-moves.test.mjs reads them):
+// values fields: subject | move | words | holder | ref | title | since | command | covered_by | quiet | via | flag | rung | chore | wait
+// values subject: goal: | ticket: | planner: | chore: | follow-up: | thread: | answer: | duty: | record:
+// values holder: owner | supervisor | planner | worker | nobody
+// values ref.kind: q | m | ticket | goal | chore | pr | o | t | a
+// values quiet: null | hold | drain | queue
+// values via: null | ticket: | planner: | goal: | chore:
+// values flag: null | owed | stalled | none
+// values rung: 0 | 1 | 2
+// values chore: branch | ahead | pr | for
+// values wait.state: open | resolved | failed
+function nextMoves() {
+  return [];
+}
+// The move whose subject is this one ("goal:<g-id>", …), or null.
+function nextMoveOf(subject) {
+  return nextMoves().find((m) => m.subject === subject) ?? null;
+}
+const MOVE_HOLDERS = ['owner', 'supervisor', 'planner', 'worker', 'nobody'];
+// A move's age in words: 45 min, 3 h, 2 d.
+const moveAge = (since) => {
+  const t = Date.parse(since);
+  if (Number.isNaN(t)) return 'since ?';
+  const min = Math.max(0, Math.floor((Date.now() - t) / 60000));
+  return min < 120 ? `${min} min` : min < 48 * 60 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`;
+};
+// moves [--json] [--holder h]: every move, grouped by holder, oldest first, owed and stalled marked.
+// It only reads.
+function cmdMoves() {
+  if (flags.holder !== undefined && !MOVE_HOLDERS.includes(flagStr('holder'))) die(`moves --holder takes one of: ${MOVE_HOLDERS.join(', ')}`);
+  const holder = flagStr('holder');
+  const moves = nextMoves().filter((m) => !holder || m.holder === holder);
+  if (flags.json) return out(JSON.stringify({ next_move: 1, moves }));
+  if (!moves.length) return out('No next moves.');
+  const L = [];
+  for (const h of MOVE_HOLDERS) {
+    const mine = moves.filter((m) => m.holder === h).sort((a, b) => (Date.parse(a.since) || 0) - (Date.parse(b.since) || 0));
+    if (!mine.length) continue;
+    L.push(`${h}:`);
+    for (const m of mine) L.push(`  ${m.subject}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`);
+  }
+  out(L.join('\n'));
+}
+/* next-moves end */
 // Per-ticket progress data for the burn-up, board and roadmap.
 function collectProgress() {
   const sub = activeTickets();
@@ -13197,6 +14590,7 @@ function collectProgress() {
       wave: level.has(t.id) ? level.get(t.id) + 1 : null, added_at: t.created_at,
       merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha, releaseOf(t)) : null, target_release: targets[0] ?? null,
       stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, held: isHeld(t) ? t.held : null, waiting: st?.waiting ?? null,
+      repo: repoOfTicketLink(t),
     };
   });
   return { now: nowIso(), features: [...new Set(items.map((t) => t.feature))], stories, tickets: items };
@@ -13315,8 +14709,8 @@ function dashboardDataRead() {
     caps: { max_active_tickets: settings.max_active_tickets },
     asked_settings: askedSettingsView(),
     gates_configured: Object.keys(settings.gates ?? {}),
-    // held_by: the open question holding it, or null
-    tickets: deriveStatus().map((r) => ({ ...r, held_by: H.get(r.id) ?? null })),
+    // held_by: the open question holding it, or null; repo: its component's repo link, home for home's lines
+    tickets: deriveStatus().map((r) => ({ ...r, repo: repoOfTicketLink(r), held_by: H.get(r.id) ?? null })),
     // every kind of decision in plain words; each row with a class carries its class_name
     class_words: CLASS_WORDS,
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
@@ -13327,6 +14721,8 @@ function dashboardDataRead() {
     awareness,
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
+    // next-move@1: every move the table names (the comment above nextMoves())
+    next_moves: nextMoves(),
     ooda: collectOoda(),
     autonomy,
     autonomy_score: autonomyScore(autonomy, efficiency, awareness),
@@ -13419,6 +14815,13 @@ const HUB_PORT = Number(process.env.DEVTEAM_HUB_PORT ?? 4320);
 // A kept-alive connection outlives any client's idle reuse: Node's 5 s default closed sockets a
 // fetch client (Node 18's keeps them about 4 s) was just reusing, and that request failed.
 const keepAlive = (srv) => { srv.keepAliveTimeout = 65000; srv.headersTimeout = 66000; return srv; };
+// What a dashboard handing over to a new kit waits for (kit-288): every request its servers (its own
+// and the hub's) have not answered, and every child it started that acts (an owner action, still
+// typing its nudge after its reply; an accounts-tick run). Never cut off by the restart.
+const inFlight = new Set();
+const liveChildren = new Set();
+const trackRequests = (srv) => { srv.on('request', (req, res) => { inFlight.add(res); res.once('close', () => inFlight.delete(res)); }); return srv; };
+const trackChild = (child) => { if (child?.pid) { liveChildren.add(child); child.once('close', () => liveChildren.delete(child)); child.once('error', () => liveChildren.delete(child)); } return child; };
 const PORT_BASE = Number(process.env.DEVTEAM_PORT_BASE ?? 4321);
 const PORT_RANGE = Array.from({ length: 25 }, (_, i) => PORT_BASE + i);
 // Who answers on a port: a devteam dashboard's /api/hello, or null (closed, slow, or not devteam).
@@ -13436,7 +14839,16 @@ function probeHello(port, ms = 300) {
 // Free means nothing answers there and this process could bind it: a dev server on localhost (::1)
 // or on every interface would still pass a bind of 127.0.0.1 alone, then take the owner's
 // localhost:<port> while the dashboard holds 127.0.0.1:<port>.
-const answers = (port, host) => new Promise((resolve) => { const c = net.connect({ port, host, timeout: 300 }); c.once('connect', () => { c.destroy(); resolve(true); }); c.once('timeout', () => { c.destroy(); resolve(false); }); c.once('error', () => resolve(false)); });
+// A blocked loop runs timers before I/O when it wakes, so the timeout could fire before a connect
+// already made is heard: the timeout's verdict waits one turn (setImmediate), and a connect wins.
+const answers = (port, host) => new Promise((resolve) => {
+  let done = false;
+  const settle = (v) => { if (!done) { done = true; resolve(v); } };
+  const c = net.connect({ port, host, timeout: 300 });
+  c.once('connect', () => { c.destroy(); settle(true); });
+  c.once('timeout', () => setImmediate(() => { c.destroy(); settle(false); }));
+  c.once('error', () => settle(false));
+});
 const binds = (port) => new Promise((resolve) => { const v = net.createServer(); v.once('error', () => resolve(false)); v.listen(port, '127.0.0.1', () => v.close(() => resolve(true))); });
 const portFree = async (port) => !(await answers(port, '127.0.0.1')) && !(await answers(port, '::1')) && (await binds(port));
 // The dashboard's port: the one pinned (settings or --port); else the one this checkout used last,
@@ -13470,7 +14882,7 @@ async function pickDashboardPort({ skip = [] } = {}) {
 // older script) is answered from its exit.
 function runOwnerAction(args, { env, timeout = 0, input = null, log = () => {}, cwd = mainRoot } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], { cwd, env: { ...env, DEVTEAM_REPLY_FD: '3' }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
+    const child = trackChild(spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], { cwd, env: { ...env, DEVTEAM_REPLY_FD: '3' }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] }));
     let so = '';
     let se = '';
     let rp = '';
@@ -13543,6 +14955,337 @@ const HUB_ACTIONS = {
   'thread-reopen': (b) => (OPERATOR_THREAD_ID.test(b.id ?? '') && (b.text === undefined || b.text === '' || hubTurnOk(b.text)) ? ['operator-thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
   start: () => ['operator-thread', 'start'],
 };
+// ===== live presence: the relay (presence@1, test/contracts/presence.md) =====
+// A /presence WebSocket on a dashboard's server and on the hub's: RFC 6455's server side by hand (Node
+// built-ins only). Each page says where it is (here) and where its pointer is (move); the relay tells
+// everyone on this server who is here (people, coalesced to one each 250 ms) and passes each move only
+// to the others on the sender's spot. Who a connection is comes only from the upgrade's headers
+// (x-devteam-person, x-devteam-level, which the box's gateway sets); with neither it is the owner.
+// Everything is in this process's memory: nothing is logged, written or kept. A connection that
+// breaks a rule is closed with the contract's code; a throw closes only its own connection (1011).
+// `okHost(host)` is the server's own Host check; `ownerCwd` where `git config user.name` names the
+// owner; `draining()` true while the dashboard hands over to a new kit (an upgrade then gets 503).
+function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false } = {}) {
+  const AT_KEYS = ['page', 'tab', 'peek', 'art', 'thread'];
+  const AT_PART = /^[A-Za-z0-9._:@/-]{1,120}$/;
+  const ID_RE = /^[A-Za-z0-9._:@/-]{1,64}$/;
+  const NAME_RE = /^(?:[A-Za-z0-9\-_.!~*'()]|%[0-9A-Fa-f]{2})+$/;
+  const L = { pageMsg: 2048, frames: 16, anchorBytes: 200, nameBytes: 80, peopleMs: 250, changedMs: 500, unsent: 1024 * 1024, closeWaitMs: 5000, perSecond: 30, overSeconds: 10, perPerson: 8, perServer: 200, present: 50 };
+  // every 20 s; DEVTEAM_PRESENCE_PING_MS (tests) when it is a whole number of at least 100
+  const pingMs = ((v) => (/^\d+$/.test(v ?? '') && Number(v) >= 100 ? Number(v) : 20000))(process.env.DEVTEAM_PRESENCE_PING_MS);
+  const STATUS = { 400: 'Bad Request', 403: 'Forbidden', 404: 'Not Found', 503: 'Service Unavailable' };
+  const OPCODES = [0, 1, 2, 8, 9, 10];
+  const jsonBytes = (s) => Buffer.byteLength(JSON.stringify(s)) - 2;
+  // §4: the longest start, by whole characters, whose JSON encoding (without quotes) is at most 80 bytes
+  const cutName = (name) => { let out = ''; let n = 0; for (const ch of String(name)) { const b = jsonBytes(ch); if (n + b > L.nameBytes) break; out += ch; n += b; } return out; };
+  const ownerName = (() => {
+    try {
+      const r = spawnSync('git', ['config', 'user.name'], { cwd: ownerCwd ?? process.cwd(), encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+      return cutName((r.status === 0 && r.stdout.trim()) || 'Owner') || 'Owner';
+    } catch { return 'Owner'; }
+  })();
+  const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  // §5: only the five keys, each a string in the set or null, built afresh
+  const checkAt = (at) => Object.fromEntries(AT_KEYS.map((k) => { const v = own(at, k) ? at[k] : null; return [k, typeof v === 'string' && AT_PART.test(v) ? v : null]; }));
+  const sameSpot = (a, b) => a.page === b.page && a.tab === b.tab && a.peek === b.peek && a.art === b.art;
+  const sameAt = (a, b) => AT_KEYS.every((k) => a[k] === b[k]);
+  const frac01 = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
+  // §6: a move's `a` from checked fields; undefined when it is neither null nor a pointer
+  const pointerOf = (a) => {
+    if (a === null) return null;
+    if (!isObj(a) || typeof a.k !== 'string' || a.k.length === 0 || Buffer.byteLength(a.k) > L.anchorBytes || !frac01(a.x) || !frac01(a.y)) return undefined;
+    return { k: a.k, x: a.x, y: a.y };
+  };
+  // ---- frames (server frames are unmasked and whole) ----
+  const frame = (payload, opcode) => {
+    const n = payload.length;
+    const head = n < 126 ? Buffer.from([0x80 | opcode, n]) : n < 65536 ? Buffer.alloc(4) : Buffer.alloc(10);
+    if (n >= 126 && n < 65536) { head[0] = 0x80 | opcode; head[1] = 126; head.writeUInt16BE(n, 2); }
+    if (n >= 65536) { head[0] = 0x80 | opcode; head[1] = 127; head.writeUInt32BE(Math.floor(n / 2 ** 32), 2); head.writeUInt32BE(n >>> 0, 6); }
+    return Buffer.concat([head, payload]);
+  };
+  const textFrame = (m) => frame(Buffer.from(JSON.stringify(m)), 1);
+  const closeFrame = (code) => { const b = Buffer.alloc(code == null ? 0 : 2); if (code != null) b.writeUInt16BE(code); return frame(b, 8); };
+  const utf8 = (buf) => new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  // ---- the upgrade's headers (§2, §4) ----
+  const rawValues = (req, name) => { const out = []; for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === name) out.push(req.rawHeaders[i + 1]); return out; };
+  const decodeName = (s) => {
+    const bytes = [];
+    for (let i = 0; i < s.length;) { if (s[i] === '%') { bytes.push(parseInt(s.slice(i + 1, i + 3), 16)); i += 3; } else { bytes.push(s.charCodeAt(i)); i += 1; } }
+    try { return utf8(Uint8Array.from(bytes)); } catch { return null; }
+  };
+  const personOf = (req) => {
+    const ps = rawValues(req, 'x-devteam-person');
+    const ls = rawValues(req, 'x-devteam-level');
+    if (ps.length > 1 || ls.length > 1) return null;
+    if (ls.length && ls[0] !== 'full' && ls[0] !== 'view') return null;
+    if (!ps.length) return ls.length ? null : { id: 'owner', name: ownerName, level: 'full' };
+    const m = /^([^;]*);name=(.*)$/.exec(ps[0]);
+    if (!m || !ID_RE.test(m[1]) || !NAME_RE.test(m[2])) return null;
+    const name = decodeName(m[2]);
+    if (!name) return null;
+    const cut = cutName(name);
+    return cut ? { id: m[1], name: cut, level: ls.length ? ls[0] : 'full' } : null;
+  };
+  const validKey = (k) => typeof k === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(k) && Buffer.from(k, 'base64').length === 16;
+  // the path exactly as sent, less a query: never normalised, so only /presence is /presence (§2)
+  const pathOf = (url) => String(url ?? '').split('?')[0];
+  // §2's guards in order: the person, or the status refusing it
+  const guard = (req, upgrade) => {
+    const host = req.headers.host;
+    if (!okHost(host)) return 403;
+    if (rawValues(req, 'x-devteam-relay').length) return 403;
+    if (pathOf(req.url) !== '/presence') return 404;
+    if (!upgrade || String(req.headers.upgrade || '').toLowerCase() !== 'websocket' || req.headers['sec-websocket-version'] !== '13' || !validKey(req.headers['sec-websocket-key'])) return 400;
+    const origin = req.headers.origin;
+    if (origin === undefined || origin === 'null' || origin !== `http://${host}`) return 403;
+    return personOf(req) || 403;
+  };
+
+  const conns = new Set(); // open connections past welcome, in open order
+  let connSeq = 0;
+  let hereSeq = 0;
+  let peopleTimer = null;
+  const chg = { open: false, pending: false };
+  const hereConns = () => [...conns].filter((c) => c.here).sort((a, b) => a.seq - b.seq);
+  const peopleList = () => {
+    const by = new Map();
+    for (const c of hereConns()) {
+      let p = by.get(c.who.id);
+      if (!p) { p = { id: c.who.id, name: c.who.name, level: c.who.level, conns: [] }; by.set(c.who.id, p); }
+      p.conns.push({ conn: c.conn, at: { ...c.at }, visible: c.visible });
+    }
+    return [...by.values()];
+  };
+  // a socket that would hold over 1 MB unsent isn't reading: dropped without a close frame
+  const write = (c, buf) => {
+    if (!c.open || c.socket.destroyed) return;
+    if (c.socket.writableLength + buf.length > L.unsent) { c.open = false; c.socket.destroy(); leave(c); return; }
+    c.socket.write(buf);
+  };
+  function leave(c) {
+    if (!conns.delete(c)) return;
+    for (const cancel of Object.values(c.timers)) cancel();
+    if (c.here) peopleChanged();
+  }
+  // the socket ended with `last`, and destroyed if the peer hasn't hung up within 5 s (its side is half-open)
+  const endSocket = (socket, last) => {
+    try { socket.end(last); } catch {}
+    const t = setTimeout(() => socket.destroy(), L.closeWaitMs);
+    t.unref();
+    socket.once('close', () => clearTimeout(t));
+  };
+  // a close frame, the socket ended
+  function kill(c, code) {
+    if (!c.open) return;
+    c.open = false;
+    endSocket(c.socket, closeFrame(code));
+    leave(c);
+  }
+  const safe = (c, fn) => { try { fn(); } catch { kill(c, 1011); } };
+  // a repeating timer of `c`'s, cleared when it leaves
+  const every = (c, name, ms, fn) => { const t = setInterval(() => { if (c.open) safe(c, fn); }, ms); t.unref(); c.timers[name] = () => clearInterval(t); };
+  // §7: the count, per whole second from the connection's open; closed after 10 seconds in a row over 30
+  const roll = (c) => { c.over = c.sec > L.perSecond ? c.over + 1 : 0; c.sec = 0; if (c.over >= L.overSeconds) kill(c, 1008); };
+  // counts one message or control frame; true when it is over the 30 of this second
+  const count = (c) => { c.sec += 1; return c.sec > L.perSecond; };
+  // §6: a ping each interval; two in a row unanswered by the next close it (1001)
+  const ping = (c) => { if (c.unanswered >= 2) return kill(c, 1001); write(c, textFrame({ t: 'ping' })); c.unanswered += 1; return undefined; };
+  // one message to every connection that has said here; each write wrapped on its own
+  const broadcast = (build) => {
+    const to = hereConns();
+    let f;
+    try { f = build(); } catch { for (const c of to) kill(c, 1011); return; }
+    for (const c of to) safe(c, () => write(c, f));
+  };
+  const flushPeople = () => { peopleTimer = null; broadcast(() => textFrame({ t: 'people', people: peopleList() })); };
+  // §6: the first change opens a 250 ms window; one people at its end carries all of them
+  function peopleChanged() { if (!peopleTimer) { peopleTimer = setTimeout(flushPeople, L.peopleMs); peopleTimer.unref(); } }
+  const sendChanged = () => broadcast(() => textFrame({ t: 'changed' }));
+  const changedWindow = () => {
+    chg.open = true;
+    setTimeout(() => { if (chg.pending) { chg.pending = false; sendChanged(); changedWindow(); } else chg.open = false; }, L.changedMs).unref();
+  };
+
+  function accept(req, socket, head, who) {
+    socket.setNoDelay(true);
+    socket.setTimeout(0);
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${crypto.createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')}\r\n\r\n`);
+    // §7: counted from the handshake; one over is accepted and closed at once, before welcome
+    const mine = [...conns].filter((o) => o.who.id === who.id).length;
+    if (mine >= L.perPerson || conns.size >= L.perServer) return endSocket(socket, closeFrame(1008));
+    const c = { conn: `c${++connSeq}`, who, socket, buf: Buffer.alloc(0), msg: null, open: true, timers: {}, here: false, seq: 0, at: null, visible: false, sec: 0, over: 0, unanswered: 0 };
+    conns.add(c);
+    write(c, textFrame({ t: 'welcome', presence: 1, you: { id: who.id, conn: c.conn } }));
+    every(c, 'second', 1000, () => roll(c));
+    every(c, 'ping', pingMs, () => ping(c));
+    const take = (d) => { if (!c.open) return; c.buf = c.buf.length ? Buffer.concat([c.buf, d]) : Buffer.from(d); parse(c); };
+    socket.on('data', (d) => safe(c, () => take(d)));
+    // the http server's sockets are half-open: a peer that ends without a close frame is gone too
+    socket.on('end', () => { c.open = false; leave(c); try { socket.end(); } catch {} });
+    socket.on('close', () => { c.open = false; leave(c); });
+    if (head && head.length) safe(c, () => take(head));
+  }
+
+  // §2: a whole header first, checked for validity, then its length weighed, then the payload awaited
+  function parse(c) {
+    while (c.open) {
+      const b = c.buf;
+      if (b.length < 2) return;
+      const fin = (b[0] & 0x80) !== 0;
+      const rsv = b[0] & 0x70;
+      const op = b[0] & 0x0f;
+      const masked = (b[1] & 0x80) !== 0;
+      const len7 = b[1] & 0x7f;
+      const control = op >= 8;
+      if (rsv || !OPCODES.includes(op) || !masked || (control && !fin)) return kill(c, 1002);
+      if (op === 0 && !c.msg) return kill(c, 1002);
+      if ((op === 1 || op === 2) && c.msg) return kill(c, 1002);
+      const ext = len7 === 126 ? 2 : len7 === 127 ? 8 : 0;
+      const start = 2 + ext + 4;
+      if (b.length < start) return;
+      let len = len7;
+      if (ext === 2) len = b.readUInt16BE(2);
+      else if (ext === 8) {
+        const hi = b.readUInt32BE(2);
+        if (hi >= 0x80000000) return kill(c, 1002);
+        len = hi * 2 ** 32 + b.readUInt32BE(6);
+      }
+      if (control && len > 125) return kill(c, 1002);
+      if (!control) {
+        if (op === 2) return kill(c, 1008);
+        if ((c.msg ? c.msg.size : 0) + len > L.pageMsg || (c.msg ? c.msg.parts.length : 0) + 1 > L.frames) return kill(c, 1008);
+      }
+      if (b.length < start + len) return;
+      const key = b.subarray(start - 4, start);
+      const payload = Buffer.alloc(len);
+      for (let i = 0; i < len; i++) payload[i] = b[start + i] ^ key[i & 3];
+      c.buf = b.subarray(start + len);
+      if (control) controlFrame(c, op, payload);
+      else {
+        if (!c.msg) c.msg = { parts: [], size: 0 };
+        c.msg.parts.push(payload);
+        c.msg.size += len;
+        if (fin) { const whole = Buffer.concat(c.msg.parts); c.msg = null; message(c, whole); }
+      }
+    }
+  }
+
+  function controlFrame(c, op, payload) {
+    if (op === 8) { // a close: answered with a close of its code and the socket ended
+      if (!c.open) return;
+      c.open = false;
+      endSocket(c.socket, closeFrame(payload.length >= 2 ? payload.readUInt16BE(0) : null));
+      leave(c);
+      return;
+    }
+    const over = count(c);
+    if (op === 10) { c.unanswered = 0; return; } // a pong frame: never dropped
+    if (over) return; // a ping frame over the rate
+    write(c, frame(payload, 10));
+  }
+
+  function message(c, buf) {
+    let m;
+    try { m = JSON.parse(utf8(buf)); } catch { return kill(c, 1008); }
+    if (!isObj(m)) return kill(c, 1008);
+    const over = count(c);
+    if (m.t === 'here') return here(c, m); // never dropped, whatever the rate
+    if (m.t === 'pong') { c.unanswered = 0; return undefined; }
+    if (over) return undefined; // a move or an unknown t over the rate
+    if (m.t === 'move') return move(c, m);
+    return undefined; // any other t is ignored (additive)
+  }
+
+  function here(c, m) {
+    if (!isObj(m.at)) return; // a here whose at is not an object is ignored
+    const at = checkAt(m.at);
+    const visible = m.visible === true;
+    if (c.here && sameAt(c.at, at) && c.visible === visible) return; // changes nothing: no people
+    if (!c.here) { c.here = true; c.seq = ++hereSeq; }
+    c.at = at;
+    c.visible = visible;
+    peopleChanged();
+  }
+
+  function move(c, m) {
+    if (!c.here || !c.visible) return;
+    const a = pointerOf(m.a);
+    if (a === undefined) return;
+    const f = textFrame({ t: 'move', id: c.who.id, conn: c.conn, a });
+    for (const o of conns) if (o !== c && o.here && o.visible && o.who.id !== c.who.id && sameSpot(o.at, c.at)) safe(o, () => write(o, f));
+  }
+
+  return {
+    // an upgrade on this server: refused with the first guard's status, or accepted
+    upgrade(req, socket, head) {
+      socket.on('error', () => {});
+      try {
+        const who = draining() ? 503 : guard(req, true);
+        if (typeof who === 'number') { endSocket(socket, `HTTP/1.1 ${who} ${STATUS[who]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); return; }
+        accept(req, socket, head, who);
+      } catch { socket.destroy(); }
+    },
+    // a plain request for /presence: the guard's status, an empty body
+    refuse(req, res) {
+      let code = 400;
+      try { const r = guard(req, false); code = typeof r === 'number' ? r : 400; } catch {}
+      res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', connection: 'close' });
+      res.end();
+      req.resume();
+    },
+    // §11: the people with a connection whose last here said visible, in people's order; 50 and the rest counted
+    present() {
+      const ps = peopleList().filter((p) => p.conns.some((x) => x.visible));
+      return { present: ps.slice(0, L.present).map(({ id, name, level }) => ({ id, name, level })), present_more: Math.max(0, ps.length - L.present) };
+    },
+    // the log grew: a changed at once, then at most one each 500 ms, never dropped; the hub sends none
+    changed() {
+      if (hub) return;
+      if (chg.open) { chg.pending = true; return; }
+      sendChanged();
+      changedWindow();
+    },
+    // every connection closed with `code` (a hand-over to a new kit, the hub closing)
+    closeAll(code = 1001) { for (const c of [...conns]) kill(c, code); },
+  };
+}
+
+// ===== live presence: the log's changes (presence@1 changed, kit-633) =====
+// What a dashboard calls `onChange` for: its instance's live log folder (run/log/, append-only files),
+// as the names and sizes of its *.jsonl files, differing from the last look. fs.watch only prompts a
+// look, and tick() looks too (the dashboard runs it each second): where watching isn't reliable (a
+// network disk, a watch that died or never started because the folder didn't exist yet) a change is
+// still seen within a second. A difference is all that counts, so a lock file, or an event with
+// nothing new, is nothing. look() is also run by each /api/data read, so a change the watch hasn't
+// delivered yet still counts. Returns { look, tick, close }.
+function presenceChanged(dir, onChange) {
+  let seen = null;
+  let watcher = null;
+  const sig = () => {
+    let names;
+    try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort(); } catch { return ''; }
+    return names.map((f) => { try { return `${f}:${fs.statSync(path.join(dir, f)).size}`; } catch { return `${f}:-`; } }).join('|');
+  };
+  const look = () => {
+    const s = sig();
+    if (seen === null || s === seen) { seen = s; return; }
+    seen = s;
+    try { onChange(); } catch {}
+  };
+  const close = () => { try { watcher?.close(); } catch {} watcher = null; };
+  const watch = () => {
+    if (watcher) return;
+    try {
+      watcher = fs.watch(dir, { persistent: false }, () => look());
+      watcher.on('error', close);
+    } catch { watcher = null; }
+  };
+  look();
+  watch();
+  return { look, tick: () => { watch(); look(); }, close };
+}
+
 function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
   // the hub alone runs its owner actions where it was started, as box-thread's run: on a box that is
@@ -13639,10 +15382,20 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
     });
   };
   let held = null;
+  // what a dashboard handing over to a new kit closes (kit-288): the hub it serves, or its next try
+  let current = null;
+  let again = null;
+  let stopped = false;
+  // live presence on the hub's own pages (presence@1): its people, never a changed
+  const presence = presenceRelay({ hub: true, okHost: ownHost, ownerCwd: actionCwd });
+  const handle = { close() { stopped = true; clearTimeout(again); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
   const tryListen = () => {
-    const hub = http.createServer(async (req, res) => {
+    if (stopped) return;
+    const hub = trackRequests(http.createServer(async (req, res) => {
       const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
       if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
+      // /presence is a socket: a plain request gets its guard's status (presence@1 §2), before the redirect
+      if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
       // One address: the hub listens on 127.0.0.1 only, and dashboards let only that origin frame
       // them, so localhost (which may mean ::1, held by something else) is sent there.
       if (req.headers.host !== `127.0.0.1:${HUB_PORT}`) { res.writeHead(302, { location: `http://127.0.0.1:${HUB_PORT}${req.url.startsWith('/') ? req.url : '/'}`, 'cache-control': 'no-store' }); return res.end(); }
@@ -13669,8 +15422,12 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         return send(200, 'application/json', body, { etag: tag, 'cache-control': 'private, no-cache' });
       }
       return send(404, 'text/plain; charset=utf-8', 'not found');
-    });
+    }));
+    current = hub;
+    hub.on('upgrade', (req, socket, head) => presence.upgrade(req, socket, head));
     hub.once('error', async (e) => {
+      if (current === hub) current = null;
+      if (stopped) return;
       if (standalone) {
         // said once for each state, never at each retry (a slow answer, unsure, changes nothing); the
         // timer keeps this process alive
@@ -13678,15 +15435,16 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         if (now !== held && now === 'other') log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; retrying every ${retry / 1000} s`);
         else if (now !== held && now.startsWith('error ')) log(`hub: ${e.message}; retrying every ${retry / 1000} s`);
         if (now !== 'unsure') held = now;
-        return void setTimeout(tryListen, retry);
+        return void (again = setTimeout(tryListen, retry));
       }
       if (e.code !== 'EADDRINUSE') return log(`hub: ${e.message}`);
-      if ((await holder()) !== 'other') setTimeout(tryListen, retry).unref();
+      if ((await holder()) !== 'other') { if (!stopped) (again = setTimeout(tryListen, retry)).unref(); }
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
     keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); });
   };
   tryListen();
+  return handle;
 }
 
 // ===== account rotation: cswap (claude-swap), when it's installed =====
@@ -13946,25 +15704,69 @@ function claimRestart(name, budget, now = Date.now()) {
   } catch { return null; }
 }
 // `worker|planner <id> --resume <flag>`, as the supervisor, but not from its pane: rememberSupervisorPane
-// needs both markers, and TMUX stays so the child talks to this tmux server
+// needs both markers, and TMUX stays so the child talks to this tmux server. Its worktree_setup is
+// given DEVTEAM_SETUP_DEADLINE, 5 s before the child's own SIGKILL, or the one this process was
+// given if that is still ahead and earlier (one handed down is never moved later; a past one is ignored).
 function relaunchChild(launch, flag, budget) {
   const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
   for (const k of ['TMUX_PANE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
+  const now = Date.now();
+  const own = process.env.DEVTEAM_SETUP_DEADLINE ? Number(process.env.DEVTEAM_SETUP_DEADLINE) : NaN;
+  const mine = now + budget - 5000;
+  env.DEVTEAM_SETUP_DEADLINE = String(Number.isFinite(own) && own > now ? Math.min(own, mine) : mine);
   return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
+// A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
+// stopped · your login changed or ended · send a prompt to continue". Its process already has the new
+// login and wants only a prompt, so one is typed (nothing is relaunched). False when the pane isn't
+// stopped so, and the caller goes on as before; otherwise what was done: null (not ours, or not due),
+// 'gave-up' (past the restart caps, which it shares), 'continued' or 'failed'. The stop must be the
+// last thing the agent said, matched by its head (the whole line wraps at 80 columns), with an empty
+// input: a draft is someone's and is never typed over, except the kit's own prompt whose Enter was
+// lost, which gets the Enter (the lost-Enter rescues skip a pane that still shows a limit banner).
+function loginChangedStop(target, name, budget, ours) {
+  const prompt = 'The kit: your login changed and the account has room now. Carry on.';
+  const stopHead = /^\s*(?:[⎿⏺●■✖!]\s*)?Automatic continue stopped · your login changed\b/;
+  if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
+  const raw = paneBottom(target);
+  const at = raw.findLastIndex((l) => !PANE_CODE.test(l.trim()) && stopHead.test(l));
+  if (at === -1) return false;
+  const below = raw.slice(at + 1).map((l) => l.trim());
+  if (below.some((l) => /^[⏺●⎿]/.test(l))) return false;
+  const draft = below.map((l) => INPUT_LINE.exec(l)).filter(Boolean).pop()?.[1] ?? '';
+  if (draft && draft !== prompt) return false;
+  const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
+  if (raw.map((l) => l.trim()).some((l) => PANE_BUSY.test(l) || promptRe.test(l) || PANE_TRUST.test(l) || /Enter to confirm/.test(l) || LIMIT_MENU.test(l))) return false;
+  if (clientActiveOn(target) || !ours()) return null;
+  const now = Date.now();
+  const verdict = claimRestart(name, budget, now);
+  if (verdict !== 'go') return verdict;
+  const ok = draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt);
+  appendLog({ type: 'observation', source: 'pane', kind: 'login-continued', subject: name, detail: !ok ? 'a session stopped by a login change could not be sent its continue prompt' : draft ? "a session stopped by a login change had the kit's continue prompt unsent in its input: Enter was pressed" : 'a session stopped by a login change was sent a continue prompt on the active account, which has room', detector: 'pane', source_key: `login-continued ${name} ${now}` });
+  if (!ok) out(`could not continue ${name}: tmux did not take the keys`);
+  return ok ? 'continued' : 'failed';
+}
 // Restart one session stopped at a limit: 'restarted', 'failed' (tried, and it may not be running),
-// 'gave-up' (stopped again, past the cap), or null when there is nothing to do. A running Claude Code
+// 'gave-up' (stopped again, past the cap), 'slot-held' (its setup found no slot: left running, no
+// attempt spent), or null when there is nothing to do. A running Claude Code
 // session keeps the limit it hit even after the machine's login moves to an account with room (typing
 // "carry on" into it meets the same banner), so it is relaunched as `worker|planner <id> --resume`
 // would, in a fresh process on the active account, continuing the same conversation. makeSession
 // replaces the old process itself, after everything that can refuse, and no key is sent to it.
+// (A session stopped by a login change is another matter: loginChangedStop, above.)
 function restartPane(name, launch, budget) {
   const { target, problem } = resolvePane(tmuxTarget(name));
-  if (problem || !target || !paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
+  if (problem || !target) return null;
+  // the stop can sit under an old limit banner: it is the newer state, so a prompt, not a relaunch
+  const login = loginChangedStop(target, name, budget, () => launchedByKit(target, name, launch[0]));
+  if (login !== false) return login;
+  if (!paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
   const now = Date.now();
-  const verdict = claimRestart(name, budget);
+  const verdict = claimRestart(name, budget, now);
   if (verdict !== 'go') return verdict;
   const r = relaunchChild(launch, '--replace-agent', budget);
+  // no setup slot came free before the deadline: nothing was done, so the attempt is given back
+  if (r.status === setupSlots.SLOT_WAIT) { releaseRestart(name, now); return 'slot-held'; }
   const ok = r.status === 0;
   const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
   appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: name, detail: ok ? 'a session stopped at a usage limit was restarted on the active account, which has room' : `a session stopped at a usage limit could not be restarted: ${why}`, detector: 'pane', source_key: `limit-restarted ${name} ${now}` });
@@ -14040,21 +15842,26 @@ function plannerAwaitsOwner(name, feature) {
   return threadViews(readLog().objects).some((t) => t.status === 'open' && on(t.subject));
 }
 // Whether a resume of this session runs a worktree_setup: its repo's setting (a worker's ticket's
-// repo, a planner's home). repo() exits on a link it can't read, so that is checked first, and a
-// repo that can't be read counts as having one.
+// repo, a planner's home), unless its worktree's setup marker matches (the resume skips it). repo()
+// exits on a link it can't read, so that is checked first, and a repo that can't be read counts as
+// having one.
 function hasWorktreeSetup(name, [role]) {
   const t = role === 'worker' ? tickets().get(name) : null;
   if (t && !repoReadable(repoOfTicketLink(t))) return true;
-  return !!(t ? repoOfTicket(t) : repo('home')).settings.worktree_setup;
+  const R = t ? repoOfTicket(t) : repo('home');
+  const s = R.settings;
+  return !!s.worktree_setup && setupMarker.needed(path.join(mainRoot, '.worktrees', name), s, R.root);
 }
-// Bring one back in a new window: 'relaunched', 'failed', 'gave-up', or null when not due. --if-gone
+// Bring one back in a new window: 'relaunched', 'failed', 'gave-up', 'slot-held' (its setup found no
+// slot before the deadline: the attempt given back, tried next tick), or null when not due. --if-gone
 // refuses if the window has appeared meanwhile, which is not a failure: someone else got there first.
 function relaunchGone(name, launch, budget) {
   const now = Date.now();
-  const verdict = claimRestart(name, budget);
+  const verdict = claimRestart(name, budget, now);
   if (verdict !== 'go') return verdict;
   const r = relaunchChild(launch, '--if-gone', budget);
   if (r.status === IF_GONE_LEFT) return 'left';
+  if (r.status === setupSlots.SLOT_WAIT) { releaseRestart(name, now); return 'slot-held'; }
   const ok = r.status === 0;
   const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
   appendLog({ type: 'observation', source: 'pane', kind: 'session-relaunched', subject: name, detail: ok ? 'a session whose window was gone after the machine stopped was relaunched' : `a session whose window was gone could not be relaunched: ${why}`, detector: 'pane', source_key: `session-relaunched ${name} ${now}` });
@@ -14202,6 +16009,12 @@ function supervisorToRestart() {
 }
 function restartSupervisor(budget) {
   if (draining() || fleetMode()) return null;
+  // stopped by a login change: a prompt into its own pane, no transcript or resume command needed
+  const { target: pane, problem } = resolvePane(supervisorTarget());
+  if (!problem && pane) {
+    const login = loginChangedStop(pane, 'supervisor', budget, () => paneStartedIn(pane, fs.realpathSync(mainRoot)) && isSupervisorProcess(paneAgentProcess(pane)));
+    if (login !== false) return login;
+  }
   const found = supervisorToRestart();
   if (!found || found.refused) return found;
   const { target, id, cmd } = found;
@@ -14286,14 +16099,16 @@ function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return super
 // strict, for typing into it: started at the root whatever the record says, and never a window
 // named shell (the owner's).
 function supervisorPaneIn(repo, noted, rec, { notedOnly = false, strict = false } = {}) {
-  const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}']);
+  const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}\t#{@devteam-shell}']);
   if (listed === null) return null;
   if (noted && !noted.startsWith('%')) noted = sh('tmux', ['display-message', '-p', '-t', noted, '#{pane_id}']);
   const root = realPath(repo);
   const server = tmuxServerPid();
   let other = null;
   for (const l of listed.split('\n').filter(Boolean)) {
-    const [id, win, start, cmd] = l.split('\t');
+    const [id, win, start, cmd, tag] = l.split('\t');
+    // a pane tagged @devteam-shell is a terminal's own shell, never the supervisor unless noted as it
+    if (tag && id !== noted) continue;
     if (SUPERVISOR_NOT_WINDOW.test(win) || SHELLS.has(cmd.replace(/^-/, ''))) continue;
     const at = realPath(start);
     if (at === path.join(root, '.worktrees') || at.startsWith(path.join(root, '.worktrees') + path.sep)) continue;
@@ -15668,7 +17483,16 @@ const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test
 // in use is what the kernel can't drop, memory.current less the page cache it can (memory.stat's
 // file, less its shmem, which lives in tmpfs and /dev/shm and can't be dropped). With no cap (no
 // cgroup, or memory.max "max"), the host's /proc/meminfo: MemTotal less MemAvailable.
+// Some platforms stop the container at its cap by memory.current, page cache and all, before the
+// kernel drops that cache (a Render box, 2026-11-17: restarted five times in an hour at 31 of 32 GB,
+// 11 GB of it cache, while this read 17). Where DEVTEAM_MEMORY_COUNTS_CACHE is 1 (the box image sets
+// it), in use is the working set, the measure container platforms evict on: memory.current less
+// only memory.stat's inactive_file, the cache the kernel drops first and cheaply; cache says how
+// much page cache that counts, idle how much it leaves out. Not memory.current in full: the kernel
+// trims the cache only at the cap, so on a box doing disk work memory.current sits near it for good,
+// and a gate on it would never open again. A cgroup with no inactive_file counts memory.current in full.
 // DEVTEAM_CGROUP and DEVTEAM_MEMINFO point both elsewhere (tests).
+const memoryCountsCache = () => process.env.DEVTEAM_MEMORY_COUNTS_CACHE === '1';
 function machineMemory() {
   try {
     const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
@@ -15677,7 +17501,10 @@ function machineMemory() {
     if (max > 0 && current !== null) {
       const stat = readText(path.join(cg, 'memory.stat')) ?? '';
       const field = (k) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(stat)?.[1] ?? 0);
-      return { inUse: Math.max(0, current - Math.max(0, field('file') - field('shmem'))), max, source: 'cgroup' };
+      const cache = Math.min(current, Math.max(0, field('file') - field('shmem')));
+      if (!memoryCountsCache()) return { inUse: current - cache, max, source: 'cgroup' };
+      const inUse = Math.max(0, current - Math.min(cache, field('inactive_file')));
+      return { inUse, max, source: 'cgroup', cache: Math.max(0, cache - (current - inUse)), idle: current - inUse };
     }
     const info = readText(process.env.DEVTEAM_MEMINFO ?? '/proc/meminfo');
     const kb = (k) => Number(new RegExp(`^${k}:\\s+(\\d+)`, 'm').exec(info ?? '')?.[1] ?? NaN);
@@ -15689,6 +17516,9 @@ function machineMemory() {
 const GiB = (b) => (b / 1073741824).toFixed(1);
 const MEMORY_CEILING_DEFAULT = 0.8;
 const memoryCeilingProblem = (v) => (typeof v === 'number' && v >= 0.5 && v <= 0.95 ? null : `settings.machine_memory_ceiling is ${JSON.stringify(v) ?? String(v)}: it is the share of the machine's memory at which new workers stop starting, a number from 0.5 to 0.95 (default ${MEMORY_CEILING_DEFAULT}); until it is, ${MEMORY_CEILING_DEFAULT} applies`);
+// , 11.0 GB of it page cache: said wherever the kit counts the cache, so a number over the ceiling
+// on a quiet box reads as the cache it is
+const cacheWords = (m) => (m?.cache !== undefined ? `, ${GiB(m.cache)} GB of it page cache` : '');
 // The machine's memory at or over the supervisor's ceiling: { words, … }, or null when under it or
 // when nothing says (never a block where the kit can't read memory). An invalid ceiling counts as
 // the default, so no value widens what a supervisor may start.
@@ -15696,8 +17526,148 @@ function memoryFull(s = loadSettings()) {
   const ceiling = memoryCeilingProblem(s.machine_memory_ceiling) ? MEMORY_CEILING_DEFAULT : s.machine_memory_ceiling;
   const m = machineMemory();
   if (!m || m.inUse < ceiling * m.max) return null;
-  return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%), at or over its ${Math.round(ceiling * 100)}% ceiling` };
+  return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%${cacheWords(m)}), at or over its ${Math.round(ceiling * 100)}% ceiling` };
 }
+/* box-memory start */
+// The memory reading's names, here so its check reads nothing outside this region (a test runs it
+// alone). The ceiling's bounds are memoryCeilingProblem's; the test holds the two equal.
+const MEMORY_KINDS = ['agent', 'browser', 'install', 'devteam', 'node', 'other'];
+const MEMORY_SOURCES = ['cgroup', 'meminfo', 'os'];
+const MEMORY_READING_KEYS = ['v', 'at', 'working_set', 'max', 'ceiling', 'source', 'partial', 'sessions', 'kinds', 'devteam', 'projects'];
+const MEMORY_PROJECT_KEYS = ['rss', 'sessions', 'devteam'];
+const MEMORY_CEILING_MIN = 0.5, MEMORY_CEILING_MAX = 0.95;
+const MEMORY_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+const MEMORY_SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
+const isBytes = (v) => Number.isSafeInteger(v) && v >= 0;
+const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
+const memoryIsMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+// A field's path: a key that isn't [A-Za-z0-9_-]+ is quoted in brackets (projects["my.app"].rss),
+// so a name with a dot can't read as two fields.
+const memoryPath = (base, key) => (/^[A-Za-z0-9_-]+$/.test(key) ? (base ? `${base}.${key}` : key) : `${base}[${JSON.stringify(key)}]`);
+// A value as the words show it, never a throw (a writer's own object can hold a BigInt or a cycle).
+const memoryShown = (v) => {
+  let s;
+  try { s = JSON.stringify(v) ?? String(v); } catch { try { s = String(v); } catch { s = 'an unprintable value'; } }
+  return s.length > 60 ? `${s.slice(0, 57)}...` : s;
+};
+// A real UTC time in the one form: 2026-02-30 or 24:00 doesn't come back as itself, so it is refused.
+const memoryAtOk = (at) => {
+  if (typeof at !== 'string' || !MEMORY_AT.test(at)) return false;
+  const t = new Date(at);
+  return Number.isFinite(t.getTime()) && t.toISOString().slice(0, 19) === at.slice(0, 19);
+};
+const memoryIs = (p, v, should) => `${p} is ${v === undefined ? 'missing' : memoryShown(v)}: it should be ${should}`;
+// A kinds or devteam entry, { n, rss }: null, or the words for its first bad field.
+const memoryCountsProblem = (p, e) => {
+  if (!memoryIsMap(e)) return memoryIs(p, e, '{ n, rss }, a count of processes and their integer bytes');
+  if (!isCount(e.n)) return memoryIs(`${p}.n`, e.n, 'a count of processes, an integer, 0 or more');
+  if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+  const other = Object.keys(e).find((k) => k !== 'n' && k !== 'rss');
+  return other === undefined ? null : `${memoryPath(p, other)} is not a field of ${p}: it holds only n and rss`;
+};
+// machine-memory@1, the memory reading: one JSON object a line in
+// ~/.devteam/machine-<hub port>/memory.jsonl, written once a minute by the machine's hub.
+//   `v`            required, `v: 1` (the line's "v":1): the contract's version; any other value is refused
+//   `at`           required, ISO 8601 UTC, YYYY-MM-DDTHH:MM:SS(.sss)Z: when the reading was taken
+//   `working_set`  required, integer bytes, 0 or more: in use as machineMemory() counts it for the
+//                  gate (cgroup working set, /proc/meminfo, or os.totalmem() - os.freemem())
+//   `max`          integer bytes, more than 0: the cap the gate reads
+//   `ceiling`      a number from 0.5 to 0.95: the lowest machine_memory_ceiling among the known
+//                  instances (default 0.8)
+//   `source`       "cgroup", "meminfo" or "os": where `working_set` and `max` came from
+//   `partial`      true: the tick ran past its 2-second budget and wrote what it had
+//   `sessions`     an integer, 0 or more: agent processes (claude, codex, opencode) whose cwd is
+//                  inside <root>/.worktrees/<name> of a known root; a supervisor in its root is not one
+//   `kinds`        { <kind>: { `n`, `rss` } }: every process by its executable's kind; `n` an integer,
+//                  0 or more, `rss` integer bytes, 0 or more
+//   `devteam`      { <subcommand>: { `n`, `rss` } }: the `devteam` kind split by subcommand, machine-wide
+//   `projects`     { <instance name>: { `rss`, `sessions`?, `devteam`? } }: by the known root holding
+//                  the process's cwd; its `devteam` is { <subcommand>: integer bytes }
+// Only `v`, `at` and `working_set` are required. The six kinds: `agent` (claude, codex, opencode),
+// `browser` (chrome, chromium, headless_shell), `install` (npm, pnpm, yarn, bundle, pip, uv, or node
+// running one of their scripts, with an install subcommand), `devteam` (node whose script ends in
+// devteam.mjs), `node` (any other node), `other` (everything else). Exactly: an installer is an
+// argv[0] basename whose first word is `npm`, `pnpm`, `yarn`, `bundle`, `pip` or `uv`, or node whose
+// script's basename is `npm-cli.js`, `pnpm.cjs`, `pnpm.js` or `yarn.js`; it is `install` only with an
+// install subcommand, the next word (`install`, `i`, `ci`, `add` or `sync`). An installer with another
+// subcommand (`npm test`) is `other`, and node running an installer script with another subcommand
+// is `node`. The kind comes from cmdline's
+// argv[0] basename (its first word), never comm (node 24 names its main thread MainThread; npm
+// retitles itself "npm ci"). A subcommand is the word after the script, kept only if it is a CLI
+// command name. Nothing else of a command line, no environment and no file content is ever kept.
+// Sizes are integer bytes (RSS is statm's resident pages times the page size). A field the machine
+// can't read is left out, never zero: on a machine with no /proc (macOS) a line has `working_set`,
+// `max`, "source":"os" and no `sessions`, `kinds` or `projects`. A new field, or a change to one, is
+// machine-memory@2.
+// A line the check refuses (one torn by a hub killed mid-append, a "v":2 line from a newer
+// recorder, anything else memoryReadingProblem has words for) is skipped by every reader, never
+// fatal: the hub's /memory.json serves only passing lines, `machine memory` and `metrics` read past
+// it and say how many lines they skipped, and the Overview draws the readings it was given. A writer
+// starts each line on a fresh line (a torn tail is ended with a newline before the next append), so
+// one torn line spoils only itself.
+// /memory.json, served by the hub with /instances.json's same-origin check (and on a box through
+// the gateway): `{"v":1,"readings":[<reading>, …]}`, oldest first.
+//   `?since=<n>h|<n>d`  the window, default 24 hours, at most 8 days; thinned to one reading per
+//                       5 minutes for readings older than 6 hours, and one per 30 minutes older than 3 days
+//   `?after=<at>`       only readings newer than at, unthinned, for an at up to 6 hours back; an
+//                       older one is answered 400 (the Overview then asks since=24h again)
+//   `?thin=0`           no thinning, for a loopback request whose window is 24 hours or less
+// memoryReadingProblem(line) takes a line's text or a parsed value: null when it is a valid
+// machine-memory@1 reading, else one sentence starting with the first bad field's path and a space
+// (reading, when the line isn't a JSON object). Shape only: it doesn't add up kinds, compare
+// working_set with max, or look a subcommand up in COMMANDS.
+function memoryReadingProblem(line) {
+  let r = line;
+  if (typeof line === 'string') {
+    try { r = JSON.parse(line); } catch { return 'reading is not JSON (a torn line, or no reading at all): it should be one JSON object, a machine-memory@1 reading'; }
+  }
+  if (!memoryIsMap(r)) return memoryIs('reading', r, 'one JSON object, a machine-memory@1 reading');
+  if (r.v !== 1) return memoryIs('v', r.v, "1, this contract's version; a line of any other version is skipped");
+  if (!memoryAtOk(r.at)) return memoryIs('at', r.at, 'the time of the reading in UTC, YYYY-MM-DDTHH:MM:SSZ, with or without milliseconds');
+  if (!isBytes(r.working_set)) return memoryIs('working_set', r.working_set, 'integer bytes, 0 or more');
+  const other = Object.keys(r).find((k) => !MEMORY_READING_KEYS.includes(k));
+  if (other !== undefined) return `${memoryPath('', other)} is not a field of machine-memory@1: a reading holds only ${MEMORY_READING_KEYS.join(', ')} (a new field is machine-memory@2)`;
+  if (r.max !== undefined && !(isBytes(r.max) && r.max > 0)) return memoryIs('max', r.max, 'integer bytes, more than 0, or left out');
+  if (r.ceiling !== undefined && !(typeof r.ceiling === 'number' && r.ceiling >= MEMORY_CEILING_MIN && r.ceiling <= MEMORY_CEILING_MAX)) return memoryIs('ceiling', r.ceiling, `a number from ${MEMORY_CEILING_MIN} to ${MEMORY_CEILING_MAX}, or left out`);
+  if (r.source !== undefined && !MEMORY_SOURCES.includes(r.source)) return memoryIs('source', r.source, `one of ${MEMORY_SOURCES.join(', ')}, or left out`);
+  if (r.partial !== undefined && r.partial !== true) return memoryIs('partial', r.partial, 'true, or left out');
+  if (r.sessions !== undefined && !isCount(r.sessions)) return memoryIs('sessions', r.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+  if (r.kinds !== undefined) {
+    if (!memoryIsMap(r.kinds)) return memoryIs('kinds', r.kinds, '{ <kind>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.kinds)) {
+      if (!MEMORY_KINDS.includes(k)) return `${memoryPath('kinds', k)} is not a kind: it should be one of ${MEMORY_KINDS.join(', ')}`;
+      const p = memoryCountsProblem(memoryPath('kinds', k), e); if (p) return p;
+    }
+  }
+  if (r.devteam !== undefined) {
+    if (!memoryIsMap(r.devteam)) return memoryIs('devteam', r.devteam, '{ <subcommand>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.devteam)) {
+      if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath('devteam', k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+      const p = memoryCountsProblem(memoryPath('devteam', k), e); if (p) return p;
+    }
+  }
+  if (r.projects !== undefined) {
+    if (!memoryIsMap(r.projects)) return memoryIs('projects', r.projects, '{ <instance name>: { rss, sessions?, devteam? } }, or left out');
+    for (const [name, e] of Object.entries(r.projects)) {
+      const p = memoryPath('projects', name);
+      if (name === '') return `${p} is an empty name: a project is keyed by its instance's name`;
+      if (!memoryIsMap(e)) return memoryIs(p, e, '{ rss, sessions?, devteam? }');
+      if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+      if (e.sessions !== undefined && !isCount(e.sessions)) return memoryIs(`${p}.sessions`, e.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+      if (e.devteam !== undefined) {
+        if (!memoryIsMap(e.devteam)) return memoryIs(`${p}.devteam`, e.devteam, '{ <subcommand>: integer bytes }, or left out');
+        for (const [k, b] of Object.entries(e.devteam)) {
+          if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath(`${p}.devteam`, k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+          if (!isBytes(b)) return memoryIs(memoryPath(`${p}.devteam`, k), b, 'integer bytes, 0 or more');
+        }
+      }
+      const extra = Object.keys(e).find((k) => !MEMORY_PROJECT_KEYS.includes(k));
+      if (extra !== undefined) return `${memoryPath(p, extra)} is not a field of ${p}: it holds only ${MEMORY_PROJECT_KEYS.join(', ')}`;
+    }
+  }
+  return null;
+}
+/* box-memory end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
 function machineLine(last) {
@@ -15710,7 +17680,8 @@ function machineLine(last) {
   const low = free < 20971520 || Math.floor((free * 100) / (total + 1)) < 15 ? ' LOW' : '';
   const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
   const m = machineMemory();
-  const mem = m?.source === 'cgroup' ? `${GiB(m.inUse)} GB in use of ${GiB(m.max)} GB` : m ? `${GiB(m.max - m.inUse)} GB free of ${GiB(m.max)} GB` : `${GiB(os.freemem())} GB free of ${GiB(os.totalmem())} GB`;
+  // the number memoryFull reads: with the page cache where the platform counts it
+  const mem = m?.source === 'cgroup' ? `${GiB(m.inUse)} GB in use of ${GiB(m.max)} GB${m.cache !== undefined ? ` (${GiB(m.cache)} GB of it page cache, and ${GiB(m.idle)} GB of inactive cache left out)` : ''}` : m ? `${GiB(m.max - m.inUse)} GB free of ${GiB(m.max)} GB` : `${GiB(os.freemem())} GB free of ${GiB(os.totalmem())} GB`;
   // the CPUs it may use, and how much of the last minute every task stood waiting for one
   const [quota, period] = (readText(path.join(cg, 'cpu.max')) ?? '').trim().split(/\s+/);
   const cpus = quota && quota !== 'max' && Number(period) > 0 ? String(Number((Number(quota) / Number(period)).toPrecision(6))) : String(os.cpus().length || '?');
@@ -15824,7 +17795,7 @@ function accountsState() {
   try {
     const s = JSON.parse(readText(ACCOUNTS_FILE));
     const age = Date.now() - Date.parse(s.at);
-    return age >= 0 && age < ACCOUNTS_FRESH_MS ? { ...s, active_no_room: s.active_no_room === true, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [] } : null;
+    return age >= 0 && age < ACCOUNTS_FRESH_MS ? { ...s, active_no_room: s.active_no_room === true, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [], slot_held: Number.isInteger(s.slot_held) && s.slot_held > 0 ? s.slot_held : 0, slot_held_since: Number.isFinite(Date.parse(s.slot_held_since)) ? s.slot_held_since : null } : null;
   } catch { return null; }
 }
 // Not supervisorOnly: that records this process's pane as the supervisor's, and this runs under the dashboard.
@@ -15835,9 +17806,13 @@ function cmdAccountsTick() {
   const bin = findCswap();
   const before = accountsState();
   const state = { at: nowIso(), cswap: !!bin, active: null, active_no_room: false, exhausted: false, needs_login: [], restart_gave_up: [], supervisor_limit: null, resumed: [], relaunched: [] };
+  // sessions whose resume found no setup slot (restartPane or relaunchGone): no attempt, tried next tick
+  state.slot_held = 0;
   let switched = false;
   let supervisorRestarted = false;
   let supervisorRefused = null;
+  // sessions sent a prompt after a login change (loginChangedStop), not restarted: in resumed too
+  const continued = new Set();
   // only the kit's own sessions, and only those it would launch now: a held one stays as it is
   const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
   // a ticket's held field holds it too: nothing runs for a held ticket
@@ -15885,34 +17860,54 @@ function cmdAccountsTick() {
         else if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
         else if (sup) tries += 1;
         if (sup === 'restarted') { supervisorRestarted = true; out('restarted the supervisor: it had stopped at a usage limit'); }
+        // continued, it is starting a turn as a restarted one is: no limit to report, no held line now
+        if (sup === 'continued') { supervisorRestarted = true; state.resumed.push('supervisor'); continued.add('supervisor'); }
         for (const { name } of ourWindows(tmuxSession())) {
           const launch = launchOf(name);
           if (!launch || held(name)) continue;
           const did = restartPane(name, launch, budget());
           if (did === 'gave-up') state.restart_gave_up.push(name);
+          else if (did === 'slot-held') state.slot_held += 1;
           else if (did) tries += 1;
-          if (did === 'restarted') state.resumed.push(name);
+          if (did === 'restarted' || did === 'continued') state.resumed.push(name);
+          if (did === 'continued') continued.add(name);
         }
       }
-      for (const w of state.resumed) out(`restarted ${w}: it had stopped at a usage limit`);
+      for (const w of state.resumed) out(continued.has(w) ? `continued ${w}: its login changed while it was stopped` : `restarted ${w}: it had stopped at a usage limit`);
     }
   }
   // After a dead machine, with or without cswap. Not onto an account known to be full: the session
   // would only stop again, and it is still there for a later tick.
-  // Up to 3 a tick while the machine's memory is under its ceiling (or unread), 1 at or over it. A
+  // Up to 3 a tick while the machine's memory is under its ceiling (or unread), and none at or over
+  // it: memory is read again before each one, as a new start reads it, so a box near its cap waits
+  // for room instead of coming back all at once (every fleet on a restarted box relaunches together:
+  // up to 3 a tick each took a 32 GB box from 1 to 18 GB in three minutes, then past its cap). One
+  // held for memory is still looked at with a budget of 0, so one past its caps is still said
+  // (restart-gave-up); how many wait (memory_held) is said when it changes, not every minute. A
   // resume runs its repo's worktree_setup before its window exists, and that can take most of the
   // 100 s: a later relaunch whose repo has one starts only with the full 100 s left, so it is never
   // cut short into a spent attempt; it waits for the next tick instead.
+  state.memory_held = 0;
   if (!state.active_no_room) {
     const gone = sessionsToRelaunch(launchOf, held);
-    const cap = gone.length ? (memoryFull() ? 1 : 3) : 0;
+    const settings = gone.length ? loadSettings() : null;
+    let said = null;
     for (const { name, launch } of gone) {
-      const did = relaunchGone(name, launch, budget(cap, tries && tries < cap && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
+      const full = memoryFull(settings);
+      const could = full ? budget(3) : 0;
+      if (full) said = full;
+      const did = relaunchGone(name, launch, full ? 0 : budget(3, tries && tries < 3 && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
       if (did === 'gave-up') state.restart_gave_up.push(name);
+      else if (did === 'slot-held') state.slot_held += 1;
       else if (did) tries += 1;
+      else if (could) state.memory_held += 1;
       if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }
     }
+    if (state.memory_held && state.memory_held !== before?.memory_held) out(`${plural(state.memory_held, 'gone session')} wait${state.memory_held === 1 ? 's' : ''} for room to relaunch: ${said.words}`);
   }
+  // since when any has waited, kept while some still do, so the wait is a finding, never silent
+  if (state.slot_held) state.slot_held_since = (before?.slot_held && before.slot_held_since) || state.at;
+  if (state.slot_held && state.slot_held !== before?.slot_held) out(`${plural(state.slot_held, 'gone session')} wait${state.slot_held === 1 ? 's' : ''} for a setup slot`);
   // in tmux or not, with or without cswap; just restarted, it hasn't stopped
   state.supervisor_limit = supervisorRestarted ? null : supervisorLimit();
   if (state.supervisor_limit && supervisorRefused) state.supervisor_limit.refused = supervisorRefused;
@@ -15921,7 +17916,7 @@ function cmdAccountsTick() {
   // tick just restarted, whose agent is still coming up
   const session = tmuxSession();
   const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
-  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed, ...state.relaunched].map((n) => `${session}:${n}`)]);
+  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed.filter((n) => !(n === 'supervisor' && continued.has(n))), ...state.relaunched].map((n) => `${session}:${n}`)]);
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -16179,16 +18174,275 @@ async function bumpPins(pins, release) {
   set(pins.releaseLine, 'DEVTEAM_RELEASE', pins.release, release);
   return { text: lines.join('\n'), changes, held: pins.tools.filter((p) => p.hold).map((p) => ({ name: p.tool.name, reason: p.hold })) };
 }
-const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | installed   (verify, check and bump take --dockerfile <path>)';
+// What the box image runs from its own copy of the kit, or relies on in a project's kit: a change to
+// any of it since the minor the image was built at makes a release a minor (box-pins changed,
+// test/contracts/image-changes.md). A new image command adds its parts here; a change that bumps a
+// crossing's version is a minor whatever this list says. Anything not listed reaches the image at
+// the next minor: staleness, never breakage, since the image is always a whole release. The file's
+// rest (the imports, the Node check, the re-exec) always counts, so it isn't listed. The classifier's
+// own parts are listed, so a change to the list is a minor.
+const IMAGE_RUNS = {
+  // whole files, as globs relative to the kit repo
+  files: ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md'],
+  // parts of this file, as fileParts names them
+  script: 'docs/devteam/scripts/devteam.mjs',
+  parts: [
+    // the handlers the machineWide expression dispatches to
+    'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover', 'cmdBoxPins',
+    // what they are built from that serves only the image: the hub
+    'probeHello', 'HUB_BODY_MAX', 'hubTurnOk', 'HUB_ACTIONS', 'startHub', 'hubLogger', 'imageHub',
+    // recover --machine (a project's own recover runs from that project's kit, never the image's;
+    // its recoverOne is listed below as a crossing, since it writes supervisor-up.json)
+    'siblingOf', 'isAdopted', 'machineProjects', 'projectKit', 'projectJson', 'kitHasRecover', 'notedPaneOf', 'tmuxName', 'readUpList', 'recoverMachine', 'LEGACY_RECOVER_MESSAGE', 'legacyRecover',
+    // machine status, tell, alert, pane-state
+    'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
+    'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
+    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'machineStatus',
+    // operator threads
+    'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
+    'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
+    'operatorStartFile', 'operatorStartNote', 'operatorStarting', 'operatorNoted', 'isShellPane', 'operatorSeat', 'operatorState', 'OPERATOR_OPENING', 'operatorStart', 'typeLine', 'OPERATOR_HELD',
+    'operatorHeld', 'deliverToOperator', 'operatorDataFrame', 'operatorThreadUsage',
+    // box-pins (installed runs in the image; verify, check and bump beside it)
+    'firstVersion', 'BOX_TOOLS', 'BOX_ARCHES', 'pinForm', 'escapeRe', 'HOLD_LIKE', 'readPins', 'pinsFile', 'releaseFlag', 'pinsBase', 'timedOut', 'unreachable', 'upstreamJson', 'notRelease', 'latestOf', 'holdText',
+    'checkPins', 'pinsCheckLine', 'assetSum', 'bumpPins', 'BOX_PINS_USAGE',
+    // the guards that let the image's commands run outside a project: the machineWide expression,
+    // and the DEVTEAM_RUN guard in realPathMade's part, which repeats that list (the helpers homeAt
+    // also calls, KIT_VIEWS, kitsOwnRepoAt, projectIn and repoLinksIn, are shared, so not listed)
+    'homeAt', 'realPathMade',
+    // the project-side parts the image relies on (the crossings): the presses the gateway signs and
+    // a dashboard verifies, and the operator's role guard
+    'gatewaySigned', 'termSigned', 'dashboardProofProblem', 'paneSigned', 'ownerSettingSigned', 'paneProofProblem', 'ownerSettingProofProblem', 'OPERATOR_READS', 'OPERATOR_SUBCOMMANDED',
+    // the dispatcher and the operator's role guard (region dispatch), and what they read: the command
+    // and its arguments
+    'dispatch', 'command', 'parseArgs',
+    // what keeps a project's kit read-only for the operator: no facts saved, no usage cache written, no host claim at a prompt
+    'factsSaveAtExit', 'usageCache', 'cmdPrompt',
+    // what the boot script calls in a project's kit: settings --get tmux_session, and the run/supervisor-pane record it reads and removes
+    // (its name, its writers, when it is written, and the mark beside it, which the image reads through markedPane)
+    'cmdSettings', 'tmuxSession', 'supervisorPaneFile', 'supervisorPaneMark', 'recordSupervisorPane', 'rememberSupervisorPane', 'markUpgradedPane', 'markedPane',
+    // run/supervisor-up.json, which the boot script reads ("up": false) to choose whom to restore, and its writers, recover's own included
+    'SUPERVISOR_UP_FILE', 'writeSupervisorUp', 'noteSupervisorFromTick', 'noteSupervisorSelf', 'recoverOne',
+    // the ~/.devteam/repos-<port> records a project's kit writes and recover --machine reads
+    'registerOnMachine', 'machineRepoDir',
+    // a dashboard leaves the machine's hub to the image (dashboardHub); the hub's port, which names the
+    // repos records too, and the block of ports a project's dashboard binds in, which the hub scans
+    'dashboardHub', 'HUB_PORT', 'PORT_BASE', 'PORT_RANGE',
+    // the classifier itself, and the readers it is built from, so a change to the list is a minor
+    'IMAGE_RUNS', 'imageChanges', 'parts', 'globs',
+  ],
+};
+// box-pins changed: the changes, sorted (image-changes@1 §5), between two commits of the cwd's repo
+// in what IMAGE_RUNS names: a file a glob matches (either side of a rename), a listed part of the
+// script whose leaves changed (judged as partsChanged judges them), and the script's rest (its r:
+// leaf only, never a region's rest). With smoke, also what the image's readers print of a project on
+// each kit. Dies with 2 when it can't tell.
+async function imageChanges(since, to, { smoke = false } = {}) {
+  const cant = (why) => die(`box-pins changed: ${why}`, 2);
+  const found = new Map();
+  const add = (file, part) => found.set(`${file}\0${part ?? ''}`, { file, part });
+  // git with a deadline and no prompt (a partial clone fetches blobs; a credential prompt would wait)
+  const git = (args) => { try { return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 120000, maxBuffer: 256 * 1024 * 1024 }).replace(/\n$/, ''); } catch { return null; } };
+  const raw = git(['diff', '-z', '--name-status', '-M', since, to]);
+  if (raw === null) cant(`git diff ${since} ${to} failed in ${repoRoot}`);
+  const tokens = raw.split('\0');
+  const paths = [];
+  const S = IMAGE_RUNS.script;
+  // which side has the script, from the diff's own letters (A added, D deleted, R/C old then new)
+  let baseHas = null, headHas = null;
+  for (let i = 0; i < tokens.length;) {
+    const status = tokens[i++];
+    if (!status) continue;
+    const n = /^[RC]/.test(status) ? 2 : 1;
+    const ps = tokens.slice(i, i + n);
+    paths.push(...ps);
+    i += n;
+    if (n === 2) { if (ps[0] === S) { baseHas = true; headHas ??= status[0] === 'C'; } if (ps[1] === S) { headHas = true; baseHas ??= false; } }
+    else if (ps[0] === S) { baseHas = status[0] !== 'A'; headHas = status[0] !== 'D'; }
+  }
+  for (const p of paths) if (IMAGE_RUNS.files.some((g) => pathMatches(g, p))) add(p, null);
+  if (paths.includes(S)) {
+    const textAt = (sha, has) => {
+      if (!has) return '';
+      const t = git(['show', `${sha}:${S}`]);
+      if (t === null) cant(`git show ${sha}:${S} failed`);
+      return t;
+    };
+    const base = textAt(since, baseHas), head = textAt(to, headHas);
+    const B = fileParts(base, S), H = fileParts(head, S);
+    const inBase = new Set(B.owner.slice(1));
+    const leaves = partsChanged(base, head, S, []);
+    if (leaves.includes('r:')) add(S, '(rest)');
+    for (const name of IMAGE_RUNS.parts) {
+      const cb = partLeaves(B, name), ch = partLeaves(H, name);
+      if (leaves.some((k) => (inBase.has(k) ? cb : ch).has(k))) add(S, name);
+    }
+  }
+  if (smoke) for (const command of await smokeDiffers()) add('(smoke)', command);
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  return [...found.values()].sort((a, b) => cmp(a.file, b.file) || (a.part === b.part ? 0 : a.part === null ? -1 : b.part === null ? 1 : cmp(a.part, b.part)));
+  // --smoke (image-changes@1 §6): the image (a worktree of since) runs its readers of a project
+  // against a fixture made by each kit, each fixture on a HOME of its own, in a temporary folder that
+  // is removed on every exit (and git's record of that worktree with it, no other). A different exit, or a
+  // different line of the fixture's own (after placeholders), is a change named for the command.
+  // Each child is awaited, so a signal is handled between children (and kills the running one).
+  async function smokeDiffers() {
+    const tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-smoke-')));
+    const tmuxDir = path.join(tmpDir, 'tmux'), imageDir = path.join(tmpDir, 'image');
+    // the children's environment is an allowlist: no DEVTEAM_*, no TMUX, no GIT_DIR or its relatives
+    // (a hook's), and none of the caller's tokens
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(PATH|HOME|LANG|LANGUAGE|LC_\w+|TZ|TMPDIR|USER|LOGNAME|SHELL)$/.test(k)));
+    let cleaned = false;
+    let child = null;
+    // each child leads a process group, so what it started (a fixture's kit under the image) goes too
+    const killGroup = (c) => { try { process.kill(-c.pid, 'SIGKILL'); } catch { try { c.kill('SIGKILL'); } catch {} } };
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (child) killGroup(child);
+      // nothing here starts a tmux server, but one left on this folder's own sockets is stopped
+      let socks = [];
+      try { socks = fs.readdirSync(tmuxDir).flatMap((d) => { try { return fs.readdirSync(path.join(tmuxDir, d)).map((s) => path.join(tmuxDir, d, s)); } catch { return []; } }); } catch {}
+      for (const s of socks) spawnSync('tmux', ['-S', s, 'kill-server'], { env, stdio: 'ignore', timeout: 10000 });
+      spawnSync('git', ['worktree', 'remove', '--force', '--force', imageDir], { cwd: repoRoot, env, stdio: 'ignore', timeout: 60000 });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    };
+    // a die (process.exit) cleans up too, and so does a signal: the running child is killed first
+    const onSignal = () => { cleanup(); process.exit(2); };
+    process.on('exit', cleanup);
+    for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(s, onSignal);
+    try {
+      fs.mkdirSync(tmuxDir);
+      const port = Number(spawnSync(process.execPath, ['-e', "const s = require('net').createServer(); s.listen(0, '127.0.0.1', () => { console.log(s.address().port); s.close(); })"], { encoding: 'utf8', timeout: 20000 }).stdout);
+      if (!Number.isInteger(port) || port <= 0 || port === 4320) cant('--smoke: no free port for the fixtures\' hub');
+      Object.assign(env, { DEVTEAM_HUB_PORT: String(port), TMUX_TMPDIR: tmuxDir, GIT_AUTHOR_NAME: 'devteam-smoke', GIT_COMMITTER_NAME: 'devteam-smoke', GIT_AUTHOR_EMAIL: 'devteam-smoke@example.invalid', GIT_COMMITTER_EMAIL: 'devteam-smoke@example.invalid' });
+      // spawnSync's result, awaited: { status, signal, stdout (a Buffer when binary), stderr, error }
+      const run = (cmd, args, { cwd, home, input, binary = false, childEnv } = {}) => new Promise((resolve) => {
+        const c = spawn(cmd, args, { cwd, env: childEnv ?? { ...env, HOME: home ?? env.HOME }, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'], detached: true });
+        child = c;
+        const so = [], se = [];
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; killGroup(c); }, 120000);
+        c.stdout.on('data', (d) => so.push(d));
+        c.stderr.on('data', (d) => se.push(d));
+        const done = (r) => { clearTimeout(timer); if (child === c) child = null; resolve(r); };
+        c.on('error', (error) => done({ status: null, signal: null, stdout: binary ? Buffer.alloc(0) : '', stderr: '', error }));
+        c.on('close', (status, signal) => { const out = Buffer.concat(so); done({ status, signal, stdout: binary ? out : out.toString('utf8'), stderr: Buffer.concat(se).toString('utf8'), error: timedOut ? Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) : undefined }); });
+        if (input) c.stdin.end(input);
+      });
+      const must = (r, what) => {
+        // the line that says why: the kit's own (devteam: …), or an error's, else the first
+        const lines = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+        const why = lines.find((l) => /^devteam: /.test(l)) ?? lines.find((l) => /^\w*Error\b/.test(l)) ?? lines[0];
+        if (r.error || r.status !== 0) cant(`--smoke: ${what} failed (${r.error ? r.error.code ?? r.error.message : r.signal ?? `exit ${r.status}`})${why ? `: ${why.slice(0, 300)}` : ''}`);
+        return r;
+      };
+      must(await run('git', ['worktree', 'add', '-q', '--detach', imageDir, since], { cwd: repoRoot }), `git worktree add of ${since}`);
+      const kitIn = (root) => path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
+      const sides = [];
+      for (const [side, sha] of [['since', since], ['to', to]]) {
+        const parent = path.join(tmpDir, side), root = path.join(parent, 'smoke-fixture'), home = path.join(tmpDir, `home-${side}`);
+        fs.mkdirSync(root, { recursive: true });
+        fs.mkdirSync(home);
+        must(await run('git', ['init', '-q', '-b', 'main'], { cwd: root, home }), `git init of the ${side} fixture`);
+        const tar = must(await run('git', ['archive', '--format=tar', sha, 'docs/devteam'], { cwd: repoRoot, binary: true }), `git archive of ${sha}`);
+        must(await run('tar', ['-x', '-C', root], { input: tar.stdout }), `unpacking the ${side} fixture's kit`);
+        for (const d of ['project', 'run']) fs.rmSync(path.join(root, 'docs', 'devteam', d), { recursive: true, force: true });
+        const own = async (args, what) => must(await run(process.execPath, [kitIn(root), ...args], { cwd: root, home }), `the ${side} fixture's ${what}`);
+        await own(['init'], 'init');
+        must(await run('git', ['add', '-A'], { cwd: root, home }), `git add in the ${side} fixture`);
+        must(await run('git', ['commit', '-q', '-m', 'fixture'], { cwd: root, home }), `git commit in the ${side} fixture`);
+        await own(['ask', '--question', 'Smoke question?', '--stake', '1', '--urgency', '1'], 'ask');
+        await own(['knowledge', 'add', '--owner', '--kind', 'fact', '--statement', 'Smoke fact.'], 'knowledge add');
+        fs.rmSync(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json'), { force: true });
+        sides.push({ side, parent, root, home, outs: {} });
+      }
+      const READERS = [['machine status', ['machine', 'status']], ['machine status --questions', ['machine', 'status', '--questions']], ['machine status --knowledge', ['machine', 'status', '--knowledge']], ['recover --machine --dry-run --force', ['recover', '--machine', '--dry-run', '--force']]];
+      const trace = process.env.DEVTEAM_SMOKE_TRACE;
+      const listing = (home) => { try { return fs.readdirSync(path.join(home, '.devteam')).sort(); } catch { return []; } };
+      for (const s of sides) for (const [name, args] of READERS) {
+        const childEnv = { ...env, HOME: s.home };
+        const before = listing(childEnv.HOME);
+        const r = await run(process.execPath, [kitIn(imageDir), ...args, '--in', s.parent], { cwd: imageDir, childEnv });
+        if (r.error || r.status === null) cant(`--smoke: the image's ${name} against the ${s.side} fixture did not finish (${r.error?.code ?? r.signal})`);
+        s.outs[name] = { exit: r.status, stdout: r.stdout };
+        if (trace) fs.appendFileSync(trace, `${JSON.stringify({ fixture: s.side, command: name, home: childEnv.HOME, parent: s.parent, exit: r.status, stdout: r.stdout, home_devteam_before: before, home_devteam: listing(childEnv.HOME) })}\n`);
+      }
+      // only the fixture's own lines (§6.7), then the placeholders (§6.8, and tools= as §1 allows)
+      const re = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const word = (s, extra = '') => new RegExp(`(?<![\\w${extra}-])${re(s)}(?![\\w${extra}-])`, 'g');
+      const kept = (s, name) => {
+        const lines = s.outs[name].stdout.split('\n');
+        const mine = (l) => word(s.root).test(l) || word('smoke-fixture').test(l);
+        const k = [];
+        for (let i = 0; i < lines.length; i++) {
+          if (!mine(lines[i])) continue;
+          k.push(lines[i]);
+          if (lines[i].endsWith(':')) while (i + 1 < lines.length && /^\s/.test(lines[i + 1])) k.push(lines[++i]);
+        }
+        const kit = /(?:^|\s)kit=(\S+)/.exec(s.outs['machine status'].stdout.split('\n').find((l) => word('smoke-fixture').test(l)) ?? '')?.[1];
+        return k.map((l) => {
+          let t = l.split(s.root).join('<path>').replace(word('smoke-fixture'), '<name>');
+          if (kit && /^[A-Za-z0-9][\w.+-]*$/.test(kit)) t = t.replace(word(kit, '.+'), '<kit>');
+          return t.replace(/(^|\s)tools=\S*/g, '$1tools=<tools>')
+            .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?/g, '<time>')
+            .replace(/\b[a-z]{1,2}-\d{8}-\d{9}-[a-z0-9][a-z0-9-]*/g, '<id>');
+        });
+      };
+      const [a, b] = sides;
+      const differs = [];
+      for (const [name] of READERS) {
+        const ka = kept(a, name), kb = kept(b, name);
+        // the image's own kit prints nothing of its own fixture: the comparison would see nothing
+        if (!ka.length) cant(`--smoke: ${name} printed no line of the --since fixture`);
+        if (a.outs[name].exit === b.outs[name].exit && ka.join('\n') === kb.join('\n')) continue;
+        differs.push(name);
+        const i = ka.findIndex((l, j) => l !== kb[j]);
+        const at = i === -1 ? ka.length : i;
+        process.stderr.write(`devteam: --smoke: ${name} differs (exit ${a.outs[name].exit} on the --since fixture, ${b.outs[name].exit} on the --to one)\n  --since: ${ka[at] ?? '(no more lines)'}\n  --to:    ${kb[at] ?? '(no more lines)'}\n`);
+      }
+      return differs;
+    } finally {
+      cleanup();
+      process.removeListener('exit', cleanup);
+      for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.removeListener(s, onSignal);
+    }
+  }
+}
+const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | changed --since <ref> [--to <ref>] [--smoke] [--json] | installed   (verify, check and bump take --dockerfile <path>; a patch, vX.Y.Z with Z > 0, is stamped vX.Y.0 and bump takes only a minor)';
 // box-pins: verify, check and bump in the kit's own checkout (a KIT_VIEWS command; bump writes only
 // the Dockerfile's pins), and installed inside the box image, from anywhere.
 async function cmdBoxPins() {
   const mode = positional[0];
+  // the stamp a release needs (image-changes@1 §8): a patch (Z > 0) is stamped with the minor it
+  // builds on, vX.Y.0; a minor or major with its own tag. tag is a vX.Y.Z releaseFlag let through.
+  const stampFor = (tag) => { const [x, y, z] = tag.slice(1).split('.').map(Number); return z > 0 ? `v${x}.${y}.0` : tag; };
+  if (mode === 'changed') {
+    // image-changes@1: exit 0 patch, 3 minor, 2 can't tell (said on stderr, nothing on stdout)
+    const usage = () => die(`usage: ${BOX_PINS_USAGE}`, 2);
+    if (positional.length !== 1 || rest !== null || Object.keys(flags).some((k) => !['since', 'to', 'smoke', 'json'].includes(k))) usage();
+    for (const k of ['since', 'to']) if (flags[k] !== undefined && (typeof flags[k] !== 'string' || !flags[k] || flags[k].startsWith('-'))) usage();
+    for (const k of ['smoke', 'json']) if (flags[k] !== undefined && flags[k] !== true) usage();
+    if (flags.since === undefined) usage();
+    if (!kitsOwnRepoAt(repoRoot)) die(`box-pins changed: ${repoRoot} is not a checkout of the kit's own repo (${KIT_UPSTREAM}); run it there, at --to`, 2);
+    const sha = (k, ref) => (() => { try { return execFileSync('git', ['rev-parse', '--verify', '-q', `${ref}^{commit}`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000 }).trim(); } catch { return null; } })() ?? die(`box-pins changed: --${k} ${ref} does not resolve to a commit`, 2);
+    const since = sha('since', flags.since), to = sha('to', flags.to ?? 'HEAD');
+    const changes = await imageChanges(since, to, { smoke: !!flags.smoke });
+    const kind = changes.length ? 'minor' : 'patch';
+    if (flags.json) out(JSON.stringify({ v: 1, since, to, kind, changes }, null, 2));
+    else {
+      for (const c of changes) out(`image: ${c.file}${c.part === null ? '' : `#${c.part}`}`);
+      out(kind === 'patch' ? 'kind: patch' : `kind: minor (${changes.length} changes the image runs)`);
+    }
+    process.exitCode = changes.length ? 3 : 0;
+    return;
+  }
   if (mode === 'verify') {
     const want = releaseFlag();
     const { text } = pinsFile();
     const pins = readPins(text);
-    if (want !== undefined && pins.release !== null && pins.release !== want) pins.problems.push(`DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}`);
+    const need = want === undefined ? undefined : stampFor(want);
+    if (need !== undefined && pins.release !== null && pins.release !== need) pins.problems.push(need === want ? `DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}` : `DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}'s minor, ${need} (a patch is stamped with the minor it builds on)`);
     for (const p of pins.problems) out(`box-pins verify: ${p}`);
     if (pins.problems.length) { process.exitCode = 1; return; }
     out(`box-pins verify: ok, ${pins.tools.length} tools, release ${pins.release}`);
@@ -16213,6 +18467,7 @@ async function cmdBoxPins() {
   if (mode === 'bump') {
     const release = releaseFlag();
     if (release === undefined) die(`box-pins bump needs --release vX.Y.Z\nusage: ${BOX_PINS_USAGE}`);
+    if (stampFor(release) !== release) die(`box-pins bump: --release ${release} is a patch; only a minor gets a release-prep PR (a patch keeps its minor's stamp, ${stampFor(release)}); nothing written`);
     const { file, text } = pinsFile();
     const pins = readPins(text);
     if (pins.problems.length) {
@@ -16281,18 +18536,465 @@ async function cmdBoxPins() {
 // dashboard whose hub port it names leaves the hub to the image; a project still on an older kit can
 // take the port in the second the image's hub restarts, until it adopts this release.
 const imageHub = () => (/^\d+$/.test(process.env.DEVTEAM_IMAGE_HUB ?? '') ? Number(process.env.DEVTEAM_IMAGE_HUB) : null);
+// The kit a dashboard runs (kit-288): the script Node loaded and the dashboard's own pages, scripts and
+// styles. A print of them, by path: size and mtime from a stat, and the sha256 of the bytes, read again
+// only for a file whose stat moved since prev. The project's files (project/, run/, its own code) are
+// not in it: they never restart a dashboard.
+const kitWatched = (self) => {
+  const dir = path.join(kitDir, 'dashboard');
+  let names = [];
+  try { names = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile() && /\.(html|js|css)$/.test(e.name)).map((e) => path.join(dir, e.name)); } catch {}
+  return [self, ...names.sort()];
+};
+function kitPrint(self, prev = new Map()) {
+  const print = new Map();
+  for (const f of kitWatched(self)) {
+    let st;
+    try { st = fs.statSync(f); } catch { continue; }
+    const was = prev.get(f);
+    if (was && was.size === st.size && was.mtime === st.mtimeMs) { print.set(f, was); continue; }
+    let sha;
+    try { sha = sha256(fs.readFileSync(f)); } catch { continue; }
+    print.set(f, { size: st.size, mtime: st.mtimeMs, sha });
+  }
+  return print;
+}
+// The files two prints differ in (a sha, or there in one only), relative to the kit; a print's key.
+const kitPrintDiff = (a, b) => [...new Set([...a.keys(), ...b.keys()])].filter((f) => a.get(f)?.sha !== b.get(f)?.sha).map((f) => path.relative(kitDir, f).split(path.sep).join('/')).sort();
+const kitPrintKey = (p) => [...p].map(([f, v]) => `${f}\0${v.sha}`).sort().join('\n');
+// How a dashboard whose kit changed hands over to the new code: 'exit' where something restarts it
+// (DEVTEAM_DASHBOARD_RESTART=exit, or a while loop around it, as the box's image runs it), 'respawn'
+// where it is its own tmux pane's process (a laptop's window: tmux runs the pane's command again),
+// else 'stay' (nothing would start it again). The first that holds wins. A pane is respawned only when
+// its process is this one, or the one shell running it: a dashboard a test or a probe started inside
+// a worker's pane inherits that pane's TMUX_PANE, and must never respawn it.
+function kitHandOver() {
+  const want = process.env.DEVTEAM_DASHBOARD_RESTART;
+  if (want === 'off') return { how: 'stay', why: 'DEVTEAM_DASHBOARD_RESTART=off' };
+  if (want === 'exit') return { how: 'exit' };
+  let parent = '';
+  try { parent = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
+  // a shell running a command line (sh -c '…'), and that line runs the dashboard: never an agent or
+  // anything else whose own arguments happen to hold the word
+  const shellRunning = /^(\S*\/)?(sh|bash|dash|zsh|ksh|ash)\s+(-\S+\s+)*-\w*c\w*\s/.test(parent) && /\bdashboard\b/.test(parent);
+  if (shellRunning && /\bwhile\b/.test(parent)) return { how: 'exit' };
+  if (process.env.TMUX && process.env.TMUX_PANE) {
+    let pid = null;
+    try { pid = Number(execFileSync('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#{pane_pid}'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch {}
+    if (pid === process.pid || (pid === process.ppid && shellRunning)) return { how: 'respawn', pane: process.env.TMUX_PANE };
+  }
+  return { how: 'stay', why: 'no while loop runs it and it is not its own tmux pane' };
+}
+/* term-server start */
+// The dashboard's terminal (terminal@1, test/contracts/terminal.md): the supervisor's pane and the
+// project's Shell, read and typed into over /api/term/*. Sizes in bytes, times in ms.
+const TERM = { CAP: 102400, DATA_MAX: 4096, PASTE_MAX: 65536, HISTORY_MAX: 500, CACHE_MS: 100, SETTLE_MS: 50, TMUX_MS: 30000 };
+// What the gateway signs for a terminal POST (§3): its own domain, the port, the path's which, and the body.
+const termSigned = (domain, which) => (p, ts, nonce, body) => Buffer.from(`${domain}\n${p}\n${which}\n${ts}\n${nonce}\n${sha256(body)}`);
+const TERM_LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
+// What tmuxServerEnv() removes but TMUX_PANE (tmux sets it fresh for the new pane, and the shell
+// needs it): the Shell's command unsets each, since a new window gets the tmux server's environment,
+// never the calling client's (S7); its session markers are found at open, as sessionMarkerPrefix does.
+const TERM_SHELL_UNSET = ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HUB_RECORD', 'DEVTEAM_CHANNEL'];
+const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste', read: 'the terminal could not be read; try again', supervisor: "the supervisor isn't running", shell: 'the shell is not open', moved: 'the terminal moved to another pane; reading it again', sent: 'the keys may not all have reached the terminal; look at it before typing again', open: 'the shell could not be opened' };
+// A refusal sent before its body is read drains it, but only so far: past 4 × CAP it is cut off.
+const termDrain = (req) => { if (req.complete) return; let n = 0; req.on('data', (c) => { if ((n += c.length) > 4 * TERM.CAP) req.destroy(); }); req.resume(); };
+// The one-call read's display fields (§6), tab-separated; pid is the server's (S1).
+const TERM_FIELDS = ['pane_id', 'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'cursor_flag', 'keypad_cursor_flag', 'keypad_flag', 'history_size', 'pane_dead', 'pane_current_command', '@devteam-shell', 'session_name', 'pane_start_path', 'pid'];
+// A paste without bracketed-paste markers: tmux passes them through, so one inside a paste would end its
+// bracket early and the rest, an Enter too, would arrive typed. A drop can join two halves into a new
+// one (ESC[20 ESC[201~ 0~), so each is dropped as it completes the output so far: one linear pass (each
+// char pushed once, popped at most once; neither marker overlaps itself or the other), the same text as
+// dropping them again until none is left, which is quadratic on nested markers.
+const termUnbracket = (s) => { const o = []; for (const c of s) { o.push(c); const n = o.length; if (c === '~' && n >= 6 && o[n - 6] === '\x1b' && o[n - 5] === '[' && o[n - 4] === '2' && o[n - 3] === '0' && (o[n - 2] === '0' || o[n - 2] === '1')) o.length = n - 6; } return o.join(''); };
+// tmux's answer that the pane, or the server, isn't there; any other failure is not "gone" (P4)
+const TERM_MISSING = /can't find (pane|session|window)|no server running|error connecting to|no current/;
+// A captured line as the page shows it (S10): SGR kept; a CSI, a string (OSC, DCS, SOS, PM, APC, to
+// BEL or ESC \ or the line's end, so an OSC 8 link's URL never shows) and any other escape dropped
+// (with its intermediates, so ESC ( B goes whole); then C0 and DEL; then trailing spaces.
+function termLine(s) {
+  return s.replace(/\x1b(?:\[([0-9;:]*)m|\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\]PX^_](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\|$)|[\x20-\x2f]*[\s\S]?)/g, (m, sgr) => (sgr === undefined ? '' : m))
+    // every ESC left opens a kept SGR
+    .replace(/[\x00-\x1a\x1c-\x1f\x7f]/g, '').replace(/ +$/, '');
+}
+// The /api/term/* routes, for cmdDashboard: `port` a getter (the dashboard re-picks its port when the
+// first is taken), `host` its bind address, `log` its own output (a refusal's reason, never a body).
+function termRoutes({ port, host, log }) {
+  // tests only (P6): a longer cache, so a test can hold a read inside it
+  const cacheMs = Number(process.env.DEVTEAM_TERM_CACHE_MS) || TERM.CACHE_MS;
+  // read once, at the start: tmuxSession() may spawn synchronously, which a request never waits on
+  const session = tmuxSession();
+  const loopback = TERM_LOOPBACK.has(host);
+  // the token's own input, so it is never a pane-answer token; valid until the server restarts
+  const termSecret = crypto.randomBytes(32);
+  const termToken = () => crypto.createHmac('sha256', termSecret).update('devteam-term-token-v1').digest('hex');
+  const tokenOk = (t) => { if (typeof t !== 'string') return false; const a = Buffer.from(t), b = Buffer.from(termToken()); return a.length === b.length && crypto.timingSafeEqual(a, b); };
+  // every terminal route's gateway nonces: each once, pruned after twice the window
+  const nonces = new Map();
+  const json = (res, status, obj, extra = {}) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...extra }); res.end(JSON.stringify(obj)); };
+  // Every tmux call: async (no request blocks the server), -u (a C locale prints a format's tab as _; P1).
+  const tmuxCall = (args, input = null) => new Promise((resolve) => {
+    let child;
+    try {
+      child = execFile('tmux', ['-u', ...args], { encoding: 'utf8', timeout: TERM.TMUX_MS, maxBuffer: 64 * 1024 * 1024 }, (e, out, err) => {
+        const timedOut = !!e?.killed;
+        resolve({ ok: !e, out: out ?? '', err: err ?? '', timedOut, missing: !!e && !timedOut && typeof e.code === 'number' && TERM_MISSING.test(err ?? '') });
+      });
+    } catch (e) { return resolve({ ok: false, out: '', err: String(e?.message ?? e), timedOut: false, missing: false }); }
+    child.stdin.on('error', () => {});
+    child.stdin.end(typeof input === 'string' ? input : undefined);
+  });
+  const root = realPath(mainRoot);
+  const fmt = TERM_FIELDS.map((f) => `#{${f}}`).join('\t');
+  // the display line, by field name (a tab in the start path stays in it)
+  const fieldsOf = (line) => { const v = line.split('\t'); const n = TERM_FIELDS.length; if (v.length > n) v.splice(n - 2, v.length - n + 1, v.slice(n - 2, -1).join('\t')); return Object.fromEntries(TERM_FIELDS.map((f, i) => [f, v[i] ?? ''])); };
+  // the supervisor's: the marked pane only, as an id (S11)
+  const marked = () => { const p = markedPane(runDir); return p && /^%\d+$/.test(p) ? p : null; };
+  // the Shell's: remembered, else the lowest-numbered live pane of this session tagged with this root,
+  // not the marked one (a dead one, kept by remain-on-exit, would shadow a live one; T5-1). A lookup
+  // tmux failed (not "isn't there") is { error }, never no pane (P4).
+  let shellPane = null;
+  async function paneOf(which) {
+    if (which === 'supervisor') return marked();
+    if (shellPane) return shellPane;
+    const got = await tmuxCall(['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{pane_dead}\t#{@devteam-shell}']);
+    if (!got.ok) { if (got.missing) return null; log(`/api/term/shell: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
+    const m = marked();
+    // the tag last, whole: a tab in a root stays in it
+    const ids = got.out.split('\n').map((l) => l.split('\t')).map(([id, dead, ...tag]) => [id, dead, tag.join('\t')]).filter(([id, dead, tag]) => /^%\d+$/.test(id) && dead === '0' && tag === root && id !== m).map(([id]) => id);
+    return (shellPane = ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))[0] ?? null);
+  }
+  // held is kit-618's; until the floor ships it is this (§6). The etag covers only whether oldest_ms is due.
+  const held = () => ({ count: 0, oldest_ms: 0, prompt: 'readable' });
+  const withEtag = (s, raw) => {
+    const etag = sha256(JSON.stringify({ ...s, held: { ...s.held, oldest_ms: s.held.oldest_ms >= 120000 } })).slice(0, 20);
+    // raw, the read's fields, for the keys route's 423s and 409s: never sent
+    return Object.defineProperty({ ...s, etag }, 'raw', { value: raw, enumerable: false });
+  };
+  const gone = (which, raw = null) => withEtag({ v: 1, which, pane: null, state: 'gone', cols: 0, rows: 0, cursor: { x: 0, y: 0, visible: false }, modes: { app_cursor: false, app_keypad: false }, history_size: 0, held: held(), lines: [] }, raw);
+  // Why the read pane isn't the route's, or null. Supervisor: resolvePane's checks, the tag, and a
+  // noted id from another server (S1); shell: its tag, session, and never the marked pane.
+  const notOurs = (which, f) => {
+    if (f.pane_dead === '1') return 'dead';
+    if (which === 'shell') return f['@devteam-shell'] !== root || f.session_name !== session || f.pane_id === marked() ? 'moved' : null;
+    if (SHELLS.has(f.pane_current_command.replace(/^-/, ''))) return 'shell';
+    if (f['@devteam-shell']) return 'tagged';
+    const rec = supervisorUpRecord();
+    return (rec?.server ? String(rec.server) !== f.pid : realPath(f.pane_start_path) !== root) ? 'foreign' : null;
+  };
+  // One call: display first, so its line is the first, then capture's rows (S16).
+  async function readNow(which, again = true) {
+    const P = await paneOf(which);
+    if (P?.error) return P;
+    if (!P) return gone(which, { pane: null, why: 'none' });
+    const got = await tmuxCall(['display', '-p', '-t', P, fmt, ';', 'capture-pane', '-e', '-p', '-t', P]);
+    if (!got.ok && !got.missing) { log(`/api/term/${which}: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
+    const out = got.ok ? got.out.split('\n') : [];
+    const f = got.ok ? fieldsOf(out[0]) : null;
+    // a display line that didn't parse is a failed read, never a screen
+    if (f && !(/^%\d+$/.test(f.pane_id) && /^\d+$/.test(f.pane_width) && /^\d+$/.test(f.pane_height))) { log(`/api/term/${which}: tmux's display line didn't parse`); return { error: TERM_WORDS.read }; }
+    const why = f ? notOurs(which, f) : 'missing';
+    // the Shell's pane moved or went: forget it, and look once more
+    if (why && which === 'shell') { shellPane = null; if (again) return readNow(which, false); }
+    if (why) return gone(which, { pane: P, why, fields: f });
+    const rows = Number(f.pane_height);
+    const lines = out.slice(1, 1 + rows).map(termLine);
+    while (lines.length < rows) lines.push('');
+    return withEtag({
+      v: 1, which, pane: f.pane_id, state: 'live', cols: Number(f.pane_width), rows,
+      cursor: { x: Number(f.cursor_x), y: Number(f.cursor_y), visible: f.cursor_flag === '1' },
+      modes: { app_cursor: f.keypad_cursor_flag === '1', app_keypad: f.keypad_flag === '1' },
+      history_size: Number(f.history_size), held: held(), lines,
+    }, { pane: P, why: null, fields: f });
+  }
+  // Per which: the read in flight, shared, and its result for cacheMs. A send voids it and bumps the
+  // generation, so a read begun before the send never fills the cache after it (S12); a failed read
+  // is never cached.
+  const screens = { supervisor: { gen: 0, at: 0, val: null, flight: null }, shell: { gen: 0, at: 0, val: null, flight: null } };
+  function readScreen(which, { fresh = false } = {}) {
+    const c = screens[which];
+    if (!fresh && c.val && Date.now() - c.at < cacheMs) return Promise.resolve(c.val);
+    if (!fresh && c.flight) return c.flight;
+    const gen = c.gen;
+    const p = readNow(which).then((s) => { if (c.gen === gen && !s.error) { c.val = s; c.at = Date.now(); } return s; })
+      .finally(() => { if (c.flight === p) c.flight = null; });
+    c.flight = p;
+    return p;
+  }
+  const voidScreen = (which) => { const c = screens[which]; c.gen++; c.val = null; c.flight = null; };
+  // History (§7): lines max(0, n - k) to n - 1, by offsets from history_size, with history_size read
+  // after them in the same call; read once more if it moved.
+  async function readHistory(P, n, k, hs) {
+    for (let again = true; ; again = false) {
+      const a = Math.max(0, n - k), b = n - 1;
+      const got = await tmuxCall(['capture-pane', '-e', '-p', '-S', String(a - hs), '-E', String(b - hs), '-t', P, ';', 'display', '-p', '-t', P, '#{history_size}']);
+      if (!got.ok && !got.missing) log(`/api/term/: tmux failed on history: ${got.timedOut ? 'timed out' : got.err.trim()}`);
+      if (!got.ok) return got.missing ? { gone: true } : { error: TERM_WORDS.read };
+      const out = got.out.split('\n');
+      if (out.at(-1) === '') out.pop();
+      const now = Number(out.pop());
+      if (now === hs || !again || !Number.isInteger(now)) return { lines: out.map(termLine), hs };
+      if (n > now) return { range: true };
+      hs = now;
+    }
+  }
+  // Keys (§8): one post at a time per pane, in arrival order; the last taken seq per page and which,
+  // for the server's life (never pruned, so a late resend never types twice).
+  const chains = { supervisor: Promise.resolve(), shell: Promise.resolve() };
+  const queue = (which, f) => { const p = chains[which].then(f); chains[which] = p.then(() => {}, () => {}); return p; };
+  const lastSeq = new Map();
+  const sendData = (pane, buf) => tmuxCall(['send-keys', '-t', pane, '-H', ...[...buf].map((b) => b.toString(16).padStart(2, '0'))]);
+  // A paste as one buffer, its text on stdin (never a file or an argument); a failed paste deletes its
+  // buffer, so the text never stays in the tmux server.
+  let buffers = 0;
+  async function sendPaste(pane, text) {
+    const name = `devteam-term-${process.pid}-${++buffers}`;
+    const loaded = await tmuxCall(['load-buffer', '-b', name, '-'], text);
+    const sent = loaded.ok ? await tmuxCall(['paste-buffer', '-p', '-d', '-b', name, '-t', pane]) : loaded;
+    if (!sent.ok) {
+      const gone = await tmuxCall(['delete-buffer', '-b', name]);
+      // its name only, so the owner can delete it by hand; never its text
+      if (!gone.ok && !/unknown buffer/.test(gone.err)) log(`/api/term/: tmux buffer ${name} kept after a failed paste; delete it with tmux delete-buffer -b ${name}`);
+    }
+    return sent;
+  }
+  // §3 steps 11 and 12, then the send, inside the pane's turn: against a read made in that turn, never
+  // the cache (S2), so keys sent just after the supervisor exits find the shell prompt.
+  async function keys(res, which, b, left) {
+    const no = (status, error, reason) => { log(`refused /api/term/${which}/keys: ${reason}`); return json(res, status, { error }); };
+    // checked at the turn's start and again just before the seq (the read can take a while): a refusal
+    // before the send, so its seq stays free (§8)
+    const went = () => left() && (log(`refused /api/term/${which}/keys: the client went before its turn`), true);
+    if (went()) return;
+    const s = await readScreen(which, { fresh: true });
+    if (s.error) return json(res, 500, { error: s.error });
+    // the pane step, in the spec's order (S3); a tagged or marked pane is never the other route's
+    if (which === 'supervisor') {
+      const { pane, fields } = s.raw;
+      if (!pane) return no(409, TERM_WORDS.supervisor, 'no marked pane');
+      if (b.pane !== pane) return no(423, TERM_WORDS.moved, 'not the marked pane');
+      if (fields?.['@devteam-shell']) return no(423, TERM_WORDS.moved, 'the marked pane is the Shell\'s');
+      if (s.state === 'gone') return no(409, TERM_WORDS.supervisor, `the marked pane is ${s.raw.why}`);
+    } else {
+      if (b.pane === marked()) return no(423, TERM_WORDS.moved, 'the marked pane is the supervisor\'s');
+      if (s.state === 'gone') return no(409, TERM_WORDS.shell, 'no Shell pane');
+      if (b.pane !== s.pane) return no(423, TERM_WORDS.moved, 'not the Shell\'s pane');
+    }
+    if (went()) return;
+    const key = `${b.page}\n${which}`;
+    if (b.seq <= (lastSeq.get(key) ?? 0)) return json(res, 200, { ...s, taken: false });
+    // taken the moment the send starts: a send that fails part way is never typed again
+    lastSeq.set(key, b.seq);
+    // kit-618: the typing lock, then the owner's floor, go here (supervisor only)
+    const sent = 'data' in b ? await sendData(s.pane, Buffer.from(b.data, 'hex')) : await sendPaste(s.pane, b.paste);
+    voidScreen(which);
+    if (!sent.ok) { log(`/api/term/${which}/keys: tmux failed on the send: ${sent.timedOut ? 'timed out' : sent.err.trim()}`); return json(res, 500, { error: TERM_WORDS.sent }); }
+    // the screen after the change: read until it differs, for up to SETTLE_MS; a failed read keeps the
+    // last, so if every read fails the answer is the pre-send screen, taken: the keys went (their seq
+    // is spent), and a 500 would tell the page they may not have; its next poll shows the change
+    let now = s;
+    for (const stop = Date.now() + TERM.SETTLE_MS; ;) {
+      const got = await readScreen(which, { fresh: true });
+      if (got.error) break;
+      now = got;
+      if (now.etag !== s.etag || Date.now() >= stop) break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return json(res, 200, { ...now, taken: true });
+  }
+  // Shell open (§9), inside the Shell's turn: the found pane (the read checks a remembered one, and
+  // looks again if it moved), else a new window in this project's session, tagged; sized on every
+  // call (the kit is the only one that sizes it); then the screen.
+  async function openShell(res, b) {
+    const failed = (status, reason) => { log(status === 409 ? `refused /api/term/shell/open: ${reason}` : `/api/term/shell/open: tmux failed: ${reason}`); return json(res, status, { error: TERM_WORDS.open }); };
+    const why = (got) => (got.timedOut ? 'timed out' : got.err.trim());
+    const s = await readScreen('shell', { fresh: true });
+    if (s.error) return json(res, 500, { error: s.error });
+    let pane = s.state === 'live' ? s.pane : null;
+    if (!pane) {
+      const has = await tmuxCall(['has-session', '-t', `=${session}`]);
+      if (!has.ok) return has.missing ? failed(409, `no tmux session ${session}`) : failed(500, why(has));
+      // the markers the new window would get: a failed read could miss one, so it is no open
+      const envs = await Promise.all([['-g'], ['-t', `=${session}`]].map((a) => tmuxCall(['show-environment', ...a])));
+      const bad = envs.find((e) => !e.ok);
+      if (bad) return failed(bad.missing ? 409 : 500, why(bad));
+      const markers = [...new Set(envs.flatMap((e) => e.out.split('\n')).map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
+      const ds = await tmuxCall(['show-options', '-gv', 'default-shell']);
+      const shell = (ds.ok && ds.out.trim()) || '/bin/sh';
+      const made = await tmuxCall(['new-window', '-d', '-P', '-F', '#{pane_id}', '-n', 'shell', '-c', root, '-t', `=${session}:`, 'env', ...[...TERM_SHELL_UNSET, ...markers].flatMap((k) => ['-u', k]), shell, '-l']);
+      pane = made.out.trim();
+      if (!made.ok || !/^%\d+$/.test(pane)) return failed(made.missing ? 409 : 500, made.ok ? `new-window answered ${JSON.stringify(pane)}` : why(made));
+      const tagged = await tmuxCall(['set-option', '-p', '-t', pane, '@devteam-shell', root]);
+      // an untagged window would never be found, and the next open would make another
+      if (!tagged.ok) { await tmuxCall(['kill-pane', '-t', pane]); return failed(500, why(tagged)); }
+    }
+    const sized = await tmuxCall(['resize-window', '-t', pane, '-x', String(b.cols), '-y', String(b.rows)]);
+    if (!sized.ok) { shellPane = null; return failed(sized.missing ? 409 : 500, why(sized)); }
+    shellPane = pane;
+    // a read begun before the open never fills the cache after it
+    voidScreen('shell');
+    const now = await readScreen('shell', { fresh: true });
+    if (now.error) return json(res, 500, { error: now.error });
+    if (now.state !== 'live') return failed(409, `the Shell's pane ${pane} went`);
+    return json(res, 200, now);
+  }
+  function route(pathname) {
+    if (pathname === '/api/term/token') return { name: 'token', method: 'GET' };
+    if (pathname === '/api/term/shell/open') return { name: 'open', method: 'POST', which: 'shell' };
+    const m = /^\/api\/term\/(supervisor|shell)\/(screen|history|keys)$/.exec(pathname);
+    return m ? { name: m[2], method: m[2] === 'keys' ? 'POST' : 'GET', which: m[1] } : null;
+  }
+  // §3 step 3: view, not-loopback, cross-site, the first that applies
+  function whyOf(req, r) {
+    if (req.headers['x-devteam-level'] === 'view') return 'view';
+    if (!loopback) return 'not-loopback';
+    const site = req.headers['sec-fetch-site'];
+    if (r.name === 'token') return site === 'same-origin' ? null : 'cross-site';
+    if (r.method === 'GET') return site === undefined || site === 'same-origin' ? null : 'cross-site';
+    return site === 'same-origin' && req.headers.origin === `http://${req.headers.host}` ? null : 'cross-site';
+  }
+  // Up to CAP kept; a body over it is read to its end (so the page reads the 413), one over 4 × CAP
+  // cut off. A client that goes first (a destroyed slow body) settles it too, as gone.
+  const readBody = (req) => new Promise((resolve) => {
+    const chunks = [];
+    let n = 0;
+    req.on('data', (c) => {
+      n += c.length;
+      if (n > 4 * TERM.CAP) { chunks.length = 0; resolve({ cut: true }); return req.destroy(); }
+      if (n <= TERM.CAP) chunks.push(c); else chunks.length = 0;
+    });
+    req.on('end', () => resolve(n > TERM.CAP ? { over: true } : { body: Buffer.concat(chunks) }));
+    for (const ev of ['error', 'aborted', 'close']) req.on(ev, () => resolve({ gone: true }));
+  });
+  const jsonType = (ct) => String(ct ?? '').split(';')[0].trim().toLowerCase() === 'application/json';
+  const PAGE = /^[A-Za-z0-9_-]{16,64}$/;
+  const shapeOk = {
+    keys(b, which) {
+      const ks = Object.keys(b).sort().join(',');
+      if (ks !== 'data,page,pane,seq,token,which' && ks !== 'page,pane,paste,seq,token,which') return false;
+      if (b.which !== which || typeof b.pane !== 'string' || !/^%\d+$/.test(b.pane)) return false;
+      if (typeof b.page !== 'string' || !PAGE.test(b.page) || !Number.isSafeInteger(b.seq) || b.seq < 1) return false;
+      if ('data' in b) return typeof b.data === 'string' && /^(?:[0-9a-fA-F]{2})+$/.test(b.data);
+      return typeof b.paste === 'string' && b.paste.length > 0;
+    },
+    open(b) {
+      const ks = Object.keys(b).sort().join(',');
+      return ks === 'cols,page,rows,token,which' && b.which === 'shell' && typeof b.page === 'string' && PAGE.test(b.page)
+        && Number.isInteger(b.cols) && b.cols >= 20 && b.cols <= 500 && Number.isInteger(b.rows) && b.rows >= 5 && b.rows <= 200;
+    },
+  };
+  // §3 step 10, on a box only: the gateway's proof, bound to this route, its which and this port
+  function proofWhy(req, r, body) {
+    const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+    if (!(gw('ts') && gw('nonce') && gw('sig'))) return 'it carries no signature from the gateway';
+    const proof = { port: port(), ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: body.toString('base64') };
+    const why = dashboardProofProblem(proof, termSigned(r.name === 'open' ? 'devteam-term-open-v1' : 'devteam-term-keys-v1', r.which)) ?? (nonces.has(proof.nonce) ? 'its signature was used already' : null);
+    if (why) return why;
+    const now = Date.now();
+    for (const [n, at] of nonces) if (now - at > 2 * OPERATOR_PROOF_MS) nonces.delete(n);
+    nonces.set(proof.nonce, now);
+    return null;
+  }
+  async function serve(req, res, u) {
+    const at = u.pathname.slice('/api/term/'.length);
+    // a refusal: its reason to the dashboard's output, never a body
+    const no = (status, obj, reason) => { log(`refused /api/term/${at}: ${reason ?? obj.why ?? obj.error}`); termDrain(req); return json(res, status, obj); };
+    const r = route(u.pathname);
+    if (!r) return no(404, { error: 'not found' });
+    if (req.method !== r.method) return no(405, { error: 'not this method' });
+    const why = whyOf(req, r);
+    if (why) return no(403, r.method === 'GET' ? { why } : { error: TERM_WORDS.page, why });
+    if (r.name === 'token') return json(res, 200, { token: termToken() });
+    if (r.name === 'history') {
+      // the shape (§7); before's top, history_size, is the screen read's
+      const before = u.searchParams.get('before'), count = u.searchParams.get('count');
+      if (!/^\d+$/.test(before ?? '') || !/^\d+$/.test(count ?? '') || Number(count) < 1 || Number(count) > TERM.HISTORY_MAX) return no(400, { error: 'missing or invalid before or count' });
+      const n = Number(before), k = Number(count);
+      const s = await readScreen(r.which);
+      if (s.error) return json(res, 500, { error: s.error });
+      const answer = (pane, hs, lines) => json(res, 200, { v: 1, which: r.which, pane, before: n, history_size: hs, lines });
+      // before=0: nothing above it, no history call, live or gone (S8)
+      if (n === 0) return answer(s.pane, s.history_size, []);
+      if (s.state === 'gone' || n > s.history_size) return no(400, { error: 'before is past the screen\'s top' });
+      const h = await readHistory(s.pane, n, k, s.history_size);
+      if (h.error) return json(res, 500, { error: h.error });
+      if (h.gone) { voidScreen(r.which); return no(400, { error: 'the pane is gone' }); }
+      if (h.range) return no(400, { error: 'before is past the screen\'s top' });
+      return answer(s.pane, h.hs, h.lines);
+    }
+    if (r.name === 'screen') {
+      const s = await readScreen(r.which);
+      if (s.error) return json(res, 500, { error: s.error });
+      const etag = `"${s.etag}"`;
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'cache-control': 'no-store', etag }); return res.end(); }
+      return json(res, 200, s, { etag });
+    }
+    // the two POSTs, §3 steps 4 to 10
+    if (!jsonType(req.headers['content-type'])) return no(403, { error: TERM_WORDS.page }, 'not application/json');
+    const got = await readBody(req);
+    if (got.cut) return void log(`refused /api/term/${at}: a body far over the cap, cut off`);
+    if (got.gone) return void log(`refused /api/term/${at}: the client went before its body ended`);
+    if (got.over) return no(413, { error: TERM_WORDS.big }, 'a body over the cap');
+    let b;
+    try { b = JSON.parse(got.body.toString('utf8')); } catch { return no(400, { error: TERM_WORDS.shape }, 'not JSON'); }
+    if (b === null || typeof b !== 'object' || Array.isArray(b)) return no(400, { error: TERM_WORDS.shape }, 'not a JSON object');
+    if (!tokenOk(b.token)) return no(403, { error: TERM_WORDS.token }, 'a missing or wrong token');
+    if (!shapeOk[r.name](b, r.which)) return no(400, { error: TERM_WORDS.shape }, 'not the route\'s shape');
+    // once, with the shape (step 8), before the cap: the cap then measures what would be typed, and a
+    // paste of markers only is the empty paste the shape refuses (400, §4's malformed body)
+    if (r.name === 'keys' && 'paste' in b && !(b.paste = termUnbracket(b.paste))) return no(400, { error: TERM_WORDS.shape }, 'a paste of bracket markers only');
+    if (r.name === 'keys' && 'data' in b && b.data.length / 2 > TERM.DATA_MAX) return no(413, { error: TERM_WORDS.big }, 'data over its cap');
+    if (r.name === 'keys' && 'paste' in b && Buffer.byteLength(b.paste, 'utf8') > TERM.PASTE_MAX) return no(413, { error: TERM_WORDS.paste }, 'a paste over its cap');
+    if (threadsNeedGateway()) { const p = proofWhy(req, r, got.body); if (p) return no(403, { error: TERM_WORDS.page }, p); }
+    if (r.name === 'keys') {
+      // a client that goes while its post waits (a timed-out gateway, a closed tab): its turn types
+      // nothing, so a line the owner types again never arrives twice (B-2)
+      let left = false;
+      res.on('close', () => { left = true; });
+      return queue(r.which, () => keys(res, r.which, b, () => left));
+    }
+    return queue('shell', () => openShell(res, b));
+  }
+  return {
+    // any throw answers 500 and never ends the dashboard (S15)
+    async handle(req, res, u) {
+      try { await serve(req, res, u); } catch (e) {
+        log(`/api/term/ failed: ${e?.message ?? e}`);
+        if (!res.headersSent) json(res, 500, { error: String(e?.message ?? e) }); else res.destroy();
+      }
+    },
+  };
+}
+/* term-server end */
+// A dashboard's hub, unless the box image runs the machine's hub on this port (DEVTEAM_IMAGE_HUB):
+// then it is left to the image. The image relies on this check (IMAGE_RUNS).
+function dashboardHub(log) {
+  if (imageHub() === HUB_PORT) { log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); return null; }
+  return startHub(log, { kit: ownKitVersion() });
+}
 async function cmdDashboard() {
+  // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
+  // while it starts is then a change it sees
+  const startPrint = kitPrint(fileURLToPath(import.meta.url));
   const picked = await pickDashboardPort();
   let port = picked.port;
   const host = flagStr('host') ?? '127.0.0.1';
   const log = dashboardLogger();
   if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
   processLog(log, 'dashboard');
+  // the terminal's routes (terminal@1): the port as a getter, since it is re-picked when taken
+  const term = termRoutes({ port: () => port, host, log });
   const page = path.join(kitDir, 'dashboard', 'index.html');
   // The page's policy, at / and at /view/: its frames are its own pages and, where a preview's lens
   // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
   const pageCsp = (frames = []) => `frame-src ${['\'self\'', ...frames].join(' ')}; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
   const self = fileURLToPath(import.meta.url);
+  // Its timers, kept so a hand-over to a new kit stops each (nothing new starts while it drains) and
+  // a respawn that failed starts them again.
+  const timers = [];
+  const every = (f, ms) => { const t = { f, ms, id: setInterval(f, ms) }; t.id.unref(); timers.push(t); };
+  const stopTimers = () => { for (const t of timers) clearInterval(t.id); };
+  const startTimers = () => { for (const t of timers) { clearInterval(t.id); t.id = setInterval(t.f, t.ms); t.id.unref(); } };
   const ownerEnv = ownerActionEnv('dashboard');
   // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
   // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
@@ -16371,6 +19073,8 @@ async function cmdDashboard() {
   // viewer: 1 says this kit has /view/ and /artifact/tree/: the gateway's owner wrapper waits for it (spec §8).
   let hello = null;
   let kit = null;
+  // the kit's version as this process started on it, from its first hello: the restart's "from"
+  let startKit = null;
   let kitAt = { main: null, at: 0 };
   let helloRunning = false;
   const refreshHello = () => {
@@ -16384,13 +19088,13 @@ async function cmdDashboard() {
       execFile(process.execPath, [self, 'hello', '--json', '--pane', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
         helloRunning = false;
         if (err) return;
-        try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
+        try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; startKit ??= hello.kit; } } catch {}
       });
     });
   };
   refreshHello();
-  setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  every(refreshHello, 10000);
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -16402,7 +19106,7 @@ async function cmdDashboard() {
     previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); });
   };
   runPreviewTick();
-  setInterval(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000)).unref();
+  every(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000));
   // ----- the laptop's preview relay (spec §7): a loopback listener per preview, opened when its viewer
   // is first asked for and closed with its record. It serves the lens on GET /.devteam/lens and
   // forwards everything else to the app as the box's gateway does (proxyPreview, downstreamHeaders):
@@ -16648,23 +19352,52 @@ async function cmdDashboard() {
     for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_CHANNEL']) delete env[k];
     // its tick runs as the supervisor, so a session's dashboard says here that it isn't the project's own
     if (sessionRun() || hubRecordOff()) env.DEVTEAM_HUB_RECORD = 'off';
-    execFile(process.execPath, [self, 'accounts-tick', '--rotate'], { cwd: mainRoot, env, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    trackChild(execFile(process.execPath, [self, 'accounts-tick', '--rotate'], { cwd: mainRoot, env, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       accountsRunning = false;
       const said = `${stdout}${err ? ` ${stderr || err.message}` : ''}`.trim();
       if (said && said !== accountsSaid) log(`accounts: ${said}`);
       accountsSaid = said;
-    });
+    }));
   };
   // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes (a page
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
-  let dataRun = null;
+  // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
+  // served while it runs, and once finished while it is young (3 s since it finished, so the 10 s poll
+  // gets previews, settings and git at most about 3 s old) and current (dataEpoch, which the log's
+  // changes and every POST action move, is what it was when the build *started*: a change during a
+  // build makes it stale when it ends). A read that finds none waits for the next build, which starts
+  // once the running one has ended and 3 s have passed since the last start; every read waiting then
+  // shares it. A failed build is never kept.
+  const DATA_EVERY_MS = 3000;
+  let dataEpoch = 0;
+  let build = null;
+  let nextBuild = null;
+  let lastStart = -Infinity;
   let lastData = null;
-  const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-    dataRun = null;
-    if (!err && stdout) lastData = stdout;
-    resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
-  })));
+  const startBuild = () => {
+    lastStart = Date.now();
+    const b = { epoch: dataEpoch, finished: null, r: null };
+    b.done = new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+      if (!err && stdout) lastData = stdout;
+      b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
+      b.finished = Date.now();
+      resolve(b.r);
+    }));
+    build = b;
+    return b.done;
+  };
+  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_EVERY_MS));
+  const dashboardData = () => {
+    if (usable(build)) return build.done;
+    nextBuild ??= (async () => {
+      if (build && build.finished === null) await build.done;
+      await new Promise((w) => setTimeout(w, Math.max(0, lastStart + DATA_EVERY_MS - Date.now())));
+      nextBuild = null;
+      return startBuild();
+    })();
+    return nextBuild;
+  };
   // /api/threads: every thread, its turns and the questions asked in it, for the open card's 2 s poll
   // and the dock. dashboard-data is a slow child, and readLog() can't serve here: its cache is cleared
   // only by appendLog, which this process never calls, and it reads main's log through git. So this
@@ -16791,17 +19524,33 @@ async function cmdDashboard() {
     return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
   }
   const bodyMs = uploadLimits().bodyMs;
+  // set while it hands over to a new kit (kit-288): what it still answers closes its connection
+  let draining = false;
+  // live presence (presence@1): its /presence socket, on the same Host check as every route here
+  const presence = presenceRelay({ okHost: (h) => [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(h ?? ''), ownerCwd: mainRoot, draining: () => draining });
+  // the log changed (presenceChanged): every page that said here is told (changed, at most each 500
+  // ms), and the kept /api/data build is stale (dataEpoch)
+  const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
+  every(logWatch.tick, 1000);
   const server = http.createServer(async (req, res) => {
+    if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
     const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
     bodyTimer.unref();
     req.once('close', () => clearTimeout(bodyTimer));
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
-    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
-    if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+    // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
+    const isTerm = req.url.startsWith('/api/term/');
+    const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
+    if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
     // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
-    if (req.headers[RELAY_MARK] !== undefined) return send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    // /presence is a socket: a plain request gets its guard's status (presence@1 §2)
+    if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
+    // the terminal: right after the global guards, before any other route
+    if (isTerm) return await term.handle(req, res, new URL(req.url, 'http://x'));
     // a file dropped on the page: before every other route, and before a byte of its body is read
     if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
       clearTimeout(bodyTimer);
@@ -16823,6 +19572,8 @@ async function cmdDashboard() {
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
+      // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
+      logWatch.look();
       // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
       // the run goes on and the next read has it, but no page waits minutes on a stuck child.
       let waited;
@@ -17093,6 +19844,10 @@ async function cmdDashboard() {
     const isOwnerSetting = name === 'owner-setting';
     const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
     if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
+    // an owner action, answered however it ends: the kept /api/data build is stale from its answer's
+    // head on, before a byte of it reaches the page, so the page's next read waits for a new build
+    const head = res.writeHead;
+    res.writeHead = function (...a) { dataEpoch += 1; return head.apply(this, a); };
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
     // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
@@ -17230,17 +19985,103 @@ async function cmdDashboard() {
     }
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
+  server.on('upgrade', (req, socket, head) => presence.upgrade(req, socket, head));
   keepAlive(server);
   server.requestTimeout = UPLOAD_REQUEST_MS;
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: ownKitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
+  trackRequests(server);
+  // the hub, unless the box's image serves it; again after a respawn that failed
+  let hubHandle = null;
+  const startHubOnce = () => { hubHandle = dashboardHub(log); };
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHubOnce(); every(accountsTick, accountsEveryMs()); });
+  // ----- the kit watch (kit-288): a dashboard runs the kit it serves. Its kit's files are printed
+  // every DEVTEAM_KIT_WATCH_MS; a print unlike the start's and the same two polls running (a sync
+  // writes its files over a few seconds) whose script parses is a new kit, and the dashboard hands
+  // over to it (kitHandOver). One that doesn't parse, or with nothing to start it again, is said
+  // once per print and served on.
+  const watchMs = Number(process.env.DEVTEAM_KIT_WATCH_MS) || 10000;
+  let lastPrint = startPrint;
+  let pending = null;
+  let checking = false;
+  let restarting = false;
+  const said = new Set();
+  const sayOnce = (key, msg) => { if (!said.has(key)) { said.add(key); log(msg); } };
+  // the version on disk now, from the new script's own hello: this process's settings are cached
+  const newKit = () => new Promise((resolve) => execFile(process.execPath, [self, 'hello', '--json'], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => { try { resolve((!err && JSON.parse(stdout).kit) || 'unknown'); } catch { resolve('unknown'); } }));
+  // The hand-over: nothing new starts (timers, the port, the hub, the relays), what is in flight is
+  // waited for (every request answered, every acting child gone: inFlight, liveChildren), and only
+  // then the new code starts: an exit for the loop around it, or its own pane respawned. A request
+  // may take as long as the server allows one (an upload); children have no limit of their own, so a
+  // hung one is waited for 5 minutes. A request answered meanwhile closes its connection.
+  const CHILDREN_WAIT_MS = 5 * 60000;
+  const drained = () => new Promise((resolve) => {
+    const since = Date.now();
+    const look = () => {
+      server.closeIdleConnections?.();
+      const waited = Date.now() - since;
+      if (!inFlight.size && !liveChildren.size) return resolve(true);
+      if ((inFlight.size && waited > UPLOAD_REQUEST_MS) || (!inFlight.size && waited > CHILDREN_WAIT_MS)) {
+        log(`handing over with ${inFlight.size} open requests and ${liveChildren.size} running commands still open`);
+        return resolve(false);
+      }
+      setTimeout(look, 100);
+    };
+    look();
+  });
+  const restart = async (files, key) => {
+    const how = kitHandOver();
+    const to = await newKit();
+    const changed = `kit files changed (${files.join(', ')}) from ${startKit ?? 'unknown'} to ${to}`;
+    if (how.how === 'stay') return sayOnce(key, `${changed}: this dashboard runs older code than its files; restart it to run them (${how.why})`);
+    restarting = true;
+    draining = true;
+    log(`restarting: ${changed}; waiting for ${inFlight.size} open requests and ${liveChildren.size} running commands`);
+    stopTimers();
+    hubHandle?.close();
+    hubHandle = null;
+    presence.closeAll(1001);
+    // stopTimers stops its tick, not its fs.watch handle; a failed respawn's first tick starts it again
+    logWatch.close();
+    for (const name of [...relays.keys()]) relayClose(name);
+    server.close();
+    await drained();
+    if (how.how === 'exit') process.exit(0);
+    // its own pane: tmux runs the pane's command again (and hangs this process up as it does). A
+    // respawn that fails leaves it serving its old code, said once, tried again on a new print.
+    const failed = await new Promise((resolve) => execFile('tmux', ['respawn-pane', '-k', '-t', how.pane], { timeout: 10000 }, (err, _o, se) => resolve(err ? String(se || err.message).trim().split('\n')[0] : null)));
+    if (failed === null) process.exit(0);
+    log(`could not respawn its tmux pane ${how.pane}: ${failed}; staying on ${startKit ?? 'unknown'}`);
+    said.add(key);
+    draining = false;
+    restarting = false;
+    server.listen(port, host);
+    startTimers();
+    startHubOnce();
+  };
+  const watchTick = () => {
+    if (checking || restarting) return;
+    const print = kitPrint(self, lastPrint);
+    const key = kitPrintKey(print);
+    const same = key === kitPrintKey(lastPrint);
+    lastPrint = print;
+    if (key === kitPrintKey(startPrint)) { pending = null; return; }
+    // settled: the same print two polls running
+    if (!same || pending !== key) { pending = key; if (!same) return; }
+    if (said.has(key)) return;
+    checking = true;
+    execFile(process.execPath, ['--check', self], { timeout: 20000, maxBuffer: 1024 * 1024 }, (err, _o, stderr) => {
+      if (err) { checking = false; return sayOnce(key, `kit files changed but scripts/devteam.mjs does not parse: ${String(stderr || err.message).split('\n').find((l) => l.trim()) ?? ''}; staying on ${startKit ?? 'unknown'}`); }
+      restart(kitPrintDiff(startPrint, print), key).catch((e) => log(`kit watch: ${e?.stack ?? e}`)).finally(() => { checking = false; });
+    });
+  };
+  every(watchTick, watchMs);
   server.listen(port, host);
 }
 
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
-  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, a TL;DR that names the approach and matches the plan, a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
+  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
@@ -17485,8 +20326,10 @@ function typeInto(target, line, paste = null) {
   const key = paneKey(target);
   if (!key) return typeNow(target, line, paste);
   const asking = paneAsking(target);
-  if (!asking && !heldPending(key)) return typeNow(target, line, paste);
-  const file = holdLine(key, target, line, paste);
+  // the look and the hold under the window's lock: a put-back can't fall between them. null: type
+  // now; false: it could not be held
+  const file = heldLock(key, () => (!asking && !heldPending(key)) ? null : holdLine(key, target, line, paste) ?? false);
+  if (file === null) return typeNow(target, line, paste);
   if (!file) return asking ? false : typeNow(target, line, paste);
   if (!asking) flushHeld(key);
   if (!fs.existsSync(file)) return true;
@@ -18121,7 +20964,9 @@ function makeSession(role) {
     warn(`no ${role} session to resume for ${name}: its worktree was just made here, so the agent has no earlier session in it (a new machine, or the worktree was removed); starting it fresh with agent_command${handoffFor(name) ? ' and its handoff note' : ''} instead`);
     resume = false;
   }
-  seedWorktree(wt, { repo: R });
+  seedWorktree(wt, { repo: R, session: true });
+  // the relaunch's deadline is the setup's alone: no tmux server, window or agent started below inherits it
+  delete process.env.DEVTEAM_SETUP_DEADLINE;
   // records in home: home's ticket/<id> in its own worktree, made on its own (a resume whose
   // records worktree was removed gets it back)
   if (role === 'worker' && recordsInHomeId(id)) ensureRecordsWorktree(id);
@@ -19034,6 +21879,146 @@ function fleetHost() {
   out(`${hostName()} now supervises this repo${from ? ` (taken from ${from.hostname}, last seen ${from.at}; if its supervisor is still running, it stops at its next tick)` : ''}`);
 }
 
+// A job under Upkeep (settings recurring, keyed by name): a check, a command run on a schedule in a
+// throwaway checkout of main and failing by its rule, or a chore, instructions the supervisor or a
+// worker carries out on a schedule. Contract RECURRING_ENTRY_SHAPE@1: the rules and defaults every
+// reader takes from here (validate, and the registry, the runner, merge and ask that build on it).
+// fields: which kinds carry each field (by: only a chore with that by), whether it must be set, its
+// default when unset, and its ceiling. A check runs at most hourly, a chore at most daily, neither
+// less often than 90 days, 12 weeks or 3 months; on is a weekday with w and a day 1..28 with mo
+// (every month has it); at is HH:MM UTC, never with h. A run command carries no credential: no word
+// with one (as a sensor URL or a link), and nothing the scrubber would hide but a host, a phone
+// number or an email, after each whole environment reference ($NAME, ${NAME}, after any Bearer,
+// Basic or token) is read as one, since a check runs in the supervisor's environment as a gate does.
+const RECURRING_ENTRY_SHAPE = Object.freeze({
+  version: 1,
+  name: /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/,
+  name_length: Object.freeze([2, 40]),
+  kinds: Object.freeze(['check', 'chore']),
+  every: /^([1-9][0-9]{0,3})(h|d|w|mo)$/,
+  every_min: Object.freeze({ check: 'h', chore: 'd' }),
+  every_max: Object.freeze({ h: 2160, d: 90, w: 12, mo: 3 }),
+  weekdays: Object.freeze(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
+  month_day_max: 28,
+  at: /^([01][0-9]|2[0-3]):[0-5][0-9]$/,
+  last_line_rules: Object.freeze(['above', 'below', 'is_not']),
+  by: Object.freeze(['supervisor', 'worker']),
+  fields: Object.freeze({
+    kind: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true }),
+    title: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true, max: 80 }),
+    what: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true, max: 160 }),
+    every: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true }),
+    on: Object.freeze({ kinds: Object.freeze(['check', 'chore']) }),
+    at: Object.freeze({ kinds: Object.freeze(['check', 'chore']) }),
+    run: Object.freeze({ kinds: Object.freeze(['check']), required: true, max: 500 }),
+    timeout_s: Object.freeze({ kinds: Object.freeze(['check']), default: 120, max: 1800 }),
+    fail: Object.freeze({ kinds: Object.freeze(['check']), default: Object.freeze({ exit: 'nonzero' }) }),
+    fail_after: Object.freeze({ kinds: Object.freeze(['check']), default: 1, max: 10 }),
+    severity: Object.freeze({ kinds: Object.freeze(['check']), default: 2, max: 3 }),
+    by: Object.freeze({ kinds: Object.freeze(['chore']), required: true }),
+    prompt: Object.freeze({ kinds: Object.freeze(['chore']), required: true, max: 2000 }),
+    component: Object.freeze({ kinds: Object.freeze(['chore']), by: 'worker', required: true }),
+    touches: Object.freeze({ kinds: Object.freeze(['chore']), by: 'worker', required: true }),
+    done_when: Object.freeze({ kinds: Object.freeze(['chore']), by: 'worker', required: true }),
+    grace_days: Object.freeze({ kinds: Object.freeze(['chore']), default: Object.freeze({ supervisor: 1, worker: 3 }), max: 30 }),
+  }),
+});
+// What is wrong with one job, each problem naming the entry and field ("settings recurring.<name>.<field>: …"),
+// empty when it holds. It reads no log and no other setting but sensor_scrub (a run its patterns
+// would scrub is refused), so any reader can check any entry.
+function recurringEntryProblems(name, entry) {
+  const R = RECURRING_ENTRY_SHAPE;
+  const UNITS = Object.keys(R.every_max); // h, d, w, mo: shortest first
+  // a whole environment reference: $NAME or ${NAME} (never ${X:-default} or ${X}more), after any scheme word
+  const REF = /(?:\b(?:bearer|basic|token)\s+)?\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})(?=$|[\s"';&|)])/gi;
+  const SCRUB_ALLOWED = ['[ip]', '[phone]', '[email]'];
+  const at = `settings recurring.${name}`;
+  const [lo, hi] = R.name_length;
+  if (typeof name !== 'string' || !R.name.test(name) || name.length < lo || name.length > hi) return [`${at}: a name is ${lo} to ${hi} lowercase letters and digits, in words joined by single hyphens (it becomes a chore slug and a ticket id)`];
+  if (!isObj(entry)) return [`${at}: an object { kind, title, what, every, … }`];
+  const errs = [];
+  const bad = (f, m) => errs.push(`${at}.${f}: ${m}`);
+  const kind = entry.kind;
+  if (!R.kinds.includes(kind)) return [`${at}.kind: check or chore`];
+  for (const [f, spec] of Object.entries(R.fields)) {
+    const carried = spec.kinds.includes(kind) && (!spec.by || entry.by === spec.by);
+    if (!carried && entry[f] !== undefined) bad(f, spec.kinds.includes(kind) ? `only a chore with by "${spec.by}" has ${f}` : `a ${spec.kinds[0]}'s field, not a ${kind}'s`);
+    else if (carried && spec.required && entry[f] === undefined) bad(f, 'required');
+  }
+  for (const f of Object.keys(entry)) if (!Object.hasOwn(R.fields, f)) bad(f, 'not a field of a job');
+  const has = (f) => entry[f] !== undefined && R.fields[f].kinds.includes(kind) && (!R.fields[f].by || entry.by === R.fields[f].by);
+  const whole = (f, lo2, hi2) => { if (has(f) && !(Number.isInteger(entry[f]) && entry[f] >= lo2 && entry[f] <= hi2)) bad(f, `a whole number from ${lo2} to ${hi2}`); };
+  for (const f of ['title', 'what']) if (has(f) && (typeof entry[f] !== 'string' || !entry[f].length || entry[f].length > R.fields[f].max || UNSAFE_TEXT.test(entry[f]))) bad(f, `one line of 1 to ${R.fields[f].max} characters`);
+  let unit = null;
+  if (has('every')) {
+    const m = typeof entry.every === 'string' ? R.every.exec(entry.every) : null;
+    if (!m) bad('every', '<n>h, <n>d, <n>w or <n>mo');
+    else if (UNITS.indexOf(m[2]) < UNITS.indexOf(R.every_min[kind])) bad('every', 'a chore runs at most daily: <n>d, <n>w or <n>mo');
+    else if (Number(m[1]) > R.every_max[m[2]]) bad('every', `at most ${R.every_max.d}d, ${R.every_max.w}w or ${R.every_max.mo}mo (${R.every_max.h}h)`);
+    else unit = m[2];
+  }
+  if (has('on') && unit) {
+    if (unit === 'w') { if (!R.weekdays.includes(entry.on)) bad('on', `with w, a weekday: ${R.weekdays.join(', ')}`); }
+    else if (unit === 'mo') { if (!(Number.isInteger(entry.on) && entry.on >= 1 && entry.on <= R.month_day_max)) bad('on', `with mo, a day of the month from 1 to ${R.month_day_max}, a number`); }
+    else bad('on', 'goes with w (a weekday) or mo (a day of the month), not h or d');
+  }
+  if (has('at')) {
+    if (typeof entry.at !== 'string' || !R.at.test(entry.at)) bad('at', 'HH:MM, UTC');
+    else if (unit === 'h') bad('at', 'goes with d, w or mo, not h');
+  }
+  if (has('run')) {
+    const r = entry.run;
+    if (typeof r !== 'string' || !r.length || r.length > R.fields.run.max || UNSAFE_TEXT.test(r)) bad('run', `one line of 1 to ${R.fields.run.max} characters`);
+    else {
+      // Each whole reference becomes one plain word (VAR), and a quote right after one joins what
+      // follows to it, as the shell joins $X"abc" into one value. Every built-in scrub rule then runs
+      // as scrubText runs them, and a value a rule would hide must be references alone (or a host, a
+      // phone number or an email): a literal glued, quoted or spaced after a reference hides as much
+      // as one with no reference. A second reading joins the words inside each quoted string, so a
+      // header or a JSON value ("Authorization: Bearer $X abc…") is judged whole. What an owner's
+      // sensor_scrub pattern would hide is refused whenever it matches at all, whatever it writes.
+      const VAR = 'zzvarzzz';
+      const glue = (t) => t.replace(new RegExp(`${VAR}["']`, 'g'), VAR);
+      const named = r.replace(REF, VAR);
+      const hidden = new Set();
+      for (const text of [glue(named), glue(named.replace(/"[^"]*"|'[^']*'/g, (q) => q.replace(/\s+/g, '_')))]) {
+        let t = text;
+        for (const [re, to] of [...SCRUB_RULES, ...SCRUB_RULES]) {
+          t = t.replace(re, (...a) => {
+            const m = a[0];
+            const out = typeof to === 'function' ? to(...a) : to.replace(/\$(\d)/g, (_, i) => a[Number(i)] ?? '');
+            if (out === m) return m;
+            let p = 0;
+            while (p < m.length && p < out.length && m[p] === out[p]) p++;
+            let s = 0;
+            while (s < m.length - p && s < out.length - p && m[m.length - 1 - s] === out[out.length - 1 - s]) s++;
+            const literal = m.slice(p, m.length - s).split(VAR).join('').replace(/["'\s_]/g, '');
+            if (literal) for (const x of out.slice(p, out.length - s).match(/\[[a-z-]+\]/g) ?? ['[scrubbed]']) if (!SCRUB_ALLOWED.includes(x)) hidden.add(x);
+            return out;
+          });
+        }
+      }
+      if (scrubExtra().some(([re]) => new RegExp(re.source, re.flags.replace('g', '')).test(named))) hidden.add('sensor_scrub');
+      if (r.split(/\s+/).some((w) => hasCredentials(w.replace(/^(["'])(.*)\1$/, '$2'))) || hidden.size) bad('run', `it carries a credential${hidden.size ? ` (${[...hidden].join(', ')})` : ''}; ${CREDENTIALS_REFUSED}. A check runs with the supervisor's environment: name a secret by reference ($NAME), never by value`);
+    }
+  }
+  whole('timeout_s', 1, R.fields.timeout_s.max);
+  if (has('fail')) {
+    const f = entry.fail;
+    const one = (o) => isObj(o) && Object.keys(o).length === 1;
+    const rule = one(f) && f.last_line !== undefined && one(f.last_line) ? Object.entries(f.last_line)[0] : null;
+    const ok = (one(f) && f.exit === 'nonzero') || (rule && ((['above', 'below'].includes(rule[0]) && typeof rule[1] === 'number' && Number.isFinite(rule[1])) || (rule[0] === 'is_not' && typeof rule[1] === 'string' && rule[1].length >= 1 && rule[1].length <= 200 && !UNSAFE_TEXT.test(rule[1]))));
+    if (!ok) bad('fail', '{ "exit": "nonzero" }, or { "last_line": { "above": n } }, { "below": n } or { "is_not": "<text, at most 200 characters>" }');
+  }
+  whole('fail_after', 1, R.fields.fail_after.max);
+  whole('severity', 1, R.fields.severity.max);
+  if (has('by') && !R.by.includes(entry.by)) bad('by', R.by.join(' or '));
+  if (has('prompt') && (typeof entry.prompt !== 'string' || !entry.prompt.length || entry.prompt.length > R.fields.prompt.max || UNSAFE_TEXT.test(entry.prompt.replace(/[\n\t]/g, '')))) bad('prompt', `1 to ${R.fields.prompt.max} characters: text, line breaks and tabs`);
+  for (const f of ['component', 'touches', 'done_when']) if (has(f)) for (const e of schemaErrors(SCHEMA.$defs.types.ticket.properties[f], entry[f], f)) bad(f, `as ticket add checks it: ${e}`);
+  whole('grace_days', 1, R.fields.grace_days.max);
+  return errs;
+}
+
 // ===== sensors: production signals into the loop =====
 // A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
 // A meaningful change becomes an observation in the log on subject sensor:<name>, and the
@@ -19439,6 +22424,9 @@ const sensorObserveOnce = (m, fields) => (sensorKeys().has(fields.source_key) ? 
 // well (ids and numbers out of its fingerprints and templates) gives it less to find.
 const SCRUB_KEY = String.raw`[\w-]*?(?:password|passwd|passphrase|secret|token|api[_-]?key|authorization|cookie|session(?:[_-]?id)?|ssn|dob|date[_-]?of[_-]?birth|birth[_-]?date|address)`;
 const luhn = (digits) => { let s = 0; for (let i = 0; i < digits.length; i++) { let d = +digits[digits.length - 1 - i]; if (i % 2) { d *= 2; if (d > 9) d -= 9; } s += d; } return s % 10 === 0; };
+// The alphanumeric token around s[off, off+len) is exactly 40 or 64 hex characters: a full sha.
+// The scan stops once the run passes 64 (never a full sha), so each match costs a constant.
+const inFullSha = (s, off, len) => { let a = off; let b = off + len; while (a > 0 && b - a <= 64 && /[0-9A-Za-z]/.test(s[a - 1])) a--; while (b < s.length && b - a <= 64 && /[0-9A-Za-z]/.test(s[b])) b++; return (b - a === 40 || b - a === 64) && /^[0-9A-Fa-f]+$/.test(s.slice(a, b)); };
 const entropy = (s) => { const c = {}; for (const ch of s) c[ch] = (c[ch] ?? 0) + 1; return Object.values(c).reduce((e, n) => e - (n / s.length) * Math.log2(n / s.length), 0); };
 const SCRUB_RULES = [
   // headers and URLs first, while their shape is intact
@@ -19457,7 +22445,8 @@ const SCRUB_RULES = [
   [/\b(?:(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|sntry[su]_[A-Za-z0-9=_+/-]{20,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|HRKU-[A-Za-z0-9_-]{20,})/g, '[key]'],
   [/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,254}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}/g, '[email]'],
   [/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]'],
-  [/(?<![\d.-])[2-6](?:[ -]?\d){12,18}(?![\d.-])/g, (x) => (luhn(x.replace(/\D/g, '')) ? '[card]' : x)],
+  // a Luhn-valid run inside a whole 40- or 64-hex git sha is the sha's, not a card (inFullSha)
+  [/(?<![\d.-])[2-6](?:[ -]?\d){12,18}(?![\d.-])/g, (x, off, s) => (luhn(x.replace(/\D/g, '')) && !inFullSha(s, off, x.length) ? '[card]' : x)],
   [/(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\w.])/g, '[ip]'],
   [/(?<![\w:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])/g, (x) => (/\d/.test(x) && net.isIPv6(x) ? '[ip]' : x)],
   [/(?<![\w+])(?:\+\d{1,3}[ .-]?)?(?:\(\d{2,4}\)[ .-]?|\d{2,4}[ .-])\d{3,4}[ .-]\d{3,4}(?!\w)/g, '[phone]'],
@@ -20741,7 +23730,18 @@ function cmdWait() {
   const minutes = Number(flagStr('minutes') ?? loadSettings().tick_minutes ?? 15);
   if (!(minutes > 0 && minutes <= 240)) die('--minutes takes 1 to 240');
   const self = fileURLToPath(import.meta.url);
-  const sub = (args) => { const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; } };
+  // Tests only: a JSON line per snapshot (its children, folds, key and RSS), shorter cycles, and
+  // the first n messages children taken as failed.
+  const trace = process.env.DEVTEAM_TEST_WAIT_TRACE || null;
+  const cycleMs = Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) : null;
+  let failMessages = Number(process.env.DEVTEAM_TEST_WAIT_FAIL_MESSAGES) || 0;
+  const started = []; // the kit children started since the last trace line (cycle 0's include the startup poll)
+  const sub = (args) => {
+    if (trace) started.push(args);
+    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    if (args[0] === 'messages' && failMessages > 0) { failMessages--; return null; }
+    try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; }
+  };
   // What arrived since the last wait woke the supervisor counts as new, though it is already in the
   // first snapshot: a worker's message that lands during the tick (or while metrics runs, which on a
   // long log takes a while) would otherwise wait out the whole next tick. A message the supervisor
@@ -20759,6 +23759,7 @@ function cmdWait() {
     try { ensureStreams(self); } catch (e) { if (!pollWarned) process.stderr.write(`devteam: a stream collector didn't start: ${e.message}\n`); }
     if (!ms.some((m) => sensorDue(m, sensorState(m.name)))) return [];
     const budget = (Math.max(0, ...ms.filter((m) => m.kind === 'probe').map((m) => m.probe_timeout_s)) + 60) * 1000;
+    if (trace) started.push(['sensor', 'poll', '--due', '--json']);
     const r = spawnSync(process.execPath, [self, 'sensor', 'poll', '--due', '--json'], { cwd: mainRoot, env: { ...process.env, NODE_USE_ENV_PROXY: '1' }, encoding: 'utf8', timeout: budget, maxBuffer: 8 * 1024 * 1024 });
     // a poll killed after it printed still said its alerts
     try { const j = (r.stdout ?? '').trim() ? JSON.parse(r.stdout) : null; if (r.status === 0 && j) return j.alerts ?? []; if (j?.alerts?.length) { if (!pollWarned) process.stderr.write('devteam: sensor poll ran out of time after it polled; its alerts are below\n'); pollWarned = true; return j.alerts; } } catch {}
@@ -20766,20 +23767,42 @@ function cmdWait() {
     pollWarned = true;
     return [];
   };
+  // The owner's lines and the open messages come only from the log: while its key holds (main's sha,
+  // each log file's name, size and mtime), a cycle keeps the last ones and starts no messages child.
+  // The key is taken before the read, so a line written during the read is read on the next cycle.
+  // A messages child that failed is not kept: the next cycle runs it again. Findings come from
+  // panes, time, accounts and git too, so metrics runs every cycle.
+  let last = null;
+  let cycle = 0;
+  let reads = 0; // the trace's folds since its last line; cycle 0's from just before its snapshot
   const snap = () => {
-    // main's copy of the log as it is now: a wait can outlast many moves of main
-    logCache = null;
-    mainRefCache = undefined;
-    const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
-    const msgs = (sub(['messages', '--open', '--to', 'supervisor', '--json']) ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
-    const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
-    return { owner, msgs, high };
+    const at = Date.now();
+    const key = logKey();
+    let now;
+    if (last && last.key === key) now = { owner: last.owner, msgs: last.msgs };
+    else {
+      // main's copy of the log as it is now: a wait can outlast many moves of main
+      logCache = null;
+      const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
+      const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
+      last = got ? { key, owner, msgs } : null;
+      now = { owner, msgs };
+    }
+    now.high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
+    if (trace) {
+      const r = readLog.reads ?? 0;
+      try { fs.appendFileSync(trace, `${JSON.stringify({ cycle: cycle++, at, children: started.splice(0), log_reads: r - reads, key, rss: process.memoryUsage().rss })}\n`); } catch {}
+      reads = r;
+    }
+    return now;
   };
   // the heartbeat while the supervisor waits: at most every HOST_REFRESH_MS, so a long quiet wait
   // keeps its claim fresh, and another machine live on this repo ends the wait
   const hostBeat = () => { if (hostState().refused || !(Date.now() - (Number(hostState().checked) || 0) < HOST_REFRESH_MS)) { const hc = hostCheck(); if (hc.refused) hostRefusedWhileRunning(hc); } };
   hostBeat();
   const firstAlerts = poll();
+  reads = readLog.reads ?? 0;
   const first = snap();
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
   const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
@@ -20794,7 +23817,7 @@ function cmdWait() {
   const until = Date.now() + minutes * 60000;
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   while (Date.now() < until) {
-    sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
+    sleep(Math.min(cycleMs ?? Math.min(Math.max(2000, (minutes * 60000) / 10), 45000), Math.max(0, until - Date.now())));
     hostBeat();
     const alerts = poll();
     if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
@@ -21565,14 +24588,13 @@ const LANDING_HINT = 'it applies here now; land it on main with the next chore P
 // entry of the supervisor's kind that differs here from the chore's is set or removed there, and
 // nothing else in the chore's settings.md changes: this checkout's copy of every other key may be
 // older than main's (a components line widened since), and carrying the whole file would revert it.
-// A link of an owner's kind is carried only as the owner approved it: link add|set|rm --approved
-// logged an act naming the link with the entry it wrote (entry_hash); anything else of an owner's
-// kind is left alone, to land with the owner's answer.
+// A link of an owner's kind is carried change by change (linkFieldChanges), each only as an owner's
+// answer approved it (linkAnswerCovers), onto the chore's entry: a field main changed since this
+// checkout's copy is never reverted, and one no answer covers is left alone, to land with the
+// owner's answer.
 // A supervisor's entry is carried only when its acts lead from the chore's (main's) entry to this
 // one: when main's entry changed since the act was made, the act's parent state is gone, and the
 // entry is refused (the run exits 1, after carrying the others).
-// An entry of an owner's kind exactly as an answered question approved it (linkByOwner's act).
-const ownerApproved = (id, entry) => logObjects('act').some((a) => a.approved_by && ['governance-edit', 'gate-change'].includes(a.class) && (a.refs ?? []).includes(`link:${id}`) && Object.hasOwn(a, 'entry_hash') && a.entry_hash === linkEntryHash(entry));
 function linkLand(slugName) {
   choreSlug(slugName);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
@@ -21591,7 +24613,18 @@ function linkLand(slugName) {
       const h = ownEntry(here, id), t = ownEntry(there, id);
       if (canonical(h) === canonical(t)) continue;
       if (ownersKind(h) || ownersKind(t)) {
-        if (!ownerApproved(id, h)) { owners.push(`links.${id}`); continue; }
+        const cs = linkFieldChanges({ [id]: t }, { [id]: h });
+        const ok = cs.filter((c) => linkAnswerCovers.any(c));
+        owners.push(...cs.filter((c) => !ok.includes(c)).map(linkFieldChanges.key));
+        if (!ok.length) continue;
+        let e = t;
+        for (const c of ok) {
+          if (c.field === null) e = c.to ?? undefined;
+          else { e = { ...e }; if (c.to === null) delete e[c.field]; else e[c.field] = c.to; }
+        }
+        if (e === undefined) delete links[id]; else links[id] = e;
+        changed.push(`links.${id} (${t === undefined ? 'added' : e === undefined ? 'removed' : 'changed'})`);
+        continue;
       } else if (!linkActsLead(id, linkEntryHash(t), linkEntryHash(h))) {
         const act = logObjects('act').filter((a) => a.class === 'registry-edit' && (a.refs ?? []).includes(`link:${id}`) && a.entry_hash === linkEntryHash(h)).sort(byTime).pop();
         refused.push(act ? `main's links.${id} changed since ${act.id}; re-run link ${h === undefined ? 'rm' : 'set'} from main's entry (bring this checkout's settings.md up to date first)` : `links.${id} differs here from main and no registry-edit act wrote it from main's entry; make the change with link add|set|rm`);
@@ -21619,6 +24652,11 @@ function cmdLink() {
   if (sub === 'land') { supervisorOnly('link'); return linkLand(id ?? 'registry'); }
   // a set value that starts with -- comes after a bare --: link set <id> <field> -- <value>
   const vals = [...given, ...(rest ?? [])];
+  // a flag of this command after the bare -- is part of the value there, never a flag: refused, so
+  // a value never swallows --approved (and asks again) nor is stored with it
+  const linkFlags = new Set(['approved', 'source', 'reason', ...Object.keys(LINK_KINDS).flatMap((k) => linkFields(k))]);
+  const swallowed = (rest ?? []).find((t) => /^--[a-z_]+(=|$)/.test(t) && linkFlags.has(t.slice(2).split('=')[0]));
+  if (swallowed) die(`${swallowed.split('=')[0]} after -- would be part of the value: put flags before -- (link set <id> <field> --approved <qid> -- <value>), or quote the value as one argument`);
   if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> [--] <value>   |   link rm <id>   |   link land [<chore slug>]');
   supervisorOnly('link');
   if (!LINK_ID.test(id) || RESERVED_LINKS.includes(id)) die(`${id}: a link id is lowercase words joined by hyphens, and not ${RESERVED_LINKS.join(' or ')}`);
@@ -21672,11 +24710,12 @@ function cmdLink() {
 // The json devteam block of the main checkout's settings.md as written, not as loadSettings pins
 // it: a repo link written by an earlier --approved run is here before it lands on main.
 const rawSettingsBlock = () => { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); try { return m ? JSON.parse(m[1]) : {}; } catch { return {}; } };
-// A link of an owner's kind: draft the change and ask a question in the class its
-// field takes (gate-change for a gate field, else governance-edit); with --approved <qid>, apply
-// exactly that change and log the act the chore-registry merge then lands under the same answer.
-// Asking twice for the same draft reuses the open question; applying a draft already written is a
-// no-op. Nothing here names a kind: the table gives fields and classes.
+// A link of an owner's kind: draft the change and ask a question in the class its field takes
+// (gate-change for a gate field, else governance-edit) about the changes no owner's answer covers
+// yet, field by field; with --approved <qid>, an answer covering this change (link set's own, or the
+// supervisor's ask --link-change), apply it and log the acts; the chore merge lands it the same way.
+// Asking twice for the same changes reuses the open question; applying a change already written is
+// a no-op. Nothing here names a kind: the table gives fields and classes.
 function linkByOwner(sub, id, field, vals, kind) {
   const K = LINK_KINDS[kind];
   const raw = rawSettingsBlock().links ?? {};
@@ -21691,33 +24730,56 @@ function linkByOwner(sub, id, field, vals, kind) {
   if (canonical(ownEntry(raw, id) ?? null) === canonical(next ?? null)) return out(`links.${id} is already ${next ? 'that' : 'gone'} in settings.md here; ${LANDING_HINT}`);
   const { errors } = registryProblems({ ...loadSettings(), links: { ...Object.fromEntries(Object.entries(loadSettings().links ?? {}).filter(([k]) => k !== id)), ...(next ? { [id]: next } : {}) } });
   if (errors.length) die(`not drafted:\n  - ${errors.join('\n  - ')}`);
-  // The bundle the answer covers: every link of an owner's kind that settings.md here, with this
-  // change, would land differently from main, this one included. One answer may approve a bundle,
-  // so the question shows all of it; merge then lands exactly these entries under that answer.
+  // The bundle: every repo link change that settings.md here, with this one, would land against
+  // main, field by field (linkFieldChanges). A change some owner's answer already covers is never
+  // asked about again; the question asks only about the rest, and says it is the one question.
   const mainLinks = mainSettings(null)?.links ?? {};
   const after = Object.assign(Object.create(null), raw);
   if (next) after[id] = next; else delete after[id];
-  const bundleIds = [...new Set(linkOwnerChanges(mainLinks, after).filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)).map((c) => c.key.split('.')[1]))].sort();
-  if (!bundleIds.includes(id)) bundleIds.push(id);
+  const L = linkFieldChanges.line;
+  const changes = linkFieldChanges(mainLinks, after);
+  // this command's own change: the field it sets (or the entry, when the link is new or goes)
+  const own = changes.filter((c) => c.id === id && (sub !== 'set' || c.field === field || c.field === null));
+  const write = () => editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
+  // back to what main has: nothing of it lands, so there is nothing to approve
+  if (!own.length) { write(); return out(`links.${id}${sub === 'set' ? `.${field}` : ''} is back to main's in settings.md here: nothing of it lands, so no question`); }
+  const coveredBy = new Map(changes.map((c) => [L(c), linkAnswerCovers.any(c)]));
+  const bundleIds = [...new Set([id, ...changes.map((c) => c.id)])].sort();
   const bundle = Object.fromEntries(bundleIds.map((l) => [l, ownEntry(after, l) ?? null]));
-  const draft = JSON.stringify(bundle, null, 2);
-  const diff = bundleIds.map((l) => `links.${l}: main has ${canonical(ownEntry(mainLinks, l) ?? null)}; would be ${canonical(ownEntry(after, l) ?? null)}`).join('\n');
   const approved = flagStr('approved');
   // the command to run once answered: this one, every value quoted, plus --approved
-  const again = (qid) => `node docs/devteam/scripts/devteam.mjs link ${argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved').map(shq).join(' ')} --approved ${qid}`;
+  // (before a bare --, so it stays a flag)
+  const again = (qid) => { const w = argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved'); const d = w.indexOf('--'); return `node docs/devteam/scripts/devteam.mjs link ${(d < 0 ? [...w.map(shq), '--approved', qid] : [...w.slice(0, d).map(shq), '--approved', qid, ...w.slice(d).map(shq)]).join(' ')}`; };
   if (!approved) {
-    const open = questions().find((q) => q.status === 'open' && q.class === cls && (q.context ?? '').includes(draft));
+    const toAsk = changes.filter((c) => !coveredBy.get(L(c)));
+    if (!toAsk.length) { const by = coveredBy.get(L(own[0])); return out(`${by} already approves this change (${own.map(L).join('; ')}); write it with: ${again(by)}`); }
+    const asking = toAsk.map(L);
+    const open = questions().find((q) => q.status === 'open' && ['governance-edit', 'gate-change'].includes(q.class) && canonical(linkAnswerCovers.section(q.context)) === canonical(asking));
     if (open) return out(`${open.id}: already asked the owner about this exact change; once answered: ${again(open.id)}`);
-    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The settings diff this answer approves${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link change(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}\n\nThe registry entries, as they would be in settings.md links (merge lands exactly these under this answer, and no other):\n${draft}`, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    const carried = changes.filter((c) => coveredBy.get(L(c)));
+    const diff = bundleIds.map((l) => L({ id: l, field: null, from: ownEntry(mainLinks, l) ?? null, to: ownEntry(after, l) ?? null })).join('\n');
+    const context = [
+      'This is the one question for this change: nothing else will ask the owner about it.',
+      [linkAnswerCovers.HEADER, ...asking].join('\n'),
+      carried.length ? ['Already approved, not asked again:', ...carried.map((c) => `- ${linkFieldChanges.key(c)} (${coveredBy.get(L(c))})`)].join('\n') : null,
+      `The whole settings diff waiting to land${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}`,
+      `The registry entries, as they would be in settings.md links:\n${JSON.stringify(bundle, null, 2)}`,
+    ].filter(Boolean).join('\n\n');
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: toAsk.some((c) => own.includes(c)) ? `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?` : `Change ${toAsk.map(linkFieldChanges.key).join(', ')}, waiting in settings.md to land with ${id}?`, context, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
     return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
   }
   const v = ownerAnswer(approved, 'link --approved');
-  if (v.class !== cls) die(`${approved} was asked in class ${v.class ?? '(none)'}, not ${cls}`);
-  if (!(v.context ?? '').includes(draft)) die(`${approved} asked about another change; ask again for this one`);
-  editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
-  // one act per entry of the bundle: the entry it lands (entry_hash) from the one main has
-  // (prior_hash), so merge binds each changed entry to this answer
-  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: cls, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as ${approved} showed it, landing with ${id}`, refs: ['chore-registry', `link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
+  if (!['governance-edit', 'gate-change'].includes(v.class)) die(`${approved} was asked in class ${v.class ?? '(none)'}, not governance-edit or gate-change`);
+  if (!own.every((c) => linkAnswerCovers(approved, c))) {
+    const named = linkAnswerCovers.lines(approved);
+    die(`${approved} asked about another change; ask again for this one: it named ${named.length ? named.join('; ') : 'no repo link change'}; this change is ${own.map(L).join('; ')}${linkAnswerCovers.why(approved) ? ` (${linkAnswerCovers.why(approved)})` : ''}`);
+  }
+  const missing = changes.filter((c) => !linkAnswerCovers(approved, c) && !coveredBy.get(L(c)));
+  if (missing.length) die(`not approved yet: ${missing.map(L).join('; ')}; run the command without --approved to ask about it (if main changed since, bring this checkout's settings.md up to date first)`);
+  write();
+  // one act per entry of the bundle, in the answer's class: the entry it lands (entry_hash) from
+  // the one main has (prior_hash), so merge binds each changed entry to this answer
+  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: v.class, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as approved, landing with ${id}`, refs: [`link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
   out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
 }
 // A field no owner class guards (a repo link's path: where its checkout is on this machine).
@@ -21900,8 +24962,279 @@ function cmdInit() {
   const claude = path.join(root, 'CLAUDE.md');
   if (fs.existsSync(claude) && !/@AGENTS\.md\b/.test(readText(claude))) { fs.appendFileSync(claude, `\n## devteam\n\n@AGENTS.md\n`); made.push('CLAUDE.md'); }
   out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
-  out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor: it drafts strategy.md with you before the first goal (the upstream README, Setup)');
+  out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor: it drafts strategy.md with you before the first goal, then keeps its loop: devteam.mjs wait in the background, a tick when it returns, never a turn ended without a wait running (the upstream README, Setup)');
 }
+
+/* browser-guard start */
+// The browser's egress guard (browser@1, refusal; design supervisors-can-use-a-browser-with-the-o,
+// Components 1). Chrome reaches the network only through it: a loopback forward proxy for
+// absolute-form HTTP and CONNECT that refuses every destination on this machine's own network.
+// Each dashboard takes owner presses from any same-origin page on its loopback port, so a browser
+// that could load one could press them; this is what stops it. The rules, in the contract's order:
+// own-name and gateway on the name, before resolving; then own-interface and special-purpose on
+// every address the name resolved to (once), and the first that refuses is reported. It dials the
+// address it checked, never the name, so DNS rebinding can't get past it. An answer it can't read
+// is refused: it fails closed.
+//
+// The refused ranges, exactly the contract's range enum: every IANA special-purpose block, and for
+// IPv6 everything outside 2000::/3 (::/3, 4000::/2, 8000::/1 when nothing narrower names it). An
+// address embedding a refused IPv4 one (mapped, NAT64, 6to4, Teredo) falls in a refused IPv6
+// range and is refused whole. The longest matching prefix is the range reported.
+const GUARD_RANGES = [
+  '127.0.0.0/8', '0.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10', '192.0.0.0/24',
+  '198.18.0.0/15', '224.0.0.0/4', '::/128', '::1/128', 'fc00::/7', 'fe80::/10', '64:ff9b::/96', '::ffff:0:0/96', '192.0.2.0/24',
+  '192.31.196.0/24', '192.52.193.0/24', '192.88.99.0/24', '192.175.48.0/24', '198.51.100.0/24', '203.0.113.0/24', '240.0.0.0/4',
+  '255.255.255.255/32', '64:ff9b:1::/48', '100::/64', '2001::/23', '2001::/32', '2001:db8::/32', '2002::/16', '2620:4f:8000::/48',
+  '3fff::/20', '5f00::/16', 'ff00::/8', '::/3', '4000::/2', '8000::/1',
+];
+// An address as a number: { v, n, text }, text its normal form (what a refusal reports), or null
+// for anything that isn't exactly an IPv4 dotted quad or an IPv6 address. IPv6 goes through WHATWG
+// URL first, which writes a dotted tail (::ffff:127.0.0.1, as libuv may answer) as hex.
+function guardAddr(s) {
+  const raw = String(s ?? '').split('%')[0];
+  if (net.isIPv4(raw)) return { v: 4, n: raw.split('.').reduce((a, x) => (a << 8n) + BigInt(x), 0n), text: raw };
+  if (!net.isIPv6(raw)) return null;
+  let text;
+  try { text = new URL(`http://[${raw}]/`).hostname.replace(/^\[|\]$/g, ''); } catch { return null; }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const groups = halves.length === 2 ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left;
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return { v: 6, n: groups.reduce((a, g) => (a << 16n) + BigInt(parseInt(g, 16)), 0n), text };
+}
+let guardTable = null;
+// The most specific refused range holding a parsed address, or null.
+function guardRange(a) {
+  guardTable ??= GUARD_RANGES.map((cidr) => { const [base, p] = cidr.split('/'); return { cidr, ...guardAddr(base), prefix: Number(p) }; });
+  const bits = a.v === 4 ? 32 : 128;
+  let best = null;
+  for (const r of guardTable) {
+    if (r.v !== a.v) continue;
+    const shift = BigInt(bits - r.prefix);
+    if ((a.n >> shift) === (r.n >> shift) && (!best || r.prefix > best.prefix)) best = r;
+  }
+  return best?.cidr ?? null;
+}
+// Whether a parsed address is one of this machine's own, read on every call (a VPN, Tailscale).
+function guardOwn(a) {
+  return Object.values(os.networkInterfaces() ?? {}).flat().some((e) => { const b = guardAddr(e?.address); return b && b.v === a.v && b.n === a.n; });
+}
+const guardBare = (h) => String(h ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+const GUARD_HOST = /^[A-Za-z0-9._:\[\]-]{1,255}$/;
+// A host as the refusal may name it (browser@1 host's pattern): every other character a -, at most
+// 255. URL lets a name keep characters the contract doesn't (a_b.localhost).
+const guardFit = (h) => (GUARD_HOST.test(h) ? h : String(h).replace(/[^A-Za-z0-9._:\[\]-]/g, '-').slice(0, 255) || '-');
+// What a request asks for: { name, asked, port, connect, hostHeader?, path? }, or null (400). An
+// absolute-form http: URL, or a CONNECT authority of exactly <host>:<port>, with the port read from
+// the authority itself (URL drops a default one, and a ws: page's CONNECT names :80).
+function guardTarget(method, target) {
+  let u;
+  let asked;
+  let port;
+  if (method === 'CONNECT') {
+    const m = /^(\[[0-9A-Fa-f:.]+\]|[^\[\]:/\\@?#\s]+):(\d{1,5})$/.exec(target ?? '');
+    if (!m) return null;
+    port = Number(m[2]);
+    try { u = new URL(`http://${m[1]}`); } catch { return null; }
+    if (u.pathname !== '/' || u.search || u.hash || u.username || u.password) return null;
+    asked = target;
+  } else {
+    if (!/^http:\/\//i.test(target ?? '')) return null;
+    try { u = new URL(target); } catch { return null; }
+    if (u.protocol !== 'http:') return null;
+    asked = target.slice(7).split(/[/?#]/)[0];
+    port = Number(u.port || 80);
+  }
+  const name = guardBare(u.hostname);
+  if (!name || port < 1 || port > 65535) return null;
+  asked = guardFit(GUARD_HOST.test(asked) ? asked : u.host);
+  if (method === 'CONNECT') return { name, asked, port, connect: true };
+  const rest = target.slice(7 + target.slice(7).split(/[/?#]/)[0].length).split('#')[0];
+  return { name, asked, port, connect: false, hostHeader: u.host, path: rest.startsWith('/') ? rest : `/${rest}` };
+}
+// own-name or gateway, decided on the name before anything resolves it.
+function guardNameRule(name) {
+  const own = guardBare(os.hostname());
+  if (name === 'localhost' || name.endsWith('.localhost') || (own && name === own)) return 'own-name';
+  let gw = '';
+  try { gw = process.env.DEVTEAM_PUBLIC_URL ? guardBare(new URL(process.env.DEVTEAM_PUBLIC_URL).hostname) : ''; } catch {}
+  if (gw && (name === gw || name.endsWith(`.${gw}`))) return 'gateway';
+  return null;
+}
+// The ports no test exception ever opens: the hub, the dashboards' block, ttyd and the gateway, at
+// their defaults and wherever the environment moved them.
+function guardNeverPorts() {
+  const own = process.env.DEVTEAM_PUBLIC_URL && Number(process.env.PORT) > 0 ? [Number(process.env.PORT)] : [];
+  return new Set([4320, ...Array.from({ length: 25 }, (_, i) => 4321 + i), 7681, 8080, HUB_PORT, ...PORT_RANGE, TTYD_PORT, ...own]);
+}
+// The tests' one way out (DEVTEAM_TEST set and non-empty): a loopback port DEVTEAM_TEST_BROWSER_ALLOW
+// lists, for the fixture site, when every address is loopback (127.0.0.0/8, or ::1 exactly).
+function guardAllowed(port, addrs) {
+  if (!process.env.DEVTEAM_TEST) return false;
+  const listed = String(process.env.DEVTEAM_TEST_BROWSER_ALLOW ?? '').split(',').map((s) => s.trim()).filter((s) => /^\d{1,5}$/.test(s)).map(Number);
+  if (!listed.includes(port) || guardNeverPorts().has(port)) return false;
+  return addrs.length > 0 && addrs.every((a) => (a.v === 4 && a.n >> 24n === 127n) || (a.v === 6 && a.n === 1n));
+}
+// A socket to the address it checked (never a name: no second lookup), connected, or an error.
+function guardDial(address, port) {
+  return new Promise((resolve, reject) => {
+    let s;
+    try { s = net.connect({ host: address, port }); } catch (e) { return reject(e); }
+    const timer = setTimeout(() => { s.destroy(); reject(Object.assign(new Error('connect timed out'), { code: 'ETIMEDOUT' })); }, 30000);
+    const failed = (e) => { clearTimeout(timer); reject(e); };
+    s.once('error', failed);
+    s.once('connect', () => { clearTimeout(timer); s.off('error', failed); s.on('error', () => {}); resolve(s); });
+  });
+}
+// Headers that end at the guard, either way: the hop-by-hop ones and those Connection names.
+const GUARD_HOP = ['connection', 'proxy-connection', 'keep-alive', 'proxy-authorization', 'proxy-authenticate', 'te', 'trailer', 'upgrade', 'transfer-encoding'];
+function guardEndToEnd(headers) {
+  const drop = new Set([...GUARD_HOP, ...String(headers.connection ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)]);
+  return Object.fromEntries(Object.entries(headers).filter(([k]) => !drop.has(k.toLowerCase())));
+}
+// A plain request, sent on the socket it dialled (createConnection, no agent: with agent: false Node
+// would ignore it and dial the host itself), its answer streamed back.
+function guardForward(req, res, t, sock, fail) {
+  // the client may have left while the name resolved or the socket dialled: nothing to send it
+  if (req.socket?.destroyed || res.destroyed) return void sock.destroy();
+  const headers = { ...guardEndToEnd(req.headers), host: t.hostHeader };
+  // the body's framing goes out as it came, whatever Connection names (Node frames no body itself
+  // for GET, HEAD, DELETE, OPTIONS; its parser has already refused a request with both or neither)
+  if (req.headers['transfer-encoding']) headers['transfer-encoding'] = req.headers['transfer-encoding'];
+  else if (req.headers['content-length']) headers['content-length'] = req.headers['content-length'];
+  const up = http.request({ host: sock.remoteAddress, port: t.port, method: req.method, path: t.path, headers, createConnection: () => sock });
+  up.on('response', (ur) => {
+    // a status line Node reads but won't write (a control character, a code under 100) is the
+    // site's fault: a 502, never a throw out of this listener
+    try { res.writeHead(ur.statusCode, guardEndToEnd(ur.headers)); } catch {
+      ur.destroy();
+      up.destroy();
+      return void fail('the site sent an answer the guard could not pass on');
+    }
+    ur.on('error', () => res.destroy());
+    ur.pipe(res);
+  });
+  up.on('error', (e) => { if (res.headersSent) res.destroy(); else fail(e?.code ?? 'the site closed the connection'); });
+  res.on('close', () => { if (!res.writableFinished) { up.destroy(); sock.destroy(); } });
+  req.pipe(up);
+}
+// A CONNECT tunnel on the socket it dialled.
+function guardTunnel(client, head, sock) {
+  if (client.destroyed) return void sock.destroy();
+  client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+  if (head?.length) sock.write(head);
+  for (const [a, b] of [[client, sock], [sock, client]]) { a.on('error', () => b.destroy()); a.on('close', () => b.destroy()); a.pipe(b); }
+}
+// { refuse: { rule, address?, range? } }, { fail: why } (a 502) or { address } to dial. lookup is
+// dns.lookup, called once for a name.
+async function guardDecide(t, lookup) {
+  const named = guardNameRule(t.name);
+  if (named) return { refuse: { rule: named } };
+  const literal = guardAddr(t.name);
+  let addrs = literal ? [literal] : null;
+  if (!addrs) {
+    let list;
+    try { list = await new Promise((resolve, reject) => lookup(t.name, { all: true, verbatim: true }, (e, l) => (e ? reject(e) : resolve(l)))); } catch (e) { return { fail: `no address for it (${e?.code ?? 'lookup failed'})` }; }
+    // before any rule or the test exception: none, or one it can't read, never reaches a dial
+    if (!Array.isArray(list) || !list.length) return { fail: 'no address for it' };
+    addrs = [];
+    for (const x of list) {
+      const a = guardAddr(x?.address);
+      if (!a) return { refuse: { rule: 'special-purpose', address: String(x?.address) } };
+      addrs.push(a);
+    }
+  }
+  if (guardAllowed(t.port, addrs)) return { address: addrs[0].text };
+  for (const a of addrs) if (guardOwn(a)) return { refuse: { rule: 'own-interface', address: a.text } };
+  for (const a of addrs) { const range = guardRange(a); if (range) return { refuse: { rule: 'special-purpose', address: a.text, range } }; }
+  return { address: addrs[0].text };
+}
+const guardEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// The refusal page: plain words, and the browser@1 refusal object as JSON with every < escaped.
+function guardRefusal(rule, { asked, address, range } = {}) {
+  // an address as given (a resolver answer that couldn't be read) is 2 to 64 characters there
+  if (address !== undefined) address = String(address).slice(0, 64).padEnd(2, '?');
+  const at = address ? `${asked} (${address})` : asked;
+  const why = {
+    'own-name': `The supervisor's browser can't open ${asked}: it is this machine's own name.`,
+    gateway: `The supervisor's browser can't open ${asked}: it is this box's gateway, where the owner's controls are.`,
+    'own-interface': `The supervisor's browser can't open ${at}: it is an address of this machine.`,
+    'special-purpose': range ? `The supervisor's browser can't open ${at}: ${range} is not on the public internet.` : `The supervisor's browser can't open ${asked}: its address (${address}) could not be read, so it is refused.`,
+    'not-a-proxy-request': "This is the browser's proxy; it answers only proxy requests.",
+  }[rule].slice(0, 500);
+  const o = { browser: 1, rule, why };
+  if (rule !== 'not-a-proxy-request') o.host = asked;
+  if (address) o.address = address;
+  if (range) o.range = range;
+  const title = rule === 'not-a-proxy-request' ? 'Not a proxy request' : 'This page is blocked';
+  const body = `<!doctype html>\n<html lang="en">\n<head><meta charset="utf-8"><title>${title}</title></head>\n<body>\n<h1>${title}</h1>\n<p>${guardEsc(why)}</p>\n<script type="application/json" id="devteam-refusal">${JSON.stringify(o).replace(/</g, '\\u003c')}</script>\n</body>\n</html>\n`;
+  return { status: rule === 'not-a-proxy-request' ? 400 : 403, body };
+}
+const guardHead = (status, type, length) => `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\ncontent-type: ${type}\r\ncontent-length: ${length}\r\nconnection: close\r\n\r\n`;
+// An answer on a raw socket (a CONNECT's), then the socket closes.
+function guardSocketAnswer(sock, status, body, type = 'text/html; charset=utf-8') {
+  if (sock.destroyed) return;
+  sock.end(guardHead(status, type, Buffer.byteLength(body)) + body);
+}
+function guardAnswer(res, status, body, type = 'text/html; charset=utf-8') {
+  if (res.headersSent) return void res.destroy();
+  res.writeHead(status, { 'content-type': type, 'content-length': Buffer.byteLength(body), connection: 'close' });
+  res.end(body);
+}
+// The guard on 127.0.0.1: { port, close() }. browser serve starts it in-process; `browser-guard`
+// runs it alone.
+async function startBrowserGuard({ port = 0 } = {}) {
+  const dns = (await import('node:dns')).default;
+  const lookup = (...a) => dns.lookup(...a);
+  const server = http.createServer();
+  server.on('connection', (s) => s.on('error', () => {}));
+  // a head Node's own parser refuses (a backslash in a CONNECT authority, say) is no proxy request either
+  server.on('clientError', (e, s) => { if (!s.writable) return void s.destroy(); const r = guardRefusal('not-a-proxy-request'); guardSocketAnswer(s, r.status, r.body); });
+  // One request or CONNECT: decided, then refused, failed (502) or passed on. answer(status, body,
+  // type) writes the guard's own answer; pass(t, address) dials. Nothing it throws ends the guard:
+  // whatever goes wrong is a 502, never a pass.
+  const serve = async (method, target, answer, pass) => {
+    const t = guardTarget(method, target);
+    if (!t) { const r = guardRefusal('not-a-proxy-request'); return answer(r.status, r.body); }
+    const fail = (why) => answer(502, `The supervisor's browser couldn't reach ${t.asked}: ${why}\n`, 'text/plain; charset=utf-8');
+    try {
+      const d = await guardDecide(t, lookup);
+      if (d.refuse) { const r = guardRefusal(d.refuse.rule, { asked: t.asked, ...d.refuse }); return answer(r.status, r.body); }
+      if (d.fail) return fail(d.fail);
+      return await pass(t, d.address, fail);
+    } catch (e) { return fail(e?.code ?? 'the guard failed'); }
+  };
+  server.on('request', (req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
+    serve(req.method, req.url, (status, body, type) => guardAnswer(res, status, body, type), async (t, address, fail) => guardForward(req, res, t, await guardDial(address, t.port), fail)).catch(() => res.destroy());
+  });
+  server.on('connect', (req, sock, head) => {
+    sock.on('error', () => {});
+    // once the tunnel is open, a fault closes it: no answer is ever written into it
+    let open = false;
+    const answer = (status, body, type) => (open ? sock.destroy() : guardSocketAnswer(sock, status, body, type));
+    serve('CONNECT', req.url, answer, async (t, address) => { const up = await guardDial(address, t.port); open = true; guardTunnel(sock, head, up); }).catch(() => sock.destroy());
+  });
+  // Chrome tunnels ws: and wss: through CONNECT, so an Upgrade in absolute form is none of its own
+  server.on('upgrade', (req, sock) => {
+    sock.on('error', () => {});
+    if (!guardTarget(req.method, req.url)) { const r = guardRefusal('not-a-proxy-request'); return guardSocketAnswer(sock, r.status, r.body); }
+    guardSocketAnswer(sock, 501, "The supervisor's browser proxy tunnels WebSockets through CONNECT; it doesn't upgrade a request.\n", 'text/plain; charset=utf-8');
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });
+  return { port: server.address().port, close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };
+}
+async function cmdBrowserGuard() {
+  const p = flagStr('port');
+  const port = p === undefined ? 0 : Number(p);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) die('--port is a port number, 0 to 65535 (0: any free one)');
+  const g = await startBrowserGuard({ port });
+  out(JSON.stringify({ browser: 1, port: g.port }));
+}
+/* browser-guard end */
 
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
@@ -21932,6 +25265,7 @@ The graph (planning.md)
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
+  moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
 
 Checks and merging (quality.md)
@@ -21963,6 +25297,7 @@ Decide and act (supervisor.md, constitution.md)
   preview list [--json]           this instance's previews, with whether each answers
   preview url [<name>]            the link, as the owner will open it
   preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
+  browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
   preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
@@ -21975,12 +25310,12 @@ Decide and act (supervisor.md, constitution.md)
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   unread [--json]   what the owner wrote that the supervisor hasn't dealt with yet (answers, thread turns, decisions), oldest first, each with its ref   |   unread ack <ref> [<ref> …]   (supervisor) dealt with exactly those lines
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
-  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
+  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> --said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]   (a question asked with thread ask --turn) | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
   ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)
@@ -21990,7 +25325,7 @@ Decide and act (supervisor.md, constitution.md)
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)
   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] [--repo <link>] -- "<what>"   an act that is its own decision; --repo names the repo a release, staging or production act was in
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
-  correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
+  correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | correct <id> --from-turn <u-id> --said "<whole clauses>" [--at <n>] | correct <id> --from-chat --said "<owner's words>"   (supervisor, the owner's correction) | repair <id> --how undo|fix-ticket|none
   correct <goal-impact d-id> --reason r --impact 1-4   (owner) give the goal's impact yourself; it stands until you give another
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
 
@@ -22036,11 +25371,11 @@ Dashboard and releases
 // recover, machine and operator-thread write, and are allowed by name below: bringing a supervisor
 // back, the machine's digest, word to a supervisor and alert, and its own replies to the owner are
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
-const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
+const OPERATOR_READS = new Set(['search', 'status', 'moves', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings', 'unread']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
-  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
@@ -22048,8 +25383,9 @@ const COMMANDS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
-  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins,
+  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard,
 };
+/* dispatch start */
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
 // A cloud box's operator (process/operator.md) looks after the machine and reads every repo. Any other
@@ -22072,3 +25408,4 @@ else {
   // a command that set a failing exit code (preview start when the app died) answers from its exit
   Promise.resolve(r).then(() => { if (!process.exitCode) replyNow(); deliverNudges(); }, (e) => die(e?.message ?? String(e)));
 }
+/* dispatch end */

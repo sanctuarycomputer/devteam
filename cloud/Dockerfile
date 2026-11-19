@@ -2,13 +2,20 @@
 # devteam in the cloud: one container that is the owner's dev box. Its only public listener is the
 # gateway (gateway.mjs), which lets in a passkey registered when the box is claimed and passes the
 # owner to the machine's devteam hub, a terminal on the box's tmux server (where supervisors and
-# workers run), and each repo's dashboard on a subdomain of its own. What lasts lives on /data.
+# workers run), and each project at a host of its own. What lasts lives on /data.
 #
-# It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com: each
-# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and the terminal has
-# its own too (term.box.example.com). Signing in is at box.example.com/auth.
-# public.box.example.com, under the same wildcard, serves the artifacts the owner published, to
-# anyone, from the gateway's own copy (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default).
+# Until the gateway change (kit-277) ships, the project hosts below don't answer and the older addresses
+# do (<box> is the box's name): <port>.<box> for a project's dashboard, public.<box>/<project>/<slug>/ for
+# a public page, <box>/public/publish?port=... for Publish, and /box.json says box: 1.
+# It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com. Each project is
+# at <project>.box.example.com: its dashboard and every private view after sign-in, and its public
+# pages (what the owner published) at /<artifact>/ for anyone, from the gateway's own copy
+# (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default). Older releases' addresses (a port number
+# or public. in front of the box's name) no longer answer, and nothing redirects them. The wildcard
+# certificate covers every project host: no DNS record or certificate to add. A project's host is its
+# name, `project` in its settings.md (else its folder's name): a DNS label of a-z, 0-9 and -, not all
+# digits, not term, public or www, unique on the box. The terminal has its own host
+# (term.box.example.com). Signing in is at box.example.com/auth.
 # A session's running dev server gets a name of its own under the same wildcard, cool-tiger.box.example.com,
 # behind the owner's session; box.example.com/dev/ lists them. DEVTEAM_PREVIEWS=1 says this image's
 # gateway serves them, so the kit prints a link only then.
@@ -39,7 +46,8 @@ FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8
 
 ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1 DEVTEAM_PREVIEWS=1
 
-RUN apt-get update \
+RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
+ && apt-get update \
  && apt-get install -y --no-install-recommends git tmux tini curl ca-certificates gnupg openssh-client procps less vim-tiny jq unzip build-essential python3 \
  && rm -rf /var/lib/apt/lists/*
 
@@ -47,7 +55,7 @@ RUN apt-get update \
 # outside /data resets on a deploy, so only what needs root lives here: system libraries, and things
 # worth having prebuilt. Languages and their versions are per project, with mise, on the disk.
 # Postgres 14, 16 and 17 with pgvector, as on the owner's Mac; `box-pg` runs a server of any of them.
-RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/pgdg.asc \
+RUN curl -fsSL --retry 5 --retry-all-errors https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/pgdg.asc \
  && echo "deb [signed-by=/usr/share/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends postgresql-common \
@@ -83,20 +91,20 @@ RUN case "$(uname -m)" in \
       aarch64) sum=$TTYD_SHA256_AARCH64 ;; \
       *) echo "no ttyd for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/$TTYD_VERSION/ttyd.$(uname -m)" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/$TTYD_VERSION/ttyd.$(uname -m)" \
  && echo "$sum  /usr/local/bin/ttyd" | sha256sum -c - && chmod 755 /usr/local/bin/ttyd
 
 # gh, from its release tarball (only the binary; the image has no man). /usr/bin/gh stays, as a
 # link: `gh auth setup-git` wrote that path into ~/.gitconfig's credential helper, on the volume.
-ARG GH_VERSION=2.104.0
-ARG GH_SHA256_X86_64=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
-ARG GH_SHA256_AARCH64=cb34cefc6f4e77b90731374a2b737516bb8f3033c6ca46aa949e5344f68069e3
+ARG GH_VERSION=2.105.0
+ARG GH_SHA256_X86_64=79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f
+ARG GH_SHA256_AARCH64=b1278c75107423d818f1937fd92cafc9e5e9b606631568f68d7fb816f5885a02
 RUN case "$(uname -m)" in \
       x86_64) arch=amd64; sum=$GH_SHA256_X86_64 ;; \
       aarch64) arch=arm64; sum=$GH_SHA256_AARCH64 ;; \
       *) echo "no gh for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$arch.tar.gz" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$arch.tar.gz" \
  && echo "$sum  /tmp/gh.tgz" | sha256sum -c - \
  && tar -xzf /tmp/gh.tgz --no-same-owner -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_$arch/bin/gh" && rm /tmp/gh.tgz \
  && chmod 755 /usr/local/bin/gh && ln -sf /usr/local/bin/gh /usr/bin/gh
@@ -111,7 +119,7 @@ RUN case "$(uname -m)" in \
       aarch64) arch=arm64; sum=$MISE_SHA256_AARCH64 ;; \
       *) echo "no mise for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/$MISE_VERSION/mise-$MISE_VERSION-linux-$arch" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/$MISE_VERSION/mise-$MISE_VERSION-linux-$arch" \
  && echo "$sum  /usr/local/bin/mise" | sha256sum -c - && chmod 755 /usr/local/bin/mise
 
 # uv, which brings claude-swap the Python 3.12 it needs (Debian's is older)
@@ -123,7 +131,7 @@ RUN case "$(uname -m)" in \
       aarch64) sum=$UV_SHA256_AARCH64 ;; \
       *) echo "no uv for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$(uname -m)-unknown-linux-gnu.tar.gz" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$(uname -m)-unknown-linux-gnu.tar.gz" \
  && echo "$sum  /tmp/uv.tgz" | sha256sum -c - && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 && rm /tmp/uv.tgz
 
 # claude-swap: with it devteam rotates this box's Claude accounts on its own; its logins land in $HOME, on the volume
@@ -132,7 +140,7 @@ RUN UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_D
  && chmod -R a+rX /opt/uv
 
 # Claude Code (its own updater can't write to /usr/local)
-ARG CLAUDE_CODE_VERSION=2.1.326
+ARG CLAUDE_CODE_VERSION=2.1.328
 RUN npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION && npm cache clean --force
 
 # Two users. dev is the owner at the terminal, and every agent: home on the volume. gw runs only
@@ -735,11 +743,17 @@ EOF
 # dashboard whose hub port it names leaves that port alone. It comes with the boot that starts the
 # hub, so no image tells dashboards to step back without serving the hub itself.
 ENV DEVTEAM_IMAGE_HUB=4320
+# The platform stops this container when its memory reaches the cap, counting the page cache the
+# kernel could still drop (2026-11-17: five restarts in an hour at 31 of 32 GB, 11 GB of it cache,
+# while the kit counted 17). So the kit's memory ceiling, and machine status, count it too, all but
+# the inactive cache the kernel drops first (the working set; devteam.mjs machineMemory). ENV, like
+# the hub's port: the boot, dev's sessions and every dashboard get it (as_dev keeps the environment).
+ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.64.5
+ARG DEVTEAM_RELEASE=v0.65.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 

@@ -47,6 +47,8 @@ async function peekPage(t, { seed, fixture, name = 'peek' } = {}) {
   later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
+  // DEVTEAM_TEST_CPU_THROTTLE=n runs the page n times slower, as on a loaded runner
+  if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
   // no classic scrollbar: innerWidth is the window's right edge
   await p.send('Emulation.setScrollbarsHidden', { hidden: true });
   const size = (width, height) => p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
@@ -54,6 +56,11 @@ async function peekPage(t, { seed, fixture, name = 'peek' } = {}) {
   const evNav = (expr) => p.ev(expr).catch((e) => { if (/navigated or closed|Cannot find context|context was destroyed|Execution context/i.test(e.message)) return false; throw e; });
   const soon = (expr, what) => until(() => evNav(expr), what);
   const load = async (hash) => {
+    // Chrome keeps 50 entries a tab and, when full, prunes the oldest one left without a user gesture (every
+    // hash here is set by script). Over a whole test that can be the entry right under a peek, and its close
+    // then goes back past the page. Each visit starts the tab's history afresh, with this visit's about:blank
+    // right below it, so a close one entry too far still lands off the dashboard and fails
+    await p.send('Page.resetNavigationHistory');
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'about:blank');
     await p.send('Page.navigate', { url: url(hash) });
@@ -94,12 +101,39 @@ const RECORD = `(() => {
     cl.add = (...c) => { if (c.includes('peek-open') && !cl.contains('peek-open')) window.__closed = { transform: getComputedStyle(d).transform, width: d.getBoundingClientRect().width, hidden: d.hidden }; return add(...c); };
     // closing: at the moment peek-open goes, whether the drawer is shown and its slide out has begun
     // (getAnimations flushes the style), recorded as it happens rather than polled for afterwards
+    // and, just after peekHide's own end listener (added in a microtask queued here, inside peekHide before
+    // it adds end; the microtask runs once the closing handler or evaluate returns, before any frame), whether
+    // the slide out's own transitionend hid the drawer: never the safety net a second later. A stale end from
+    // the slide in (a transform transition still running) is skipped. And, for an end or cancel that came while
+    // the drawer was shown and a transform transition still ran on it (read in the capture phase, before the
+    // page's listeners): __hit, a leftover event from the slide in reached the page during its slide out; __cut,
+    // that event hid the drawer, a slide out cut short. Listeners left by a close that was reopened go at the next close or RECORD.
+    const slides = () => d.getAnimations().some((a) => a.transitionProperty === 'transform');
+    for (const ty of ['transitionend', 'transitioncancel']) addEventListener(ty, (e) => { if (e.target === d && e.propertyName === 'transform') window.__pre = { shown: !d.hidden, sliding: slides() }; }, true);
     cl.remove = (...c) => { const was = c.includes('peek-open') && cl.contains('peek-open'); const r = remove(...c);
-      if (was) window.__out = { hidden: d.hidden, scrim: document.getElementById('scrim').hidden, sliding: d.getAnimations().some((a) => a.transitionProperty === 'transform') }; return r; };
+      if (was) {
+        window.__out = { hidden: d.hidden, scrim: document.getElementById('scrim').hidden, sliding: slides() };
+        if (window.__endL) d.removeEventListener('transitionend', window.__endL);
+        if (window.__cutL) for (const ty of ['transitionend', 'transitioncancel']) d.removeEventListener(ty, window.__cutL);
+        window.__hit = false;
+        window.__cut = null;
+        queueMicrotask(() => {
+          const l = window.__endL = (e) => { if (e.target !== d || e.propertyName !== 'transform' || slides()) return; window.__endHidden = d.hidden; d.removeEventListener('transitionend', l); if (window.__endL === l) window.__endL = null; };
+          d.addEventListener('transitionend', l);
+          const cut = window.__cutL = (e) => { if (e.target !== d || e.propertyName !== 'transform' || !window.__pre?.shown || !window.__pre.sliding) return; window.__hit = true; if (d.hidden) window.__cut = e.type; };
+          for (const ty of ['transitionend', 'transitioncancel']) d.addEventListener(ty, cut);
+        });
+      }
+      return r; };
   }
+  if (window.__endL) { d.removeEventListener('transitionend', window.__endL); window.__endL = null; }
+  if (window.__cutL) { for (const ty of ['transitionend', 'transitioncancel']) d.removeEventListener(ty, window.__cutL); window.__cutL = null; }
+  window.__cut = null;
+  window.__hit = false;
   window.__tr.length = 0;
   window.__closed = null;
   window.__out = null;
+  window.__endHidden = null;
   return true;
 })()`;
 const TX = (m) => { const v = /^matrix\(([^)]+)\)$/.exec(m); return v ? Number(v[1].split(',')[4]) : NaN; };
@@ -299,7 +333,8 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.deepEqual(await style(`#drawer-body ${pillSel}`), boardPill, 'a ticket pill in the peek is styled as on Board');
     assert.deepEqual(await style('#drawer-body ol.steps li.now'), cardStep, 'the current step as on the goal card');
     assert.deepEqual(await style('#drawer-body ol.steps li'), cardStep0, 'the first step as on the goal card');
-    assert.ok(await p.ev("!!document.querySelector('#drawer-body ol.steps').closest('.no-shell')"), 'the stepper is fenced');
+    // the step bar is the shell's goalSteps on the card and in the peek alike (kit-90): not fenced
+    assert.ok(await p.ev("!document.querySelector('#drawer-body ol.steps').closest('.no-shell')"), 'the stepper is the shell\'s, not fenced');
     assert.ok(await p.ev(`!!document.querySelector('#drawer-body ${pillSel}').closest('.no-shell')`), 'the progress block is fenced');
     await closePeek();
   });
@@ -320,7 +355,80 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
       await soon("window.__tr.some((x) => x.type === 'transitionrun')", `${how}: the slide out runs`);
       assert.equal(await p.ev("window.__tr.find((x) => x.type === 'transitionrun').hidden"), false, `${how}: still shown when its transitionrun arrives`);
       await soon("window.__tr.some((x) => x.type === 'transitionend')", `${how}: the slide out ended`);
+      await soon('window.__endHidden !== null', `${how}: the slide out's own end heard`);
+      assert.equal(await p.ev('window.__endHidden'), true, `${how}: hidden by the slide's own end`);
       await soon(isClosed, `${how}: hidden once the slide ends`);
+    }
+  });
+
+  // A close during the slide in, or in the frame it ends, still slides out (kit-289): the slide in's own
+  // transitioncancel (or a late transitionend), sent with the next frame, must not hide the drawer at once.
+  // Each close clears __tr in its own task, so the first transitionrun read after it is the slide out's.
+  const slidesOut = async (what) => {
+    await soon("window.__tr.some((x) => x.type === 'transitionrun')", `${what}: the slide out runs`);
+    assert.equal(await p.ev("window.__tr.find((x) => x.type === 'transitionrun').hidden"), false, `${what}: shown when the slide out's transitionrun arrives`);
+    await soon(isClosed, `${what}: closed`);
+    assert.equal(await p.ev('window.__cut'), null, `${what}: not hidden while its slide out ran`);
+    await soon("window.__tr.some((x) => x.type === 'transitionend')", `${what}: the slide out ended`);
+    await soon('window.__endHidden !== null', `${what}: the slide out's own end heard`);
+    assert.equal(await p.ev('window.__endHidden'), true, `${what}: hidden by the slide's own end`);
+  };
+  // Open from Board and close from the task in which ready(a) first holds (a: the slide in's animation, or
+  // null once it is gone), polled from setTimeout tasks as a CDP evaluate or a key event lands: between frames.
+  const closeWhen = async (ready) => {
+    await p.ev("location.hash = '#board'");
+    await soon(isClosed, 'back on Board');
+    await p.ev(RECORD);
+    return p.ev(`new Promise((resolve) => {
+      const d = document.getElementById('drawer'), t0 = performance.now(), ready = ${ready};
+      let began = false;
+      location.hash = '#ticket/${T}';
+      (function poll() {
+        const a = d.getAnimations().find((x) => x.transitionProperty === 'transform') || null;
+        if (a) began = true;
+        if (began && ready(a)) { window.__tr.length = 0; document.getElementById('drawer-close').click(); return resolve(true); }
+        if (performance.now() - t0 > 5000) return resolve(false);
+        setTimeout(poll, 0);
+      })();
+    })`);
+  };
+
+  await t.test('slide out survives: a leftover cancel from the slide in', async () => {
+    await openPeek(`#ticket/${T}`);
+    await p.ev(RECORD);
+    const hidden = await p.ev(`(() => {
+      const d = document.getElementById('drawer');
+      window.__tr.length = 0;
+      document.getElementById('drawer-close').click();
+      d.dispatchEvent(new TransitionEvent('transitioncancel', { propertyName: 'transform', bubbles: true }));
+      return d.hidden;
+    })()`);
+    assert.equal(hidden, false, 'a leftover cancel from the slide in leaves the slide out running');
+    await slidesOut('leftover cancel');
+  });
+
+  await t.test('slide out survives: a close mid slide in', async () => {
+    // mid slide: drawn (its transitionrun sent) and 40-200 ms into its 280. A try counts once the slide in's
+    // cancel reached the page while the slide out ran (__hit). It is tried again when the poll missed the
+    // window, or when one slow frame on a loaded runner outlasted the shorter reversed slide out (over before
+    // Chrome sent its events, so nothing is left to cut short, and hiding then is right)
+    let hit = false;
+    for (let i = 0; i < 8 && !hit; i++) {
+      if (!(await closeWhen("(a) => !!a && window.__tr.some((x) => x.type === 'transitionrun') && a.currentTime >= 40 && a.currentTime <= 200"))) continue;
+      await soon(isClosed, 'closed');
+      hit = await p.ev('window.__hit');
+    }
+    assert.ok(hit, 'closed mid slide in, and its leftover cancel came while the slide out ran');
+    await slidesOut('mid slide in');
+  });
+
+  await t.test('slide out survives: a close in the frame the slide in ends', async () => {
+    for (let i = 1; i <= 5; i++) {
+      assert.ok(await closeWhen('(a) => !a'), `round ${i}: closed as the slide in ended`);
+      await soon("window.__tr.some((x) => x.type === 'transitionrun')", `round ${i}: the slide out runs`);
+      assert.equal(await p.ev("window.__tr.find((x) => x.type === 'transitionrun').hidden"), false, `round ${i}: shown when the slide out's transitionrun arrives`);
+      await soon(isClosed, `round ${i}: closed`);
+      assert.equal(await p.ev('window.__cut'), null, `round ${i}: not hidden while its slide out ran`);
     }
   });
 
@@ -360,6 +468,10 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon("document.getElementById('artifact-view').hidden && !document.body.classList.contains('overlay-open') && document.getElementById('scrim').hidden", 'the preview closed, overlay-open cleared');
   });
 
+  // the viewer's frame has loaded the artifact (a frame of its own process: the page hears it, as a load in the
+  // capture phase on the frame with a src); armed after each visit's load, before the viewer opens
+  const armLoad = () => p.ev("window.__avLoaded = false; if (!window.__avArmed) { window.__avArmed = true; document.addEventListener('load', (e) => { if (e.target.id === 'av-frame' && e.target.getAttribute('src')) window.__avLoaded = true; }, true); } true");
+  const frameLoaded = () => p.ev('window.__avLoaded === true');
   await t.test('the shared scrim: the viewer and a review show it and close on it; the viewer leaves a peek it opened over', async () => {
     const scrimShown = "(!document.getElementById('scrim').hidden && getComputedStyle(document.getElementById('scrim')).opacity === '1')";
     const scrimClick = async () => {
@@ -380,34 +492,112 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon(`!document.getElementById('review-view').hidden && ${scrimShown}`, 'the review over the scrim');
     await scrimClick();
     await soon("document.getElementById('review-view').hidden && document.getElementById('scrim').hidden && !document.body.classList.contains('overlay-open')", 'the review closed by the scrim');
-    // the viewer over a peek: closing it shows the peek again. Each viewer opens in a fresh visit: once a
-    // visit's viewer frame has loaded a page, the next page it loads is a history entry of its own, and
-    // the viewer's close (history.back()) moves the frame, not the hash
+    // the viewer over a peek: closing it shows the peek again (a fresh visit, so each case's history is short;
+    // see load())
     await load('#board');
     await openPeek(`#ticket/${T}`);
-    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
-    await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
-    await p.click('#av-close');
-    await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed');
-    assert.ok(await p.ev(isOpen), 'the peek is still open');
-    assert.ok(await p.ev(scrimShown), 'with its scrim');
-    await closePeek();
+    // DEVTEAM_TEST_FRAME_LATENCY_MS=n holds the viewer's frame back until after the close is pressed, the order
+    // CI's speed gives
+    const FL = Number(process.env.DEVTEAM_TEST_FRAME_LATENCY_MS) || 0;
+    const latency = (ms) => p.send('Network.emulateNetworkConditions', { offline: false, latency: ms, downloadThroughput: -1, uploadThroughput: -1 });
+    if (FL) { await p.send('Network.enable'); await latency(FL); }
+    // (taken off again however the section ends, so a later subtest's failure is never the knob's)
+    try {
+      await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+      await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
+      await p.click('#av-close');
+      await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed');
+      assert.ok(await p.ev(isOpen), 'the peek is still open');
+      assert.ok(await p.ev(scrimShown), 'with its scrim');
+      await closePeek();
+    } finally {
+      if (FL) await latency(0).catch(() => {});
+    }
     // the viewer over a review: closing it leaves the review's scrim dark (R1)
     await load('#library');
     await p.ev("location.hash = '#review-preview?path=review%2Fpage.html&ref=main'");
     await soon(`!document.getElementById('review-view').hidden && ${scrimShown}`, 'the review');
+    await armLoad();
     await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
     await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the review');
+    await until(frameLoaded, "the viewer's frame loaded");
     await p.click('#av-close');
     await soon("document.getElementById('artifact-view').hidden && location.hash.startsWith('#review-preview')", 'back to the review');
     await new Promise((r) => setTimeout(r, 400));
     assert.ok(await p.ev(`!document.getElementById('review-view').hidden && document.body.classList.contains('overlay-open') && ${scrimShown}`), 'the review keeps its scrim');
-    // (not closed here by the scrim: the viewer's frame left an entry in the joint history, so the review's
-    // history.back() would move that frame; a fresh visit instead)
+    // and the review's own close then lands on the page under it: the viewer's close, its frame loaded, left no
+    // frame entry for its history.back() to step instead (kit-303)
+    await scrimClick();
+    await soon("document.getElementById('review-view').hidden && document.getElementById('scrim').hidden && !document.body.classList.contains('overlay-open')", 'the review closed by the scrim after the viewer');
+    assert.equal(await p.ev('location.hash'), '#library', 'the review closed to #library');
+    await load('#board');
+  });
+
+  await t.test('a peek under a closed viewer closes to #board, and a reload shows the board (kit-303)', async () => {
+    // the viewer's frame has loaded before its ×, as a person's has ('the shared scrim' closes it loaded or not)
+    await load('#board');
+    await openPeek(`#ticket/${T}`);
+    await armLoad();
+    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+    await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
+    await until(frameLoaded, "the viewer's frame loaded");
+    await p.click('#av-close');
+    await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed by ×');
+    await closePeek();
+    // the peek's close lands on the page it was opened over, not on an entry the viewer's frame left
+    // (kit-303): a reload then shows the board, with no peek. closePeek waits for the slide out, not for the
+    // history.go it started, so the hash is read after the same settle as the history checks
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await p.ev('location.hash'), '#board', 'the peek closed to #board');
+    await p.ev('window.__beforeReload = true');
+    await p.send('Page.reload');
+    await soon("!window.__beforeReload && location.protocol === 'http:' && !!document.querySelector('main') && !document.querySelector('main.waiting')", 'the dashboard drawn again');
+    assert.equal(await p.ev('location.hash'), '#board', 'reloaded on #board');
+    const after = await p.ev(`({ closed: ${isClosed}, board: document.getElementById('board').classList.contains('on') })`);
+    assert.deepEqual(after, { closed: true, board: true }, 'the reload shows the board, not the ticket');
+    await load('#board');
+  });
+
+  await t.test('closing the viewer by its × adds no history entry once its frame has loaded (kit-303)', async () => {
+    // back to the peek's entry, with the viewer's entry still ahead of it: an entry the close pushed for the frame
+    // would have replaced that one, and the peek's next close would move only the frame
+    const nav = () => p.send('Page.getNavigationHistory');
+    await load('#board');
+    await openPeek(`#ticket/${T}`);
+    await armLoad();
+    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+    await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
+    await until(frameLoaded, "the viewer's frame loaded");
+    const open = await nav();
+    await p.click('#av-close');
+    await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed by ×');
+    await new Promise((r) => setTimeout(r, 400));
+    const shut = await nav();
+    assert.equal(shut.entries.length, open.entries.length, 'as many entries');
+    assert.equal(shut.currentIndex, open.currentIndex - 1, 'one back');
+    assert.match(shut.entries[open.currentIndex].url, /#artifact\//, "the viewer's entry is still ahead");
+    await closePeek();
+    await load('#board');
+  });
+
+  await t.test('closing the viewer by a route away adds no history entry once its frame has loaded (kit-303)', async () => {
+    // history.length goes up by the new hash's entry, and by none for the frame
+    await load('#library');
+    await armLoad();
+    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+    await soon("!document.getElementById('artifact-view').hidden", 'the viewer');
+    await until(frameLoaded, "the viewer's frame loaded");
+    const before = await p.ev('history.length');
+    await p.ev("location.hash = '#board'");
+    await soon("document.getElementById('artifact-view').hidden && document.getElementById('board').classList.contains('on')", 'the viewer closed by a route');
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await p.ev('history.length'), before + 1, "the route's entry only");
     await load('#board');
   });
 
   await t.test('the top-right button stays reachable beside the peek', async () => {
+    // a fresh visit: a kit-303 case that failed partway leaves no viewer or peek here
+    await load('#board');
     const m = () => p.ev(`(() => { ${SEEN}
       const tt = document.querySelector('.pagebar .tt'), tp = document.getElementById('tt-peek'), d = document.getElementById('drawer');
       const r = tp?.getBoundingClientRect(), tr = tt.getBoundingClientRect(), dr = d.getBoundingClientRect();
@@ -569,7 +759,8 @@ const inventory = (ids) => {
     row('goal', 'goal', 'every stored field', 'stored:goal'),
     row('goal', 'goal', 'outcome', 'dt:Outcome >> text:admins pay alone'),
     row('goal', 'goal', 'horizon', 'dt:Horizon'),
-    row('goal', 'goal', 'measure', 'dt:Measure >> text:cards taken a day'),
+    // the stored measure reads Measured by in the goal peek (kit-90 spec §5)
+    row('goal', 'goal', 'measure', 'dt:Measured by >> text:cards taken a day'),
     row('goal', 'goal', 'numbered milestones', `dt:Milestones >> ol li a[href^="#milestone/"]`),
     row('goal', 'goal', 'preconditions with "no plan yet"', 'dt:Preconditions >> ol >> text:no plan yet'),
     row('goal', 'goal', 'not in scope', 'dt:Not in scope >> text:refunds'),
@@ -1320,17 +1511,22 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
       assert.equal(await p.ev(`location.hash === ${J(page)} && !document.body.classList.contains('peek-open') && document.getElementById('drawer').hidden`), true, `${what}: no peek, still on ${page}`);
     };
     // the ⋯: on a ticket card and on a goal card, it only opens its menu
-    for (const [page, el] of [['#board', tcard], ['#goals', "document.querySelector('#goals-list .card.goal[data-open]')"]]) {
+    for (const [page, el] of [['#board', tcard], ['#goals', "document.querySelector('#goals-list .card.goal[data-open]:not(.upkeep)')"]]) {
       await on(page);
       await p.ev(`(() => { const d = ${el}.querySelector('details.menu'); d.open = false; window.__menu = d; d.querySelector('summary').click(); })(); void 0`);
       await still(page, `${page}: the ⋯`);
       assert.equal(await p.ev('window.__menu.open'), true, `${page}: the ⋯ opened its menu`);
       await p.ev('window.__menu.open = false; void 0');
     }
-    // a hold button on a goal card: its first Let go asks to confirm, and opens nothing
+    // a goal's hold control is in its peek (kit-90): its first Let go asks to confirm, and opens nothing else
     await on('#goals');
-    await p.ev(`(() => { const b = document.querySelector('#goals-list .card.goal[data-open] [data-hold-id][data-mode="let-go"]'); window.__hb = b; b.click(); })(); void 0`);
-    await still('#goals', 'Let go');
+    const gopen = await p.ev(`document.querySelector('#goals-list .card.goal[data-open]:not(.upkeep)').dataset.open`);
+    await p.ev(`location.hash = ${J(gopen)}; void 0`);
+    await opened(gopen, 'the goal\'s peek');
+    await soon(`!!document.querySelector('#drawer-body [data-hold-id][data-mode="let-go"]')`, 'the peek\'s Hold');
+    await p.ev(`(() => { const b = document.querySelector('#drawer-body [data-hold-id][data-mode="let-go"]'); window.__hb = b; b.click(); })(); void 0`);
+    await settle();
+    assert.equal(await p.ev(`decodeURIComponent(location.hash.slice(1)) === decodeURIComponent(${J(gopen)}) && DRAWER.kind === 'goal' && !document.getElementById('drawer').hidden`), true, 'Let go: still the goal\'s peek, nothing else opened');
     assert.equal(await p.ev('window.__hb.textContent'), 'Confirm let go', 'the hold button did its own thing');
     // a link to another record inside a card: it goes there, not to the card's own peek
     let found = null;

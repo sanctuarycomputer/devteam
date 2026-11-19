@@ -180,10 +180,14 @@ test('status says the machine\'s own CPU and memory caps, not the host\'s', () =
   fs.writeFileSync(path.join(cg, 'cpu.pressure'), 'some avg10=20.00 avg60=15.00 avg300=10.00 total=1\nfull avg10=14.00 avg60=12.60 avg300=9.00 total=1\n');
   fs.writeFileSync(path.join(cg, 'memory.max'), `${8 * G}\n`);
   fs.writeFileSync(path.join(cg, 'memory.current'), `${6 * G}\n`);
-  fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${3 * G}\nfile ${2 * G}\n`);
+  fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${3 * G}\nfile ${2 * G}\ninactive_file ${G}\n`);
   const r = machine(['machine', 'status'], { DEVTEAM_CGROUP: cg });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^machine: disk .*; memory 4\.0 GB in use of 8\.0 GB; cpus 2 \(all waiting 13% of the last minute\); load /m);
+  // a platform that stops the box by memory.current, cache and all (the box image says so): the
+  // working set, all but the inactive cache, the number the memory ceiling reads, and the split
+  const counts = { DEVTEAM_CGROUP: cg, DEVTEAM_MEMORY_COUNTS_CACHE: '1' };
+  assert.match(machine(['machine', 'status'], counts).stdout, /^machine: disk .*; memory 5\.0 GB in use of 8\.0 GB \(1\.0 GB of it page cache, and 1\.0 GB of inactive cache left out\); cpus 2 /m);
   // no caps (a laptop, or a cgroup that says max): the machine's own numbers
   fs.writeFileSync(path.join(cg, 'cpu.max'), 'max 100000\n');
   fs.writeFileSync(path.join(cg, 'memory.max'), 'max\n');
@@ -192,6 +196,8 @@ test('status says the machine\'s own CPU and memory caps, not the host\'s', () =
   const meminfo = path.join(cg, 'meminfo');
   fs.writeFileSync(meminfo, 'MemTotal:       8388608 kB\nMemFree:          524288 kB\nMemAvailable:    3145728 kB\n');
   assert.match(machine(['machine', 'status'], { DEVTEAM_CGROUP: cg, DEVTEAM_MEMINFO: meminfo }).stdout, /^machine: disk .*; memory 3\.0 GB free of 8\.0 GB; cpus /m);
+  // with no cap the setting changes nothing: MemAvailable already counts what the kernel can drop
+  assert.match(machine(['machine', 'status'], { ...counts, DEVTEAM_MEMINFO: meminfo }).stdout, /^machine: disk .*; memory 3\.0 GB free of 8\.0 GB; cpus /m);
 });
 
 // Every read the operator is allowed, against a repo with something in it: the log, git status and

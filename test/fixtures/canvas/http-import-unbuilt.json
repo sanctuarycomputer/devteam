@@ -1,0 +1,21 @@
+{
+  "fake": {
+    "canvases": {
+      "board": "doc-minimal.json"
+    }
+  },
+  "request": {
+    "method": "POST",
+    "path": "/api/canvas/import?slug=board",
+    "headers": {
+      "Origin": "$origin",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "key": "AbC123"
+    }
+  },
+  "status": 501,
+  "requestKind": null,
+  "responseKind": null
+}

@@ -310,8 +310,24 @@ test('the minute loop recreates home:hub only when it is gone', () => {
   assert.deepEqual(made(noServer.calls), []);
 });
 
+test('the image\'s downloads retry', () => {
+  const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').replace(/\\\n/g, ' ');
+  const curls = df.split('\n').filter((l) => /\bcurl\b/.test(l) && /https:\/\//.test(l));
+  assert.ok(curls.length >= 5, `at least 5 network curl lines, found ${curls.length}`);
+  for (const l of curls) {
+    assert.match(l, /--retry 5\b/, `--retry 5 on: ${l.slice(0, 80)}`);
+    assert.match(l, /--retry-all-errors\b/, `--retry-all-errors on: ${l.slice(0, 80)}`);
+  }
+  const conf = df.indexOf('Acquire::Retries "5"');
+  assert.ok(conf >= 0, 'apt is told to retry');
+  assert.ok(conf < df.indexOf('apt-get update'), 'the apt retry config is written before the first apt-get update');
+});
+
 test('the boot\'s hub lines sit where the boot needs them', () => {
-  assert.ok(fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n').includes('ENV DEVTEAM_IMAGE_HUB=4320'));
+  const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n');
+  assert.ok(df.includes('ENV DEVTEAM_IMAGE_HUB=4320'));
+  // the box's platform counts the page cache toward its cap, so the kit's memory ceiling does too
+  assert.ok(df.includes('ENV DEVTEAM_MEMORY_COUNTS_CACHE=1'));
   const d = devteamDev();
   const at = (pred, what) => { const i = d.findIndex(pred); assert.ok(i >= 0, what); return i; };
   at((l) => l.trim().startsWith('timeout 20 tmux new-session -d -s home -n operator'), 'the home session, in start_operator');
@@ -352,27 +368,132 @@ test('hub_window makes home:hub on a real tmux even when another session has a w
   } finally { kill(); }
 });
 
-// box-deploy.yml's step, as a release runs it (Actions' bash flags), from this checkout (box-pins runs
-// only in the kit's own repo: a remote naming sanctuarycomputer/devteam, as CI's checkout has) and with no hook: the stamp is checked before the hook is read, so even a run without
-// the secret refuses a release cut without its release-prep PR.
-test('box-deploy refuses a release whose stamp isn\'t its tag, before it reads the hook', () => {
-  const wf = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'box-deploy.yml'), 'utf8');
-  const lines = wf.split('\n');
-  const from = lines.indexOf('        run: |');
+// ===== box-deploy.yml's step, as a release runs it (Actions' bash flags) =====
+// In a fixture kit repo made from this checkout's tracked files (the working tree's copies, so the
+// change under test is in it), whose origin names sanctuarycomputer/devteam (box-pins runs only in
+// the kit's own repo), stamped and tagged v9.1.0: the minor every patch case builds on. Each case is
+// a branch off v9.1.0 with one commit (its edit and its stamp), tagged with its tag, origin/main at
+// it. curl, gh and node are the test's shims: curl and gh note each call; gh answers the run list
+// with $RUNS and the release list with $RELEASES; node stands in for box-pins changed with one of
+// image-changes@1's fixtures when $STUB_CHANGED names it, and is the real node otherwise.
+const DEPLOY_WF = path.join(REPO, '.github', 'workflows', 'box-deploy.yml');
+const deployStep = () => {
+  const wfLines = fs.readFileSync(DEPLOY_WF, 'utf8').split('\n');
+  const from = wfLines.indexOf('        run: |');
   assert.ok(from > 0, 'the deploy step\'s run block');
   const block = [];
-  for (const l of lines.slice(from + 1)) { if (l.trim() && !l.startsWith(' '.repeat(10))) break; block.push(l.slice(10)); }
-  const script = block.join('\n');
-  const stamp = /^ARG DEVTEAM_RELEASE=(v\S+)$/m.exec(fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8'))[1];
-  const env = { ...process.env, HOOK: '' };
-  for (const k of ['DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_TICKET', 'DEVTEAM_ROLE']) delete env[k];
-  const run = (tag) => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script], { cwd: REPO, encoding: 'utf8', env: { ...env, TAG: tag } });
-  const ok = run(stamp);
-  assert.equal(ok.status, 0, `${ok.stdout}${ok.stderr} (box-pins needs this checkout's remote to name sanctuarycomputer/devteam)`);
-  assert.match(ok.stdout, /no RENDER_DEPLOY_HOOK/);
-  const bad = run('v0.0.1');
-  assert.equal(bad.status, 1, bad.stdout + bad.stderr);
-  assert.match(bad.stdout, /^refusing v0\.0\.1: .*box-pins bump --release v0\.0\.1/m);
+  for (const l of wfLines.slice(from + 1)) { if (l.trim() && !l.startsWith(' '.repeat(10))) break; block.push(l.slice(10)); }
+  return block.join('\n');
+};
+const DEPLOY_ID = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+const deployEnv = () => { const e = { ...process.env, HOME: home, ...DEPLOY_ID }; for (const k of Object.keys(e)) if (/^(DEVTEAM_|GITHUB_|TMUX)/.test(k)) delete e[k]; return e; };
+const deployRepo = path.join(tmp, 'deploy-kit');
+const dg = (args) => execFileSync('git', args, { cwd: deployRepo, encoding: 'utf8', env: deployEnv() });
+const stampTo = (t, v) => { assert.match(t, /^ARG DEVTEAM_RELEASE=v\S+$/m); return t.replace(/^ARG DEVTEAM_RELEASE=v\S+$/m, `ARG DEVTEAM_RELEASE=${v}`); };
+const DOCKERFILE = path.join(deployRepo, 'cloud', 'Dockerfile');
+let deployBuilt = false;
+function deployKit() {
+  if (deployBuilt) return;
+  fs.mkdirSync(deployRepo);
+  dg(['init', '-q', '-b', 'main']);
+  dg(['remote', 'add', 'origin', 'git@github.com:sanctuarycomputer/devteam.git']);
+  for (const f of execFileSync('git', ['ls-files', '-z'], { cwd: REPO, encoding: 'utf8' }).split('\0').filter(Boolean)) {
+    const from = path.join(REPO, f), to = path.join(deployRepo, f);
+    const st = fs.lstatSync(from, { throwIfNoEntry: false });
+    if (!st) continue; // deleted in the working tree, not yet committed
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    if (st.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(from), to);
+    else fs.copyFileSync(from, to), fs.chmodSync(to, st.mode & 0o777);
+  }
+  fs.writeFileSync(DOCKERFILE, stampTo(fs.readFileSync(DOCKERFILE, 'utf8'), 'v9.1.0'));
+  dg(['add', '-A']);
+  dg(['commit', '-qm', 'v9.1.0']);
+  dg(['tag', 'v9.1.0']);
+  deployBuilt = true;
+}
+// a commit off v9.1.0 stamped stamp, with edits ({ path: (text) => text }), tagged tag; origin/main at it
+function deployRelease(name, { tag, stamp = 'v9.1.0', edits = {} }) {
+  deployKit();
+  dg(['checkout', '-q', '-f', '-B', name, 'v9.1.0']);
+  for (const [f, fn] of Object.entries(edits)) { const p = path.join(deployRepo, f); fs.writeFileSync(p, fn(fs.readFileSync(p, 'utf8'))); }
+  fs.writeFileSync(DOCKERFILE, stampTo(fs.readFileSync(DOCKERFILE, 'utf8'), stamp));
+  dg(['add', '-A']);
+  dg(['commit', '-q', '--allow-empty', '-m', name]);
+  dg(['tag', '-f', tag]);
+  dg(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+  return dg(['rev-parse', 'HEAD']).trim();
+}
+const deployShims = path.join(tmp, 'deploy-shims');
+fs.mkdirSync(deployShims);
+write(path.join(deployShims, 'curl'), '#!/bin/sh\necho "$*" >> "$CURLS"\necho 200\n');
+write(path.join(deployShims, 'gh'), [
+  '#!/bin/sh',
+  'for a in "$@"; do printf \'%s\\037\' "$a"; done >> "$GH_CALLS"; echo >> "$GH_CALLS"',
+  'case "$1 $2" in',
+  '  "run list") [ -n "${RUNS+x}" ] || exit 1; printf \'%s\' "$RUNS" ;;',
+  '  "release list") printf \'%s\' "$RELEASES" ;;',
+  '  *) exit 1 ;;',
+  'esac',
+  ''].join('\n'));
+write(path.join(deployShims, 'node'), [
+  '#!/bin/sh',
+  'echo "$2 $3 HOOK=${HOOK+set} GH_TOKEN=${GH_TOKEN+set}" >> "$NODE_ENVS"',
+  'if [ -n "${STUB_CHANGED:-}" ] && [ "$1" = docs/devteam/scripts/devteam.mjs ] && [ "$2" = box-pins ] && [ "$3" = changed ]; then',
+  '  for a in "$@"; do printf \'%s\\037\' "$a"; done >> "$STUB_CALLS"; echo >> "$STUB_CALLS"',
+  '  f="$FIXTURES/$STUB_CHANGED"',
+  '  if [ "$STUB_CHANGED" = cant-tell ]; then cat "$f.txt" >&2; else cat "$f.txt"; fi',
+  '  exit "$(cat "$f.exit")"',
+  'fi',
+  `exec '${process.execPath.replace(/'/g, "'\\''")}' "$@"`,
+  ''].join('\n'));
+for (const f of ['curl', 'gh', 'node']) fs.chmodSync(path.join(deployShims, f), 0o755);
+const DEPLOYED = [{ event: 'release', conclusion: 'success' }];
+const RELEASED = [{ tagName: 'v9.1.0', publishedAt: '2026-01-01T00:00:00Z' }];
+let deployRuns = 0;
+function deploy({ tag, sha, hook = 'https://hook.invalid/deploy?key=k', runs, stub } = {}) {
+  const d = path.join(tmp, `deploy-run-${++deployRuns}`);
+  fs.mkdirSync(d);
+  const f = (n) => path.join(d, n);
+  const env = { ...deployEnv(), PATH: `${deployShims}${path.delimiter}${process.env.PATH}`, HOME: d, TAG: tag, SHA: sha, PUBLISHED: '2026-06-01T00:00:00Z', HOOK: hook, GH_TOKEN: 'fake-token', GH_REPO: 'sanctuarycomputer/devteam', CURLS: f('curls'), GH_CALLS: f('gh'), STUB_CALLS: f('stub'), NODE_ENVS: f('node-envs'), FIXTURES: path.join(REPO, 'test', 'fixtures', 'image-changes'), RELEASES: JSON.stringify(RELEASED) };
+  if (runs !== undefined) env.RUNS = typeof runs === 'string' ? runs : JSON.stringify(runs);
+  if (stub) env.STUB_CHANGED = stub;
+  // as a file, as Actions runs a step (bash --noprofile --norc -eo pipefail {0}): a file and -c differ
+  // in what an expansion error skips
+  write(f('step.sh'), `${deployStep()}\n`);
+  const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', f('step.sh')], { cwd: deployRepo, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 600000 });
+  const read = (n) => (fs.existsSync(f(n)) ? fs.readFileSync(f(n), 'utf8').split('\n').filter(Boolean) : []);
+  const calls = (n) => read(n).map((l) => l.split('\x1f').slice(0, -1));
+  const gh = calls('gh');
+  // every run list the step asks for is of box-deploy's runs at one commit, up to 100 of them
+  for (const c of gh.filter((c) => c[0] === 'run' && c[1] === 'list')) {
+    const at = (flag) => c[c.indexOf(flag) + 1];
+    assert.ok(c.includes('--commit') && /^[0-9a-f]{40}$/.test(at('--commit')), `run list --commit <sha>: ${c.join(' ')}`);
+    assert.equal(at('-L'), '100', `run list -L 100: ${c.join(' ')}`);
+    assert.equal(at('--workflow'), 'box-deploy.yml', c.join(' '));
+  }
+  // the kit commands the step runs never get the hook or the token
+  for (const l of read('node-envs')) assert.match(l, / HOOK= GH_TOKEN=$/, `node ran with the hook or the token: ${l}`);
+  return { ...r, out: r.stdout + r.stderr, nodeRuns: read('node-envs'), curls: read('curls'), gh, runLists: gh.filter((c) => c[0] === 'run' && c[1] === 'list'), stubs: calls('stub') };
+}
+const v910 = () => (deployKit(), dg(['rev-parse', 'v9.1.0^{commit}']).trim());
+const appendTo = (s) => (t) => `${t}${s}`;
+
+// The stamp is checked before the hook is read, so even a run without the secret refuses a release
+// cut without its release-prep PR.
+test('box-deploy refuses a release whose stamp isn\'t its tag, before it reads the hook', () => {
+  const wf = fs.readFileSync(DEPLOY_WF, 'utf8');
+  const script = deployStep();
+  const sha = deployRelease('minor-stamped', { tag: 'v9.2.0', stamp: 'v9.2.0' });
+  const ok = deploy({ tag: 'v9.2.0', sha, hook: '' });
+  // a stamped minor gets past verify to the hook; without it the run fails red, so no patch can take
+  // a green run of it for a deploy
+  assert.equal(ok.status, 1, ok.out);
+  assert.match(ok.stdout, /^refusing v9\.2\.0: no RENDER_DEPLOY_HOOK secret, so the box can't deploy/m);
+  assert.deepEqual(ok.curls, []);
+  dg(['checkout', '-q', '-f', 'v9.1.0']);
+  const bad = deploy({ tag: 'v9.2.0', sha: v910(), hook: '' });
+  assert.equal(bad.status, 1, bad.out);
+  assert.match(bad.stdout, /^refusing v9\.2\.0: .*box-pins bump --release v9\.2\.0/m);
   assert.doesNotMatch(bad.stdout, /no RENDER_DEPLOY_HOOK/, 'refused before the hook is read');
   // what the image is built from: every path the Dockerfile copies; and every rule there was
   assert.match(script, /^inputs=\(cloud docs\/devteam\)$/m);
@@ -380,6 +501,126 @@ test('box-deploy refuses a release whose stamp isn\'t its tag, before it reads t
   const copies = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n').filter((l) => l.startsWith('COPY ')).map((l) => l.split(/\s+/).slice(1).filter((w) => !w.startsWith('--'))[0]).filter((src) => !src.startsWith('<<'));
   assert.ok(copies.length >= 3, copies.join(' '));
   for (const src of copies) assert.ok(/^(cloud|docs\/devteam)(\/|$)/.test(src), `${src} is an input`);
+});
+
+test('box-deploy: verify, then the tag, then a patch branch that never reads the hook; actions: read; the header says so', () => {
+  const wf = fs.readFileSync(DEPLOY_WF, 'utf8');
+  const L = deployStep().split('\n');
+  const at = (pred, what) => { const i = L.findIndex(pred); assert.ok(i >= 0, what); return i; };
+  const iVerify = at((l) => l.startsWith('env -u HOOK -u GH_TOKEN node docs/devteam/scripts/devteam.mjs box-pins verify --release "$TAG" ||'), 'verify');
+  const iParse = at((l) => l.startsWith('[[ $TAG =~ ^v([0-9]{1,9})\\.([0-9]{1,9})\\.([0-9]{1,9})$ ]] ||'), 'the tag parse');
+  const iPatch = at((l) => l === 'if ! [[ $z =~ ^0+$ ]]; then', 'the patch branch');
+  const iEnd = L.findIndex((l, i) => i > iPatch && l === 'fi');
+  // the first line that reads the hook (env -u HOOK only takes it away)
+  const iHook = at((l) => /\bHOOK\b/.test(l.replaceAll('env -u HOOK -u GH_TOKEN ', '')), 'the hook');
+  assert.ok(iVerify < iParse && iParse < iPatch && iPatch < iEnd && iEnd < iHook, `${iVerify} < ${iParse} < ${iPatch} < ${iEnd} < ${iHook}`);
+  const branch = L.slice(iPatch + 1, iEnd);
+  const text = branch.join('\n');
+  for (const need of ['gh run list --workflow box-deploy.yml --commit "$base" -L 100 --json event,conclusion', '.event == "release"', '.conclusion == "success"', 'env -u HOOK -u GH_TOKEN node docs/devteam/scripts/devteam.mjs box-pins changed --since "$minor" --to "$SHA" --smoke', 'exit 0']) assert.ok(text.includes(need), need);
+  assert.doesNotMatch(text.replaceAll('env -u HOOK -u GH_TOKEN ', ''), /HOOK|curl/i, 'nothing on the patch path reads the hook or calls curl');
+  // In a step, an expansion error ends only the command it is in, and the step runs on: the patch
+  // path is one subshell that only an exit 0 lets out as success, then an exit 1 nothing can skip.
+  const code = branch.filter((l) => l.trim() && !l.trim().startsWith('#')).map((l) => l.trim());
+  assert.equal(code[0], '(', 'the patch path opens a subshell');
+  assert.deepEqual(code.slice(-2), [') && exit 0', 'exit 1'], 'and ends in exit 1, so nothing falls through');
+  assert.ok(wf.includes('\n    permissions:\n      contents: read\n      actions: read\n    steps:\n'), 'the job reads contents and actions, nothing more');
+  assert.ok(wf.includes('\npermissions: {}\n'), 'the workflow grants nothing by default');
+  const header = wf.split('\n').filter((l, i, a) => a.slice(0, i + 1).every((x) => x.startsWith('#'))).map((l) => l.replace(/^#\s?/, '')).join(' ');
+  for (const said of ['A minor (vX.Y.0) or a major deploys the box', 'A patch (vX.Y.Z, Z > 0) never deploys the box', 'lands in place', 'Otherwise the job fails red without deploying']) assert.ok(header.includes(said), said);
+  assert.doesNotMatch(header, /every release deploys/);
+});
+
+test('box-deploy: a dashboard-only patch whose minor deployed lands in place, posting nothing', () => {
+  const sha = deployRelease('patch-dashboard', { tag: 'v9.1.1', edits: { 'docs/devteam/dashboard/index.html': appendTo('\n<!-- a dashboard fix -->\n') } });
+  const r = deploy({ tag: 'v9.1.1', sha, runs: DEPLOYED });
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.stdout, /^v9\.1\.1 is a patch: nothing the box image runs or relies on changed since v9\.1\.0, which the box runs; it lands in place/m);
+  assert.deepEqual(r.curls, [], 'no deploy');
+  assert.deepEqual(r.nodeRuns, ['box-pins verify HOOK= GH_TOKEN=', 'box-pins changed HOOK= GH_TOKEN='], 'verify and the classifier ran without the hook or the token');
+  assert.equal(r.runLists.length, 1);
+  assert.equal(r.runLists[0][r.runLists[0].indexOf('--commit') + 1], v910());
+});
+
+test('box-deploy: a patch that changes what the image runs, or can\'t be told, fails red and posts nothing', () => {
+  const sha = deployRelease('patch-classified', { tag: 'v9.1.1' });
+  const minor = deploy({ tag: 'v9.1.1', sha, runs: DEPLOYED, stub: 'minor' });
+  assert.equal(minor.status, 1, minor.out);
+  for (const l of fs.readFileSync(path.join(REPO, 'test', 'fixtures', 'image-changes', 'minor.txt'), 'utf8').trim().split('\n')) assert.ok(minor.stdout.includes(`${l}\n`), l);
+  assert.match(minor.stdout, /^refusing to deploy v9\.1\.1: a patch may not change what the box image runs; cut v9\.2\.0 for these$/m);
+  assert.deepEqual(minor.curls, []);
+  assert.deepEqual(minor.stubs, [['docs/devteam/scripts/devteam.mjs', 'box-pins', 'changed', '--since', 'v9.1.0', '--to', sha, '--smoke']]);
+  const cant = deploy({ tag: 'v9.1.1', sha, runs: DEPLOYED, stub: 'cant-tell' });
+  assert.equal(cant.status, 1, cant.out);
+  assert.match(cant.stdout, /^refusing v9\.1\.1: box-pins changed couldn't tell .*\(exit 2\); cut v9\.2\.0/m);
+  assert.match(cant.stderr, /^devteam: /m, 'the classifier\'s why reaches the log');
+  assert.deepEqual(cant.curls, []);
+  assert.equal(cant.stubs.length, 1);
+});
+
+test('box-deploy: a patch whose minor never deployed, or whose runs can\'t be read, fails red and posts nothing', () => {
+  const sha = deployRelease('patch-undeployed', { tag: 'v9.1.1' });
+  for (const runs of [[{ event: 'release', conclusion: 'failure' }], [], [{ event: 'push', conclusion: 'success' }], [{ event: 'release', conclusion: '' }], 'not json']) {
+    const r = deploy({ tag: 'v9.1.1', sha, runs, stub: 'minor' });
+    assert.equal(r.status, 1, `${JSON.stringify(runs)}: ${r.out}`);
+    assert.match(r.stdout, /^refusing v9\.1\.1: v9\.1\.0 never deployed, so the box isn't on it; cut v9\.2\.0$/m, JSON.stringify(runs));
+    assert.deepEqual(r.curls, [], JSON.stringify(runs));
+    assert.deepEqual(r.stubs, [], 'the classifier is never asked');
+    assert.equal(r.runLists.length, 1);
+  }
+  const unread = deploy({ tag: 'v9.1.1', sha, stub: 'minor' });
+  assert.equal(unread.status, 1, unread.out);
+  assert.match(unread.stdout, /^refusing v9\.1\.1: can't read v9\.1\.0's box-deploy runs/m);
+  assert.deepEqual(unread.curls, []);
+  assert.deepEqual(unread.stubs, []);
+  // a patch of a minor that has no tag here
+  const orphan = deployRelease('patch-no-minor', { tag: 'v9.3.1', stamp: 'v9.3.0' });
+  const o = deploy({ tag: 'v9.3.1', sha: orphan, runs: DEPLOYED, stub: 'minor' });
+  assert.equal(o.status, 1, o.out);
+  assert.match(o.stdout, /^refusing v9\.3\.1: there is no tag v9\.3\.0, so the box isn't on it; cut v9\.4\.0$/m);
+  assert.deepEqual(o.curls, []);
+  assert.deepEqual(o.gh, []);
+});
+
+test('box-deploy: a patch stamped with itself, or a tag too long to read, fails red and posts nothing', () => {
+  const sha = deployRelease('patch-self-stamped', { tag: 'v9.1.1', stamp: 'v9.1.1' });
+  const r = deploy({ tag: 'v9.1.1', sha, runs: DEPLOYED, stub: 'minor' });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.stdout, /v9\.1\.0/);
+  assert.match(r.stdout, /^refusing v9\.1\.1: .*cut v9\.2\.0/m);
+  assert.doesNotMatch(r.stdout, /box-pins bump --release v9\.1\.1/);
+  assert.deepEqual(r.curls, []);
+  assert.deepEqual(r.gh, [], 'refused at verify, before anything else');
+  // verify reads v9.1.18446744073709551616 as a patch of v9.1.0; bash's arithmetic would wrap it to 0
+  const huge = 'v9.1.18446744073709551616';
+  const hsha = deployRelease('patch-huge', { tag: huge });
+  const h = deploy({ tag: huge, sha: hsha, runs: DEPLOYED, stub: 'minor' });
+  assert.equal(h.status, 1, h.out);
+  assert.match(h.stdout, /^refusing v9\.1\.18446744073709551616: not vX\.Y\.Z/m);
+  assert.deepEqual(h.curls, []);
+  assert.deepEqual(h.gh, []);
+  assert.deepEqual(h.stubs, []);
+});
+
+test('box-deploy: a patch whose Z ends in 0 is a patch, and lands in place without deploying', () => {
+  const sha = deployRelease('patch-ten', { tag: 'v9.1.10' });
+  const r = deploy({ tag: 'v9.1.10', sha, runs: DEPLOYED, stub: 'patch' });
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.stdout, /^v9\.1\.10 is a patch: .*lands in place/m);
+  assert.deepEqual(r.curls, []);
+  assert.deepEqual(r.stubs, [['docs/devteam/scripts/devteam.mjs', 'box-pins', 'changed', '--since', 'v9.1.0', '--to', sha, '--smoke']]);
+});
+
+test('box-deploy: a minor and a major still deploy, once, at their commit', () => {
+  for (const tag of ['v9.2.0', 'v10.0.0']) {
+    const sha = deployRelease(`deploy-${tag}`, { tag, stamp: tag, edits: { 'cloud/gateway.mjs': appendTo('\n// a gateway change\n') } });
+    const r = deploy({ tag, sha, runs: DEPLOYED, stub: 'minor' });
+    assert.equal(r.status, 0, `${tag}: ${r.out}`);
+    assert.equal(r.curls.length, 1, `${tag}: one deploy`);
+    assert.ok(r.curls[0].endsWith(` https://hook.invalid/deploy?key=k&ref=${sha}`), r.curls[0]);
+    assert.match(r.stdout, new RegExp(`^Render answered 200 for ${sha}$`, 'm'));
+    assert.deepEqual(r.runLists, [], 'a minor never asks for the runs');
+    assert.deepEqual(r.stubs, [], 'nor the classifier');
+  }
 });
 
 test('after the first deploy, a supervisor only an older image\'s ages still named stays stopped', { skip: !hasTmux || skipOld() }, () => {
@@ -556,7 +797,7 @@ case $cmd in
 esac
 `);
 write(path.join(loopFakes, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
-write(path.join(loopFakes, 'flock'), '#!/bin/sh\necho "$*" >> "$HOME/.flocks"\n[ -z "$LOCK_HELD" ]\n');
+write(path.join(loopFakes, 'flock'), '#!/bin/sh\nfor a; do printf \'%s\\037\' "$a" >> "$HOME/.flocks"; done; echo >> "$HOME/.flocks"\n[ -z "$LOCK_HELD" ]\n');
 write(path.join(loopFakes, 'node'), '#!/bin/sh\n[ -z "$STOP_DURING" ] || : > "$HOME/.box/stopping"\ncase $* in *"settings --get tmux_session"*) cat .session 2>/dev/null || echo null ;; esac\n');
 write(path.join(loopFakes, 'box-recover'), '#!/bin/sh\necho ran >> "$HOME/.recovers"\n');
 for (const f of ['tmux', 'timeout', 'flock', 'node', 'box-recover']) fs.chmodSync(path.join(loopFakes, f), 0o755);
@@ -727,7 +968,7 @@ test('the minute loop brings back a lost tmux server as a boot does, from the li
   assert.equal(recovers(), before, 'none started');
   const owed = path.join(h, '.box', 'recover.owed');
   assert.ok(fs.existsSync(owed), 'owed');
-  assert.ok(!read(path.join(h, '.flocks')).includes('-w'), 'the loop never waits on the lock');
+  assert.ok(!read(path.join(h, '.flocks')).split('\n').some((l) => l.split('\x1f').some((a) => /^-[A-Za-z]*w/.test(a) || (a.startsWith('--') && ((n) => n !== '' && ('wait'.startsWith(n) || 'timeout'.startsWith(n)))(a.slice(2).split('=')[0])))), 'the loop never waits on the lock');
   state({ pid: 905, home: ['operator', 'hub'], panes: '' });
   turn({ LOCK_HELD: '1' });
   assert.equal(recovers(), before, 'still held: still owed');
