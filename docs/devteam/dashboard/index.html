@@ -436,6 +436,25 @@ try {
   .sugg-e { font-size: 12px; color: var(--green-fg); margin-top: 2px; }
 
 /* css-efficiency end */
+/* css-autonomy-pages start */
+  /* kit-93: the Autonomy pages. A page's cards stack with the grid's gap; its tables scroll inside their card */
+  #trust > .card + .card { margin-top: var(--gap); }
+  .tbl-wrap { overflow-x: auto; min-width: 0; }
+  .trust-card .stat > b { display: block; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .trust-card .trust-missing { margin: 10px 0 0; }
+  /* a kind's peek: its levels, the one it is on marked, any above its limit faded; its evidence rows open */
+  .lvls { display: flex; flex-direction: column; }
+  .lvl { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+  .lvl:last-child { border-bottom: 0; }
+  .lvl .t { flex: 1; min-width: 0; color: var(--fg-2); }
+  .lvl.now .t { color: var(--fg); font-weight: 600; }
+  .lvl.off { opacity: .55; }
+  .cls-ev .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .cls-ev .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .cls-ev .rowline[data-open]:hover .t, .cls-ev .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .cls-ev .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+
+/* css-autonomy-pages end */
 /* css-progress start */
   /* progress */
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
@@ -1253,13 +1272,7 @@ try {
 
 <!-- html-loop end -->
 <!-- html-trust start -->
-  <section id="trust" class="no-shell" data-page="trust">
-    <h2>Trust Ladder <span class="sub">which of your decisions the supervisor may make, and how it earned or lost that</span></h2>
-    <p class="loop-intro">Some of your decisions can be handed to the supervisor one step at a time as it keeps recommending what you'd have chosen: first it asks, then it asks with a default, then it decides and tells you. A correction on one of its calls drops that kind back to asking. More trust is always your answer to a question in the Inbox.</p>
-    <div class="scroll"><table id="trust-table"></table></div>
-    <h3 style="margin-top:14px">How the rungs moved</h3>
-    <div class="feed" id="trust-history"></div>
-  </section>
+  <section id="trust" data-page="trust"></section>
 <!-- html-trust end -->
 
 <!-- html-efficiency start -->
@@ -2003,6 +2016,171 @@ function navCounts(d) {
   const down = (d.sensors || []).filter((m) => m.state === 'down');
   const fs = d.metrics?.findings || [];
   set('n-sensors', down.length ? `${down.length} down` : (fs.length || ''), down.length > 0 || fs.some((f) => f.severity === 'high'));
+}
+// A page's tables (plan D2): each sits in its own <div data-tbl="<page>:<name>">, its rows ({ cells, sort, open })
+// kept in TBL_ROWS by that key and its sort in TBL_SORT (kept across redraws). After each write of the page's
+// HTML, bindPageTables binds every wrapper: a header sorts and redraws the page, a row opens its open hash.
+const TBL_SORT = new Map();
+const TBL_ROWS = new Map();
+function pageTable(key, cols, rows) {
+  TBL_ROWS.set(key, rows);
+  return `<div class="tbl-wrap" data-tbl="${esc(key)}">${dbTable(cols, rows, { sort: TBL_SORT.get(key) ?? null })}</div>`;
+}
+function bindPageTables(root, redrawPage) {
+  for (const w of root.querySelectorAll('[data-tbl]')) {
+    const key = w.dataset.tbl;
+    bindDbTable(w, {
+      onSort: (col) => {
+        TBL_SORT.set(key, nextSort(TBL_SORT.get(key), col));
+        redrawPage();
+        // the page was written again: focus back on the header that sorted it
+        root.querySelector(`[data-tbl="${CSS.escape(key)}"] button.sort[data-col="${col}"]`)?.focus();
+      },
+      onOpen: (i) => { const open = TBL_ROWS.get(key)?.[i]?.open; if (open) location.hash = open; },
+    });
+  }
+}
+// ---- Trust (kit-93): the Trust Score card, the kinds of decision by plain name, How the levels moved ----
+// The levels in the design's words (the kit's RUNG_PLAIN; RUNG_WORDS stays for the pages that use it). A kind
+// is named by its class_name, never its class id (which sits only in a row's hash).
+const TRUST_LEVELS = { 1: 'Asks you first', 2: 'Asks, goes ahead at a deadline', 3: 'Decides and tells you' };
+const trustName = (t) => t?.class_name || cap(t?.about || '') || 'A kind of decision';
+const trustLevel = (r) => TRUST_LEVELS[r] ?? '–';
+const trustAgreed = (t) => (effNum(t.agreement) ? `${Math.round(t.agreement * 100)}% of the last ${(t.agreement_questions || []).length}` : '–');
+const trustCorrected = (t) => (t.corrections ? `${t.corrections} time${t.corrections > 1 ? 's' : ''}` : 'never');
+const TRUST_READY = '<span class="badge good" title="Enough answers went with its recommendation to ask you to raise it">ready to ask for more</span>';
+// the hash of a call by its id's kind: an act, a decision or a question; null for any other
+const callHash = (id) => { const s = String(id ?? ''); const k = /^a-/.test(s) ? 'act' : /^d-/.test(s) ? 'decision' : /^q-/.test(s) ? 'q' : null; return k ? `${k}/${encodeURIComponent(s)}` : null; };
+// Kinds of decision: a row a kind, opening its peek (class/<id>)
+function trustRows(trust) {
+  return (trust || []).map((t) => ({
+    cells: [esc(trustName(t)), `${esc(trustLevel(t.rung))}${t.can_ask ? ` ${TRUST_READY}` : ''}`, esc(trustLevel(t.ceiling)), esc(trustAgreed(t)), esc(trustCorrected(t))],
+    sort: [trustName(t), t.rung ?? null, t.ceiling ?? null, effNum(t.agreement) ? t.agreement : null, t.corrections ?? 0],
+    open: t.class ? `class/${encodeURIComponent(t.class)}` : null,
+  }));
+}
+// How the levels moved: every move of every kind, capped at its ceiling, newest first, at most 40; a row opens
+// the question that moved it (your answer) or the call you corrected
+function levelMoves(trust) {
+  return (trust || []).flatMap((t) => (t.history || []).map((e) => ({ t, e, rung: effNum(t.ceiling) ? Math.min(e.rung, t.ceiling) : e.rung })))
+    .sort((a, b) => String(b.e.at ?? '').localeCompare(String(a.e.at ?? ''))).slice(0, 40)
+    .map(({ t, e, rung }) => {
+      const why = e.by === 'correction' ? `your correction${e.why ? `: ${e.why}` : ''}` : e.by === 'answer' ? 'your answer' : words(e.by);
+      return {
+        cells: [esc(trustName(t)), esc(trustLevel(rung)), esc(why), e.at ? esc(when(e.at)) : ''],
+        sort: [trustName(t), rung ?? null, why, e.at ?? null],
+        open: e.by === 'answer' ? (e.id ? `q/${encodeURIComponent(e.id)}` : null) : callHash(e.id),
+      };
+    });
+}
+// A kind's evidence since it last moved (its newest history entry; all of it when it never moved): the answered
+// questions its agreement counts and its calls since its last correction, each looked up in what /api/data holds
+// (answered, acts, decisions). An id none of them holds is kept, as "a question" or "a call" with no date.
+function classEvidence(t, ooda) {
+  const since = (t?.history || []).reduce((m, e) => (e.at && e.at > m ? e.at : m), '');
+  const answered = new Map((ooda?.answered || []).map((q) => [q.id, q]));
+  const acts = new Map((ooda?.acts || []).map((a) => [a.id, a]));
+  const calls = new Map((ooda?.decisions || []).filter((r) => r.kind === 'decision' || r.kind === 'act').map((r) => [r.id, r]));
+  const qs = (t?.agreement_questions || []).map((id) => {
+    const q = answered.get(id);
+    return { what: q?.question || 'a question', kind: q ? (q.agreed_by_owner ? 'Agreed' : 'Not agreed') : null, at: q?.answered_at ?? null, open: `q/${encodeURIComponent(id)}` };
+  });
+  const cs = (t?.uncorrected_acts || []).map((id) => {
+    const a = acts.get(id), r = calls.get(id);
+    return { what: a?.what || r?.what || 'a call', kind: 'Call', at: a?.created_at ?? r?.at ?? null, open: a ? `act/${encodeURIComponent(id)}` : r ? `${r.kind}/${encodeURIComponent(id)}` : callHash(id) };
+  });
+  return [...qs, ...cs].filter((x) => !x.at || !since || x.at > since).sort((a, b) => String(b.at ?? '').localeCompare(String(a.at ?? '')));
+}
+// The Trust Score card's charts, drawn at the width they get: the score line and a bar a week split three ways
+let TRUST_WEEKS = [];
+const TRUST_SPLIT = [['alone', 'decided alone'], ['asked', 'asked you'], ['corrected', 'corrected']];
+function trustSplitBars(weeks, W = 560) {
+  const n = weeks.length, val = (w, k) => (effNum(w?.[k]) && w[k] > 0 ? w[k] : 0);
+  const tot = (w) => TRUST_SPLIT.reduce((s, [k]) => s + val(w, k), 0);
+  const max = Math.max(0, ...weeks.map(tot));
+  if (!n || !max) return effNone();
+  const H = 96, slot = W / n, bw = Math.max(1, slot - 6);
+  return `<svg class="split" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Decisions each week: decided alone, asked you, corrected">${weeks.map((w, i) => {
+    let y = H - 14;
+    return TRUST_SPLIT.map(([k, l], j) => { const v = val(w, k); if (!v) return ''; const h = ((H - 24) * v) / max; y -= h;
+      return `<rect data-i="${i}" x="${(i * slot).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" style="fill:${EFF_COLORS[j]}"><title>${esc(`${weekName(i, n)}: ${l} ${v} of ${tot(w)}`)}</title></rect>`; }).join('');
+  }).join('')}<text x="0" y="${H - 2}" class="lc-t">12 weeks ago</text><text x="${W - 6}" y="${H - 2}" text-anchor="end" class="lc-t">this week</text></svg>
+    <div class="legend small">${TRUST_SPLIT.map(([k, l], j) => `<span><i style="border-top-color:${EFF_COLORS[j]}"></i>${esc(l)} ${esc(val(weeks[n - 1], k))}</span>`).join('')}</div>`;
+}
+FIT_DRAW['trust-score'] = (el, W) => scoreLine(TRUST_WEEKS.map((w) => (effNum(w.score) ? w.score : null)), W, { min: 0, max: 100 });
+FIT_DRAW['trust-split'] = (el, W) => trustSplitBars(TRUST_WEEKS, W);
+// Score: this and last week's score, the line, a sparkline a count, the split, the lessons and the week's record
+function trustScore(a) {
+  const d = a.decisions || {}, weeks = Array.isArray(d.weeks) ? d.weeks : [], w = d.this_week || weeks[weeks.length - 1] || {};
+  TRUST_WEEKS = weeks;
+  const sc = (x) => (effNum(x) ? `${x}%` : '–'), num = (x) => (effNum(x) ? String(+x.toFixed(2)) : '–');
+  const col = (f) => weeks.map((x) => { const y = f(x); return effNum(y) ? y : null; });
+  const rec = w.with_recommendation || {};
+  const counts = [
+    ['decided alone', num(w.alone), col((x) => x.alone)],
+    ['asked you', num(w.asked), col((x) => x.asked)],
+    ['corrected', num(w.corrected), col((x) => x.corrected)],
+    ['changes merged per question answered', num(w.merged_per_answer), col((x) => x.merged_per_answer)],
+    ['questions asked again', effNum(w.asked_again) ? `${w.asked_again} (target 0)` : '–', col((x) => x.asked_again)],
+    ['hours waiting on you', num(w.hours_waiting), col((x) => x.hours_waiting)],
+    ['answers that went with the recommendation', effNum(rec.count) && effNum(rec.of) ? `${rec.count} of ${rec.of}${effNum(rec.share) ? ` · ${Math.round(rec.share * 100)}%` : ''}` : '–', col((x) => x.with_recommendation?.share)],
+  ];
+  const links = ['<a class="linkish" href="#loop?lt=orient&kind=lesson">the lessons it counted</a>', w.record ? `<a class="linkish" href="#learning/${esc(encodeURIComponent(w.record))}">this week's learning record</a>` : ''].filter(Boolean);
+  // the charts' data in their attributes, so new data is a new card (renderTrust compares the html)
+  const sig = esc(JSON.stringify(weeks.map((x) => [x.score, x.alone, x.asked, x.corrected])));
+  return `<div class="score"><b>${sc(d.score?.this_week)}</b><span class="dim">last week ${sc(d.score?.last_week)}</span></div>
+    <p class="score-w">decisions made without asking that you didn't correct · ${links.join(' · ')}</p>
+    <div class="score-mod"><h4 class="props-h">The score, 12 weeks</h4><div class="fit" data-fit="trust-score" data-v="${sig}"></div></div>
+    <div class="score-mod score-counts">${counts.map(([k, v, s]) => `<div class="stat mini"><span class="k">${esc(k)}</span><b>${esc(v)}</b>${spark(s, k)}</div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">Each week</h4><div class="fit" data-fit="trust-split" data-v="${sig}"></div></div>`;
+}
+const trustStat = (v, k) => `<div class="stat"><b>${esc(v)}</b><span class="dim">${esc(k)}</span></div>`;
+const trustCount = (x) => (effNum(x) ? String(x) : '–');
+function trustScoreCard(a) {
+  const tr = a?.trust || {}, se = a?.senses || {}, missing = Array.isArray(se.missing) ? se.missing : [];
+  const trust = `<div class="eff-parts">${trustStat(`${trustCount(tr.own)} of ${trustCount(tr.kinds)}`, 'kinds of decision decided on their own')}${trustStat(`${trustCount(tr.raised)} raised, ${trustCount(tr.dropped)} dropped`, 'this week')}</div>`;
+  const senses = `<div class="eff-parts">${[['needed', se.needed], ['has', se.has], ['working', se.working]].map(([k, v]) => `<div class="stat"><span class="k">${k}</span><b>${esc(trustCount(v))}</b></div>`).join('')}</div>
+    <p class="score-w trust-missing">${missing.length ? `Missing: ${esc(missing.join(', '))}` : 'None missing'}</p>`;
+  return `<div class="card eff-card trust-card">${cardHead('shield-check', 'Trust Score', { extra: '<span class="muted">this week</span>' })}${
+    effSection('Score', a ? trustScore(a) : effNone())}${effSection('Trust', a ? trust : effNone())}${effSection('Senses', a ? senses : effNone())}</div>`;
+}
+// The page, written into #trust only when its HTML changed, so a redraw keeps focus and a pin's element
+function renderTrust(d) {
+  const trust = d.ooda?.trust || [];
+  const html = `${trustScoreCard(d.autonomy || null)}<div class="card flush">${cardHead('shield-check', 'Kinds of decision')}${
+    pageTable('trust:kinds', ['Kind of decision', 'Now', 'At most', 'Agreed with you', 'Corrected'], trustRows(trust))}</div><div class="card flush">${cardHead('history', 'How the levels moved')}${
+    pageTable('trust:moves', ['Kind of decision', 'To', 'Why', 'When'], levelMoves(trust))}</div>`;
+  const el = $('trust');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
+  el.innerHTML = html;
+  bindPageTables(el, () => renderTrust(DATA));
+  fitCharts();
+}
+// A kind's peek (#class/<id>, home Trust): read-only, from DATA.ooda.trust (the server has no class peek, so it
+// is marked missing, as a Library item's is). Its properties (no ID row: the class id never shows), its three
+// levels with the one it is on marked, and the evidence since it last moved, each row opening its record.
+function openClass(id) {
+  drawerFor('class', id);
+  PEEKS.set(peekKey('class', id), { error: 'not a record', missing: true });
+  const t = (DATA?.ooda?.trust || []).find((x) => x.class === id);
+  if (!t) return notFound('class', id, null, 'No kind of decision by that name.', { noRecord: true });
+  const last = (t.history || []).reduce((m, e) => (e.at && (!m || e.at > m.at) ? e : m), null);
+  const rows = [
+    attrRow('Now', `${esc(trustLevel(t.rung))}${t.can_ask ? ` ${TRUST_READY}` : ''}`),
+    attrRow('At most', esc(trustLevel(t.ceiling))),
+    attrRow('Since', last ? esc(when(last.at)) : 'never moved'),
+    attrRow('Agreed with you', esc(trustAgreed(t))),
+    attrRow('Corrected', esc(trustCorrected(t)), 'How many times you corrected one of its calls.'),
+    attrRow('How it changes', 'Shift+click it and say so in a thread'),
+  ].filter(Boolean);
+  const levels = [1, 2, 3].map((r) => `<div class="lvl${r === t.rung ? ' now' : ''}${r > t.ceiling ? ' off' : ''}"><span class="t">${esc(TRUST_LEVELS[r])}</span>${
+    r === t.rung ? '<span class="badge low">now</span>' : r > t.ceiling ? '<span class="muted">beyond its limit</span>' : ''}</div>`).join('');
+  const ev = classEvidence(t, DATA?.ooda);
+  const evHtml = ev.length ? `<div class="rows cls-ev">${ev.map((x) => `<div class="rowline"${x.open ? ` data-open="${esc(x.open)}" tabindex="0" role="link"` : ''}><span class="dot ${x.kind === 'Agreed' ? 'green' : x.kind === 'Not agreed' ? 'amber' : 'blue'}"></span><span class="t">${esc(x.what)}</span><span class="r">${
+    esc([x.kind === 'Call' ? '' : x.kind, x.at ? when(x.at) : ''].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>` : effNone();
+  showDrawer(`<h2 id="drawer-title">${esc(trustName(t))}</h2><section class="attrs">${props(rows)}</section>${psect('Levels', `<div class="lvls">${levels}</div>`)}${psect('Since it last moved', evHtml)}`);
 }
 /* autonomy-pages end */
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
@@ -4139,13 +4317,7 @@ function renderOoda(o) {
 
   /* ooda-orient end */
   /* ooda-trust start */
-  // Trust Ladder
-  $('trust-table').innerHTML = '<tr><th>Kind of decision</th><th>Now</th><th>At most</th><th>Agreed with you</th><th>Corrected</th></tr>' + o.trust.map((t) => `
-    <tr><td>${esc(cap(t.about || words(t.class)))}<div class="muted small">${esc(t.class)}</div></td><td>${esc(RUNG_WORDS[t.rung])}</td><td>${esc(RUNG_WORDS[t.ceiling])}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}% of the last ${esc(t.agreement_questions.length)}`}${t.can_ask ? '<div><span class="badge good">ready to ask you for more trust</span></div>' : ''}</td><td>${t.corrections ? `${esc(t.corrections)} time${t.corrections > 1 ? 's' : ''}` : 'never'}</td></tr>`).join('');
-
-  const moves = (o.trust || []).flatMap((t) => (t.history || []).map((e) => ({ ...e, rung: Math.min(e.rung, t.ceiling), class: t.class, about: t.about }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
-  $('trust-history').innerHTML = moves.length ? moves.map((e) => `<div class="card small${e.by === 'correction' ? ' corrected' : ''}"><div>${esc(cap(e.about || words(e.class)))}: <b>${esc(RUNG_WORDS[e.rung])}</b>
-    <div class="meta">${esc(when(e.at))} · ${e.by === 'correction' ? `a correction on ${linkify(e.id)}: ${esc(e.why)}` : `your answer to ${qlink(e.id)}`}</div></div></div>`).join('') : empty('No moves yet. Every kind of decision is on its starting rung.');
+  // Trust is its own page now (kit-93): renderTrust draws it from render, so the loop draws nothing here
 
   /* ooda-trust end */
   /* ooda-decide start */
@@ -4239,6 +4411,7 @@ const TYPE_META = {
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
   q: ['circle-help', 'Question'], file: ['file-text', 'File'], sensor: ['activity', 'Sensor'],
   observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'], lib: ['library', 'Library item'],
+  class: ['shield-check', 'Kind of decision'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -4280,6 +4453,8 @@ const KEY_TIPS = {
   Version: 'The ref the file is shown at.', Commits: 'How many commits changed it.', Reads: 'What it reads.', Triage: 'When a new error is sorted.', 'Last run': 'When it last ran, and how it went.', Today: 'What it read today.', 'Invalid lines': 'Lines it could not read.',
   'Measured by': 'What says it is met.', Opened: 'When it was created, and by whom.', 'Held because': 'Why it is held, while it is.', 'What it covers': 'The work it holds.', 'Chores in flight': 'Its chores not merged yet.',
   Checks: 'What it requests and what counts as up.', Uptime: 'The share of checks that passed.', 'Response time': 'p50 and p95 latency.', 'Last check': 'When it last checked.', Certificate: 'The TLS certificate, if any.',
+  Now: 'How this kind of decision is made today.', 'At most': 'The furthest this kind may go without asking, whatever you answer.', Since: 'When its level last moved.',
+  'Agreed with you': 'How often your answers went with its recommendation, over the questions it counts.', Levels: 'The three ways a kind of decision is made, the one it is on marked.',
 };
 // none of the three: no tip (and the peek test's "every key has a tooltip" fails)
 const keyTip = (label, tip, field) => tip || KEY_TIPS[label] || (field ? `Stored on the record as ${field}.` : '');
@@ -4526,7 +4701,7 @@ let LAST_HTML = '';
 let AFTER = [];
 // The hash that opens a record's peek: #<kind>/<encoded id>; a file's is #file?path=<encoded path>.
 const peekFor = (kind, id) => (kind === 'file' ? `#file?path=${encodeURIComponent(id)}` : `#${kind}/${encodeURIComponent(id)}`);
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -6100,7 +6275,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // (at once: the card replaces the peek, with no slide)
   // (its own head first: a card on a framed page opens the viewer before this route ends)
   if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); LAST_HEAD = location.hash; return void tlRoute(h.slice(5)); }
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -7130,6 +7305,7 @@ function render(d) {
 
   // Hours by phase, USD by phase, USD by model and Tokens are Efficiency's now (kit-174): Where it goes
   renderEfficiency(d);
+  renderTrust(d);
 
   // The configured checks, one plain line each, trouble first; one-off checks a worker ran by hand
   // are counted, not listed.

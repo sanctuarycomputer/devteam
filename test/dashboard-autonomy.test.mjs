@@ -174,4 +174,146 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await load(autonomyFixture(), '#trust');
     assert.equal(await p.ev("tWhere({ kind: 'page', view: '#health' })"), 'Sensors');
   });
+
+  // ---- Trust (T3): the Trust Score card, the kinds in words, How the levels moved, a kind's peek ----
+  const LEVELS = ['Asks you first', 'Asks, goes ahead at a deadline', 'Decides and tells you'];
+  const secText = (label) => p.ev(`(() => { const s = [...document.querySelectorAll('#trust .card .sec')].find((x) => x.querySelector('.lbl')?.textContent.trim() === ${JSON.stringify(label)}); return s ? s.querySelector('.sec-b').textContent.replace(/\\s+/g, ' ').trim() : null; })()`);
+  const KINDS = '#trust [data-tbl="trust:kinds"]', MOVES = '#trust [data-tbl="trust:moves"]';
+
+  await t.test('the Trust Score card', async () => {
+    await load(autonomyFixture(), '#trust');
+    await soon("!!document.querySelector('#trust .card .card-head')", 'the Trust page drawn');
+    // the head's label, then its "this week"
+    assert.equal(await p.ev("[...document.querySelector('#trust .card .card-head').childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim()"), 'Trust Score');
+    assert.equal(await text('#trust .card .card-head .grow'), 'this week');
+    assert.deepEqual(await texts('#trust .card:first-child .sec .lbl'), ['Score', 'Trust', 'Senses']);
+    const score = await secText('Score');
+    assert.match(score, /\b64%/);
+    assert.match(score, /last week 58%/);
+    await soon("!!document.querySelector('#trust circle.tw')", 'the score line drawn');
+    assert.equal(await p.ev("document.querySelector('#trust circle.tw').dataset.i"), '11');
+    assert.equal(await p.ev("document.querySelector('#trust circle.lw').dataset.i"), '10');
+    assert.equal(await p.ev("document.querySelectorAll('#trust .card:first-child .sparkline').length"), 7);
+    await soon("!!document.querySelector('#trust [data-fit=\"trust-split\"] rect[data-i]')", 'the split chart drawn');
+    assert.equal(await p.ev("new Set([...document.querySelectorAll('#trust [data-fit=\"trust-split\"] rect[data-i]')].map((r) => r.dataset.i)).size"), 12);
+    // the recommendation: this week's count, of, and the share as a %
+    assert.match(score, /8 of 9 · 89%/);
+    const trust = await secText('Trust');
+    assert.match(trust, /3 of 12/);
+    assert.match(trust, /1 raised, 1 dropped/);
+    const senses = await secText('Senses');
+    assert.match(senses, /needed\s*4/);
+    assert.match(senses, /has\s*3/);
+    assert.match(senses, /working\s*2/);
+    assert.match(senses, /Missing: sentry/);
+  });
+
+  await t.test('the lessons link', async () => {
+    await load(autonomyFixture(), '#trust');
+    await soon("!!document.querySelector('#trust a.linkish[href^=\"#loop\"]')", 'the lessons link');
+    assert.equal(await p.ev("document.querySelector('#trust a.linkish[href^=\"#loop\"]').getAttribute('href')"), '#loop?lt=orient&kind=lesson');
+    assert.equal(await text('#trust a.linkish[href^="#loop"]'), 'the lessons it counted');
+    await p.ev("document.querySelector('#trust a.linkish[href^=\"#loop\"]').click(); void 0");
+    await soon("location.hash === '#loop?lt=orient&kind=lesson'", 'landed on the lessons');
+  });
+
+  await t.test('kinds in words', async () => {
+    const fx = autonomyFixture();
+    await load(fx, '#trust');
+    await soon(`!!document.querySelector(${JSON.stringify(`${KINDS} tbody tr`)})`, 'the kinds table');
+    const rows = await rowsOf(KINDS);
+    assert.deepEqual(rows.map((r) => r[0]), fx.patch.ooda.trust.map((x) => x.class_name));
+    for (const r of rows) {
+      assert.ok(LEVELS.some((l) => r[1].startsWith(l)), `Now in words: ${r[1]}`);
+      assert.ok(LEVELS.includes(r[2]), `At most in words: ${r[2]}`);
+    }
+    assert.deepEqual(await texts(`${KINDS} thead th`), ['Kind of decision', 'Now', 'At most', 'Agreed with you', 'Corrected']);
+    assert.deepEqual(await texts(`${MOVES} thead th`), ['Kind of decision', 'To', 'Why', 'When']);
+    const seen = async (scope) => p.ev(`(() => { const r = document.querySelector(${JSON.stringify(scope)}); return [r.textContent, ...[...r.querySelectorAll('[title], [aria-label]')].flatMap((e) => [e.getAttribute('title') ?? '', e.getAttribute('aria-label') ?? ''])].join('\\n'); })()`);
+    const page = await seen('#trust');
+    for (const id of fx.ids.classes) assert.ok(!page.includes(id), `no ${id} on the page`);
+    assert.ok(await openRow(KINDS, 0), 'a kind opens');
+    await soon("!!document.querySelector('#drawer-body .attrs')", 'the kind drawn');
+    const peek = await seen('#drawer');
+    for (const id of fx.ids.classes) assert.ok(!peek.includes(id), `no ${id} in the peek`);
+    await closePeek();
+  });
+
+  await t.test('ready to ask for more', async () => {
+    const fx = autonomyFixture();
+    await load(fx, '#trust');
+    await soon(`!!document.querySelector(${JSON.stringify(`${KINDS} tbody tr`)})`, 'the kinds table');
+    const rows = await rowsOf(KINDS);
+    fx.patch.ooda.trust.forEach((k, i) => {
+      assert.equal(rows[i][1].includes('ready to ask for more'), k.class === fx.ids.canAsk, `${k.class_name}: the badge only when it can ask`);
+    });
+  });
+
+  await t.test("a kind's peek", async () => {
+    const fx = autonomyFixture();
+    await load(fx, `#class/${fx.ids.newFeature}`);
+    await soon("!document.getElementById('drawer').hidden && DRAWER.kind === 'class' && !!document.querySelector('#drawer-body .attrs') && !!document.querySelector('#drawer-body .lvl')", 'the kind peek');
+    assert.equal(await text('#drawer-bar-title .dtitle'), fx.patch.ooda.trust.find((k) => k.class === fx.ids.newFeature).class_name);
+    assert.equal(await text('#drawer-bar-title .dtype .badge'), 'Kind of decision');
+    assert.equal(await p.ev("document.querySelector('#drawer-body').firstElementChild.matches('section.attrs')"), true, 'the properties first');
+    assert.deepEqual((await texts('#drawer-body .attrs dt')).slice(0, 6), ['Now', 'At most', 'Since', 'Agreed with you', 'Corrected', 'How it changes']);
+    assert.equal(await p.ev("document.querySelectorAll('#drawer-body .lvl').length"), 3);
+    assert.equal(await p.ev("document.querySelectorAll('#drawer-body .lvl.now').length"), 1);
+    assert.match(await text('#drawer-body .lvl.now'), new RegExp(`^${LEVELS[1]}`));
+    assert.match(await text('#drawer-body .lvl.now'), /now$/);
+    // since it last moved: the answers after its newest move, and the calls after it, never one before
+    const open = await p.ev("[...document.querySelectorAll('#drawer-body .psect .rowline[data-open]')].map((r) => r.dataset.open)");
+    const want = [...fx.ids.agreement[fx.ids.newFeature].slice(1).map((id) => `q/${id}`), ...fx.ids.acts[fx.ids.newFeature].slice(1).map((id) => `act/${id}`)];
+    assert.deepEqual([...open].sort(), [...want].sort());
+    assert.ok(!open.includes(`q/${fx.ids.nfBeforeMove}`), 'the question answered before the move is absent');
+    assert.equal(await p.ev("document.querySelectorAll('#drawer-body .psect .rowline[data-open][tabindex=\"0\"][role=\"link\"]').length"), want.length);
+    assert.equal(await p.ev("document.querySelectorAll('#drawer-body button, #drawer-body form, #drawer-body select, #drawer-body input, #drawer-body textarea').length"), 0, 'no control in the peek');
+    // a row opens its record
+    await p.ev(`document.querySelector('#drawer-body .rowline[data-open="act/${fx.ids.acts[fx.ids.newFeature][2]}"]').click(); void 0`);
+    await soon(`DRAWER.kind === 'act' && DRAWER.id === ${JSON.stringify(fx.ids.acts[fx.ids.newFeature][2])}`, 'the act opened');
+    await closePeek();
+  });
+
+  await t.test('Trust rows open', async () => {
+    const fx = autonomyFixture();
+    await load(fx, '#trust');
+    await soon(`!!document.querySelector(${JSON.stringify(`${KINDS} tbody tr`)})`, 'the kinds table');
+    for (const [i, how] of [[0, 'click'], [1, 'enter'], [3, 'click']]) {
+      assert.deepEqual(await openRow(KINDS, i, how), { kind: 'class', id: fx.patch.ooda.trust[i].class }, `kind row ${i} by ${how}`);
+      await closePeek();
+    }
+    // the newest moves: priority-change's correction (an hour ago), then incident-fix's answer (two hours ago)
+    const moves = await rowsOf(MOVES);
+    assert.equal(moves.length, 8);
+    assert.match(moves[0][2], /^your correction: /);
+    assert.equal(moves[1][2], 'your answer');
+    assert.deepEqual(await openRow(MOVES, 0, 'click'), { kind: 'act', id: fx.ids.moveCorrection[fx.ids.priorityChange] });
+    await closePeek();
+    assert.deepEqual(await openRow(MOVES, 1, 'enter'), { kind: 'q', id: fx.ids.moveAnswer[fx.ids.incidentFix] });
+    await closePeek();
+  });
+
+  await t.test('an unknown kind', async () => {
+    await load(autonomyFixture(), '#class/nope');
+    await soon("!document.getElementById('drawer').hidden && DRAWER.kind === 'class'", 'the peek');
+    await soon("document.getElementById('drawer-body').textContent.includes('No kind of decision by that name.')", 'not found');
+  });
+
+  await t.test('no autonomy', async () => {
+    const fx = autonomyFixture();
+    fx.patch.autonomy = null;
+    await load(fx, '#trust');
+    await soon("!!document.querySelector('#trust .card .sec')", 'the Trust page drawn');
+    for (const l of ['Score', 'Trust', 'Senses']) assert.equal(await secText(l), 'None', `${l} says None`);
+    await polls(2);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('redraw keeps focus', async () => {
+    await load(autonomyFixture(), '#trust');
+    await soon(`!!document.querySelector(${JSON.stringify(`${KINDS} tbody tr`)})`, 'the kinds table');
+    assert.ok(await p.ev(`(() => { const tr = document.querySelector(${JSON.stringify(`${KINDS} tbody tr`)}); tr.focus(); window.__f = tr; return document.activeElement === tr; })()`));
+    await polls(2);
+    assert.equal(await p.ev('document.activeElement === window.__f && window.__f.isConnected'), true);
+  });
 });

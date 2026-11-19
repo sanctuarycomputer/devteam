@@ -289,7 +289,7 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
   await t.test('the header names the kind: its icon, then its type chip', async () => {
     const hashes = { ticket: `#ticket/${T}`, goal: `#goal/${ids.goal}`, feature: '#feature/pay', story: '#story/PAY-S1', release: '#release/v0.2.0', wave: '#wave/pay/wave-1', milestone: `#milestone/${ids.goal}/M1`,
       act: '#act/a-none', decision: '#decision/d-none', retro: '#retro/r-none', lesson: '#lesson/k-none', problem: '#problem/p-none', thread: '#thread/m-none', planner: '#planner/pay',
-      q: `#q/${ids.long}`, file: '#file?path=docs%2Fdevteam%2FREADME.md', sensor: '#sensor/none', observation: '#observation/o-none', signal: '#signal/none', learning: '#learning/l-none', lib: '#lib/artifact%3Aframe-mock' };
+      q: `#q/${ids.long}`, file: '#file?path=docs%2Fdevteam%2FREADME.md', sensor: '#sensor/none', observation: '#observation/o-none', signal: '#signal/none', learning: '#learning/l-none', lib: '#lib/artifact%3Aframe-mock', class: '#class/new-feature' };
     const kinds = await p.ev('Object.keys(TYPE_META)');
     assert.deepEqual([...kinds].sort(), Object.keys(hashes).sort(), 'every TYPE_META kind has a hash here');
     for (const k of kinds) {
@@ -980,7 +980,8 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
   await visit();
   const H = peekHashes(ids);
   // lib: a Library item has no server record and no History section; its rows are tested in test/dashboard-library.test.mjs
-  const NOT_A_RECORD = ['lib'];
+  // class: a kind of decision (kit-93) is a row of the trust table, with no record and no History; tested in test/dashboard-autonomy.test.mjs
+  const NOT_A_RECORD = ['lib', 'class'];
   // TYPE_META's kinds less NOT_A_RECORD, each exception checked to be a TYPE_META kind (a stale one goes red)
   const recordKinds = async () => {
     const all = await p.ev('Object.keys(TYPE_META)');
@@ -1567,11 +1568,12 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
   });
 
   await t.test('peekFor: every opener kind\'s hash, opened through route()', async () => {
-    const ON = { ticket: 'ticket', goal: 'goal', feature: 'feature', story: 'story', release: 'release', wave: 'wave', milestone: 'milestone', act: 'act', decision: 'decision', retro: 'retro', lesson: 'lesson', problem: 'problem', thread: 'thread', planner: 'planner', q: 'qAnswered', file: 'file', sensor: 'sensorHttp', observation: 'observation', signal: 'signal', learning: 'learning', lib: 'lib' };
+    const ON = { ticket: 'ticket', goal: 'goal', feature: 'feature', story: 'story', release: 'release', wave: 'wave', milestone: 'milestone', act: 'act', decision: 'decision', retro: 'retro', lesson: 'lesson', problem: 'problem', thread: 'thread', planner: 'planner', q: 'qAnswered', file: 'file', sensor: 'sensorHttp', observation: 'observation', signal: 'signal', learning: 'learning', lib: 'lib', class: 'class' };
     assert.deepEqual((await p.ev('Object.keys(OPENERS())')).sort(), Object.keys(ON).sort(), 'a fixture record for every opener kind');
-    // lib is NOT_A_RECORD, so not in peekHashes: its hash and id here, the fixture's artifact peek-mock
-    const H = { ...peekHashes(ids), lib: ['lib', `#lib/${encodeURIComponent(`artifact:${ids.artifact}`)}`] };
-    const idOf = { ...ids, lib: `artifact:${ids.artifact}` };
+    // lib and class are NOT_A_RECORD, so not in peekHashes: their hashes and ids here, the fixture's artifact peek-mock
+    // and its ladder's new-feature
+    const H = { ...peekHashes(ids), lib: ['lib', `#lib/${encodeURIComponent(`artifact:${ids.artifact}`)}`], class: ['class', '#class/new-feature'] };
+    const idOf = { ...ids, lib: `artifact:${ids.artifact}`, class: 'new-feature' };
     for (const [k, key] of Object.entries(ON)) {
       const h = await p.ev(`peekFor(${J(k)}, ${J(idOf[key])})`);
       assert.equal(h, H[key][1], `${k}: the opener's hash`);
