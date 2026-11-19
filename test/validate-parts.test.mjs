@@ -308,6 +308,18 @@ test('the gate: lines inserted inside another part are that part\'s, however the
   assert.deepEqual(partsChanged(sh(''), sh('\n'), 'x.sh', named('mine')), ['r:other'], 'S1 a blank line in a heredoc');
   const tbl = (body) => `<!-- other start -->\n| a | b |\n|---|---|\n| 1 | 2 |\n${body}| 3 | 4 |\n<!-- other end -->\n\n# T\n\n## mine\n\ntext\n`;
   assert.deepEqual(partsChanged(tbl(''), tbl('\n'), 'd.md', named('mine')), ['r:other'], 'M1 a blank line splitting a table');
+  // review 4 F13: a long run of blank lines inside a leaf is trimmed in linear time (a regex for it
+  // backtracked exponentially), in a region's rest, a function and a section; a long heading too
+  const k = 5000, t0 = Date.now();
+  const yk = `# other start\na\n${'\n'.repeat(k)}b\n# other end\n# mine start\nm\n# mine end\n`;
+  assert.deepEqual(partsChanged(yk, yk.replace('m\n', 'm2\n'), 'c.yml', named('mine')), []);
+  assert.deepEqual(partsChanged(yk, yk.replace('b\n', '\r\nb\n'), 'c.yml', named('mine')), ['r:other'], 'a CRLF blank line in the run is still content');
+  const jk = `function other() {\n  a();\n${'  \n'.repeat(k)}  b();\n}\nfunction mine() {}\n`;
+  assert.deepEqual(partsChanged(jk, jk.replace('mine() {}', 'mine() { x(); }'), 'a.js', named('mine')), []);
+  assert.deepEqual(partsChanged(jk, jk.replace('  b();', '\n  b();'), 'a.js', named('mine')), ['d:other#1']);
+  const mk = `# T\n\n## other\n\na\n${'\t\n'.repeat(k)}b\n\n## mine\n\nm\n## ${'x '.repeat(k)}#${' '.repeat(k)}y\n`;
+  assert.deepEqual(partsChanged(mk, mk.replace('\nm\n', '\nm2\n'), 'd.md', named('mine')), []);
+  assert.ok(Date.now() - t0 < 1000, `${Date.now() - t0} ms for runs of ${k} blank lines`);
   // a run's edges still aren't: blank lines added round your own part between two others
   assert.deepEqual(partsChanged(yml(''), yml('').replace('# mine end\n', '# mine end\n\n\n'), 'c.yml', named('mine')), [], 'blank lines at a run\'s edge');
 

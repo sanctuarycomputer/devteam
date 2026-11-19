@@ -3374,8 +3374,13 @@ function fileParts(text, file) {
       const f = l.match(/^\s{0,3}(`{3,}|~{3,})/);
       if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; continue; }
       if (fence) continue;
-      const h = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
-      if (h) heads.push({ i, level: h[1].length, name: headingSlug(h[2]) });
+      // the title without its closing #s, trimmed by hand: a regex for it backtracks on long lines
+      const h = l.match(/^(#{1,6})\s+/);
+      if (h) {
+        let t = l.slice(h[0].length).trimEnd(), e = t.length;
+        while (e > 0 && t[e - 1] === '#') e--;
+        heads.push({ i, level: h[1].length, name: headingSlug(t.slice(0, e).trimEnd()) });
+      }
     }
     const above = [];
     for (let j = 0; j < heads.length; j++) {
@@ -3442,11 +3447,18 @@ function leafTexts(P) {
     const k = P.owner[i], l = P.lines[i - 1], blank = !l.trim();
     if (k.startsWith('r:') && blank && last !== k) continue;
     const cut = k.startsWith('r:') && m.has(k) && last !== k;
-    m.set(k, m.has(k) ? `${cut ? `${m.get(k).replace(/(?:\n\s*)+$/, '')}\n\u241e` : m.get(k)}\n${l}` : l);
+    m.set(k, m.has(k) ? `${cut ? `${trimBlankEnd(m.get(k))}\n\u241e` : m.get(k)}\n${l}` : l);
     if (!blank) last = k;
   }
-  for (const [k, v] of m) m.set(k, v.replace(/(?:\n\s*)+$/, ''));
+  for (const [k, v] of m) m.set(k, trimBlankEnd(v));
   return m;
+}
+// A text without its trailing blank (whitespace-only) lines, its first line kept. A loop, not a
+// regex: /(?:\n\s*)+$/ backtracks exponentially on a run of blank lines followed by more text.
+function trimBlankEnd(s) {
+  let e = s.length;
+  for (let i = s.lastIndexOf('\n'); i >= 0 && !s.slice(i + 1, e).trim(); i = i ? s.lastIndexOf('\n', i - 1) : -1) e = i;
+  return s.slice(0, e);
 }
 // The leaves of a file that changed between two texts and that none of the named parts covers. A
 // leaf the base has is judged by the base: only a part named there covers it, so widening a part at
