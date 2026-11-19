@@ -63,7 +63,7 @@
     },
     {
       "subject": "goal:g-20261115-120000000-supervisor",
-      "move": "chore-move",
+      "move": "merge-it",
       "words": "Merge it",
       "holder": "supervisor",
       "ref": { "kind": "chore", "id": "chore-settings" },
@@ -73,8 +73,8 @@
       "covered_by": [],
       "quiet": null,
       "via": "chore:settings",
-      "flag": null,
-      "rung": 0
+      "flag": "owed",
+      "rung": 1
     },
     {
       "subject": "goal:g-20261113-070000000-supervisor",
@@ -162,7 +162,7 @@
       "holder": "supervisor",
       "ref": null,
       "title": "The hub says stalled, not idle",
-      "since": "2026-11-17T21:30:00.000Z",
+      "since": "2026-11-18T19:30:00.000Z",
       "command": "merge kit-14-hub-stalled",
       "covered_by": [],
       "quiet": null,
@@ -187,16 +187,34 @@
     },
     {
       "subject": "planner:board-chores",
+      "move": "answer-planner",
+      "words": "Answer the planner: review-request",
+      "holder": "supervisor",
+      "ref": { "kind": "m", "id": "m-20261118-221500000-plan-board-chores" },
+      "title": "Chore work on the Board",
+      "since": "2026-11-18T22:15:00.000Z",
+      "command": "send plan-board-chores \"…\" --kind ruling",
+      "covered_by": [
+        { "kind": "unanswered-message", "subject": "m-20261118-221500000-plan-board-chores" },
+        { "kind": "blocked-without-question", "subject": "plan-board-chores" }
+      ],
+      "quiet": null,
+      "via": null,
+      "flag": null,
+      "rung": 0
+    },
+    {
+      "subject": "planner:hub-holders",
       "move": "planning",
       "words": "Planning",
       "holder": "planner",
       "ref": null,
-      "title": "Chore work on the Board",
+      "title": "The hub says who holds each fleet",
       "since": "2026-11-17T22:00:00.000Z",
       "command": null,
       "covered_by": [
-        { "kind": "stale-planner", "subject": "plan-board-chores" },
-        { "kind": "planner-gone", "subject": "plan-board-chores" }
+        { "kind": "stale-planner", "subject": "plan-hub-holders" },
+        { "kind": "planner-gone", "subject": "plan-hub-holders" }
       ],
       "quiet": null,
       "via": null,
@@ -220,20 +238,20 @@
       "chore": { "branch": "chore-settings", "ahead": 1, "pr": { "number": 412, "url": "https://github.com/example-org/example-repo/pull/412" }, "for": [] }
     },
     {
-      "subject": "chore:artifact-console-design-canvas",
+      "subject": "chore:docs-site-redesign",
       "move": "open-its-pr",
       "words": "Open its PR",
       "holder": "supervisor",
       "ref": null,
-      "title": "The console's design canvas",
+      "title": "The docs site redesign",
       "since": "2026-11-16T15:20:00.000Z",
-      "command": "chore pr artifact-console-design-canvas --title \"The console's design canvas\"",
+      "command": "chore pr docs-site-redesign --title \"The docs site redesign\"",
       "covered_by": [],
       "quiet": null,
       "via": null,
       "flag": "stalled",
       "rung": 2,
-      "chore": { "branch": "chore-artifact-console-design-canvas", "ahead": 7, "pr": null, "for": ["g-20261116-080000000-supervisor"] }
+      "chore": { "branch": "chore-docs-site-redesign", "ahead": 7, "pr": null, "for": ["g-20261116-080000000-supervisor"] }
     }
   ]
 }

@@ -25,13 +25,6 @@ const RUNGS = [0, 1, 2];
 const CHORE_KEYS = ['branch', 'ahead', 'pr', 'for'];
 const ALWAYS = FIELDS.filter((f) => f !== 'chore');
 const LISTS = { fields: FIELDS, subject: SUBJECT_KINDS, holder: HOLDERS, 'ref.kind': REF_KINDS, quiet: QUIET, via: VIA_KINDS, flag: FLAGS, rung: RUNGS, chore: CHORE_KEYS };
-// every rule moveErrors and wrapperErrors can report; 3.4's table must break each
-const RULES = [
-  'field-missing', 'field-unknown', 'subject', 'move', 'words', 'holder', 'ref', 'ref-kind', 'ref-id', 'ref-url', 'title', 'since', 'command', 'covered-by',
-  'quiet', 'via', 'flag', 'rung', 'quiet-flag', 'quiet-rung', 'owed-holder', 'owed-rung', 'owed-c4', 'stalled-rung', 'none-holder',
-  'chore-missing', 'chore-extra', 'chore-keys', 'chore-branch', 'chore-ahead', 'chore-pr', 'chore-for',
-  'wrap-version', 'wrap-moves', 'wrap-keys', 'cache-at', 'cache-goal', 'pulse-one',
-];
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const isIso = (s) => typeof s === 'string' && ISO.test(s) && !Number.isNaN(Date.parse(s));
@@ -135,6 +128,9 @@ function contractComment() {
   assert.ok(j < i, 'a comment sits directly above nextMoves()');
   return lines.slice(j, i).join('\n');
 }
+// Every rule moveErrors and wrapperErrors can report, read from their own source (each `no('<rule>', …)`
+// and each literal '<rule>: …' they return), so a rule added there without a broken copy in 3.4 fails.
+const RULES = [...new Set([...`${moveErrors}\n${wrapperErrors}`.matchAll(/no\('([a-z0-9-]+)'|\['([a-z0-9-]+): /g)].map((x) => x[1] ?? x[2]))];
 // `// values <name>: a | b | …` lines, by name.
 function valueLines(comment) {
   const m = new Map();
@@ -148,7 +144,8 @@ function valueLines(comment) {
 test('next-moves: the comment above nextMoves() defines next-move@1', () => {
   const c = contractComment();
   assert.match(c, /next-move@1/);
-  for (const f of FIELDS) assert.ok(c.includes(f), `the comment names the field ${f}`);
+  // each field has its own definition line, `//   <field>  <what it is>`, besides the values line
+  for (const f of FIELDS) assert.match(c, new RegExp(`^//   ${f} +\\S`, 'm'), `the comment defines the field ${f} on its own line`);
   for (const k of SUBJECT_KINDS) assert.ok(c.includes(k), `the comment names the subject kind ${k}`);
   for (const h of HOLDERS) assert.ok(c.includes(h), `the comment names the holder ${h}`);
   for (const k of REF_KINDS) assert.ok(c.includes(k), `the comment names the ref kind ${k}`);
@@ -183,6 +180,11 @@ test('next-moves: every fixture move fits the shape', () => {
   assert.equal(kindOf(pulse.subject), 'goal', "pulse.next is a goal's move");
   assert.notEqual(pulse.flag, null, 'the pulse sample is flagged');
   assert.ok(cache.moves.some((m) => m.flag !== null), 'the cache holds a flagged move');
+  // a copied move shows its source's holder, flag and rung, where its source is in the same file
+  const by = new Map(moves.moves.map((m) => [m.subject, m]));
+  const copies = moves.moves.filter((m) => m.via && by.has(m.via));
+  assert.ok(copies.length > 0, 'a via move whose source is in moves.json');
+  for (const m of copies) for (const k of ['holder', 'flag', 'rung']) assert.equal(m[k], by.get(m.via)[k], `${m.subject} copies ${k} from ${m.via}`);
 });
 
 test('next-moves: the fixtures cover every holder, kind, quiet, flag, rung and ref', () => {
@@ -273,5 +275,6 @@ test('next-moves: a broken copy fails the checker, one per rule', () => {
     assert.ok(wrapperErrors(kind, make()).some((x) => x.startsWith(`${rule}: `)), `${rule} is reported for a ${kind} wrapper`);
   }
   const broken = new Set([...CASES.map(([r]) => r), ...WRAPS.map(([r]) => r)]);
+  assert.ok(RULES.length >= 30 && RULES.includes('owed-c4') && RULES.includes('pulse-one'), `the rules are read from the checkers: ${RULES.join(' ')}`);
   assert.deepEqual(RULES.filter((r) => !broken.has(r)), [], 'every rule has a broken copy');
 });
