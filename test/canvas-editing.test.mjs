@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { openCanvas, resolve, startCanvasFake } from './lib/canvas-fake.mjs';
+import { docErrors, openCanvas, resolve, startCanvasFake } from './lib/canvas-fake.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { until } from './lib/kit.mjs';
 
@@ -1913,5 +1913,226 @@ test('running text within six columns while editing', { skip: canDrive ? false :
     const mw = await capped(sel);
     assert.ok(mw.length > 0 && mw.every((v) => /^(min\()?560px\b/.test(v)), `${sel} capped at the measure (${mw.join(', ')})`);
   }
+  noExceptions(rec);
+});
+
+// ---- C1: every node type drawn with the tools, saved and reloaded unchanged (done-when 1) ----
+
+const HOSTILE = fixture('hostile.json');
+// What the page draws, in page px: every drawn node (`[data-id]`) and every node drawn inside an
+// instance (`[data-of][data-src]`), in document order, with its tag, its box unscaled (from the
+// surface's origin, over the zoom), its computed display and background colour; and the Layers rows'
+// ids, names and levels.
+const snapshot = (p) => p.ev(`(() => {
+  const s = document.getElementById('surface');
+  const o = s.getBoundingClientRect();
+  const z = new DOMMatrix(getComputedStyle(s).transform).a;
+  const drawn = [...s.querySelectorAll('[data-id], [data-of][data-src]')].map((e) => {
+    const r = e.getBoundingClientRect();
+    const cs = getComputedStyle(e);
+    return { key: e.dataset.id ?? e.dataset.of + '/' + e.dataset.src, tag: e.localName, l: (r.left - o.left) / z, t: (r.top - o.top) / z, w: r.width / z, h: r.height / z, display: cs.display, bg: cs.backgroundColor };
+  });
+  const layers = [...document.querySelectorAll('#layers .layer[data-node]')].map((r) => ({ id: r.dataset.node, name: r.querySelector('.nm')?.textContent ?? null, level: r.getAttribute('aria-level') }));
+  return { drawn, layers };
+})()`);
+// Two snapshots draw the same thing: the same rows and nodes, each node's tag, display and background
+// equal and its box within 0.5 page px.
+function sameDrawing(a, b) {
+  assert.deepEqual(b.layers, a.layers, 'the Layers rows: ids, names and levels');
+  assert.deepEqual(b.drawn.map((d) => d.key), a.drawn.map((d) => d.key), 'the same drawn nodes, in the same order');
+  a.drawn.forEach((d, i) => {
+    const e = b.drawn[i];
+    assert.deepEqual([e.tag, e.display, e.bg], [d.tag, d.display, d.bg], `${d.key}: its tag, display and background`);
+    for (const k of ['l', 't', 'w', 'h']) near(e[k], d[k], 0.5, `${d.key}: its box's ${k}`);
+  });
+}
+const imagesLoaded = (p) => within(() => p.ev("[...document.querySelectorAll('#surface img')].every((i) => i.complete)"), 'the drawn images loaded');
+
+test('canvas A8: every node type is drawn with the tools, saved and reloaded unchanged, and the hostile fixture loads nothing from elsewhere', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, origin, rec, load } = await open(t, { canvases: { draw: MINIMAL, hostile: HOSTILE }, images: { hostile: { [IMG_FILE]: IMG } } });
+  await live(p);
+  await rec.send('Page.setInterceptFileChooserDialog', { enabled: true });
+  const folder = { images: new Set([IMG_FILE]) }; // the image the picker uploads is the only file draw's folder gets
+  const id = {};
+  let drawn = false;
+  let kept = null;
+  let before = null;
+
+  // C1.1: on the empty page (p1), at 1440 × 900, with the tools and the panel only
+  await t.test('C1.1 drawn with the tools', async () => {
+    assert.equal(await shownMsg(p), 'This page is empty.', 'the empty page says so');
+    const z = await zoomNow(p);
+    // a point given in page px, on screen
+    const at = async (x, y) => {
+      const s = await box(p, '#surface');
+      return { x: Math.round(s.l + x * z), y: Math.round(s.t + y * z) };
+    };
+    // one tool used: one add of that type into that parent, acked, the new node selected, Move again
+    const made = async (key, type, parent, use) => {
+      const n0 = edits(rec).length;
+      await use();
+      const op = await added(rec, n0, key);
+      assert.equal(op.node.type, type, `${key}: a ${type}`);
+      assert.equal(op.node.parent, parent, `${key}: in ${parent}`);
+      await madeAndSelected(p, op.node.id, key);
+      id[key] = op.node.id;
+      return op;
+    };
+    // fields changed by real input: one edit of one set, acked
+    const changed = async (what, steps, want) => {
+      const n0 = edits(rec).length;
+      for (const [f, v] of steps) await fieldSet(p, f, v);
+      const e = await nextEdit(rec, n0);
+      assert.deepEqual(e.ops, [want], `${what}: one set`);
+      await ackOf(rec, e);
+    };
+    const dragOut = async (key, x, y, w, h) => { await p.key(key); await drag(p, await at(x, y), w * z, h * z); };
+    const clickIn = async (key, x, y) => { await p.key(key); const q = await at(x, y); await p.clickAt(q.x, q.y); };
+
+    // a `none` frame dragged out on the page; the empty-page note goes (C1.1a)
+    await made('free', 'frame', 'p1', () => dragOut('F', 20, 60, 560, 560));
+    await within(async () => (await shownMsg(p)) === null, 'C1.1a: "This page is empty." no longer shown', async () => shownMsg(p), 5000);
+    // inside it, three frames dragged out and set to Row, Column and Grid (its columns typed)
+    await made('row', 'frame', id.free, () => dragOut('F', 40, 80, 400, 120));
+    await changed('Row', [['layout.mode', 'row']], setOp(id.row, 'layout.mode', 'row'));
+    await made('column', 'frame', id.free, () => dragOut('F', 40, 220, 200, 340));
+    await changed('Column', [['layout.mode', 'column']], setOp(id.column, 'layout.mode', 'column'));
+    await made('grid', 'frame', id.free, () => dragOut('F', 260, 220, 200, 150));
+    await changed('Grid', [['layout.mode', 'grid']], setOp(id.grid, 'layout.mode', 'grid'));
+    await within(async () => (await count(p, '#props [data-prop="layout.columns"]')) === 1, "the grid's Columns field");
+    await changed('Columns', [['layout.columns', '1fr 1fr']], setOp(id.grid, 'layout.columns', ['1fr', '1fr']));
+    // a text clicked into the row, its text typed; a rectangle into the row, after it
+    await made('text', 'text', id.row, () => clickIn('T', 100, 140));
+    await changed('Text', [['text', 'Hello']], setOp(id.text, 'text', 'Hello'));
+    const r = await made('rect', 'rect', id.row, () => clickIn('R', 340, 140));
+    assert.equal(r.after, id.text, 'the rectangle after the text in the row');
+    // an ellipse into the column
+    await made('ellipse', 'ellipse', id.column, () => clickIn('O', 140, 270));
+    // a vector of three clicks in the `none` frame, ended with Enter
+    await made('vector', 'vector', id.free, async () => {
+      await p.key('P');
+      for (const [x, y] of [[510, 260], [570, 320], [520, 390]]) { const q = await at(x, y); await p.clickAt(q.x, q.y); }
+      await enter(p);
+    });
+    // an image clicked into the column, below the ellipse, and uploaded through the picker: its add is
+    // sent (what the server keeps of it is C1.2's)
+    {
+      const n0 = edits(rec).length;
+      const c0 = rec.choosers.length;
+      await clickIn('I', 140, 480);
+      await within(async () => rec.choosers.length > c0, 'the file chooser opened', async () => JSON.stringify(rec.choosers));
+      await rec.send('DOM.setFileInputFiles', { files: [IMG_PATH], backendNodeId: rec.choosers[c0].backendNodeId });
+      const e = await nextEdit(rec, n0);
+      assert.equal(e.ops.length, 1, 'image: one op');
+      assert.deepEqual([e.ops[0].op, e.ops[0].node?.type, e.ops[0].node?.parent, e.ops[0].after], ['add', 'image', id.column, id.ellipse], 'image: an add into the column, after the ellipse');
+      id.image = e.ops[0].node.id;
+      assert.equal(await pressedTool(p), 'move', 'image: Move again');
+    }
+    // a frame dragged out on the page with a rectangle drawn in it, made a component
+    await made('frameB', 'frame', 'p1', () => dragOut('F', 620, 60, 240, 160));
+    await made('inner', 'rect', id.frameB, () => dragOut('R', 640, 80, 80, 60));
+    await selectRow(p, id.frameB);
+    {
+      const n0 = edits(rec).length;
+      await p.click('#props [data-action="make-component"]');
+      const e = await nextEdit(rec, n0);
+      assert.deepEqual([e.ops[0].op, e.ops[0].node?.type, e.ops[0].node?.parent], ['add', 'component', 'p1'], 'Make component: adds a component on the page');
+      id.comp = e.ops[0].node.id;
+      await ackOf(rec, e);
+      await within(async () => JSON.stringify(await selectedIds(p)) === JSON.stringify([id.comp]), 'the component selected', () => selectedIds(p));
+    }
+    // given a variant dark by Add variant
+    {
+      const n0 = edits(rec).length;
+      assert.equal(await focusField(p, '@new-variant'), true, 'the variant name field');
+      await typeKeys(p, 'dark');
+      await p.click('#props [data-action="add-variant"]');
+      const e = await nextEdit(rec, n0);
+      assert.deepEqual(e.ops, [setOp(id.comp, 'variants.dark', {})], 'Add variant: one set of {}');
+      await ackOf(rec, e);
+      await within(async () => (await variantsListed(p)).includes('dark'), 'dark listed', () => variantsListed(p));
+    }
+    // with Change in dark on the rectangle, its fill set to hex #222222
+    await selectRow(p, id.inner);
+    await changed('Change in dark: fill', [['@variant', 'dark'], ['fill', '@hex'], ['fill#hex', '#222222']], setOp(id.comp, `variants.dark.${id.inner}.fill`, '#222222'));
+    // Place instance on the page, and the instance's Variant set to dark
+    await selectRow(p, id.comp);
+    const inst = await made('instance', 'instance', 'p1', async () => {
+      await p.click('#props [data-action="place-instance"]');
+      const q = await at(620, 300);
+      await mouse(p, 'mousePressed', q.x, q.y);
+      await mouse(p, 'mouseReleased', q.x, q.y);
+    });
+    assert.equal(inst.node.component, id.comp, 'an instance of the component');
+    await changed('Variant', [['variant', 'dark']], setOp(id.instance, 'variant', 'dark'));
+    drawn = true;
+  });
+
+  // C1.2: once all is acked and saved, the fake's document holds every type, rightly
+  await t.test('C1.2 sent and kept', async () => {
+    assert.ok(drawn, 'C1.1 drew everything');
+    await waitSaved(p);
+    const doc = structuredClone(fake.doc('draw'));
+    const N = doc.nodes;
+    assert.deepEqual([...new Set(Object.values(N).map((n) => n.type))].sort(), ['component', 'ellipse', 'frame', 'image', 'instance', 'rect', 'text', 'vector'], 'a node of each type');
+    assert.deepEqual(Object.values(N).filter((n) => n.type === 'frame').map((n) => n.layout?.mode ?? 'none').sort(), ['column', 'grid', 'none', 'row'], 'frames of each of the four modes');
+    const where = [['free', 'frame', 'p1'], ['row', 'frame', id.free], ['column', 'frame', id.free], ['grid', 'frame', id.free], ['text', 'text', id.row], ['rect', 'rect', id.row], ['ellipse', 'ellipse', id.column], ['vector', 'vector', id.free], ['image', 'image', id.column], ['inner', 'rect', id.comp], ['comp', 'component', 'p1'], ['instance', 'instance', 'p1']];
+    for (const [key, type, parent] of where) assert.deepEqual([N[id[key]]?.type, N[id[key]]?.parent], [type, parent], `${key}: a ${type} in ${parent}`);
+    assert.equal(Object.hasOwn(N, id.frameB), false, 'the frame made a component is gone');
+    assert.deepEqual(doc.pages[0].children, [id.free, id.comp, id.instance], "the page's nodes");
+    assert.deepEqual(N[id.row].children, [id.text, id.rect], 'the row: the text, then the rectangle');
+    assert.deepEqual(N[id.column].children, [id.ellipse, id.image], 'the column: the ellipse, then the image');
+    assert.equal(N[id.text].text, 'Hello', 'the text typed');
+    assert.deepEqual(N[id.grid].layout.columns, ['1fr', '1fr'], "the grid's columns");
+    assert.match(N[id.vector].path, /^M [\d.]+ [\d.]+ L [\d.]+ [\d.]+ L [\d.]+ [\d.]+$/, "the vector's path of three points");
+    assert.equal(N[id.image].src, `images/${IMG_FILE}`, "the image's src");
+    assert.deepEqual(N[id.comp].variants, { dark: { [id.inner]: { fill: '#222222' } } }, "the component's variant dark: the rectangle's fill");
+    assert.deepEqual([N[id.instance].component, N[id.instance].variant], [id.comp, 'dark'], 'the instance: of the component, variant dark');
+    assert.deepEqual(docErrors(doc, folder), [], "docErrors finds nothing, with the folder's images");
+    assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+    kept = doc;
+  });
+
+  // C1.3: the fake restarted (back to its last saved document, the socket closed 1012) loses nothing
+  await t.test('C1.3 saved, not just held', async () => {
+    assert.ok(kept, 'C1.2 read the document');
+    // what the page draws now, with nothing selected, for C1.4
+    await p.key('Escape');
+    await within(async () => (await selectedIds(p)).length === 0, 'nothing selected', () => selectedIds(p));
+    await imagesLoaded(p);
+    before = await snapshot(p);
+    fake.restart('draw');
+    assert.deepEqual(fake.doc('draw'), kept, 'the restarted document is the one read in C1.2');
+  });
+
+  // C1.4: the page reloaded draws the same thing
+  await t.test('C1.4 reloaded unchanged', async () => {
+    assert.ok(before, 'C1.3 took the drawing before the restart');
+    const keys = before.drawn.map((d) => d.key);
+    for (const key of ['free', 'row', 'column', 'grid', 'text', 'rect', 'ellipse', 'vector', 'image', 'comp', 'inner', 'instance']) assert.ok(keys.includes(id[key]), `${key} drawn before the reload`);
+    assert.ok(keys.includes(`${id.instance}/${id.inner}`), "the instance's rectangle drawn before the reload");
+    const n0 = edits(rec).length;
+    await load('/view/canvas/draw');
+    await live(p);
+    await imagesLoaded(p);
+    sameDrawing(before, await snapshot(p));
+    assert.equal(edits(rec).length, n0, 'the reload sent no edit');
+    assert.deepEqual(fake.doc('draw'), kept, 'the document is still the one saved');
+    assert.deepEqual(docErrors(fake.doc('draw'), folder), [], 'docErrors finds nothing after the reload');
+  });
+
+  // C1.5: the hostile fixture loaded in the editor loads nothing from elsewhere and opens no dialog
+  await t.test('C1.5 the hostile fixture loads nothing from elsewhere', async () => {
+    await load('/view/canvas/hostile');
+    await live(p);
+    await imagesLoaded(p);
+    await sleep(500);
+    const urls = [...rec.urls];
+    assert.deepEqual(urls.filter((u) => u !== origin && !u.startsWith(`${origin}/`)), [], `no URL off the fake's origin (saw ${urls.join(' ')})`);
+    assert.deepEqual(urls.filter((u) => u.includes('evil.example')), [], 'no evil.example');
+    assert.ok(rec.urls.has(`${origin}/api/canvas/doc?slug=hostile`), 'the hostile document loaded');
+    assert.deepEqual(rec.dialogs, [], 'no dialog opened');
+    assert.equal(await body(p, 'live'), 'on', 'the socket open');
+  });
   noExceptions(rec);
 });
