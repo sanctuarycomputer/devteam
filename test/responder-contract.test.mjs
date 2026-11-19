@@ -383,6 +383,12 @@ test('responder-contract A4 A7: a responder turn is never cited; artifact new st
         assert.match(r.err, /that turn is the responder's/, r.err);
         assert.deepEqual(hashDirs([F.logDir]), before, `${args[0]} writes nothing`);
       }
+      // the control (task-5 T5-2): the owner's turn in the same thread passes this guard, so the refusal above is the turn's writer
+      const O = JSON.parse(F.owner(['thread', 'show', T, '--json'])).turns.find((u) => u.writer === 'owner').id;
+      for (const args of [['answer', q, 'Yes', '--from-turn', O], ['correct', D, '--from-turn', O, '--said', 'x']]) {
+        const r = F.run(F.old, args, { DEVTEAM_ROLE: 'supervisor' });
+        assert.doesNotMatch(r.err, /that turn is the/, `${args[0]} with the owner's turn passes the writer guard: ${r.err}`);
+      }
     });
 
     await t.test('A4: artifact new as the responder stamps by: responder, and it checks; a role-less one stamps owner', () => {
@@ -397,6 +403,12 @@ test('responder-contract A4 A7: a responder turn is never cited; artifact new st
       const o = F.run(a, ['artifact', 'new', 'mock-o', '--title', 'Mock', '--summary', 'A mock'], {});
       assert.equal(o.status, 0, o.err || o.out);
       assert.equal(man(a, 'mock-o').by, 'owner');
+      // every other role stamps what it did before (task-5 T5-1): a worker its ticket, a planner plan-<feature>, the supervisor
+      for (const [slug, role, by] of [['mock-w', { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'kit-9-probe' }, 'kit-9-probe'], ['mock-p', { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'probe' }, 'plan-probe'], ['mock-s', { DEVTEAM_ROLE: 'supervisor' }, 'supervisor'], ['mock-rt', { ...RESPONDER, DEVTEAM_TICKET: 'kit-9-probe' }, 'responder']]) {
+        const w = F.run(a, ['artifact', 'new', slug, '--title', 'Mock', '--summary', 'A mock'], role);
+        assert.equal(w.status, 0, w.err || w.out);
+        assert.equal(man(a, slug).by, by, `${slug} stamps ${by}`);
+      }
     });
   } finally { F.done(); }
 });
@@ -467,6 +479,15 @@ test('responder-contract A5 A8: the draft fingerprint route, the /api/view comme
     assert.equal((await dashGet(port, fpRoute('fp-fixture', 'main'), SAME)).status, 400);
     assert.equal((await dashGet(port, fpRoute('fp-fixture', `tree:${'a'.repeat(40)}`), SAME)).status, 400);
     assert.equal((await dashGet(port, fpRoute('Not_A_Slug'), SAME)).status, 400);
+    // drafts only where a draft can be (task-6 T6-1): a reviewer's or a scratch worktree, and a symlinked folder, are nothing
+    for (const name of ['review-fp', 'tmp-fp']) {
+      const w = path.join(F.old, '.worktrees', name);
+      F.g(['worktree', 'add', '-q', '--detach', w], F.old);
+      fs.cpSync(path.join(testDir, 'fixtures', 'artifact-fp', 'draft'), path.join(w, 'docs/devteam/project/artifacts/fp-fixture'), { recursive: true });
+      assert.equal((await dashGet(port, fpRoute('fp-fixture', name), SAME)).status, 404, `${name}: not a draft`);
+    }
+    fs.symlinkSync(draft, path.join(wt, 'docs/devteam/project/artifacts/fp-link'));
+    assert.equal((await dashGet(port, fpRoute('fp-link'), SAME)).status, 404, 'a symlinked folder: not a draft');
     const CROSS = { 'sec-fetch-site': 'cross-site' };
     const x = await dashGet(port, fpRoute(), CROSS);
     assert.equal(x.status, 403, x.body);

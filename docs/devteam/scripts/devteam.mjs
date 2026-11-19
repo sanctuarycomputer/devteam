@@ -20075,8 +20075,12 @@ async function cmdDashboard() {
       const slug = u.searchParams.get('slug') ?? '';
       const at = u.searchParams.get('at') ?? '';
       if (!LINK_ID.test(slug) || !ARTIFACT_AT.test(at) || at === 'main' || at.startsWith('tree:')) return send(res, 400, 'application/json', JSON.stringify({ error: 'a slug, and at a draft\'s worktree (drafts only)' }));
+      // a draft that vanishes mid-walk is nothing there (404); any other failure (EACCES, EMFILE) is a 500, as /api/view keeps them apart
       let src;
-      try { src = artifactSource(at, slug); } catch { src = null; }
+      try { src = artifactSource(at, slug); } catch (e) {
+        if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') return send(res, 500, 'application/json', JSON.stringify({ error: `the draft's files: ${e?.code ?? 'error'}` }));
+        src = null;
+      }
       if (!src) return send(res, 404, 'application/json', JSON.stringify({ error: `no draft of ${slug} at ${at}` }));
       return send(res, 200, 'application/json', JSON.stringify({ fp: fingerprint(src.entries), at }));
     }
