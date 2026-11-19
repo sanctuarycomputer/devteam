@@ -831,12 +831,14 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       await p.ev(`location.hash = '#board'`);
       await soon(`getComputedStyle(document.querySelector('#board')).display !== 'none' && !!document.querySelector('${att}')`, 'the Board page and its toggle');
       await p.click(att);
-      await soon(`location.hash.includes('att=1') && document.activeElement?.matches?.('${att}')`, 'the toggle pressed, and focused');
+      // each press is awaited until routed (LAST_HEAD): the press changes the hash at once, but its route redraws the
+      // page bar and the Board a task later, and the next step (or the open-select subtest) must not start under it
+      await soon(`location.hash.includes('att=1') && LAST_HEAD === location.hash && document.activeElement?.matches?.('${att}')`, 'the toggle pressed, routed, and focused');
       const q = 'After the toggle?';
       ask(q);
       await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a toggle focused');
       await p.click(att); // leave the setting as it was
-      await soon(`!location.hash.includes('att=')`, 'the toggle off again');
+      await soon(`!location.hash.includes('att=') && LAST_HEAD === location.hash && document.querySelector('${att}')?.getAttribute('aria-pressed') === 'false'`, 'the toggle off again, routed and drawn');
       await p.ev(`document.activeElement.blur()`);
     });
 
