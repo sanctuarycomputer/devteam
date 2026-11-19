@@ -25342,15 +25342,15 @@ function browserProfiles() {
   try { keys = fs.readdirSync(browserHome(), { withFileTypes: true }).filter((d) => d.isDirectory() && BROWSER_KEY.test(d.name)).map((d) => d.name).sort(); } catch {}
   return keys.map((key) => { const root = browserRootOf(path.join(browserHome(), key)); return { key, root: root ?? '(unknown)', root_gone: root !== null && !fs.existsSync(root), current: key === mine }; });
 }
-// forget --profile <another key>: refused while any local process carries it, else removed. The path
-// removed is the validated key under the literal folder, never one read from anywhere.
+// forget: a profile refused while any local process carries it, else removed (this checkout's own once
+// stopped). The path removed is the validated key under the literal folder, never one read from anywhere.
 function browserForgetOther(key) {
-  if (!BROWSER_KEY.test(key)) die(`browser forget --profile: ${JSON.stringify(key.slice(0, 80))} isn't a profile key (<project>-<12 hex>); browser profiles lists them`);
+  if (!BROWSER_KEY.test(key)) die(`browser forget: ${JSON.stringify(key.slice(0, 80))} isn't a profile key (<project>-<12 hex>); browser profiles lists them`);
   const dir = path.join(browserHome(), key);
-  if (!fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory()) die(`browser forget --profile: no profile ${key} under ${browserHome()}`);
+  if (!fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory()) die(`browser forget: no profile ${key} under ${browserHome()}`);
   const pids = browserProcsOn(dir);
-  if (pids === null) die(`browser forget --profile: couldn't list this machine's processes to see whether profile ${key} is in use; nothing removed`);
-  if (pids.length) die(`browser forget --profile: profile ${key} is in use (process ${pids.join(', ')} carries it); stop that browser first`);
+  if (pids === null) die(`browser forget: couldn't list this machine's processes to see whether profile ${key} is in use; nothing removed`);
+  if (pids.length) die(`browser forget: profile ${key} is in use (process ${pids.join(', ')} carries it); stop that browser first`);
   fs.rmSync(path.join(browserHome(), key), { recursive: true, force: true });
   out(`forgot profile ${key}: every site in it is signed out`);
 }
@@ -25800,14 +25800,15 @@ async function browserSnapshot(ctx, tab, json) {
 // The verb then prints said, plus where the page went or the guard's refusal.
 async function browserInput(ctx, tab, act, said) {
   let started = false, loaded = false;
-  tab.started = () => { started = true; loaded = false; tab.refs = new Map(); };
+  const had = new Set(ctx.tabs);
+  tab.started = () => { started = true; loaded = false; tab.unreachable = null; tab.refs = new Map(); };
   tab.loaded = () => { loaded = true; };
   try {
     await act();
-    for (const t = Date.now(); !started && ctx.active === tab && Date.now() - t < 500;) await browserSleep(25);
+    for (const t = Date.now(); !started && had.has(ctx.active) && Date.now() - t < 500;) await browserSleep(25);
     for (const t = Date.now(); started && !loaded && Date.now() - t < (tab.unreachable ? 3000 : 30000);) await browserSleep(50);
   } finally { tab.started = tab.loaded = null; }
-  const pop = ctx.active !== tab ? ctx.active : null;
+  const pop = ctx.active && !had.has(ctx.active) ? ctx.active : null;
   if (pop) {
     for (const t = Date.now(); Date.now() - t < 10000; await browserSleep(100)) {
       if (!pop.sessionId || !browserHttp(pop.url)) continue;
