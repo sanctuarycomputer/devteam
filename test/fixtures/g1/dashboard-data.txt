@@ -46,6 +46,7 @@ exit 0
       "note": null,
       "usd": null,
       "waiting": null,
+      "repo": "home",
       "held_by": "q-<sha>-<sha>-supervisor"
     },
     {
@@ -73,6 +74,7 @@ exit 0
       "note": null,
       "usd": null,
       "waiting": null,
+      "repo": "home",
       "held_by": null
     }
   ],
@@ -877,7 +879,8 @@ exit 0
         "phase": null,
         "task": null,
         "held": null,
-        "waiting": null
+        "waiting": null,
+        "repo": "home"
       },
       {
         "id": "g1-02-b",
@@ -902,7 +905,8 @@ exit 0
         "phase": null,
         "task": null,
         "held": null,
-        "waiting": null
+        "waiting": null,
+        "repo": "home"
       }
     ]
   },
