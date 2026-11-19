@@ -836,7 +836,8 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon('window.__reading === 0', 'no read of the data under way');
     await press(IN(`[data-answer="${q1}"]`), "q1's Answer");
     const b1 = await posted('/api/answer', q1);
-    assert.equal(b1.answer, 'Stripe');
+    // the pick goes as its own field, the note (none here) as the words (kit-313)
+    assert.deepEqual([b1.answer, b1.choice], ['', 'Stripe']);
     assert.equal(b1.rule, 'Stripe: the standing answer to questions like “Which processor?”', 'the rule box rides on the answer');
     const COUNTS = `[${TAB('inbox')}.querySelector('.n')?.textContent, document.querySelector('.pagebar .tt .n.q')?.textContent, document.title.match(/^\\((\\d+)\\)/)?.[1]]`;
     await soon(`window.__staleN > 0 && RAW.questions.some((q) => q.id === '${q1}') && !document.querySelector(${JSON.stringify(IN(`[data-qcard="${q1}"]`))})`, "a read with q1 still open, drawn")
