@@ -2778,7 +2778,30 @@ function cardHead(icon, label, { extra = '', id = null, rows = [], open = null, 
   return `<div class="card-head">${lead}<i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
 }
 const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap', review: 'list-checks' };
-const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
+const fileHref = (l) => (!l.repo && repoDocHref(l.path, l.ref)) || `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
+// Where a path into another repo opens, or null for a home path. Its first folder (after one ../, a
+// link's default checkout place) is a repo link's id or its remote's repository name. On GitHub: the
+// file's blob at ref (a ticket merged in that repo: its merge commit, since its branch may be gone;
+// no ref: the default branch), opened in a new tab by its callers; any other remote: that repo's peek.
+function repoDocHref(path, ref) {
+  if (typeof path !== 'string') return null;
+  const segs = path.split('/');
+  if (segs[0] === '..') segs.shift();
+  const [dir, ...rest] = segs;
+  if (!dir || !rest.length || rest.some((s) => !s || s === '.' || s === '..')) return null;
+  const name = (r) => String(r ?? '').replace(/\/+$/, '').replace(/\.git$/, '').split(/[/:]/).pop().toLowerCase();
+  const link = (DATA?.library?.links || []).find((x) => x?.kind === 'repo' && (String(x.id).toLowerCase() === dir.toLowerCase() || (x.remote && name(x.remote) === dir.toLowerCase())));
+  if (!link) return null;
+  const tid = /^ticket\/(.+)$/.exec(ref ?? '')?.[1];
+  const t = tid ? ticketMap().get(tid) : null;
+  const at = t?.merge_sha && t.repo === link.id ? t.merge_sha : ref || null;
+  const remote = String(link.remote ?? '').trim();
+  const gh = /^[A-Za-z0-9][\w.-]*\/[\w.-]+$/.test(remote) ? remote.replace(/\.git$/, '').split('/')
+    : (/^(?:https?:\/\/|ssh:\/\/(?:[^@/\s]+@)?|[^@/\s]+@)github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(remote) || []).slice(1);
+  const inner = rest.join('/');
+  if (gh.length === 2) return `https://github.com/${gh.map(encodeURIComponent).join('/')}/blob/${at ? at.split('/').map(encodeURIComponent).join('/') : 'HEAD'}/${rest.map(encodeURIComponent).join('/')}`;
+  return `#file?${new URLSearchParams({ path: inner, ...(at ? { ref: at } : {}), repo: link.id, title: inner })}`;
+}
 // An artifact link opens the viewer. The server resolves an open question's links (href, changed,
 // gone); a link it didn't resolve (an answered question's) opens the artifact where it was asked.
 const artHref = (slug, at) => `#artifact/${at === 'main' ? 'main' : `wt/${encodeURIComponent(at)}`}/${encodeURIComponent(slug)}`;
