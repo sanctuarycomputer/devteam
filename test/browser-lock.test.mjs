@@ -508,9 +508,13 @@ sweepCase('a start removes dead starters\' prepared folders, asides and claims, 
     prepOf(dir, '0-0123456789abcdef'), // pid 0: not a token
     'start.lock.new.junk',
     'notes.txt',
+    `start.lock.new.${tok(2147483638, '18')}`, // a dead token's name, but a file: not a starter's folder
+    `start.lock.${tok(2147483637, '29')}.0a1b2c3d`, // likewise, an aside's name on a symlink
   ];
   fs.writeFileSync(path.join(dir, 'start.lock.new.junk'), 'x');
   fs.writeFileSync(path.join(dir, 'notes.txt'), 'x');
+  fs.writeFileSync(path.join(dir, keep[6]), 'x');
+  fs.symlinkSync('notes.txt', path.join(dir, keep[7]));
   check(await run({ dir, n: 1, livePids: [LIVE_PREP, LIVE_ASIDE, LIVE_CLAIM] }), { left: keep });
 });
 
@@ -540,6 +544,31 @@ sweepCase('the sweep lists before it looks: a token that reached the path after 
   const r = await run({ dir, n: 2, script, livePids: [LIVE_CLAIM] });
   check(r, {});
   assert.ok(t, 'B never made its lock');
+});
+
+// While an ownerless folder holds the path, dead claims on null (its key) stay, as on any held token.
+sweepCase('a dead claim on null stays while an ownerless folder holds the path', async (dir) => {
+  const lock = path.join(dir, 'start.lock');
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'stray'), 'x');
+  const dead0 = claimOf(dir, null, DEAD_CLAIM, 0);
+  check(await run({ dir, n: 1, env: quick }), { entries: 0, errors: /timed out/, left: ['start.lock', dead0] });
+});
+
+// An ownerless folder is owned with a fresh token of the starter's, never its lock's token, so the
+// lock's token reaches the path only once (spec S1-1): stepped to the rename that moves the folder
+// aside, its owner is the starter's pid but not the token its prepared folder names.
+sweepCase('an ownerless folder is owned with a fresh token, not the lock\'s', async (dir) => {
+  LOCKS['old ownerless'].plant(path.join(dir, 'start.lock'));
+  let seen = null;
+  const script = [
+    { who: 0, until: 'renameSync', note: /^start\.lock start\.lock\./ },
+    (c) => { seen = { owner: ownerOf(c.dir), prep: fs.readdirSync(c.dir).find((f) => f.startsWith('start.lock.new.')) }; },
+  ];
+  check(await run({ dir, n: 1, script }), {});
+  assert.ok(seen?.prep, 'the starter had no prepared folder at its take');
+  assert.match(seen.owner ?? '', new RegExp(`^${STARTER_PID}-[0-9a-f]{16}$`));
+  assert.notEqual(`start.lock.new.${seen.owner}`, seen.prep);
 });
 
 sweepCase('a start that times out names start.lock and says to remove it when no browser start runs', async (dir) => {
