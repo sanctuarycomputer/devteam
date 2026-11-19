@@ -287,11 +287,11 @@ test('a door answered in words approves its plan only once read; a pick approves
     const plan = (id, q) => F.run(old, ['act', '--class', 'approve-plan', '--approved', q, '--refs', id, '--', 'plan ok'], SUP);
     const A = 'api-01-words';
     const QA = door(A, 'Move the order data to the new database in one cutover?');
-    F.ok(old, ['answer', QA, 'later maybe', '--in-words']);
+    F.ok(old, ['answer', QA, 'yes, go ahead with it', '--in-words']);
     const r = plan(A, QA);
     assert.notEqual(r.status, 0, r.out);
     assert.match(r.err, /not its recommendation/);
-    F.ok(old, ['answer', QA, '--read', 'Yes', '--cite', 'later maybe', '--class', 'one-way-door'], SUP);
+    F.ok(old, ['answer', QA, '--read', 'Yes', '--cite', 'yes, go ahead', '--class', 'one-way-door'], SUP);
     const a = plan(A, QA);
     assert.equal(a.status, 0, a.err);
     const B = 'api-02-pick';
