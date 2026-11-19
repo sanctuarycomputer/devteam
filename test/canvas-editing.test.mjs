@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { openCanvas, startCanvasFake } from './lib/canvas-fake.mjs';
+import { openCanvas, resolve, startCanvasFake } from './lib/canvas-fake.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { until } from './lib/kit.mjs';
 
@@ -209,17 +209,32 @@ async function enter(p) {
   await p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k, text: '\r', unmodifiedText: '\r' });
   await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k });
 }
+// Typed, key by key: letters, digits and space by the helper's key(); any other character as a key
+// event carrying only its text (the helper gives `(` the virtual key code 40, ArrowDown, `#` 35, End,
+// `.` 46, Delete, so Chrome would take them for those keys).
+async function typeKeys(p, s) {
+  for (const c of s) {
+    if (/^[A-Za-z0-9 ]$/.test(c)) { await p.key(c); continue; }
+    await p.send('Input.dispatchKeyEvent', { type: 'keyDown', key: c, text: c, unmodifiedText: c });
+    await p.send('Input.dispatchKeyEvent', { type: 'keyUp', key: c });
+  }
+}
 // Focus out of the Properties panel: a click on its title (not focusable), so a deferred rebuild runs.
 const leavePanel = (p) => p.click('.panel.right .ptitle');
 // Change a field by real input, then leave the panel: an input has its text selected, typed over and
 // Enter pressed; the `text` textarea is typed and Tabbed out of (Enter there is a new line); a select is
-// set by value with a `change` event (headless Chrome opens no popup); a button group is clicked.
+// set by value with a `change` event (headless Chrome opens no popup); a button group is clicked; a
+// checkbox is clicked when it isn't already `value` (true or false).
 async function fieldSet(p, prop, value) {
-  const kind = await p.ev(`(() => { const e = document.querySelector('#props [data-prop="${prop}"]'); return e ? e.localName : null; })()`);
+  const kind = await p.ev(`(() => { const e = document.querySelector('#props [data-prop="${prop}"]'); return e ? (e.type === 'checkbox' ? 'checkbox' : e.localName) : null; })()`);
   assert.ok(kind, `a #props [data-prop="${prop}"] control`);
-  if (kind === 'input' || kind === 'textarea') {
+  if (kind === 'checkbox') {
+    const checked = await p.ev(`document.querySelector('#props [data-prop="${prop}"]').checked`);
+    assert.notEqual(checked, value, `${prop} is not already ${value}`);
+    await p.click(`#props [data-prop="${prop}"]`);
+  } else if (kind === 'input' || kind === 'textarea') {
     assert.equal(await focusField(p, prop), true, `${prop} focused`);
-    await p.type(String(value));
+    await typeKeys(p, String(value));
     if (kind === 'textarea') await p.key('Tab'); else await enter(p);
   } else if (kind === 'select') {
     await p.ev(`(() => { const e = document.querySelector('#props [data-prop="${prop}"]'); e.focus(); e.value = ${JSON.stringify(String(value))}; e.dispatchEvent(new Event('change', { bubbles: true })); })()`);
@@ -556,5 +571,259 @@ test('the panel follows edits while a button has focus', { skip: canDrive ? fals
   await sleep(500);
   assert.equal(edits(rec).length, n0, 'nothing deleted after Escape');
   assert.ok(fake.doc('every').nodes.title, 'title kept');
+  noExceptions(rec);
+});
+
+// ---- C2: the Properties panel's fields ----
+
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const setOp = (id, prop, value) => ({ op: 'set', id, prop, value });
+// A property path's value in a stored node (variants.<name>.<id>.<prop> split at its third dot,
+// overrides.<id>.<prop> at its second), or undefined when absent.
+function valueAt(n, prop) {
+  const s = prop.split('.');
+  const keys = s[0] === 'variants' && s.length >= 4 ? ['variants', s[1], s[2], s.slice(3).join('.')]
+    : s[0] === 'overrides' && s.length >= 3 ? ['overrides', s[1], s.slice(2).join('.')] : s;
+  let at = n;
+  for (const k of keys) {
+    if (!isObj(at) || !Object.hasOwn(at, k)) return undefined;
+    at = at[k];
+  }
+  return at;
+}
+// A null that removes: a property whose default is absent (a variant, an override; contract §2
+// Defaults, spec-3 F3-1) reads as the key absent; a null elsewhere (stroke, variant) is a stored null.
+const removes = (prop) => /^(variants|overrides|props)\./.test(prop);
+function holds(n, prop, value) {
+  if (value === null && removes(prop)) return valueAt(n, prop) === undefined;
+  try { assert.deepEqual(valueAt(n, prop), value); return true; } catch { return false; }
+}
+
+// The shown page (the Pages list's current link), and showing another by its link.
+const shownPage = (p) => p.ev("document.querySelector('#pages a[aria-current=\"page\"]')?.dataset.page ?? null");
+async function showPg(p, pg) {
+  if ((await shownPage(p)) === pg) return;
+  await p.click(`#pages a[data-page="${pg}"]`);
+  await within(async () => (await shownPage(p)) === pg, `page ${pg} shown`, async () => shownPage(p));
+}
+// The page each fixture node is on (its ancestors walked up to a page).
+function pageOf(doc, id) {
+  let at = id;
+  while (Object.hasOwn(doc.nodes, at)) at = doc.nodes[at].parent;
+  return at;
+}
+// A node's drawn width in page px, rounded (the box's width over the stage's zoom).
+const drawnW = (p, id) => p.ev(`(() => {
+  const e = document.querySelector('#surface [data-id="${id}"]');
+  const z = new DOMMatrix(getComputedStyle(document.getElementById('surface')).transform).a;
+  return Math.round(e.getBoundingClientRect().width / z);
+})()`);
+// A colour (hex) as the page's computed style gives it.
+const cssColor = (p, hex) => p.ev(`(() => { const d = document.createElement('div'); d.style.backgroundColor = ${JSON.stringify(hex)}; document.body.append(d); const c = getComputedStyle(d).backgroundColor; d.remove(); return c; })()`);
+// A paint value's hex: a hex as it is, a colour token's hex, null transparent.
+function hexOf(doc, v) {
+  if (v === null || v === undefined) return 'transparent';
+  if (typeof v === 'string') return v;
+  let at = doc.tokens;
+  for (const seg of v.$ref.split('.')) at = at[seg];
+  return at.$value.hex;
+}
+// The panel's notes, as text.
+const notes = (p) => p.ev("[...document.querySelectorAll('#props .note')].filter((e) => !e.hidden).map((e) => e.textContent)");
+
+// C2.4's drawing checks, run after their rows.
+async function drawnRow(p) {
+  await within(async () => (await p.ev("getComputedStyle(document.querySelector('#surface [data-id=\"card\"]')).flexDirection")) === 'row', 'card drawn as a row');
+}
+async function drawnHello(p) {
+  await within(async () => (await text(p, '#surface [data-id="title"]')) === 'Hello', 'title shows Hello', async () => text(p, '#surface [data-id="title"]'));
+}
+async function drawnQuiet(p, fake) {
+  const want = await cssColor(p, hexOf(EVERY, resolve(fake.doc('every'), 'buy')['button-bg'].fill));
+  const got = () => p.ev("(() => { const e = document.querySelector('#surface [data-of=\"buy\"][data-src=\"button-bg\"]'); return e ? getComputedStyle(e).backgroundColor : null; })()");
+  await within(async () => (await got()) === want, `buy's background drawn as resolve gives it (${want})`, got);
+}
+
+// The C2 table (spec C2), in its order: the node, its page, the field changed (each step a fieldSet),
+// and the one set op sent (on `on`, else the node). Task 5 adds the four rows on button's variants
+// before the last row, which stays last.
+const C2_ROWS = [
+  { id: 'card', steps: [['layout.mode', 'row']], prop: 'layout.mode', value: 'row', after: drawnRow },
+  { id: 'card', steps: [['layout.gap', '24']], prop: 'layout.gap', value: 24 },
+  { id: 'card', steps: [['layout.align', 'center']], prop: 'layout.align', value: 'center' },
+  { id: 'card', steps: [['layout.justify', 'end']], prop: 'layout.justify', value: 'end' },
+  { id: 'card', steps: [['layout.wrap', true]], prop: 'layout.wrap', value: true },
+  { id: 'card', steps: [['layout.padding#1', '24']], prop: 'layout.padding', value: [16, 24, 16, 16] },
+  { id: 'card', steps: [['size.w#n', '320']], prop: 'size.w', value: 320 },
+  { id: 'card', steps: [['size.h', 'fill']], prop: 'size.h', value: 'fill' },
+  { id: 'card', steps: [['fill', 'color.brand']], prop: 'fill', value: { $ref: 'color.brand' } },
+  { id: 'card', steps: [['stroke#hex', '#ff000080']], prop: 'stroke', value: '#ff000080' },
+  { id: 'card', steps: [['strokeWidth', '2']], prop: 'strokeWidth', value: 2 },
+  { id: 'card', steps: [['radius', '6']], prop: 'radius', value: 6 },
+  { id: 'card', steps: [['clip', false]], prop: 'clip', value: false },
+  { id: 'card', steps: [['opacity', '50']], prop: 'opacity', value: 0.5 },
+  { id: 'card', steps: [['name', 'Card 2']], prop: 'name', value: 'Card 2' },
+  { id: 'dot', steps: [['fill', '@hex'], ['fill#hex', '#123456']], prop: 'fill', value: '#123456' },
+  { id: 'icon', steps: [['stroke', '@none']], prop: 'stroke', value: null },
+  { id: 'photo', steps: [['radius', '4']], prop: 'radius', value: 4 },
+  { id: 'buy', steps: [['size.w', 'fixed']], prop: 'size.w', value: (p) => drawnW(p, 'buy') },
+  { id: 'title', steps: [['size.w', 'hug']], prop: 'size.w', value: 'hug' },
+  { id: 'button', page: 'p-parts', steps: [['layout.gap', '4']], prop: 'layout.gap', value: 4 },
+  { id: 'tiles', steps: [['layout.columns', '1fr 80 auto']], prop: 'layout.columns', value: ['1fr', 80, 'auto'] },
+  { id: 'tiles', steps: [['layout.rows', '40']], prop: 'layout.rows', value: [40] },
+  { id: 'loose', steps: [['x', '420']], prop: 'x', value: 420 },
+  { id: 'loose', steps: [['y', '10']], prop: 'y', value: 10 },
+  { id: 'title', steps: [['text', 'Hello']], prop: 'text', value: 'Hello', after: drawnHello },
+  { id: 'title', steps: [['font', '@custom']], prop: 'font', value: { family: 'sans', size: 16, weight: 400, lineHeight: 1.4 } },
+  { id: 'title', steps: [['font#family', 'serif']], prop: 'font', value: { family: 'serif', size: 16, weight: 400, lineHeight: 1.4 } },
+  { id: 'title', steps: [['font#size', '20']], prop: 'font', value: { family: 'serif', size: 20, weight: 400, lineHeight: 1.4 } },
+  { id: 'title', steps: [['font', 'type.body']], prop: 'font', value: { $ref: 'type.body' } },
+  { id: 'title', steps: [['color', 'color.brand']], prop: 'color', value: { $ref: 'color.brand' } },
+  { id: 'title', steps: [['align', 'center']], prop: 'align', value: 'center' },
+  { id: 'photo', steps: [['fit', 'contain']], prop: 'fit', value: 'contain' },
+  { id: 'buy', steps: [['variant', 'quiet']], prop: 'variant', value: 'quiet', after: drawnQuiet },
+  { id: 'buy', steps: [['variant', '@none']], prop: 'variant', value: null },
+  { id: 'loose', steps: [['visible', false]], prop: 'visible', value: false },
+];
+
+test('every property sends one set op the fake accepts', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  for (const row of C2_ROWS) {
+    const on = row.on ?? row.id;
+    const what = `${row.id} ${row.steps.map(([f, v]) => `${f} ${JSON.stringify(v)}`).join(', ')}`;
+    await showPg(p, row.page ?? 'p-main');
+    await selectRow(p, row.id);
+    const value = typeof row.value === 'function' ? await row.value(p) : row.value;
+    assert.equal(holds(fake.doc('every').nodes[on], row.prop, value), false, `${what}: ${on} doesn't already hold ${JSON.stringify(value)}`);
+    const n0 = edits(rec).length;
+    for (const [f, v] of row.steps) await fieldSet(p, f, v);
+    const e = await nextEdit(rec, n0);
+    assert.deepEqual(e.ops, [setOp(on, row.prop, value)], `${what}: one set op`);
+    await ackOf(rec, e);
+    await sleep(200);
+    assert.equal(edits(rec).length, n0 + 1, `${what}: exactly one edit frame`);
+    assert.deepEqual(refusedFrames(rec), [], `${what}: nothing refused`);
+    assert.equal(holds(fake.doc('every').nodes[on], row.prop, value), true, `${what}: the fake's document holds ${JSON.stringify(value)} (${JSON.stringify(valueAt(fake.doc('every').nodes[on], row.prop))})`);
+    if (row.after) await row.after(p, fake);
+  }
+  await waitSaved(p);
+  noExceptions(rec);
+});
+
+test("the panel's fields are all checked", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const sent = new Set(C2_ROWS.map((r) => r.prop));
+  // a field's property paths: data-prop values with no # (a part) and no @ (the panel's own)
+  const paths = () => p.ev("[...document.querySelectorAll('#props [data-prop]')].map((e) => e.dataset.prop).filter((v) => !v.includes('#') && !v.includes('@'))");
+  const covered = async (what) => {
+    const ps = await paths();
+    assert.ok(ps.includes('name') && ps.includes('size.w'), `${what}: the panel has its fields (${ps.join(' ')})`);
+    for (const x of ps) assert.ok(sent.has(x), `${what}: ${x} is a path some row of C2 sends`);
+    return ps;
+  };
+  const types = new Set();
+  for (const id of Object.keys(EVERY.nodes)) {
+    await showPg(p, pageOf(EVERY, id));
+    await selectRow(p, id);
+    await covered(id);
+    types.add(EVERY.nodes[id].type);
+  }
+  assert.deepEqual([...types].sort(), ['component', 'ellipse', 'frame', 'image', 'instance', 'rect', 'text', 'vector'], 'one of each type');
+  // card in each of the four layout modes, by its Direction buttons
+  await showPg(p, 'p-main');
+  await selectRow(p, 'card');
+  const has = { none: [], row: ['layout.gap', 'layout.wrap'], column: ['layout.gap', 'layout.wrap'], grid: ['layout.gap', 'layout.columns', 'layout.rows'] };
+  const not = { none: ['layout.gap', 'layout.wrap', 'layout.columns'], row: ['layout.columns'], column: ['layout.columns'], grid: ['layout.wrap'] };
+  for (const mode of ['none', 'row', 'grid', 'column']) {
+    await fieldSet(p, 'layout.mode', mode);
+    await within(async () => (await p.ev(`document.querySelector('#props [data-prop="layout.mode"] button[aria-pressed="true"]')?.dataset.value ?? null`)) === mode, `card's Direction ${mode} pressed`);
+    const ps = await covered(`card, ${mode}`);
+    for (const x of has[mode]) assert.ok(ps.includes(x), `card, ${mode}: ${x} shown`);
+    for (const x of not[mode]) assert.ok(!ps.includes(x), `card, ${mode}: ${x} not shown`);
+  }
+  await waitSaved(p);
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+test('out-of-class input sends nothing', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const TRACKS = 'Tracks are numbers, auto or 1fr-like, apart by spaces.';
+  const COLOUR = 'A colour is #rgb, #rrggbb or #rrggbbaa.';
+  await selectRow(p, 'tiles');
+  let n0 = edits(rec).length;
+  await fieldSet(p, 'layout.columns', 'repeat(3, 1fr)');
+  await within(async () => (await notes(p)).includes(TRACKS), 'the tracks note', async () => JSON.stringify(await notes(p)));
+  await sleep(800);
+  assert.equal(edits(rec).length, n0, 'repeat(…) sends nothing');
+  await selectRow(p, 'card');
+  n0 = edits(rec).length;
+  await fieldSet(p, 'stroke#hex', 'red');
+  await within(async () => (await notes(p)).includes(COLOUR), 'the colour note', async () => JSON.stringify(await notes(p)));
+  await sleep(800);
+  assert.equal(edits(rec).length, n0, 'red sends nothing');
+  assert.deepEqual(fake.doc('every').nodes.tiles.layout.columns, EVERY.nodes.tiles.layout.columns, 'tiles unchanged');
+  assert.equal(fake.doc('every').nodes.card.stroke, EVERY.nodes.card.stroke, 'card unchanged');
+  // a number out of its range is clamped to it, and sent
+  await fieldSet(p, 'opacity', '150');
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [setOp('card', 'opacity', 1)], 'opacity 150 % clamped to 1');
+  await ackOf(rec, e);
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+test('a hostile name is text', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const HOSTILE_NAME = '<img src=x onerror=alert(1)>';
+  const imgs = () => count(p, 'img');
+  await selectRow(p, 'rule');
+  const before = await imgs();
+  const n0 = edits(rec).length;
+  await fieldSet(p, 'name', HOSTILE_NAME);
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [setOp('rule', 'name', HOSTILE_NAME)], 'sent as that string');
+  await ackOf(rec, e);
+  assert.equal(fake.doc('every').nodes.rule.name, HOSTILE_NAME);
+  await within(async () => (await text(p, '#layers .layer[data-node="rule"] .nm')) === HOSTILE_NAME, 'the Layers row shows it as text', async () => text(p, '#layers .layer[data-node="rule"] .nm'));
+  // the panel is rebuilt in a timer after focus leaves it, so it is waited on
+  await within(async () => (await text(p, '#props [data-field="name"]')) === HOSTILE_NAME, 'the read-only Name row shows it as text', async () => text(p, '#props [data-field="name"]'), 5000);
+  assert.equal(await imgs(), before, 'no img element added');
+  assert.equal(await count(p, '#layers img, #props img'), 0, 'no img in the Layers or the panel');
+  await sleep(300);
+  assert.deepEqual(rec.dialogs, [], 'no dialog opened');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+test("a remote edit doesn't take a field from under a person typing", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const a = await ana(fake, later);
+  await selectRow(p, 'title');
+  assert.equal(await focusField(p, 'text'), true, 'the Text field focused');
+  await typeKeys(p, 'Typed');
+  const n0 = edits(rec).length;
+  // Ana changes the same node's text and align while the person types
+  await a.edit([setOp('title', 'text', 'From Ana'), setOp('title', 'align', 'center')]);
+  await within(async () => (await text(p, '#surface [data-id="title"]')) === 'From Ana', "Ana's text drawn on the stage", async () => text(p, '#surface [data-id="title"]'), 5000);
+  await sleep(300);
+  assert.equal(await p.ev('document.activeElement?.dataset.prop ?? null'), 'text', 'the Text field keeps focus');
+  assert.equal(await p.ev("document.querySelector('#props [data-prop=\"text\"]').value"), 'Typed', 'the Text field keeps what was typed');
+  assert.equal(edits(rec).length, n0, 'nothing sent while typing');
+  // leaving the field sends what was typed, once; the panel then follows Ana's align
+  await leavePanel(p);
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [setOp('title', 'text', 'Typed')], 'one set of text');
+  await ackOf(rec, e);
+  await within(async () => (await p.ev("document.querySelector('#props [data-prop=\"align\"] button[aria-pressed=\"true\"]')?.dataset.value ?? null")) === 'center', "the panel shows Ana's align", async () => p.ev("document.querySelector('#props [data-prop=\"align\"] button[aria-pressed=\"true\"]')?.dataset.value ?? null"), 5000);
+  await waitSaved(p);
+  assert.equal(fake.doc('every').nodes.title.text, 'Typed', "the server's order: the page's edit came last");
+  assert.equal(await p.ev("document.querySelector('#props [data-prop=\"text\"]').value"), 'Typed');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
   noExceptions(rec);
 });

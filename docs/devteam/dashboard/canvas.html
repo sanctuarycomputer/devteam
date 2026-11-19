@@ -79,6 +79,19 @@
   .props .fields .row { align-items: center; }
   .props input, .props textarea { font: inherit; font-size: 12px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; height: 28px; padding: 0 8px; min-width: 0; width: 100%; }
   .props .foot { margin-top: 16px; }
+  .props .ctl { display: flex; gap: 4px; align-items: center; min-width: 0; }
+  .props .ctl > select, .props .ctl > input:not([type="checkbox"]) { flex: 1 1 0; width: auto; }
+  .props select { width: 100%; }
+  .props input[type="checkbox"] { width: 16px; height: 16px; margin: 0; padding: 0; }
+  .props textarea { height: auto; min-height: 64px; padding: 4px 8px; resize: vertical; line-height: 1.4; }
+  .props .group { display: flex; flex-wrap: wrap; gap: 2px; flex: 1 1 auto; min-width: 0; }
+  .props .group button { flex: 1 1 auto; padding: 0 5px; }
+  .props .group button[aria-pressed="true"] { background: var(--well); border-color: var(--fg-2); color: var(--fg); }
+  .props .pad { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; flex: 1 1 auto; min-width: 0; }
+  .props .pad input { padding: 0 4px; }
+  .props .swatch { flex: none; width: 20px; height: 20px; border-radius: 4px; border: 1px solid var(--line-2); }
+  .props .swatch.none { border-style: dashed; }
+  .props .fnote { margin: -4px 0 8px 80px; color: var(--red-fg); }
   .props :disabled { opacity: .5; cursor: not-allowed; }
 
   /* the stage: the page surface is the one element zoom and pan move */
@@ -369,9 +382,14 @@
   }
   // A whole font: a typography token, or the four fields each a literal or a token. A size or line
   // height that is a number is clamped to its range (as a length is); a field that is no number, or a
-  // weight off the 100 steps, takes its default.
+  // weight off the 100 steps, takes its default. fontWords gives the family as its word (sans, serif,
+  // mono), font as the page's own font stack for it.
   function font(v) {
-    const out = { family: FAMILY.sans, size: 16, weight: 400, lineHeight: 1.4 };
+    const w = fontWords(v);
+    return { ...w, family: FAMILY[w.family] };
+  }
+  function fontWords(v) {
+    const out = { family: 'sans', size: 16, weight: 400, lineHeight: 1.4 };
     let fam; let size; let weight; let lh;
     if (isRef(v)) {
       const t = ref(v, 'typography');
@@ -386,7 +404,7 @@
       weight = isRef(v.weight) ? ref(v.weight, 'fontWeight') : v.weight;
       lh = isRef(v.lineHeight) ? ref(v.lineHeight, 'number') : v.lineHeight;
     } else return out;
-    if (typeof fam === 'string' && own(FAMILY, fam)) out.family = FAMILY[fam];
+    if (typeof fam === 'string' && own(FAMILY, fam)) out.family = fam;
     if (finite(size)) out.size = clamp(size, 1, 1000);
     if (finite(weight) && weight >= 100 && weight <= 900 && weight % 100 === 0) out.weight = weight;
     if (finite(lh)) out.lineHeight = clamp(lh, 0.5, 10);
@@ -898,10 +916,14 @@
   // focused control, when the new panel has it again, keeps focus.
   let propsStale = false;
   let pressing = false;
+  // The colour fields set to Hex while their value isn't one (`<id> <path>`): kept until a hex is sent
+  // or the selection changes, so the panel rebuilt meanwhile still shows the hex input.
+  const hexChosen = new Set();
   const inProps = (x) => x instanceof Node && $('props').contains(x);
+  // A field a person types or chooses in (a checkbox, like a button, holds nothing).
   const fieldFocused = () => {
     const a = document.activeElement;
-    return inProps(a) && a.matches('input, select, textarea');
+    return inProps(a) && a.matches('input:not([type="checkbox"]), select, textarea');
   };
   const holdProps = () => pressing || fieldFocused();
   function renderProps() {
@@ -958,6 +980,7 @@
     for (const [rid, row] of layerRows) row.setAttribute('aria-selected', rid === next ? 'true' : 'false');
     for (const el of $('surface').querySelectorAll('.sel')) el.classList.remove('sel');
     if (next !== null && drawn.has(next)) drawn.get(next).classList.add('sel');
+    if (next !== state.sel) hexChosen.clear();
     state.sel = next;
     renderProps();
   }
@@ -1583,26 +1606,390 @@
   }
   const wellFormed = (v) => typeof v.isWellFormed !== 'function' || v.isWellFormed();
 
-  // The fields under the read-only rows, for the selected node: Name, then Delete layer at the foot.
-  // Disabled once editing has stopped.
+  // ---- the Properties panel's fields (spec §4) ----
+  // Each field shows the node's value as drawn and sends one edit of one set (setProp) of a value
+  // checked against its class: a number clamped to its range, a colour, tracks or a font built only
+  // from what the class allows. Text and number inputs send on change (Enter or leaving), the text
+  // textarea on leaving it. A field reads the value it builds on when it changes, not when it was built.
+
+  const PX = 100000;
+  const NUM_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+  const TRACK_PX_RE = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
+  const NOTE = {
+    tracks: 'Tracks are numbers, auto or 1fr-like, apart by spaces.',
+    colour: 'A colour is #rgb, #rrggbb or #rrggbbaa.',
+  };
+  // Each field's default (canvas-doc@1 §2 Properties), shown when the node doesn't store it.
+  const DEFAULT = {
+    visible: true, opacity: 1, x: 0, y: 0, 'size.w': 'hug', 'size.h': 'hug', fill: null, stroke: null, strokeWidth: 0,
+    radius: 0, clip: false, 'layout.mode': 'none', 'layout.gap': 0, 'layout.padding': [0, 0, 0, 0], 'layout.align': 'start',
+    'layout.justify': 'start', 'layout.wrap': false, 'layout.columns': [], 'layout.rows': [], text: '',
+    font: { family: 'sans', size: 16, weight: 400, lineHeight: 1.4 }, color: '#000000', align: 'left', fit: 'cover', variant: null,
+  };
+  const PAINTED = new Set(['frame', 'component', 'rect', 'ellipse', 'vector']);
+  const ROUNDED = new Set(['frame', 'component', 'rect', 'image']);
+  // A property's value on the node as drawn now, or its default.
+  function valueOf(id, path) {
+    const n = nodeOf(id);
+    const v = n ? getPath(n, path) : undefined;
+    return v === undefined ? DEFAULT[path] : v;
+  }
+  const numText = (v) => String(Math.round(v * 10000) / 10000);
+  const lenOk = (x) => isRef(x) || (finite(x) && x >= 0 && x <= PX);
+
+  // A field's note under its row (null removes it).
+  function fieldNote(row, text) {
+    let p = row.nextElementSibling;
+    if (!(p instanceof HTMLElement && p.classList.contains('fnote'))) {
+      if (text === null) return;
+      p = document.createElement('p');
+      p.className = 'note fnote';
+      p.setAttribute('role', 'status');
+      row.after(p);
+    }
+    if (text === null) p.remove(); else p.textContent = text;
+  }
+  // A labelled row of controls.
+  function fieldRow(label, ...controls) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = label;
+    const c = document.createElement('div');
+    c.className = 'ctl';
+    c.append(...controls);
+    row.append(k, c);
+    return row;
+  }
+  function control(tag, prop, label) {
+    const e = document.createElement(tag);
+    e.dataset.prop = prop;
+    e.setAttribute('aria-label', label);
+    return e;
+  }
+  function textInput(prop, label, value) {
+    const e = control('input', prop, label);
+    e.type = 'text';
+    e.spellcheck = false;
+    e.value = value;
+    return e;
+  }
+  // A select of [value, label] options showing `value` (an option of its own when none has it).
+  function selectOf(prop, label, opts, value) {
+    const s = control('select', prop, label);
+    const v = String(value);
+    const all = opts.some(([o]) => o === v) ? opts : [...opts, [v, v]];
+    for (const [o, l] of all) {
+      const opt = document.createElement('option');
+      opt.value = o;
+      opt.textContent = l;
+      s.append(opt);
+    }
+    s.value = v;
+    return s;
+  }
+  // A number input: the value shown times `scale` (a dimension token's path as its placeholder, the
+  // input then empty); on change the number typed, clamped to [min, max], is sent divided by `scale`;
+  // anything else puts back what was shown and sends nothing.
+  function numInput(prop, label, v, min, max, send, scale = 1) {
+    const e = textInput(prop, label, '');
+    e.inputMode = 'decimal';
+    if (isRef(v)) e.placeholder = v.$ref; else if (finite(v)) e.value = numText(v * scale);
+    let was = e.value;
+    e.addEventListener('change', () => {
+      const s = e.value.trim();
+      if (!NUM_RE.test(s)) { e.value = was; return; }
+      const x = clamp(Number(s), min, max);
+      e.value = numText(x);
+      was = e.value;
+      send(x / scale);
+    });
+    return e;
+  }
+  function checkbox(id, path, label) {
+    const e = control('input', path, label);
+    e.type = 'checkbox';
+    e.checked = valueOf(id, path) === true;
+    e.addEventListener('change', () => setProp(id, path, e.checked));
+    return fieldRow(label, e);
+  }
+  function numField(id, path, label, min, max, scale = 1) {
+    return fieldRow(label, numInput(path, label, valueOf(id, path), min, max, (x) => setProp(id, path, x), scale));
+  }
+  // Buttons, one per [value, label], the current one pressed; a press on another sends it.
+  function buttons(id, path, label, opts) {
+    const cur = valueOf(id, path);
+    const g = document.createElement('div');
+    g.className = 'group';
+    g.setAttribute('role', 'group');
+    g.setAttribute('aria-label', label);
+    g.dataset.prop = path;
+    for (const [v, l] of opts) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.dataset.value = v;
+      b.textContent = l;
+      b.setAttribute('aria-pressed', String(v === cur));
+      b.addEventListener('click', () => { if (valueOf(id, path) !== v) setProp(id, path, v); });
+      g.append(b);
+    }
+    return fieldRow(label, g);
+  }
+  // A select of fixed words; the panel is rebuilt after a choice, which keeps focus on it.
+  function wordSelect(id, path, label, opts) {
+    const s = selectOf(path, label, opts, valueOf(id, path));
+    s.addEventListener('change', () => { setProp(id, path, s.value); buildProps(); });
+    return fieldRow(label, s);
+  }
+
+  // size.w or size.h: Hug, Fill or Fixed and its number. Choosing Fixed sends the size drawn now, in
+  // page px, rounded.
+  function sizeField(id, axis, label) {
+    const path = `size.${axis}`;
+    const v = valueOf(id, path);
+    const kind = v === 'fill' ? 'fill' : finite(v) || isRef(v) ? 'fixed' : 'hug';
+    const s = selectOf(path, label, [['hug', 'Hug'], ['fill', 'Fill'], ['fixed', 'Fixed']], kind);
+    s.addEventListener('change', () => {
+      if (s.value === 'fixed') {
+        const el = drawn.get(id);
+        const r = el ? el.getBoundingClientRect() : null;
+        const px = r ? (axis === 'w' ? r.width : r.height) / view.z : 100;
+        setProp(id, path, Math.round(clamp(Number.isFinite(px) ? px : 100, 0, PX)));
+      } else setProp(id, path, s.value === 'fill' ? 'fill' : 'hug');
+      buildProps();
+    });
+    const parts = [s];
+    if (kind === 'fixed') parts.push(numInput(`${path}#n`, `${label} in px`, v, 0, PX, (x) => setProp(id, path, x)));
+    return fieldRow(label, ...parts);
+  }
+  // Padding: four numbers; one changed sends the whole array, the other sides as stored ($refs kept).
+  function paddingSides(id) {
+    const v = valueOf(id, 'layout.padding');
+    return [0, 1, 2, 3].map((i) => (Array.isArray(v) && v.length === 4 && lenOk(v[i]) ? v[i] : 0));
+  }
+  function paddingField(id) {
+    const sides = paddingSides(id);
+    const box = document.createElement('div');
+    box.className = 'pad';
+    ['top', 'right', 'bottom', 'left'].forEach((side, i) => {
+      box.append(numInput(`layout.padding#${i}`, `Padding ${side}`, sides[i], 0, PX, (x) => {
+        const now = paddingSides(id);
+        now[i] = x;
+        setProp(id, 'layout.padding', now);
+      }));
+    });
+    return fieldRow('Padding', box);
+  }
+  // Tracks typed apart by spaces, each a number, `auto` or `<n>fr`, at most 64; null when any isn't.
+  function parseTracks(s) {
+    const parts = s.trim() === '' ? [] : s.trim().split(/\s+/);
+    if (parts.length > 64) return null;
+    const out = [];
+    for (const t of parts) {
+      if (t === 'auto' || FR_RE.test(t)) out.push(t);
+      else if (TRACK_PX_RE.test(t) && Number(t) <= PX) out.push(Number(t));
+      else return null;
+    }
+    return out;
+  }
+  function tracksField(id, path, label) {
+    const v = valueOf(id, path);
+    const e = textInput(path, label, Array.isArray(v) ? v.map((t) => (finite(t) ? numText(t) : typeof t === 'string' ? t : '?')).join(' ') : '');
+    const row = fieldRow(label, e);
+    e.addEventListener('change', () => {
+      const t = parseTracks(e.value);
+      fieldNote(row, t === null ? NOTE.tracks : null);
+      if (t !== null) setProp(id, path, t);
+    });
+    return row;
+  }
+  // The document's tokens of one $type, by path (groups walked in order, at most 8 deep).
+  function tokensOf(type) {
+    const out = [];
+    const walk = (g, pre, depth) => {
+      if (!isObj(g) || depth > 8) return;
+      for (const k of Object.keys(g)) {
+        const x = g[k];
+        if (!isObj(x)) continue;
+        const at = pre ? `${pre}.${k}` : k;
+        if (own(x, '$type')) { if (x.$type === type) out.push(at); } else walk(x, at, depth + 1);
+      }
+    };
+    walk(state.doc.tokens, '', 1);
+    return out;
+  }
+  // The colour field: a select of the colour tokens, Hex and (where null is allowed) None, a swatch
+  // drawn through color(), and for Hex a hex input. Choosing Hex sends nothing: the hex typed is sent.
+  function colourField(id, path, label, none) {
+    const v = valueOf(id, path);
+    const key = `${id} ${path}`;
+    const chosen = hexChosen.has(key);
+    const mode = isRef(v) && !chosen ? v.$ref : v === null && none && !chosen ? '@none' : '@hex';
+    const opts = tokensOf('color').map((t) => [t, t]);
+    opts.push(['@hex', 'Hex']);
+    if (none) opts.push(['@none', 'None']);
+    const s = selectOf(path, label, opts, mode);
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    sw.setAttribute('aria-hidden', 'true');
+    const c = color(v);
+    if (c) sw.style.backgroundColor = c; else sw.classList.add('none');
+    s.addEventListener('change', () => {
+      if (s.value === '@hex') hexChosen.add(key);
+      else {
+        hexChosen.delete(key);
+        setProp(id, path, s.value === '@none' ? null : { $ref: s.value });
+      }
+      buildProps();
+    });
+    const parts = [s, sw];
+    let row = null;
+    if (mode === '@hex') {
+      const r = isRef(v) ? ref(v, 'color') : v;
+      const h = textInput(`${path}#hex`, `${label} hex`, typeof r === 'string' && HEX_RE.test(r) ? r : '');
+      h.maxLength = 9;
+      h.placeholder = '#rrggbb';
+      h.addEventListener('change', () => {
+        const x = h.value.trim();
+        if (!HEX_RE.test(x)) { fieldNote(row, NOTE.colour); return; }
+        fieldNote(row, null);
+        hexChosen.delete(key);
+        sw.classList.remove('none');
+        sw.style.backgroundColor = x;
+        setProp(id, path, x);
+      });
+      parts.push(h);
+    }
+    row = fieldRow(label, ...parts);
+    return row;
+  }
+  // The font: a select of the typography tokens and Custom; choosing Custom sends the font drawn now
+  // as literals. Custom shows family, size, weight and line height, any of which sends the whole font
+  // (the other parts as stored, $refs kept, or as drawn when not stored in their class).
+  const FONT_PART_OK = {
+    family: (x) => typeof x === 'string' && own(FAMILY, x),
+    size: (x) => finite(x) && x >= 1 && x <= 1000,
+    weight: (x) => finite(x) && x >= 100 && x <= 900 && x % 100 === 0,
+    lineHeight: (x) => finite(x) && x >= 0.5 && x <= 10,
+  };
+  function fontParts(id) {
+    const now = valueOf(id, 'font');
+    const words = fontWords(now);
+    const out = {};
+    for (const k of ['family', 'size', 'weight', 'lineHeight']) {
+      const x = isObj(now) && !isRef(now) ? now[k] : undefined;
+      out[k] = isRef(x) || FONT_PART_OK[k](x) ? x : words[k];
+    }
+    return out;
+  }
+  function fontField(id) {
+    const v = valueOf(id, 'font');
+    const custom = !isRef(v);
+    const opts = tokensOf('typography').map((t) => [t, t]);
+    opts.push(['@custom', 'Custom']);
+    const s = selectOf('font', 'Font', opts, custom ? '@custom' : v.$ref);
+    s.addEventListener('change', () => {
+      setProp(id, 'font', s.value === '@custom' ? fontWords(valueOf(id, 'font')) : { $ref: s.value });
+      buildProps();
+    });
+    const rows = [fieldRow('Font', s)];
+    if (!custom) return rows;
+    const parts = fontParts(id);
+    const sendPart = (k, x) => {
+      const now = fontParts(id);
+      now[k] = x;
+      setProp(id, 'font', now);
+    };
+    // a part held by a token shows as that token in its select (its value `@<path>`)
+    const refOpt = (x) => (isRef(x) ? [[`@${x.$ref}`, x.$ref]] : []);
+    const partSelect = (k, label, opts) => {
+      const x = parts[k];
+      const ps = selectOf(`font#${k}`, label, [...opts, ...refOpt(x)], isRef(x) ? `@${x.$ref}` : x);
+      ps.addEventListener('change', () => {
+        const val = ps.value;
+        sendPart(k, val.startsWith('@') ? { $ref: val.slice(1) } : k === 'weight' ? Number(val) : val);
+        buildProps();
+      });
+      return fieldRow(label, ps);
+    };
+    rows.push(partSelect('family', 'Family', [['sans', 'Sans'], ['serif', 'Serif'], ['mono', 'Mono']]));
+    rows.push(fieldRow('Size', numInput('font#size', 'Font size', parts.size, 1, 1000, (x) => sendPart('size', x))));
+    rows.push(partSelect('weight', 'Weight', [100, 200, 300, 400, 500, 600, 700, 800, 900].map((w) => [String(w), String(w)])));
+    rows.push(fieldRow('Line height', numInput('font#lineHeight', 'Line height', parts.lineHeight, 0.5, 10, (x) => sendPart('lineHeight', x))));
+    return rows;
+  }
+  // The text: a textarea (Enter is a new line), sent on leaving it.
+  function textField(id) {
+    const v = valueOf(id, 'text');
+    const e = control('textarea', 'text', 'Text');
+    e.maxLength = 10000;
+    e.rows = 3;
+    e.spellcheck = false;
+    e.value = typeof v === 'string' ? v : '';
+    e.addEventListener('change', () => {
+      if ([...e.value].length <= 10000 && wellFormed(e.value)) setProp(id, 'text', e.value);
+    });
+    return fieldRow('Text', e);
+  }
+  // An instance's variant: None or one of its component's variants.
+  function variantField(id, n) {
+    const comp = nodeOf(n.component);
+    const names = comp && comp.type === 'component' && isObj(comp.variants) ? Object.keys(comp.variants) : [];
+    const v = valueOf(id, 'variant');
+    const s = selectOf('variant', 'Variant', [['@none', 'None'], ...names.map((x) => [x, x])], typeof v === 'string' ? v : '@none');
+    s.addEventListener('change', () => { setProp(id, 'variant', s.value === '@none' ? null : s.value); buildProps(); });
+    return fieldRow('Variant', s);
+  }
+  // x and y place a node only under a `none` frame or component, or the page.
+  function placedByXY(n) {
+    if (pageAt(state.doc, n.parent) >= 0) return true;
+    const p = nodeOf(n.parent);
+    return !!p && CONTAINERS.has(p.type) && pick(MODE, getPath(p, 'layout.mode'), 'none') === 'none';
+  }
+
+  // The fields of a node's type (spec §4's table), in the panel's order, after Name.
+  function fieldsFor(id, n) {
+    const t = n.type;
+    const out = [checkbox(id, 'visible', 'Visible'), numField(id, 'opacity', 'Opacity %', 0, 100, 100)];
+    if (placedByXY(n)) out.push(numField(id, 'x', 'X', -PX, PX), numField(id, 'y', 'Y', -PX, PX));
+    out.push(sizeField(id, 'w', 'Width'), sizeField(id, 'h', 'Height'));
+    if (CONTAINERS.has(t)) {
+      const mode = pick(MODE, valueOf(id, 'layout.mode'), 'none');
+      out.push(buttons(id, 'layout.mode', 'Direction', [['none', 'Free'], ['row', 'Row'], ['column', 'Column'], ['grid', 'Grid']]));
+      if (mode !== 'none') {
+        out.push(numField(id, 'layout.gap', 'Gap', 0, PX));
+        out.push(buttons(id, 'layout.align', 'Align', [['start', 'Start'], ['center', 'Center'], ['end', 'End'], ['stretch', 'Stretch']]));
+        out.push(buttons(id, 'layout.justify', 'Justify', [['start', 'Start'], ['center', 'Center'], ['end', 'End'], ['between', 'Apart']]));
+      }
+      if (mode === 'row' || mode === 'column') out.push(checkbox(id, 'layout.wrap', 'Wrap'));
+      out.push(paddingField(id));
+      if (mode === 'grid') out.push(tracksField(id, 'layout.columns', 'Columns'), tracksField(id, 'layout.rows', 'Rows'));
+    }
+    if (PAINTED.has(t)) out.push(colourField(id, 'fill', 'Fill', true), colourField(id, 'stroke', 'Stroke', true), numField(id, 'strokeWidth', 'Stroke width', 0, PX));
+    if (ROUNDED.has(t)) out.push(numField(id, 'radius', 'Radius', 0, PX));
+    if (CONTAINERS.has(t)) out.push(checkbox(id, 'clip', 'Clip'));
+    if (t === 'text') {
+      out.push(textField(id), ...fontField(id), colourField(id, 'color', 'Colour', false));
+      out.push(buttons(id, 'align', 'Align', [['left', 'Left'], ['center', 'Center'], ['right', 'Right'], ['justify', 'Justify']]));
+    }
+    if (t === 'image') out.push(wordSelect(id, 'fit', 'Fit', [['cover', 'Cover'], ['contain', 'Contain'], ['fill', 'Fill']]));
+    if (t === 'instance') out.push(variantField(id, n));
+    return out;
+  }
+
+  // The fields under the read-only rows, for the selected node: Name, its type's fields, then Delete
+  // layer at the foot. Disabled once editing has stopped.
   function editFields(id, n) {
     const box = document.createElement('div');
     box.className = 'fields';
-    const name = document.createElement('input');
-    name.type = 'text';
+    const name = textInput('name', 'Name', typeof n.name === 'string' ? n.name : '');
     name.maxLength = 200;
-    name.dataset.prop = 'name';
-    name.value = typeof n.name === 'string' ? n.name : '';
     name.addEventListener('change', () => {
       const v = name.value;
       if (v.length <= 200 && wellFormed(v)) setProp(id, 'name', v);
     });
-    const row = document.createElement('label');
-    row.className = 'row';
-    const k = document.createElement('span');
-    k.className = 'k';
-    k.textContent = 'Name';
-    row.append(k, name);
+    const row = fieldRow('Name', name);
     const foot = document.createElement('div');
     foot.className = 'foot';
     const del = document.createElement('button');
@@ -1611,7 +1998,7 @@
     del.textContent = 'Delete layer';
     del.addEventListener('click', () => deleteNode(id));
     foot.append(del);
-    box.append(row, foot);
+    box.append(row, ...fieldsFor(id, n), foot);
     if (!editable()) for (const c of box.querySelectorAll('input, select, textarea, button')) c.disabled = true;
     return box;
   }
