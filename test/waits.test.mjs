@@ -235,4 +235,96 @@ test('waits A2: waitCause() reads each cause form, the contract carries the new 
     assert.equal(lit('LINK'), SRC.match(/\nconst LINK_ID = \/(.+)\/;/)[1]);
     assert.equal(lit('SLUG'), SRC.match(/\nfunction choreSlug\(slugName\) \{\n {2}if \(!\/(.+?)\/\.test/)[1]);
   });
+
+  await t.test('moves --json still carries next_move 1, and no row for the new subjects yet', () => {
+    const dir = project('a2-moves');
+    logLine(dir, 'supervisor', ticketNew({ held: 'waits on an answer', held_for: [Q], held_until: '2026-11-30' }));
+    logLine(dir, 'kit-01-probe', { type: 'observation', kind: 'follow-up', subject: TICKET, source: 'worker', detail: 'the empty state was left for later' });
+    const r = logCheck(dir);
+    assert.equal(r.status, 0, r.out + r.err);
+    assert.equal(ok(dir, ['moves', '--json']).trim(), '{"next_move":1,"moves":[]}');
+  });
+
+  await t.test("the fixtures hold one move of each new subject, each fitting the comment's shape", () => {
+    const L = valueLines(contractComment());
+    const one = (name) => { const v = L.get(name); assert.equal(v?.length, 1, `one "// values ${name}:" line`); return v[0]; };
+    const fields = one('fields'), subjects = one('subject'), holders = one('holder'), refKinds = one('ref.kind');
+    const quiet = one('quiet'), via = one('via'), flags = one('flag'), rungs = one('rung'), states = one('wait.state');
+    const kindOf = (s) => subjects.find((k) => typeof s === 'string' && s.startsWith(k) && s.length > k.length) ?? null;
+    const { next_move, moves } = JSON.parse(fs.readFileSync(path.join(FIX, 'moves.json'), 'utf8'));
+    assert.equal(next_move, 1);
+    for (const m of moves) {
+      const at = `${m.subject} ${m.move}`;
+      for (const f of fields.filter((x) => !['chore', 'wait'].includes(x))) assert.ok(f in m, `${at}: has ${f}`);
+      for (const f of Object.keys(m)) assert.ok(fields.includes(f), `${at}: ${f} is a field of the contract`);
+      assert.ok(kindOf(m.subject), `${at}: a known subject`);
+      assert.ok(holders.includes(m.holder), `${at}: holder`);
+      if (m.ref !== null) { assert.ok(refKinds.includes(m.ref.kind), `${at}: ref kind ${m.ref.kind}`); assert.equal(typeof m.ref.id, 'string'); }
+      assert.ok(quiet.includes(String(m.quiet)), `${at}: quiet`);
+      assert.ok(m.via === null || via.includes(kindOf(m.via)), `${at}: via`);
+      assert.ok(flags.includes(String(m.flag)), `${at}: flag`);
+      assert.ok(rungs.includes(String(m.rung)), `${at}: rung`);
+      assert.ok(!Number.isNaN(Date.parse(m.since)), `${at}: since`);
+      if ('wait' in m) {
+        assert.equal(kindOf(m.subject), 'ticket:', `${at}: only a ticket move waits`);
+        assert.deepEqual(Object.keys(m.wait).sort(), ['causes', 'until']);
+        assert.ok(m.wait.until === null || /^\d{4}-\d{2}-\d{2}$/.test(m.wait.until), `${at}: until`);
+        assert.ok(m.wait.causes.length > 0);
+        for (const c of m.wait.causes) {
+          assert.deepEqual(Object.keys(c).sort(), ['ref', 'state', 'words']);
+          assert.ok(states.includes(c.state), `${at}: cause state ${c.state}`);
+          assert.ok(c.words.trim() && c.ref.trim());
+        }
+      }
+    }
+    const kinds = new Set(moves.map((m) => kindOf(m.subject)));
+    for (const k of ['follow-up:', 'thread:', 'answer:', 'duty:', 'record:']) assert.ok(kinds.has(k), `a ${k} move`);
+    const refs = new Set(moves.filter((m) => m.ref).map((m) => m.ref.kind));
+    for (const k of ['o', 't', 'a']) assert.ok(refs.has(k), `a ref of kind ${k}`);
+    assert.ok(moves.some((m) => kindOf(m.subject) === 'ticket:' && m.wait?.causes.some((c) => c.state === 'open') && m.wait.until), 'a ticket move with its wait');
+  });
+});
+
+// The `//` lines directly above `function nextMoves(` in the next-moves region, and its value lines.
+function contractComment() {
+  const a = SRC.indexOf('/* next-moves start */'), b = SRC.indexOf('/* next-moves end */');
+  const lines = SRC.slice(a, b).split('\n');
+  const i = lines.findIndex((l) => l.startsWith('function nextMoves('));
+  let j = i;
+  while (j > 0 && lines[j - 1].startsWith('//')) j--;
+  return lines.slice(j, i).join('\n');
+}
+function valueLines(comment) {
+  const m = new Map();
+  for (const l of comment.split('\n')) {
+    const x = l.match(/^\/\/ values ([\w.]+): (.*)$/);
+    if (x) m.set(x[1], [...(m.get(x[1]) ?? []), x[2].split(' | ').map((v) => v.trim())]);
+  }
+  return m;
+}
+
+test("waits: the comment documents this goal's subjects, ref kinds and a ticket move's wait", () => {
+  const c = contractComment();
+  for (const s of ['follow-up:<o-id>', 'thread:<t-id>', 'answer:<q-id>', 'duty:<name>', 'record:<id>']) assert.ok(c.includes(s), `the comment names the subject ${s}`);
+  for (const [k, what] of [['o', 'follow-up'], ['t', 'thread'], ['a', 'act']]) assert.ok(c.split('\n').some((l) => new RegExp(`\\b${k}\\b`).test(l) && l.includes(what)), `the comment says ref kind ${k} is a ${what}`);
+  assert.match(c, /^\/\/ {3}wait +\S.*/m, 'wait has its own definition line');
+  assert.ok(c.includes('causes') && c.includes('until') && c.includes('{ "ref", "words", "state" }'), "wait's shape is given");
+  assert.match(c, /always present/);
+  assert.match(c, /but chore and wait/);
+  assert.ok(c.includes('test/fixtures/waits/'), "the comment names this goal's fixtures");
+});
+
+test('waits: each check name is one real test', () => {
+  const self = fs.readFileSync(new URL(import.meta.url), 'utf8');
+  const tag = ['waits', ' A'].join('');
+  const found = [...self.matchAll(new RegExp(`${tag}(\\d+):`, 'g'))];
+  assert.deepEqual(found.map((m) => Number(m[1])).sort(), [1, 2], 'the checks this ticket adds, once each');
+  for (const m of found) {
+    const before = self.slice(Math.max(0, m.index - 6), m.index);
+    assert.equal(before, "test('", `${m[0]} is a test's own name`);
+    const line = self.slice(m.index, self.indexOf('\n', m.index));
+    assert.ok(!/\b(skip|todo)\b/.test(line), `${m[0]} is neither skipped nor todo`);
+  }
+  const fixtures = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? fixtures(path.join(d, e.name)) : [path.join(d, e.name)]));
+  for (const f of [...fixtures(FIX), DT]) assert.ok(!new RegExp(`${tag}\\d+:`).test(fs.readFileSync(f, 'utf8')), `no check name in ${path.relative(here, f)}`);
 });

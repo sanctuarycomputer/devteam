@@ -2,6 +2,8 @@
 // here to a shape checker both ways; the fixtures in test/fixtures/next-moves/ checked against it, with
 // one broken copy per rule so no rule goes unchecked; and its places on a fixture project with one goal,
 // empty until the table's rows land: moves --json, /api/data's next_moves and goal views' next_move.
+// The waits goal's additions (kit-570: its subjects, ref kinds o, t and a, a ticket move's wait) are in
+// the same closed lists, and their fixture moves in test/fixtures/waits/ are held to the same checker.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -12,26 +14,32 @@ import { fleetFixture, json } from './lib/kit.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DT = path.join(here, '..', 'docs', 'devteam', 'scripts', 'devteam.mjs');
 const FIX = path.join(here, 'fixtures', 'next-moves');
+const WAITS_FIX = path.join(here, 'fixtures', 'waits', 'moves.json');
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const fixture = (f) => JSON.parse(fs.readFileSync(path.join(FIX, f), 'utf8'));
 
 // The contract's closed lists, as the checker knows them.
-const FIELDS = ['subject', 'move', 'words', 'holder', 'ref', 'title', 'since', 'command', 'covered_by', 'quiet', 'via', 'flag', 'rung', 'chore'];
-const SUBJECT_KINDS = ['goal:', 'ticket:', 'planner:', 'chore:'];
+const FIELDS = ['subject', 'move', 'words', 'holder', 'ref', 'title', 'since', 'command', 'covered_by', 'quiet', 'via', 'flag', 'rung', 'chore', 'wait'];
+// next-move@1 as kit-287 landed it, and the waits goal's additions (kit-570)
+const FIRST_SUBJECT_KINDS = ['goal:', 'ticket:', 'planner:', 'chore:'];
+const SUBJECT_KINDS = [...FIRST_SUBJECT_KINDS, 'follow-up:', 'thread:', 'answer:', 'duty:', 'record:'];
 const HOLDERS = ['owner', 'supervisor', 'planner', 'worker', 'nobody'];
-const REF_KINDS = ['q', 'm', 'ticket', 'goal', 'chore', 'pr'];
+const FIRST_REF_KINDS = ['q', 'm', 'ticket', 'goal', 'chore', 'pr'];
+const REF_KINDS = [...FIRST_REF_KINDS, 'o', 't', 'a'];
 const QUIET = [null, 'hold', 'drain', 'queue'];
 const VIA_KINDS = [null, 'ticket:', 'planner:', 'goal:', 'chore:'];
 const FLAGS = [null, 'owed', 'stalled', 'none'];
 const RUNGS = [0, 1, 2];
 const CHORE_KEYS = ['branch', 'ahead', 'pr', 'for'];
-const ALWAYS = FIELDS.filter((f) => f !== 'chore');
-const LISTS = { fields: FIELDS, subject: SUBJECT_KINDS, holder: HOLDERS, 'ref.kind': REF_KINDS, quiet: QUIET, via: VIA_KINDS, flag: FLAGS, rung: RUNGS, chore: CHORE_KEYS };
+const WAIT_STATES = ['open', 'resolved', 'failed'];
+const ALWAYS = FIELDS.filter((f) => f !== 'chore' && f !== 'wait');
+const LISTS = { fields: FIELDS, subject: SUBJECT_KINDS, holder: HOLDERS, 'ref.kind': REF_KINDS, quiet: QUIET, via: VIA_KINDS, flag: FLAGS, rung: RUNGS, chore: CHORE_KEYS, 'wait.state': WAIT_STATES };
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const isIso = (s) => typeof s === 'string' && ISO.test(s) && !Number.isNaN(Date.parse(s));
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const kindOf = (s) => (typeof s === 'string' ? (s.match(/^(goal|ticket|planner|chore):\S+$/)?.[1] ?? null) : null);
+const kindOf = (s) => (typeof s === 'string' ? (s.match(/^(goal|ticket|planner|chore|follow-up|thread|answer|duty|record):\S+$/)?.[1] ?? null) : null);
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const nonEmpty = (s) => typeof s === 'string' && s.trim() !== '';
 
@@ -69,7 +77,7 @@ function moveErrors(m) {
     else for (const c of m.covered_by) if (!isObj(c) || !nonEmpty(c.kind) || !nonEmpty(c.subject) || Object.keys(c).length !== 2) no('covered-by', JSON.stringify(c));
   }
   if ('quiet' in m && !QUIET.includes(m.quiet)) no('quiet', String(m.quiet));
-  if ('via' in m && m.via !== null && !kindOf(m.via)) no('via', String(m.via));
+  if ('via' in m && m.via !== null && !VIA_KINDS.includes(`${kindOf(m.via)}:`)) no('via', String(m.via));
   if ('flag' in m && !FLAGS.includes(m.flag)) no('flag', String(m.flag));
   if ('rung' in m && !RUNGS.includes(m.rung)) no('rung', JSON.stringify(m.rung));
   const c4 = kind === 'chore' && isObj(m.chore) && m.chore.pr === null;
@@ -82,6 +90,12 @@ function moveErrors(m) {
   if (m.flag === 'none' && m.holder !== 'nobody') no('none-holder', `no next move is nobody's (${m.holder})`);
   if (kind === 'chore' && !('chore' in m)) no('chore-missing', 'a chore move carries chore');
   if (kind && kind !== 'chore' && 'chore' in m) no('chore-extra', `a ${kind} move carries no chore`);
+  if ('wait' in m && kind !== 'ticket') no('wait-extra', `a ${kind} move carries no wait`);
+  if ('wait' in m && kind === 'ticket') {
+    const w = m.wait;
+    if (!isObj(w) || Object.keys(w).sort().join() !== 'causes,until' || !Array.isArray(w.causes) || !w.causes.length || !(w.until === null || (typeof w.until === 'string' && DATE.test(w.until)))) no('wait-shape', JSON.stringify(w));
+    else for (const c of w.causes) if (!isObj(c) || Object.keys(c).sort().join() !== 'ref,state,words' || !nonEmpty(c.ref) || !nonEmpty(c.words) || !WAIT_STATES.includes(c.state)) no('wait-cause', JSON.stringify(c));
+  }
   if (kind === 'chore' && 'chore' in m) {
     const c = m.chore;
     if (!isObj(c) || Object.keys(c).sort().join() !== [...CHORE_KEYS].sort().join()) no('chore-keys', JSON.stringify(c));
@@ -179,6 +193,9 @@ test('next-moves: every fixture move fits the shape', () => {
   assert.deepEqual(wrapperErrors('pulse', pulse), []);
   assert.ok(moves.moves.length > 0 && cache.moves.length > 0);
   for (const m of [...moves.moves, ...cache.moves, pulse]) assert.deepEqual(moveErrors(m), [], `${m.subject} ${m.move}`);
+  const waits = JSON.parse(fs.readFileSync(WAITS_FIX, 'utf8'));
+  assert.deepEqual(wrapperErrors('moves', waits), []);
+  for (const m of waits.moves) assert.deepEqual(moveErrors(m), [], `${m.subject} ${m.move}`);
   assert.equal(kindOf(pulse.subject), 'goal', "pulse.next is a goal's move");
   assert.notEqual(pulse.flag, null, 'the pulse sample is flagged');
   assert.ok(cache.moves.some((m) => m.flag !== null), 'the cache holds a flagged move');
@@ -193,11 +210,16 @@ test('next-moves: the fixtures cover every holder, kind, quiet, flag, rung and r
   const { moves } = fixture('moves.json');
   const set = (f) => [...new Set(moves.map(f))].map(String).sort();
   assert.deepEqual(set((m) => m.holder), [...HOLDERS].sort());
-  assert.deepEqual(set((m) => `${kindOf(m.subject)}:`), [...SUBJECT_KINDS].sort());
+  assert.deepEqual(set((m) => `${kindOf(m.subject)}:`), [...FIRST_SUBJECT_KINDS].sort());
+  // with the waits goal's fixtures, every subject kind and ref kind, and a ticket move's wait
+  const all = [...moves, ...JSON.parse(fs.readFileSync(WAITS_FIX, 'utf8')).moves];
+  assert.deepEqual([...new Set(all.map((m) => `${kindOf(m.subject)}:`))].sort(), [...SUBJECT_KINDS].sort());
+  assert.deepEqual([...new Set(all.filter((m) => m.ref).map((m) => m.ref.kind))].sort(), [...REF_KINDS].sort());
+  assert.ok(all.some((m) => m.wait), 'a ticket move with its wait');
   assert.deepEqual(set((m) => m.quiet), QUIET.map(String).sort());
   assert.deepEqual(set((m) => m.flag), FLAGS.map(String).sort());
   assert.deepEqual(set((m) => m.rung), RUNGS.map(String).sort());
-  assert.deepEqual([...new Set(moves.filter((m) => m.ref).map((m) => m.ref.kind))].sort(), [...REF_KINDS].sort());
+  assert.deepEqual([...new Set(moves.filter((m) => m.ref).map((m) => m.ref.kind))].sort(), [...FIRST_REF_KINDS].sort());
   assert.ok(moves.some((m) => m.via), 'a via move');
   assert.ok(moves.some((m) => m.covered_by.some((c) => c.subject === '*')), 'a covered_by on any subject');
   assert.ok(moves.some((m) => m.covered_by.some((c) => c.subject !== '*')), 'a covered_by on a stated subject');
@@ -218,6 +240,8 @@ test('next-moves: a broken copy fails the checker, one per rule', () => {
   const stalled = () => pick((m) => m.flag === 'stalled');
   const none = () => pick((m) => m.flag === 'none');
   const set = (base, f) => () => { const m = base(); f(m); return m; };
+  const waits = JSON.parse(fs.readFileSync(WAITS_FIX, 'utf8')).moves;
+  const waiting = () => clone(waits.find((m) => m.wait) ?? assert.fail('no waits fixture move with a wait'));
   const CASES = [
     ...ALWAYS.map((f) => ['field-missing', set(goal, (m) => { delete m[f]; })]),
     ['field-unknown', set(goal, (m) => { m.extra = 1; })],
@@ -240,6 +264,15 @@ test('next-moves: a broken copy fails the checker, one per rule', () => {
     ['covered-by', set(goal, (m) => { m.covered_by = [{ subject: '*' }]; })],
     ['quiet', set(goal, (m) => { m.quiet = 'nap'; })],
     ['via', set(goal, (m) => { m.via = 'feature:x'; })],
+    ['via', set(goal, (m) => { m.via = 'thread:t-20261118-120000000-owner'; })],
+    ['wait-extra', set(goal, (m) => { m.wait = waiting().wait; })],
+    ['wait-shape', set(waiting, (m) => { m.wait.causes = []; })],
+    ['wait-shape', set(waiting, (m) => { m.wait.until = 'next week'; })],
+    ['wait-shape', set(waiting, (m) => { delete m.wait.until; })],
+    ['wait-shape', set(waiting, (m) => { m.wait = ['kit-1-x']; })],
+    ['wait-cause', set(waiting, (m) => { m.wait.causes[0].state = 'done'; })],
+    ['wait-cause', set(waiting, (m) => { delete m.wait.causes[0].words; })],
+    ['wait-cause', set(waiting, (m) => { m.wait.causes[0].extra = 1; })],
     ['flag', set(goal, (m) => { m.flag = 'late'; })],
     ['rung', set(goal, (m) => { m.rung = 3; })],
     ['rung', set(goal, (m) => { m.rung = '1'; })],

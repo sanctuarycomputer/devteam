@@ -14463,13 +14463,17 @@ function waitCause(ref) {
 // itself; it names it.
 //
 // The contract next-move@1. A move is one object:
-//   subject     "goal:<g-id>" | "ticket:<id>" | "planner:<feature>" | "chore:<slug>"
+//   subject     "goal:<g-id>" | "ticket:<id>" | "planner:<feature>" | "chore:<slug>", and the waits goal's
+//               "follow-up:<o-id>" (a put-off note), "thread:<t-id>" (a thread bound to work),
+//               "answer:<q-id>" (an owner's answer to carry out), "duty:<name>" (a duty fallen due, e.g.
+//               duty:retro) and "record:<id>" (a loop record: a corrected act, a trial with no outcome)
 //   move        the row's key, kebab-case (e.g. ask-goal-met)
 //   words       a plain sentence for the owner (e.g. "Ask you whether it is met")
 //   holder      owner | supervisor | planner | worker | nobody
-//   ref         null, or { kind, id, url }: kind q | m | ticket | goal | chore | pr; id the question's,
-//               message's, ticket's, goal's or chore branch's id as a string, or for a pr the PR number
-//               as an integer; url the PR's URL on a pr ref, absent on every other kind
+//   ref         null, or { kind, id, url }: kind q | m | ticket | goal | chore | pr | o | t | a; id the
+//               question's, message's, ticket's, goal's or chore branch's id as a string, o a follow-up
+//               observation's id, t a thread's id, a an act's id, or for a pr the PR number as an
+//               integer; url the PR's URL on a pr ref, absent on every other kind
 //   title       the subject's own title: the goal's, the ticket's, the planner's feature's, a chore's
 //               --what or its tip commit's subject
 //   since       ISO time the move began (never stored: each row names its source)
@@ -14491,8 +14495,13 @@ function waitCause(ref) {
 //               rung 1 or 2, a stalled one at 2, a quiet one stays 0
 //   chore       on a chore: move only (absent on every other): { branch: "chore-<slug>", ahead: the
 //               commits main lacks, pr: null | { number, url }, for: [ the refs from chore start --for ] }
-// Every field but chore is always present; ref, command, quiet, via and flag carry null, never go
-// missing.
+//   wait        on a ticket move whose hold names its causes (held_for) only, absent on every other:
+//               { "causes": [ { "ref", "words", "state" } ], "until": null | "<YYYY-MM-DD>" }: each cause
+//               as held_for gives it (ref), in words, and its state open | resolved | failed
+//               (waitCause()); until the hold's held_until. A page shows what the hold waits on from it
+//               without a second read
+// Every field but chore and wait is always present; ref, command, quiet, via and flag carry null,
+// never go missing.
 //
 // Its five places:
 //   1. moves --json: { "next_move": 1, "moves": [ … ] }
@@ -14503,16 +14512,19 @@ function waitCause(ref) {
 //      running goals' moves only (no chore moves)
 //   5. hello's pulse.next: one move (the top flagged, else top-priority, running goal's), or null
 // Additive changes keep @1; a renamed or removed field, or a changed meaning, bumps it. Fixtures:
-// test/fixtures/next-moves/. The closed lists, one per line (test/next-moves.test.mjs reads them):
-// values fields: subject | move | words | holder | ref | title | since | command | covered_by | quiet | via | flag | rung | chore
-// values subject: goal: | ticket: | planner: | chore:
+// test/fixtures/next-moves/, and for the waits goal's additions (its subjects, ref kinds o, t and a, and
+// wait) test/fixtures/waits/. via gains no values: the new rows copy moves from tickets and chores.
+// The closed lists, one per line (test/next-moves.test.mjs reads them):
+// values fields: subject | move | words | holder | ref | title | since | command | covered_by | quiet | via | flag | rung | chore | wait
+// values subject: goal: | ticket: | planner: | chore: | follow-up: | thread: | answer: | duty: | record:
 // values holder: owner | supervisor | planner | worker | nobody
-// values ref.kind: q | m | ticket | goal | chore | pr
+// values ref.kind: q | m | ticket | goal | chore | pr | o | t | a
 // values quiet: null | hold | drain | queue
 // values via: null | ticket: | planner: | goal: | chore:
 // values flag: null | owed | stalled | none
 // values rung: 0 | 1 | 2
 // values chore: branch | ahead | pr | for
+// values wait.state: open | resolved | failed
 function nextMoves() {
   return [];
 }

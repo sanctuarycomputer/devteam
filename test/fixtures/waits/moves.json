@@ -1,0 +1,102 @@
+{
+  "next_move": 1,
+  "moves": [
+    {
+      "subject": "follow-up:o-20261118-140000000-kit-12-board-column",
+      "move": "ticket-ask-or-rule-out",
+      "words": "Ticket it, ask, or rule it out: the drawer's empty state was left for later",
+      "holder": "supervisor",
+      "ref": { "kind": "o", "id": "o-20261118-140000000-kit-12-board-column" },
+      "title": "The drawer's empty state was left for later",
+      "since": "2026-11-18T14:00:00.000Z",
+      "command": "devteam.mjs ticket add <id> --json '{\"from\": [\"o-20261118-140000000-kit-12-board-column\"]}'",
+      "covered_by": [],
+      "quiet": null,
+      "via": null,
+      "flag": "stalled",
+      "rung": 2
+    },
+    {
+      "subject": "thread:t-20261118-120000000-owner",
+      "move": "propose-thread-ready",
+      "words": "Propose it ready: kit-12-board-column landed",
+      "holder": "supervisor",
+      "ref": { "kind": "t", "id": "t-20261118-120000000-owner" },
+      "title": "Make the board show chore work",
+      "since": "2026-11-18T16:00:00.000Z",
+      "command": "devteam.mjs thread ready t-20261118-120000000-owner --outcome \"<what changed, in plain words>\"",
+      "covered_by": [{ "kind": "untracked-work", "subject": "thread:t-20261118-120000000-owner" }],
+      "quiet": null,
+      "via": null,
+      "flag": "owed",
+      "rung": 1
+    },
+    {
+      "subject": "answer:q-20261118-110000000-supervisor",
+      "move": "carry-out-answer",
+      "words": "Carry out your answer: May I add the release step to the rules? (1 of 2 parts left)",
+      "holder": "supervisor",
+      "ref": { "kind": "q", "id": "q-20261118-110000000-supervisor" },
+      "title": "May I add the release step to the rules?",
+      "since": "2026-11-18T11:30:00.000Z",
+      "command": "devteam.mjs act --class process-edit --approved q-20261118-110000000-supervisor -- \"…\"",
+      "covered_by": [],
+      "quiet": null,
+      "via": null,
+      "flag": "owed",
+      "rung": 2
+    },
+    {
+      "subject": "duty:retro",
+      "move": "hold-retro",
+      "words": "Hold the retro: 7 days since the last one",
+      "holder": "supervisor",
+      "ref": null,
+      "title": "The retro",
+      "since": "2026-11-18T09:00:00.000Z",
+      "command": null,
+      "covered_by": [],
+      "quiet": null,
+      "via": null,
+      "flag": null,
+      "rung": 0
+    },
+    {
+      "subject": "record:a-20261117-090000000-supervisor",
+      "move": "repair-correction",
+      "words": "Repair what was corrected: merged kit-11 before its review",
+      "holder": "supervisor",
+      "ref": { "kind": "a", "id": "a-20261117-090000000-supervisor" },
+      "title": "merged kit-11 before its review",
+      "since": "2026-11-17T10:00:00.000Z",
+      "command": "devteam.mjs repair a-20261117-090000000-supervisor --how undo|fix-ticket|none",
+      "covered_by": [],
+      "quiet": null,
+      "via": null,
+      "flag": "stalled",
+      "rung": 2
+    },
+    {
+      "subject": "ticket:kit-14-board-filter",
+      "move": "waits-on-cause",
+      "words": "Waits for kit-11-board-data to merge",
+      "holder": "worker",
+      "ref": { "kind": "ticket", "id": "kit-11-board-data" },
+      "title": "Filter the board by goal",
+      "since": "2026-11-18T13:00:00.000Z",
+      "command": null,
+      "covered_by": [],
+      "quiet": null,
+      "via": "ticket:kit-11-board-data",
+      "flag": null,
+      "rung": 0,
+      "wait": {
+        "causes": [
+          { "ref": "kit-11-board-data", "words": "kit-11-board-data merges", "state": "open" },
+          { "ref": "q-20261118-100000000-supervisor", "words": "your answer on the filter's default", "state": "resolved" }
+        ],
+        "until": "2026-11-30"
+      }
+    }
+  ]
+}
