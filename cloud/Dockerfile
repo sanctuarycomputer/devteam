@@ -589,6 +589,40 @@ tick='Check on the box and your supervisors.'
       fi
     fi
   done ) &
+# The operator back from a usage limit. Each project's dashboard relaunches its own sessions stopped at a
+# limit once an account has room (accounts-tick); nothing looks after window 0, which sat at the limit
+# menu for hours once. Each minute the kit says whether the operator is stopped at a limit and whether
+# the active account has room (machine limit-state): with room, its process is replaced and it starts
+# again on the same conversation, never a key sent to the menu (so nothing can pick usage credits), at
+# most once in 10 minutes; with every account at its limit, one alert says so, cleared once there is
+# room (room) or the operator is no longer stopped (none). A person, a draft or another prompt in the pane
+# leaves it alone (unsafe); unsafe and unknown (cswap unread, or a usage read that failed) change nothing,
+# and hold the alert: clearing on them would raise it again a minute later and push it to the owner again.
+( last=0; raised=
+  while :; do
+    sleep "${DEVTEAM_OPERATOR_LIMIT_SECONDS:-60}"
+    p=$(timeout 20 tmux display-message -p -t home:operator '#{pane_id}' 2>/dev/null) || continue
+    ls=$(timeout 90 /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine limit-state "$p" 2>/dev/null) || continue
+    case $ls in room|none) if [ -n "$raised" ] && [ "$(cat "$HOME/.box/alert" 2>/dev/null)" = "$raised" ]; then box-alert --clear >/dev/null; fi; raised= ;; esac
+    case $ls in
+      room)
+        now=$(date +%s)
+        if [ $((now - last)) -ge "${DEVTEAM_OPERATOR_LIMIT_COOLDOWN:-600}" ]; then
+          last=$now
+          note "the operator was stopped at a usage limit and the active account has room: restarting it on the same conversation"
+          if timeout 20 tmux respawn-pane -k -t "$p" -c "$HOME/operator"; then
+            sleep 3
+            again='You were restarted after a usage limit, on this same conversation, by the box. Carry on from where you were, then check on the box and your supervisors.'
+            timeout 20 tmux send-keys -t "$p" -l "export DEVTEAM_ROLE=operator; claude --continue --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$again'" && timeout 20 tmux send-keys -t "$p" Enter
+          fi
+        fi ;;
+      no-room)
+        if [ -z "$raised" ]; then
+          raised="Every Claude account is at its usage limit, the operator's included. Fleets and the operator restart on their own once one resets or you add an account (cswap add)."
+          box-alert "$raised" >/dev/null
+        fi ;;
+    esac
+  done ) &
 # The box's global tools, on the disk: edit the file to change them, and they come back each boot.
 mkdir -p .box .config/mise
 [ -f .config/mise/config.toml ] || cat > .config/mise/config.toml <<'TOML'
@@ -756,7 +790,7 @@ ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.65.0
+ARG DEVTEAM_RELEASE=v0.68.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 
