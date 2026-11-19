@@ -1120,6 +1120,8 @@ test('Open in side peek opens the item\'s properties', { ...CHROME, timeout: 300
   await soon(`${PEEK}.rows[0]?.[1] === ${JSON.stringify(`artifact:${ids.broken}`)}`, 'the broken artifact\'s peek');
   const bad = await p.ev(PEEK);
   assert.deepEqual(bad.rows.find((r) => r[0] === 'Error')?.[1], 'manifest.json: title is missing');
+  // its row's own fields still show: its time (it names no by and no for)
+  assert.deepEqual(bad.rows.map((r) => r[0]), ['ID', 'Kind', 'Where', 'Error', 'Updated', 'How it changes'], 'a broken one: what its row has');
   // every item's peek: ID first, How it changes last, the rows in the spec's order
   for (const i of items) {
     await p.ev(`location.hash = ${JSON.stringify(`#lib/${encodeURIComponent(i.id)}`)}`);
@@ -1158,6 +1160,60 @@ test('a link\'s peek has its details', { ...CHROME, timeout: 300000 }, async (t)
   const path_ = await p.ev(PEEK);
   assert.match(path_.rows.find((r) => r[0] === 'Where')[1], /docs\/devteam\/project\/designs\/pay\.md/);
   assert.deepEqual(path_.rows.find((r) => r[0] === 'For')[2], [`#feature/${ids.feat1}`]);
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a preview\'s peek: its state and who drew it', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, ids } = await libraryAll(t);
+  const peekOn = async (id) => {
+    await p.ev(`location.hash = ${JSON.stringify(`#lib/${encodeURIComponent(id)}`)}`);
+    await soon(`${PEEK}.rows[0]?.[1] === ${JSON.stringify(id)}`, `${id}'s peek`);
+    return Object.fromEntries((await p.ev(PEEK)).rows.map(([k, v, a]) => [k, { v, a }]));
+  };
+  const down = await peekOn(`preview:${ids.pvDown}`);
+  assert.deepEqual(Object.keys(down), ['ID', 'Kind', 'Drawn by', 'State', 'Updated', 'How it changes']);
+  assert.match(down.State.v, /^not answering down since .+/, 'State: the card\'s words, and since when');
+  assert.deepEqual(down['Drawn by'].a, [`#planner/${ids.feat1}`], 'Drawn by: the planner\'s session');
+  const live = await peekOn(`preview:${ids.pvLive}`);
+  assert.equal(live.State.v, 'live');
+  assert.deepEqual(live['Drawn by'].a, [`#ticket/${ids.tBuilding}`], 'Drawn by: the ticket\'s session');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+// counts the page's /api/peek requests (after dataPatchInit and READS_INIT)
+const PEEK_REQS_INIT = `(() => {
+  window.__peekReqs = [];
+  const f = window.fetch;
+  window.fetch = (u, o) => { const s = String(u && u.url ? u.url : u); if (s.startsWith('/api/peek')) window.__peekReqs.push(s); return f(u, o); };
+})();`;
+
+test('a lib peek asks the server for no peek', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, ids } = await libraryAll(t, { init: `${READS_INIT}\n${PEEK_REQS_INIT}` });
+  for (const id of [`artifact:${ids.drafted}`, `link:${ids.linkUrl}`, 'artifact:no-such-thing']) {
+    await p.ev(`location.hash = ${JSON.stringify(`#lib/${encodeURIComponent(id)}`)}`);
+    await soon(`document.querySelector('#drawer-bar-title .dtitle')?.textContent.length > 0 && (${PEEK}.rows[0]?.[1] === ${JSON.stringify(id)})`, `${id}'s peek`);
+    // through three refreshes (each one asks again for the open object's peek, unless it is missing)
+    const n = await p.ev('window.__dataReads');
+    await soon(`window.__dataReads >= ${n + 3}`, 'three refreshes');
+  }
+  assert.deepEqual(await p.ev('window.__peekReqs'), [], 'no /api/peek request');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('the peek\'s frame is its own, beside the grid\'s 12', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon } = await libraryAll(t, { fx: libraryFixture({ artifacts: 60 }), height: 3000 });
+  await soon(`${VIEW}.frames === 12`, 'twelve frames');
+  await sleep(1000);
+  const framed = (await p.ev(VIEW)).holding.map((h) => h.id).find((id) => id.startsWith('artifact:'));
+  assert.ok(framed, 'a framed artifact');
+  await p.ev(`location.hash = ${JSON.stringify(`#lib/${encodeURIComponent(framed)}`)}`);
+  const box = "document.querySelector('#drawer-body .lib-thumb')";
+  await soon(`!!${box}?.querySelector('iframe')`, 'the peek\'s box holds a frame');
+  await sleep(1000);
+  assert.equal(await p.ev(`${box}.dataset.thumb`), 'live');
+  assert.equal(await p.ev(`${box}.querySelector('iframe').getAttribute('src') === ${box}.dataset.thumbSrc`), true);
+  assert.equal(await p.ev(`${VIEW}.frames`), 12, 'the grid still has 12');
+  assert.equal(await p.ev("document.querySelectorAll('#drawer-body .lib-thumb iframe').length"), 1, 'one in the peek');
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
