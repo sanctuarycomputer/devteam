@@ -830,7 +830,7 @@ const testHome = pinsEnv().HOME;
 const lsOr = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
 function leftNothing(tmpd) {
   assert.deepEqual(fs.readdirSync(tmpd), [], 'the temporary folder, its worktree and tmux folder are gone');
-  assert.deepEqual(lsOr(path.join(changedRepo, '.git', 'worktrees')), [], 'git\'s worktree record is pruned');
+  assert.deepEqual(lsOr(path.join(changedRepo, '.git', 'worktrees')), [], 'git\'s record of the smoke worktree is removed');
   assert.equal(cg(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
   assert.equal(cg(['status', '--porcelain']), '', 'nothing written in the checkout');
   const dot = lsOr(path.join(testHome, '.devteam'));
