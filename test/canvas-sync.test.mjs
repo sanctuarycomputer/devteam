@@ -1202,9 +1202,16 @@ test('S3.8 not in a field, not for refused edits', { skip: canDrive ? false : 'n
   // in a field Ctrl+Z is the field's: nothing sent, the entry still there for the page
   const e = await rename(p, rec, 'title', 'Field');
   await ackOf(rec, e);
+  // the Name field rebuilt by the page (another row, then title's again), so it holds no typing
+  // history: Chrome's own field undo then has nothing to take back
+  await selectRow(p, 'dot');
+  await selectRow(p, 'title');
+  const nameValue = () => p.ev("document.querySelector('#props [data-prop=\"name\"]')?.value ?? null");
+  assert.equal(await nameValue(), 'Field', "title's Name field shows Field");
   assert.equal(await focusField(p, 'name'), true, 'the Name field focused');
   let n0 = edits(rec).length;
   await ctrl(p, 'z');
+  assert.equal(await nameValue(), 'Field', "Ctrl+Z in the field changed nothing in it (no typing history)");
   await sendsNothing(rec, n0, 'Ctrl+Z in the Name field');
   await undoKey(p);
   const u = await nextEdit(rec, n0);
