@@ -42,9 +42,29 @@ function project(name, home) {
   return P;
 }
 
+// Resolves once process pid is idle: its main thread asleep and its CPU time unchanged for 300 ms
+// (a client waiting on stdin), or after 20 s, or once it is gone.
+async function idle(pid) {
+  const sample = () => {
+    let st; try { st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); } catch { return null; }
+    const f = st.slice(st.lastIndexOf(')') + 2).split(' '); // state, ppid, …; utime and stime are 11 and 12
+    return f[0] === 'Z' ? null : { state: f[0], cpu: Number(f[11]) + Number(f[12]) };
+  };
+  let last = null, still = 0;
+  for (const end = Date.now() + 20000; Date.now() < end;) {
+    const s = sample();
+    if (!s) return;
+    still = s.state === 'S' && last && s.cpu === last.cpu ? still + 1 : 0;
+    if (still >= 6) return;
+    last = s;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
 // browser <args> on project P: { status, out, err }. cwd defaults to the project's checkout. input,
-// when given, is written to stdin, which is then ended unless keepOpen (then it ends when the child
-// closes); a client that exits before reading it all must not crash this process (EPIPE).
+// when given, is written to stdin. A list is written chunk by chunk, each once the client has gone
+// idle on the one before and 200 ms more, so each arrives as a read of its own. stdin is then ended
+// unless keepOpen (then it ends when the child closes); a client that exits before reading it all
+// must not crash this process (EPIPE).
 function cli(P, args, extraEnv = {}, cwd = P.old, { input, keepOpen } = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...P.env, ...extraEnv };
@@ -52,8 +72,14 @@ function cli(P, args, extraEnv = {}, cwd = P.old, { input, keepOpen } = {}) {
     const child = spawn(process.execPath, [path.join(P.old, 'docs/devteam/scripts/devteam.mjs'), 'browser', ...args], { cwd, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     if (input !== undefined) {
       child.stdin.on('error', () => {});
-      child.stdin.write(input);
-      if (!keepOpen) child.stdin.end();
+      (async () => {
+        for (const [i, chunk] of (Array.isArray(input) ? input : [input]).entries()) {
+          if (i) { await idle(child.pid); await new Promise((r) => setTimeout(r, 200)); }
+          if (child.stdin.destroyed) return;
+          child.stdin.write(chunk);
+        }
+        if (!keepOpen) child.stdin.end();
+      })();
     }
     let out = '', err = '';
     child.stdout.on('data', (d) => { out += d; });
@@ -559,11 +585,16 @@ test('S1 type --stdin refusals', opts, async () => {
     { name: '65537 bytes', args: ['type', 'e1', '--stdin'], input: 'x'.repeat(65537) },
     { name: '65536 bytes, a newline, more', args: ['type', 'e1', '--stdin'], input: `${'x'.repeat(65536)}\nmore` },
     { name: 'a TTY', args: ['type', 'e1', '--stdin'], input: 'zq-e', env: { DEVTEAM_TEST_BROWSER_STDIN_TTY: '1' }, err: /reads the text from a pipe/ },
+    // T4-1: more than 65538 bytes on a stdin still open is refused as they arrive, not at the timeout
+    { name: '65539 bytes, stdin held open', args: ['type', 'e1', '--stdin'], input: 'x'.repeat(65539), keepOpen: true, env: { DEVTEAM_TEST_BROWSER_STDIN_MS: '20000' }, err: /over 65536 bytes/, within: 10000 },
     { name: 'stdin held open', args: ['type', 'e1', '--stdin'], input: 'zq-d', keepOpen: true, env: { DEVTEAM_TEST_BROWSER_STDIN_MS: '1000' }, err: /didn't close in/ },
   ];
   for (const c of cases) {
+    const t0 = Date.now();
     const r = await cli(e, c.args, c.env, e.old, c.input === undefined ? {} : { input: c.input, keepOpen: c.keepOpen });
+    const ms = Date.now() - t0;
     assert.equal(r.status, 1, `${c.name}: exited ${r.status}`);
+    if (c.within) assert.ok(ms < c.within, `${c.name}: took ${ms} ms`);
     if (c.err) assert.match(r.err, c.err, c.name);
     const text = c.secret ?? c.input;
     if (text) assert.ok(!(r.out + r.err).includes(text), `${c.name}: the text is echoed`);
@@ -734,6 +765,9 @@ test('S1 type --stdin', opts, async () => {
   await typed('zq-crlf\r\n', 'zq-crlf');
   // exactly one trailing newline is dropped
   await typed('zq-two\n\n', 'zq-two\n');
+  // T4-2: ö and ✓ each split across two reads still arrive whole (decoded once, at the end)
+  const split = Buffer.concat([Buffer.from('zq-pö✓', 'utf8'), Buffer.from('\n')]);
+  await typed([split.subarray(0, 5), split.subarray(5, 7), split.subarray(7)], 'zq-pö✓');
   // T2b: the limit is the text's after the strip (on /record: a 64 KiB value won't fit the textarea's report URL)
   await typedRef(`${site.origin}/record`, 'textbox', '', `${'x'.repeat(65536)}\r\n`);
 });
@@ -864,5 +898,5 @@ test('J2 nothing secret printed', opts, async () => {
   [...secrets].forEach((v, i) => assert.ok(!all.includes(v), `control secret ${i} printed`));
   for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!all.includes(v), `the ${what} printed`);
   // S1: every text typed or offered with --stdin
-  for (const v of ['zq-s3cret', 'pässwörd✓', 'zq-crlf', 'zq-two', 'zq-a', 'zq-b', 'zq-c', 'zq-d', 'zq-e']) assert.ok(!all.includes(v), `${v} printed`);
+  for (const v of ['zq-s3cret', 'pässwörd✓', 'zq-crlf', 'zq-two', 'zq-pö✓', 'zq-a', 'zq-b', 'zq-c', 'zq-d', 'zq-e']) assert.ok(!all.includes(v), `${v} printed`);
 });
