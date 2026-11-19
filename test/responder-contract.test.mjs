@@ -8,7 +8,8 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { testDir, threadsFixture } from './lib/kit.mjs';
+import http from 'node:http';
+import { dashboardOnFreePort, testDir, threadsFixture } from './lib/kit.mjs';
 
 const FAKE = path.join(testDir, 'fixtures', 'responder');
 const FAKE_LOG = path.join(FAKE, 'log');
@@ -389,4 +390,106 @@ test('responder-contract A4 A7: a responder turn is never cited; artifact new st
       assert.equal(man(a, 'mock-o').by, 'owner');
     });
   } finally { F.done(); }
+});
+
+// A GET on the dashboard with the headers the test chooses: status, headers and body text.
+const dashGet = (port, route, headers = {}) => new Promise((resolve, reject) => {
+  const r = http.get({ host: '127.0.0.1', port, path: route, headers: { host: `127.0.0.1:${port}`, ...headers }, timeout: 30000 }, (res) => {
+    let b = '';
+    res.setEncoding('utf8');
+    res.on('data', (c) => { b += c; });
+    res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b }));
+  });
+  r.on('timeout', () => r.destroy(new Error(`${route} timed out`)));
+  r.on('error', reject);
+});
+
+test('responder-contract A5 A8: the draft fingerprint route, the /api/view comment, writer on /api/threads', async (t) => {
+  const F = threadsFixture('responder-a5');
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  t.after(async () => { await dash.stop(); F.done(); });
+  const SAME = { 'sec-fetch-site': 'same-origin' };
+  const wt = path.join(F.old, '.worktrees', 'wt-fp');
+  F.g(['worktree', 'add', '-q', '--detach', wt], F.old);
+  const draft = path.join(wt, 'docs/devteam/project/artifacts/fp-fixture');
+  fs.cpSync(path.join(testDir, 'fixtures', 'artifact-fp', 'draft'), draft, { recursive: true });
+  const fpRoute = (slug = 'fp-fixture', at = 'wt-fp') => `/api/artifact-fp?slug=${encodeURIComponent(slug)}&at=${encodeURIComponent(at)}`;
+  const fp = async () => {
+    const r = await dashGet(port, fpRoute(), SAME);
+    assert.equal(r.status, 200, r.body);
+    return JSON.parse(r.body).fp;
+  };
+
+  await t.test("A5a: 200 {fp, at}, no-store, fp the same as artifact describe's", async () => {
+    const r = await dashGet(port, fpRoute(), SAME);
+    assert.equal(r.status, 200, r.body);
+    assert.match(r.headers['cache-control'] ?? '', /no-store/);
+    const b = JSON.parse(r.body);
+    assert.deepEqual(Object.keys(b).sort(), ['at', 'fp']);
+    assert.equal(b.at, 'wt-fp');
+    assert.equal(typeof b.fp, 'string');
+    assert.ok(b.fp.length > 0, 'fp is not empty');
+    const d = F.run(F.old, ['artifact', 'describe', 'fp-fixture', '--at', 'wt-fp', '--json']);
+    assert.equal(d.status, 0, d.err || d.out);
+    assert.equal(b.fp, JSON.parse(d.out).fp, "describe's fingerprint");
+  });
+
+  await t.test('A5b: fp moves with one byte (same size), and comes back when the byte does', async () => {
+    const first = await fp();
+    assert.equal(await fp(), first, 'nothing changed: the same fp');
+    const notes = path.join(draft, 'notes.txt');
+    const was = fs.readFileSync(notes, 'utf8');
+    assert.ok(was.trimEnd().endsWith('A'), 'the fixture ends in A');
+    const at = (s) => new Date(Date.now() + s * 1000);
+    fs.writeFileSync(notes, `${was.trimEnd().slice(0, -1)}B${was.slice(was.trimEnd().length)}`);
+    assert.equal(fs.statSync(notes).size, Buffer.byteLength(was), 'the same size');
+    fs.utimesSync(notes, at(60), at(60));
+    const moved = await fp();
+    assert.notEqual(moved, first, 'one byte changed: another fp');
+    assert.equal(await fp(), moved, 'asked again: the same');
+    fs.writeFileSync(notes, was);
+    fs.utimesSync(notes, at(120), at(120));
+    assert.equal(await fp(), first, 'the byte put back and the file touched: the first fp again');
+  });
+
+  await t.test('A5c: unknown slug 404, main 400, cross-site 403 as /api/threads', async () => {
+    assert.equal((await dashGet(port, fpRoute('no-such-thing'), SAME)).status, 404);
+    assert.equal((await dashGet(port, fpRoute('fp-fixture', 'no-such-wt'), SAME)).status, 404);
+    assert.equal((await dashGet(port, fpRoute('fp-fixture', 'main'), SAME)).status, 400);
+    assert.equal((await dashGet(port, fpRoute('fp-fixture', `tree:${'a'.repeat(40)}`), SAME)).status, 400);
+    assert.equal((await dashGet(port, fpRoute('Not_A_Slug'), SAME)).status, 400);
+    const CROSS = { 'sec-fetch-site': 'cross-site' };
+    const x = await dashGet(port, fpRoute(), CROSS);
+    assert.equal(x.status, 403, x.body);
+    assert.ok(JSON.parse(x.body).error, 'an {error}');
+    assert.equal((await dashGet(port, '/api/threads', CROSS)).status, 403, 'the reference refuses it too');
+    assert.equal((await dashGet(port, fpRoute())).status, 200, 'no sec-fetch-site (not a browser): answered');
+  });
+
+  await t.test('A8: the comment over /api/view says it is polled, and names /api/artifact-fp', () => {
+    const src = fs.readFileSync(path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'utf8');
+    const at = src.indexOf("u.pathname === '/api/view'");
+    assert.ok(at > 0, 'the /api/view route');
+    const lines = src.slice(0, at).split('\n');
+    let i = lines.length - 2;
+    while (i >= 0 && /^\s*\/\//.test(lines[i])) i--;
+    const comment = lines.slice(i + 1, -1).join('\n');
+    assert.ok(comment.length > 0, 'a comment above it');
+    assert.doesNotMatch(comment, /never polled/);
+    assert.match(comment, /every 10 s/);
+    assert.match(comment, /\/api\/artifact-fp/);
+  });
+
+  await t.test("A3e (/api/threads): each turn's writer is its line's by, and by unchanged", async () => {
+    const T = F.owner(['thread', 'new', '--title', 'Header colour', '--', 'Make the header darker.']).split('\n')[0];
+    const ru = F.run(F.old, ['thread', 'reply', T, 'On it'], RESPONDER);
+    assert.equal(ru.status, 0, ru.err);
+    F.sup(['thread', 'reply', T, 'Merged']);
+    const r = await dashGet(port, '/api/threads', SAME);
+    assert.equal(r.status, 200, r.body);
+    const th = JSON.parse(r.body).threads.find((x) => x.id === T);
+    assert.ok(th, `${T} on /api/threads`);
+    assert.deepEqual(th.turns.map((u) => [u.writer, u.by]), [['owner', 'owner'], ['responder', 'supervisor'], ['supervisor', 'supervisor']]);
+    for (const u of th.turns) assert.ok(u.id.endsWith(`-${u.writer}`), `${u.id}: writer is its line's by`);
+  });
 });

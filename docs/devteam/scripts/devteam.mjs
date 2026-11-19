@@ -20063,11 +20063,28 @@ async function cmdDashboard() {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
       return res.end(fs.readFileSync(page));
     }
+    // A draft's fingerprint, for the viewer's 2 s draft poll (responder contract, artifact-fp@1): the
+    // same fp artifact describe gives, from stat calls and the oid cache (diskOid hashes only a file
+    // whose size or mtime moved), in this process: no child, no git. Drafts only: main or a published
+    // tree never changes under a viewer, so it is a 400. 404 when artifactSource finds nothing (an
+    // unknown slug or worktree, a reviewer's or scratch one, a symlinked folder). Same-origin only, as /api/threads.
+    if (req.method === 'GET' && u.pathname === '/api/artifact-fp') {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      const slug = u.searchParams.get('slug') ?? '';
+      const at = u.searchParams.get('at') ?? '';
+      if (!LINK_ID.test(slug) || !ARTIFACT_AT.test(at) || at === 'main' || at.startsWith('tree:')) return send(res, 400, 'application/json', JSON.stringify({ error: 'a slug, and at a draft\'s worktree (drafts only)' }));
+      let src;
+      try { src = artifactSource(at, slug); } catch { src = null; }
+      if (!src) return send(res, 404, 'application/json', JSON.stringify({ error: `no draft of ${slug} at ${at}` }));
+      return send(res, 200, 'application/json', JSON.stringify({ fp: fingerprint(src.entries), at }));
+    }
     // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
-    // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
-    // never polled: a child process per ask, shared by asks for the same one while it runs. A GET
-    // carries no Origin: same-origin only, as /api/threads. 404 only when describe says nothing is
-    // there (the viewer then shows main); a timeout or a crash is a 500, never mistaken for that.
+    // viewer never waits on /api/data. Since kit-206 the viewer asks it every 10 s while it is seen:
+    // a child process per ask, one shared by asks for the same one while it runs. The cheap,
+    // stat-only route for the 2 s draft poll is /api/artifact-fp. A GET carries no Origin:
+    // same-origin only, as /api/threads. 404 only when describe says nothing is there (the viewer
+    // then shows main); a timeout or a crash is a 500, never mistaken for that.
     if (req.method === 'GET' && u.pathname === '/api/view') {
       const site = req.headers['sec-fetch-site'];
       if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
