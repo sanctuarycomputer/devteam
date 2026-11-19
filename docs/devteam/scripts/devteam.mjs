@@ -7544,6 +7544,12 @@ function askLine({ thread, about } = {}) {
       const n = Object.keys(change).find((x) => Object.hasOwn(p.change, x));
       if (n) die(`recurring.${n} already has ${p.qid} (${p.status === 'open' ? 'open' : 'answered Yes, not landed yet'}): one question per job at a time; withdraw it or land it first`);
     }
+    // asked again: the decision is the change, not the words (ask's check on words is skipped below),
+    // so exactly this change, answered other than a Yes and not superseded, needs --new-because
+    if (!flagStr('new-because')?.trim()) {
+      const before = R.questions().find((v) => v.status === 'answered' && v.matched !== true && R.shown(v) && canonical(R.shown(v)) === canonical(change) && !R.superseded(v));
+      if (before) die(`${before.id} already asked exactly this change and the owner answered ${JSON.stringify(String(before.answer))}; ask again only with --new-because "<what changed>"`);
+    }
     // the cap, worst case: each job at the most it could run, whichever way the counted questions go
     const most = new Map();
     const take = (n, e) => most.set(n, Math.max(most.get(n) ?? 0, R.runsADay(e)));
@@ -7551,9 +7557,11 @@ function askLine({ thread, about } = {}) {
     for (const p of R.counted()) for (const [n, e] of Object.entries(p.change)) take(n, e);
     for (const [n, e] of Object.entries(change)) take(n, e);
     const total = [...most.values()].reduce((t, r) => t + r, 0);
-    if (total > R.CAP) die(`this change could take the jobs to ${R.runsWords(total)} runs a day, over the cap of ${R.CAP}, counting each job at the most it could run whichever way the pending questions are answered (a stop frees nothing until it lands): ${R.tally([...most].filter(([, r]) => r > 0))}`);
+    // a change that adds no runs (a stop, a slower schedule) is never refused: it can bring an over-cap registry back under
+    const adds = Object.entries(change).some(([n, e]) => R.runsADay(e) > R.runsADay(onMain[n]));
+    if (adds && total > R.CAP) die(`this change could take the jobs to ${R.runsWords(total)} runs a day, over the cap of ${R.CAP}, counting each job at the most it could run whichever way the pending questions are answered (a stop frees nothing until it lands): ${R.tally([...most].filter(([, r]) => r > 0))}`);
     // the approval lines are the kit's alone
-    if (`${q}\n${ownerText(flagStr('context')) ?? ''}`.split(/\r\n|\r|\n/).some((l) => l.includes(R.HEADER) || /^\s*recurring\.[^\s:]*:/.test(l))) die('--question and --context may not hold a job approval line ("recurring.<name>: …") or its header: the kit writes them, from --change');
+    if (`${q}\n${ownerText(flagStr('context')) ?? ''}`.split(/\r\n|\r|\n/).some((l) => l.includes(R.HEADER) || /^\s*recurring\.[^\s:]*\s*:/.test(l))) die('--question and --context may not hold a job approval line ("recurring.<name>: …") or its header: the kit writes them, from --change');
     recurringChange = { recurring: change };
     const lines = Object.entries(change).map(([n, e]) => (e === null ? `recurring.${n}: stop it (main has ${JSON.stringify(onMain[n])})` : Object.hasOwn(onMain, n) ? `recurring.${n}: main has ${JSON.stringify(onMain[n])}; would be ${JSON.stringify(e)}` : `recurring.${n}: add ${JSON.stringify(e)}`));
     const kinds = new Set(Object.values(change).filter((e) => e !== null).map((e) => e.kind));
@@ -22940,14 +22948,14 @@ const recurringRegistry = Object.freeze({
     }
     return rows;
   },
-  // What the cap counts when asking: pending(), and every answer in words not read yet that is
-  // neither landed nor superseded, since a reading could still make it a Yes. A picked or typed No
-  // can never become one, so it frees its room.
+  // What the cap counts when asking: pending(), and every answer in words, read or not, that is
+  // neither landed nor superseded, since a reading can be withdrawn and read again as Yes. A picked
+  // or typed No can never become one, so it frees its room.
   counted() {
     const rows = recurringRegistry.pending();
     for (const v of recurringRegistry.questions()) {
       const change = recurringRegistry.shown(v);
-      if (change && v.status === 'answered' && v.in_words === true && !v.reading && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v)) rows.push({ qid: v.id, status: 'in words', change });
+      if (change && v.status === 'answered' && v.in_words === true && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v)) rows.push({ qid: v.id, status: 'in words', change });
     }
     return rows;
   },

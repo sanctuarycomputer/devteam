@@ -248,6 +248,8 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     refused(T.ask({ recurring: { z1: chore() } }, ['--choices', '[{"label":"Yes"},{"label":"No"}]']), /the kit writes its choices/);
     refused(T.ask({ recurring: { z2: chore() } }, ['--kind', 'owner-action', '--secrets', '[{"name":"API_KEY","sink":"rails-credentials:test:api.key"}]']), /a plain yes or no: --kind owner-decision and no --secrets/);
     refused(T.ask({ recurring: { z3: chore() } }, ['--context', `${HEADER}\nrecurring.z3: add {}`]), /may not hold a job approval line/);
+    // a look-alike line with a space before its colon, and no header (task-1 F4)
+    refused(T.ask({ recurring: { z4: chore() } }, ['--context', 'recurring.xx : add {}']), /may not hold a job approval line/);
     // the cap: main at 90 with hourly x (24); an open stop of x; then an hourly y is refused
     const filler = Object.fromEntries(Array.from({ length: 66 }, (_, i) => [`daily-${i + 1}`, chore({ every: '1d' })]));
     T.onMain((j) => { j.recurring = { ...filler, xx: check({ every: '1h' }) }; });
@@ -268,11 +270,21 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     // a No frees its room: 89 + 8 fits, and once declined, another 8 fits too
     const p1 = T.asked({ recurring: { p1: check({ every: '3h' }) } });
     T.answer(p1, 'No');
+    // the declined change is not asked again unless something changed (task-1 F1); withdrawn after, so the room stays as it was
+    const again = T.ask({ recurring: { p1: check({ every: '3h' }) } });
+    refused(again, /already asked exactly this change/);
+    assert.match(again.text, new RegExp(p1));
+    const because = T.ask({ recurring: { p1: check({ every: '3h' }) } }, ['--new-because', 'the deploys now run every three hours']);
+    passes(because);
+    T.ok(['withdraw', because.qid, '--reason', 'test']);
     const p2 = T.ask({ recurring: { p2: check({ every: '3h' }) } });
     passes(p2);
     // words not read yet keep counting: p2 answered in words still holds its 8 (97), so another 8 is refused
     T.ok(['answer', p2.qid, 'hmm, not sure', '--in-words'], {});
     refused(T.ask({ recurring: { p3: check({ every: '3h' }) } }), /cap of 100/);
+    // main over the cap (a hand edit): a stop adds no runs, so the cap never refuses it (task-1 F3)
+    T.onMain((j) => { j.recurring = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`hourly-${i + 1}`, check({ every: '1h' })])); });
+    passes(T.ask({ recurring: { 'hourly-1': null } }));
   } finally { T.done(); }
 });
 
