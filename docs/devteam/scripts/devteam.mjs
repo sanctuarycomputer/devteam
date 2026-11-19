@@ -26015,10 +26015,10 @@ async function browserStartLock(file, fn) {
       if (k !== undefined && k !== held && dead(link(f))) try { fs.unlinkSync(f); } catch {}
     }
   };
+  sweep();
   // Each attempt rewrites the prepared owner (its mtime is the lock's age) and renames the folder onto
   // the path: EEXIST or ENOTEMPTY while a lock is held, and an empty leftover folder is replaced at
   // once. The prepared folder goes before a die() or a throw.
-  sweep();
   try {
     fs.mkdirSync(prep);
     for (;;) {
