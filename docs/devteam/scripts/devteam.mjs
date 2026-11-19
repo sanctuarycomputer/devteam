@@ -1067,6 +1067,8 @@ const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', '
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
 // what a repo link's maintain may turn on; linkMaintains(l, 'prs')
 const LINK_DUTIES = ['prs', 'releases'];
+// maintain.reviews: another name its review records may go under, run/reviews/<reviews>-pr-<n>/, besides the link's id
+const REVIEWS_PREFIX = /^[a-z0-9][a-z0-9_.-]{0,63}$/i;
 const linkMaintains = (l, duty) => !!l && typeof l === 'object' && !!l.maintain && typeof l.maintain === 'object' && l.maintain[duty] === true;
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
 // records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
@@ -1098,7 +1100,7 @@ const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
   gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string', records: 'string',
-  worktree_copy: 'any', worktree_setup_always: 'boolean',
+  worktree_copy: 'any', worktree_setup_always: 'boolean', maintain: 'object',
 });
 const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
@@ -1178,7 +1180,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
       else ctx.remotes.set(k, ctx.id);
       if (l.project !== undefined && (typeof l.project !== 'string' || !REPO_PATH.test(l.project))) errs.push(`${at}: project is a path inside that repo`);
       if (l.records !== undefined && !RECORDS_WHERE.includes(l.records)) errs.push(`${at}: records is "repo" or "home"`);
-      if (l.maintain !== undefined && (!isObj(l.maintain) || Object.entries(l.maintain).some(([k, v]) => !LINK_DUTIES.includes(k) || typeof v !== 'boolean'))) errs.push(`${at}: maintain is { "prs": true|false, "releases": true|false }`);
+      if (l.maintain !== undefined && (!isObj(l.maintain) || Object.entries(l.maintain).some(([k, v]) => (k === 'reviews' ? typeof v !== 'string' || !REVIEWS_PREFIX.test(v) : !LINK_DUTIES.includes(k) || typeof v !== 'boolean')))) errs.push(`${at}: maintain is { "prs": true|false, "releases": true|false, "reviews": "<records prefix>" }`);
       return errs;
     },
     // local and cheap: metrics asks it live
@@ -11803,7 +11805,7 @@ async function fetchLinkMains(end) {
   return skipped;
 }
 // The open PRs on each GitHub repo link that aren't the fleet's own (ticket/, plan/, chore- branches
-// land through merge and their records), read with gh inside the tick's budget, so metrics can say
+// in the repo itself land through merge and their records; a fork's branch of that name is an outside PR), read with gh inside the tick's budget, so metrics can say
 // when one waits unreviewed or with findings its author never saw (pr-unreviewed,
 // pr-changes-unanswered) without touching the network. A good read is reused for
 // LINK_PRS_REUSE_MS (the findings count hours). A failed read (gh missing, logged out, offline, a
@@ -11819,7 +11821,10 @@ const LINK_PRS_REUSE_MS = 30 * 60000;
 const LINK_PRS_UNREAD_HOURS = 6;
 const LINK_PRS_MAX_AGE_MS = 2 * 3600000;
 const FLEET_BRANCH = /^(ticket\/|plan\/|chore-)/;
-const BOT_LOGIN = /\[bot\]$|^(github-actions|copilot-pull-request-reviewer|copilot|dependabot|renovate)$/i;
+// gh's GraphQL logins drop the [bot] suffix an app has on the REST API, so the common apps are named too
+const BOT_LOGIN = /\[bot\]$|^(github-actions|copilot-pull-request-reviewer|copilot|dependabot|renovate|vercel|vercel-fleet-prod|netlify|coderabbitai|chatgpt-codex-connector|codecov|sonarcloud|sonarqubecloud|changeset-bot|linear|cursor|gemini-code-assist|sourcery-ai|deepsource-io|snyk-io|socket-security|mergify|graphite-app|pre-commit-ci)$/i;
+// gh asks for a PR's first 100 reviews and comments, the oldest: at 100 the newest may be missing
+const LINK_PR_PAGE = 100;
 const linkPrRepos = (s = loadSettings()) => Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents && linkMaintains(l, 'prs') && LINK_KINDS[l.kind].effectiveSettings(l, s).forge === 'github' && ghSpec(l.remote)).map(([id, l]) => [id, ghSpec(l.remote)]);
 const trimLinkPr = (p, before) => {
   const head = p.headRefOid;
@@ -11829,6 +11834,8 @@ const trimLinkPr = (p, before) => {
   return {
     number: p.number, title: String(p.title ?? '').slice(0, 200), url: p.url ?? null, head, branch: p.headRefName ?? null,
     head_at: seen,
+    // its reviews or comments ran past one page: what's newest may be missing, so nothing is claimed about it
+    truncated: (p.reviews?.length ?? 0) >= LINK_PR_PAGE || (p.comments?.length ?? 0) >= LINK_PR_PAGE,
     forge_reviews: (p.reviews ?? []).filter((r) => human(r) && r?.commit?.oid === head).map((r) => ({ state: r.state ?? null, at: r.submittedAt ?? null })),
     last_comment_at: (() => { const t = Math.max(0, ...times(p.comments, 'createdAt'), ...times(p.reviews, 'submittedAt')); return t ? new Date(t).toISOString() : null; })(),
   };
@@ -11844,7 +11851,7 @@ async function fetchLinkPrs(end) {
     for (let next = queue.shift(); next; next = queue.shift()) {
       const [id, spec] = next;
       if (Date.now() >= end) { skipped.push(id); continue; }
-      const r = await runProbe({ cmd: 'gh', args: ['pr', 'list', '-R', spec, '--state', 'open', '--limit', '100', '--json', 'number,title,url,headRefName,headRefOid,isDraft,createdAt,updatedAt,reviews,comments'], cwd: mainRoot, env: { ...process.env, GH_PROMPT_DISABLED: '1' }, stderr: true, judge: (code, text, err = '') => {
+      const r = await runProbe({ cmd: 'gh', args: ['pr', 'list', '-R', spec, '--state', 'open', '--limit', '100', '--json', 'number,title,url,headRefName,headRefOid,isCrossRepository,isDraft,createdAt,updatedAt,reviews,comments'], cwd: mainRoot, env: { ...process.env, GH_PROMPT_DISABLED: '1' }, stderr: true, judge: (code, text, err = '') => {
         const why = () => (String(err).split('\n').map((x) => x.trim()).find(Boolean) ?? (code == null ? 'gh did not run or timed out' : `gh exited ${code}`)).slice(0, 300);
         if (code !== 0) return { error: why() };
         try { const list = JSON.parse(text); return Array.isArray(list) ? { list } : { error: 'gh printed no PR list' }; } catch { return { error: 'gh printed no PR list' }; }
@@ -11853,7 +11860,7 @@ async function fetchLinkPrs(end) {
       const prev = ownEntry(state, id);
       if (r.error) { state[id] = { ...(prev ?? {}), failing_since: prev?.failing_since ?? nowIso(), failed_at: nowIso(), error: r.error }; continue; }
       const before = new Map((Array.isArray(prev?.prs) ? prev.prs : []).map((p) => [p?.number, p]));
-      state[id] = { at: nowIso(), prs: r.list.filter((p) => p && !p.isDraft && !FLEET_BRANCH.test(p.headRefName ?? '')).map((p) => trimLinkPr(p, before.get(p.number))) };
+      state[id] = { at: nowIso(), prs: r.list.filter((p) => p && !p.isDraft && !(p.isCrossRepository !== true && FLEET_BRANCH.test(p.headRefName ?? ''))).map((p) => trimLinkPr(p, before.get(p.number))) };
     }
   };
   if (queue.length) await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, queue.length) }, one));
@@ -14458,13 +14465,14 @@ function efficiencyData(m, now = Date.now()) {
 // long, with nothing posted on the PR since, so its author never saw the findings; release-due,
 // merges on the link's main waiting RELEASE_DUE_HOURS since its latest tag. A review is a record
 // under run/reviews/ in a folder or file named for the PR (…pr-<n>/…md, …pr-<n>…md) whose
-// "Verdict: APPROVE|CHANGES <full sha>" names the head (run/reviews/<link>-pr-<n>/, or a bare
-// pr-<n> when there's one GitHub link), or a person's review of that head on the forge.
+// "Verdict: APPROVE|CHANGES <full sha>" names the head (run/reviews/<link>-pr-<n>/, or
+// <maintain.reviews>-pr-<n>/, or a bare pr-<n> when there's one GitHub link), or a person's review
+// of that head on the forge. A PR whose reviews or comments ran past gh's page raises nothing.
 // The PRs come from the tick's read (fetchLinkPrs); with no good read nothing about PRs is raised,
 // and reads failing for LINK_PRS_UNREAD_HOURS are a low link-prs-unread.
 const LINK_PR_STALL_HOURS = 24;
 const RELEASE_DUE_HOURS = 6;
-function linkPrReviewRecords(ids) {
+function linkPrReviewRecords(ids, prefixes = new Map()) {
   const root = path.join(runDir, 'reviews');
   const byPr = new Map();
   const put = (key, file) => {
@@ -14478,7 +14486,7 @@ function linkPrReviewRecords(ids) {
   };
   // <link>-pr-<n> names the link; a bare pr-<n> (not <other>-pr-<n>) counts only when there is one GitHub repo link
   const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const named = [...ids].sort((a, b) => b.length - a.length).map((id) => [id, new RegExp(`(?:^|[^a-z0-9])${esc(id)}-pr-(\\d+)(?![0-9])`, 'i')]);
+  const named = ids.flatMap((id) => [[id, id], ...(prefixes.has(id) ? [[id, prefixes.get(id)]] : [])]).sort((a, b) => b[1].length - a[1].length).map(([id, pre]) => [id, new RegExp(`(?:^|[^a-z0-9])${esc(pre)}-pr-(\\d+)(?![0-9])`, 'i')]);
   const keyOf = (name) => {
     for (const [id, re] of named) { const m = re.exec(name); if (m) return `${id}#${Number(m[1])}`; }
     const m = /(?:^|[^a-z0-9-])pr-(\d+)(?![0-9])/i.exec(name);
@@ -14499,7 +14507,7 @@ function linkDutyFindings(settings, now, add) {
   let read = {};
   try { read = readJson(LINK_PRS_FILE); } catch {}
   const repos = linkPrRepos(settings);
-  const records = repos.some(([id]) => ownEntry(read, id)) ? linkPrReviewRecords(repos.map(([id]) => id)) : new Map();
+  const records = repos.some(([id]) => ownEntry(read, id)) ? linkPrReviewRecords(repos.map(([id]) => id), new Map(repos.map(([id]) => [id, settings.links[id].maintain.reviews]).filter(([, p]) => typeof p === 'string'))) : new Map();
   const hours = (ms) => Math.floor(ms / 3600000);
   for (const [id, spec] of repos) {
     const entry = ownEntry(read, id);
@@ -14514,7 +14522,7 @@ function linkDutyFindings(settings, now, add) {
     }
     if (!Array.isArray(entry.prs)) continue;
     for (const pr of entry.prs) {
-      if (!Number.isInteger(pr?.number) || typeof pr.head !== 'string') continue;
+      if (!Number.isInteger(pr?.number) || typeof pr.head !== 'string' || pr.truncated) continue;
       const subject = `${id}#${pr.number}`;
       const mine = (records.get(subject) ?? []).sort((a, b) => a.at - b.at);
       const atHead = mine.filter((r) => r.sha === pr.head);
@@ -14528,7 +14536,7 @@ function linkDutyFindings(settings, now, add) {
       }
       if (atHead.length || forgeAtHead.length) continue;
       const waited = now - (Date.parse(pr.head_at) || now);
-      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then comment the verdict to its author`);
+      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${settings.links[id].maintain.reviews ?? id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then comment the verdict to its author`);
     }
   }
   // release-due: only for a repo link whose releases the supervisor keeps (maintain.releases) and

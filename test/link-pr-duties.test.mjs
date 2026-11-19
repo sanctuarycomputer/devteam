@@ -21,7 +21,7 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     g(['remote', 'set-url', 'origin', 'https://github.com/usbclub/console.git'], F.console);
     g(['config', `url.${F.consoleOrigin}.insteadOf`, 'https://github.com/usbclub/console.git'], F.console);
     const links = json(okIn(old, ['settings'])).links;
-    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, remote: 'usbclub/console', forge: 'github', release: 'tag', maintain: { prs: true, releases: true } } } });
+    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, remote: 'usbclub/console', forge: 'github', release: 'tag', maintain: { prs: true, releases: true, reviews: 'kit' } } } });
 
     const pr = (number, head, o = {}) => ({ number, title: `pr ${number}`, url: `https://github.com/usbclub/console/pull/${number}`, headRefName: `feature-${number}`, headRefOid: head, isDraft: false, createdAt: iso(72), updatedAt: iso(o.pushedH ?? 72), reviews: [], comments: [], ...o });
     const prs = [
@@ -38,6 +38,9 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
       pr(21, sha('5'), { comments: [{ author: { login: 'github-actions' }, createdAt: iso(1) }] }), // CHANGES, then only a bot commented: unanswered
       pr(22, sha('6')), // approved only in a record named for another link: unreviewed
       pr(23, sha('7')), // approved in a bare pr-<n> record (one GitHub link)
+      pr(24, sha('8'), { headRefName: 'chore-fix-typo', isCrossRepository: true }), // a fork's branch that only looks like the fleet's: watched
+      pr(25, sha('0'), { comments: Array.from({ length: 100 }, () => ({ author: { login: 'someone' }, createdAt: iso(60) })) }), // CHANGES, but 100 comments: the newest may be past gh's page
+      pr(26, sha('a').slice(0, 39) + 'b'), // approved in a record under maintain.reviews' prefix
     ];
     const bin = path.join(F.base, 'fakegh');
     const logf = path.join(F.base, 'gh-args.log');
@@ -61,6 +64,8 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     record('console-pr-21/final-1.md', 'CHANGES', sha('5'), 48);
     record('companion-pr-22.md', 'APPROVE', sha('6'), 30);
     record('pr-23.md', 'APPROVE', sha('7'), 30);
+    record('console-pr-25/final-1.md', 'CHANGES', sha('0'), 48);
+    record('kit-pr-26/final-1.md', 'APPROVE', sha('a').slice(0, 39) + 'b', 30);
 
     // release-due: v1 tags console's main, then a merge waits a day
     g(['tag', 'v1'], F.console);
@@ -83,7 +88,8 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     assert.deepEqual(calls.filter((c) => c.startsWith('pr list')).map((c) => / -R (\S+)/.exec(c)?.[1]), ['usbclub/console'], `only the GitHub link is asked: ${calls.join(' | ')}`);
     const findings = json(okIn(old, ['metrics', '--json'])).findings;
     const of = (kind) => findings.filter((x) => x.kind === kind).map((x) => x.subject).sort();
-    assert.deepEqual(of('pr-unreviewed'), ['console#11', 'console#19', 'console#20', 'console#22']);
+    assert.ok(calls.find((c) => c.startsWith('pr list')).includes('isCrossRepository'), 'asks whether a head is a fork\'s');
+    assert.deepEqual(of('pr-unreviewed'), ['console#11', 'console#19', 'console#20', 'console#22', 'console#24']);
     assert.deepEqual(of('pr-changes-unanswered'), ['console#12', 'console#21']);
     const ch = findings.find((x) => x.kind === 'pr-changes-unanswered' && x.subject === 'console#12');
     assert.match(ch.detail, /console-pr-12\/final-1\.md/);
@@ -99,14 +105,14 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     okIn(old, ['observe-metrics'], SUP, withGh);
     assert.equal(asked(), 1, 'a read under 30 min old is reused');
     const prsFile = path.join(old, 'docs/devteam/run/link-prs.json');
-    const backdate = (k, h) => { const j = JSON.parse(fs.readFileSync(prsFile, 'utf8')); j.console[k] = iso(h); fs.writeFileSync(prsFile, JSON.stringify(j)); };
-    // an old read (a tick's budget cut the next ones) raises nothing from what it last saw
-    backdate('at', 3);
-    assert.ok(!json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind.startsWith('pr-')), 'no PR findings from a read over 2 h old');
+    const backdate = (k, h) => { const j = JSON.parse(fs.readFileSync(prsFile, 'utf8')); if (h === null) delete j.console[k]; else j.console[k] = iso(h); fs.writeFileSync(prsFile, JSON.stringify(j)); };
 
-    // gh fails (missing, logged out, offline, refused): the PR findings go quietly; the tick carries on
+    // gh fails right after a good read (35 min old, so it is asked again): the PR findings go
+    // quietly though the last read is fresh; the tick carries on
+    backdate('at', 35 / 60);
     write(path.join(bin, 'gh'), '#!/bin/sh\necho "HTTP 401: Bad credentials" >&2\nexit 1\n');
     assert.match(okIn(old, ['observe-metrics'], SUP, withGh), /recorded/);
+    assert.ok(JSON.parse(fs.readFileSync(prsFile, 'utf8')).console.failing_since, 'the failed read is recorded');
     const after = json(okIn(old, ['metrics', '--json'])).findings;
     assert.ok(!after.some((x) => x.kind.startsWith('pr-')), 'no PR findings without a good read');
     assert.ok(!after.some((x) => x.kind === 'link-prs-unread'), 'one failed read is not yet a finding');
@@ -117,10 +123,39 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     assert.equal(unread?.subject, 'console');
     assert.equal(unread.severity, 'low');
     assert.match(unread.detail, /HTTP 401: Bad credentials/);
+    // an old read (a tick's budget cut the next ones) raises nothing from what it last saw
+    backdate('failing_since', null);
+    backdate('at', 3);
+    assert.ok(!json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind.startsWith('pr-')), 'no PR findings from a read over 2 h old');
 
     // a release cut elsewhere (the tag only on origin) clears release-due: the tick fetches v* tags
     g(['tag', 'v2', 'trunk'], F.consoleOrigin);
     okIn(old, ['observe-metrics'], SUP, withGh);
     assert.ok(!json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind === 'release-due'));
+  } finally { F.done(); }
+});
+
+test('maintain is set through link set and link add, as an object, by a governance-edit', () => {
+  const F = multiFixture('link-maintain');
+  const { old, okIn, runIn } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const QID = /q-[0-9]+-[0-9]+-supervisor/;
+  const block = () => JSON.parse(/```json devteam\s*\n([\s\S]*?)\n```/.exec(fs.readFileSync(F.settingsFile, 'utf8'))[1]);
+  try {
+    const out = okIn(old, ['link', 'set', 'console', 'maintain', '{"prs":true}'], SUP);
+    const qid = QID.exec(out)?.[0];
+    assert.ok(qid, `drafts a question: ${out}`);
+    const q = json(okIn(old, ['questions', '--id', qid, '--json']))[0];
+    assert.equal(q.class, 'governance-edit');
+    assert.ok(q.context.includes('links.console.maintain: main has null; would be {"prs":true}'), q.context);
+    okIn(old, ['answer', qid, 'yes']);
+    okIn(old, ['link', 'set', 'console', 'maintain', '{"prs":true}', '--approved', qid], SUP);
+    assert.deepEqual(block().links.console.maintain, { prs: true });
+    const bad = runIn(old, ['link', 'set', 'console', 'maintain', '{"prs":"yes"}'], SUP);
+    assert.equal(bad.status, 1, bad.out);
+    assert.match(bad.err, /maintain is \{ "prs": true\|false/);
+    const add = okIn(old, ['link', 'add', 'docs', '--kind', 'repo', '--remote', 'usbclub/docs', '--title', 'Docs', '--maintain', '{"releases":true,"reviews":"docs-site"}'], SUP);
+    const q2 = json(okIn(old, ['questions', '--id', QID.exec(add)?.[0], '--json']))[0];
+    assert.ok(q2.context.includes('"maintain":{"releases":true,"reviews":"docs-site"}'), q2.context);
   } finally { F.done(); }
 });
