@@ -72,6 +72,34 @@ test('thread working and the pickup: the record, who writes it, and what clears 
     assert.equal(rec()[T].stage, 'responding');
   });
 
+  await t.test('at resets when another writer or another turn takes the record', () => {
+    const { T } = thread('At resets');
+    F.sup(['thread', 'working', T]);
+    const a = rec()[T].at;
+    pause(20);
+    F.owner(['thread', 'working', T], WORKER);
+    assert.equal(rec()[T].by, 'kit-9');
+    const b = rec()[T].at;
+    assert.ok(Date.parse(b) > Date.parse(a), 'another writer: at is newer');
+    pause(20);
+    const U = say(T, 'next');
+    F.owner(['thread', 'working', T], WORKER);
+    assert.equal(rec()[T].turn, U);
+    assert.ok(Date.parse(rec()[T].at) > Date.parse(b), 'another turn: at is newer');
+  });
+
+  await t.test('entries not written for 24 hours go on the next write', () => {
+    const { T } = thread('Old entries');
+    const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
+    const old = { by: 'supervisor', stage: 'responding', turn: 'x', at: ago(25), beat: ago(25), pid: null };
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ 'old-25h': old, 'old-23h': { ...old, at: ago(23), beat: ago(23) } }));
+    F.sup(['thread', 'working', T]);
+    assert.equal(rec()['old-25h'], undefined, '25 h old is dropped');
+    assert.ok(rec()['old-23h'], '23 h old stays');
+    assert.ok(rec()[T]);
+  });
+
   await t.test('reply first, then keep working', () => {
     const { T } = thread('Reply first');
     F.sup(['thread', 'show', T]);

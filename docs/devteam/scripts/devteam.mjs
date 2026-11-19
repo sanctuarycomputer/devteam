@@ -8086,6 +8086,8 @@ function markThreadWorking(t, w, { pickup = false } = {}) {
     } catch {}
     return null;
   };
+  // found before the lock: up to 12 `ps` calls must not run while it is held (a slow one would outlast its stale time)
+  const pid = w ? agentPid() : null;
   const change = () => {
     let m;
     try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
@@ -8095,7 +8097,7 @@ function markThreadWorking(t, w, { pickup = false } = {}) {
     if (!w && !was) return false;
     const now = Date.now();
     for (const [k, v] of Object.entries(m)) if (!(now - Date.parse(v?.beat) <= 86400000)) delete m[k];
-    if (w) m[t] = { by: w.by, stage: w.stage, turn: w.turn, at: was?.by === w.by && was?.turn === w.turn && typeof was.at === 'string' ? was.at : new Date(now).toISOString(), beat: new Date(now).toISOString(), pid: agentPid() };
+    if (w) m[t] = { by: w.by, stage: w.stage, turn: w.turn, at: was?.by === w.by && was?.turn === w.turn && typeof was.at === 'string' ? was.at : new Date(now).toISOString(), beat: new Date(now).toISOString(), pid };
     else delete m[t];
     writeJsonAtomic(THREAD_WORKING_FILE, m);
     return !!was;
@@ -8111,6 +8113,7 @@ function threadWorking(now = Date.now()) {
   let m;
   try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
   if (!isObj(m)) return {};
+  const THREAD_WORKING_STALE_MS = 10 * 60000;
   const alive = (pid) => {
     if (pid === null) return true;
     if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -8118,7 +8121,7 @@ function threadWorking(now = Date.now()) {
   };
   const r = {};
   for (const [k, v] of Object.entries(m)) {
-    if (!isObj(v) || !alive(v.pid) || !(now - Date.parse(v.beat) <= 10 * 60000)) continue;
+    if (!isObj(v) || !alive(v.pid) || !(now - Date.parse(v.beat) <= THREAD_WORKING_STALE_MS)) continue;
     r[k] = { by: v.by, stage: v.stage, turn: v.turn, at: v.at, beat: v.beat };
   }
   return r;
@@ -8151,7 +8154,8 @@ function cmdThread() {
     return process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : logWriter();
   };
   // the holder spoke (or the owner closed the thread): its stage goes
-  const spoke = (t) => markThreadWorking(t.id, null);
+  // a failed clear never fails a command already written (a retry would post twice): the card ignores a record older than the reply anyway
+  const spoke = (t) => { try { markThreadWorking(t.id, null); } catch {} };
   if (sub === 'new') {
     const { by } = threadOwner();
     const words = turnText(wordsFrom(1));
