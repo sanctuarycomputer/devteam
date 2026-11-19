@@ -17,7 +17,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { startCanvasFake, shapeErrors as canvasShape } from './lib/canvas-fake.mjs';
+import { request, startCanvasFake, shapeErrors as canvasShape } from './lib/canvas-fake.mjs';
 import { hashPart, startPresenceFake, shapeErrors as presenceShape } from './lib/presence-fake.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { until } from './lib/kit.mjs';
@@ -347,6 +347,44 @@ const anaSelections = (p, n0, id = 'ana') => ofKind(after(p.rec.got, n0), 'selec
   return e ? e.ids : null;
 });
 
+// Others' boxes on a page: selection boxes (.others-sel) or last-edit marks (.flash) of a person, each
+// with its node, its box on screen and its tag's text (null when it has none).
+const boxesOf = (p, cls, person) => p.ev(`[...document.querySelectorAll('#others .${cls}[data-person="${person}"]')].filter((e) => e.getClientRects().length > 0).map((e) => {
+  const r = e.getBoundingClientRect();
+  return { node: e.dataset.node, l: r.left, t: r.top, w: r.width, h: r.height, tag: e.querySelector('.tag')?.textContent ?? null };
+})`);
+const allBoxes = (p, cls) => p.ev(`[...document.querySelectorAll('#others .${cls}')].filter((e) => e.getClientRects().length > 0).map((e) => ({ person: e.dataset.person, node: e.dataset.node }))`);
+// A selection box sits 2 px outside its node's drawn box (within 1 px).
+async function boxAround(p, b, grow = 2) {
+  const n = await nodeBox(p, b.node);
+  return !!n && Math.abs(b.l - (n.l - grow)) <= 1 && Math.abs(b.t - (n.t - grow)) <= 1 && Math.abs(b.w - (n.w + 2 * grow)) <= 1 && Math.abs(b.h - (n.h + 2 * grow)) <= 1;
+}
+// A node's name changed in the Properties panel: its row selected, the Name field's text replaced, Enter.
+async function rename(p, id, value) {
+  await p.click(`#layers .layer[data-node="${id}"]`);
+  const ok = await p.ev(`(() => { const e = document.querySelector('#props [data-prop="name"]'); if (!e) return false; e.focus(); e.select(); return document.activeElement === e; })()`);
+  assert.equal(ok, true, 'the Name field focused');
+  await p.send('Input.insertText', { text: value });
+  const k = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+  await p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k, text: '\r', unmodifiedText: '\r' });
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k });
+}
+// The first ops frame a page got after order n0 whose by is `id`.
+async function opsBy(ctx, p, n0, id, what) {
+  const find = () => ofKind(after(p.rec.got, n0), 'ops').find((f) => f.m.by && f.m.by.id === id);
+  await within(ctx, async () => !!find(), what, async () => JSON.stringify(after(p.rec.got, n0).map((f) => f.m.t)));
+  return find();
+}
+// Polls until `f()` is false; the time (Date.now()) it was first seen false.
+async function goneAt(ctx, f, what, ms = 8000) {
+  const end = Date.now() + ms;
+  while (await f()) {
+    if (Date.now() > end) assert.fail(`timed out waiting for ${what} to go`);
+    await sleep(25);
+  }
+  return Date.now();
+}
+
 // ---- kit-669 F2: a select waits for a document fetch (spec §6, S6.1, S6.2) ----
 
 test('canvas cursors: a select made while the document is fetched after a restart or a reload waits for the fetch and the re-sent edits', { skip: SKIP, timeout: 240000 }, async (t) => {
@@ -375,6 +413,7 @@ test('canvas cursors: a select made while the document is fetched after a restar
   assert.ok(sel.n > again.ack.n, `the first select after the restart (${sel.n}) comes after X's ack (${again.ack.n})`);
   assert.deepEqual([...sel.m.ids].sort(), [x.id, 'n-card'].sort(), 'it names X and n-card');
   await within(ctx, async () => anaSelections(B, b0).some((ids) => ids && ids.includes(x.id) && ids.includes('n-card')), "B's selections list Ana with X and n-card", async () => JSON.stringify(anaSelections(B, b0)));
+  await within(ctx, async () => { const n = (await boxesOf(B, 'others-sel', 'ana')).map((b) => b.node).sort(); return n.join(' ') === [x.id, 'n-card'].sort().join(' '); }, "B draws Ana's boxes on X and n-card", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')));
 
   // S6.2: X saved; a new unsaved X2 selected alone; the canvas replaced without X2 (a reload)
   fake.resume(SLUG);
@@ -393,6 +432,7 @@ test('canvas cursors: a select made while the document is fetched after a restar
   await within(ctx, async () => ofKind(after(A.rec.sent, again2.ack.n), 'select').length > 0, 'a select after the reload and the ack', async () => JSON.stringify(after(A.rec.sent, r1).map((f) => f.m.t)));
   assert.deepEqual(ofKind(after(A.rec.sent, again2.ack.n), 'select')[0].m.ids, [x2.id], 'the select names X2 again');
   await within(ctx, async () => anaSelections(B, b1).some((ids) => ids && ids.includes(x2.id)), "B's selections after the reload list Ana with X2", async () => JSON.stringify(anaSelections(B, b1)));
+  await within(ctx, async () => (await boxesOf(B, 'others-sel', 'ana')).map((b) => b.node).join(' ') === x2.id, "B draws Ana's box on X2", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')));
 
   // S6.3 (task-1 T1-1, T1-2): nothing to re-send; A's selection cleared while a reload's fetch is held
   // goes out once the fetch lands, as an empty select, and B's selections then list Ana with none
@@ -416,6 +456,7 @@ test('canvas cursors: a select made while the document is fetched after a restar
   await within(ctx, async () => ofKind(after(A.rec.sent, r2), 'select').length > 0, 'a select once the fetch lands');
   assert.deepEqual(ofKind(after(A.rec.sent, r2), 'select').map((f) => f.m.ids), [[]], 'one empty select');
   await within(ctx, async () => anaSelections(B, b3).some((ids) => ids && ids.length === 0), "B's selections list Ana with nothing", async () => JSON.stringify(anaSelections(B, b3)));
+  await within(ctx, async () => (await boxesOf(B, 'others-sel', 'ana')).length === 0, "B draws no Ana box", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')));
   noExceptions(A, 'A');
   noExceptions(B, 'B');
 });
@@ -655,6 +696,52 @@ test("canvas cursors: the page reports its spot, draws others' selections and ma
     assert.deepEqual(presenceShape('move', f.m), [], 'presence move shape');
     if (f.m.a !== null) assert.deepEqual(canvasShape('presence-move', f.m), [], 'canvas presence-move shape');
   }
+  await showPageOf(ctx, A, 'p-main');
+
+  // C2.2: A selects n-side; B selects n-card: A draws Ben's box, never its own; B draws Ana's
+  await A.click('#layers .layer[data-node="n-side"]');
+  await B.click('#layers .layer[data-node="n-card"]');
+  await within(ctx, async () => { const b = await boxesOf(A, 'others-sel', 'ben'); return b.length === 1 && b[0].node === 'n-card' && b[0].tag === 'Ben' && await boxAround(A, b[0]); }, "C2.2: Ben's box on A around n-card, tagged Ben", async () => JSON.stringify(await boxesOf(A, 'others-sel', 'ben')));
+  await within(ctx, async () => { const b = await boxesOf(B, 'others-sel', 'ana'); return b.length === 1 && b[0].node === 'n-side' && await boxAround(B, b[0]); }, "C2.2: Ana's box on B around n-side", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')));
+  assert.deepEqual(await boxesOf(A, 'others-sel', 'ana'), [], 'A never draws its own selection');
+  await B.shiftClick('#layers .layer[data-node="n-side"]');
+  await within(ctx, async () => { const b = await boxesOf(A, 'others-sel', 'ben'); return b.map((x) => x.node).sort().join(' ') === 'n-card n-side' && b.filter((x) => x.tag !== null).length === 1; }, "C2.2: two Ben boxes on A, one tag", async () => JSON.stringify(await boxesOf(A, 'others-sel', 'ben')));
+  await B.key('Escape');
+  await within(ctx, async () => (await boxesOf(A, 'others-sel', 'ben')).length === 0, 'C2.2: no Ben box on A once B clears', async () => JSON.stringify(await boxesOf(A, 'others-sel', 'ben')));
+  assert.deepEqual(await boxesOf(A, 'others-sel', 'ana'), [], 'A never draws its own selection');
+
+  // C2.3: B renames n-card: A marks it with Ben's name at once, B marks nothing; gone 2.5 to 4.5 s later
+  const a0 = A.rec.order();
+  await rename(B, 'n-card', 'Card two');
+  const benOps = await opsBy(ctx, A, a0, 'ben', "Ben's ops on A");
+  const flashBen = async () => (await boxesOf(A, 'flash', 'ben')).some((b) => b.node === 'n-card' && b.tag === 'Ben');
+  await within(ctx, flashBen, "C2.3: A marks n-card with Ben's name", async () => JSON.stringify(await allBoxes(A, 'flash')), 2000);
+  assert.deepEqual(await allBoxes(B, 'flash'), [], "C2.3: B marks nothing for its own edit");
+  const gone = await goneAt(ctx, flashBen, "Ben's mark on A");
+  const lasted = gone - benOps.at;
+  assert.ok(lasted >= 2500 && lasted <= 4500, `C2.3: the mark lasted ${lasted} ms`);
+
+  // C2.4: Ben edits again; 1.5 to 2 s after its mark shows, the supervisor applies an op to n-side:
+  // only n-side is marked, with "supervisor", for its own 3 s
+  const o1 = A.rec.order();
+  await rename(B, 'n-card', 'Card three');
+  await within(ctx, flashBen, "Ben's second mark on A", async () => JSON.stringify(await allBoxes(A, 'flash')), 2000);
+  await sleep(1700);
+  const res = await request(`${ctx.fake.url}/api/canvas/local?slug=${SLUG}`, {
+    method: 'POST', headers: { 'x-devteam-canvas-token': ctx.fake.token, 'Content-Type': 'application/json' },
+    body: { by: 'supervisor', via: 'apply', ops: [{ op: 'set', id: 'n-side', prop: 'name', value: 'Side by the supervisor' }] },
+  });
+  assert.equal(res.status, 200, "the supervisor's local apply");
+  const supOps = await opsBy(ctx, A, o1, 'supervisor', "the supervisor's ops on A");
+  const flashSup = async (p) => (await boxesOf(p, 'flash', 'supervisor')).some((b) => b.node === 'n-side' && b.tag === 'supervisor');
+  await within(ctx, () => flashSup(A), "C2.4: A marks n-side with supervisor", async () => JSON.stringify(await allBoxes(A, 'flash')), 2000);
+  assert.deepEqual(await allBoxes(A, 'flash'), [{ person: 'supervisor', node: 'n-side' }], "C2.4: the supervisor's mark replaced Ben's");
+  await within(ctx, () => flashSup(B), "C2.4: B marks n-side with supervisor", async () => JSON.stringify(await allBoxes(B, 'flash')), 2000);
+  const wait = supOps.at + 2500 - Date.now();
+  if (wait > 0) await sleep(wait);
+  assert.equal(await flashSup(A), true, "C2.4: the supervisor's mark still shown 2.5 s after its ops");
+  const gone2 = await goneAt(ctx, () => flashSup(A), "the supervisor's mark on A");
+  assert.ok(gone2 - supOps.at <= 4500, `C2.4: the supervisor's mark gone by 4.5 s (${gone2 - supOps.at} ms)`);
   noExceptions(A, 'A');
   noExceptions(B, 'B');
 });

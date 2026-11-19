@@ -168,6 +168,10 @@
   #others [hidden] { display: none; }
   #others .cursor { position: absolute; left: 0; top: 0; }
   #others .cursor svg { display: block; }
+  #others .others-sel, #others .flash { position: absolute; left: 0; top: 0; box-sizing: border-box; border-radius: 2px; }
+  #others .others-sel { border: 2px solid var(--who); }
+  #others .flash { box-shadow: 0 0 0 3px var(--who); }
+  #others .tag { position: absolute; left: -2px; bottom: 100%; margin-bottom: 3px; font: 500 10px/16px var(--sans); color: #fff; background: var(--who); padding: 0 5px; border-radius: 3px; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
   #others .cursor-name { position: absolute; left: 14px; top: 16px; font: 500 11px/18px var(--sans); color: #fff; background: var(--who); padding: 0 6px; border-radius: 4px; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
   body[data-state="error"] #surface, body[data-state="error"] .zoom { display: none; }
 
@@ -4493,6 +4497,8 @@
     if (sock.ws !== ws) return;
     sock.ws = null;
     sock.live = false;
+    seen.sels = []; // others' selections are stale while down (kit-663)
+    placeOthers();
     if (sock.pumpTimer !== null) { clearTimeout(sock.pumpTimer); sock.pumpTimer = null; }
     if (!sock.ended) { sock.down = true; retry(); }
     showBanner();
@@ -4539,7 +4545,8 @@
     try { m = JSON.parse(data); } catch { return; }
     if (!isObj(m) || typeof m.t !== 'string' || !state.base) return;
     if (m.t === 'welcome') welcome(m);
-    else if (m.t === 'ops') { if (Number.isSafeInteger(m.rev)) { m.via = sock.session; ops(m); } }
+    else if (m.t === 'ops') { if (Number.isSafeInteger(m.rev)) { markEdit(m); m.via = sock.session; ops(m); } }
+    else if (m.t === 'selections') takeSelections(m);
     else if (m.t === 'refused') refused(m);
     else if (m.t === 'saved') { if (Number.isSafeInteger(m.rev)) saved(m); }
     else if (m.t === 'ping') send({ t: 'pong' });
@@ -4562,6 +4569,7 @@
   // rest; on any other (a new session, a rev below the highest seen, or edits made while away, which the
   // socket doesn't replay), fetch the document first (the fetch then resends kept on a new session).
   function welcome(m) {
+    seen.you = isObj(m.you) && typeof m.you.id === 'string' ? m.you.id : null; // kit-663
     sock.session = m.session;
     if (m.session === state.session && Number.isSafeInteger(m.rev) && m.rev < sock.highest) {
       sock.lowered = true;
@@ -4904,6 +4912,40 @@
     }, HIDDEN_MS);
   });
 
+  // ---- others' selections and last edits (kit-663 §4, §5; canvas@1 §5) ----
+
+  // you: our person id on the canvas socket (its welcome); sels: [{ id, name, ids }] of other people;
+  // mark: the nodes another person's last edit changed { ids, name, person }, for 3 s.
+  const MARK_MS = 3000;
+  const BOXES_MAX = 1000;
+  const seen = { you: null, sels: [], mark: null, markTimer: null };
+  function takeSelections(m) {
+    if (!Array.isArray(m.people)) return;
+    seen.sels = m.people
+      .filter((p) => isObj(p) && typeof p.id === 'string' && p.id !== seen.you && Array.isArray(p.ids))
+      .map((p) => ({ id: p.id, name: typeof p.name === 'string' && p.name ? p.name : p.id, ids: p.ids.filter((x) => typeof x === 'string').slice(0, SELECT_IDS) }));
+    placeOthers();
+  }
+  // An ops frame that isn't ours (its ack names another client or none) by another person: the nodes
+  // its set, move and add ops name become the mark, replacing any earlier one, for 3 s from now.
+  function markEdit(m) {
+    if (isObj(m.ack) && m.ack.client === CLIENT) return;
+    const by = isObj(m.by) ? m.by : {};
+    const person = typeof by.id === 'string' && by.id ? by.id : null;
+    if (person !== null && person === seen.you) return;
+    const ids = new Set();
+    for (const op of Array.isArray(m.ops) ? m.ops : []) {
+      if (!isObj(op)) continue;
+      if ((op.op === 'set' || op.op === 'move') && typeof op.id === 'string') ids.add(op.id);
+      else if (op.op === 'add' && isObj(op.node) && typeof op.node.id === 'string') ids.add(op.node.id);
+    }
+    if (ids.size === 0) return;
+    seen.mark = { ids: [...ids].slice(0, BOXES_MAX), name: typeof by.name === 'string' && by.name ? by.name : 'Someone', person: person ?? 'someone' };
+    clearTimeout(seen.markTimer);
+    seen.markTimer = setTimeout(() => { seen.markTimer = null; seen.mark = null; placeOthers(); }, MARK_MS);
+    placeOthers();
+  }
+
   // ---- drawing others ----
 
   // An anchor's point on screen: a drawn node's box at the fraction, or the shown page's content bounds
@@ -4945,9 +4987,56 @@
   }
   // Every other person's cursor placed again from its anchor (after every redraw, zoom, pan, resize and
   // late image load). Cursors are rebuilt whole: there are few, and a name or person never goes stale.
+  // A box around a drawn node of the shown page (grown by `grow` px), in stage px, or null.
+  function boxEl(cls, person, id, st, grow) {
+    const el = drawn.get(id);
+    if (!el || el.getClientRects().length === 0) return null;
+    const r = el.getBoundingClientRect();
+    const b = document.createElement('div');
+    b.className = cls;
+    b.dataset.person = person;
+    b.dataset.node = id;
+    b.style.setProperty('--who', colourOf(person));
+    b.style.transform = `translate(${r.left - grow - st.left}px, ${r.top - grow - st.top}px)`;
+    b.style.width = `${r.width + 2 * grow}px`;
+    b.style.height = `${r.height + 2 * grow}px`;
+    return b;
+  }
+  // The first box of a person carries their name.
+  function tagged(box, name) {
+    const t = document.createElement('span');
+    t.className = 'tag';
+    t.textContent = name;
+    box.append(t);
+  }
   function placeOthers() {
     const st = $('stage').getBoundingClientRect();
     const els = [];
+    let boxes = 0;
+    if (ready()) {
+      for (const p of seen.sels) {
+        let first = true;
+        for (const id of p.ids) {
+          if (boxes >= BOXES_MAX) break;
+          const b = boxEl('others-sel', p.id, id, st, 2);
+          if (!b) continue;
+          if (first) { tagged(b, p.name); first = false; }
+          els.push(b);
+          boxes += 1;
+        }
+      }
+      if (seen.mark !== null) {
+        let first = true;
+        for (const id of seen.mark.ids) {
+          if (boxes >= BOXES_MAX) break;
+          const b = boxEl('flash', seen.mark.person, id, st, 0);
+          if (!b) continue;
+          if (first) { tagged(b, seen.mark.name); first = false; }
+          els.push(b);
+          boxes += 1;
+        }
+      }
+    }
     for (const [conn, c] of pres.cursors) {
       const el = cursorEl(conn, c);
       el.dataset.k = c.k;
