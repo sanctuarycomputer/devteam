@@ -1,8 +1,0 @@
-# test/search.test.mjs
-TAP version 13
-ok 1 - something
-1..1
-
-
-summary: 1 file, concurrency 4
-test/search.test.mjs  3.4  ok

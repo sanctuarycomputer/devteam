@@ -1,0 +1,819 @@
+{
+  "canvas": "doc-minimal.json",
+  "slug": "whole-board",
+  "steps": [
+    {
+      "open": "a",
+      "person": "ana;name=Ana%20Lima",
+      "level": null,
+      "expect": {
+        "a": [
+          {
+            "t": "welcome",
+            "canvas": 1,
+            "session": "$session",
+            "rev": 0,
+            "you": {
+              "id": "ana",
+              "conn": "$conn:a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "a": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 1,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "btn",
+              "type": "component",
+              "parent": "p1",
+              "name": "Button"
+            },
+            "after": null
+          },
+          {
+            "op": "set",
+            "id": "btn",
+            "prop": "props.label",
+            "value": {
+              "type": "text",
+              "default": "Go",
+              "target": {
+                "id": "btn-label",
+                "prop": "text"
+              }
+            }
+          },
+          {
+            "op": "add",
+            "node": {
+              "id": "btn-label",
+              "type": "text",
+              "parent": "btn",
+              "text": "Label"
+            },
+            "after": null
+          },
+          {
+            "op": "add",
+            "node": {
+              "id": "buy",
+              "type": "instance",
+              "parent": "p1",
+              "component": "btn",
+              "props": {
+                "label": "Buy"
+              }
+            },
+            "after": "btn"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 1,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 1
+            },
+            "ops": [
+              {
+                "op": "add",
+                "node": {
+                  "id": "btn",
+                  "type": "component",
+                  "parent": "p1",
+                  "name": "Button"
+                },
+                "after": null
+              },
+              {
+                "op": "set",
+                "id": "btn",
+                "prop": "props.label",
+                "value": {
+                  "type": "text",
+                  "default": "Go",
+                  "target": {
+                    "id": "btn-label",
+                    "prop": "text"
+                  }
+                }
+              },
+              {
+                "op": "add",
+                "node": {
+                  "id": "btn-label",
+                  "type": "text",
+                  "parent": "btn",
+                  "text": "Label"
+                },
+                "after": null
+              },
+              {
+                "op": "add",
+                "node": {
+                  "id": "buy",
+                  "type": "instance",
+                  "parent": "p1",
+                  "component": "btn",
+                  "props": {
+                    "label": "Buy"
+                  }
+                },
+                "after": "btn"
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 1,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "btn",
+              "buy"
+            ]
+          }
+        ],
+        "nodes": {
+          "btn": {
+            "type": "component",
+            "parent": "p1",
+            "children": [
+              "btn-label"
+            ],
+            "name": "Button",
+            "props": {
+              "label": {
+                "type": "text",
+                "default": "Go",
+                "target": {
+                  "id": "btn-label",
+                  "prop": "text"
+                }
+              }
+            }
+          },
+          "btn-label": {
+            "type": "text",
+            "parent": "btn",
+            "text": "Label"
+          },
+          "buy": {
+            "type": "instance",
+            "parent": "p1",
+            "component": "btn",
+            "props": {
+              "label": "Buy"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 2,
+        "ops": [
+          {
+            "op": "set",
+            "id": "buy",
+            "prop": "name",
+            "value": "Buy button"
+          },
+          {
+            "op": "del",
+            "id": "btn-label"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 2,
+            "why": "ref"
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 1,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "btn",
+              "buy"
+            ]
+          }
+        ],
+        "nodes": {
+          "btn": {
+            "type": "component",
+            "parent": "p1",
+            "children": [
+              "btn-label"
+            ],
+            "name": "Button",
+            "props": {
+              "label": {
+                "type": "text",
+                "default": "Go",
+                "target": {
+                  "id": "btn-label",
+                  "prop": "text"
+                }
+              }
+            }
+          },
+          "btn-label": {
+            "type": "text",
+            "parent": "btn",
+            "text": "Label"
+          },
+          "buy": {
+            "type": "instance",
+            "parent": "p1",
+            "component": "btn",
+            "props": {
+              "label": "Buy"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 3,
+        "ops": [
+          {
+            "op": "set",
+            "id": "buy",
+            "prop": "name",
+            "value": "Buy button"
+          },
+          {
+            "op": "set",
+            "id": "ghost",
+            "prop": "name",
+            "value": "G"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 3,
+            "why": "missing"
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 1,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "btn",
+              "buy"
+            ]
+          }
+        ],
+        "nodes": {
+          "btn": {
+            "type": "component",
+            "parent": "p1",
+            "children": [
+              "btn-label"
+            ],
+            "name": "Button",
+            "props": {
+              "label": {
+                "type": "text",
+                "default": "Go",
+                "target": {
+                  "id": "btn-label",
+                  "prop": "text"
+                }
+              }
+            }
+          },
+          "btn-label": {
+            "type": "text",
+            "parent": "btn",
+            "text": "Label"
+          },
+          "buy": {
+            "type": "instance",
+            "parent": "p1",
+            "component": "btn",
+            "props": {
+              "label": "Buy"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 4,
+        "ops": [
+          {
+            "op": "move",
+            "id": "buy",
+            "parent": "btn",
+            "after": "btn-label"
+          },
+          {
+            "op": "del",
+            "id": "btn-label"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 4,
+            "why": "ref"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 5,
+        "ops": [
+          {
+            "op": "move",
+            "id": "buy",
+            "parent": "btn",
+            "after": "btn-label"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 5,
+            "why": "cycle"
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 1,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "btn",
+              "buy"
+            ]
+          }
+        ],
+        "nodes": {
+          "btn": {
+            "type": "component",
+            "parent": "p1",
+            "children": [
+              "btn-label"
+            ],
+            "name": "Button",
+            "props": {
+              "label": {
+                "type": "text",
+                "default": "Go",
+                "target": {
+                  "id": "btn-label",
+                  "prop": "text"
+                }
+              }
+            }
+          },
+          "btn-label": {
+            "type": "text",
+            "parent": "btn",
+            "text": "Label"
+          },
+          "buy": {
+            "type": "instance",
+            "parent": "p1",
+            "component": "btn",
+            "props": {
+              "label": "Buy"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 6,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "note",
+              "type": "text",
+              "parent": "p1"
+            },
+            "after": "buy"
+          },
+          {
+            "op": "set",
+            "id": "note",
+            "prop": "text",
+            "value": "Hi"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 2,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 6
+            },
+            "ops": [
+              {
+                "op": "add",
+                "node": {
+                  "id": "note",
+                  "type": "text",
+                  "parent": "p1"
+                },
+                "after": "buy"
+              },
+              {
+                "op": "set",
+                "id": "note",
+                "prop": "text",
+                "value": "Hi"
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 2,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "btn",
+              "buy",
+              "note"
+            ]
+          }
+        ],
+        "nodes": {
+          "btn": {
+            "type": "component",
+            "parent": "p1",
+            "children": [
+              "btn-label"
+            ],
+            "name": "Button",
+            "props": {
+              "label": {
+                "type": "text",
+                "default": "Go",
+                "target": {
+                  "id": "btn-label",
+                  "prop": "text"
+                }
+              }
+            }
+          },
+          "btn-label": {
+            "type": "text",
+            "parent": "btn",
+            "text": "Label"
+          },
+          "buy": {
+            "type": "instance",
+            "parent": "p1",
+            "component": "btn",
+            "props": {
+              "label": "Buy"
+            }
+          },
+          "note": {
+            "type": "text",
+            "parent": "p1",
+            "text": "Hi"
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 7,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "box",
+              "type": "frame",
+              "parent": "p1"
+            },
+            "after": "note"
+          },
+          {
+            "op": "move",
+            "id": "note",
+            "parent": "box",
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 3,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 7
+            },
+            "ops": [
+              {
+                "op": "add",
+                "node": {
+                  "id": "box",
+                  "type": "frame",
+                  "parent": "p1"
+                },
+                "after": "note"
+              },
+              {
+                "op": "move",
+                "id": "note",
+                "parent": "box",
+                "after": null
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 3,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "btn",
+              "buy",
+              "box"
+            ]
+          }
+        ],
+        "nodes": {
+          "btn": {
+            "type": "component",
+            "parent": "p1",
+            "children": [
+              "btn-label"
+            ],
+            "name": "Button",
+            "props": {
+              "label": {
+                "type": "text",
+                "default": "Go",
+                "target": {
+                  "id": "btn-label",
+                  "prop": "text"
+                }
+              }
+            }
+          },
+          "btn-label": {
+            "type": "text",
+            "parent": "btn",
+            "text": "Label"
+          },
+          "buy": {
+            "type": "instance",
+            "parent": "p1",
+            "component": "btn",
+            "props": {
+              "label": "Buy"
+            }
+          },
+          "box": {
+            "type": "frame",
+            "parent": "p1",
+            "children": [
+              "note"
+            ]
+          },
+          "note": {
+            "type": "text",
+            "parent": "box",
+            "text": "Hi"
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 8,
+        "ops": [
+          {
+            "op": "move",
+            "id": "note",
+            "parent": "box",
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 4,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 8
+            },
+            "ops": [
+              {
+                "op": "move",
+                "id": "note",
+                "parent": "box",
+                "after": null
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 4,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "btn",
+              "buy",
+              "box"
+            ]
+          }
+        ],
+        "nodes": {
+          "btn": {
+            "type": "component",
+            "parent": "p1",
+            "children": [
+              "btn-label"
+            ],
+            "name": "Button",
+            "props": {
+              "label": {
+                "type": "text",
+                "default": "Go",
+                "target": {
+                  "id": "btn-label",
+                  "prop": "text"
+                }
+              }
+            }
+          },
+          "btn-label": {
+            "type": "text",
+            "parent": "btn",
+            "text": "Label"
+          },
+          "buy": {
+            "type": "instance",
+            "parent": "p1",
+            "component": "btn",
+            "props": {
+              "label": "Buy"
+            }
+          },
+          "box": {
+            "type": "frame",
+            "parent": "p1",
+            "children": [
+              "note"
+            ]
+          },
+          "note": {
+            "type": "text",
+            "parent": "box",
+            "text": "Hi"
+          }
+        }
+      }
+    },
+    {
+      "tick": 500,
+      "expect": {
+        "a": [
+          {
+            "t": "saved",
+            "rev": 4
+          }
+        ]
+      }
+    }
+  ]
+}

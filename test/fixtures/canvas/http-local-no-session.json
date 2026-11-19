@@ -1,0 +1,34 @@
+{
+  "fake": {
+    "canvases": {
+      "board": "doc-minimal.json"
+    },
+    "token": "fixture-token"
+  },
+  "request": {
+    "method": "POST",
+    "path": "/api/canvas/local?slug=board",
+    "headers": {
+      "x-devteam-canvas-token": "fixture-token",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "by": "supervisor",
+      "via": "apply",
+      "ops": [
+        {
+          "op": "set",
+          "id": "p1",
+          "prop": "name",
+          "value": "Local"
+        }
+      ]
+    }
+  },
+  "status": 503,
+  "requestKind": "local-request",
+  "responseKind": "error-response",
+  "response": {
+    "why": "no-session"
+  }
+}

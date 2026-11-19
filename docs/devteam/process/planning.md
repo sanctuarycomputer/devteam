@@ -160,7 +160,7 @@ devteam.mjs ticket add api-07-session-tokens --json '{
 - **D6 Full coverage.** Every story is served; every ticket serves a story, except chores and spikes, which say why in `notes`. (gate)
 - **D7 One integration ticket per story that spans components**, whose done-whens are the story's acceptance checked end to end, depending on every ticket that serves it. A story served in more than one repo is split per repo, with the end-to-end check in the ticket that lands last (it depends on all the others); `validate --strict` errors otherwise.
 - **D8 Risk is assigned, not guessed.** `high` for auth, authorization, payments, PII, migrations, CI or release config, or any one-way door. (gate: one-way doors force high)
-- **D9 Spikes are timeboxed and produce a document** under `project/designs/`, not merged domain code.
+- **D9 Spikes are timeboxed and produce a document** in their own ticket folder, `project/tickets/<id>/`, not merged domain code. That folder may be a spike's whole `touches`: validate accepts a ticket's own folder there, and no other path in the kit's line (gate: validate, for the folder). A ticket whose records live in home (a link with `records: "home"`) writes its findings in home's `project/tickets/<id>/` through its records checkout, and validate doesn't accept that folder in its own repo.
 - **D10 Vertical over horizontal.** Prefer a thin working slice to a whole layer nobody can exercise.
 - **D11 Short critical path.** Run `devteam.mjs waves`; if the path is long relative to the ticket count, find a dependency a contract ticket could break.
 

@@ -1,0 +1,52 @@
+{
+  "t": "people",
+  "people": [
+    {
+      "id": "p-ann",
+      "name": "Ann Lee",
+      "level": "full",
+      "conns": [
+        {
+          "conn": "c1",
+          "at": {
+            "page": "goals",
+            "tab": "active",
+            "peek": null,
+            "art": null,
+            "thread": null
+          },
+          "visible": true
+        },
+        {
+          "conn": "c2",
+          "at": {
+            "page": "goals",
+            "tab": "done",
+            "peek": null,
+            "art": null,
+            "thread": "q-1"
+          },
+          "visible": false
+        }
+      ]
+    },
+    {
+      "id": "p-bo",
+      "name": "Bo Park",
+      "level": "view",
+      "conns": [
+        {
+          "conn": "c3",
+          "at": {
+            "page": "board",
+            "tab": null,
+            "peek": "kit-1",
+            "art": "example@1",
+            "thread": null
+          },
+          "visible": true
+        }
+      ]
+    }
+  ]
+}
