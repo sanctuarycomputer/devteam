@@ -2337,19 +2337,18 @@ function sensorsProduction(d) {
   return `<div class="g12"><div class="card c12 inc-card">${cardHead('siren', 'Incidents', { extra: open ? `<span class="muted">${open} open</span>` : '' })}<div id="incidents">${incidentBoard(incs)}</div></div>${
     ms.map((m) => sensorCard(m, MON_SERIES.get(m.name)?.data ?? null)).join('')}${ms.length ? '' : '<p class="empty c12">None</p>'}</div>`;
 }
-// The hash of the record a finding's subject names, else null (R2): a ticket (by the list, or an id's shape), a
-// planner, a sensor, a thread, a goal or another logged id by its prefix (as linkify maps it); a commit, a check
-// or anything else names none
+// The hash of the record a finding's subject names, else null (R2), as linkify links them: a ticket, a sensor or a
+// planner only when /api/data lists it, a thread, a goal or another logged id by its prefix; a commit, a check or
+// anything else names none
 const SUBJ_KINDS = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk', o: 'observation', q: 'q' };
 function subjectOpen(subj) {
   const s = String(subj ?? '');
   if (/^thread:t-/.test(s)) return subjectOpen(s.slice(7));
-  if (/^sensor:[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(s)) return `#sensor/${encodeURIComponent(s.slice(7))}`;
-  if (/^plan-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s)) return `#planner/${encodeURIComponent(s.slice(5))}`;
+  if (ticketMap().has(s)) return `#ticket/${encodeURIComponent(s)}`;
+  if (/^sensor:/.test(s)) { const n = s.slice(7); return (DATA?.sensors || []).some((x) => x.name === n) ? `#sensor/${encodeURIComponent(n)}` : null; }
+  if (/^plan-/.test(s)) { const f = s.slice(5); return (DATA?.planners || []).some((x) => x.feature === f) ? `#planner/${encodeURIComponent(f)}` : null; }
   const id = /^([gkapmodtq])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/.exec(s);
-  if (id) return `#${SUBJ_KINDS[id[1]]}/${encodeURIComponent(s)}`;
-  if (ticketMap().has(s) || /^[a-z][a-z0-9]*-\d+(?:-[a-z0-9]+)*$/.test(s)) return `#ticket/${encodeURIComponent(s)}`;
-  return null;
+  return id ? `#${SUBJ_KINDS[id[1]]}/${encodeURIComponent(s)}` : null;
 }
 // A subject as plain text (the row opens it): a ticket by its title, a sensor by its name, else as written
 const subjectText = (subj) => { const s = String(subj ?? ''); const t = ticketMap().get(s); return t ? esc(t.title) : /^sensor:/.test(s) ? esc(s.slice(7)) : s ? `<code>${esc(s)}</code>` : ''; };

@@ -668,10 +668,15 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await load(fx, '#sensors?st=fleet');
     await fleetDrawn();
     assert.equal(await openRow(FLEET('aside'), 0, 'click'), null);
-    // one whose subject names a record (a sensor) opens it
+    // one whose subject names a record (a sensor) opens it; the finding's ticket is a real one, listed in /api/data;
+    // a subject shaped like a ticket, and a sensor or planner the data doesn't list, name no record (R2)
     fx.patch.metrics.acknowledged[0].subject = 'sensor:hub';
+    fx.patch.tickets = [{ id: fx.ids.findingTicket, title: 'Refund a payment', stage: 'building', phase: 'implementing' }];
+    const base = fx.patch.metrics.findings[1];
+    fx.patch.metrics.findings.push(...['max-2', 'sensor:no-such-sensor', 'plan-no-such-feature'].map((subject) => ({ ...base, subject })));
     await load(fx, '#sensors?st=fleet');
     await fleetDrawn();
+    assert.equal((await rowsOf(FLEET('findings')))[0][3], 'Refund a payment', "the Subject cell names the ticket by its title");
     for (const how of ['click', 'enter']) {
       assert.deepEqual(await openRow(FLEET('findings'), 0, how), { kind: 'ticket', id: fx.ids.findingTicket }, `the ticket finding by ${how}`);
       await closePeek();
@@ -679,7 +684,7 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
       await closePeek();
       assert.equal(await selectedTab(), 'fleet', 'back on Fleet');
       // a commit names no record; a check and a test are figures
-      for (const [sel, i] of [[FLEET('findings'), 1], [FLEET('gates'), 0], [FLEET('gates'), 1], [FLEET('flaky'), 0], [FLEET('slowest'), 0]]) {
+      for (const [sel, i] of [[FLEET('findings'), 1], [FLEET('findings'), 2], [FLEET('findings'), 3], [FLEET('findings'), 4], [FLEET('gates'), 0], [FLEET('gates'), 1], [FLEET('flaky'), 0], [FLEET('slowest'), 0]]) {
         assert.equal(await openRow(sel, i, how), null, `${sel} row ${i} by ${how} opens nothing`);
         assert.equal(await ROW_A(sel, i), 0, `${sel} row ${i} holds no link`);
       }
