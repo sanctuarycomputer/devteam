@@ -25959,10 +25959,15 @@ async function browserStartLock(file, fn) {
     if (!claim) return false;
     try {
       if (seen === null) {
-        // an empty folder goes at once; ENOENT is a free path, not a take. A non-empty folder still
-        // without an owner is one no starter can replace or fill, so it is renamed below.
+        // an empty folder goes at once; ENOENT is a free path, not a take. A non-empty folder is owned
+        // first: an exclusive write of our token as its owner works only on a folder with none (a live
+        // lock has one, a free path has no folder), and then it holds a live token, ours, which no one
+        // else removes and no starter can rename over, so the rename below moves exactly it. Reading
+        // "no owner" instead can't tell an ownerless folder from a path a release just freed (kit-321
+        // design-change-1).
         try { fs.rmdirSync(lock); return (took = true); } catch (e) {
-          if ((e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST') || read(owner) !== null) return false;
+          if (e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST') return false;
+          try { fs.writeFileSync(owner, token, { flag: 'wx' }); } catch { return false; }
         }
       } else {
         const l = look();

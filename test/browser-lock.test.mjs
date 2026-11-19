@@ -332,11 +332,15 @@ const seeds = (list) => (SEEDS_ENV ? range(Number(SEEDS_ENV[1]), Number(SEEDS_EN
 //   M4 the old put-back: dead 3, dead 4, live 3, live 4: 1; ownerless 3 and 4: 4
 // M5 (dead claims never passed over) is caught by KILL_SEEDS and S3; M6 (no token check under the
 // claim) by no seed in 1 to 2000 that passes at the head, only by S3's release race.
+//   M7 an ownerless folder renamed when no owner can be read, not owned first by an exclusive write
+//      (design-change-1): ownerless 4: 398, which moved a live lock at the code before that change.
+// Since that change M3 is equivalent (the exclusive write fails on a free path too); 41, 253 and 222
+// stay as ownerless seeds.
 const plus = (list, extra) => [...new Set([...list, ...extra])].sort((a, b) => a - b);
 const SWEEP = {
   'dead-owner': { 3: plus(range(1, 20), [21, 22, 30, 42, 43, 53]), 4: plus(range(1, 15), [34, 65]) },
   'old live-owner': { 3: plus(range(1, 12), [21, 43]), 4: range(1, 15) },
-  'old ownerless': { 3: plus(range(1, 10), [16, 41, 253]), 4: plus(range(1, 10), [11, 16, 162, 222]) },
+  'old ownerless': { 3: plus(range(1, 10), [16, 41, 253]), 4: plus(range(1, 10), [11, 16, 162, 222, 398]) },
 };
 
 // Runs every seed and returns one message naming each failing seed and its problems ('' when none
