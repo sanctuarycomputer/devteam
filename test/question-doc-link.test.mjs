@@ -45,7 +45,7 @@ function dashboard(data = DATA) {
   const ctx = { DATA: data, URLSearchParams };
   vm.createContext(ctx);
   vm.runInContext([
-    take('esc'), take('ticketMap'), take('tlink'), take('fileHref'), take('linkify'),
+    take('esc'), take('ticketMap'), take('tlink'), take('repoDocHref'), take('fileHref'), take('linkify'),
     'const qlink = (id) => `<a href="#q/${id}">q</a>`;',
     'const idLink = (k, id) => `<a href="#id/${id}">${id}</a>`;',
     'this.linkify = linkify; this.fileHref = fileHref;',
@@ -124,6 +124,28 @@ test('what linkify did before stays: a bare path is text, other ids still link, 
   assert.match(linkify('asked in q-20261119-143912078-supervisor'), /href="#q\/q-20261119-143912078-supervisor"/);
   assert.equal(linkify(`at ${SHA_C}`), `at <code>${SHA_C.slice(0, 12)}</code>`);
   assert.equal(linkify('<b>x</b> & docs/x.md'), '&lt;b&gt;x&lt;/b&gt; &amp; docs/x.md');
+  // a path inside a URL's query, an address, or numbers is not a doc
+  for (const s of ['https://x.example/?a=1&b=console/docs/x.md', 'mail ops@console/x.md', 'about 1/2.5 on main', 'see console/docs/x.md-old']) assert.equal(anchors(linkify(s)).length, 0, `no link in "${s}": ${linkify(s)}`);
+  // a path left as text keeps the ids inside it that link today
+  assert.match(linkify('see q-20261119-143912078-supervisor/notes.md'), /href="#q\/q-20261119-143912078-supervisor"/);
+});
+
+test('the ref is read whole or not at all, and ../<repo>/ names the repo as <repo>/ does', () => {
+  const { linkify } = dashboard();
+  // a ref that runs on is no ref: never a shorter branch than was written
+  for (const s of ['console/docs/x.md on ticket/kit-12/sub', 'console/docs/x.md on main-line']) {
+    const a = anchors(linkify(s));
+    assert.equal(a.length, 1, s);
+    assert.equal(unesc(a[0].href), 'https://github.com/acme/console/blob/HEAD/docs/x.md', s);
+  }
+  let a = anchors(linkify('console/docs/x.md on ticket/kit-12-Foo.'));
+  assert.equal(unesc(a[0].href), 'https://github.com/acme/console/blob/ticket/kit-12-Foo/docs/x.md');
+  a = anchors(linkify('Read ../arrangements.nyc/docs/x.md on ticket/arrangements-230-booking-copy-to-leads.'));
+  assert.equal(a.length, 1);
+  assert.equal(unesc(a[0].href), 'https://github.com/acme/arrangements.nyc/blob/ticket/arrangements-230-booking-copy-to-leads/docs/x.md');
+  assert.equal(a[0].text, '../arrangements.nyc/docs/x.md');
+  // any other .. stays text
+  assert.equal(anchors(linkify('see docs/../x.md on main')).length, 0);
 });
 
 test('fileHref: a link into a GitHub repo link is its blob URL; every other link opens the peek as before', () => {
