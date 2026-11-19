@@ -6252,6 +6252,96 @@ const publicLinks = (me) => ({
   page: (slug) => `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`,
 });
 /* public-states end */
+/* library-items start */
+// The Library's items, pure: /api/data in, one card item per thing out, in kind order. Uses only its
+// arguments; the page passes its own href helpers and previewState in ctx, so none is copied here.
+// Each kind: [value, label, Lucide icon], in the grid's order.
+const LIB_KINDS = [['mock', 'Mock', 'layout-dashboard'], ['diagram', 'Diagram', 'workflow'], ['docs', 'Docs', 'book-open'], ['review', 'Review page', 'list-checks'], ['preview', 'Preview', 'monitor-play'], ['link', 'Link', 'link']];
+// A ref's goals: goal:<id> itself, ticket:<id> and a bare ticket id (a session) through its feature,
+// feature:<id> to the goals the roadmap gives it, plan-<feature> (a planner's session) by its feature
+// and its planner row; [] for anything else.
+function libraryGoalIndex(data) {
+  const rm = data?.ooda?.roadmap ?? {};
+  const featGoals = new Map();
+  const add = (f, g) => { if (f && g) featGoals.set(f, new Set([...(featGoals.get(f) ?? []), g])); };
+  for (const g of rm.goals ?? []) for (const f of g.features ?? []) add(f, g.id);
+  for (const [f, row] of Object.entries(rm.features ?? {})) for (const g of row?.goals ?? []) add(f, g);
+  for (const p of data?.planners ?? []) for (const g of p.goals ?? []) add(p.feature, g);
+  const ticketFeat = new Map();
+  for (const t of [...(data?.tickets ?? []), ...(data?.progress?.tickets ?? [])]) if (t?.id && t.feature) ticketFeat.set(t.id, t.feature);
+  const ofFeat = (f) => [...(featGoals.get(f) ?? [])];
+  return (ref) => {
+    const r = String(ref ?? '');
+    const m = /^(goal|ticket|feature):(.+)$/.exec(r);
+    if (m?.[1] === 'goal') return [m[2]];
+    if (m?.[1] === 'ticket') return ticketFeat.has(m[2]) ? ofFeat(ticketFeat.get(m[2])) : [];
+    if (m?.[1] === 'feature') return ofFeat(m[2]);
+    if (r.startsWith('plan-')) return ofFeat(r.slice(5));
+    return ticketFeat.has(r) ? ofFeat(ticketFeat.get(r)) : [];
+  };
+}
+// A link's host for its thumbnail: its url's, else its remote's (git@host:…, ssh://[user@]host/…,
+// https://host/…), else null.
+function linkHost(l) {
+  const of = (u) => { try { return new URL(u).host || null; } catch { return null; } };
+  if (l?.url) return of(l.url);
+  const r = String(l?.remote ?? '');
+  const scp = /^[^@/\s]+@([^:/\s]+):/.exec(r);
+  if (scp) return scp[1].toLowerCase();
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(r) ? of(r) : null;
+}
+function libraryItems(data, now, ctx) {
+  const lib = data?.library ?? {};
+  const goalsOf = libraryGoalIndex(data);
+  const goals = (refs) => [...new Set((refs ?? []).flatMap(goalsOf))];
+  const by = Object.fromEntries(LIB_KINDS.map(([k]) => [k, []]));
+  // artifacts: one item per slug, in the server's order; the newest draft is what opens, the landed
+  // row (if any) gives the publish state
+  const slugs = new Map();
+  for (const a of lib.artifacts ?? []) slugs.set(a.slug, [...(slugs.get(a.slug) ?? []), a]);
+  for (const [slug, rows] of slugs) {
+    const landed = rows.find((a) => a.at === 'main') ?? null;
+    const drafts = rows.filter((a) => a.at !== 'main');
+    const newest = drafts.reduce((x, a) => (!x || (Date.parse(a.updated_at ?? '') || 0) > (Date.parse(x.updated_at ?? '') || 0) ? a : x), null);
+    const art = newest ?? landed;
+    const kind = ['mock', 'diagram', 'docs'].includes(art.kind) ? art.kind : 'mock';
+    // a broken manifest is shown by its slug, and opens nothing
+    by[kind].push({
+      id: `artifact:${slug}`, kind, title: art.error ? slug : art.title || slug,
+      href: art.error ? null : ctx.artHref(slug, art.at), tab: art.error ? null : ctx.artViewer(slug, art.at),
+      summary: art.error ? null : art.summary ?? null, goals: goals(art.for), at: art.at, art, landed, drafts,
+      preview: null, pstate: null, review: null, link: null, host: null, error: art.error ?? null,
+    });
+  }
+  // a review page: each open review question, opened on its own page
+  for (const q of data?.questions ?? []) {
+    if (q?.kind !== 'review' || (q.status ?? 'open') !== 'open') continue;
+    by.review.push({
+      id: `review:${q.id}`, kind: 'review', title: q.review?.title ?? q.question, href: `#review/${encodeURIComponent(q.id)}`, tab: null,
+      summary: null, goals: q.goal ? [q.goal] : q.ticket ? goalsOf(`ticket:${q.ticket}`) : [], at: null, art: null, landed: null, drafts: [],
+      preview: null, pstate: null, review: q, link: null, host: null, error: null,
+    });
+  }
+  for (const p of lib.previews ?? []) {
+    by.preview.push({
+      id: `preview:${p.name}`, kind: 'preview', title: p.label || p.name, href: `#preview/${encodeURIComponent(p.name)}`, tab: ctx.pvViewer(p.name),
+      summary: null, goals: goals([p.session]), at: null, art: null, landed: null, drafts: [],
+      preview: p, pstate: ctx.previewState(p, now), review: null, link: null, host: null, error: null,
+    });
+  }
+  // a link opens its URL, or a path (with no remote) in the file peek, as linkOf does
+  for (const l of lib.links ?? []) {
+    by.link.push({
+      id: `link:${l.id}`, kind: 'link', title: l.title || l.id, href: l.url || (l.path && !l.remote ? ctx.fileHref({ path: l.path, title: l.title }) : null), tab: l.url || null,
+      summary: l.notes ?? null, goals: goals(l.for), at: null, art: null, landed: null, drafts: [],
+      preview: null, pstate: null, review: null, link: l, host: linkHost(l), error: null,
+    });
+  }
+  return LIB_KINDS.flatMap(([k]) => by[k]);
+}
+// The Kind and Goal filters: an item with no goal is kept only when no goal is picked.
+const libraryKeep = (item, { kind, goal } = {}) => (!kind || item.kind === kind) && (!goal || item.goals.includes(goal));
+/* library-items end */
 // The Library: each landed artifact with its drafts beneath it, then drafts of slugs that haven't
 // landed (by worktree), then the link registry. A manifest that broke the rules shows its slug and
 // the error, never its title.
