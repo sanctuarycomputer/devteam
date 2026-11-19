@@ -1060,6 +1060,9 @@ const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-sett
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
 const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records', 'worktree_copy', 'worktree_setup_always'];
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
+// what a repo link's maintain may turn on; linkMaintains(l, 'prs')
+const LINK_DUTIES = ['prs', 'releases'];
+const linkMaintains = (l, duty) => !!l && typeof l === 'object' && !!l.maintain && typeof l.maintain === 'object' && l.maintain[duty] === true;
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
 // records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
 // "repo", in its own project folder, landing with its code; or "home", on home's ticket/<id> in
@@ -1147,7 +1150,9 @@ const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w
 // looks up: kind "constructor" is unknown, not Object's.
 const LINK_KINDS = Object.assign(Object.create(null), {
   repo: {
-    fields: { required: ['remote'], optional: ['path', ...REPO_KEYS] },
+    // maintain: { prs, releases }, duties the supervisor keeps for a repo it doesn't only merge
+    // tickets into (linkDutyFindings): the owner's, a governance-edit like the rest
+    fields: { required: ['remote'], optional: ['path', 'maintain', ...REPO_KEYS] },
     // where the checkout is on this machine is never the owner's; what a gate run sees is
     // gate-change; anything else about a repo devteam merges into is governance-edit
     ownerClass: (field) => (field === 'path' ? null : REPO_GATE_KEYS.includes(field) ? 'gate-change' : 'governance-edit'),
@@ -1168,6 +1173,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
       else ctx.remotes.set(k, ctx.id);
       if (l.project !== undefined && (typeof l.project !== 'string' || !REPO_PATH.test(l.project))) errs.push(`${at}: project is a path inside that repo`);
       if (l.records !== undefined && !RECORDS_WHERE.includes(l.records)) errs.push(`${at}: records is "repo" or "home"`);
+      if (l.maintain !== undefined && (!isObj(l.maintain) || Object.entries(l.maintain).some(([k, v]) => !LINK_DUTIES.includes(k) || typeof v !== 'boolean'))) errs.push(`${at}: maintain is { "prs": true|false, "releases": true|false }`);
       return errs;
     },
     // local and cheap: metrics asks it live
@@ -11240,7 +11246,7 @@ async function cmdObserveMetrics() {
   const unlisted = await fetchLinkPrs(end);
   const s = observeSpend();
   const learned = writeLearning();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}`);
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
   // finished worktrees go, at most every 30 minutes (one line when any did)
   tidyFinishedWorktrees();
 }
@@ -11266,6 +11272,10 @@ async function fetchLinkMains(end) {
       const r = await runProbe({ cmd: 'git', args: ['fetch', '--quiet', 'origin', b], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: (code) => (code === 0 ? {} : { problem: `could not fetch origin ${b} from ${redactUrl(R.remote)} in ${R.root}; its main here is as last fetched` }) }, end);
       if (r === 'budget') { skipped.push(id); continue; }
       state[id] = { at: nowIso(), problem: r.problem ?? null };
+      // a repo whose releases are kept (maintain.releases) also gets its release tags, which a
+      // fetch of one branch doesn't bring, so a release cut elsewhere clears release-due; never
+      // forced, so a local tag that differs stays as it is
+      if (!r.problem && linkMaintains(loadSettings().links?.[id], 'releases') && Date.now() < end) await runProbe({ cmd: 'git', args: ['fetch', '--quiet', '--no-tags', 'origin', 'refs/tags/v*:refs/tags/v*'], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: () => ({}) }, end);
       if (!r.problem) R.resetCaches();
     }
   };
@@ -11277,21 +11287,31 @@ async function fetchLinkMains(end) {
 // The open PRs on each GitHub repo link that aren't the fleet's own (ticket/, plan/, chore- branches
 // land through merge and their records), read with gh inside the tick's budget, so metrics can say
 // when one waits unreviewed or with findings its author never saw (pr-unreviewed,
-// pr-changes-unanswered) without touching the network. gh missing, logged out or offline: that
-// link's entry is dropped and nothing is raised. Kept per PR: its head, when that head was pushed
-// (its last commit's date, or the PR's creation if later), the forge's reviews of that head, and
-// when it was last commented on.
+// pr-changes-unanswered) without touching the network. A good read is reused for
+// LINK_PRS_REUSE_MS (the findings count hours). A failed read (gh missing, logged out, offline, a
+// query GitHub refuses) keeps the last PRs but marks the entry failing, with when it started and
+// gh's first line, so metrics raises no PR finding from stale data and says (link-prs-unread) when
+// reads have failed for LINK_PRS_UNREAD_HOURS. Kept per PR: its head, when that head was first seen
+// (the PR's updatedAt, which a push moves, when the head is new to us: never later than the push
+// is old, so never a false stall), the forge's reviews of that head and when it was last commented
+// on, leaving out bots. The query asks for no `commits`: gh's commits field nests authors under
+// commits under PRs and GitHub refuses it for its node count.
 const LINK_PRS_FILE = runPath('link-prs.json');
+const LINK_PRS_REUSE_MS = 30 * 60000;
+const LINK_PRS_UNREAD_HOURS = 6;
+const LINK_PRS_MAX_AGE_MS = 2 * 3600000;
 const FLEET_BRANCH = /^(ticket\/|plan\/|chore-)/;
-const linkPrRepos = (s = loadSettings()) => Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents && LINK_KINDS[l.kind].effectiveSettings(l, s).forge === 'github' && ghSpec(l.remote)).map(([id, l]) => [id, ghSpec(l.remote)]);
-const trimLinkPr = (p) => {
+const BOT_LOGIN = /\[bot\]$|^(github-actions|copilot-pull-request-reviewer|copilot|dependabot|renovate)$/i;
+const linkPrRepos = (s = loadSettings()) => Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents && linkMaintains(l, 'prs') && LINK_KINDS[l.kind].effectiveSettings(l, s).forge === 'github' && ghSpec(l.remote)).map(([id, l]) => [id, ghSpec(l.remote)]);
+const trimLinkPr = (p, before) => {
   const head = p.headRefOid;
-  const pushed = Math.max(Date.parse(p.createdAt) || 0, Date.parse((p.commits ?? []).at(-1)?.committedDate) || 0);
-  const times = (xs, k) => (xs ?? []).map((x) => Date.parse(x?.[k])).filter((t) => !Number.isNaN(t));
+  const human = (x) => !BOT_LOGIN.test(String(x?.author?.login ?? ''));
+  const times = (xs, k) => (xs ?? []).filter(human).map((x) => Date.parse(x?.[k])).filter((t) => !Number.isNaN(t));
+  const seen = before && before.head === head && before.head_at ? before.head_at : (() => { const t = Math.max(Date.parse(p.createdAt) || 0, Date.parse(p.updatedAt) || 0); return t ? new Date(t).toISOString() : null; })();
   return {
     number: p.number, title: String(p.title ?? '').slice(0, 200), url: p.url ?? null, head, branch: p.headRefName ?? null,
-    head_at: pushed ? new Date(pushed).toISOString() : null,
-    forge_reviews: (p.reviews ?? []).filter((r) => r?.commit?.oid === head).map((r) => ({ state: r.state ?? null, at: r.submittedAt ?? null })),
+    head_at: seen,
+    forge_reviews: (p.reviews ?? []).filter((r) => human(r) && r?.commit?.oid === head).map((r) => ({ state: r.state ?? null, at: r.submittedAt ?? null })),
     last_comment_at: (() => { const t = Math.max(0, ...times(p.comments, 'createdAt'), ...times(p.reviews, 'submittedAt')); return t ? new Date(t).toISOString() : null; })(),
   };
 };
@@ -11299,22 +11319,26 @@ async function fetchLinkPrs(end) {
   const repos = linkPrRepos();
   let state = {};
   try { state = readJson(LINK_PRS_FILE); } catch {}
+  if (state === null || typeof state !== 'object' || Array.isArray(state)) state = {};
   const skipped = [];
-  const queue = [...repos];
+  const queue = repos.filter(([id]) => { const e = ownEntry(state, id); return !(e && !e.failing_since && Date.now() - Date.parse(e.at) < LINK_PRS_REUSE_MS); });
   const one = async () => {
     for (let next = queue.shift(); next; next = queue.shift()) {
       const [id, spec] = next;
       if (Date.now() >= end) { skipped.push(id); continue; }
-      const r = await runProbe({ cmd: 'gh', args: ['pr', 'list', '-R', spec, '--state', 'open', '--limit', '100', '--json', 'number,title,url,headRefName,headRefOid,isDraft,createdAt,commits,reviews,comments'], cwd: mainRoot, env: { ...process.env, GH_PROMPT_DISABLED: '1' }, judge: (code, text) => {
-        if (code !== 0) return null;
-        try { const list = JSON.parse(text); return Array.isArray(list) ? list : null; } catch { return null; }
+      const r = await runProbe({ cmd: 'gh', args: ['pr', 'list', '-R', spec, '--state', 'open', '--limit', '100', '--json', 'number,title,url,headRefName,headRefOid,isDraft,createdAt,updatedAt,reviews,comments'], cwd: mainRoot, env: { ...process.env, GH_PROMPT_DISABLED: '1' }, stderr: true, judge: (code, text, err = '') => {
+        const why = () => (String(err).split('\n').map((x) => x.trim()).find(Boolean) ?? (code == null ? 'gh did not run or timed out' : `gh exited ${code}`)).slice(0, 300);
+        if (code !== 0) return { error: why() };
+        try { const list = JSON.parse(text); return Array.isArray(list) ? { list } : { error: 'gh printed no PR list' }; } catch { return { error: 'gh printed no PR list' }; }
       } }, end);
       if (r === 'budget') { skipped.push(id); continue; }
-      if (!r) { delete state[id]; continue; }
-      state[id] = { at: nowIso(), prs: r.filter((p) => p && !p.isDraft && !FLEET_BRANCH.test(p.headRefName ?? '')).map(trimLinkPr) };
+      const prev = ownEntry(state, id);
+      if (r.error) { state[id] = { ...(prev ?? {}), failing_since: prev?.failing_since ?? nowIso(), failed_at: nowIso(), error: r.error }; continue; }
+      const before = new Map((Array.isArray(prev?.prs) ? prev.prs : []).map((p) => [p?.number, p]));
+      state[id] = { at: nowIso(), prs: r.list.filter((p) => p && !p.isDraft && !FLEET_BRANCH.test(p.headRefName ?? '')).map((p) => trimLinkPr(p, before.get(p.number))) };
     }
   };
-  if (repos.length) await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, repos.length) }, one));
+  if (queue.length) await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, queue.length) }, one));
   for (const id of Object.keys(state)) if (!repos.some(([r]) => r === id)) delete state[id];
   if (repos.length || fs.existsSync(LINK_PRS_FILE)) writeJson(LINK_PRS_FILE, state);
   return skipped;
@@ -11327,7 +11351,8 @@ const PROBE_FILE = runPath('link-probes.json');
 // Probes run four at a time, each with its own 12 s deadline, inside a budget per tick (20 s;
 // DEVTEAM_PROBE_BUDGET_MS in tests): a probe the budget cuts short, or one never started, is "not
 // probed this tick", writes nothing, and is asked again next tick; it is never a finding.
-// A probe is a kind's { cmd, args, cwd?, env?, judge(code, stdout) → { problem?, note? } }, or null.
+// A probe is a kind's { cmd, args, cwd?, env?, stderr?, judge(code, stdout, stderr) → { problem?, note? } }, or null
+// (stderr is passed only when the spec asks for it).
 const PROBE_AT_ONCE = 4;
 const PROBE_EACH_MS = 12000;
 function runProbe(spec, end) {
@@ -11335,14 +11360,16 @@ function runProbe(spec, end) {
     const left = end - Date.now();
     const cut = left < PROBE_EACH_MS;
     let outText = '';
+    let errText = '';
     let done = false;
     // its own process group, so a kill takes git's ssh with it, and no controlling terminal to prompt on
-    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', spec.stderr ? 'pipe' : 'ignore'], detached: true });
     const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
     const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} finish(cut ? 'budget' : spec.judge(null, '')); }, Math.max(0, Math.min(left, PROBE_EACH_MS)));
     child.stdout.on('data', (d) => { outText += d; });
-    child.on('error', () => finish(spec.judge(null, '')));
-    child.on('close', (code) => finish(spec.judge(code, outText)));
+    if (spec.stderr) child.stderr.on('data', (d) => { if (errText.length < 4096) errText += d; });
+    child.on('error', (e) => finish(spec.judge(null, '', String(e?.message ?? e))));
+    child.on('close', (code) => finish(spec.judge(code, outText, errText)));
   });
 }
 async function probeLinks(end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000)) {
@@ -13898,27 +13925,39 @@ function efficiencyData(m, now = Date.now()) {
 // long, with nothing posted on the PR since, so its author never saw the findings; release-due,
 // merges on the link's main waiting RELEASE_DUE_HOURS since its latest tag. A review is a record
 // under run/reviews/ in a folder or file named for the PR (…pr-<n>/…md, …pr-<n>…md) whose
-// "Verdict: APPROVE|CHANGES <full sha>" names the head, or the forge's own review of that head.
-// The PRs come from the tick's read (fetchLinkPrs); with no read (no gh, offline) nothing is raised.
+// "Verdict: APPROVE|CHANGES <full sha>" names the head (run/reviews/<link>-pr-<n>/, or a bare
+// pr-<n> when there's one GitHub link), or a person's review of that head on the forge.
+// The PRs come from the tick's read (fetchLinkPrs); with no good read nothing about PRs is raised,
+// and reads failing for LINK_PRS_UNREAD_HOURS are a low link-prs-unread.
 const LINK_PR_STALL_HOURS = 24;
 const RELEASE_DUE_HOURS = 6;
-function linkPrReviewRecords() {
+function linkPrReviewRecords(ids) {
   const root = path.join(runDir, 'reviews');
   const byPr = new Map();
-  const put = (n, file) => {
+  const put = (key, file) => {
     let text, st;
     try { st = fs.statSync(file); if (!st.isFile() || st.size > 1e6) return; text = fs.readFileSync(file, 'utf8'); } catch { return; }
     const v = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-f]{40}(?:[0-9a-f]{24})?)[ \t]*$/gm)].pop();
-    if (v) (byPr.get(n) ?? byPr.set(n, []).get(n)).push({ verdict: v[1], sha: v[2], at: st.mtimeMs, file: path.relative(mainRoot, file) });
+    // when the record was written: its birth time where the filesystem keeps one, so filling in a
+    // Disposition later doesn't move it past a comment already posted
+    const at = st.birthtimeMs > 0 ? Math.min(st.birthtimeMs, st.mtimeMs) : st.mtimeMs;
+    if (v) (byPr.get(key) ?? byPr.set(key, []).get(key)).push({ verdict: v[1], sha: v[2], at, file: path.relative(mainRoot, file) });
   };
-  const prOf = (name) => /(?:^|[^a-z0-9])pr-(\d+)(?![0-9])/i.exec(name)?.[1];
+  // <link>-pr-<n> names the link; a bare pr-<n> (not <other>-pr-<n>) counts only when there is one GitHub repo link
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const named = [...ids].sort((a, b) => b.length - a.length).map((id) => [id, new RegExp(`(?:^|[^a-z0-9])${esc(id)}-pr-(\\d+)(?![0-9])`, 'i')]);
+  const keyOf = (name) => {
+    for (const [id, re] of named) { const m = re.exec(name); if (m) return `${id}#${Number(m[1])}`; }
+    const m = /(?:^|[^a-z0-9-])pr-(\d+)(?![0-9])/i.exec(name);
+    return m && ids.length === 1 ? `${ids[0]}#${Number(m[1])}` : null;
+  };
   let entries = [];
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return byPr; }
   for (const e of entries) {
-    const n = prOf(e.name);
-    if (!n) continue;
-    if (e.isDirectory()) { let fs2 = []; try { fs2 = fs.readdirSync(path.join(root, e.name)); } catch {} for (const f of fs2) if (f.endsWith('.md')) put(Number(n), path.join(root, e.name, f)); }
-    else if (e.name.endsWith('.md')) put(Number(n), path.join(root, e.name));
+    const key = keyOf(e.name);
+    if (!key) continue;
+    if (e.isDirectory()) { let fs2 = []; try { fs2 = fs.readdirSync(path.join(root, e.name)); } catch {} for (const f of fs2) if (f.endsWith('.md')) put(key, path.join(root, e.name, f)); }
+    else if (e.name.endsWith('.md')) put(key, path.join(root, e.name));
   }
   return byPr;
 }
@@ -13927,42 +13966,52 @@ function linkDutyFindings(settings, now, add) {
   let read = {};
   try { read = readJson(LINK_PRS_FILE); } catch {}
   const repos = linkPrRepos(settings);
-  const records = repos.some(([id]) => ownEntry(read, id)) ? linkPrReviewRecords() : new Map();
+  const records = repos.some(([id]) => ownEntry(read, id)) ? linkPrReviewRecords(repos.map(([id]) => id)) : new Map();
   const hours = (ms) => Math.floor(ms / 3600000);
-  for (const [id] of repos) {
+  for (const [id, spec] of repos) {
     const entry = ownEntry(read, id);
-    if (!entry || !Array.isArray(entry.prs)) continue;
+    if (!entry) continue;
+    // a failing or old read (the tick's budget cut it) raises no PR finding from what it last saw,
+    // and says so once that has lasted
+    const age = now - (Date.parse(entry.at) || 0);
+    if (entry.failing_since || age > LINK_PRS_MAX_AGE_MS) {
+      const unread = entry.failing_since ? now - (Date.parse(entry.failing_since) || now) : age;
+      if (unread > LINK_PRS_UNREAD_HOURS * 3600000) add('low', 'link-prs-unread', id, `${id}'s open PRs haven't been read for ${hours(unread)} h${entry.at ? ` (last read ${entry.at})` : ''}: ${entry.failing_since ? entry.error ?? 'gh failed' : "the tick's time budget ran out first"}`, `check gh on this machine (gh auth status; gh pr list -R ${spec} --state open --limit 5): until it reads, pr-unreviewed and pr-changes-unanswered can't fire for ${id}`);
+      continue;
+    }
+    if (!Array.isArray(entry.prs)) continue;
     for (const pr of entry.prs) {
       if (!Number.isInteger(pr?.number) || typeof pr.head !== 'string') continue;
       const subject = `${id}#${pr.number}`;
-      const mine = (records.get(pr.number) ?? []).sort((a, b) => a.at - b.at);
+      const mine = (records.get(subject) ?? []).sort((a, b) => a.at - b.at);
       const atHead = mine.filter((r) => r.sha === pr.head);
       const forgeAtHead = pr.forge_reviews ?? [];
       const latest = mine.at(-1);
       if (latest && latest.verdict === 'CHANGES' && latest.sha === pr.head) {
         const since = now - latest.at;
         const answered = pr.last_comment_at && Date.parse(pr.last_comment_at) > latest.at;
-        if (since > stall && !answered) add('medium', 'pr-changes-unanswered', subject, `review ${latest.file} asked for changes at its head ${pr.head.slice(0, 12)} ${hours(since)} h ago, and nothing has been posted on the PR since: its author hasn't seen the findings`, `fix the PR (push the fixes, then review the new head), or comment the findings to its author on ${pr.url ?? `the PR`} (gh pr comment ${pr.number} --body-file ${latest.file})`);
+        if (since > stall && !answered) add('medium', 'pr-changes-unanswered', subject, `review ${latest.file} asked for changes at its head ${pr.head.slice(0, 12)} ${hours(since)} h ago, and nothing has been posted on the PR since: its author hasn't seen the findings`, `comment the findings to its author on ${pr.url ?? `the PR`} (gh pr comment ${pr.number} --body-file ${latest.file}); a fix the fleet should make is a ticket in ${id}`);
         continue;
       }
       if (atHead.length || forgeAtHead.length) continue;
       const waited = now - (Date.parse(pr.head_at) || now);
-      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then merge it, fix it, or comment the findings to its author`);
+      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then comment the verdict to its author`);
     }
   }
-  // release-due: only for a repo link that names its own release: "tag" (a release duty the project
-  // declared for it), read from its local main as the tick fetched it, against the nearest tag on it.
+  // release-due: only for a repo link whose releases the supervisor keeps (maintain.releases) and
+  // that releases from a tag, read from its local main as the tick fetched it (with its v* tags),
+  // against the nearest release tag on it (v*, not a release candidate, as releasedInAt).
   for (const [id, l] of Object.entries(settings.links ?? {})) {
-    if (!LINK_KINDS[l?.kind]?.hostsComponents || l.release !== 'tag' || !repoReadable(id)) continue;
+    if (!LINK_KINDS[l?.kind]?.hostsComponents || !linkMaintains(l, 'releases') || LINK_KINDS[l.kind].effectiveSettings(l, settings).release !== 'tag' || !repoReadable(id)) continue;
     const R = repo(id);
     const ref = R.mainRef();
     if (!ref) continue;
-    const tag = R.git(['describe', '--tags', '--abbrev=0', ref]);
+    const tag = R.git(['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', '*-rc*', ref]);
     if (!tag) continue;
     const rows = (R.git(['log', '--first-parent', '--format=%ct', `refs/tags/${tag}..${ref}`]) ?? '').split('\n').filter(Boolean);
     if (!rows.length) continue;
     const waited = now - Number(rows.at(-1)) * 1000;
-    if (waited > RELEASE_DUE_HOURS * 3600000) add('medium', 'release-due', id, `${rows.length} commit(s) on ${id}'s main since ${tag}, the oldest waiting ${hours(waited)} h`, `cut a release of ${id} from its main (tag it and publish it), or record why it waits (observe)`);
+    if (waited > RELEASE_DUE_HOURS * 3600000) add('medium', 'release-due', id, `${rows.length} commit(s) on ${id}'s main since ${tag}, the oldest waiting ${hours(waited)} h`, `a tag on ${id} deploys to production, so a release is a release-production decision on its ladder (decide, or ask the owner), or record why it waits (observe)`);
   }
 }
 function collectMetrics(since) {

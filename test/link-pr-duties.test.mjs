@@ -21,19 +21,23 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     g(['remote', 'set-url', 'origin', 'https://github.com/usbclub/console.git'], F.console);
     g(['config', `url.${F.consoleOrigin}.insteadOf`, 'https://github.com/usbclub/console.git'], F.console);
     const links = json(okIn(old, ['settings'])).links;
-    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, remote: 'usbclub/console', forge: 'github', release: 'tag' } } });
+    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, remote: 'usbclub/console', forge: 'github', release: 'tag', maintain: { prs: true, releases: true } } } });
 
-    const pr = (number, head, o = {}) => ({ number, title: `pr ${number}`, url: `https://github.com/usbclub/console/pull/${number}`, headRefName: `feature-${number}`, headRefOid: head, isDraft: false, createdAt: iso(72), commits: [{ oid: head, committedDate: iso(o.pushedH ?? 72) }], reviews: [], comments: [], ...o });
+    const pr = (number, head, o = {}) => ({ number, title: `pr ${number}`, url: `https://github.com/usbclub/console/pull/${number}`, headRefName: `feature-${number}`, headRefOid: head, isDraft: false, createdAt: iso(72), updatedAt: iso(o.pushedH ?? 72), reviews: [], comments: [], ...o });
     const prs = [
       pr(11, sha('a')), // never reviewed: pr-unreviewed
       pr(12, sha('b')), // CHANGES at its head two days ago, nothing posted: pr-changes-unanswered
-      pr(13, sha('c'), { comments: [{ createdAt: iso(1) }] }), // CHANGES, then the findings were commented
+      pr(13, sha('c'), { comments: [{ author: { login: 'someone' }, createdAt: iso(1) }] }), // CHANGES, then the findings were commented
       pr(14, sha('d'), { pushedH: 2 }), // a fresh head
       pr(15, sha('e'), { headRefName: 'ticket/console-01-a' }), // the fleet's own
       pr(16, sha('f'), { isDraft: true }),
-      pr(17, sha('1'), { reviews: [{ state: 'COMMENTED', submittedAt: iso(48), commit: { oid: sha('1') } }] }), // reviewed on the forge
+      pr(17, sha('1'), { reviews: [{ author: { login: 'someone' }, state: 'COMMENTED', submittedAt: iso(48), commit: { oid: sha('1') } }] }), // reviewed on the forge
       pr(18, sha('2')), // approved in a record
       pr(19, sha('3')), // CHANGES at an older head: the new head is unreviewed
+      pr(20, sha('4'), { reviews: [{ author: { login: 'copilot-pull-request-reviewer' }, state: 'COMMENTED', submittedAt: iso(48), commit: { oid: sha('4') } }] }), // only a bot looked: unreviewed
+      pr(21, sha('5'), { comments: [{ author: { login: 'github-actions' }, createdAt: iso(1) }] }), // CHANGES, then only a bot commented: unanswered
+      pr(22, sha('6')), // approved only in a record named for another link: unreviewed
+      pr(23, sha('7')), // approved in a bare pr-<n> record (one GitHub link)
     ];
     const bin = path.join(F.base, 'fakegh');
     const logf = path.join(F.base, 'gh-args.log');
@@ -54,6 +58,9 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     record('console-pr-13/final-1.md', 'CHANGES', sha('c'), 48);
     record('console-pr-18.md', 'APPROVE', sha('2'), 30);
     record('console-pr-19/final-1.md', 'CHANGES', sha('9'), 48);
+    record('console-pr-21/final-1.md', 'CHANGES', sha('5'), 48);
+    record('companion-pr-22.md', 'APPROVE', sha('6'), 30);
+    record('pr-23.md', 'APPROVE', sha('7'), 30);
 
     // release-due: v1 tags console's main, then a merge waits a day
     g(['tag', 'v1'], F.console);
@@ -62,17 +69,24 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     const day = `${Math.floor((Date.now() - 26 * H) / 1000)} +0000`;
     execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'a merge'], { cwd: F.console, env: { ...process.env, GIT_COMMITTER_DATE: day, GIT_AUTHOR_DATE: day } });
     g(['push', '-q', 'origin', 'trunk', 'v1'], F.console);
+    // companion releases from a tag too (the default) and has a merge waiting, but its owner set no
+    // maintain: no release duty, no finding
+    g(['tag', 'v1'], F.companion);
+    write(path.join(F.companion, 'app/z.js'), 'z\n');
+    g(['add', '-A'], F.companion);
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'a merge'], { cwd: F.companion, env: { ...process.env, GIT_COMMITTER_DATE: day, GIT_AUTHOR_DATE: day } });
+    g(['push', '-q', 'origin', 'main', 'v1'], F.companion);
 
     assert.match(okIn(old, ['observe-metrics'], SUP, withGh), /recorded/);
     const calls = fs.readFileSync(logf, 'utf8').trim().split('\n');
+    assert.ok(!/\bcommits\b/.test(calls.find((c) => c.startsWith('pr list'))), `no commits field: GitHub refuses its node count (${calls[0]})`);
     assert.deepEqual(calls.filter((c) => c.startsWith('pr list')).map((c) => / -R (\S+)/.exec(c)?.[1]), ['usbclub/console'], `only the GitHub link is asked: ${calls.join(' | ')}`);
     const findings = json(okIn(old, ['metrics', '--json'])).findings;
     const of = (kind) => findings.filter((x) => x.kind === kind).map((x) => x.subject).sort();
-    assert.deepEqual(of('pr-unreviewed'), ['console#11', 'console#19']);
-    assert.deepEqual(of('pr-changes-unanswered'), ['console#12']);
-    const ch = findings.find((x) => x.kind === 'pr-changes-unanswered');
+    assert.deepEqual(of('pr-unreviewed'), ['console#11', 'console#19', 'console#20', 'console#22']);
+    assert.deepEqual(of('pr-changes-unanswered'), ['console#12', 'console#21']);
+    const ch = findings.find((x) => x.kind === 'pr-changes-unanswered' && x.subject === 'console#12');
     assert.match(ch.detail, /console-pr-12\/final-1\.md/);
-    assert.match(ch.suggestion, /fix the PR/);
     assert.match(ch.suggestion, /comment the findings to its author/);
     const rel = findings.find((x) => x.kind === 'release-due');
     assert.equal(rel?.subject, 'console', 'release-due on console');
@@ -80,16 +94,32 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     assert.ok(!findings.some((x) => x.kind === 'release-due' && x.subject === 'companion'), 'companion declares no release duty');
     assert.ok(json(okIn(old, ['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'pr-unreviewed' && o.subject === 'console#11'), 'observed');
 
-    // gh fails (missing, logged out, offline): the PR findings go quietly; the tick carries on
-    write(path.join(bin, 'gh'), '#!/bin/sh\nexit 1\n');
+    // a fresh read is reused: the next tick doesn't ask gh again
+    const asked = () => fs.readFileSync(logf, 'utf8').trim().split('\n').filter((c) => c.startsWith('pr list')).length;
+    okIn(old, ['observe-metrics'], SUP, withGh);
+    assert.equal(asked(), 1, 'a read under 30 min old is reused');
+    const prsFile = path.join(old, 'docs/devteam/run/link-prs.json');
+    const backdate = (k, h) => { const j = JSON.parse(fs.readFileSync(prsFile, 'utf8')); j.console[k] = iso(h); fs.writeFileSync(prsFile, JSON.stringify(j)); };
+    // an old read (a tick's budget cut the next ones) raises nothing from what it last saw
+    backdate('at', 3);
+    assert.ok(!json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind.startsWith('pr-')), 'no PR findings from a read over 2 h old');
+
+    // gh fails (missing, logged out, offline, refused): the PR findings go quietly; the tick carries on
+    write(path.join(bin, 'gh'), '#!/bin/sh\necho "HTTP 401: Bad credentials" >&2\nexit 1\n');
     assert.match(okIn(old, ['observe-metrics'], SUP, withGh), /recorded/);
     const after = json(okIn(old, ['metrics', '--json'])).findings;
-    assert.ok(!after.some((x) => x.kind.startsWith('pr-')), 'no PR findings without a read');
+    assert.ok(!after.some((x) => x.kind.startsWith('pr-')), 'no PR findings without a good read');
+    assert.ok(!after.some((x) => x.kind === 'link-prs-unread'), 'one failed read is not yet a finding');
     assert.ok(after.some((x) => x.kind === 'release-due'), 'release-due reads local git, not gh');
+    // reads failing for hours: a low note with gh's first line
+    backdate('failing_since', 7);
+    const unread = json(okIn(old, ['metrics', '--json'])).findings.find((x) => x.kind === 'link-prs-unread');
+    assert.equal(unread?.subject, 'console');
+    assert.equal(unread.severity, 'low');
+    assert.match(unread.detail, /HTTP 401: Bad credentials/);
 
-    // a release clears release-due
-    g(['tag', 'v2'], F.console);
-    g(['push', '-q', 'origin', 'v2'], F.console);
+    // a release cut elsewhere (the tag only on origin) clears release-due: the tick fetches v* tags
+    g(['tag', 'v2', 'trunk'], F.consoleOrigin);
     okIn(old, ['observe-metrics'], SUP, withGh);
     assert.ok(!json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind === 'release-due'));
   } finally { F.done(); }
