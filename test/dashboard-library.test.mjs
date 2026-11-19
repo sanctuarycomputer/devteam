@@ -1471,7 +1471,7 @@ test('a viewer tab guesses no kind', { ...CHROME, timeout: 300000 }, async (t) =
   assert.deepEqual(await p.ev(`[${shown('av-kind')}, document.getElementById('av-where').textContent]`), [false, 'Landed on main'], 'no kind badge: a viewer tab has no Library row to read it from');
 });
 
-test('a tree opened by a link is the published version',{ ...CHROME, timeout: 300000 }, async (t) => {
+test('a tree opened by a link is the published version', { ...CHROME, timeout: 300000 }, async (t) => {
   const { p, soon, go, made } = await versOn(t);
   const mid = made.versions[2];
   await go('#library');

@@ -877,6 +877,9 @@ try {
   .lib-thumb { flex-direction: column; gap: 6px; }
   .lib-thumb > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
   .lib-thumb > img { width: 32px; height: 32px; object-fit: contain; }
+  /* a closed ⋯ menu's pop out of layout, as the Inbox's and Goals' (Chrome boxes a closed <details>' content at the
+     summary's 26px, so the pop's key column would stick out of it: the measure) */
+  #library details.menu:not([open]) > .pop { display: none; }
 
 /* css-library end */
 /* css-viewer start */

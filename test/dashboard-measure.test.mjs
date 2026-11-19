@@ -41,8 +41,18 @@ const OVERVIEW_GOALS = [
 // A page that is only kit-87's frame until its own ticket converts it: its hash, with the view a
 // selector no element has (see PAGES). A page ticket replaces its entries here with its own.
 const frameOnly = (ids) => ids.map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } }));
-// kit-92: the Library
-const LIBRARY_PAGES = frameOnly(['library']);
+// kit-92: the Library, on the shell, whole, with test/lib/kit.mjs's libraryFixture (every kind, state and
+// publish record exists only with it); page-top at 1440x900 only, as kit-90's and kit-91's entries. And one
+// item's peek over it (the public mock: the most rows), with the peeks' options below (PEEK_OPTS): its wait
+// is PEEK_READY's, inline, since that is defined after this list. Last, the empty Library ("None") in a new
+// document with no patch: the pages listed after these load by a change of hash alone (measureAt), so they must
+// not inherit the fixture's data (it has no goal the test seeds)
+const LIB_PEEK_READY = "!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none'";
+const LIBRARY_PAGES = [
+  { hash: '#library', narrow: { view: '#no-such-view' }, init: lib.dataPatchInit(lib.libraryFixture().patch), ready: "!!document.querySelector('#lib-grid .lib-card')" },
+  { hash: `#lib/${encodeURIComponent(`artifact:${lib.libraryFixture().ids.public}`)}`, init: lib.dataPatchInit(lib.libraryFixture().patch), ready: LIB_PEEK_READY, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } },
+  { hash: '#library', narrow: { view: '#no-such-view' }, init: '/* no patch: a new document */', ready: "document.querySelector('#lib-grid > .empty')?.textContent.trim() === 'None'" },
+];
 // kit-93: the autonomy pages
 const AUTONOMY_PAGES = frameOnly(['trust', 'sensors', 'health', 'retros']);
 // kit-96: the Loop
