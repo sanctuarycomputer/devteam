@@ -10217,6 +10217,9 @@ function cmdArtifact() {
     const other = draftArtifacts().filter((a) => a.slug === slugName).map((a) => a.at);
     if (other.length) warn(`${slugName} is also being drawn in ${other.join(', ')}`);
     const by = process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
+    // flags keep a repeated flag's last value; a kind given twice is refused rather than guessed
+    const own = argv.indexOf('--') < 0 ? argv : argv.slice(0, argv.indexOf('--'));
+    if (own.filter((a) => a === '--kind' || a.startsWith('--kind=')).length > 1) die('artifact new: give --kind once; kind is mock, diagram or docs');
     const manifest = { v: 1, title: flagStr('title') ?? die('artifact new needs --title'), summary: flagStr('summary') ?? die('artifact new needs --summary'), by, for: jsonFlag('for') ?? [], ...(flags.kind !== undefined ? { kind: flagStr('kind') ?? '' } : {}) };
     const m = parseArtifactManifest(Buffer.from(JSON.stringify(manifest)));
     if (m.error) die(`artifact new: ${m.error}`);

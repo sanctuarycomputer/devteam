@@ -48,6 +48,13 @@ test('artifact new --kind writes the kind; with none the manifest has no kind; a
     assert.match(r.err, /kind is mock, diagram or docs/, r.err);
     assert.equal(fs.existsSync(path.join(wt, ARTIFACTS_REL, 'a-bad')), false, `--kind ${JSON.stringify(bad)} writes nothing`);
   }
+  // a repeated --kind (task-1 T1-1): the parser keeps the last, so it is refused rather than guessed
+  for (const twice of [['--kind', 'docs', '--kind', 'mock'], ['--kind=docs', '--kind', 'docs']]) {
+    const r = F.run(wt, ['artifact', 'new', 'a-bad', '--title', 'Bad', '--summary', 'A page', ...twice], { DEVTEAM_ROLE: 'supervisor' });
+    assert.notEqual(r.status, 0, `${twice.join(' ')} is refused: ${r.out}`);
+    assert.match(r.err, /--kind once; kind is mock, diagram or docs/, r.err);
+    assert.equal(fs.existsSync(path.join(wt, ARTIFACTS_REL, 'a-bad')), false, `${twice.join(' ')} writes nothing`);
+  }
   const c = F.run(wt, ['artifact', 'check'], {});
   assert.equal(c.status, 0, c.err || c.out);
   assert.match(c.out, /4 artifacts pass/);
