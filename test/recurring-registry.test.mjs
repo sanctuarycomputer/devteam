@@ -355,6 +355,8 @@ test('A12: recurring apply writes exactly the answered change and leaves every o
     T.g(['branch', '-D', 'chore-recurring'], T.old);
     T.ok(['chore', 'start', 'recurring']);
     refused(apply(open), /already landed/);
+    // once landed, the question no longer blocks its jobs: a is asked about again
+    T.asked({ recurring: { a: check({ every: '24h' }) } });
     // declined, and another class
     const no = T.asked({ recurring: { e: chore() } });
     T.answer(no, 'No');
