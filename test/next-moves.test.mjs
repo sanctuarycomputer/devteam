@@ -1,11 +1,13 @@
 // next-move@1 (kit-287): the move shape, defined in the comment above nextMoves() in devteam.mjs, held
 // here to a shape checker both ways; the fixtures in test/fixtures/next-moves/ checked against it, with
-// one broken copy per rule so no rule goes unchecked.
-import { test } from 'node:test';
+// one broken copy per rule so no rule goes unchecked; and its places on a fixture project with one goal,
+// empty until the table's rows land: moves --json, /api/data's next_moves and goal views' next_move.
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fleetFixture, json } from './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DT = path.join(here, '..', 'docs', 'devteam', 'scripts', 'devteam.mjs');
@@ -277,4 +279,68 @@ test('next-moves: a broken copy fails the checker, one per rule', () => {
   const broken = new Set([...CASES.map(([r]) => r), ...WRAPS.map(([r]) => r)]);
   assert.ok(RULES.length >= 30 && RULES.includes('owed-c4') && RULES.includes('pulse-one'), `the rules are read from the checkers: ${RULES.join(' ')}`);
   assert.deepEqual(RULES.filter((r) => !broken.has(r)), [], 'every rule has a broken copy');
+});
+
+// One fixture project for the CLI checks: one goal, no tickets, so the table has nothing to say yet.
+let P = null;
+const project = () => {
+  if (P) return P;
+  const F = fleetFixture('next-moves');
+  const goal = F.ok(F.old, ['goal', 'add', '--title', 'A goal to point at'], { DEVTEAM_ROLE: 'supervisor' }).split('\n')[0].trim();
+  P = { F, goal };
+  return P;
+};
+after(() => P?.F.done());
+const logState = (F) => {
+  const dir = path.join(F.old, 'docs/devteam/run/log');
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort();
+  return { files, bytes: files.map((f) => fs.readFileSync(path.join(dir, f)).toString('base64')) };
+};
+
+test('next-moves: moves --json prints the empty wrapper', () => {
+  const { F } = project();
+  assert.equal(F.ok(F.old, ['moves', '--json']), '{"next_move":1,"moves":[]}');
+});
+
+test('next-moves: moves text and --holder', () => {
+  const { F } = project();
+  assert.equal(F.ok(F.old, ['moves']), 'No next moves.');
+  assert.equal(F.ok(F.old, ['moves', '--holder', 'supervisor', '--json']), '{"next_move":1,"moves":[]}');
+  assert.equal(F.ok(F.old, ['moves', '--holder', 'owner']), 'No next moves.');
+  for (const args of [['moves', '--holder', 'nobodyy'], ['moves', '--holder'], ['moves', '--json', '--holder']]) {
+    const r = F.run(F.old, args);
+    assert.notEqual(r.status, 0, `${args.join(' ')} is refused`);
+    for (const h of ['owner', 'supervisor', 'planner', 'worker', 'nobody']) assert.match(r.err, new RegExp(`\\b${h}\\b`), `${args.join(' ')} names ${h}`);
+  }
+});
+
+test('next-moves: /api/data and goal views carry the empty move', () => {
+  const { F, goal } = project();
+  const d = json(F.ok(F.old, ['dashboard-data']));
+  assert.ok('next_moves' in d, '/api/data has next_moves');
+  assert.deepEqual(d.next_moves, []);
+  assert.ok(d.ooda.goals.length >= 1, 'the fixture goal is in ooda.goals');
+  assert.ok(d.ooda.goals.some((g) => g.id === goal));
+  for (const g of d.ooda.goals) {
+    assert.ok('next_move' in g, `${g.id} has next_move`);
+    assert.equal(g.next_move, null);
+  }
+  const shown = json(F.ok(F.old, ['goal', 'show', goal]));
+  assert.ok('next_move' in shown, 'goal show has next_move');
+  assert.equal(shown.next_move, null);
+});
+
+test('next-moves: moves writes nothing', () => {
+  const { F } = project();
+  const before = logState(F);
+  F.ok(F.old, ['moves']);
+  F.ok(F.old, ['moves', '--json']);
+  F.ok(F.old, ['moves', '--holder', 'worker']);
+  assert.deepEqual(logState(F), before);
+});
+
+test('next-moves: operators may read moves, and help lists it', () => {
+  const { F } = project();
+  assert.equal(F.ok(F.old, ['moves', '--json'], { DEVTEAM_ROLE: 'operator' }), '{"next_move":1,"moves":[]}');
+  assert.match(F.ok(F.old, ['help']), /^ {2}moves \[--json\] \[--holder /m);
 });

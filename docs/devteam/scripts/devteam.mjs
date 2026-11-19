@@ -12584,7 +12584,7 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id), at_target: atTargetView(g) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id), at_target: atTargetView(g), next_move: nextMoveOf(`goal:${g.id}`) };
 }
 // A running goal at its target, as its card shows it: the reading, and the open goal-met question.
 function atTargetView(g) {
@@ -14464,6 +14464,29 @@ function nextMoves() {
 function nextMoveOf(subject) {
   return nextMoves().find((m) => m.subject === subject) ?? null;
 }
+const MOVE_HOLDERS = ['owner', 'supervisor', 'planner', 'worker', 'nobody'];
+// A move's age in words: 45 min, 3 h, 2 d.
+const moveAge = (since) => {
+  const min = Math.max(0, Math.floor((Date.now() - Date.parse(since)) / 60000));
+  return min < 120 ? `${min} min` : min < 48 * 60 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`;
+};
+// moves [--json] [--holder h]: every move, grouped by holder, oldest first, owed and stalled marked.
+// It only reads.
+function cmdMoves() {
+  if (flags.holder !== undefined && !MOVE_HOLDERS.includes(flagStr('holder'))) die(`moves --holder takes one of: ${MOVE_HOLDERS.join(', ')}`);
+  const holder = flagStr('holder');
+  const moves = nextMoves().filter((m) => !holder || m.holder === holder);
+  if (flags.json) return out(JSON.stringify({ next_move: 1, moves }));
+  if (!moves.length) return out('No next moves.');
+  const L = [];
+  for (const h of MOVE_HOLDERS) {
+    const mine = moves.filter((m) => m.holder === h).sort((a, b) => a.since.localeCompare(b.since));
+    if (!mine.length) continue;
+    L.push(`${h}:`);
+    for (const m of mine) L.push(`  ${m.subject}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`);
+  }
+  out(L.join('\n'));
+}
 /* next-moves end */
 // Per-ticket progress data for the burn-up, board and roadmap.
 function collectProgress() {
@@ -14613,6 +14636,8 @@ function dashboardDataRead() {
     awareness,
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
+    // next-move@1: every move the table names (the comment above nextMoves())
+    next_moves: nextMoves(),
     ooda: collectOoda(),
     autonomy,
     autonomy_score: autonomyScore(autonomy, efficiency, awareness),
@@ -24671,6 +24696,7 @@ The graph (planning.md)
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
+  moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
 
 Checks and merging (quality.md)
@@ -24776,11 +24802,11 @@ Dashboard and releases
 // recover, machine and operator-thread write, and are allowed by name below: bringing a supervisor
 // back, the machine's digest, word to a supervisor and alert, and its own replies to the owner are
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
-const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
+const OPERATOR_READS = new Set(['search', 'status', 'moves', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings', 'unread']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
-  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
