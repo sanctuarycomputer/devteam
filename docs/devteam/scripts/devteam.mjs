@@ -2280,7 +2280,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: isObj(q.change) && Array.isArray(q.change.order) ? null : q.change ?? null, ...(isObj(q.change) && Array.isArray(q.change.order) ? { order: q.change.order } : {}), met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, no_default: q.no_default ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
@@ -7426,6 +7426,21 @@ function askLine({ thread, about } = {}) {
       if (k.type === 'stdin' && !allowedCommand(k.argv)) die(`secret ${x.name}: \`${k.argv.join(' ')}\` is not in settings.secret_commands, the commands the owner lets a secret be piped to`);
     }
   }
+  // A question with no default stops the work behind it until the owner answers (supervisor.md §6,
+  // Ask with a default where you can). Where a default is allowed, a clarification and an
+  // owner-decision in a ladder class on rung 2 or above carry one, or say with --no-default why
+  // silence can't go ahead. Not where silence is never a yes (a one-way door, the owner's alone, an
+  // answer after the owner's no, a secret), below rung 2, nor on the kit's own wordings; the kinds
+  // whose job is to ask (trust, proposal, goal-definition, goal-approval, owner-action, review) never.
+  let noDefault = flagStr('no-default');
+  if (flags['no-default'] !== undefined && !noDefault?.trim()) die('--no-default says why this can\'t go ahead on the owner\'s silence; it can\'t be blank');
+  noDefault = noDefault?.trim();
+  if (noDefault && def !== null) die('--default or --no-default, not both');
+  const rungNow = onLadder ? rungFor(cls, scope) : null;
+  const silenceNeverYes = kind === 'one-way-door' || reasons.includes('one-way-door') || reasons.includes('owner-only') || (L.owner_only ?? []).includes(cls) || flagStr('owner-said') !== undefined || secrets !== undefined || KIT_WORDED(cls, kind);
+  const wantsDefault = !silenceNeverYes && (kind === 'clarification' ? !onLadder || rungNow >= 2 : kind === 'owner-decision' && onLadder && rungNow >= 2);
+  if (wantsDefault && def === null && !noDefault) die(`${kind === 'clarification' ? 'a clarification' : `${cls}${scope ? ` (${scope})` : ''} is on rung ${rungNow} (${RUNG[rungNow]}), so this question`} needs --default: the choice you would act on if the owner hasn't answered by the deadline, so the work goes on. If silence can't be a yes here, say why: --no-default "<why it can't go ahead without the owner>" (supervisor.md §6)`);
+  if (noDefault && !wantsDefault) { warn('--no-default is for a question that would otherwise need a --default; this one doesn\'t, so it is left off'); noDefault = undefined; }
   // Each link is one thing to look at: a repo path, a url, a registry link or an artifact. A name
   // lets the question's text point at it inline ([[name]]). An artifact is pinned to where it was
   // and what it held when asked, in this one line: the question's hash covers its links, so
@@ -7493,7 +7508,7 @@ function askLine({ thread, about } = {}) {
   try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : orderAsked ? [context, goalOrderText(orderAsked)].filter(Boolean).join('\n\n') : context,
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined, no_default: noDefault,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
@@ -8436,8 +8451,21 @@ const ARTIFACT_LENS = String.raw`(() => {
   let shiftDown = false;
   // no key is told before the page that frames it has said hello, as the preview lens tells nothing first
   let heard = false;
+  // A Shift pressed while typing in one of the page's own fields is a capital letter, not a point: it
+  // is never told, as the viewer never raises its overlay for a Shift typed in its own fields. Told,
+  // it raised the overlay over a page being typed in, and only the pointer moving lowered it again,
+  // so a click made without moving the pointer was the overlay's, never the page's.
+  const NOT_TYPED = ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'];
+  const typingIn = (el) => {
+    // the field itself, inside any open shadow roots
+    for (let n = 0; el && el.shadowRoot && el.shadowRoot.activeElement && n < 32; n++) el = el.shadowRoot.activeElement;
+    if (!el || el.nodeType !== 1) return false;
+    const tag = String(el.localName || '').toLowerCase();
+    return !!el.isContentEditable || tag === 'textarea' || (tag === 'input' && !NOT_TYPED.includes(String(el.type || 'text').toLowerCase()));
+  };
   const onKey = (e) => {
     if (!heard || (e.key !== 'Shift' && e.key !== 'Escape')) return;
+    if (e.type === 'keydown' && e.key === 'Shift' && typingIn(e.target && e.target.nodeType === 1 ? e.target : document.activeElement)) return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
     tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
@@ -9437,6 +9465,10 @@ function artifactProblems(slug, entries) {
     if (!host) { warnings.push(`${slug}: ${redactUrl(url)} is not on an allowed CDN (${ARTIFACT_CDNS.join(', ')}); it won't load`); continue; }
     if (ARTIFACT_CDNS.includes(host) && !/@\d+\.\d+\.\d+/.test(url) && !/\/ajax\/libs\/[^/]+\/\d+\.\d+\.\d+\//.test(url)) warnings.push(`${slug}: ${redactUrl(url)} has no exact version (name@x.y.z); pin it so the page renders the same tomorrow`);
   }
+  // Images and media load from its own folder, data: and blob: alone, never a CDN or any other host.
+  const media = new Set();
+  for (const [, url] of html.matchAll(/<(?:img|source|video|audio|track|input)\b[^>]*?\b(?:src|poster)\s*=\s*["'](https?:[^"']+)["']/gi)) media.add(url);
+  for (const url of media) warnings.push(`${slug}: ${redactUrl(url)} is an image or media from another host; it won't load (copy it into the artifact's folder)`);
   if (/<meta\b[^>]*http-equiv\s*=\s*["']?refresh/i.test(html)) warnings.push(`${slug}: a meta refresh; an artifact doesn't navigate itself`);
   return { errors, warnings, manifest: m.manifest ?? null };
 }
@@ -10704,6 +10736,7 @@ function cmdQuestions() {
     for (const l of q.links) out(`  see: ${l.title} (${l.url ?? (l.remote ? `repo ${l.remote}` : `${l.ref ? `${l.ref}:` : ''}${l.path}`)})`);
     if (q.review) out(`  review: ${q.review.page?.path} at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${q.review.data ? `, ${q.review.data.rows} rows` : ''}; ${q.result_status} (devteam.mjs review show ${q.id})`);
     if (q.recommendation) out(`  recommend: ${q.recommendation}${q.confidence != null ? ` (${Math.round(q.confidence * 100)}%)` : ''}`);
+    if (q.no_default) out(`  no default, because: ${q.no_default}`);
     if (q.why_asked?.reasons?.length) out(`  why asked: ${q.why_asked.reasons.join(', ')}${q.class ? ` (${q.class}, rung ${q.why_asked.rung ?? '-'} of ${q.why_asked.ceiling ?? '-'})` : ''}`);
     if (q.answer) out(`  answer (${q.answered_by}): ${q.answer}`);
     if (q.autonomy) out(`  next time: ${q.autonomy.class} at rung ${q.autonomy.rung} (${RUNG[q.autonomy.rung]})${q.autonomy.scope ? ` for ${q.autonomy.scope}` : ''}`);
@@ -15698,6 +15731,23 @@ function paneBottom(target) {
   try { text = execFileSync('tmux', ['capture-pane', '-p', '-t', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: TMUX_TIMEOUT_MS }); } catch {}
   return text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-15);
 }
+// Whether a pane (the box's operator, which no project's dashboard looks after) is stopped at a usage
+// limit, and whether there is room to start it again: none (not stopped at a limit), unsafe (stopped,
+// but a person, a draft or another prompt is there: left alone), room (the machine's active cswap
+// account has room: relaunch it on the same conversation), no-room (every account is at its limit),
+// or unknown (no cswap, or its accounts can't be read). The box's minute loop acts on it.
+function limitState(target) {
+  const st = limitStop(paneBottom(target));
+  if (!st.limit) return 'none';
+  if (!paneStoppedAtLimit(target)) return 'unsafe';
+  const bin = findCswap();
+  const rows = bin ? cswapAccounts(bin) : null;
+  if (!rows) return 'unknown';
+  const active = rows.find((a) => a.active);
+  if (active && accountHasRoom(active)) return 'room';
+  const usable = rows.filter((a) => !a.disabled);
+  return usable.length && usable.every(accountKnownFull) ? 'no-room' : 'unknown';
+}
 // A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
 // starts a relaunch, and makeSession again right before it replaces the process (worktree_setup may
 // have run for a while in between). A split window could lose the wrong pane; a background shell's
@@ -16628,7 +16678,7 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
   if (plainText(dim === -1 ? text : text.slice(0, dim)).trim()) return 'typing';
   return busy ? 'busy' : 'ready';
 }
-const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine pane-state <pane>';
+const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine limit-state <pane> | machine pane-state <pane>';
 // tell and alert speak on the machine: the operator's, or the owner's at a terminal; never a session
 // in a fleet, which would be speaking as someone else.
 function machineSpeaker(what) {
@@ -16641,6 +16691,10 @@ function cmdMachine() {
   if (sub === 'pane-state') {
     if (!positional[1]) die(machineUsage, 2);
     return out(paneState(positional[1]));
+  }
+  if (sub === 'limit-state') {
+    if (!positional[1]) die(machineUsage, 2);
+    return out(limitState(positional[1]));
   }
   if (sub === 'alert') return machineAlert(words);
   if (sub === 'tell') return machineTell(words);
@@ -25322,7 +25376,7 @@ Setup and roles
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
   recover [--dry-run] [--force] [--here] | recover --machine [--dry-run] [--force] [--in <dir>…] [--was-up <list>] [--session s] [--only <repo>]   after a restart (a dead laptop, a redeploy): bring back this repo's supervisor, or every repo's on this machine, if it was up and its fleet isn't held, on its exact conversation where the harness can (Claude Code); --force also starts one the owner stopped or whose fleet is held; --here runs it in this terminal; safe to run twice. --in adds every adopted repo in a folder; --was-up names a list of roots that were up (a box's), used up as they come back; --session puts each in that tmux session as sup-<repo>
-  machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
+  machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane> | machine limit-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
   operator-thread new "<words>" [--title t] [--subject json] | say <ot-id> "<words>" | close <ot-id> | reopen <ot-id> ["<words>"] | start | reply <ot-id> "<words>" | list [--open | --waiting] [--json] | show <ot-id> | status   the owner's threads with the machine's operator, as the hub's Overview keeps them (beside the operator, in no repo): new, say, close, reopen and start are the owner's (start brings up a laptop's operator, once, in tmux session devteam-home); reply is the operator's; each owner turn is typed into the operator's pane as one line
   worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, or (a resume of one that ran aside) while the machine's memory is at its machine_memory_ceiling, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
