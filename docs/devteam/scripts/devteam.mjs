@@ -17761,7 +17761,9 @@ async function machineStatus() {
     const qs = openQuestionsOf(root);
     const q = qs ? qs.filter((x) => x?.id && !(notes && notes.includes(x.id))).length : '?';
     const ks = harvestOf(root, notes);
-    if (hello.alert) flagged.push(`attention: ${n}: ${hello.alert}`);
+    // the box's own alert has the hub line; only the project's part is this project's attention
+    const ownAlert = alertLessBox(hello.alert, hello.box_alert);
+    if (ownAlert) flagged.push(`attention: ${n}: ${ownAlert}`);
     const state = p ? paneState(p) : null;
     // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
     // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
@@ -23844,9 +23846,20 @@ function boxAlert() {
     return readText(f)?.trim().slice(0, 200) || null;
   } catch { return null; }
 }
-// alert is this project's own; box_alert is the machine's, the same on every project's hello, so
-// the hub shows it once, on the Overview, and not as a "!" on every project's tab.
-const helloAlert = () => (accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null);
+// box_alert is the machine's, the same on every project's hello, so a hub or gateway on this kit
+// shows it once, on the Overview, and not as a "!" on every project's tab. alert still ends with it,
+// after " · ", so an older hub or gateway, which reads only alert, still shows and pushes it (hub: 1
+// stays: the change is additive); a reader on this kit takes it off again (alertLessBox).
+const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
+// A hello's alert, less the box's alert folded in at its end: the project's own part, or null. Matched
+// as the whole alert or a " · " suffix, never split, so a box alert holding " · " still comes off.
+function alertLessBox(alert, box) {
+  const a = typeof alert === 'string' ? alert.trim() : '';
+  const b = typeof box === 'string' ? box.trim() : '';
+  if (!a || !b) return a || null;
+  if (a === b) return null;
+  return a.endsWith(` · ${b}`) ? a.slice(0, -(b.length + 3)).trim() || null : a;
+}
 // The hub's Overview: is this project moving, and if not, why. From the log in one pass; from git,
 // only whether each ticket has merged (main's log and the refs, one call each under cmdHello's
 // read cache, never one per ticket), so hello stays cheap at every 10 s.

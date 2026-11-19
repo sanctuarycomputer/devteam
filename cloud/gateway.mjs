@@ -682,14 +682,19 @@ export function alertNews(seen, instances, ports, resting = new Set()) {
   const next = {};
   const fresh = new Map();
   // the box's own alert (box_alert, the same on every hello) is one push named for the box; a
-  // project's alert is its own, less the box's where an older kit still folds it in
-  const boxText = list.map((x) => (typeof x.box_alert === 'string' ? wellFormed(x.box_alert.trim().slice(0, ALERT_MAX)) : '')).find(Boolean) || '';
+  // project's alert is its own, less the box's, which every kit folds in at its end for older readers
+  const boxRaw = list.map((x) => (typeof x.box_alert === 'string' ? x.box_alert.trim() : '')).find(Boolean) || '';
+  const boxText = boxRaw ? wellFormed(boxRaw.slice(0, ALERT_MAX)) : '';
   if (boxText) {
     next[BOX_KEY] = boxText;
     if (seen[BOX_KEY] !== boxText && !resting.has(`alert:${boxText}`)) fresh.set(boxText, ['the box']);
   }
   for (const x of list) {
-    const own = typeof x.alert === 'string' ? x.alert.split(' · ').map((p) => p.trim()).filter((p) => p && p !== boxText).join(' · ') : '';
+    // the box's text folded at the end (every kit folds it, for older readers): matched whole or as a
+    // " · " suffix against the untouched text, never split, so one holding " · " still comes off
+    const a = typeof x.alert === 'string' ? x.alert.trim() : '';
+    const b = typeof x.box_alert === 'string' && x.box_alert.trim() ? x.box_alert.trim() : boxRaw;
+    const own = !a || !b ? a : a === b ? '' : a.endsWith(` · ${b}`) ? a.slice(0, -(b.length + 3)).trim() : a;
     if (!own) continue;
     const text = wellFormed(own.slice(0, ALERT_MAX));
     if (!text) continue;

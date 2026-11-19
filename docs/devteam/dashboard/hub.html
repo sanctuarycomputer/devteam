@@ -1616,7 +1616,7 @@ function paintOverview() {
   // the box's alert, once, under the header: it is every project's, so no card repeats it
   const box = boxAlertNow();
   const boxUl = box ? el('ul', 'ov-att') : null;
-  if (boxUl) boxUl.append(pinOn(el('li', 'red', box), 'attention', tLine(box, 200)));
+  if (boxUl) boxUl.append(el('li', 'red', box));
   // the machine's memory under the head, when the hub has a reading (kit-593)
   const mem = memoryEl();
   ovBody.replaceChildren(head, ...(boxUl ? [boxUl] : []), ...(mem ? [mem] : []), ...(all.length ? [grid] : []));
@@ -2309,16 +2309,20 @@ function tlDock() {
   if (closed.length) { const d = el('details', 'tl-closed'); d.open = !!wasOpen; d.append(el('summary', '', `Closed (${closed.length})`), ...closed.map(row)); list.append(d); }
 }
 // The box's alert (box-alert) is the machine's, not a project's: each project's hello carries it as
-// box_alert, so it shows once, on the Overview tab and at the top of the Overview. A project on a
-// kit from before the split carries it inside its own alert; that part is left out there too.
+// box_alert, so it shows once, on the Overview tab and at the top of the Overview. Its alert still
+// ends with it after " · " (for older hubs), as a kit from before box_alert's does: that part comes
+// off, matched as the whole alert or a suffix, never split (a box alert may hold " · " itself).
 function boxAlertNow() {
   for (const it of items.values()) if (typeof it.x.box_alert === 'string' && it.x.box_alert.trim()) return it.x.box_alert.trim();
   return null;
 }
 function ownAlert(x) {
   if (typeof x.alert !== 'string' || !x.alert.trim()) return null;
-  const box = boxAlertNow();
-  return x.alert.split(' · ').map((p) => p.trim()).filter((p) => p && p !== box).join(' · ') || null;
+  const a = x.alert.trim();
+  const box = typeof x.box_alert === 'string' && x.box_alert.trim() ? x.box_alert.trim() : boxAlertNow();
+  if (!box) return a;
+  if (a === box) return null;
+  return a.endsWith(` · ${box}`) ? a.slice(0, -(box.length + 3)).trim() || null : a;
 }
 function paintOvTab() {
   if (!ovTab) return;

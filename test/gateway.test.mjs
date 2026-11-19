@@ -615,6 +615,13 @@ test("the box's own alert is one push named for the box, and left out of each pr
   assert.deepEqual(mixed.messages.map((m) => [m.title, m.body]).sort(), [['Alert (b)', 'at a usage limit'], ['Box alert', 'memory at the limit']]);
   const onlyBox = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'memory at the limit' }), r('/b', 'b', P + 1, { alert: 'memory at the limit' })], ports);
   assert.deepEqual(onlyBox.messages.map((m) => m.title), ['Box alert'], "an older kit's copy of the box's alert is not a project's own");
+  // this kit folds it in too, for older readers: still one push, and a box alert holding " · " comes off whole
+  const folded = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'disk · full', alert: 'disk · full' }), r('/b', 'b', P + 1, { box_alert: 'disk · full', alert: 'at a usage limit · disk · full' })], ports);
+  assert.deepEqual(folded.messages.map((m) => [m.title, m.body]).sort(), [['Alert (b)', 'at a usage limit'], ['Box alert', 'disk · full']]);
+  const olderKit = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'disk · full' }), r('/b', 'b', P + 1, { alert: 'at a usage limit · disk · full' })], ports);
+  assert.deepEqual(olderKit.messages.map((m) => [m.title, m.body]).sort(), [['Alert (b)', 'at a usage limit'], ['Box alert', 'disk · full']], 'an older kit without box_alert: matched against the box text another project carries');
+  const notSuffix = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'disk', alert: 'disk is fine · own' })], ports);
+  assert.deepEqual(notSuffix.messages.map((m) => m.body).sort(), ['disk', 'disk is fine · own'], 'only a trailing copy comes off');
 });
 
 test('an alert on the hub is pushed once, when it turns up or changes', () => {
