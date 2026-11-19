@@ -4419,20 +4419,21 @@ function ticketGoals(t) {
 }
 // A ticket whose feature names no goal (an old project) follows the fleet, like its session.
 const ticketMode = (t) => { const gs = ticketGoals(t); return gs.length ? modeOf(gs) : fleetMode() ?? 'run'; };
-// A ticket's own priority: the best (lowest) priority among the live goals it serves, and which goal
-// that is; null when none has one (a chore, an unprioritised goal).
+// A ticket's own priority: the best (lowest) priority among the running goals it serves (not met,
+// abandoned or held), and which goal that is; null when none has one (a chore, an unprioritised goal).
 function ownPriority(t) {
-  const g = ticketGoals(t).filter((x) => !['met', 'abandoned'].includes(x.status) && typeof x.priority === 'number').sort((a, b) => a.priority - b.priority)[0];
+  const g = ticketGoals(t).filter((x) => !['met', 'abandoned'].includes(x.status) && goalMode(x) === 'run' && typeof x.priority === 'number').sort((a, b) => a.priority - b.priority)[0];
   return g ? { priority: g.priority, goal: g.id } : null;
 }
 // Each live ticket's effective priority: the best of its own and that of every live ticket that
 // depends on it, directly or through others. Work a higher-priority goal waits on goes first,
 // whatever goal it serves, so the goal isn't left waiting on work nobody pushes (ready, idle
-// capacity, priority-inversion). Priority orders the queue, never gates it. Live: active, unmerged, its goal not
-// parked or let go.
+// capacity, priority-inversion). Priority orders the queue, never gates it. Live: active,
+// unmerged, its goal running (a drained, parked or let-go goal's ticket starts nothing, so
+// pushes nothing).
 function effectivePriorities(ts) {
-  const live = new Map([...ts].filter(([, t]) => isActive(t) && !mergeShaFor(t.id) && !['park', 'let-go'].includes(ticketMode(t))));
-  // over live tickets only: a chain through a parked ticket passes nothing on, and history costs nothing
+  const live = new Map([...ts].filter(([, t]) => isActive(t) && !mergeShaFor(t.id) && ticketMode(t) === 'run'));
+  // over live tickets only: a chain through a held goal's ticket passes nothing on, and history costs nothing
   const clos = closures(live);
   const own = new Map([...live.values()].map((t) => [t.id, ownPriority(t)]));
   const eff = new Map([...own].map(([id, p]) => [id, { own: p, priority: p?.priority ?? null, goal: p?.goal ?? null }]));
@@ -20590,7 +20591,7 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -25773,7 +25774,7 @@ async function cmdBrowserGuard() {
 // devteam.mjs browser (browser@1; design supervisors-can-use-a-browser-with-the-o, §2 and §3): the
 // supervisor's own Chrome, driven from its shell. One private profile per project (the owner's
 // answer to q-20261114-203933946-supervisor), at ~/.devteam/browser/<key>/, used by nobody else.
-const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>]';
+const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | type <ref> --stdin | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>]';
 // The instance key, the contract's instance pattern: <project slug>-<12 hex>. A path is built from a
 // key only once it matches, so no key can climb out of browserHome().
 const BROWSER_KEY = /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$/;
@@ -25845,9 +25846,15 @@ function browserIdleMs() {
   const v = loadSettings().browser_idle_minutes;
   return (Number.isInteger(v) && v >= 1 && v <= 1440 ? v : SETTINGS_DEFAULTS.browser_idle_minutes) * 60000;
 }
-// The pids of local processes whose command line carries this profile as --user-data-dir, or null
-// when they can't be listed (so nothing is removed on a guess). /proc, else ps (macOS).
+// The pids of this user's local processes whose command line carries this profile as --user-data-dir,
+// or null when they can't be listed (so nothing is removed on a guess; DEVTEAM_TEST_BROWSER_PROCS_UNLISTED
+// stands in for that in tests). /proc, else ps (macOS). Only
+// this uid's count (kit-316 S4): another user can't read a 0700 profile, so it can't hold one. The uid
+// is /proc's real uid (status's Uid: line), not the /proc/<pid> owner, which reads as root for a
+// non-dumpable process; a status that can't be read isn't counted. DEVTEAM_TEST_BROWSER_UID in tests.
 function browserProcsOn(profile) {
+  if (browserTestEnv('DEVTEAM_TEST_BROWSER_PROCS_UNLISTED')) return null;
+  const me = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_UID') ?? process.getuid());
   const want = new Set([profile, realPath(profile)].flatMap((p) => [p, `${p}${path.sep}`]));
   const carries = (args) => args.some((a, i) => (a.startsWith('--user-data-dir=') && want.has(a.slice('--user-data-dir='.length))) || (a === '--user-data-dir' && want.has(args[i + 1])));
   if (fs.existsSync('/proc/self/cmdline')) {
@@ -25855,13 +25862,15 @@ function browserProcsOn(profile) {
     for (const d of fs.readdirSync('/proc')) {
       if (!/^\d+$/.test(d) || Number(d) === process.pid) continue;
       let c; try { c = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8'); } catch { continue; }
-      if (carries(c.split('\0'))) pids.push(Number(d));
+      if (!carries(c.split('\0'))) continue;
+      let u; try { u = /^Uid:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${d}/status`, 'utf8'))?.[1]; } catch { continue; }
+      if (u !== undefined && Number(u) === me) pids.push(Number(d));
     }
     return pids;
   }
-  const r = spawnSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8' });
+  const r = spawnSync('ps', ['-axww', '-o', 'pid=,uid=,command='], { encoding: 'utf8' });
   if (r.status !== 0) return null;
-  return r.stdout.split('\n').map((l) => /^\s*(\d+)\s+(.*)$/.exec(l)).filter((m) => m && Number(m[1]) !== process.pid && [...want].some((w) => ` ${m[2]} `.includes(` --user-data-dir=${w} `))).map((m) => Number(m[1]));
+  return r.stdout.split('\n').map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter((m) => m && Number(m[1]) !== process.pid && Number(m[2]) === me && [...want].some((w) => ` ${m[3]} `.includes(` --user-data-dir=${w} `))).map((m) => Number(m[1]));
 }
 function browserProfiles() {
   const mine = browserKey();
@@ -25899,11 +25908,13 @@ const browserStateFile = () => path.join(BROWSER_DIR(), 'state.json');
 const browserDirMade = () => { fs.mkdirSync(BROWSER_DIR(), { recursive: true, mode: 0o700 }); fs.chmodSync(BROWSER_DIR(), 0o700); };
 // state.json as written, whatever it says (a new daemon reads a dead one's chrome_pid from it), or null.
 function browserRawState() { try { const s = JSON.parse(fs.readFileSync(browserStateFile(), 'utf8')); return isObj(s) ? s : null; } catch { return null; } }
-// The state of a daemon that is alive (its file holds together and its pid lives), or null.
+// The state of a daemon that is alive (its file holds together and its pid lives), or null. cdp_port
+// is written only by a daemon from before kit-316 (DevTools now goes over a pipe); one present must be
+// a port, so this version still reaches such a daemon.
 function browserState() {
   const s = browserRawState();
   const port = (v) => Number.isInteger(v) && v >= 1 && v <= 65535;
-  if (!s || s.browser !== 1 || !['control_port', 'cdp_port', 'guard_port', 'view_port'].every((k) => port(s[k])) || !/^[0-9a-f]{64}$/.test(s.control_secret ?? '') || typeof s.preview !== 'string' || !Number.isInteger(s.chrome_pid)) return null;
+  if (!s || s.browser !== 1 || !['control_port', 'guard_port', 'view_port'].every((k) => port(s[k])) || ('cdp_port' in s && !port(s.cdp_port)) || !/^[0-9a-f]{64}$/.test(s.control_secret ?? '') || typeof s.preview !== 'string' || !Number.isInteger(s.chrome_pid)) return null;
   return browserAlive(s.daemon_pid) ? s : null;
 }
 function browserWriteState(s) {
@@ -25936,27 +25947,39 @@ async function browserLive() {
   try { return (await browserCall('ping', {}, { state: s, ms: 5000 })).code === 0 ? s : null; } catch { return null; }
 }
 // The region's own lock, held across awaits (withLock is synchronous): mkdir <file>.lock holding its
-// owner's token, stale after 120 s, waited on up to 60 s. A lock is only ever removed by first renaming
+// owner's token, stale after 120 s, or at once when the token's pid is dead (kit-316 F1), waited on up
+// to 60 s (DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS in tests). A lock is only ever removed by first renaming
 // it to a name of the remover's own, and only when it still holds the token seen: so of two waiters
 // on one stale lock only one takes it, and release removes only its own. A die() inside lets it go.
 async function browserStartLock(file, fn) {
   const lock = `${file}.lock`, owner = path.join(lock, 'owner'), start = Date.now();
   const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS')) || 60000;
   const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
-  // Remove the lock if it still holds `seen`; a lock taken from under us is put back.
+  // Remove the lock if it still holds `seen`; a lock taken from under us is put back. True only when
+  // the lock was moved off its path: a waiter whose take fails (the rename refused, or the test hook
+  // DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL) goes on to the deadline and the sleep, never spins. An aside
+  // that can't be removed is left behind: the lock's path is free either way.
   const drop = (seen) => {
+    if (seen !== token && browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL')) return false;
     const aside = `${lock}.${token}.${crypto.randomBytes(4).toString('hex')}`;
-    try { fs.renameSync(lock, aside); } catch { return; }
-    if (read(path.join(aside, 'owner')) === seen) fs.rmSync(aside, { recursive: true, force: true });
-    else { try { fs.renameSync(aside, lock); } catch { fs.rmSync(aside, { recursive: true, force: true }); } }
+    try { fs.renameSync(lock, aside); } catch { return false; }
+    if (read(path.join(aside, 'owner')) === seen) { try { fs.rmSync(aside, { recursive: true, force: true }); } catch {} return true; }
+    try { fs.renameSync(aside, lock); } catch { fs.rmSync(aside, { recursive: true, force: true }); }
+    return false;
   };
   for (;;) {
     try { fs.mkdirSync(lock); fs.writeFileSync(owner, token); break; } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const st = fs.statSync(owner, { throwIfNoEntry: false }) ?? fs.statSync(lock, { throwIfNoEntry: false });
       const seen = read(owner);
-      if (st && Math.abs(Date.now() - st.mtimeMs) > 120000) { drop(seen); continue; }
-      if (Date.now() - start > 60000) die(`browser: timed out waiting for ${lock}`);
+      if (st && Math.abs(Date.now() - st.mtimeMs) > 120000 && drop(seen)) continue;
+      // a well-formed token naming a dead pid (a positive integer) that isn't ours: stale now. No owner
+      // file yet, a token that isn't one (pid 0 too), or a live owner (EPERM counts as alive) keeps the
+      // 120 s rule.
+      const op = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(seen ?? '')?.[1];
+      if (op && Number(op) !== process.pid && !browserAlive(Number(op)) && drop(seen)) continue;
+      if (Date.now() - start > wait) die(`browser: timed out waiting for ${lock}`);
       await browserSleep(100);
     }
   }
@@ -26024,6 +26047,13 @@ function browserSingleton(profile) {
   try { t = fs.readlinkSync(path.join(profile, 'SingletonLock')); } catch { return null; }
   const i = t.lastIndexOf('-'), pid = Number(t.slice(i + 1));
   return i > 0 && Number.isInteger(pid) && pid > 0 ? { host: t.slice(0, i), pid } : null;
+}
+// A SingletonLock's host as printed (kit-316 F4): each character outside printable ASCII (U+0021 to
+// U+007E) becomes ?, so no newline starts a forged line, and past 100 characters it is cut, with …
+// added. Comparisons use the raw host.
+function browserHostWords(host) {
+  const w = String(host).replace(/[^\x21-\x7e]/gu, '?');
+  return w.length > 100 ? `${w.slice(0, 100)}…` : w;
 }
 // The proof: one argument of pid's command line is exactly --user-data-dir=<profile>. /proc's cmdline
 // split at NUL, else ps (macOS), matched as a word.
@@ -26097,9 +26127,9 @@ async function browserPrepareProfile(profile, notes) {
   const { killed } = await browserKillChrome(profile, browserCandidates(profile));
   const lock = browserSingleton(profile), procs = browserProcsOn(profile);
   if (lock && lock.host !== browserHostname()) {
-    if (procs === null) throw new Error(`browser: the profile is locked by host ${lock.host}, and this machine's processes couldn't be listed to see whether one here has it open`);
-    if (procs.length) throw new Error(`browser: the profile is locked by host ${lock.host} and a process here (pid ${procs[0]}) has it open`);
-    notes.push(`Cleared a stale SingletonLock left by host ${lock.host}.`);
+    if (procs === null) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)}, and this machine's processes couldn't be listed to see whether one here has it open`);
+    if (procs.length) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)} and a process here (pid ${procs[0]}) has it open`);
+    notes.push(`Cleared a stale SingletonLock left by host ${browserHostWords(lock.host)}.`);
   }
   if (procs?.length === 0) for (const n of fs.readdirSync(profile).filter((x) => x.startsWith('Singleton'))) fs.rmSync(path.join(profile, n), { force: true });
   browserDeleteSession(profile);
@@ -26112,16 +26142,20 @@ function browserLeads(pid) {
   try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) === pid; } catch {}
   return Number(spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).stdout?.trim()) === pid;
 }
-// The CDP client: one browser-level WebSocket, ids from 1, each call rejected on an error or after
-// 30 s, every pending one rejected when the socket closes. on(method, fn) gets (params, sessionId).
-async function cdpBrowser(wsUrl) {
-  const ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => { ws.addEventListener('open', resolve, { once: true }); ws.addEventListener('error', () => reject(new Error("couldn't connect to Chrome's DevTools")), { once: true }); });
-  let id = 0, closed = false;
+// The CDP client, over Chrome's DevTools pipe (--remote-debugging-pipe, kit-316 S2): the daemon
+// writes fd 3 and reads fd 4, each message JSON ended by a NUL byte. There is no port, so nothing
+// else can connect. Reads are kept as chunks and joined only at a NUL; a message that isn't JSON is
+// dropped. Ids from 1, each call rejected on an error or after 30 s, every pending one rejected when
+// the pipe closes: fd 4 ending or erroring, a write to fd 3 failing (EPIPE), or Chrome exiting.
+// on(method, fn) gets (params, sessionId). It resolves once Browser.getVersion answers.
+async function cdpBrowser(chrome) {
+  const writer = chrome.stdio[3], reader = chrome.stdio[4];
+  let id = 0, closed = false, parts = [];
   const pending = new Map(), handlers = new Map(), closers = [];
-  ws.addEventListener('message', (ev) => {
+  const dispatch = (buf) => {
     let m;
-    try { m = JSON.parse(String(ev.data)); } catch { return; }
+    try { m = JSON.parse(buf.toString('utf8')); } catch { return; }
+    if (!isObj(m)) return;
     if (m.id !== undefined) {
       const p = pending.get(m.id);
       if (!p) return;
@@ -26129,26 +26163,44 @@ async function cdpBrowser(wsUrl) {
       clearTimeout(p.timer);
       if (m.error) p.reject(new Error(`${p.method}: ${m.error.message ?? 'failed'}`)); else p.resolve(m.result ?? {});
     } else if (m.method) for (const fn of handlers.get(m.method) ?? []) { try { fn(m.params ?? {}, m.sessionId); } catch {} }
-  });
-  ws.addEventListener('close', () => {
+  };
+  const close = () => {
+    if (closed) return;
     closed = true;
     for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error(`${p.method}: Chrome's DevTools closed`)); }
     pending.clear();
+    parts = [];
     for (const fn of closers) { try { fn(); } catch {} }
+  };
+  reader.on('data', (c) => {
+    let at = 0;
+    for (let nul = c.indexOf(0); nul !== -1; nul = c.indexOf(0, at)) {
+      parts.push(c.subarray(at, nul));
+      const msg = parts.length === 1 ? parts[0] : Buffer.concat(parts);
+      parts = [];
+      at = nul + 1;
+      dispatch(msg);
+    }
+    if (at < c.length) parts.push(c.subarray(at));
   });
-  return {
+  for (const ev of ['end', 'close', 'error']) reader.on(ev, close);
+  writer.on('error', close);
+  chrome.once('exit', close);
+  const cdp = {
     send(method, params = {}, sessionId) {
       if (closed) return Promise.reject(new Error(`${method}: Chrome's DevTools closed`));
       const i = ++id;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => { pending.delete(i); reject(new Error(`${method}: Chrome didn't answer in 30 s`)); }, 30000);
         pending.set(i, { resolve, reject, timer, method });
-        ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
+        try { writer.write(`${JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) })}\0`); } catch { close(); }
       });
     },
     on(method, fn) { if (method === 'close') closers.push(fn); else handlers.set(method, [...(handlers.get(method) ?? []), fn]); },
-    close() { try { ws.close(); } catch {} },
+    close() { try { writer.end(); } catch {} },
   };
+  await cdp.send('Browser.getVersion');
+  return cdp;
 }
 // The tabs: page targets in the order they appeared, each attached flat with Page enabled. A page
 // opened by another (a popup) becomes active; a sixth is closed at once, with a note.
@@ -26439,38 +26491,44 @@ function browserUserAgent(bin) {
   const v = /(\d+\.\d+\.\d+\.\d+)/.exec(spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] }).stdout ?? '')?.[1];
   return v ? `Mozilla/5.0 (${process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64'}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${v} Safari/537.36` : null;
 }
-// Chrome, detached in its own group, its DevTools port read only from its own stderr within 30 s
-// (DevToolsActivePort is never read). No usable sandbox: once more with --no-sandbox, and a note.
-// After the port line its stderr is drained and dropped: Chrome's log lines can carry page URLs.
+// Chrome, detached in its own group, its DevTools on a pipe (fds 3 and 4, kit-316 S2: no port, and no
+// DevToolsActivePort), up once it answers Browser.getVersion there within 30 s. No usable sandbox: once
+// more with --no-sandbox, and a note. Its stderr is kept (the last 64 KiB) only until then, for the
+// sandbox check; after, it is drained and dropped: Chrome's log lines can carry page URLs.
 async function browserLaunchChrome(ctx, { headed }) {
   const ua = browserUserAgent(ctx.bin);
   const args = [
-    ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-pipe',
     `--proxy-server=127.0.0.1:${ctx.guard.port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync',
     ...(process.platform === 'linux' ? ['--password-store=basic'] : []), ...(ua ? [`--user-agent=${ua}`] : []),
   ];
   for (let tries = 0; ; tries++) {
-    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
     ctx.chrome = chrome;
     const r = await new Promise((resolve) => {
-      let buf = '';
-      const timer = setTimeout(() => resolve({ late: true }), 30000);
-      const done = (v) => { clearTimeout(timer); chrome.stderr.removeListener('data', read); chrome.stderr.on('data', () => {}); resolve(v); };
-      const read = (c) => {
-        buf = (buf + c).slice(-65536);
-        const m = /DevTools listening on (ws:\/\/127\.0\.0\.1:(\d+)\/\S+)/.exec(buf);
-        if (m) done({ wsUrl: m[1], cdpPort: Number(m[2]) });
-      };
+      let buf = '', over = false;
+      const timer = setTimeout(() => done({ late: true }), 30000);
+      const read = (c) => { buf = (buf + c).slice(-65536); };
+      function done(v) {
+        if (over) return;
+        over = true;
+        clearTimeout(timer);
+        chrome.stderr.removeListener('data', read);
+        chrome.stderr.on('data', () => {});
+        resolve(v);
+      }
       chrome.stderr.setEncoding('utf8');
       chrome.stderr.on('data', read);
       chrome.once('error', () => done({ exited: true, buf: '' }));
       chrome.once('exit', () => done({ exited: true, buf }));
+      // a pipe that fails before Chrome exits is left to the exit (its stderr says why) or the timer
+      cdpBrowser(chrome).then((cdp) => done({ cdp }), () => {});
     });
-    if (r.wsUrl) return r;
+    if (r.cdp) return { cdp: r.cdp };
     try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
     if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) { ctx.notes.push("Chrome's sandbox isn't available on this machine; it runs without it."); continue; }
-    throw new Error(r.late ? "browser: Chrome didn't open its DevTools port in 30 s" : 'browser: Chrome exited before its DevTools port opened');
+    throw new Error(r.late ? "browser: Chrome didn't open its DevTools pipe in 30 s" : 'browser: Chrome exited before its DevTools pipe opened');
   }
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
@@ -26619,9 +26677,11 @@ function browserControl(ctx, secret) {
   return { server, arm };
 }
 const browserListen = (server, port) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(server.address().port); }); });
-// browser serve, in the preview's window: the profile and its start steps, the guard, the 503 view
-// placeholder, Chrome, the CDP tabs, the control server, then state.json. It writes nothing to its
-// window once it is up.
+// browser serve, in the preview's window: the 503 view placeholder bound first, then the profile and
+// its start steps, the guard, Chrome, the CDP tabs, the control server, then state.json. It writes
+// nothing to its window once it is up. The bind comes before the start steps (kit-316 final-1b S1): a
+// port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
+// got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
   const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
@@ -26631,17 +26691,17 @@ async function browserServe({ chrome: bin }) {
   ctx.preview = rec.name;
   ctx.profile = browserProfile();
   try {
-    ctx.restarted = (await browserPrepareProfile(ctx.profile, ctx.notes)).restarted;
-    ctx.guard = await startBrowserGuard();
     ctx.view = http.createServer((req, res) => { req.resume(); res.on('error', () => {}); res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' }); res.end("The supervisor's browser runs here; its live view comes with a later release.\n"); });
     // test hook: the first daemon to find this file missing makes it and fails its bind (T4-1)
     const failOnce = browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL');
     if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
     await browserListen(ctx.view, viewPort);
-    const { wsUrl, cdpPort } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    ctx.restarted = (await browserPrepareProfile(ctx.profile, ctx.notes)).restarted;
+    ctx.guard = await startBrowserGuard();
+    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
     ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
-    ctx.cdp = await cdpBrowser(wsUrl);
+    ctx.cdp = cdp;
     ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
@@ -26650,12 +26710,13 @@ async function browserServe({ chrome: bin }) {
     const { server, arm } = browserControl(ctx, secret);
     ctx.control = server;
     const controlPort = await browserListen(server, 0);
-    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, cdp_port: cdpPort, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
+    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
     arm();
     process.on('uncaughtException', () => browserShutdown(ctx, 'error'));
     process.on('unhandledRejection', () => browserShutdown(ctx, 'error'));
   } catch (e) {
     if (ctx.chrome?.pid) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} }
+    try { ctx.view?.close(); } catch {} // bound before the start steps: a refused start frees its port
     const m = String(e?.message ?? e);
     die(m.startsWith('browser') ? m : `browser: ${m}`);
   }
@@ -26689,6 +26750,32 @@ async function browserStatus() {
   if (r) { process.exitCode = r.code; return out(r.out); }
   return out(flags.json ? JSON.stringify(off) : `browser isn't running (profile ${off.instance})`);
 }
+// browser type --stdin's text: stdin read to its end, bounded in bytes (stops once past max + 2, room
+// for a \r\n) and in time, decoded once at the end so a character split across reads stays whole,
+// with one trailing \n or \r\n dropped and then held to max. A refusal never echoes the text.
+function browserReadStdin({ max, ms }) {
+  if (process.stdin.isTTY || browserTestEnv('DEVTEAM_TEST_BROWSER_STDIN_TTY') === '1') die('browser type --stdin reads the text from a pipe: printf %s "$SECRET" | devteam.mjs browser type <ref> --stdin');
+  const over = `browser type --stdin: the text is over ${max} bytes`;
+  return new Promise((resolve) => {
+    const chunks = [];
+    let size = 0;
+    const timer = setTimeout(() => die(`browser type --stdin: stdin didn't close in ${ms / 1000} s`), ms);
+    process.stdin.on('data', (d) => {
+      size += d.length;
+      if (size > max + 2) { clearTimeout(timer); die(over); }
+      chunks.push(d);
+    });
+    process.stdin.on('error', (e) => { clearTimeout(timer); die(`browser type --stdin: stdin unreadable (${e.code ?? 'error'})`); });
+    process.stdin.on('end', () => {
+      clearTimeout(timer);
+      let b = Buffer.concat(chunks);
+      if (b.length >= 2 && b[b.length - 2] === 0x0d && b[b.length - 1] === 0x0a) b = b.subarray(0, -2);
+      else if (b.length >= 1 && b[b.length - 1] === 0x0a) b = b.subarray(0, -1);
+      if (b.length > max) die(over);
+      resolve(b.toString('utf8'));
+    });
+  });
+}
 // Which gates each verb runs: status, profiles and stop skip Chrome; the memory check is browserEnsure's.
 const BROWSER_VERBS = {
   ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve'].map((v) => [v, { chrome: true }])),
@@ -26718,13 +26805,16 @@ async function cmdBrowser() {
   // value or a key.
   const usage = () => die(`usage: ${BROWSER_USAGE}`);
   const n = positional.length, ref = () => (/^e[1-9]\d{0,5}$/.test(positional[1] ?? '') ? positional[1] : usage());
-  const send = {
+  let send = {
     open: () => ({ url: positional[1] }),
     snapshot: () => ({ json: !!flags.json }),
     click: () => (n === 2 ? { ref: ref() } : usage()),
-    // a word starting with -- would be read as an option and dropped: refused (unnamed, it may be part
-    // of the text), and text after a bare -- is taken whole
-    type: () => (Object.keys(flags).length ? die("browser type: a word starting with -- can't be typed as it stands; put the text after a bare --: browser type <ref> -- <text>")
+    // --stdin alone takes the text from stdin (read below, before any daemon is touched); with a value,
+    // text words or text after -- it is a usage error. Any other word starting with -- would be read as
+    // an option and dropped: refused (unnamed, it may be part of the text), and text after a bare -- is
+    // taken whole
+    type: () => (Object.hasOwn(flags, 'stdin') && Object.keys(flags).length === 1 ? (flags.stdin === true && n === 2 && rest === null ? { ref: ref(), stdin: true } : usage())
+      : Object.keys(flags).length ? die("browser type: a word starting with -- can't be typed as it stands; put the text after a bare --: browser type <ref> -- <text>")
       : rest !== null ? (n === 2 && rest.length ? { ref: ref(), text: rest.join(' ') } : usage()) : n >= 3 ? { ref: ref(), text: positional.slice(2).join(' ') } : usage()),
     press: () => (n === 2 && browserKeyOk(positional[1]) ? { key: positional[1] } : die(BROWSER_KEY_LIST)),
     scroll: () => (n === 2 && ['up', 'down'].includes(positional[1]) ? { dir: positional[1] } : usage()),
@@ -26733,6 +26823,11 @@ async function cmdBrowser() {
     tab: () => (n === 2 && /^[1-9]\d{0,2}$/.test(positional[1]) ? { n: Number(positional[1]) } : die('browser tab takes a tab number (browser tabs lists them)')),
     screenshot: () => (n === 1 && flags.out !== true ? { out: flagStr('out') === undefined ? undefined : path.resolve(flagStr('out')) } : usage()),
   }[verb]();
+  if (send.stdin) {
+    const text = await browserReadStdin({ max: 65536, ms: Number(browserTestEnv('DEVTEAM_TEST_BROWSER_STDIN_MS')) || 30000 });
+    if (!text) usage();
+    send = { ref: send.ref, text };
+  }
   const s = await browserEnsure();
   let r;
   try { r = await browserCall(verb, send, { state: s }); } catch (e) { die(`browser ${verb}: ${e.message}`); }
@@ -26804,7 +26899,7 @@ Decide and act (supervisor.md, constitution.md)
   preview url [<name>]            the link, as the owner will open it
   preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
   browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
-  ${BROWSER_USAGE}   supervisor: the supervisor's own Chrome (Node 22+), in a tmux window beside yours, with one private profile per project under ~/.devteam/browser/; profiles lists them as JSON, and forget removes one (every site in it signed out)
+  ${BROWSER_USAGE}   supervisor: the supervisor's own Chrome (Node 22+), in a tmux window beside yours, with one private profile per project under ~/.devteam/browser/; profiles lists them as JSON, and forget removes one (every site in it signed out); a password or one-time code goes in on stdin, never as an argument (other local users can read a command line): browser type <ref> --stdin
   preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
