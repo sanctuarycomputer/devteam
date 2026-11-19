@@ -1526,6 +1526,8 @@ function schemaErrors(schema, value, where) {
 // plan-<feature> (a planner's graph, landed by its plan PR), plan-<feature>-<yyyy-mm> (the same
 // planner's messages and observations, live), or a ticket id. Anything else counts for nothing.
 const MONTHLY = /^(owner|supervisor|plan-[a-z0-9]+(?:-[a-z0-9]+)*?)-\d{4}-\d{2}$/;
+// responder.jsonl is the responder's (responder-1): it falls to the last rule, and no ticket id can be
+// "responder", since a keyed ticket id carries a -NN- number.
 function writerOfFile(name) {
   const base = name.replace(/\.jsonl$/, '');
   const m = MONTHLY.exec(base);
@@ -1533,7 +1535,7 @@ function writerOfFile(name) {
   if (/^(owner|supervisor)(-|$)/.test(base)) return null;
   return /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(base) ? base : null;
 }
-const writerClass = (by) => (by === 'owner' || by === 'supervisor' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
+const writerClass = (by) => (by === 'owner' || by === 'supervisor' || by === 'responder' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
 const planFeature = (by) => (writerClass(by) === 'planner' ? by.slice('plan-'.length) : null);
 
 // The cheap checks every reader runs, so a line never grants more than its file's writer has: the
@@ -1561,6 +1563,24 @@ function integrity(o, file) {
       if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
     }
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
+    // responder-1: the responder answers the owner's turns and hands work over, and no more. It asks
+    // nothing, replies to no message (a reply's re closes what it names, in every reader of open
+    // messages), and its observations are its own and of no kind readers honour by kind alone.
+    if (cls === 'responder') {
+      if (o.type === 'turn' && o.question !== undefined) return "the responder's turns ask nothing";
+      if (o.type === 'message' && !['handoff', 'info'].includes(o.kind)) return 'the responder sends handoff and info messages only';
+      if (o.type === 'message' && o.re !== undefined && o.re !== null) return 'the responder replies to no message (re)';
+      if (o.type === 'observation' && o.source !== 'responder') return "the responder's observations have source responder";
+      if (o.type === 'observation' && [...SET_ASIDE_KINDS, 'outcome', 'escaped-defect', 'discovery', 'footprint-refusal'].includes(o.kind)) return `the responder doesn't write ${o.kind} observations`;
+      // a detector line is the kit's own (sensor, findings), which readers act on by detector alone
+      if (o.type === 'observation' && o.detector !== undefined && o.detector !== null) return "the responder's observations name no detector";
+    }
+    // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
+    if (o.type === 'message' && o.kind === 'handoff' && typeof o.thread !== 'string') return 'a handoff names its thread';
+    if (o.type === 'message' && o.kind === 'handoff' && o.to !== 'supervisor') return 'a handoff goes to the supervisor';
+    if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
+    if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
+    if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
     // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
     // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
     // (goal order), and of asking for one of the supervisor's settings (owner-setting). Nobody else
@@ -1888,8 +1908,10 @@ function currentTicketId() {
   const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   return b?.startsWith('ticket/') ? b.slice('ticket/'.length) : null;
 }
-// Who this process writes the log as: a ticket id, plan-<feature>, or supervisor. Never the owner.
+// Who this process writes the log as: the responder (its role wins over a ticket, a feature or a
+// branch), a ticket id, plan-<feature>, or supervisor. Never the owner.
 function logWriter() {
+  if (process.env.DEVTEAM_ROLE === 'responder') return 'responder';
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
@@ -1914,7 +1936,10 @@ function ownerWriter(hint) {
   return { by: 'owner' };
 }
 const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli');
+// What the responder is told when it runs a supervisor's command: who does it, and how to hand it over.
+const responderRefusal = (what) => `${what}: the supervisor does this; hand it over: send supervisor "…" --kind handoff --thread <t-id>`;
 const supervisorOnly = (what) => {
+  if (process.env.DEVTEAM_ROLE === 'responder' || logWriter() === 'responder') die(responderRefusal(what));
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`${what}: the supervisor does this`);
   rememberSupervisorPane();
   noteSupervisorSelf();
@@ -7743,7 +7768,7 @@ function turnAnswer(what, v) {
   if (!TURN_ID.test(uid ?? '')) die(`${what} --from-turn <u-id>: the owner's turn whose words settle it`);
   const u = logGet(uid);
   if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
-  if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words settle a question`);
+  if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the ${u.created_by}'s; only the owner's words settle a question`);
   // --said: whole clauses of the turn the question was asked about (thread ask --turn), a span no
   // other binding on the turn overlaps, with what the owner wrote since the question read first
   if (flags.said !== undefined) {
@@ -8110,7 +8135,8 @@ function threadViews(objects) {
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
 function threadView(t, ts, qs) {
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null }));
+  // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null }));
   const status = t.status === 'resolved' ? 'resolved' : 'open';
   const last = turns[turns.length - 1] ?? null;
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
@@ -8314,15 +8340,15 @@ function cmdThread() {
     });
     return deliveredWords(typed);
   };
-  // Who writes a reply from this session: the supervisor (a responder's replies are written as the
-  // supervisor's until kit-102 gives it its own), or null where supervisorOnly would refuse one. The
-  // one place both reply and working's own-turn rule ask, so the two stay in step.
-  const replyWriter = () => (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
-  // Who holds a turn, as the stage names it: null for the owner's terminal and the dashboard, which
-  // never hold one; the responder says so itself until kit-102 makes logWriter say it.
+  // Who writes a reply from this session: the responder (its own turns), the supervisor, or null
+  // where supervisorOnly would refuse one. The one place both reply and working's own-turn rule ask,
+  // so the two stay in step.
+  const replyWriter = () => (logWriter() === 'responder' ? 'responder' : logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
+  // Who holds a turn, as the stage names it (the session's writer, the responder included): null for
+  // the owner's terminal and the dashboard, which never hold one.
   const sessionBy = () => {
     if (!process.env.DEVTEAM_ROLE || process.env.DEVTEAM_CHANNEL === 'dashboard') return null;
-    return process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : logWriter();
+    return logWriter();
   };
   // the holder spoke (or the owner closed the thread): its stage goes
   // a failed clear never fails a command already written (a retry would post twice): the card ignores a record older than the reply anyway
@@ -8352,16 +8378,17 @@ function cmdThread() {
     out(t.id);
     return out(deliver(t, u, words, files));
   }
-  // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
-  // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
+  // say is the owner's and reply the supervisor's or the responder's, never one falling through to the
+  // other: a reply with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the
+  // owner's file. The responder writes its own; anyone else goes through supervisorOnly.
   if (sub === 'say' || sub === 'reply') {
-    const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), replyWriter());
+    const by = sub === 'say' ? threadOwner().by : sub === 'reply' && logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply'), replyWriter());
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
     const words = turnText(wordsFrom(2));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
-    if (refs.length && by !== 'supervisor') die("--refs are on the supervisor's turns: what it did, as <type>:<id>");
+    if (refs.length && by !== 'supervisor' && by !== 'responder') die("--refs are on the supervisor's turns and the responder's: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
     const files = filesFlag();
@@ -8394,7 +8421,7 @@ function cmdThread() {
       if (!TURN_ID.test(uid ?? '')) die("thread ask --turn <u-id>: the owner's turn the question is about");
       const u = logGet(uid);
       if (u?.type !== 'turn') die(`--turn ${uid}: no such turn`);
-      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the supervisor's; a question is about the owner's words`);
+      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the ${u.created_by}'s; a question is about the owner's words`);
       if (u.thread !== t.id) die(`--turn ${uid}: that turn is in ${u.thread}, not ${t.id}; ask in its own thread`);
       if (flags.at !== undefined && flags['owner-said'] === undefined) die('--at goes with --owner-said: which match of a repeated clause');
       about = { about_turn: uid };
@@ -8533,7 +8560,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s or the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -10023,7 +10050,7 @@ function cmdArtifact() {
     if (fs.existsSync(path.join(here, slugName))) die(`${ARTIFACTS_REL}/${slugName} already exists here`);
     const other = draftArtifacts().filter((a) => a.slug === slugName).map((a) => a.at);
     if (other.length) warn(`${slugName} is also being drawn in ${other.join(', ')}`);
-    const by = process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
+    const by = process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
     const manifest = { v: 1, title: flagStr('title') ?? die('artifact new needs --title'), summary: flagStr('summary') ?? die('artifact new needs --summary'), by, for: jsonFlag('for') ?? [] };
     const m = parseArtifactManifest(Buffer.from(JSON.stringify(manifest)));
     if (m.error) die(`artifact new: ${m.error}`);
@@ -11397,7 +11424,7 @@ function cmdCorrect() {
     if (!TURN_ID.test(uid ?? '')) die("correct --from-turn <u-id>: the owner's turn whose words correct it");
     const u = logGet(uid);
     if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
-    if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words correct a call`);
+    if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the ${u.created_by}'s; only the owner's words correct a call`);
     const ref = logGet(u.thread)?.subject?.ref ?? null;
     const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
     if (ref !== `${act.type}:${actId}` && !(via?.type === 'act' && via.decision === actId)) die(`--from-turn ${uid}: that thread is about ${ref ?? 'nothing in particular'}, not ${actId}; the owner's words correct the record the thread is on`);
@@ -11449,7 +11476,7 @@ const stageOf = (o) => { const s = Object.hasOwn(OODA.stages, o?.type ?? '') ? O
 // The sources each writer may name for itself (observe --source); sensor, metrics and spend are the
 // kit's own, read off its own lines, never given. The supervisor records what the owner said (an
 // answer, a thread, the chat), but never speaks as the owner.
-const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'] };
+const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner', 'responder'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'], responder: ['responder'] };
 // An owner-* source on a line someone else wrote is a claim about the owner's words, so it counts
 // only when its ref is the record that holds them: an answered question (the owner's answer) for
 // owner-answer, the owner's turn or thread for owner-thread, either for owner-chat. A ref that
@@ -11503,7 +11530,7 @@ function cmdObserve() {
   // a goal's reading (source repo, prod or owner) is the kit's, from goal check or an answer
   if (flagStr('kind') === 'reading' && ['repo', 'prod', 'owner'].includes(src)) die(`observe --kind reading --source ${src}: a goal's readings come from the kit itself (goal check, the owner's answer)`);
   const mine = SOURCE_FOR[writerClass(by)];
-  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: a ${{ ticket: 'worker', planner: 'planner', supervisor: 'supervisor', owner: 'owner' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
+  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: ${{ ticket: 'a worker', planner: 'a planner', supervisor: 'a supervisor', owner: 'a owner', responder: 'the responder' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
   if (writerClass(by) !== 'owner' && String(src).startsWith('owner-') && !ownerRefHolds(src, flagStr('ref'))) die(`observe --source ${src} needs --ref <id> naming where the owner said it: ${src === 'owner-answer' ? 'a question they answered' : src === 'owner-thread' ? 'their turn or the thread' : 'a question they answered, or their turn'}`);
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
@@ -19552,7 +19579,7 @@ async function dashRoutesPage(D, req, res, q) {
   }
   return DASH_NEXT;
 }
-// /view/artifact/…, /view/preview/…, /api/view, /api/artifact-versions
+// /view/artifact/…, /view/preview/…, /api/artifact-fp, /api/view, /api/artifact-versions
 async function dashRoutesViewer(D, req, res, q) {
   const { u } = q;
   const { page, pageCsp, run, describing, versioning, send, previewStage } = D;
@@ -19578,11 +19605,32 @@ async function dashRoutesViewer(D, req, res, q) {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
     return res.end(fs.readFileSync(page));
   }
+  // A draft's fingerprint, for the viewer's 2 s draft poll (responder contract, artifact-fp@1): the
+  // same fp artifact describe gives, from stat calls and the oid cache (diskOid hashes only a file
+  // whose size or mtime moved), in this process: no child, no git. Drafts only: main or a published
+  // tree never changes under a viewer, so it is a 400. 404 when artifactSource finds nothing (an
+  // unknown slug or worktree, a reviewer's or scratch one, a symlinked folder). Same-origin only, as /api/threads.
+  if (req.method === 'GET' && u.pathname === '/api/artifact-fp') {
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+    const slug = u.searchParams.get('slug') ?? '';
+    const at = u.searchParams.get('at') ?? '';
+    if (!LINK_ID.test(slug) || !ARTIFACT_AT.test(at) || at === 'main' || at.startsWith('tree:')) return send(res, 400, 'application/json', JSON.stringify({ error: 'a slug, and at a draft\'s worktree (drafts only)' }));
+    // a draft that vanishes mid-walk is nothing there (404); any other failure (EACCES, EMFILE) is a 500, as /api/view keeps them apart
+    let src;
+    try { src = artifactSource(at, slug); } catch (e) {
+      if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') return send(res, 500, 'application/json', JSON.stringify({ error: `the draft's files: ${e?.code ?? 'error'}` }));
+      src = null;
+    }
+    if (!src) return send(res, 404, 'application/json', JSON.stringify({ error: `no draft of ${slug} at ${at}` }));
+    return send(res, 200, 'application/json', JSON.stringify({ fp: fingerprint(src.entries), at }));
+  }
   // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
-  // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
-  // never polled: a child process per ask, shared by asks for the same one while it runs. A GET
-  // carries no Origin: same-origin only, as /api/threads. 404 only when describe says nothing is
-  // there (the viewer then shows main); a timeout or a crash is a 500, never mistaken for that.
+  // viewer never waits on /api/data. Since kit-206 the viewer asks it every 10 s while it is seen:
+  // a child process per ask, one shared by asks for the same one while it runs. The cheap,
+  // stat-only route for the 2 s draft poll is /api/artifact-fp. A GET carries no Origin:
+  // same-origin only, as /api/threads. 404 only when describe says nothing is there (the viewer
+  // then shows main); a timeout or a crash is a 500, never mistaken for that.
   if (req.method === 'GET' && u.pathname === '/api/view') {
     const site = req.headers['sec-fetch-site'];
     if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
@@ -21026,20 +21074,33 @@ function cmdPane() {
 function cmdSend() {
   const [to, ...words] = positional;
   const text = words.join(' ').replace(/\s+/g, ' ').trim();
-  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s]');
+  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s] [--thread t-… (handoff)]');
   const kind = flagStr('kind') ?? 'info';
+  const thread = flagStr('thread') ?? null;
+  if (thread && kind !== 'handoff') die('--thread goes with --kind handoff only: a handoff names the thread it hands over');
   // --owner: the owner, in their own terminal, telling a session something. Logged as the owner's.
   const from = flags.owner ? ownerWriter().by : myAddress();
   if (from === 'owner' && kind !== 'info') die('the owner sends info messages; answers go through answer <qid>, rulings come from the supervisor');
   if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages`);
   const sha = flagStr('sha') ?? (kind === 'merge-request' ? cwdGit(['rev-parse', 'HEAD']) : null);
   const re = flagStr('re') ?? null;
+  // responder-1: a reply's re closes what it names in every reader of open messages, so the
+  // responder's never carries one (integrity refuses the line too; this says so before it is built)
+  if (re && from === 'responder') die('the responder replies to no message (re): a reply would close what it names; send info, or hand the thread over with --kind handoff --thread <t-id>');
+  if (kind === 'handoff') {
+    if (from !== 'responder' || to !== 'supervisor') die('a handoff is the responder\'s: the responder hands threads to the supervisor (send supervisor "…" --kind handoff --thread <t-id>, run as the responder)');
+    if (!thread) die('a handoff names its thread: --thread <t-id>');
+    const t = logGet(thread);
+    if (t?.type !== 'thread') die(`no thread ${thread} (devteam.mjs thread list)`);
+    // a resolved thread takes no supervisor turn, so its handoff could never settle
+    if (t.status === 'resolved') die(`${thread} is resolved: the owner closed it, so a handoff on it could never be answered there; ask the owner to reopen it, or send --kind info`);
+  }
   if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
-  out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()) }).id);
+  out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()), thread }).id);
 }
 // Log one message and type it into the recipient's pane. The log is the record; the pane is
 // delivery. A recipient whose pane is gone catches up with `messages`.
-function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }) {
+function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, thread = null }) {
   const target = to === 'supervisor' ? supervisorTarget() : tmuxTarget(to);
   const resolved = resolvePane(target);
   const { target: exact } = resolved;
@@ -21047,7 +21108,8 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }
   // never into the machine's operator, by its name or a window number (on a box a fleet's session
   // can be home): only the owner's threads reach it from the kit
   if (!problem && sh('tmux', ['display-message', '-p', '-t', exact, '#{window_name}']) === OPERATOR_WINDOW) problem = 'that is the machine\'s operator, which takes no messages from a fleet';
-  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null) }, from);
+  // thread only on a handoff's line, so every other message's line is as before
+  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null), ...(thread ? { thread } : {}) }, from);
   const typed = problem ? false : typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`);
   if (!typed) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   else if (typed !== true) warn(`${line.id} ${heldWords(typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`);
@@ -21056,7 +21118,23 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }
 // A request is settled when the work it is about has landed: a ticket's once it merged, a
 // planner's once its plan file is on main, a ticket's review request once it was approved. The
 // merge or the approval is the answer even if nobody replied.
+//
+// Every reader of open messages calls this (messages --open, metrics' unanswered-message and
+// messages.still_open, /api/data's open_messages, idsAwaitingReply), so the handoff rule lives here
+// and they all agree: a handoff is settled by a supervisor turn in its thread after it, and by
+// nothing else here (a responder turn or the owner's resolve never settles it; a reply citing it
+// with --re closes it through each reader's replied set, as for any message).
 function settledByLanding(m) {
+  if (m.kind === 'handoff') {
+    // the supervisor's newest turn per thread, worked out once per fold (readLog's object), not per message per read
+    const log = readLog();
+    if (settledByLanding.log !== log) {
+      const last = new Map();
+      for (const u of log.byType.get('turn') ?? []) if (u.created_by === 'supervisor' && typeof u.thread === 'string' && !(last.get(u.thread) >= u.created_at)) last.set(u.thread, u.created_at);
+      Object.assign(settledByLanding, { log, last });
+    }
+    return (settledByLanding.last.get(m.thread) ?? '') > m.created_at;
+  }
   const by = m.created_by ?? m.by;
   if (!by) return false;
   const cls = writerClass(by);
@@ -21096,6 +21174,7 @@ function cmdPhase() {
     ? { usd: flagNum('usd') ?? prev?.usd ?? 0, input_tokens: flagNum('in') ?? prev?.input_tokens ?? 0, output_tokens: flagNum('out') ?? prev?.output_tokens ?? 0 }
     : {};
   if (supervisor) {
+    supervisorOnly('phase supervisor');
     if (cost.usd === undefined) die('phase supervisor needs --usd (its cumulative spend)');
     appendLog({ type: 'phase', from: 'supervisor', to: 'supervisor', ...cost }, 'supervisor');
     return out('recorded supervisor cost');
@@ -26960,7 +27039,7 @@ const HELP_CHECKS = `Checks and merging (quality.md)
 const HELP_SESSIONS = `Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
   gate <name> [--junit f] -- <cmd…>   run a gate and record it   |   gate --all: every settings gate here
-  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | messages [--open] [--to x] [--json]
+  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | send supervisor "<text>" --kind handoff --thread <t-id> (the responder's) | messages [--open] [--to x] [--json]
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line`;
 const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
@@ -26998,7 +27077,7 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
