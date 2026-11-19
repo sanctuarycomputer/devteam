@@ -548,7 +548,7 @@ test('box-deploy: a patch that changes what the image runs, or can\'t be told, f
 
 test('box-deploy: a patch whose minor never deployed, or whose runs can\'t be read, fails red and posts nothing', () => {
   const sha = deployRelease('patch-undeployed', { tag: 'v9.1.1' });
-  for (const runs of [[{ event: 'release', conclusion: 'failure' }], [], [{ event: 'push', conclusion: 'success' }], 'not json']) {
+  for (const runs of [[{ event: 'release', conclusion: 'failure' }], [], [{ event: 'push', conclusion: 'success' }], [{ event: 'release', conclusion: '' }], 'not json']) {
     const r = deploy({ tag: 'v9.1.1', sha, runs, stub: 'minor' });
     assert.equal(r.status, 1, `${JSON.stringify(runs)}: ${r.out}`);
     assert.match(r.stdout, /^refusing v9\.1\.1: v9\.1\.0 never deployed, so the box isn't on it; cut v9\.2\.0$/m, JSON.stringify(runs));
@@ -588,6 +588,15 @@ test('box-deploy: a patch stamped with itself, or a tag too long to read, fails 
   assert.deepEqual(h.curls, []);
   assert.deepEqual(h.gh, []);
   assert.deepEqual(h.stubs, []);
+});
+
+test('box-deploy: a patch whose Z ends in 0 is a patch, and lands in place without deploying', () => {
+  const sha = deployRelease('patch-ten', { tag: 'v9.1.10' });
+  const r = deploy({ tag: 'v9.1.10', sha, runs: DEPLOYED, stub: 'patch' });
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.stdout, /^v9\.1\.10 is a patch: .*lands in place/m);
+  assert.deepEqual(r.curls, []);
+  assert.deepEqual(r.stubs, [['docs/devteam/scripts/devteam.mjs', 'box-pins', 'changed', '--since', 'v9.1.0', '--to', sha, '--smoke']]);
 });
 
 test('box-deploy: a minor and a major still deploy, once, at their commit', () => {
