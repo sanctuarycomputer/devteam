@@ -22,7 +22,9 @@ test('prompt supervisor: after the end-of-setup sentence, setup ends at start-up
     const rest = out.slice(end);
     assert.match(rest, /Setup ends when start-up \(supervisor\.md §1, steps 1-6\) has run/);
     assert.match(rest, /devteam\.mjs wait in the background/);
-    assert.match(rest, /tick \(supervisor\.md §3\) when it returns/);
+    assert.match(rest, /keep the loop until the owner stops you/);
+    assert.match(rest, /run the tick \(supervisor\.md §3\), then start node docs\/devteam\/scripts\/devteam\.mjs wait/);
+    assert.match(rest, /tick again when it returns/);
     assert.match(rest, /Never end a turn without a wait running/);
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
@@ -37,7 +39,7 @@ test('init: the next line says the supervisor keeps its loop', () => {
     assert.equal(r.status, 0, r.stderr);
     const last = r.stdout.split('\n').filter((l) => l.trim()).pop();
     assert.ok(last.startsWith('next:'), last);
-    assert.ok(last.includes('keeps its loop: devteam.mjs wait in the background, a tick when it returns, never a turn ended without one'), last);
+    assert.ok(last.includes('keeps its loop: devteam.mjs wait in the background, a tick when it returns, never a turn ended without a wait running'), last);
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
