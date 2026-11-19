@@ -466,7 +466,8 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   // setTimeout draws what the press held back): a redraw can't move or replace what is clicked
   const still = async (f) => { await p.ev('window.__still()'); try { await f(); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
   const answeredOnServer = (q) => /answered/.test(dt(['questions', '--id', q]).split('\n')[0]);
-  await soon(`!!${card(Q1)} && !!${card(Q2)}`, 'the question cards');
+  // #questions opens the Inbox in the panel (kit-100): the cards, in the panel at rest (a click takes a box's centre once)
+  await soon(`!!${card(Q1)} && !!${card(Q2)} && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the question cards');
 
   await t.test('an answer: the card says so at once; the server has it once the post goes through', async () => {
     await hold();
@@ -539,7 +540,7 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   });
 
   await t.test('a new thread: the turn is in the card at once, and two quick Sends make one thread', async () => {
-    await p.ev(`document.querySelector('[data-tl-new]')?.click() ?? (document.getElementById('tl-pill').click(), document.querySelector('[data-tl-new]').click()); void 0`);
+    await p.ev(`document.querySelector('#threads [data-tl-new]').click(); void 0`);
     await soon(`document.activeElement?.id === 'tl-c-text'`, 'the composer');
     await hold();
     await p.type('first words');
@@ -593,7 +594,8 @@ test('a typed answer on a question with choices asks which choice it means, on t
   const ask = (q, where = card(q)) => `document.querySelectorAll('${where} [data-which-for="${q}"]').length`;
   const logged = (q) => JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === q);
   const write = async (sel, text) => { await p.click(sel); await soon(`document.activeElement === document.querySelector('${sel}')`, 'the note focused'); await p.type(text); };
-  await soon(`!!document.querySelector('${card(D1)}') && !!document.querySelector('${card(D2)}') && !!document.querySelector('${card(D3)}')`, 'the door cards');
+  // #questions opens the Inbox in the panel (kit-100): the cards, in the panel at rest (a click takes a box's centre once)
+  await soon(`!!document.querySelector('${card(D1)}') && !!document.querySelector('${card(D2)}') && !!document.querySelector('${card(D3)}') && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the door cards, in the panel at rest');
 
   await t.test('Something else and words: the ask, and nothing posted', async () => {
     await still(() => p.click(`${card(D1)} input[data-pick][value="__other"]`));
@@ -709,14 +711,23 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     await p.send('Runtime.enable');
     await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 600, deviceScaleFactor: 1, mobile: false });
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+    // kit-307: DEVTEAM_TEST_CPU_THROTTLE=<n> runs the page n times slower, as a loaded runner does;
+    // DEVTEAM_TEST_ROUTE_DELAY_MS=<ms> runs the page's hashchange listeners that much later, as a runner too
+    // loaded to reach the route's task before the test's next step does
+    if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
+    if (process.env.DEVTEAM_TEST_ROUTE_DELAY_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const add = window.addEventListener; window.addEventListener = function (type, f, ...a) { return add.call(this, type, type === 'hashchange' && typeof f === 'function' ? (e) => setTimeout(() => f(e), ${Number(process.env.DEVTEAM_TEST_ROUTE_DELAY_MS)}) : f, ...a); }; })()` });
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
     const box = `textarea[data-q="${Q}"]`;
     const soon = soonIn(p, 15000, () => dash.out());
-    await soon(`!!document.querySelector('${box}')`, 'the question card');
+    // the Inbox is the panel's tab (kit-100), and it scrolls in #th-body: the card, in the panel at rest (a click
+    // takes the field's centre once)
+    await soon(`!!document.querySelector('${box}') && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the question card');
     // Answered by polls actually arriving, however long /api/data takes.
     const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
     // jumped: a space on the page scrolls most of a screen; a pixel or two is a caret coming into view
-    const state = (y) => p.ev(`(() => { const a = document.activeElement, t = document.querySelector('${box}'); return { value: t.value, focus: a === t, start: t.selectionStart, end: t.selectionEnd, jumped: Math.abs(window.scrollY - ${y ?? 'window.scrollY'}) > 20 }; })()`);
+    // the Inbox's scroll: #th-body's, since the Inbox is the panel's tab (kit-100)
+    const TH_Y = "document.getElementById('th-body').scrollTop";
+    const state = (y) => p.ev(`(() => { const a = document.activeElement, t = document.querySelector('${box}'); return { value: t.value, focus: a === t, start: t.selectionStart, end: t.selectionEnd, jumped: Math.abs(${TH_Y} - ${y ?? TH_Y}) > 20 }; })()`);
     const wrote = (v) => ({ value: v, focus: true, start: v.length, end: v.length, jumped: false });
     // A new question lands in the log: the tab title says so at once, the cards wait.
     const newQuestion = async (q) => {
@@ -734,7 +745,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
         await soon('window.__gated > 0 && window.__quiet()', 'a refresh held at the gate');
         await p.click(box);
         await soon(`document.activeElement === document.querySelector('${box}')`, 'the field focused');
-        y = await p.ev('window.scrollY');
+        y = await p.ev(TH_Y);
         assert.ok(y > 0, 'the fixture page scrolls');
         await p.type('hello');
         await p.ev('window.__t = document.querySelector(\'' + box + '\'); void 0');
@@ -747,7 +758,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('the caret and a selection stay where they were', async () => {
-      const y = await p.ev('window.scrollY');
+      const y = await p.ev(TH_Y);
       for (let i = 0; i < 5; i++) await p.key('ArrowLeft');
       await p.type('X');
       await polls();
@@ -763,7 +774,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       const q = 'Arrived while you typed?';
       await newQuestion(q);
       assert.equal(await p.ev(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`), false, 'not drawn under the typing');
-      assert.equal(await p.ev(`document.getElementById('n-questions').textContent === document.title.match(/\\((\\d+)\\)/)[1]`), true, 'the Inbox count');
+      assert.equal(await p.ev(`document.getElementById('inbox-btn-n').textContent === document.title.match(/\\((\\d+)\\)/)[1]`), true, 'the Inbox count');
       await p.key('Tab');
       await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'the held data, once focus left');
       assert.equal(await p.ev(`document.querySelector('${box}').value`), 'hello Xworld', 'the draft survives the redraw');
@@ -771,7 +782,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('held for a long time: a hint, and clicking it draws without losing the field or the caret', async () => {
-      const y = await p.click(box).then(() => p.ev('window.scrollY'));
+      const y = await p.click(box).then(() => p.ev(TH_Y));
       const q = 'Urgent while you were idle?';
       await newQuestion(q);
       assert.equal(await p.ev(`getComputedStyle($('held')).display`), 'none', 'no hint while typing normally');
@@ -806,7 +817,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       await soon(`document.querySelector('#questions').textContent.includes('Before the radio?')`, 'the redraw after the click');
       assert.equal(await p.ev(`document.querySelector('input[data-pick="${Q}"][value="Right"]').checked`), true, 'the pick took');
       assert.equal(await p.ev(`document.activeElement.dataset.pick`), Q, 'focus is back on the radio, not on the page');
-      const y = await p.ev('window.scrollY');
+      const y = await p.ev(TH_Y);
       await p.key(' ');
       // a space that scrolls does so smoothly, a little each frame: compared once the page is at rest
       await p.ev(AT_REST);
@@ -815,29 +826,39 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('a control that keeps focus without typing doesn\'t stop the page refreshing', async () => {
-      // its control is on Progress (one page at a time)
-      await p.ev(`location.hash = '#progress'`);
-      await soon(`getComputedStyle(document.querySelector('#progress')).display !== 'none'`, 'the Progress page');
-      await p.click('#left-only');
-      const q = 'After the checkbox?';
+      // its control is the Board's Needs attention toggle, in the page bar (one page at a time)
+      const att = '.pagebar .extra [data-f="att"]';
+      await p.ev(`location.hash = '#board'`);
+      await soon(`getComputedStyle(document.querySelector('#board')).display !== 'none' && !!document.querySelector('${att}')`, 'the Board page and its toggle');
+      await p.click(att);
+      // each press is awaited until routed (LAST_HEAD): the press changes the hash at once, but its route redraws the
+      // page bar and the Board a task later, and the next step (or the open-select subtest) must not start under it
+      await soon(`location.hash.includes('att=1') && LAST_HEAD === location.hash && document.activeElement?.matches?.('${att}')`, 'the toggle pressed, routed, and focused');
+      const q = 'After the toggle?';
       ask(q);
-      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a checkbox focused');
-      await p.click('#left-only'); // leave the setting as it was
+      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a toggle focused');
+      await p.click(att); // leave the setting as it was
+      await soon(`!location.hash.includes('att=') && LAST_HEAD === location.hash && document.querySelector('${att}')?.getAttribute('aria-pressed') === 'false'`, 'the toggle off again, routed and drawn');
       await p.ev(`document.activeElement.blur()`);
     });
 
     await t.test('an open select is left alone, and a list closed without a choice can\'t stop the refreshing', async () => {
-      await p.ev(`window.__o = $('view').options[0]`);
-      await p.click('#view');
+      // the Board's Goal select, in the page bar (drawn again only when it changes); a Board column, drawn on every
+      // read the page isn't held, says whether the page is drawing
+      const goal = '.pagebar .extra select[data-f="goal"]';
+      await p.ev(`window.__o = document.querySelector('${goal}').options[0]`);
+      await p.click(goal);
+      await p.ev(`window.__c = document.querySelector('#board-cols > .col')`);
       await polls();
       assert.equal(await p.ev(`window.__o.isConnected`), true, 'its options are not redrawn');
+      assert.equal(await p.ev(`window.__c.isConnected`), true, 'nothing is drawn while it is open');
       await p.key('Escape');
       await p.ev('(() => { const n = Date.now; Date.now = () => n() + 120000; })()');
-      await soon(`!window.__o.isConnected`, 'the page drawing again, no change event to say so');
+      await soon(`!window.__c.isConnected`, 'the page drawing again, no change event to say so');
       await p.ev(`document.activeElement.blur()`);
-      // back to the Inbox, for the card
+      // back to the Inbox, for the card (#inbox opens the panel on its Inbox tab, kit-100)
       await p.ev(`location.hash = '#inbox'`);
-      await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
+      await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !document.getElementById('th-inbox').hidden`, 'the Inbox in the panel, at rest');
     });
 
     await t.test('Answer still works with a draft and held data: answered at once, and refreshes while it posts keep it so', async () => {
@@ -1915,9 +1936,11 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     await soon(`document.getElementById('av-title').textContent === 'Viewer mock' && document.getElementById('av-project').textContent === 'viewer-page'`, 'the bar');
     assert.equal(await p.ev(`document.getElementById('av-frame').getAttribute('src')`), '/artifact/main/viewer-mock/');
     assert.equal(await p.ev(`document.documentElement.classList.contains('viewer') && getComputedStyle(document.querySelector('.app')).display`), 'none');
-    assert.equal(await p.ev(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(); return r.left === 0 && r.top === 0 && r.width === innerWidth && r.height === innerHeight; })()`), true, 'the whole tab');
+    // the whole tab below a --bar-h band, where the Inbox button floats at the top right (kit-89 spec §2.8)
+    assert.equal(await p.ev(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(); return r.left === 0 && r.top === 49 && r.width === innerWidth && r.height === innerHeight - 49; })()`), true, 'the whole tab below the band');
+    await soon(`(() => { const m = document.getElementById('tt-peek'), c = getComputedStyle(m), r = m.getBoundingClientRect(); return c.display !== 'none' && c.visibility === 'visible' && c.opacity === '1' && r.bottom <= 49 && Math.abs(innerWidth - r.right - 16) <= 1; })()`, '#tt-peek shown at the top right');
     assert.equal(await p.ev(`[TS.kind, TS.slug, TS.at, TS.fp === TS.mainFp, /^[0-9a-f]{64}$/.test(TS.fp)].join()`), 'artifact,viewer-mock,main,true,true');
-    assert.equal(await p.ev(`getComputedStyle(document.getElementById('tl-pill')).display !== 'none'`), true, 'the dock');
+    assert.equal(await p.ev(`!document.getElementById('tl-pill') && !!document.getElementById('threads')`), true, 'no dock; the Threads panel');
   });
 
   await t.test('it polls the threads and hello, and never /api/data', async () => {
@@ -2583,7 +2606,10 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
 
   await t.test('in pin mode the wheel scrolls the artifact, and the pin follows', async () => {
     await p.ev('document.activeElement?.blur()');
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
+    // the panel's Pin, with the viewer up: #tt-peek above the viewer opens the panel, then Pin
+    await soon(`getComputedStyle(document.getElementById('tt-peek')).opacity === '1'`, '#tt-peek above the viewer');
+    await p.click('#tt-peek');
+    await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel over the viewer');
     await p.click('#tl-pinbtn');
     await soon(`!document.getElementById('av-over').hidden`, 'the overlay in pin mode');
     const at = await frameAt(300, 300);
@@ -2591,6 +2617,8 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
     await soon(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && parseInt(b.style.top, 10) === 140 - 100 - 11; })()`, 'the pin, 100 px up');
     await p.key('Escape');
     await soon(`document.getElementById('av-over').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
+    await p.click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open') && !document.getElementById('artifact-view').hidden`, 'the panel closed, the viewer still up');
   });
 
   await t.test('the pin opens its card beside it, and the card says when the artifact changed since', async () => {
@@ -3154,8 +3182,19 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   // look at where a button is could see the card before it moves. So a click ends once that has run.
   const released = () => soon('!TL.pressed && PRESSED === 0', 'the release handled');
   const click = (sel) => still(async () => { await p.click(sel); await released(); });
+  // the panel open on its Threads tab: the Inbox button opens it on its Inbox tab (kit-100), so Threads is a
+  // click on its tab, once the panel is at rest
+  const onThreads = async () => {
+    if (!await p.ev(`document.body.classList.contains('threads-open')`)) await click('.pagebar .tt');
+    await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest');
+    const tab = '#th-tabs [role="tab"][data-tab="threads"]';
+    if (await p.ev(`document.querySelector('${tab}')?.getAttribute('aria-selected') !== 'true'`)) await click(tab);
+    await soon(`document.querySelector('${tab}')?.getAttribute('aria-selected') === 'true' && !!document.getElementById('th-inbox').hidden`, 'the panel on Threads');
+  };
   const goalSel = `#goals-list [data-subject="goal:${F.goal}"]`;
   const shown = (id) => `!document.getElementById('${id}').hidden`;
+  // the peek slid in (kit-88): shown, and at rest, so a point read on it stays where it is
+  const slid = () => `${shown('drawer')} && getComputedStyle(document.getElementById('drawer')).transform === 'none'`;
   await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   let T;
@@ -3194,9 +3233,9 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('Shift held while typing in a field shows nothing until the pointer leaves the field', async () => {
     const box = `textarea[data-q="${Q0}"]`;
-    // the field is on the Inbox page (one page at a time)
+    // the field is in the Inbox (the panel's Inbox tab, kit-100)
     await p.ev(`location.hash = '#inbox'`);
-    await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
+    await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !document.getElementById('th-inbox').hidden`, 'the Inbox in the panel, at rest');
     await click(box);
     await p.hold('Shift', true);
     await p.key('A', 8);
@@ -3204,13 +3243,19 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const over = await p.at(box);
     await p.move(over.x, over.y, 8);
     assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'not over the field');
-    await still(async () => { const g = await p.at('#inbox h2'); await p.move(g.x, g.y, 8); });
+    await still(async () => { const g = await p.at(`#q-${Q0} .card-head`); await p.move(g.x, g.y, 8); });
     await soon(shown('tl-cursor'), 'the pin once outside it');
     await p.hold('Shift', false);
     assert.match(await p.ev(`document.querySelector('${box}').value`), /A$/);
     await p.ev(`document.querySelector('${box}').value = ''; document.activeElement.blur()`);
+    // the panel closed by its ×, so Goals isn't opened with it remembered (kit-89 §2.5; the Inbox is its tab, kit-100)
+    await soon(`getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
+    await p.click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open')`, 'the panel closed');
     await p.ev(`location.hash = '#goals'`);
-    await soon(`getComputedStyle(document.querySelector('#goals')).display !== 'none'`, 'the Goals page again');
+    // and at rest: the page's margin slides back as the panel closes, and Goals' cards sit two across (kit-90),
+    // so a point read mid-slide is on the card beside the goal's by the time it is clicked
+    await soon(`getComputedStyle(document.querySelector('#goals')).display !== 'none' && !document.getAnimations().some((a) => a.transitionProperty === 'margin-right')`, 'the Goals page again, at rest');
   });
 
   await t.test("a Shift+click is the layer's alone: it starts a thread on the goal, and the title link under it isn't followed", async () => {
@@ -3246,7 +3291,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`localStorage.setItem('devteam.thread.draft.new:item:goal:gone', ${old(8)}); localStorage.setItem('devteam.thread.draft.new:item:goal:kept', ${old(1)}); void 0`);
     await p.key('Escape');
     await soon(`document.getElementById('tl-card').hidden`, 'Escape closed the card');
-    await shiftClick('#goals h2');
+    await shiftClick('#goals .tabbar [role="tab"][data-tab="active"]');
     await soon(`${shown('tl-card')} && TL.draft?.subject?.kind === 'page'`, 'a card on a spot in Goals');
     assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '', "the goal's draft isn't here");
     assert.deepEqual(await p.ev(`['gone', 'kept'].map((k) => localStorage.getItem('devteam.thread.draft.new:item:goal:' + k) !== null)`), [false, true], 'the week-old draft pruned');
@@ -3286,7 +3331,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev("document.getElementById('tl-c-text').focus()");
     await p.type('half a thought');
     const polls = await p.ev('window.__polls');
-    await p.ev(`window.__g = document.querySelector('${goalSel}'); void 0`);
+    // Goals draws only what changed (kit-90): its last drawing forgotten, as a change would, so the next poll redraws the card
+    await p.ev(`window.__g = document.querySelector('${goalSel}'); GOALS_HTML = ''; void 0`);
     await soon(`window.__polls >= ${polls + 2} && !window.__g.isConnected`, 'polls landing and the goal card redrawn');
     assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text');
     assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), 'half a thought', 'the draft untouched');
@@ -3383,7 +3429,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`addEventListener('popstate', () => { location.hash = '#talk/${T}'; }, { once: true }); void 0`);
     await p.ev("document.getElementById('tl-c-text').focus()");
     await p.key('Escape');
-    await soon(`${shown('tl-card')} && location.hash === '#talk/${T}' && history.state?.page === '#goals'`, 'the link followed again at once');
+    // (the subject's page head carries the card's t since kit-89, spec §2.5)
+    await soon(`${shown('tl-card')} && location.hash === '#talk/${T}' && history.state?.page === '#goals?t=${T}'`, 'the link followed again at once');
     assert.equal(await p.ev('history.state.depth'), 1, 'one entry above #goals');
   });
 
@@ -3394,7 +3441,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const before = await pin();
     assert.equal(before.n, '1');
     assert.ok(Math.abs(before.dx) <= 2 && Math.abs(before.dy) <= 2, `at the goal's top right corner: ${JSON.stringify(before)}`);
-    await p.ev(`window.__g = document.querySelector('${goalSel}'); void 0`);
+    // Goals draws only what changed (kit-90): its last drawing forgotten, so the next poll rebuilds the card
+    await p.ev(`window.__g = document.querySelector('${goalSel}'); GOALS_HTML = ''; void 0`);
     await soon('!window.__g.isConnected', 'the goal card redrawn');
     assert.deepEqual(await pin(), before, 'placed again after the rebuild');
     await click('[data-tl-close]');
@@ -3403,26 +3451,26 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from its pin');
   });
 
-  await t.test('the dock: the pill with its count and a dot for a reply not seen, where each subject is, New thread with no subject', async () => {
+  await t.test('the panel: the Inbox button counting a reply, where each subject is, New thread with no subject', async () => {
     await click('[data-tl-close]');
     F.sup(['thread', 'reply', T, 'Noted.']);
-    await soon(`/Threads · 1/.test(document.getElementById('tl-pill').textContent) && !!document.querySelector('#tl-pill .tl-dot')`, 'the count, and a dot for the reply');
-    await click('#tl-pill');
-    await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals')`, 'where its subject is');
+    await soon(`document.querySelector('.pagebar .tt .n.th.you')?.textContent === '1'`, 'the count: one your move');
+    await onThreads();
+    await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals') && !!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.you')`, 'where its subject is, and its mark');
     await click('[data-tl-new]');
-    await soon(`${shown('tl-card')} && document.getElementById('tl-card').classList.contains('in-dock')`, 'a card in the dock');
+    await soon(`${shown('tl-card')} && !!document.querySelector('#th-card-slot #tl-card.in-panel')`, 'a card in the panel');
     await p.ev("document.getElementById('tl-c-text').focus()");
     await p.type('What about onboarding?');
     await p.key('Enter', 8);
     const n = await until(() => threads().find((x) => x.title === 'What about onboarding?'), 'the thread with no subject');
     assert.equal(n.subject, null);
-    await soon(`/Threads · 2/.test(document.getElementById('tl-pill').textContent)`, 'two open');
     await p.ev('document.activeElement?.blur()');
-    await click('[data-tl-close]');
+    await click('[data-tl-back]');
+    await soon(`/Open 2/.test(document.querySelector('#th-pane [data-thf="open"]')?.textContent)`, 'two open');
   });
 
   await t.test('the pin button: pointing without Shift, until Esc', async () => {
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
+    await onThreads();
     await click('#tl-pinbtn');
     assert.equal(await p.ev(`document.getElementById('tl-pinbtn').getAttribute('aria-pressed')`), 'true');
     await still(async () => { const at = await p.at(`${goalSel} h4`); await p.move(at.x, at.y, 0); });
@@ -3431,9 +3479,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`document.getElementById('tl-cursor').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
   });
 
-  await t.test("a dock row keeps the keyboard's focus through reads that change the list", async () => {
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
-    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'its row');
+  await t.test("a panel row keeps the keyboard's focus through reads that change the list", async () => {
+    await onThreads();
+    // the owner's word first, so the supervisor's reply below changes the row's mark
+    F.owner(['thread', 'say', T, 'Over to you.']);
+    await p.ev('tlRefresh()');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.wait')`, 'its row, waiting on the supervisor');
     await p.ev(`window.__row = document.querySelector('#tl-list [data-tl-open="${T}"]'); window.__row.focus(); void 0`);
     F.sup(['thread', 'reply', T, 'One more thing.']);
     // a read begun now, and the polls beside it: waited on until one has brought the reply in
@@ -3442,12 +3493,13 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.ok(await p.ev('document.activeElement === window.__row && window.__row.isConnected'), 'focus still on the same row');
     await p.ev('window.__row.blur()');
     await p.ev('tlRefresh()');
-    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .tl-dot[role="img"][aria-label]')`, 'drawn once focus left, its dot named');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.you[role="img"][aria-label]')`, 'drawn once focus left, its mark named');
   });
 
   await t.test('a press on a pin across a read that adds a pin still opens its card', async () => {
-    await click('#tl-pill');
-    await soon(`document.getElementById('tl-panel').hidden`, 'the panel closed');
+    await click('#th-close');
+    // closed, and the page back at rest (its margin slides over --dur), so the pin stays where it is found
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'`, 'the panel closed, the page at rest');
     // still from finding the pin to pressing it; the reads then land under the press
     const at = await still(async () => {
       const xy = await p.at('.tl-pin');
@@ -3578,10 +3630,16 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
     await soon(`!document.getElementById('t-q-${Q}')?.querySelector('textarea, button[data-answer]') && /ship it/.test(document.getElementById('tl-c-turns').textContent)`, 'answered in the thread too');
     const X = F.owner(['thread', 'new', 'hello', '--title', `${H} hello`]).split('\n')[0];
-    await p.ev(`tlOpen('${X}')`);
-    await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)}`, 'the title as written');
-    assert.equal(await p.ev(`!!document.querySelector('#tl img') || !!window.__xss`), false, 'no element made from the title');
-    await click('[data-tl-close]');
+    // no subject: it opens in the panel, through the route
+    await p.ev(`location.hash = '#goals?th=open&t=${X}'`);
+    await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)} && !!document.querySelector('#th-card-slot #tl-card.in-panel')`, 'the title as written');
+    assert.equal(await p.ev(`!!document.querySelector('#tl img, #threads img') || !!window.__xss`), false, 'no element made from the title');
+    await soon(`getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
+    await click('[data-tl-back]');
+    // closed by its × (kit-89 T3: a nav to a head without keys would carry the remembered panel)
+    await soon(`location.hash === '#goals?th=open' && !!document.querySelector('#tl-list')`, 'the list');
+    await click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open') && location.hash === '#goals'`, 'the panel closed');
     F.owner(['thread', 'resolve', X]);
     await p.ev('tlRefresh()');
     await click(`[data-tl-pin="${T}"]`);
@@ -3669,19 +3727,24 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await click('[data-tl-accept]');
     await until(() => threads().find((x) => x.id === T).status === 'resolved', 'resolved');
     await soon(`!document.querySelector('[data-tl-pin="${T}"]') && document.getElementById('tl-card').hidden`, 'unpinned, the card closed');
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
-    await soon(`!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`, 'listed under Resolved');
+    await onThreads();
+    await click('#th-pane [data-thf="resolved"]');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'listed under Resolved');
     assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}` && o.detail === 'EU only'));
     assert.equal(JSON.parse(F.owner(['questions', '--id', Q2, '--json']))[0].status, 'open', 'its question stays in the Inbox');
   });
 
   await t.test('a resolved thread reopens from its card', async () => {
-    await p.ev(`document.querySelector('.tl-resolved').open = true`);
-    await click(`.tl-resolved [data-tl-open="${T}"]`);
+    await click(`#tl-list [data-tl-open="${T}"]`);
     await soon(`!!document.querySelector('[data-tl-reopen]')`, 'Reopen in its header');
     await click('[data-tl-reopen]');
     await until(() => threads().find((x) => x.id === T).status === 'open', 'reopened');
     await soon(`!!document.querySelector('[data-tl-pin="${T}"]')`, 'its pin back');
+    // the panel closed (by its ×, pressed in place: the card may sit over it)
+    await p.ev(`document.getElementById('th-close').click(); void 0`);
+    // and the page at rest after its slide back (the card on it placed again), so the next press lands where it was found
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'`, 'the panel closed');
+    await p.ev(FRAMES);
   });
 
   await t.test('a press on Resolve across a read still opens the form', async () => {
@@ -3748,7 +3811,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('Shift held over the drawer shows no pin, and its click is the drawer\'s', async () => {
     await p.ev(`location.hash = '#goal/${F.goal}'`);
-    await soon(shown('drawer'), 'the drawer');
+    await soon(slid(), 'the drawer');
     const at = await p.at('#drawer-close');
     await p.hold('Shift', true);
     await p.move(at.x, at.y, 8);
@@ -3778,6 +3841,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`location.hash = '#talk/${R}'`);
     // its own card: the card already open has a Resolve too, until the read of the new thread lands
     await soon(`document.getElementById('tl-card').dataset.key === '${R}' && !!document.querySelector('[data-tl-resolve]')`, 'its card');
+    // no subject: its card is in the Threads panel, which the link opened; pressed once it has slid in
+    await soon(`!!document.querySelector('#th-card-slot #tl-card.in-panel') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
     await click('[data-tl-resolve]');
     await soon(`!!document.getElementById('tl-outcome')`, 'the form');
     await p.ev(`document.getElementById('tl-outcome').focus()`);
@@ -4182,6 +4247,8 @@ test("the Library's preview card opens the stage here and the viewer in a tab; a
   const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
   const card = `[data-preview="${name}"]`;
   await soon(`!!document.querySelector('${card} a.av-open')`, 'the card');
+  const said = await soon(`(() => { const b = document.querySelector('${card} .art-t .badge'); return !!b && b.textContent !== 'checking' && b.textContent; })()`, "the card's first probe");
+  assert.equal(said, 'live', `an app answering on 127.0.0.1 reads live from the dashboard's first probe: ${said}`);
   assert.deepEqual(await link(`${card} a.av-open`), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'Open']);
   assert.deepEqual(await link(`${card} .art-t > a`), [`#preview/${name}`, '', '', 'Checkout']);
   assert.equal(await p.ev(`document.querySelector('${card} [data-copy]').dataset.copy`), `http://127.0.0.1:${app.port}/`, 'Copy link is still its own link');
@@ -4250,13 +4317,16 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   // a click anywhere on the card (here its detail, no link in it) opens it
   await click(`${card(O1)} > div`);
   await soon(`location.hash === '#observation/${O1}' && !document.getElementById('drawer').hidden`, 'the observation sidepeek');
-  await soon(`/From the supervisor/.test(document.querySelector('#drawer-body [data-from]')?.textContent ?? '')`, 'where it came from, first');
-  // an attribute's value, by its label (the label's tooltip is in its text)
+  // where it came from, under its properties (kit-88: every peek opens with its properties)
+  await soon(`/From the supervisor/.test(document.querySelector('#drawer-body section.attrs + [data-from]')?.textContent ?? '')`, 'where it came from, under the properties');
+  // an attribute's value, by its label (its tooltip is the key's title)
   const attr = (label) => p.ev(`[...document.querySelectorAll('#drawer-body .attrs dt')].find((x) => x.textContent.startsWith(${JSON.stringify(label)}))?.nextElementSibling?.textContent ?? null`);
   assert.equal(await attr('Where it sits'), 'Part of a recurring signal (2 of 3)', 'two slow-test notes on app, of the three a signal takes');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Observation/);
   // a signal whose key holds a /: its card opens #signal/<key>
   await p.ev(`document.getElementById('drawer-close').click()`);
+  // closed once it has slid out (kit-88): until then it still covers the cards under it
+  await soon(`document.getElementById('drawer').hidden`, 'the peek closed');
   await click('[data-tab="orient"]');
   const sig = `#clusters [data-open="signal/${encodeURIComponent('metrics:flaky-gate:web/e2e')}"]`;
   await soon(`!!document.querySelector(${JSON.stringify(sig)})`, 'the signal card');
@@ -4264,7 +4334,7 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   assert.match(await p.ev(`document.getElementById('debt').textContent`), /Metrics flaky-gate:web\/e2e · seen 3 times · unexplained for 30 hours/);
   await click(`${sig} > div`);
   await soon(`decodeURIComponent(location.hash) === '#signal/metrics:flaky-gate:web/e2e' && !document.getElementById('drawer').hidden`, 'the signal sidepeek');
-  await soon(`document.querySelectorAll('#drawer-body h3 + ul a[href^="#observation/"]').length === 3`, 'its three observations');
+  await soon(`document.querySelectorAll('#drawer-body .psect-body > ul a[href^="#observation/"]').length === 3`, 'its three observations');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Recurring signal/);
   assert.equal(await attr('Unexplained for'), '30 hours');
   // the lineage: Mermaid blocked, the list stands in, every record in it a link
@@ -4283,6 +4353,475 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   if (!drawn) return t.diagnostic('Mermaid did not load (offline?): the graph and its links were not checked');
   assert.equal(await p.ev(`document.querySelector('#drawer-body .lineage svg a[aria-current]').getAttribute('href')`), `#observation/${O4}`);
   assert.equal(await p.ev(`document.querySelectorAll('#drawer-body .lineage svg a.lineage-node title').length`), 2, 'each node titled');
+  // the peek at rest (kit-88: it reopened as the last one slid out), so the click lands where the node is
+  await soon(`getComputedStyle(document.getElementById('drawer')).transform === 'none'`, 'the peek at rest');
   await click('#drawer-body .lineage svg a.lineage-node:not([aria-current])');
   await soon(`location.hash === '#lesson/${K}'`, 'a node opens its sidepeek');
+});
+
+// kit-287: a goal approval's card offers Approve, Refine and Let go whatever the supervisor's
+// recommendation says, and each, through the page's own verdict map, is a body the dashboard server's
+// goal-decide check takes. Approve (or the verdict named) is marked only when the recommendation says
+// just that: "Yes, but refine the measure" marks nothing.
+test("a goal approval's choices are the three verdicts, each one the server takes, whatever the recommendation says", () => {
+  const PAGE = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
+  const SERVER = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const from = (src, start, end) => { const a = src.indexOf(start); const b = src.indexOf(end, a); assert.ok(a >= 0 && b > a, `${start} is in the source`); return src.slice(a, b); };
+  const line = (src, start) => from(src, start, '\n');
+  const ctx = vm.createContext({});
+  vm.runInContext([
+    // norm, the page's GOAL_VERDICTS and choicesOf, in the page's order
+    from(PAGE, 'const norm = ', '// An open owner-action without secrets'),
+    from(PAGE, 'const isOa = ', '\n// What the supervisor suggested'),
+    line(SERVER, 'const ID = /^[a-z]-'),
+    line(SERVER, 'const text = (x, max = 4000)'),
+    `const goalDecide = ${line(SERVER, "'goal-decide': (b) => ").replace(/^'goal-decide': /, '').replace(/,\s*$/, '')};`,
+    'this.choicesOf = choicesOf; this.GOAL_VERDICTS = GOAL_VERDICTS; this.goalDecide = goalDecide;',
+  ].join('\n'), ctx);
+  const G = 'g-20261117-174044056-supervisor';
+  const marks = { Yes: 'Approve', 'Yes.': 'Approve', APPROVE: 'Approve', approved: 'Approve', 'go ahead': 'Approve', Refine: 'Refine', 'let go': 'Let go', 'Refine the measure': null, No: null, 'Yes, but refine the measure': null, 'Approve with changes': null, '': null };
+  for (const rec of [...Object.keys(marks), null]) {
+    const c = JSON.parse(JSON.stringify(ctx.choicesOf({ kind: 'goal-approval', status: 'open', options: [], choices: [], secrets: [], recommendation: rec })));
+    assert.deepEqual(c.map((x) => x.label), ['Approve', 'Refine', 'Let go'], `recommendation ${JSON.stringify(rec)}: the three verdicts, nothing else`);
+    for (const x of c) assert.ok(ctx.goalDecide({ id: G, verdict: ctx.GOAL_VERDICTS[x.label] }), `recommendation ${JSON.stringify(rec)}: ${x.label} is a body the server takes`);
+    assert.deepEqual(c.filter((x) => x.rec).map((x) => x.label), marks[rec] ? [marks[rec]] : [], `recommendation ${JSON.stringify(rec)}: marks ${marks[rec] ?? 'nothing'}`);
+  }
+  assert.equal(ctx.goalDecide({ id: G, verdict: undefined }), null, 'and a label the map lacks is refused, as the owner saw');
+});
+
+// kit-287: a goal's approval from the phone, the way the owner presses it (390 px wide, the Inbox's
+// card): the recommended choice and Send record the approval once; a recommendation that names no
+// verdict is said in words; a refusal says plainly what went wrong, and Send works again.
+test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-goal-phone-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 84), DEVTEAM_PORT_BASE: String(PORTS + 85), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE'].includes(k)) delete env[k];
+  for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'goal-phone');
+  const dt = (args, role = { DEVTEAM_ROLE: 'supervisor' }) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }); assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+  // a goal defined in full, with a reading and milestones, and its design up for approval
+  const approval = (title, rec, priority) => {
+    const g = dt(['goal', 'add', '--title', title, '--outcome', `${title} holds`, '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)]).split('\n')[0].trim();
+    dt(['goal', 'reading', g, '--run']);
+    dt(['goal', 'set', g, '--milestones', JSON.stringify([{ title: 'Most admins pay alone', target: 80, preconditions: [1, 2], tickets: 2 }])]);
+    const q = dt(['ask', '--kind', 'goal-approval', '--goal', g, '--question', `Approve the ${title} design?`, '--recommendation', rec, '--links', JSON.stringify([{ title: 'The design', path: 'docs/devteam/project/designs/x.md' }])]).split('\n')[0].trim();
+    return { g, q };
+  };
+  const GY = approval('Admins pay alone', 'Yes', 1);
+  const GR = approval('Refunds without support', 'Refine the measure', 2);
+  // what the log holds for a goal's decision and its question's answer, as goal decide writes them
+  const logLines = () => fs.readdirSync(path.join(root, 'docs/devteam/run/log')).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(root, 'docs/devteam/run/log', f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+  const decided = (g, verdict) => logLines().filter((l) => l.type === 'goal' && l.op === 'set' && l.id === g && l.decision?.verdict === verdict).length;
+  const answers = (q) => logLines().filter((l) => l.type === 'question' && l.op === 'set' && l.id === q && l.answer !== undefined).length;
+  const asked = (q) => JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === q);
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  // kit-300: DEVTEAM_TEST_CPU_THROTTLE=<n> runs the page n times slower, as a loaded runner does;
+  // DEVTEAM_TEST_SLIDE_MS=<ms> makes the panel's slide-in take that long, so a click aimed while it
+  // moves (the race this test lost on CI, where the cards drew before the slide had ended) always shows
+  if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
+  if (process.env.DEVTEAM_TEST_SLIDE_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `document.addEventListener('DOMContentLoaded', () => document.documentElement.style.setProperty('--dur', '${Number(process.env.DEVTEAM_TEST_SLIDE_MS)}ms'))` });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
+  const soon = soonIn(p, 30000, () => dash.out());
+  const card = (q) => `document.getElementById('q-${q}')`;
+  // a step no read lands in, from finding what to click to the release's own work (pointerup's
+  // setTimeout draws what the press held back), as the presses test has it: a redraw can't replace
+  // what is clicked between its press and its release
+  const still = async (f) => { await p.ev('window.__still()'); try { await f(); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
+  await soon(`!!${card(GY.q)} && !!${card(GR.q)} && innerWidth === 390`, 'both approvals, on a phone');
+  // kit-300: the cards are the Threads panel's Inbox tab (#th-inbox #questions), which slides in over
+  // --dur. A click aims at where its target is, then presses there: aimed while the panel still moves
+  // (the cards can draw before the slide ends), the press lands beside the choice and picks nothing
+  await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open on Inbox, at rest');
+
+  await t.test('a recommendation that names no verdict is said as words', async () => {
+    const shown = async (q) => JSON.parse(await p.ev(`JSON.stringify((() => { const c = ${card(q)}; return { suggest: c.querySelector('[data-goal-suggest]')?.textContent ?? null, labels: [...c.querySelectorAll('input[data-pick]')].map((i) => i.value), rec: [...c.querySelectorAll('.choice.rec input')].map((i) => i.value) }; })())`));
+    assert.deepEqual(await shown(GR.q), { suggest: 'Suggested: Refine the measure', labels: ['Approve', 'Refine', 'Let go'], rec: [] }, 'the suggestion in words; no choice marked, none added');
+    assert.deepEqual(await shown(GY.q), { suggest: null, labels: ['Approve', 'Refine', 'Let go'], rec: ['Approve'] }, '"Yes" marks Approve, with no line of its own');
+  });
+
+  // the goal's status as the dashboard's server has it
+  const goalStatus = async (g) => (await (await fetch(`http://127.0.0.1:${port}/api/data`)).json()).ooda.goals.find((x) => x.id === g)?.status;
+  // a wait on the server, whose failure says what the card said (a refusal, in the red run)
+  const onServer = async (f, what, q) => {
+    const end = Date.now() + 30000;
+    while (!(await f())) {
+      if (Date.now() > end) assert.fail(`timed out: ${what}; the card says: ${JSON.stringify(await p.ev(`${card(q)}?.querySelector('[data-refused]')?.textContent ?? ${card(q)}?.querySelector('.err')?.textContent ?? 'no card'`))}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+
+  await t.test('a stale pick is refused on the page, and nothing is posted', async () => {
+    let said = null;
+    // the click and the read in one still step: no read redraws the card's error line between them
+    await still(async () => { said = await p.ev(`(() => { picks['${GR.q}'] = 'Yes'; window.__posts = []; ${card(GR.q)}.querySelector('[data-answer]').click(); return document.getElementById('e-${GR.q}').textContent; })()`); });
+    assert.equal(said, 'Choose Approve, Refine or Let go.');
+    assert.deepEqual(JSON.parse(await p.ev('JSON.stringify(window.__posts)')), [], 'nothing posted');
+    await p.ev(`delete picks['${GR.q}']; void 0`);
+  });
+
+  await t.test('refused, said plainly, and pressed again: recorded once', async () => {
+    // the next goal press reaches the real server with a verdict it doesn't take, as a page older
+    // than its server could send one
+    await p.ev(`(() => { const f0 = window.fetch; window.__badVerdict = true; window.fetch = (u, o) => { if (window.__badVerdict && String(u) === '/api/goal-decide') { window.__badVerdict = false; o = { ...o, body: JSON.stringify({ ...JSON.parse(o.body), verdict: 'yes' }) }; } return f0(u, o); }; })(); void 0`);
+    // the pick pressed, and the note written as an input event (a focus from a phone's emulated tap
+    // isn't certain on a loaded runner, and typing isn't what this checks), in one still step: no
+    // read redraws the card between them
+    await still(async () => {
+      await p.click(`#q-${GR.q} input[data-pick][value="Refine"]`);
+      await p.ev(`(() => { const ta = ${card(GR.q)}.querySelector('textarea[data-q]'); ta.value = 'a smaller measure'; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    });
+    await soon(`${card(GR.q)}.querySelector('textarea[data-q]').value === 'a smaller measure'`, 'the note typed');
+    await still(() => p.click(`#q-${GR.q} [data-answer]`));
+    // timed out, it says what the card showed instead: its error line, the pick, what was posted
+    for (const end = Date.now() + 30000; !(await p.ev(`!!${card(GR.q)}?.querySelector('[data-refused]')`));) {
+      if (Date.now() > end) assert.fail(`timed out: the refusal, on the card; it shows ${await p.ev(`JSON.stringify({ err: document.getElementById('e-${GR.q}')?.textContent ?? null, pick: picks['${GR.q}'] ?? null, posts: (window.__posts ?? []).map((x) => x.url) })`)}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const said = await p.ev(`${card(GR.q)}.querySelector('[data-refused]').textContent`);
+    assert.match(said, /^Not saved: the server didn't take this approval as sent, and nothing was recorded\. Reload the page and press Approve, Refine or Let go again\./, said);
+    assert.doesNotMatch(said, /missing or invalid fields/, 'never the server\'s terse words');
+    assert.equal(await p.ev(`${card(GR.q)}.querySelector('input[data-pick][value="Refine"]').checked`), true, 'the pick back');
+    assert.equal(await p.ev(`${card(GR.q)}.querySelector('textarea[data-q]').value`), 'a smaller measure', 'the note back');
+    assert.equal(asked(GR.q).status, 'open', 'nothing recorded');
+    await still(() => p.click(`#q-${GR.q} [data-answer]`));
+    await onServer(() => asked(GR.q).status === 'answered', 'the approval pressed again, on the server', GR.q);
+    assert.equal(asked(GR.q).answer, 'Refine — a smaller measure');
+    assert.equal(decided(GR.g, 'refine'), 1, 'one decision');
+    assert.equal(answers(GR.q), 1, 'one answer');
+  });
+
+  await t.test("any other press's refusal of a body the server can't read is said plainly too", async () => {
+    // the goal's own Let go and Restore post goal-decide as well: their refusal names no Approve or Refine
+    const said = await p.ev(`(async () => { const s = document.createElement('span'); s.id = 'e-plain-probe'; document.body.append(s); await press('plain-probe', { build: () => ({ action: 'goal-decide', body: { id: '${GR.g}', verdict: 'nonsense' } }), errId: 'plain-probe' }); const t = s.textContent; s.remove(); return t; })()`);
+    assert.equal(said, "Not saved: the server didn't take what this page sent, and nothing was recorded. Reload the page and try again.");
+  });
+
+  await t.test('the recommended press is recorded once', async () => {
+    await still(() => p.click(`#q-${GY.q} .choice.rec input[data-pick]`));
+    await soon(`${card(GY.q)}.querySelector('.choice.rec input[data-pick]').checked`, 'the recommended choice picked');
+    // pressed as the owner presses it, whatever the recommended choice is called: before #337 it was
+    // "Yes", and the server refused the press ("missing or invalid fields", shown by this wait failing)
+    await still(() => p.click(`#q-${GY.q} [data-answer]`));
+    await onServer(async () => asked(GY.q).status === 'answered' && (await goalStatus(GY.g)) === 'ready', 'the approval recorded and the goal ready', GY.q);
+    assert.equal(asked(GY.q).answer, 'Approve');
+    assert.equal(decided(GY.g, 'approve'), 1, 'one decision');
+    assert.equal(answers(GY.q), 1, 'one answer');
+  });
+});
+
+// ----- kit watch (kit-288): a dashboard runs the kit it serves. When its own kit files change
+// (scripts/devteam.mjs, dashboard/*.html|js|css) and settle, it finishes what is in flight and hands
+// over to the new code: it exits under a while loop (the box's), respawns its own tmux pane (a
+// laptop's window), and otherwise stays and says so in run/dashboard.log.
+const KW_WATCH = `const g = Number(process.argv[1]); const end = () => { try { process.kill(-g, 'SIGKILL'); } catch {} process.exit(0); };
+process.stdin.on('end', end); process.stdin.on('close', end); process.stdin.on('error', end); process.stdin.resume();`;
+const kwSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const kwAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const KW_GIT = ['-c', 'user.name=t', '-c', 'user.email=t@t'];
+const kwHello = async (port) => { try { const r = await fetch(`http://127.0.0.1:${port}/api/hello`); return r.ok ? await r.json() : null; } catch { return null; } };
+const kwLogOf = (root) => () => { try { return fs.readFileSync(path.join(root, 'docs/devteam/run/dashboard.log'), 'utf8'); } catch { return ''; } };
+// each started line: its pid and its text
+const kwStartsOf = (log) => () => log().split('\n').filter((l) => / started (\(kit B\) )?on http/.test(l)).map((l) => ({ pid: Number(l.match(/\[(\d+)\]/)?.[1]), line: l }));
+function kwEnv(base, extra = {}) {
+  const env = { ...process.env, HOME: path.join(base, 'home'), DEVTEAM_HUB_PORT: String(PORTS + 91), DEVTEAM_PORT_BASE: String(PORTS + 92), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex'), DEVTEAM_KIT_WATCH_MS: '200', ...extra };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_DASHBOARD_RESTART', 'TMUX', 'TMUX_PANE']) if (!(k in extra)) delete env[k];
+  fs.mkdirSync(env.HOME, { recursive: true });
+  return env;
+}
+// A project of its own on release v0.0.1, its whole tree committed, so its kit reads v0.0.1 (not +local).
+function kwFixture(t, name) {
+  const later = cleanup(t);
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), `devteam-kw-${name}-`));
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const root = bareProject(base, name);
+  const sf = path.join(root, 'docs/devteam/project/settings.md');
+  const s = fs.readFileSync(sf, 'utf8');
+  assert.match(s, /"upstream_base": null/);
+  fs.writeFileSync(sf, s.replace('"upstream_base": null', '"upstream_base": "v0.0.1"'));
+  execFileSync('git', ['add', '-A'], { cwd: root });
+  execFileSync('git', [...KW_GIT, 'commit', '-qm', 'v0.0.1'], { cwd: root });
+  const dt = path.join(root, 'docs/devteam/scripts/devteam.mjs');
+  return { base, root, dt, env: kwEnv(base), later, orig: fs.readFileSync(dt, 'utf8') };
+}
+// The new kit: the original script with a marker in its start line. With base, made in a clone and
+// fast-forwarded in, so the files and main move in one step and the kit reads as that release.
+function kitB(F, { base = null, text = null } = {}) {
+  const b = text ?? F.orig.replace('started on http://', 'started (kit B) on http://');
+  assert.notEqual(b, F.orig, 'the start line is marked');
+  if (!base) return void fs.writeFileSync(F.dt, b);
+  const c = path.join(F.base, `b-${crypto.randomBytes(3).toString('hex')}`);
+  execFileSync('git', ['clone', '-q', F.root, c]);
+  fs.writeFileSync(path.join(c, 'docs/devteam/scripts/devteam.mjs'), b);
+  const sf = path.join(c, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace(/"upstream_base": "v[\d.]+"/, `"upstream_base": "${base}"`));
+  execFileSync('git', [...KW_GIT, 'commit', '-qam', base], { cwd: c });
+  execFileSync('git', ['pull', '-q', '--ff-only', c, 'main'], { cwd: F.root });
+}
+// A dashboard under a while loop, as the box runs it: a process group of its own, ended when the test
+// is done (or by the watcher when the test process dies any way at all), and by its own condition
+// when the test process or the fixture is gone. Resolved once /api/hello answers with a kit.
+async function loopedDashboard(F, port, extra = {}) {
+  const env = { ...F.env, ...extra };
+  const loop = `while kill -0 ${process.pid} 2>/dev/null && [ -d '${F.root}' ]; do '${process.execPath}' '${F.dt}' dashboard --port ${port}; sleep 1; done`;
+  const p = spawn('sh', ['-c', loop], { cwd: F.root, env, stdio: 'ignore', detached: true });
+  p.on('error', () => {});
+  const w = spawn(process.execPath, ['-e', KW_WATCH, String(p.pid)], { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  w.on('error', () => {});
+  w.stdin.on('error', () => {});
+  w.unref();
+  w.stdin.unref();
+  p.unref();
+  F.later(async () => {
+    try { w.kill('SIGKILL'); } catch {}
+    w.stdin.destroy();
+    for (let i = 0; i < 200; i++) { try { process.kill(-p.pid, 'SIGKILL'); } catch { break; } await kwSleep(50); }
+  });
+  const log = kwLogOf(F.root);
+  const starts = kwStartsOf(log);
+  await until(async () => (await kwHello(port))?.kit, 'the looped dashboard with its kit');
+  return { log, starts, group: p.pid };
+}
+const kwCount = (s, re) => (s.match(new RegExp(re.source, `${re.flags.replace('g', '')}g`)) ?? []).length;
+
+test('kit watch: a looped dashboard restarts into the new kit when devteam.mjs changes, naming both versions', { timeout: 180000 }, async (t) => {
+  const F = kwFixture(t, 'kwloop');
+  const port = await freePort();
+  const d = await loopedDashboard(F, port);
+  const first = d.starts()[0].pid;
+  assert.equal((await kwHello(port)).kit, 'v0.0.1');
+  kitB(F, { base: 'v0.0.2' });
+  await until(() => /restarting: kit files changed \(scripts\/devteam\.mjs\) from v0\.0\.1 to v0\.0\.2/.test(d.log()), 'the restarting line, with both versions');
+  await until(() => d.starts().some((s) => s.line.includes(`started (kit B) on http://127.0.0.1:${port}`)), 'the new kit started');
+  assert.equal(kwAlive(first), false, 'the old process is gone');
+  await until(async () => (await kwHello(port))?.kit === 'v0.0.2', 'the address answers again, on v0.0.2');
+});
+
+test("kit watch: a dashboard page file restarts it too; the project's files do not", { timeout: 180000 }, async (t) => {
+  const F = kwFixture(t, 'kwpage');
+  const port = await freePort();
+  const d = await loopedDashboard(F, port);
+  const first = d.starts()[0].pid;
+  write(path.join(F.root, 'docs/devteam/project/notes.md'), 'notes\n');
+  const sf = path.join(F.root, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace(/"project": "[^"]*"/, '"project": "kwpage-renamed"'));
+  write(path.join(F.root, 'docs/devteam/run/x.txt'), 'x\n');
+  await kwSleep(2000);
+  assert.doesNotMatch(d.log(), /restarting/, "the project's own files restart nothing");
+  assert.ok(kwAlive(first) && (await kwHello(port)), 'the first dashboard still answers');
+  fs.appendFileSync(path.join(F.root, 'docs/devteam/dashboard/index.html'), '<!-- b -->\n');
+  await until(() => /restarting: kit files changed \(dashboard\/index\.html\)/.test(d.log()) && d.starts().length === 2 && d.starts()[1].pid !== first, 'a restart for the page');
+  await until(async () => (await kwHello(port))?.kit, 'the second dashboard with its kit');
+  write(path.join(F.root, 'docs/devteam/dashboard/extra.css'), 'body {}\n');
+  await until(() => /restarting: kit files changed \(dashboard\/extra\.css\)/.test(d.log()) && d.starts().length === 3, 'a restart for a new stylesheet');
+});
+
+test('kit watch: a kit that does not parse is not started', { timeout: 180000 }, async (t) => {
+  const F = kwFixture(t, 'kwparse');
+  const port = await freePort();
+  const d = await loopedDashboard(F, port);
+  const first = d.starts()[0].pid;
+  fs.writeFileSync(F.dt, `${F.orig}\n}}}\n`);
+  await until(() => /does not parse/.test(d.log()), 'the broken kit named');
+  await kwSleep(2000);
+  assert.equal(kwCount(d.log(), /does not parse/), 1, 'said once, not once a poll');
+  assert.ok(kwAlive(first), 'the first dashboard still runs');
+  assert.ok(await kwHello(port), 'and answers');
+  kitB(F);
+  await until(() => d.starts().some((s) => s.line.includes('started (kit B)')), 'the fixed kit started');
+});
+
+// A request to the dashboard as its own page sends it: its body written by the test, part by part.
+function kwPost(port, route, body) {
+  const buf = Buffer.from(JSON.stringify(body));
+  let resolveRes;
+  const answered = new Promise((r) => { resolveRes = r; });
+  const req = http.request({ host: '127.0.0.1', port, path: route, method: 'POST', headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: `http://127.0.0.1:${port}`, 'content-length': buf.length } }, (res) => {
+    let b = '';
+    res.on('data', (c) => { b += c; });
+    res.on('end', () => resolveRes({ status: res.statusCode, body: b }));
+  });
+  req.on('error', (e) => resolveRes({ status: 0, body: e.message }));
+  return { buf, req, answered };
+}
+
+test('kit watch: an answer in flight is answered before the restart', { timeout: 180000 }, async (t) => {
+  const F = kwFixture(t, 'kwflight');
+  const port = await freePort();
+  const d = await loopedDashboard(F, port);
+  const first = d.starts()[0].pid;
+  const { buf, req, answered } = kwPost(port, '/api/thread-new', { title: 'kit watch', text: 'in flight' });
+  req.write(buf.subarray(0, 10));
+  await kwSleep(300);
+  kitB(F);
+  await until(() => /restarting: .*waiting for 1 open requests/.test(d.log()), 'the restart waiting on the request');
+  await kwSleep(2000);
+  assert.ok(kwAlive(first), 'the old dashboard waits for the request');
+  assert.ok(!d.starts().some((s) => s.line.includes('started (kit B)')), 'and the new kit has not started');
+  req.end(buf.subarray(10));
+  const r = await answered;
+  assert.equal(r.status, 200, r.body);
+  assert.equal(JSON.parse(r.body).ok, true);
+  await until(() => d.starts().some((s) => s.line.includes('started (kit B)')), 'the new kit started after the answer');
+  const threads = JSON.parse(execFileSync(process.execPath, [F.dt, 'thread', 'list', '--json'], { cwd: F.root, env: F.env, encoding: 'utf8' }));
+  assert.ok(threads.some((x) => x.title === 'kit watch'), 'the thread the request made is there');
+});
+
+test('kit watch: a press whose command is still typing holds the restart', { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  const T = threadsFixture('kit-watch-press');
+  const later = cleanup(t);
+  later(() => T.done());
+  const env = { ...T.env({}), HOME: path.join(T.base, 'kwhome'), DEVTEAM_HUB_PORT: String(PORTS + 91), DEVTEAM_PORT_BASE: String(PORTS + 92), DEVTEAM_KIT_WATCH_MS: '200' };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_DASHBOARD_RESTART', 'TMUX', 'TMUX_PANE']) delete env[k];
+  fs.mkdirSync(env.HOME, { recursive: true });
+  const dt = path.join(T.old, 'docs/devteam/scripts/devteam.mjs');
+  const F = { base: T.base, root: T.old, dt, env, later, orig: fs.readFileSync(dt, 'utf8') };
+  const pane = T.standIn();
+  for (const n of ['supervisor-pane', 'supervisor-pane-role']) fs.writeFileSync(path.join(T.old, 'docs/devteam/run', n), pane.target);
+  // tmux whose send-keys waits for the test's go: the answer's command is still typing after its reply
+  const bin = path.join(T.base, 'kwbin');
+  const go = path.join(T.base, 'kwgo');
+  write(path.join(bin, 'tmux'), `#!/bin/sh\ncase " $* " in *" send-keys "*) i=0; while [ ! -e '${go}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done ;; esac\nPATH='${env.PATH}' exec tmux "$@"\n`);
+  fs.chmodSync(path.join(bin, 'tmux'), 0o755);
+  const port = await freePort();
+  const d = await loopedDashboard(F, port, { PATH: `${bin}${path.delimiter}${env.PATH}` });
+  const first = d.starts()[0].pid;
+  const q = T.sup(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]']);
+  const { buf, req, answered } = kwPost(port, '/api/answer', { id: q, answer: 'Yes' });
+  req.end(buf);
+  const r = await answered;
+  assert.equal(r.status, 200, r.body);
+  kitB(F);
+  await until(() => /restarting: .*waiting for 0 open requests and 1 running commands/.test(d.log()), 'the restart waiting on the command');
+  await kwSleep(2000);
+  assert.ok(kwAlive(first), 'the old dashboard waits for the command');
+  assert.ok(!d.starts().some((s) => s.line.includes('started (kit B)')), 'and the new kit has not started');
+  fs.writeFileSync(go, '');
+  await until(() => pane.typed().includes('[devteam answer'), 'the nudge typed');
+  assert.ok(!d.starts().some((s) => s.line.includes('started (kit B)')), 'the nudge landed before the new kit started (the loop waits 1 s after the old one exits)');
+  await until(() => d.starts().some((s) => s.line.includes('started (kit B)')), 'the new kit started after the nudge');
+});
+
+test('kit watch: supervisor.md says the dashboard restarts itself', () => {
+  const doc = fs.readFileSync(path.join(kit, 'process', 'supervisor.md'), 'utf8');
+  const s11 = doc.slice(doc.indexOf('\n## 11.'), doc.indexOf('\n## 12.'));
+  const bullet = s11.split('\n').find((l) => l.startsWith('- The dashboard:'));
+  assert.ok(bullet, "§11's dashboard bullet");
+  assert.match(bullet, /restarts itself when its kit/);
+  assert.match(bullet, /DEVTEAM_DASHBOARD_RESTART/);
+  assert.match(bullet, /no manual restart after a sync/i);
+});
+
+// tmux, in the test lib's own server only (its TMUX_TMPDIR shim): never the box's, never kill-server.
+const kwTmux = (args) => { const r = spawnSync('tmux', args, { encoding: 'utf8', env: process.env, timeout: 20000 }); return { status: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() }; };
+const kwSq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+// a pane's command starts with the fixture's whole environment, so a pane's dashboard never touches
+// the real ~/.devteam, hub or tmux
+const kwInPane = (env, cmd) => `env ${Object.entries(env).filter(([k]) => /^(HOME|PATH|CLAUDE_CONFIG_DIR|CODEX_HOME|TMUX_TMPDIR|DEVTEAM_[A-Z0-9_]+)$/.test(k)).map(([k, v]) => kwSq(`${k}=${v}`)).join(' ')} ${cmd}`;
+function kwSession(F, prefix) {
+  const s = `${prefix}-${crypto.randomBytes(3).toString('hex')}`;
+  F.later(() => { kwTmux(['kill-session', '-t', `=${s}`]); });
+  return s;
+}
+const kwPanePid = (target) => Number(kwTmux(['display-message', '-p', '-t', target, '#{pane_pid}']).out);
+
+test('kit watch: a dashboard that is its own tmux pane respawns it', { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  const F = kwFixture(t, 'kwpane');
+  const [P1, P2] = [await freePort(), await freePort()];
+  const s = kwSession(F, 'kw');
+  const run = (p) => `${kwSq(process.execPath)} ${kwSq(F.dt)} dashboard --port ${p}`;
+  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', '-c', F.root, kwInPane(F.env, run(P1))]).status, 0);
+  assert.equal(kwTmux(['new-window', '-d', '-t', `=${s}:`, '-n', 'b', '-c', F.root, `${kwInPane(F.env, run(P2))}; true`]).status, 0);
+  const log = kwLogOf(F.root);
+  const starts = kwStartsOf(log);
+  await until(async () => (await kwHello(P1))?.kit && (await kwHello(P2))?.kit, 'both pane dashboards with their kit');
+  const startOf = (p, b = false) => starts().find((x) => x.line.includes(`started ${b ? '(kit B) ' : ''}on http://127.0.0.1:${p}`));
+  const [a0, b0] = [kwPanePid(`=${s}:a`), kwPanePid(`=${s}:b`)];
+  assert.equal(a0, startOf(P1).pid, "window a's pane process is the dashboard itself");
+  assert.notEqual(b0, startOf(P2).pid, "window b's is the shell that runs it");
+  kitB(F);
+  await until(() => startOf(P1, true) && startOf(P2, true), 'both panes started the new kit');
+  await until(async () => (await kwHello(P1)) && (await kwHello(P2)), 'both addresses answer again');
+  assert.notEqual(kwPanePid(`=${s}:a`), a0, 'pane a was respawned');
+  assert.notEqual(kwPanePid(`=${s}:b`), b0, 'pane b was respawned');
+});
+
+test('kit watch: a failed respawn listens again on the old code', { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  const F = kwFixture(t, 'kwnorespawn');
+  const bin = path.join(F.base, 'kwbin');
+  write(path.join(bin, 'tmux'), `#!/bin/sh\ncase " $* " in *" respawn-pane "*) echo 'respawn refused by the test' >&2; exit 1 ;; esac\nPATH=${kwSq(F.env.PATH)} exec tmux "$@"\n`);
+  fs.chmodSync(path.join(bin, 'tmux'), 0o755);
+  const port = await freePort();
+  const s = kwSession(F, 'kwn');
+  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', '-c', F.root, kwInPane({ ...F.env, PATH: `${bin}${path.delimiter}${F.env.PATH}` }, `${kwSq(process.execPath)} ${kwSq(F.dt)} dashboard --port ${port}`)]).status, 0);
+  const log = kwLogOf(F.root);
+  await until(async () => (await kwHello(port))?.kit, 'the pane dashboard with its kit');
+  const first = kwStartsOf(log)()[0].pid;
+  kitB(F);
+  await until(() => /could not respawn/.test(log()), 'the failed respawn said');
+  await until(async () => !!(await kwHello(port)), 'the address answers again');
+  assert.ok(kwAlive(first), 'from the first process');
+  assert.ok(!/started \(kit B\)/.test(log()), 'on the old code');
+  fs.appendFileSync(path.join(F.root, 'docs/devteam/dashboard/index.html'), '<!-- c -->\n');
+  await until(() => kwCount(log(), /restarting: kit files changed/) === 2, 'a new change noticed again: its timers came back');
+});
+
+test("kit watch: a pane whose process is a dashboard's parent but no shell is never respawned", { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  // an agent as a pane's own command, its child the dashboard, "dashboard" in its own arguments
+  const F = kwFixture(t, 'kwagent');
+  const port = await freePort();
+  const parent = path.join(F.base, 'agent.mjs');
+  write(parent, `import { spawn } from 'node:child_process';\nconst c = spawn(process.execPath, [${JSON.stringify(F.dt)}, 'dashboard', '--port', '${port}'], { stdio: 'inherit', cwd: ${JSON.stringify(F.root)} });\nc.on('exit', () => setInterval(() => {}, 1000));\n`);
+  const s = kwSession(F, 'kwa');
+  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', '-c', F.root, kwInPane(F.env, `${kwSq(process.execPath)} ${kwSq(parent)} --task kit-288-dashboard-self-restart`)]).status, 0);
+  const log = kwLogOf(F.root);
+  await until(async () => (await kwHello(port))?.kit, 'the dashboard under the agent');
+  const p0 = kwPanePid(`=${s}:a`);
+  const dash = kwStartsOf(log)()[0].pid;
+  assert.notEqual(p0, dash, "the pane's process is the agent, not the dashboard");
+  kitB(F);
+  await until(() => /runs older code than its files/.test(log()), 'the stale code said');
+  await kwSleep(1000);
+  assert.equal(kwPanePid(`=${s}:a`), p0, "the agent's pane was never respawned");
+  assert.ok(kwAlive(p0) && kwAlive(dash), 'both still run');
+});
+
+test('kit watch: a plain dashboard, or one told off, stays and says so', { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  // (a) no loop, and the TMUX_PANE it inherited is a pane whose process is something else
+  const F = kwFixture(t, 'kwstay');
+  const s = kwSession(F, 'kws');
+  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', 'sleep 600']).status, 0);
+  const paneId = kwTmux(['display-message', '-p', '-t', `=${s}:a`, '#{pane_id}']).out;
+  const sock = kwTmux(['display-message', '-p', '-t', `=${s}:a`, '#{socket_path}']).out;
+  const spid = kwTmux(['display-message', '-p', '-t', `=${s}:a`, '#{pid}']).out;
+  const p0 = kwPanePid(`=${s}:a`);
+  const { dash, port } = await dashboardOnFreePort(F.root, { ...F.env, TMUX: `${sock},${spid},0`, TMUX_PANE: paneId });
+  F.later(() => dash.stop());
+  const log = kwLogOf(F.root);
+  await until(async () => (await kwHello(port))?.kit, 'the plain dashboard with its kit');
+  kitB(F);
+  await until(() => /runs older code than its files/.test(log()), 'the stale code said');
+  await kwSleep(2000);
+  assert.equal(kwCount(log(), /runs older code than its files/), 1, 'said once');
+  assert.ok(kwAlive(dash.p.pid) && (await kwHello(port)), 'it stays up');
+  assert.equal(kwPanePid(`=${s}:a`), p0, 'and never respawned the pane it inherited');
+  // (b) under a loop, told off
+  const G = kwFixture(t, 'kwoff');
+  const gp = await freePort();
+  const d = await loopedDashboard(G, gp, { DEVTEAM_DASHBOARD_RESTART: 'off' });
+  const first = d.starts()[0].pid;
+  kitB(G);
+  await until(() => /runs older code than its files;.*\(DEVTEAM_DASHBOARD_RESTART=off\)/.test(d.log()), 'the stale code said, off');
+  await kwSleep(1000);
+  assert.ok(kwAlive(first) && !d.starts().some((x) => x.line.includes('started (kit B)')), 'it stays on its code');
 });

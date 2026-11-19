@@ -1,0 +1,158 @@
+{
+  "roots": {
+    "devteam-dev": "/fixture/code/devteam-dev",
+    "mothership": "/fixture/code/mothership"
+  },
+  "page_size": 4096,
+  "processes": {
+    "27": {
+      "kind": "other"
+    },
+    "640": {
+      "kind": "other"
+    },
+    "700": {
+      "kind": "node"
+    },
+    "812": {
+      "kind": "other",
+      "project": "devteam-dev"
+    },
+    "905": {
+      "kind": "other"
+    },
+    "1001": {
+      "kind": "agent",
+      "project": "devteam-dev"
+    },
+    "1102": {
+      "kind": "devteam",
+      "subcommand": "dashboard",
+      "project": "devteam-dev"
+    },
+    "1150": {
+      "kind": "devteam",
+      "subcommand": "wait",
+      "project": "mothership"
+    },
+    "1203": {
+      "kind": "agent",
+      "project": "devteam-dev",
+      "session": true
+    },
+    "1240": {
+      "kind": "devteam",
+      "subcommand": "hello",
+      "project": "devteam-dev"
+    },
+    "1302": {
+      "kind": "agent",
+      "project": "mothership",
+      "session": true
+    },
+    "1311": {
+      "kind": "agent",
+      "project": "mothership",
+      "session": true
+    },
+    "1350": {
+      "kind": "devteam",
+      "subcommand": "gate",
+      "project": "mothership"
+    },
+    "1388": {
+      "kind": "install",
+      "project": "devteam-dev"
+    },
+    "1395": {
+      "kind": "other",
+      "project": "devteam-dev"
+    },
+    "1420": {
+      "kind": "browser",
+      "project": "mothership"
+    },
+    "1440": {
+      "kind": "install",
+      "project": "mothership"
+    },
+    "1466": {
+      "kind": "node",
+      "project": "mothership"
+    },
+    "1490": {
+      "kind": "devteam",
+      "project": "mothership"
+    }
+  },
+  "reading": {
+    "v": 1,
+    "at": "2026-11-17T14:00:00Z",
+    "working_set": 20401094656,
+    "max": 51539607552,
+    "source": "cgroup",
+    "sessions": 3,
+    "kinds": {
+      "agent": {
+        "n": 4,
+        "rss": 1409024000
+      },
+      "browser": {
+        "n": 1,
+        "rss": 307200000
+      },
+      "install": {
+        "n": 2,
+        "rss": 282624000
+      },
+      "devteam": {
+        "n": 5,
+        "rss": 552960000
+      },
+      "node": {
+        "n": 2,
+        "rss": 110592000
+      },
+      "other": {
+        "n": 5,
+        "rss": 66355200
+      }
+    },
+    "devteam": {
+      "dashboard": {
+        "n": 1,
+        "rss": 212992000
+      },
+      "wait": {
+        "n": 1,
+        "rss": 73728000
+      },
+      "hello": {
+        "n": 1,
+        "rss": 98304000
+      },
+      "gate": {
+        "n": 1,
+        "rss": 122880000
+      }
+    },
+    "projects": {
+      "devteam-dev": {
+        "rss": 1495449600,
+        "sessions": 1,
+        "devteam": {
+          "dashboard": 212992000,
+          "hello": 98304000
+        }
+      },
+      "mothership": {
+        "rss": 1179648000,
+        "sessions": 2,
+        "devteam": {
+          "wait": 73728000,
+          "gate": 122880000
+        }
+      }
+    }
+  }
+}

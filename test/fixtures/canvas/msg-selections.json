@@ -1,0 +1,17 @@
+{
+  "t": "selections",
+  "people": [
+    {
+      "id": "ana",
+      "name": "Ana Lima",
+      "ids": [
+        "card"
+      ]
+    },
+    {
+      "id": "owner",
+      "name": "Owner",
+      "ids": []
+    }
+  ]
+}

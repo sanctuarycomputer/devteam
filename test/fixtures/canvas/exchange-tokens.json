@@ -1,0 +1,689 @@
+{
+  "canvas": "doc-minimal.json",
+  "slug": "tokens-board",
+  "steps": [
+    {
+      "open": "a",
+      "person": "ana;name=Ana%20Lima",
+      "level": null,
+      "expect": {
+        "a": [
+          {
+            "t": "welcome",
+            "canvas": 1,
+            "session": "$session",
+            "rev": 0,
+            "you": {
+              "id": "ana",
+              "conn": "$conn:a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "a": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 1,
+        "ops": [
+          {
+            "op": "token",
+            "path": "color.brand",
+            "value": {
+              "$type": "color",
+              "$value": {
+                "colorSpace": "srgb",
+                "components": [
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          },
+          {
+            "op": "add",
+            "node": {
+              "id": "r1",
+              "type": "rect",
+              "parent": "p1",
+              "fill": {
+                "$ref": "color.brand"
+              }
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 1,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 1
+            },
+            "ops": [
+              {
+                "op": "token",
+                "path": "color.brand",
+                "value": {
+                  "$type": "color",
+                  "$value": {
+                    "colorSpace": "srgb",
+                    "components": [
+                      0,
+                      0,
+                      1
+                    ]
+                  }
+                }
+              },
+              {
+                "op": "add",
+                "node": {
+                  "id": "r1",
+                  "type": "rect",
+                  "parent": "p1",
+                  "fill": {
+                    "$ref": "color.brand"
+                  }
+                },
+                "after": null
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 1,
+        "tokens": {
+          "color": {
+            "brand": {
+              "$type": "color",
+              "$value": {
+                "colorSpace": "srgb",
+                "components": [
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          }
+        },
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1",
+            "fill": {
+              "$ref": "color.brand"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 2,
+        "ops": [
+          {
+            "op": "token",
+            "path": "color.brand",
+            "value": {
+              "$type": "dimension",
+              "$value": {
+                "value": 4,
+                "unit": "px"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 2,
+            "why": "ref"
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 1,
+        "tokens": {
+          "color": {
+            "brand": {
+              "$type": "color",
+              "$value": {
+                "colorSpace": "srgb",
+                "components": [
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          }
+        },
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1",
+            "fill": {
+              "$ref": "color.brand"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 3,
+        "ops": [
+          {
+            "op": "token",
+            "path": "color.brand",
+            "value": {
+              "$type": "dimension",
+              "$value": {
+                "value": 4,
+                "unit": "px"
+              }
+            }
+          },
+          {
+            "op": "set",
+            "id": "r1",
+            "prop": "fill",
+            "value": "#ff0000"
+          },
+          {
+            "op": "set",
+            "id": "r1",
+            "prop": "radius",
+            "value": {
+              "$ref": "color.brand"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 2,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 3
+            },
+            "ops": [
+              {
+                "op": "token",
+                "path": "color.brand",
+                "value": {
+                  "$type": "dimension",
+                  "$value": {
+                    "value": 4,
+                    "unit": "px"
+                  }
+                }
+              },
+              {
+                "op": "set",
+                "id": "r1",
+                "prop": "fill",
+                "value": "#ff0000"
+              },
+              {
+                "op": "set",
+                "id": "r1",
+                "prop": "radius",
+                "value": {
+                  "$ref": "color.brand"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 2,
+        "tokens": {
+          "color": {
+            "brand": {
+              "$type": "dimension",
+              "$value": {
+                "value": 4,
+                "unit": "px"
+              }
+            }
+          }
+        },
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1",
+            "fill": "#ff0000",
+            "radius": {
+              "$ref": "color.brand"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 4,
+        "ops": [
+          {
+            "op": "token",
+            "path": "color.brand.x",
+            "value": {
+              "$type": "dimension",
+              "$value": {
+                "value": 4,
+                "unit": "px"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 4,
+            "why": "value"
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 2,
+        "tokens": {
+          "color": {
+            "brand": {
+              "$type": "dimension",
+              "$value": {
+                "value": 4,
+                "unit": "px"
+              }
+            }
+          }
+        },
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1",
+            "fill": "#ff0000",
+            "radius": {
+              "$ref": "color.brand"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 5,
+        "ops": [
+          {
+            "op": "token",
+            "path": "color",
+            "value": {
+              "$type": "number",
+              "$value": 1
+            }
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 5,
+            "why": "value"
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 2,
+        "tokens": {
+          "color": {
+            "brand": {
+              "$type": "dimension",
+              "$value": {
+                "value": 4,
+                "unit": "px"
+              }
+            }
+          }
+        },
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1",
+            "fill": "#ff0000",
+            "radius": {
+              "$ref": "color.brand"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 6,
+        "ops": [
+          {
+            "op": "token",
+            "path": "space.s",
+            "value": {
+              "$type": "dimension",
+              "$value": "4px"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 6,
+            "why": "value"
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 2,
+        "tokens": {
+          "color": {
+            "brand": {
+              "$type": "dimension",
+              "$value": {
+                "value": 4,
+                "unit": "px"
+              }
+            }
+          }
+        },
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1",
+            "fill": "#ff0000",
+            "radius": {
+              "$ref": "color.brand"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 7,
+        "ops": [
+          {
+            "op": "token",
+            "path": "space.none",
+            "value": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 3,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 7
+            },
+            "ops": [
+              {
+                "op": "token",
+                "path": "space.none",
+                "value": null
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 3,
+        "tokens": {
+          "color": {
+            "brand": {
+              "$type": "dimension",
+              "$value": {
+                "value": 4,
+                "unit": "px"
+              }
+            }
+          }
+        },
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1",
+            "fill": "#ff0000",
+            "radius": {
+              "$ref": "color.brand"
+            }
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 8,
+        "ops": [
+          {
+            "op": "set",
+            "id": "r1",
+            "prop": "radius",
+            "value": 0
+          },
+          {
+            "op": "token",
+            "path": "color.brand",
+            "value": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 4,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 8
+            },
+            "ops": [
+              {
+                "op": "set",
+                "id": "r1",
+                "prop": "radius",
+                "value": 0
+              },
+              {
+                "op": "token",
+                "path": "color.brand",
+                "value": null
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 4,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1",
+            "fill": "#ff0000",
+            "radius": 0
+          }
+        }
+      }
+    },
+    {
+      "tick": 500,
+      "expect": {
+        "a": [
+          {
+            "t": "saved",
+            "rev": 4
+          }
+        ]
+      }
+    }
+  ]
+}

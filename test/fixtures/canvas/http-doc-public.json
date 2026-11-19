@@ -1,0 +1,40 @@
+{
+  "fake": {
+    "main": {
+      "board": "doc-minimal.json"
+    },
+    "repo": {
+      "name": "acme/site",
+      "public": true
+    }
+  },
+  "request": {
+    "method": "GET",
+    "path": "/api/canvas/doc?slug=board&at=main",
+    "headers": {}
+  },
+  "status": 200,
+  "requestKind": null,
+  "responseKind": "doc-response",
+  "response": {
+    "session": null,
+    "rev": 0,
+    "doc": {
+      "canvas": 1,
+      "rev": 0,
+      "tokens": {},
+      "pages": [
+        {
+          "id": "p1",
+          "name": "Page 1",
+          "children": []
+        }
+      ],
+      "nodes": {}
+    },
+    "repo": {
+      "name": "acme/site",
+      "public": true
+    }
+  }
+}
