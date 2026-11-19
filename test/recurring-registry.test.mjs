@@ -80,14 +80,20 @@ test('A2: a chore adding a job lands only with an answered recurring-edit questi
 test('A3: editing one field of a live job (every, run, prompt) needs an answer showing the edited job', () => {
   const T = setup('edit');
   try {
-    T.onMain((j) => { j.recurring = { 'ci-main': check(), tidy: chore() }; });
-    for (const [name, edited] of [['ci-main', check({ every: '12h' })], ['ci-main', check({ run: 'gh run list --limit 2' })], ['tidy', chore({ prompt: 'Delete merged branches, then prune.' })]]) {
-      const slug = `edit-${name}-${Object.keys(edited).find((k) => JSON.stringify(edited[k]) !== JSON.stringify((name === 'tidy' ? chore() : check())[k]))}`;
+    // a job of its own per field, so each question is the only one for its job
+    T.onMain((j) => { j.recurring = { 'ci-every': check(), 'ci-run': check(), tidy: chore() }; });
+    const cases = [
+      ['ci-every', 'every', check({ every: '12h' }), check({ every: '24h' })],
+      ['ci-run', 'run', check({ run: 'gh run list --limit 2' }), check({ run: 'gh run list --limit 3' })],
+      ['tidy', 'prompt', chore({ prompt: 'Delete merged branches, then prune.' }), chore({ prompt: 'Delete every branch.' })],
+    ];
+    for (const [name, field, edited, otherValue] of cases) {
+      const slug = `edit-${name}-${field}`;
       const q = T.yes({ recurring: { [name]: edited } });
       T.jobsChore(slug, (j) => { j.recurring[name] = edited; });
       refused(T.dry(slug), /recurring-edit/);
       // the same field edited to another value: the answer showed something else
-      T.jobsChore(`${slug}-other`, (j) => { j.recurring[name] = { ...edited, title: 'Something else' }; });
+      T.jobsChore(`${slug}-other`, (j) => { j.recurring[name] = otherValue; });
       refused(T.dry(`${slug}-other`, q), new RegExp(`recurring\\.${name}`));
       passes(T.dry(slug, q));
     }
@@ -153,6 +159,13 @@ test('A5: another class, a standing rule, or a question changed after its answer
     T.asked({ recurring: { 'ci-main': check({ every: '12h' }) } });
     T.ok(['answer', first, '--read', 'Yes', '--cite', 'maybe', '--class', 'recurring-edit']);
     refused(T.dry('add', first), /superseded/);
+    // a secrets question of the class (ask refuses one; written here by hand) answered "Posted": no Yes, so it approves nothing
+    const sq = 'q-20990101-000000001-supervisor';
+    fs.appendFileSync(T.logFile('supervisor'), `${JSON.stringify({ v: 1, type: 'question', op: 'new', id: sq, at: new Date().toISOString(), by: 'supervisor', kind: 'owner-action', class: 'recurring-edit', question: 'Post the key for the job?', recommendation: 'Yes', secrets: [{ name: 'API_KEY', sink: 'rails-credentials:test:api.key' }], change: { recurring: { 'ci-main': check() } } })}\n`);
+    T.ok(['answer', sq, 'Posted 1 secret'], {});
+    refused(T.dry('add', sq), /can't approve a job change: answered/);
+    T.ok(['chore', 'start', 'recurring']);
+    refused(T.run(['recurring', 'apply', sq]), /can't approve|Yes/);
   } finally { T.done(); }
 });
 
@@ -232,7 +245,7 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     refused(T.ask({ recurring: { tidy: chore() } }), /already has exactly this/);
     refused(T.run(['ask', '--class', 'recurring-edit', '--question', 'Add it?', '--recommendation', 'Later', '--change', JSON.stringify({ recurring: { z1: chore() } })]), /Yes/);
     refused(T.ask({ recurring: { z1: chore() } }, ['--choices', '[{"label":"Yes"},{"label":"No"}]']), /the kit writes its choices/);
-    refused(T.ask({ recurring: { z2: chore() } }, ['--kind', 'owner-action', '--secrets', '[{"name":"API_KEY","sink":"env:API_KEY"}]']), /a plain yes or no: --kind owner-decision and no --secrets/);
+    refused(T.ask({ recurring: { z2: chore() } }, ['--kind', 'owner-action', '--secrets', '[{"name":"API_KEY","sink":"rails-credentials:test:api.key"}]']), /a plain yes or no: --kind owner-decision and no --secrets/);
     refused(T.ask({ recurring: { z3: chore() } }, ['--context', `${HEADER}\nrecurring.z3: add {}`]), /may not hold a job approval line/);
     // the cap: main at 90 with hourly x (24); an open stop of x; then an hourly y is refused
     const filler = Object.fromEntries(Array.from({ length: 66 }, (_, i) => [`daily-${i + 1}`, chore({ every: '1d' })]));
@@ -251,10 +264,14 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     // an answered Yes not landed yet still counts (89 here)
     T.answer(w.qid);
     refused(T.ask({ recurring: { v: check({ every: '1h' }) } }), /cap of 100/);
-    // a picked No frees its room: 89 + 8 fits, and once declined, another 8 fits too
+    // a No frees its room: 89 + 8 fits, and once declined, another 8 fits too
     const p1 = T.asked({ recurring: { p1: check({ every: '3h' }) } });
     T.answer(p1, 'No');
-    passes(T.ask({ recurring: { p2: check({ every: '3h' }) } }));
+    const p2 = T.ask({ recurring: { p2: check({ every: '3h' }) } });
+    passes(p2);
+    // words not read yet keep counting: p2 answered in words still holds its 8 (97), so another 8 is refused
+    T.ok(['answer', p2.qid, 'hmm, not sure', '--in-words'], {});
+    refused(T.ask({ recurring: { p3: check({ every: '3h' }) } }), /cap of 100/);
   } finally { T.done(); }
 });
 
