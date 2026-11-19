@@ -914,9 +914,10 @@ test('tool keys', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeo
   assert.equal(await p.ev("document.querySelector('#props [data-prop=\"name\"]').value"), TOOL_KEYS.map(([k]) => k).join(''), 'the keys went to the field');
   assert.equal(edits(rec).length, n0, 'nothing sent while typing');
   await leavePanel(p);
-  // a narrower desktop stage (review T3-1): the bar stays one row at the foot, every button inside
-  // it, its right edge at least 160 px left of the stage's, and the stage's own corner points bare
-  for (const w of [1280, 1024, 870, 800]) {
+  // a narrower desktop stage (review T3-1, T3-2-1): the bar stays one row at the foot, every button
+  // inside it, its right edge at least 160 px left of the stage's, centred while key buttons of a
+  // usable size fit so (a stage of 520 px and over), and the stage's own corner points bare
+  for (const w of [1280, 1070, 1024, 870, 800]) {
     await size(w, 900);
     await within(async () => (await p.ev('innerWidth')) === w, `the window at ${w}`);
     const st = await box(p, '#stage');
@@ -934,11 +935,23 @@ test('tool keys', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeo
     assert.equal(new Set(g.btns.map((r) => Math.round(r.t))).size, 1, `${w}: the bar is one row`);
     assert.ok(st.r - g.bar.r >= 160, `${w}: the bar's right edge ${st.r - g.bar.r} px left of the stage's`);
     assert.ok(g.bar.l >= st.l && st.b - g.bar.b >= 0 && st.b - g.bar.b < 40, `${w}: the bar inside the stage, at its foot`);
+    if (st.w >= 520) {
+      assert.ok(Math.abs((g.bar.l + g.bar.r) / 2 - (st.l + st.r) / 2) < 1, `${w}: the bar centred on a ${st.w} px stage`);
+      assert.ok(g.btns.every((r) => r.w >= 20), `${w}: key buttons of a usable size (${g.btns.map((r) => r.w).join(', ')})`);
+    }
     for (const d of [60, 120]) assert.equal(await p.ev(`document.elementFromPoint(${st.r - d}, ${st.b - d})?.id`), 'stage', `${w}: the stage's corner point ${d} px in is bare stage`);
     await p.key('F');
     assert.equal(await pressedTool(p), 'frame', `${w}: F still presses Frame`);
     await p.key('Escape');
   }
+  // at 790 (a 250 px stage) no bar keeps 160 px clear: it is hidden, and the keys still pick tools
+  await size(790, 900);
+  await within(async () => (await p.ev('innerWidth')) === 790, 'the window at 790');
+  assert.equal(await p.ev("(() => { const t = document.getElementById('tools'); return getComputedStyle(t).display === 'none' || t.getBoundingClientRect().width === 0; })()"), true, '790: the bar hidden');
+  await p.key('F');
+  assert.equal(await pressedTool(p), 'frame', '790: F still picks Frame');
+  await p.key('Escape');
+  assert.equal(await pressedTool(p), 'move', '790: Escape back to Move');
   noExceptions(rec);
 });
 

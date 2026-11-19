@@ -114,16 +114,17 @@
   #banner { background: var(--amber-bg); color: var(--amber-fg); border-color: var(--amber-fg); }
   /* the tools bar (kit-662): one row at the stage's foot, centred, its right edge at least 160 px left
      of the stage's (kit-661 checks the stage's own bottom-right corner, 60 and 120 px in). It never
-     wraps: by the stage's width it shows names and keys (about 470 px), the keys alone (about 190 px),
-     then the keys in 12 px buttons at the stage's left (90 px); under a 260 px stage, where not even
-     that keeps 160 px clear, it is hidden and the tool keys still work. */
+     wraps, and stays centred while key buttons of a usable size fit so: by the stage's width it shows
+     names and keys (about 470 px, centred, from 840 px), the keys alone (about 190 px, centred, from
+     520 px), then below that the keys in 12 px buttons at the stage's left (90 px); under a 260 px
+     stage, where not even that keeps 160 px clear, it is hidden and the tool keys still work. */
   .stage { container: stage / inline-size; }
   .tools { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; flex-wrap: nowrap; gap: 2px; width: max-content; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 3px; box-shadow: var(--shadow); z-index: 3; }
   .tools button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; border-color: transparent; background: transparent; }
   @container stage (width < 840px) {
     .tools .tn { display: none; }
   }
-  @container stage (width < 540px) {
+  @container stage (width < 520px) {
     .tools { left: 4px; transform: none; gap: 0; padding: 2px; }
     .tools button { width: 12px; padding: 0; overflow: hidden; }
   }
