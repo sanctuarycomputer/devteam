@@ -1,0 +1,35 @@
+{
+  "doc": {
+    "canvas": 1,
+    "rev": 0,
+    "tokens": {},
+    "pages": [
+      {
+        "id": "p1",
+        "name": "Page 1",
+        "children": [
+          "card"
+        ]
+      }
+    ],
+    "nodes": {
+      "card": {
+        "type": "frame",
+        "parent": "p1",
+        "layout": {
+          "mode": "column"
+        },
+        "layout.mode": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+        "children": []
+      }
+    }
+  },
+  "errors": [
+    {
+      "rule": "keys",
+      "code": "prop",
+      "where": "nodes.card.layout.mode",
+      "message": "a dotted key (a property is stored nested: \"layout\": { \"mode\": … })"
+    }
+  ]
+}

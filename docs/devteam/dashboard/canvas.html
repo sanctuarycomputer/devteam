@@ -1754,6 +1754,10 @@
     edit([{ op: 'del', id }]);
   }
   const wellFormed = (v) => typeof v.isWellFormed !== 'function' || v.isWellFormed();
+  // Free text as canvas-doc@1's name and text classes take it (kit-312): well-formed, and no control
+  // character but tab, line feed and carriage return; the server refuses anything else.
+  const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
+  const freeText = (v) => wellFormed(v) && !CONTROL_RE.test(v);
 
   // ---- the Properties panel's fields (spec §4) ----
   // Each field shows the node's value as drawn and sends one edit of one set (setProp) of a value
@@ -2095,7 +2099,7 @@
     e.spellcheck = false;
     e.value = typeof v === 'string' ? v : '';
     e.addEventListener('change', () => {
-      if ([...e.value].length <= 10000 && wellFormed(e.value)) setProp(id, 'text', e.value);
+      if ([...e.value].length <= 10000 && freeText(e.value)) setProp(id, 'text', e.value);
     });
     return fieldRow('Text', e);
   }
@@ -2274,7 +2278,7 @@
       name.maxLength = 200;
       name.addEventListener('change', () => {
         const v = name.value;
-        if (v.length <= 200 && wellFormed(v)) setProp(id, 'name', v);
+        if (v.length <= 200 && freeText(v)) setProp(id, 'name', v);
       });
       box.append(fieldRow('Name', name));
     }
@@ -2688,10 +2692,10 @@
     $('imageFile').value = '';
     if (file && place && editable()) uploadImage(file, place);
   });
-  // The upload's name: the file's, cut to 200 characters, or "image".
+  // The upload's name: the file's, cut to 200 characters, or "image" when that isn't free text.
   function uploadName(s) {
     const cut = [...(typeof s === 'string' ? s : '')].slice(0, 200).join('');
-    return cut.trim() && wellFormed(cut) ? cut : 'image';
+    return cut.trim() && freeText(cut) ? cut : 'image';
   }
   async function uploadImage(file, place) {
     if (file.size > IMAGE_BYTES) { say(IMAGE_SAY.tooBig); return; }
