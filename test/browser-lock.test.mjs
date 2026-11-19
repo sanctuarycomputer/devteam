@@ -519,10 +519,14 @@ sweepCase('a start removes dead starters\' prepared folders, asides and claims, 
 });
 
 // A dead claim on the key of the token the lock holds may stand between two live claimants of that
-// token: removing it would let this start claim the same token beside the live claimant at .1.
+// token: removing it would let this start claim the same token beside the live claimant at .1. The
+// rest of a dead starter's leftovers still go while that lock holds the path (final-1 F1).
 sweepCase('a dead claim on the lock\'s own token stays, and the start yields to the live claim past it', async (dir) => {
   LOCKS['dead-owner'].plant(path.join(dir, 'start.lock'));
   const dead0 = claimOf(dir, DEAD, DEAD_CLAIM, 0), live1 = claimOf(dir, DEAD, tok(LIVE_CLAIM, 'f6'), 1);
+  prepOf(dir, DEAD_CLAIM);
+  asideOf(dir, DEAD_CLAIM);
+  claimOf(dir, tok(2147483640, 'a1'), DEAD_CLAIM);
   check(await run({ dir, n: 1, env: quick, livePids: [LIVE_CLAIM] }), { entries: 0, errors: /timed out/, left: ['start.lock', dead0, live1] });
   assert.equal(ownerOf(dir), DEAD);
 });
