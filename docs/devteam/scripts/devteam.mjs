@@ -2280,7 +2280,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: isObj(q.change) && Array.isArray(q.change.order) ? null : q.change ?? null, ...(isObj(q.change) && Array.isArray(q.change.order) ? { order: q.change.order } : {}), met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, no_default: q.no_default ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
@@ -7426,6 +7426,21 @@ function askLine({ thread, about } = {}) {
       if (k.type === 'stdin' && !allowedCommand(k.argv)) die(`secret ${x.name}: \`${k.argv.join(' ')}\` is not in settings.secret_commands, the commands the owner lets a secret be piped to`);
     }
   }
+  // A question with no default stops the work behind it until the owner answers (supervisor.md §6,
+  // Ask with a default where you can). Where a default is allowed, a clarification and an
+  // owner-decision in a ladder class on rung 2 or above carry one, or say with --no-default why
+  // silence can't go ahead. Not where silence is never a yes (a one-way door, the owner's alone, an
+  // answer after the owner's no, a secret), below rung 2, nor on the kit's own wordings; the kinds
+  // whose job is to ask (trust, proposal, goal-definition, goal-approval, owner-action, review) never.
+  let noDefault = flagStr('no-default');
+  if (flags['no-default'] !== undefined && !noDefault?.trim()) die('--no-default says why this can\'t go ahead on the owner\'s silence; it can\'t be blank');
+  noDefault = noDefault?.trim();
+  if (noDefault && def !== null) die('--default or --no-default, not both');
+  const rungNow = onLadder ? rungFor(cls, scope) : null;
+  const silenceNeverYes = kind === 'one-way-door' || reasons.includes('one-way-door') || reasons.includes('owner-only') || (L.owner_only ?? []).includes(cls) || flagStr('owner-said') !== undefined || secrets !== undefined || KIT_WORDED(cls, kind);
+  const wantsDefault = !silenceNeverYes && (kind === 'clarification' ? !onLadder || rungNow >= 2 : kind === 'owner-decision' && onLadder && rungNow >= 2);
+  if (wantsDefault && def === null && !noDefault) die(`${kind === 'clarification' ? 'a clarification' : `${cls}${scope ? ` (${scope})` : ''} is on rung ${rungNow} (${RUNG[rungNow]}), so this question`} needs --default: the choice you would act on if the owner hasn't answered by the deadline, so the work goes on. If silence can't be a yes here, say why: --no-default "<why it can't go ahead without the owner>" (supervisor.md §6)`);
+  if (noDefault && !wantsDefault) { warn('--no-default is for a question that would otherwise need a --default; this one doesn\'t, so it is left off'); noDefault = undefined; }
   // Each link is one thing to look at: a repo path, a url, a registry link or an artifact. A name
   // lets the question's text point at it inline ([[name]]). An artifact is pinned to where it was
   // and what it held when asked, in this one line: the question's hash covers its links, so
@@ -7493,7 +7508,7 @@ function askLine({ thread, about } = {}) {
   try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : orderAsked ? [context, goalOrderText(orderAsked)].filter(Boolean).join('\n\n') : context,
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined, no_default: noDefault,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
@@ -7788,6 +7803,12 @@ const SUBJECT_MAX = 2500; // bytes, as encoded in the line
 const OUTCOME_MAX = 300; // bytes
 const THREAD_TITLE_MAX = 120; // characters
 const THREAD_WAIT_MS = 10 * 60000;
+// An owner's turn no supervisor terminal took, unseen this long (no check since), is a high finding;
+// unanswered three times this long, whatever the checks (undeliveredTurns).
+const TURN_UNDELIVERED_MS = 5 * 60000;
+// Those turns, machine-local as delivery is: { "<u-id>": { thread, at } }. Named at load, so every
+// process's loose-file check knows it.
+const UNDELIVERED_FILE = runPath('undelivered-turns.json');
 const THREAD_ID = /^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 const TURN_ID = /^u-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 // When a proposal was made, as the log stamps it: what the owner's accept names to bind to it.
@@ -7968,7 +7989,52 @@ function deliverOwnerTurn(t, text, files) {
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
   return typeInto(target, `[devteam thread ${t.id} from owner${subjectWords(t.subject)}] ${said} — devteam.mjs thread show ${t.id}${droppedWords(files)}`, droppedPaths(files));
 }
-const deliveredWords = (typed) => (typed === true ? "sent to the supervisor's pane" : typed ? heldWords(typed, "the supervisor's") : 'recorded; the supervisor reads it when it next checks (thread list --waiting)');
+// Never "supervisor's pane" (the page reads that as typed) nor "recorded and held" for a turn no
+// terminal took: it says so, and when the supervisor last checked.
+const deliveredWords = (typed) => {
+  if (typed === true) return "sent to the supervisor's pane";
+  if (typed) return heldWords(typed, "the supervisor's");
+  const at = supervisorCheckedAt();
+  const when = at ? `it last checked ${Math.floor(Math.max(0, Date.now() - Date.parse(at)) / 60000)} min ago (${at.slice(11, 16)} UTC)` : 'it has not checked yet';
+  return `not delivered: no supervisor terminal took it, so the supervisor sees it only when it next checks; ${when}`;
+};
+// When the supervisor last checked, as ISO, or null: the newest of its host check (every tick's,
+// and a wait's every HOST_REFRESH_MS) and wait-since (a wait woke it for a tick). A claim refused
+// (another machine holds the repo) is no check by this one.
+function supervisorCheckedAt() {
+  const h = hostState();
+  const times = [Number(readText(runPath('wait-since'))) || 0];
+  if (h.refused !== true) times.push(Number(h.checked) || 0, Date.parse(h.at) || 0);
+  const t = Math.max(...times);
+  return t > 0 ? new Date(t).toISOString() : null;
+}
+// The owner's turns no terminal took (UNDELIVERED_FILE), read once and guarded: a missing,
+// unreadable or non-map file is none. entries: the map itself. Else the open threads waiting on the
+// supervisor whose every owner turn since its last word was missed, the first of them unseen past
+// TURN_UNDELIVERED_MS (no check since) or unanswered past three times that, whatever the checks:
+// [{ id, waited_min, checked }] (checked: the last check in words), oldest first. An empty file folds no threads (hello runs often).
+function undeliveredTurns(now = Date.now(), { entries = false } = {}) {
+  let m = null;
+  try { m = JSON.parse(readText(UNDELIVERED_FILE) ?? 'null'); } catch {}
+  if (!isObj(m)) m = {};
+  if (entries) return m;
+  if (!Object.keys(m).length) return [];
+  const at = supervisorCheckedAt();
+  const checkedMs = at ? Date.parse(at) : 0;
+  const checked = at ? `last checked ${Math.floor(Math.max(0, now - checkedMs) / 60000)} min ago` : 'has no record of checking';
+  const found = [];
+  for (const v of threadViews(readLog().objects)) {
+    if (v.status !== 'open' || v.waiting !== 'supervisor') continue;
+    let i = v.turns.length;
+    while (i > 0 && v.turns[i - 1].by === 'owner') i--;
+    const mine = v.turns.slice(i);
+    if (!mine.length || !mine.every((u) => Object.hasOwn(m, u.id))) continue;
+    const firstMs = Date.parse(mine[0].at);
+    const waited = now - firstMs;
+    if ((waited > TURN_UNDELIVERED_MS && !(checkedMs > firstMs)) || waited > 3 * TURN_UNDELIVERED_MS) found.push({ id: v.id, waited_min: Math.floor(waited / 60000), checked, first_at: mine[0].at });
+  }
+  return found.sort((a, b) => a.first_at.localeCompare(b.first_at)).map(({ first_at, ...x }) => x);
+}
 // The title and subject as the supervisor reads them: inside a frame that says they are data, every
 // value quoted (quoteData), in the pattern the prompt's knowledge and link blocks use.
 function threadDataFrame(v) {
@@ -8007,6 +8073,19 @@ function threadCounts() {
 // second says whether it was typed into the supervisor's pane.
 function cmdThread() {
   const [sub, id] = positional;
+  // An owner's turn typed into the supervisor's pane, or held for it; one no terminal took is
+  // recorded (UNDELIVERED_FILE, under its lock; entries over 7 days dropped) for the card and
+  // undeliveredTurns. The words say which.
+  const deliver = (t, u, words, files) => {
+    const typed = deliverOwnerTurn(t, words, files);
+    if (typed === false) withLock(UNDELIVERED_FILE, () => {
+      const m = undeliveredTurns(Date.now(), { entries: true });
+      for (const [k, v] of Object.entries(m)) if (!(Date.now() - Date.parse(v?.at) <= 7 * 86400000)) delete m[k];
+      m[u.id] = { thread: t.id, at: u.at };
+      writeJsonAtomic(UNDELIVERED_FILE, m);
+    });
+    return deliveredWords(typed);
+  };
   if (sub === 'new') {
     const { by } = threadOwner();
     const words = turnText(wordsFrom(1));
@@ -8028,9 +8107,9 @@ function cmdThread() {
     // both lines checked before the thread's is written: a refused first turn leaves no thread with none
     if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
-    appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
+    const u = appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
     out(t.id);
-    return out(deliveredWords(deliverOwnerTurn(t, words, files)));
+    return out(deliver(t, u, words, files));
   }
   // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
   // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
@@ -8052,7 +8131,7 @@ function cmdThread() {
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
     const u = appendLog(line, by);
     out(u.id);
-    if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words, files)));
+    if (by === 'owner') out(deliver(t, u, words, files));
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -8142,9 +8221,9 @@ function cmdThread() {
     const n = openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
     appendLog({ type: 'thread', op: 'set', id: t.id, status: 'open' }, by);
-    if (words) appendLog({ type: 'turn', thread: t.id, text: words }, by);
+    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words }, by) : null;
     out(`reopened ${t.id}`);
-    if (words) return out(deliveredWords(deliverOwnerTurn(t, words)));
+    if (words) return out(deliver(t, u, words));
     return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
   if (sub === 'show') {
@@ -8372,8 +8451,21 @@ const ARTIFACT_LENS = String.raw`(() => {
   let shiftDown = false;
   // no key is told before the page that frames it has said hello, as the preview lens tells nothing first
   let heard = false;
+  // A Shift pressed while typing in one of the page's own fields is a capital letter, not a point: it
+  // is never told, as the viewer never raises its overlay for a Shift typed in its own fields. Told,
+  // it raised the overlay over a page being typed in, and only the pointer moving lowered it again,
+  // so a click made without moving the pointer was the overlay's, never the page's.
+  const NOT_TYPED = ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'];
+  const typingIn = (el) => {
+    // the field itself, inside any open shadow roots
+    for (let n = 0; el && el.shadowRoot && el.shadowRoot.activeElement && n < 32; n++) el = el.shadowRoot.activeElement;
+    if (!el || el.nodeType !== 1) return false;
+    const tag = String(el.localName || '').toLowerCase();
+    return !!el.isContentEditable || tag === 'textarea' || (tag === 'input' && !NOT_TYPED.includes(String(el.type || 'text').toLowerCase()));
+  };
   const onKey = (e) => {
     if (!heard || (e.key !== 'Shift' && e.key !== 'Escape')) return;
+    if (e.type === 'keydown' && e.key === 'Shift' && typingIn(e.target && e.target.nodeType === 1 ? e.target : document.activeElement)) return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
     tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
@@ -9373,6 +9465,10 @@ function artifactProblems(slug, entries) {
     if (!host) { warnings.push(`${slug}: ${redactUrl(url)} is not on an allowed CDN (${ARTIFACT_CDNS.join(', ')}); it won't load`); continue; }
     if (ARTIFACT_CDNS.includes(host) && !/@\d+\.\d+\.\d+/.test(url) && !/\/ajax\/libs\/[^/]+\/\d+\.\d+\.\d+\//.test(url)) warnings.push(`${slug}: ${redactUrl(url)} has no exact version (name@x.y.z); pin it so the page renders the same tomorrow`);
   }
+  // Images and media load from its own folder, data: and blob: alone, never a CDN or any other host.
+  const media = new Set();
+  for (const [, url] of html.matchAll(/<(?:img|source|video|audio|track|input)\b[^>]*?\b(?:src|poster)\s*=\s*["'](https?:[^"']+)["']/gi)) media.add(url);
+  for (const url of media) warnings.push(`${slug}: ${redactUrl(url)} is an image or media from another host; it won't load (copy it into the artifact's folder)`);
   if (/<meta\b[^>]*http-equiv\s*=\s*["']?refresh/i.test(html)) warnings.push(`${slug}: a meta refresh; an artifact doesn't navigate itself`);
   return { errors, warnings, manifest: m.manifest ?? null };
 }
@@ -10640,6 +10736,7 @@ function cmdQuestions() {
     for (const l of q.links) out(`  see: ${l.title} (${l.url ?? (l.remote ? `repo ${l.remote}` : `${l.ref ? `${l.ref}:` : ''}${l.path}`)})`);
     if (q.review) out(`  review: ${q.review.page?.path} at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${q.review.data ? `, ${q.review.data.rows} rows` : ''}; ${q.result_status} (devteam.mjs review show ${q.id})`);
     if (q.recommendation) out(`  recommend: ${q.recommendation}${q.confidence != null ? ` (${Math.round(q.confidence * 100)}%)` : ''}`);
+    if (q.no_default) out(`  no default, because: ${q.no_default}`);
     if (q.why_asked?.reasons?.length) out(`  why asked: ${q.why_asked.reasons.join(', ')}${q.class ? ` (${q.class}, rung ${q.why_asked.rung ?? '-'} of ${q.why_asked.ceiling ?? '-'})` : ''}`);
     if (q.answer) out(`  answer (${q.answered_by}): ${q.answer}`);
     if (q.autonomy) out(`  next time: ${q.autonomy.class} at rung ${q.autonomy.rung} (${RUNG[q.autonomy.rung]})${q.autonomy.scope ? ` for ${q.autonomy.scope}` : ''}`);
@@ -14183,6 +14280,9 @@ function collectMetrics(since) {
     const ago = now - Date.parse(x.turns[x.turns.length - 1].at);
     if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
   }
+  // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
+  // it reaches past the stalled supervisor (hello's alert: machine status, the hub). By id only.
+  for (const x of undeliveredTurns(now)) add('high', 'thread-undelivered', x.id, `the owner wrote ${x.waited_min} min ago and no supervisor terminal took it; the supervisor ${x.checked}`, `the supervisor is not checking: resume it (inside tmux, so turns reach it at once) and answer thread show ${x.id}`);
   // A harness's runtime file committed by accident: it churns in every worktree and means nothing elsewhere.
   const trackedRuntime = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => f && isHarnessRuntime(f));
   if (trackedRuntime.length) add('medium', 'tracked-runtime-file', trackedRuntime.slice(0, 3).join(', '), `${trackedRuntime.length} agent-harness runtime file(s) are tracked in git (${trackedRuntime.slice(0, 5).join(', ')}): machine-local state that changes in every worktree`, `a chore (it changes .gitignore, so it needs the owner's answer): git rm --cached ${trackedRuntime.map((f) => `'${f}'`).join(' ')}, and add ${RUNTIME_RES.filter(([, re]) => trackedRuntime.some((f) => re.test(f))).map(([pat]) => pat).join(' ')} to .gitignore`);
@@ -19680,16 +19780,20 @@ async function cmdDashboard() {
       try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
       const pane = supervisorPane();
       const asks = supervisorAsks();
+      // the card's "not delivered": the turns no terminal took, and when the supervisor last checked
+      // (two small run files, read here: no child, no tmux)
+      const undelivered = Object.keys(undeliveredTurns(Date.now(), { entries: true }));
+      const checked = supervisorCheckedAt();
       // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
       // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
       // this process's work is saved.
       // the token for an answer goes only to this page's own read, said so by the browser
       if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
-      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}`).slice(0, 20)}"`;
+      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}`).slice(0, 20)}"`;
       const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
       if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
       res.writeHead(200, { 'content-type': 'application/json', ...head });
-      return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks })},"threads":${r.body}}`);
+      return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"threads":${r.body}}`);
     }
     // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
     if (req.method === 'GET' && u.pathname === '/api/fleet') {
@@ -23865,7 +23969,17 @@ function boxAlert() {
     return readText(f)?.trim().slice(0, 200) || null;
   } catch { return null; }
 }
-const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
+// Worked out once a process: cmdHello reads it twice.
+const helloAlert = (() => {
+  let memo;
+  const undelivered = () => {
+    const xs = undeliveredTurns();
+    if (!xs.length) return null;
+    const [x] = xs;
+    return `A message in a thread reached no supervisor and has waited ${x.waited_min} min (thread ${x.id}${xs.length > 1 ? `, and ${xs.length - 1} more` : ''}); the supervisor ${x.checked}: resume it`;
+  };
+  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
+})();
 // The hub's Overview: is this project moving, and if not, why. From the log in one pass; from git,
 // only whether each ticket has merged (main's log and the refs, one call each under cmdHello's
 // read cache, never one per ticket), so hello stays cheap at every 10 s.

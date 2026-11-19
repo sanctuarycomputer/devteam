@@ -1835,6 +1835,69 @@ test('dropped files: the root must be the gateway\'s own; old ones go, and only 
   } finally { await gw.close(); }
 });
 
+// ⌘⌥←/→ (Ctrl+Alt+←/→ off a Mac) in the terminal type Ctrl+Alt+Shift+←/→, which the box's tmux binds to
+// the previous and next window; any other chord passes through untouched.
+test('the terminal\'s page sends ⌘⌥←/→ to tmux as previous and next window', async () => {
+  const gw = await signedIn('keys-page');
+  try {
+    const tp = await gw.req('GET', '/', { on: 'term' });
+    assert.equal(tp.status, 200);
+    const keys = [...tp.body.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((x) => x.includes("addEventListener('keydown'") && x.includes('1;8D'));
+    assert.ok(keys, 'the page carries the key handler');
+    const run = (platform) => {
+      let on = null;
+      const typed = [];
+      const win = { term: { input: (d) => typed.push(d) } };
+      new Function('addEventListener', 'navigator', 'window', keys)((ev, f) => { if (ev === 'keydown') on = f; }, { platform }, win);
+      // caught means both: preventDefault for the browser, and stopPropagation for xterm, whose own
+      // keydown listener on its textarea never reads defaultPrevented and would type the chord too
+      const press = (key, mods) => {
+        let prevented = false, stopped = false;
+        on({ key, altKey: false, shiftKey: false, metaKey: false, ctrlKey: false, ...mods, preventDefault: () => { prevented = true; }, stopPropagation: () => { stopped = true; } });
+        assert.equal(prevented, stopped, `${key} ${JSON.stringify(mods)}: caught means both preventDefault and stopPropagation`);
+        return prevented;
+      };
+      return { typed, press };
+    };
+    const mac = run('MacIntel');
+    assert.ok(mac.press('ArrowLeft', { metaKey: true, altKey: true }));
+    assert.ok(mac.press('ArrowRight', { metaKey: true, altKey: true }));
+    assert.deepEqual(mac.typed, ['\x1b[1;8D', '\x1b[1;8C'], 'previous, then next window');
+    assert.ok(!mac.press('ArrowLeft', { altKey: true }), '⌥← alone is word movement, left to the shell');
+    assert.ok(!mac.press('ArrowLeft', { metaKey: true }), '⌘← alone passes through');
+    assert.ok(!mac.press('ArrowLeft', { metaKey: true, altKey: true, shiftKey: true }), 'with Shift too, not ours');
+    assert.ok(!mac.press('ArrowLeft', { ctrlKey: true, metaKey: true, altKey: true }), '⌃⌘⌥← on a Mac is not ours');
+    assert.ok(!mac.press('ArrowLeft', { ctrlKey: true, altKey: true }), 'Ctrl+Alt on a Mac is not ours');
+    assert.equal(mac.typed.length, 2);
+    const pc = run('Linux x86_64');
+    assert.ok(pc.press('ArrowRight', { ctrlKey: true, altKey: true }));
+    assert.ok(!pc.press('ArrowRight', { metaKey: true, altKey: true }));
+    assert.ok(!pc.press('ArrowRight', { ctrlKey: true, metaKey: true, altKey: true }), 'Ctrl with ⌘ off a Mac is not ours');
+    assert.ok(!pc.press('ArrowRight', { ctrlKey: true }), 'Ctrl+→ alone is word movement');
+    assert.deepEqual(pc.typed, ['\x1b[1;8C']);
+  } finally { await gw.close(); }
+});
+
+// the tmux half: the box's .tmux.conf seeding binds both chords, each line on its own guard, so a
+// conf that has one of them gets the other and neither twice
+test('the box seeds tmux with Ctrl+Alt+Shift+←/→ as previous and next window', () => {
+  const lines = fs.readFileSync(path.join(here, '..', 'cloud', 'Dockerfile'), 'utf8').split('\n').filter((l) => /^grep -q 'C-M-S-(Left|Right)' \.tmux\.conf \|\| /.test(l));
+  assert.equal(lines.length, 2, 'one seeding line per chord');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmux-keys-'));
+  try {
+    const conf = path.join(dir, '.tmux.conf');
+    const seed = () => execFileSync('sh', ['-c', lines.join('\n')], { cwd: dir, timeout: 10000 });
+    fs.writeFileSync(conf, '');
+    seed();
+    assert.equal(fs.readFileSync(conf, 'utf8'), 'bind -n C-M-S-Left previous-window\nbind -n C-M-S-Right next-window\n');
+    seed();
+    assert.equal(fs.readFileSync(conf, 'utf8').split('\n').filter(Boolean).length, 2, 'seeding again adds nothing');
+    fs.writeFileSync(conf, 'bind -n C-M-S-Left previous-window\n');
+    seed();
+    assert.equal(fs.readFileSync(conf, 'utf8'), 'bind -n C-M-S-Left previous-window\nbind -n C-M-S-Right next-window\n', 'a conf with only Left still gets Right');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // A phone has no wheel: the terminal's page turns a one-finger swipe into the wheel events xterm
 // passes to tmux, which scrolls; a two-finger touch is left alone.
 test('the terminal\'s page turns a swipe into wheel events on the terminal', async () => {

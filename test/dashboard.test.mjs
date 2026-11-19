@@ -956,7 +956,7 @@ test("threads on the dashboard's server: owner actions checked before anything r
   let r = await get();
   assert.equal(r.status, 200);
   let j = await r.json();
-  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false, question: null }], 'no threads, no supervisor pane, and so nothing its terminal asks');
+  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false, question: null, checked: null, undelivered: [] }], 'no threads, no supervisor pane, and so nothing its terminal asks, no check and no turn missed');
   const heads = [];
   for (let i = 0; i < 3; i++) heads.push((await get()).headers.get('x-devteam-threads'));
   assert.ok(heads.includes('cached'), `a read with no file changed is served from the cache: ${heads}`);
@@ -1598,7 +1598,7 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const later = 'Sent; the supervisor will read it when it next checks.';
   assert.equal(A.tCardState(th(['owner', 5], ['supervisor', 1]), now, true, true), null, 'the reply is the state');
   assert.equal(A.tCardState(th(['owner', 1]), now, true, true), 'Sent.');
-  assert.equal(A.tCardState(th(['owner', 1]), now, false, false), later);
+  assert.equal(A.tCardState(th(['owner', 1]), now, false, false), 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it has not checked yet.', 'the send said no terminal took it');
   assert.equal(A.tCardState(th(['owner', 1]), now, undefined, true), later, 'after a reload nobody knows: when it next checks');
   assert.equal(A.tCardState(th(['owner', 11]), now, true, true), "The supervisor hasn't replied yet.");
   assert.equal(A.tCardState(th(['owner', 11]), now, true, false), later, 'not running: it will read it later');
@@ -3154,6 +3154,7 @@ test("a preview's viewer: its route, frame-src naming exactly where its lens is,
 });
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
+const NOT_DELIVERED_37 = 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it last checked 37 min ago.';
 test('threads on the dashboard page: Shift and point, the card, the pins and the dock', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   // stopped last-in first-out, each whatever the one before did: the fixture's files go only once the
   // dashboard writing into them has stopped, and one cleanup that throws leaves no Chrome running
@@ -3307,6 +3308,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test('Shift+Enter sends the first words: a thread on the goal, its turn in the card, the draft cleared', async () => {
+    // the supervisor last checked 37 minutes ago (and 20 s, for a slow runner: the card rounds)
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/host-claim.json'), JSON.stringify({ checked: Date.now() - 37 * 60000 - 20000 }));
     await p.type('Narrow this to the EU launch');
     // a read of the threads begun before the send, answering after it: the card must stay the thread's
     await p.ev(`window.__threadsRead = false; window.__threadsLanded = false; window.__threadsHold = new Promise((r) => { window.__threadsLet = r; }); tlRefresh(); void 0`);
@@ -3324,7 +3327,16 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`document.querySelector('#tl-c-turns .tl-turn.owner')?.textContent.includes('Narrow this to the EU launch')`, 'the turn in the card');
     assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '');
     assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text', 'still in the composer after the card became the thread');
-    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), 'Sent; the supervisor will read it when it next checks.', 'no pane here');
+    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), NOT_DELIVERED_37, 'no pane here: not delivered, and when the supervisor last checked');
+  });
+
+  await t.test("after a reload only the server's record knows the turn missed, and the card still says so", async () => {
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/host-claim.json'), JSON.stringify({ checked: Date.now() - 37 * 60000 - 20000 }));
+    await p.ev(`location.hash = '#talk/${T}'; window.__beforeReload = true`);
+    await p.send('Page.reload');
+    await soon(`!window.__beforeReload && typeof TL !== 'undefined' && TL.have > 0 && ${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card again, after a reload');
+    assert.equal(await p.ev(`TL.typed['${T}'] === undefined`), true, 'a new document: the send is forgotten');
+    await soon(`document.getElementById('tl-c-state').textContent === ${JSON.stringify(NOT_DELIVERED_37)}`, "the server's record and last check");
   });
 
   await t.test('the page refreshes while the owner writes in the card: the layer holds no redraw', async () => {
