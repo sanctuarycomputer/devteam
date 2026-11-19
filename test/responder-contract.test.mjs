@@ -351,3 +351,42 @@ test('responder-contract A3: the handoff, sent, open and settled; writer on thre
     });
   } finally { F.done(); }
 });
+
+test('responder-contract A4 A7: a responder turn is never cited; artifact new stamps the responder', async (t) => {
+  const F = threadsFixture('responder-a4');
+  try {
+    const R = (cwd, args, extra = {}) => F.run(cwd, args, { ...RESPONDER, ...extra });
+    const q = F.sup(['ask', '--question', 'Ship it?', '--goal', F.goal, '--stake', '1', '--urgency', '1', '--recommendation', 'Yes']).split('\n')[0];
+    const T = F.owner(['thread', 'new', '--title', 'Header colour', '--subject', JSON.stringify({ kind: 'item', ref: 'decision:d-20990101-000000000-supervisor' }), '--', 'Make the header darker.']).split('\n')[0];
+    const ru = R(F.old, ['thread', 'reply', T, 'x']);
+    assert.equal(ru.status, 0, ru.err);
+    const U = ru.out.split('\n')[0];
+    assert.match(U, /^u-\S+-responder$/, ru.out);
+    const D = F.sup(['decide', '--class', 'rename-column', '--', 'renamed a column']).match(/d-\S+/)?.[0];
+    assert.ok(D, 'a decision to correct');
+
+    await t.test("A7: answer and correct --from-turn naming the responder's turn are refused, the log unchanged", () => {
+      for (const args of [['answer', q, 'Yes', '--from-turn', U], ['correct', D, '--from-turn', U, '--said', 'x']]) {
+        const before = hashDirs([F.logDir]);
+        const r = F.run(F.old, args, { DEVTEAM_ROLE: 'supervisor' });
+        assert.notEqual(r.status, 0, `${args.join(' ')} should fail: ${r.out}`);
+        assert.match(r.err, /that turn is the responder's/, r.err);
+        assert.deepEqual(hashDirs([F.logDir]), before, `${args[0]} writes nothing`);
+      }
+    });
+
+    await t.test('A4: artifact new as the responder stamps by: responder, and it checks; a role-less one stamps owner', () => {
+      const a = path.join(F.base, 'wt-a');
+      F.g(['worktree', 'add', '-q', '--detach', a], F.old);
+      const n = R(a, ['artifact', 'new', 'mock-r', '--title', 'Mock', '--summary', 'A mock']);
+      assert.equal(n.status, 0, n.err || n.out);
+      const man = (cwd, s) => JSON.parse(fs.readFileSync(path.join(cwd, 'docs/devteam/project/artifacts', s, 'artifact.json'), 'utf8'));
+      assert.equal(man(a, 'mock-r').by, 'responder');
+      const c = R(a, ['artifact', 'check', 'mock-r']);
+      assert.equal(c.status, 0, c.err || c.out);
+      const o = F.run(a, ['artifact', 'new', 'mock-o', '--title', 'Mock', '--summary', 'A mock'], {});
+      assert.equal(o.status, 0, o.err || o.out);
+      assert.equal(man(a, 'mock-o').by, 'owner');
+    });
+  } finally { F.done(); }
+});
