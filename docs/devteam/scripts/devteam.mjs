@@ -1741,22 +1741,33 @@ function fold(all) {
     // A goal's hold has its own rule (planning.md §1, holds): the owner's line always counts; the
     // supervisor's counts as a fleet op, the undo of a fleet op still in force on this goal, a drain
     // of a running goal, or the release of a drain it set itself. Anything else is ignored, with why.
+    // hold_for and hold_until (what the hold waits on, and when to look again) are part of the hold
+    // line: they apply with its hold, are refused with it, and a hold line without them leaves the
+    // hold with no cause. A line carrying them with no hold changes neither.
+    const holdKey = (k) => k === 'hold' || k === 'hold_for' || k === 'hold_until';
+    const onlyHold = () => Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || holdKey(k));
+    const holdWith = (h) => {
+      obj.hold = h;
+      obj.__holdBy = cls;
+      for (const k of ['hold_for', 'hold_until']) if (l[k] !== undefined && l[k] !== null) obj[k] = l[k]; else delete obj[k];
+      return { hold: h, ...(l.hold_for !== undefined ? { hold_for: l.hold_for } : {}), ...(l.hold_until !== undefined ? { hold_until: l.hold_until } : {}) };
+    };
     let holdLine = null;
+    if (obj.type === 'goal' && !l.hold && (l.hold_for !== undefined || l.hold_until !== undefined)) {
+      ignored.push({ line: l, why: 'hold_for and hold_until go with a hold' });
+      if (onlyHold()) continue;
+    }
     if (obj.type === 'goal' && l.hold) {
       const cur = obj.hold ?? { mode: 'run' };
       const why = holdRefusal(l.hold, cur, obj.__holdBy ?? null, cls);
       if (why) {
         ignored.push({ line: l, why });
-        if (Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold')) continue;
+        if (onlyHold()) continue;
       } else holdLine = l.hold;
     }
-    const holdOnly = obj.type === 'goal' && Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold');
+    const holdOnly = obj.type === 'goal' && onlyHold();
     if (holdOnly) {
-      if (holdLine) {
-        obj.hold = holdLine;
-        obj.__holdBy = cls;
-        obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), hold: holdLine });
-      }
+      if (holdLine) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...holdWith(holdLine) });
       continue;
     }
     // A supervisor's line under an answer to a goal-change --order question is that answer applied, on
@@ -1801,14 +1812,9 @@ function fold(all) {
       continue;
     }
     const rank = RANK[cls];
-    const changed = {};
-    if (holdLine) {
-      obj.hold = holdLine;
-      obj.__holdBy = cls;
-      changed.hold = holdLine;
-    }
+    const changed = holdLine ? holdWith(holdLine) : {};
     for (const [k, val] of Object.entries(l)) {
-      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (notOwnTag && k === 'kit_lesson')) continue;
+      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (obj.type === 'goal' && holdKey(k)) || (notOwnTag && k === 'kit_lesson')) continue;
       // an order line's priority is the owner's answer, at the owner's rank; its approved stays the
       // supervisor's, so a later answer's approved still lands and is seen as used
       const r = byOrder && k === 'priority' ? RANK.owner : rank;

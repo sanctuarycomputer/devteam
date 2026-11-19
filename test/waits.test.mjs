@@ -111,4 +111,74 @@ test('waits A1: holds and follow-ups carry their fields in the log, and the fold
     assert.deepEqual(Object.keys(hold.properties), ['mode', 'reason', 'fleet', 'undoes', 'prior', 'host', 'move']);
     for (const t of ['ticket', 'goal']) for (const k of t === 'ticket' ? ['held_for', 'held_until', 'from'] : ['hold_for', 'hold_until']) assert.ok(SCHEMA.$defs.types[t].properties[k], `${t}.${k} is a top-level field`);
   });
+
+  // the fold: one project, the goal's hold changed line by line and read after each
+  const dir = project('a1-fold');
+  const g = readyGoal(dir);
+  const noCause = (v) => { assert.ok(!('hold_for' in v), `no hold_for: ${JSON.stringify(v.hold_for)}`); assert.ok(!('hold_until' in v), `no hold_until: ${JSON.stringify(v.hold_until)}`); };
+
+  await t.test("a supervisor's drain with its cause is applied, and the goal keeps the cause beside hold", () => {
+    goalSet(dir, 'supervisor', g, DRAIN);
+    const v = show(dir, g);
+    assert.equal(v.hold?.mode, 'drain', 'the goal reads draining');
+    assert.deepEqual(v.hold_for, DRAIN.hold_for);
+    assert.equal(v.hold_until, DRAIN.hold_until);
+    const d = JSON.parse(ok(dir, ['dashboard-data']));
+    const dg = d.ooda.goals.find((x) => x.id === g);
+    assert.ok(dg, 'the goal is in /api/data ooda.goals');
+    assert.equal(dg.hold?.mode, 'drain');
+    assert.deepEqual(dg.hold_for, DRAIN.hold_for);
+    assert.equal(dg.hold_until, DRAIN.hold_until);
+  });
+
+  await t.test("a supervisor's release clears the cause", () => {
+    goalSet(dir, 'supervisor', g, { hold: { mode: 'run' }, hold_for: null, hold_until: null });
+    const v = show(dir, g);
+    assert.equal(v.hold?.mode, 'run');
+    noCause(v);
+  });
+
+  await t.test('a line with a cause and no hold changes nothing, and is listed as ignored', () => {
+    const id = goalSet(dir, 'supervisor', g, { hold_for: [TICKET], hold_until: '2026-11-30' });
+    const v = show(dir, g);
+    assert.equal(v.hold?.mode, 'run');
+    noCause(v);
+    const r = logCheck(dir);
+    assert.equal(r.status, 0, r.out + r.err);
+    assert.ok(r.out.split('\n').some((l) => l.startsWith('ignored:') && l.includes(id) && l.includes('hold_for and hold_until go with a hold')), r.out);
+  });
+
+  await t.test("the owner's hold line with a cause and other fields keeps the cause, and its update records it", () => {
+    goalSet(dir, 'owner', g, { hold: { mode: 'drain', reason: 'mine' }, hold_for: ['external:the vendor key'], hold_until: '2026-12-01', priority: 2 });
+    const v = show(dir, g);
+    assert.equal(v.hold?.mode, 'drain');
+    assert.deepEqual(v.hold_for, ['external:the vendor key']);
+    assert.equal(v.hold_until, '2026-12-01');
+    assert.equal(v.priority, 2);
+    const u = v.updates[v.updates.length - 1];
+    assert.deepEqual([u.hold, u.hold_for, u.hold_until], [{ mode: 'drain', reason: 'mine' }, ['external:the vendor key'], '2026-12-01']);
+  });
+
+  await t.test('a plain hold line replaces the cause: the hold then has none', () => {
+    goalSet(dir, 'owner', g, { hold: { mode: 'park' } });
+    const v = show(dir, g);
+    assert.equal(v.hold?.mode, 'park');
+    noCause(v);
+  });
+
+  await t.test('a refused hold line takes its cause with it', () => {
+    goalSet(dir, 'supervisor', g, DRAIN); // the supervisor drains only a running goal; this one is parked
+    const v = show(dir, g);
+    assert.equal(v.hold?.mode, 'park');
+    noCause(v);
+  });
+
+  await t.test("the same drain without its cause (an older kit's view) applies too", () => {
+    const old = project('a1-older');
+    const og = readyGoal(old);
+    goalSet(old, 'supervisor', og, { hold: DRAIN.hold });
+    const v = show(old, og);
+    assert.equal(v.hold?.mode, 'drain');
+    noCause(v);
+  });
 });
