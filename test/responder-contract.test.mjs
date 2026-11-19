@@ -5,6 +5,7 @@
 // Run: node --test test/responder-contract.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { testDir, threadsFixture } from './lib/kit.mjs';
@@ -109,6 +110,127 @@ test('responder-contract A1: the fake, its refusals by name, and readers droppin
         for (const [what, id] of [['a handoff with thread null', nullThread], ['a responder discovery observation', discovery], ['a responder observation with a detector', detector]]) assert.ok(!found(id), `record finds no ${what}`);
         assert.ok(!open().includes(nullThread), 'the null-thread handoff is not open');
       } finally { F.restoreLog(snap); }
+    });
+  } finally { F.done(); }
+});
+
+// every file under each dir (recursively), by path: size and sha256; a dir that isn't there is empty
+const hashDirs = (dirs) => {
+  const m = new Map();
+  const walk = (d) => {
+    if (!fs.existsSync(d)) return;
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else { const b = fs.readFileSync(p); m.set(p, `${b.length}:${crypto.createHash('sha256').update(b).digest('hex')}`); }
+    }
+  };
+  for (const d of dirs) walk(d);
+  return m;
+};
+const RESPONDER = { DEVTEAM_ROLE: 'responder' };
+
+test('responder-contract A2: the responder is its own writer, and is refused the supervisor\'s commands', async (t) => {
+  const F = threadsFixture('responder-a2');
+  try {
+    // as the supervisor first: a goal (the fixture's), a question, a thread with an owner turn, a decision
+    const q = F.sup(['ask', '--question', 'Ship it?', '--goal', F.goal, '--stake', '1', '--urgency', '1', '--recommendation', 'Yes']).split('\n')[0];
+    const T = F.owner(['thread', 'new', '--title', 'Header colour', '--', 'Make the header darker.']).split('\n')[0];
+    F.sup(['decide', '--class', 'rename-column', '--', 'renamed a column']);
+    const wt = path.join(F.base, 'wt-r');
+    F.g(['worktree', 'add', '-q', '--detach', wt], F.old);
+    const R = (args, extra = {}) => F.run(wt, args, { ...RESPONDER, ...extra });
+
+    await t.test('A2a: whoami in a detached worktree says writer=responder, with DEVTEAM_TICKET set too', () => {
+      for (const extra of [{}, { DEVTEAM_TICKET: 'kit-9-probe' }]) {
+        const r = R(['whoami'], extra);
+        assert.equal(r.status, 0, r.err);
+        assert.match(r.out, /# writer=responder\b/, r.out);
+        // the worktree's live log is the main checkout's (runDir from mainRoot), F.logDir
+        assert.equal(fs.realpathSync(r.out.match(/^DEVTEAM_RUN=(.*)$/m)[1]), fs.realpathSync(path.join(F.old, 'docs/devteam/run')), r.out);
+      }
+    });
+
+    await t.test('A2b: each supervisor or owner command, run as the responder, exits non-zero and writes no log file', () => {
+      const dirs = [F.logDir, path.join(F.old, 'docs/devteam/project/log'), path.join(wt, 'docs/devteam/project/log'), path.join(wt, 'docs/devteam/run/log')];
+      const ask = ['--question', 'Which?', '--goal', F.goal, '--stake', '1', '--urgency', '1'];
+      const cmds = [
+        ['answer', q, 'yes'],
+        ['ask', ...ask],
+        ['ack', 'stale-worker', 'w-01-a', '--reason', 'r'],
+        ['thread', 'ask', T, ...ask],
+        ['thread', 'ready', T, '--outcome', 'done'],
+        ['merge', 'kit-9-probe'],
+        ['act', '--class', 'worker-slots', '--', 'x'],
+        ['decide', '--class', 'rename-column', '--', 'x'],
+        ['goal', 'set', F.goal, '--title', 'x'],
+        ['chore', 'start', 'x'],
+        ['thread', 'say', T, 'words'],
+        ['phase', 'supervisor', '--usd', '1'],
+      ];
+      for (const args of cmds) {
+        const before = hashDirs(dirs);
+        const r = R(args);
+        assert.notEqual(r.status, 0, `${args.join(' ')} should fail as the responder: ${r.out}`);
+        assert.deepEqual(hashDirs(dirs), before, `${args.join(' ')} leaves every log file as it was, and adds none`);
+      }
+    });
+
+    await t.test('A2c: act\'s refusal says the supervisor does it and how to hand it over', () => {
+      const r = R(['act', '--class', 'worker-slots', '--', 'x']);
+      assert.notEqual(r.status, 0);
+      assert.match(r.err, /the supervisor does this/, r.err);
+      assert.match(r.err, /--kind handoff --thread/, r.err);
+    });
+  } finally { F.done(); }
+});
+
+test('responder-contract C2: the reply guard, the responder\'s reply and refs, its turn cited, its observations', async (t) => {
+  const F = threadsFixture('responder-c2');
+  try {
+    const T = F.owner(['thread', 'new', '--title', 'Header colour', '--', 'Make the header darker.']).split('\n')[0];
+    const R = (args) => F.run(F.old, args, RESPONDER);
+    const raw = (id) => fs.readdirSync(F.logDir).flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))).find((l) => l.id === id);
+    let U;
+
+    await t.test("a worker's and a planner's thread reply are refused, the log unchanged", () => {
+      for (const role of [{ DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'kit-9-probe' }, { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'probe' }]) {
+        const before = hashDirs([F.logDir]);
+        const r = F.run(F.old, ['thread', 'reply', T, 'x'], role);
+        assert.notEqual(r.status, 0, `${role.DEVTEAM_ROLE}'s reply should fail: ${r.out}`);
+        assert.deepEqual(hashDirs([F.logDir]), before, `${role.DEVTEAM_ROLE}'s refused reply writes nothing`);
+      }
+    });
+
+    await t.test("the responder's reply with --refs is a responder turn with those refs", () => {
+      const r = R(['thread', 'reply', T, 'On it', '--refs', `goal:${F.goal}`]);
+      assert.equal(r.status, 0, r.err);
+      U = r.out.split('\n')[0];
+      assert.match(U, /^u-\S+-responder$/, r.out);
+      const l = raw(U);
+      assert.equal(l?.by, 'responder', JSON.stringify(l));
+      assert.equal(l.type, 'turn');
+      assert.deepEqual(l.refs, [`goal:${F.goal}`]);
+    });
+
+    await t.test("thread ask --turn naming the responder's turn is refused, naming the responder's", () => {
+      assert.ok(U, 'the responder turn above');
+      assert.match(F.fails(['thread', 'ask', T, '--turn', U, '--question', 'Which?', '--goal', F.goal, '--stake', '1', '--urgency', '1'], F.SUP), /that turn is the responder's/);
+    });
+
+    await t.test("the responder's observation is source responder; --source supervisor is refused", () => {
+      const r = R(['observe', '--subject', 's', '--kind', 'note', '--detail', 'd']);
+      assert.equal(r.status, 0, r.err);
+      const id = r.out.split('\n')[0].match(/o-\S+/)?.[0];
+      const l = raw(id);
+      assert.equal(l?.type, 'observation', `${r.out}: ${JSON.stringify(l)}`);
+      assert.equal(l.source, 'responder');
+      assert.equal(l.by, 'responder');
+      const before = hashDirs([F.logDir]);
+      const s = R(['observe', '--subject', 's', '--kind', 'note', '--detail', 'd', '--source', 'supervisor']);
+      assert.notEqual(s.status, 0, s.out);
+      assert.match(s.err, /the responder's observation is from responder/, s.err);
+      assert.deepEqual(hashDirs([F.logDir]), before);
     });
   } finally { F.done(); }
 });

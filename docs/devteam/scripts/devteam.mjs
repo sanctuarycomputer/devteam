@@ -1907,8 +1907,10 @@ function currentTicketId() {
   const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   return b?.startsWith('ticket/') ? b.slice('ticket/'.length) : null;
 }
-// Who this process writes the log as: a ticket id, plan-<feature>, or supervisor. Never the owner.
+// Who this process writes the log as: the responder (its role wins over a ticket, a feature or a
+// branch), a ticket id, plan-<feature>, or supervisor. Never the owner.
 function logWriter() {
+  if (process.env.DEVTEAM_ROLE === 'responder') return 'responder';
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
@@ -1933,7 +1935,10 @@ function ownerWriter(hint) {
   return { by: 'owner' };
 }
 const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli');
+// What the responder is told when it runs a supervisor's command: who does it, and how to hand it over.
+const responderRefusal = (what) => `${what}: the supervisor does this; hand it over: send supervisor "…" --kind handoff --thread <t-id>`;
 const supervisorOnly = (what) => {
+  if (process.env.DEVTEAM_ROLE === 'responder' || logWriter() === 'responder') die(responderRefusal(what));
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`${what}: the supervisor does this`);
   rememberSupervisorPane();
   noteSupervisorSelf();
@@ -8299,15 +8304,15 @@ function cmdThread() {
     });
     return deliveredWords(typed);
   };
-  // Who writes a reply from this session: the supervisor (a responder's replies are written as the
-  // supervisor's until kit-102 gives it its own), or null where supervisorOnly would refuse one. The
-  // one place both reply and working's own-turn rule ask, so the two stay in step.
-  const replyWriter = () => (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
-  // Who holds a turn, as the stage names it: null for the owner's terminal and the dashboard, which
-  // never hold one; the responder says so itself until kit-102 makes logWriter say it.
+  // Who writes a reply from this session: the responder (its own turns), the supervisor, or null
+  // where supervisorOnly would refuse one. The one place both reply and working's own-turn rule ask,
+  // so the two stay in step.
+  const replyWriter = () => (logWriter() === 'responder' ? 'responder' : logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
+  // Who holds a turn, as the stage names it (the session's writer, the responder included): null for
+  // the owner's terminal and the dashboard, which never hold one.
   const sessionBy = () => {
     if (!process.env.DEVTEAM_ROLE || process.env.DEVTEAM_CHANNEL === 'dashboard') return null;
-    return process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : logWriter();
+    return logWriter();
   };
   // the holder spoke (or the owner closed the thread): its stage goes
   // a failed clear never fails a command already written (a retry would post twice): the card ignores a record older than the reply anyway
@@ -8337,16 +8342,17 @@ function cmdThread() {
     out(t.id);
     return out(deliver(t, u, words, files));
   }
-  // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
-  // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
+  // say is the owner's and reply the supervisor's or the responder's, never one falling through to the
+  // other: a reply with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the
+  // owner's file. The responder writes its own; anyone else goes through supervisorOnly.
   if (sub === 'say' || sub === 'reply') {
-    const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), replyWriter());
+    const by = sub === 'say' ? threadOwner().by : sub === 'reply' && logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply'), replyWriter());
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
     const words = turnText(wordsFrom(2));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
-    if (refs.length && by !== 'supervisor') die("--refs are on the supervisor's turns: what it did, as <type>:<id>");
+    if (refs.length && by !== 'supervisor' && by !== 'responder') die("--refs are on the supervisor's and the responder's turns: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
     const files = filesFlag();
@@ -8379,7 +8385,7 @@ function cmdThread() {
       if (!TURN_ID.test(uid ?? '')) die("thread ask --turn <u-id>: the owner's turn the question is about");
       const u = logGet(uid);
       if (u?.type !== 'turn') die(`--turn ${uid}: no such turn`);
-      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the supervisor's; a question is about the owner's words`);
+      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the ${u.created_by}'s; a question is about the owner's words`);
       if (u.thread !== t.id) die(`--turn ${uid}: that turn is in ${u.thread}, not ${t.id}; ask in its own thread`);
       if (flags.at !== undefined && flags['owner-said'] === undefined) die('--at goes with --owner-said: which match of a repeated clause');
       about = { about_turn: uid };
@@ -21007,6 +21013,7 @@ function cmdPhase() {
     : {};
   if (supervisor) {
     if (cost.usd === undefined) die('phase supervisor needs --usd (its cumulative spend)');
+    supervisorOnly('phase supervisor');
     appendLog({ type: 'phase', from: 'supervisor', to: 'supervisor', ...cost }, 'supervisor');
     return out('recorded supervisor cost');
   }
