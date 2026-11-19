@@ -761,7 +761,7 @@ test('every devteam.mjs command cloud/Dockerfile runs is a command of the kit (k
   const ran = new Set();
   for (const m of lines.join('\n').matchAll(/scripts\/devteam\.mjs\s+([a-z][a-z-]*)/g)) ran.add(m[1]);
   assert.deepEqual([...ran].sort(), ['dashboard', 'hub', 'machine', 'operator-thread', 'recover', 'settings']);
-  const table = kitSource.slice(kitSource.indexOf('\nconst COMMANDS = {'), kitSource.indexOf('\n};\n', kitSource.indexOf('\nconst COMMANDS = {')));
+  const table = kitSource.slice(kitSource.indexOf('/* commandGroups start */'), kitSource.indexOf('\n};\n', kitSource.indexOf('\nconst COMMANDS = {')));
   for (const c of ran) assert.ok(new RegExp(`(?:^|[\\s,{])(?:'${c}'|${c}):`).test(table), `COMMANDS has ${c}`);
 });
 
@@ -773,7 +773,7 @@ test('IMAGE_RUNS lists every machineWide handler, the guards, and only parts and
   assert.ok(wide, 'the machineWide line');
   const commands = [...new Set([...[...wide.matchAll(/\[([^\]]*)\]\.includes\(command\)/g)].flatMap((m) => [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1])), ...[...wide.matchAll(/command === '([^']+)'/g)].map((m) => m[1])])];
   assert.deepEqual(commands.sort(), ['box-pins', 'hub', 'machine', 'operator-thread', 'recover']);
-  const table = kitSource.slice(kitSource.indexOf('\nconst COMMANDS = {'), kitSource.indexOf('\n};\n', kitSource.indexOf('\nconst COMMANDS = {')));
+  const table = kitSource.slice(kitSource.indexOf('/* commandGroups start */'), kitSource.indexOf('\n};\n', kitSource.indexOf('\nconst COMMANDS = {')));
   const handlers = commands.map((c) => { const m = new RegExp(`(?:^|[\\s,{])(?:'${c}'|${c.includes('-') ? `'${c}'` : c}): (\\w+)`).exec(table); assert.ok(m, `COMMANDS has ${c}`); return m[1]; });
   assert.deepEqual(handlers.sort(), ['cmdBoxPins', 'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover']);
   for (const h of handlers) assert.ok(listed.has(h), `${h} is in IMAGE_RUNS`);
