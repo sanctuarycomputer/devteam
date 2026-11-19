@@ -2482,7 +2482,8 @@ function linkify(text) {
     const at = t?.merge_sha && t.repo === 'home' ? t.merge_sha : ref;
     if (!repoHref && (!ref || p.split('/').includes('..'))) return m.replace(rest, one);
     const href = repoHref || fileHref({ path: p, ref: at, title: p });
-    return `<a class="linkish" href="${esc(href)}"${/^https:/.test(href) ? ' target="_blank" rel="noopener noreferrer"' : ''}>${p}</a>${sep ? `${sep}${ref}` : ''}`;
+    const after = sep ? `${sep}${ref}` : '';
+    return /^https:/.test(href) ? `<a class="linkish" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${p}</a>${after}` : `<a class="linkish" href="${esc(href)}">${p}</a>${after}`;
   };
   const one = (m) => {
     if (/^q-\d{8}-\d{9}-/.test(m)) return qlink(m);
@@ -2828,7 +2829,7 @@ const artLinkOf = (l, inline = false) => {
   if (!href) return `<span>${esc(l.title)} <span class="muted">(no longer available)</span></span>`;
   return `<a href="${esc(href)}" data-av-note="${l.changed ? AV_CHANGED : ''}"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>${l.changed && !inline ? ' <span class="badge high">changed since asked</span>' : ''}`;
 };
-const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : l.path ? ((h) => `<a href="${esc(h)}"${/^https:/.test(h) ? ' target="_blank" rel="noopener noreferrer"' : ''}>${esc(l.title)}</a>`)(fileHref(l)) : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
+const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : l.path ? ((h) => (/^https:/.test(h) ? `<a href="${esc(h)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : `<a href="${esc(h)}">${esc(l.title)}</a>`))(fileHref(l)) : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
 // A question's text with each [[name]] drawn in place as that link (every link is still listed under
 // the question). The rest is linkified as before; a [[name]] that names no link stays as written.
 const NAME_REF = /\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/;
