@@ -1580,7 +1580,7 @@
     renderPages();
     renderPageSel();
     const pg = pageById(state.pageId);
-    if (!pg) { showPage(hashPage()); syncBody(); return; } // the shown page is gone: the first one
+    if (!pg) { showPage(hashPage()); syncBody(); keepDrag(); return; } // the shown page is gone: the first one
     const a = document.activeElement;
     const focusRow = a instanceof Element && a.matches('#layers .layer[data-node]') ? a.dataset.node : null;
     markPage(pg);
@@ -1590,6 +1590,7 @@
     if (focusRow !== null && layerRows.has(focusRow)) layerRows.get(focusRow).focus({ preventScroll: true });
     if (document.body.dataset.state !== 'error') { if (kidsOf(pg).length === 0) showMsg(TEXT.empty); else hideMsg(); }
     syncBody();
+    keepDrag();
   }
 
   // The message line (#toast) for 6 s, and the banner (#banner; null hides it).
@@ -2080,7 +2081,8 @@
   const IMAGE_BYTES = 4 * 1024 * 1024; // canvas@1 §7 imageBytes
   const DRAG_SLOP = 3; // px a press may move and still be a click
   let tool = 'move';
-  // gesture: the press a tool is following ({ id, tool, sx, sy, cx, cy, dragged, draft }), or null;
+  // gesture: the press a tool is following ({ id, tool, sx, sy, cx, cy, dragged, draft }, and for
+  // Move the node, its element and where the press was: see pressMove), or null;
   // toolPress: the click that ends such a press is the tool's, not a selection; pen: the path being
   // drawn ({ pts in page px, el, line }), or null; placing: where the image being chosen goes, or null.
   let gesture = null;
@@ -2194,8 +2196,9 @@
   // middle button or by touch is the pan's.
   $('stage').addEventListener('pointerdown', (e) => {
     toolPress = false;
-    if (tool === 'move' || !toolsOn() || isTouch(e) || e.button !== 0 || spaceHeld || pan || gesture) return;
+    if (!toolsOn() || isTouch(e) || e.button !== 0 || spaceHeld || pan || gesture) return;
     if (!(e.target instanceof Element) || e.target.closest('.zoom, .stage-top, #tools')) return;
+    if (tool === 'move') { pressMove(e); return; }
     toolPress = true;
     if (tool === 'vector') { penPoint(e.clientX, e.clientY); return; }
     gesture = { id: e.pointerId, tool, sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null };
@@ -2208,7 +2211,14 @@
     g.cx = e.clientX;
     g.cy = e.clientY;
     if (!g.dragged && Math.hypot(g.cx - g.sx, g.cy - g.sy) <= DRAG_SLOP) return;
+    if (g.tool === 'move' && !g.dragged) {
+      // past 3 px a Move press is a drag: the pointer kept (a release outside the stage still ends
+      // it), and the click that ends it isn't a selection
+      try { $('stage').setPointerCapture(g.id); } catch { /* moves over the stage still arrive */ }
+      toolPress = true;
+    }
     g.dragged = true;
+    if (g.tool === 'move') { movePreview(g); return; }
     if (g.tool === 'text') return; // a text is placed where it was pressed
     if (!g.draft) {
       g.draft = document.createElement('div');
@@ -2225,6 +2235,7 @@
     if (!gesture) return;
     try { $('stage').releasePointerCapture(gesture.id); } catch { /* already released */ }
     if (gesture.draft) gesture.draft.remove();
+    if (gesture.el) gesture.el.style.translate = '';
     gesture = null;
   }
   $('stage').addEventListener('pointerup', (e) => {
@@ -2239,6 +2250,7 @@
   // What a press made: placed by where it was pressed; a drag's box (frame, rectangle, ellipse, image)
   // gives its top-left and its size, in page px.
   function make(g) {
+    if (g.tool === 'move') { dropMove(g); return; }
     const at = placeAt(g.sx, g.sy);
     const z = view.z;
     const box = g.dragged && g.tool !== 'text'
@@ -2270,6 +2282,138 @@
       default:
     }
   }
+
+  // ---- Move: a press selects, a drag moves, arrows nudge (spec §2) ----
+  // A press on a drawn node selects it (kit-661's rule: inside an instance, the instance); past 3 px it
+  // drags it, the node previewed under the pointer by a translate on its element; the release sends one
+  // edit. Escape (setTool) or a lost pointer drops the drag. The press, the grab and the movement are
+  // kept in page px, so the grab point stays under the pointer whatever the view does meanwhile.
+
+  function pressMove(e) {
+    const hit = e.target.closest('#surface [data-id]');
+    const id = hit ? hit.dataset.id : null;
+    if (id === null || !nodeOf(id)) return;
+    select(id);
+    if (state.sel !== id) return;
+    const s = $('surface').getBoundingClientRect();
+    const r = (drawn.get(id) ?? hit).getBoundingClientRect();
+    const z = view.z;
+    gesture = {
+      id: e.pointerId, tool: 'move', sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, dragged: false, draft: null,
+      node: id, el: null,
+      px: (e.clientX - s.left) / z, py: (e.clientY - s.top) / z, // the press, in page px
+      gx: (e.clientX - r.left) / z, gy: (e.clientY - r.top) / z, // the grab, from the node's top-left
+    };
+  }
+  // The pointer's movement since the press, in page px.
+  function moveBy(g) {
+    const s = $('surface').getBoundingClientRect();
+    return { dx: (g.cx - s.left) / view.z - g.px, dy: (g.cy - s.top) / view.z - g.py };
+  }
+  function movePreview(g) {
+    const el = drawn.get(g.node);
+    if (g.el && g.el !== el) g.el.style.translate = '';
+    g.el = el ?? null;
+    if (!g.el) return;
+    const { dx, dy } = moveBy(g);
+    if (Number.isFinite(dx) && Number.isFinite(dy)) g.el.style.translate = `${dx}px ${dy}px`;
+  }
+  // After a redraw (someone's edit) the dragged node's new element takes the preview; a node gone or
+  // no longer on the shown page ends the drag.
+  function keepDrag() {
+    const g = gesture;
+    if (!g || g.tool !== 'move' || !g.dragged) return;
+    if (!nodeOf(g.node) || !drawn.has(g.node)) { endGesture(); return; }
+    movePreview(g);
+  }
+  // Every node of a subtree (the root first), bounded.
+  function subtreeOf(id) {
+    const out = [];
+    const stack = [id];
+    while (stack.length && out.length <= MAX_ELEMENTS) {
+      const n = nodeOf(stack.pop());
+      if (!n) continue;
+      out.push(n);
+      if (CONTAINERS.has(n.type)) stack.push(...kidsOf(n));
+    }
+    return out;
+  }
+  // The components at or above a parent (a node id, or a page id: none).
+  function componentsAbove(pid) {
+    const out = new Set();
+    let cur = pid;
+    for (let steps = 0; steps <= MAX_ELEMENTS && nodeOf(cur); steps++) {
+      if (nodeOf(cur).type === 'component') out.add(cur);
+      cur = nodeOf(cur).parent;
+    }
+    return out;
+  }
+  // May node `id` go under `pid`? Never into itself or its subtree, never a component inside a
+  // component, never an instance inside the component it names.
+  function mayGo(id, pid) {
+    if (inSubtree(pid, id)) return false;
+    const comps = componentsAbove(pid);
+    if (comps.size === 0) return true;
+    return !subtreeOf(id).some((n) => n.type === 'component' || (n.type === 'instance' && comps.has(n.component)));
+  }
+  // The release: placed by placeAt at the pointer (the node's own subtree skipped). Under the same
+  // `none` frame or page: set x, set y, only those that changed. Elsewhere, or within an auto-layout
+  // frame: a move with its `after` (nothing when that is where it already is), plus set x, set y (its
+  // top-left as previewed, whole px) when the new parent places by x, y. A drop the canvas would
+  // refuse sends nothing and says so.
+  function dropMove(g) {
+    if (!g.dragged || !editable()) return;
+    const id = g.node;
+    const n = nodeOf(id);
+    if (!n || !layerRows.has(id)) return; // gone, or no longer on the shown page
+    const at = placeAt(g.cx, g.cy, id);
+    if (!mayGo(id, at.parent)) { say(REFUSED.parent); return; }
+    const { dx, dy } = moveBy(g);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    const left = clamp(Math.round(at.x - g.gx), -PX, PX);
+    const top = clamp(Math.round(at.y - g.gy), -PX, PX);
+    const ops = [];
+    if (at.parent === n.parent && at.free) {
+      for (const [k, d, drop] of [['x', dx, left], ['y', dy, top]]) {
+        const v = valueOf(id, k);
+        const next = finite(v) ? clamp(Math.round(v + d), -PX, PX) : drop;
+        if (next !== v) ops.push({ op: 'set', id, prop: k, value: next });
+      }
+    } else {
+      if (at.parent === n.parent) {
+        const sibs = kidsOf(nodeOf(n.parent) ?? pageById(n.parent) ?? { children: [] });
+        const i = sibs.indexOf(id);
+        if (i >= 0 && at.after === (i > 0 ? sibs[i - 1] : null)) return; // dropped where it was
+      }
+      ops.push({ op: 'move', id, parent: at.parent, after: at.after });
+      if (at.free) ops.push({ op: 'set', id, prop: 'x', value: left }, { op: 'set', id, prop: 'y', value: top });
+    }
+    if (ops.length) edit(ops);
+  }
+
+  // Arrow keys nudge the selected node placed by x, y: 1 px, 10 with Shift; one set each, so held keys
+  // coalesce in the sender while unsent (§1). Only while focus is on the page itself or the stage: in a
+  // field the arrows are the field's, in the Layers tree they move between rows.
+  const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  function nudge(dx, dy) {
+    const id = state.sel;
+    const n = nodeOf(id);
+    if (!editable() || !n || !placedByXY(n)) return;
+    for (const [k, d] of [['x', dx], ['y', dy]]) {
+      const v = valueOf(id, k);
+      if (d !== 0 && finite(v)) setProp(id, k, clamp(v + d, -PX, PX));
+    }
+  }
+  document.addEventListener('keydown', (e) => {
+    if (!own(ARROWS, e.key) || !toolsOn() || e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    if (t !== document.body && t !== document.documentElement && t !== $('stage')) return;
+    if (state.sel === null || gesture !== null || pen !== null) return;
+    e.preventDefault();
+    const step = e.shiftKey ? 10 : 1;
+    const [dx, dy] = ARROWS[e.key];
+    nudge(dx * step, dy * step);
+  });
 
   // ---- the image: posted, then added under the src the server answers ----
   $('imageFile').addEventListener('cancel', () => { placing = null; });

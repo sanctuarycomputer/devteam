@@ -1179,3 +1179,307 @@ test('the empty-page note follows the page', { skip: canDrive ? false : 'needs C
   assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
   noExceptions(rec);
 });
+
+// ---- C4.2 to C4.4: moving by drag and by arrows ----
+
+const CANT_GO = "That layer can't go there.";
+const ARROW_CODE = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
+// An arrow key as a keyboard sends it (the helper's key() knows only Left and Right), Shift held when asked.
+async function arrow(p, k, shift = false) {
+  const e = { key: k, code: k, windowsVirtualKeyCode: ARROW_CODE[k], nativeVirtualKeyCode: ARROW_CODE[k], modifiers: shift ? 8 : 0 };
+  await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...e });
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...e });
+}
+// A left press at the first point, moved through the others in steps of at most 10 px, released at the
+// last; `mid` runs before the release, the button still down.
+async function dragPath(p, pts, mid = null) {
+  const [a] = pts;
+  await p.move(a.x, a.y);
+  await mouse(p, 'mousePressed', a.x, a.y);
+  let at = a;
+  for (const b of pts.slice(1)) {
+    const steps = Math.max(1, Math.ceil(Math.hypot(b.x - at.x, b.y - at.y) / 10));
+    for (let i = 1; i <= steps; i++) await mouse(p, 'mouseMoved', at.x + ((b.x - at.x) * i) / steps, at.y + ((b.y - at.y) * i) / steps);
+    at = b;
+  }
+  if (mid) await mid();
+  await mouse(p, 'mouseReleased', at.x, at.y);
+}
+const centre = (b) => ({ x: Math.round(b.l + b.w / 2), y: Math.round(b.t + b.h / 2) });
+const selectedIds = (p) => p.ev("[...document.querySelectorAll('#layers .layer[aria-selected=\"true\"]')].map((r) => r.dataset.node)");
+// No edit frame after the first n0 for `ms`.
+async function sendsNothing(rec, n0, what, ms = 600) {
+  await sleep(ms);
+  assert.deepEqual(edits(rec).slice(n0).map((e) => e.ops), [], `${what}: nothing sent`);
+}
+const near = (a, b, tol, what) => assert.ok(Math.abs(a - b) <= tol, `${what}: ${a} within ${tol} of ${b}`);
+
+test('drag a loose node', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  // a zoom other than 1
+  const z0 = await zoomNow(p);
+  await p.click('#zoomOut');
+  await within(async () => Math.abs((await zoomNow(p)) - z0 / 1.25) < 1e-4, 'zoomed out a step');
+  const z = await zoomNow(p);
+  assert.ok(Math.abs(z - 1) > 0.05, `the zoom is not 1 (${z})`);
+  assert.deepEqual(await selectedIds(p), [], 'nothing selected at first');
+
+  // C4.2a and C4.2: a press on the unselected badge selects it, and a drag of (30, 20) moves it, previewed
+  // under the pointer meanwhile; one edit of set x and set y by (30/z, 20/z), rounded
+  const b0 = await box(p, '#surface [data-id="badge"]');
+  const a = centre(b0);
+  assert.equal(await hitAt(p, a), 'badge');
+  let n0 = edits(rec).length;
+  await drag(p, a, 30, 20, async () => {
+    assert.deepEqual(await selectedIds(p), ['badge'], 'the press selected badge');
+    const b = await box(p, '#surface [data-id="badge"]');
+    near(b.l, b0.l + 30, 1, 'previewed x');
+    near(b.t, b0.t + 20, 1, 'previewed y');
+    assert.equal(await count(p, '#surface [data-id="badge"]'), 1, 'one badge drawn while dragging');
+  });
+  const e = await nextEdit(rec, n0);
+  const want = [{ op: 'set', id: 'badge', prop: 'x', value: Math.round(12 + 30 / z) }, { op: 'set', id: 'badge', prop: 'y', value: Math.round(-8 + 20 / z) }];
+  assert.deepEqual(e.ops, want, 'one edit: set x and set y');
+  await ackOf(rec, e);
+  await sendsNothing(rec, n0 + 1, 'after the drop');
+  const b1 = await box(p, '#surface [data-id="badge"]');
+  near(b1.l, b0.l + 30, z, 'drawn there: x');
+  near(b1.t, b0.t + 20, z, 'drawn there: y');
+  assert.deepEqual(await selectedIds(p), ['badge'], 'still selected after the release');
+  await waitSaved(p);
+  assert.equal(fake.doc('every').nodes.badge.x, want[0].value, "the fake's badge.x");
+  assert.equal(fake.doc('every').nodes.badge.y, want[1].value, "the fake's badge.y");
+
+  // a press without a drag (3 px or less) is a click: it selects and sends nothing
+  const d = centre(await box(p, '#surface [data-id="dot"]'));
+  n0 = edits(rec).length;
+  await drag(p, d, 2, 2);
+  await within(async () => JSON.stringify(await selectedIds(p)) === '["dot"]', 'the press on dot selected it', async () => JSON.stringify(await selectedIds(p)), 5000);
+  await sendsNothing(rec, n0, 'a press of 2 px');
+
+  // Escape during a drag drops it: nothing sent, badge back where it was, the selection kept
+  n0 = edits(rec).length;
+  await drag(p, centre(b1), 40, 0, async () => {
+    near((await box(p, '#surface [data-id="badge"]')).l, b1.l + 40, 1, 'previewed before Escape');
+    await p.key('Escape');
+  });
+  await sendsNothing(rec, n0, 'Escape during the drag');
+  const b2 = await box(p, '#surface [data-id="badge"]');
+  near(b2.l, b1.l, 0.5, 'badge back: x');
+  near(b2.t, b1.t, 0.5, 'badge back: y');
+  assert.deepEqual(await selectedIds(p), ['badge'], 'Escape during a drag keeps the selection');
+
+  // a drag released outside the stage still ends (pointer capture): released over the Layers panel,
+  // the drop is on the page, by the same rule as any drop there
+  const lay = await box(p, '#layers');
+  n0 = edits(rec).length;
+  await dragPath(p, [centre(b2), { x: Math.round(lay.l + lay.w / 2), y: centre(b2).y }]);
+  const out = await nextEdit(rec, n0);
+  assert.deepEqual(out.ops[0], { op: 'move', id: 'badge', parent: 'p-main', after: 'tiles' }, 'released outside the stage: a move onto the page');
+  assert.deepEqual(out.ops.slice(1).map((o) => o.prop), ['x', 'y'], 'with set x and set y');
+  await ackOf(rec, out);
+  assert.equal(await p.ev("document.querySelector('#surface [data-id=\"badge\"]').style.translate"), '', 'no preview left');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+test('drag into and within auto-layout', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const z = await zoomNow(p);
+  const kids = (id) => fake.doc('every').nodes[id].children;
+
+  // dot (in the column card) to the lower half of photo's drawn box: one move into card after photo
+  let dot = await box(p, '#surface [data-id="dot"]');
+  let photo = await box(p, '#surface [data-id="photo"]');
+  let n0 = edits(rec).length;
+  await dragPath(p, [centre(dot), { x: Math.round(photo.l + photo.w / 2), y: Math.round(photo.t + photo.h * 0.75) }]);
+  let e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'move', id: 'dot', parent: 'card', after: 'photo' }], 'one move of dot after photo');
+  await ackOf(rec, e);
+  await waitSaved(p);
+  assert.deepEqual(kids('card'), ['title', 'rule', 'icon', 'photo', 'dot', 'actions'], "the fake's card");
+  photo = await box(p, '#surface [data-id="photo"]');
+  dot = await box(p, '#surface [data-id="dot"]');
+  assert.ok(dot.t >= photo.b, 'dot drawn below photo');
+
+  // dot to the centre of loose's drawn box: one edit of a move into loose with set x and set y, where
+  // the drop put it (its top-left, as previewed) in loose's px, whole
+  const loose = await box(p, '#surface [data-id="loose"]');
+  const from = centre(dot);
+  const to = centre(loose);
+  n0 = edits(rec).length;
+  await dragPath(p, [from, to]);
+  e = await nextEdit(rec, n0);
+  const x = Math.round((dot.l + (to.x - from.x) - loose.l) / z);
+  const y = Math.round((dot.t + (to.y - from.y) - loose.t) / z);
+  assert.deepEqual(e.ops, [{ op: 'move', id: 'dot', parent: 'loose', after: 'badge' }, { op: 'set', id: 'dot', prop: 'x', value: x }, { op: 'set', id: 'dot', prop: 'y', value: y }], 'a move into loose with its x, y');
+  await ackOf(rec, e);
+  await waitSaved(p);
+  assert.deepEqual(kids('loose'), ['badge', 'dot']);
+  assert.equal(fake.doc('every').nodes.dot.x, x);
+  assert.equal(fake.doc('every').nodes.dot.y, y);
+  dot = await box(p, '#surface [data-id="dot"]');
+  near(dot.l, loose.l + x * z, 1, 'dot drawn at its x in loose');
+  near(dot.t, loose.t + y * z, 1, 'dot drawn at its y in loose');
+  assert.equal(await p.ev("document.querySelector('#surface [data-id=\"dot\"]').parentElement.dataset.id"), 'loose', 'drawn inside loose');
+
+  // badge to the lower half of title's drawn box: a move into card after title, and no x, y
+  const badge = await box(p, '#surface [data-id="badge"]');
+  const title = await box(p, '#surface [data-id="title"]');
+  n0 = edits(rec).length;
+  await dragPath(p, [centre(badge), { x: Math.round(title.l + title.w / 2), y: Math.round(title.t + title.h * 0.75) }]);
+  e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'move', id: 'badge', parent: 'card', after: 'title' }], 'one move of badge after title, no x, y');
+  await ackOf(rec, e);
+  await waitSaved(p);
+  assert.deepEqual(kids('card'), ['title', 'badge', 'rule', 'icon', 'photo', 'actions'], "the fake's card");
+  assert.equal(await p.ev("document.querySelector('#surface [data-id=\"badge\"]').parentElement.dataset.id"), 'card', 'badge drawn inside card');
+
+  // within the column: rule dragged to the upper half of title goes first
+  const rule = await box(p, '#surface [data-id="rule"]');
+  const title2 = await box(p, '#surface [data-id="title"]');
+  n0 = edits(rec).length;
+  await dragPath(p, [centre(rule), { x: Math.round(title2.l + title2.w / 2), y: Math.round(title2.t + title2.h * 0.25) }]);
+  e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'move', id: 'rule', parent: 'card', after: null }], 'rule moved first in card');
+  await ackOf(rec, e);
+  await waitSaved(p);
+  assert.deepEqual(kids('card'), ['rule', 'title', 'badge', 'icon', 'photo', 'actions'], "the fake's card");
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+test('arrow keys nudge, coalesced', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const badgeAt = async () => centre(await box(p, '#surface [data-id="badge"]'));
+  // badge selected by a click on its drawn node: focus stays on the page
+  const pt = await badgeAt();
+  await p.clickAt(pt.x, pt.y);
+  await within(async () => JSON.stringify(await selectedIds(p)) === '["badge"]', 'badge selected');
+  assert.equal(await p.ev('document.activeElement === document.body'), true, 'focus on the page');
+  // Arrow Right: set x +1; Shift+Arrow Down: set y +10
+  let n0 = edits(rec).length;
+  await arrow(p, 'ArrowRight');
+  let e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'set', id: 'badge', prop: 'x', value: 13 }], 'Arrow Right: x + 1');
+  await ackOf(rec, e);
+  n0 = edits(rec).length;
+  await arrow(p, 'ArrowDown', true);
+  e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'set', id: 'badge', prop: 'y', value: 2 }], 'Shift+Arrow Down: y + 10');
+  await ackOf(rec, e);
+  await waitSaved(p);
+
+  // in a field the arrows are the field's, and on a Layers row they never nudge
+  assert.equal(await focusField(p, 'x'), true, 'the X field focused');
+  n0 = edits(rec).length;
+  await arrow(p, 'ArrowRight');
+  await arrow(p, 'ArrowUp');
+  assert.equal(await p.ev("document.activeElement.matches('#props [data-prop=\"x\"]')"), true, 'focus still in the field');
+  await leavePanel(p);
+  assert.equal(await p.ev("(() => { const r = document.querySelector('#layers .layer[data-node=\"badge\"]'); r.focus(); return document.activeElement === r; })()"), true, "badge's row focused");
+  for (const k of ['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp']) await arrow(p, k);
+  await sendsNothing(rec, n0, 'arrows in the X field and on a Layers row');
+  assert.equal(fake.doc('every').nodes.badge.x, 13, 'x unchanged by those arrows');
+
+  // 30 Arrow Right presses back to back: fewer than 30 frames, at most 21 in any second, each a single
+  // set x, rising, at least one jump over 1, the last the start + 30, which the fake holds
+  const pt2 = await badgeAt();
+  await p.clickAt(pt2.x, pt2.y);
+  await within(async () => (await p.ev('document.activeElement === document.body')) && JSON.stringify(await selectedIds(p)) === '["badge"]', 'badge selected, focus on the page');
+  await sleep(1100); // the sender's last second clear
+  n0 = edits(rec).length;
+  const k = { key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 };
+  // the key held: 30 keydowns (the later ones auto-repeats, as a held key sends them), then its keyup,
+  // dispatched without waiting on each other. When each press was made is its event's timeStamp (a
+  // listener of the test's, on window, before the page's): the presses queue in the page and are
+  // handled one after another, so the wall time to the last answer is the page's work, not the presses'
+  await p.ev("window.pressedAt = []; addEventListener('keydown', (e) => { if (e.key === 'ArrowRight') window.pressedAt.push(e.timeStamp); }, true)");
+  const presses = [];
+  for (let i = 0; i < 30; i++) presses.push(p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...k, autoRepeat: i > 0 }));
+  await Promise.all(presses);
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k });
+  const stamps = await p.ev('window.pressedAt');
+  assert.equal(stamps.length, 30, '30 presses reached the page');
+  const span = stamps[stamps.length - 1] - stamps[0];
+  t.diagnostic(`30 presses made within ${span.toFixed(1)} ms`);
+  assert.ok(span <= 300, `30 presses within 300 ms (${span} ms)`);
+  await within(async () => { const s = edits(rec).slice(n0); return s.length > 0 && s[s.length - 1].ops[0].value === 43; }, 'the last nudge sent', async () => JSON.stringify(edits(rec).slice(n0).map((x) => x.ops)), 10000);
+  await waitSaved(p);
+  await sleep(300);
+  const burst = edits(rec).slice(n0);
+  const at = rec.sentAt.filter((_, i) => rec.sent[i] && rec.sent[i].t === 'edit').slice(n0);
+  assert.ok(burst.length < 30, `fewer than 30 edit frames (${burst.length})`);
+  for (const f of burst) assert.deepEqual(f.ops.map((o) => [o.op, o.id, o.prop]), [['set', 'badge', 'x']], 'each a single set x');
+  const vals = burst.map((f) => f.ops[0].value);
+  for (let i = 1; i < vals.length; i++) assert.ok(vals[i] > vals[i - 1], `rising: ${vals.join(' ')}`);
+  assert.ok(vals.some((v, i) => (i === 0 ? v - 13 : v - vals[i - 1]) > 1), `at least one jump over 1 (coalesced): ${vals.join(' ')}`);
+  assert.equal(vals[vals.length - 1], 43, 'the last is the start + 30');
+  for (let i = 0; i < at.length; i++) assert.ok(at.filter((x) => x >= at[i] && x < at[i] + 1000).length <= 21, 'at most 21 in any second');
+  assert.equal(fake.doc('every').nodes.badge.x, 43, "the fake's badge.x");
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+test('a drag into its own subtree sends nothing', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  // a frame pressed and dragged over itself and back, released on itself: it isn't dropped into itself
+  // (nor into its child), so nothing is sent; nor is the row actions, dragged out and back in card
+  let n0 = edits(rec).length;
+  const loose = await box(p, '#surface [data-id="loose"]');
+  const lp = { x: Math.round(loose.l + loose.w * 0.6), y: Math.round(loose.t + loose.h * 0.6) };
+  const badge = centre(await box(p, '#surface [data-id="badge"]'));
+  await dragPath(p, [lp, { x: lp.x + 40, y: lp.y + 30 }, { x: lp.x + (badge.x - lp.x) / 2, y: lp.y + (badge.y - lp.y) / 2 }, lp]);
+  await sendsNothing(rec, n0, 'loose dropped where it was');
+  const actions = await box(p, '#surface [data-id="actions"]');
+  const ap = { x: Math.round(actions.r - 6), y: Math.round(actions.t + actions.h / 2) };
+  assert.equal(await hitAt(p, ap), 'actions');
+  await dragPath(p, [ap, { x: ap.x, y: ap.y - 30 }, ap]);
+  await sendsNothing(rec, n0, 'actions dropped where it was');
+  // dragged by (40, 30) and released on itself: moved within its parent, never into itself
+  n0 = edits(rec).length;
+  await dragPath(p, [lp, { x: lp.x + 40, y: lp.y + 30 }]);
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops.map((o) => [o.op, o.id, o.prop]), [['set', 'loose', 'x'], ['set', 'loose', 'y']], 'loose moved within the page');
+  await ackOf(rec, e);
+
+  // a component dropped into another component, or a frame holding one: refused here with the page's
+  // words, nothing sent, and drawn back where it was
+  const a = await ana(fake, later);
+  await a.edit([
+    { op: 'add', node: { id: 'chip', type: 'component', parent: 'p-parts', name: 'Chip', x: 400, y: 0, size: { w: 120, h: 60 }, layout: { mode: 'none' }, fill: '#cccccc' }, after: 'button' },
+    { op: 'add', node: { id: 'holder', type: 'frame', parent: 'p-parts', name: 'Holder', x: 400, y: 200, size: { w: 200, h: 150 }, layout: { mode: 'none' }, fill: '#eeeeee' }, after: 'chip' },
+    { op: 'add', node: { id: 'chip2', type: 'component', parent: 'holder', name: 'Chip 2', x: 150, y: 100, size: { w: 40, h: 40 }, layout: { mode: 'none' }, fill: '#999999' }, after: null },
+  ]);
+  await within(async () => (await body(p, 'rev')) === String(fake.rev('every')), 'the page has Ana\'s edit');
+  await p.click('#pages a[data-page="p-parts"]');
+  await within(async () => (await count(p, '#surface [data-id="chip"]')) === 1 && (await count(p, '#surface [data-id="button"]')) === 1, 'Parts shown with chip');
+  const button = centre(await box(p, '#surface [data-id="button"]'));
+  for (const [id, grab] of [['chip', (b) => centre(b)], ['holder', (b) => ({ x: Math.round(b.l + 10), y: Math.round(b.t + 10) })]]) {
+    const b0 = await box(p, `#surface [data-id="${id}"]`);
+    const from = grab(b0);
+    assert.equal(await hitAt(p, from), id, `the press is on ${id}`);
+    await p.ev("document.getElementById('toast').hidden = true");
+    n0 = edits(rec).length;
+    await dragPath(p, [from, button]);
+    await within(async () => (await shownText(p, '#toast')) === CANT_GO, `${id}: the page says it can't go there`, async () => shownText(p, '#toast'), 5000);
+    await sendsNothing(rec, n0, `${id} into the component button`);
+    const b1 = await box(p, `#surface [data-id="${id}"]`);
+    near(b1.l, b0.l, 0.5, `${id} drawn back: x`);
+    near(b1.t, b0.t, 0.5, `${id} drawn back: y`);
+    assert.equal(fake.doc('every').nodes[id].parent, 'p-parts', `${id} still on the page`);
+  }
+  // a component dragged on the page itself moves
+  const chip = await box(p, '#surface [data-id="chip"]');
+  n0 = edits(rec).length;
+  await dragPath(p, [centre(chip), { x: centre(chip).x + 30, y: centre(chip).y + 40 }]);
+  const m = await nextEdit(rec, n0);
+  assert.deepEqual(m.ops.map((o) => [o.op, o.id, o.prop]), [['set', 'chip', 'x'], ['set', 'chip', 'y']], 'chip moved on its page');
+  await ackOf(rec, m);
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
