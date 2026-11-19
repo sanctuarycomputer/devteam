@@ -434,17 +434,24 @@ test('canvas cursors: a select made while the document is fetched after a restar
   await within(ctx, async () => anaSelections(B, b1).some((ids) => ids && ids.includes(x2.id)), "B's selections after the reload list Ana with X2", async () => JSON.stringify(anaSelections(B, b1)));
   await within(ctx, async () => (await boxesOf(B, 'others-sel', 'ana')).map((b) => b.node).join(' ') === x2.id, "B draws Ana's box on X2", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')));
 
-  // S6.3 (task-1 T1-1, T1-2): nothing to re-send; A's selection cleared while a reload's fetch is held
-  // goes out once the fetch lands, as an empty select, and B's selections then list Ana with none
+  // S6.3 (task-1 T1-1, T1-2, task-1-2 T1-2-1): A's selection cleared while a reload's fetch is held goes
+  // out as an empty select once the fetch lands and the re-sent edit X3 is acked, although an empty
+  // selection is what the old dedupe took a fresh socket's last select to be; B's selections then list
+  // Ana with none
   fake.resume(SLUG);
   await within(ctx, async () => (await body(A, 'kept')) === '0' && (await body(A, 'pending')) === '0', "A's edits all saved");
+  fake.pause(SLUG);
+  const x3 = await drawRect(ctx, A, 340, 120, 'X3');
   await A.click('#layers .layer[data-node="n-side"]');
   await within(ctx, async () => ofKind(A.rec.sent, 'select').at(-1)?.m.ids.join(' ') === 'n-side', "A's select of n-side");
   const b2 = B.rec.order();
   await within(ctx, async () => anaSelections(B, b2).some((ids) => ids && ids.join(' ') === 'n-side'), "B's selections list Ana with n-side");
   A.rec.hold = (url) => url.includes('/api/canvas/doc?');
   const r2 = A.rec.order();
-  fake.replace(SLUG, fake.doc(SLUG));
+  const doc3 = fake.doc(SLUG);
+  delete doc3.nodes[x3.id];
+  for (const pg of doc3.pages) pg.children = pg.children.filter((c) => c !== x3.id);
+  fake.replace(SLUG, doc3);
   await within(ctx, async () => A.rec.held.length > 0, "A's document fetch after the reload, held");
   await A.key('Escape');
   await within(ctx, async () => (await A.ev('document.querySelectorAll(\'#layers .layer[aria-selected="true"]\').length')) === 0, 'A has nothing selected');
@@ -453,8 +460,10 @@ test('canvas cursors: a select made while the document is fetched after a restar
   const b3 = B.rec.order();
   A.rec.hold = null;
   A.rec.release();
-  await within(ctx, async () => ofKind(after(A.rec.sent, r2), 'select').length > 0, 'a select once the fetch lands');
+  const again3 = await addAfter(ctx, A, r2, "X3's add re-sent", x3.id);
+  await within(ctx, async () => ofKind(after(A.rec.sent, r2), 'select').length > 0, 'a select once the fetch lands and X3 is acked');
   assert.deepEqual(ofKind(after(A.rec.sent, r2), 'select').map((f) => f.m.ids), [[]], 'one empty select');
+  assert.ok(ofKind(after(A.rec.sent, r2), 'select')[0].n > again3.ack.n, "the select after X3's ack");
   await within(ctx, async () => anaSelections(B, b3).some((ids) => ids && ids.length === 0), "B's selections list Ana with nothing", async () => JSON.stringify(anaSelections(B, b3)));
   await within(ctx, async () => (await boxesOf(B, 'others-sel', 'ana')).length === 0, "B draws no Ana box", async () => JSON.stringify(await boxesOf(B, 'others-sel', 'ana')));
   noExceptions(A, 'A');
@@ -505,14 +514,14 @@ const cursorOf = (p, person) => p.ev(`(() => {
 const cursorCount = (p, person) => p.ev(`[...document.querySelectorAll('#others .cursor[data-person="${person}"]')].filter((e) => e.getClientRects().length > 0).length`);
 const at = (box, fx, fy) => ({ x: box.l + fx * box.w, y: box.t + fy * box.h });
 // The person's cursor on `p` anchored to `k`, its tip within 2 px of `want` (a function, read afresh).
-async function cursorAt(ctx, p, person, k, want, what) {
+async function cursorAt(ctx, p, person, k, want, what, ms = 10000) {
   let last = null;
   let w = null;
   await within(ctx, async () => {
     last = await cursorOf(p, person);
     w = await want();
     return !!last && last.k === k && Math.abs(last.x - w.x) <= 2 && Math.abs(last.y - w.y) <= 2;
-  }, what, async () => `cursor ${JSON.stringify(last)}, want ${k} at ${JSON.stringify(w)}; presence got ${JSON.stringify(p.rec.pgot.slice(-3).map((f) => f.m))}`, 10000);
+  }, what, async () => `cursor ${JSON.stringify(last)}, want ${k} at ${JSON.stringify(w)}; presence got ${JSON.stringify(p.rec.pgot.slice(-3).map((f) => f.m))}`, ms);
   return last;
 }
 // A point at the fraction (fx, fy) of a node's box on screen, in whole px, and its fraction as rounded.
@@ -550,6 +559,15 @@ test("canvas A3: two pages of different sizes and zooms show each other's cursor
   await B.move(c2.pt.x, c2.pt.y);
   const curB = await cursorAt(ctx, A, 'ben', 'n-side', async () => at(await nodeBox(A, 'n-side'), c2.fx, c2.fy), "C1.2: Ben's cursor on A at n-side (0.6, 0.25)");
   assert.equal(curB.name, 'Ben');
+  // an edit moves n-side (the supervisor's): A redraws and Ben's cursor follows the node (task-2 T2-3)
+  const moved = await request(`${ctx.fake.url}/api/canvas/local?slug=${SLUG}`, {
+    method: 'POST', headers: { 'x-devteam-canvas-token': ctx.fake.token, 'Content-Type': 'application/json' },
+    body: { by: 'supervisor', via: 'apply', ops: [{ op: 'set', id: 'n-side', prop: 'y', value: 30 }] },
+  });
+  assert.equal(moved.status, 200, "the supervisor's move of n-side");
+  await within(ctx, async () => (await A.ev("document.querySelector('#surface [data-id=\"n-side\"]').style.top")) === '30px', 'n-side moved on A');
+  // within 1 s: well before the supervisor's 3 s mark ends (its end places cursors again too)
+  await cursorAt(ctx, A, 'ben', 'n-side', async () => at(await nodeBox(A, 'n-side'), c2.fx, c2.fy), "Ben's cursor follows n-side after A's redraw", 1000);
 
   // C1.3: A's pointer on empty canvas at page (360, 100), shown on B at the same fraction of its bounds
   const e = await screenOf(A, 360, 100);
@@ -575,6 +593,16 @@ test("canvas A3: two pages of different sizes and zooms show each other's cursor
     await A.move(last.x, last.y);
     await sleep(16);
   }
+  // the last move made inside an open 67 ms window (just after a move went), so only the window-end
+  // send can deliver it (task-2 T2-1)
+  const sentMoves = () => ofKind(A.rec.psent, 'move').length;
+  const k0 = sentMoves();
+  await A.move(last.x, Math.round(box.t + box.h * 0.3));
+  const wEnd = Date.now() + 2000;
+  while (sentMoves() === k0 && Date.now() < wEnd) await sleep(2);
+  assert.ok(sentMoves() > k0, 'a move went');
+  last = { x: Math.round(box.l + box.w * 0.75), y: Math.round(box.t + box.h * 0.8) };
+  await A.move(last.x, last.y);
   const lf = { x: (last.x - box.l) / box.w, y: (last.y - box.t) / box.h };
   await cursorAt(ctx, B, 'ana', 'n-card', async () => at(await nodeBox(B, 'n-card'), lf.x, lf.y), "C1.8: Ana's cursor at her last position");
   const moves = ofKind(after(A.rec.psent, m0), 'move');
@@ -614,7 +642,7 @@ test("canvas A3: two pages of different sizes and zooms show each other's cursor
 
 // ---- the presence duties (spec §1, §3; presence@1 §6–§9) ----
 
-test('canvas cursors: the presence socket answers pings, reconnects when dropped and reports a hidden page', { skip: SKIP, timeout: 240000 }, async (t) => {
+test('canvas cursors: the presence socket answers pings, reconnects when dropped and reports a hidden page', { skip: SKIP, timeout: 360000 }, async (t) => {
   const ctx = await twoPages(t, { presenceClock: 'manual' });
   const { A, B, pfake, fa } = ctx;
   await waitSpot(ctx, A, 'ben', 'A');
@@ -658,6 +686,20 @@ test('canvas cursors: the presence socket answers pings, reconnects when dropped
   await ctx.showA();
   await within(ctx, async () => (await A.ev('document.visibilityState')) === 'visible', 'A shown again');
   await within(ctx, async () => ofKind(after(A.rec.psent, v0), 'here').at(-1)?.m.visible === true, 'C1.10: A says here visible true');
+
+  // C1.11 (task-2 T2-2; presence@1 §9): A loaded while hidden says here visible false, closes its
+  // presence socket within 60 s (plus slack) and opens a new one when shown
+  await ctx.hideA();
+  await within(ctx, async () => (await A.ev('document.visibilityState')) === 'hidden', 'A hidden again');
+  await A.load(`/view/canvas/${SLUG}`);
+  const l0 = A.rec.order();
+  await within(ctx, async () => ofKind(A.rec.psent, 'here').some((f) => f.m.visible === false), 'C1.11: the hidden load says here visible false');
+  const opened = Date.now();
+  await within(ctx, async () => !pfake.stats().some((x) => x.id === 'ana'), "C1.11: A's presence socket closed while hidden", async () => JSON.stringify(pfake.stats()), 75000);
+  assert.ok(Date.now() - opened >= 50000, `closed after ${Date.now() - opened} ms, not before 60 s`);
+  await ctx.showA();
+  await within(ctx, async () => ofKind(after(A.rec.psent, l0), 'here').some((f) => f.m.visible === true), 'C1.11: shown, A says here on a new socket', async () => '', 10000);
+  assert.ok(pfake.stats().some((x) => x.id === 'ana'), "A's presence socket open again");
   noExceptions(A, 'A');
   noExceptions(B, 'B');
 });
@@ -679,9 +721,14 @@ test("canvas cursors: the page reports its spot, draws others' selections and ma
   void h2;
   const s0 = B.rec.order();
   const two = await pointOn(A, 'n-two', 0.5, 0.5);
+  // counted before the first move (A's last move was long ago, so it goes at once; the next two share
+  // the following window): two sends, after which B would have had any relay
+  const mv0 = ofKind(A.rec.psent, 'move').length;
   await A.move(two.pt.x, two.pt.y);
   await A.move(two.pt.x + 5, two.pt.y + 5);
-  await sleep(1500);
+  await A.move(two.pt.x + 9, two.pt.y + 9);
+  await within(ctx, async () => ofKind(A.rec.psent, 'move').length >= mv0 + 2, "A's moves on p-two sent");
+  await sleep(300);
   assert.equal(await cursorCount(B, 'ana'), 0, "no Ana cursor on B's p-main while A is on p-two");
   assert.equal(ofKind(after(B.rec.pgot, s0), 'move').length, 0, 'B got no move from another spot');
   for (const f of ofKind(A.rec.psent, 'here')) {

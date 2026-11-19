@@ -4892,8 +4892,9 @@
     flushMove();
   });
 
-  // Visibility (§9): every change says `here`; hidden for 60 s closes the socket, shown reconnects.
-  document.addEventListener('visibilitychange', () => {
+  // Visibility (§9): every change says `here`; hidden for 60 s closes the socket, shown reconnects. Run
+  // on every change and once at start, so a canvas that loads hidden (a background tab) closes too.
+  function onVisibility() {
     clearTimeout(pres.hiddenTimer);
     pres.hiddenTimer = null;
     if (document.visibilityState === 'visible') {
@@ -4910,7 +4911,8 @@
       pres.retryTimer = null;
       if (pres.ws) pres.ws.close(); else presenceClosed(null);
     }, HIDDEN_MS);
-  });
+  }
+  document.addEventListener('visibilitychange', onVisibility);
 
   // ---- others' selections and last edits (kit-663 §4, §5; canvas@1 §5) ----
 
@@ -5077,7 +5079,7 @@
     showPage(hashPage());
     syncBody();
     // main's copy (session null) is read-only: no socket, no editing
-    if (state.session !== null) { connect(); connectPresence(); }
+    if (state.session !== null) { connect(); connectPresence(); if (document.visibilityState !== 'visible') onVisibility(); }
   }
 
   start().catch(() => fail(TEXT.notLoaded));
