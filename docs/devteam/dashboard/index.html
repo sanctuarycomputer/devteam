@@ -453,6 +453,10 @@ try {
   .cls-ev .rowline[data-open] { cursor: pointer; border-radius: 4px; }
   .cls-ev .rowline[data-open]:hover .t, .cls-ev .rowline[data-open]:focus-visible .t { text-decoration: underline; }
   .cls-ev .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  /* Awareness: Efficiency's card, its four parts and four sparklines four across, two on a narrower screen, one on a phone */
+  .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: minmax(0, 1fr); } }
 
 /* css-autonomy-pages end */
 /* css-progress start */
@@ -1981,15 +1985,16 @@ const EFF_SUGG_WORDS = { 'review-depth': 'Fit review depth to the ticket', 'smal
 function effSuggestions(xs) {
   return suggestionsList(xs.map((x) => ({ id: String(x.id), title: Object.hasOwn(EFF_SUGG_WORDS, String(x.kind)) ? EFF_SUGG_WORDS[x.kind] : 'Suggestion', what: x.what ?? '', evidence: x.evidence ?? '', effect: x.effect ?? '' })));
 }
-// A suggestion's thread: on the page subject #efficiency?suggestion=<id> (tlStart opens the open one,
-// as a Settings row's); placed by the item, from the click's point or, by Enter, the item's right edge
+// A suggestion's thread: on the page subject #<page>?suggestion=<id>, its page the section it is on
+// (Efficiency, Awareness; tlStart opens the open one, as a Settings row's); placed by the item, from
+// the click's point or, by Enter, the item's right edge
 function effSuggGo(it, x, y) {
-  const view = suggView(it.dataset.sugg);
+  const view = suggView(it.dataset.sugg, it.closest('section[id]').id);
   const title = tLine(it.dataset.title, T_TITLE_MAX);
   tlStart({ subject: { kind: 'page', view, quote: tCut(title, 300) }, title, el: it, x, y });
 }
 document.addEventListener('click', (e) => {
-  const it = e.target.closest?.('#efficiency [data-sugg]');
+  const it = e.target.closest?.('#efficiency [data-sugg], #awareness [data-sugg]');
   if (!it || e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   if (String(window.getSelection?.() ?? '')) return;
   e.preventDefault();
@@ -2001,7 +2006,7 @@ document.addEventListener('keydown', (e) => {
   const space = e.key === ' ' && !!t?.matches?.('[data-open][role="button"][tabindex]');
   if ((e.key !== 'Enter' && !space) || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   // a focused suggestion starts its thread; a focused row with a record (data-open, focusable) opens it
-  if (t?.matches?.('#efficiency [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
+  if (t?.matches?.('#efficiency [data-sugg], #awareness [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
   if (t?.matches?.('[data-open][tabindex]')) { e.preventDefault(); location.hash = t.dataset.open; }
 });
 
@@ -2181,6 +2186,51 @@ function openClass(id) {
   const evHtml = ev.length ? `<div class="rows cls-ev">${ev.map((x) => `<div class="rowline"${x.open ? ` data-open="${esc(x.open)}" tabindex="0" role="link"` : ''}><span class="dot ${x.kind === 'Agreed' ? 'green' : x.kind === 'Not agreed' ? 'amber' : 'blue'}"></span><span class="t">${esc(x.what)}</span><span class="r">${
     esc([x.kind === 'Call' ? '' : x.kind, x.at ? when(x.at) : ''].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>` : effNone();
   showDrawer(`<h2 id="drawer-title">${esc(trustName(t))}</h2><section class="attrs">${props(rows)}</section>${psect('Levels', `<div class="lvls">${levels}</div>`)}${psect('Since it last moved', evHtml)}`);
+}
+// ---- Awareness (kit-93): the Awareness Score card, drawn as Efficiency's, with its charts and suggestion list ----
+// A suggestion's page: the section its view names (efficiency, awareness), else null
+function suggPageOf(view) {
+  const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : '');
+  return m && parseSuggView(view) !== null ? m[1] : null;
+}
+// The four parts in plain words, and a suggestion's title by its kind
+const AW_PARTS = [['signals', 'signals explained within a day'], ['incidents', 'fixed incidents that left a lesson'], ['lessons', 'lessons sessions use'], ['starts', 'fresh starts given what they need']];
+const AW_SUGG_WORDS = { incident: 'Learn from a fixed incident', lessons: 'Retire lessons nobody is given', signal: 'Explain something that keeps happening' };
+// The score line, drawn at the width it gets
+let AW_WEEKS = [];
+FIT_DRAW['aw-score'] = (el, W) => scoreLine(AW_WEEKS.map((w) => (effNum(w.score) ? w.score : null)), W, { min: 0, max: 100 });
+// Score: this and last week's score, this week's four parts ("c of o · share", "none" with no share),
+// the 12-week line (a null week a gap) and a sparkline a part over its weekly share
+function awarenessScore(a) {
+  const weeks = Array.isArray(a.weeks) ? a.weeks : [];
+  AW_WEEKS = weeks;
+  const sc = (x) => (effNum(x) ? `${x}%` : '–'), pc = (s) => (effNum(s) ? `${Math.round(100 * s)}%` : 'none');
+  const part = (x) => (effNum(x?.share) ? `${x.count} of ${x.of} · ${pc(x.share)}` : 'none');
+  const share = (k) => weeks.map((w) => (effNum(w?.parts?.[k]?.share) ? w.parts[k].share : null));
+  // the chart's data in its attribute, so new data is a new card (renderAwareness compares the html)
+  const sig = esc(JSON.stringify(weeks.map((w) => [w?.score ?? null, ...AW_PARTS.map(([k]) => w?.parts?.[k]?.share ?? null)])));
+  return `<div class="score"><b>${sc(a.score?.this_week)}</b><span class="dim">last week ${sc(a.score?.last_week)}</span></div>
+    <p class="score-w">how well the fleet understands what happens: the mean of the four parts below</p>
+    <div class="eff-parts aw-parts">${AW_PARTS.map(([k, l]) => `<div class="stat"><span class="k">${esc(l)}</span><b>${esc(part(a.parts?.[k]))}</b></div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">The score, 12 weeks</h4><div class="fit" data-fit="aw-score" data-v="${sig}"></div></div>
+    <div class="score-mod score-counts">${AW_PARTS.map(([k, l]) => `<div class="stat mini"><span class="k">${esc(l)}</span><b>${esc(pc(a.parts?.[k]?.share))}</b>${spark(share(k), l)}</div>`).join('')}</div>`;
+}
+// Suggestions: Efficiency's list, each titled by its kind; a click or Enter starts or opens its thread (effSuggGo)
+const awSuggestions = (xs) => suggestionsList(xs.map((x) => ({ id: String(x.id), title: Object.hasOwn(AW_SUGG_WORDS, String(x.kind)) ? AW_SUGG_WORDS[x.kind] : 'Suggestion', what: x.what ?? '', evidence: x.evidence ?? '', effect: x.effect ?? '' })));
+function awarenessCard(a) {
+  return `<div class="card eff-card aw-card">${cardHead('eye', 'Awareness Score', { extra: '<span class="muted">this week</span>' })}${
+    effSection('Score', a ? awarenessScore(a) : effNone())}${
+    effSection('Suggestions', a ? awSuggestions(Array.isArray(a.suggestions) ? a.suggestions : []) : effNone())}</div>`;
+}
+// The page, written into #awareness only when its HTML changed, so a redraw keeps focus and a pin's element
+function renderAwareness(d) {
+  const html = awarenessCard(d.awareness || null);
+  const el = $('awareness');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
+  el.innerHTML = html;
+  fitCharts();
 }
 /* autonomy-pages end */
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
@@ -7306,6 +7356,7 @@ function render(d) {
   // Hours by phase, USD by phase, USD by model and Tokens are Efficiency's now (kit-174): Where it goes
   renderEfficiency(d);
   renderTrust(d);
+  renderAwareness(d);
 
   // The configured checks, one plain line each, trouble first; one-off checks a worker ran by hand
   // are counted, not listed.
@@ -7384,11 +7435,12 @@ const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').repla
 // A Settings row's view (#settings?key=<key>): its key, else null.
 const T_SETTING_VIEW = /^#settings\?key=([a-z][a-z0-9_]{0,63})$/;
 const parseSettingView = (view) => T_SETTING_VIEW.exec(typeof view === 'string' ? view : '')?.[1] ?? null;
-// A suggestion on Efficiency (kit-174): #efficiency?suggestion=<its id, URI-encoded>; its id, else null
-// (the prefix is 23 bytes: an encoded id of at most 177 keeps the view within the log's 200)
-const T_SUGG_VIEW = /^#efficiency\?suggestion=([^&#?]{1,177})$/;
-const suggView = (id) => `#efficiency?suggestion=${encodeURIComponent(String(id))}`;
-const parseSuggView = (view) => { const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : ''); if (!m) return null; try { return decodeURIComponent(m[1]); } catch { return null; } };
+// A suggestion on Efficiency (kit-174) or Awareness (kit-93): #<page>?suggestion=<its id, URI-encoded>;
+// its id, else null (the longer prefix is 23 bytes: an encoded id of at most 177 keeps the view within
+// the log's 200); its page is suggPageOf's
+const T_SUGG_VIEW = /^#(efficiency|awareness)\?suggestion=([^&#?]{1,177})$/;
+const suggView = (id, page = 'efficiency') => `#${page}?suggestion=${encodeURIComponent(String(id))}`;
+const parseSuggView = (view) => { const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : ''); if (!m) return null; try { return decodeURIComponent(m[2]); } catch { return null; } };
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
 // a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
 // box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
@@ -7402,11 +7454,12 @@ function tSubjectAt(el, x, y, sec) {
     const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
     return { subject: { kind: 'item', ref, quote: tCut(said, 300) }, title: title || T_KIND[ref.split(':')[0]], el: item };
   }
-  // a suggestion on Efficiency (kit-174): its page subject, the item its spot, its title the quote
-  const sg = el?.closest?.('#efficiency [data-sugg]');
+  // a suggestion on Efficiency (kit-174) or Awareness (kit-93): its page subject, the item its spot,
+  // its title the quote
+  const sg = el?.closest?.('#efficiency [data-sugg], #awareness [data-sugg]');
   if (sg) {
     const title = tLine(sg.dataset.title, T_TITLE_MAX);
-    return { subject: { kind: 'page', view: suggView(sg.dataset.sugg), quote: tCut(title, 300) }, title, el: sg };
+    return { subject: { kind: 'page', view: suggView(sg.dataset.sugg, sg.closest('section[id]').id), quote: tCut(title, 300) }, title, el: sg };
   }
   // a Settings row (spec §8): a page subject on #settings?key=<key>, the row (not a point) its spot,
   // its plain name the quote
@@ -7549,7 +7602,7 @@ function tWhere(s) {
   // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
   if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
   // a Settings row: by the name it had when the thread began (the subject's quote), else its key
-  if (s.kind === 'page' && parseSuggView(s.view) !== null) return 'Efficiency';
+  if (s.kind === 'page' && parseSuggView(s.view) !== null) return T_SECTIONS[suggPageOf(s.view)];
   if (s.kind === 'page' && parseSettingView(s.view)) return `Settings, ${tLine(s.quote, 300) || parseSettingView(s.view)}`;
   if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
@@ -7876,8 +7929,8 @@ const settingRow = (key) => (key ? document.querySelector(`#settings [data-setti
 // The row a page subject is about, when it is a Settings row's: its key, and the row if drawn.
 const tlSettingOf = (s) => { const key = s?.kind === 'page' ? parseSettingView(s.view) : null; return key ? { key, el: settingRow(key) } : null; };
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
-// A suggestion's item on Efficiency, for its page subject (kit-174): its id, and the item if drawn
-const tlSuggOf = (s) => { const id = s?.kind === 'page' ? parseSuggView(s.view) : null; return id === null ? null : { key: id, el: document.querySelector(`#efficiency [data-sugg="${CSS.escape(id)}"]`) }; };
+// A suggestion's item on its page (Efficiency, Awareness), for its page subject: its id, and the item if drawn
+const tlSuggOf = (s) => { const id = s?.kind === 'page' ? parseSuggView(s.view) : null; return id === null ? null : { key: id, el: document.querySelector(`#${suggPageOf(s.view)} [data-sugg="${CSS.escape(id)}"]`) }; };
 // The row a page subject is about: a Settings row's, or a suggestion's
 const tlRowOf = (s) => tlSettingOf(s) ?? tlSuggOf(s);
 function tlTargetRect(s) {

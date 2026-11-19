@@ -316,4 +316,92 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await polls(2);
     assert.equal(await p.ev('document.activeElement === window.__f && window.__f.isConnected'), true);
   });
+
+  // ---- Awareness (T4): one Awareness Score card, Efficiency's charts and suggestion list ----
+  const AW_WORDS = ['signals explained within a day', 'fixed incidents that left a lesson', 'lessons sessions use', 'fresh starts given what they need'];
+  const awSec = (label) => p.ev(`(() => { const s = [...document.querySelectorAll('#awareness .card .sec')].find((x) => x.querySelector('.lbl')?.textContent.trim() === ${JSON.stringify(label)}); return s ? s.querySelector('.sec-b').textContent.replace(/\\s+/g, ' ').trim() : null; })()`);
+  const AW_ITEM = (id) => `document.querySelector('#awareness [data-sugg="' + CSS.escape(${JSON.stringify(id)}) + '"]')`;
+  const AW_VIEW = (id) => `#awareness?suggestion=${encodeURIComponent(id)}`;
+  const awDrawn = () => soon("!!document.querySelector('#awareness .card .sec')", 'the Awareness page drawn');
+
+  await t.test('the Awareness card', async () => {
+    await load(autonomyFixture(), '#awareness');
+    await awDrawn();
+    assert.equal(await p.ev("document.querySelectorAll('#awareness .card').length"), 1);
+    assert.equal(await p.ev("[...document.querySelector('#awareness .card .card-head').childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim()"), 'Awareness Score');
+    assert.deepEqual(await texts('#awareness .card .sec .lbl'), ['Score', 'Suggestions']);
+    const score = await awSec('Score');
+    assert.match(score, /\b71%/);
+    assert.match(score, /last week 66%/);
+    // this week's parts: each in its words with "c of o", the starts part (0 of 0) none
+    const parts = await p.ev("[...document.querySelectorAll('#awareness .aw-parts .stat')].map((s) => [s.querySelector('.k').textContent.trim(), s.querySelector('b').textContent.trim()])");
+    assert.deepEqual(parts.map((x) => x[0]), AW_WORDS);
+    assert.deepEqual(parts.slice(0, 3).map((x) => x[1]), ['3 of 4 · 75%', '2 of 3 · 67%', '5 of 7 · 71%']);
+    assert.equal(parts[3][1], 'none');
+    // the line, broken at the null week: two runs
+    await soon("!!document.querySelector('#awareness [data-fit=\"aw-score\"] path.line')", 'the score line drawn');
+    assert.equal(await p.ev("(document.querySelector('#awareness [data-fit=\"aw-score\"] path.line').getAttribute('d').match(/M/g) || []).length"), 2);
+    assert.equal(await p.ev("document.querySelector('#awareness circle.tw').dataset.i"), '11');
+    assert.equal(await p.ev("document.querySelectorAll('#awareness .card .sparkline').length"), 4);
+  });
+
+  await t.test('suggestions', async () => {
+    await load(autonomyFixture(), '#awareness');
+    await awDrawn();
+    assert.deepEqual(await texts('#awareness .sugg-n'), ['1', '2', '3']);
+    assert.deepEqual(await texts('#awareness .sugg-go'), ['Learn from a fixed incident', 'Retire lessons nobody is given', 'Explain something that keeps happening']);
+    assert.equal(await p.ev("document.querySelectorAll('#awareness button').length"), 0);
+  });
+
+  await t.test('a suggestion starts its thread', async () => {
+    const fx = autonomyFixture();
+    const [one, two, three] = fx.ids.suggestions;
+    await load(fx, '#awareness');
+    await awDrawn();
+    await p.ev('window.__writes.length = 0; void 0');
+    await p.click(`#awareness [data-sugg="${one}"]`);
+    await soon(`TL.draft?.subject?.view === ${JSON.stringify(AW_VIEW(one))}`, 'a draft on the first');
+    assert.equal(await p.ev('TL.draft.subject.kind'), 'page');
+    assert.equal(await p.ev(`TL.draft.subject.view`), '#awareness?suggestion=aw-incident-p-1');
+    assert.equal(await p.ev(`tlRowOf(TL.draft.subject).el === ${AW_ITEM(one)}`), true, 'the item is its row');
+    await p.ev('tlClose(); void 0');
+    await p.ev(`(${AW_ITEM(two)}).focus(); void 0`);
+    await p.key('Enter');
+    await soon(`TL.draft?.subject?.view === ${JSON.stringify(AW_VIEW(two))}`, 'a draft by Enter');
+    await p.ev('tlClose(); void 0');
+    assert.deepEqual(await p.ev('window.__writes'), []);
+    // an open thread on the third: a click opens it
+    const TH3 = 't-20261116-000000003-owner';
+    await p.ev(`window.__fx.threads.push(${JSON.stringify({ id: TH3, title: 'Explain something that keeps happening', subject: { kind: 'page', view: AW_VIEW(three), quote: 'x' }, status: 'open', outcome: null, ready: null, turns: [], questions: [], waiting: 'owner', created_at: new Date(Date.now() - 3600000).toISOString(), resolved_at: null, activity_at: new Date(Date.now() - 3600000).toISOString(), first_reply_ms: null })}); void 0`);
+    await soon(`TL.threads.some((t) => t.id === ${JSON.stringify(TH3)})`, 'the threads read');
+    await p.click(`#awareness [data-sugg="${three}"]`);
+    await soon(`TL.open === ${JSON.stringify(TH3)}`, 'the open thread opened');
+    assert.equal(await p.ev('TL.draft'), null);
+    await p.ev('tlClose(); void 0');
+    assert.deepEqual(await p.ev('window.__writes'), []);
+  });
+
+  await t.test("where an Awareness suggestion's thread lives", async () => {
+    await load(autonomyFixture(), '#awareness');
+    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#awareness?suggestion=aw-x' })"), 'Awareness');
+    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#efficiency?suggestion=eff-x' })"), 'Efficiency');
+  });
+
+  await t.test('plain words', async () => {
+    await load(autonomyFixture(), '#awareness');
+    await awDrawn();
+    const words = await p.ev("document.getElementById('awareness').textContent");
+    assert.doesNotMatch(words, /informed|orient|debt/i);
+  });
+
+  await t.test('no awareness', async () => {
+    const fx = autonomyFixture();
+    fx.patch.awareness = null;
+    await load(fx, '#awareness');
+    await awDrawn();
+    for (const l of ['Score', 'Suggestions']) assert.equal(await awSec(l), 'None', `${l} says None`);
+    assert.equal(await text('#n-awareness'), '');
+    await polls(2);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
 });
