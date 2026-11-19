@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { monoFixture, multiFixture, write, json, kit } from './lib/kit.mjs';
 
@@ -150,6 +151,35 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     T.g(['commit', '-q', '--allow-empty', '-am', 'stop ff again'], late);
     T.g(['push', '-q', 'origin', 'chore-stop-ff'], late);
     passes(T.dry('stop-ff', qf));
+    // criss-cross: two merge bases, and the one git merge-base names has main's settings blob, while
+    // the merge itself (over both) lands something else: what lands is read from the merge (task-2-r4 F1-1b).
+    // Deterministic: B1, whose blob is main's, is committed after B2, so merge-base names it.
+    const qe = T.yes({ recurring: { ee: null } });
+    const before = fs.readFileSync(T.settingsFile, 'utf8');
+    const ago = (secs) => { const d = `${Math.floor(Date.now() / 1000) - secs} +0000`; return { ...process.env, GIT_AUTHOR_DATE: d, GIT_COMMITTER_DATE: d }; };
+    T.g(['checkout', '-q', '-b', 'cc-side'], T.old);
+    T.edit((j) => { const { ee, ...rest } = j.recurring; j.recurring = { ee, ...rest }; });
+    execFileSync('git', ['commit', '-qam', 'B2: the jobs text reordered'], { cwd: T.old, env: ago(120) });
+    T.g(['checkout', '-q', 'main'], T.old);
+    fs.writeFileSync(path.join(T.old, 'README.md'), 'B1\n');
+    execFileSync('git', ['commit', '-qam', 'B1: unrelated'], { cwd: T.old, env: ago(60) });
+    const b1 = T.g(['rev-parse', 'HEAD'], T.old);
+    const cc = path.join(T.old, '.worktrees/chore-cc');
+    T.g(['worktree', 'add', '-q', '-b', 'chore-cc', cc, 'cc-side'], T.old);
+    T.g(['merge', '-q', '--no-edit', b1], cc);
+    T.g(['merge', '-q', '--no-edit', 'cc-side'], T.old);
+    fs.writeFileSync(T.settingsFile, before);
+    T.g(['commit', '-qam', 'the jobs text back'], T.old);
+    T.g(['push', '-q', 'origin', 'main'], T.old);
+    T.edit((j) => { delete j.recurring.ee; }, cc);
+    T.g(['commit', '-qam', 'stop ee'], cc);
+    T.g(['push', '-q', 'origin', 'chore-cc'], cc);
+    write(path.join(T.old, 'docs/devteam/run/pr/chore-cc.md'), '# chore-cc: jobs\n\n## One-way doors\n\nNone.\n');
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cc'], T.old).split('\n').length, 2, 'two merge bases');
+    const mb = T.g(['merge-base', 'origin/main', 'origin/chore-cc'], T.old);
+    assert.equal(T.g(['rev-parse', `${mb}:docs/devteam/project/settings.md`], T.old), T.g(['rev-parse', 'origin/main:docs/devteam/project/settings.md'], T.old), 'the named base has main\'s settings blob');
+    refused(T.dry('cc', qe), /main's settings changed since this branch: merge main into it, then check again/);
   } finally { T.done(); }
 });
 

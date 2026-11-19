@@ -23096,13 +23096,16 @@ const recurringRegistry = Object.freeze({
 // against the head, compared canonically). An answer of another class is the class check's to refuse.
 function recurringBindingFails(base, sha, approved) {
   const R = recurringRegistry;
-  // What lands is git's text merge of the head onto main as it is now: the base-to-head diff is
-  // exactly that change only while main's settings file is the merge base's, byte for byte (its
-  // blob). A canonical compare misses a reorder, after which the text merge can keep a job this
-  // branch stops (task-2 F1, task-2-r3 F1-1a). A file missing on either side differs.
+  // What lands is git's merge of the head onto main as it is now, so the base-to-head diff below is
+  // what lands only when that merge is clean and leaves the head's settings file byte for byte (its
+  // blob). Read from the merge itself (merge-tree, over every merge base), never from one base: a
+  // canonical compare misses a reorder, and one base of a criss-cross can match main while the
+  // merge drops a stop (task-2 F1, task-2-r3 F1-1a, task-2-r4 F1-1b). A conflict, an error, or the
+  // file missing on either side refuses.
   const blob = (ref) => (ref ? git(['rev-parse', '--verify', '-q', `${ref}:${projectRel}/settings.md`]) : null);
-  const [was, is] = [blob(base), blob(mainRef())];
-  if (!was || !is || was !== is) return ["main's settings changed since this branch: merge main into it, then check again"];
+  const merged = mainRef() ? mergeTree(mainRef(), sha) : { error: 'no main' };
+  const [lands, own] = [merged.tree ? blob(merged.tree) : null, blob(sha)];
+  if (!lands || !own || lands !== own) return ["main's settings changed since this branch: merge main into it, then check again"];
   const jobsAt = (ref) => { const s = settingsAt(ref, { orNull: true }); return s && s.recurring === undefined ? {} : s?.recurring; };
   const q = logGet(approved);
   if (q?.type !== 'question' || q.class !== 'recurring-edit') return [];
