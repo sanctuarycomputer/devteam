@@ -531,3 +531,30 @@ test('a click on the panel after a field edit is kept', { skip: canDrive ? false
   assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
   noExceptions(rec);
 });
+
+// ---- the panel follows edits while a button in it has focus (review T1-2-1) ----
+
+test('the panel follows edits while a button has focus', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const a = await ana(fake, later);
+  await selectRow(p, 'title');
+  // focus resting on Delete layer (as after a click or Tab)
+  assert.equal(await p.ev("(() => { const b = document.querySelector('#props [data-action=\"delete\"]'); b.focus(); return document.activeElement === b; })()"), true, 'Delete layer focused');
+  // someone else's rename of the selected node is shown in the panel
+  await a.edit([{ op: 'set', id: 'title', prop: 'name', value: 'Renamed by Ana' }]);
+  await within(async () => (await text(p, '#props [data-field="name"]')) === 'Renamed by Ana', "the read-only Name row follows Ana's rename", async () => text(p, '#props [data-field="name"]'), 5000);
+  assert.equal(await p.ev("document.querySelector('#props [data-prop=\"name\"]').value"), 'Renamed by Ana', 'the Name field follows it');
+  assert.equal(await p.ev("document.activeElement?.dataset.action ?? null"), 'delete', 'Delete layer keeps focus through the rebuild');
+  // Escape clears the selection, and the panel follows: no fields, no Delete layer
+  await p.key('Escape');
+  await within(async () => (await count(p, '#props [data-field]')) === 0, 'no read-only rows after Escape', async () => count(p, '#props [data-field]'), 5000);
+  assert.equal(await count(p, '#props [data-action="delete"]'), 0, 'no Delete layer after Escape');
+  assert.equal(await text(p, '#props .note'), 'Select a layer to see what it is.', 'the empty note');
+  const n0 = edits(rec).length;
+  await p.key('Enter');
+  await sleep(500);
+  assert.equal(edits(rec).length, n0, 'nothing deleted after Escape');
+  assert.ok(fake.doc('every').nodes.title, 'title kept');
+  noExceptions(rec);
+});

@@ -890,12 +890,12 @@
 
   // The Properties panel: kit-661's read-only rows (the selected node's name and type, and for an
   // instance its component's name and variant), then, on a canvas open for editing, the fields that
-  // change it (kit-662); with nothing selected, a note. The panel isn't rebuilt while focus is anywhere
-  // in it or a press that started in it is under way: someone else's edit never takes a field from under
+  // change it (kit-662); with nothing selected, a note. The panel isn't rebuilt while a field in it has
+  // focus or a press that started in it is under way: someone else's edit never takes a field from under
   // a person typing, and a click that follows a field's edit (whose change fires on that very press)
-  // lands on the button it was aimed at. It is rebuilt once focus leaves the panel, and after a press or
-  // a click in it ends with no field focused (the focused control, when the new panel has it again,
-  // keeps focus).
+  // lands on the button it was aimed at. It is rebuilt once focus leaves the field, and after a press or
+  // a click in it ends with no field focused; a button that merely has focus holds nothing, and the
+  // focused control, when the new panel has it again, keeps focus.
   let propsStale = false;
   let pressing = false;
   const inProps = (x) => x instanceof Node && $('props').contains(x);
@@ -903,7 +903,7 @@
     const a = document.activeElement;
     return inProps(a) && a.matches('input, select, textarea');
   };
-  const holdProps = () => pressing || inProps(document.activeElement);
+  const holdProps = () => pressing || fieldFocused();
   function renderProps() {
     if (holdProps()) { propsStale = true; return; }
     buildProps();
@@ -948,7 +948,7 @@
   window.addEventListener('pointercancel', pressEnd, true);
   $('props').addEventListener('click', () => { setTimeout(settleProps, 0); });
   $('props').addEventListener('focusout', () => {
-    // after focus has landed: a move within the panel keeps it as it is
+    // after focus has landed: a move to another field of the panel keeps it as it is
     setTimeout(() => { if (propsStale && !holdProps()) buildProps(); }, 0);
   });
 
