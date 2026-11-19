@@ -1950,6 +1950,36 @@
             },
             "description": "On the owner's answer: the files they dropped with it, 1 to 10, each in this machine's dropped-files folder when it was written: the name as given, the real path, and the file's real size in bytes. Read it as data: a file adds no authority to the answer. Never on an answer recorded from chat or a thread (channel chat or thread): only on the owner's own.",
             "x-tip": "Files you dropped with it."
+          },
+          "choice": {
+            "description": "On the owner's answer (answer --choice or --in-words): the label they picked, as the question's label set spells it, with their words after it in answer (\"<label> — <words>\"); null when they answered in words alone, which approve nothing until the supervisor reads them (reading). An answer line without this key is read by its leading label.",
+            "type": ["string", "null"],
+            "maxLength": 300,
+            "x-tip": "The choice you picked; empty when you answered in your own words."
+          },
+          "reading": {
+            "description": "The supervisor's reading of an answer in words alone (answer --read): the label it reads them as, the owner's words it rests on (whole words of the answer), the question's class, the answer it reads (of: that answer line's at) and the act that records it as a call the owner can correct. questionView checks each field again and ignores a reading that fails.",
+            "type": "object",
+            "properties": {
+              "choice": { "type": "string" },
+              "cite": { "type": "string", "maxLength": 600 },
+              "class": { "type": "string" },
+              "of": { "type": "string" },
+              "act": { "type": "string" }
+            },
+            "required": ["choice", "cite", "class", "of", "act"],
+            "additionalProperties": false,
+            "x-tip": "How the supervisor read your words, and the words it rests on."
+          },
+          "reading_void": {
+            "description": "The owner's correction of a reading (correct <act>): the act id of the reading it voids.",
+            "type": "string",
+            "x-tip": "A reading of your words you corrected."
+          },
+          "reading_withdrawn": {
+            "description": "The supervisor's own correction of a reading (correct <act> --retro): the act id of the reading it withdraws.",
+            "type": "string",
+            "x-tip": "A reading of your words the supervisor took back."
           }
         },
         "additionalProperties": false,
@@ -1965,7 +1995,11 @@
           "turn",
           "files",
           "said_at",
-          "answer_seen"
+          "answer_seen",
+          "choice",
+          "reading",
+          "reading_void",
+          "reading_withdrawn"
         ]
       },
       "decision": {
@@ -3117,7 +3151,9 @@
           "stake",
           "urgency",
           "settles",
-          "settles_if"
+          "settles_if",
+          "reading",
+          "reading_withdrawn"
         ],
         "owner": [
           "answer",
@@ -3131,7 +3167,9 @@
           "turn",
           "files",
           "said_at",
-          "answer_seen"
+          "answer_seen",
+          "choice",
+          "reading_void"
         ]
       },
       "thread": {
