@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { canDrive, openChrome } from './lib/chrome.mjs';
+import { canDrive, chromePath, openChrome } from './lib/chrome.mjs';
 import { monoFixture, until, sessionOf } from './lib/kit.mjs';
 import { startSites } from './lib/sites.mjs';
 import { validate } from './fixtures/browser/check.mjs';
@@ -176,9 +176,9 @@ const sessionLeft = (P) => { const d = path.join(P.profile, 'Default'); return [
 const sessionsWritten = (P) => { try { return fs.readdirSync(path.join(P.profile, 'Default', 'Sessions')).length > 0; } catch { return false; } };
 // A pid that is certainly dead: a process that ran and was reaped.
 const deadPid = () => spawnSync('true').pid;
-// A schema-valid state.json of a dead daemon, naming chrome_pid.
+// A schema-valid state.json of a dead daemon, naming chrome_pid, in the pipe form (no cdp_port; kit-316).
 function plantState(P, chromePid) {
-  const s = { browser: 1, daemon_pid: deadPid(), chrome_pid: chromePid, control_port: 1, control_secret: '0'.repeat(64), cdp_port: 1, guard_port: 1, view_port: 1, preview: 'gone-preview' };
+  const s = { browser: 1, daemon_pid: deadPid(), chrome_pid: chromePid, control_port: 1, control_secret: '0'.repeat(64), guard_port: 1, view_port: 1, preview: 'gone-preview' };
   assert.deepEqual(validate('state', s), []);
   fs.mkdirSync(path.dirname(P.state), { recursive: true });
   fs.writeFileSync(P.state, JSON.stringify(s));
@@ -277,29 +277,37 @@ hygiene.push(['F4 stop deletes them', async (h) => {
   assert.deepEqual(sessionLeft(h), [], 'no Sessions* entry and none of the four files after stop');
 }]);
 
-hygiene.push(['G1 the daemon\'s death leaves Chrome; the next start kills it', async (h) => {
+// kit-316 S2: Chrome's DevTools pipe closes with the daemon, so Chrome goes with it (P7).
+hygiene.push(['G1 the daemon\'s death takes Chrome with it', async (h) => {
   await started(h);
   const old = await crash(h, { chrome: false });
-  await new Promise((r) => setTimeout(r, 1000));
-  assert.ok(alive(old.chrome_pid), 'Chrome outlives a SIGKILLed daemon');
+  const t0 = Date.now();
+  await until(() => !alive(old.chrome_pid), 'Chrome gone after its daemon');
+  assert.ok(Date.now() - t0 < 15000, `took ${Date.now() - t0} ms`);
   await started(h);
-  assert.equal(alive(old.chrome_pid), false, 'the old Chrome is gone');
-  assert.notEqual(readState(h).chrome_pid, old.chrome_pid);
-  const s = await statusJson(h);
-  assert.equal(s.restarted, true);
-  assert.equal(s.tabs, 1);
+  assert.equal((await statusJson(h)).tabs, 1);
   await stopped(h);
 }]);
 
-hygiene.push(['G2 the same with state.json deleted: the SingletonLock names it', async (h) => {
-  await started(h);
-  const old = await crash(h, { chrome: false });
-  fs.rmSync(h.state);
-  assert.ok(alive(old.chrome_pid));
-  await started(h);
-  assert.equal(alive(old.chrome_pid), false, 'the old Chrome is gone');
-  assert.equal((await statusJson(h)).restarted, true);
+// A leftover Chrome the test starts itself on P's profile, kept off the network (its group is the test's).
+async function leftoverOn(P) {
+  const c = spawn(chromePath, ['--headless=new', `--user-data-dir=${P.profile}`, '--proxy-server=127.0.0.1:9', '--disable-background-networking', '--no-first-run', '--no-sandbox', 'about:blank'], { detached: true, stdio: 'ignore' });
+  ownGroups.add(c.pid);
+  await until(() => carries(c.pid, P), 'the leftover Chrome up');
+  return c.pid;
+}
+
+hygiene.push(['G2 a leftover Chrome with state.json deleted: the SingletonLock names it', async (h) => {
   await stopped(h);
+  fs.rmSync(h.state, { force: true });
+  const pid = await leftoverOn(h);
+  try {
+    await until(() => { try { return fs.readlinkSync(path.join(h.profile, 'SingletonLock')) === `${os.hostname()}-${pid}`; } catch { return false; } }, 'the SingletonLock names the leftover');
+    await started(h);
+    assert.equal(alive(pid), false, 'the leftover Chrome is gone');
+    assert.equal((await statusJson(h)).restarted, true);
+    await stopped(h);
+  } finally { await killGroup(pid); }
 }]);
 
 hygiene.push(['G3 DevToolsActivePort is never read', async (h) => {

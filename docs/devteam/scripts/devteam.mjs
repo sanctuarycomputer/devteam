@@ -25558,11 +25558,13 @@ const browserStateFile = () => path.join(BROWSER_DIR(), 'state.json');
 const browserDirMade = () => { fs.mkdirSync(BROWSER_DIR(), { recursive: true, mode: 0o700 }); fs.chmodSync(BROWSER_DIR(), 0o700); };
 // state.json as written, whatever it says (a new daemon reads a dead one's chrome_pid from it), or null.
 function browserRawState() { try { const s = JSON.parse(fs.readFileSync(browserStateFile(), 'utf8')); return isObj(s) ? s : null; } catch { return null; } }
-// The state of a daemon that is alive (its file holds together and its pid lives), or null.
+// The state of a daemon that is alive (its file holds together and its pid lives), or null. cdp_port
+// is written only by a daemon from before kit-316 (DevTools now goes over a pipe); one present must be
+// a port, so this version still reaches such a daemon.
 function browserState() {
   const s = browserRawState();
   const port = (v) => Number.isInteger(v) && v >= 1 && v <= 65535;
-  if (!s || s.browser !== 1 || !['control_port', 'cdp_port', 'guard_port', 'view_port'].every((k) => port(s[k])) || !/^[0-9a-f]{64}$/.test(s.control_secret ?? '') || typeof s.preview !== 'string' || !Number.isInteger(s.chrome_pid)) return null;
+  if (!s || s.browser !== 1 || !['control_port', 'guard_port', 'view_port'].every((k) => port(s[k])) || ('cdp_port' in s && !port(s.cdp_port)) || !/^[0-9a-f]{64}$/.test(s.control_secret ?? '') || typeof s.preview !== 'string' || !Number.isInteger(s.chrome_pid)) return null;
   return browserAlive(s.daemon_pid) ? s : null;
 }
 function browserWriteState(s) {
@@ -25771,16 +25773,20 @@ function browserLeads(pid) {
   try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) === pid; } catch {}
   return Number(spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).stdout?.trim()) === pid;
 }
-// The CDP client: one browser-level WebSocket, ids from 1, each call rejected on an error or after
-// 30 s, every pending one rejected when the socket closes. on(method, fn) gets (params, sessionId).
-async function cdpBrowser(wsUrl) {
-  const ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => { ws.addEventListener('open', resolve, { once: true }); ws.addEventListener('error', () => reject(new Error("couldn't connect to Chrome's DevTools")), { once: true }); });
-  let id = 0, closed = false;
+// The CDP client, over Chrome's DevTools pipe (--remote-debugging-pipe, kit-316 S2): the daemon
+// writes fd 3 and reads fd 4, each message JSON ended by a NUL byte. There is no port, so nothing
+// else can connect. Reads are kept as chunks and joined only at a NUL; a message that isn't JSON is
+// dropped. Ids from 1, each call rejected on an error or after 30 s, every pending one rejected when
+// the pipe closes: fd 4 ending or erroring, a write to fd 3 failing (EPIPE), or Chrome exiting.
+// on(method, fn) gets (params, sessionId). It resolves once Browser.getVersion answers.
+async function cdpBrowser(chrome) {
+  const writer = chrome.stdio[3], reader = chrome.stdio[4];
+  let id = 0, closed = false, parts = [];
   const pending = new Map(), handlers = new Map(), closers = [];
-  ws.addEventListener('message', (ev) => {
+  const dispatch = (buf) => {
     let m;
-    try { m = JSON.parse(String(ev.data)); } catch { return; }
+    try { m = JSON.parse(buf.toString('utf8')); } catch { return; }
+    if (!isObj(m)) return;
     if (m.id !== undefined) {
       const p = pending.get(m.id);
       if (!p) return;
@@ -25788,26 +25794,44 @@ async function cdpBrowser(wsUrl) {
       clearTimeout(p.timer);
       if (m.error) p.reject(new Error(`${p.method}: ${m.error.message ?? 'failed'}`)); else p.resolve(m.result ?? {});
     } else if (m.method) for (const fn of handlers.get(m.method) ?? []) { try { fn(m.params ?? {}, m.sessionId); } catch {} }
-  });
-  ws.addEventListener('close', () => {
+  };
+  const close = () => {
+    if (closed) return;
     closed = true;
     for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error(`${p.method}: Chrome's DevTools closed`)); }
     pending.clear();
+    parts = [];
     for (const fn of closers) { try { fn(); } catch {} }
+  };
+  reader.on('data', (c) => {
+    let at = 0;
+    for (let nul = c.indexOf(0); nul !== -1; nul = c.indexOf(0, at)) {
+      parts.push(c.subarray(at, nul));
+      const msg = parts.length === 1 ? parts[0] : Buffer.concat(parts);
+      parts = [];
+      at = nul + 1;
+      dispatch(msg);
+    }
+    if (at < c.length) parts.push(c.subarray(at));
   });
-  return {
+  for (const ev of ['end', 'close', 'error']) reader.on(ev, close);
+  writer.on('error', close);
+  chrome.once('exit', close);
+  const cdp = {
     send(method, params = {}, sessionId) {
       if (closed) return Promise.reject(new Error(`${method}: Chrome's DevTools closed`));
       const i = ++id;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => { pending.delete(i); reject(new Error(`${method}: Chrome didn't answer in 30 s`)); }, 30000);
         pending.set(i, { resolve, reject, timer, method });
-        ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
+        try { writer.write(`${JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) })}\0`); } catch { close(); }
       });
     },
     on(method, fn) { if (method === 'close') closers.push(fn); else handlers.set(method, [...(handlers.get(method) ?? []), fn]); },
-    close() { try { ws.close(); } catch {} },
+    close() { try { writer.end(); } catch {} },
   };
+  await cdp.send('Browser.getVersion');
+  return cdp;
 }
 // The tabs: page targets in the order they appeared, each attached flat with Page enabled. A page
 // opened by another (a popup) becomes active; a sixth is closed at once, with a note.
@@ -26098,38 +26122,44 @@ function browserUserAgent(bin) {
   const v = /(\d+\.\d+\.\d+\.\d+)/.exec(spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] }).stdout ?? '')?.[1];
   return v ? `Mozilla/5.0 (${process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64'}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${v} Safari/537.36` : null;
 }
-// Chrome, detached in its own group, its DevTools port read only from its own stderr within 30 s
-// (DevToolsActivePort is never read). No usable sandbox: once more with --no-sandbox, and a note.
-// After the port line its stderr is drained and dropped: Chrome's log lines can carry page URLs.
+// Chrome, detached in its own group, its DevTools on a pipe (fds 3 and 4, kit-316 S2: no port, and no
+// DevToolsActivePort), up once it answers Browser.getVersion there within 30 s. No usable sandbox: once
+// more with --no-sandbox, and a note. Its stderr is kept (the last 64 KiB) only until then, for the
+// sandbox check; after, it is drained and dropped: Chrome's log lines can carry page URLs.
 async function browserLaunchChrome(ctx, { headed }) {
   const ua = browserUserAgent(ctx.bin);
   const args = [
-    ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-pipe',
     `--proxy-server=127.0.0.1:${ctx.guard.port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync',
     ...(process.platform === 'linux' ? ['--password-store=basic'] : []), ...(ua ? [`--user-agent=${ua}`] : []),
   ];
   for (let tries = 0; ; tries++) {
-    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
     ctx.chrome = chrome;
     const r = await new Promise((resolve) => {
-      let buf = '';
-      const timer = setTimeout(() => resolve({ late: true }), 30000);
-      const done = (v) => { clearTimeout(timer); chrome.stderr.removeListener('data', read); chrome.stderr.on('data', () => {}); resolve(v); };
-      const read = (c) => {
-        buf = (buf + c).slice(-65536);
-        const m = /DevTools listening on (ws:\/\/127\.0\.0\.1:(\d+)\/\S+)/.exec(buf);
-        if (m) done({ wsUrl: m[1], cdpPort: Number(m[2]) });
-      };
+      let buf = '', over = false;
+      const timer = setTimeout(() => done({ late: true }), 30000);
+      const read = (c) => { buf = (buf + c).slice(-65536); };
+      function done(v) {
+        if (over) return;
+        over = true;
+        clearTimeout(timer);
+        chrome.stderr.removeListener('data', read);
+        chrome.stderr.on('data', () => {});
+        resolve(v);
+      }
       chrome.stderr.setEncoding('utf8');
       chrome.stderr.on('data', read);
       chrome.once('error', () => done({ exited: true, buf: '' }));
       chrome.once('exit', () => done({ exited: true, buf }));
+      // a pipe that fails before Chrome exits is left to the exit (its stderr says why) or the timer
+      cdpBrowser(chrome).then((cdp) => done({ cdp }), () => {});
     });
-    if (r.wsUrl) return r;
+    if (r.cdp) return { cdp: r.cdp };
     try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
     if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) { ctx.notes.push("Chrome's sandbox isn't available on this machine; it runs without it."); continue; }
-    throw new Error(r.late ? "browser: Chrome didn't open its DevTools port in 30 s" : 'browser: Chrome exited before its DevTools port opened');
+    throw new Error(r.late ? "browser: Chrome didn't open its DevTools pipe in 30 s" : 'browser: Chrome exited before its DevTools pipe opened');
   }
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
@@ -26297,10 +26327,10 @@ async function browserServe({ chrome: bin }) {
     const failOnce = browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL');
     if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
     await browserListen(ctx.view, viewPort);
-    const { wsUrl, cdpPort } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
     ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
-    ctx.cdp = await cdpBrowser(wsUrl);
+    ctx.cdp = cdp;
     ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
@@ -26309,7 +26339,7 @@ async function browserServe({ chrome: bin }) {
     const { server, arm } = browserControl(ctx, secret);
     ctx.control = server;
     const controlPort = await browserListen(server, 0);
-    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, cdp_port: cdpPort, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
+    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
     arm();
     process.on('uncaughtException', () => browserShutdown(ctx, 'error'));
     process.on('unhandledRejection', () => browserShutdown(ctx, 'error'));

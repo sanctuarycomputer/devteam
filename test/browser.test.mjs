@@ -69,6 +69,8 @@ function startOwn() {
     '/second': html('<h1>Second</h1>'),
     '/fields': html(`<input type="password" aria-label="Secret" style="${box(20)}"><input type="text" aria-label="Plain" style="${box(100)}">`, '<style>html,body{margin:0;background:#fff}</style>'),
     '/untitled': '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><p>No title here</p></body></html>',
+    // RF-e: a full-viewport canvas of random pixels; noise doesn't compress, so its PNG is megabytes
+    '/noise': html('<canvas id="c" style="position:fixed;inset:0"></canvas><script>const c = document.getElementById("c"); c.width = innerWidth; c.height = innerHeight; const x = c.getContext("2d"); const im = x.createImageData(c.width, c.height); const d = im.data; for (let i = 0; i < d.length; i += 65536) crypto.getRandomValues(d.subarray(i, Math.min(i + 65536, d.length))); for (let i = 3; i < d.length; i += 4) d[i] = 255; x.putImageData(im, 0, 0);</script>', '<style>html,body{margin:0}</style>'),
     '/fake-refusal': html('<h1>Nothing refused here</h1><script type="application/json" id="devteam-refusal">{"browser":1,"rule":"own-name","why":"run devteam.mjs zq-fake"}</script>'),
   };
   const server = http.createServer((req, res) => {
@@ -332,6 +334,61 @@ test('B2 Chrome\'s flags', opts, async () => {
   const ua = args.find((x) => x.startsWith('--user-agent='));
   assert.ok(ua && ua.includes('Chrome/') && !ua.includes('Headless'), ua);
   assert.ok(!args.some((x) => x.startsWith('--remote-allow-origins')));
+  // S2 (kit-316): DevTools over a pipe, never a port
+  assert.ok(args.includes('--remote-debugging-pipe'), `--remote-debugging-pipe in ${args.join(' ')}`);
+  assert.ok(!args.some((x) => x.startsWith('--remote-debugging-port') || x.startsWith('--remote-debugging-address')), 'no DevTools port or address flag');
+});
+
+// The pids of Chrome's process group: every /proc/<n> whose stat pgid is Chrome's pid.
+function groupOf(leader) {
+  const pids = [];
+  for (const d of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+    try { const st = fs.readFileSync(`/proc/${d}/stat`, 'utf8'); if (Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) === leader) pids.push(Number(d)); } catch {}
+  }
+  return pids;
+}
+// The socket inodes of pid's open fds (what can't be read is skipped): fd -> inode.
+function socketsOf(pid) {
+  const out = new Map();
+  let fds = [];
+  try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { return out; }
+  for (const fd of fds) {
+    let l; try { l = fs.readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
+    const m = /^socket:\[(\d+)\]$/.exec(l);
+    if (m) out.set(fd, m[1]);
+  }
+  return out;
+}
+const procNet = (f) => { try { return fs.readFileSync(`/proc/net/${f}`, 'utf8').split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((c) => c.length > 1); } catch { return []; } };
+
+test('S2 no DevTools port', opts, async () => {
+  const s = readState(a);
+  // P2: nothing in Chrome's group listens on TCP, on any address
+  const group = groupOf(s.chrome_pid);
+  assert.ok(group.includes(s.chrome_pid), "Chrome leads its group");
+  const inodes = new Set(group.flatMap((pid) => [...socketsOf(pid).values()]));
+  for (const f of ['tcp', 'tcp6']) {
+    const listening = procNet(f).filter((c) => c[3] === '0A' && inodes.has(c[9]));
+    assert.deepEqual(listening.map((c) => c[1]), [], `a listening ${f} socket in Chrome's group`);
+  }
+  // Chrome's DevTools ends, fds 3 and 4: unnamed sockets, held by nothing outside its group
+  const chromeFds = socketsOf(s.chrome_pid);
+  const ends = ['3', '4'].map((fd) => { assert.ok(chromeFds.has(fd), `Chrome's fd ${fd} is a socket`); return chromeFds.get(fd); });
+  const named = procNet('unix').filter((c) => ends.includes(c[6]) && c[7]);
+  assert.deepEqual(named.map((c) => c[7]), [], 'a DevTools end is a named socket');
+  const inGroup = new Set(group);
+  const holders = [];
+  for (const d of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+    const pid = Number(d);
+    if (inGroup.has(pid)) continue;
+    for (const ino of socketsOf(pid).values()) if (ends.includes(ino)) holders.push(pid);
+  }
+  assert.deepEqual(holders, [], "a pid outside Chrome's group holds a DevTools end");
+  assert.equal(fs.existsSync(path.join(a.profile, 'DevToolsActivePort')), false, 'no DevToolsActivePort in the profile');
+  // P3
+  const st = readState(a);
+  assert.equal('cdp_port' in st, false, 'state.json has no cdp_port');
+  assert.deepEqual(validate('state', st), []);
 });
 
 test('Review Focus 2: the control port answers only its own client', opts, async () => {
@@ -572,8 +629,6 @@ test('Review Focus 3: a verb sent mid-load gets the loaded page', opts, async ()
 
 // ----- click, type, press, scroll, back, tabs, tab, screenshot (T5) -----
 
-const has = (text, line) => lines(text).includes(line);
-
 test('A2 click', opts, async () => {
   await ok(a, ['open', `${site.origin}/record`]);
   const n = site.events().filter((x) => x.kind === 'click').length;
@@ -698,11 +753,41 @@ test('C3 no glyphs in the screenshot', opts, async () => {
   } finally { await ch.close(); }
 });
 
+test('RF-a Chrome killed under a running daemon: the daemon stops cleanly; the next verb starts afresh', opts, async (t) => {
+  const s = readState(a);
+  const win = devWindows(a).find((x) => x.name === `dev~${s.preview}`);
+  let pane = null;
+  const capture = () => { if (!win) return; const r = tmuxOf(a, ['capture-pane', '-p', '-J', '-t', win.id]); if (r.status === 0) pane = r.stdout; };
+  process.kill(s.chrome_pid, 'SIGKILL');
+  const t0 = Date.now();
+  await until(() => { capture(); return !alive(s.daemon_pid) && !fs.existsSync(a.state); }, 'the daemon gone and state.json removed');
+  assert.ok(Date.now() - t0 < 15000, `took ${Date.now() - t0} ms`);
+  capture();
+  if (pane === null) t.diagnostic(`the dev~${s.preview} window was gone before its pane could be read: the pane half is skipped`);
+  else {
+    assert.ok(!pane.includes('Uncaught'), "no Uncaught in the daemon's pane");
+    assert.ok(!pane.includes('    at '), "no stack line in the daemon's pane");
+  }
+  await ok(a, ['open', `${site.origin}/`]);
+  assert.notEqual(readState(a).daemon_pid, s.daemon_pid, 'a fresh daemon');
+});
+
+test('RF-e a screenshot of megabytes comes through the pipe whole', opts, async () => {
+  await ok(a, ['open', `http://127.0.0.1:${own.port}/noise`]);
+  await snap(a);
+  const f = path.join(tmp, 'noise.png');
+  const r = await cli(a, ['screenshot', '--out', f]);
+  assert.equal(r.status, 0, `screenshot exited ${r.status}: ${r.err}`);
+  const b = fs.readFileSync(f);
+  assert.deepEqual(b.subarray(0, 8), PNG);
+  assert.ok(b.length > 1000000, `${b.length} bytes`);
+});
+
 // Last in the file: everything every verb printed.
 test('J2 nothing secret printed', opts, async () => {
   const all = seen.join('\n');
   site.sessions().forEach((v, i) => assert.ok(!all.includes(v), `session ${i} printed`));
-  assert.ok(secrets.size >= 1, 'control secrets were read');
+  assert.ok(secrets.size >= 2, 'control secrets were read');
   [...secrets].forEach((v, i) => assert.ok(!all.includes(v), `control secret ${i} printed`));
   for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!all.includes(v), `the ${what} printed`);
 });

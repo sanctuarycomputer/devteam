@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { monoFixture, until, sessionOf } from './lib/kit.mjs';
 import { startSites } from './lib/sites.mjs';
-import { canDrive } from './lib/chrome.mjs';
+import { canDrive, chromePath } from './lib/chrome.mjs';
 import { validate } from './fixtures/browser/check.mjs';
 
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
@@ -84,9 +84,13 @@ before(() => {
   return setup;
 });
 
+// Groups the test made (G1b's leftover Chrome); each test kills its own, and this catches the rest. Only
+// these are ever signalled as a group: never one the test didn't create.
+const ownGroups = new Set();
 after(async () => {
   if (skip) return;
   await setup.catch(() => {});
+  for (const G of ownGroups) { try { process.kill(-G, 'SIGKILL'); } catch {} }
   for (const P of projects) await cli(P, ['stop']).catch(() => {});
   for (const pid of testBrowserPids()) { try { process.kill(pid, 'SIGKILL'); } catch {} }
   for (const P of projects) P.done();
@@ -150,6 +154,63 @@ function refOf(text, role, name) {
   return m[1];
 }
 const has = (text, line) => lines(text).includes(line);
+
+// ----- restarts on q (kit-316): each opens with stopped(q) and ends with q stopped -----
+
+// A pid that is certainly dead: a process that ran and was reaped.
+const deadPid = () => spawnSync('true').pid;
+// A schema-valid state.json of a dead daemon, naming chrome_pid, in the pipe form (no cdp_port).
+function plantState(P, chromePid) {
+  const s = { browser: 1, daemon_pid: deadPid(), chrome_pid: chromePid, control_port: 1, control_secret: '0'.repeat(64), guard_port: 1, view_port: 1, preview: 'gone-preview' };
+  assert.deepEqual(validate('state', s), []);
+  fs.mkdirSync(path.dirname(P.state), { recursive: true });
+  fs.writeFileSync(P.state, JSON.stringify(s));
+}
+const carries = (pid, P) => { try { return cmdline(pid).includes(`--user-data-dir=${P.profile}`); } catch { return false; } };
+const killGroup = async (G) => { try { process.kill(-G, 'SIGKILL'); } catch {} ownGroups.delete(G); await until(() => !alive(G), 'the group gone'); };
+
+test('G1b a leftover Chrome is killed by the next start', opts, async () => {
+  await stopped(q);
+  fs.rmSync(q.state, { force: true });
+  // the test's own Chrome on q's profile, kept off the network
+  const c = spawn(chromePath, ['--headless=new', `--user-data-dir=${q.profile}`, '--proxy-server=127.0.0.1:9', '--disable-background-networking', '--no-first-run', '--no-sandbox', 'about:blank'], { detached: true, stdio: 'ignore' });
+  ownGroups.add(c.pid);
+  try {
+    await until(() => carries(c.pid, q), 'the leftover Chrome up');
+    plantState(q, c.pid);
+    await started(q);
+    assert.equal(alive(c.pid), false, 'the leftover Chrome is gone');
+    assert.equal((await statusJson(q)).restarted, true);
+    await stopped(q);
+  } finally { await killGroup(c.pid); }
+});
+
+// The supervisor's ruling (m-20261119-112945313): an older devteam.mjs reads a new state.json as one
+// missing a field it requires. A state.json without control_port stands in for that here.
+test('R1 a state.json the reader can\'t use restarts, never crashes', opts, async () => {
+  await stopped(q);
+  await started(q);
+  const s1 = readState(q);
+  // the old form, with cdp_port, reaches the same daemon
+  fs.writeFileSync(q.state, JSON.stringify({ ...s1, cdp_port: 1 }));
+  await ok(q, ['status', '--json']);
+  assert.equal(readState(q).daemon_pid, s1.daemon_pid, 'the old form is accepted with no restart');
+  // a state.json the reader can't use: a fresh daemon, no crash
+  const unusable = { ...s1 };
+  delete unusable.control_port;
+  fs.writeFileSync(q.state, JSON.stringify(unusable));
+  const r = await cli(q, ['open', `${site.origin}/`]);
+  assert.equal(r.status, 0, `open exited ${r.status}`);
+  assert.ok(!(r.out + r.err).includes('    at '), 'no stack line');
+  assert.ok(!(r.out + r.err).includes('TypeError'), 'no TypeError');
+  const s2 = readState(q);
+  assert.notEqual(s2.daemon_pid, s1.daemon_pid, 'a fresh daemon');
+  assert.deepEqual(validate('state', s2), []);
+  assert.equal('cdp_port' in s2, false, 'no cdp_port');
+  await until(() => !alive(s1.daemon_pid) && !alive(s1.chrome_pid), 'the old daemon and its Chrome gone');
+  assert.equal((await statusJson(q)).tabs, 1);
+  await stopped(q);
+});
 
 test('K1 run.env reaches the daemon', opts, async () => {
   const other = newHome();
