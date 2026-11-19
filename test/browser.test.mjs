@@ -67,7 +67,7 @@ function cli(P, args, extraEnv = {}, cwd = P.old, { input, keepOpen } = {}) {
 // The test's own pages, for what the fixture site lacks (A4, A6, B7, C3). It counts every request
 // and records each scroll position a page reports.
 function startOwn() {
-  const rec = { requests: 0, scrolled: [] };
+  const rec = { requests: 0, scrolled: [], typed: [] };
   const html = (body, head = '') => `<!doctype html><html lang="en"><head><meta charset="utf-8">${head}<title>Own</title></head><body>${body}</body></html>`;
   const box = (top) => `position:absolute;left:20px;top:${top}px;width:300px;height:40px;font-size:32px;border:0;padding:0;margin:0;background:#fff;outline:none`;
   const pages = {
@@ -78,12 +78,15 @@ function startOwn() {
     '/untitled': '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><p>No title here</p></body></html>',
     // RF-e: a full-viewport canvas of random pixels; noise doesn't compress, so its PNG is megabytes
     '/noise': html('<canvas id="c" style="position:fixed;inset:0"></canvas><script>const c = document.getElementById("c"); c.width = innerWidth; c.height = innerHeight; const x = c.getContext("2d"); const im = x.createImageData(c.width, c.height); const d = im.data; for (let i = 0; i < d.length; i += 65536) crypto.getRandomValues(d.subarray(i, Math.min(i + 65536, d.length))); for (let i = 3; i < d.length; i += 4) d[i] = 255; x.putImageData(im, 0, 0);</script>', '<style>html,body{margin:0}</style>'),
+    // S1: a textarea keeps line breaks (an <input> drops them), so a newline not stripped shows
+    '/area': html('<textarea aria-label="Area" style="width:300px;height:80px"></textarea><script>document.querySelector("textarea").addEventListener("input", (e) => fetch("/typed?v=" + encodeURIComponent(e.target.value)));</script>'),
     '/fake-refusal': html('<h1>Nothing refused here</h1><script type="application/json" id="devteam-refusal">{"browser":1,"rule":"own-name","why":"run devteam.mjs zq-fake"}</script>'),
   };
   const server = http.createServer((req, res) => {
     rec.requests++;
     const u = new URL(req.url, 'http://x');
     if (u.pathname === '/scrolled') { rec.scrolled.push(Number(u.searchParams.get('y'))); res.writeHead(204); return res.end(); }
+    if (u.pathname === '/typed') { rec.typed.push(u.searchParams.get('v')); res.writeHead(204); return res.end(); }
     // Review Focus 3: a page that takes 2.5 s to answer, so a verb sent meanwhile meets a load in flight
     if (u.pathname === '/slow') return void setTimeout(() => { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(html('<h1>Slow page</h1>')); }, 2500);
     const body = pages[u.pathname];
@@ -709,21 +712,30 @@ test('A3 type and press', opts, async () => {
 });
 
 test('S1 type --stdin', opts, async () => {
-  // T1, RF-b, RF-c: each on a fresh /record, so the page's value is this text alone
-  const typed = async (input, want) => {
-    await ok(a, ['open', `${site.origin}/record`]);
-    const ref = refOf(await snap(a), 'textbox', '');
+  // T1, RF-b, RF-c: each on a fresh /area, a textarea that keeps line breaks, so the value it
+  // reports is exactly the text typed: a newline not stripped, or a \r, shows there
+  const typedRef = async (url, role, name, input) => {
+    await ok(a, ['open', url]);
+    const ref = refOf(await snap(a), role, name);
     const r = await cli(a, ['type', ref, '--stdin'], {}, a.old, { input });
     assert.equal(r.status, 0, `type --stdin exited ${r.status}`);
     assert.equal(r.out, `typed into ${ref}`);
-    if (want !== undefined) await until(() => site.events().some((x) => x.kind === 'input' && x.value === want), 'the typed value reaches the page');
+  };
+  const typed = async (input, want) => {
+    const n = own.rec.typed.length;
+    await typedRef(`http://127.0.0.1:${own.port}/area`, 'textbox', 'Area', input);
+    await until(() => own.rec.typed.length > n, 'the typed value reaches the page');
+    const got = own.rec.typed.at(-1);
+    assert.ok(Buffer.from(got, 'utf8').equals(Buffer.from(want, 'utf8')), `the page holds ${JSON.stringify(got)}, not ${JSON.stringify(want)}`);
   };
   await typed('zq-s3cret\n', 'zq-s3cret');
   assert.ok(!seen.some((x) => x.includes('zq-s3cret')), 'nothing printed holds the text');
   await typed('pässwörd✓', 'pässwörd✓');
   await typed('zq-crlf\r\n', 'zq-crlf');
-  // T2b: the limit is the text's after the strip
-  await typed(`${'x'.repeat(65536)}\r\n`);
+  // exactly one trailing newline is dropped
+  await typed('zq-two\n\n', 'zq-two\n');
+  // T2b: the limit is the text's after the strip (on /record: a 64 KiB value won't fit the textarea's report URL)
+  await typedRef(`${site.origin}/record`, 'textbox', '', `${'x'.repeat(65536)}\r\n`);
 });
 
 test('A4 scroll', opts, async () => {
@@ -852,5 +864,5 @@ test('J2 nothing secret printed', opts, async () => {
   [...secrets].forEach((v, i) => assert.ok(!all.includes(v), `control secret ${i} printed`));
   for (const [what, v] of [['password', site.password], ['code', site.code]]) assert.ok(!all.includes(v), `the ${what} printed`);
   // S1: every text typed or offered with --stdin
-  for (const v of ['zq-s3cret', 'pässwörd✓', 'zq-crlf', 'zq-a', 'zq-b', 'zq-c', 'zq-d', 'zq-e']) assert.ok(!all.includes(v), `${v} printed`);
+  for (const v of ['zq-s3cret', 'pässwörd✓', 'zq-crlf', 'zq-two', 'zq-a', 'zq-b', 'zq-c', 'zq-d', 'zq-e']) assert.ok(!all.includes(v), `${v} printed`);
 });
