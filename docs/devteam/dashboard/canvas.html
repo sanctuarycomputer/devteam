@@ -1704,6 +1704,8 @@
   // the pointer is down), 'release' (a drag's drop), 'restore' (a drag ended without its drop, back to
   // its start); only two plain edits coalesce. notBefore: the sender holds it, and everything behind
   // it, until then (performance.now() ms; a drag's throttle). The queued item, or false when nothing was.
+  // A plain edit pushes its undo entry (§3; 'undo' is an undo's own edit, which pushes none); a plain
+  // edit coalesced into the last one updates that one's own entry with what the new value leaves.
   function edit(ops, { kind = 'plain', notBefore = 0 } = {}) {
     if (!editable() || !Array.isArray(ops) || ops.length === 0) return false;
     if (new TextEncoder().encode(JSON.stringify(ops)).length > OPS_BYTES) { say(SAY.tooBig); return false; }
@@ -1713,8 +1715,13 @@
     if (kind === 'plain' && last && last.kind === 'plain' && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) {
       last.ops = ops;
       item = last;
+      if (last.entry) coalesceEntry(last.entry, ops[0]);
     } else {
       item = { ops, seq: null, kind, entry: null, notBefore };
+      if (kind === 'plain') {
+        item.entry = makeEntry(state.doc, ops);
+        if (item.entry) pushEntry(item.entry);
+      }
       state.pending.push(item);
     }
     redraw();
@@ -1795,6 +1802,7 @@
     radius: 0, clip: false, 'layout.mode': 'none', 'layout.gap': 0, 'layout.padding': [0, 0, 0, 0], 'layout.align': 'start',
     'layout.justify': 'start', 'layout.wrap': false, 'layout.columns': [], 'layout.rows': [], text: '',
     font: { family: 'sans', size: 16, weight: 400, lineHeight: 1.4 }, color: '#000000', align: 'left', fit: 'cover', variant: null,
+    name: '',
   };
   const PAINTED = new Set(['frame', 'component', 'rect', 'ellipse', 'vector']);
   const ROUNDED = new Set(['frame', 'component', 'rect', 'image']);
@@ -2490,6 +2498,7 @@
       try { $('stage').setPointerCapture(g.id); } catch { /* moves over the stage still arrive */ }
       toolPress = true;
       g.lastAt = performance.now(); // the throttle's first live edit goes 100 ms after this
+      g.snapshot = structuredClone(state.doc); // the drag's one undo entry is walked from here (§3)
     }
     g.dragged = true;
     if (g.tool === 'move') {
@@ -2526,6 +2535,7 @@
     endGesture(g);
     if (!toolsOn()) return;
     make(g);
+    if (g.tool === 'move') dragEntry(g);
   });
   $('stage').addEventListener('pointercancel', (e) => { if (gesture && e.pointerId === gesture.id) endGesture(gesture, { abort: true }); });
 
@@ -2601,8 +2611,9 @@
       // live: sends live edits (placed by x, y, both stored as numbers: a token-valued x or y sends none,
       // its drop falls back to the pointer's position); start: x, y as drawn at the press; sent: x, y as
       // the last live edit (or restore) left them; lastAt: when the last live edit went (performance.now);
-      // timer: the throttle's; liveSent: a live edit went; items: the drag's queued edits; snapshot: T3's;
-      // restored: the drag ended in a restore (pushes no undo entry)
+      // timer: the throttle's; liveSent: a live edit went; items: the drag's queued edits; snapshot: the
+      // drawn document when it passed its slop (its one undo entry is walked from it); restored: the
+      // drag ended in a restore (pushes no undo entry)
       live: false, start: { x: baseOf(id, 'x'), y: baseOf(id, 'y') }, sent: null, lastAt: null, timer: null,
       liveSent: false, items: [], snapshot: null, restored: false,
     };
@@ -2772,6 +2783,214 @@
     const step = e.shiftKey ? 10 : 1;
     const [dx, dy] = ARROWS[e.key];
     nudge(dx * step, dy * step);
+  });
+
+  // ---- undo (kit-668 §3) ----
+  // Each page undoes its own edits. Every plain edit (a tool, a field, a key, a drop, a button) pushes
+  // one entry on `undos`; a whole Move drag (its live edits and its release) one entry at its end, none
+  // when it ended in a restore; an undo's own edit none. At most UNDO_MAX, the oldest goes; an entry
+  // goes when any of its edits is refused (dropEntryOf). An entry holds one revert per op, walked over
+  // a copy of the drawn document when the edit was made, each with what its op left; an undo reverts
+  // only what is still as its edit left it, so someone else's change since is skipped, and said.
+  const UNDO_MAX = 100;
+  const UNDO_SAY = {
+    none: 'Nothing to undo.',
+    all: "Someone else changed that since, so it wasn't undone.",
+    part: 'Part of that was changed by someone else since, so only the rest was undone.',
+  };
+  const undos = [];
+  const NONE = Symbol('nothing stored');
+  // A path whose default is absent: a null there removes it (contract §4), so that is its "before".
+  const ABSENT_DEFAULT = removing;
+  // The value stored at a property path of a node (own keys only; a page has only its name), or NONE.
+  function stored(d, id, path) {
+    const pi = pageAt(d, id);
+    if (pi >= 0) return path === 'name' && own(d.pages[pi], 'name') ? d.pages[pi].name : NONE;
+    let at = nodeIn(d, id);
+    if (at === null) return NONE;
+    for (const k of pathKeys(path)) {
+      if (!isObj(at) || !own(at, k)) return NONE;
+      at = at[k];
+    }
+    return at;
+  }
+  // Stored values compared deep-equal (objects by their keys, whatever the order); NONE equals only NONE.
+  function same(a, b) {
+    if (a === b) return true;
+    if (a === NONE || b === NONE) return false;
+    if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((x, i) => same(x, b[i]));
+    if (isObj(a)) {
+      if (!isObj(b)) return false;
+      const ka = Object.keys(a);
+      return ka.length === Object.keys(b).length && ka.every((k) => own(b, k) && same(a[k], b[k]));
+    }
+    return false;
+  }
+  const copy = (v) => (v === NONE ? NONE : structuredClone(v));
+  const onCanvas = (d, id) => pageAt(d, id) >= 0 || nodeIn(d, id) !== null;
+  const parentIn = (d, id) => (pageAt(d, id) >= 0 ? null : nodeIn(d, id)?.parent);
+  // A page's or node's subtree, its ids in pre-order (the root first), bounded.
+  function subtreeIds(d, id) {
+    const out = [];
+    const seen = new Set();
+    const stack = [id];
+    while (stack.length && out.length <= MAX_ELEMENTS) {
+      const x = stack.pop();
+      if (seen.has(x)) continue;
+      const pi = pageAt(d, x);
+      const n = pi >= 0 ? d.pages[pi] : nodeIn(d, x);
+      if (!n) continue;
+      seen.add(x);
+      out.push(x);
+      stack.push(...kidsOf(n).reverse());
+    }
+    return out;
+  }
+  // The sibling before `id` in its parent's children (a page's: the pages), null for first.
+  function prevOf(d, id) {
+    const pi = pageAt(d, id);
+    if (pi >= 0) return pi > 0 && isObj(d.pages[pi - 1]) ? d.pages[pi - 1].id : null;
+    const list = childrenOf(d, nodeIn(d, id)?.parent);
+    const i = list ? list.indexOf(id) : -1;
+    return i > 0 ? list[i - 1] : null;
+  }
+  // A node as an add puts it back: its properties as stored, no children key; a page by its name.
+  function addBack(d, id) {
+    const pi = pageAt(d, id);
+    if (pi >= 0) return { op: 'add', node: { id, type: 'page', name: d.pages[pi].name }, after: prevOf(d, id) };
+    const n = nodeIn(d, id);
+    const node = { id };
+    for (const k of Object.keys(n)) if (k !== 'children' && k !== 'id') put(node, k, structuredClone(n[k]));
+    return { op: 'add', node, after: prevOf(d, id) };
+  }
+  // One op's revert, read from `d` before the op is applied (spec §3's table); what it left is read
+  // after (makeEntry). null when the op changes nothing undoable here; `entry.partial` when it changes
+  // something with no revert (a set of a path with no default, a token, an add over an id already there).
+  function revertOf(d, op, entry) {
+    if (op.op === 'set') {
+      if (typeof op.prop !== 'string' || !onCanvas(d, op.id)) return null;
+      if (pageAt(d, op.id) >= 0 && op.prop !== 'name') return null;
+      let before = stored(d, op.id, op.prop);
+      if (before === NONE) {
+        if (ABSENT_DEFAULT(pathKeys(op.prop))) before = null;
+        else if (own(DEFAULT, op.prop)) before = DEFAULT[op.prop];
+        else { entry.partial = true; return null; }
+      }
+      return { t: 'set', id: op.id, prop: op.prop, before: structuredClone(before), left: NONE };
+    }
+    if (op.op === 'add') {
+      const id = isObj(op.node) ? op.node.id : null;
+      if (typeof id !== 'string') return null;
+      if (onCanvas(d, id)) { entry.partial = true; return null; }
+      return { t: 'add', id, ids: [] };
+    }
+    if (op.op === 'del') {
+      if (!onCanvas(d, op.id)) return null;
+      const ids = subtreeIds(d, op.id);
+      return { t: 'del', id: op.id, parent: parentIn(d, op.id), ids, adds: ids.map((x) => addBack(d, x)) };
+    }
+    if (op.op === 'move') {
+      if (!onCanvas(d, op.id)) return null;
+      return { t: 'move', id: op.id, parent: parentIn(d, op.id), after: prevOf(d, op.id), left: null };
+    }
+    entry.partial = true;
+    return null;
+  }
+  // An edit's entry: its ops walked one by one over a copy of `doc`, each giving a revert with what it
+  // left; several sets of one path keep the earliest before and the latest left. null when no op gave one.
+  function makeEntry(doc, ops) {
+    const d = structuredClone(doc);
+    const entry = { reverts: [], partial: false };
+    for (const op of ops) {
+      if (!isObj(op)) continue;
+      const r = revertOf(d, op, entry);
+      applyOps(d, [op]);
+      if (r === null) continue;
+      if (r.t === 'set') {
+        r.left = copy(stored(d, r.id, r.prop));
+        const prior = entry.reverts.find((x) => x.t === 'set' && x.id === r.id && x.prop === r.prop);
+        if (prior) { prior.left = r.left; continue; }
+      } else if (r.t === 'add') {
+        if (!onCanvas(d, r.id)) continue; // it didn't apply here: nothing to take back
+        r.ids = subtreeIds(d, r.id);
+      } else if (r.t === 'move') {
+        r.left = parentIn(d, r.id);
+      }
+      entry.reverts.push(r);
+    }
+    return entry.reverts.length > 0 ? entry : null;
+  }
+  // A coalesced set (kit-662's held key): the replaced edit's entry takes what the new value leaves.
+  function coalesceEntry(entry, op) {
+    const r = entry.reverts.find((x) => x.t === 'set' && x.id === op.id && x.prop === op.prop);
+    if (r) r.left = op.value === null && ABSENT_DEFAULT(pathKeys(op.prop)) ? NONE : structuredClone(op.value);
+  }
+  function pushEntry(entry) {
+    undos.push(entry);
+    if (undos.length > UNDO_MAX) undos.splice(0, undos.length - UNDO_MAX);
+  }
+  // A Move drag's end: one entry for all its edits, from where the node was when it passed its slop
+  // (g.snapshot) to where it ended; none when it ended in a restore, sent nothing, or an edit of it was
+  // refused already.
+  function dragEntry(g) {
+    if (g.restored || g.snapshot === null || g.items.length === 0 || g.items.some((i) => i.dropped)) return;
+    const entry = makeEntry(g.snapshot, g.items.flatMap((i) => i.ops));
+    if (entry === null) return;
+    for (const i of g.items) i.entry = entry;
+    pushEntry(entry);
+  }
+  // One revert judged against `c` (the drawn document, with the reverts kept so far applied): its ops,
+  // or null when someone else changed it since (spec §3's skip column). A move back whose old parent is
+  // gone is skipped too: the server would refuse it, and with it the rest of the undo.
+  function judge(c, r) {
+    if (r.t === 'set') {
+      if (!onCanvas(c, r.id) || !same(stored(c, r.id, r.prop), r.left)) return null;
+      return [{ op: 'set', id: r.id, prop: r.prop, value: structuredClone(r.before) }];
+    }
+    if (r.t === 'add') {
+      if (!onCanvas(c, r.id)) return null;
+      const was = new Set(r.ids);
+      if (subtreeIds(c, r.id).some((x) => !was.has(x))) return null;
+      return [{ op: 'del', id: r.id }];
+    }
+    if (r.t === 'del') {
+      if (r.ids.some((x) => onCanvas(c, x))) return null;
+      if (r.parent !== null && !onCanvas(c, r.parent)) return null;
+      return structuredClone(r.adds);
+    }
+    if (r.t === 'move') {
+      if (!onCanvas(c, r.id) || parentIn(c, r.id) !== r.left) return null;
+      if (r.parent !== null && !onCanvas(c, r.parent)) return null;
+      return [{ op: 'move', id: r.id, parent: r.parent, after: r.after }];
+    }
+    return null;
+  }
+  // Ctrl+Z: the top entry taken off, its reverts judged in reverse op order over a copy of the drawn
+  // document (each kept one applied to it, so later ones are judged against what earlier ones did);
+  // the kept ones go as one edit, and the person is told what was skipped.
+  function undo() {
+    const entry = undos.pop();
+    if (!entry) { say(UNDO_SAY.none); return; }
+    const c = structuredClone(state.doc);
+    const out = [];
+    let skipped = entry.partial;
+    for (const r of [...entry.reverts].reverse()) {
+      const ops = judge(c, r);
+      if (ops === null) { skipped = true; continue; }
+      applyOps(c, ops);
+      out.push(...ops);
+    }
+    if (out.length === 0) { say(UNDO_SAY.all); return; }
+    if (edit(out, { kind: 'undo' }) && skipped) say(UNDO_SAY.part);
+  }
+  // Ctrl+Z (Cmd+Z on a Mac), no Shift, no Alt: only while no field has focus (there it is the field's),
+  // at 760 px and over, while editing is allowed, and not during a drag (its throttled release or
+  // restore included) or a path being drawn.
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || typeof e.key !== 'string' || e.key.toLowerCase() !== 'z') return;
+    if (!toolsOn() || typing(e.target) || gesture !== null || pen !== null || dragWaiting()) return;
+    e.preventDefault();
+    undo();
   });
 
   // ---- the image: posted, then added under the src the server answers ----
@@ -3014,8 +3233,13 @@
     state.kept = state.kept.filter((e) => e.session !== sock.session || e.rev > m.rev);
     syncBody();
   }
-  // A refused edit's undo entry goes with it (kit-668 §3; no undo entries yet).
-  function dropEntryOf() {}
+  // A refused edit's undo entry goes with it (kit-668 §3); a drag's edit refused before the drag ends
+  // keeps the drag from pushing one (dropped).
+  function dropEntryOf(item) {
+    item.dropped = true;
+    const i = item.entry ? undos.indexOf(item.entry) : -1;
+    if (i >= 0) undos.splice(i, 1);
+  }
   // refused, for this page: that edit dropped (from pending, or kept should a resent one be refused) and
   // why said in plain words; then the document fetched again (canvas@1 §5), the other pending edits
   // drawn over it and sent after it.
