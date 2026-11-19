@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { merge, normalDoc, apply, validate } from '../docs/devteam/scripts/canvas.mjs';
+import { merge, normalDoc, apply, validate, PROPS } from '../docs/devteam/scripts/canvas.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.join(here, 'fixtures', 'canvas');
@@ -445,4 +445,232 @@ test('canvas merge: a 20000-node list reversed merges in time', () => {
   assert.equal(r.refused, null);
   assert.equal(r.ops.length, N - 1);
   gives(base, r.ops, copy);
+});
+
+// ---- T3: generated copies, commuting edits, running twice ----
+
+// A seeded generator: mulberry32, so every run makes the same cases.
+function prng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const pick = (rng, xs) => xs[Math.floor(rng() * xs.length)];
+
+// Values per property path: every value doc-every-type stores at that path, the default, and a few more.
+const POOL = new Map();
+function poolAdd(p, v) { if (v === undefined) return; if (!POOL.has(p)) POOL.set(p, []); POOL.get(p).push(v); }
+for (const type of Object.keys(PROPS)) for (const [p, def] of Object.entries(PROPS[type])) if (!p.includes('<')) poolAdd(p, def.default);
+for (const n of Object.values(EVERY.nodes)) {
+  for (const type of [n.type]) for (const p of Object.keys(PROPS[type])) {
+    if (p.includes('<')) continue;
+    let v = n;
+    for (const k of p.split('.')) v = v && typeof v === 'object' ? v[k] : undefined;
+    poolAdd(p, v);
+  }
+}
+for (const [p, vs] of Object.entries({
+  name: ['A', 'Beta', 'x y'], text: ['Hello', 'Bye'], x: [3, -40], y: [7, 120], opacity: [0.5], 'size.w': [100, 'fill'], 'size.h': [44, 'fill'],
+  'layout.gap': [2, 8], 'layout.mode': ['row', 'column', 'grid', 'none'], radius: [2, 12], fill: ['#ff0000', '#00ff00'], color: ['#123456'],
+  'layout.padding': [[1, 2, 3, 4]], visible: [false, true], strokeWidth: [2],
+})) for (const v of vs) poolAdd(p, v);
+const TOKEN_VALUES = [
+  { $type: 'number', $value: 2 }, { $type: 'number', $value: 3.5 }, { $type: 'dimension', $value: { value: 8, unit: 'px' } },
+  { $type: 'color', $value: { colorSpace: 'srgb', components: [0.1, 0.2, 0.3] } }, { $type: 'fontWeight', $value: 600 },
+];
+const TOKEN_PATHS = ['t.a', 't.b', 't.g.x', 't.g.y', 't.g', 'u', 'space.xl', 'ratio.loose', 'constructor.k'];
+
+// One random op that `apply` applies to `doc`, or null after many tries. `tag` prefixes new ids.
+function randomOp(doc, rng, tag, counter) {
+  const nodeIds = Object.keys(doc.nodes);
+  const pageIds = doc.pages.map((p) => p.id);
+  const containers = [...pageIds, ...nodeIds.filter((id) => ['frame', 'component'].includes(doc.nodes[id].type))];
+  const listOf = (id) => (doc.nodes[id] ? doc.nodes[id].children : doc.pages.find((p) => p.id === id).children);
+  const afterIn = (id) => { const l = listOf(id); return rng() < 0.3 || l.length === 0 ? null : pick(rng, l); };
+  for (let tries = 0; tries < 60; tries++) {
+    const k = rng();
+    let op;
+    if (k < 0.32 && nodeIds.length) {
+      const id = pick(rng, nodeIds);
+      const n = doc.nodes[id];
+      const r = rng();
+      if (n.type === 'instance' && r < 0.3) {
+        const comp = doc.nodes[n.component];
+        const desc = comp && comp.children.length ? pick(rng, comp.children) : null;
+        const forms = [
+          desc && ['overrides.' + desc + '.' + pick(rng, ['visible', 'opacity', 'name', 'text', 'fill']), pick(rng, [false, 0.4, 'Ov', '#abcdef', null])],
+          ['props.' + pick(rng, Object.keys((comp && comp.props) || { label: 1 })), pick(rng, ['Pay', true, false, null])],
+          ['variant', pick(rng, [null, ...Object.keys((comp && comp.variants) || {})])],
+          ['overrides', {}],
+        ].filter(Boolean);
+        const [prop, value] = pick(rng, forms);
+        op = set(id, prop, value);
+      } else if (n.type === 'component' && r < 0.3) {
+        const desc = n.children.length ? pick(rng, n.children) : 'none';
+        const forms = [
+          ['variants.' + pick(rng, ['v1', 'v2', 'primary', 'quiet']) + '.' + desc + '.' + pick(rng, ['visible', 'opacity', 'fill']), pick(rng, [false, 0.3, '#0000ff', null])],
+          ['variants.' + pick(rng, ['v3', 'quiet']), pick(rng, [{}, null])],
+          ['props.' + pick(rng, ['label', 'p2']), pick(rng, [null, { type: 'bool', default: true, target: { id: desc, prop: 'visible' } }])],
+          ['props', {}],
+        ];
+        const [prop, value] = pick(rng, forms);
+        op = set(id, prop, value);
+      } else {
+        const paths = Object.keys(PROPS[n.type]).filter((p) => !p.includes('<') && !['component', 'props', 'variants', 'overrides', 'path', 'src'].includes(p));
+        const p = pick(rng, paths);
+        op = set(id, p, structuredClone(pick(rng, POOL.get(p) || [null])));
+      }
+    } else if (k < 0.37) {
+      op = set(pick(rng, pageIds), 'name', pick(rng, ['Pg', 'Page X', 'Ü']));
+    } else if (k < 0.55) {
+      const type = pick(rng, ['rect', 'ellipse', 'text', 'frame', 'frame', 'instance']);
+      const id = rng() < 0.03 ? pick(rng, ['constructor', 'toString', '__proto__']) : `${tag}${counter.n++}`;
+      const parent = pick(rng, containers);
+      const props = type === 'instance' ? { component: pick(rng, nodeIds.filter((x) => doc.nodes[x].type === 'component').concat(['none'])) } : {};
+      if (rng() < 0.5) props.name = pick(rng, ['N1', 'N2']);
+      if (type === 'frame' && rng() < 0.5) props.layout = { mode: pick(rng, ['row', 'column']), gap: 4 };
+      op = add(id, type, parent, afterIn(parent), props);
+    } else if (k < 0.58) {
+      op = add(`${tag}pg${counter.n++}`, 'page', null, rng() < 0.5 ? null : pick(rng, pageIds), { name: 'New page' });
+    } else if (k < 0.68 && nodeIds.length) {
+      op = del(pick(rng, nodeIds));
+    } else if (k < 0.7) {
+      op = del(pick(rng, pageIds));
+    } else if (k < 0.85 && nodeIds.length) {
+      const parent = pick(rng, containers);
+      op = mv(pick(rng, nodeIds), doc.nodes[parent] || pageIds.includes(parent) ? parent : parent, afterIn(parent));
+    } else if (k < 0.88) {
+      op = mv(pick(rng, pageIds), null, rng() < 0.5 ? null : pick(rng, pageIds));
+    } else {
+      op = { op: 'token', path: pick(rng, TOKEN_PATHS), value: rng() < 0.3 ? null : structuredClone(pick(rng, TOKEN_VALUES)) };
+    }
+    const r = apply(doc, [op], { maxOpsBytes: null });
+    if (r.why === null) return { op, doc: r.doc };
+  }
+  return null;
+}
+function randomEdit(doc, rng, n, tag, counter) {
+  const ops = [];
+  let d = doc;
+  for (let i = 0; i < n; i++) {
+    const r = randomOp(d, rng, tag, counter);
+    if (!r) break;
+    ops.push(r.op);
+    d = r.doc;
+  }
+  return { ops, doc: d };
+}
+
+// The wide base: 3 pages of 4 frames of 4 to 6 children, a nested frame per page, a component with a
+// variant and a prop, two instances, 12 tokens.
+function wideBase() {
+  const ops = [add('p2', 'page', null, 'p1', { name: 'Two' }), add('p3', 'page', null, 'p2', { name: 'Three' })];
+  const rng = prng(7);
+  for (const pg of ['p1', 'p2', 'p3']) {
+    let prevF = null;
+    for (let f = 0; f < 4; f++) {
+      const fid = `${pg}f${f}`;
+      ops.push(add(fid, 'frame', pg, prevF, { layout: { mode: 'column', gap: 4 } }));
+      prevF = fid;
+      let prevC = null;
+      const n = 4 + Math.floor(rng() * 3);
+      for (let c = 0; c < n; c++) { const cid = `${fid}c${c}`; ops.push(add(cid, c % 2 ? 'text' : 'rect', fid, prevC, { name: cid })); prevC = cid; }
+    }
+    ops.push(add(`${pg}sub`, 'frame', `${pg}f0`, null), add(`${pg}sub1`, 'rect', `${pg}sub`, null), add(`${pg}sub2`, 'ellipse', `${pg}sub`, `${pg}sub1`));
+  }
+  ops.push(add('cmp', 'component', 'p3', null), add('cmp-t', 'text', 'cmp', null, { text: 'Label' }), add('cmp-b', 'rect', 'cmp', 'cmp-t'));
+  ops.push(set('cmp', 'props.label', { type: 'text', default: 'Go', target: { id: 'cmp-t', prop: 'text' } }));
+  ops.push(set('cmp', 'variants.v1', { 'cmp-b': { fill: '#ff0000' } }));
+  ops.push(add('i1', 'instance', 'p1f1', null, { component: 'cmp', variant: 'v1' }), add('i2', 'instance', 'p2f2', null, { component: 'cmp', props: { label: 'Hi' } }));
+  for (let t = 0; t < 12; t++) ops.push({ op: 'token', path: `w.g${t % 3}.k${t}`, value: TOKEN_VALUES[t % TOKEN_VALUES.length] });
+  return edit(MINIMAL, ops);
+}
+const BASES = [['doc-every-type', EVERY], ['wide', wideBase()]];
+
+// What an op touches (spec C8), on the document it applies to.
+function touchesOf(doc, ops) {
+  const t = { nodes: new Set(), lists: new Set(), tokens: [] };
+  const listKey = (id) => (id === null ? '#pages' : id);
+  let d = doc;
+  for (const op of ops) {
+    const subtree = (root) => {
+      const out = [];
+      const stack = [root];
+      while (stack.length) {
+        const id = stack.pop();
+        out.push(id);
+        const n = d.nodes[id];
+        const kids = n ? n.children : (d.pages.find((p) => p.id === id) || {}).children;
+        if (kids) { t.lists.add(id); for (const k of kids) stack.push(k); }
+      }
+      return out;
+    };
+    const parentOf = (id) => (d.nodes[id] ? d.nodes[id].parent : null);
+    if (op.op === 'set') t.nodes.add(op.id);
+    else if (op.op === 'add') { t.nodes.add(op.node.id); t.lists.add(listKey(op.node.parent)); }
+    else if (op.op === 'del') { for (const id of subtree(op.id)) t.nodes.add(id); t.lists.add(listKey(parentOf(op.id))); }
+    else if (op.op === 'move') { t.nodes.add(op.id); t.lists.add(listKey(parentOf(op.id))); t.lists.add(listKey(op.parent)); }
+    else if (op.op === 'token') t.tokens.push(op.path);
+    d = edit(d, [op]);
+  }
+  return t;
+}
+function disjoint(a, b) {
+  for (const id of a.nodes) if (b.nodes.has(id)) return false;
+  for (const l of a.lists) if (b.lists.has(l)) return false;
+  const near = (x, y) => x === y || x.startsWith(`${y}.`) || y.startsWith(`${x}.`);
+  return !a.tokens.some((x) => b.tokens.some((y) => near(x, y)));
+}
+
+// Running twice is safe (C12): the ops again change nothing; a second merge against the result changes nothing.
+function twice(base, copy, result, ops, msg) {
+  const again = after(result, ops);
+  assert.deepEqual(normalDoc(again), normalDoc(result), `${msg}: ops applied twice`);
+  const r2 = opsOf(base, copy, result);
+  assert.deepEqual(normalDoc(after(result, r2.ops)), normalDoc(result), `${msg}: a second merge`);
+}
+
+test('canvas merge: merging a generated copy against its own base gives the copy (C7, C12)', () => {
+  for (const [name, base] of BASES) {
+    const rng = prng(name.length * 1000 + 11);
+    for (let i = 0; i < 200; i++) {
+      const counter = { n: 0 };
+      const { ops: did, doc: copy } = randomEdit(base, rng, 1 + Math.floor(rng() * 12), 's', counter);
+      const msg = `${name} case ${i}: ${JSON.stringify(did).slice(0, 1500)}`;
+      const r = opsOf(base, copy, base);
+      assert.deepEqual(r.skipped, [], msg);
+      const out = after(base, r.ops);
+      assert.deepEqual(normalDoc(out), normalDoc(copy), msg);
+      twice(base, copy, out, r.ops, msg);
+    }
+  }
+});
+
+test('canvas merge: a person\'s edit to what the copy didn\'t change survives (C8, C12)', () => {
+  for (const [name, base] of BASES) {
+    const rng = prng(name.length * 1000 + 23);
+    let kept = 0;
+    for (let tries = 0; tries < 2000 && kept < 150; tries++) {
+      const counter = { n: 0 };
+      const person = randomEdit(base, rng, 1 + Math.floor(rng() * 6), 'h', counter);
+      const sup = randomEdit(base, rng, 1 + Math.floor(rng() * 6), 's', counter);
+      if (!person.ops.length || !sup.ops.length) continue;
+      if (!disjoint(touchesOf(base, person.ops), touchesOf(base, sup.ops))) continue;
+      const want = apply(sup.doc, person.ops, { maxOpsBytes: null });
+      if (want.why !== null) continue;
+      kept++;
+      const msg = `${name} try ${tries}: person ${JSON.stringify(person.ops).slice(0, 800)} supervisor ${JSON.stringify(sup.ops).slice(0, 800)}`;
+      const r = opsOf(base, sup.doc, person.doc);
+      assert.deepEqual(r.skipped, [], msg);
+      const out = after(person.doc, r.ops);
+      assert.deepEqual(normalDoc(out), normalDoc(want.doc), msg);
+      twice(base, sup.doc, out, r.ops, msg);
+    }
+    assert.ok(kept >= 150, `${name}: only ${kept} disjoint pairs`);
+  }
 });

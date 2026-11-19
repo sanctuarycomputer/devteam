@@ -1348,13 +1348,21 @@ export function merge(base, copy, now, { images = null, folderBytes = 0 } = {}) 
   const parentInCopy = (id) => (cPage.has(id) ? PAGES : nc.nodes[id].parent);
   const copyList = (P) => (P === PAGES ? nc.pages.map((pg) => pg.id) : cPage.has(P) ? cPage.get(P).children : nc.nodes[P].children);
 
+  // In the base and not in the copy: step 6 deletes it.
+  const doomed = (id) => inBase(id) && !(cPage.has(id) || own(nc.nodes, id));
   // Where an id goes in list P (spec step 3): after the nearest settled id to its left in C, else
-  // before the nearest kept id to its right in C that is in P's list, else first.
-  const anchor = (P, leftSettled, C, from, keep) => {
+  // right before the nearest kept id to its right in C that is in P's list, else first. "Right before"
+  // is after its nearest predecessor that stays put: not one step 6 deletes nor one of this list's ids
+  // still to be placed (`pending`), so the op places the same when `take` runs again.
+  const anchor = (P, leftSettled, C, from, keep, pending) => {
     if (leftSettled !== null) return leftSettled;
     for (let j = from + 1; j < C.length; j++) {
       const r = C[j];
-      if (keep.has(r) && parentOf.get(r) === P) return prev.get(r);
+      if (keep.has(r) && parentOf.get(r) === P) {
+        let p = prev.get(r);
+        while (p !== null && (doomed(p) || pending.has(p))) p = prev.get(p);
+        return p;
+      }
     }
     return null;
   };
@@ -1364,14 +1372,21 @@ export function merge(base, copy, now, { images = null, folderBytes = 0 } = {}) 
     const bpos = new Map(B.map((id, i) => [id, i]));
     const common = C.filter((id) => bpos.has(id));
     const keep = lisKeep(common.map((id) => bpos.get(id)), common);
-    // the nearest kept id at or after each index, for the right anchor without rescanning
+    const pending = new Set(C.filter((id) => !keep.has(id)));
     let left = null;
     for (let i = 0; i < C.length; i++) {
       const x = C[i];
       if (keep.has(x)) { if (parentOf.get(x) === P) left = x; continue; }
+      pending.delete(x);
       if (!hasList(P)) { skip('id', x, 'parent-deleted'); continue; }
       if (!inBase(x)) {
-        const at = anchor(P, left, C, i, keep);
+        const at = anchor(P, left, C, i, keep, pending);
+        // already there (`take` run again after its ops applied): an add of an existing id only sets
+        // its properties, so put it in its place first
+        if (has(x) && at !== x && (parentOf.get(x) !== P || prev.get(x) !== at)) {
+          if (P !== PAGES && cycles(x, P)) { skip('id', x, 'cycle'); continue; }
+          emitMove(x, P, at);
+        }
         if (P === PAGES) {
           ops.push({ op: 'add', node: { id: x, type: 'page', parent: null, name: cPage.get(x).name }, after: at });
           modelAdd(x, 'page', PAGES, at);
@@ -1387,7 +1402,7 @@ export function merge(base, copy, now, { images = null, folderBytes = 0 } = {}) 
       }
       if (!has(x)) { skip('id', x, 'deleted'); continue; }
       if (P !== PAGES && cycles(x, P)) { skip('id', x, 'cycle'); continue; }
-      emitMove(x, P, anchor(P, left, C, i, keep));
+      emitMove(x, P, anchor(P, left, C, i, keep, pending));
       left = x;
     }
   };
@@ -1412,7 +1427,6 @@ export function merge(base, copy, now, { images = null, folderBytes = 0 } = {}) 
   }
 
   // 4. kept nodes under something step 6 deletes: back to their copy parent
-  const doomed = (id) => inBase(id) && !(cPage.has(id) || own(nc.nodes, id));
   for (const id of order) {
     if (!has(id)) continue;
     let under = false;
@@ -1429,7 +1443,7 @@ export function merge(base, copy, now, { images = null, folderBytes = 0 } = {}) 
     const i = C.indexOf(id);
     let left = null;
     for (let j = i - 1; j >= 0; j--) if (parentOf.get(C[j]) === P) { left = C[j]; break; }
-    emitMove(id, P, anchor(P, left, C, i, new Set(C.filter((x) => parentOf.get(x) === P))));
+    emitMove(id, P, anchor(P, left, C, i, new Set(C.filter((x) => parentOf.get(x) === P)), new Set()));
   }
 
   // 5. properties
