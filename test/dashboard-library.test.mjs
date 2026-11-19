@@ -867,17 +867,19 @@ async function tapPage(chrome, { patterns, paused, children = false }) {
   return { ...p, sessions, close: () => { try { ws.close(); } catch {} close(); } };
 }
 // an init that records every thumbnail frame put in and taken out, with the page's clock: window.__frames,
-// { id: its card's, in, out }
+// { id: its card's, in, out }, and each box's data-thumb change: window.__states, { id, v, t }
 const FRAMES_INIT = `(() => {
   window.__frames = [];
+  window.__states = [];
   const frames = (n) => (n.nodeName === 'IFRAME' ? [n] : n.querySelectorAll ? [...n.querySelectorAll('iframe')] : []);
   new MutationObserver((ms) => {
     const t = performance.now();
     for (const m of ms) {
+      if (m.type === 'attributes') { window.__states.push({ id: m.target.closest('.lib-card')?.dataset.libId ?? null, v: m.target.dataset.thumb ?? null, t }); continue; }
       for (const n of m.addedNodes) for (const f of frames(n)) if (f.parentElement?.classList.contains('lib-thumb')) window.__frames.push({ el: f, id: f.closest('.lib-card')?.dataset.libId ?? null, in: t });
       for (const n of m.removedNodes) for (const f of frames(n)) { const r = window.__frames.find((x) => x.el === f); if (r && r.out === undefined) r.out = t; }
     }
-  }).observe(document, { childList: true, subtree: true });
+  }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-thumb'] });
 })();`;
 const FRAMES = "window.__frames.map(({ id, in: a, out }) => ({ id, in: a, out: out ?? null }))";
 // what is in view (the window scrolls): the boxes intersecting it, those with a frame source, the frames
@@ -952,18 +954,20 @@ test('a frame that never loads falls back after 5 s', { ...CHROME, timeout: 3000
     if (Date.now() - t0 > 3000) assert.fail(`no paused request for the slow frame within 3 s (held: ${JSON.stringify(held)})`);
     await sleep(50);
   }
-  await soon(`performance.now() - ${rec}.in >= 4000`, '4 s since the frame went in');
-  const at4 = await p.ev(`({ el: performance.now() - ${rec}.in, frame: !!${thumb(slow)}.querySelector('iframe'), state: ${thumb(slow)}.dataset.thumb })`);
-  assert.ok(at4.el < 5000, `read before 5 s (${at4.el} ms)`);
-  assert.deepEqual([at4.frame, at4.state], [true, 'live'], 'still a frame at 4 s');
-  await soon(`${thumb(slow)}.dataset.thumb === 'failed' || performance.now() - ${rec}.in > 8000`, 'the fallback');
-  const after = await p.ev(`({ gone: ${rec}.out - ${rec}.in, frame: !!${thumb(slow)}.querySelector('iframe'), state: ${thumb(slow)}.dataset.thumb, icon: !!${thumb(slow)}.querySelector(':scope > i.icon-layout-dashboard') })`);
+  // the page's own clock throughout: data-thumb-at is stamped before its wait starts, and the observer stamps
+  // a frame's going out and each data-thumb change no earlier than it happened
+  const at = Number(await p.ev(`${thumb(slow)}.dataset.thumbAt`));
+  assert.ok(at > 0, 'the box stamped when its frame went in');
+  await soon(`${thumb(slow)}.dataset.thumb === 'failed' || performance.now() - ${at} > 8000`, 'the fallback');
+  const after = await p.ev(`({ gone: ${rec}.out - ${at}, frame: !!${thumb(slow)}.querySelector('iframe'), state: ${thumb(slow)}.dataset.thumb, icon: !!${thumb(slow)}.querySelector(':scope > i.icon-layout-dashboard'),
+    states: window.__states.filter((s) => s.id === ${JSON.stringify(slow)} && s.t >= ${at}).map((s) => [s.v, s.t - ${at}]) })`);
   assert.equal(after.state, 'failed', 'data-thumb="failed"');
   assert.equal(after.frame, false, 'no frame');
   assert.equal(after.icon, true, 'the kind\'s icon');
-  // the observer stamps the frame's going in at the end of the task that put it in, after the page's timer
-  // started (a run read 4995 ms), so 100 ms of slack below 5 s; a fallback at 4 s or earlier is still red
-  assert.ok(after.gone >= 4900 && after.gone <= 7000, `taken out between 5 and 7 s (${after.gone} ms)`);
+  // still a frame, and live, at its own stamp + 4 s: nothing but live before the frame went out
+  assert.ok(after.gone > 4000, `a frame at 4 s (out at ${after.gone} ms)`);
+  assert.ok(after.states.every(([v, dt]) => v === 'live' || dt >= 5000), `live until the fallback: ${JSON.stringify(after.states)}`);
+  assert.ok(after.gone >= 5000 && after.gone <= 7000, `taken out between 5 and 7 s (${after.gone} ms)`);
   // not retried; one that loads keeps its frame
   await sleep(1500);
   assert.deepEqual(await p.ev(`[${thumb(slow)}.dataset.thumb, !!${thumb(slow)}.querySelector('iframe'), window.__frames.filter((f) => f.id === ${JSON.stringify(slow)}).length]`), ['failed', false, 1], 'not retried');
@@ -1029,5 +1033,35 @@ test('a poll keeps a live frame', { ...CHROME, timeout: 300000 }, async (t) => {
   const reads = await p.ev('window.__dataReads');
   await soon(`window.__dataReads >= ${reads + 3}`, 'two more polls');
   assert.deepEqual(await p.ev(`(() => { const f = ${thumb(id)}.querySelector('iframe'); return [f?.__mark ?? null, f?.isConnected ?? false, ${thumb(id)}.dataset.thumb]; })()`), ['kept', true, 'live'], 'the same frame in its box');
+  // another card changes: the grid is patched (that card drawn anew), and the marked frame is still the same element
+  const other = `artifact:${ids.docs}`;
+  await p.ev(`${card(other)}.__mark = 'old'`);
+  await p.ev(`window.__fx.library.artifacts.find((a) => a.slug === ${JSON.stringify(ids.docs)}).summary = 'Now it shows the new guide'`);
+  await soon(`${card(other)}.querySelector('.lib-body').textContent.includes('Now it shows the new guide')`, 'the other card patched');
+  assert.equal(await p.ev(`${card(other)}.__mark ?? null`), null, 'the other card is a new node');
+  assert.deepEqual(await p.ev(`(() => { const f = ${thumb(id)}.querySelector('iframe'); return [f?.__mark ?? null, f?.isConnected ?? false, ${thumb(id)}.dataset.thumb]; })()`), ['kept', true, 'live'], 'the same frame after a patch');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a card removed by a poll frees its slot', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon } = await libraryAll(t, { fx: libraryFixture({ artifacts: 60 }), height: 3000 });
+  await soon(`${VIEW}.frames === 12`, 'twelve frames');
+  await sleep(1000);
+  const before = await p.ev(VIEW);
+  assert.ok(before.srcInView > 12, `more than 12 boxes with a frame source in view (${before.srcInView})`);
+  const gone = before.holding.map((h) => h.id).find((id) => id.startsWith('artifact:bulk-'));
+  assert.ok(gone, 'a framed bulk card');
+  const slug = gone.slice('artifact:'.length);
+  await p.ev(`window.__fx.library.artifacts = window.__fx.library.artifacts.filter((a) => a.slug !== ${JSON.stringify(slug)})`);
+  await soon(`!${card(gone)}`, 'the card patched away');
+  const was = JSON.stringify(before.holding.map((h) => h.id));
+  await soon(`(() => { const v = ${VIEW}; return v.frames === 12 && v.holding.some((h) => !${was}.includes(h.id)); })()`, 'its slot taken by the next box in view');
+  await sleep(1000);
+  const after = await p.ev(VIEW);
+  assert.equal(after.frames, 12, 'exactly 12 frames');
+  assert.ok(after.holding.every((h) => h.inView && h.id !== gone), 'every frame in a box in view that still exists');
+  // nothing the thumbnails keep is a box no longer in the page (its observer let go of it)
+  assert.deepEqual(await p.ev('[THUMBS.watched, THUMBS.seen, THUMBS.live].map((s) => [...s].filter((b) => !b.isConnected).length)'), [0, 0, 0], 'no detached box kept');
+  assert.equal(await p.ev("[...document.querySelectorAll('iframe')].filter((f) => f.closest('.lib-thumb') && !f.closest('#lib-grid')).length"), 0);
   assert.deepEqual(await p.ev('window.__errors'), []);
 });

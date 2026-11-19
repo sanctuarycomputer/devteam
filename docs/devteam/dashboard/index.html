@@ -6488,14 +6488,23 @@ function renderLibrary(lib) {
 // went in, or that this page's policy refuses, is taken out and the box keeps its icon until its card is drawn
 // anew. data-thumb: icon | live | failed. Frames are only put in and taken out here; a poll keeps the nodes.
 const THUMB_MAX = 12, THUMB_WAIT = 5000;
-// io: one IntersectionObserver; seen: the boxes in view; live: the boxes holding a frame
-const THUMBS = { io: null, seen: new Set(), live: new Set() };
+// io: one IntersectionObserver; watched: the boxes it observes; seen: those in view; live: those holding a frame
+const THUMBS = { io: null, watched: new Set(), seen: new Set(), live: new Set() };
 // Watches every .lib-thumb under root once (a box seen before is left alone), then fills the free slots.
 function thumbsWatch(root) {
   THUMBS.io ??= new IntersectionObserver((es) => {
     for (const e of es) if (e.isIntersecting) THUMBS.seen.add(e.target); else THUMBS.seen.delete(e.target);
     thumbsFill();
   });
+  // a box no longer in the page (its card patched away), in view or not, framed or not: unobserved, so the
+  // observer doesn't keep the detached card alive; its frame's slot is freed
+  for (const b of THUMBS.watched) {
+    if (b.isConnected) continue;
+    THUMBS.io.unobserve(b);
+    THUMBS.watched.delete(b);
+    THUMBS.seen.delete(b);
+    if (THUMBS.live.has(b)) thumbOut(b, 'icon');
+  }
   for (const b of root.querySelectorAll('.lib-thumb')) {
     if (b._thumbs) continue;
     b._thumbs = true;
@@ -6505,7 +6514,7 @@ function thumbsWatch(root) {
       const gone = () => { const i = document.createElement('i'); i.className = 'icon-link'; i.setAttribute('aria-hidden', 'true'); img.replaceWith(i); };
       if (img.complete && !img.naturalWidth && img.getAttribute('src')) gone(); else img.addEventListener('error', gone, { once: true });
     }
-    if (b.dataset.thumbSrc) THUMBS.io.observe(b);
+    if (b.dataset.thumbSrc) { THUMBS.io.observe(b); THUMBS.watched.add(b); }
   }
   thumbsFill();
 }
@@ -6531,6 +6540,8 @@ function thumbIn(b) {
   let loaded = false;
   f.addEventListener('load', () => { loaded = true; }, { once: true });
   b._thumbFrame = f;
+  // when it went in (the page's clock), stamped before the wait starts
+  b.dataset.thumbAt = String(performance.now());
   b._thumbTimer = setTimeout(() => { if (!loaded && b._thumbFrame === f) { thumbOut(b, 'failed'); thumbsFill(); } }, THUMB_WAIT);
   b.append(f);
   b.dataset.thumb = 'live';
@@ -6543,7 +6554,7 @@ function thumbOut(b, state) {
   b._thumbFrame = null;
   THUMBS.live.delete(b);
   b.dataset.thumb = state;
-  if (state === 'failed') { THUMBS.seen.delete(b); THUMBS.io?.unobserve(b); }
+  if (state === 'failed') { THUMBS.seen.delete(b); THUMBS.watched.delete(b); THUMBS.io?.unobserve(b); }
 }
 // a frame this page's frame-src refuses (on a laptop, a preview's own origin) goes at once, before Chrome's
 // error page shows in it: the blocked address's origin must be the frame's exactly
