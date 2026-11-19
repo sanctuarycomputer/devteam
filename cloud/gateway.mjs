@@ -1729,6 +1729,26 @@ export function createGateway(opts = {}) {
   // there. So does this: each file goes to the box first, and then its path goes in by term.paste,
   // bracketed like any paste when the program in the pane has asked for that, to the focused pane.
   // No Enter, so the owner can add to the message. The drop is the owner's own act, on their page.
+  // ⌘⌥← and ⌘⌥→ (on a Mac; Ctrl+Alt+←/→ elsewhere) move to the previous or next tmux window, as they
+  // move between tabs elsewhere. The terminal types them as Ctrl+Alt+Shift+←/→ (xterm's \e[1;8D and
+  // \e[1;8C), which the box's .tmux.conf binds to previous-window and next-window: no shell or agent
+  // uses that chord, and tmux needs no prefix for it. On a Mac nothing is lost: terminal programs don't
+  // use ⌘⌥←/→. Off a Mac, Ctrl+Alt+←/→ is taken from the pane: emacs -nw's C-M-left/right (sexp
+  // movement) and any readline or vim binding of \e[1;7D/\e[1;7C no longer reach it, and on Windows
+  // AltGr+←/→ (which reports Ctrl+Alt) is caught too; Ctrl+Alt+Shift+←/→ itself still reaches tmux.
+  // A browser or desktop that keeps the chord for its own tabs or workspaces takes it before the page,
+  // and is left to; nothing else is caught.
+  const TERM_KEYS = Buffer.from(`<script>(() => {
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+  addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    if (!e.altKey || e.shiftKey || !(mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) return;
+    if (!window.term || typeof window.term.input !== 'function') return;
+    e.preventDefault();
+    e.stopPropagation();
+    window.term.input(e.key === 'ArrowLeft' ? '\\x1b[1;8D' : '\\x1b[1;8C');
+  }, { capture: true });
+})();</script>`);
   const TERM_DROP = Buffer.from(`<script>(() => {
   const MAX = ${uploadMax};
   const shellQuote = ${shellQuote};
@@ -1845,8 +1865,8 @@ export function createGateway(opts = {}) {
   // The page the terminal is served, and a name for it that changes only when its bytes do.
   const termPage = () => {
     const html = ttydPage();
-    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]))).slice(0, 22);
-    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]) };
+    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH, TERM_KEYS]))).slice(0, 22);
+    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH, TERM_KEYS]) };
   };
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 

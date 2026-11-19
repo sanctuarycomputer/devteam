@@ -484,6 +484,9 @@ set -g window-status-format '#{?#{e|<:#{client_width},80}, #I #{=7:#{s/^sup-//:w
 set -g window-status-current-format '#[reverse]#{?#{e|<:#{client_width},80}, #I #{=7:#{s/^sup-//:window_name}} , #I:#W#F }#[default]'
 bind -n MouseDown1StatusLeft run-shell -b "box-tmux-menu '#{client_name}'"
 TMUX
+# ⌘⌥←/→ in the terminal page (gateway.mjs, TERM_KEYS) arrive as Ctrl+Alt+Shift+←/→: previous and next window
+grep -q 'C-M-S-Left' .tmux.conf || echo 'bind -n C-M-S-Left previous-window' >> .tmux.conf
+grep -q 'C-M-S-Right' .tmux.conf || echo 'bind -n C-M-S-Right next-window' >> .tmux.conf
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'
