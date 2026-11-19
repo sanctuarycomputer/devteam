@@ -19215,11 +19215,18 @@ async function cmdDashboard() {
   const filesArgs = (b) => (b.files === undefined || (Array.isArray(b.files) && !b.files.length) ? [] : Array.isArray(b.files) && b.files.length <= FILES_MAX ? [`--files=${JSON.stringify(b.files)}`] : null);
   const ACTIONS = {
     answer: (b) => {
-      if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
+      // choice, from a card with choices (kit-313): the label picked, the words in answer optional, or
+      // null for the words alone. Without the key (an older page, a goal or owner-action card) the
+      // answer is the text as typed.
+      const picked = Object.hasOwn(b, 'choice');
+      if (!ID.test(b.id ?? '')) return null;
+      if (picked && (b.decline !== undefined || (b.choice !== null && !text(b.choice, 300)))) return null;
+      const words = text(b.answer) ? b.answer.trim() : '';
+      if (!words && !(typeof b.choice === 'string' && (b.answer === undefined || (typeof b.answer === 'string' && !b.answer.trim())))) return null;
       if (b.decline !== undefined && b.decline !== true) return null;
       const files = filesArgs(b);
       if (!files) return null;
-      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
+      const args = ['answer', b.id, ...(words ? [words] : []), ...(!picked ? [] : b.choice === null ? ['--in-words'] : ['--choice', b.choice.trim()]), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
       // "Send it back" on a review: the owner's reason, no result
       if (b.decline === true) return [...args, '--decline'];
       if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
