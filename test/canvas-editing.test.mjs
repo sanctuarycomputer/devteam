@@ -1305,13 +1305,19 @@ test('drag a loose node', { skip: canDrive ? false : 'needs Chrome and WebSocket
   await within(async () => JSON.stringify(await selectedIds(p)) === '["dot"]', 'the press on dot selected it', async () => JSON.stringify(await selectedIds(p)), 5000);
   await sendsNothing(rec, n0, 'a press of 2 px');
 
-  // Escape during a drag drops it: nothing sent, badge back where it was, the selection kept
+  // Escape during a drag drops it: badge back where it was (kit-668: any live frames followed by a
+  // restore, the fake's badge where it was), the selection kept
   n0 = edits(rec).length;
   await drag(p, centre(b1), 40, 0, async () => {
     near((await box(p, '#surface [data-id="badge"]')).l, b1.l + 40, 1, 'previewed before Escape');
     await p.key('Escape');
   });
-  await sendsNothing(rec, n0, 'Escape during the drag');
+  await sleep(600);
+  const esc = edits(rec).slice(n0);
+  for (const f of esc) assert.ok(f.ops.every((o) => o.op === 'set' && o.id === 'badge' && ['x', 'y'].includes(o.prop)), `Escape: live frames and a restore only: ${JSON.stringify(f.ops)}`);
+  if (esc.length) assert.deepEqual(esc[esc.length - 1].ops, [{ op: 'set', id: 'badge', prop: 'x', value: want[0].value }], 'Escape after live frames: the last frame restores x');
+  await waitSaved(p);
+  assert.deepEqual([fake.doc('every').nodes.badge.x, fake.doc('every').nodes.badge.y], [want[0].value, want[1].value], "Escape: the fake's badge where it was");
   const b2 = await box(p, '#surface [data-id="badge"]');
   near(b2.l, b1.l, 0.5, 'badge back: x');
   near(b2.t, b1.t, 0.5, 'badge back: y');
@@ -1322,8 +1328,10 @@ test('drag a loose node', { skip: canDrive ? false : 'needs Chrome and WebSocket
   const lay = await box(p, '#layers');
   n0 = edits(rec).length;
   await dragPath(p, [centre(b2), { x: Math.round(lay.l + lay.w / 2), y: centre(b2).y }]);
-  const out = await nextEdit(rec, n0);
-  assert.deepEqual(out.ops[0], { op: 'move', id: 'badge', parent: 'p-main', after: 'tiles' }, 'released outside the stage: a move onto the page');
+  await within(async () => edits(rec).slice(n0).some((f) => f.ops[0].op === 'move'), 'the move sent', async () => JSON.stringify(edits(rec).slice(n0).map((f) => f.ops)), 10000);
+  await sendsNothing(rec, edits(rec).length, 'after the move');
+  const out = edits(rec)[edits(rec).length - 1];
+  assert.deepEqual(out.ops[0], { op: 'move', id: 'badge', parent: 'p-main', after: 'tiles' }, 'released outside the stage: the last frame a move onto the page');
   assert.deepEqual(out.ops.slice(1).map((o) => o.prop), ['x', 'y'], 'with set x and set y');
   await ackOf(rec, out);
   assert.equal(await p.ev("document.querySelector('#surface [data-id=\"badge\"]').style.translate"), '', 'no preview left');
@@ -1377,8 +1385,10 @@ test('drag into and within auto-layout', { skip: canDrive ? false : 'needs Chrom
   const title = await box(p, '#surface [data-id="title"]');
   n0 = edits(rec).length;
   await dragPath(p, [centre(badge), { x: Math.round(title.l + title.w / 2), y: Math.round(title.t + title.h * 0.75) }]);
-  e = await nextEdit(rec, n0);
-  assert.deepEqual(e.ops, [{ op: 'move', id: 'badge', parent: 'card', after: 'title' }], 'one move of badge after title, no x, y');
+  await within(async () => edits(rec).slice(n0).some((f) => f.ops[0].op === 'move'), 'the move sent', async () => JSON.stringify(edits(rec).slice(n0).map((f) => f.ops)), 10000);
+  await sendsNothing(rec, edits(rec).length, 'after the move');
+  e = edits(rec)[edits(rec).length - 1];
+  assert.deepEqual(e.ops, [{ op: 'move', id: 'badge', parent: 'card', after: 'title' }], 'the last frame: one move of badge after title, no x, y');
   await ackOf(rec, e);
   await waitSaved(p);
   assert.deepEqual(kids('card'), ['title', 'badge', 'rule', 'icon', 'photo', 'actions'], "the fake's card");
@@ -1480,18 +1490,25 @@ test('a drag into its own subtree sends nothing', { skip: canDrive ? false : 'ne
   const loose = await box(p, '#surface [data-id="loose"]');
   const lp = { x: Math.round(loose.l + loose.w * 0.6), y: Math.round(loose.t + loose.h * 0.6) };
   const badge = centre(await box(p, '#surface [data-id="badge"]'));
+  const loose0 = { x: fake.doc('every').nodes.loose.x, y: fake.doc('every').nodes.loose.y };
   await dragPath(p, [lp, { x: lp.x + 40, y: lp.y + 30 }, { x: lp.x + (badge.x - lp.x) / 2, y: lp.y + (badge.y - lp.y) / 2 }, lp]);
-  await sendsNothing(rec, n0, 'loose dropped where it was');
+  await sleep(600);
+  for (const f of edits(rec).slice(n0)) assert.ok(f.ops.every((o) => o.op === 'set' && o.id === 'loose' && ['x', 'y'].includes(o.prop)), `loose out and back: live frames only: ${JSON.stringify(f.ops)}`);
+  await waitSaved(p);
+  assert.deepEqual({ x: fake.doc('every').nodes.loose.x, y: fake.doc('every').nodes.loose.y, parent: fake.doc('every').nodes.loose.parent }, { ...loose0, parent: 'p-main' }, "loose dropped where it was: the fake's loose unchanged");
   const actions = await box(p, '#surface [data-id="actions"]');
   const ap = { x: Math.round(actions.r - 6), y: Math.round(actions.t + actions.h / 2) };
   assert.equal(await hitAt(p, ap), 'actions');
+  n0 = edits(rec).length;
   await dragPath(p, [ap, { x: ap.x, y: ap.y - 30 }, ap]);
   await sendsNothing(rec, n0, 'actions dropped where it was');
   // dragged by (40, 30) and released on itself: moved within its parent, never into itself
   n0 = edits(rec).length;
   await dragPath(p, [lp, { x: lp.x + 40, y: lp.y + 30 }]);
-  const e = await nextEdit(rec, n0);
-  assert.deepEqual(e.ops.map((o) => [o.op, o.id, o.prop]), [['set', 'loose', 'x'], ['set', 'loose', 'y']], 'loose moved within the page');
+  await nextEdit(rec, n0);
+  await waitSaved(p); // every frame of the drag sent and acked
+  const e = edits(rec)[edits(rec).length - 1];
+  assert.deepEqual(e.ops.map((o) => [o.op, o.id, o.prop]), [['set', 'loose', 'x'], ['set', 'loose', 'y']], 'loose moved within the page: the last frame');
   await ackOf(rec, e);
 
   // a component dropped into another component, or a frame holding one: refused here with the page's
@@ -1511,10 +1528,17 @@ test('a drag into its own subtree sends nothing', { skip: canDrive ? false : 'ne
     const from = grab(b0);
     assert.equal(await hitAt(p, from), id, `the press is on ${id}`);
     await p.ev("document.getElementById('toast').hidden = true");
+    const start = { x: fake.doc('every').nodes[id].x, y: fake.doc('every').nodes[id].y };
     n0 = edits(rec).length;
     await dragPath(p, [from, button]);
     await within(async () => (await shownText(p, '#toast')) === CANT_GO, `${id}: the page says it can't go there`, async () => shownText(p, '#toast'), 5000);
-    await sendsNothing(rec, n0, `${id} into the component button`);
+    // kit-668: a restore if live frames went, the fake's node at its start
+    await sleep(600);
+    const fr = edits(rec).slice(n0);
+    for (const f of fr) assert.ok(f.ops.every((o) => o.op === 'set' && o.id === id && ['x', 'y'].includes(o.prop)), `${id}: live frames and a restore only: ${JSON.stringify(f.ops)}`);
+    if (fr.length) assert.deepEqual(fr[fr.length - 1].ops.map((o) => o.value), fr[fr.length - 1].ops.map((o) => start[o.prop]), `${id}: the last frame restores the start`);
+    await waitSaved(p);
+    assert.deepEqual({ x: fake.doc('every').nodes[id].x, y: fake.doc('every').nodes[id].y }, start, `${id}: the fake's node at its start`);
     const b1 = await box(p, `#surface [data-id="${id}"]`);
     near(b1.l, b0.l, 0.5, `${id} drawn back: x`);
     near(b1.t, b0.t, 0.5, `${id} drawn back: y`);
@@ -1724,7 +1748,13 @@ test('place an instance and set its variant', { skip: canDrive ? false : 'needs 
   n0 = edits(rec).length;
   await dragPath(p, [centre(buy0), centre(await box(p, '#surface [data-id="button"]'))]);
   await within(async () => (await shownText(p, '#toast')) === OWN_COMPONENT, 'buy dropped on button: the own-component words', () => shownText(p, '#toast'), 5000);
-  await sendsNothing(rec, n0, 'buy into button');
+  // kit-668: a restore if live frames went, the fake's buy unchanged
+  await sleep(600);
+  const fr = edits(rec).slice(n0);
+  for (const f of fr) assert.ok(f.ops.every((o) => o.op === 'set' && o.id === 'buy' && ['x', 'y'].includes(o.prop)), `buy: live frames and a restore only: ${JSON.stringify(f.ops)}`);
+  if (fr.length) assert.deepEqual(fr[fr.length - 1].ops.map((o) => o.value), fr[fr.length - 1].ops.map((o) => ({ x: 0, y: 300 })[o.prop]), 'buy: the last frame restores the start');
+  await waitSaved(p);
+  assert.deepEqual([fake.doc('every').nodes.buy.x, fake.doc('every').nodes.buy.y], [0, 300], "buy unchanged in the fake");
   const buy1 = await box(p, '#surface [data-id="buy"]');
   near(buy1.l, buy0.l, 0.5, 'buy drawn back: x');
   near(buy1.t, buy0.t, 0.5, 'buy drawn back: y');

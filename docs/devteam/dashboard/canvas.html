@@ -1700,17 +1700,26 @@
 
   // One edit: queued in pending, drawn at once, sent when the socket and the rate allow. A single set of
   // the same node and property as the last unsent edit replaces it (so a held key sends the latest
-  // value, never a burst). False when nothing was queued.
-  function edit(ops) {
+  // value, never a burst). kit-668: each edit has a kind: 'plain' (a person's), 'live' (a drag's while
+  // the pointer is down), 'release' (a drag's drop), 'restore' (a drag ended without its drop, back to
+  // its start); only two plain edits coalesce. notBefore: the sender holds it, and everything behind
+  // it, until then (performance.now() ms; a drag's throttle). The queued item, or false when nothing was.
+  function edit(ops, { kind = 'plain', notBefore = 0 } = {}) {
     if (!editable() || !Array.isArray(ops) || ops.length === 0) return false;
     if (new TextEncoder().encode(JSON.stringify(ops)).length > OPS_BYTES) { say(SAY.tooBig); return false; }
     const last = state.pending[state.pending.length - 1];
     const oneSet = (o) => o.length === 1 && isObj(o[0]) && o[0].op === 'set';
-    if (last && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) last.ops = ops;
-    else state.pending.push({ ops, seq: null, kind: 'plain', entry: null });
+    let item;
+    if (kind === 'plain' && last && last.kind === 'plain' && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) {
+      last.ops = ops;
+      item = last;
+    } else {
+      item = { ops, seq: null, kind, entry: null, notBefore };
+      state.pending.push(item);
+    }
     redraw();
     pump();
-    return true;
+    return item;
   }
   // One property of one node set: one edit of one set op.
   const setRaw = (id, prop, value) => edit([{ op: 'set', id, prop, value }]);
@@ -2356,7 +2365,7 @@
 
   function setTool(name) {
     if (!TOOLS.includes(name)) return;
-    endGesture();
+    endGesture(gesture, { abort: true }); // Escape, a lock, a narrow screen: a drag dropped, not dropped in
     dropPen();
     tool = name;
     if (name !== 'instance') state.placing = null;
@@ -2480,9 +2489,14 @@
       // it), and the click that ends it isn't a selection
       try { $('stage').setPointerCapture(g.id); } catch { /* moves over the stage still arrive */ }
       toolPress = true;
+      g.lastAt = performance.now(); // the throttle's first live edit goes 100 ms after this
     }
     g.dragged = true;
-    if (g.tool === 'move') { movePreview(g); return; }
+    if (g.tool === 'move') {
+      if (g.live && g.timer === null) g.timer = setTimeout(() => liveSend(g), Math.max(0, 100 - (performance.now() - g.lastAt)));
+      movePreview(g);
+      return;
+    }
     if (g.tool === 'text') return; // a text is placed where it was pressed
     if (!g.draft) {
       g.draft = document.createElement('div');
@@ -2495,26 +2509,30 @@
     g.draft.style.width = `${Math.abs(g.cx - g.sx)}px`;
     g.draft.style.height = `${Math.abs(g.cy - g.sy)}px`;
   });
-  function endGesture() {
-    if (!gesture) return;
-    try { $('stage').releasePointerCapture(gesture.id); } catch { /* already released */ }
-    if (gesture.draft) gesture.draft.remove();
-    if (gesture.el) gesture.el.style.translate = '';
+  // A gesture ended: its pointer released, its draft and preview gone, a drag's throttle timer cleared.
+  // An abort (Escape, a lost pointer, a lock) of a Move drag after live edits went sends it back (restore).
+  function endGesture(g = gesture, { abort = false } = {}) {
+    if (!g || g !== gesture) return;
+    try { $('stage').releasePointerCapture(g.id); } catch { /* already released */ }
+    if (g.draft) g.draft.remove();
+    if (g.el) g.el.style.translate = '';
+    if (g.timer) { clearTimeout(g.timer); g.timer = null; }
     gesture = null;
+    if (abort && g.tool === 'move') restore(g);
   }
   $('stage').addEventListener('pointerup', (e) => {
     const g = gesture;
     if (!g || e.pointerId !== g.id) return;
-    endGesture();
+    endGesture(g);
     if (!toolsOn()) return;
     make(g);
   });
-  $('stage').addEventListener('pointercancel', (e) => { if (gesture && e.pointerId === gesture.id) endGesture(); });
+  $('stage').addEventListener('pointercancel', (e) => { if (gesture && e.pointerId === gesture.id) endGesture(gesture, { abort: true }); });
 
   // What a press made: placed by where it was pressed; a drag's box (frame, rectangle, ellipse, image)
   // gives its top-left and its size, in page px.
   function make(g) {
-    if (g.tool === 'move') { dropMove(g); return; }
+    if (g.tool === 'move') { if (dropMove(g) === 'refused') restore(g); return; }
     const at = placeAt(g.sx, g.sy);
     const z = view.z;
     const box = g.dragged && g.tool !== 'text'
@@ -2559,6 +2577,12 @@
   // drags it, the node previewed under the pointer by a translate on its element; the release sends one
   // edit. Escape (setTool) or a lost pointer drops the drag. The press, the grab and the movement are
   // kept in page px, so the grab point stays under the pointer whatever the view does meanwhile.
+  // kit-668 §2: a node placed by x, y sends live edits while dragged (set x, set y as if dropped in its
+  // own parent at the pointer), at most one per 100 ms: the first 100 ms after the drag passes its slop,
+  // then 100 ms after the last while the position has changed, each with the latest values. The release's
+  // edit and a restore wait (notBefore) until 100 ms after the last live edit. A drag that ends without
+  // its drop after live edits went (Escape, a lost pointer, a refused drop, the node off the shown page)
+  // sends x, y back to its start. A drag's queued items are kept in g.items (its one undo entry, T3).
 
   function pressMove(e) {
     const hit = e.target.closest('#surface [data-id]');
@@ -2574,7 +2598,16 @@
       node: id, el: null,
       px: (e.clientX - s.left) / z, py: (e.clientY - s.top) / z, // the press, in page px
       gx: (e.clientX - r.left) / z, gy: (e.clientY - r.top) / z, // the grab, from the node's top-left
+      // live: sends live edits (placed by x, y, both stored as numbers: a token-valued x or y sends none,
+      // its drop falls back to the pointer's position); start: x, y as drawn at the press; sent: x, y as
+      // the last live edit (or restore) left them; lastAt: when the last live edit went (performance.now);
+      // timer: the throttle's; liveSent: a live edit went; items: the drag's queued edits; snapshot: T3's;
+      // restored: the drag ended in a restore (pushes no undo entry)
+      live: false, start: { x: baseOf(id, 'x'), y: baseOf(id, 'y') }, sent: null, lastAt: null, timer: null,
+      liveSent: false, items: [], snapshot: null, restored: false,
     };
+    gesture.live = placedByXY(nodeOf(id)) && finite(gesture.start.x) && finite(gesture.start.y);
+    gesture.sent = { ...gesture.start };
   }
   // The pointer's movement since the press, in page px.
   function moveBy(g) {
@@ -2586,15 +2619,58 @@
     if (g.el && g.el !== el) g.el.style.translate = '';
     g.el = el ?? null;
     if (!g.el) return;
+    // less what the live edits have already moved it in the drawing (no doubled step after a redraw)
     const { dx, dy } = moveBy(g);
-    if (Number.isFinite(dx) && Number.isFinite(dy)) g.el.style.translate = `${dx}px ${dy}px`;
+    const ox = g.live ? g.sent.x - g.start.x : 0;
+    const oy = g.live ? g.sent.y - g.start.y : 0;
+    if (Number.isFinite(dx) && Number.isFinite(dy)) g.el.style.translate = `${dx - ox}px ${dy - oy}px`;
   }
-  // After a redraw (someone's edit) the dragged node's new element takes the preview; a node gone or
-  // no longer on the shown page ends the drag.
+  // The drag's position now in its own parent, whole px: the start moved by the pointer.
+  function liveTarget(g) {
+    const { dx, dy } = moveBy(g);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+    return { x: clamp(Math.round(g.start.x + dx), -PX, PX), y: clamp(Math.round(g.start.y + dy), -PX, PX) };
+  }
+  // The throttle's timer: one live edit of the sets that changed since the last sent. g.sent moves to the
+  // targets before edit() (whose redraw then previews from them); back when nothing was queued.
+  function liveSend(g) {
+    g.timer = null;
+    if (gesture !== g || !g.live || !editable() || !nodeOf(g.node)) return;
+    const to = liveTarget(g);
+    if (to === null) return;
+    const ops = [];
+    for (const k of ['x', 'y']) if (to[k] !== g.sent[k]) ops.push({ op: 'set', id: g.node, prop: k, value: to[k] });
+    if (ops.length === 0) return;
+    const prev = g.sent;
+    g.sent = to;
+    const item = edit(ops, { kind: 'live' });
+    if (!item) { g.sent = prev; return; }
+    g.lastAt = performance.now();
+    g.liveSent = true;
+    g.items.push(item);
+  }
+  // A drag ended without its drop after live edits went: one edit setting x, y back to the start (those
+  // the last live edit moved), through the same throttle, drawn at once. Nothing when editing is no
+  // longer allowed, or the node is gone.
+  function restore(g) {
+    if (!g.liveSent || !editable() || !nodeOf(g.node)) return;
+    g.restored = true;
+    const ops = [];
+    for (const k of ['x', 'y']) if (g.sent[k] !== g.start[k]) ops.push({ op: 'set', id: g.node, prop: k, value: g.start[k] });
+    if (ops.length === 0) return;
+    g.sent = { ...g.start };
+    const item = edit(ops, { kind: 'restore', notBefore: g.lastAt + 100 });
+    if (item) g.items.push(item);
+  }
+  // A Move drag or its release or restore waiting for the throttle (T3: Ctrl+Z is ignored meanwhile).
+  const dragWaiting = () => state.pending.some((e) => e.notBefore > performance.now());
+  // After a redraw (someone's edit) the dragged node's new element takes the preview; a node gone ends
+  // the drag with nothing sent, one no longer on the shown page ends it with a restore.
   function keepDrag() {
     const g = gesture;
     if (!g || g.tool !== 'move' || !g.dragged) return;
-    if (!nodeOf(g.node) || !drawn.has(g.node)) { endGesture(); return; }
+    if (!nodeOf(g.node)) { endGesture(g); return; }
+    if (!drawn.has(g.node)) { endGesture(g, { abort: true }); return; }
     movePreview(g);
   }
   // Every node of a subtree (the root first), bounded.
@@ -2634,36 +2710,44 @@
   // `none` frame or page: set x, set y, only those that changed. Elsewhere, or within an auto-layout
   // frame: a move with its `after` (nothing when that is where it already is), plus set x, set y (its
   // top-left as previewed, whole px) when the new parent places by x, y. A drop the canvas would
-  // refuse sends nothing and says so.
+  // refuse sends nothing and says so. kit-668: under the same parent the sets are computed from the
+  // drag's start and hold only those that differ from the last live edit; the edit waits for the
+  // throttle (notBefore) and is never coalesced. 'sent', 'none' (nothing more to send) or 'refused' (a
+  // refused drop, or the node off the shown page: the caller restores).
   function dropMove(g) {
-    if (!g.dragged || !editable()) return;
+    if (!g.dragged || !editable()) return 'none';
     const id = g.node;
     const n = nodeOf(id);
-    if (!n || !layerRows.has(id)) return; // gone, or no longer on the shown page
+    if (!n) return 'none'; // gone
+    if (!layerRows.has(id)) return 'refused'; // no longer on the shown page
     const at = placeAt(g.cx, g.cy, id);
     const no = goRefusal(id, at.parent);
-    if (no !== null) { say(no); return; }
+    if (no !== null) { say(no); return 'refused'; }
     const { dx, dy } = moveBy(g);
-    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return 'refused';
     const left = clamp(Math.round(at.x - g.gx), -PX, PX);
     const top = clamp(Math.round(at.y - g.gy), -PX, PX);
     const ops = [];
     if (at.parent === n.parent && at.free) {
       for (const [k, d, drop] of [['x', dx, left], ['y', dy, top]]) {
-        const v = baseOf(id, k);
+        const v = g.start[k];
         const next = finite(v) ? clamp(Math.round(v + d), -PX, PX) : drop;
-        if (next !== v) ops.push({ op: 'set', id, prop: k, value: next });
+        if (next !== g.sent[k]) ops.push({ op: 'set', id, prop: k, value: next });
       }
     } else {
       if (at.parent === n.parent) {
         const sibs = kidsOf(nodeOf(n.parent) ?? pageById(n.parent) ?? { children: [] });
         const i = sibs.indexOf(id);
-        if (i >= 0 && at.after === (i > 0 ? sibs[i - 1] : null)) return; // dropped where it was
+        if (i >= 0 && at.after === (i > 0 ? sibs[i - 1] : null)) return 'none'; // dropped where it was
       }
       ops.push({ op: 'move', id, parent: at.parent, after: at.after });
       if (at.free) ops.push({ op: 'set', id, prop: 'x', value: left }, { op: 'set', id, prop: 'y', value: top });
     }
-    if (ops.length) edit(ops);
+    if (ops.length === 0) return 'none';
+    const item = edit(ops, { kind: 'release', notBefore: g.liveSent ? g.lastAt + 100 : 0 });
+    if (!item) return 'none';
+    g.items.push(item);
+    return 'sent';
   }
 
   // Arrow keys nudge the selected node placed by x, y: 1 px, 10 with Shift; one set each, so held keys
@@ -2832,6 +2916,11 @@
         return;
       }
       const e = state.pending[sock.cursor];
+      // a drag's throttle: this edit, and everything behind it, waits until its notBefore
+      if (e.notBefore > now) {
+        sock.pumpTimer = setTimeout(() => { sock.pumpTimer = null; pump(); }, Math.ceil(e.notBefore - now));
+        return;
+      }
       if (e.seq === null) e.seq = ++sock.seq;
       if (!send({ t: 'edit', client: CLIENT, seq: e.seq, ops: e.ops })) return;
       sock.sentAt.push(now);
