@@ -1070,6 +1070,20 @@ test('a card removed by a poll frees its slot', { ...CHROME, timeout: 300000 }, 
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
+test('no thumbnail frame while the viewer covers the grid', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, ids } = await libraryOnce(t, libraryFixture());
+  const frames = "document.querySelectorAll('.lib-thumb iframe').length";
+  await soon(`${frames} > 0`, 'frames in the grid');
+  // the viewer's page, framed again in a thumbnail, would talk to this window beside the stage's own frame
+  await p.click(`[data-lib-id="artifact:${ids.mock}"] .lib-title`);
+  await soon(`!document.getElementById('artifact-view').hidden && ${frames} === 0`, 'every thumbnail frame out while the viewer is open');
+  await sleep(1000);
+  assert.equal(await p.ev(frames), 0, 'and none comes back while it is open');
+  await p.click('#av-close');
+  await soon(`document.getElementById('artifact-view').hidden && ${frames} > 0`, 'the frames back once it closes');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
 // ---- in Chrome (kit-92 T5): an item's side peek, properties first ----
 
 // the peek as drawn: shown, its bar's type badge and title, its properties (dt, dd text, dd's links), what follows them

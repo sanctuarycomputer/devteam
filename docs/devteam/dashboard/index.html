@@ -6600,10 +6600,15 @@ function thumbsWatch(root) {
   }
   thumbsFill();
 }
-// Frames out of boxes gone or out of view, then into the boxes in view, in page order, up to the cap.
+// Frames out of boxes gone or out of view, then into the boxes in view, in page order, up to the cap. The large
+// viewer open over the page covers every box (the observer can't tell): no frame then, so none runs unseen, and no
+// copy of the page on the stage talks to this window beside the stage's own frame (a thumbnail's page says what the
+// stage's says, from a frame of another size).
 function thumbsFill() {
+  const covered = !$('artifact-view').hidden;
   for (const b of THUMBS.seen) if (!b.isConnected) { THUMBS.seen.delete(b); THUMBS.io.unobserve(b); }
-  for (const b of THUMBS.live) if (!b.isConnected || !THUMBS.seen.has(b)) thumbOut(b, 'icon');
+  for (const b of THUMBS.live) if (covered || !b.isConnected || !THUMBS.seen.has(b)) thumbOut(b, 'icon');
+  if (covered) return;
   const want = [...THUMBS.seen].filter((b) => !THUMBS.live.has(b) && b.dataset.thumb !== 'failed' && b.dataset.thumbSrc)
     .sort((a, c) => (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
   // an open peek's box takes a slot first: with none free, the grid's frame farthest from the viewport's centre
@@ -6662,6 +6667,8 @@ document.addEventListener('securitypolicyviolation', (e) => {
   }
   if (out) thumbsFill();
 });
+// the viewer opened or closed: its frames out, or back into the boxes in view
+new MutationObserver(() => { if (THUMBS.io) thumbsFill(); }).observe($('artifact-view'), { attributes: true, attributeFilter: ['hidden'] });
 /* library-thumbs end */
 /* library-peek start */
 // A Library item's side peek (kit-92): #lib/<id>, the item found by its id among libraryItems. Properties first, on
