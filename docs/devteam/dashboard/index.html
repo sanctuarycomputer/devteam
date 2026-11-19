@@ -428,8 +428,17 @@ try {
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
   /* a select is as wide as its longest option, unless its label can shrink too */
   .filters label { max-width: 100%; min-width: 0; } .filters select { min-width: 0; }
-  .progress-layout { display: grid; gap: 12px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
-  @media (max-width: 860px) { .progress-layout { grid-template-columns: minmax(0, 1fr); } }
+  /* kit-91: the Board's and Progress's filters in the page bar */
+  .pagebar .extra select { min-width: 0; max-width: 220px; font-size: 12px; }
+  .pagebar .extra button[data-f="att"] { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+  .pagebar .extra button[data-f="att"][aria-pressed="true"] { background: var(--well); color: var(--fg); border-color: var(--fg-2); }
+  /* Progress on the shell (kit-91): a .g12 of a .c8 and a .c4 column, each a stack of cards; the forecast at the
+     burn-up head's right, cut short rather than overflowing it; the No goal line under Features */
+  #progress .pg-col { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+  #progress .pg-col > .card { margin: 0; }
+  #progress #forecast { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #progress .card-head > .grow { flex: 1 0 auto; } /* the title never gives way: a long forecast shortens instead */
+  #progress .nogoal { font-size: 12px; color: var(--fg-2); border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
   .chart { position: relative; }
   .chart svg { width: 100%; height: auto; display: block; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--fg-2); margin-bottom: 6px; }
@@ -454,7 +463,6 @@ try {
   .tcard:not(.inert) { box-sizing: border-box; cursor: pointer; text-align: left; width: 100%; height: auto; margin: 0 0 6px; font: inherit; font-size: 12px; font-weight: 400; color: var(--fg); background: var(--surface); border: 1px solid var(--line); display: block; white-space: normal; transition: none; }
   .tcard:not(.inert):hover { border-color: var(--line-2); background: var(--hover); opacity: 1; }
   .tcard:not(.inert) .t b { font-family: var(--sans); font-size: 12.5px; font-weight: 600; }
-  .tcard:not(.inert) .t b i { color: var(--amber-fg); font-size: 12px; }
   .drawer dd a, .drawer p a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; }
   .tcard:not(.inert) .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
   .tcard:not(.inert) .pill { margin: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
@@ -478,6 +486,26 @@ try {
   .tcard b { font-family: var(--mono); font-weight: 500; font-size: 11.5px; overflow-wrap: anywhere; }
   .tcard.blocked { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .more { font-size: 12px; color: var(--muted); padding: 2px 4px; }
+  /* the Board on the shell and the boards in peeks (kit-91, the owner's mock): seven columns of at least 180px on the
+     Board; a column head's rule is the column's own --line and runs to its edges; a card's head holds its id in
+     mono and its ⋯ menu above a --line rule; its pills are .badge.pill (the shell's dot off), alike inside and
+     outside a .no-shell fence; a card that needs attention has the red outline and its attention row */
+  #board .board { grid-template-columns: repeat(7, minmax(180px, 1fr)); }
+  :is(#board, .board-peek) .col h3 { margin: -8px -8px 8px; padding: 8px 12px 7px; font-size: 12px; font-weight: 600; color: var(--fg-2); border-bottom: 1px solid var(--line); }
+  :is(#board, .board-peek) .col.none h3 { color: var(--muted); }
+  .tcard > .tc-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 29px; box-sizing: border-box; margin: -8px -10px 6px; padding: 2px 4px 2px 10px; border-bottom: 1px solid var(--line); }
+  .tcard > .tc-head > b { min-width: 0; }
+  .tcard > .tc-head > details.menu { flex: none; margin: 0; }
+  .col:first-child .tcard > .tc-head > details.menu[open] > .pop { right: auto; left: 0; }
+  .tcard .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .tcard .pill::before, .plcard .pill::before { content: none; }
+  .tcard .pill i, .plcard .pill i { margin-right: 4px; font-size: 11px; vertical-align: -1px; }
+  :is(#board, .board-peek) .tcard.blocked { border: 1px solid var(--red); box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 25%, transparent); }
+  .tcard > .att { margin-top: 6px; min-width: 0; }
+  .att-q { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; color: var(--blue-fg); min-width: 0; text-decoration: none; }
+  .att-q span { text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+  .att-q i { flex: none; margin-top: 2px; }
+  .att .badge { margin-right: 0; }
 
   /* loop */
   .why { font-size: 12px; color: var(--fg-2); margin: 4px 0 8px; padding: 4px 10px; border-left: 2px solid var(--line-2); }
@@ -585,12 +613,22 @@ try {
   .card h4 a.title-link { color: inherit; }
   .card h4 a.title-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-  /* planners lane */
-  #planners { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-bottom: 10px; }
+  /* the planners strip above the Board (kit-91): four across, two below 1100px, one below 560px; each card in the
+     dashed outline, a flex column whose attention row sits at the bottom; stuck or held by a question, the dashed
+     outline in red */
+  #planners.planners { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  @media (max-width: 1100px) { #planners.planners { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { #planners.planners { grid-template-columns: minmax(0, 1fr); } }
   #planners:empty { display: none; }
-  .plcard { cursor: pointer; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px dashed var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; font-size: 12px; display: block; white-space: normal; }
+  .plcard { cursor: pointer; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px dashed var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; font-size: 12px; display: flex; flex-direction: column; min-width: 0; white-space: normal; }
   .plcard:hover { background: var(--hover); opacity: 1; }
-  .plcard.stuck { border-style: solid; border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+  .plcard:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+  .plcard .pl-head { margin: -10px -12px 6px; padding: 6px 12px; border-bottom: 1px dashed var(--line-2); }
+  .plcard.stuck, .plcard.blocked { --pl-red: color-mix(in srgb, var(--red) 45%, var(--line-2)); border: 1px dashed var(--pl-red); }
+  .plcard.stuck .pl-head, .plcard.blocked .pl-head { border-bottom-color: var(--pl-red); }
+  .plcard .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .plcard .pill { margin: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+  .plcard > .att { margin-top: auto; padding-top: 6px; min-width: 0; }
   .plcard b { font-size: 12.5px; }
 
   /* acts in plain words */
@@ -706,7 +744,7 @@ try {
   .sink-cmd pre { background: var(--well); padding: 6px 8px; border-radius: 6px; font: 12px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; }
   .md figure.diagram { margin: 12px 0; padding: 12px; background: var(--well); border-radius: 8px; overflow-x: auto; }
   .md figure.diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
-  .viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  div.viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
   @media (max-width: 900px) { .drawer dl:not(.props) { grid-template-columns: 1fr; } }
 
@@ -792,8 +830,10 @@ try {
   .lib-link .links { margin: 0; }
   .lib-link .loc { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
 
-  /* the artifact viewer: a page the fleet drew, centered over the scrim at 80% of the window */
-  #artifact-view:not([hidden]) { position: fixed; inset: 10%; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
+  /* the artifact viewer: a page the fleet drew, a modal over the scrim from under the page bar (--bar-h, so the Inbox button above it stays
+     clear) to 16px from the window's sides and bottom; its right edge is --av-right, which the open Inbox panel moves left of itself (8px all
+     round under 600px, below) */
+  #artifact-view:not([hidden]) { position: fixed; inset: var(--bar-h, 49px) var(--av-right, 16px) 16px 16px; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
   /* a viewer opened over a review stays above it: the review sits above the panel (z 25, kit-100) */
   .app:has(main.reviewing) ~ #artifact-view:not([hidden]) { z-index: 26; }
   .av-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
@@ -808,7 +848,7 @@ try {
   #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: 1px; }
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
-  @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
+  @media (max-width: 600px) { #artifact-view:not([hidden]) { inset: 8px; } }
   #av-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
   /* over the frame, under the layer's cursor and chip: Shift raises it, so a click is the layer's */
   .av-over { position: absolute; inset: 0; z-index: 2; touch-action: none; }
@@ -1031,34 +1071,28 @@ try {
     <div id="unassigned" class="small dim"></div>
   </section>
 
-  <section id="progress" class="no-shell" data-page="progress">
-    <h2>Progress</h2>
-    <div class="filters">
-      <label>Show <select id="view"></select></label>
-      <label class="small"><input type="checkbox" id="left-only"> Only what's left</label>
-      <span id="forecast"></span>
-    </div>
-    <div class="progress-layout">
-      <div>
+  <section id="progress" data-page="progress">
+    <div class="g12">
+      <div class="c8 pg-col">
         <div class="card chart" id="burnup-card">
+          <div class="card-head"><i class="icon-chart-line" aria-hidden="true"></i><span class="grow">Burn-up</span><span class="end" id="forecast"></span></div>
           <div class="legend" id="legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div>
           <div id="burnup"></div>
           <div class="tip" id="tip"></div>
         </div>
-        <div class="card"><h3>Stories</h3><div id="w-stories"></div></div>
+        <div class="card"><div class="card-head"><i class="icon-book-open" aria-hidden="true"></i><span class="grow">Stories</span></div><div id="w-stories"></div></div>
       </div>
-      <div>
-        <div class="card"><h3>Features</h3><div id="w-features"></div></div>
-        <div class="card"><h3>Releases</h3><div id="w-releases"></div></div>
-        <div class="card"><h3>Waves</h3><div id="w-waves"></div></div>
-        <div class="card"><h3>Points per week</h3><div class="throughput" id="w-throughput"></div><div class="dim small" id="w-throughput-note" style="margin-top:4px"></div></div>
+      <div class="c4 pg-col">
+        <div class="card"><div class="card-head"><i class="icon-layers" aria-hidden="true"></i><span class="grow">Features</span></div><div id="w-features"></div><div class="nogoal" id="w-nogoal"></div></div>
+        <div class="card"><div class="card-head"><i class="icon-tag" aria-hidden="true"></i><span class="grow">Releases</span></div><div id="w-releases"></div></div>
+        <div class="card"><div class="card-head"><i class="icon-waves" aria-hidden="true"></i><span class="grow">Waves</span></div><div id="w-waves"></div></div>
+        <div class="card"><div class="card-head"><i class="icon-chart-column" aria-hidden="true"></i><span class="grow">Points per week</span></div><div class="throughput" id="w-throughput"></div><div class="dim small" id="w-throughput-note" style="margin-top:4px"></div></div>
       </div>
     </div>
   </section>
 
-  <section id="board" class="no-shell" data-page="board">
-    <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span> <span class="sub" id="board-scope"></span></h2>
-    <div id="planners"></div>
+  <section id="board" data-page="board">
+    <div id="planners" class="planners"></div>
     <div class="board" id="board-cols"></div>
   </section>
 
@@ -1608,16 +1642,6 @@ let PAGE_VERSION = null;
 let PUBLIC = null;
 // Whether this box's gateway serves previews (x-devteam-previews, set only by the release that does).
 let PREVIEWS = false;
-let VIEW = 'all';
-try { VIEW = localStorage.getItem('devteam.view') || 'all'; } catch {}
-let LEFT_ONLY = false;
-try { LEFT_ONLY = localStorage.getItem('devteam.left') === '1'; } catch {}
-const setView = (view, left) => {
-  VIEW = view;
-  if (left !== undefined) LEFT_ONLY = left;
-  try { localStorage.setItem('devteam.view', VIEW); localStorage.setItem('devteam.left', LEFT_ONLY ? '1' : '0'); } catch {}
-  if (DATA) renderProgress();
-};
 
 // Every empty state says what would fill it, so an empty section reads as "nothing yet", not "broken".
 const empty = (html) => `<p class="empty">${html}</p>`;
@@ -1820,15 +1844,17 @@ document.addEventListener('click', (e) => {
   effSuggGo(it, e.clientX, e.clientY);
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter' || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   const t = e.target;
+  // Space presses a focused card that is a button (a Board ticket or planner card), as a <button> would
+  const space = e.key === ' ' && !!t?.matches?.('[data-open][role="button"][tabindex]');
+  if ((e.key !== 'Enter' && !space) || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   // a focused suggestion starts its thread; a focused row with a record (data-open, focusable) opens it
   if (t?.matches?.('#efficiency [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
   if (t?.matches?.('[data-open][tabindex]')) { e.preventDefault(); location.hash = t.dataset.open; }
 });
 
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
-// Each is [value, label, group]; the board and the burn-up both follow the one chosen.
+// Each is [value, label, group]; Progress's Narrow offers them (narrowViews), its goal held by the Goal filter.
 function views(p) {
   const v = [['all', 'Everything', '']];
   for (const g of (DATA.ooda.goals || []).filter((x) => !['abandoned'].includes(x.status))) {
@@ -1843,7 +1869,6 @@ function views(p) {
   for (const [s, st] of Object.entries(p.stories)) v.push([`story:${s}`, `${s} ${String(st.text ?? '').slice(0, 60)}`, 'Stories']);
   return v;
 }
-const viewLabel = (view) => { const v = views(DATA.progress).find(([k]) => k === view); return v ? (v[2] ? `${v[2].replace(/s$/, '')}: ${v[1]}` : v[1]) : view; };
 function goalFeatures(gid) {
   const R = DATA.ooda.roadmap;
   return new Set([...(R.goals.find((x) => x.id === gid)?.features || []), ...Object.values(R.features).filter((f) => (f.goals || []).includes(gid)).map((f) => f.feature)]);
@@ -1963,25 +1988,44 @@ function burnup(items, now, ui = PROGRESS_CHART()) {
 function meterRow(label, done, total, note = '', open = null) {
   return `<div class="row"${open ? ` data-open="${esc(open.slice(1))}" tabindex="0" role="link"` : ''}><span>${label}</span><span class="muted">${note || `${done}/${total} · ${pct(done, total)}%`}</span><div class="meter"><span style="width:${pct(done, total)}%"></span></div></div>`;
 }
-function widgets(p, now) {
+// p: Progress's data scoped to the page's items (scopeProgress). show: Progress's Show, each row of Features,
+// Stories, Releases and Waves kept by progressShown (done: every one of its tickets merged); an empty list says
+// None. nameGoals (no goal picked): each wave row names its tickets' goals after it, dim. all: Progress's whole data:
+// a release's tagged or ready to tag, and a story's done, are facts about the whole release or story, so they are
+// read from it, never from the scope (a goal or a Narrow may hold only the part of a release that is done); a
+// row's meter and Show read the scope.
+function widgets(p, now, show, { nameGoals = false, all = p } = {}) {
   const pts = (ts) => ts.reduce((a, t) => a + t.weight, 0);
-  $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return meterRow(flink(f), pts(ts.filter(isDone)), pts(ts), '', peekFor('feature', f)); }).join('') || empty('No features yet.');
-  const storyDone = (s) => { const ts = p.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); };
+  const none = empty('None');
+  const allDone = (ts) => ts.length > 0 && ts.every(isDone);
+  $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return progressShown(allDone(ts), show) ? meterRow(flink(f), pts(ts.filter(isDone)), pts(ts), '', peekFor('feature', f)) : ''; }).join('') || none;
+  const storyDone = (s) => allDone(p.tickets.filter((t) => t.serves.includes(s)));
+  const storyDoneAll = (s) => allDone(all.tickets.filter((t) => t.serves.includes(s)));
   const rels = [...new Set([...Object.values(p.stories).map((s) => s.release), ...p.tickets.map((t) => t.target_release)].filter(Boolean))].sort();
   $('w-releases').innerHTML = rels.map((r) => {
     const stories = Object.entries(p.stories).filter(([, s]) => s.release === r).map(([id]) => id);
-    const shipped = p.tickets.some((t) => t.released_in === r);
+    const ts = p.tickets.filter((t) => t.target_release === r || stories.some((s) => t.serves.includes(s)));
+    if (!progressShown(allDone(ts), show)) return '';
+    const shipped = all.tickets.some((t) => t.released_in === r);
     const done = stories.filter(storyDone).length;
-    const state = shipped ? '<span class="badge good">tagged</span>' : stories.length && done === stories.length ? '<span class="badge medium">ready to tag</span>' : '';
+    const whole = Object.entries(all.stories).filter(([, s]) => s.release === r).map(([id]) => id);
+    const state = shipped ? '<span class="badge good">tagged</span>' : whole.length && whole.every(storyDoneAll) ? '<span class="badge medium">ready to tag</span>' : '';
     return meterRow(`${rlink(r)} ${state}`, done, stories.length, `${done}/${stories.length} stories`, peekFor('release', r));
-  }).join('') || empty('No release targets yet. Each story in a feature names the release it ships in.');
+  }).join('') || none;
   const waves = [...new Set(p.tickets.map((t) => t.wave).filter(Boolean))].sort((a, b) => a - b);
-  $('w-waves').innerHTML = waves.map((w) => { const ts = p.tickets.filter((t) => t.wave === w); return meterRow(wlink(w), ts.filter(isDone).length, ts.length, '', peekFor('wave', w)); }).join('') || empty('No waves yet: they come from the ticket graph.');
-  const storyEntries = Object.entries(p.stories);
-  $('w-stories').innerHTML = storyEntries.length ? `<div>${storyEntries.map(([id, s]) => {
+  // the goals a wave's tickets serve, as the Goal select lists them (an abandoned goal is not named)
+  const goalsOf = (ts) => filterGoals().filter((g) => { const gf = goalFeatures(g.id); return ts.some((t) => gf.has(t.feature)); }).map((g) => g.title || g.id);
+  $('w-waves').innerHTML = waves.map((w) => {
+    const ts = p.tickets.filter((t) => t.wave === w);
+    if (!progressShown(allDone(ts), show)) return '';
+    const gs = nameGoals ? goalsOf(ts) : [];
+    return meterRow(`${wlink(w)}${gs.length ? ` <span class="dim wave-goals">${esc(gs.join(', '))}</span>` : ''}`, ts.filter(isDone).length, ts.length, '', peekFor('wave', w));
+  }).join('') || none;
+  const storyRows = Object.entries(p.stories).filter(([id]) => progressShown(storyDone(id), show));
+  $('w-stories').innerHTML = storyRows.length ? `<div>${storyRows.map(([id, s]) => {
     const ts = p.tickets.filter((t) => t.serves.includes(id)); const d = ts.filter(isDone).length;
-    return meterRow(`${d === ts.length && ts.length ? '<span class="badge good">done</span>' : ''}${slink(id)} ${esc(String(s.text ?? '').slice(0, 80))}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`, peekFor('story', id));
-  }).join('')}</div>` : empty('No stories yet. A planner writes them into each feature; chores serve none.');
+    return meterRow(`${storyDoneAll(id) ? '<span class="badge good">done</span>' : ''}${slink(id)} ${esc(String(s.text ?? '').slice(0, 80))}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`, peekFor('story', id));
+  }).join('')}</div>` : none;
   const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
   const wmax = Math.max(1, ...weeks);
   $('w-throughput').innerHTML = weeks.map((v, i) => `<span title="${v} points, ${i === 7 ? 'this week' : `${7 - i} week(s) ago`}" style="height:${(100 * v) / wmax}%"></span>`).join('');
@@ -2001,52 +2045,219 @@ function columnOf(t) {
   const byPhase = PHASE_COLUMN[t.phase];
   return byPhase && RANK[byPhase] > RANK[byStage] && RANK[byStage] < RANK.Merged ? byPhase : byStage;
 }
+/* board-filter start */
+// The Board's and Progress's pure rules (kit-91), run alone in vm by test/dashboard-board-progress:
+// no page globals. x is a ticket row or a planner row as /api/data serves them. A ticket row always has
+// a stage (and its own kind: build, chore…); a planner row has goals and no stage.
+const isPlannerRow = (x) => x.stage === undefined && Array.isArray(x.goals);
+// needsAttention: a ticket blocked, waiting at a pane or held by a question; a planner waiting at a
+// pane, with no window, or held by a question.
+function needsAttention(x) {
+  if (isPlannerRow(x)) return !!(x.waiting || x.window === false || x.held_by);
+  return !!(x.phase === 'blocked' || x.waiting || x.held_by);
+}
+// boardKeep: whether the Board shows x under the header's filters f = { goal, feat, repo, att };
+// ctx.goalFeatures is the goal's features (a Set), or null when no goal applies (none, or unknown).
+// A planner is always home's, and is kept by its own goals, not its feature's.
+function boardKeep(x, f, ctx) {
+  const gf = f.goal && ctx && ctx.goalFeatures ? ctx.goalFeatures : null;
+  if (f.feat && x.feature !== f.feat) return false;
+  if (f.att && !needsAttention(x)) return false;
+  if (isPlannerRow(x)) {
+    if (gf && !x.goals.includes(f.goal)) return false;
+    return !f.repo || f.repo === 'home';
+  }
+  if (gf && !gf.has(x.feature)) return false;
+  return !f.repo || x.repo === f.repo;
+}
+// progressShown: a Progress row by Show: 'complete' the done, 'all' both, else (Active) the not done.
+function progressShown(done, show) {
+  if (show === 'complete') return !!done;
+  if (show === 'all') return true;
+  return !done;
+}
+/* board-filter end */
 const PHASE_SHORT = { starting: 'Starting', spec: 'Spec', plan: 'Plan', contract: 'Contracts', build: 'Building', verify: 'Verifying', 'final-review': 'Final review', 'awaiting-word': 'Waiting', merging: 'Merging', parked: 'Parked' };
-// A card's pills, most important first: what stops it, then what to know, then what it's doing.
-// Each pill is a word or two and never wraps; the row wraps between pills.
-function ticketPills(t) {
+// A card's pills (kit-91, the mock's order and words): critical path first, then the phase in words with its task
+// (an unmerged ticket not blocked or done), then usage limit or stuck on a prompt, held, high risk, then the
+// component, last. No Blocked pill: the red outline and the attention row say it. [label, tone, title, icon]
+function ticketPills(t, crit) {
   const ps = [];
-  if (t.phase === 'blocked') ps.push(['Blocked', 'high']);
-  if (t.waiting) ps.push([t.waiting.kind === 'limit' ? 'Usage limit' : 'Stuck on a prompt', 'high', t.waiting.line]);
-  if (t.held) ps.push(['Held', '', t.held]);
-  if (t.risk === 'high') ps.push(['High risk', 'medium']);
-  if (t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage)) ps.push([PHASE_SHORT[t.phase] || words(t.phase), 'low', `${PHASE_WORDS[t.phase] || t.phase}${t.task ? ` (${t.task})` : ''}`]);
+  if (crit && crit.has(t.id)) ps.push(['critical path', 'high cp', 'On the critical path: it delays the goal', 'route']);
+  if (t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage)) ps.push([`${PHASE_WORDS[t.phase] || words(t.phase).toLowerCase()}${t.task ? `, task ${String(t.task).replace(/^T(?=\d)/i, '')}` : ''}`, '']);
+  if (t.waiting) ps.push(t.waiting.kind === 'limit' ? ['usage limit', 'medium', t.waiting.line] : ['stuck on a prompt', 'high', t.waiting.line]);
+  if (t.held) ps.push(['held', 'medium', t.held]);
+  if (t.risk === 'high') ps.push(['high risk', 'high']);
+  if (t.component) ps.push([t.component, '']);
   return ps;
 }
-function board(items, crit) {
-  $('planners').innerHTML = plannerCards(DATA.planners || []);
-  $('board-cols').innerHTML = boardCols(items, crit);
-}
+const pillsOf = (ps) => (ps.length ? `<div class="pills">${ps.map(([label, tone, tip, icon]) => `<span class="badge pill${tone ? ` ${tone}` : ''}" title="${esc(tip || label)}">${icon ? `<i class="icon-${icon}" aria-hidden="true"></i>` : ''}${esc(label)}</span>`).join('')}</div>` : '');
+// A card's attention row (a ticket or planner that needs attention): the question holding it, a link that opens
+// the panel's Inbox tab at its card (its text from DATA.questions; "a question" once it has left them), or "no
+// question yet".
+const attLine = (x) => (x.held_by
+  ? `<a class="att-q" href="#q/${esc(encodeURIComponent(x.held_by))}"><i class="icon-inbox" aria-hidden="true"></i><span>${esc((DATA?.questions || []).find((q) => q.id === x.held_by)?.question || 'a question')}</span></a>`
+  : '<span class="badge high">no question yet</span>');
 // The board's columns and cards, for the Board and for a sidepeek's tickets (only: the columns that
-// have cards, so a few tickets don't sit in seven mostly empty columns).
+// have cards, so a few tickets don't sit in seven mostly empty columns). Each item is joined with its
+// /api/data ticket row by id for held_by, so a peek's board shows the outline and the question too.
 function boardCols(items, crit, { only = false, inert = false } = {}) {
-  return COLUMNS.filter(([name]) => !only || items.some((t) => t.stage !== 'superseded' && columnOf(t) === name)).map(([name]) => {
-    let cards = items.filter((t) => t.stage !== 'superseded' && columnOf(t) === name).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
+  const rows = ticketMap();
+  const live = items.filter((t) => t.stage !== 'superseded').map((t) => ({ ...t, held_by: t.held_by ?? rows.get(t.id)?.held_by ?? null }));
+  return COLUMNS.filter(([name]) => !only || live.some((t) => columnOf(t) === name)).map(([name]) => {
+    let cards = live.filter((t) => columnOf(t) === name).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
     const total = cards.length;
     // finished columns show the most recent few; the rest are counted
     if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
-    return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
-      <div class="tcard${inert ? ' inert' : ''} ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}"${subj('ticket', t.id, t.title)} ${inert ? '' : `role="button" tabindex="0" data-ticket="${esc(t.id)}" data-open="ticket/${esc(encodeURIComponent(t.id))}" aria-label="Open ${esc(t.title)}"`}>${inert ? '' : cardMenu('ticket', t.id)}
-        <div class="t">${(() => { const b = `<b>${crit.has(t.id) ? '<i class="icon-flag" title="on the critical path" aria-label="on the critical path"></i> ' : ''}${esc(t.title)}</b>`; return inert ? b : `<a class="title-link" href="${esc(peekFor('ticket', t.id))}">${b}</a>`; })()}</div>
-        <div class="muted">${esc(t.component)} · ${esc(t.size)}</div>
-        ${(() => { const ps = ticketPills(t); return ps.length ? `<div class="pills">${ps.map(([label, tone, tip]) => `<span class="badge pill ${tone}" title="${esc(tip || label)}">${esc(label)}</span>`).join('')}</div>` : ''; })()}
-      </div>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
+    return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => { const att = needsAttention(t); return `
+      <div class="tcard${inert ? ' inert' : ''}${att ? ' blocked' : ''}"${subj('ticket', t.id, t.title)} ${inert ? '' : `role="button" tabindex="0" data-ticket="${esc(t.id)}" data-open="ticket/${esc(encodeURIComponent(t.id))}" aria-label="Open ${esc(t.title)}"`}>
+        <div class="tc-head"><b>${esc(t.id)}</b>${inert ? '' : cardMenu('ticket', t.id)}</div>
+        <div class="t">${inert ? `<b>${esc(t.title)}</b>` : `<a class="title-link" href="${esc(peekFor('ticket', t.id))}"><b>${esc(t.title)}</b></a>`}</div>
+        ${pillsOf(ticketPills(t, crit))}${att ? `<div class="att">${attLine(t)}</div>` : ''}
+      </div>`; }).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('');
 }
 
+// ---- the Board's and Progress's header filters (kit-91): in the page bar's .extra, each in the URL ----
+// A page head's state is its filters (dashboard-shell@1's STATE_KEYS): Board goal, feat, repo, att; Progress goal,
+// narrow, show. Each change is a history entry (setFilters assigns the hash), so Back restores the earlier filter.
+const FILTER_PAGES = ['board', 'progress'];
+const NARROW_GROUPS = ['Milestones', 'Features', 'Releases', 'Waves', 'Stories'];
+// the goals a filter can name: every goal not let go, by title
+const filterGoals = () => (DATA?.ooda?.goals || []).filter((g) => g.status !== 'abandoned').sort((a, b) => String(a.title ?? a.id).localeCompare(String(b.title ?? b.id)));
+// Narrow's views: today's views() less Everything and the goals; with a goal, the goal's own milestones and the
+// features, releases, waves and stories of the goal's tickets
+function narrowViews(p, goal) {
+  const own = (vs) => vs.filter(([, , g]) => NARROW_GROUPS.includes(g));
+  if (!goal) return own(views(p));
+  const ts = filterTickets(p, `goal:${goal}`);
+  const sub = { ...p, tickets: ts, features: p.features.filter((f) => ts.some((t) => t.feature === f)), stories: Object.fromEntries(Object.entries(p.stories).filter(([id]) => ts.some((t) => t.serves.includes(id)))) };
+  return own(views(sub)).filter(([k, , g]) => g !== 'Milestones' || k.startsWith(`milestone:${goal}:`));
+}
+// The page head in force: the hash's, or under a link (a peek) the head in its stamp.
+function pageHeadNow() {
+  const h = parseHead(location.hash, SHELL_ROUTES);
+  return h.link === undefined ? h : parseHead(typeof history.state?.page === 'string' ? history.state.page : '#overview', SHELL_ROUTES);
+}
+// A page's filters as the head in force has them (none when another page shows), with a goal naming no goal
+// a filter can pick, a Narrow outside the goal's views and a Show that isn't one dropped: the controls then show
+// All goals, Every view, Active, and nothing is filtered by them.
+function filtersNow(page) {
+  const h = pageHeadNow();
+  const f = {};
+  if (h.page === page) for (const k of STATE_KEYS[page] || []) if (h.state[k]) f[k] = h.state[k];
+  if (f.goal && !filterGoals().some((g) => g.id === f.goal)) delete f.goal;
+  if (f.att && f.att !== '1') delete f.att; // the toggle writes att=1; any other value is no filter
+  if (page === 'progress') {
+    if (f.narrow && !(DATA && narrowViews(DATA.progress, f.goal).some(([k]) => k === f.narrow))) delete f.narrow;
+    if (f.show && !['complete', 'all'].includes(f.show)) delete f.show;
+  }
+  return f;
+}
+// A filter changed: the new state (a goal changed clears the feature and the narrow, which were the old goal's),
+// remembered (the shell's saveFilters: each page its own keys; a goal changed on Progress also drops the Board's
+// stored feature, so a later Board visit isn't emptied by it), then a new entry with the new head.
+function setFilters(page, patch) {
+  const h = pageHeadNow();
+  const state = { ...filtersNow(page) };
+  for (const k of STATE_KEYS['*']) if (h.page === page && h.state[k] !== undefined) state[k] = h.state[k];
+  const goalChanged = Object.hasOwn(patch, 'goal') && (patch.goal || undefined) !== state.goal;
+  for (const [k, v] of Object.entries(patch)) { if (v) state[k] = String(v); else delete state[k]; }
+  if (goalChanged) { delete state.feat; delete state.narrow; }
+  saveFilters(page, state);
+  if (page === 'progress' && goalChanged) saveFilters('board', { ...(storedFilters() || {}), goal: state.goal, feat: undefined });
+  location.hash = headFor({ page, state });
+}
+// The page's filters drawn into the page bar's .extra; emptied on every other page. Written only when they
+// change: every read draws them, and a control replaced under a press would lose the press.
+function drawFilters(page) {
+  const el = document.querySelector('.pagebar .extra');
+  if (!el) return;
+  const html = filtersHtml(page);
+  if (el.dataset.drawn !== html) { el.innerHTML = html; el.dataset.drawn = html; }
+}
+function filtersHtml(page) {
+  if (!DATA || !FILTER_PAGES.includes(page)) return '';
+  const f = filtersNow(page);
+  const opt = (v, label, cur) => `<option value="${esc(v)}"${(cur || '') === v ? ' selected' : ''}>${esc(label)}</option>`;
+  const sel = (k, label, inner) => `<select data-f="${k}" aria-label="${label}">${inner}</select>`;
+  const goal = sel('goal', 'Goal', opt('', 'All goals', f.goal) + filterGoals().map((g) => opt(g.id, g.title || g.id, f.goal)).join(''));
+  if (page === 'board') {
+    const p = DATA.progress;
+    const gf = f.goal ? goalFeatures(f.goal) : null;
+    // the features of the goal's tickets and planners (every one with no goal); a feature named outside them (a
+    // hand-made URL) is still offered, so the select shows what filters the cards
+    const feats = [...new Set([...p.tickets.filter((t) => !gf || gf.has(t.feature)), ...(DATA.planners || []).filter((x) => !f.goal || (x.goals || []).includes(f.goal))].map((x) => x.feature).filter(Boolean))];
+    if (f.feat && !feats.includes(f.feat)) feats.push(f.feat);
+    const repos = [...new Set(['home', ...p.tickets.map((t) => t.repo).filter(Boolean)])];
+    if (f.repo && !repos.includes(f.repo)) repos.push(f.repo);
+    return goal
+      + sel('feat', 'Feature', opt('', 'All features', f.feat) + feats.map((x) => opt(x, featureTitle(x), f.feat)).join(''))
+      + sel('repo', 'Repo', opt('', 'All repos', f.repo) + repos.map((r) => opt(r, r, f.repo)).join(''))
+      + `<button type="button" class="ghost" data-f="att" aria-label="Needs attention" aria-pressed="${f.att ? 'true' : 'false'}"><i class="icon-circle-alert" aria-hidden="true"></i>Needs attention</button>`;
+  }
+  const vs = narrowViews(DATA.progress, f.goal);
+  const narrow = opt('', 'Every view', f.narrow) + NARROW_GROUPS.map((g) => { const xs = vs.filter((v) => v[2] === g); return xs.length ? `<optgroup label="${esc(g)}">${xs.map(([k, label]) => opt(k, label, f.narrow)).join('')}</optgroup>` : ''; }).join('');
+  return goal + sel('narrow', 'Narrow', narrow) + sel('show', 'Show', opt('', 'Active', f.show) + opt('complete', 'Complete', f.show) + opt('all', 'Everything', f.show));
+}
+// The page shown drawn again for its filters (a filter change, Back, Forward): at once, not at the next read,
+// focus kept on the control it was on.
+function drawFilterPage(page) {
+  if (!DATA || !FILTER_PAGES.includes(page)) return void drawFilters(page);
+  const m = focusMark();
+  drawFilters(page);
+  if (page === 'board') renderBoard(); else renderProgress();
+  focusBack(m);
+}
+// Board and Progress on a route (in routeHead, once the entry is stamped): a fresh entry whose head has none of
+// the page's remembered keys gets them written into its hash (the shell's rememberedFilters), and a head that isn't
+// its canonical self (a key of no page, or another page's: #progress?feat=x) is replaced by it; in place, the
+// stamp's page head with it, so a peek opened over it closes back to the filtered head.
+function filterHead(fresh) {
+  let p = parseHead(location.hash, SHELL_ROUTES);
+  if (p.link !== undefined || p.redirected || !FILTER_PAGES.includes(p.page)) return;
+  const r = fresh ? rememberedFilters(p.page, Object.keys(p.state), true) : null;
+  if (r) p = { page: p.page, state: { ...p.state, ...r } };
+  const head = headFor(p);
+  if (location.hash === head) return;
+  history.replaceState(withPage(history.state, head), '', head);
+  HERE = history.state;
+}
+
+// The Board: the tickets (joined with /api/data's ticket rows for held_by) and planners the header's filters keep.
+function renderBoard() {
+  const f = filtersNow('board');
+  const ctx = { goalFeatures: f.goal ? goalFeatures(f.goal) : null };
+  const rows = new Map((DATA.tickets || []).map((t) => [t.id, t]));
+  const items = DATA.progress.tickets.map((t) => ({ ...t, held_by: rows.get(t.id)?.held_by ?? null })).filter((t) => boardKeep(t, f, ctx));
+  $('planners').innerHTML = plannerCards((DATA.planners || []).filter((x) => boardKeep(x, f, ctx)));
+  $('board-cols').innerHTML = boardCols(items, new Set(DATA.critical_path));
+}
+// Progress's scope (kit-91): the goal's tickets (every ticket with no goal), then the Narrow view's within them.
+function progressItems(p, f) {
+  const items = f.goal ? filterTickets(p, `goal:${f.goal}`) : p.tickets;
+  return f.narrow ? filterTickets({ ...p, tickets: items }, f.narrow) : items;
+}
+// Progress's data scoped to items: those tickets, and the features and stories they hold (the releases and waves
+// widgets() lists come from these), so each card lists only what the items hold.
+function scopeProgress(p, items) {
+  return {
+    ...p, tickets: items,
+    features: p.features.filter((x) => items.some((t) => t.feature === x)),
+    stories: Object.fromEntries(Object.entries(p.stories).filter(([id]) => items.some((t) => t.serves.includes(id)))),
+  };
+}
+// Progress: the burn-up, Points per week and the rows of Features, Stories, Releases and Waves over the goal and
+// Narrow's items, the rows by Show; under Features, the features with no goal and the rate (ooda.roadmap).
 function renderProgress() {
   const p = DATA.progress, now = Date.parse(p.now);
-  const opts = views(p);
-  if (!opts.some(([k]) => k === VIEW)) VIEW = 'all';
-  const opt = ([k, label]) => `<option value="${esc(k)}" ${k === VIEW ? 'selected' : ''}>${esc(label)}</option>`;
-  const groups = [...new Set(opts.map((o) => o[2]))];
-  $('view').innerHTML = groups.map((g) => (g ? `<optgroup label="${esc(g)}">${opts.filter((o) => o[2] === g).map(opt).join('')}</optgroup>` : opts.filter((o) => !o[2]).map(opt).join(''))).join('');
-  const items = filterTickets(p, VIEW);
+  const f = filtersNow('progress');
+  const items = progressItems(p, f);
   burnup(items, now);
-  $('left-only').checked = LEFT_ONLY;
-  board(LEFT_ONLY ? items.filter((t) => !isDone(t)) : items, new Set(DATA.critical_path));
-  $('board-scope').innerHTML = VIEW === 'all' && !LEFT_ONLY ? '' : `showing ${esc(LEFT_ONLY ? "what's left of " : '')}${esc(VIEW === 'all' ? 'everything' : viewLabel(VIEW))} · <a class="linkish" href="#board" data-view="all" data-left="0">show all</a>`;
-  widgets(p, now);
+  widgets(scopeProgress(p, items), now, f.show, { nameGoals: !f.goal, all: p });
+  const R = DATA.ooda?.roadmap || {};
+  const un = (R.unassigned || []).map((x) => { const r = R.features?.[x]; const tot = r?.points_total ?? 0; return `${flink(x)} <span class="dim">${tot - (r?.points_left ?? 0)} of ${tot} points</span>`; });
+  $('w-nogoal').innerHTML = `${un.length ? `No goal: ${un.join(', ')} · ` : ''}${esc(R.rate_points_per_day ?? 0)} points a day`;
   const all = forecast(p.tickets, now);
   $('n-progress').textContent = all.scope ? `${pct(all.done, all.scope)}%` : '';
 }
@@ -3716,12 +3927,25 @@ bindTabBar($('goals'), { onSelect: (id) => {
 const registryAttestLine = (g) => { const r = g.registry_attest; return r ? `<div class="meta">Registry attestation: precondition ${esc(r.precondition)}, ${esc(r.status)}${r.question ? ` (${qlink(r.question, r.answer ? `answered “${r.answer}”` : 'the question')})` : ''}</div>` : ''; };
 const planningFor = (g) => (DATA?.planners || []).filter((p) => p.goals.includes(g.id));
 const ago = (m) => (m == null ? 'no activity yet' : m < 1 ? 'active just now' : m < 60 ? `active ${m} min ago` : `active ${Math.round(m / 60)} h ago`);
+// The Board's planner cards (kit-91): a div[role=button] (a button can't hold the question link) opening the
+// planner's peek (data-open: the record cards' one click and Enter handlers, which leave a link inside it to
+// itself); a flex column of its head, its line, its badges as pills and, when it needs attention, the attention
+// row at the bottom. .stuck (waiting, or no window) and .blocked (held by a question) outline it in red.
 function plannerCards(ps) {
-  return ps.map((p) => `<button type="button" class="plcard${p.waiting || !p.window ? ' stuck' : ''}" data-planner="${esc(p.feature)}"${subj('planner', p.feature, `Planning ${p.title}`)}>
-    <div><i class="icon-bot" aria-hidden="true"></i> <b>Planning ${esc(p.title)}</b></div>
+  return ps.map((p) => {
+    const waits = p.waiting_on_owner || [];
+    const pills = [
+      ...(p.waiting ? [[p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt', 'high', p.waiting.line]] : []),
+      ...(!p.window ? [['window gone', 'medium']] : []),
+      ...((p.waiting_on_supervisor || []).length ? [['waiting for the supervisor', 'low']] : []),
+      ...(waits.length ? [[`waiting for ${waits.length} answer${waits.length > 1 ? 's' : ''} from you`, 'medium']] : []),
+    ];
+    return `<div class="plcard${p.waiting || !p.window ? ' stuck' : ''}${p.held_by ? ' blocked' : ''}" role="button" tabindex="0" data-planner="${esc(p.feature)}" data-open="planner/${esc(encodeURIComponent(p.feature))}" aria-label="Open the planner for ${esc(p.title)}"${subj('planner', p.feature, `Planning ${p.title}`)}>
+    <div class="pl-head"><i class="icon-bot" aria-hidden="true"></i> <b>Planning ${esc(p.title)}</b></div>
     <div class="muted">${p.goals.length ? `for ${p.goals.map((gid) => esc((DATA.ooda.goals.find((g) => g.id === gid) || {}).title || gid)).join(', ')} · ` : ''}${p.tickets ? `${p.tickets} ticket${p.tickets > 1 ? 's' : ''} so far · ` : ''}${esc(ago(p.minutes_silent))}</div>
-    <div>${p.waiting ? `<span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${!p.window ? '<span class="badge medium">window gone</span>' : ''}${p.waiting_on_supervisor.length ? '<span class="badge low">waiting for the supervisor</span>' : ''}${(p.waiting_on_owner || []).length ? `<span class="badge medium">waiting for ${p.waiting_on_owner.length} answer${p.waiting_on_owner.length > 1 ? 's' : ''} from you</span>` : ''}</div>
-  </button>`).join('');
+    ${pillsOf(pills)}${needsAttention(p) ? `<div class="att">${attLine(p)}</div>` : ''}
+  </div>`;
+  }).join('');
 }
 
 function renderOoda(o) {
@@ -5337,9 +5561,29 @@ async function renderMermaid(root) {
 let AV = null;
 // set by the question link that opens it, read once: the header's "Changed since this question was asked"
 let AV_NOTE = null;
-// a viewer opened from the dashboard closes back to it; one opened from a link goes to the Library
+// a viewer opened from the dashboard closes back to it; one opened from a link goes to the page its stamp names
 let AV_FROM = false;
 let avFocus = null;
+// The frame's own moves add entries to the joint history, so a close by history.back() after one only steps the
+// frame back (kit-141): AV_NAVS counts them since the viewer opened, AV_RET is the head it was opened over (the
+// router's LAST_HEAD then), and AV_LOADS each frame element's loads of a src.
+let AV_NAVS = 0, AV_RET = null;
+// Set once a frame Escape has closed the viewer (kit-141 final-1 F1): the frame's Escapes then close nothing
+// until the next route, the viewer's opening or the stage frame's next load, so a page that posts a burst
+// of them walks the tab back at most once. Only the frame's Escape: X, the scrim and the dashboard's own
+// Escape are never held, so a close that routes nothing (a back that only steps the frame) can't lock it.
+let AV_FRAME_ESC = false;
+const AV_LOADS = new WeakMap();
+// A frame of its own for each page set on it: a new frame's first load replaces its about:blank and adds no
+// entry, where a second src on the same frame adds one. Its load is listened for once it is in the document,
+// so the about:blank load of its insertion is never heard.
+function avFreshFrame(id) {
+  const old = $(id), f = old.cloneNode(false);
+  f.removeAttribute('src');
+  old.replaceWith(f);
+  f.addEventListener('load', avFrameLoad);
+  return f;
+}
 function avHeader() {
   const a = (DATA?.library?.artifacts ?? []).find((x) => x.slug === AV.slug && x.at === AV.at);
   $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
@@ -5388,7 +5632,7 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   $('pv-frame').hidden = true;
   $('pv-frame').removeAttribute('src');
   $('av-frame').hidden = false;
-  if ($('av-frame').getAttribute('src') !== src) $('av-frame').src = src;
+  if ($('av-frame').getAttribute('src') !== src) avFreshFrame('av-frame').src = src;
   $('artifact-view').hidden = false;
   avHint();
 }
@@ -5437,9 +5681,9 @@ function showPreview(name, info) {
   tsBar();
   $('av-frame').hidden = true;
   $('av-frame').removeAttribute('src');
-  const f = $('pv-frame');
-  f.hidden = !info?.lens;
   const src = info?.lens ? `${info.lens}?${new URLSearchParams({ route: '/' })}` : null;
+  const f = src && $('pv-frame').getAttribute('src') !== src ? avFreshFrame('pv-frame') : $('pv-frame');
+  f.hidden = !info?.lens;
   if (!src) f.removeAttribute('src');
   else if (f.getAttribute('src') !== src) f.src = src;
   $('artifact-view').hidden = false;
@@ -5460,11 +5704,13 @@ async function openPreview(raw) {
   let name = null;
   try { name = decodeURIComponent(raw); } catch {}
   if (!/^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/.test(name ?? '')) return void (location.hash = '#library');
+  // whether the router had routed before this one, read before the await: the router sets it as soon as this returns
+  const routed = ROUTED;
   const info = await previewInfo(name);
   // the owner went elsewhere while it was asked
   if (location.hash !== `#preview/${raw}`) return;
-  // where the stage was opened from, taken now: the await above is long enough for focus and the route to move
-  if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
+  // the focus it was opened from, taken now: the await above is long enough for it to move
+  if (!AV) { AV_FROM = routed; avFocus = document.activeElement; }
   showPreview(name, info);
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
@@ -5505,9 +5751,9 @@ function closeArtifact() {
   tsSet(null);
   tsPins();
   $('artifact-view').hidden = true;
-  $('av-frame').removeAttribute('src');
-  $('pv-frame').removeAttribute('src');
-  $('pv-frame').hidden = true;
+  // both frames let go of, with their history: the next page shown gets a new one
+  avFreshFrame('av-frame');
+  avFreshFrame('pv-frame').hidden = true;
   // a drawer or a review it was opened over stays, with its scrim
   if (!RV) document.body.classList.remove('overlay-open');
   document.body.classList.remove('av-open');
@@ -5515,14 +5761,41 @@ function closeArtifact() {
   avFocus?.focus?.();
   return true;
 }
-// a viewer tab has nothing to go back to: it never closes. Back to the entry below, which has its own head: the
-// panel's th and t from under the viewer go with it, as from under a peek (kit-89 spec §2.5)
+// After a frame move, where the close lands, in place of the viewer's entry: over a page, that page as it was
+// with the panel's th and t as they are now (the carry's rule); over a peek, the peek, over the page its stamp
+// names (kept current while the viewer was up), depth 1. Never goHead (its stamp is from the viewer's own) nor a
+// cold stampFor (a ticket peek would go over #board, without th).
+function avReturn() {
+  const now = history.state?.page || '#library', r = parseHead(AV_RET || '#library', SHELL_ROUTES);
+  if (r.link !== undefined) return { head: AV_RET, stamp: { page: now, depth: 1, openedHere: false } };
+  const c = parseHead(now, SHELL_ROUTES), s = { ...r.state };
+  delete s.th;
+  delete s.t;
+  if (c.link === undefined && c.state.th !== undefined) s.th = c.state.th;
+  if (c.link === undefined && c.state.t !== undefined) s.t = c.state.t;
+  const head = headFor({ page: r.page, state: s });
+  return { head, stamp: { page: head, depth: 0, openedHere: false } };
+}
+// a viewer tab has nothing to go back to: it never closes. Its first route (a cold link, a reload) has nothing
+// of this visit's below it: the page its stamp names, in place. Unmoved, back to the entry below, which has its
+// own head: the panel's th and t from under the viewer go with it, as from under a peek (kit-89 spec §2.5). Once
+// the frame has moved, back would only move the frame: its entry is replaced by the head it was opened over. A
+// thread's card (#talk/) routed again would open the viewer again, moved or not: the page under the card.
 function leaveArtifact() {
-  if (VIEWER) return;
-  if (!AV_FROM) return void (location.hash = '#library');
-  TH_CARRY = history.state?.page ?? null;
-  TH_CARRY_FROM = location.hash;
-  history.back();
+  if (VIEWER || !AV) return;
+  if (!AV_FROM || AV_RET?.startsWith('#talk/')) {
+    const page = history.state?.page || '#library';
+    history.replaceState({ page, depth: 0, openedHere: false }, '', page);
+    return void route();
+  }
+  if (AV_NAVS === 0) {
+    TH_CARRY = history.state?.page ?? null;
+    TH_CARRY_FROM = location.hash;
+    return void history.back();
+  }
+  const { head, stamp } = avReturn();
+  history.replaceState(stamp, '', head);
+  route();
 }
 $('av-close').addEventListener('click', leaveArtifact);
 $('av-reload').addEventListener('click', () => {
@@ -5573,6 +5846,7 @@ function showHead(p, opts) {
   showPage(p.page, opts);
   if (p.page === 'loop') { showTab(LOOP_TABS.includes(p.state?.lt) ? p.state.lt : 'observe'); tlPins(); }
   if (p.page === 'goals') { GOALS_TAB = GOALS_TABS.includes(p.state?.gt) ? p.state.gt : 'active'; renderGoals(); }
+  drawFilterPage(p.page);
 }
 // A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
 // whether this visit pushed every entry down to that page; HERE becomes the entry on screen.
@@ -5591,7 +5865,10 @@ let ROUTE_N = 0;
 // before its stamp ({ hash, fresh }); TH_CARRY: the page head under a peek being closed by going back
 // TH_CARRY_FROM: the peek's hash it was taken on (a history move that stays on it carries nothing)
 let TH_MADE = null, TH_FRESH = null, TH_CARRY = null, TH_CARRY_FROM = null;
+// LAST_HEAD: the last head routed that isn't the viewer's own (kit-141), what a viewer routed next is opened over
+let LAST_HEAD = null;
 function route() {
+  AV_FRAME_ESC = false;
   thFreshness();
   const fresh = !!TH_FRESH && TH_FRESH.hash === location.hash && TH_FRESH.fresh;
   TH_FRESH = null;
@@ -5601,11 +5878,14 @@ function route() {
   routeHead({ fresh, carry });
   if (n !== ROUTE_N) return;
   thRoute();
+  // the head a viewer opened next is over, as it stands once routed (after a redirect's or the panel's replace)
+  if (!/^#(artifact|preview)\//.test(location.hash)) LAST_HEAD = location.hash;
 }
 function routeHead({ fresh = false, carry = null } = {}) {
   stampEntry();
   if (carry) thCarry(carry);
   if (fresh) thRemember();
+  filterHead(fresh);
   const raw = location.hash.slice(1);
   const p = parseHead(location.hash, SHELL_ROUTES);
   // leaving a talk/ entry (a route to any other head) closes the card it opened
@@ -5613,8 +5893,9 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // a link opens over the page in its stamp: the one it was clicked on, or on a cold load its kind's home
   if (p.link !== undefined) showHead(parseHead(HERE.page, SHELL_ROUTES));
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
-  if (raw.startsWith('preview/')) { openPreview(raw.slice(8)); ROUTED = true; return; }
-  if (raw.startsWith('artifact/')) { openArtifact(raw); ROUTED = true; return; }
+  // (a viewer opening takes the head it is over, and counts the frame's moves from none)
+  if (raw.startsWith('preview/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; AV_FRAME_ESC = false; } openPreview(raw.slice(8)); ROUTED = true; return; }
+  if (raw.startsWith('artifact/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; AV_FRAME_ESC = false; } openArtifact(raw); ROUTED = true; return; }
   closeArtifact();
   if (raw.startsWith('review/') || raw.startsWith('review-preview')) { if (!RV) RV_FROM = ROUTED ? raw : null; ROUTED = true; return void openReview(raw); }
   ROUTED = true; RV_FROM = null;
@@ -5630,7 +5911,8 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // a thread: its card, beside its subject (#thread/ is a message's thread, in the sidepeek)
   // over nothing: a drawer it was followed from (or open under it) closes, as for any other link
   // (at once: the card replaces the peek, with no slide)
-  if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); return void tlRoute(h.slice(5)); }
+  // (its own head first: a card on a framed page opens the viewer before this route ends)
+  if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); LAST_HEAD = location.hash; return void tlRoute(h.slice(5)); }
   const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
@@ -5659,6 +5941,8 @@ document.addEventListener('keydown', (e) => {
   if (document.activeElement?.matches?.('.props dt[title]')) return void document.activeElement.blur();
   // a half-typed answer in the Inbox tab isn't hidden by a stray key: no peek closes under it (kit-100 spec §2.7)
   if (!AV && !RV && inboxTyping(document.activeElement)) return;
+  // a floating card over the viewer closes first; the next Escape closes the viewer (kit-141 spec §Approach 7)
+  if (AV && tlFloating()) return void tlClose();
   if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer(); else thEscapePage();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
@@ -6186,7 +6470,9 @@ function render(d) {
   drawSettings();
   if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > (FLEET.data && FLEET.data.ready ? 600000 : 120000)) loadFleet();
   for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
+  renderBoard();
   renderProgress();
+  drawFilters(PAGE_NOW);
 
   const fkey = (f) => `${f.kind} ${f.subject}`;
   $('findings').innerHTML = (m.findings.length ? m.findings.map((f) => `
@@ -6382,15 +6668,26 @@ function tFit(s) {
   return x;
 }
 // The line under the turns: nothing once the supervisor has the last word (its reply is the state).
-// Else: "Sent." when the POST that sent it said a pane took it; "will read it when it next checks"
-// when none did, or nobody knows (a reload); after 10 minutes with the supervisor running (a pane, as
-// /api/threads says), that it hasn't replied.
-function tCardState(t, now, typed, pane) {
+// Else: "Sent." when the POST that sent it said a pane took it; "Not delivered" when no terminal took
+// it (sup: /api/threads' record of such turns and the supervisor's last check, as tlRefresh keeps
+// it); "will read it when it next checks" when nobody knows (a reload); after 10 minutes with the
+// supervisor running (a pane, as /api/threads says), that it hasn't replied.
+function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.sup ?? null : null) {
   const last = t.turns[t.turns.length - 1];
   if (!last || last.by !== 'owner') return null;
   if (last.pending) return 'Sending…';
   // its terminal is asking a question: these words wait, and are never the answer to it
   if (typed === 'held' && pane) return "Held: the supervisor's terminal is asking something, and these words must not answer it. They reach the supervisor once it is answered (see the card).";
+  // missed: a turn in the log is the server's record's to say (typed is the thread's last send, and
+  // can be stale); the page's own turn, before a read has it, is its send's. Never "no pane now".
+  const missed = sup && /^u-/.test(last.id ?? '') ? !!sup.undelivered?.includes(last.id) : typed === false;
+  if (missed) {
+    const at = Date.parse(sup?.checked ?? '');
+    const m = Math.max(0, Math.round((now - at) / 60000));
+    const ago = m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+    if (at > Date.parse(last.at)) return `Not delivered: no supervisor terminal took it. The supervisor has checked since (${ago}) but hasn't replied yet.`;
+    return `Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; ${at > 0 ? `it last checked ${ago}` : 'it has not checked yet'}.`;
+  }
   if (now - Date.parse(last.at) > T_WAIT_MS) return pane ? "The supervisor hasn't replied yet." : 'Sent; the supervisor will read it when it next checks.';
   return typed === true ? 'Sent.' : 'Sent; the supervisor will read it when it next checks.';
 }
@@ -6475,7 +6772,8 @@ function tLensMessage(e, frameWin, minted) {
   }
   // where watched anchors are now: null is "not found there"; a rect that is no box says nothing
   if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').flatMap((r) => { const rect = r.rect === null ? null : tBox(r.rect, ['x', 'y', 'w', 'h']); return r.rect === null || rect ? [{ key: r.key, rect, changed: r.changed === true }] : []; }) };
-  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true };
+  // a keyup's key message is marked up (kit-141 design-change 1); the field is left out for a keydown's
+  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true, ...(m.up === true ? { up: true } : {}) };
   if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
   if (m.type === 'route') return { type: 'route', route: str(m.route, T_CAPS.route) };
   return { type: 'errors', errors: (Array.isArray(m.errors) ? m.errors : []).filter((x) => typeof x === 'string').slice(-T_ERRORS).map((x) => tCut(tUncap(x.replace(T_UNSAFE, '')), T_ERROR_MAX)) };
@@ -6532,6 +6830,9 @@ const layerField = tlOwn;
 // a text field in the Inbox tab: Escape there is the field's, and closes nothing (kit-100 spec §2.7)
 const inboxTyping = (el) => inInbox(el) && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text'));
 const tlShowing = () => !tlEl('tl-cursor').hidden;
+// A thread's card open floating (beside its pin, or a draft), not the panel's in-panel thread: an Escape
+// over the viewer closes it before the viewer (kit-141 spec §Approach 7).
+const tlFloating = () => !tlEl('tl-card').hidden && !tlEl('tl-card').classList.contains('in-panel');
 // The section a point is in: its hash route (the Loop's with its tab), its box and its heading.
 function tlSection(el) {
   const sec = el?.closest?.('main > section[id]');
@@ -7209,6 +7510,7 @@ async function tlRefresh() {
     TL.raw = j.threads || [];
     tlRelay();
     TL.pane = !!j.supervisor?.pane;
+    TL.sup = { checked: typeof j.supervisor?.checked === 'string' ? j.supervisor.checked : null, undelivered: Array.isArray(j.supervisor?.undelivered) ? j.supervisor.undelivered : [] };
     askSet(j.supervisor?.question);
     const first = !TL.have;
     TL.have = n;
@@ -8017,8 +8319,19 @@ function tsDrawSoon() {
   requestAnimationFrame(() => { TS.pinsPending = false; tsBar(); tlDraw(); });
 }
 // Each page the stage's frame loads is asked what it is: its lens answers ready. The other frame's
-// loads (one let go of) are nothing to the stage.
-for (const id of ['av-frame', 'pv-frame']) $(id).addEventListener('load', (e) => { if (e.target !== tsFrame()) return; tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' }); });
+// loads (one let go of) are nothing to the stage. Every load of a src after the frame's first is a move of the
+// frame's own (a link in it, the Reload button), counted for the close.
+function avFrameLoad(e) {
+  if (e.target !== tsFrame()) return;
+  if (e.target.hasAttribute('src')) {
+    const n = (AV_LOADS.get(e.target) ?? 0) + 1;
+    AV_LOADS.set(e.target, n);
+    if (n > 1) AV_NAVS++;
+  }
+  AV_FRAME_ESC = false;
+  tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' });
+}
+for (const id of ['av-frame', 'pv-frame']) $(id).addEventListener('load', avFrameLoad);
 window.addEventListener('message', (e) => {
   if (!TS.kind) return;
   // a preview's lens has an origin of its own: only messages from it (an artifact's is opaque, 'null')
@@ -8027,10 +8340,11 @@ window.addEventListener('message', (e) => {
   if (!m) return;
   // a preview's app went to another route (its lens says so, or says ready on the next page): what is
   // pinned there is another set. Taken as often as it comes, drawn once a frame, so a page saying
-  // routes as fast as it can costs a comparison each.
+  // routes as fast as it can costs a comparison each. A route after the first ready is the app's own move, an
+  // entry in the history, counted for the close (one before it, a redirect while it loads, adds none).
   if (TS.kind === 'preview' && (m.type === 'route' || m.type === 'ready')) {
     if (m.type === 'ready' && m.viewport) TS.viewport = m.viewport;
-    if (m.route !== TS.route) { TS.route = m.route; TS.rects.clear(); TS.watch = ''; if (TS.ready) tsDrawSoon(); }
+    if (m.route !== TS.route) { if (TS.ready) AV_NAVS++; TS.route = m.route; TS.rects.clear(); TS.watch = ''; if (TS.ready) tsDrawSoon(); }
     if (m.type === 'route') return;
   }
   if (m.type === 'errors') { if (TS.kind === 'preview') TS.errors = m.errors; return; }
@@ -8047,11 +8361,27 @@ window.addEventListener('message', (e) => {
     tsDrawSoon();
     return;
   }
-  // a key only while the frame has the keyboard (decision 20), and only ever to raise: the page's own
+  // a key only while the frame has the keyboard (decision 20), and never to lower the overlay: the page's own
   // scripts can say the same at any time, so a "Shift up" or an Esc from it lowers nothing while the
   // owner may be holding Shift. The overlay goes on the parent's own evidence: its pointer moving
-  // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame ends pin mode only.
-  if (m.type === 'key') { if (document.activeElement !== tsFrame()) return; if (m.key === 'Escape') { if (TL.pin) tlPinMode(false); } else if (m.shift) tsRaise(true); return; }
+  // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame (its keydown's message
+  // only, never the keyup's, marked up) ends pin mode; else, with the overlay raised or the chip
+  // showing (Shift may be held), nothing; else it closes a floating card, else the viewer (kit-141
+  // spec §Approach 7). A page that fakes it can only close its own viewer, once, and only when the owner
+  // isn't pointing: once one has closed it, the frame's Escapes close nothing until the next route, open or
+  // frame load (AV_FRAME_ESC), so a burst of them, or an old lens's keyup without up, steps back once at most.
+  if (m.type === 'key') {
+    if (document.activeElement !== tsFrame()) return;
+    if (m.key === 'Escape') {
+      if (m.up) return;
+      if (TL.pin) tlPinMode(false);
+      else if (TS.raised || tlShowing()) {}
+      else if (AV_FRAME_ESC) {}
+      else if (tlFloating()) tlClose();
+      else { AV_FRAME_ESC = true; leaveArtifact(); }
+    } else if (m.shift) tsRaise(true);
+    return;
+  }
   if (m.type === 'hit-reply') {
     // one answer a question: its id let go of as it is taken, so a page that answers it again is
     // dropped by tLensMessage and costs nothing more
@@ -8218,17 +8548,15 @@ function inboxTitle(d) {
   $('inbox-btn-n').textContent = n || '';
 }
 
-document.addEventListener('click', (e) => {
-  const a = e.target.closest('[data-view]');
-  if (!a) return;
-  setView(a.dataset.view, a.dataset.left === undefined ? undefined : a.dataset.left === '1');
-});
-$('left-only').addEventListener('change', (e) => setView(VIEW, e.target.checked));
 $('reload-page').addEventListener('click', () => location.reload());
-$('view').addEventListener('change', (e) => {
-  VIEW = e.target.value;
-  try { localStorage.setItem('devteam.view', VIEW); } catch {}
-  if (DATA) renderProgress();
+// the header filters (kit-91): a select's pick, or the Needs attention toggle, through setFilters
+document.querySelector('.pagebar .extra').addEventListener('change', (e) => {
+  const k = e.target?.dataset?.f;
+  if (k && FILTER_PAGES.includes(PAGE_NOW)) setFilters(PAGE_NOW, { [k]: e.target.value });
+});
+document.querySelector('.pagebar .extra').addEventListener('click', (e) => {
+  const b = e.target.closest?.('button[data-f="att"]');
+  if (b && PAGE_NOW === 'board') setFilters('board', { att: b.getAttribute('aria-pressed') === 'true' ? '' : '1' });
 });
 
 document.addEventListener('click', async (ev) => {
@@ -8293,8 +8621,7 @@ document.addEventListener('click', async (ev) => {
     document.querySelectorAll('#drawer-body [data-md]').forEach((el) => { el.hidden = el.dataset.md !== v; });
     return;
   }
-  const pl = ev.target.closest('[data-planner]');
-  if (pl) { location.hash = `planner/${pl.dataset.planner}`; return; }
+  // a planner card opens its peek through the record cards' data-open handlers (kit-91), which leave its question link alone
   // Stop and Start on a preview: the kit's own actions, as an owner action
   const pvb = ev.target.closest('[data-preview-stop],[data-preview-start]');
   if (pvb) {

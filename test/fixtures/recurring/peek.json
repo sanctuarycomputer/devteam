@@ -1,0 +1,163 @@
+{
+  "ci-main": {
+    "name": "ci-main",
+    "entry": {
+      "kind": "check",
+      "title": "Main builds and its tests pass",
+      "what": "The full suite on main, every six hours.",
+      "every": "6h",
+      "run": "npm ci && npm test",
+      "timeout_s": 1800,
+      "fail": {
+        "exit": "nonzero"
+      },
+      "fail_after": 1,
+      "severity": 2,
+      "registered": {
+        "qid": "q-20261101-090000000",
+        "at": "2026-11-01T09:05:00Z"
+      }
+    },
+    "runs": [
+      {
+        "status": "error",
+        "at": "2026-11-19T06:27:10Z",
+        "slot": "2026-11-19T06:27:09Z",
+        "seconds": 1800,
+        "excerpt": "timed out after 1800 s",
+        "ref": null
+      },
+      {
+        "status": "fail",
+        "at": "2026-11-19T00:27:09Z",
+        "slot": "2026-11-19T00:27:08Z",
+        "seconds": 241.6,
+        "excerpt": "not ok 14 - merge keeps the queue order",
+        "ref": null
+      },
+      {
+        "status": "error",
+        "at": "2026-11-18T18:27:08Z",
+        "slot": "2026-11-18T18:27:07Z",
+        "seconds": 1800,
+        "excerpt": "timed out after 1800 s",
+        "ref": null
+      },
+      {
+        "status": "pass",
+        "at": "2026-11-18T12:27:07Z",
+        "slot": "2026-11-18T12:27:06Z",
+        "seconds": 236.9,
+        "excerpt": "tests 412, pass 412",
+        "ref": null
+      },
+      {
+        "status": "error",
+        "at": "2026-11-18T06:27:06Z",
+        "slot": "2026-11-18T06:27:05Z",
+        "seconds": 1800,
+        "excerpt": "timed out after 1800 s",
+        "ref": null
+      },
+      {
+        "status": "pass",
+        "at": "2026-11-18T00:27:05Z",
+        "slot": "2026-11-18T00:27:04Z",
+        "seconds": 236.9,
+        "excerpt": "tests 412, pass 412",
+        "ref": null
+      },
+      {
+        "status": "fail",
+        "at": "2026-11-17T18:27:04Z",
+        "slot": "2026-11-17T18:27:03Z",
+        "seconds": 241.6,
+        "excerpt": "not ok 14 - merge keeps the queue order",
+        "ref": null
+      },
+      {
+        "status": "pass",
+        "at": "2026-11-17T12:27:03Z",
+        "slot": "2026-11-17T12:27:02Z",
+        "seconds": 236.9,
+        "excerpt": "tests 412, pass 412",
+        "ref": null
+      },
+      {
+        "status": "pass",
+        "at": "2026-11-17T06:27:02Z",
+        "slot": "2026-11-17T06:27:01Z",
+        "seconds": 236.9,
+        "excerpt": "tests 412, pass 412",
+        "ref": null
+      },
+      {
+        "status": "pass",
+        "at": "2026-11-17T00:27:01Z",
+        "slot": "2026-11-17T00:27:00Z",
+        "seconds": 236.9,
+        "excerpt": "tests 412, pass 412",
+        "ref": null
+      }
+    ]
+  },
+  "deps-bump": {
+    "name": "deps-bump",
+    "entry": {
+      "kind": "chore",
+      "title": "Dependencies are bumped",
+      "what": "A worker bumps patch and minor versions each Monday.",
+      "every": "1w",
+      "on": "mon",
+      "by": "worker",
+      "prompt": "Bump every dependency to its newest patch or minor version.\nRun the suite; leave a major bump for a ticket of its own.",
+      "component": "deps",
+      "touches": [
+        "package.json",
+        "package-lock.json"
+      ],
+      "done_when": [
+        "the suite passes in CI"
+      ],
+      "grace_days": 3,
+      "registered": {
+        "qid": "q-20261020-090000000",
+        "at": "2026-10-20T09:05:00Z"
+      }
+    },
+    "runs": [
+      {
+        "status": "started",
+        "at": "2026-11-19T08:00:00Z",
+        "slot": "2026-11-16T00:00:00Z",
+        "seconds": null,
+        "excerpt": null,
+        "ref": "deps-07-recurring-deps-bump"
+      },
+      {
+        "status": "nothing",
+        "at": "2026-11-12T10:00:00Z",
+        "slot": "2026-11-09T00:00:00Z",
+        "seconds": null,
+        "excerpt": null,
+        "ref": "deps-06-recurring-deps-bump"
+      },
+      {
+        "status": "abandoned",
+        "at": "2026-11-02T00:05:00Z",
+        "slot": "2026-11-02T00:00:00Z",
+        "seconds": null,
+        "excerpt": null,
+        "ref": "deps-05-recurring-deps-bump"
+      },
+      {
+        "status": "done",
+        "at": "2026-10-26T00:05:00Z",
+        "slot": "2026-10-26T00:00:00Z",
+        "seconds": null,
+        "excerpt": null,
+        "ref": "deps-04-recurring-deps-bump"
+      }
+    ]
+  }
+}

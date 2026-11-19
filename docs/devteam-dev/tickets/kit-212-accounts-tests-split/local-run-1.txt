@@ -1,6 +1,0 @@
-rotation exit 0 tests 6, pass 6, fail 0, file 62.4 s, sum 61.5 s, gap 0.9 s, longest 20.2 s
-leaving exit 0 tests 7, pass 7, fail 0, file 88.5 s, sum 87.6 s, gap 0.9 s, longest 24.8 s
-restart exit 0 tests 3, pass 3, fail 0, file 107.9 s, sum 107.4 s, gap 0.5 s, longest 76.2 s
-restart-guards exit 0 tests 4, pass 4, fail 0, file 92.0 s, sum 91.5 s, gap 0.5 s, longest 60.2 s
-untrusted exit 0 tests 2, pass 2, fail 0, file 88.4 s, sum 87.0 s, gap 1.4 s, longest 68.3 s
-supervisor exit 0 tests 3, pass 3, fail 0, file 58.4 s, sum 57.9 s, gap 0.6 s, longest 33.0 s

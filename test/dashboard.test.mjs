@@ -711,6 +711,11 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     await p.send('Runtime.enable');
     await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 600, deviceScaleFactor: 1, mobile: false });
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+    // kit-307: DEVTEAM_TEST_CPU_THROTTLE=<n> runs the page n times slower, as a loaded runner does;
+    // DEVTEAM_TEST_ROUTE_DELAY_MS=<ms> runs the page's hashchange listeners that much later, as a runner too
+    // loaded to reach the route's task before the test's next step does
+    if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
+    if (process.env.DEVTEAM_TEST_ROUTE_DELAY_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const add = window.addEventListener; window.addEventListener = function (type, f, ...a) { return add.call(this, type, type === 'hashchange' && typeof f === 'function' ? (e) => setTimeout(() => f(e), ${Number(process.env.DEVTEAM_TEST_ROUTE_DELAY_MS)}) : f, ...a); }; })()` });
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
     const box = `textarea[data-q="${Q}"]`;
     const soon = soonIn(p, 15000, () => dash.out());
@@ -821,25 +826,35 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('a control that keeps focus without typing doesn\'t stop the page refreshing', async () => {
-      // its control is on Progress (one page at a time)
-      await p.ev(`location.hash = '#progress'`);
-      await soon(`getComputedStyle(document.querySelector('#progress')).display !== 'none'`, 'the Progress page');
-      await p.click('#left-only');
-      const q = 'After the checkbox?';
+      // its control is the Board's Needs attention toggle, in the page bar (one page at a time)
+      const att = '.pagebar .extra [data-f="att"]';
+      await p.ev(`location.hash = '#board'`);
+      await soon(`getComputedStyle(document.querySelector('#board')).display !== 'none' && !!document.querySelector('${att}')`, 'the Board page and its toggle');
+      await p.click(att);
+      // each press is awaited until routed (LAST_HEAD): the press changes the hash at once, but its route redraws the
+      // page bar and the Board a task later, and the next step (or the open-select subtest) must not start under it
+      await soon(`location.hash.includes('att=1') && LAST_HEAD === location.hash && document.activeElement?.matches?.('${att}')`, 'the toggle pressed, routed, and focused');
+      const q = 'After the toggle?';
       ask(q);
-      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a checkbox focused');
-      await p.click('#left-only'); // leave the setting as it was
+      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a toggle focused');
+      await p.click(att); // leave the setting as it was
+      await soon(`!location.hash.includes('att=') && LAST_HEAD === location.hash && document.querySelector('${att}')?.getAttribute('aria-pressed') === 'false'`, 'the toggle off again, routed and drawn');
       await p.ev(`document.activeElement.blur()`);
     });
 
     await t.test('an open select is left alone, and a list closed without a choice can\'t stop the refreshing', async () => {
-      await p.ev(`window.__o = $('view').options[0]`);
-      await p.click('#view');
+      // the Board's Goal select, in the page bar (drawn again only when it changes); a Board column, drawn on every
+      // read the page isn't held, says whether the page is drawing
+      const goal = '.pagebar .extra select[data-f="goal"]';
+      await p.ev(`window.__o = document.querySelector('${goal}').options[0]`);
+      await p.click(goal);
+      await p.ev(`window.__c = document.querySelector('#board-cols > .col')`);
       await polls();
       assert.equal(await p.ev(`window.__o.isConnected`), true, 'its options are not redrawn');
+      assert.equal(await p.ev(`window.__c.isConnected`), true, 'nothing is drawn while it is open');
       await p.key('Escape');
       await p.ev('(() => { const n = Date.now; Date.now = () => n() + 120000; })()');
-      await soon(`!window.__o.isConnected`, 'the page drawing again, no change event to say so');
+      await soon(`!window.__c.isConnected`, 'the page drawing again, no change event to say so');
       await p.ev(`document.activeElement.blur()`);
       // back to the Inbox, for the card (#inbox opens the panel on its Inbox tab, kit-100)
       await p.ev(`location.hash = '#inbox'`);
@@ -941,7 +956,7 @@ test("threads on the dashboard's server: owner actions checked before anything r
   let r = await get();
   assert.equal(r.status, 200);
   let j = await r.json();
-  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false, question: null }], 'no threads, no supervisor pane, and so nothing its terminal asks');
+  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false, question: null, checked: null, undelivered: [] }], 'no threads, no supervisor pane, and so nothing its terminal asks, no check and no turn missed');
   const heads = [];
   for (let i = 0; i < 3; i++) heads.push((await get()).headers.get('x-devteam-threads'));
   assert.ok(heads.includes('cached'), `a read with no file changed is served from the cache: ${heads}`);
@@ -1583,7 +1598,7 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const later = 'Sent; the supervisor will read it when it next checks.';
   assert.equal(A.tCardState(th(['owner', 5], ['supervisor', 1]), now, true, true), null, 'the reply is the state');
   assert.equal(A.tCardState(th(['owner', 1]), now, true, true), 'Sent.');
-  assert.equal(A.tCardState(th(['owner', 1]), now, false, false), later);
+  assert.equal(A.tCardState(th(['owner', 1]), now, false, false), 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it has not checked yet.', 'the send said no terminal took it');
   assert.equal(A.tCardState(th(['owner', 1]), now, undefined, true), later, 'after a reload nobody knows: when it next checks');
   assert.equal(A.tCardState(th(['owner', 11]), now, true, true), "The supervisor hasn't replied yet.");
   assert.equal(A.tCardState(th(['owner', 11]), now, true, false), later, 'not running: it will read it later');
@@ -3139,6 +3154,7 @@ test("a preview's viewer: its route, frame-src naming exactly where its lens is,
 });
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
+const NOT_DELIVERED_37 = 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it last checked 37 min ago.';
 test('threads on the dashboard page: Shift and point, the card, the pins and the dock', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   // stopped last-in first-out, each whatever the one before did: the fixture's files go only once the
   // dashboard writing into them has stopped, and one cleanup that throws leaves no Chrome running
@@ -3292,6 +3308,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test('Shift+Enter sends the first words: a thread on the goal, its turn in the card, the draft cleared', async () => {
+    // the supervisor last checked 37 minutes ago (and 20 s, for a slow runner: the card rounds)
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/host-claim.json'), JSON.stringify({ checked: Date.now() - 37 * 60000 - 20000 }));
     await p.type('Narrow this to the EU launch');
     // a read of the threads begun before the send, answering after it: the card must stay the thread's
     await p.ev(`window.__threadsRead = false; window.__threadsLanded = false; window.__threadsHold = new Promise((r) => { window.__threadsLet = r; }); tlRefresh(); void 0`);
@@ -3309,7 +3327,16 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`document.querySelector('#tl-c-turns .tl-turn.owner')?.textContent.includes('Narrow this to the EU launch')`, 'the turn in the card');
     assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '');
     assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text', 'still in the composer after the card became the thread');
-    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), 'Sent; the supervisor will read it when it next checks.', 'no pane here');
+    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), NOT_DELIVERED_37, 'no pane here: not delivered, and when the supervisor last checked');
+  });
+
+  await t.test("after a reload only the server's record knows the turn missed, and the card still says so", async () => {
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/host-claim.json'), JSON.stringify({ checked: Date.now() - 37 * 60000 - 20000 }));
+    await p.ev(`location.hash = '#talk/${T}'; window.__beforeReload = true`);
+    await p.send('Page.reload');
+    await soon(`!window.__beforeReload && typeof TL !== 'undefined' && TL.have > 0 && ${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card again, after a reload');
+    assert.equal(await p.ev(`TL.typed['${T}'] === undefined`), true, 'a new document: the send is forgotten');
+    await soon(`document.getElementById('tl-c-state').textContent === ${JSON.stringify(NOT_DELIVERED_37)}`, "the server's record and last check");
   });
 
   await t.test('the page refreshes while the owner writes in the card: the layer holds no redraw', async () => {
@@ -4410,6 +4437,11 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  // kit-300: DEVTEAM_TEST_CPU_THROTTLE=<n> runs the page n times slower, as a loaded runner does;
+  // DEVTEAM_TEST_SLIDE_MS=<ms> makes the panel's slide-in take that long, so a click aimed while it
+  // moves (the race this test lost on CI, where the cards drew before the slide had ended) always shows
+  if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
+  if (process.env.DEVTEAM_TEST_SLIDE_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `document.addEventListener('DOMContentLoaded', () => document.documentElement.style.setProperty('--dur', '${Number(process.env.DEVTEAM_TEST_SLIDE_MS)}ms'))` });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
   const soon = soonIn(p, 30000, () => dash.out());
@@ -4419,6 +4451,10 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
   // what is clicked between its press and its release
   const still = async (f) => { await p.ev('window.__still()'); try { await f(); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
   await soon(`!!${card(GY.q)} && !!${card(GR.q)} && innerWidth === 390`, 'both approvals, on a phone');
+  // kit-300: the cards are the Threads panel's Inbox tab (#th-inbox #questions), which slides in over
+  // --dur. A click aims at where its target is, then presses there: aimed while the panel still moves
+  // (the cards can draw before the slide ends), the press lands beside the choice and picks nothing
+  await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open on Inbox, at rest');
 
   await t.test('a recommendation that names no verdict is said as words', async () => {
     const shown = async (q) => JSON.parse(await p.ev(`JSON.stringify((() => { const c = ${card(q)}; return { suggest: c.querySelector('[data-goal-suggest]')?.textContent ?? null, labels: [...c.querySelectorAll('input[data-pick]')].map((i) => i.value), rec: [...c.querySelectorAll('.choice.rec input')].map((i) => i.value) }; })())`));

@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PORTS, bareProject, dashboardOnFreePort, dataRewriteInit, efficiencyFixture, inboxFixture, peekFixture, threadsFixture } from './lib/kit.mjs';
+import { PORTS, bareProject, boardFixture, dashboardOnFreePort, dataPatchInit, dataRewriteInit, efficiencyFixture, inboxFixture, peekFixture, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { SIZES, measureAt } from './lib/measure.mjs';
 
@@ -45,9 +45,15 @@ const PAGES = [
   // other checks ignore; with the default view it would be taken for the page's first content, whose
   // page-top is its page ticket's, so the view is a selector no element has. (kit-100 moved the interim
   // Inbox page into the Threads panel: its entry is the panel's, below.)
-  ...['progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
+  ...['library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
   // kit-90: Overview and Goals, on the shell, whole, with the goal the test seeds (goalArgs, below)
   ...OVERVIEW_GOALS,
+  // kit-91: Board (plain and Needs attention) and Progress, on the shell, with test/lib/kit.mjs's boardFixture
+  // (every column, the held items, the burn-up and its forecast exist only with it). page-top is judged at
+  // 1440x900 only (narrow: its view a selector no element has, as kit-90's entries above; a load at 720x800
+  // and 390x844 starts 104px below the bar, o-20261116-110914358); every other check runs at all three sizes.
+  ...['#board', '#board?att=1'].map((hash) => ({ hash, narrow: { view: '#no-such-view' }, init: dataPatchInit(boardFixture().patch), ready: "!!document.querySelector('#board [data-ticket]')" })),
+  { hash: '#progress', narrow: { view: '#no-such-view' }, init: dataPatchInit(boardFixture().patch), ready: "!!document.querySelector('#burnup svg') && !!document.querySelector('#w-features .row') && !!document.getElementById('forecast').textContent" },
   // kit-174: Efficiency, on the shell, with test/lib/kit.mjs's fixture (the phase bars and the waste
   // line exist only with it)
   { hash: '#efficiency', init: dataRewriteInit(efficiencyFixture()), ready: "!!document.querySelector('#efficiency [data-fit] svg rect') && /kit-87/.test(document.querySelector('#efficiency').textContent)" },
@@ -117,7 +123,9 @@ test('the dashboard measure: every listed page at three sizes', { skip: canDrive
     try {
       await p.send('Page.navigate', { url: 'about:blank' });
       for (let i = 0; i < 200 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await new Promise((r) => setTimeout(r, 50));
-      const res = await measureAt(p, url(pg.hash), { ready: pg.ready ?? 'true', ...(pg.opts || {}) });
+      const o = { ready: pg.ready ?? 'true', ...(pg.opts || {}) };
+      const res = pg.narrow ? { ...(await measureAt(p, url(pg.hash), { ...o, sizes: SIZES.slice(0, 1) })), ...(await measureAt(p, url(pg.hash), { ...o, ...pg.narrow, sizes: SIZES.slice(1) })) } : await measureAt(p, url(pg.hash), o);
+      assert.deepEqual(Object.keys(res), SIZES.map(([w, h]) => `${w}x${h}`));
       for (const [at, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${pg.hash} at ${at}`);
     } finally {
       await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier });

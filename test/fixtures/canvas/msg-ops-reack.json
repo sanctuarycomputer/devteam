@@ -1,0 +1,14 @@
+{
+  "t": "ops",
+  "rev": 58,
+  "by": {
+    "id": "ana",
+    "name": "Ana Lima",
+    "via": "page"
+  },
+  "ack": {
+    "client": "k3f9a2x7q1m0z8w4",
+    "seq": 7
+  },
+  "ops": []
+}
