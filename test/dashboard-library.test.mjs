@@ -608,9 +608,10 @@ test('a card\'s head', { ...CHROME, timeout: 300000 }, async (t) => {
     assert.ok(h.right <= 1, `${x.id}: ⋯ at the head's right edge (off by ${h.right}px)`);
   }
   // the drafts: the draft badge, then "in <worktree>" (the newest draft's)
-  const draft = (slug) => p.ev(`(() => { const h = ${art(slug)}.querySelector('.card-head'), b = h.querySelector('.badge.amber'); return { badge: b?.textContent ?? null, afterTitle: !!b && h.querySelector('.lib-title').compareDocumentPosition(b) === Node.DOCUMENT_POSITION_FOLLOWING, in: b?.nextElementSibling?.textContent.startsWith('in ') ?? false, wt: b?.nextElementSibling?.querySelector('a')?.getAttribute('href') ?? null }; })()`);
-  assert.deepEqual(await draft(ids.drafted), { badge: 'draft', afterTitle: true, in: true, wt: `#ticket/${ids.wt2}` }, 'the newest draft\'s worktree');
-  assert.deepEqual(await draft(ids.draftOnly), { badge: 'draft', afterTitle: true, in: true, wt: `#ticket/${ids.wt1}` });
+  const draft = (slug) => p.ev(`(() => { const h = ${art(slug)}.querySelector('.card-head'), b = h.querySelector('.badge.amber'); return { badge: b?.textContent ?? null, afterTitle: !!b && h.querySelector('.lib-title').compareDocumentPosition(b) === Node.DOCUMENT_POSITION_FOLLOWING, in: b?.nextElementSibling?.textContent ?? null, wt: b?.nextElementSibling?.querySelector('a')?.getAttribute('href') ?? null }; })()`);
+  // the worktree by its id, as the spec writes it, a link to its ticket
+  assert.deepEqual(await draft(ids.drafted), { badge: 'draft', afterTitle: true, in: `in ${ids.wt2}`, wt: `#ticket/${ids.wt2}` }, 'the newest draft\'s worktree');
+  assert.deepEqual(await draft(ids.draftOnly), { badge: 'draft', afterTitle: true, in: `in ${ids.wt1}`, wt: `#ticket/${ids.wt1}` });
   assert.equal(await p.ev(`!!${art(ids.docs)}.querySelector('.badge.amber')`), false, 'a landed card has no draft badge');
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
@@ -660,6 +661,7 @@ test('an artifact card\'s meta', { ...CHROME, timeout: 300000 }, async (t) => {
     return { by: by ? [by.firstChild.textContent, [...by.querySelectorAll('a')].map((a) => a.getAttribute('href'))] : null, for: f ? [f.firstChild.textContent, [...f.querySelectorAll('a')].map((a) => a.getAttribute('href'))] : null, text: m?.textContent ?? '' }; })()`);
   const d = await meta(ids.drafted);
   assert.deepEqual([d.by, d.for], [['drawn by ', ['#planner/pay']], ['for ', [`#feature/${ids.feat1}`]]], 'the planner\'s session; the feature');
+  assert.equal(await p.ev(`${art(ids.drafted)}.querySelector('.lib-for a').textContent === DATA.ooda.roadmap.features[${JSON.stringify(ids.feat1)}].title`), true, 'the feature by its title');
   const pub = await meta(ids.public);
   assert.deepEqual([pub.by, pub.for], [['drawn by ', ['#planner/pay']], ['for ', [`#goal/${ids.goal1}`]]], 'a goal');
   const nl = await meta(ids.notLive);
@@ -734,7 +736,8 @@ test('publish on the card (box)', { ...CHROME, timeout: 300000 }, async (t) => {
   const s = await text(ids.public);
   assert.ok(s.includes('Public on this box') && /recorded .+ from the dashboard/.test(s), `publish details: ${s}`);
   assert.ok((await text(ids.drift)).includes('changed on main since'), 'drift');
-  assert.ok(await p.ev(`${art(ids.drift)}.querySelector('.amber, .lib-drift') !== null`), 'drift in amber');
+  // drift in amber: its computed colour is --amber-fg's (resolved on a probe beside it)
+  assert.deepEqual(await p.ev(`(() => { const d = ${art(ids.drift)}.querySelector('.lib-drift'), x = document.createElement('span'); x.style.color = 'var(--amber-fg)'; d.after(x); const want = getComputedStyle(x).color; x.remove(); return [d.textContent, getComputedStyle(d).color === want, want !== getComputedStyle(${art(ids.drift)}).color]; })()`), ['changed on main since', true, true], 'drift in amber');
   // not live: the badge, Restore (the gateway's publish page, a new tab), the error span, Forget in ⋯
   const box = `http://box.localhost:${port}`;
   const nl = art(ids.notLive);
@@ -783,5 +786,32 @@ test('a refused Forget says why (box)', { ...CHROME, timeout: 300000 }, async (t
   await soon(`document.getElementById('e-pub-${ids.notLive}').textContent.includes('no')`, 'the refusal in e-pub');
   assert.equal(await p.ev(`document.getElementById('e-pub-${ids.notLive}').textContent`), 'Not saved: no');
   assert.equal(await p.ev(`document.querySelector('${c}').contains(document.getElementById('e-pub-${ids.notLive}'))`), true, 'on the card');
+  assert.deepEqual(await p.ev(ERRORS), []);
+});
+
+test('a draft\'s worktree truncates in the head', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { patch, ids } = fx;
+  // the newest draft in a worktree with a long id, its ticket a very long title
+  const WT = `pay-99-${'a-very-long-worktree-name-'.repeat(4)}end`;
+  const base = patch.tickets.find((x) => x.id === ids.wt2);
+  patch.tickets = [...patch.tickets, { ...base, id: WT, title: `The refund screen, ${'with every state the processor can answer in, '.repeat(6)}end` }];
+  patch.library.artifacts.find((a) => a.slug === ids.drafted && a.at === ids.wt2).at = WT;
+  const { p } = await libraryAll(t, { fx });
+  const m = await p.ev(`(() => { const c = ${art(ids.drafted)}, h = c.querySelector('.card-head'), w = h.querySelector('.lib-wt'), r = h.getBoundingClientRect(), edge = r.right - parseFloat(getComputedStyle(h).paddingRight);
+    const plain = ${art(ids.docs)}.querySelector('.card-head').getBoundingClientRect().height;
+    return { text: w.textContent, href: w.querySelector('a').getAttribute('href'), tip: w.querySelector('a').title.startsWith('The refund screen'), cut: w.scrollWidth > w.clientWidth, tab: h.querySelector(':scope > .lib-tab').getBoundingClientRect().right <= edge + 1, menu: h.querySelector(':scope > details.menu').getBoundingClientRect().right <= edge + 1, height: r.height === plain, cardRight: h.querySelector(':scope > details.menu').getBoundingClientRect().right <= c.getBoundingClientRect().right }; })()`);
+  assert.deepEqual(m, { text: `in ${WT}`, href: `#ticket/${WT}`, tip: true, cut: true, tab: true, menu: true, height: true, cardRight: true }, 'the worktree id, cut short; ↗ and ⋯ inside the head; the head\'s height unchanged');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('served by another instance: from instance <port> (box)', { ...CHROME, timeout: 300000 }, async (t) => {
+  // the box serves this project's copy from instance 4399, not this page's 4321
+  const fx = libraryFixture();
+  const box = servedOf(fx.ids);
+  box[fx.ids.project].port = 4399;
+  const { p, ids } = await libraryAll(t, { fx, box });
+  const s = await p.ev(`${art(ids.public)}.textContent.replace(/\\s+/g, ' ')`);
+  assert.ok(s.includes('from instance 4399') && !s.includes('Public on this box'), `from instance: ${s}`);
   assert.deepEqual(await p.ev(ERRORS), []);
 });

@@ -863,7 +863,10 @@ try {
   .lib-body { margin-top: 8px; min-width: 0; }
   .lib-body .lib-sum { color: var(--fg-2); max-width: var(--measure); }
   /* the thumbnail opens what the title opens; Public's globe; publish details, drift in amber; the details and meta lines */
-  a.lib-thumb { text-decoration: none; cursor: pointer; }
+  a.lib-thumb { text-decoration: none; } a.lib-thumb[href] { cursor: pointer; }
+  /* a draft's "in <worktree>" shrinks too, after the title has given way (its shrink is the title's thousandth) */
+  .lib-card .card-head > .lib-title { flex-shrink: 1000; }
+  .lib-card .card-head > .lib-wt { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lib-card .card-head .badge > i { font-size: 11px; margin-right: 4px; }
   .lib-body > .lib-pub, .lib-body > .lib-meta, .lib-body > .err { margin-top: 6px; max-width: var(--measure); }
   .lib-body .lib-drift { color: var(--amber-fg); }
@@ -6387,7 +6390,9 @@ function renderLibrary(lib) {
   const PV_BADGE = { live: '<span class="badge good">live</span>', checking: '<span class="badge">checking</span>', 'not-running': '<span class="badge medium">not running</span>', 'not-answering': '<span class="badge medium">not answering</span>', expired: '<span class="badge">expired</span>' };
   // a for ref as a link, its kind prefix dropped: a feature to its peek (linkify knows no feature ids), a goal or
   // ticket as linkify makes it (its title), anything else as linkify leaves it
-  const forRef = (f) => { const m = /^(goal|ticket|feature):(.+)$/.exec(f ?? ''); return m?.[1] === 'feature' ? `<a class="linkish" href="#feature/${esc(encodeURIComponent(m[2]))}">${esc(m[2])}</a>` : linkify(m ? m[2] : f); };
+  const forRef = (f) => { const m = /^(goal|ticket|feature):(.+)$/.exec(f ?? ''); return m?.[1] === 'feature' ? flink(m[2]) : linkify(m ? m[2] : f); };
+  // a draft's worktree by its id, as the spec writes it: a link to its ticket (the title on hover), truncated in the head
+  const wtOf = (at) => { const t = ticketMap().get(at); return `<span class="lib-wt small muted">in ${t ? `<a class="linkish" href="#ticket/${esc(encodeURIComponent(at))}" title="${esc(t.title)}">${esc(at)}</a>` : esc(at)}</span>`; };
   const forOf = (refs) => (refs?.length ? `<span class="lib-for">for ${refs.map(forRef).join(', ')}</span>` : '');
   // a card: its head built in place (cardHead would put the trailing items in its grow span: kind icon, title,
   // badges, a preview's Copy link, ↗, ⋯), the thumbnail's box (an anchor opening what the title opens;
@@ -6400,7 +6405,7 @@ function renderLibrary(lib) {
     // the landed row gives the publish state, the shown row (the newest draft, else the landed) the rest
     const ps = x.landed && !x.landed.error ? publicState(x.landed, PUBLIC, me) : null;
     const badges = [
-      x.art && x.art.at !== 'main' ? `<span class="badge amber">draft</span><span class="small muted">in ${linkify(x.art.at)}</span>` : '',
+      x.art && x.art.at !== 'main' ? `<span class="badge amber">draft</span>${wtOf(x.art.at)}` : '',
       ps?.state === 'public' ? '<span class="badge good"><i class="icon-globe" aria-hidden="true"></i>Public</span>' : ps?.state === 'published' ? '<span class="badge">published</span>' : ps?.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : '',
       x.pstate ? PV_BADGE[x.pstate.state] : '',
       x.error ? '<span class="badge high">broken</span>' : '',
