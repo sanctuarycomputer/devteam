@@ -249,12 +249,14 @@
 
   // What the page holds: the slug, the response's session and rev, the document drawn, and the page
   // shown. Editing (kit-662) keeps two copies: `base`, the document as the server has applied it, and
-  // `pending`, the page's own edits not yet acked ({ ops, seq }, seq null until sent), in order; `doc`
-  // is base with pending applied over it, what is drawn. `saved` is the last `saved` rev; `locked` is
-  // null, 'view' (refused as a View person) or 'closed' (landed or removed): no more edits either way.
+  // `pending`, the page's own edits not yet acked ({ ops, seq, kind, entry }, seq null until sent), in
+  // order; `doc` is base with pending applied over it, what is drawn. `kept` (kit-668) holds the page's
+  // own edits acked but not yet saved, each with the `rev` of its ack and the socket's `session` then:
+  // a new session resends them. `saved` is the last `saved` rev; `locked` is null, 'view' (refused as a
+  // View person) or 'closed' (landed or removed): no more edits either way.
   const state = {
     slug: null, session: null, rev: null, doc: null, repo: null, pageId: null, sel: null,
-    base: null, pending: [], saved: null, locked: null, paused: false, closedText: null,
+    base: null, pending: [], kept: [], saved: null, locked: null, paused: false, closedText: null,
     // Change in (spec §3): { comp, name }, the variant a component's nodes are edited in, or null (Base);
     // placing: the component Place instance adds an instance of at the next click, or null
     variantMode: null, placing: null,
@@ -1379,6 +1381,7 @@
   const NOT_VALID = "That change wasn't valid, so it wasn't kept.";
   const SAY = {
     tooBig: 'That change is too big to send.',
+    notSaved: 'Some of your edits may not have been saved.',
     instancesFirst: "Delete this component's instances first.",
   };
   const BANNER = {
@@ -1387,6 +1390,7 @@
     removed: 'This canvas was closed for editing.',
     down: 'Reconnecting… your edits are kept here.',
   };
+  const KEPT_MAX = 2000; // kept edits at most (canvas@1 refusedMemory's bound); the oldest go past it
   const RATE = 20; // edits sent a second at most (canvas@1 §7 allows 30 messages, pongs included)
   const OPS_BYTES = 65536; // an edit's ops as JSON (canvas@1 §7 editOpsBytes)
 
@@ -1618,14 +1622,17 @@
     state.rev = d.rev;
     state.session = own(b, 'session') && typeof b.session === 'string' ? b.session : null;
     state.repo = b.repo;
+    sock.highest = Math.max(sock.highest, d.rev);
     $('tools').hidden = state.session === null; // main's copy is watched, never edited: no tools
   }
-  // For tests and the bar: data-live, data-rev (base's), data-pending (its count) and data-saved.
+  // For tests and the bar: data-live, data-rev (base's), data-pending and data-kept (their counts) and
+  // data-saved.
   function syncBody() {
     const b = document.body.dataset;
     b.live = sock.live ? 'on' : 'off';
     b.rev = state.base ? String(state.base.rev) : '';
     b.pending = String(state.pending.length);
+    b.kept = String(state.kept.length);
     b.saved = state.saved === null ? '' : String(state.saved);
   }
   // Draw again from the two copies: the shown page, its layers, the selection and the properties (the
@@ -1699,7 +1706,7 @@
     const last = state.pending[state.pending.length - 1];
     const oneSet = (o) => o.length === 1 && isObj(o[0]) && o[0].op === 'set';
     if (last && last.seq === null && oneSet(last.ops) && oneSet(ops) && last.ops[0].id === ops[0].id && last.ops[0].prop === ops[0].prop) last.ops = ops;
-    else state.pending.push({ ops, seq: null });
+    else state.pending.push({ ops, seq: null, kind: 'plain', entry: null });
     redraw();
     pump();
     return true;
@@ -2776,10 +2783,13 @@
   // tries: reconnects since the last welcome; cursor: pending[cursor] is the next edit to send on this
   // socket; sentAt: when the edits of the last second went; seq: the last seq given; fetching: the
   // document being fetched again, the ops that arrive meanwhile waiting in held; stale: fetch at the next
-  // welcome whatever it says; again: fetch once more when this fetch ends.
+  // welcome whatever it says; again: fetch once more when this fetch ends. kit-668: session: the session
+  // the socket is on now (every welcome's and reload's; state.session is base's); highest: the highest
+  // rev seen in it; epoch: counts reloads, so a fetch asked for before one is thrown away; lowered: a
+  // welcome on base's session came at a rev below the highest seen (the edits above it are gone).
   const sock = {
     ws: null, live: false, down: false, ended: false, tries: 0, cursor: 0, sentAt: [], pumpTimer: null, seq: 0,
-    fetching: false, held: [], stale: false, again: false,
+    fetching: false, held: [], stale: false, again: false, session: null, highest: 0, epoch: 0, lowered: false,
   };
   function connect() {
     if (sock.ended || sock.ws) return;
@@ -2841,32 +2851,42 @@
     try { m = JSON.parse(data); } catch { return; }
     if (!isObj(m) || typeof m.t !== 'string' || !state.base) return;
     if (m.t === 'welcome') welcome(m);
-    else if (m.t === 'ops') { if (Number.isSafeInteger(m.rev)) ops(m); }
+    else if (m.t === 'ops') { if (Number.isSafeInteger(m.rev)) { m.via = sock.session; ops(m); } }
     else if (m.t === 'refused') refused(m);
-    else if (m.t === 'saved') { if (Number.isSafeInteger(m.rev)) { state.saved = m.rev; syncBody(); } }
+    else if (m.t === 'saved') { if (Number.isSafeInteger(m.rev)) saved(m); }
     else if (m.t === 'ping') send({ t: 'pong' });
     else if (m.t === 'paused') { state.paused = true; showBanner(); }
     else if (m.t === 'resumed') { state.paused = false; showBanner(); }
     else if (m.t === 'closed') lock('closed', m.why === 'landed' ? BANNER.landed : BANNER.removed);
     else if (m.t === 'reload') {
-      // the document replaced whole: taken again over HTTP with its session; the old session's unacked
-      // edits go with it (kit-668 adds the resend)
-      dropPending(() => true);
+      // the document replaced whole, a new session on this socket: the frames held from before it are
+      // the old session's (their acks no longer count, so those edits stay pending and are resent), and
+      // the document is fetched again; a fetch already running is superseded (its answer thrown away)
+      if (typeof m.session !== 'string') return;
+      sock.session = m.session;
+      sock.held = [];
+      sock.epoch += 1;
       refetch();
     }
     // any other kind is ignored
   }
   // welcome: on the session loaded and at base's rev, send again what was sent and not acked, then the
-  // rest; on any other (a new session, or edits made while away, which the socket doesn't replay), fetch
-  // the document first.
+  // rest; on any other (a new session, a rev below the highest seen, or edits made while away, which the
+  // socket doesn't replay), fetch the document first (the fetch then resends kept on a new session).
   function welcome(m) {
+    sock.session = m.session;
+    if (m.session === state.session && Number.isSafeInteger(m.rev) && m.rev < sock.highest) {
+      sock.lowered = true;
+      sock.held = []; // their revs are gone
+    }
+    if (Number.isSafeInteger(m.rev)) sock.highest = Math.max(sock.highest, m.rev);
     sock.live = true;
     sock.down = false;
     sock.tries = 0;
     sock.cursor = 0;
     showBanner();
     syncBody();
-    if (!sock.stale && m.session === state.session && m.rev === state.base.rev) pump();
+    if (!sock.stale && !sock.lowered && m.session === state.session && m.rev === state.base.rev) pump();
     else refetch();
   }
   // ops: applied to base when it is the next rev (dropped at or below base's rev; one missed fetches
@@ -2879,28 +2899,58 @@
   }
   function takeOps(m) {
     if (m.rev > state.base.rev + 1) { sock.held.push(m); refetch(); return; }
+    if (m.via === sock.session) sock.highest = Math.max(sock.highest, m.rev);
     if (m.rev === state.base.rev + 1) {
       applyOps(state.base, m.ops);
       state.base.rev = m.rev;
     }
     const ack = m.ack;
-    if (isObj(ack) && ack.client === CLIENT && Number.isSafeInteger(ack.seq)) dropPending((e) => e.seq !== null && e.seq <= ack.seq);
+    if (isObj(ack) && ack.client === CLIENT && Number.isSafeInteger(ack.seq)) {
+      const acked = [];
+      dropPending((e) => { const hit = e.seq !== null && e.seq <= ack.seq; if (hit) acked.push(e); return hit; });
+      for (const e of acked) { e.rev = m.rev; e.session = m.via; state.kept.push(e); }
+      if (state.kept.length > KEPT_MAX) {
+        state.kept.splice(0, state.kept.length - KEPT_MAX);
+        say(SAY.notSaved);
+      }
+    }
   }
-  // refused, for this page: that edit dropped (so undone on screen), and why said in plain words.
+  // saved: the socket's session's kept edits at or below its rev are on disk; another session's stay.
+  function saved(m) {
+    state.saved = m.rev;
+    state.kept = state.kept.filter((e) => e.session !== sock.session || e.rev > m.rev);
+    syncBody();
+  }
+  // A refused edit's undo entry goes with it (kit-668 §3; no undo entries yet).
+  function dropEntryOf() {}
+  // refused, for this page: that edit dropped (from pending, or kept should a resent one be refused) and
+  // why said in plain words; then the document fetched again (canvas@1 §5), the other pending edits
+  // drawn over it and sent after it.
   function refused(m) {
     if (m.client !== CLIENT || !Number.isSafeInteger(m.seq)) return;
-    dropPending((e) => e.seq === m.seq);
+    const gone = [];
+    dropPending((e) => { const hit = e.seq === m.seq; if (hit) gone.push(e); return hit; });
+    state.kept = state.kept.filter((e) => { const hit = e.seq === m.seq; if (hit) gone.push(e); return !hit; });
+    for (const e of gone) dropEntryOf(e);
     const why = typeof m.why === 'string' && own(REFUSED, m.why) ? m.why : null;
     say(why === null ? NOT_VALID : REFUSED[why]);
     if (why === 'view') lock('view');
     redraw();
+    refetch();
   }
+  const bySeq = (a, b) => a.seq - b.seq;
   // The document fetched again as base (its session too); the ops held meanwhile applied after it, in
-  // order, those above its rev. A fetch that fails closes the socket, and the next welcome fetches.
+  // order, those above its rev. A fetch that fails closes the socket, and the next welcome fetches. When
+  // the fetched session isn't the one base had (a restart or a replace), or a welcome came at a lower
+  // rev, kept goes back in front of pending, in seq order; pending is then sent from the start either way
+  // (a same-session resend is re-acked). A fetch a reload came during is thrown away, failed or not, and
+  // asked again at once.
   async function refetch() {
     if (sock.fetching) { sock.again = true; return; }
     sock.fetching = true;
     sock.again = false;
+    const epoch = sock.epoch;
+    const before = state.session;
     let b = null;
     try {
       const res = await fetch(`/api/canvas/doc?slug=${encodeURIComponent(state.slug)}`, { credentials: 'same-origin', cache: 'no-store' });
@@ -2910,6 +2960,7 @@
       }
     } catch { b = null; }
     sock.fetching = false;
+    if (epoch !== sock.epoch) { refetch(); return; }
     if (b === null) {
       sock.held = [];
       sock.stale = true;
@@ -2918,7 +2969,16 @@
     }
     sock.stale = false;
     takeDoc(b);
+    if (state.session !== before || sock.lowered) {
+      state.pending = [...state.kept.sort(bySeq), ...state.pending];
+      state.kept = [];
+      sock.lowered = false;
+      sock.highest = state.base.rev;
+    }
+    sock.cursor = 0;
+    // frames of another session than the one fetched are dropped: their acks don't count there
     for (const m of sock.held.splice(0)) {
+      if (m.via !== state.session) continue;
       if (sock.fetching) sock.held.push(m); else takeOps(m);
     }
     if (sock.again && !sock.fetching) refetch();
