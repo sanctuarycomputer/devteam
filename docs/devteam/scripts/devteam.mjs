@@ -21293,7 +21293,11 @@ async function cmdDashboard() {
     });
   };
   refreshHello();
-  every(refreshHello, 30000);
+  // How often the dashboard looks again through the hello child (kit-595: 30 s). DEVTEAM_HELLO_MS is for
+  // tests only, not a setting: test/lib/pane-question-fixture.mjs sets 1000, so a question change shows
+  // in a second (kit-223). Anything that isn't a number of at least 0 is the default.
+  const HELLO_MS = ((n) => (process.env.DEVTEAM_HELLO_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 30000))(Number(process.env.DEVTEAM_HELLO_MS));
+  every(refreshHello, HELLO_MS);
   const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.

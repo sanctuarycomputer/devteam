@@ -72,7 +72,7 @@ const acts = (F) => logLines(F).filter((l) => l.type === 'act' && l.class === 'p
 async function dash(later, F, pane, env = {}) {
   const port = await freePort();
   const B = `http://127.0.0.1:${port}`;
-  const d = startDashboard(F.old, F.env({ DEVTEAM_SUPERVISOR: pane.target, ...env }), ['--port', String(port)]);
+  const d = startDashboard(F.old, F.env({ DEVTEAM_SUPERVISOR: pane.target, DEVTEAM_HELLO_MS: '1000', ...env }), ['--port', String(port)]);
   later(() => d.stop());
   await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
   const own = { origin: B, 'sec-fetch-site': 'same-origin' };
