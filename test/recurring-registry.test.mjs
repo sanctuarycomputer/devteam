@@ -685,6 +685,45 @@ test('A5: a recurring-edit answer counts only as the owner\'s own pick: answer -
   } finally { T.done(); }
 });
 
+test('A5: a recurring-edit answer is never recorded from chat, and from a turn only when the owner\'s words there start with Yes; such a line already in the log lands nothing (final-11b F1)', () => {
+  const T = setup('chat-turn');
+  try {
+    const plant = (q, fields) => fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: q, at: new Date().toISOString(), by: 'owner', answer: 'Yes', ...fields })}\n`);
+    // H1: the owner said No in chat; the supervisor records Yes from chat: refused
+    const q = T.asked({ recurring: { aa: check() } });
+    refused(T.run(['answer', q, 'Yes', '--from-chat', '--said', 'No, never add it']), new RegExp(`${q} is a recurring-edit question: only the owner's own Yes approves a job change, never words recorded from chat`));
+    // a chat line written some other way (an older kit, a hand edit) is not the owner's own Yes
+    const other = QID.exec(T.run(['ask', '--question', 'Tidy the branches?', '--recommendation', 'Yes']).out)[0];
+    T.ok(['answer', other, 'Yes'], {});
+    plant(q, { channel: 'chat', said: 'No, never add it' });
+    assert.equal(json(T.ok(['questions', '--id', q, '--json']))[0].matched, true, 'the view takes the line');
+    T.jobsChore('chat', () => ({ aa: check() }));
+    refused(T.merge('chat', ['--approved', q]), new RegExp(`${q} can't approve a job change: answered from chat`));
+    assert.equal(Object.hasOwn(T.mainJobs(), 'aa'), false, 'no job landed');
+    // H6: in a thread, the owner says No; Yes recorded from that turn is refused, and so is a turn
+    // whose words don't start with the label Yes, as it is written
+    const bb = check({ title: 'bb job', run: 'echo bb' });
+    const tid = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const q2 = QID.exec(T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', 'Add bb?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { bb } })]).out)[0];
+    for (const words of ['No, never add it', 'Yesterday I said no', 'yes, add it', 'Sure. Yes, add it']) {
+      const u = T.ok(['thread', 'say', tid, words], {}).split('\n')[0];
+      refused(T.run(['answer', q2, 'Yes', '--from-turn', u]), new RegExp(`--from-turn ${u}: ${q2} is a recurring-edit question, and the owner's words there don't start with Yes`));
+    }
+    assert.equal(json(T.ok(['questions', '--id', q2, '--json']))[0].status, 'open');
+    // a turn line of that kind already in the log is not the owner's own Yes either
+    const q3 = T.asked({ recurring: { cc: check({ title: 'cc job', run: 'echo cc' }) } });
+    plant(q3, { channel: 'thread', said: 'No, never add it', turn: 'u-20990101-000000001-owner' });
+    T.jobsChore('turn-no', () => ({ cc: check({ title: 'cc job', run: 'echo cc' }) }));
+    refused(T.merge('turn-no', ['--approved', q3]), new RegExp(`${q3} can't approve a job change: answered from u-20990101-000000001-owner, whose words don't start with Yes`));
+    // the owner's "Yes, add it" in the thread is accepted, and the job lands
+    const yes = T.ok(['thread', 'say', tid, 'Yes, add it'], {}).split('\n')[0];
+    passes(T.run(['answer', q2, 'Yes', '--from-turn', yes]));
+    T.jobsChore('turn', () => ({ bb }));
+    passes(T.merge('turn', ['--approved', q2]));
+    assert.deepEqual(T.mainJobs(), { bb }, 'the job the owner said Yes to landed, and nothing else');
+  } finally { T.done(); }
+});
+
 test('A12: recurring apply writes exactly the answered change into the chore worktree\'s file, and nothing else', () => {
   const T = setup('apply');
   try {

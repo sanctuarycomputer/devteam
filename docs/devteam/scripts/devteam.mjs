@@ -8405,6 +8405,9 @@ function cmdAnswer() {
   const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
   const files = filesFlag();
   const v = openQuestion(id, ['open', 'defaulted']);
+  // a job change takes only the owner's own Yes: never words the supervisor records from chat, and
+  // from a turn only when the owner's words there start with it (final-11b F1)
+  if (fromChat && v.class === 'recurring-edit') die(`${id} is a recurring-edit question: only the owner's own Yes approves a job change, never words recorded from chat; the owner answers it in the card, or says Yes in its thread (answer --from-turn)`);
   if (pickFlag) {
     const own = v.kind === 'review' ? 'a review' : v.kind === 'goal-approval' ? 'a goal approval' : (v.secrets ?? []).length ? 'a secrets question' : null;
     if (own) die(`answer --${pickFlag}: ${id} is ${own}, answered its own way, not by a pick or words alone`);
@@ -8415,6 +8418,7 @@ function cmdAnswer() {
   if (inWords && v.class === 'goal-met') die(`${id} is a goal-met question: pick Yes or No (answer ${id} ["<words>"] --choice Yes|No)`);
   if (fromTurn && v.kind === 'review') die(`${id} is a review: its answer is the owner's result, which a turn can't carry`);
   const turn = fromTurn ? turnAnswer('answer', v) : null;
+  if (turn && v.class === 'recurring-edit' && !recurringRegistry.saysYes(turn.said)) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner's words there don't start with Yes ("${String(turn.said).slice(0, 80)}"): only the owner's own Yes approves a job change; ask back in its thread`);
   // a credential question has two answers: the token posted, or don't use this sensor
   if (v.sensor && !/^don['’]?t use this sensor\s*$/i.test(restWords.join(' ').trim())) die(`${id} asks for a sensor's token: post it (dashboard, or devteam.mjs secret post ${id}), or answer "Don't use this sensor". Any other answer would close it with neither`);
   if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
@@ -24162,7 +24166,12 @@ const recurringRegistry = Object.freeze({
   // the question can approve its change: answered by the owner, as recommended, by their own pick or
   // label (agreed_by_owner; never a reading of words, whatever line wrote it:
   // d-20261120-195829274-supervisor), not landed, not superseded
-  live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && v.agreed_by_owner === true && !v.reading && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
+  live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && v.agreed_by_owner === true && !v.reading && !recurringRegistry.notOwnYes(v) && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
+  // words that start with the label Yes, as it is written, as a whole word
+  saysYes: (said) => /^Yes(?![\p{L}\p{N}])/u.test(String(said ?? '').trimStart()),
+  // why an answer line is not the owner's own Yes, whatever it says (final-11b F1): one recorded
+  // from chat, or from a turn whose words don't start with Yes; else null
+  notOwnYes: (v) => (v?.channel === 'chat' ? `answered from chat ("${String(v.said ?? '').slice(0, 80)}"), which approves no job change` : v?.channel === 'thread' && !recurringRegistry.saysYes(v.said) ? `answered from ${v.turn ?? 'a turn'}, whose words don't start with Yes ("${String(v.said ?? '').slice(0, 80)}")` : null),
   // The questions that block another question for their names: open ones, and live ones
   // (registering an addition or edit, stopping when every value is null), as { qid, status, change }.
   pending() {
@@ -24290,7 +24299,8 @@ function recurringBindingFails(main, landed, approved) {
   if (done) fails.push(`${approved} already landed (${done.id})`);
   else if (!R.live(v)) {
     const later = R.superseded(v);
-    fails.push(`${approved} can't approve a job change: ${later ? `superseded by ${later.qid}, asked later about ${later.name}` : `${v.status === 'answered' ? `answered "${String(v.answer ?? '').slice(0, 80)}"` : `it is ${v.status}`}, not Yes`}`);
+    const notOwn = v.status === 'answered' ? R.notOwnYes(v) : null;
+    fails.push(`${approved} can't approve a job change: ${later ? `superseded by ${later.qid}, asked later about ${later.name}` : notOwn ? `${notOwn}: only the owner's own Yes does` : `${v.status === 'answered' ? `answered "${String(v.answer ?? '').slice(0, 80)}"` : `it is ${v.status}`}, not Yes`}`);
   }
   const shown = R.shown(v);
   if (!shown) return [...fails, `${approved} showed no job change: ask again with --change`];
