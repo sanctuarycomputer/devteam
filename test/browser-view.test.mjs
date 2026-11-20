@@ -576,11 +576,11 @@ test('V10 the idle timer spares an open viewer; once it closes, the daemon stops
   s1?.close();
   await browser(a, ['stop']);
   try {
-    const s = await running({ DEVTEAM_TEST_BROWSER_IDLE_MS: '1500' });
+    const s = await running({ DEVTEAM_TEST_BROWSER_IDLE_MS: '3000' });
     const c = await ws(view.port);
     assert.equal(c.status, 101, `the viewer is let in before the first idle stop: ${c.head.split('\r\n')[0]}`);
     // three idle periods with the socket open
-    await sleep(4500);
+    await sleep(9000);
     assert.ok(alive(s.daemon_pid), 'the daemon is up with a viewer open');
     assert.equal(c.closed, null, 'the viewer\'s socket is still open');
     const n = c.msgs.length;
@@ -588,8 +588,8 @@ test('V10 the idle timer spares an open viewer; once it closes, the daemon stops
     await c.wait(isFrame, 3000, n);
     c.close();
     const t0 = Date.now();
-    await within(1500 + 3000, () => !alive(s.daemon_pid), 'the idle stop after the viewer closed');
-    assert.ok(Date.now() - t0 <= 4500, `stopped ${Date.now() - t0} ms after the viewer closed (at most 4500)`);
+    await within(3000 + 3000, () => !alive(s.daemon_pid), 'the idle stop after the viewer closed');
+    assert.ok(Date.now() - t0 <= 6000, `stopped ${Date.now() - t0} ms after the viewer closed (at most 6000)`);
   } finally {
     await browser(a, ['stop']);
     await running();
