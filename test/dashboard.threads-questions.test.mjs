@@ -129,16 +129,12 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   await p.ev(`(() => { if (window.__keys) return; window.__keys = []; addEventListener('keydown', (e) => { const { key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat } = e; window.__keys.push({ key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat }); }, true); })()`);
   // the page at #goals, the card closed and T's pin drawn, as subtest 19 leaves it (:3643's wait)
   await soon(`!!document.querySelector('${goalSel}') && !!document.querySelector('[data-tl-pin="${T}"]')`, 'the goal and its pin');
-  // what subtest 20 leaves: T's card open from its pin (:3562-3563), and its question (:3564) answered
-  // Yes, here by the owner's command in place of the page's picks and Answer (:3568-3577), as the page
-  // then has it (:3578-3587's waits: answered, the Inbox copy gone or done, the thread's copy answered)
-  await click(`[data-tl-pin="${T}"]`);
-  await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
-  const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
-  await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}')`, 'both copies');
-  F.owner(['answer', Q, 'Yes']);
-  assert.equal(JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status, 'answered');
-  await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered' && !document.getElementById('q-${Q}')?.matches(':not(.done)') && document.getElementById('tl-card').dataset.key === '${T}'`, 'its question answered on the page');
+  // Nothing of subtest 20's (:3561-3588: T's card opened, its question Q asked and answered) is built:
+  // subtest 21 (:3590-3655) reads none of it. It names no Q; it reads only its own Qa/Qb cards in the
+  // Inbox (:3597, :3599, :3610-3619); asks() (:3593) counts which-choice steps, none of which an answered
+  // Q leaves; posts() is relative to its own `sent` (:3598); it sets the hash itself (:3596, :3642); it
+  // reads no toast; and T's card it opens itself by the pin (:3644-3645), whose press opens T whether
+  // or not a card was open (tlOpen, from the pin's click, sets TL.open = T).
 
   await t.test("Shift+Enter in a question box presses its Answer: posted once, with no which-choice step, in the Inbox and in the thread", async () => {
     const qOf = (id) => JSON.parse(F.owner(['questions', '--id', id, '--json']))[0];
