@@ -138,12 +138,13 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     T.g(['push', '-q', 'origin', 'chore-stale'], stale);
     passes(T.dry('stale', qd));
     // main reorders the jobs' text, the same value, with no answer needed: the text merge would keep
-    // a job this branch stops, so the settings file must be main's byte for byte (task-2-r3 F1-1a)
+    // a job this branch stops: what lands is read from that merge, which leaves ff as main has it
+    // (task-2-r3 F1-1a; final-1 F1)
     T.onMain((j) => { j.recurring = { ...j.recurring, ee: check({ every: '12h' }), ff: chore({ every: '1d' }) }; });
     const qf = T.yes({ recurring: { ff: null } });
     const late = T.jobsChore('stop-ff', (j) => { delete j.recurring.ff; });
     T.onMain((j) => { const { ff, ...rest } = j.recurring; j.recurring = { ff, ...rest }; });
-    refused(T.dry('stop-ff', qf), /the merged settings \(this branch merged onto main as it is now\) differ from the branch's: merge main into it, then check again/);
+    refused(T.dry('stop-ff', qf), /recurring\.ff: q-[0-9]+-[0-9]+-supervisor showed a stop, and this PR leaves it as main has it/);
     T.g(['fetch', '-q', 'origin'], late);
     T.g(['merge', '-q', '--no-edit', 'origin/main'], late);
     // the merge keeps main's moved ff, so the branch stops it again on top
@@ -179,7 +180,8 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     assert.equal(T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cc'], T.old).split('\n').length, 2, 'two merge bases');
     const mb = T.g(['merge-base', 'origin/main', 'origin/chore-cc'], T.old);
     assert.equal(T.g(['rev-parse', `${mb}:docs/devteam/project/settings.md`], T.old), T.g(['rev-parse', 'origin/main:docs/devteam/project/settings.md'], T.old), 'the named base has main\'s settings blob');
-    refused(T.dry('cc', qe), /the merged settings \(this branch merged onto main as it is now\) differ from the branch's: merge main into it, then check again/);
+    // the bases' spans disagree, so the jobs are read from merge-tree: it drops the stop, and ee lands as main has it
+    refused(T.dry('cc', qe), /recurring\.ee: q-[0-9]+-[0-9]+-supervisor showed a stop, and this PR leaves it as main has it/);
   } finally { T.done(); }
 });
 
