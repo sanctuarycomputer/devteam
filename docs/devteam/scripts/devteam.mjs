@@ -23935,7 +23935,8 @@ const recurringRegistry = Object.freeze({
   // onto it). Under every method the head's settings.md must be a regular file (mode 100644): blob
   // compares ignore the mode (final-7 F2). Four cases are cleared:
   // - the head's settings.md blob is M's, both present: the same file on both sides lands as it is,
-  //   and the jobs are main's (no job change). Under rebase only when M..sha has no merge commit
+  //   and the jobs are main's (no job change). Under merge and squash only when the file is also
+  //   present at every merge base (final-8b R1). Under rebase only when M..sha has no merge commit
   //   and no commit touching the file (final-7 F1, final-7b B7-1): a rebase drops merges and
   //   patches already upstream, so an equal final file says nothing about where the replay ends;
   // - M is an ancestor of the head: a merge or squash lands the head's tree, so the head's file
@@ -23992,7 +23993,21 @@ const recurringRegistry = Object.freeze({
         if (!merges.ok || !touch.ok) return lands(null, `settings.md: git rev-list ${M.slice(0, 12)}..${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
         return merges.out.trim() || touch.out.trim() ? lands(null, rebaseMsg) : lands(now);
       }
-      if (atMain && atHead && atMain === atHead) return lands(now);
+      // the merge bases and settings.md's blob at each, read once; a failed read gives no bases
+      let basesRead;
+      const basesAt = () => {
+        if (!basesRead) { const mb = run(['merge-base', '--all', M, sha]); const bases = mb.ok ? mb.out.split('\n').filter(Boolean) : []; basesRead = { bases, atBases: bases.map(blob) }; }
+        return basesRead;
+      };
+      // the equal case under merge and squash also needs the file at every merge base
+      // (d-20261120-123629470; final-8b R1): a path missing at a base can be paired by rename
+      // detection on main's side, so the branch's edit of the old path would land through it. A
+      // path present at every base and on both sides is added on neither, so no rename targets it.
+      if (atMain && atHead && atMain === atHead) {
+        const { bases, atBases } = basesAt();
+        if (late.length) return lands(null);
+        if (bases.length && atBases.every(Boolean)) return lands(now);
+      }
       const anc = run(['merge-base', '--is-ancestor', M, sha]);
       if (late.length) return lands(null);
       if (anc.status === 0) return lands(jobsAt(sha));
@@ -24001,9 +24016,7 @@ const recurringRegistry = Object.freeze({
       // at tree level (no rename, the path is on every side; no text merge, one side is unchanged),
       // and a merge of main with -s ours is caught by the blobs. The jobs are main's.
       if (anc.status === 1) {
-        const mb = run(['merge-base', '--all', M, sha]);
-        const bases = mb.ok ? mb.out.split('\n').filter(Boolean) : [];
-        const atBases = bases.map(blob);
+        const { bases, atBases } = basesAt();
         if (late.length) return lands(null);
         if (atMain && atHead && bases.length && atBases.every((b) => b && b === atHead)) return lands(now);
         // main left the file alone (merge and squash; d-20261120-085914614): present at every base,

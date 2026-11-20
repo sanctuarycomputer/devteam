@@ -1468,6 +1468,21 @@ test('RV7-SYMLINK: the head turns settings.md into a symlink whose target text i
   } finally { T.done(); }
 });
 
+test('RV8-EXEC: the head commits settings.md as mode 100755 with an answered job: refused as not a regular file (final-8b R2)', () => {
+  const T = setup('rv8exec');
+  try {
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job' }) }; });
+    const zz = check({ title: 'Z job', run: 'echo zz' });
+    const wt = T.jobsChore('ex', (j) => { j.recurring.zz = zz; });
+    T.g(['update-index', '--chmod=+x', SETP], wt); T.g(['commit', '-qm', 'x bit'], wt); T.g(['push', '-q', '-f', 'origin', 'chore-ex'], wt);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.match(T.g(['ls-tree', 'origin/chore-ex', '--', SETP], T.old), /^100755 /, 'the head\'s settings.md is mode 100755');
+    const q = T.yes({ recurring: { zz } });
+    refused(T.dry('ex', q), /settings\.md at the head is not a regular file \(mode 100755\)/);
+    refused(T.merge('ex', ['--approved', q]), NOT_REGULAR);
+  } finally { T.done(); }
+});
+
 test('RV7-RENAME-MIRROR: main lacks settings.md at the base and its tip and edits the old path, the branch renames it into settings.md: refused (final-7b B7-4)', () => {
   const T = setup('rv7mir');
   try {
@@ -1487,5 +1502,52 @@ test('RV7-RENAME-MIRROR: main lacks settings.md at the base and its tip and edit
     refused(T.merge('mir'), DIFFERS);
     T.g(['fetch', '-q', 'origin'], T.old);
     assert.throws(() => T.g(['rev-parse', '--verify', '-q', `origin/main:${SETP}`], T.old), 'nothing landed');
+  } finally { T.done(); }
+});
+
+// ---- round 8 (d-20261120-123629470): under merge and squash the equal case also needs
+// settings.md at every merge base ----
+// main moves settings.md aside, a chore is cut that adds settings.md as a byte copy of the old path
+// and adds zz at the old path, and main moves the file back: the head's blob is main's, but git's
+// rename detection carries the old path's edit into settings.md
+const copyBack = (T, how) => {
+  T.onMain((j) => { j.recurring = Object.fromEntries(['aa', 'bb', 'cc', 'dd', 'ee'].map((n) => [n, check({ title: `${n} job`, run: `echo ${n}` })])); if (how !== 'merge') j.merge_method = how; });
+  T.g(['mv', SETP, OLDP], T.old); T.g(['commit', '-qm', 'settings aside'], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+  T.choreBranch('cb', (wt) => { fs.copyFileSync(path.join(wt, OLDP), path.join(wt, SETP)); editAt(wt, OLDP, (j) => { j.recurring.zz = check({ title: 'Z job', run: 'echo zz' }); }); });
+  T.g(['fetch', '-q', 'origin'], T.old); T.g(['reset', '-q', '--hard', 'origin/main'], T.old);
+  T.g(['mv', OLDP, SETP], T.old); T.g(['commit', '-qm', 'settings back'], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+  T.g(['fetch', '-q', 'origin'], T.old);
+  assert.equal(T.g(['rev-parse', `origin/main:${SETP}`], T.old), T.g(['rev-parse', `origin/chore-cb:${SETP}`], T.old), 'the head\'s file is main\'s');
+  const mb = T.g(['merge-base', 'origin/main', 'origin/chore-cb'], T.old);
+  assert.throws(() => T.g(['rev-parse', '--verify', '-q', `${mb}:${SETP}`], T.old), 'the base has no settings.md');
+  const gl = gitLands(T, 'origin/chore-cb');
+  assert.equal(!gl.conflict && Object.hasOwn(gl.jobs, 'zz'), true, 'git\'s merge lands zz');
+};
+
+for (const how of ['merge', 'squash']) {
+  test(`RV8-COPYBACK (${how}): the base lacks settings.md, main moves it back, the chore adds a byte copy and edits the old path: refused, and zz doesn't land (final-8b R1)`, () => {
+    const T = setup(`rv8cb-${how}`);
+    try {
+      copyBack(T, how);
+      refused(T.dry('cb'), DIFFERS);
+      refused(T.merge('cb'), DIFFERS);
+      T.g(['fetch', '-q', 'origin'], T.old);
+      assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'zz'), false, 'zz landed with no answer');
+    } finally { T.done(); }
+  });
+}
+
+test('RV8-COPYBACK-GOV: the copy-back chore with only a governance-edit answer: refused, and zz doesn\'t land (final-8b R1)', () => {
+  const T = setup('rv8cbgov');
+  try {
+    copyBack(T, 'merge');
+    const gr = T.run(['ask', '--class', 'governance-edit', '--question', 'Should I put settings.md back where it was?', '--recommendation', 'Yes']);
+    assert.equal(gr.status, 0, gr.text);
+    const gq = (QID.exec(gr.out) ?? [null])[0];
+    T.answer(gq);
+    refused(T.dry('cb', gq), DIFFERS);
+    refused(T.merge('cb', ['--approved', gq]), DIFFERS);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'zz'), false, 'zz landed under a governance-edit answer');
   } finally { T.done(); }
 });
