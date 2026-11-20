@@ -392,3 +392,39 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
     assert.ok(!(await p.ev("document.getElementById('loop').textContent")).includes('Informed'), 'no Informed card');
   });
 });
+
+// final review F1/F2: record text is data, never markup. A record whose fields hold an <img onerror> draws it as text
+// in every tab's table (an act's class included: actView's default head), and nothing from it runs.
+test('Self Improvement: every table draws record text as text, never as markup', { skip: SKIP, timeout: 300000 }, async (t) => {
+  const F = threadsFixture('loop-hostile');
+  const later = cleanup(t);
+  later(() => F.done());
+  const H = '<img src=x class=hostile onerror=window.__xss=1>';
+  const stamp = (ago) => { const d = new Date(Date.now() - ago); return `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`; };
+  F.hand('supervisor', { type: 'observation', source: H, kind: H, subject: H, detail: H, severity: 2, valence: -1 }, 50000);
+  F.hand('supervisor', { id: `k-${stamp(40000)}-supervisor`, type: 'knowledge', kind: 'lesson', scope: H, statement: H, status: 'accepted', evidence: [] }, 40000);
+  F.hand('supervisor', { id: `p-${stamp(30000)}-supervisor`, type: 'problem', title: H, realized: true, severity: 2, status: 'open' }, 30000);
+  F.sup(['decide', '--class', 'rename-column', '--', H]);
+  F.hand('supervisor', { id: `a-${stamp(20000)}-supervisor`, type: 'act', class: H, what: H, refs: [], reversible: true }, 20000);
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: INIT });
+  const soon = soonIn(p);
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#loop` });
+  await soonIn(p, 120000)('!!DATA && !document.querySelector("main.waiting")', 'the first data drawn');
+  for (const tab of ['observe', 'orient', 'decide', 'act']) {
+    await p.ev(`location.hash = ${JSON.stringify(`#loop?lt=${tab}`)}; void 0`);
+    await soon(`${rowsOf(tab)}.some((tr) => tr.textContent.includes('onerror=window.__xss'))`, `${tab}: the hostile record's text, drawn as text`);
+    await p.ev(FRAMES);
+    assert.equal(await p.ev(`document.querySelectorAll('${BOX[tab]} img.hostile').length`), 0, `${tab}: no element made from record text`);
+  }
+  assert.equal(await p.ev("document.querySelectorAll('img.hostile').length"), 0, 'no element made from record text anywhere on the page');
+  assert.equal(await p.ev('window.__xss ?? null'), null, 'nothing from record text ran');
+});

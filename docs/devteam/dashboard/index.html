@@ -2981,7 +2981,7 @@ function actView(a) {
     case 'new-feature': return { head: 'Started planning a feature you hadn’t asked for', detail: linkify(a.what) };
     case 'priority-change': return { head: 'Changed what gets worked on first', detail: linkify(a.what) };
     case 'release-scope': return { head: 'Moved work to a later release', detail: linkify(a.what) };
-    default: return { head: words(a.class), detail: linkify(a.what) };
+    default: return { head: esc(words(a.class)), detail: linkify(a.what) };
   }
 }
 
