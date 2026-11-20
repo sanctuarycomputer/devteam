@@ -120,8 +120,14 @@ test('link probes: four at a time inside a tick budget, never a prompt, and a pa
   write(path.join(shim, 'git'), `#!/bin/sh\nif [ "$1" = ls-remote ]; then echo "prompt=$GIT_TERMINAL_PROMPT askpass=[$GIT_ASKPASS]" >> "${path.join(F.base, 'lsremote.log')}"; exit 2; fi\nexec "${REAL_GIT}" "$@"\n`);
   fs.chmodSync(path.join(shim, 'git'), 0o755);
   const url = (id, host) => ({ kind: 'url', title: id, url: `https://${host}.test/${id}` });
+  // gh is stubbed to fail: the console repo link below is on GitHub, and the tick reads its open PRs
+  const noGh = path.join(F.base, 'nogh');
+  write(path.join(noGh, 'gh'), '#!/bin/sh\nexit 1\n');
+  fs.chmodSync(path.join(noGh, 'gh'), 0o755);
   const tick = (extra) => {
-    const r = spawnSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), 'observe-metrics'], { cwd: old, env: { ...F.env(SUP), DEVTEAM_URL_PROBE: stub, ...extra }, encoding: 'utf8' });
+    const env = { ...F.env(SUP), DEVTEAM_URL_PROBE: stub, ...extra };
+    env.PATH = `${noGh}${path.delimiter}${env.PATH ?? process.env.PATH}`;
+    const r = spawnSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), 'observe-metrics'], { cwd: old, env, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     return { out: r.stdout, sinceFirst: fs.existsSync(first) ? Date.now() - fs.statSync(first).mtimeMs : null };
   };
