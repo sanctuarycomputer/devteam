@@ -107,4 +107,79 @@ setInterval(() => {}, 1e6);\n`);
 }
 const shown = (pane, text) => until(() => tmuxSh(['capture-pane', '-p', '-t', pane]).stdout.includes(text), `pane ${pane} drawn`);
 
-export { agent, baseEnv, box, code, conversation, dtIn, home, KIT, kitAt, latestRelease, link, machine, nowhere, prompt, repo, REPO, rule, shown, SID, tmp, tmuxSh };
+// ---- from machine.box-pins.test.mjs ----
+const PINS_CLEARED = ['DEVTEAM_IMAGE_HUB', 'DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS', 'DEVTEAM_PINS_NPM', 'DEVTEAM_PINS_PYPI', 'DEVTEAM_PINS_GITHUB', 'DEVTEAM_BOX_BIN', 'GH_TOKEN', 'GITHUB_TOKEN', 'UV_TOOL_DIR'];
+const pinsEnv = (extra = {}) => { const e = { ...baseEnv }; for (const k of PINS_CLEARED) delete e[k]; return { ...e, ...extra }; };
+function fakeBins(name, scripts) {
+  const d = path.join(tmp, name);
+  for (const [f, body] of Object.entries(scripts)) { write(path.join(d, f), `#!/bin/sh\n${body}\n`); fs.chmodSync(path.join(d, f), 0o755); }
+  return d;
+}
+
+// ===== box-pins changed: what a release range changes in what the box image runs (image-changes@1) =====
+// A kit repo made from this checkout's tracked tree (the working tree's copy, so the change under
+// test is in it), tagged v9.1.0; each case is a branch off the tag with one commit, run with that
+// branch's own script, as a release script or the deploy gate runs it from a checkout at --to.
+const SCRIPT = 'docs/devteam/scripts/devteam.mjs';
+const GIT_ID = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+const changedRepo = path.join(tmp, 'changed-kit');
+const cg = (args) => execFileSync('git', args, { cwd: changedRepo, encoding: 'utf8', env: { ...pinsEnv(), ...GIT_ID } });
+let changedBuilt = false;
+function changedKit() {
+  if (changedBuilt) return changedRepo;
+  fs.mkdirSync(changedRepo);
+  cg(['init', '-q', '-b', 'main']);
+  cg(['remote', 'add', 'origin', 'git@github.com:sanctuarycomputer/devteam.git']);
+  for (const f of execFileSync('git', ['ls-files', '-z'], { cwd: REPO, encoding: 'utf8' }).split('\0').filter(Boolean)) {
+    const from = path.join(REPO, f), to = path.join(changedRepo, f);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    const st = fs.lstatSync(from, { throwIfNoEntry: false });
+    if (!st) continue; // deleted in the working tree, not yet committed
+    if (st.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(from), to);
+    else fs.copyFileSync(from, to), fs.chmodSync(to, st.mode & 0o777);
+  }
+  cg(['add', '-A']);
+  cg(['commit', '-qm', 'v9.1.0']);
+  cg(['tag', 'v9.1.0']);
+  changedBuilt = true;
+  return changedRepo;
+}
+// edits: { path: (text) => text | null (delete) }, or a function given the repo for anything else
+function onBranch(name, edits, from = 'v9.1.0') {
+  changedKit();
+  cg(['checkout', '-q', '-B', name, from]);
+  if (typeof edits === 'function') edits(changedRepo);
+  else for (const [f, fn] of Object.entries(edits)) {
+    const p = path.join(changedRepo, f);
+    const t = fn(fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '');
+    if (t === null) fs.rmSync(p); else write(p, t);
+  }
+  cg(['add', '-A']);
+  cg(['commit', '-qm', name]);
+  return cg(['rev-parse', 'HEAD']).trim();
+}
+// one edit to the script: text after an anchor that must occur exactly once
+const after = (anchor, add) => (t) => { assert.equal(t.split(anchor).length, 2, `anchor ${anchor} once`); return t.replace(anchor, () => `${anchor}${add}`); };
+const changed = (args, env = {}) => spawnSync(process.execPath, [path.join(changedRepo, SCRIPT), 'box-pins', 'changed', ...args], { cwd: changedRepo, encoding: 'utf8', env: pinsEnv(env), timeout: 600000 });
+let smokeRuns = 0;
+// the next trace number, for a test that names its own trace (an importer can't bump smokeRuns itself)
+const nextSmokeRun = () => ++smokeRuns;
+function smokeRun(args, extra = {}) {
+  const tmpd = fs.realpathSync(fs.mkdtempSync(path.join(tmp, 'smoke-tmp-')));
+  const trace = path.join(tmp, `smoke-trace-${++smokeRuns}.jsonl`);
+  const r = changed([...args, '--smoke'], { TMPDIR: tmpd, DEVTEAM_SMOKE_TRACE: trace, ...extra });
+  const lines = fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+  return { r, tmpd, trace: lines };
+}
+const testHome = pinsEnv().HOME;
+const lsOr = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
+function leftNothing(tmpd) {
+  assert.deepEqual(fs.readdirSync(tmpd), [], 'the temporary folder, its worktree and tmux folder are gone');
+  assert.deepEqual(lsOr(path.join(changedRepo, '.git', 'worktrees')), [], 'git\'s record of the smoke worktree is removed');
+  assert.equal(cg(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
+  assert.equal(cg(['status', '--porcelain']), '', 'nothing written in the checkout');
+  const dot = lsOr(path.join(testHome, '.devteam'));
+  assert.deepEqual(dot.filter((n) => n.startsWith('repos-') || n.startsWith('status-last-')), [], 'nothing under the test HOME\'s ~/.devteam');
+}
+
+export { after, agent, baseEnv, box, cg, changed, changedKit, changedRepo, code, conversation, dtIn, fakeBins, home, KIT, kitAt, latestRelease, leftNothing, link, lsOr, machine, nextSmokeRun, nowhere, onBranch, pinsEnv, prompt, repo, REPO, rule, SCRIPT, shown, SID, smokeRun, testHome, tmp, tmuxSh };
