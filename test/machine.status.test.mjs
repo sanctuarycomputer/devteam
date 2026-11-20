@@ -218,6 +218,73 @@ test('status says the machine\'s own CPU and memory caps, not the host\'s', () =
   assert.match(machine(['machine', 'status'], { ...counts, DEVTEAM_MEMINFO: meminfo }).stdout, /^machine: disk .*; memory 3\.0 GB free of 8\.0 GB; cpus /m);
 });
 
+test('status lists the operator\'s own open kit PRs, and which need it now', () => {
+  const notes = path.join(home, 'operator/NOTES.md');
+  fs.mkdirSync(path.dirname(notes), { recursive: true });
+  if (!fs.existsSync(notes)) fs.writeFileSync(notes, '');
+  const stub = fs.mkdtempSync(path.join(tmp, 'gh-prs-'));
+  const prs = path.join(stub, 'prs.json');
+  const asked = path.join(stub, 'asked');
+  write(path.join(stub, 'gh'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(asked)}\n[ "$1 $2" = "pr list" ] || exit 0\n[ -f ${JSON.stringify(prs)} ] || exit 1\ncat ${JSON.stringify(prs)}\n`);
+  fs.chmodSync(path.join(stub, 'gh'), 0o755);
+  const status = (args = ['--notes', notes]) => machine(['machine', 'status', '--in', path.join(tmp, 'no-repos'), ...args], { PATH: `${stub}${path.delimiter}${baseEnv.PATH}` });
+  const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
+  const head = 'a'.repeat(40);
+  const old = 'b'.repeat(40);
+  const verdict = (v, sha, h) => ({ body: `# Review\n\n| Id | Finding |\n\nVerdict: ${v} ${sha}\n`, createdAt: ago(h) });
+  const mark = 'Fixes the thing.\n\nOpened by the box operator.\n';
+  const pr = (number, headRefName, more = {}) => ({ number, headRefName, body: mark, isDraft: false, headRefOid: head, createdAt: ago(30), latestReviews: [], comments: [], statusCheckRollup: [{ __typename: 'CheckRun', name: 'kit', status: 'COMPLETED', conclusion: 'SUCCESS' }], ...more });
+  fs.writeFileSync(prs, JSON.stringify([
+    pr(405, 'link-pr-stall-findings', { comments: [verdict('CHANGES', old, 20), { body: 'fixed', createdAt: ago(10) }, verdict('CHANGES', head, 2)] }),
+    pr(356, 'operator-idle-fleets', { comments: [verdict('APPROVE', head, 3)], statusCheckRollup: [{ __typename: 'CheckRun', name: 'kit', status: 'COMPLETED', conclusion: 'FAILURE' }, { __typename: 'StatusContext', context: 'x', state: 'SUCCESS' }] }),
+    pr(400, 'fixed-since', { comments: [verdict('CHANGES', old, 5)] }),
+    pr(401, 'reviewed-on-github', { latestReviews: [{ state: 'CHANGES_REQUESTED', body: '', submittedAt: ago(1), commit: { oid: head } }] }),
+    pr(402, 'approved-after', { comments: [verdict('CHANGES', head, 4)], latestReviews: [{ state: 'APPROVED', body: '', submittedAt: ago(1), commit: { oid: head } }] }),
+    pr(403, 'brand-new', { createdAt: ago(3) }),
+    pr(404, 'waiting-long'),
+    pr(406, 'pending-only', { latestReviews: [{ state: 'PENDING', body: '', submittedAt: null }], statusCheckRollup: [{ __typename: 'StatusContext', context: 'ci', state: 'ERROR' }] }),
+    pr(407, 'ticket/kit-1-x'), pr(408, 'plan/g-1'), pr(409, 'chore-devteam-sync-v1.0.0'), pr(415, 'release-prep-v1.0.0'),
+    // a note after the sha is still the verdict
+    pr(410, 'trailing-note', { comments: [{ body: `Verdict: CHANGES ${head} (F1, F2)`, createdAt: ago(2) }] }),
+    // a fix pushed after CHANGES and said so, then a day with no one looking at the new head
+    pr(411, 're-review-wait', { createdAt: ago(60), comments: [verdict('CHANGES', old, 40), { body: 'fixed F1 at the new head', createdAt: ago(26) }] }),
+    // a verdict in a GitHub review's body, which GitHub only calls a comment
+    pr(412, 'review-body-verdict', { latestReviews: [{ state: 'COMMENTED', body: `Verdict: CHANGES ${head}`, submittedAt: ago(1), commit: { oid: head } }] }),
+    // checks still running, or cancelled by a newer run: not red
+    pr(413, 'checks-running', { createdAt: ago(3), statusCheckRollup: [{ __typename: 'CheckRun', name: 'kit', status: 'IN_PROGRESS', conclusion: '' }, { __typename: 'CheckRun', name: 'old', status: 'COMPLETED', conclusion: 'CANCELLED' }] }),
+    // a review that only comments is no verdict
+    pr(414, 'commented-only', { createdAt: ago(40), latestReviews: [{ state: 'COMMENTED', body: 'looks fine so far', submittedAt: ago(30), commit: { oid: head } }] }),
+    // a verdict quoted in a reply is not one
+    pr(416, 'quoted', { createdAt: ago(2), comments: [{ body: `> Verdict: CHANGES ${head}\n\nwill fix`, createdAt: ago(1) }] }),
+    // the same gh login opened it, but not the operator (no line of its own saying so): not the operator's
+    pr(417, 'owners-own', { body: 'by hand', statusCheckRollup: [{ __typename: 'CheckRun', name: 'kit', status: 'COMPLETED', conclusion: 'FAILURE' }] }),
+    pr(418, 'mentions-it', { body: 'see `Opened by the box operator.` in operator.md' }),
+    pr(419, 'no-body', { body: null }),
+    // a draft isn't up for review yet
+    pr(420, 'a-draft', { isDraft: true }),
+  ]));
+  const st = status();
+  assert.equal(st.status, 0, st.stderr);
+  assert.match(st.stdout, /^machine: operator PRs: 14 open, 9 need you \(#405 changes requested, #356 CI red, #401 changes requested, #404 no review 30h, #406 CI red and no review 30h, #410 changes requested, #411 no review of its head 26h, #412 changes requested, #414 no review 30h\)$/m);
+  // one gh call for it, on the kit's repo, by the gh login
+  const calls = fs.readFileSync(asked, 'utf8').split('\n').filter((l) => l.startsWith('pr list'));
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /-R sanctuarycomputer\/devteam --author @me --state open --search "Opened by the box operator\." in:body .*--json \S*body\S*isDraft\S*statusCheckRollup/);
+  fs.writeFileSync(prs, JSON.stringify([pr(400, 'fixed-since', { comments: [verdict('CHANGES', old, 5)] }), pr(407, 'ticket/kit-1-x')]));
+  assert.match(status().stdout, /^machine: operator PRs: 1 open, none need you$/m);
+  fs.writeFileSync(prs, '[]');
+  assert.match(status().stdout, /^machine: operator PRs: none open$/m);
+  // gh missing, offline or logged out: unknown, never "none"
+  fs.rmSync(prs);
+  assert.match(status().stdout, /^machine: operator PRs: \?$/m);
+  fs.writeFileSync(prs, 'not json');
+  assert.match(status().stdout, /^machine: operator PRs: \?$/m);
+  // only the operator's digest (box-status passes --notes) asks
+  fs.writeFileSync(asked, '');
+  assert.doesNotMatch(status([]).stdout, /operator PRs/m);
+  assert.doesNotMatch(fs.readFileSync(asked, 'utf8'), /^pr list/m);
+});
+
 // Every read the operator is allowed, against a repo with something in it: the log, git status and
 // the files on disk are byte-for-byte what they were. That's the point of the list.
 test('each read the operator may run writes nothing', () => {
