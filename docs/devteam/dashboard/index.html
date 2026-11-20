@@ -2061,12 +2061,14 @@ const trustLevel = (r) => TRUST_LEVELS[r] ?? '–';
 const trustAgreed = (t) => (effNum(t.agreement) ? `${Math.round(t.agreement * 100)}% of the last ${(t.agreement_questions || []).length}` : '–');
 const trustCorrected = (t) => (t.corrections ? `${t.corrections} time${t.corrections > 1 ? 's' : ''}` : 'never');
 const TRUST_READY = '<span class="badge good" title="Enough answers went with its recommendation to ask you to raise it">ready to ask for more</span>';
+// a kind's Now: its level in words, and the badge when it can ask for more (the table's cell, the peek's row)
+const trustNow = (t) => `${esc(trustLevel(t.rung))}${t.can_ask ? ` ${TRUST_READY}` : ''}`;
 // the hash of a call by its id's kind: an act, a decision or a question; null for any other
 const callHash = (id) => { const s = String(id ?? ''); const k = /^a-/.test(s) ? 'act' : /^d-/.test(s) ? 'decision' : /^q-/.test(s) ? 'q' : null; return k ? `${k}/${encodeURIComponent(s)}` : null; };
 // Kinds of decision: a row a kind, opening its peek (class/<id>)
 function trustRows(trust) {
   return (trust || []).map((t) => ({
-    cells: [esc(trustName(t)), `${esc(trustLevel(t.rung))}${t.can_ask ? ` ${TRUST_READY}` : ''}`, esc(trustLevel(t.ceiling)), esc(trustAgreed(t)), esc(trustCorrected(t))],
+    cells: [esc(trustName(t)), trustNow(t), esc(trustLevel(t.ceiling)), esc(trustAgreed(t)), esc(trustCorrected(t))],
     sort: [trustName(t), t.rung ?? null, t.ceiling ?? null, effNum(t.agreement) ? t.agreement : null, t.corrections ?? 0],
     open: t.class ? `class/${encodeURIComponent(t.class)}` : null,
   }));
@@ -2177,10 +2179,11 @@ function openClass(id) {
   drawerFor('class', id);
   PEEKS.set(peekKey('class', id), { error: 'not a record', missing: true });
   const t = (DATA?.ooda?.trust || []).find((x) => x.class === id);
-  if (!t) return notFound('class', id, null, 'No kind of decision by that name.', { noRecord: true });
+  // not notFound, which titles the peek with the id and gives it an ID row: the class id never shows (R2)
+  if (!t) return showDrawer('<h2 id="drawer-title">Not found</h2><p class="muted">No kind of decision by that name.</p>');
   const last = (t.history || []).reduce((m, e) => (e.at && (!m || e.at > m.at) ? e : m), null);
   const rows = [
-    attrRow('Now', `${esc(trustLevel(t.rung))}${t.can_ask ? ` ${TRUST_READY}` : ''}`),
+    attrRow('Now', trustNow(t)),
     attrRow('At most', esc(trustLevel(t.ceiling))),
     attrRow('Since', last ? esc(when(last.at)) : 'never moved'),
     attrRow('Agreed with you', esc(trustAgreed(t))),
@@ -2190,7 +2193,7 @@ function openClass(id) {
   const levels = [1, 2, 3].map((r) => `<div class="lvl${r === t.rung ? ' now' : ''}${r > t.ceiling ? ' off' : ''}"><span class="t">${esc(TRUST_LEVELS[r])}</span>${
     r === t.rung ? '<span class="badge low">now</span>' : r > t.ceiling ? '<span class="muted">beyond its limit</span>' : ''}</div>`).join('');
   const ev = classEvidence(t, DATA?.ooda);
-  const evHtml = ev.length ? `<div class="rows cls-ev">${ev.map((x) => `<div class="rowline"${x.open ? ` data-open="${esc(x.open)}" tabindex="0" role="link"` : ''}><span class="dot ${x.kind === 'Agreed' ? 'green' : x.kind === 'Not agreed' ? 'amber' : 'blue'}"></span><span class="t">${esc(x.what)}</span><span class="r">${
+  const evHtml = ev.length ? `<div class="rows cls-ev">${ev.map((x) => `<div class="rowline"${x.open ? ` data-open="${esc(x.open)}" tabindex="0" role="link"` : ''}><span class="dot${x.kind === 'Agreed' ? ' green' : x.kind === 'Not agreed' ? ' amber' : x.kind === 'Call' ? ' blue' : ''}"></span><span class="t">${esc(x.what)}</span><span class="r">${
     esc([x.kind === 'Call' ? '' : x.kind, x.at ? when(x.at) : ''].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>` : effNone();
   showDrawer(`<h2 id="drawer-title">${esc(trustName(t))}</h2><section class="attrs">${props(rows)}</section>${psect('Levels', `<div class="lvls">${levels}</div>`)}${psect('Since it last moved', evHtml)}`);
 }
@@ -2250,7 +2253,8 @@ async function loadGovernance(force = false) {
     const r = await fetch('/api/governance');
     const j = await r.json().catch(() => null);
     if (!r.ok) throw new Error(j?.error || `${r.status} ${r.statusText}`.trim());
-    GOV.files = Array.isArray(j?.files) ? j.files : [];
+    if (!Array.isArray(j?.files)) throw new Error('the reply was not a list of files');
+    GOV.files = j.files;
     GOV.error = null;
   } catch (e) { GOV.error = String(e?.message ?? e); }
   finally { GOV.at = Date.now(); GOV.pending = false; }
@@ -2273,9 +2277,10 @@ function governanceRows(files, group) {
 }
 // The page, written into #governance only when its HTML changed, so a redraw keeps focus and a pin's element
 function renderGovernance() {
-  const body = GOV.error ? `<p class="err">The governance files didn't load: ${esc(GOV.error)}</p>`
-    : !GOV.files ? '<p class="loading">Loading…</p>'
-    : GOV_GROUPS.map(([g, l]) => effSection(l, pageTable(`gov:${g}`, ['File', 'Path', 'Last change'], governanceRows(GOV.files, g)))).join('');
+  // a failed read's error, above the last listing when there is one (its paragraphs stay pinnable)
+  const err = GOV.error ? `<p class="err">The governance files didn't load: ${esc(GOV.error)}</p>` : '';
+  const body = err + (GOV.files ? GOV_GROUPS.map(([g, l]) => effSection(l, pageTable(`gov:${g}`, ['File', 'Path', 'Last change'], governanceRows(GOV.files, g)))).join('')
+    : err ? '' : '<p class="loading">Loading…</p>');
   const html = `<div class="card flush gov-card">${cardHead('scale', 'Files')}${body}</div>`;
   const el = $('governance');
   if (!el || el.__html === html) return;
@@ -2407,7 +2412,8 @@ function sensorPeekRows(name, d) {
 // Retros: the next one when due, then a card a retro (a click or Enter opens its peek)
 function retroCards(rt) {
   const all = rt?.all || [];
-  const due = rt?.due ? `<div class="card">${cardHead('history', 'Next retro', { extra: `<span class="muted">due since ${esc((rt.due_since || '').slice(0, 10))}</span>` })}<p>${esc((rt.reasons || []).join('; '))}</p></div>` : '';
+  const since = String(rt?.due_since || '').slice(0, 10);
+  const due = rt?.due ? `<div class="card">${cardHead('history', 'Next retro', { extra: since ? `<span class="badge medium">due since ${esc(since)}</span>` : '' })}<p>${esc((rt.reasons || []).join('; '))}</p></div>` : '';
   const cards = all.map((r) => `<div class="card retro-card" data-open="retro/${esc(encodeURIComponent(r.id))}" tabindex="0" role="button" aria-label="Open the retro of ${esc(retroDate(r))}">${cardHead('history', esc(retroDate(r)))}<p>${esc(r.summary)}</p></div>`).join('');
   return due || cards ? `<div class="cards">${due}${cards}</div>` : effNone();
 }
@@ -5361,7 +5367,7 @@ function renderMonitoring(d) {
   if ($('down-banner').innerHTML !== banner) { $('down-banner').innerHTML = banner; $('down-banner').hidden = !down.length; }
   // the page (kit-93): its tabs, then Production or Fleet, written only when its HTML changed (focus kept)
   const fs = d.metrics?.findings || [];
-  const html = tabBar({ tabs: [{ id: 'production', label: 'Production', count: ms.length || null }, { id: 'fleet', label: 'Fleet', count: fs.length || null, waiting: true }], selected: SENSOR_TAB })
+  const html = tabBar({ tabs: [{ id: 'production', label: 'Production', count: ms.length }, { id: 'fleet', label: 'Fleet', count: fs.length, waiting: true }], selected: SENSOR_TAB })
     + (SENSOR_TAB === 'fleet' ? sensorsFleet(d) : sensorsProduction(d));
   const el = $('monitoring');
   if (el.__html !== html) { el.__html = html; el.innerHTML = html; bindPageTables(el, () => renderMonitoring(DATA)); }

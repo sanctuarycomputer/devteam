@@ -117,6 +117,8 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     assert.equal(await get('/api/data', 'd.ooda.trust.length'), 4);
     assert.equal(await get('/api/data', "Array.isArray(d.ooda.knowledge)"), true, 'ooda merged one level');
     assert.equal(await get('/api/governance', 'd.files.length'), 5);
+    // a rewritten reply carries none of the original's length or encoding
+    assert.deepEqual(await p.ev("fetch('/api/data').then((r) => [r.headers.get('content-length'), r.headers.get('content-encoding'), r.headers.get('content-type')])"), [null, null, 'application/json']);
     assert.equal(await get('/api/peek?kind=sensor&id=errors', 'd.feed.length'), 2);
     await p.ev("fetch('/api/x', { method: 'POST' }).catch(() => null).then(() => 0)");
     assert.deepEqual(await p.ev('window.__writes.map((w) => [w.url, w.method])'), [['/api/x', 'POST']]);
@@ -274,6 +276,18 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await closePeek();
   });
 
+  await t.test('evidence the page does not hold', async () => {
+    const fx = autonomyFixture();
+    // a question its agreement counts that /api/data's answered list doesn't hold: kept, with a muted dot
+    const q = 'q-20261101-000000000-gone';
+    fx.patch.ooda.trust.find((k) => k.class === fx.ids.newFeature).agreement_questions.push(q);
+    await load(fx, `#class/${fx.ids.newFeature}`);
+    await soon(`!!document.querySelector('#drawer-body .rowline[data-open="q/${q}"]')`, 'the unheld question listed');
+    assert.equal(await p.ev(`document.querySelector('#drawer-body .rowline[data-open="q/${q}"] .dot').className`), 'dot', 'a neutral dot, not a colour');
+    assert.equal(await p.ev(`document.querySelector('#drawer-body .rowline[data-open="act/${fx.ids.acts[fx.ids.newFeature][2]}"] .dot').className`), 'dot blue', 'a call keeps its blue dot');
+    await closePeek();
+  });
+
   await t.test('Trust rows open', async () => {
     const fx = autonomyFixture();
     await load(fx, '#trust');
@@ -297,6 +311,9 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await load(autonomyFixture(), '#class/nope');
     await soon("!document.getElementById('drawer').hidden && DRAWER.kind === 'class'", 'the peek');
     await soon("document.getElementById('drawer-body').textContent.includes('No kind of decision by that name.')", 'not found');
+    // R2: the id it was asked for shows nowhere in the peek, as text, a title or a label
+    assert.equal(await p.ev("(() => { const d = document.getElementById('drawer'); return [d.textContent, ...[...d.querySelectorAll('[title], [aria-label]')].flatMap((e) => [e.getAttribute('title') ?? '', e.getAttribute('aria-label') ?? ''])].join('\\n').includes('nope'); })()"), false, 'no class id in the peek');
+    await closePeek();
   });
 
   await t.test('no autonomy', async () => {
@@ -315,6 +332,32 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     assert.ok(await p.ev(`(() => { const tr = document.querySelector(${JSON.stringify(`${KINDS} tbody tr`)}); tr.focus(); window.__f = tr; return document.activeElement === tr; })()`));
     await polls(2);
     assert.equal(await p.ev('document.activeElement === window.__f && window.__f.isConnected'), true);
+  });
+
+  await t.test('a sorted table holds', async () => {
+    const fx = autonomyFixture();
+    await load(fx, '#trust');
+    await soon(`!!document.querySelector(${JSON.stringify(`${KINDS} tbody tr`)})`, 'the kinds table');
+    const names = fx.patch.ooda.trust.map((x) => x.class_name);
+    assert.deepEqual((await rowsOf(KINDS)).map((r) => r[0]), names);
+    const HEAD = `${KINDS} button.sort[data-col="0"]`;
+    const sortBy = async () => {
+      const at = await p.ev(`(() => { const b = document.querySelector(${JSON.stringify(HEAD)}); b.scrollIntoView({ block: 'center' }); const r = b.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`);
+      await p.clickAt(at.x, at.y);
+    };
+    const asc = [...names].sort((a, b) => a.localeCompare(b));
+    assert.notDeepEqual(asc, names, 'the fixture is not already in name order');
+    await sortBy();
+    await soon(`document.querySelector(${JSON.stringify(`${KINDS} th`)}).getAttribute('aria-sort') === 'ascending'`, 'sorted up');
+    assert.deepEqual((await rowsOf(KINDS)).map((r) => r[0]), asc);
+    assert.equal(await p.ev(`document.activeElement === document.querySelector(${JSON.stringify(HEAD)})`), true, 'focus on the header');
+    await polls(2);
+    assert.deepEqual((await rowsOf(KINDS)).map((r) => r[0]), asc, 'the order held through two polls');
+    assert.equal(await p.ev(`document.activeElement === document.querySelector(${JSON.stringify(HEAD)})`), true, 'focus held on the header');
+    await sortBy();
+    await soon(`document.querySelector(${JSON.stringify(`${KINDS} th`)}).getAttribute('aria-sort') === 'descending'`, 'sorted down');
+    assert.deepEqual((await rowsOf(KINDS)).map((r) => r[0]), [...asc].reverse());
+    assert.equal(await p.ev(`document.activeElement === document.querySelector(${JSON.stringify(HEAD)})`), true, 'focus on the header again');
   });
 
   // ---- Awareness (T4): one Awareness Score card, Efficiency's charts and suggestion list ----
@@ -490,7 +533,8 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
       assert.deepEqual(await p.ev("[...document.querySelectorAll('#drawer-body button')].filter((b) => !b.matches('[data-mdview]')).map((b) => b.outerHTML)"), [], 'no button but the view toggle');
       await closePeek();
     }
-    // the not-written file: nothing to open
+    // the not-written file: nothing to open, and no link in its row (A8)
+    assert.equal(await p.ev(`(() => { const tr = ${ROWS(GOV_TBL('project'))}[0]; return !!tr && /not written yet/.test(tr.textContent) && !tr.querySelector('a'); })()`), true, 'the not-written row holds no link');
     assert.equal(await openRow(GOV_TBL('project'), 0, 'click'), null);
     assert.equal(await openRow(GOV_TBL('project'), 0, 'enter'), null);
     assert.deepEqual(await p.ev('window.__writes'), []);
@@ -510,6 +554,23 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     assert.deepEqual(await openRow(GOV_TBL('project'), 1, 'click'), { kind: 'file', id: g.written });
     await pinParagraph(g.written);
     assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('a listed file with a long path pins on Governance', async () => {
+    const fx = autonomyFixture();
+    const g = fx.ids.governance;
+    await load(fx, '#governance');
+    await govDrawn();
+    assert.deepEqual(await openRow(GOV_TBL('governance'), 0, 'click'), { kind: 'file', id: g.constitution });
+    await peekSettled('the rendered file');
+    // the peek's paragraph, as the listing's file and as a listed file whose #file view is over the log's 200 bytes
+    const long = `docs/devteam/governance/${'a-very-long-name-'.repeat(12)}.md`;
+    const at = (path) => p.ev(`(() => { const was = DRAWER.id; GOV.files.push({ path: ${JSON.stringify(long)}, group: 'governance', title: 'Long', written: true }); DRAWER.id = ${JSON.stringify(path)};
+      try { return tSubjectAt(document.querySelector('#drawer-body .md p'), 0, 0, () => null)?.subject?.view ?? null; } finally { DRAWER.id = was; GOV.files.pop(); } })()`);
+    assert.equal(await at(g.constitution), fileView(g.constitution));
+    assert.ok(Buffer.byteLength(fileView(long)) > 200, 'the long view is over 200 bytes');
+    assert.equal(await at(long), '#governance');
+    await closePeek();
   });
 
   await t.test("a peek outside Governance's list", async () => {
@@ -534,6 +595,31 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await soon("/boom/.test(document.getElementById('governance').textContent)", 'the error shown');
     assert.equal(await p.ev("!!document.querySelector('#governance .err')"), true);
     await polls(2);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('a reply that is not a listing', async () => {
+    const fx = autonomyFixture();
+    fx.governance = { nope: 1 };
+    await load(fx, '#governance');
+    await soon("!!document.querySelector('#governance .err')", 'the error shown');
+    assert.equal(await p.ev("document.querySelectorAll('#governance .sec').length"), 0, 'no empty sections');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('a failed re-read keeps the last listing', async () => {
+    const fx = autonomyFixture();
+    await load(fx, '#governance');
+    await govDrawn();
+    const before = await govSec('Governance');
+    await p.ev('window.__fx.governance = 500; loadGovernance(true); void 0');
+    await soon("/boom/.test(document.querySelector('#governance .err')?.textContent ?? '')", 'the error shown');
+    assert.deepEqual(await govSec('Governance'), before, 'the last listing still shown');
+    assert.equal(await p.ev("(() => { const e = document.querySelector('#governance .err'), s = document.querySelector('#governance .sec'); return !!(e.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING); })()"), true, 'the error above the listing');
+    // read again, the error goes
+    await p.ev(`window.__fx.governance = ${JSON.stringify(fx.governance)}; loadGovernance(true); void 0`);
+    await soon("!document.querySelector('#governance .err')", 'the error gone');
+    assert.deepEqual(await govSec('Governance'), before);
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
 
@@ -574,6 +660,16 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     assert.match(await text(SCARD('kit-github')), /\binfo 8\b/);
     // a card is a button to the keyboard
     assert.equal(await p.ev(`[...document.querySelectorAll('#monitoring .sensor-card')].every((c) => c.getAttribute('role') === 'button' && c.getAttribute('tabindex') === '0')`), true);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('the tabs count zero', async () => {
+    const fx = autonomyFixture();
+    fx.patch.sensors = [];
+    fx.patch.metrics.findings = [];
+    await load(fx, '#sensors');
+    await soon("document.querySelectorAll('#monitoring [role=\"tab\"]').length === 2", 'the tabs');
+    assert.deepEqual(await texts('#monitoring [role="tab"]'), ['Production 0', 'Fleet 0']);
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
 
@@ -773,6 +869,7 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     const cards = await texts('#retros .cards > .card');
     assert.match(cards[0], /Next retro/);
     assert.match(cards[0], /due since/);
+    assert.match(await text('#retros .cards > .card:first-child .badge.medium'), new RegExp(`^due since ${fx.patch.ooda.retro.due_since.slice(0, 10)}$`), 'the date in a badge');
     assert.match(cards[0], /a feature merged/);
     assert.match(cards[1], /Reviews caught the card-form regressions/);
     assert.match(cards[2], /The first wave merged on time/);
@@ -784,6 +881,16 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     assert.equal(await p.ev("(() => { const c = document.querySelectorAll('#retros .cards > .card[data-open]')[1]; c.focus(); return document.activeElement === c; })()"), true);
     await p.key('Enter');
     await soon(`${drawerOpen} && DRAWER.kind === 'retro' && DRAWER.id === ${JSON.stringify(fx.ids.retros[1])}`, 'the second retro by Enter');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('a due retro with no date', async () => {
+    const fx = autonomyFixture();
+    fx.patch.ooda.retro.due_since = null;
+    await load(fx, '#retros');
+    await soon("/Next retro/.test(document.querySelector('#retros .cards > .card')?.textContent ?? '')", 'the next retro');
+    assert.doesNotMatch(await text('#retros .cards > .card'), /due since/);
+    assert.match(await text('#retros .cards > .card'), /a feature merged/);
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
 

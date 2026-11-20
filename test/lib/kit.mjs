@@ -1223,7 +1223,9 @@ export function autonomyFixture({ now = Date.now() } = {}) {
   window.__polls = 0;
   window.addEventListener('error', (e) => window.__errors.push(String(e.message || e.error || e)));
   window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason && e.reason.message || e.reason)));
-  const json = (body, status, r) => new Response(JSON.stringify(body), r ? { status: r.status, statusText: r.statusText, headers: r.headers } : { status, headers: { 'content-type': 'application/json' } });
+  // a rewritten reply keeps the original's headers but its length and encoding, which were the original body's
+  const heads = (r) => { const h = new Headers(r.headers); h.delete('content-length'); h.delete('content-encoding'); return h; };
+  const json = (body, status, r) => new Response(JSON.stringify(body), r ? { status: r.status, statusText: r.statusText, headers: heads(r) } : { status, headers: { 'content-type': 'application/json' } });
   const real = window.fetch;
   window.fetch = async (u, o) => {
     const url = String(u && u.url ? u.url : u);
