@@ -6585,15 +6585,18 @@ function tsForget() {
 }
 function tsSet(kind, info = {}) {
   tsForget();
-  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, fpNow: null, mainFpNow: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, watch: '', last: null }, info);
+  // fpSerial and fpGone: the draft poll's (avLiveReload) stage and whether a 404 stopped it, kept in TS so an
+  // image over the stage (kit-171's avUnderTake/avUnderGive) keeps them with the rest
+  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, fpNow: null, mainFpNow: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, watch: '', last: null, fpSerial: avLiveReload.serial(), fpGone: false }, info);
   for (const m of [TS.rects, TS.keyOf, TS.watching]) m.clear();
   avHint();
 }
 // The stage, in the dashboard or as a viewer tab: the page in its frame, the bar, and the lens's
 // state for it. title: the viewer's (from /api/view); the dashboard's comes from its data.
 // picked: a version picked from the bar's list ({ at, label, earlier }), which keeps the versions this open has read.
-function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null, picked = null } = {}) {
-  const src = artSrc(slug, at);
+// anchor: '#…' to frame the page at (a viewer tab's own hash, kit-106), kept by a live reload.
+function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null, picked = null, anchor = '' } = {}) {
+  const src = artSrc(slug, at) + anchor;
   const keep = picked && AV?.slug === slug ? AV : null;
   AV = { at, slug, picked, vers: keep?.vers ?? null, known: keep?.known ?? null };
   // a dropped image the stage showed gone, the bar's controls back (kit-171)
@@ -6614,9 +6617,9 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   $('av-note').textContent = said ?? '';
   $('av-tab').href = artViewer(slug, at);
   // fp and mainFp are what the frame loads now; on the stage already shown its frame isn't loaded
-  // again, so what it loaded stays, and what is given is only the latest seen
+  // again, so what it loaded stays, and what is given is only the latest seen (a draft's own: its poll's, avLiveReload)
   if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at) tsSet('artifact', { slug, at, fp, mainFp, fpNow: fp, mainFpNow: mainFp });
-  else Object.assign(TS, { fpNow: fp ?? TS.fpNow, mainFpNow: mainFp ?? TS.mainFpNow });
+  else Object.assign(TS, { fpNow: avLiveReload.draft(at) ? TS.fpNow : fp ?? TS.fpNow, mainFpNow: mainFp ?? TS.mainFpNow });
   $('pv-frame').hidden = true;
   $('pv-frame').removeAttribute('src');
   $('av-frame').hidden = false;
@@ -6624,11 +6627,11 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   $('artifact-view').hidden = false;
   avHint();
 }
-// The reload button says when the artifact on the stage changed since its frame loaded it (the
-// latest fingerprint seen is another), until a press loads it. Never a reload by itself: kit-106's
-// live reload of drafts is to take over from this.
+// The reload button says when main's artifact on the stage changed since its frame loaded it (the
+// latest fingerprint seen is another), until a press loads it. A draft reloads by itself
+// (avLiveReload, kit-106) and never shows it; a published tree never changes.
 function avHint() {
-  const stale = TS.kind === 'artifact' && !!TS.fp && !!TS.fpNow && TS.fp !== TS.fpNow;
+  const stale = TS.kind === 'artifact' && TS.at === 'main' && !!TS.fp && !!TS.fpNow && TS.fp !== TS.fpNow;
   const b = $('av-reload');
   b.classList.toggle('stale', stale);
   b.title = stale ? 'A newer version is ready: reload to see it' : 'Load the page again';
@@ -6636,13 +6639,79 @@ function avHint() {
   b.hidden = !!AV?.picked?.earlier;
 }
 // The fingerprints just seen for an artifact there (null: not known), taken only while the stage
-// shows it; a published tree never changes, so it is never checked.
+// shows it; a published tree never changes, so it is never checked. A draft's own comes from its
+// poll alone (avLiveReload): a slower read begun before an edit would set it back.
 function avFpSeen(fp, mainFp, slug, at) {
   if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at || String(at).startsWith('tree:')) return;
-  if (fp) TS.fpNow = fp;
+  if (fp && !avLiveReload.draft(at)) TS.fpNow = fp;
   if (mainFp) TS.mainFpNow = mainFp;
   avHint();
 }
+// A draft on the stage reloads by itself when its files change (kit-106): every 2 s while the page is
+// seen, and at once when it is shown again, it asks /api/artifact-fp (a stat-only fingerprint, the
+// responder contract's artifact-fp@1), one ask at a time, given up after 5 s. A new fingerprint loads
+// the frame again in a fresh frame (no history entry, no move counted for the close: kit-141), at its
+// src (its anchor kept) or the page of the artifact its lens last named; the scroll position isn't kept
+// (the frame is opaque-origin). A 404 says the draft is gone, links main's version (shown in place),
+// and stops for this stage. main and a published tree are never asked about, nor a framed viewer tab
+// (the owner wrapper, which may hold a gone draft in place under its own note). An answer is the page's
+// only if its stage (TS.fpSerial) is still the one asked under, and only a { fp: string } is taken.
+const avLiveReload = (() => {
+  let serial = 0, inFlight = false;
+  const draft = (at) => !!at && at !== 'main' && !String(at).startsWith('tree:');
+  const due = () => TS.kind === 'artifact' && draft(TS.at) && !(VIEWER && window.parent !== window) && document.visibilityState === 'visible' && !TS.fpGone && !inFlight;
+  // the frame again: its src, or the page its lens names when the owner has followed a link to another
+  function reload() {
+    const f = $('av-frame'), src = f.getAttribute('src');
+    if (!src) return;
+    const base = artSrc(TS.slug, TS.at);
+    const page = src.split('#')[0].startsWith(base) ? src.split('#')[0].slice(base.length) || 'index.html' : null;
+    avFreshFrame('av-frame').src = TS.path && page !== null && TS.path !== page ? base + TS.path : src;
+  }
+  function seen(fp) {
+    if (!TS.fp) { TS.fp = TS.fpNow = fp; return; }
+    if (fp === TS.fp) return;
+    reload();
+    TS.fp = TS.fpNow = fp;
+    avHint();
+  }
+  // gone: the words and a link to main's version, which a plain click shows here, in place (no route,
+  // so kit-141's close still closes); the frame keeps what it last loaded
+  function gone() {
+    TS.fpGone = true;
+    const { slug } = TS, n = $('av-note'), a = document.createElement('a');
+    a.href = VIEWER ? artViewer(slug, 'main') : `#artifact/main/${encodeURIComponent(slug)}`;
+    a.textContent = "see main's version";
+    a.addEventListener('click', (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      const arts = DATA?.library?.artifacts ?? [];
+      const mainFp = arts.find((x) => x.slug === slug && x.at === 'main')?.fp ?? null;
+      showArtifact(slug, 'main', { title: $('av-title').textContent, fp: mainFp, mainFp });
+    });
+    n.replaceChildren('This draft was landed or removed: ', a);
+    n.hidden = false;
+  }
+  async function ask() {
+    if (!due()) return;
+    const { slug, at, fpSerial } = TS;
+    inFlight = true;
+    const stop = new AbortController();
+    const late = setTimeout(() => stop.abort(), 5000);
+    try {
+      const r = await fetch(`/api/artifact-fp?${new URLSearchParams({ slug, at })}`, { signal: stop.signal });
+      if (TS.kind !== 'artifact' || TS.fpSerial !== fpSerial) return;
+      if (r.status === 404) return void gone();
+      if (!r.ok) return;
+      const j = await r.json();
+      if (TS.kind !== 'artifact' || TS.fpSerial !== fpSerial) return;
+      if (typeof j?.fp === 'string' && j.fp.length >= 1 && j.fp.length <= 128) seen(j.fp);
+    } catch {} finally { clearTimeout(late); inFlight = false; }
+  }
+  setInterval(ask, 2000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') ask(); });
+  return { serial: () => ++serial, draft };
+})();
 // A preview's viewer, in a tab of its own.
 const pvViewer = (name) => `/view/preview/${encodeURIComponent(name)}`;
 // The bar for a preview: the session that offered it, its app's route, whether it answers.
@@ -10812,11 +10881,16 @@ async function viewerArtifact() {
     else { note = String(at).startsWith('tree:') ? 'Not the published version: this is the one on main' : 'Not the draft: this is the one on main'; at = 'main'; got = await info(VIEWER.name, at); }
   }
   const d = got.d;
-  showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: held ?? (d ? note : got.status === 404 ? 'This artifact is not here' : 'This artifact could not be read'), fp: d?.fp ?? null, mainFp: d?.main_fp ?? null });
+  // the tab's own hash, when it isn't a thread's (#talk/), is where the page is framed (kit-106): as the
+  // browser gives it (percent-encoded), at most 200 characters, no whitespace
+  const h = location.hash;
+  const anchor = /^#[^\s]{1,200}$/.test(h) && !h.startsWith('#talk/') ? h : '';
+  showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: held ?? (d ? note : got.status === 404 ? 'This artifact is not here' : 'This artifact could not be read'), fp: d?.fp ?? null, mainFp: d?.main_fp ?? null, anchor });
 }
 // The viewer's own start: the stage, the layer's threads every 5 s while the tab is seen, the
-// instance's hello (its name) every 30 s, and for an artifact on main or a draft its fingerprint
-// every 10 s while seen (/api/view: one artifact describe per ask, for the reload button's hint).
+// instance's hello (its name) every 30 s, and for an artifact on main its fingerprint every 10 s while
+// seen (/api/view: one artifact describe per ask, for the reload button's hint). A draft's is asked
+// every 2 s by the stage's own poll (avLiveReload: /api/artifact-fp, stat-only), and a tree never changes.
 // Nothing else.
 async function viewerBoot() {
   document.documentElement.classList.add('viewer');
@@ -10847,10 +10921,10 @@ async function viewerBoot() {
   viewerTalk();
   addEventListener('hashchange', viewerTalk);
   setInterval(() => { if (document.visibilityState === 'visible') tlRefresh(); }, 5000);
-  // one ask at a time (a describe can take 12 s), for the stage as it is when asked; a tree never changes
+  // one ask at a time (a describe can take 12 s), for the stage as it is when asked; main only (a draft has its 2 s poll)
   let asking = false;
   setInterval(async () => {
-    if (asking || document.visibilityState !== 'visible' || TS.kind !== 'artifact' || String(TS.at).startsWith('tree:')) return;
+    if (asking || document.visibilityState !== 'visible' || TS.kind !== 'artifact' || TS.at !== 'main') return;
     const { slug, at } = TS;
     asking = true;
     const stop = new AbortController();
