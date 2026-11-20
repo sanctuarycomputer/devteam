@@ -16296,7 +16296,8 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       // the machine's memory readings (machine-memory@1), refused to another site's page as the list is
       if (req.url === '/memory.json' || req.url.startsWith('/memory.json?')) {
         if (site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the readings are for the hub\'s own page');
-        try { return await serveMemory(req, send); } catch (e) { return send(500, 'application/json', JSON.stringify({ error: e.message })); }
+        // the detail (it can name the hub's own file) goes to the hub's log, once, never to the page
+        try { return await serveMemory(req, send); } catch (e) { recorder.say(`/memory.json: ${e?.message ?? String(e)}`); return send(500, 'application/json', JSON.stringify({ error: 'memory readings unavailable' })); }
       }
       // The operator's threads, for the Overview's dock: a GET carries no Origin, so it is refused
       // when the browser says another site's page asks (as a dashboard's /api/threads is).
@@ -18813,8 +18814,10 @@ async function memoryProc(dir) {
 }
 // The walk: { procs: [{ words, cwd, pages }] | null, partial }. Numeric names only, in batches of 50
 // with a turn of the event loop between them; before each batch after the first, the seam's delay,
-// then the budget (from start, the tick's own start): past it the walk stops, partial. A procDir
-// that can't be listed gives procs null.
+// then the budget (from start, the tick's own start): past it the walk stops, partial. Each batch
+// also races what is left of the budget, so a read that never settles (a process stuck in the
+// kernel, a hung mount) ends the walk there, partial, with what the batch has read. A procDir that
+// can't be listed gives procs null.
 async function memoryWalk(procDir, { budgetMs, slowMs, start }) {
   let names;
   try { names = await fs.promises.readdir(procDir); } catch { return { procs: null, partial: false }; }
@@ -18826,7 +18829,15 @@ async function memoryWalk(procDir, { budgetMs, slowMs, start }) {
       if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
       if (Date.now() - start >= budgetMs) return { procs, partial: true };
     }
-    for (const p of await Promise.all(pids.slice(i, i + MEMORY_BATCH).map((pid) => memoryProc(path.join(procDir, pid))))) if (p) procs.push(p);
+    const got = [];
+    const all = Promise.all(pids.slice(i, i + MEMORY_BATCH).map(async (pid) => { const p = await memoryProc(path.join(procDir, pid)); if (p) got.push(p); }));
+    // the race's timer is unref'd, so it never holds the process open (clearTimeout isn't one of the
+    // walk's names: C3e2 runs it with only setTimeout)
+    const late = new Promise((r) => { setTimeout(() => r(true), Math.max(0, budgetMs - (Date.now() - start))).unref?.(); });
+    const timedOut = await Promise.race([all.then(() => false), late]);
+    // a read still out is left to settle on its own: only what is read by now counts
+    procs.push(...got.splice(0));
+    if (timedOut) return { procs, partial: true };
   }
   return { procs, partial: false };
 }
@@ -18938,11 +18949,12 @@ async function serveMemory(req, send) {
 // The hub's recorder: a trim then a tick at start, a tick a minute and a trim a day after, one at a
 // time in one chain (a tick due while one is still running is skipped); each distinct error said once
 // in the hub's log, never thrown. Off (both no-ops) where DEVTEAM_MEMORY_RECORD is off (tests). The
-// timers are unref'd: the hub's server keeps the process alive. stop() is for good.
+// timers are unref'd: the hub's server keeps the process alive. stop() is for good. say is the
+// once-logger, for the route's own errors too (on whether the recorder is on or off).
 function memoryRecorder(log, scan) {
-  if (process.env.DEVTEAM_MEMORY_RECORD === 'off') return { start() {}, stop() {} };
   const said = new Set();
   const say = (m) => { if (!said.has(m)) { said.add(m); log(`hub: memory: ${m}`); } };
+  if (process.env.DEVTEAM_MEMORY_RECORD === 'off') return { start() {}, stop() {}, say };
   const seam = (k, d) => { const v = process.env[k]; const n = Number(v); return v?.trim() && Number.isFinite(n) && n >= 0 ? n : d; };
   let started = false, stopped = false, ticking = false, trimming = false, slowMs = 0;
   let chain = Promise.resolve();
@@ -18971,6 +18983,7 @@ function memoryRecorder(log, scan) {
       for (const t of timers) t.unref();
     },
     stop() { stopped = true; for (const t of timers) clearInterval(t); timers.length = 0; },
+    say,
   };
 }
 /* box-memory end */

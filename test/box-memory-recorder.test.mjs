@@ -447,6 +447,26 @@ test('C3e3: the walk reads a cmdline only to its first 64 KB (plan-1 F5)', async
   assert.ok(cmdBytes > 0 && cmdBytes <= 65536, `${cmdBytes} bytes of the cmdline read`);
 });
 
+test('C3e4: a read that never settles ends the walk at the budget (task-3 F1)', async () => {
+  // one pid's cwd readlink hangs, as a read of a process stuck in the kernel or on a hung mount does
+  const stuck = `${path.sep}1203${path.sep}cwd`;
+  const promises = new Proxy(fs.promises, { get: (o, k) => (k === 'readlink' ? (f, ...a) => (String(f).endsWith(stuck) ? new Promise(() => {}) : o.readlink(f, ...a)) : o[k]) });
+  const ctx = vm.createContext({ fs: { promises, constants: fs.constants }, path, Buffer, setImmediate, setTimeout });
+  const { memoryWalk } = vm.runInContext(`${region()}\n;({ memoryWalk })`, ctx);
+  const t0 = Date.now();
+  // a guard that holds the loop open, so a walk that never ends fails here rather than draining the run
+  let guard;
+  const w = await Promise.race([
+    memoryWalk(PROC, { budgetMs: 300, slowMs: 0, start: t0 }),
+    new Promise((r) => { guard = setTimeout(() => r('hung'), 5000); }),
+  ]);
+  clearTimeout(guard);
+  assert.notEqual(w, 'hung', 'the walk never ended');
+  assert.ok(Date.now() - t0 < 2000, `ended in ${Date.now() - t0} ms`);
+  assert.equal(w.partial, true);
+  assert.equal(w.procs.length, Object.keys(EXPECTED.processes).length - 1, 'every other process read');
+});
+
 test('C3f: at start the file loses readings older than 8 days and torn lines; a torn tail never spoils the next line', async (t) => {
   const now = Date.now();
   const old = JSON.stringify({ v: 1, at: iso(now - 9 * DAY), working_set: 1 });
