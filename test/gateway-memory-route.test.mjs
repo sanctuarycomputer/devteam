@@ -282,7 +282,7 @@ test('C5: since and after are checked before the hub is asked; only they pass, a
   const gw = await signedIn(t, 'guards');
   const recent = iso(Date.now() - 30 * MIN);
   const bad = ['since=9d', 'since=193h', 'since=24', 'since=h', 'since=1w', 'since=1000h', 'since=0h', 'since=0d', 'since=', 'since', 'since=24H', 'since=+24h', 'since=%2024h', 'since=24h%20', 'since=24h&since=1h', 'since=1e2h',
-    'after=yesterday', 'after=', 'after', 'after=2026-02-30T00:00:00Z', 'after=2026-11-20T25:00:00Z', `after=${encodeURIComponent(recent.replace('Z', '.000Z'))}`, `after=${encodeURIComponent(recent.replace('Z', ''))}`, `after=${encodeURIComponent(recent.replace('Z', '+00:00'))}`, `after=${Date.now()}`, `after=${encodeURIComponent(recent)}&after=${encodeURIComponent(recent)}`,
+    'after=yesterday', 'after=', 'after', 'after=2026-02-30T00:00:00Z', 'after=2026-11-20T25:00:00Z', `after=${encodeURIComponent(recent.replace('Z', '.5Z'))}`, `after=${encodeURIComponent(recent.replace('Z', '.0000Z'))}`, 'after=2026-11-20T23:59:60Z', `after=${encodeURIComponent(recent.replace('Z', ''))}`, `after=${encodeURIComponent(recent.replace('Z', '+00:00'))}`, `after=${Date.now()}`, `after=${encodeURIComponent(recent)}&after=${encodeURIComponent(recent)}`,
     'thin=0', 'thin=1', 'since=24h&thin=0', `after=${encodeURIComponent(recent)}&thin=0`, 'foo=1', 'since=24h&foo=1', '__proto__=1', 'since=6h&since=6h'];
   for (const q of bad) {
     const r = await gw.req('GET', `/memory.json?${q}`);
@@ -292,7 +292,7 @@ test('C5: since and after are checked before the hub is asked; only they pass, a
   }
   assert.deepEqual(s.seen, [], 'none of them reached the hub');
   const good = [['', '/memory.json'], ['?', '/memory.json'], ['?since=1h', '/memory.json?since=1h'], ['?since=6h', '/memory.json?since=6h'], ['?since=24h', '/memory.json?since=24h'], ['?since=8d', '/memory.json?since=8d'], ['?since=192h', '/memory.json?since=192h'], ['?since=008d', '/memory.json?since=008d'],
-    [`?after=${encodeURIComponent(recent)}`, `/memory.json?after=${encodeURIComponent(recent)}`], [`?after=${recent}`, `/memory.json?after=${encodeURIComponent(recent)}`],
+    [`?after=${encodeURIComponent(recent)}`, `/memory.json?after=${encodeURIComponent(recent)}`], [`?after=${recent}`, `/memory.json?after=${encodeURIComponent(recent)}`], [`?after=${encodeURIComponent(recent.replace('Z', '.250Z'))}`, `/memory.json?after=${encodeURIComponent(recent.replace('Z', '.250Z'))}`],
     [`?after=${encodeURIComponent(recent)}&since=6h`, `/memory.json?since=6h&after=${encodeURIComponent(recent)}`]];
   for (const [q, want] of good) {
     const was = s.seen.length;
