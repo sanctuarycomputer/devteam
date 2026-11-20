@@ -401,17 +401,32 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     assert.match(head[1] ?? '', /^attachment/);
   });
 
-  await t.test('B4: opened from a floating thread card, the first Escape closes the card, the second the image', async () => {
+  await t.test('B4: over a floating thread card Escape closes the image and keeps the card; in pin mode it ends pin mode first', async () => {
     await p.ev(`location.hash = '#goals?t=${T3}'; void 0`);
     await soon("!document.getElementById('tl-card').hidden && document.getElementById('tl-card').parentElement.id === 'tl' && !!document.querySelector('#tl-c-turns .file-chip')", 'the floating card with its chip');
-    await p.ev("document.querySelector('#tl-c-turns button.file-chip').click(); void 0");
-    await soon("!document.getElementById('artifact-view').hidden && !!document.getElementById('av-img')", 'the image open over the card');
     const esc = "document.activeElement?.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); void 0";
+    const shown = "!document.getElementById('artifact-view').hidden && !!document.getElementById('av-img')";
+    const open = async () => { await p.ev("document.querySelector('#tl-c-turns button.file-chip').click(); void 0"); await soon(shown, 'the image open over the card'); };
+    await open();
+    const at = await p.ev('[location.href, history.length]');
     await p.ev(esc);
-    await soon("document.getElementById('tl-card').hidden", 'the card closed first');
-    assert.equal(await p.ev("!document.getElementById('artifact-view').hidden && !!document.getElementById('av-img')"), true, 'the image still open');
+    await soon("document.getElementById('artifact-view').hidden && !document.getElementById('av-img')", 'the image closed');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await p.ev("!document.getElementById('tl-card').hidden"), true, 'the floating card stays open');
+    assert.deepEqual(await p.ev('[location.href, history.length]'), at, 'the floating card: the address and history unchanged');
+    // pin mode on over the image: the first Escape ends it, the image stays; the next closes the image
+    await open();
+    await p.ev('tlPinMode(true); void 0');
+    await p.ev(esc);
+    await soon('!TL.pin', 'pin mode ended');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await p.ev(shown), true, 'pin mode: the image still open');
+    assert.deepEqual(await p.ev('[location.href, history.length]'), at, 'pin mode: the address and history unchanged');
     await p.ev(esc);
     await soon("document.getElementById('artifact-view').hidden && !document.getElementById('av-img')", 'then the image');
+    assert.deepEqual(await p.ev('[location.href, history.length]'), at, 'then: the address and history unchanged');
+    await p.ev(esc);
+    await soon("document.getElementById('tl-card').hidden", 'the next Escape closes the card, as today');
   });
 
   await t.test('B6: a swept file: the download chip says gone, the image viewer says so', async () => {
