@@ -63,9 +63,13 @@ const sorted = (a) => [...a].sort();
 // --- the stub: a second method type, as a provider's would be ------------------------------------
 // start sends { hello: 'stub' }; finish takes its key from the body (and waits body.delayMs first,
 // a provider's token fetch), returning an `email` the gateway must ignore; finishByGet: a redirect type.
+// `finishing`, when a test sets it, is called as a finish begins: a race test waits on it rather than
+// on a fixed sleep, so the state is rewritten while the finish is really in flight.
+let finishing = null;
 const stub = {
   start: () => ({ send: { hello: 'stub' } }),
   finish: async ({ body }) => {
+    finishing?.();
     if (body.delayMs) await sleep(Number(body.delayMs));
     if (!body.key) throw new Error('no key');
     return { key: body.key, data: { n: Number(body.n ?? 0) }, email: body.email };
@@ -554,8 +558,9 @@ test('org-access A17: what start rested on, gone by finish, is refused', async (
       const b = browser(gw);
       const st = await b.start('stub', { purpose: 'invite', token });
       ok(st, 'invite start');
+      let began = new Promise((r) => { finishing = r; });
       const pending = b.finish('stub', { purpose: 'invite', state: st.json.state, key: 'k5e', delayMs: 500 });
-      await sleep(150);
+      await began;
       gw.write({ ...gw.state(), invites: [] });
       const before = gw.state();
       refused(await pending, 403, T.invite, 'an invite revoked during the finish');
@@ -563,13 +568,14 @@ test('org-access A17: what start rested on, gone by finish, is refused', async (
       const c = anaBrowser(gw, ana);
       const ast = await c.start('stub', { purpose: 'add' });
       ok(ast, 'add start');
+      began = new Promise((r) => { finishing = r; });
       const pending2 = c.finish('stub', { purpose: 'add', state: ast.json.state, key: 'k5e2', delayMs: 500 });
-      await sleep(150);
+      await began;
       reclaim(gw);
       const before2 = gw.state();
       refused(await pending2, 401, T.ended, 'a box reclaimed during the finish');
       assert.deepEqual(gw.state(), before2, 'nothing written');
-    } finally { await gw.close(); }
+    } finally { finishing = null; await gw.close(); }
   });
 });
 
@@ -595,7 +601,22 @@ test('org-access A17: a flow finishes only in the browser and session that start
     const before = gw.state();
     refused(await other.finish('stub', { purpose: 'invite', state: st.json.state, key: 'k7' }), 403, T.otherBrowser, 'B finishes A\'s invite');
     assert.deepEqual(gw.state(), before, 'nothing written');
-    ok(await a.finish('stub', { purpose: 'invite', state: st.json.state, key: 'k7' }), 'A finishes it: B\'s try spent nothing');
+    // the right state with a nonce that isn't the one start set: not this browser either
+    const forged = (jar) => `${jar.flow.split('=')[0]}=${jar.flow.split('=')[1].split('.')[0]}.${u(crypto.randomBytes(32))}`;
+    refused(await a.finish('stub', { purpose: 'invite', state: st.json.state, key: 'k7' }, { flow: forged(a.jar), store: false }), 403, T.otherBrowser, 'a forged nonce for A\'s invite');
+    assert.deepEqual(gw.state(), before, 'nothing written');
+    ok(await a.finish('stub', { purpose: 'invite', state: st.json.state, key: 'k7' }), 'A finishes it: B\'s and the forged tries spent nothing');
+    const c = browser(gw);
+    const sst = await c.start('stub', { purpose: 'sign-in' });
+    ok(sst, 'sign-in start in C');
+    refused(await c.finish('stub', { purpose: 'sign-in', state: sst.json.state, key: 'k7' }, { flow: forged(c.jar), store: false }), 403, T.otherBrowser, 'a forged nonce for C\'s sign-in');
+    ok(await c.finish('stub', { purpose: 'sign-in', state: sst.json.state, key: 'k7' }), 'C signs in with its own nonce');
+    // malformed pairs beside the real one are skipped, and a second cookie of the name is read too
+    const d = browser(gw);
+    const dst = await d.start('stub', { purpose: 'sign-in' });
+    ok(dst, 'sign-in start in D');
+    const [name, value] = d.jar.flow.split('=');
+    ok(await d.finish('stub', { purpose: 'sign-in', state: dst.json.state, key: 'k7' }, { flow: `${name}=not-a-pair~x.y~${'a'.repeat(200)}; ${name}=${value}`, store: false }), 'the real pair found among bad ones, in a second cookie');
     const s1 = mintSession(gw, ana.id, ana.methods[0].id);
     const s2 = mintSession(gw, ana.id, ana.methods[0].id);
     const b = browser(gw, { session: s1 });
