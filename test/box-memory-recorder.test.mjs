@@ -573,7 +573,14 @@ test('C3h: a 24-hour window over a file of long lines (over 2 MB a day) starts a
   const got = res.json.readings;
   const first = Date.parse(got[0].at);
   assert.ok(first >= t0 - DAY && first < t1 - DAY + 61000, `the first reading ${got[0].at} is the window's first`);
-  assert.ok(got.length >= 1439 && got.length <= 1441, `${got.length} readings`);
+  // The hub counts 24 hours back from its own now, taken while it served the call (so between t0 and
+  // t1), and keeps the readings at or after now - 24h. The file's last reading is the whole minute
+  // before now's, so a fixed count is off by one whenever the call crosses a minute (now late in its
+  // minute, or a slow runner): kit main CI run 44730646336 counted 1438. The count is the file's
+  // readings in that window for a now in [t0, t1]: one number, or two adjacent ones when the call
+  // crosses a minute (as kit-342 did for C1 in test/gateway-memory-route.test.mjs).
+  const inDay = (hubNow) => rs.filter((r) => Date.parse(r.at) >= hubNow - DAY).length;
+  assert.ok(got.length >= inDay(t1) && got.length <= inDay(t0), `${got.length} readings (the file holds ${inDay(t1)} to ${inDay(t0)} for the hub's now)`);
   for (let i = 1; i < got.length; i++) assert.ok(got[i].at > got[i - 1].at, 'oldest first');
 });
 
