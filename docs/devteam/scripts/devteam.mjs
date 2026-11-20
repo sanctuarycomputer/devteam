@@ -2772,7 +2772,10 @@ function questionRewrites() {
 // Fill a finding's Disposition cell in a review record, keeping the row the header's width: the
 // author's way to answer a finding without hand-editing the table (a hand-added cell makes a row a
 // reviewer reads as malformed). Only a cell that holds no disposition yet can be filled, as
-// fillInOnly allows, so a filled record still holds the verdicts after it.
+// fillInOnly allows, so a filled record still holds the verdicts after it. A row that isn't its
+// header's width (an unescaped "|" in a cell splits it; a cell left out narrows it) is refused,
+// nothing written: which cell is the Disposition can't be told, and filling by index wrote over
+// another (kit-162's final-4b B4-1 lost its Fix). tableCells reads "\|" as no break.
 function cmdDispose() {
   const [id, file, fid, ...rest] = positional;
   const text = rest.join(' ').trim();
@@ -2792,7 +2795,8 @@ function cmdDispose() {
     const lower = cells.map((c) => c.toLowerCase());
     if (lower.includes('disposition')) { disp = lower.indexOf('disposition'); width = cells.length; continue; }
     if (cells[0] !== fid || disp < 0) continue;
-    const cur = cells.length > width ? (cells.slice(disp).find((c) => c) ?? '') : (cells[disp] ?? '');
+    if (cells.length !== width) die(`${file} line ${k + 1}: finding ${fid}'s row has ${cells.length} cells where its table's header has ${width}, so dispose can't tell which is the Disposition: ${cells.length > width ? 'a "|" inside a cell (a code span too) splits it; escape each as "\\|" (or remove a stray cell)' : 'a cell is missing (an empty Disposition is a cell too, "| |"); add it'}, then dispose again`);
+    const cur = cells[disp] ?? '';
     if (disposed(cur)) die(`${file} ${fid} already has a disposition ("${cur}"); a disposition given doesn't change`);
     const row = Array.from({ length: width }, (_, j) => (j === disp ? text : (cells[j] ?? '')));
     lines[k] = `| ${row.map((c) => c.replace(/\|/g, '\\|')).join(' | ')} |`;
@@ -5575,8 +5579,9 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: 
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
   for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition${f.disposition ? ` ("${f.disposition.slice(0, 40)}" isn't one)` : ''}: the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>`);
-  // a row whose cell count differs from its header reads fine here, but not to a reviewer: say how to fill one
-  for (const r of reviews) for (const f of r.findings) if (f.cells) warn(`${r.file} ${f.id}: its row has ${f.cells} cells and the header ${f.width}; fill a Disposition with devteam.mjs dispose ${'<ticket>'} ${r.file} ${f.id} "fixed", which keeps the row's shape`);
+  // a row whose cell count differs from its header reads fine here, but not to a reviewer, and dispose
+  // refuses it: say how to fix its shape, then fill it
+  for (const r of reviews) for (const f of r.findings) if (f.cells) warn(`${r.file} ${f.id}: its row has ${f.cells} cells and the header ${f.width}, so dispose refuses it: ${f.cells > f.width ? 'a "|" inside a cell (a code span too) splits it; escape each as "\\|" (or remove a stray cell)' : 'a cell is missing (an empty Disposition is a cell too, "| |"); add it'}, then fill its Disposition with devteam.mjs dispose ${'<ticket>'} ${r.file} ${f.id} "fixed"`);
   }
   const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
   if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
