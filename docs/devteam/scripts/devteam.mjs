@@ -7828,14 +7828,16 @@ function askLine({ thread, about } = {}) {
     }
     // the cap, worst case: each job at the most it could run, whichever way the counted questions go
     const most = new Map();
-    const take = (n, e) => most.set(n, Math.max(most.get(n) ?? 0, R.runsADay(e)));
+    const mostUnits = new Map();
+    const take = (n, e) => { most.set(n, Math.max(most.get(n) ?? 0, R.runsADay(e))); mostUnits.set(n, Math.max(mostUnits.get(n) ?? 0, R.unitsADay(e))); };
     for (const [n, e] of Object.entries(onMain)) take(n, e);
     for (const p of R.counted()) for (const [n, e] of Object.entries(p.change)) take(n, e);
     for (const [n, e] of Object.entries(change)) take(n, e);
-    const total = [...most.values()].reduce((t, r) => t + r, 0);
+    const units = [...mostUnits.values()].reduce((t, r) => t + r, 0);
+    const total = units / R.UNIT;
     // a change that adds no runs (a stop, a slower schedule) is never refused: it can bring an over-cap registry back under
-    const adds = Object.entries(change).some(([n, e]) => R.runsADay(e) > R.runsADay(onMain[n]));
-    if (adds && total > R.CAP) die(`this change could take the jobs to ${R.runsWords(total)} runs a day, over the cap of ${R.CAP}, counting each job at the most it could run whichever way the pending questions are answered (a stop frees nothing until it lands): ${R.tally([...most].filter(([, r]) => r > 0))}`);
+    const adds = R.addsRuns(change, onMain);
+    if (adds && units > R.CAP * R.UNIT) die(`this change could take the jobs to ${R.runsWords(total)} runs a day, over the cap of ${R.CAP}, counting each job at the most it could run whichever way the pending questions are answered (a stop frees nothing until it lands): ${R.tally([...most].filter(([, r]) => r > 0))}`);
     // the approval lines are the kit's alone
     if (`${q}\n${ownerText(flagStr('context')) ?? ''}`.split(/\r\n|\r|\n/).some((l) => l.includes(R.HEADER) || /^\s*recurring\.[^\s:]*\s*:/.test(l))) die('--question and --context may not hold a job approval line ("recurring.<name>: …") or its header: the kit writes them, from --change');
     recurringChange = { recurring: change };
@@ -24090,6 +24092,18 @@ const recurringRegistry = Object.freeze({
     if (!m) return 0;
     return m[2] === 'h' && Number(m[1]) < 24 ? 24 / Number(m[1]) : 1;
   },
+  // The same in whole units, so the cap sums exactly (final-10b F5): UNIT is the lowest common
+  // multiple of 1 to 23, so 24/n runs is a whole number of units for every n under 24, and
+  // a total stays far below 2^53. Exactly 100 runs a day is CAP * UNIT.
+  UNIT: 5354228880,
+  unitsADay(entry) {
+    const m = isObj(entry) && typeof entry.every === 'string' ? RECURRING_ENTRY_SHAPE.every.exec(entry.every) : null;
+    if (!m) return 0;
+    return m[2] === 'h' && Number(m[1]) < 24 ? (24 * recurringRegistry.UNIT) / Number(m[1]) : recurringRegistry.UNIT;
+  },
+  // whether a change (name to entry, null a stop) adds runs to main's jobs: a stop or a slower
+  // schedule doesn't, so the cap never refuses one (ask and the landing alike; final-10b F4)
+  addsRuns: (change, main) => Object.entries(isObj(change) ? change : {}).some(([n, e]) => recurringRegistry.unitsADay(e) > recurringRegistry.unitsADay(isObj(main) ? main[n] : undefined)),
   // a number of runs as a message prints it: at most two decimals
   runsWords: (n) => String(Math.round(n * 100) / 100),
   // [[name, runs], …] as "<name> <n>, …", largest first
@@ -24097,8 +24111,9 @@ const recurringRegistry = Object.freeze({
   // null at the cap or under; over it, one line naming every entry, largest first
   capProblem(jobs, why) {
     const rows = Object.entries(isObj(jobs) ? jobs : {}).map(([n, e]) => [n, recurringRegistry.runsADay(e)]);
-    const total = rows.reduce((t, [, r]) => t + r, 0);
-    if (!(total > recurringRegistry.CAP)) return null;
+    const units = Object.values(isObj(jobs) ? jobs : {}).reduce((t, e) => t + recurringRegistry.unitsADay(e), 0);
+    if (!(units > recurringRegistry.CAP * recurringRegistry.UNIT)) return null;
+    const total = units / recurringRegistry.UNIT;
     return `recurring.json: ${recurringRegistry.runsWords(total)} runs a day, over the cap of ${recurringRegistry.CAP} (${why}): ${recurringRegistry.tally(rows)}`;
   },
   // the recurring-edit questions, folded (questionView), oldest first

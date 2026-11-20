@@ -628,6 +628,26 @@ test('A11: a main jobs file nested thousands deep is a read problem, never a cra
   } finally { T.done(); }
 });
 
+test('A9: the cap sums exactly: 27 checks every 7h, 4 weekly chores and a 28th 7h check are 100 runs a day, accepted by ask and validate; one run more is refused (final-10b F5)', () => {
+  const T = setup('exact');
+  try {
+    const jobs = {};
+    for (let i = 0; i < 4; i++) jobs[`weekly-${i}`] = chore({ title: `w${i}` });
+    for (let i = 0; i < 27; i++) jobs[`seven-${i}`] = check({ every: '7h', run: `echo ${i}` });
+    T.onMain(() => jobs);
+    const seven = check({ every: '7h', run: 'echo 27' });
+    passes(T.ask({ recurring: { 'seven-27': seven } }));
+    // with the 28th open, one more run (a weekly chore) is 101
+    refused(T.ask({ recurring: { 'weekly-4': chore({ title: 'w4' }) } }), /could take the jobs to 101 runs a day, over the cap of 100/);
+    T.syncMain();
+    putJobs(T.old, (j) => { j['seven-27'] = seven; });
+    assert.doesNotMatch(T.run(['validate']).text, /over the cap/, 'exactly 100 passes validate');
+    putJobs(T.old, (j) => { j['weekly-4'] = chore({ title: 'w4' }); });
+    assert.match(T.run(['validate']).text, /recurring\.json: 101 runs a day, over the cap of 100/);
+    T.g(['checkout', '--', '.']);
+  } finally { T.done(); }
+});
+
 test('A5: a recurring-edit answer counts only as the owner\'s own pick: answer --read is refused, and a reading line already in the log lands nothing (final-10b F2)', () => {
   const T = setup('reading');
   try {
