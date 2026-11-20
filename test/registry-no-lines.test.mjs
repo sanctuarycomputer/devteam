@@ -35,11 +35,6 @@ test('url links and no lines need no git 2.38: the registry at landing is read f
     g(['commit', '-qam', 'chore-registry: notion'], w); g(['push', '-q', 'origin', 'chore-registry'], w);
     write(path.join(old, 'docs/devteam/run/pr/chore-registry.md'), '# chore-registry: notion\n\n## One-way doors\n\nNone.\n');
     const oldGit = gitShim(F, 'old');
-    // main changed settings.md since the branch left it: refused until main is merged in (kit-162,
-    // ruling d-20261120-044235981), with no merge predicted
-    const stale = run(old, ['check-pr', '--head-ref', 'chore-registry', '--sha', g(['rev-parse', 'HEAD'], w), '--title', 'chore-registry: notion', '--body-file', body], oldGit.env);
-    assert.match(stale.out, /settings\.md: this branch doesn't contain main's tip, and the kit can only judge settings\.md that one side left alone at a single merge base; merge main into the branch first/);
-    g(['fetch', '-q', 'origin'], w); g(['merge', '-q', '--no-edit', 'origin/main'], w); g(['push', '-q', 'origin', 'chore-registry'], w);
     const c = run(old, ['check-pr', '--head-ref', 'chore-registry', '--sha', g(['rev-parse', 'HEAD'], w), '--title', 'chore-registry: notion', '--body-file', body], oldGit.env);
     assert.equal(c.status, 0, `check-pr on git 2.34 with no lines: ${c.out}`);
     const m = run(old, ['merge', '--chore', 'registry', '--dry-run'], { ...SUP, ...oldGit.env });
