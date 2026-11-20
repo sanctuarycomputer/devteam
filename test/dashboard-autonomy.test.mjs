@@ -56,6 +56,9 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await soon("location.href === 'about:blank'", 'a blank page');
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
     await soon("typeof DATA !== 'undefined' && !!DATA && !document.querySelector('main.waiting')", 'the dashboard drawn');
+    // and its charts drawn at their width: fitCharts draws a chart on a later frame when its page wasn't shown yet,
+    // and a chart drawn after this would move what a test then clicks (a chart with no width is skipped, as there)
+    await soon("[...document.querySelectorAll('main.page > section.on .fit[data-fit]')].every((e) => !e.clientWidth || +e.dataset.w === Math.floor(e.clientWidth))", "the page's charts drawn");
   };
   // text, whitespace folded: of the first match, and of every match
   const text = (sel) => p.ev(`(document.querySelector(${JSON.stringify(sel)})?.textContent ?? '').replace(/\\s+/g, ' ').trim()`);
@@ -463,17 +466,9 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
   const govSec = (label) => p.ev(`(() => { const s = [...document.querySelectorAll('#governance .card .sec')].find((x) => x.querySelector('.lbl')?.textContent.trim() === ${JSON.stringify(label)}); return s ? [...s.querySelectorAll('tbody tr')].map((r) => [...r.cells].map((c) => c.textContent.replace(/\\s+/g, ' ').trim())) : null; })()`);
   const fileView = (path) => `#file?path=${encodeURIComponent(path)}`;
   const PEEK_MD = "!!document.querySelector('#drawer-body .md p')";
-  // the peek rendered and done redrawing (its history arrives after the file and redraws it): the same .md for 1 s
-  const peekSettled = async (what) => {
-    await soon(PEEK_MD, what);
-    const end = Date.now() + 15000;
-    for (;;) {
-      await p.ev("window.__md = document.querySelector('#drawer-body .md'); void 0");
-      await new Promise((r) => setTimeout(r, 1000));
-      if (await p.ev("window.__md === document.querySelector('#drawer-body .md') && !!window.__md?.isConnected")) return;
-      assert.ok(Date.now() < end, `${what}: the peek never settled`);
-    }
-  };
+  // the peek rendered and done redrawing: its history arrives after the file and redraws it (its properties grow, so
+  // what is under them moves), and until then the History card says Loading…
+  const peekSettled = (what) => soon(`${PEEK_MD} && !document.querySelector('#drawer-body .loading')`, `${what}: the peek redrawn with its history`);
   // Shift held and the pointer moved over the i-th of the peek's rendered blocks matching sel (kept as window.__blk)
   const pointAt = async (sel, i) => {
     const at = await p.ev(`(() => { const e = document.querySelectorAll(${JSON.stringify(sel)})[${i}]; if (!e) return null; window.__blk = e; e.scrollIntoView({ block: 'center', behavior: 'instant' }); const r = e.getBoundingClientRect(); return { x: Math.round(r.left + Math.min(40, r.width / 2)), y: Math.round(r.top + r.height / 2) }; })()`);
