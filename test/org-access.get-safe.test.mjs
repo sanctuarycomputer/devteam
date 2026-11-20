@@ -348,7 +348,7 @@ async function sweep(t, F, mode, env) {
     await settled(F, leaders);
     const failures = [];
     // the seeded states as seeded, once the instance is up: a start that wrote either would leave the sweep nothing to see
-    for (const f of [path.join(F.home, '.devteam', 'machine-id'), path.join(F.old, 'docs/devteam/run/tmux-session')]) if (fs.existsSync(f)) failures.push(`${mode}: ${path.relative(F.base, f)} exists before any request (the dashboard's start wrote it)`);
+    for (const f of [path.join(F.home, '.devteam', 'machine-id'), path.join(F.old, 'docs/devteam/run/tmux-session')]) if (fs.existsSync(f)) failures.push(`${mode}: ${path.relative(F.base, f)} exists before the sweep's first request (the start, or an earlier sweep, wrote it)`);
     const ask = async (key, method, [want, p, headers = SAME, has = null], checkStatus) => {
       const at = key.startsWith('hub ') ? PORTS : port;
       const before = snapshot(F);
