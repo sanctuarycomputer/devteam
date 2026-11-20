@@ -6760,6 +6760,8 @@ function ownerAnswer(qid, what) {
   // recommendation (a review, its verified result). Answered any other way, the owner declined or
   // changed it, and the supervisor asks again; a secrets question approves by what was posted.
   // Words alone approve nothing until the supervisor reads them as one choice, citing them.
+  // a job change takes only the owner's own pick: no reading is offered (d-20261120-195829274-supervisor)
+  if (v.in_words && v.class === 'recurring-edit') die(`${what}: ${qid} was answered in the owner's own words ("${String(v.words).slice(0, 80)}"), not a choice: only the owner's own pick of Yes approves a job change; ask back in its thread, or ask again`);
   if (v.in_words && !v.reading) die(`${what}: ${qid} was answered in the owner's own words ("${String(v.words).slice(0, 80)}"), not a choice: read them with answer ${qid} --read "<label>" --cite "<their words>" --class ${v.class ?? v.kind}, or ask back in its thread when they fit more than one choice`);
   if (!(v.secrets ?? []).length && v.kind !== 'review' && !v.matched) die(`${what}: ${qid} was answered "${String(v.answer ?? '').slice(0, 80)}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ' (it has none)'}: that approves nothing; ask again for what the owner wants`);
   return v;
@@ -8321,6 +8323,8 @@ function cmdAnswer() {
     if (!picked) die(`--read "${label}" is not one of ${id}'s choices (${v.labels.join(', ') || 'it has none'})`);
     if (cls !== (v.class ?? v.kind)) die(`--class ${cls}: ${id} was asked in ${v.class ?? v.kind}; a reading is a call in the question's class`);
     if (OWNER_ACTS.includes(cls)) die(`${cls} acts are the owner's: ask back in its thread`);
+    // a job change lands only on the owner's own Yes, never on a reading (d-20261120-195829274-supervisor)
+    if (cls === 'recurring-edit') die(`${id} is a recurring-edit question: only the owner's own pick of Yes approves a job change, never a reading of their words; ask back in its thread, or ask again`);
     // the cite as the view will check it: everything else here already passes, so only the cite can fail
     const said = cite.replace(/\s+/g, ' ').trim();
     const reading = { choice: picked, cite: said, class: cls, of: v.answered_at };
@@ -24113,8 +24117,10 @@ const recurringRegistry = Object.freeze({
     }
     return null;
   },
-  // the question can approve its change: answered by the owner, as recommended, not landed, not superseded
-  live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
+  // the question can approve its change: answered by the owner, as recommended, by their own pick or
+  // label (agreed_by_owner; never a reading of words, whatever line wrote it:
+  // d-20261120-195829274-supervisor), not landed, not superseded
+  live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && v.agreed_by_owner === true && !v.reading && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
   // The questions that block another question for their names: open ones, and live ones
   // (registering an addition or edit, stopping when every value is null), as { qid, status, change }.
   pending() {

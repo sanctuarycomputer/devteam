@@ -278,12 +278,13 @@ test('A5: another class, a standing rule, or a question changed after its answer
     };
     rewrite({ change: { recurring: { 'ci-main': check({ every: '12h' }) } } });
     rewrite({ question: 'Should I add a job that runs every hour?' });
-    // answered in words, then asked again about the same job, then the first's words read as Yes: superseded
+    // answered in words, then asked again about the same job: the words can't be read as Yes
+    // (final-10b F2), and the first approves nothing, in words or superseded
     const first = T.asked({ recurring: { 'ci-main': check() } });
     T.ok(['answer', first, 'maybe, let me think', '--in-words'], {});
     T.asked({ recurring: { 'ci-main': check({ every: '12h' }) } });
-    T.ok(['answer', first, '--read', 'Yes', '--cite', 'maybe', '--class', 'recurring-edit']);
-    refused(T.dry('add', first), /superseded/);
+    refused(T.run(['answer', first, '--read', 'Yes', '--cite', 'maybe', '--class', 'recurring-edit']), /only the owner's own pick of Yes approves a job change/);
+    refused(T.dry('add', first), /answered in the owner's own words \("maybe, let me think"\), not a choice: only the owner's own pick of Yes approves a job change/);
     // a secrets question of the class (ask refuses one; written here by hand) answered "Posted": no Yes, so it approves nothing
     const sq = 'q-20990101-000000001-supervisor';
     fs.appendFileSync(T.logFile('supervisor'), `${JSON.stringify({ v: 1, type: 'question', op: 'new', id: sq, at: new Date().toISOString(), by: 'supervisor', kind: 'owner-action', class: 'recurring-edit', question: 'Post the key for the job?', recommendation: 'Yes', secrets: [{ name: 'API_KEY', sink: 'rails-credentials:test:api.key' }], change: { recurring: { 'ci-main': check() } } })}\n`);
@@ -621,6 +622,28 @@ test('A11: a main jobs file nested thousands deep is a read problem, never a cra
     const v = T.run(['validate']);
     assert.doesNotMatch(v.text, crash);
     refused(v, /recurring\.json in this checkout: nested deeper than 64 levels/);
+  } finally { T.done(); }
+});
+
+test('A5: a recurring-edit answer counts only as the owner\'s own pick: answer --read is refused, and a reading line already in the log lands nothing (final-10b F2)', () => {
+  const T = setup('reading');
+  try {
+    const q = T.asked({ recurring: { aa: check() } });
+    T.ok(['answer', q, 'No, never add it', '--in-words'], {});
+    refused(T.run(['answer', q, '--read', 'Yes', '--cite', 'add it', '--class', 'recurring-edit']), new RegExp(`${q} is a recurring-edit question: only the owner's own pick of Yes approves a job change, never a reading of their words`));
+    // a reading line written some other way (an older kit, a hand edit): the view reads it as Yes,
+    // and still nothing lands on it
+    const answeredAt = json(T.ok(['questions', '--id', q, '--json']))[0].answered_at;
+    fs.appendFileSync(T.logFile('supervisor'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: q, at: new Date().toISOString(), by: 'supervisor', reading: { choice: 'Yes', cite: 'add it', class: 'recurring-edit', of: answeredAt, act: 'a-20990101-000000001-supervisor' } })}\n`);
+    assert.equal(json(T.ok(['questions', '--id', q, '--json']))[0].matched, true, 'the view takes the reading');
+    T.jobsChore('read', () => ({ aa: check() }));
+    // merge refuses words before the binding; apply reaches live itself, which ignores the reading
+    const words = new RegExp(`${q} was answered in the owner's own words \\("No, never add it"\\), not a choice: only the owner's own pick of Yes approves a job change`);
+    refused(T.dry('read', q), words);
+    refused(T.merge('read', ['--approved', q]), words);
+    assert.equal(Object.hasOwn(T.mainJobs(), 'aa'), false, 'no job landed');
+    T.ok(['chore', 'start', 'recurring']);
+    refused(T.run(['recurring', 'apply', q]), new RegExp(`${q} can't approve a job change`));
   } finally { T.done(); }
 });
 
