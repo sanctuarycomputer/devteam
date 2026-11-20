@@ -7055,10 +7055,7 @@ function cmdMerge() {
     }
     // The jobs' binding: whenever --approved is a recurring-edit answer, the PR changing the jobs or
     // not (it then lands none of what the answer showed), on the jobs that land against main's.
-    if (approved && jobAnswer && L && !L.problem) {
-      const M = recurringRegistry.read(checkedMain);
-      fails.push(...recurringBindingFails(M.problem ? {} : M.jobs, L.jobs, approved));
-    }
+    if (approved && jobAnswer && L && !L.problem) fails.push(...recurringBindingFails(L.main, L.jobs, approved));
     // A change to the jobs, or the recurring chore, waits while Upkeep is drained or parked, whatever
     // its slug (record-keeping ones too); heldBy's own refusal, when it has one, is the one given.
     const jobsHold = chore === 'recurring' || jobsChanged ? goalMode(upkeepOrVirtual()) : 'run';
@@ -7281,8 +7278,9 @@ function cmdMerge() {
     out(`landed the records of ${id} at ${rec.sha.slice(0, 12)} in home (${ra.id})`);
   }
   // The code lands onto the main the checks judged (kit-162): what they cleared holds only there.
+  // A fetch that fails or times out can't tell: it refuses, never clears (T3-1).
   const moved = () => {
-    R.git(['fetch', '--quiet', 'origin', mainBranch]);
+    if (R.git(['fetch', '--quiet', 'origin', mainBranch]) === null) return `couldn't fetch ${mainBranch}${inR} to check it hasn't moved since the checks; run merge again`;
     const tip = R.resolveCommit(`origin/${mainBranch}`);
     return tip === checkedMain ? null : `main moved since the checks (${String(checkedMain).slice(0, 12)} to ${String(tip).slice(0, 12)}); run merge again`;
   };
@@ -24081,7 +24079,8 @@ const recurringRegistry = Object.freeze({
     return Object.fromEntries(names.filter((n) => Object.hasOwn(A, n) !== Object.hasOwn(B, n) || canonical(A[n]) !== canonical(B[n])).map((n) => [n, Object.hasOwn(B, n) ? B[n] : null]));
   },
   // What lands (kit-162, spec "What lands"): the jobs a merge of sha onto main lands, under method,
-  // known exactly in two cases only, as { from: 'head' | 'main', jobs, changed, problem, warn }:
+  // known exactly in two cases only, as { from: 'head' | 'main', jobs, main, changed, problem, warn }
+  // (main: main's jobs as the binding reads them, {} when its file doesn't read):
   // the branch contains main's tip (with no merge commits since it, under rebase), so the head's tree
   // lands; or it is behind at a single merge base and no watched path changed on either side since
   // (nor in any of its commits, under rebase), so git never merges the file and main's lands. Every
@@ -24096,6 +24095,8 @@ const recurringRegistry = Object.freeze({
     if (!main || !sha) return refuse(`recurring.json: no ${!main ? 'main' : 'head'} to judge the jobs against`);
     const P = R.path();
     const parents = R.parents();
+    // the names are the repo's, whole: never relative to a subdirectory (diff.relative), and with every
+    // gitlink shown (diff.ignoreSubmodules), whatever the user's git config says (T3-3)
     // a path whose change could put another file, a directory or a link at P, or carry one into it
     const watched = (n) => n === 'recurring.json' || n.endsWith('/recurring.json') || n === P || n.startsWith(`${P}/`) || parents.includes(n);
     const cant = (what, r) => `recurring.json: git ${what} ${r.timedOut ? 'timed out' : 'failed'}, so the kit can't tell what would land; check again`;
@@ -24103,7 +24104,7 @@ const recurringRegistry = Object.freeze({
     if (M.failed) return refuse(M.problem);
     const warn = M.problem ? `main's recurring.json doesn't read (${M.problem}); fix it in a recurring chore` : null;
     const mainJobs = M.problem ? {} : M.jobs;
-    const lands = (from, jobs) => ({ from, jobs, changed: R.changed(mainJobs, jobs), problem: null, warn });
+    const lands = (from, jobs) => ({ from, jobs, main: mainJobs, changed: R.changed(mainJobs, jobs), problem: null, warn });
     // 1. the head's file reads, or is main's broken one, entry for entry (which waives only this)
     const H = R.read(sha);
     if (H.failed) return refuse(H.problem, warn);
@@ -24131,13 +24132,13 @@ const recurringRegistry = Object.freeze({
     if (bases.length !== 1) return refuse(behind, warn);
     if (rebase && merges) return refuse(merged, warn);
     for (const side of [sha, main]) {
-      const d = g(['diff', '--no-renames', '--name-only', '-z', bases[0], side]);
+      const d = g(['diff', '--no-renames', '--no-relative', '--ignore-submodules=none', '--name-only', '-z', bases[0], side]);
       if (!d.ok) return refuse(cant('diff', d), warn);
       if (d.out.split('\0').some((n) => n && watched(n))) return refuse(behind, warn);
     }
     // under rebase, each commit is replayed: none may touch a watched path, even one it later restores
     if (rebase) {
-      const l = g(['log', '--no-renames', '--format=%x00%H', '--name-only', '-z', `${main}..${sha}`]);
+      const l = g(['log', '--no-renames', '--no-relative', '--ignore-submodules=none', '--format=%x00%H', '--name-only', '-z', `${main}..${sha}`]);
       if (!l.ok) return refuse(cant('log', l), warn);
       // "\0<hash>" heads each commit, then its names, the first after one newline, each ending in \0:
       // an empty field comes before every hash, and no name is empty

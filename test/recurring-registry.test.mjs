@@ -928,6 +928,26 @@ history('refused under rebase: a behind branch whose commits add the jobs file a
   refused(T.merge('flip'), BEHIND);
 }, ['rebase']);
 
+// the user's git config can't hide a name from the scan (T3-3): diff.relative with merge run from
+// docs/, and diff.ignoreSubmodules=all, while a commit puts a gitlink at the project dir and the next
+// puts the directory back
+history('refused under rebase: with diff.relative and diff.ignoreSubmodules=all, a behind branch whose commits make docs/devteam/project a gitlink and then a directory again', (T) => {
+  T.g(['config', 'diff.relative', 'true']);
+  T.g(['config', 'diff.ignoreSubmodules', 'all']);
+  const wt = T.choreBranch('subflip', (w) => {
+    T.g(['rm', '-r', '-q', '--cached', PROJ], w);
+    T.g(['update-index', '--add', '--cacheinfo', `160000,${T.g(['rev-parse', 'HEAD'], w)},${PROJ}`], w);
+  }, { add: false });
+  assert.match(T.g(['ls-tree', 'origin/chore-subflip', '--', PROJ]), /^160000 commit /, 'a gitlink at the project dir');
+  T.g(['rm', '-q', '--cached', PROJ], wt);
+  T.commitIn(wt, 'chore-subflip', () => {}, 'and back');
+  T.onMainFile('README.md', 'main moves\n');
+  assert.match(T.g(['ls-tree', 'origin/chore-subflip', '--', PROJ]), /^040000 tree /, 'the head\'s project dir is a directory');
+  const docs = path.join(T.old, 'docs');
+  refused(T.run(['merge', '--chore', 'subflip', '--dry-run'], SUP, docs), BEHIND);
+  refused(T.dry('subflip'), BEHIND);
+}, ['rebase']);
+
 // the two above whose head refuses on its own (step 1), here with the head clean again: only the
 // commit scan sees the path under the jobs file, or the project dir turned into a link
 history('refused under rebase: a behind branch whose commits add docs/devteam/project/recurring.json/x and then delete it (no plain-git proof)', (T) => {
@@ -1007,6 +1027,20 @@ test('A15 landing: forge github, main moves after the checks: refused before gh 
     assert.deepEqual(prMerges(), [`pr merge 7 --merge --match-head-commit ${still.sha}`]);
     T.g(['fetch', '-q', 'origin']);
     assert.equal(T.g(['rev-parse', 'origin/main']), adv, 'the stand-in lands nothing');
+    // the re-fetch before gh pr merge fails (a git that fails every fetch once the chore's gate has
+    // run): refused, never read as main unmoved, and gh pr merge never runs (T3-1)
+    const marker = path.join(T.base, 'fetches-fail');
+    const shim = path.join(T.base, 'git-fetch-fails');
+    write(path.join(shim, 'git'), `#!/bin/sh\nif [ -f "${marker}" ]; then case " $* " in *" fetch "*) echo "fatal: the test's fetch fails" >&2; exit 128 ;; esac; fi\nexec "${REAL_GIT}" "$@"\n`);
+    fs.chmodSync(path.join(shim, 'git'), 0o755);
+    const nf = T.choreBranch('nofetch', gate('nofetch', `touch "${marker}"`));
+    const nsha = T.g(['rev-parse', 'HEAD'], nf);
+    write(prFile, JSON.stringify({ number: 7, headRefOid: nsha, title: 'chore-nofetch: jobs', body: '## One-way doors\n\nNone.\n', isDraft: false, mergeStateStatus: 'CLEAN', url: 'https://example.test/pr/7', statusCheckRollup: [] }));
+    fs.rmSync(log, { force: true });
+    const nr = T.merge('nofetch', [], { PATH: `${shim}${path.delimiter}${bin}${path.delimiter}${process.env.PATH}` });
+    refused(nr, /couldn't fetch main to check it hasn't moved since the checks; run merge again/);
+    assert.ok(fs.existsSync(marker), 'the gate ran');
+    assert.deepEqual(prMerges(), [], 'gh pr merge was never called');
   } finally { T.done(); }
 });
 
@@ -1071,13 +1105,28 @@ test('A16: git failing is never read as no jobs, and a jobs file this checkout c
     const c = T.run(['check-pr', '--head-ref', 'chore-notes', '--sha', T.headOf('chore-notes'), '--title', 'chore-notes: jobs'], { ...SUP, ...env });
     refused(c, /recurring\.json at [0-9a-f]{12}: git cat-file failed, so the kit can't read the jobs/);
     passes(T.checkPr('chore-notes'));
-    // a jobs file this checkout can't read (EACCES): validate names it
+    // only main's reads fail (cat-file -p of main's trees), the head's read: landing refuses on main's
+    // own failure, never reading it as a broken file or no jobs (T3-4)
+    const mainSha = T.headOf('main');
+    const only = path.join(T.base, 'git-main-fails');
+    write(path.join(only, 'git'), `#!/bin/sh\ncase " $* " in *" cat-file -p ${mainSha}:"*) echo "fatal: the test's git fails on main" >&2; exit 128 ;; esac\nexec "${REAL_GIT}" "$@"\n`);
+    fs.chmodSync(path.join(only, 'git'), 0o755);
+    const onlyEnv = { PATH: `${only}${path.delimiter}${process.env.PATH}` };
+    const m = T.run(['check-pr', '--head-ref', 'chore-notes', '--sha', T.headOf('chore-notes'), '--title', 'chore-notes: jobs'], { ...SUP, ...onlyEnv });
+    refused(m, new RegExp(`recurring\\.json at ${mainSha.slice(0, 12)}: git cat-file failed, so the kit can't read the jobs`));
+    assert.doesNotMatch(m.text, /main's recurring\.json doesn't read/, 'a git failure on main is not a broken file');
+    refused(T.dry('notes'), new RegExp(`recurring\\.json at ${mainSha.slice(0, 12)}: git cat-file failed`));
+  } finally { T.done(); }
+});
+
+test('A16: a jobs file this checkout can\'t read (EACCES) is a validate problem, not a throw (task-2 T2-3)', (t) => {
+  // root reads a mode-000 file, so there is no EACCES to see
+  if (process.getuid?.() === 0) { t.skip('running as root: a mode-000 file still reads'); return; }
+  const T = setup('eacces');
+  try {
+    T.onMain(() => ({ aa: check() }));
     T.syncMain();
     fs.chmodSync(path.join(T.old, JOBS), 0o000);
-    try {
-      let readable = true;
-      try { fs.readFileSync(path.join(T.old, JOBS)); } catch { readable = false; }
-      if (!readable) refused(T.run(['validate']), /recurring\.json in this checkout: can't read it \(EACCES\)/);
-    } finally { fs.chmodSync(path.join(T.old, JOBS), 0o644); }
+    try { refused(T.run(['validate']), /recurring\.json in this checkout: can't read it \(EACCES\)/); } finally { fs.chmodSync(path.join(T.old, JOBS), 0o644); }
   } finally { T.done(); }
 });
