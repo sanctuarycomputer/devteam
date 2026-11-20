@@ -1420,45 +1420,48 @@ export function createGateway(opts = {}) {
     if (!mine) return no(403, OTHER_BROWSER);
     // 4. the flow: a record is spent here, once, whatever follows; a sign-in only when it succeeds
     const dropped = [flowCookie(pairs.filter((x) => pairState(x) !== state).slice(-4))];
-    const kept = rec ? dropped : [];
+    const after = rec ? dropped : [];
     if (rec) records.delete(state);
     const p = signIn ? 'sign-in' : rec?.purpose;
-    if (signIn ? usedSignIns.has(state) || !signInLive(state) : !rec || !(rec.expires > Date.now()) || rec.type !== type) return no(403, START_AGAIN, kept);
-    if (method === 'POST' && purpose !== p) return no(403, START_AGAIN, kept);
+    if (signIn ? usedSignIns.has(state) || !signInLive(state) : !rec || !(rec.expires > Date.now()) || rec.type !== type) return no(403, START_AGAIN, after);
+    if (method === 'POST' && purpose !== p) return no(403, START_AGAIN, after);
     // 5. an add finishes in the session that started it (by hash, before asking if it's live)
-    if (p === 'add' && !sessionHashes(req).includes(rec.session)) return no(403, 'this challenge was issued to another session: finish it where you started it', kept);
+    if (p === 'add' && !sessionHashes(req).includes(rec.session)) return no(403, 'this challenge was issued to another session: finish it where you started it', after);
     // 6. the type's own finish
     const lookup = (key) => holderOf(store.load(), type, key)?.method.data ?? null;
     let out;
-    try { out = await row.finish({ purpose: p, state, body: input, lookup, kept: rec?.keep }); } catch (e) { return no(400, said(e), kept); }
+    try { out = await row.finish({ purpose: p, state, body: input, lookup, kept: rec?.keep }); } catch (e) { return no(400, said(e), after); }
     const key = out?.key;
-    if (typeof key !== 'string' || !key || key.length > 512) return no(400, 'bad sign-in method', kept);
+    if (typeof key !== 'string' || !key || key.length > 512) return no(400, 'bad sign-in method', after);
     let data;
-    try { data = JSON.parse(JSON.stringify(out.data ?? null)); } catch { return no(400, 'bad sign-in method', kept); }
+    try { data = JSON.parse(JSON.stringify(out.data ?? null)); } catch { return no(400, 'bad sign-in method', after); }
     // 7. what start rested on, against the state as it is now
     const s = store.load();
     const now = Date.now();
     const iso = new Date(now).toISOString();
     let person = null;
     if (p === 'claim') {
-      if (s.passkeys.length) return no(409, 'this box is already claimed', kept);
-      if (!claimLive(s) || s.claimHash !== rec.claimHash) return no(403, CLAIM_EXPIRED, kept);
+      if (s.passkeys.length) return no(409, 'this box is already claimed', after);
+      if (!claimLive(s) || s.claimHash !== rec.claimHash) return no(403, CLAIM_EXPIRED, after);
     } else if (p === 'sign-in') {
       if (!s.passkeys.length) return no(409, 'this box is not claimed yet');
     } else if (p === 'add') {
       const held = stillHeld(s, { hash: rec.session });
-      if (!held) return no(401, 'your session ended; sign in again', kept);
-      if (!fresh(held.session)) return no(403, NOT_FRESH, kept);
-      if (held.person.role !== rec.role) return no(409, 'your account changed since; start again', kept);
+      if (!held) return no(401, 'your session ended; sign in again', after);
+      if (!fresh(held.session)) return no(403, NOT_FRESH, after);
+      // a top-level session is whoever owns the box now, so the person is checked by id as well
+      if ((held.person.id ?? null) !== (rec.person ?? null) || held.person.role !== rec.role) return no(409, 'your account changed since; start again', after);
       person = held.person;
     } else {
       const found = inviteOf(s, rec.invite);
-      if (!found) return no(403, INVITE_GONE, kept);
+      if (!found) return no(403, INVITE_GONE, after);
       person = found.person;
     }
     // 8. one write
     const holder = holderOf(s, type, key);
     if (p === 'sign-in') {
+      // another finish of this state may have landed while this one's finish was awaited
+      if (usedSignIns.has(state)) return no(403, START_AGAIN);
       if (!holder) return no(403, 'no one on this box signs in with that');
       const people = s.people?.map((x) => (x.id !== holder.person.id ? x : { ...x, last_seen: iso, methods: holder.top ? x.methods : x.methods.map((m) => (m.id === holder.method.id ? { ...m, data, last_used: iso } : m)) }));
       // a top-level passkey takes back only its counter and last use, as today
@@ -1468,7 +1471,7 @@ export function createGateway(opts = {}) {
       spendSignIn(state);
       return { status: 200, body: { ok: true }, cookies: [set, ...dropped] };
     }
-    if (holder) return no(400, type === 'passkey' ? 'that passkey is already registered' : 'that sign-in method is already registered', kept);
+    if (holder) return no(400, type === 'passkey' ? 'that passkey is already registered' : 'that sign-in method is already registered', after);
     const owner = p === 'claim' || isOwner(person);
     const base = owner ? withOwner(s, now) : s;
     const ownRow = owner ? ownerRow(base) : null;
@@ -1757,7 +1760,7 @@ export function createGateway(opts = {}) {
       const alerts = alertNews(before.pushAlerts ?? {}, list, BLOCK, new Set(lastSent.keys()));
       const messages = [...inboxMessages, ...alerts.messages];
       const subs = everySub(before);
-      // a root restsOn after news to anyone's devices, not only the owner's
+      // a root rests after news to anyone's devices, not only the owner's
       if (subs.length) for (const r of [...roots, ...alerts.keys]) lastSent.set(r, now);
       if (JSON.stringify(seen) !== JSON.stringify(before.pushSeen ?? {}) || JSON.stringify(alerts.seen) !== JSON.stringify(before.pushAlerts ?? {})) store.save({ ...before, pushSeen: seen, pushAlerts: alerts.seen });
       const dead = new Set();
@@ -2263,7 +2266,7 @@ export function createGateway(opts = {}) {
   // nothing else of the owner's, and it is synchronous: nothing is asked on the request path, not even
   // on a miss, so its timing says nothing of who is visiting. The list can be up to a poll stale.
   // The root check is for consistency, against another real checkout on that port, not for
-  // authenticity: that restsOn on the port binding, as it does for the dashboard on that name.
+  // authenticity: that rests on the port binding, as it does for the dashboard on that name.
   // The wrapper's own policy: styles and one frame, the bound instance's; no script, nothing to fetch.
   const WRAP_CSP = (inst) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${inst}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   const ownerWrapper = (req, url) => {

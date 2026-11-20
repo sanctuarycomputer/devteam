@@ -441,6 +441,15 @@ test('org-access A17: the state value missing, expired, reused, or for another p
       refused(await b.finish('stub', { purpose, state: st.json.state, key: reuseKey[purpose] }, { flow: pair, session: purpose === 'add' ? session : null }), 403, T.startAgain, `${purpose} finished twice`);
       assert.deepEqual(gw.state(), before, `${purpose} reused: nothing written`);
     }
+    // reused while in flight: two finishes of one sign-in, both waiting on a provider's finish
+    {
+      const b = browser(gw);
+      const st = await b.start('stub', { purpose: 'sign-in' });
+      ok(st, 'sign-in start');
+      const both = await Promise.all([0, 1].map(() => b.finish('stub', { purpose: 'sign-in', state: st.json.state, key: 'k4', delayMs: 300 }, { store: false })));
+      assert.deepEqual(both.map((r) => r.status).sort(), [200, 403], 'one sign-in, once');
+      assert.deepEqual(both.find((r) => r.status === 403).json, { error: T.startAgain });
+    }
     // another purpose: an add's state finished as a sign-in, and a sign-in's as an add
     {
       const { b, body } = flows.add();
@@ -761,6 +770,26 @@ test('org-access A17: an add spanning a transfer is refused', async () => {
     const before = gw.state();
     refused(await b.finish('stub', { purpose: 'add', state: st.json.state, key: 'k11' }), 409, T.changed, 'add across a transfer');
     assert.deepEqual(gw.state(), before, 'nothing written');
+  } finally { await gw.close(); }
+});
+
+test('org-access A17: the owner\'s add spanning a transfer, their session kept, is refused', async () => {
+  const { gw, owner, ana } = await setup('c11b');
+  try {
+    const st = await owner.start('stub', { purpose: 'add' });
+    ok(st, 'the owner\'s add start');
+    // the transfer with the old owner's top-level sessions left where they are: a top-level session
+    // is now the new owner's, so only the person's id tells the add it is someone else's
+    const s = gw.state();
+    const toTop = (m) => ({ id: m.key, userId: m.data.userId, jwk: m.data.jwk, alg: m.data.alg, signCount: m.data.signCount, name: m.label, rp: m.data.rp, createdAt: m.added_at });
+    const anaRow = s.people.find((p) => p.id === ana.id);
+    const passkeys = anaRow.methods.filter((m) => m.type === 'passkey').map(toTop);
+    const people = s.people.map((p) => (p.role === 'owner' ? { ...p, role: 'admin', rev: p.rev + 1 }
+      : p.id === ana.id ? { ...p, role: 'owner', methods: p.methods.filter((m) => m.type !== 'passkey'), rev: p.rev + 1 } : p));
+    gw.write({ ...s, passkeys, people, peopleStamp: stampOf(passkeys.map((p) => p.id)) });
+    const before = gw.state();
+    refused(await owner.finish('stub', { purpose: 'add', state: st.json.state, key: 'k11b' }), 409, T.changed, 'the old owner\'s add, finished after the transfer');
+    assert.deepEqual(gw.state(), before, 'nothing written, to Ana\'s row least of all');
   } finally { await gw.close(); }
 });
 
