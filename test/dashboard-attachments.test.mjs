@@ -443,7 +443,10 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
   });
 
   await t.test('A2, A3, B1, B2: new threads, one with words and a file removed, one of files alone, titled by its file', async () => {
-    await p.ev("document.querySelector('[data-tl-close]')?.click(); document.querySelector('[data-tl-new]').click(); void 0");
+    // + from a settled thread card, as A1: a close in the same step would step back in history after the + and undo it
+    await p.ev(`location.hash = '#talk/${T1}'; void 0`);
+    await soon(`document.getElementById('tl-card')?.dataset.key === ${JSON.stringify(T1)} && !document.getElementById('tl-card').hidden`, 'the thread card, settled');
+    await p.ev("document.querySelector('[data-tl-new]').click(); void 0");
     const key = await soon("(() => { const k = document.querySelector('#tl-c-text')?.closest('.dropbox')?.dataset.drop; return k && k.startsWith('tl:new:') ? k : null; })()", 'the new-thread composer');
     await p.ev(`window.__drop('#tl-c-text', [{ name: 'Plan.png', png: true }, { name: 'drop-me.txt', text: 'x' }]); void 0`);
     await soon(`${pills(key)}.length === 2 && ${pills(key)}.every((x) => x.dataset.pillState === 'ok')`, 'two pills');
@@ -465,7 +468,7 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     await soon("window.__posts.some((x) => x.url === '/api/thread-say' && JSON.parse(x.body).text === 'and these')", 'the reply posted');
     assert.deepEqual((await posted('/api/thread-say')).find((b) => b.text === 'and these').files.map((f) => f.name), ['while-pending.txt', 'after-named.txt'], 'both went');
     await soon("!!document.querySelector('[data-tl-close]')", 'its card');
-    await p.ev("document.querySelector('[data-tl-close]').click(); document.querySelector('[data-tl-new]').click(); void 0");
+    await p.ev("document.querySelector('[data-tl-new]').click(); void 0");
     const k2 = await soon("(() => { const k = document.querySelector('#tl-c-text')?.closest('.dropbox')?.dataset.drop; return k && k.startsWith('tl:new:') ? k : null; })()", 'a fresh composer');
     assert.equal(await p.ev(`${pills(k2)}.length`), 0, 'no pills carried into a new draft');
     await p.ev(`window.__drop('#tl-c-text', [{ name: 'Alone.png', png: true }]); void 0`);
