@@ -79,7 +79,7 @@ async function openThreadsPage(t, name) {
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
 const NOT_DELIVERED_37 = 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it last checked 37 min ago.';
-test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 1 of 6: pointing, the card, the first send, the reply)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 1 of 8: pointing, the card, the first send, the reply)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   const { F, Q0, p, soon, still, click, goalSel, shown, threads } = await openThreadsPage(t, 'threads-page-1');
   let T;
 
@@ -235,7 +235,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   });
 });
 
-test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 2 of 6: slow reads, the thread box's keys, #talk, pins, the panel)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 2 of 8: slow reads, the thread box's keys, #talk, pins, the panel)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   const { F, p, soon, still, click, onThreads, goalSel, shown, threads, enter, composing, lastKey, posts, ticks } = await openThreadsPage(t, 'threads-page-2');
   let T;
   // T as the page makes it in subtest 6 (base :3328-3349: the owner's first words on the goal, with

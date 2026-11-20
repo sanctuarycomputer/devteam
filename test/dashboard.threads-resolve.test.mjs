@@ -1,4 +1,4 @@
-// Threads on the dashboard page in Chrome, parts 5 and 6: answered elsewhere, secrets, resolving and reopening, the drawer, the hidden tab, the Loop spot.
+// Threads on the dashboard page in Chrome, parts 6, 7 and 8: answered elsewhere, secrets, resolving and reopening, the drawer, the hidden tab, the Loop spot.
 // Ports: none of its own (lib/kit.mjs's +0 hub, +1..25)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -6,7 +6,7 @@ import { dashboardOnFreePort, until, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { FRAMES, soonIn, POLL_FAST } from './lib/dashboard-page.mjs';
 
-// The threads page's setup, the one test's own before it was cut in six (base :3177-3238: a fixture,
+// The threads page's setup, the one test's own before it was cut in parts (base :3177-3238: a fixture,
 // a dashboard, a Chrome page under POLL_FAST at #goals, and the steps its subtests share), for each
 // part; a part then builds the rest of the state its subtests read, through the kit's commands.
 async function openThreadsPage(t, name) {
@@ -74,8 +74,8 @@ async function openThreadsPage(t, name) {
   return { F, Q0, dash, port, p, soon, still, released, click, onThreads, goalSel, shown, slid, threads, enter, composing, lastKey, posts, soonTicks, ticks, later };
 }
 
-test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 5 of 6: answered elsewhere, secrets, ready to resolve)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
-  const { F, p, soon, still, click, onThreads, goalSel, threads, lastKey } = await openThreadsPage(t, 'threads-page-5');
+test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 6 of 8: answered elsewhere)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+  const { F, p, soon, click, goalSel, threads } = await openThreadsPage(t, 'threads-page-6');
   let T;
   // T as the page makes it in subtest 6 (base :3328-3349: the owner's first words on the goal, with
   // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
@@ -115,6 +115,29 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
     assert.equal(await p.ev('window.__inboxLink'), false, 'nor once the threads are read again');
     await p.ev('window.__obs.disconnect(); void 0');
   });
+});
+
+test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 7 of 8: secrets, ready to resolve)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+  const { F, p, soon, click, onThreads, goalSel, threads } = await openThreadsPage(t, 'threads-page-7');
+  let T;
+  // T as the page makes it in subtest 6 (base :3328-3349: the owner's first words on the goal, with
+  // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
+  T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' })]).split('\n')[0];
+  { const th = threads().find((x) => x.id === T); assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']); }
+  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
+  // the keys log subtest 12 installs (:3408), as the page has it by subtest 24
+  await p.ev(`(() => { if (window.__keys) return; window.__keys = []; addEventListener('keydown', (e) => { const { key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat } = e; window.__keys.push({ key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat }); }, true); })()`);
+  // the page at #goals, the card closed and T's pin drawn, as subtest 19 leaves it (:3643's wait)
+  await soon(`!!document.querySelector('${goalSel}') && !!document.querySelector('[data-tl-pin="${T}"]')`, 'the goal and its pin');
+  // the card open from its pin, as subtest 21 leaves it (:3644-3645)
+  await click(`[data-tl-pin="${T}"]`);
+  await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
+  // what subtest 24 leaves: its question on T (:3710) answered in the terminal (:3717), as the page then
+  // has it (:3730's wait), the card still open on T; subtest 26's warning counts T's open questions
+  const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to Canada too?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+  await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
+  F.owner(['answer', Q, 'Not this quarter']);
+  await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered' && /Not this quarter/.test(document.getElementById('tl-c-turns').textContent) && document.getElementById('tl-card').dataset.key === '${T}'`, 'the answer as the log has it');
 
   await t.test('a secrets question in the thread is a link to the Inbox, never a second form', async () => {
     const Q = F.sup(['thread', 'ask', T, '--kind', 'owner-action', '--question', 'Post the API key', '--secrets', JSON.stringify([{ name: 'KEY', sink: 'file:secrets/key.txt' }]), '--goal', F.goal, '--stake', '1', '--urgency', '1']);
@@ -153,8 +176,8 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   });
 });
 
-test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 6 of 6: reopen, Resolve across a read, the drawer, the hidden tab, Resolve in the header, the Loop spot, a half-typed resolution)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
-  const { F, p, soon, still, released, click, onThreads, shown, slid, threads } = await openThreadsPage(t, 'threads-page-6');
+test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 8 of 8: reopen, Resolve across a read, the drawer, the hidden tab, Resolve in the header, the Loop spot, a half-typed resolution)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+  const { F, p, soon, still, released, click, onThreads, shown, slid, threads } = await openThreadsPage(t, 'threads-page-8');
   let T;
   // T as the page makes it in subtest 6 (base :3328-3349: the owner's first words on the goal, with
   // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
