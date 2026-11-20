@@ -5475,6 +5475,7 @@ async function openTicket(id) {
     ${gateTable(p.history)}
     ${spendChart(p.spend)}
     ${near.length > 1 ? psect('Dependencies', depGraph(near, { focus: id })) : ''}
+    ${peekArtSection(peekArtifacts(DATA, `ticket:${id}`, PEEK_ART_CTX()))}
     ${historySection(p, id)}`);
 }
 // A goal's impact: the words, why, who said so, and the owner's way to give it another value (a
@@ -5591,6 +5592,7 @@ function openGoal(id) {
       ['Questions', asks.length ? `<ul>${asks.map((q) => `<li>${qlink(q.id, q.question)}${q.status === 'open' ? ' <span class="badge medium">open</span>' : ''}</li>`).join('')}</ul>` : '', 'Questions asked for it, or about its tickets.'],
     ] })}
     ${GOAL_PEEK.goal.map((sid) => GOAL_PEEK_SECTIONS[sid](g, ctx)).join('')}
+    ${peekArtSection(peekArtifacts(DATA, `goal:${id}`, PEEK_ART_CTX()))}
     ${historySection(p, id)}`);
 }
 function openTicketSet({ kind, id, title, sub, computed = [], items, attr = {}, extra = '', q = {} }) {
@@ -5619,7 +5621,7 @@ function openFeature(f) {
     ['Waves', uniq(items.filter((t) => !isDone(t)).map((t) => t.wave)).sort((a, b) => a - b).map(wlink).join(', '), 'Waves its unfinished tickets are in.'],
     ['Planner', (DATA.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">planning now</a>` : '', 'A planner working on it now.'],
     ['Plan reviews', p?.plan_reviews ? reviewList(p.plan_reviews) || 'none yet' : '', 'Reviews of its plan PR while it is being planned.'],
-  ], extra: `${designBlock(p?.design)}${live.length > 1 && f !== 'chores' ? psect('Dependencies', depGraph(live, { groups: waves.map((w) => [w ? `Wave ${w}` : 'No wave', live.filter((t) => t.wave === w)]) })) : ''}` });
+  ], extra: `${designBlock(p?.design)}${live.length > 1 && f !== 'chores' ? psect('Dependencies', depGraph(live, { groups: waves.map((w) => [w ? `Wave ${w}` : 'No wave', live.filter((t) => t.wave === w)]) })) : ''}${peekArtSection(peekArtifacts(DATA, `feature:${f}`, PEEK_ART_CTX()))}` });
 }
 function openStory(sid) {
   const pr = DATA.progress, st = pr.stories[sid];
@@ -6018,6 +6020,7 @@ async function openThread(mid) {
   showDrawer(`<h2 id="drawer-title">${ticket ? `Thread on ${tlink(ticket)}` : 'Message'}</h2>
     ${attrs({ id: mid, peek: p, type: 'message', computed: [['From', esc(who(by)), 'Who sent it.']] })}
     ${!ticket ? '<p class="muted">Its thread is on the ticket\'s timeline.</p>' : tp === undefined ? '<p class="muted">Loading the thread…</p>' : tp.error ? `<p class="err">Could not load the thread: ${esc(tp.error)}</p>` : thread.length ? psect('The thread', thread.map((m) => `<div class="card small ${m.id === mid ? 'qcard' : ''}"><div class="meta">${esc(who(m.by))} → ${esc(who(m.to))} · ${esc(words(m.kind || 'message'))} · ${esc(when(m.at))}</div><div>${linkify(m.text)}</div></div>`).join('')) : `<p class="muted">Not on ${esc(ticket)}'s timeline.</p>`}
+    ${ticket ? peekArtSection(peekArtifacts(DATA, `ticket:${ticket}`, PEEK_ART_CTX())) : ''}
     ${historySection(p, mid)}`);
 }
 function openPlanner(feature) {
