@@ -105,9 +105,21 @@ const kwSq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 // a pane's command starts with the fixture's whole environment, so a pane's dashboard never touches
 // the real ~/.devteam, hub or tmux
 const kwInPane = (env, cmd) => `env ${Object.entries(env).filter(([k]) => /^(HOME|PATH|CLAUDE_CONFIG_DIR|CODEX_HOME|TMUX_TMPDIR|DEVTEAM_[A-Z0-9_]+)$/.test(k)).map(([k, v]) => kwSq(`${k}=${v}`)).join(' ')} ${cmd}`;
+// A pane runs a process group of its own (its pid the group's id; a shell's or execFile's children
+// join it). kill-session only hangs it up: the dashboard it ran still logs into the fixture as it
+// stops (stopped by SIGHUP; its hub's restart after a failed respawn), and each log line recreates
+// docs/devteam/run, so the fixture's rm waits until every group is gone (kit-346), the way
+// lib/kit.mjs's stop() ends a dashboard's group.
+const kwKillGroups = (groups) => groups.filter((g) => { try { process.kill(-g, 'SIGKILL'); return true; } catch { return false; } });
 function kwSession(F, prefix) {
   const s = `${prefix}-${crypto.randomBytes(3).toString('hex')}`;
-  F.later(() => { kwTmux(['kill-session', '-t', `=${s}`]); });
+  F.later(async () => {
+    const groups = kwTmux(['list-panes', '-s', '-t', `=${s}`, '-F', '#{pane_pid}']).out.split('\n').map(Number).filter((n) => n > 1);
+    kwTmux(['kill-session', '-t', `=${s}`]);
+    let left = kwKillGroups(groups);
+    for (let i = 0; i < 200 && left.length; i++) { await kwSleep(50); left = kwKillGroups(left); }
+    if (left.length) throw new Error(`tmux session ${s}: process groups ${left.join(', ')} still run after kill-session and SIGKILL`);
+  });
   return s;
 }
 const kwPanePid = (target) => Number(kwTmux(['display-message', '-p', '-t', target, '#{pane_pid}']).out);
