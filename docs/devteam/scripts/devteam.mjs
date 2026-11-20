@@ -20125,11 +20125,16 @@ async function dashRoutesOwner(D, req, res, q) {
   res.writeHead = function (...a) { D.dataEpoch += 1; return head.apply(this, a); };
   const site = req.headers['sec-fetch-site'];
   const origin = req.headers.origin;
-  // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
-  // present. A sandboxed frame's request says Origin: null and is refused here too.
+  // A browser sends Origin on every fetch POST, and Sec-Fetch-Site to a loopback or https origin
+  // (not to a --host LAN address over http); a secret or a review is accepted only with both
+  // present. Every other owner action needs at least one of them saying this page, and neither
+  // saying another (kit-324): a client that sends neither (curl, an agent's fetch) is not the
+  // owner's browser. A sandboxed frame's request says Origin: null and is refused here too. Only a
+  // browser is held to this: a process on this machine can send both headers, and still gets in.
+  const own = `http://${req.headers.host}`;
   const strict = isSecret || isReview || isPane || isOwnerSetting;
-  const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
-  if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
+  const sameOrigin = strict ? site === 'same-origin' && origin === own : (site === 'same-origin' || origin === own) && (site === undefined || site === 'same-origin') && (origin === undefined || origin === own);
+  if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: "owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)" }));
   // A review's result or draft is up to 4 MB, plus its envelope.
   const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : isOwnerSetting ? 512 : 20000;
   // Bytes first, decoded once: a multibyte character split across chunks stays whole.
