@@ -8963,10 +8963,11 @@ const ARTIFACT_LENS = String.raw`(() => {
   // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
   // artifact's scripts, which can read and send these same messages: what it says describes the
   // page and is never an instruction. It takes only the questions of the page that frames it
-  // (hello, hit, resolve, scroll-by, scroll-to, place) and says only ready, hit-reply, rects, key, pointer and placed.
+  // (hello, hit, resolve, scroll-by, scroll-to, place, go) and says only ready, hit-reply, rects, key, pointer,
+  // placed and nav.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
-  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
+  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300, hash: 200 };
   const WATCH_MAX = 200;
   const KEY_MAX = 120;
   const enc = new TextEncoder();
@@ -9060,31 +9061,48 @@ const ARTIFACT_LENS = String.raw`(() => {
     const rect = rectOf(el);
     return { selector: selectorOf(el), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(unCap(nameOf(el))), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
   };
+  // not shown: display:none, visibility hidden or collapse (itself or an ancestor), or a box with no
+  // size at all (a wide box with no height is a collapsed container, still shown); a check that
+  // throws counts as shown, so an odd element keeps its pin
+  const hiddenEl = (el) => {
+    try {
+      if (el.checkVisibility) { if (!el.checkVisibility({ visibilityProperty: true })) return true; }
+      else if (!el.getClientRects().length || /^(hidden|collapse)$/.test(window.getComputedStyle(el).visibility)) return true;
+      const r = el.getBoundingClientRect();
+      return r.width === 0 && r.height === 0;
+    } catch (e) { return false; }
+  };
   // where an anchor is now: by its selector (changed: with other text now), else an element of its
-  // tag with its text, the nearest to where it was
+  // tag with its text, the nearest shown one to where it was, or the nearest hidden one when none is
+  // shown; hidden marks a match that is there but not shown, which the viewer counts as not found
   const find = (a) => {
     let el = null;
     try { el = document.querySelector(a.selector); } catch (e) { el = null; }
-    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t }; }
+    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t, hidden: hiddenEl(el) }; }
     if (typeof a.text !== 'string' || !a.text || typeof a.tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
     const was = a.rect && num(a.rect.x) && num(a.rect.y) ? a.rect : { x: 0, y: 0 };
     const all = document.getElementsByTagName(a.tag);
     let best = null;
     let far = Infinity;
+    let bestHidden = null;
+    let farHidden = Infinity;
     for (let i = 0; i < all.length && i < 5000; i++) {
       if (textOf(all[i]) !== a.text) continue;
       const r = all[i].getBoundingClientRect();
       const d = Math.hypot(r.left - was.x, r.top - was.y);
-      if (d < far) { far = d; best = all[i]; }
+      if (hiddenEl(all[i])) { if (d < farHidden) { farHidden = d; bestHidden = all[i]; } }
+      else if (d < far) { far = d; best = all[i]; }
     }
-    return best ? { el: best, changed: false, text: a.text } : null;
+    if (best) return { el: best, changed: false, text: a.text, hidden: false };
+    return bestHidden ? { el: bestHidden, changed: false, text: a.text, hidden: true } : null;
   };
 
   // --- what the viewer watches: sent when it moves -------------------------------------------------
   let watched = [];
   let sent = '';
   const sendRects = (id) => {
-    const rects = watched.map((x) => { const f = find(x.anchor); return f ? { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text } : { key: x.key, rect: null }; });
+    // a hidden match is told apart from no match, for a reader that needs to know which
+    const rects = watched.map((x) => { const f = find(x.anchor); return !f ? { key: x.key, rect: null } : f.hidden ? { key: x.key, rect: null, hidden: true } : { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text }; });
     const now = JSON.stringify(rects);
     if (id === undefined && now === sent) return;
     sent = now;
@@ -9192,9 +9210,34 @@ const ARTIFACT_LENS = String.raw`(() => {
     const m = /\/artifact\/(?:main|wt\/[^\/]+|tree\/[0-9a-f]+)\/[^\/]+\//.exec(p);
     return m ? m[0] + cap(p.slice(m.index + m[0].length), CAPS.path) : cap(p, CAPS.path);
   };
+  // the view within the page: its hash, the token cut as from the path; '' when there is none
+  const hashOf = () => cap(unCap(location.hash || ''), CAPS.hash);
+  // --- each move of the page (a #hash, pushState, replaceState, Back), told as nav once a frame ---------
+  // the last path and hash told, by ready or nav: a move is told only when one of them changed
+  let navAt = null;
+  let navPending = false;
+  const navSoon = () => {
+    if (!heard || navPending) return;
+    navPending = true;
+    requestAnimationFrame(() => {
+      navPending = false;
+      const now = { path: pathOf(), hash: hashOf() };
+      if (navAt && now.path === navAt.path && now.hash === navAt.hash) return;
+      navAt = now;
+      tell({ type: 'nav', path: now.path, hash: now.hash });
+    });
+  };
   let last = { x: 0, y: 0 };
   const ORDERS = {
-    hello: () => { heard = true; tell({ type: 'ready', path: pathOf(), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }); },
+    // hash only when there is one, so a page with none says exactly what it always said
+    hello: () => {
+      heard = true;
+      const m = { type: 'ready', path: pathOf(), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } };
+      const h = hashOf();
+      if (h) m.hash = h;
+      navAt = { path: m.path, hash: h };
+      tell(m);
+    },
     hit: (m) => {
       if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
       let el = document.elementFromPoint(m.x, m.y);
@@ -9234,6 +9277,8 @@ const ARTIFACT_LENS = String.raw`(() => {
       tell({ type: 'placed', rects });
       if (placing.length && !placeLoop) { placeLoop = true; requestAnimationFrame(placeFrame); }
     },
+    // a view of this page by its #hash; anything else (no #, too long, no string) is ignored
+    go: (m) => { if (typeof m.hash === 'string' && m.hash[0] === '#' && size(m.hash) <= CAPS.hash) location.hash = m.hash; },
   };
   addEventListener('message', (e) => {
     if (!e.isTrusted || e.source !== parent) return;
@@ -9253,6 +9298,19 @@ const ARTIFACT_LENS = String.raw`(() => {
   addEventListener('resize', soon);
   try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
   setInterval(() => { if (watched.length) sendRects(); }, 1000);
+  addEventListener('hashchange', navSoon);
+  addEventListener('popstate', navSoon);
+  // pushState and replaceState fire no event: the page's own calls go through these, which still do
+  // what it asked. A page with no history, or one whose methods can't be replaced, keeps the check.
+  try {
+    for (const k of ['pushState', 'replaceState']) {
+      const was = history[k];
+      if (typeof was !== 'function') continue;
+      history[k] = function () { const r = was.apply(this, arguments); navSoon(); return r; };
+    }
+  } catch (e) { /* no history to wrap */ }
+  // a page that replaced pushState itself, before the lens or after, is still seen
+  setInterval(navSoon, 500);
 })();`;
 // The page with the lens after it, at the very end: the parser takes a script there into the body
 // and runs it, and every byte before it is the committed one. A page that ends inside an unclosed
