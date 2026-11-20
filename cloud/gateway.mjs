@@ -1664,6 +1664,69 @@ export function createGateway(opts = {}) {
   // No hub answering (nothing on the port, or an answer no list could be) is the empty list with
   // down: true, which only this fallback ever sets: the page says the hub isn't answering.
   const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [], down: true }));
+  // The machine's memory readings (machine-memory@1, the hub's /memory.json), for the Overview's
+  // memory line, after the session check. Only since and after go to the hub, each once and checked
+  // here first, in the path the gateway builds itself: never thin, which the hub takes only from
+  // loopback (as the gateway is) and which would unthin 24 hours. The hub thins long windows; a
+  // body past MEMORY_CAP anyway (8 days on a busy box) is refused whole, never cut.
+  const MEMORY_CAP = 2 * 1024 * 1024;
+  const MEMORY_DOWN = { error: 'the hub isn\'t answering' };
+  const memoryParams = (search) => {
+    const keys = [...search.keys()];
+    const other = keys.find((k) => k !== 'since' && k !== 'after');
+    if (other !== undefined) return { error: 'only since and after are parameters of /memory.json' };
+    if (new Set(keys).size !== keys.length) return { error: 'give since and after once each' };
+    const since = search.get('since'), after = search.get('after');
+    const q = [];
+    if (since !== null) {
+      const m = /^(\d{1,3})([hd])$/.exec(since);
+      const hours = m ? Number(m[1]) * (m[2] === 'd' ? 24 : 1) : 0;
+      if (!m || hours < 1 || hours > 8 * 24) return { error: 'since should be hours or days, 1 to 3 digits then h or d, up to 8 days (24h, 8d)' };
+      q.push(`since=${since}`);
+    }
+    if (after !== null) {
+      const t = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(after) ? Date.parse(after) : NaN;
+      if (!Number.isFinite(t) || new Date(t).toISOString().slice(0, 19) !== after.slice(0, 19)) return { error: 'after should be a reading\'s at, YYYY-MM-DDTHH:MM:SSZ in UTC (milliseconds may follow the seconds)' };
+      q.push(`after=${encodeURIComponent(after)}`);
+    }
+    return { path: `/memory.json${q.length ? `?${q.join('&')}` : ''}` };
+  };
+  // { status, body } as the hub answered, { over: true } past the cap, or null (nothing answering,
+  // a broken answer, or none within the deadline).
+  const memoryAsk = (p) => new Promise((settle) => {
+    let deadline = null;
+    let settled = false;
+    const resolve = (v) => { if (settled) return; settled = true; clearTimeout(deadline); settle(v); };
+    const up = http.get({ host: '127.0.0.1', port: HUB_PORT, path: p, timeout: 10000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (ur) => {
+      const chunks = [];
+      let size = 0;
+      ur.on('data', (c) => { size += c.length; if (size > MEMORY_CAP) { resolve({ over: true }); up.destroy(); } else chunks.push(c); });
+      ur.on('end', () => resolve({ status: ur.statusCode, body: Buffer.concat(chunks) }));
+      ur.on('error', () => resolve(null));
+      ur.on('close', () => resolve(null));
+    });
+    up.on('timeout', () => up.destroy());
+    up.on('error', () => resolve(null));
+    deadline = setTimeout(() => { up.destroy(); resolve(null); }, opts.hubDeadlineMs ?? 15000);
+  });
+  // The hub's 200 goes back byte for byte when it is a JSON object; its 400 (an after over 6 hours
+  // old, which the Overview reads as "ask for the day again") and 500 go back as their one line of
+  // error. Anything else is the route's own 502, never another route's body.
+  const memory = async (req, res, search) => {
+    const q = memoryParams(search);
+    if (q.error) return json(res, 400, { error: q.error });
+    const r = await memoryAsk(q.path);
+    if (r?.over) {
+      log(`/memory.json: the hub's answer to ${q.path} was over 2 MB; refused`);
+      return json(res, 502, { error: 'the hub\'s readings for that window are over 2 MB: ask for a shorter one' });
+    }
+    let body = null;
+    try { body = r ? JSON.parse(r.body.toString('utf8')) : null; } catch {}
+    const object = body !== null && typeof body === 'object' && !Array.isArray(body);
+    if (object && r.status === 200) return send(res, 200, 'application/json', r.body);
+    if (object && [400, 500].includes(r.status) && typeof body.error === 'string') return json(res, r.status, { error: body.error.slice(0, 600) });
+    return json(res, 502, MEMORY_DOWN);
+  };
   // The owner's threads with the box's operator (the Overview's dock): the hub keeps them and types
   // each owner turn into the operator's pane, so the box's name passes these few requests to it, after
   // the session check, as the hub's own page would send them on the machine. What comes back is JSON
@@ -2581,6 +2644,7 @@ export function createGateway(opts = {}) {
       // set (a laptop, an older image). Versions only. An additive change keeps box: 1.
       if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
+      if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
       if (req.method === 'POST' && p.startsWith('/operator/') && HUB_POSTS.includes(p.slice(10))) return operatorThreads(req, res, p.slice(10));
       if (req.method === 'POST' && p === '/push/subscribe') {
