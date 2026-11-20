@@ -97,7 +97,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
   await t.test('in a viewer tab: its own check of the draft, every 10 s; a press before any check still leaves the hint to come; a tree is never checked', async () => {
     edit('v1');
     // "no check yet when pressed" reads an absolute window (the tab's first check not run between its
-    // boot and the press, two frame loads later): this tab's polls run at full period until it has run
+    // boot and the press, two frame loads later): this tab's polls run at full period until the 'no check yet when pressed' assertion has run
     const { identifier: hold } = await p.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__scale = 1;' });
     await p.send('Page.navigate', { url: `${B}/view/artifact/hint-mock?at=demo-01-draft` });
     await soon(`document.documentElement.classList.contains('viewer') && typeof __titles === 'object' && __titles.includes('v1')`, 'the draft in the viewer');
@@ -106,7 +106,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     await soon(`__titles.filter((x) => x === 'v1').length === 2`, 'the draft again');
     assert.equal(await p.ev(`__asked.filter((u) => u.startsWith('/api/view?')).length`), 1, 'no check yet when pressed');
     // the window has been read: back to a twentieth, here and on the tree's navigate below; the first
-    // check runs on the next 50 ms look
+    // check runs on a 50 ms look once 500 ms have passed since the check was set up
     await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: hold });
     await p.ev(`window.__scale = ${SCALE_BY}`);
     let b = await button();
