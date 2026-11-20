@@ -1,85 +1,17 @@
-// The presence relay (kit-631, presence@1): the /presence WebSocket on a real dashboard and on its
-// real hub, driven by the contract's own test client (test/lib/presence-fake.mjs's openPresence) and
-// held to its shapes (shapeErrors). The clock is real: every wait is a `next` or a `closed` with a
-// deadline, and every "never" is bounded by a sentinel people on the same socket.
-import { test, after } from 'node:test';
+// The presence relay (presence@1): the fake's present list, welcome and moves, headers, guards, frames, the hub, the hello.
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fleetFixture, dashboardOnFreePort, PORTS } from './lib/kit.mjs';
-import { startPresenceFake, openPresence, shapeErrors, LIMITS } from './lib/presence-fake.mjs';
+import { LIMITS, openPresence, shapeErrors, startPresenceFake } from './lib/presence-fake.mjs';
+import { between, check, closedWithin, closeEvery, dashboard, fill200, hereMsg, HUB_PORT, json, kinds, onlyProbe, open, P, peopleIds, peopleWith, sentinel, until } from './lib/presence-relay-fixture.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const contract = () => fs.readFileSync(path.join(here, 'contracts', 'presence.md'), 'utf8');
-
-// ---- the file's people: every id, name and at word starts zq7, so A8(d) can look for them on disk ----
-const SPOT = Object.freeze({ page: 'zq7-board', tab: null, peek: 'zq7-kit-1', art: null, thread: null });
-const hereMsg = (at = {}, visible = true) => ({ t: 'here', at: { ...SPOT, ...at }, visible });
-const P = (id, name = 'zq7 Ann') => ({ 'x-devteam-person': `${id};name=${encodeURIComponent(name)}` });
-
-async function until(fn, what, ms = 5000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const v = await fn();
-    if (v) return v;
-    if (Date.now() > end) assert.fail(`timed out after ${ms} ms: ${what}`);
-    await new Promise((r) => setTimeout(r, 5));
-  }
-}
-
-// ---- A8 (e): the contract and the fake say present is visible people only (the ruling) ----
-
-test('presence A8: (e) the fake and the contract list only people with a visible connection', async () => {
-  const s = contract();
-  assert.ok(s.includes('whose connection said here and is visible'), "§11 says present is visible people only");
-  const fake = await startPresenceFake({ clock: 'manual' });
-  try {
-    const open = (id) => openPresence(fake.url, { headers: P(id) });
-    const said = async (c, m) => { const n = fake.stats().find((x) => x.conn === c.you.conn).messages; c.send(m); await until(() => fake.stats().find((x) => x.conn === c.you.conn).messages > n, 'taken'); };
-    const A1 = await open('zq7-a'); const A2 = await open('zq7-a');
-    const F1 = await open('zq7-f'); const F2 = await open('zq7-f');
-    const B = await open('zq7-b'); const V = await open('zq7-v'); const H = await open('zq7-h');
-    await open('zq7-s'); // silent: never says here
-    await said(A1, hereMsg()); await said(A2, hereMsg({ tab: 'zq7-2' }));
-    await said(F1, hereMsg({}, false)); await said(B, hereMsg());
-    await said(V, hereMsg()); await said(H, hereMsg({}, false));
-    await said(F2, hereMsg({ tab: 'zq7-2' }));
-    await said(V, hereMsg({}, false));
-    const who = (id) => ({ id, name: 'zq7 Ann', level: 'full' });
-    assert.deepEqual(fake.present(), { present: [who('zq7-a'), who('zq7-f'), who('zq7-b')], present_more: 0 },
-      'A (two visible tabs) once, F (first tab hidden, a later one visible) at its first here, B; not V (now hidden), H (hidden) or S (silent)');
-    assert.deepEqual(shapeErrors('hello', fake.present()), []);
-  } finally {
-    await fake.close();
-  }
-});
-
-// ---- the fixture: a real dashboard on a scratch fleet; its hub is real too (DEVTEAM_HUB_PORT) ----
-
-const HUB_PORT = PORTS + 0;
-let fixture = null;
-// The dashboard, started once for the file (the first check that needs it waits for it).
-function dashboard() {
-  fixture ??= (async () => {
-    const F = fleetFixture('presence');
-    const env = F.env({ DEVTEAM_HUB_PORT: String(HUB_PORT) });
-    const { dash, port } = await dashboardOnFreePort(F.old, env);
-    const gitName = execFileSync('git', ['config', 'user.name'], { cwd: F.old, encoding: 'utf8' }).trim();
-    return { F, dash, port, url: `http://127.0.0.1:${port}`, gitName, runDir: path.join(F.old, 'docs/devteam/run') };
-  })();
-  return fixture;
-}
-after(async () => {
-  if (!fixture) return;
-  const { F, dash } = await fixture;
-  await dash.stop();
-  F.done();
-});
 
 // A plain HTTP request with exactly the Host given (127.0.0.1:<port> by default).
 function get(port, p, { host, headers = {}, method = 'GET', ms = 120000 } = {}) {
@@ -95,39 +27,6 @@ function get(port, p, { host, headers = {}, method = 'GET', ms = 120000 } = {}) 
     r.end();
   });
 }
-
-// ---- the file's clients: every one through open(), which answers the relay's ping, and closed with its
-// close awaited at the end of each check (closeEvery), so no check starts with another's connections ----
-
-const clients = new Set();
-async function open(url, opts = {}) {
-  const c = await openPresence(url, opts);
-  clients.add(c);
-  let answered = 0;
-  const pong = setInterval(() => {
-    const pings = c.messages.filter((m) => m.t === 'ping').length;
-    for (; answered < pings; answered++) c.send({ t: 'pong' });
-  }, 500);
-  pong.unref();
-  c.closed.then(() => clearInterval(pong));
-  return c;
-}
-async function closeEvery() {
-  const all = [...clients];
-  clients.clear();
-  await Promise.all(all.map(async (c) => {
-    c.close(1000);
-    let timer;
-    const late = new Promise((r) => { timer = setTimeout(r, 5000); });
-    await Promise.race([c.closed, late]);
-    clearTimeout(timer);
-    c.destroy();
-  }));
-}
-// Each check: its clients closed whatever happens in it.
-const check = (fn) => async (t) => { try { await fn(t); } finally { await closeEvery(); } };
-
-const json = (m) => Buffer.from(JSON.stringify(m));
 const pieces = (buf, n) => { const size = Math.ceil(buf.length / n); return Array.from({ length: n }, (_, i) => buf.subarray(i * size, (i + 1) * size)); };
 // A here of exactly n bytes (an extra key the server ignores pads it).
 function padded(n, at = {}) {
@@ -136,28 +35,6 @@ function padded(n, at = {}) {
   assert.equal(json(m).length, n);
   return json(m);
 }
-async function closedWithin(c, ms = 5000) {
-  let timer;
-  const late = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`not closed within ${ms} ms`)), ms); });
-  try { return await Promise.race([c.closed, late]); } finally { clearTimeout(timer); }
-}
-const kinds = (list, t) => list.filter((m) => m.t === t);
-// `c`'s messages from index `mark` up to (not including) `msg`.
-const between = (c, mark, msg) => { const i = c.messages.indexOf(msg); assert.ok(i >= mark, 'the sentinel came after the mark'); return c.messages.slice(mark, i); };
-
-// The sentinel: `E` (which has said here at `at`) says here again with a fresh thread tag. A server
-// handles one socket's messages in order, so the people naming the tag, which every watched client
-// (each has said here) gets, comes after anything E sent before it, and after anything the server sent
-// those clients before it. Resolves to each watched client's people.
-let tags = 0;
-async function sentinel(E, at, watched, ms = 5000) {
-  const tag = `zq7-s${++tags}`;
-  E.send(hereMsg({ ...at, thread: tag }));
-  const hasTag = (m) => m.t === 'people' && m.people.some((p) => p.conns.some((x) => x.conn === E.you.conn && x.at.thread === tag));
-  return Promise.all(watched.map((c) => c.next(hasTag, ms)));
-}
-const peopleWith = (n) => (m) => m.t === 'people' && m.people.length === n;
-const peopleIds = (m) => m.people.map((p) => p.id);
 
 // ---- the shared tables, each a function of a server's URL, run on the dashboard and on the hub ----
 
@@ -309,6 +186,71 @@ async function sizes(url) {
 
 // ---- A3: two clients, people, and moves on the same spot only ----
 
+const tagE = (i) => `zq7-e${i}`;
+
+// ---- A5: who you are comes only from the upgrade's headers; at and move are rebuilt ----
+
+// A raw client that never ends its side (allowHalfOpen): sends the upgrade (and, once upgraded, `then`),
+// then probe bytes 3, 3.5, 6.5 and 7 s after. The second write after the server drops the socket fails
+// (the first is answered with a reset), so the close comes at 3.5 s if it was dropped before 3 s, at 7 s
+// if between 3.5 and 6.5 s, never if it is kept. Resolves to the ms from its last message to the close.
+function halfOpen(port, upgradeHeaders, then) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect({ host: '127.0.0.1', port, allowHalfOpen: true });
+    s.on('error', () => {});
+    let at = 0;
+    let shook = false;
+    s.on('connect', () => { s.write(upgradeHeaders); at = Date.now(); });
+    s.on('data', (d) => {
+      if (shook || !then) return;
+      if (d.toString('latin1').startsWith('HTTP/1.1 101')) { shook = true; s.write(then); at = Date.now(); }
+    });
+    for (const ms of [3000, 3500, 6500, 7000]) setTimeout(() => { if (!s.destroyed) s.write('x'); }, ms).unref();
+    s.on('end', () => {}); // never ended from here
+    s.on('close', () => resolve(Date.now() - at));
+    setTimeout(() => { s.destroy(); reject(new Error('the server never dropped a half-open socket')); }, 15000).unref();
+  });
+}
+const upgradeReq = (port, extra = '') => `GET /presence HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n${extra}\r\n`;
+const maskedClose = () => { const k = crypto.randomBytes(4); const b = Buffer.from([0x03, 0xe8]); return Buffer.concat([Buffer.from([0x88, 0x82]), k, Buffer.from([b[0] ^ k[0], b[1] ^ k[1]])]); };
+
+// ---- A6: the guards, and a bad frame closes only its own connection ----
+
+// ---- A35: framing against the real dashboard ----
+
+// ---- the hub: the same relay on the hub's own server (hub: true, its own Host check) ----
+
+async function hubUp() {
+  const d = await dashboard();
+  await until(async () => { try { return (await get(HUB_PORT, '/instances.json', { ms: 5000 })).status === 200; } catch { return false; } }, 'the hub listening', 60000);
+  return { ...d, hubUrl: `http://127.0.0.1:${HUB_PORT}` };
+}
+
+test('presence A8: (e) the fake and the contract list only people with a visible connection', async () => {
+  const s = contract();
+  assert.ok(s.includes('whose connection said here and is visible'), "§11 says present is visible people only");
+  const fake = await startPresenceFake({ clock: 'manual' });
+  try {
+    const open = (id) => openPresence(fake.url, { headers: P(id) });
+    const said = async (c, m) => { const n = fake.stats().find((x) => x.conn === c.you.conn).messages; c.send(m); await until(() => fake.stats().find((x) => x.conn === c.you.conn).messages > n, 'taken'); };
+    const A1 = await open('zq7-a'); const A2 = await open('zq7-a');
+    const F1 = await open('zq7-f'); const F2 = await open('zq7-f');
+    const B = await open('zq7-b'); const V = await open('zq7-v'); const H = await open('zq7-h');
+    await open('zq7-s'); // silent: never says here
+    await said(A1, hereMsg()); await said(A2, hereMsg({ tab: 'zq7-2' }));
+    await said(F1, hereMsg({}, false)); await said(B, hereMsg());
+    await said(V, hereMsg()); await said(H, hereMsg({}, false));
+    await said(F2, hereMsg({ tab: 'zq7-2' }));
+    await said(V, hereMsg({}, false));
+    const who = (id) => ({ id, name: 'zq7 Ann', level: 'full' });
+    assert.deepEqual(fake.present(), { present: [who('zq7-a'), who('zq7-f'), who('zq7-b')], present_more: 0 },
+      'A (two visible tabs) once, F (first tab hidden, a later one visible) at its first here, B; not V (now hidden), H (hidden) or S (silent)');
+    assert.deepEqual(shapeErrors('hello', fake.present()), []);
+  } finally {
+    await fake.close();
+  }
+});
+
 test('presence A3: on a real dashboard, welcome, people, and a move reaches only others on its spot', check(async () => {
   const { url } = await dashboard();
   const A = await open(url, { headers: P('zq7-a') });
@@ -386,9 +328,6 @@ test('presence A3: on a real dashboard, welcome, people, and a move reaches only
   C.send({ t: 'move', a: { k: 'zq7-kit-1', x: 0.75, y: 0.5 } });
   assert.deepEqual(await A.next((m) => m.t === 'move' && m.id === 'zq7-c'), { t: 'move', id: 'zq7-c', conn: C.you.conn, a: { k: 'zq7-kit-1', x: 0.75, y: 0.5 } });
 }));
-const tagE = (i) => `zq7-e${i}`;
-
-// ---- A5: who you are comes only from the upgrade's headers; at and move are rebuilt ----
 
 test('presence A5: names, ids and levels only from the headers; no header is the owner; at and move checked and rebuilt', check(async () => {
   const { url, port, gitName } = await dashboard();
@@ -453,32 +392,6 @@ test('presence A5: names, ids and levels only from the headers; no header is the
   assert.deepEqual(kinds(between(O, mark, end), 'move').map((m) => m.a), [{ k: 'zq7-kit-1', x: 0, y: 1 }, { k: k200, x: 1, y: 0 }, null], 'only the good three, in order');
 }));
 
-// A raw client that never ends its side (allowHalfOpen): sends the upgrade (and, once upgraded, `then`),
-// then probe bytes 3, 3.5, 6.5 and 7 s after. The second write after the server drops the socket fails
-// (the first is answered with a reset), so the close comes at 3.5 s if it was dropped before 3 s, at 7 s
-// if between 3.5 and 6.5 s, never if it is kept. Resolves to the ms from its last message to the close.
-function halfOpen(port, upgradeHeaders, then) {
-  return new Promise((resolve, reject) => {
-    const s = net.connect({ host: '127.0.0.1', port, allowHalfOpen: true });
-    s.on('error', () => {});
-    let at = 0;
-    let shook = false;
-    s.on('connect', () => { s.write(upgradeHeaders); at = Date.now(); });
-    s.on('data', (d) => {
-      if (shook || !then) return;
-      if (d.toString('latin1').startsWith('HTTP/1.1 101')) { shook = true; s.write(then); at = Date.now(); }
-    });
-    for (const ms of [3000, 3500, 6500, 7000]) setTimeout(() => { if (!s.destroyed) s.write('x'); }, ms).unref();
-    s.on('end', () => {}); // never ended from here
-    s.on('close', () => resolve(Date.now() - at));
-    setTimeout(() => { s.destroy(); reject(new Error('the server never dropped a half-open socket')); }, 15000).unref();
-  });
-}
-const upgradeReq = (port, extra = '') => `GET /presence HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n${extra}\r\n`;
-const maskedClose = () => { const k = crypto.randomBytes(4); const b = Buffer.from([0x03, 0xe8]); return Buffer.concat([Buffer.from([0x88, 0x82]), k, Buffer.from([b[0] ^ k[0], b[1] ^ k[1]])]); };
-
-// ---- A6: the guards, and a bad frame closes only its own connection ----
-
 test('presence A6: a laptop dashboard refuses a foreign Host or Origin; a malformed frame closes only that connection', check(async () => {
   const { url, port } = await dashboard();
   await refusals(url, port);
@@ -499,8 +412,6 @@ test('presence A6: a laptop dashboard refuses a foreign Host or Origin; a malfor
   await alive(url, port, by, '/api/data');
 }));
 
-// ---- A35: framing against the real dashboard ----
-
 test('presence A35: the dashboard reads every length form and fragments, and closes 1002 and 1008 as the contract says', check(async () => {
   const { url, port } = await dashboard();
   const by = await bystander(url);
@@ -508,14 +419,6 @@ test('presence A35: the dashboard reads every length form and fragments, and clo
   await sizes(url);
   await alive(url, port, by, '/api/data');
 }));
-
-// ---- the hub: the same relay on the hub's own server (hub: true, its own Host check) ----
-
-async function hubUp() {
-  const d = await dashboard();
-  await until(async () => { try { return (await get(HUB_PORT, '/instances.json', { ms: 5000 })).status === 200; } catch { return false; } }, 'the hub listening', 60000);
-  return { ...d, hubUrl: `http://127.0.0.1:${HUB_PORT}` };
-}
 
 test('presence A4: the hub answers /presence the same way for its own pages, and sends no changed', check(async () => {
   const { hubUrl, url: dashUrl, runDir } = await hubUp();
@@ -560,192 +463,6 @@ test('presence A35: the hub reads every length form and fragments, and closes 10
   await frames(hubUrl);
   await sizes(hubUrl);
   await alive(hubUrl, HUB_PORT, by, '/instances.json');
-}));
-
-// ---- A7 and A8: the limits, the ping, and the hello's present ----
-
-// `n` people at the field limits, every field starting zq7: a 64-character id, a name of 80 JSON bytes
-// (zq7, 38 escaped quotes, a), five 120-character at parts.
-const padTo = (head, len, i) => `${head}${'x'.repeat(len - head.length - 3)}${String(i).padStart(3, '0')}`;
-const limitZq7 = (n) => Array.from({ length: n }, (_, i) => ({
-  id: padTo('zq7-p', 64, i),
-  header: `zq7${'%22'.repeat(38)}a`,
-  name: `zq7${'"'.repeat(38)}a`,
-  at: { page: padTo('zq7-pg', 120, i), tab: padTo('zq7-tb', 120, i), peek: padTo('zq7-pk', 120, i), art: padTo('zq7-ar', 120, i), thread: padTo('zq7-th', 120, i) },
-}));
-// 200 at the field limits, all open first (only the first keeps its messages), then every here at once.
-// Resolves to the clients and the first client's people listing all 200.
-async function fill200(url) {
-  const people = limitZq7(LIMITS.perServer);
-  const cs = [];
-  for (const [i, p] of people.entries()) {
-    const c = await open(url, { headers: { 'x-devteam-person': `${p.id};name=${p.header}` }, keep: i === 0 });
-    assert.ok(c.you, `client ${i} welcomed`);
-    cs.push(c);
-  }
-  for (const [i, c] of cs.entries()) c.send({ t: 'here', at: people[i].at, visible: true });
-  const p = await cs[0].next(peopleWith(LIMITS.perServer), 30000);
-  assert.deepEqual(shapeErrors('people', p), []);
-  return { cs, people, p };
-}
-// Nobody but a probe is on the server: its first people lists only itself.
-async function onlyProbe(url) {
-  const probe = await open(url, { headers: P('zq7-probe') });
-  probe.send(hereMsg({ page: 'zq7-probe' }));
-  const p = await probe.next((m) => m.t === 'people', 5000);
-  assert.deepEqual(peopleIds(p), ['zq7-probe'], 'nobody else is connected');
-  probe.close(1000);
-  await closedWithin(probe);
-  clients.delete(probe);
-}
-
-test('presence A7: the rate, the per-person and per-server caps, and the ping, each closing as the contract says', check(async (t) => {
-  const { url } = await dashboard();
-  await t.test('(a) over 30 a second for 10 s is closed 1008; one second over is not', async () => {
-    const O = await open(url, { headers: P('zq7-once') });
-    O.send(hereMsg({ page: 'zq7-once' }));
-    await O.next((m) => m.t === 'people', 5000);
-    const G = await open(url, { headers: P('zq7-flood') });
-    const tG = Date.now(); // G's server seconds roll at tG − (a few ms) + n s
-    const burst = (c) => c.raw(Buffer.concat(Array.from({ length: 40 }, () => c.build(json({ t: 'zz' })))));
-    await new Promise((r) => setTimeout(r, 1100));
-    burst(O); // one second over, then nothing
-    await new Promise((r) => setTimeout(r, Math.max(0, tG + 2150 - Date.now()))); // 150 ms into G's third second
-    const start = Date.now();
-    let code = null;
-    G.closed.then((x) => { code = x; });
-    while (code === null && Date.now() - start < 15000) { burst(G); await new Promise((r) => setTimeout(r, 250)); }
-    const took = Date.now() - start;
-    assert.equal(code, 1008, 'the flood is closed 1008');
-    // over in each of the ten seconds from the one it began in: closed at that tenth second's roll, about 9.85 s
-    // (eleven would be 10.85 s)
-    assert.ok(took >= 9000 && took <= 10400, `closed after ten seconds over, not before and not eleven (${took} ms)`);
-    await sentinel(O, { page: 'zq7-once' }, [O]);
-    assert.equal(O.status, 101, 'the one-second burst is still open');
-  });
-  await t.test('(a2) ten seconds over, but not in a row, is not closed', async () => {
-    const R = await open(url, { headers: P('zq7-rows') });
-    R.send(hereMsg({ page: 'zq7-rows' }));
-    await R.next((m) => m.t === 'people', 5000);
-    let closed = false;
-    R.closed.then(() => { closed = true; });
-    const burst = () => R.raw(Buffer.concat(Array.from({ length: 40 }, () => R.build(json({ t: 'zz' })))));
-    const flood = async (ms) => { const end = Date.now() + ms; while (Date.now() < end && !closed) { burst(); await new Promise((r) => setTimeout(r, 250)); } };
-    await flood(7000);
-    await new Promise((r) => setTimeout(r, 2500)); // at least one whole server second under 30
-    await flood(7000);
-    await new Promise((r) => setTimeout(r, 1100));
-    assert.equal(closed, false, 'fourteen seconds over in two runs of seven is not closed');
-    await sentinel(R, { page: 'zq7-rows' }, [R]);
-  });
-  await t.test('(a3) heres, ping and pong frames and pongs count; a here and a pong over the rate are never dropped', async () => {
-    const A = await open(url, { headers: P('zq7-ca') });
-    const B = await open(url, { headers: P('zq7-cb') });
-    const at = { page: 'zq7-count' };
-    A.send(hereMsg(at)); B.send(hereMsg(at));
-    await B.next((m) => m.t === 'people' && ['zq7-ca', 'zq7-cb'].every((id) => peopleIds(m).includes(id)), 5000);
-    const mark = B.messages.length;
-    const move = (k) => A.build(json({ t: 'move', a: { k, x: 0, y: 0 } }));
-    const wait = () => new Promise((r) => setTimeout(r, 1100));
-    // each write: 30 counted messages of one kind, then a move, which is the 31st and dropped
-    await wait();
-    A.raw(Buffer.concat([...Array.from({ length: 30 }, (_, i) => A.build(json(hereMsg({ ...at, thread: `zq7-h${i % 2}` })))), move('zq7-after-heres')]));
-    await wait();
-    A.raw(Buffer.concat([...Array.from({ length: 30 }, () => A.build(Buffer.from('p'), { opcode: 9 })), move('zq7-after-pings')]));
-    await wait();
-    A.raw(Buffer.concat([...Array.from({ length: 30 }, () => A.build(json({ t: 'pong' }))), move('zq7-after-pongs')]));
-    await wait();
-    A.raw(Buffer.concat([...Array.from({ length: 30 }, () => A.build(Buffer.from('p'), { opcode: 10 })), move('zq7-after-pong-frames')]));
-    // over the rate already, a here still lands
-    await wait();
-    A.raw(Buffer.concat([...Array.from({ length: 40 }, () => A.build(json({ t: 'zz' }))), A.build(json(hereMsg({ ...at, thread: 'zq7-late' })))]));
-    await B.next((m) => m.t === 'people' && m.people.some((p) => p.id === 'zq7-ca' && p.conns[0].at.thread === 'zq7-late'), 5000);
-    await wait();
-    A.send({ t: 'move', a: { k: 'zq7-end', x: 0, y: 0 } });
-    const end = await B.next((m) => m.t === 'move' && m.a?.k === 'zq7-end', 5000);
-    assert.deepEqual(kinds(between(B, mark, end), 'move').map((m) => m.a.k), [], 'the move after 30 heres, 30 ping frames, 30 pongs or 30 pong frames is the 31st and dropped');
-  });
-  await t.test('(b) moves over 30 in a second are dropped', async () => {
-    const A = await open(url, { headers: P('zq7-ra') });
-    const B = await open(url, { headers: P('zq7-rb') });
-    A.send(hereMsg({ page: 'zq7-rate' })); B.send(hereMsg({ page: 'zq7-rate' }));
-    await B.next((m) => m.t === 'people' && ['zq7-ra', 'zq7-rb'].every((id) => peopleIds(m).includes(id)), 5000);
-    await new Promise((r) => setTimeout(r, 1100));
-    const mark = B.messages.length;
-    A.raw(Buffer.concat(Array.from({ length: 200 }, (_, i) => A.build(json({ t: 'move', a: { k: 'zq7-kit-1', x: i / 1000, y: 0 } })))));
-    await new Promise((r) => setTimeout(r, 2100));
-    A.send({ t: 'move', a: { k: 'zq7-end', x: 0, y: 0 } });
-    const end = await B.next((m) => m.t === 'move' && m.a?.k === 'zq7-end', 5000);
-    const xs = kinds(between(B, mark, end), 'move').map((m) => m.a.x);
-    assert.ok(xs.length >= 30 && xs.length <= 60, `30 to 60 of 200 moves in one write arrive (${xs.length})`);
-    assert.deepEqual(xs, [...xs].sort((a, b) => a - b), 'in their order');
-  });
-  await closeEvery();
-  await t.test('(c) the 9th connection of one person is closed 1008 before welcome', async () => {
-    for (let i = 0; i < LIMITS.perPerson; i++) assert.ok((await open(url, { headers: P('zq7-p8') })).you, `connection ${i + 1} welcomed`);
-    const ninth = await open(url, { headers: P('zq7-p8') });
-    assert.equal(ninth.status, 101, 'accepted');
-    assert.equal(ninth.you, undefined, 'no welcome');
-    assert.equal(await closedWithin(ninth), 1008);
-    assert.ok((await open(url, { headers: P('zq7-p9') })).you, 'another person is still welcome');
-  });
-  await closeEvery();
-  await t.test('(d) 200 at the field limits fit; a new person\'s 201st is closed 1008 before welcome', async () => {
-    await onlyProbe(url);
-    const { cs } = await fill200(url);
-    await until(() => cs.every((c) => c.sizes.length >= 2), 'each of the 200 has a people', 30000);
-    for (const [i, c] of cs.entries()) assert.ok(c.sizes.every((n) => n < LIMITS.serverMsg), `client ${i}: every frame under 262144`);
-    const over = await open(url, { headers: P('zq7-p201') });
-    assert.equal(over.status, 101);
-    assert.equal(over.you, undefined, 'the 201st gets no welcome');
-    assert.equal(await closedWithin(over), 1008);
-  });
-  await closeEvery();
-  await t.test('(d2) the per-server cap counts connections: 25 people with 8 each fill it', async () => {
-    await onlyProbe(url);
-    for (let p = 0; p < 25; p++) {
-      for (let i = 0; i < LIMITS.perPerson; i++) assert.ok((await open(url, { headers: P(`zq7-m${p}`), keep: false })).you, `person ${p} connection ${i + 1} welcomed`);
-    }
-    const over = await open(url, { headers: P('zq7-m-new') });
-    assert.equal(over.status, 101);
-    assert.equal(over.you, undefined, "a new person's 201st connection gets no welcome");
-    assert.equal(await closedWithin(over), 1008);
-  });
-  await closeEvery();
-  await t.test('(e) two unanswered pings close 1001; a connection that pongs stays', async () => {
-    const F = fleetFixture('presence-ping');
-    const env = F.env({ DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PRESENCE_PING_MS: '1000' });
-    const { dash, port } = await dashboardOnFreePort(F.old, env);
-    try {
-      const u = `http://127.0.0.1:${port}`;
-      const Pn = await openPresence(u, { headers: P('zq7-never') });
-      clients.add(Pn);
-      const t0 = Date.now();
-      // Q answers each ping with its pong at the end of a burst over the rate: a pong is never dropped
-      const Q = await openPresence(u, { headers: P('zq7-pongs') });
-      clients.add(Q);
-      let answered = 0;
-      const answer = setInterval(() => {
-        const pings = Q.messages.filter((m) => m.t === 'ping').length;
-        for (; answered < pings; answered++) Q.raw(Buffer.concat([...Array.from({ length: 40 }, () => Q.build(json({ t: 'zz' }))), Q.build(json({ t: 'pong' }))]));
-      }, 100);
-      answer.unref();
-      let qClosed = false;
-      Q.closed.then(() => { qClosed = true; clearInterval(answer); });
-      assert.equal(await closedWithin(Pn, 8000), 1001, 'two unanswered pings close 1001');
-      assert.equal(Pn.messages.filter((m) => m.t === 'ping').length, 2, 'closed after exactly two pings, at the third');
-      const took = Date.now() - t0;
-      assert.ok(took >= 2500 && took <= 6000, `at the third ping, not the second (${took} ms)`);
-      const seen = Q.messages.filter((m) => m.t === 'ping').length;
-      await until(() => Q.messages.filter((m) => m.t === 'ping').length > seen, 'a ping after Pn closed', 5000);
-      assert.equal(qClosed, false, 'the connection that pongs, over the rate each time, is still open');
-      clearInterval(answer);
-    } finally {
-      await closeEvery();
-      await dash.stop();
-      F.done();
-    }
-  });
 }));
 
 test('presence A8: the hello carries present, one entry per visible person, capped at 50; nothing about presence is kept', check(async () => {
