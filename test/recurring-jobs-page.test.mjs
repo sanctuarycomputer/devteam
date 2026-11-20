@@ -129,6 +129,8 @@ const heads = (sect) => `[...(${sect})?.querySelectorAll('table.db-t thead th') 
 const rows = (sect) => `[...(${sect})?.querySelectorAll('table.db-t tbody tr[data-row]') ?? []].map((tr) => [...tr.cells].map((td) => td.textContent.trim()))`;
 const jobsReady = (more = 'true') => `${PAGE.on} && !!${PAGE.card('jobs')} && (${more})`;
 const withRows = (jp) => `!!${PAGE.card(jp)}?.querySelector('table.db-t tbody tr[data-row]')`;
+// a table with no rows: the shell's None row, its only body row (dashboard-copy: every empty state reads None)
+const NONE_ROW = (jp) => `(() => { const tb = ${PAGE.card(jp)}?.querySelector(':scope > [data-tbl] table.db-t tbody'); return tb && tb.rows.length === 1 && tb.rows[0].classList.contains('none') ? tb.rows[0].textContent.trim() : null; })()`;
 const AT_REST = "getComputedStyle(document.getElementById('drawer')).transform === 'none'";
 const peekOpen = (kind, id) => `DRAWER.kind === ${J(kind)} && DRAWER.id === ${J(id)} && !document.getElementById('drawer').hidden && ${AT_REST}`;
 const peekClosed = "document.getElementById('drawer').hidden && !document.body.classList.contains('peek-open')";
@@ -291,12 +293,12 @@ test('Upkeep\'s peek: its Jobs section\'s head has an All jobs link that opens #
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
-test('with no jobs the page shows Built in, says no jobs are registered, and has no What the loop noticed rows (done-when 6)', { ...CHROME, timeout: 300000 }, async (t) => {
+test('with no jobs the page shows Built in, its Jobs table says None, and What the loop noticed has no rows (done-when 6)', { ...CHROME, timeout: 300000 }, async (t) => {
   const { p, soon, go } = await openOn(t, { rec: (r) => ({ entries: [], builtin: r.builtin, proposals: [] }) });
   await go('#jobs');
   await soon(jobsReady(withRows('builtin')), 'the Jobs page with Built in');
   assert.deepEqual((await p.ev(PAGE.cards)).map((c) => c.jp), ['jobs', 'noticed', 'builtin', 'proposals'], 'the four cards still');
-  assert.match(await p.ev(`${PAGE.card('jobs')}.textContent`), /No jobs are registered/);
+  assert.equal(await p.ev(NONE_ROW('jobs')), 'None', 'the Jobs table says no jobs are registered: its None row');
   assert.equal(await p.ev(`${PAGE.card('jobs')}.querySelectorAll('tr[data-row]').length`), 0, 'no job rows');
   assert.deepEqual(await p.ev(rows(PAGE.card('noticed'))), [], 'no What the loop noticed rows');
   assert.deepEqual((await p.ev(rows(PAGE.card('builtin')))).map((r) => r[0]), ['Retro', 'Research', 'Kit sync', 'Sensors'], 'Built in shows');
@@ -305,7 +307,7 @@ test('with no jobs the page shows Built in, says no jobs are registered, and has
   await p.ev('window.__rec = undefined; void 0');
   await soon(`!DATA.upkeep?.recurring && !${withRows('builtin')}`, 'no jobs data');
   assert.deepEqual((await p.ev(PAGE.cards)).map((c) => c.jp), ['jobs', 'noticed', 'builtin', 'proposals']);
-  assert.match(await p.ev(`${PAGE.card('jobs')}.textContent`), /No jobs are registered/);
+  assert.equal(await p.ev(NONE_ROW('jobs')), 'None', 'the Jobs table says no jobs are registered: its None row');
   assert.deepEqual(await p.ev(rows(PAGE.card('noticed'))), []);
   assert.equal(await p.ev(`${NAV}.textContent.trim()`), '');
   assert.deepEqual(await p.ev('window.__errors'), []);

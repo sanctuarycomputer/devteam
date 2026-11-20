@@ -5814,11 +5814,11 @@ function renderJobs() {
   const sigBadge = (s) => `<span class="badge medium">${esc(recWord(REC_SIGNAL_WORDS, s.kind) ?? String(s.kind ?? ''))}</span>`;
   const jobOpen = (e) => `recurring/${encodeURIComponent(e.name)}`;
   const card = (jp, icon, label, body, extra = '') => `<div class="card flush c12" data-jp="${jp}">${cardHead(icon, label, { extra })}${body}</div>`;
-  const jobsBody = es.length ? pageTable('jobs:jobs', ['Job', 'Kind', 'Every', 'Last run', 'Next', 'Fails in a row', 'Noticed'], es.map((e) => ({
+  const jobsBody = pageTable('jobs:jobs', ['Job', 'Kind', 'Every', 'Last run', 'Next', 'Fails in a row', 'Noticed'], es.map((e) => ({
     cells: [esc(e.title || e.name), esc(recKind(e)), esc(recEvery(e, true)), recLast(e.last), esc(recNext(e)), esc(Number.isFinite(e.fails_in_a_row) ? e.fails_in_a_row : ''), sigs(e).length ? sigs(e).map(sigBadge).join(' ') : '—'],
     sort: [undefined, undefined, undefined, e.last?.at ?? null, e.kind === 'chore' && e.state === 'held' ? null : e.next_at ?? null, undefined, undefined],
     open: jobOpen(e),
-  }))) : empty('No jobs are registered.');
+  })));
   const noticed = es.flatMap((e) => sigs(e).map((s) => ({ e, s })));
   const noticedBody = pageTable('jobs:noticed', ['Job', 'Signal', 'What it saw', 'What it may propose'], noticed.map(({ e, s }) => ({
     cells: [esc(e.title || e.name), sigBadge(s), esc(s.text ?? ''), esc(s.may ?? '')],
