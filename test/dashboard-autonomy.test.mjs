@@ -902,4 +902,42 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     assert.equal(await p.ev("document.querySelectorAll('#retros .card').length"), 0);
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
+
+  await t.test('hostile strings are drawn as text', async () => {
+    const PAY = '<img src=x onerror="window.__xss=(window.__xss||0)+1">';
+    const fx = autonomyFixture();
+    // every string a page draws from the server's data, made hostile (the data is production text and file names)
+    const swap = (o, pairs) => {
+      let j = JSON.stringify(o);
+      for (const [from, to] of pairs) {
+        assert.ok(j.includes(JSON.stringify(from).slice(1, -1)), `fixture has ${from}`);
+        j = j.split(JSON.stringify(from).slice(1, -1)).join(JSON.stringify(to).slice(1, -1));
+      }
+      return JSON.parse(j);
+    };
+    const hot = (s) => `${PAY} ${s}`;
+    for (const f of fx.governance.files) { f.title = hot(f.title); f.path = hot(f.path); if (f.state) f.state = hot(f.state); }
+    const kinds = fx.patch.ooda.trust.map((k) => k.class_name);
+    fx.patch = swap(fx.patch, [
+      ...kinds.map((k) => [k, hot(k)]),
+      ['no phase line for 3 hours', hot('no phase line for 3 hours')],
+      ['look at its pane: restart the agent, or ask what holds it', hot('look at its pane')],
+      ['connection refused', hot('connection refused')],
+      ['TypeError: card is undefined on the pay form', hot('TypeError: card is undefined on the pay form')],
+      ['Reviews caught the card-form regressions', hot('Reviews caught the card-form regressions')],
+      ['Look at the 2 lessons no session was given in 4 weeks', hot('Look at the 2 lessons no session was given in 4 weeks')],
+      ['Fixed 3 days ago and verified since; no lesson cites it', hot('Fixed 3 days ago and verified since; no lesson cites it')],
+    ]);
+    fx.peeks = swap(fx.peeks, [['connection refused', hot('connection refused')]]);
+    const pages = [['#governance', 'governance'], ['#trust', 'trust'], ['#sensors', 'sensors'], ['#sensors?st=fleet', 'fleet'], ['#retros', 'retros'], ['#awareness', 'awareness'], [`#class/${fx.ids.newFeature}`, 'the kind peek']];
+    for (const [hash, what] of pages) {
+      await load(fx, hash);
+      await soon("document.body.innerText.includes('onerror=') || !!document.querySelector('img[src=\"x\"]')", `${what}: the payload drawn`);
+      await polls(2);
+      assert.equal(await p.ev('window.__xss === undefined'), true, `${what}: nothing ran`);
+      assert.equal(await p.ev("document.querySelectorAll('img[src=\"x\"]').length"), 0, `${what}: no element made from the payload`);
+      assert.equal(await p.ev("document.body.innerText.includes('onerror=')"), true, `${what}: the payload is text`);
+      assert.deepEqual(await p.ev('window.__errors'), [], `${what}: no errors`);
+    }
+  });
 });
