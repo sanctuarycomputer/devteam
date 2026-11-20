@@ -824,6 +824,10 @@ test('A14: supervisor.md documents registering, changing and stopping a job in r
   const end = doc.indexOf('\n## ', s + 1);
   const section = doc.slice(s, end);
   for (const w of ['recurring.json', 'only looks', 'recurring-edit', 'thread ask', '--from-turn', 'answer <qid> "Yes" --from-turn', 'recurring apply', 'chore start recurring', 'merge --chore recurring --approved', 'null', 'recurring propose', '--stop', 'production']) assert.ok(section.includes(w), `the section says ${w}`);
+  // the move from settings lands before the upgrade or in the sync PR, and apply can't fix a broken main (final-10b F6)
+  assert.match(section, /\*\*Moving jobs from settings\.\*\*[^\n]*before the upgrade[^\n]*sync PR[^\n]*asked again/);
+  assert.match(section, /`recurring apply` can't fix a broken main[^\n]*up-to-date chore/);
+  assert.match(section, /rebase it onto main/);
   const mon = doc.slice(at(/^### Monitoring$/m), at(/^## Recurring jobs$/m));
   assert.match(mon, /Recurring jobs/);
   const five = doc.slice(at(/^## 5\. /m), at(/^## 6\. /m));
