@@ -1101,6 +1101,73 @@ test('A15 landing: forge github, main moves after the checks: refused before gh 
   } finally { T.done(); }
 });
 
+// A job that never had an answer, as a hook or a moved HEAD would write it.
+const EVIL = '{"evil":{"kind":"check","title":"Evil","what":"x","every":"1h","run":"echo evil"}}';
+// The commands that write it at the jobs file of the checkout git runs in, as a commit on HEAD's
+// parents (-p … flags in $p), and move HEAD there; $G is the git to run.
+const evilCommit = (p) => `printf '%s\\n' '${EVIL}' > ${JOBS}\n"$G" update-index --add ${JOBS}\nt=$("$G" write-tree)\nc=$("$G" commit-tree ${p} -m 'moved HEAD' "$t")\n"$G" update-ref HEAD "$c"\n`;
+
+test('A15 landing: forge git, a hook the branch tracks (home has core.hooksPath .githooks) never runs in the landing merge: the judged merge lands, and no job (final-10 F1)', () => {
+  const T = setup('a15-hook');
+  try {
+    // final-10's H1: home runs its hooks from a tracked dir (husky, a .githooks convention), and a
+    // chore adds a post-merge hook there that writes a job and moves HEAD, after git merge
+    const ran = path.join(T.base, 'hook-ran');
+    T.g(['config', 'core.hooksPath', '.githooks']);
+    T.choreBranch('hook', (wt) => {
+      const h = path.join(wt, '.githooks/post-merge');
+      write(h, `#!/bin/sh\n# runs inside the kit's landing merge, after the judged tree is merged\ntouch "${ran}"\nG=git\n${evilCommit('-p HEAD')}`);
+      fs.chmodSync(h, 0o755);
+    });
+    const sha = T.headOf('chore-hook');
+    const checked = T.g(['rev-parse', 'origin/main']);
+    assert.equal(T.has('origin/chore-hook', JOBS), false, 'the judged head has no jobs file');
+    // the hook file is outside project/: a chore lands it only with an owner's answer
+    const gr = T.run(['ask', '--class', 'governance-edit', '--question', 'Should I add a post-merge git hook?', '--recommendation', 'Yes']);
+    passes(gr);
+    const gq = QID.exec(gr.out)[0];
+    T.answer(gq);
+    const spy = gitShim(T);
+    const r = T.merge('hook', ['--approved', gq], spy.env);
+    assert.equal(fs.existsSync(ran), false, 'the branch\'s hook never ran');
+    passes(r);
+    // what lands is the merge the checks judged: checked main and the head, and no job
+    T.g(['fetch', '-q', 'origin']);
+    assert.equal(T.has('origin/main', JOBS), false, 'no job landed on main');
+    assert.equal(T.g(['rev-list', '--parents', '-n', '1', 'origin/main']).split(' ').slice(1).join(' '), `${checked} ${sha}`);
+    assert.equal(T.g(['rev-parse', 'origin/main^{tree}']), T.g(['rev-parse', `${sha}^{tree}`]), 'the head\'s tree lands');
+    assert.match(spy.calls(), /(^| )-c core\.hooksPath=\/dev\/null -c merge\.directoryRenames=conflict merge --no-ff/m);
+    assert.match(spy.calls(), /(^| )push --quiet --no-verify --force-with-lease=main:/m);
+  } finally { T.done(); }
+});
+
+test('A15 landing: forge git, HEAD moved after the landing merge (as a hook that ran anyway would) is refused before the push: the merge must be the head onto the checked main, its jobs the judged ones (final-10 F1)', () => {
+  const T = setup('a15-head');
+  try {
+    T.onMain(() => ({ aa: check({ title: 'A job' }) }));
+    // a git that, after the kit's landing merge, moves HEAD as the mode file says: "jobs", to a
+    // commit with the same two parents and a job no answer showed; "extra", to one more commit on
+    // the merge, with the jobs left as they are
+    const mode = path.join(T.base, 'head-mode');
+    const dir = path.join(T.base, 'git-moves-head');
+    write(path.join(dir, 'git'), `#!/bin/sh\nG="${REAL_GIT}"\ncase " $* " in\n  *" merge --no-ff --quiet "*)\n    "$G" "$@" || exit $?\n    case "$(cat "${mode}")" in\n      jobs)\n${evilCommit('-p HEAD^1 -p HEAD^2')}      ;;\n      extra)\n        echo x > hook-extra.txt\n        "$G" update-index --add hook-extra.txt\n        t=$("$G" write-tree)\n        c=$("$G" commit-tree -p HEAD -m 'moved HEAD' "$t")\n        "$G" update-ref HEAD "$c"\n      ;;\n    esac\n    exit 0 ;;\nesac\nexec "$G" "$@"\n`);
+    fs.chmodSync(path.join(dir, 'git'), 0o755);
+    const env = { PATH: `${dir}${path.delimiter}${process.env.PATH}` };
+    for (const [how, re] of [
+      ['jobs', /the landing merge at [0-9a-f]{12} lands other jobs \(recurring\.json\) than the checks judged; nothing pushed/],
+      ['extra', /the landing merge at [0-9a-f]{12} is not the merge of [0-9a-f]{12} onto main at [0-9a-f]{12} the checks judged; nothing pushed/],
+    ]) {
+      T.choreBranch(how, (w) => write(path.join(w, NOTES), `${how}\n`));
+      const before = T.g(['rev-parse', 'origin/main']);
+      write(mode, `${how}\n`);
+      refused(T.merge(how, [], env), re);
+      T.g(['fetch', '-q', 'origin']);
+      assert.equal(T.g(['rev-parse', 'origin/main']), before, `${how}: nothing pushed`);
+      assert.deepEqual(T.mainJobs(), { aa: check({ title: 'A job' }) }, `${how}: no job landed`);
+    }
+  } finally { T.done(); }
+});
+
 test('A16: settings.md holds no jobs: no default, no words, and validate reads the jobs file of the project dir in use', () => {
   const T = setup('settings');
   try {

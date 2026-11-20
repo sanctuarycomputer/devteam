@@ -7008,6 +7008,9 @@ function cmdMerge() {
   let jobsChanged = false;
   let jobAnswer = false;
   let jobsForced = null;
+  // what the checks said lands at the jobs file (recurringRegistry.landing, home only): the landing
+  // merge is held to it before its push (final-10 F1)
+  let landsJobs = null;
   { const aq = approved ? logGet(approved) : null; jobAnswer = aq?.type === 'question' && aq.class === 'recurring-edit'; }
   // a linked repo's ticket never changes home's jobs file, so it never lands a job change (task-2 F3)
   if (R.name !== 'home' && jobAnswer) fails.push(`${approved} approves job changes in this repo's recurring.json: land it in a chore PR here`);
@@ -7019,6 +7022,7 @@ function cmdMerge() {
     // is the owner's recurring-edit. A landing problem is checkPr's fail line already, which refuses
     // the PR on its own; it isn't read as a job change too. A main file that doesn't read is {}.
     const L = checkedMain ? recurringRegistry.landing(checkedMain, sha, S.merge_method) : null;
+    landsJobs = L;
     jobsChanged = !!L && !L.problem && Object.keys(L.changed).length > 0;
     const classed0 = base ? ownerSettingsChanged(base, sha) : [];
     const classed = classed0 && [...classed0, ...(jobsChanged ? [{ key: 'recurring', cls: 'recurring-edit' }] : [])];
@@ -7289,11 +7293,27 @@ function cmdMerge() {
     if (viaGit) {
       // Merge the exact verified sha (never the branch name, which may have moved) onto the checked
       // main, never a re-fetched tip, and push only if origin's main is still that commit. Directory
-      // renames are a conflict, whatever the user's git config says.
+      // renames are a conflict, whatever the user's git config says, and no hook runs: a hooks dir the
+      // branch tracks (core.hooksPath) would otherwise run inside this merge (final-10 F1).
+      const noHooks = ['-c', 'core.hooksPath=/dev/null'];
       const wt = detachedWorktree(checkedMain, `land-${slug(branch)}`, R);
       try {
-        if (R.git(['-c', 'merge.directoryRenames=conflict', 'merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt) === null) return `${sha.slice(0, 12)} does not merge onto ${mainBranch}${inR}`;
-        if (R.git(['push', '--quiet', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
+        if (R.git([...noHooks, '-c', 'merge.directoryRenames=conflict', 'merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt) === null) return `${sha.slice(0, 12)} does not merge onto ${mainBranch}${inR}`;
+        // What is pushed is what was judged: one merge commit of exactly the checked main and the
+        // head, in that order, whose jobs are the ones the checks said land. Anything that moved HEAD
+        // is refused, and nothing is pushed.
+        const head = R.git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], wt);
+        if (!head) return `couldn't read the landing merge's commit; nothing pushed`;
+        const parents = (R.git(['rev-list', '--parents', '-n', '1', head], wt) ?? '').split(' ').slice(1);
+        if (parents.length !== 2 || parents[0] !== checkedMain || parents[1] !== sha) return `the landing merge at ${head.slice(0, 12)} is not the merge of ${sha.slice(0, 12)} onto ${mainBranch}${inR} at ${checkedMain.slice(0, 12)} the checks judged; nothing pushed`;
+        // (main's broken file, left as it is, lands as it was: its entry is main's, entry for entry)
+        if (R.name === 'home' && landsJobs && !landsJobs.problem) {
+          const H = recurringRegistry.read(head);
+          const M = H.problem && !H.failed ? recurringRegistry.read(checkedMain) : null;
+          const kept = !!M?.problem && !!H.entry && H.entry === M.entry && !Object.keys(landsJobs.changed).length;
+          if (H.failed || (H.problem ? !kept : Object.keys(recurringRegistry.changed(landsJobs.jobs, H.jobs)).length > 0)) return `the landing merge at ${head.slice(0, 12)} lands other jobs (recurring.json) than the checks judged${H.problem ? ` (${H.problem})` : ''}; nothing pushed`;
+        }
+        if (R.git([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
       } finally {
         R.git(['worktree', 'remove', '--force', wt], R.root);
       }
