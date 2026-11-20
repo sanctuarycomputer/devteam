@@ -12,7 +12,8 @@ import vm from 'node:vm';
 import { bareProject, dashboardOnFreePort } from './kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const kit = path.resolve(here, '..', 'docs', 'devteam');
+// test/lib/, so the kit is two levels up (the line moved here from test/attachments.test.mjs)
+const kit = path.resolve(here, '..', '..', 'docs', 'devteam');
 // ports of its own, apart from the blocks lib/kit.mjs hands out (20000 and up); set after its import, so these win
 const PORTS = 10000 + (process.pid % 90) * 100;
 const HUB = PORTS;
