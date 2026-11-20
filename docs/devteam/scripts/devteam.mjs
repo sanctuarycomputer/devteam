@@ -838,36 +838,54 @@ function newGateProblem(name, spec) {
 }
 // The keys JSON text repeats inside one object, each as its path ([key, …]), or undefined when the
 // text isn't JSON. JSON.parse keeps the last of a repeated key and says nothing.
+// How deep a JSON text nests its objects and arrays, read without recursion (strings skipped).
+function jsonDepth(text) {
+  let d = 0;
+  let most = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') { for (i++; i < text.length && text[i] !== '"'; i += text[i] === '\\' ? 2 : 1); }
+    else if (c === '{' || c === '[') most = Math.max(most, ++d);
+    else if (c === '}' || c === ']') d--;
+  }
+  return most;
+}
 function jsonDuplicateKeys(text) {
   try { JSON.parse(text); } catch { return undefined; }
   const dups = [];
   let i = 0;
   const ws = () => { while (' \t\n\r'.includes(text[i]) && i < text.length) i++; };
   const str = () => { const s = i++; while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1; i++; return JSON.parse(text.slice(s, i)); };
-  const val = (at) => {
+  // iterative, with an explicit stack (final-10b F1): a file nested thousands deep never overflows
+  // the call stack. Each frame is an open object or array; its path is built only for a duplicate.
+  const pathOf = (f) => { const p = []; for (let x = f; x; x = x.up) if (x.up) p.push(x.key); return p.reverse(); };
+  const stack = [];
+  // a value at i: a container is opened as a frame (with its key in the parent), a scalar is skipped
+  const open = (up, key) => {
     ws();
-    if (text[i] === '{') {
+    const c = text[i];
+    if (c === '{' || c === '[') {
       i++; ws();
-      if (text[i] === '}') { i++; return; }
-      const seen = new Set();
-      for (;;) {
-        ws(); const k = str();
-        if (seen.has(k)) dups.push([...at, k]);
-        seen.add(k);
-        ws(); i++; // the colon
-        val([...at, k]); ws();
-        if (text[i++] === '}') return;
-      }
+      if (text[i] === (c === '{' ? '}' : ']')) { i++; return; }
+      stack.push({ obj: c === '{', up, key, seen: new Set(), n: 0, started: false });
+      return;
     }
-    if (text[i] === '[') {
-      i++; ws();
-      if (text[i] === ']') { i++; return; }
-      for (let n = 0; ; n++) { val([...at, n]); ws(); if (text[i++] === ']') return; }
-    }
-    if (text[i] === '"') { str(); return; }
+    if (c === '"') { str(); return; }
     while (i < text.length && !' \t\n\r,]}'.includes(text[i])) i++;
   };
-  val([]);
+  open(null, null);
+  while (stack.length) {
+    const f = stack[stack.length - 1];
+    if (f.started) { ws(); const c = text[i++]; if (c === '}' || c === ']') { stack.pop(); continue; } }
+    f.started = true;
+    if (f.obj) {
+      ws(); const k = str();
+      if (f.seen.has(k)) dups.push([...pathOf(f), k]);
+      f.seen.add(k);
+      ws(); i++; // the colon
+      open(f, k);
+    } else open(f, f.n++);
+  }
   return dups;
 }
 // A link is classified by both sides: an owner's kind (LINK_KINDS[k].ownedByOwner: repo) on
@@ -23975,10 +23993,19 @@ const recurringRegistry = Object.freeze({
   },
   // The file's text as jobs: a JSON object with no key twice in one object, at any depth. where is
   // "at <ref12>" or "in this checkout".
+  // No job needs more than DEPTH levels of nesting, and a file past it is a problem, never read on:
+  // every reader after this one (canonical, the shape checks) walks the jobs recursively. Any throw
+  // here is a problem too, so a main file that breaks the reader reads as {} with the warning and
+  // never blocks a merge (final-10b F1).
+  DEPTH: 64,
   parse(text, where) {
+    try { return recurringRegistry.parseOrThrow(text, where); } catch (e) { return { jobs: null, problem: `recurring.json ${where}: the kit can't read it (${String(e?.message ?? e).slice(0, 200)})` }; }
+  },
+  parseOrThrow(text, where) {
     let v;
     try { v = JSON.parse(text); } catch (e) { return { jobs: null, problem: `recurring.json ${where}: not a JSON object (${e.message})` }; }
     if (!isObj(v)) return { jobs: null, problem: `recurring.json ${where}: not a JSON object (${v === null ? 'null' : Array.isArray(v) ? 'an array' : `a ${typeof v}`})` };
+    if (jsonDepth(text) > recurringRegistry.DEPTH) return { jobs: null, problem: `recurring.json ${where}: nested deeper than ${recurringRegistry.DEPTH} levels; no job needs that` };
     const dup = (jsonDuplicateKeys(text) ?? [])[0];
     if (dup) return { jobs: null, problem: `recurring.json: ${JSON.stringify(String(dup.at(-1)))} appears twice in one object (${dup.join('.')}): JSON keeps only the last, so the file would say one thing and the kit read another` };
     return { jobs: v, problem: null };

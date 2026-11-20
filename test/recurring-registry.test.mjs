@@ -596,6 +596,34 @@ test("A11: a jobs file broken by hand on main never blocks an unrelated PR, and 
   } finally { T.done(); }
 });
 
+test('A11: a main jobs file nested thousands deep is a read problem, never a crash: an unrelated chore lands with the warning, and a deep head file is refused (final-10b F1)', () => {
+  const T = setup('deep');
+  try {
+    const deep = `{"aa": ${'['.repeat(20000)}${']'.repeat(20000)}}\n`;
+    const crash = /RangeError|Maximum call stack/;
+    T.choreBranch('deephead', (wt) => write(path.join(wt, JOBS), deep));
+    const h = T.dry('deephead');
+    assert.doesNotMatch(h.text, crash);
+    refused(h, /recurring\.json at [0-9a-f]{12}: nested deeper than 64 levels; no job needs that/);
+    T.onMainFile(JOBS, deep, 'main: deep');
+    T.choreBranch('notes', (wt) => write(path.join(wt, NOTES), 'x\n'));
+    const c = T.checkPr('chore-notes');
+    assert.doesNotMatch(c.text, crash);
+    passes(c);
+    assert.match(c.text, MAIN_BROKEN);
+    passes(T.merge('notes'));
+    T.g(['fetch', '-q', 'origin']);
+    assert.equal(T.g(['show', `origin/main:${NOTES}`]), 'x', 'the unrelated chore landed');
+    const l = T.run(['recurring', 'list']);
+    assert.doesNotMatch(l.text, crash);
+    assert.match(l.text, /nested deeper than 64 levels/);
+    T.syncMain();
+    const v = T.run(['validate']);
+    assert.doesNotMatch(v.text, crash);
+    refused(v, /recurring\.json in this checkout: nested deeper than 64 levels/);
+  } finally { T.done(); }
+});
+
 test('A12: recurring apply writes exactly the answered change into the chore worktree\'s file, and nothing else', () => {
   const T = setup('apply');
   try {
