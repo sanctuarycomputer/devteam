@@ -1429,8 +1429,10 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
   assert.equal((await fetch(`${B}/api/view?kind=lens&slug=viewer-mock`)).status, 400);
   assert.equal((await view({ slug: 'viewer-mock', at: 'main' }, { 'sec-fetch-site': 'cross-site' })).status, 403);
   assert.match(F.owner(['artifact', 'describe', 'viewer-mock']), /^viewer-mock at main: "Viewer mock", fingerprint [0-9a-f]{12}/);
-  // thread show says when the artifact a thread is about has changed since (decision 21)
-  const on = (s) => F.owner(['thread', 'new', 'About it', '--subject', JSON.stringify({ kind: 'artifact', slug: 'viewer-mock', path: 'index.html', point: { x: 1, y: 2 }, ...s })]).split('\n')[0];
+  // thread show says when the artifact a thread is about has changed since (decision 21); each at a spot of
+  // its own, since a spot with an open thread takes no second one (kit-97)
+  let spot = 0;
+  const on = (s) => F.owner(['thread', 'new', 'About it', '--subject', JSON.stringify({ kind: 'artifact', slug: 'viewer-mock', path: 'index.html', point: { x: 1, y: 2 + spot++ }, ...s })]).split('\n')[0];
   assert.doesNotMatch(F.sup(['thread', 'show', on({ at: 'main', fp: lib.fp })]), /changed since/, 'as it was');
   assert.match(F.sup(['thread', 'show', on({ at: 'main', fp: 'a'.repeat(64) })]), /^the artifact viewer-mock has changed since this thread began$/m);
   assert.doesNotMatch(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: lib.fp })]), /changed since/, 'a published tree main still has');
