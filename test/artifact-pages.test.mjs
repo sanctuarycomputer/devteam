@@ -428,13 +428,14 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     await V.frameClick('go-tab2', 'pages/a.html', { hash: '#tab2', load: false });
     await V.soon("TS.hash === '#tab2'", 'setup: the viewer heard the move to #tab2');
     await pinsAre(V, [N.TAL, N.TP, N.TP2], 'setup: on a.html#tab2');
-    // (a fresh frame is a clone of the last: the old one is told by being gone from the page)
-    const navs = await V.p.ev('(window.__kit142Old = tsFrame(), AV_NAVS)');
+    // the new frame's own ready, counted as the viewer takes it (its listener runs first): until then the
+    // stage still reads as the last frame left it (ready, a.html, #tab2), so only that ready says anything
+    const navs = await V.p.ev(`(window.__kit142Old = tsFrame(), window.__kit142Ready = [], addEventListener('message', (e) => { const f = tsFrame(); if (f !== window.__kit142Old && e.source === f.contentWindow && e.data?.lens === 1 && e.data.type === 'ready') window.__kit142Ready.push(TS.hash); }), AV_NAVS)`);
     await V.p.ev(`(window.__fp = ${J('f'.repeat(64))}, true)`);
-    const back = await V.settle(`!window.__kit142Old.isConnected && TS.ready && TS.path === 'a.html'`, 15000);
+    const back = await V.settle(`!window.__kit142Old.isConnected && window.__kit142Ready.length > 0 && TS.ready && TS.path === 'a.html'`, 15000);
     assert.ok(back, `the draft reloaded in a fresh frame, its lens ready: ${await V.p.ev('JSON.stringify({ fp: TS.fp, fpNow: TS.fpNow, gone: TS.fpGone, vis: document.visibilityState, old: window.__kit142Old.isConnected, src: tsFrame().getAttribute("src"), ready: TS.ready, path: TS.path, hash: TS.hash, at: TS.at })')}`);
     assert.match(await V.p.ev('tsFrame().getAttribute("src")'), /\/a\.html#tab2$/, 'reloaded at a.html#tab2');
-    assert.equal(await V.p.ev('TS.hash'), '#tab2', "the reload's ready names #tab2");
+    assert.deepEqual(await V.p.ev('window.__kit142Ready'), ['#tab2'], "the reload's ready names #tab2, once");
     await pinsAre(V, [N.TAL, N.TP, N.TP2], 'after the reload, still the #tab2 pins');
     assert.equal(await V.p.ev('AV_NAVS'), navs, 'a reload is no move for the close');
   });
