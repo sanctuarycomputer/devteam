@@ -23404,13 +23404,17 @@ const recurringRegistry = Object.freeze({
   // merge-tree and a throwaway git merge each disagreed somewhere with what the forge lands (a decoy
   // block, another diff algorithm, attributes read from another checkout, a rebase that replays
   // commits one by one). It clears only the cases where what lands needs no text merge of the file,
-  // and refuses the rest. With settings.md's blob at main, the head and every merge base:
-  // - main changed it (main's blob differs from some base's, or there is no base) and a commit in
-  //   main..sha touches it: refused, merge main into the branch first (then main is the only base);
-  // - only main changed it: main's file lands under every merge method (tree level, no text merge),
-  //   so the jobs are main's;
-  // - main didn't change it: the head's file lands (merge and squash take the changed side; a rebase
-  //   replays the branch onto the file it started from), compared canonically with main's.
+  // and refuses the rest. With settings.md's blob at main, the head and every merge base, judged
+  // from blobs, never from which commits rev-list happens to list (d-20261120-064519721):
+  // - main changed it (main's blob differs from some base's, or there is no base): refused unless
+  //   the head's blob is every base's and no commit in main..sha touches the file. A merge of main
+  //   that keeps the branch's file (-s ours) is TREESAME to a parent, so rev-list alone misses it
+  //   (final-5b B5-1). Then main's file lands under every merge method (tree level, no text merge),
+  //   and the jobs are main's. The refusal says merge main in, or under rebase, rebase onto main;
+  // - main didn't change it: the head's file lands (merge and squash take the changed side),
+  //   compared canonically with main's. A rebase drops a branch commit whose patch main already
+  //   has, even if main later put the file back (final-5 F1), so under rebase a branch commit that
+  //   touches the file beside any commit in sha..main that touches it is refused too.
   // Under merge_method rebase the forge drops merge commits and lands every other commit on main:
   // a merge commit beside a commit that touches the file is refused, and each touching commit's
   // jobs must read and pass their shape. Every git call has a timeout; one that times out refuses.
@@ -23439,11 +23443,16 @@ const recurringRegistry = Object.freeze({
       const touching = list(['rev-list', `${main}..${sha}`, '--full-history', '--', rel]);
       if (late.length) return lands(null);
       if (touching === null) return lands(null, `settings.md: git rev-list ${main}..${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
-      const atMain = blob(main);
-      const mainChanged = !bases.length || bases.some((b) => blob(b) !== atMain);
+      const rebase = repo('home').settings.merge_method === 'rebase';
+      const both = `settings.md: main changed it since this branch left it, and so does the branch; ${rebase ? 'rebase the branch onto main first' : 'merge main into the branch first'}`;
+      const [atMain, atHead, atBases] = [blob(main), blob(sha), bases.map(blob)];
       if (late.length) return lands(null);
-      if (mainChanged && touching.length) return lands(null, 'settings.md: main changed it since this branch left it, and so does the branch; merge main into the branch first');
-      if (repo('home').settings.merge_method === 'rebase' && touching.length) {
+      const mainChanged = !bases.length || atBases.some((b) => b !== atMain);
+      if (mainChanged) return touching.length || !atBases.every((b) => b === atHead) ? lands(null, both) : lands(now);
+      if (rebase && touching.length) {
+        const upstream = list(['rev-list', `${sha}..${main}`, '--full-history', '--', rel]);
+        if (late.length) return lands(null);
+        if (upstream === null || upstream.length) return lands(null, both);
         const merges = list(['rev-list', '--merges', `${main}..${sha}`]);
         if (late.length) return lands(null);
         if (merges === null || merges.length) return lands(null, 'settings.md: merge_method is rebase and this branch has merge commits beside a settings change; rebase the branch onto main instead');
@@ -23456,7 +23465,7 @@ const recurringRegistry = Object.freeze({
           if (why) return lands(null, `settings.md at ${c.slice(0, 12)}: ${why}; merge_method is rebase, which lands each commit on main, so each must read`);
         }
       }
-      return lands(mainChanged ? now : jobsAt(sha));
+      return lands(jobsAt(sha));
     });
   },
   // The .gitattributes lines that give settings.md a merge driver or a filter (final-3 F2): git's
