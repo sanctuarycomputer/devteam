@@ -141,7 +141,85 @@ const THREAD_PAGES = [lib.reopenFixture()].map(({ hash, init, ready }) => ({ has
 // kit-99: the Trust Score's suggestions
 const TRUST_SUGG_PAGES = [];
 // kit-171: attachments
-const ATTACH_PAGES = [];
+const ATTACH_PAGES = (() => {
+  const at = new Date(Date.now() - 3600000).toISOString();
+  // an open question in /api/data's shape (test/lib/kit.mjs's boardFixture `question`)
+  const qid = 'q-20261120-000000001-supervisor';
+  const q = {
+    id: qid, kind: 'owner-decision', class: null, scope: null, ticket: null, re: null, sensor: null, thread: null,
+    asked_at: at, question: 'Which of these should the next build look like?', context: '', options: [], choices: [{ label: 'Yes' }, { label: 'No' }], links: [],
+    goal: null, change: null, met: null, rule_scope: null, recommendation: '', confidence: null, default: null, deadline: null, blocks: [],
+    stake: 2, urgency: 2, settles: [], settles_if: null, settles_label: null,
+    rating_history: [{ at, by: 'supervisor', stake: 2, urgency: 2, asked: true }], approves: [], evidence: [], note: null, new_because: null,
+    why_asked: { reasons: [] }, secrets: [], secrets_posted: [], status: 'open', answer: null, answered_by: null, answered_at: null, matched: null,
+    hash: '0123456789abcde1', rewritten: false, autonomy: null, standing_rule: null, channel: null, said: null, turn: null, review: null, result: null,
+    declined: null, allow_partial: null, result_status: null, links_moved: null, goal_hold: null, files: [],
+    rank: {
+      score: 9, own: 9, position: 1, of: 1, top: true, floor: null, chips: [], reason: null, sum: 'score 9',
+      parts: { goal: null, goal_title: null, goal_impact: 2, judged: false, impact_by: null, stake: 2, urgency: 2, urgency_given: 2, rated: true, held_up: 0, on_path: 0, behind: 0, unblock: 0, default: false, default_soon: false, parked: false, floor: null, age_days: 1, settles: [], settled_by: [] },
+    },
+    class_name: null,
+  };
+  const OK_NAME = `${'a-sixty-character-file-name-'.repeat(3).slice(0, 56)}.png`;
+  const WHY = `The upload was refused: ${'this file is far too large for the machine to take '.repeat(4)}`.slice(0, 160);
+  const key = `q:${qid}`, box = `.dropbox[data-drop="${key}"]`;
+  // the two pills set into the box once its card is drawn; then, as INBOX_READY (below) does, #th-body is made to
+  // overflow visible at its own width so the box is judged at its real width, and the panel must be at rest
+  const noteReady = `(() => {
+  if (!(document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none') || !document.querySelector('#questions [data-qcard="${qid}"] ${box}')) return false;
+  getComputedStyle(document.querySelector('.main')).marginRight;
+  if (document.getAnimations().some((a) => a.transitionProperty === 'margin-right')) return false;
+  if (!window.__attached) {
+    window.__attached = true;
+    ATTACH.set(${JSON.stringify(key)}, [
+      { id: 'att-m1', name: ${JSON.stringify(OK_NAME)}, sendName: ${JSON.stringify(OK_NAME)}, size: 48213, type: 'image/png', state: 'ok', why: '', path: 'docs/devteam/uploads/a.png', bytes: 48213 },
+      { id: 'att-m2', name: 'huge.bin', sendName: 'huge.bin', size: 9437184, type: 'application/octet-stream', state: 'refused', why: ${JSON.stringify(WHY)}, path: '', bytes: 0 },
+    ]);
+    drawPills(${JSON.stringify(key)});
+  }
+  if (document.querySelectorAll('${box} .att-pill').length !== 2 || !document.querySelector('${box} .att-pill.refused .pill-why')) return false;
+  const b = document.getElementById('th-body');
+  b.style.width = ''; b.style.overflowY = '';
+  b.style.width = getComputedStyle(b).width; b.style.overflowY = 'visible';
+  return true;
+})()`;
+  // a thread on Upkeep's card, floating on Goals, whose owner turn has three files
+  const tid = 't-20261120-000000002-owner';
+  const files = [{ name: 'Shot 1.png', path: 'docs/devteam/uploads/1.png', bytes: 48213 }, { name: 'Spec.pdf', path: 'docs/devteam/uploads/2.pdf', bytes: 2411000 }, { name: `${'a-long-file-name-without-spaces-'.repeat(3).slice(0, 76)}.txt`, path: 'docs/devteam/uploads/3.txt', bytes: 912 }];
+  const thread = { ...lib.effThread({ id: tid, subject: { kind: 'item', ref: 'goal:upkeep' }, title: 'About upkeep', turns: [{ id: 'u-20261120-000000002-owner', by: 'owner', writer: 'owner', at, text: 'Look at these three before we go on', refs: [], question: null, files }] }), waiting: 'supervisor' };
+  const threadInit = `(() => {
+  const si = window.setInterval;
+  window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
+  const json = (r, body) => new Response(JSON.stringify(body), { status: r.status, statusText: r.statusText, headers: r.headers });
+  const real = window.fetch;
+  window.fetch = async (u, o) => {
+    const url = String(u && u.url ? u.url : u);
+    const r = await real(u, o);
+    if (String(o?.method || 'GET').toUpperCase() === 'GET' && r.ok && url.startsWith('/api/threads')) {
+      const j = await r.json();
+      return json(r, { ...j, threads: [...(j.threads || []), ${JSON.stringify(thread)}] });
+    }
+    return r;
+  };
+})();`;
+  const turnReady = `(() => {
+  const c = document.getElementById('tl-card');
+  if (!(TL.open === ${JSON.stringify(tid)} && !c.hidden && c.parentElement.id === 'tl' && document.querySelectorAll('#tl-c-turns .file-chip').length === 3)) return false;
+  // #tl-c-turns scrolls (overflow-y: auto) and measure.mjs skips what a scrolling container holds: as INBOX_READY does
+  // for #th-body, its width is fixed at its own and it overflows visible, so the turn and its chips are judged
+  // and #tl (the floating cards' layer) is .no-shell, which measure.mjs's ignore skips whole: the class is taken
+  // off it for the measure, so the card's turns are in the judged set
+  document.getElementById('tl').classList.remove('no-shell');
+  const t = document.getElementById('tl-c-turns');
+  t.style.width = ''; t.style.overflowY = '';
+  t.style.width = getComputedStyle(t).width; t.style.overflowY = 'visible';
+  return true;
+})()`;
+  return [
+    { hash: '#questions', init: lib.dataPatchInit({ questions: [q] }), ready: noteReady, narrow: { view: '#no-such-view' } },
+    { hash: `#goals?t=${tid}`, init: threadInit, ready: turnReady, narrow: { view: '#no-such-view' } },
+  ];
+})();
 // kit-166: Upkeep's peek with its Jobs, Built in and Proposed jobs sections, two jobs' peeks (a check with what the
 // loop noticed and its runs, a worker chore with its instructions) and a built-in's, on the jobs fixtures
 // (test/fixtures/recurring/dashboard.json in /api/data's upkeep.recurring, peek.json for /api/peek?kind=recurring).
