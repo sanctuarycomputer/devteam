@@ -467,8 +467,9 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
   const fileView = (path) => `#file?path=${encodeURIComponent(path)}`;
   const PEEK_MD = "!!document.querySelector('#drawer-body .md p')";
   // the peek rendered and done redrawing: its history arrives after the file and redraws it (its properties grow, so
-  // what is under them moves), and until then the History card says Loading…
-  const peekSettled = (what) => soon(`${PEEK_MD} && !document.querySelector('#drawer-body .loading')`, `${what}: the peek redrawn with its history`);
+  // what is under them moves), and until then the History card says Loading…; and done sliding in (its transform's
+  // transition, --dur, moves everything in it sideways until it ends)
+  const peekSettled = (what) => soon(`${PEEK_MD} && !document.querySelector('#drawer-body .loading') && document.getElementById('drawer').getAnimations().length === 0`, `${what}: the peek redrawn with its history, at rest`);
   // Shift held and the pointer moved over the i-th of the peek's rendered blocks matching sel (kept as window.__blk)
   const pointAt = async (sel, i) => {
     const at = await p.ev(`(() => { const e = document.querySelectorAll(${JSON.stringify(sel)})[${i}]; if (!e) return null; window.__blk = e; e.scrollIntoView({ block: 'center', behavior: 'instant' }); const r = e.getBoundingClientRect(); return { x: Math.round(r.left + Math.min(40, r.width / 2)), y: Math.round(r.top + r.height / 2) }; })()`);
