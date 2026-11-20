@@ -495,6 +495,22 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     assert.equal(await v.ev(shown('av-close')), false, 'the × gone with the image');
   });
 
+  await t.test('B4: a route taken while an image is up closes it first, so the router resets the viewer as it does from an empty stage', async () => {
+    // an image over nothing: the thread's card on a plain page, the viewer closed
+    await p.ev(`location.hash = '#talk/${T1}'; void 0`);
+    await soon(`document.getElementById('artifact-view').hidden && document.getElementById('tl-card')?.dataset.key === ${JSON.stringify(T1)} && !!document.querySelector('#tl-c-turns button.file-chip')`, 'the thread card, the viewer closed');
+    await p.ev("[...document.querySelectorAll('#tl-c-turns button.file-chip')].find((c) => c.querySelector('.chip-name')?.textContent === 'Look.png').click(); void 0");
+    await soon("!document.getElementById('artifact-view').hidden && !!document.getElementById('av-img')", 'the image open over nothing');
+    // what an earlier viewer could leave behind; the router's reset (index.html route(), `if (!AV) { AV_RET = …; AV_NAVS = 0; … }`) clears it only on an empty stage
+    await p.ev("AV_RET = '#stale'; AV_NAVS = 5; AV_FROM = false; AV_FRAME_ESC = true; void 0");
+    await p.ev("location.hash = '#artifact/main/art-one'; void 0");
+    await soon("!document.getElementById('av-img') && !document.getElementById('artifact-view').hidden && TS.kind === 'artifact' && TS.slug === 'art-one'", 'the artifact routed to, the image gone');
+    const s = await p.ev("({ ret: AV_RET, navs: AV_NAVS < 5, from: AV_FROM, frameEsc: AV_FRAME_ESC, upload: !!AV?.upload })");
+    assert.deepEqual(s, { ret: `#talk/${T1}`, navs: true, from: true, frameEsc: false, upload: false }, "the router's reset ran: the image closed before the route, the viewer's return is this page");
+    await p.ev(`location.hash = '#talk/${T1}'; void 0`);
+    await soon("document.getElementById('artifact-view').hidden", 'the viewer closed');
+  });
+
   await t.test('B6: a swept file: the download chip says gone, the image viewer says so', async () => {
     await p.ev(`location.hash = '#talk/${T1}'; void 0`);
     await soon("[...document.querySelectorAll('#tl-c-turns .file-chip .chip-name')].some((c) => c.textContent === 'report.pdf')", 'the thread with its chips');
