@@ -27751,6 +27751,10 @@ const HELP_GOALS = `Goals and retros
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR`;
+const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
+  recurring list [--json]   main's jobs (settings recurring) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null, problems?: ["…"] }], runs_a_day, cap, pending: [{ qid, name, change, status }], problems?: ["…"] }; problems is there only when an entry, or recurring itself, breaks the shape (validate says the same)
+  recurring show <name> [--json]   one job on main in full, who registered it, its problems if it breaks the shape, and its pending questions
+  recurring apply <qid>   supervisor: write an answered recurring-edit question's exact change into .worktrees/chore-recurring's settings.md (chore start recurring first; its jobs must be main's), rewriting only the recurring value; then chore pr recurring and merge --chore recurring --approved <qid>`;
 const HELP_LOG = `The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
@@ -27763,14 +27767,10 @@ const HELP_DASHBOARD = `Dashboard and releases
   box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run]  (each [--dockerfile p])   in the kit's own checkout: the box image's tool pins in cloud/Dockerfile (Claude Code, claude-swap, gh, ttyd, mise, uv). verify checks them and the release stamp offline; check says which are behind upstream (exit 1 stale, 3 some unknown, 0 none, 2 no file or one that doesn't verify); bump moves every tool not held (a "# hold: <reason>" line above its _VERSION ARG) to its latest, with sums from the downloaded assets, and stamps the release. Only the top package of the npm and PyPI tools is pinned: their dependencies resolve when the image is built
   box-pins installed   inside the box image: each tool's version, asked at its path in the image (never through PATH), against DEVTEAM_BOX_TOOLS
   hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)`;
-const RECURRING_HELP = `Jobs under Upkeep (supervisor.md, Recurring jobs)
-  recurring list [--json]   main's jobs (settings recurring) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null }], runs_a_day, cap, pending: [{ qid, name, change, status }] }
-  recurring show <name> [--json]   one job on main in full, who registered it, and its pending questions
-  recurring apply <qid>   supervisor: write an answered recurring-edit question's exact change into .worktrees/chore-recurring's settings.md (chore start recurring first; its jobs must be main's), rewriting only the recurring value; then chore pr recurring and merge --chore recurring --approved <qid>`;
 /* helpSections end */
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
-${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, HELP_OBSERVE, HELP_GOALS, RECURRING_HELP, HELP_LOG, HELP_DASHBOARD].join('\n\n')}
+${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, HELP_OBSERVE, HELP_GOALS, HELP_RECURRING, HELP_LOG, HELP_DASHBOARD].join('\n\n')}
 `;
 
 /* HELP end */
@@ -27812,10 +27812,12 @@ const COMMANDS_HOLDS = {
 const COMMANDS_DASHBOARD = {
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard, browser: cmdBrowser,
 };
+const COMMANDS_RECURRING = {
+  recurring: cmdRecurring,
+};
 /* commandGroups end */
 const COMMANDS = {
-  ...COMMANDS_SETUP, ...COMMANDS_GRAPH, ...COMMANDS_CHECKS, ...COMMANDS_SESSIONS, ...COMMANDS_DECIDE, ...COMMANDS_OBSERVE, ...COMMANDS_GOALS, ...COMMANDS_LOG, ...COMMANDS_HOLDS, ...COMMANDS_DASHBOARD,
-  recurring: cmdRecurring,
+  ...COMMANDS_SETUP, ...COMMANDS_GRAPH, ...COMMANDS_CHECKS, ...COMMANDS_SESSIONS, ...COMMANDS_DECIDE, ...COMMANDS_OBSERVE, ...COMMANDS_GOALS, ...COMMANDS_LOG, ...COMMANDS_HOLDS, ...COMMANDS_DASHBOARD, ...COMMANDS_RECURRING,
 };
 /* dispatch start */
 if (!command || command === 'help' || command === '--help') out(HELP);
