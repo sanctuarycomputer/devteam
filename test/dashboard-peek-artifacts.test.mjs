@@ -220,9 +220,10 @@ test('each of the four peeks lists its artifacts, a link opens the viewer', { ..
   // a link opens the large viewer on what it names (the drafted one: its newest draft)
   await go(`#feature/${ids.feat1}`);
   await soon("!!document.querySelector('#drawer [data-peek-arts]')", 'the feature peek');
-  // the drawer slides in (a transform transition over --dur); a click before it settles lands off the page (plan-1 F1)
-  await soon("(() => { const d = document.getElementById('drawer'), r = d.getBoundingClientRect(); return !d.getAnimations().length && r.width > 0 && r.right <= innerWidth + 1; })()", 'the drawer settled');
-  await p.click(`#drawer [data-peek-arts] a[href="#artifact/wt/${ids.wt2}/refund-screen"]`);
+  // the link clicked in the page (a real anchor click: the page's own hash routing follows its href), not at
+  // screen coordinates: the drawer slides in and its Dependencies diagram is drawn later, both moving the link
+  // between a coordinate click's measure and its press (plan-1 F1, plan-2 F2-1)
+  assert.equal(await p.ev(`(() => { const a = document.querySelector('#drawer [data-peek-arts] a[href="#artifact/wt/${ids.wt2}/refund-screen"]'); if (!a) return 'no link'; a.click(); return 'clicked'; })()`), 'clicked', 'the drafted artifact\'s link is in the feature peek');
   await soon(`!document.getElementById('artifact-view').hidden && document.getElementById('av-frame').getAttribute('src').endsWith('/artifact/wt/${ids.wt2}/refund-screen/')`, 'the link opens the viewer on the draft');
 });
 
