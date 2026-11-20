@@ -11,7 +11,7 @@ import path from 'node:path';
 import { canDrive, chromePath } from './lib/chrome.mjs';
 import { until } from './lib/kit.mjs';
 import { validate } from './fixtures/browser/check.mjs';
-import { tmp, site, cli, testBrowserPids, alive, readState, cmdline, startCli, started, statusJson, stopped, h, g, ownGroups, opened, hygieneFile } from './lib/browser-fixture.mjs';
+import { tmp, site, cli, testBrowserPids, alive, readState, startCli, started, statusJson, stopped, h, g, ownGroups, opened, hygieneFile } from './lib/browser-fixture.mjs';
 
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
@@ -19,6 +19,7 @@ const skip = canDrive ? false : 'needs Chrome and Node 22+';
 if (mustRun && !canDrive) test('Chrome is needed on CI\'s Node 22+', () => assert.fail('Chrome is needed on CI\'s Node 22+: this file must run there, not skip'));
 hygieneFile({ sweep: true });
 
+const cmdline = (pid) => fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
 const hygiene = [];
 const PREFS = (P) => path.join(P.profile, 'Default', 'Preferences');
 const SESSION_NAMES = ['Current Session', 'Current Tabs', 'Last Session', 'Last Tabs'];

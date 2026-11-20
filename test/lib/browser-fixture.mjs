@@ -94,7 +94,6 @@ export function alive(pid) {
   try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return st.slice(st.lastIndexOf(')') + 2)[0] !== 'Z'; } catch { return false; }
 }
 export const readState = (P) => { const s = JSON.parse(fs.readFileSync(P.state, 'utf8')); if (/[1-9a-f]/.test(s.control_secret ?? '')) secrets.add(s.control_secret); return s; };
-export const cmdline = (pid) => fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
 // Starts run one at a time across the file: the two chains run at once, and two projects' daemons
 // starting together can pick the same free view port before either binds it. ms is the start's own.
 let starting = Promise.resolve();
