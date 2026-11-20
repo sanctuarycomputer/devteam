@@ -3164,14 +3164,14 @@ function findCycle(ts) {
   for (const id of ts.keys()) if (!state.has(id)) { const c = dfs(id); if (c) return c; }
   return null;
 }
-// Longest dependency chain, weighted S = 1, M = 2.
-function criticalPath(ts) {
+// Longest dependency chain, weighted S = 1, M = 2 (or by w: () => 1 counts tickets).
+function criticalPath(ts, w = weight) {
   const best = new Map();
   const longest = (id) => {
     if (best.has(id)) return best.get(id);
     let top = { len: 0, path: [] };
     for (const d of ts.get(id).depends_on ?? []) if (ts.has(d)) { const r = longest(d); if (r.len > top.len) top = r; }
-    const res = { len: top.len + weight(ts.get(id)), path: [...top.path, id] };
+    const res = { len: top.len + w(ts.get(id)), path: [...top.path, id] };
     best.set(id, res);
     return res;
   };
@@ -4118,6 +4118,39 @@ function deriveStatus() {
   });
 }
 
+// A mostly serial graph (D4, D11): the longest chain of unmerged tickets is SERIAL_DEPTH or more
+// deep and at least SERIAL_RATIO times the ready width (unmerged tickets whose dependencies have
+// all merged). Every check passes on such a graph, yet only one or two tickets can ever run. When
+// most of the chain's links join tickets that share nothing but a whole-file touch of a file
+// split_files lists, the dependency only serializes: naming parts (path#name) lets them run at once.
+const SERIAL_DEPTH = 8, SERIAL_RATIO = 4;
+function serialGraphWarning(live, s = loadSettings()) {
+  const U = new Map(live.map((t) => [t.id, t]));
+  if (U.size < SERIAL_DEPTH) return null;
+  const chain = criticalPath(U, () => 1).path;
+  const depth = chain.length;
+  const width = live.filter((t) => !(t.depends_on ?? []).some((d) => U.has(d))).length;
+  if (depth < SERIAL_DEPTH || depth < SERIAL_RATIO * width) return null;
+  const msg = `the unmerged ticket graph is mostly serial: its longest dependency chain is ${depth} tickets deep (${chain[0]} … ${chain[depth - 1]}) while ${width} of ${U.size} are ready (no unmerged dependency) (D4, D11)`;
+  // a link that only serializes: every footprint the two share is a whole-file touch of a split file
+  const wholeSplit = (a, b) => {
+    const repo = repoOfTicketLink(a);
+    if (repo !== repoOfTicketLink(b)) return null;
+    const files = new Set();
+    for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) {
+      if (!touchesOverlap(ga, gb, repo, s)) continue;
+      const pa = trimSlash(touchPath(ga)), pb = trimSlash(touchPath(gb));
+      if (pa !== pb || hasWild(pa) || !isSplitFile(pa, s) || (touchPart(ga) && touchPart(gb))) return null;
+      files.add(pa);
+    }
+    return files.size ? [...files] : null;
+  };
+  const links = [];
+  for (let i = 1; i < depth; i++) { const f = wholeSplit(U.get(chain[i - 1]), U.get(chain[i])); if (f) links.push(`${chain[i]} on ${chain[i - 1]} (${f.join(', ')})`); }
+  if (links.length * 2 <= depth - 1) return `${msg}; find dependencies a contract ticket or a split could break`;
+  return `${msg}; ${links.length} of its ${depth - 1} links only serialize whole-file touches of a file split_files lists, e.g. ${links.slice(0, 2).join('; ')}: name the parts each changes (path#name) and drop the dependencies that only serialize`;
+}
+
 const onPlanBranch = () => (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
 function cmdValidate() {
@@ -4309,6 +4342,8 @@ function cmdValidate() {
       if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
       outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (touchesOverlap(ga, gb, repoOfTicketLink(a))) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
+    const w = serialGraphWarning(live);
+    if (w) warnings.push(scope ? `${w}; not ${scope}'s to fix` : w);
   }
 
   // The registry and the lines. Labels-only components and an empty registry print nothing.
@@ -14943,6 +14978,44 @@ function collectMetrics(since) {
   if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
   if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
+  // A fleet with nothing running: no worker and no planner for FLEET_IDLE_MS while it is neither
+  // parked nor drained. idle-capacity speaks when a ticket can start, idle-planning when a goal
+  // waits for a planner, memory-full when the machine has no room for either; each names its own
+  // move, so this stays quiet when any of them spoke this pass. It speaks when nothing can start
+  // (every ready ticket waits on the owner, everything is held, nothing is planned), so the
+  // supervisor makes work instead of ticking over an empty fleet. The last sign of life is the
+  // newest line any ticket's worker or any planner wrote (a planner's branch and files too), or the
+  // log's first line when no session has ever run. A planner counts as running only while its
+  // window is open and it waits on no owner answer: a plan branch left behind, or a design parked
+  // on the owner's approval, is the stuck fleet this finding is for, once its stamps go quiet.
+  // stale_after_minutes (30 by default, two quiet ticks at the default tick_minutes): the silence
+  // after which a session reads as stuck reads the same for the fleet. A start takes a tick, so an
+  // idle tick between waves is normal; more is the fleet idling.
+  const FLEET_IDLE_MS = (settings.stale_after_minutes ?? 30) * 60000;
+  const spoken = f.some((x) => ['idle-capacity', 'idle-planning', 'memory-full'].includes(x.kind));
+  if (!drained && !fleetMode() && !active && !spoken && !planners().some((p) => !p.parked && p.window && !p.waiting_on_owner.length)) {
+    const lines = readLog().lines;
+    const stamps = lines.filter((l) => l.at && (ts.has(l.by) || String(l.by).startsWith('plan-'))).map((l) => l.at);
+    for (const p of planners()) if (p.last_seen) stamps.push(p.last_seen);
+    const lastAt = stamps.sort().pop() ?? lines.map((l) => l.at).filter(Boolean).sort()[0] ?? null;
+    const idleMs = lastAt ? now - Date.parse(lastAt) : 0;
+    if (idleMs > FLEET_IDLE_MS) {
+      // open tickets: not superseded, not merged, no worker running. Held: the ticket's held field,
+      // a goal not running, parked, or an open owner question naming it. Planned: the rest that
+      // aren't ready (waiting on a dependency or a running ticket's touches).
+      const open = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !countsAsWorker(t));
+      const heldT = open.filter((t) => isHeld(t) || ticketMode(t) !== 'run' || H.has(t.id) || workerState(t.id)?.phase === 'parked');
+      const heldIds = new Set(heldT.map((t) => t.id));
+      const readyT = ready.filter((t) => !heldIds.has(t.id));
+      const readyIds = new Set(readyT.map((t) => t.id));
+      const planned = open.filter((t) => !heldIds.has(t.id) && !readyIds.has(t.id)).length;
+      const L = ladder();
+      const noDefault = questions().filter((q) => q.status === 'open' && !q.goal_hold && !q.default && !['one-way-door', 'review', 'owner-action'].includes(q.kind) && !(q.reasons ?? []).includes('one-way-door') && !(L.owner_only ?? []).includes(q.class));
+      const chore = readyT.find((t) => t.kind === 'chore') ?? readyT[0];
+      const ids = (xs) => xs.slice(0, 3).map((x) => x.id).join(', ');
+      add('medium', 'fleet-idle', 'fleet', `no worker or planner has run for ${(idleMs / 3600000).toFixed(1)}h (last sign of life ${lastAt}); ${readyT.length} ticket${readyT.length === 1 ? '' : 's'} ready, ${heldT.length} held, ${planned} planned`, `in order: 1. ${chore ? `start a ready chore (worker ${chore.id})` : 'add a chore from what the metrics or the code point at'}; 2. split a held ticket so the part that doesn't need the owner runs (${heldT.length ? ids(heldT) : 'none held'}); 3. give an open no-default question a default (${noDefault.length ? ids(noDefault) : 'none open'}); 4. propose the next goal from strategy.md (a proposal question naming the "How it wins" line it serves, supervisor.md §9)`);
+    }
+  }
   // the owner asked for one of the supervisor's settings and main doesn't have it yet
   {
     const um = goalMode(upkeepOrVirtual());

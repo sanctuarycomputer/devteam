@@ -2458,18 +2458,34 @@ const approvedBy = (id) => (id?.startsWith('q-') ? `with your answer to ${qlink(
 function linkify(text) {
   // One pass over the escaped text: each id becomes a link once, and nothing inside a link (its
   // href, its text) is scanned again, so an id holding a planner's name (m-…-plan-x) stays whole.
+  // A doc path, with the branch or commit written after it: one link to the file, the " on <ref>"
+  // left as text after it (kit-327). A ticket id only where it stands alone, never inside a path, a
+  // branch or a filename (ticket/<id>, <id>/x.md, docs/<id>.md).
   const h = esc(text ?? '');
   const ids = [...ticketMap().keys()].sort((a, b) => b.length - a.length);
+  const DOC = String.raw`(?<![^\s(\[\x7b,;>])(?<!&amp;|\w&#39;)(?:\.\.\/)?[A-Za-z_.][\w.-]*(?:\/[\w.-]+)*\/[\w.-]*\.[A-Za-z][A-Za-z0-9]*(?![\w\/-]|\.\w)(?: (?:on (?:(?:ticket|plan)\/[\w.-]*[A-Za-z0-9]|main)|at [0-9a-f]{40})(?![\w\/-]|\.\w))?`;
   const parts = [
     String.raw`\bq-\d{8}-\d{9}-[a-z0-9-]+`,
     String.raw`\b[gkapmodt]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
-    ...(ids.length ? [String.raw`\b(?:${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\b`] : []),
+    ...(ids.length ? [String.raw`(?<![\w./-])(?:${ids.map((x) => x.replace(/[-.]/g, '\\$&')).join('|')})(?![\w\/-]|\.[A-Za-z0-9])`] : []),
     String.raw`\bsensor:[A-Za-z0-9][A-Za-z0-9_.-]*`,
     String.raw`\bplan-[a-z0-9]+(?:-[a-z0-9]+)*\b`,
     String.raw`\b[0-9a-f]{40}\b`,
     String.raw`\bsanctuarycomputer\/devteam#\d+`,
   ];
-  return h.replace(new RegExp(parts.join('|'), 'g'), (m) => {
+  const rest = new RegExp(parts.join('|'), 'g');
+  const doc = (m) => {
+    const [, p, sep, ref] = /^(\S+?)(?:( (?:on|at) )(\S+))?$/.exec(m);
+    const repoHref = repoDocHref(p, ref);
+    // a home path keeps its ref, a merged home ticket's its merge commit; any other .. is no doc
+    const t = !repoHref && ref?.startsWith('ticket/') ? ticketMap().get(ref.slice('ticket/'.length)) : null;
+    const at = t?.merge_sha && t.repo === 'home' ? t.merge_sha : ref;
+    if (!repoHref && (!ref || p.split('/').includes('..'))) return m.replace(rest, one);
+    const href = repoHref || fileHref({ path: p, ref: at, title: p });
+    const after = sep ? `${sep}${ref}` : '';
+    return /^https:/.test(href) ? `<a class="linkish" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${p}</a>${after}` : `<a class="linkish" href="${esc(href)}">${p}</a>${after}`;
+  };
+  const one = (m) => {
     if (/^q-\d{8}-\d{9}-/.test(m)) return qlink(m);
     if (/^[gkapmodt]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
     if (ticketMap().has(m)) return tlink(m);
@@ -2478,7 +2494,8 @@ function linkify(text) {
     if (/^[0-9a-f]{40}$/.test(m)) return `<code>${m.slice(0, 12)}</code>`;
     const pr = m.split('#')[1];
     return `<a class="linkish" href="https://github.com/sanctuarycomputer/devteam/pull/${pr}" target="_blank" rel="noopener noreferrer">devteam #${pr}</a>`;
-  });
+  };
+  return h.replace(new RegExp(`(${DOC})|${rest.source}`, 'g'), (m, d) => (d !== undefined ? doc(m) : one(m)));
 }
 const FIELD_WORDS = { depends_on: 'what it waits on', touches: 'which files it may change', done_when: 'what “done” means', title: 'its title', held: 'whether it is on hold', superseded_by: 'what replaces it', serves: 'which stories it serves', risk: 'its risk', size: 'its size', kind: 'its kind', contracts: 'its contracts', one_way_doors: 'its hard-to-undo parts', notes: 'its notes' };
 const syncTag = (x) => x.replace(/^(v\d+)-(\d+)-(\d+)/, '$1.$2.$3');
@@ -2778,7 +2795,31 @@ function cardHead(icon, label, { extra = '', id = null, rows = [], open = null, 
   return `<div class="card-head">${lead}<i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
 }
 const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap', review: 'list-checks' };
-const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
+const fileHref = (l) => (!l.repo && repoDocHref(l.path, l.ref)) || `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
+// Where a path into another repo opens, or null for a home path. Its first folder (after one ../, a
+// link's default checkout place) is a repo link's id or its remote's repository name. On GitHub: the
+// file's blob at ref (a ticket merged in that repo: its merge commit, since its branch may be gone;
+// no ref: the default branch), opened in a new tab by its callers; any other remote: that repo's peek.
+function repoDocHref(path, ref) {
+  if (typeof path !== 'string') return null;
+  const segs = path.split('/');
+  if (segs[0] === '..') segs.shift();
+  const [dir, ...rest] = segs;
+  if (!dir || !rest.length || rest.some((s) => !s || s === '.' || s === '..')) return null;
+  const name = (r) => String(r ?? '').replace(/\/+$/, '').replace(/\.git$/, '').split(/[/:]/).pop().toLowerCase();
+  const link = (DATA?.library?.links || []).find((x) => x?.kind === 'repo' && (String(x.id).toLowerCase() === dir.toLowerCase() || (x.remote && name(x.remote) === dir.toLowerCase())));
+  if (!link) return null;
+  if (ref != null && (typeof ref !== 'string' || ref.split('/').some((s) => !s || s === '.' || s === '..'))) return null;
+  const tid = /^ticket\/(.+)$/.exec(ref ?? '')?.[1];
+  const t = tid ? ticketMap().get(tid) : null;
+  const at = t?.merge_sha && t.repo === link.id ? t.merge_sha : ref || null;
+  const remote = String(link.remote ?? '').trim();
+  const gh = /^[A-Za-z0-9][\w.-]*\/[\w.-]+$/.test(remote) ? remote.replace(/\.git$/, '').split('/')
+    : (/^(?:https?:\/\/|ssh:\/\/(?:[^@/\s]+@)?|[^@/\s]+@)github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(remote) || []).slice(1);
+  const inner = rest.join('/');
+  if (gh.length === 2) return `https://github.com/${gh.map(encodeURIComponent).join('/')}/blob/${at ? at.split('/').map(encodeURIComponent).join('/') : 'HEAD'}/${rest.map(encodeURIComponent).join('/')}`;
+  return `#file?${new URLSearchParams({ path: inner, ...(at ? { ref: at } : {}), repo: link.id, title: inner })}`;
+}
 // An artifact link opens the viewer. The server resolves an open question's links (href, changed,
 // gone); a link it didn't resolve (an answered question's) opens the artifact where it was asked.
 const artHref = (slug, at) => `#artifact/${at === 'main' ? 'main' : `wt/${encodeURIComponent(at)}`}/${encodeURIComponent(slug)}`;
@@ -2788,7 +2829,7 @@ const artLinkOf = (l, inline = false) => {
   if (!href) return `<span>${esc(l.title)} <span class="muted">(no longer available)</span></span>`;
   return `<a href="${esc(href)}" data-av-note="${l.changed ? AV_CHANGED : ''}"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>${l.changed && !inline ? ' <span class="badge high">changed since asked</span>' : ''}`;
 };
-const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
+const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : l.path ? ((h) => (/^https:/.test(h) ? `<a href="${esc(h)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : `<a href="${esc(h)}">${esc(l.title)}</a>`))(fileHref(l)) : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
 // A question's text with each [[name]] drawn in place as that link (every link is still listed under
 // the question). The rest is linkified as before; a [[name]] that names no link stays as written.
 const NAME_REF = /\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/;
