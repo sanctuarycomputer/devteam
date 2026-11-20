@@ -522,7 +522,8 @@ test('presses: the page answers before the server, and a refusal puts it back', 
     assert.equal(await p.ev(`${kcard}.querySelector('details[data-technical]').open`), false, 'the technical wording folded');
     assert.match(await p.ev(`${kcard}.querySelector('details[data-technical]').textContent`), /The build uses make/);
     assert.equal(await p.ev(`!!document.querySelector('#questions [data-know="${KA}"]')`), false, 'the agents\' own lesson is not in the Inbox');
-    assert.match(await p.ev(`document.getElementById('knowledge').textContent`), /The agents' own lessons, waiting for the supervisor \(1\)/, 'it is in the Loop, folded');
+    // kit-96: Knowledge is a table; the agents' own candidate is its row (first cell's [data-subject] names the record), Status "proposed"
+    assert.equal(await p.ev(`(() => { const tr = [...document.querySelectorAll('#knowledge tr[data-row]')].find((r) => r.querySelector('[data-subject$=":${KA}"]')); return tr ? tr.children[2].textContent.trim() : null; })()`), 'proposed', 'it is in the Loop, as a proposed row');
     await hold();
     await p.click(`[data-know="${K}"][data-status="accepted"]`);
     assert.equal(await p.ev(`!!${lesson}`), false, 'gone at once');
@@ -1463,7 +1464,8 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
 test('every item the dashboard draws says what it is; a question asked in a thread links to it; an answer from a thread says so', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
   for (const type of ['goal', 'question', 'ticket', 'planner', 'observation', 'problem', 'lesson', 'act', 'preview', 'artifact']) assert.match(html, new RegExp(`subj\\('${type}'`), `the ${type} renderer marks its item`);
-  assert.match(html, /subj\(decSubject\(r\)/, 'and the Decide feed, by kind');
+  // kit-96: the Decide table's rows (decRows) mark their kind through decSubject
+  assert.match(html, /const kind = decSubject\(r\);[\s\S]{0,300}subj\(kind, r\.id/, 'and the Decide table, by kind');
   const F = threadsFixture('threads-items');
   const later = cleanup(t);
   later(() => F.done());
