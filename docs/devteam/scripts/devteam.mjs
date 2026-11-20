@@ -3164,14 +3164,14 @@ function findCycle(ts) {
   for (const id of ts.keys()) if (!state.has(id)) { const c = dfs(id); if (c) return c; }
   return null;
 }
-// Longest dependency chain, weighted S = 1, M = 2.
-function criticalPath(ts) {
+// Longest dependency chain, weighted S = 1, M = 2 (or by w: () => 1 counts tickets).
+function criticalPath(ts, w = weight) {
   const best = new Map();
   const longest = (id) => {
     if (best.has(id)) return best.get(id);
     let top = { len: 0, path: [] };
     for (const d of ts.get(id).depends_on ?? []) if (ts.has(d)) { const r = longest(d); if (r.len > top.len) top = r; }
-    const res = { len: top.len + weight(ts.get(id)), path: [...top.path, id] };
+    const res = { len: top.len + w(ts.get(id)), path: [...top.path, id] };
     best.set(id, res);
     return res;
   };
@@ -4118,6 +4118,39 @@ function deriveStatus() {
   });
 }
 
+// A mostly serial graph (D4, D11): the longest chain of unmerged tickets is SERIAL_DEPTH or more
+// deep and at least SERIAL_RATIO times the ready width (unmerged tickets whose dependencies have
+// all merged). Every check passes on such a graph, yet only one or two tickets can ever run. When
+// most of the chain's links join tickets that share nothing but a whole-file touch of a file
+// split_files lists, the dependency only serializes: naming parts (path#name) lets them run at once.
+const SERIAL_DEPTH = 8, SERIAL_RATIO = 4;
+function serialGraphWarning(live, s = loadSettings()) {
+  const U = new Map(live.map((t) => [t.id, t]));
+  if (U.size < SERIAL_DEPTH) return null;
+  const chain = criticalPath(U, () => 1).path;
+  const depth = chain.length;
+  const width = live.filter((t) => !(t.depends_on ?? []).some((d) => U.has(d))).length;
+  if (depth < SERIAL_DEPTH || depth < SERIAL_RATIO * width) return null;
+  const msg = `the unmerged ticket graph is mostly serial: its longest dependency chain is ${depth} tickets deep (${chain[0]} … ${chain[depth - 1]}) while ${width} of ${U.size} are ready (no unmerged dependency) (D4, D11)`;
+  // a link that only serializes: every footprint the two share is a whole-file touch of a split file
+  const wholeSplit = (a, b) => {
+    const repo = repoOfTicketLink(a);
+    if (repo !== repoOfTicketLink(b)) return null;
+    const files = new Set();
+    for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) {
+      if (!touchesOverlap(ga, gb, repo, s)) continue;
+      const pa = trimSlash(touchPath(ga)), pb = trimSlash(touchPath(gb));
+      if (pa !== pb || hasWild(pa) || !isSplitFile(pa, s) || (touchPart(ga) && touchPart(gb))) return null;
+      files.add(pa);
+    }
+    return files.size ? [...files] : null;
+  };
+  const links = [];
+  for (let i = 1; i < depth; i++) { const f = wholeSplit(U.get(chain[i - 1]), U.get(chain[i])); if (f) links.push(`${chain[i]} on ${chain[i - 1]} (${f.join(', ')})`); }
+  if (links.length * 2 <= depth - 1) return `${msg}; find dependencies a contract ticket or a split could break`;
+  return `${msg}; ${links.length} of its ${depth - 1} links only serialize whole-file touches of a file split_files lists, e.g. ${links.slice(0, 2).join('; ')}: name the parts each changes (path#name) and drop the dependencies that only serialize`;
+}
+
 const onPlanBranch = () => (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
 function cmdValidate() {
@@ -4309,6 +4342,8 @@ function cmdValidate() {
       if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
       outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (touchesOverlap(ga, gb, repoOfTicketLink(a))) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
+    const w = serialGraphWarning(live);
+    if (w) warnings.push(scope ? `${w}; not ${scope}'s to fix` : w);
   }
 
   // The registry and the lines. Labels-only components and an empty registry print nothing.
@@ -18602,6 +18637,10 @@ async function machineStatus() {
   for (const s of machineRecords().strays) out(`machine: stray hub record ${/^[\w.-]{1,80}$/.test(s.file) ? s.file : '?'} (${s.why}; ignored, remove it)`);
   const notes = notedIn();
   if (flagStr('notes')) { const r = lastReview(notes); out(r === utcDay() ? `machine: daily review done ${r}` : `machine: daily review due (last ${r ?? 'never'})`); }
+  // the operator's own PRs on the kit (operator.md, Pull requests upstream): one gh call, ? when it can't.
+  // The search keeps the reply to PRs whose body has the operator's line (no fleet or owner PRs and
+  // their comments); operatorPrsLine checks the line exactly, since search matches words, not lines
+  if (flagStr('notes')) out(`machine: ${operatorPrsLine(sh('gh', ['pr', 'list', '-R', KIT_UPSTREAM, '--author', '@me', '--state', 'open', '--search', `"${OPERATOR_PR_MARK}" in:body`, '--limit', '100', '--json', 'number,headRefName,body,isDraft,headRefOid,createdAt,latestReviews,comments,statusCheckRollup'], { timeout: 15000, maxBuffer: 16 * 1024 * 1024 }))}`); // gh-direct: the kit's own repo, which no project here speaks for
   const flagged = [];
   const latest = new Map();
   for (const root of roots) {
@@ -18668,6 +18707,65 @@ async function machineStatus() {
   out(`changed since last reading: ${changed.join(' ')}`);
   const now = Math.floor(Date.now() / 1000);
   if (now - (last.at ?? 0) >= Number(process.env.DEVTEAM_STATUS_SECONDS ?? 1200)) writeText(statusLastFile(), [`at ${now}`, `disk ${free}`, ...seen].map((l) => `${l}\n`).join(''));
+}
+// The operator's open PRs on the kit, from gh pr list's JSON, as one digest line: those that need it
+// now. A PR's verdicts are its GitHub reviews that approve or request changes, and quality.md §3's
+// `Verdict: APPROVE|CHANGES <sha>` line in a review or comment (the operator's reviewers share its gh
+// login, so most are comments). A PR needs the operator when its latest verdict is CHANGES at its
+// head, when a check at its head failed, or when no verdict names its head a day after its last
+// comment or review, or its opening (a fix pushed and never looked at again). Drafts wait.
+// Which PRs are the operator's: the box's gh login is shared by the owner, the supervisors and other
+// sessions, so --author @me is not enough. The operator ends every PR body it opens with the line
+// OPERATOR_PR_MARK (operator.md, Pull requests upstream), and only a PR whose body has that line on
+// its own counts: it is set when the PR is opened, needs no records to agree, and a reader can see
+// it on the PR. Branches the fleets and the kit's own releases push (ticket/, plan/, chore-,
+// release-prep-) aren't the operator's even so. gh gives a PR's first 100 comments: a longer
+// thread's latest verdict is unread.
+const OPERATOR_PR_MARK = 'Opened by the box operator.';
+const OPERATOR_PR_WAIT_MS = 24 * 3600000;
+function operatorPrsLine(text, now = Date.now()) {
+  let prs;
+  try { prs = JSON.parse(text); } catch { return 'operator PRs: ?'; }
+  if (!Array.isArray(prs)) return 'operator PRs: ?';
+  const marked = (body) => String(body ?? '').split(/\r?\n/).some((l) => l.trim() === OPERATOR_PR_MARK);
+  const mine = prs.filter((p) => p && Number.isInteger(p.number) && typeof p.headRefName === 'string' && !/^(ticket\/|plan\/|chore-|release-prep-)/.test(p.headRefName) && marked(p.body) && p.isDraft !== true);
+  if (!mine.length) return 'operator PRs: none open';
+  const atHead = (sha, head) => typeof sha === 'string' && typeof head === 'string' && sha.length >= 7 && head.toLowerCase().startsWith(sha.toLowerCase());
+  const RED = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR']);
+  // the line's last verdict; reviewers may add a note after the sha ("Verdict: CHANGES <sha> (F1, F2)")
+  const verdictIn = (body, at) => {
+    const v = [...String(body ?? '').matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-fA-F]{7,40})(?![0-9a-zA-Z])[^\n]*$/gm)].pop();
+    return v ? { v: v[1], sha: v[2], at: String(at ?? '') } : null;
+  };
+  const need = [];
+  for (const p of mine) {
+    const verdicts = [];
+    for (const r of Array.isArray(p.latestReviews) ? p.latestReviews : []) {
+      if (!r) continue;
+      const v = verdictIn(r.body, r.submittedAt);
+      if (v) verdicts.push(v);
+      else if (r.state === 'CHANGES_REQUESTED' || r.state === 'APPROVED') verdicts.push({ v: r.state === 'APPROVED' ? 'APPROVE' : 'CHANGES', sha: r.commit?.oid, at: String(r.submittedAt ?? '') });
+    }
+    for (const c of Array.isArray(p.comments) ? p.comments : []) {
+      const v = c && verdictIn(c.body, c.createdAt);
+      if (v) verdicts.push(v);
+    }
+    const last = verdicts.sort((x, y) => x.at.localeCompare(y.at)).pop();
+    const why = [];
+    if (last?.v === 'CHANGES' && atHead(last.sha, p.headRefOid)) why.push('changes requested');
+    const checks = Array.isArray(p.statusCheckRollup) ? p.statusCheckRollup : [];
+    if (checks.some((c) => c && (RED.has(c.conclusion) || RED.has(c.state)))) why.push('CI red');
+    if (!last || !atHead(last.sha, p.headRefOid)) {
+      // from its newest word: the operator comments what it changed when it pushes (operator.md); any
+      // comment restarts the wait, so a thread kept busy without a verdict waits longer to be flagged
+      const said = [p.createdAt, ...(Array.isArray(p.comments) ? p.comments.map((c) => c?.createdAt) : []), ...(Array.isArray(p.latestReviews) ? p.latestReviews.map((r) => r?.submittedAt) : [])];
+      const since = Math.max(0, ...said.map((t) => Date.parse(t) || 0));
+      const waited = since ? now - since : 0;
+      if (waited >= OPERATOR_PR_WAIT_MS) why.push(`${last ? 'no review of its head' : 'no review'} ${Math.floor(waited / 3600000)}h`);
+    }
+    if (why.length) need.push(`#${p.number} ${why.join(' and ')}`);
+  }
+  return `operator PRs: ${mine.length} open, ${need.length ? `${need.length} need you (${need.join(', ')})` : 'none need you'}`;
 }
 function accountsState() {
   try {
@@ -19076,7 +19174,7 @@ const IMAGE_RUNS = {
     // machine status, tell, alert, pane-state
     'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
     'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
-    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'machineStatus',
+    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_MARK', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
     // operator threads
     'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
     'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
