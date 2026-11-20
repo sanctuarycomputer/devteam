@@ -98,6 +98,11 @@ test('peek-artifacts: what ties an artifact to each peek', () => {
   assert.ok(!slugs(`ticket:${ids.tMerged}`, more).includes('draft-drops'), 'a landed row\'s ref the newest draft dropped does not (kit-92 reads the shown row)');
   assert.ok(!slugs(`feature:${ids.feat1}`, more).includes('draft-drops'), 'nor through its ticket\'s feature');
   for (const r of [`goal:${ids.goal1}`, `feature:${ids.feat1}`, `ticket:${ids.tHeld}`]) assert.ok(!slugs(r, more).includes('odd-refs'), `odd refs tie to nothing (${r})`);
+  // a ticket the board lists but not progress, and one progress lists but not the board, each reach its feature (task-1 F3)
+  const split = { ...more, tickets: [...(more.tickets ?? []), { id: 'pay-90-board-only', feature: ids.feat1 }], progress: { ...more.progress, tickets: [...more.progress.tickets, { ...more.progress.tickets[0], id: 'pay-91-progress-only', feature: ids.feat1 }] },
+    library: { ...more.library, artifacts: [...more.library.artifacts, row('board-only', 'main', ['ticket:pay-90-board-only']), row('progress-only', 'main', ['pay-91-progress-only'])] } };
+  assert.ok(slugs(`feature:${ids.feat1}`, split).includes('board-only'), 'a ticket only in data.tickets reaches its feature');
+  assert.ok(slugs(`feature:${ids.feat1}`, split).includes('progress-only'), 'a ticket only in progress.tickets reaches its feature');
 
   // nothing for anything else, or with no library
   assert.deepEqual(slugs(`ticket:${ids.tMerged}`), [], 'a ticket no artifact names: none');
@@ -121,17 +126,24 @@ test('peek-artifacts: the section is links, or nothing', () => {
   assert.deepEqual(links, items.map((x) => [x.href.replace(/&/g, '&amp;'), x.title]), 'one link per item, its href and title');
   assert.ok(links.some(([h]) => h === `#artifact/wt/${ids.wt2}/refund-screen`), 'the drafted one opens its newest draft');
   assert.match(html, new RegExp(`draft in ${ids.wt2}`), 'a draft says so');
+  const liOf = (h, slug) => (h.match(new RegExp(`<li><a [^>]*${slug}"[^<]*</a>[^]*?</li>`)) ?? [''])[0];
+  const landed = liOf(html, 'pay-guide');
+  assert.ok(landed && !/draft in/.test(landed), `a landed one says no draft: ${landed}`);
   assert.match(html, /Diagram/, 'the kind word');
 
   // a broken one links to its Library peek, by its slug, badged; titles are escaped
   const odd = { ...data, library: { ...data.library, artifacts: [
     { slug: 'bad-one', at: 'main', tree: 'a'.repeat(40), published: null, title: null, summary: null, by: null, for: [`ticket:${ids.tMerged}`], error: 'manifest.json: title is missing', fp: 'b', updated_at: null },
+    { slug: 'bad<i>', at: 'main', tree: 'c'.repeat(40), published: null, title: null, summary: null, by: null, for: [`ticket:${ids.tMerged}`], error: 'broken', fp: 'bi', updated_at: null },
+    { slug: 'wt-draft', at: 'wt<b>', title: 'In a draft', summary: null, by: null, for: [`ticket:${ids.tMerged}`], error: null, fp: 'wd', updated_at: '2026-11-18T00:00:00Z' },
     { slug: 'sharp', at: 'main', tree: 'b'.repeat(40), published: null, title: '<b>x</b> & y', summary: null, by: null, for: [`ticket:${ids.tMerged}`], error: null, fp: 's', updated_at: null },
   ] } };
   const h2 = peekArtSection(peekArtifacts(odd, `ticket:${ids.tMerged}`, ctx));
   assert.ok(h2.includes('<a class="linkish" href="#lib/artifact%3Abad-one">bad-one</a>'), `broken: its Library peek: ${h2}`);
   assert.match(h2, /<span class="badge[^"]*">broken<\/span>/, 'broken: badged');
   assert.ok(h2.includes('&lt;b&gt;x&lt;/b&gt; &amp; y') && !h2.includes('<b>x</b>'), 'the title escaped');
+  assert.ok(h2.includes('>bad&lt;i&gt;</a>') && !h2.includes('bad<i>'), `a broken slug escaped: ${h2}`);
+  assert.ok(h2.includes('draft in wt&lt;b&gt;') && !h2.includes('wt<b>'), `the draft's worktree escaped: ${h2}`);
 });
 
 // ---- the peeks in Chrome ----
