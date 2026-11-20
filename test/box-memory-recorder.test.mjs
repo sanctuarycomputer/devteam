@@ -56,6 +56,8 @@ function get(port, route, headers = {}) {
   });
 }
 
+const HUB_WATCH = `const g = Number(process.argv[1]); const end = () => { try { process.kill(-g, 'SIGKILL'); } catch {} process.exit(0); };
+process.stdin.on('end', end); process.stdin.on('close', end); process.stdin.on('error', end); process.stdin.resume();`;
 // A standalone hub: { home, port, file, out, stop }. roots: [[root, name?]] written to the machine
 // registry; file: lines to seed memory.jsonl with; env: more variables (undefined deletes one).
 async function startHub(t, { proc = PROC, cgroup = CGROUP, roots = [], file = null, env = {}, record = true } = {}) {
@@ -71,10 +73,17 @@ async function startHub(t, { proc = PROC, cgroup = CGROUP, roots = [], file = nu
   if (record) delete e.DEVTEAM_MEMORY_RECORD;
   for (const [k, v] of Object.entries(e)) if (v === undefined) delete e[k];
   const p = spawn(process.execPath, [SCRIPT, 'hub'], { cwd: home, env: e, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  // a watcher holding a pipe from this process ends the hub's group if this process dies first (a
+  // timeout's SIGKILL runs no after hook), as test/lib/kit.mjs's startDashboard does
+  const w = spawn(process.execPath, ['-e', HUB_WATCH, String(p.pid)], { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  w.on('error', () => {});
+  w.stdin.on('error', () => {});
+  w.unref();
+  w.stdin.unref();
   let out = '';
   p.stdout.on('data', (b) => { out += b; });
   p.stderr.on('data', (b) => { out += b; });
-  const stop = () => (p.exitCode !== null || p.signalCode !== null ? Promise.resolve() : new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }));
+  const stop = () => { try { w.kill('SIGKILL'); } catch {} return p.exitCode !== null || p.signalCode !== null ? Promise.resolve() : new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }); };
   t.after(stop);
   await until(async () => { try { return (await get(port, '/instances.json')).status === 200; } catch { return p.exitCode !== null; } }, `the hub on ${port}`);
   assert.equal(p.exitCode, null, `the hub runs (${out})`);
