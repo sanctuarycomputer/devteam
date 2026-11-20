@@ -35,7 +35,8 @@ function el(tag, { text = '', rect = { x: 10, y: 10, w: 100, h: 20 }, display = 
     getClientRects: () => (display ? [rect] : []),
     scrollIntoView() { this.scrolled += 1; },
   };
-  if (!noCheck) e.checkVisibility = (o) => display && !(o && o.visibilityProperty && /^(hidden|collapse)$/.test(visibility));
+  // (an older browser knows the option as checkVisibilityCSS only: task-1 T1-3)
+  if (!noCheck) e.checkVisibility = (o) => display && !(o && (o.visibilityProperty || o.checkVisibilityCSS) && /^(hidden|collapse)$/.test(visibility));
   return e;
 }
 // The lens's script, run against a stand-in window: a location and a history it moves (pushState and
@@ -55,7 +56,8 @@ function lens({ pathname = '/artifact/main/viewer-mock/index.html', hash = '', b
     if (p) location.pathname = p;
     location.hash = i === -1 || i === u.length - 1 ? '' : u.slice(i);
   };
-  const hist = { pushState: (s, t, u) => moveTo(u), replaceState: (s, t, u) => moveTo(u) };
+  // a real History's methods throw when called on anything but it (task-1 T1-1: the lens's wrapper keeps this)
+  const hist = { pushState(s, t, u) { if (this !== hist) throw new TypeError('Illegal invocation'); moveTo(u); }, replaceState(s, t, u) { if (this !== hist) throw new TypeError('Illegal invocation'); moveTo(u); } };
   const doc = { title: 'A mock', documentElement: {}, body: {}, activeElement: null, elementFromPoint: () => null, querySelectorAll: (s) => (by[s] ? [by[s]] : []), querySelector: (s) => by[s] ?? null, getElementsByTagName: (t) => tags[t] ?? [], getElementById: () => null };
   const win = {
     document: doc, parent, location, innerWidth: 800, innerHeight: 600,
@@ -212,6 +214,11 @@ test('C7: a box capability in the hash is cut from ready and nav, as from the pa
   L.frame();
   const h = L.navs()[1].hash;
   assert.ok(Buffer.byteLength(h) <= 200 && Buffer.byteLength(h) >= 199 && h === `#${'é'.repeat(99)}`, `cut to 200 bytes: ${Buffer.byteLength(h)}`);
+  // a browser's hash is percent-encoded: a cut inside an escape drops the rest of it (task-1 T1-2)
+  L.location.hash = `#${'a'.repeat(197)}%C3%A9`;
+  L.fire('hashchange');
+  L.frame();
+  assert.equal(L.navs()[2].hash, `#${'a'.repeat(197)}`, 'no half escape at the cut');
   // a page with no hash: ready as it always was
   const N = lens();
   N.hear({ type: 'hello' });

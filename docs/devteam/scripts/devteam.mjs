@@ -9066,7 +9066,8 @@ const ARTIFACT_LENS = String.raw`(() => {
   // throws counts as shown, so an odd element keeps its pin
   const hiddenEl = (el) => {
     try {
-      if (el.checkVisibility) { if (!el.checkVisibility({ visibilityProperty: true })) return true; }
+      // (checkVisibilityCSS: the same option's name in Chrome 105-120 and Firefox 106-121)
+      if (el.checkVisibility) { if (!el.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true })) return true; }
       else if (!el.getClientRects().length || /^(hidden|collapse)$/.test(window.getComputedStyle(el).visibility)) return true;
       const r = el.getBoundingClientRect();
       return r.width === 0 && r.height === 0;
@@ -9210,8 +9211,9 @@ const ARTIFACT_LENS = String.raw`(() => {
     const m = /\/artifact\/(?:main|wt\/[^\/]+|tree\/[0-9a-f]+)\/[^\/]+\//.exec(p);
     return m ? m[0] + cap(p.slice(m.index + m[0].length), CAPS.path) : cap(p, CAPS.path);
   };
-  // the view within the page: its hash, the token cut as from the path; '' when there is none
-  const hashOf = () => cap(unCap(location.hash || ''), CAPS.hash);
+  // the view within the page: its hash, the token cut as from the path; '' when there is none. A browser
+  // gives the hash percent-encoded, so a cut that ends inside an escape (%C or %) drops what's left of it.
+  const hashOf = () => cap(unCap(location.hash || ''), CAPS.hash).replace(/%[0-9A-Fa-f]?$/, '');
   // --- each move of the page (a #hash, pushState, replaceState, Back), told as nav once a frame ---------
   // the last path and hash told, by ready or nav: a move is told only when one of them changed
   let navAt = null;
