@@ -7363,7 +7363,8 @@ function cmdMerge() {
           const kept = !!M?.problem && !!H.entry && H.entry === M.entry && !Object.keys(landsJobs.changed).length;
           if (H.failed || (H.problem ? !kept : Object.keys(recurringRegistry.changed(landsJobs.jobs, H.jobs)).length > 0)) return `the landing merge at ${head.slice(0, 12)} lands other jobs (recurring.json) than the checks judged${H.problem ? ` (${H.problem})` : ''}; nothing pushed`;
         }
-        if (lg([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
+        // the checked commit, by sha: never HEAD, read again at push time (final-11 F5)
+        if (lg([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `${head}:refs/heads/${mainBranch}`], wt) === null) return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
       } finally {
         R.git(['worktree', 'remove', '--force', wt], R.root);
       }
