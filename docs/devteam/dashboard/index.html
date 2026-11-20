@@ -4728,8 +4728,7 @@ function loopDraw(tab, o = DATA?.ooda) {
   const el = $(LOOP_BOX[tab]);
   if (!el || !o) return;
   const rows = LOOP_ROWS[tab](o);
-  // Orient's tab count is render's (every row, whatever the filter); its card's head counts the rows shown
-  for (const id of tab === 'orient' ? ['c-orient'] : [`n-${tab}`, `c-${tab}`]) { const c = $(id); if (c && c.textContent !== String(rows.length || '')) c.textContent = rows.length || ''; }
+  for (const id of [`n-${tab}`, `c-${tab}`]) { const c = $(id); if (c && c.textContent !== String(rows.length || '')) c.textContent = rows.length || ''; }
   const html = pageTable(`loop:${tab}`, LOOP_COLS[tab], rows);
   if (el.__html === html) return;
   el.__html = html;
@@ -7793,8 +7792,9 @@ function render(d) {
   }
   renderLibrary(d.library);
   count('n-knowledge', o.knowledge.filter(ownerLesson).length);
-  // Self Improvement's tab counts are the rows each table draws: loopDraw sets Observe's, Decide's and Act's
-  $('n-orient').textContent = (o.clusters.length + o.problems.length + o.knowledge.length) || '';
+  // Self Improvement's tab counts are the rows each table draws (loopDraw sets each again, the same count): Orient's
+  // its rows under the header's filter, as its table and card head count them
+  $('n-orient').textContent = LOOP_ROWS.orient(o).length || '';
   navCounts(d);
   renderOverview();
 
