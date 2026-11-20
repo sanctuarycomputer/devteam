@@ -10,7 +10,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { PORTS, bareProject, dashboardOnFreePort, until } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
-const NAV = [['Project', ['Overview', 'Goals', 'Progress', 'Board', 'Library']], ['Autonomy', ['Trust', 'Efficiency', 'Sensors', 'Health', 'Retros', 'Self Improvement']]];
+const NAV = [['Project', ['Overview', 'Goals', 'Progress', 'Board', 'Library']], ['Autonomy', ['Trust', 'Efficiency', 'Awareness', 'Governance', 'Sensors', 'Retros', 'Self Improvement']]];
 const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
 
 // One project, its dashboard and a Chrome tab on it. With records, the project has what the
