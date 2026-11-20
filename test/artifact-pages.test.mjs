@@ -318,6 +318,11 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     await V.open(AV_P);
     await V.frameClick('to-a', 'pages/a.html');
     await pinsAre(V, [N.TE, N.TAL, N.TP], 'on a.html');
+    // C4b (ruling m-20261120-191501324): nav is a kind the viewer takes because T_LENS_SAYS lists it, and
+    // nothing outside that list gets through
+    const kinds = await V.p.ev("(() => { const w = tsFrame().contentWindow; return Object.fromEntries(['nav', 'go', 'hello', 'resolve', 'place', 'Nav', 'navs', 'constructor'].map((k) => [k, tLensMessage({ data: { lens: 1, type: k, hash: '#x', path: '/x' }, source: w }, w, new Map())?.type ?? null])); })()");
+    assert.deepEqual(kinds, { nav: 'nav', go: null, hello: null, resolve: null, place: null, Nav: null, navs: null, constructor: null }, 'tLensMessage takes nav and no kind outside T_LENS_SAYS');
+    assert.deepEqual(await V.p.ev('T_LENS_SAYS'), ['ready', 'route', 'hit-reply', 'rects', 'key', 'errors', 'nav'], "T_LENS_SAYS: today's kinds and nav");
     await V.frameClick('go-tab2', 'pages/a.html', { hash: '#tab2', load: false });
     await pinsAre(V, [N.TAL, N.TP, N.TP2], 'on a.html#tab2 (TP2 shows on #tab2; TE hides with its view)');
     // where a new note's hash lives: on empty page, or an anchor with no selector, the path holds it
