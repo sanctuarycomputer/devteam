@@ -6026,10 +6026,26 @@ function openLesson(id) {
   const p = peekOf('lesson', id);
   if (!k) return notFound('knowledge', id, p, p?.error ? 'No such record.' : 'Retired, or older than the dashboard shows; its record is above.');
   const obs = p?.related || [];
+  // its Evidence (what it names, from the peek's cited; an id the peek doesn't know stands alone) and Given to
+  // (the starts whose prompts carried it, and how often its signal came back since), as tables the drawer's
+  // one REC_BIND binds once a write
+  const evidence = pageTable('lesson:evidence', ['What', 'Kind', 'When'], (k.evidence ?? p?.record?.fields?.evidence ?? []).map((eid) => {
+    const x = p?.cited?.[eid];
+    return x
+      ? { cells: [esc(x.text ?? eid), esc(words(x.kind ?? x.type)), esc(x.created_at ? when(x.created_at) : '')], sort: [undefined, undefined, x.created_at ?? null], open: recordHref(eid) }
+      : { cells: [esc(eid), '', ''], open: recordHref(eid) };
+  }));
+  const since = (n) => (n == null ? 'no signal to follow' : n === 0 ? 'not seen since' : `seen again ${n} time${n === 1 ? '' : 's'} since`);
+  const given = p === undefined ? '<p class="loading">Loading…</p>' : pageTable('lesson:given', ['Session', 'Given', 'What changed after'], (p?.given_to || []).map((g) => ({
+    cells: [esc(g.session), esc(g.at ? when(g.at) : ''), esc(since(g.since))], sort: [undefined, g.at ?? null, g.since ?? null], open: `#act/${encodeURIComponent(g.act)}`,
+  })));
+  recBind();
   showDrawer(`<h2 id="drawer-title">${esc(k.statement.length > 80 ? `${k.statement.slice(0, 80)}…` : k.statement)}</h2>
     ${attrs({ id, peek: p, type: 'knowledge', computed: [
       ['Goes to', k.status === 'accepted' ? whoGets(k) : `nobody yet: it is ${esc(k.status)}`, 'Whose instructions it is put into, from its scope; only accepted knowledge is.'],
     ] })}
+    ${psect('Evidence', evidence)}
+    ${psect('Given to', given)}
     ${k.plain ? `<p>${esc(k.plain)}</p>` : ''}
     ${ownerLesson(k) ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : k.status === 'candidate' ? '<p class="muted">About how the agents work: the supervisor keeps or retires it itself.</p>' : ''}
     ${['candidate', 'accepted'].includes(k.status) && !ownerLesson(k) ? `<div class="row-inline"><button type="button" class="ghost" data-thread-on="${esc(`lesson:${k.id}`)}">Retire it</button></div>` : ''}
