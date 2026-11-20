@@ -842,6 +842,32 @@ test("A13: recurring list --json and show read main's jobs, with who registered 
   } finally { T.done(); }
 });
 
+test('A13b: a settings.md with CRLF line endings reads as the same jobs, and validate says the same, as with LF', () => {
+  const T = setup('crlf');
+  try {
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job', every: '6h' }), bb: chore({ title: 'B job', prompt: 'B.' }) }; });
+    const read = () => {
+      const l = T.run(['recurring', 'list', '--json']);
+      passes(l);
+      const v = T.run(['validate']);
+      // validate's verdict and its error and warning lines, the counts line included
+      return { list: JSON.parse(l.out), validate: { status: v.status, lines: T.text(v).split('\n').filter((x) => /^(error|warning)|ticket\(s\)/.test(x)) } };
+    };
+    const lf = read();
+    assert.deepEqual(lf.list.entries.map((e) => e.name), ['aa', 'bb']);
+    const text = fs.readFileSync(T.settingsFile, 'utf8');
+    assert.doesNotMatch(text, /\r/);
+    fs.writeFileSync(T.settingsFile, text.replace(/\n/g, '\r\n'));
+    T.g(['commit', '-qam', 'settings.md with CRLF'], T.old);
+    T.g(['push', '-q', 'origin', 'main'], T.old);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.match(T.g(['show', `origin/main:${SETP}`], T.old), /\r\n/, 'main has CRLF');
+    const crlf = read();
+    assert.deepEqual(crlf.list, lf.list);
+    assert.deepEqual(crlf.validate, lf.validate);
+  } finally { T.done(); }
+});
+
 test('A14: supervisor.md documents registering, changing and stopping a job, and that none writes to production', () => {
   const doc = fs.readFileSync(path.join(kit, 'process/supervisor.md'), 'utf8');
   const at = (re) => doc.search(re);
