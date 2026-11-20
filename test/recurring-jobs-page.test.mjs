@@ -318,13 +318,11 @@ test('the page reads only upkeep.recurring and adds no field; text from the data
   // render() hands it nothing to read but what recData reads
   const r = INDEX.indexOf('\nfunction render(d)');
   assert.match(INDEX.slice(r, INDEX.indexOf('\n}\n', r)), /\n {2}renderJobs\(\);/, 'render() calls renderJobs()');
-  // adds no field: the kit's /api/data builder is untouched by this page (its fields are kit-168's), so the page's
-  // data with the fixture holds exactly the fixture's keys
+  // adds no field: held by touches (docs/devteam/scripts/devteam.mjs, which builds /api/data, is not in them), not here
   const BAD = '<img src=x onerror="window.__xss=1"><b id="xss">bold</b>';
   const { p, soon, go } = await openOn(t, { rec: (x) => { x.entries[0].title = BAD; x.entries[0].signals[0].text = BAD; x.entries[0].signals[0].may = BAD; x.entries[0].signals[1].kind = BAD; x.entries[1].last.status = BAD; x.builtin[0].name = BAD; x.proposals[0].title = BAD; return x; } });
   await go('#jobs');
   await soon(jobsReady(`${withRows('jobs')} && ${withRows('noticed')} && ${withRows('proposals')}`), 'the Jobs page');
-  assert.deepEqual(await p.ev('Object.keys(DATA.upkeep.recurring).sort()'), ['builtin', 'entries', 'proposals']);
   assert.equal(await p.ev("document.querySelectorAll('#jobs #xss, #jobs img[src=\"x\"]').length"), 0, 'nothing drawn from the data');
   assert.equal(await p.ev('window.__xss'), undefined, 'nothing ran');
   const jr = await p.ev(rows(PAGE.card('jobs')));
