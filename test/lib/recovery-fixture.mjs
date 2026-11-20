@@ -109,4 +109,21 @@ function tmuxShim(F, body) {
   return { PATH: `${dir}${path.delimiter}${process.env.PATH}` };
 }
 
-export { CLAUDE_RESUME, findings, fixture, HOME, MENU, OFF, rateLimit, ROOM, SID, SKIP, sleepMs, STUB_SHELL, SUP, supervisorPane, tmuxShim };
+// ---- from recovery.relaunch.test.mjs ----
+// The machine's memory as a test sets it: at or over the 80% ceiling (no relaunch), or under it.
+const memory = (F, availGb) => { const f = path.join(F.base, `meminfo-${availGb}`); write(f, `MemTotal:       8388608 kB\nMemFree:         262144 kB\nMemAvailable:   ${Math.round(availGb * 1048576)} kB\n`); return { ...OFF, DEVTEAM_MEMINFO: f, DEVTEAM_CGROUP: path.join(F.base, 'no-cgroup') }; };
+const UNDER = (F) => memory(F, 6);
+
+// kit-596: relaunches carry the setup deadline, and a relaunch that finds no setup slot costs no
+// attempt. The slots are the fixture's shared HOME's (~/.devteam/setup-slots), set up and removed by
+// each test. A test that waits sets DEVTEAM_SETUP_DEADLINE a few seconds ahead, afresh on each tick.
+const SLOTS = path.join(HOME, '.devteam', 'setup-slots');
+const clearSlots = () => { if (path.dirname(path.dirname(SLOTS)) === HOME && path.basename(SLOTS) === 'setup-slots') fs.rmSync(SLOTS, { recursive: true, force: true }); };
+// the fleet's committed worktree_setup
+const withSetup = (F, cmd) => {
+  const sf = path.join(F.root, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"project":', `"worktree_setup": ${JSON.stringify(cmd)},\n  "project":`));
+  execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm setup'], { cwd: F.root });
+};
+
+export { CLAUDE_RESUME, clearSlots, findings, fixture, HOME, memory, MENU, OFF, rateLimit, ROOM, SID, SKIP, sleepMs, SLOTS, STUB_SHELL, SUP, supervisorPane, tmuxShim, UNDER, withSetup };

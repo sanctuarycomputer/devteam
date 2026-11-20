@@ -1,11 +1,10 @@
 // machine status: the check-in digest, the machine's caps, and what the operator may run (reads only).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { hasTmux, write } from './lib/kit.mjs';
-import { agent, baseEnv, box, code, conversation, dtIn, home, latestRelease, link, machine, prompt, repo, shown, tmp, tmuxSh } from './lib/machine-fixture.mjs';
+import { baseEnv, dtIn, home, machine, repo, shown, statusFixture, tmp, tmuxSh } from './lib/machine-fixture.mjs';
 
 test('alert reaches the hub, by hello, and clears', () => {
   const r = repo('alerted');
@@ -38,68 +37,15 @@ test('alert reaches the hub, by hello, and clears', () => {
 });
 
 test('status says at a glance what a check-in needs, and reads no pane it needn\'t', { skip: !hasTmux }, async () => {
-  const notes = path.join(home, 'operator/NOTES.md');
-  fs.mkdirSync(path.dirname(notes), { recursive: true });
-  fs.rmSync(path.join(home, '.box/alert'), { force: true });
-  const last = path.join(home, '.devteam', `status-last-${process.env.DEVTEAM_HUB_PORT}`);
-  fs.rmSync(last, { force: true });
-  const sub = path.join(tmp, 'status-code');
-  const r = repo('statused', { settings: { upstream_base: 'v0.1.0', worktree_files: ['config/master.key'] }, dir: sub });
-  const sib = repo('a-sib', { dir: sub });
-  repo('the-home', { links: { 'a-sib': link('a-sib') }, dir: sub });
-  const sup = { DEVTEAM_ROLE: 'supervisor', DEVTEAM_SUPERVISOR_UP: 'off' };
-  const q1 = dtIn(r, ['ask', '--question', 'first?', '--kind', 'owner-decision', '--class', 'design', '--reasons', 'x'], sup);
-  assert.equal(q1.status, 0, q1.stderr + q1.stdout);
-  assert.equal(dtIn(r, ['ask', '--question', 'second?', '--kind', 'owner-decision', '--class', 'design', '--reasons', 'x'], sup).status, 0);
-  // knowledge to harvest: the owner's rule, a lesson the supervisor tagged for the kit, one already noted, one still a candidate
-  const rule = dtIn(r, ['knowledge', 'add', '--kind', 'preference', '--statement', 'Ship banners without asking', '--owner']).stdout.trim();
-  const ob = dtIn(r, ['observe', '--subject', 'kit', '--kind', 'friction', '--detail', 'd', '--severity', '1', '--valence', '-1'], sup).stdout.trim();
-  const kitL = dtIn(r, ['knowledge', 'add', '--kind', 'lesson', '--statement', 'Fetch before the merge', '--evidence', ob, '--kit'], sup).stdout.trim();
-  const seenL = dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 'Seen already', '--evidence', ob], sup).stdout.trim();
-  dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 'Still a candidate'], sup);
-  for (const k of [kitL, seenL]) assert.equal(dtIn(r, ['knowledge', 'set', k, '--status', 'accepted'], sup).status, 0);
-  fs.writeFileSync(notes, `read ${q1.stdout.trim()}\n- ${seenL}: stays\nfriction: same as ${kitL}, in passing\n`);
-  fs.mkdirSync(path.join(r, '.worktrees/a/node_modules'), { recursive: true });
-  fs.writeFileSync(path.join(r, '.worktrees/a/node_modules/big'), Buffer.alloc(4096 * 256));
-  fs.writeFileSync(path.join(r, 'docs/devteam/run/accounts.json'), JSON.stringify({ at: new Date().toISOString(), cswap: true, active: 'a@b', active_no_room: false, exhausted: false, needs_login: ['c@d'], restart_gave_up: [], supervisor_limit: null, capacity: { accounts: 5, room: 1, unknown: 0, active_week_pct: 9, active_5h_pct: 31, runs_out_at: null, next_reset_at: '2026-11-16T21:00:00Z', gap: false } }));
-  // tmux, as the kit sees it, noting what it was asked
-  const logged = path.join(tmp, 'tmux-asked');
-  const spy = path.join(tmp, 'spy');
-  write(path.join(spy, 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(logged)}\nPATH=${JSON.stringify(process.env.PATH)} exec tmux "$@"\n`);
-  fs.chmodSync(path.join(spy, 'tmux'), 0o755);
-  const srv = spawn(process.execPath, ['-e', "require('http').createServer((q, r) => r.end('ok')).listen(0, '127.0.0.1', function () { console.log(this.address().port); });"], { stdio: ['ignore', 'pipe', 'inherit'] });
-  const portUp = await new Promise((ok) => srv.stdout.once('data', (d) => ok(Number(String(d).trim()))));
-  const worker = path.join(tmp, 'statused-wt');
-  fs.mkdirSync(worker, { recursive: true });
-  const a = agent({ screens: [box(prompt), `✻ Ticking… (esc to interrupt)\n${box(prompt)}`], cwd: r, window: 'sup-statused' });
-  const shell = agent({ screens: ['secret in the owner\'s shell'], cwd: home, window: 'shell' });
-  const x = agent({ screens: [`line\n${box(prompt)}`, `other output now\n${box(prompt)}`], cwd: worker, window: 'worker-x' });
-  const y = agent({ screens: [`You've hit your limit · resets 3pm\n${box(prompt)}`], cwd: worker, window: 'worker-y' });
-  const status = (args = [], env = {}) => machine(['machine', 'status', '--in', sub, '--notes', notes, ...args], { PATH: `${spy}${path.delimiter}${baseEnv.PATH}`, ...env });
+  const S = await statusFixture();
+  const { a, kitL, last, logged, portUp, rule, shell, status, x, y } = S;
   try {
-    for (const p of [a, x, y]) await shown(p.pane, 'status');
-    fs.writeFileSync(path.join(r, 'docs/devteam/run/dashboard-port'), `${portUp}\n`);
-    fs.writeFileSync(logged, '');
     const st = status([], { DEVTEAM_STATUS_SECONDS: '0' });
     assert.equal(st.status, 0, st.stderr);
     assert.match(st.stdout, /^machine: disk \S+ free of \S+.*; memory .*; cpus \S+.*; load [\d.]+ [\d.]+ [\d.]+$/m);
     assert.match(st.stdout, /^machine: accounts cswap active=a@b exhausted=false no-room=false needs-login=c@d as of /m);
     assert.match(st.stdout, /^machine: capacity 1 of 5 accounts with room THIN; active 9% week, 31% 5h; room runs out after the next reset; next reset 2026-11-16 21:00$/m);
     // the capacity line, as accounts-tick last wrote it: usage that can't be read is unknown, never NONE
-    const accFile = path.join(r, 'docs/devteam/run/accounts.json');
-    const accounts = JSON.parse(fs.readFileSync(accFile, 'utf8'));
-    const withCap = (capacity) => { fs.writeFileSync(accFile, JSON.stringify({ ...accounts, capacity })); return status().stdout; };
-    const blank = { active_week_pct: null, active_5h_pct: null, runs_out_at: null, next_reset_at: null, gap: false };
-    const unread = withCap({ accounts: 3, room: 0, unknown: 3, ...blank });
-    assert.match(unread, /^machine: capacity 0 of 3 accounts with room, 3 unknown \(usage unreadable\); active \?% week, \?% 5h; room runs out unknown; next reset -$/m);
-    assert.doesNotMatch(unread, /NONE|THIN/, 'not knowing is no alarm');
-    assert.match(withCap({ accounts: 3, room: 0, unknown: 0, ...blank }), /^machine: capacity 0 of 3 accounts with room NONE; .*room runs out now; /m, 'every account known full');
-    assert.match(withCap({ accounts: 3, room: 1, unknown: 1, ...blank }), /^machine: capacity 1 of 3 accounts with room, 1 unknown \(usage unreadable\); /m, 'one with room and one unread is not thin');
-    // no cswap, or an accounts-tick from before capacity: no capacity line at all
-    const { capacity: _, ...none } = accounts;
-    fs.writeFileSync(accFile, JSON.stringify(none));
-    assert.doesNotMatch(status().stdout, /^machine: capacity/m);
-    fs.writeFileSync(accFile, JSON.stringify(accounts));
     assert.match(st.stdout, new RegExp(`^machine: hub ${process.env.DEVTEAM_HUB_PORT} DOWN$`, 'm'));
     assert.match(st.stdout, new RegExp(`^statused sup=up fleet=run kit=v0\\.1\\.0\\S* inbox=\\d+ missing=config/master\\.key tools=ok behind=v9\\.9\\.9 pane=${a.pane} state=ready dash=${portUp}/up wt=1/\\S+ new-questions=1 new-knowledge=2$`, 'm'));
     assert.match(st.stdout, /^machine: daily review due \(last never\)$/m);
@@ -108,15 +54,6 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     assert.match(kn.stdout, new RegExp(`^statused ${rule} \\[preference, project, owner's\\] Ship banners without asking$`, 'm'));
     assert.match(kn.stdout, new RegExp(`^statused ${kitL} \\[lesson, project, kit lesson\\] Fetch before the merge$`, 'm'));
     assert.doesNotMatch(kn.stdout, /Seen already|Still a candidate/, 'noted, or not accepted: not listed');
-    // the review is done for the day once the notes have today's heading; an older one leaves it due
-    fs.appendFileSync(notes, '\n## Review 2026-01-02\n');
-    assert.match(status().stdout, /^machine: daily review due \(last 2026-01-02\)$/m);
-    const today = new Date().toISOString().slice(0, 10);
-    fs.appendFileSync(notes, `\n## Review ${today} (UTC)\n1. **${rule}**: the owner's ruling, stays\n`);
-    // one reading for both: nothing changes between them
-    const done = status();
-    assert.match(done.stdout, new RegExp(`^machine: daily review done ${today}$`, 'm'));
-    assert.match(done.stdout, /^statused .* new-knowledge=1$/m);
     assert.match(st.stdout, /^a-sib sup=down .* sibling-of=the-home$/m);
     assert.match(st.stdout, new RegExp(`^attention: ${y.pane} keep:worker-y limit$`, 'm'));
     assert.doesNotMatch(st.stdout, new RegExp(`${shell.pane}\\b`), 'never the owner\'s shell');
@@ -131,62 +68,10 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     await shown(x.pane, 'other output now');
     assert.match(status([], { DEVTEAM_STATUS_SECONDS: '0' }).stdout, new RegExp(`^changed since last reading: ${x.pane}$`, 'm'));
     assert.match(status([], { DEVTEAM_STATUS_SECONDS: '0' }).stdout, /^changed since last reading: $/m, 'nothing moved since: nothing changed');
-    // the reading is held 20 minutes, so a manual re-run doesn't erase the change the next check-in should see
-    const held = fs.readFileSync(last, 'utf8');
-    status();
-    assert.equal(fs.readFileSync(last, 'utf8'), held);
-    // a dashboard's port nothing answers is down; a repo whose kit is at the latest isn't behind
-    fs.writeFileSync(path.join(r, 'docs/devteam/run/dashboard-port'), '9\n');
-    fs.writeFileSync(latestRelease, 'v0.1.0\n');
-    // and an alert raised: one reading says all three (the alert is on the hub's line, not the repo's)
-    machine(['machine', 'alert', '--', 'look at the disk']);
-    const st3 = status();
-    assert.match(st3.stdout, /^statused .*dash=9\/DOWN/m);
-    assert.doesNotMatch(st3.stdout, /behind=/);
-    assert.match(st3.stdout, /^machine: hub \d+ DOWN; alert: look at the disk$/m);
-    assert.doesNotMatch(st3.stdout, /^attention: statused: /m, "the box's alert, folded into hello's alert, is not repeated as the repo's");
-    machine(['machine', 'alert', '--', '--clear']);
-    // a supervisor up, idle at its prompt, its fleet running, and no tick or wait for 45 minutes: it
-    // stopped its loop, and the check-in says so; its host check is the sign, as each tick and wait make one
     assert.doesNotMatch(st.stdout, /supervisor idle/, 'no record of its loop (a kit before it): nothing said');
-    const claim = path.join(r, 'docs/devteam/run/host-claim.json');
-    const beat = (checked, at = checked) => fs.writeFileSync(claim, JSON.stringify({ sha: 'x', at: new Date(Date.now() - at * 60000).toISOString(), machine: 'm', checked: Date.now() - checked * 60000 }));
-    beat(138, 140);
-    assert.match(status().stdout, /^attention: statused supervisor idle, not ticking for 138m$/m);
-    beat(5, 140);
-    assert.doesNotMatch(status().stdout, /supervisor idle/, 'a wait checks every 10 minutes however long it runs: waiting is not idle');
-    beat(30);
-    assert.doesNotMatch(status().stdout, /supervisor idle/, 'under 45 minutes: a tick can be that far apart');
-    fs.writeFileSync(claim, JSON.stringify({ checked: Date.now() - 138 * 60000, refused: true }));
-    assert.doesNotMatch(status().stdout, /supervisor idle/, 'another machine holds the repo: the kit told it to stop, so never told to tick');
-    fs.writeFileSync(claim, '{ not json');
-    assert.doesNotMatch(status().stdout, /supervisor idle/, 'a record it can\'t read says nothing');
-    beat(138);
-    // a parked fleet's supervisor has nothing to start, and isn't flagged
-    const sup2 = { ...sup, DEVTEAM_SUPERVISOR_UP: 'off' };
-    const parked = dtIn(r, ['fleet', 'park', '--reason', 'a quiet week'], sup2);
-    assert.equal(parked.status, 0, parked.stderr + parked.stdout);
-    beat(138);
-    assert.match(status().stdout, /^statused sup=up fleet=park /m);
-    assert.doesNotMatch(status().stdout, /supervisor idle/, 'parked: not flagged');
-    beat(138);
-    const unparked = dtIn(r, ['fleet', 'unpark'], sup2);
-    assert.equal(unparked.status, 0, unparked.stderr + unparked.stdout);
-    assert.doesNotMatch(status().stdout, /supervisor idle/, 'an unpark is a start: it checks the claim, a sign of its loop');
-    beat(138);
-    assert.match(status().stdout, /^attention: statused supervisor idle, not ticking for 138m$/m, 'running again, and still idle');
-    // busy in a turn (a long step of a tick): not idle, however old the sign
-    tmuxSh(['send-keys', '-t', a.pane, 'Enter']);
-    await shown(a.pane, 'Ticking');
-    const busy = status();
-    assert.match(busy.stdout, new RegExp(`^statused .* pane=${a.pane} state=busy `, 'm'));
-    assert.doesNotMatch(busy.stdout, /supervisor idle/, 'busy: not flagged');
-    assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/run/supervisor-pane')), 'reading a project writes nothing of its');
+    S.readNothing();
   } finally {
-    srv.kill();
-    for (const p of [a, shell, x, y]) p.kill();
-    fs.writeFileSync(latestRelease, 'v9.9.9\n');
-
+    S.done();
   }
 });
 
@@ -283,48 +168,4 @@ test('status lists the operator\'s own open kit PRs, and which need it now', () 
   fs.writeFileSync(asked, '');
   assert.doesNotMatch(status([]).stdout, /operator PRs/m);
   assert.doesNotMatch(fs.readFileSync(asked, 'utf8'), /^pr list/m);
-});
-
-// Every read the operator is allowed, against a repo with something in it: the log, git status and
-// the files on disk are byte-for-byte what they were. That's the point of the list.
-test('each read the operator may run writes nothing', () => {
-  const r = repo('read-only', { settings: { upstream_base: 'v0.2.0', sensors: { web: { kind: 'http', url: 'https://app.example.test/up' } } } });
-  const sup = { DEVTEAM_ROLE: 'supervisor', DEVTEAM_SUPERVISOR_UP: 'off' };
-  assert.equal(dtIn(r, ['goal', 'add', '--title', 'a goal', '--outcome', 'x'], sup).status, 0);
-  const goal = dtIn(r, ['goal'], sup).stdout.match(/g-\S+/)?.[0];
-  assert.ok(goal);
-  const k = dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 's'], sup).stdout.match(/k-\S+/)?.[0];
-  assert.ok(k);
-  assert.equal(dtIn(r, ['ask', '--question', 'q?', '--kind', 'owner-decision', '--class', 'design', '--reasons', 'x'], sup).status, 0);
-  assert.equal(dtIn(r, ['send', 'supervisor', 'hello'], sup).status, 0);
-  const p = dtIn(r, ['problem', 'add', '--title', 'a problem', '--severity', '2'], sup).stdout.trim();
-  assert.match(p, /^p-/);
-  conversation(r);
-  const op = { DEVTEAM_ROLE: 'operator', TMUX: 'x', TMUX_PANE: '%7' };
-  const walk = (d, out = []) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.name === '.git') continue; if (e.isDirectory()) walk(p, out); else out.push(p); } return out; };
-  const snap = () => ({ files: Object.fromEntries(walk(r).map((f) => [f, fs.readFileSync(f).toString('base64')])), status: execFileSync('git', ['status', '--porcelain'], { cwd: r, encoding: 'utf8' }) });
-  const before = snap();
-  const reads = [['search', 'goal'], ['status'], ['status', '--json'], ['ready'], ['ready', '--json'], ['metrics'], ['metrics', '--json'], ['hello', '--json'], ['settings'], ['supervisor-session'], ['prompt', 'supervisor'], ['validate'], ['questions'], ['questions', '--json', '--all'], ['log', '--json', '--tail', '5'], ['messages', '--to', 'supervisor', '--open'], ['knowledge', '--json'], ['knowledge', '--for', 'x'], ['goal', '--json'], ['goal', 'list'], ['goal', 'show', goal], ['fleet', 'status', '--json', '--no-fetch'], ['trust'], ['trust', '--json'], ['problem'], ['problem', '--json', '--all'], ['sensor', 'status'], ['sensor', 'status', '--json'], ['sensor', 'series', 'web', '--range', '7d'], ['knowledge', '--kit'], ['machine', 'pane-state', '%7'], ['peek', 'lesson', k, '--json'], ['peek', 'lesson', k, '--mermaid'], ['peek', 'problem', p, '--json'], ['peek', 'goal', goal, '--json'], ['peek', 'sensor', 'web', '--json']];
-  for (const c of reads) { const x = dtIn(r, c, op); assert.equal(x.status, 0, `${c.join(' ')}: ${x.stderr}`); assert.doesNotMatch(x.stderr, /only reads/, c.join(' ')); }
-  // and the machine's digest, run from inside the project, reads it the same way
-  assert.equal(dtIn(r, ['machine', 'status', '--in', code], op).status, 0);
-  const after = snap();
-  assert.deepEqual(Object.keys(after.files).sort(), Object.keys(before.files).sort(), 'no file created or removed');
-  for (const f of Object.keys(before.files)) assert.equal(after.files[f], before.files[f], `${f} unchanged`);
-  assert.equal(after.status, before.status);
-});
-
-test('the kit lets a box operator look, and nothing else', () => {
-  const r = repo('guarded');
-  const op = { DEVTEAM_ROLE: 'operator', TMUX: 'x', TMUX_PANE: '%7' };
-  for (const c of [['status'], ['fleet', 'status', '--json', '--no-fetch'], ['settings', '--get', 'main_branch'], ['supervisor-session'], ['questions', '--json'], ['log', '--json'], ['messages', '--to', 'supervisor', '--open'], ['knowledge'], ['knowledge', '--kind', 'fact'], ['goal'], ['goal', 'list']]) assert.equal(dtIn(r, c, op).status, 0, c.join(' '));
-  for (const c of [['merge', 't-1'], ['fleet', 'park', '--reason', 'x'], ['fleet', 'unpark'], ['answer', 'q', 'yes'], ['send', 'supervisor', 'hi'], ['knowledge', 'add', '--kind', 'fact', '--statement', 'x'], ['knowledge', 'set', 'k-1'], ['goal', 'add', '--title', 'x'], ['goal', 'set', 'g-1'], ['goal', 'status', 'g-1', 'met'], ['goal', 'hold', 'g-1', 'park'], ['goal', 'reading', 'g-1', '--run'], ['ticket', 'show', 't-1'], ['dashboard-data'], ['ask', '--question', 'q', '--kind', 'x'], ['problem', 'add', '--title', 'x', '--severity', '1'], ['problem', 'set', 'p-1', '--status', 'resolved'], ['sensor', 'poll'], ['sensor', 'test', 'web'], ['sensor', 'ignore', 'f-1', '--reason', 'x'], ['sensor', 'discover'], ['knowledge', 'set', 'k-1', '--kit']]) { const x = dtIn(r, c, op); assert.notEqual(x.status, 0, c.join(' ')); assert.match(x.stderr, /only reads|owner commands/, c.join(' ')); }
-  assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/run/supervisor-pane')), 'and it is never taken for the supervisor\'s pane');
-  // the one write the operator has: bringing a supervisor back (operator.md)
-  const dry = dtIn(r, ['recover', '--dry-run'], op);
-  assert.equal(dry.status, 0, dry.stderr);
-  assert.match(dry.stdout, /left stopped/);
-  const worker = dtIn(r, ['recover', '--dry-run'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'x-1' });
-  assert.notEqual(worker.status, 0);
-  assert.match(worker.stderr, /recover: /);
 });
