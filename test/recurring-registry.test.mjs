@@ -628,6 +628,29 @@ test('A11: a main jobs file nested thousands deep is a read problem, never a cra
   } finally { T.done(); }
 });
 
+test('A11: a jobs file over the kit\'s size bound is a read problem with its entry, never a git failure: on main an unrelated chore lands with the warning, and a big head file is refused (final-11b F2)', () => {
+  const T = setup('big');
+  try {
+    // the bound cut to 4 KiB (DEVTEAM_RECURRING_MAX_BYTES, for tests), so the file stays small
+    const SMALL = { DEVTEAM_RECURRING_MAX_BYTES: '4096' };
+    const big = `{"aa":"${'x'.repeat(8000)}"}\n`;
+    const BIG = /recurring\.json at [0-9a-f]{12}: 8010 bytes, over the kit's bound of 4096; no jobs file needs that/;
+    T.choreBranch('bighead', (wt) => write(path.join(wt, JOBS), big));
+    refused(T.merge('bighead', ['--dry-run'], SMALL), BIG);
+    T.onMainFile(JOBS, big, 'main: big');
+    T.choreBranch('notes', (wt) => write(path.join(wt, NOTES), 'x\n'));
+    const c = T.run(['check-pr', '--head-ref', 'chore-notes', '--sha', T.headOf('chore-notes'), '--title', 'chore-notes: jobs'], { ...SUP, ...SMALL });
+    passes(c);
+    assert.match(c.text, MAIN_BROKEN);
+    assert.match(c.text, BIG);
+    const m = T.merge('notes', [], SMALL);
+    passes(m);
+    T.g(['fetch', '-q', 'origin']);
+    assert.equal(T.g(['show', `origin/main:${NOTES}`]), 'x', 'the unrelated chore landed');
+    assert.match(T.run(['recurring', 'list'], { ...SUP, ...SMALL }).text, BIG);
+  } finally { T.done(); }
+});
+
 test('A11: on a main over the cap by a hand edit, a stop is asked, answered and lands; an addition there is still refused at landing (final-10b F4)', () => {
   const T = setup('overcap');
   try {
@@ -1532,6 +1555,19 @@ test('A16: git failing is never read as no jobs, and a jobs file this checkout c
     refused(m, new RegExp(`recurring\\.json at ${mainSha.slice(0, 12)}: git cat-file failed, so the kit can't read the jobs`));
     assert.doesNotMatch(m.text, /main's recurring\.json doesn't read/, 'a git failure on main is not a broken file');
     refused(T.merge('notes', ['--dry-run'], onlyEnv), new RegExp(`recurring\\.json at ${mainSha.slice(0, 12)}: git cat-file failed`));
+  } finally { T.done(); }
+});
+
+test('A16: a git call that prints more than the kit reads (ENOBUFS) is told apart from a timeout (final-11b F2)', () => {
+  const T = setup('enobufs');
+  try {
+    T.onMain(() => ({ aa: check() }));
+    const dir = path.join(T.base, 'git-prints-much');
+    write(path.join(dir, 'git'), `#!/bin/sh\ncase " $* " in *" cat-file -s "*) yes 1234567 | head -c 70000000; exit 0 ;; esac\nexec "${REAL_GIT}" "$@"\n`);
+    fs.chmodSync(path.join(dir, 'git'), 0o755);
+    const l = T.run(['recurring', 'list'], { ...SUP, PATH: `${dir}${path.delimiter}${process.env.PATH}` });
+    refused(l, /recurring\.json at [0-9a-f]{12}: git cat-file printed more than the 64 MiB the kit reads, so the kit can't read the jobs/);
+    assert.doesNotMatch(l.text, /timed out/);
   } finally { T.done(); }
 });
 

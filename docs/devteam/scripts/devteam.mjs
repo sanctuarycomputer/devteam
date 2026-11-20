@@ -24023,11 +24023,18 @@ const recurringRegistry = Object.freeze({
   // git, bounded: every call the registry makes has a timeout and is killed at it; { status, out,
   // err, timedOut, ok }. A timeout or a failure is never read as an answer. encoding null gives
   // out as a Buffer (the bytes git printed). DEVTEAM_GIT_TIMEOUT_MS only for tests.
+  // overflow: git printed more than maxBuffer and node killed it, told apart from a timeout (final-11b F2)
   git(args, { cwd = HOME_CWD, env, encoding = 'utf8' } = {}) {
     const r = spawnSync('git', args, { cwd, env: env ? { ...process.env, ...env } : process.env, encoding: encoding ?? 'buffer', timeout: Number(process.env.DEVTEAM_GIT_TIMEOUT_MS) || 120000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-    const timedOut = r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL';
-    return { status: r.status, out: r.stdout ?? (encoding === null ? Buffer.alloc(0) : ''), err: String(r.stderr ?? ''), timedOut, ok: r.status === 0 && !timedOut };
+    const overflow = r.error?.code === 'ENOBUFS';
+    const timedOut = !overflow && (r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL');
+    return { status: r.status, out: r.stdout ?? (encoding === null ? Buffer.alloc(0) : ''), err: String(r.stderr ?? ''), timedOut, overflow, ok: r.status === 0 && !timedOut && !overflow };
   },
+  // what went wrong with a git call, in words
+  why: (r) => (r.timedOut ? 'timed out' : r.overflow ? 'printed more than the 64 MiB the kit reads' : 'failed'),
+  // No jobs file needs more than this: a file over it is a read problem, never read (final-11b F2).
+  // DEVTEAM_RECURRING_MAX_BYTES only for tests.
+  MAX_BYTES: 1024 * 1024,
   // The file's text as jobs: a JSON object with no key twice in one object, at any depth. where is
   // "at <ref12>" or "in this checkout".
   // No job needs more than DEPTH levels of nesting, and a file past it is a problem, never read on:
@@ -24066,14 +24073,14 @@ const recurringRegistry = Object.freeze({
     // quote, a backslash or a control character, starts with " and matches no segment of the path)
     const entry = (dir, name) => {
       const r = g(['-c', 'core.quotePath=false', 'cat-file', '-p', `${sha}:${dir}`]);
-      if (!r.ok) return { failed: true, timedOut: r.timedOut };
+      if (!r.ok) return { failed: true, timedOut: r.timedOut, overflow: r.overflow };
       for (const rec of r.out.split('\n')) {
         const tab = rec.indexOf('\t');
         if (tab > 0 && rec.slice(tab + 1) === name) { const [mode, type, oid] = rec.slice(0, tab).split(' '); return { mode, type, oid }; }
       }
       return null;
     };
-    const cant = (e) => ({ jobs: null, problem: `recurring.json ${where}: git cat-file ${e.timedOut ? 'timed out' : 'failed'}, so the kit can't read the jobs`, failed: true });
+    const cant = (e) => ({ jobs: null, problem: `recurring.json ${where}: git cat-file ${recurringRegistry.why(e)}, so the kit can't read the jobs`, failed: true });
     const at = (rel, e) => `${rel}\0${e.mode}\0${e.type}\0${e.oid}`;
     let up = '';
     for (const dir of recurringRegistry.parents()) {
@@ -24087,6 +24094,13 @@ const recurringRegistry = Object.freeze({
     if (f?.failed) return cant(f);
     if (!f) return { jobs: {}, problem: null };
     if (f.mode !== '100644' || f.type !== 'blob') return { jobs: null, problem: `recurring.json ${where} is not a regular file (mode ${f.mode}); the kit reads only a plain file`, entry: at(recurringRegistry.path(), f) };
+    // its size first: a file over the bound is main's broken file (read as {} with the warning) or a
+    // refused head, never a git failure that blocks every merge
+    const z = g(['cat-file', '-s', f.oid]);
+    if (!z.ok) return cant(z);
+    const bytes = Number(z.out.trim());
+    const max = Number(process.env.DEVTEAM_RECURRING_MAX_BYTES) || recurringRegistry.MAX_BYTES;
+    if (!Number.isInteger(bytes) || bytes > max) return { jobs: null, problem: `recurring.json ${where}: ${z.out.trim()} bytes, over the kit's bound of ${max}; no jobs file needs that`, entry: at(recurringRegistry.path(), f) };
     const b = g(['cat-file', 'blob', f.oid]);
     if (!b.ok) return cant(b);
     const p = recurringRegistry.parse(b.out, where);
@@ -24223,7 +24237,7 @@ const recurringRegistry = Object.freeze({
     // gitlink shown (diff.ignoreSubmodules), whatever the user's git config says (T3-3)
     // a path whose change could put another file, a directory or a link at P, or carry one into it
     const watched = (n) => n === 'recurring.json' || n.endsWith('/recurring.json') || n === P || n.startsWith(`${P}/`) || parents.includes(n);
-    const cant = (what, r) => `recurring.json: git ${what} ${r.timedOut ? 'timed out' : 'failed'}, so the kit can't tell what would land; check again`;
+    const cant = (what, r) => `recurring.json: git ${what} ${R.why(r)}, so the kit can't tell what would land; check again`;
     const M = R.read(main);
     if (M.failed) return refuse(M.problem);
     const warn = M.problem ? `main's recurring.json doesn't read (${M.problem}); fix it in a recurring chore` : null;
