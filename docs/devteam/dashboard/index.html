@@ -482,6 +482,11 @@ try {
   .sensor-rows .rowline[data-open]:hover .t, .sensor-rows .rowline[data-open]:focus-visible .t { text-decoration: underline; }
   .sensor-rows .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
 
+  /* a retro's card opens its peek */
+  .retro-card { cursor: pointer; }
+  .retro-card:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  .retro-card > p { margin: 0; }
+
 /* css-autonomy-pages end */
 /* css-progress start */
   /* progress */
@@ -1315,11 +1320,7 @@ try {
 <!-- html-governance end -->
 
 <!-- html-retros start -->
-  <section id="retros" class="no-shell" data-page="retros">
-    <h2>Retros <span class="sub">the supervisor's look back at how the work went, across every goal: what merged, what was slow or rejected, what it changed</span></h2>
-    <div id="retro-due"></div>
-    <div id="retro-list"></div>
-  </section>
+  <section id="retros" data-page="retros"></section>
 
 <!-- html-retros end -->
 <!-- html-health start -->
@@ -2402,6 +2403,13 @@ function sensorPeekRows(name, d) {
     [o.severity != null ? `severity ${o.severity}` : '', o.created_at ? when(o.created_at) : ''].filter(Boolean).join(' · '))).join('')}</div>` : effNone())
     + psect('Incidents', incs.length ? `<div class="rows sensor-rows">${incs.map((x) => row(`problem/${encodeURIComponent(x.id)}`, x.stage === 'resolved' ? 'green' : x.stage === 'regressed' ? 'red' : 'amber', x.title || x.id,
       [stage(x), x.severity != null ? `severity ${x.severity}` : '', x.created_at ? `opened ${when(x.created_at)}` : ''].filter(Boolean).join(' · '))).join('')}</div>` : effNone());
+}
+// Retros: the next one when due, then a card a retro (a click or Enter opens its peek)
+function retroCards(rt) {
+  const all = rt?.all || [];
+  const due = rt?.due ? `<div class="card">${cardHead('history', 'Next retro', { extra: `<span class="muted">due since ${esc((rt.due_since || '').slice(0, 10))}</span>` })}<p>${esc((rt.reasons || []).join('; '))}</p></div>` : '';
+  const cards = all.map((r) => `<div class="card retro-card" data-open="retro/${esc(encodeURIComponent(r.id))}" tabindex="0" role="button" aria-label="Open the retro of ${esc(retroDate(r))}">${cardHead('history', esc(retroDate(r)))}<p>${esc(r.summary)}</p></div>`).join('');
+  return due || cards ? `<div class="cards">${due}${cards}</div>` : effNone();
 }
 /* autonomy-pages end */
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
@@ -7454,8 +7462,8 @@ function render(d) {
     const all = rt.all || [];
     count('n-retros', all.length);
     if (rt.due) { $('n-retros').textContent = 'due'; $('n-retros').classList.add('hot'); }
-    $('retro-due').innerHTML = rt.due ? `<div class="card"><span class="badge medium">due since ${esc((rt.due_since || '').slice(0, 10))}</span> <span class="small">${esc(rt.reasons.join('; '))}</span><p class="meta">The supervisor drafts it next (supervisor.md §10).</p></div>` : '';
-    $('retro-list').innerHTML = all.length ? all.map((r) => `<a class="card retro-row" href="#retro/${encodeURIComponent(r.id)}"><b>${esc(retroDate(r))}</b><span>${esc(r.summary)}</span></a>`).join('') : '<p class="empty">No retro yet.</p>';
+    const rEl = $('retros'), rHtml = retroCards(rt);
+    if (rEl && rEl.__html !== rHtml) { rEl.__html = rHtml; rEl.innerHTML = rHtml; }
   }
   renderLibrary(d.library);
   count('n-knowledge', o.knowledge.filter(ownerLesson).length);

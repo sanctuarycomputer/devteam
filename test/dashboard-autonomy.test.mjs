@@ -765,4 +765,34 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     assert.equal(await p.ev('location.hash'), '#sensors?st=fleet');
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
+
+  await t.test('Retros as cards', async () => {
+    const fx = autonomyFixture();
+    await load(fx, '#retros');
+    await soon("document.querySelectorAll('#retros .cards > .card').length === 3", 'three cards');
+    const cards = await texts('#retros .cards > .card');
+    assert.match(cards[0], /Next retro/);
+    assert.match(cards[0], /due since/);
+    assert.match(cards[0], /a feature merged/);
+    assert.match(cards[1], /Reviews caught the card-form regressions/);
+    assert.match(cards[2], /The first wave merged on time/);
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('#retros .cards > .card[data-open]')].map((c) => [c.dataset.open, c.getAttribute('tabindex'), c.getAttribute('role')])"), fx.ids.retros.map((id) => [`retro/${id}`, '0', 'button']));
+    assert.equal(await p.ev("document.querySelector('#retros').matches('.no-shell') || !!document.querySelector('#retros .no-shell')"), false, 'no no-shell');
+    await p.click('#retros .cards > .card[data-open]:nth-of-type(2)');
+    await soon(`${drawerOpen} && DRAWER.kind === 'retro' && DRAWER.id === ${JSON.stringify(fx.ids.retros[0])}`, 'the first retro by a click');
+    await closePeek();
+    assert.equal(await p.ev("(() => { const c = document.querySelectorAll('#retros .cards > .card[data-open]')[1]; c.focus(); return document.activeElement === c; })()"), true);
+    await p.key('Enter');
+    await soon(`${drawerOpen} && DRAWER.kind === 'retro' && DRAWER.id === ${JSON.stringify(fx.ids.retros[1])}`, 'the second retro by Enter');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('no retros', async () => {
+    const fx = autonomyFixture();
+    fx.patch.ooda.retro = { due: false, all: [] };
+    await load(fx, '#retros');
+    await soon("/None/.test(document.querySelector('#retros')?.textContent ?? '')", 'None');
+    assert.equal(await p.ev("document.querySelectorAll('#retros .card').length"), 0);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
 });
