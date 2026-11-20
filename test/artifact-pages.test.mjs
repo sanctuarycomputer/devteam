@@ -428,16 +428,41 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     await V.frameClick('go-tab2', 'pages/a.html', { hash: '#tab2', load: false });
     await V.soon("TS.hash === '#tab2'", 'setup: the viewer heard the move to #tab2');
     await pinsAre(V, [N.TAL, N.TP, N.TP2], 'setup: on a.html#tab2');
-    // the new frame's own ready, counted as the viewer takes it (its listener runs first): until then the
-    // stage still reads as the last frame left it (ready, a.html, #tab2), so only that ready says anything
-    const navs = await V.p.ev(`(window.__kit142Old = tsFrame(), window.__kit142Ready = [], addEventListener('message', (e) => { const f = tsFrame(); if (f !== window.__kit142Old && e.source === f.contentWindow && e.data?.lens === 1 && e.data.type === 'ready') window.__kit142Ready.push(TS.hash); }), AV_NAVS)`);
-    await V.p.ev(`(window.__fp = ${J('f'.repeat(64))}, true)`);
-    const back = await V.settle(`!window.__kit142Old.isConnected && window.__kit142Ready.length > 0 && TS.ready && TS.path === 'a.html'`, 15000);
-    assert.ok(back, `the draft reloaded in a fresh frame, its lens ready: ${await V.p.ev('JSON.stringify({ fp: TS.fp, fpNow: TS.fpNow, gone: TS.fpGone, vis: document.visibilityState, old: window.__kit142Old.isConnected, src: tsFrame().getAttribute("src"), ready: TS.ready, path: TS.path, hash: TS.hash, at: TS.at })')}`);
-    assert.match(await V.p.ev('tsFrame().getAttribute("src")'), /\/a\.html#tab2$/, 'reloaded at a.html#tab2');
-    assert.deepEqual(await V.p.ev('window.__kit142Ready'), ['#tab2'], "the reload's ready names #tab2, once");
+    // a save: the fingerprint changed at the fake, then the new frame's own ready, counted as the viewer
+    // takes it (its listener runs first): until then the stage still reads as the last frame left it
+    // (ready, its path and hash), so only that ready says anything. Gives the new frame's src and the
+    // hashes its readies named.
+    let fp = 0;
+    const save = async (path, what) => {
+      await V.p.ev(`(window.__kit142Old = tsFrame(), window.__kit142Ready = [], window.__kit142On || (window.__kit142On = addEventListener('message', (e) => { const f = tsFrame(); if (f !== window.__kit142Old && e.source === f.contentWindow && e.data?.lens === 1 && e.data.type === 'ready') window.__kit142Ready.push(TS.hash); }) || 1), window.__fp = ${J(String(++fp).repeat(64).slice(0, 64))}, true)`);
+      const back = await V.settle(`!window.__kit142Old.isConnected && window.__kit142Ready.length > 0 && TS.ready && TS.path === ${J(path)}`, 15000);
+      assert.ok(back, `${what}: reloaded in a fresh frame, its lens ready: ${await V.p.ev('JSON.stringify({ fp: TS.fp, fpNow: TS.fpNow, gone: TS.fpGone, vis: document.visibilityState, old: window.__kit142Old.isConnected, src: tsFrame().getAttribute("src"), ready: TS.ready, path: TS.path, hash: TS.hash, at: TS.at })')}`);
+      return V.p.ev('({ src: tsFrame().getAttribute("src"), readies: window.__kit142Ready })');
+    };
+    const navs = await V.p.ev('AV_NAVS');
+    const one = await save('a.html', 'the first save');
+    assert.match(one.src, /\/a\.html#tab2$/, 'reloaded at a.html#tab2');
+    assert.deepEqual(one.readies, ['#tab2'], "the reload's ready names #tab2, once");
     await pinsAre(V, [N.TAL, N.TP, N.TP2], 'after the reload, still the #tab2 pins');
     assert.equal(await V.p.ev('AV_NAVS'), navs, 'a reload is no move for the close');
+    // a second save after another move: the hash the last reload put in the src is no anchor of the
+    // page's own (final-2 F1), so the frame comes back at the view the owner is on now
+    await V.frameClick('go-tab1', 'pages/a.html', { hash: '#tab1', load: false });
+    await V.soon("TS.hash === '#tab1'", 'setup: the viewer heard the move to #tab1');
+    await pinsAre(V, [N.TE, N.TAL, N.TP], 'setup: on a.html#tab1');
+    const two = await save('a.html', 'the second save');
+    assert.match(two.src, /\/a\.html#tab1$/, 'the second save reloads at a.html#tab1, not the #tab2 the last reload added');
+    assert.deepEqual(two.readies, ['#tab1'], "the second reload's ready names #tab1");
+    await pinsAre(V, [N.TE, N.TAL, N.TP], 'after the second reload, the #tab1 pins');
+    // opened at an anchor of its own (a viewer tab's own hash, which it opens the stage with: kit-106),
+    // a save keeps that anchor whatever view the owner moved to on that page (the ruling; final-2 F2)
+    await V.p.ev(`(window.__kit142Old = tsFrame(), showArtifact('pages', ${J(WT)}, { anchor: '#pushed' }), true)`);
+    await V.soon(`!window.__kit142Old.isConnected && TS.ready && TS.path === 'index.html' && TS.hash === '#pushed'`, 'setup: the stage opened at index.html#pushed');
+    await V.frameClick('to-tab2', 'pages/index.html', { hash: '#tab2', load: false });
+    await V.soon("TS.hash === '#tab2'", 'setup: the viewer heard the move to #tab2 on the index');
+    const three = await save('index.html', 'a save of a stage opened at an anchor');
+    assert.match(three.src, /\/pages\/#pushed$/, 'reloaded at its own anchor, #pushed, not at the #tab2 moved to');
+    assert.deepEqual(three.readies, ['#pushed'], "that reload's ready names #pushed");
   });
 
   // C2: a move inside the frame with no load, then each closer: closed, on the head it was opened over

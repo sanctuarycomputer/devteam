@@ -6625,7 +6625,9 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   $('pv-frame').hidden = true;
   $('pv-frame').removeAttribute('src');
   $('av-frame').hidden = false;
-  if ($('av-frame').getAttribute('src') !== src) avFreshFrame('av-frame').src = src;
+  // the src opened kept on the frame (a fresh frame is its clone): a live reload judges the page's own
+  // anchor by it, never by a src an earlier reload gave its #hash (kit-142)
+  if ($('av-frame').getAttribute('src') !== src) { const f = avFreshFrame('av-frame'); f.dataset.opened = src; f.src = src; }
   $('artifact-view').hidden = false;
   avHint();
 }
@@ -6664,14 +6666,17 @@ const avLiveReload = (() => {
   let serial = 0, inFlight = false;
   const draft = (at) => !!at && at !== 'main' && !String(at).startsWith('tree:');
   const due = () => TS.kind === 'artifact' && draft(TS.at) && !(VIEWER && window.parent !== window) && document.visibilityState === 'visible' && !TS.fpGone && !inFlight;
-  // the frame again: its src, or the page (and, the src unanchored, the #hash) its lens names when the owner has moved in it
+  // the frame again: its src, or the page (and, the src opened unanchored, the #hash) its lens names
+  // when the owner has moved in it. The anchor is the opened src's (showArtifact's), not the frame's now:
+  // that holds the #hash the last reload added (kit-142 final-2 F1)
   function reload() {
     const f = $('av-frame'), src = f.getAttribute('src');
     if (!src) return;
-    const base = artSrc(TS.slug, TS.at);
-    const page = src.split('#')[0].startsWith(base) ? src.split('#')[0].slice(base.length) || 'index.html' : null;
-    const hash = src.includes('#') ? '' : TS.hash;
-    avFreshFrame('av-frame').src = TS.path && page !== null && (TS.path !== page || hash) ? base + TS.path + hash : src;
+    const anchored = (f.dataset.opened ?? src).includes('#'), at = src.indexOf('#');
+    const base = artSrc(TS.slug, TS.at), file = at < 0 ? src : src.slice(0, at);
+    const page = file.startsWith(base) ? file.slice(base.length) || 'index.html' : null;
+    const same = TS.path === page && (anchored || TS.hash === (at < 0 ? '' : src.slice(at)));
+    avFreshFrame('av-frame').src = !TS.path || page === null || same ? src : base + TS.path + (anchored ? '' : TS.hash);
   }
   function seen(fp) {
     if (!TS.fp) { TS.fp = TS.fpNow = fp; return; }
