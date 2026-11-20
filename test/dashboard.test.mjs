@@ -591,12 +591,12 @@ test('an answer posts the pick and the words on the first press, with no which-c
   later(() => dash.stop());
   // a page loaded before the upgrade posts the old shape, the pick inside the text and no choice key:
   // still taken, as a line judged by its leading label
-  const old = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: D6, answer: 'Yes — fine' }), signal: AbortSignal.timeout(60000) });
+  const old = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ id: D6, answer: 'Yes — fine' }), signal: AbortSignal.timeout(60000) });
   assert.equal(old.status, 200, await old.clone().text());
   const d6 = JSON.parse(dt(['questions', '--id', D6, '--json']))[0];
   assert.deepEqual([d6.status, d6.answer, d6.choice, d6.matched], ['answered', 'Yes — fine', null, true], 'an old-shaped body still answers');
   // words, and a label, that start with "--" stay words and a label: never read as a flag (task-3 T3-1, T3-2)
-  const api = async (body) => { const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) }); assert.equal(r.status, 200, await r.clone().text()); return JSON.parse(dt(['questions', '--id', body.id, '--json']))[0]; };
+  const api = async (body) => { const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) }); assert.equal(r.status, 200, await r.clone().text()); return JSON.parse(dt(['questions', '--id', body.id, '--json']))[0]; };
   const d7 = await api({ id: D7, answer: '-- but only after the release', choice: 'No' });
   assert.deepEqual([d7.answer, d7.choice], ['No — -- but only after the release', 'No'], 'the words kept');
   const d8 = await api({ id: D8, answer: '--rule=always yes', choice: 'Yes' });
