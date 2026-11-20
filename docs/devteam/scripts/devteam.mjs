@@ -5904,7 +5904,8 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     if (L.problem) fails.push(L.problem);
     else if (Object.keys(L.changed).length) {
       fails.push(...Object.entries(L.jobs).flatMap(([n, e]) => recurringEntryProblems(n, e)).map((e) => `at landing: ${e}`));
-      const over = recurringRegistry.capProblem(L.jobs, "main's jobs with this PR's changes; a check every n hours runs 24/n times, anything daily or slower once");
+      // over the cap only when the change adds runs: a stop on a main over it by hand still lands (final-10b F4)
+      const over = recurringRegistry.addsRuns(L.changed, L.main) ? recurringRegistry.capProblem(L.jobs, "main's jobs with this PR's changes; a check every n hours runs 24/n times, anything daily or slower once") : null;
       if (over) fails.push(`at landing: ${over}`);
       if (/^(ticket|plan)\//.test(branch)) fails.push(`${branch} changes the jobs (recurring.json): they are the owner's, so they land only in the supervisor's chore PR with the owner's answer (recurring apply), never from a ticket or plan`);
     }

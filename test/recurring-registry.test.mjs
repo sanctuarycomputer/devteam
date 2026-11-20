@@ -628,6 +628,21 @@ test('A11: a main jobs file nested thousands deep is a read problem, never a cra
   } finally { T.done(); }
 });
 
+test('A11: on a main over the cap by a hand edit, a stop is asked, answered and lands; an addition there is still refused at landing (final-10b F4)', () => {
+  const T = setup('overcap');
+  try {
+    T.onMain(() => Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`hourly-${i}`, check({ every: '1h', run: `echo ${i}` })])));
+    const q = T.asked({ recurring: { 'hourly-0': null } });
+    T.answer(q);
+    T.jobsChore('stop', (j) => { delete j['hourly-0']; });
+    passes(T.checkPr('chore-stop'));
+    passes(T.merge('stop', ['--approved', q]));
+    assert.equal(Object.hasOwn(T.mainJobs(), 'hourly-0'), false, 'the stop landed');
+    T.jobsChore('more', (j) => { j['hourly-9'] = check({ every: '1h', run: 'echo 9' }); });
+    refused(T.checkPr('chore-more'), /at landing: recurring\.json: 144 runs a day, over the cap of 100/);
+  } finally { T.done(); }
+});
+
 test('A9: the cap sums exactly: 27 checks every 7h, 4 weekly chores and a 28th 7h check are 100 runs a day, accepted by ask and validate; one run more is refused (final-10b F5)', () => {
   const T = setup('exact');
   try {
