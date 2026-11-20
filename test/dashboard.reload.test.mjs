@@ -28,7 +28,9 @@ test("the viewer's reload button says when a newer version is ready, and the pre
   const edit = (title) => { for (const [rel, text] of Object.entries(mock(title))) write(path.join(draft, rel), text); };
   // written before the dashboard starts: its first read already lists the draft
   edit('v1');
-  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  // a build served again for 3 s after it ends (the kit's 20 s, kit-595, set back for tests): the
+  // outline's 45 s wait is timed to it
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({ DEVTEAM_DATA_REUSE_MS: '3000' }));
   const B = `http://127.0.0.1:${port}`;
   later(() => dash.stop());
   const chrome = await openChrome();
