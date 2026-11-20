@@ -447,6 +447,25 @@ test('org-access A13: Check now fetches by POST /api/fleet-check, from the page\
       await settled(F, leaders);
       assert.equal(gone.status, 502, `home's origin gone: ${gone.body}`);
       assert.match(JSON.parse(gone.body).error ?? '', /could not fetch origin/, 'the answer says why');
+      // and how to clear it (kit-341): a fetch from a terminal, which shows why; the agent and the saved login
+      // only when a key or a password was needed, since the fetch can't prompt
+      const HINT = /^home: could not fetch origin: .*; what its sessions pushed is unchecked\. Run git fetch origin in a terminal to see why, then check again$/;
+      assert.match(JSON.parse(gone.body).error ?? '', HINT, 'the answer says how to clear it');
+      // the CLI's blocker is the same words
+      const cli = F.run(F.old, ['fleet', 'status', '--json'], { HOME: F.home });
+      assert.equal(cli.status, 0, `fleet status: ${cli.err}`);
+      assert.ok(JSON.parse(cli.out).blockers.some((b) => HINT.test(b)), `the CLI's blocker says how to clear it: ${cli.out}`);
+      // a key that needed a passphrase (ssh refuses it: no agent, and BatchMode): the agent and the saved login too
+      const sshStub = path.join(F.base, 'ssh-denied.sh');
+      fs.writeFileSync(sshStub, '#!/bin/sh\necho "git@origin.invalid: Permission denied (publickey)." >&2\nexit 255\n', { mode: 0o755 });
+      F.g(['remote', 'set-url', 'origin', 'ssh://git@origin.invalid/x.git'], F.old);
+      try {
+        const denied = F.run(F.old, ['fleet', 'status', '--json'], { HOME: F.home, GIT_SSH_COMMAND: sshStub });
+        assert.equal(denied.status, 0, `fleet status: ${denied.err}`);
+        const LOGIN = /^home: could not fetch origin: git@origin\.invalid: Permission denied \(publickey\)\.; what its sessions pushed is unchecked\. The fetch can't prompt: load the ssh key into an agent \(ssh-add\) or save an https login \(a git credential helper\), or run git fetch origin in a terminal, then check again$/;
+        assert.ok(JSON.parse(denied.out).blockers.some((b) => LOGIN.test(b)), `a key refused: the agent and the saved login: ${denied.out}`);
+        assert.ok(!JSON.parse(cli.out).blockers.some((b) => /ssh-add/.test(b)), 'a missing repository gets no ssh-add advice');
+      } finally { F.g(['remote', 'set-url', 'origin', path.join(F.base, 'gone.git')], F.old); }
       // home's origin hung (it takes the connection and never answers): the check is stopped at its
       // deadline, 12 s, and says so, never holding the request
       const held = new Set();

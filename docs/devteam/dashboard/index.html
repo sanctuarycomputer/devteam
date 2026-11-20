@@ -4126,17 +4126,27 @@ bindFleetSwitch(document.querySelector('.app'), {
 // GET changes anything (kit-251). One refused (403: a view session may not POST, or a guard said no)
 // reads instead, so the card still shows, and says it wasn't checked. One asked for while a read is
 // out is kept in FLEET.wantFetch and runs once that read ends, so arriving on Settings always checks again.
+// A check that failed otherwise (502: origin unreachable; 500) with nothing drawn yet reads too, so the card
+// still has its blockers under the error (kit-341); over an answer already drawn, that answer stays, marked old.
 async function loadFleet(fetchToo = false) {
   if (FLEET.busy) { if (fetchToo) FLEET.wantFetch = true; return; }
   FLEET.busy = true;
   drawSettings(); // Check now disabled while the read is out
+  const PLAIN = ' What shows is a plain read, not checked against origin.';
   try {
     let r = await (fetchToo ? fetch('/api/fleet-check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }) : fetch('/api/fleet'));
     // refused: a plain read instead, said to be one
     let refused = null;
     if (fetchToo && r.status === 403) { const e = (await r.json().catch(() => ({})))?.error; refused = typeof e === 'string' && e.trim() ? e.trim() : "This session can't run a check"; r = await fetch('/api/fleet'); }
-    if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now(), error: refused ? `${refused.replace(/\.$/, '')}. What shows is a plain read, not checked against origin.` : null };
-    else { const j = await r.json().catch(() => ({})); FLEET.error = String(j.error ?? `HTTP ${r.status}`); }
+    if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now(), error: refused ? `${refused.replace(/\.$/, '')}.${PLAIN}` : null };
+    else {
+      const j = await r.json().catch(() => ({}));
+      const error = String(j.error ?? `HTTP ${r.status}`);
+      // a read that fails (an answer, a throw, a body that isn't JSON) leaves the check's error alone
+      const plain = fetchToo && !refused && !FLEET.data ? await fetch('/api/fleet').then((p) => (p.ok ? p.json() : null)).catch(() => null) : null;
+      if (plain) FLEET = { ...FLEET, data: plain, at: Date.now(), error: `${error.replace(/\.?$/, '.')}${PLAIN}` };
+      else FLEET.error = error;
+    }
   } catch (e) { FLEET.error = String(e?.message ?? e); }
   const wasReady = !!FLEET.prevReady;
   FLEET.busy = false;
