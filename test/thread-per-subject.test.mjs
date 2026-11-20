@@ -8,9 +8,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
-import { kit, threadsFixture } from './lib/kit.mjs';
+import { kit, threadsFixture, dashboardOnFreePort } from './lib/kit.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
+const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
 const idOf = (out) => out.split('\n')[0].trim();
+const goalArgs = (title, priority) => ['goal', 'add', '--title', title, '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)];
 
 // Each kind: a subject, another with the same key (only what the key leaves out differs), and one
 // with another key (its spot, ref or route moved).
@@ -84,4 +87,86 @@ test("the page's tKey and devteam.mjs's subjectKey give the same key for every s
   assert.equal(subjectKey({ kind: 'artifact', slug: 'viewer-mock', at: 'main', point: { x: 1, y: 2 } }), 'artifact:viewer-mock:index.html:1,2');
   assert.equal(subjectKey({ kind: 'preview', name: 'brisk-otter', route: '/cart', anchor: { selector: 'h1', text: 'Cart' } }), 'preview:brisk-otter:/cart:h1|Cart');
   assert.equal(subjectKey(null), null);
+});
+
+// A fixture's dashboard and a Chrome tab on it at 1440x900, the threads read every 300 ms and every
+// POST kept in window.__posts.
+const INIT = `(() => {
+  const si = window.setInterval;
+  window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
+  window.__posts = [];
+  const rf = window.fetch;
+  window.fetch = (u, o) => { if (String(o?.method || 'GET').toUpperCase() === 'POST') window.__posts.push(String(u)); return rf(u, o); };
+})()`;
+const soonIn = (p, ms = 30000) => async (expr, what) => {
+  const end = Date.now() + ms;
+  for (;;) {
+    let v, err = null;
+    try { v = await p.ev(expr); } catch (e) { err = e; }
+    if (v) return v;
+    if (Date.now() > end) assert.fail(`timed out: ${what}${err ? `; last: ${err.message}` : ''}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+};
+const FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))';
+
+test('a Shift+click on a subject with an open thread opens that thread, not a new one', { skip: SKIP, timeout: 300000 }, async (t) => {
+  const F = threadsFixture('thread-per-subject-page');
+  const later = cleanup(t);
+  later(() => F.done());
+  F.sup(goalArgs('Self-serve billing', 2));
+  const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
+  F.sup(['thread', 'reply', G, 'On it.']);
+  const D = idOf(F.sup(['decide', '--class', 'rename-column', '--', 'renamed a column']));
+  const DT = idOf(F.owner(['thread', 'new', 'About this call', '--subject', JSON.stringify({ kind: 'item', ref: `decision:${D}` })]));
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: INIT });
+  const soon = soonIn(p);
+  const shiftClick = async (sel) => {
+    await soon(`!!document.querySelector(${JSON.stringify(sel)})?.getClientRects().length`, `${sel} drawn`);
+    await p.ev(`document.querySelector(${JSON.stringify(sel)}).scrollIntoView({ block: 'center' }); void 0`);
+    await p.ev(FRAMES);
+    const at = await p.at(sel);
+    await p.hold('Shift', true);
+    await p.move(at.x, at.y, 8);
+    await soon(`!document.getElementById('tl-cursor').hidden`, 'the pin over it');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await p.ev(FRAMES);
+  };
+  const opened = (id) => `TL.open === ${JSON.stringify(id)} && !TL.draft && !document.getElementById('tl-card').hidden && document.getElementById('tl-card').dataset.key === ${JSON.stringify(id)}`;
+
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#goals` });
+  await soon('typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page and its threads read');
+  // the goal's card has a pin: a Shift+click on the card opens its thread's floating card
+  const card = `#goals [data-subject="goal:${F.goal}"]`;
+  await shiftClick(card);
+  await soon(opened(G), 'the goal\'s open thread, in its card');
+  assert.equal(await p.ev("document.getElementById('tl-card').parentElement.id"), 'tl', 'floating beside its pin, not in the panel');
+  assert.deepEqual(await p.ev('window.__posts'), [], 'nothing posted');
+  await p.ev('tlClose()');
+
+  // a decision row on Self Improvement's Decide tab: its open thread opens
+  await p.ev("location.hash = '#loop?lt=decide'");
+  const row = `#decisions-feed [data-subject="decision:${D}"]`;
+  await shiftClick(row);
+  await soon(opened(DT), 'the decision\'s open thread');
+  assert.deepEqual(await p.ev('window.__posts'), [], 'nothing posted');
+  await p.ev('tlClose()');
+
+  // resolved, the same Shift+click starts a new thread: a draft on the goal, nothing open
+  F.owner(['thread', 'resolve', G, '--outcome', 'done']);
+  await p.ev("location.hash = '#goals'");
+  await soon(`TL.threads.find((x) => x.id === ${JSON.stringify(G)})?.status === 'resolved'`, 'the resolve read');
+  await shiftClick(card);
+  await soon(`!TL.open && TL.draft?.subject?.ref === ${JSON.stringify(`goal:${F.goal}`)}`, 'a new thread about to start');
+  assert.deepEqual(await p.ev('window.__posts'), [], 'nothing posted until the owner sends words');
 });
