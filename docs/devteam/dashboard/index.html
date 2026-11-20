@@ -5513,7 +5513,8 @@ const recList = (k) => { const v = recData()?.[k]; return Array.isArray(v) ? v.f
 const recRow = (name) => recList('entries').find((e) => e.name === name) ?? null;
 const REC_SIGNAL_WORDS = { flapping: 'flapping', erroring: 'erroring', slow: 'slow', 'failing-long': 'failing a long time', idle: 'nothing to do', overdue: 'often late', quiet: 'never fails' };
 const REC_RESULT = { pass: ['passed', 'good'], fail: ['failed', 'high'], error: ['error', 'high'], started: ['started', ''], nothing: ['nothing to do', ''], abandoned: ['abandoned', 'medium'], done: ['done', 'good'] };
-const recResult = (st) => { const [w, tone] = REC_RESULT[st] ?? [String(st ?? ''), '']; return `<span class="badge${tone ? ` ${tone}` : ''}">${esc(w)}</span>`; };
+const recWord = (table, k) => (Object.hasOwn(table, String(k)) ? table[k] : null);
+const recResult = (st) => { const [w, tone] = recWord(REC_RESULT, st) ?? [String(st ?? ''), '']; return `<span class="badge${tone ? ` ${tone}` : ''}">${esc(w)}</span>`; };
 const REC_DAYS = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const REC_UNIT = { h: ['hour', 'hours'], d: ['day', 'days'], w: ['week', 'weeks'], mo: ['month', 'months'] };
 const recOrd = (n) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
@@ -5587,7 +5588,7 @@ const GOAL_PEEK_SECTIONS = {
     if (!bs.length) return '';
     recBind();
     return gpCard('builtin', psect('Built in', pageTable('upkeep:builtin', ['Job', 'Every', 'Last', 'Next'], bs.map((b) => ({
-      cells: [esc(REC_BUILTIN[b.name] ?? b.name), esc(recEvery({ every: b.every }, true)), esc(b.last_at ? when(b.last_at) : ''), esc(b.next_at ? when(b.next_at) : '')],
+      cells: [esc(recWord(REC_BUILTIN, b.name) ?? b.name), esc(recEvery({ every: b.every }, true)), esc(b.last_at ? when(b.last_at) : ''), esc(b.next_at ? when(b.next_at) : '')],
       sort: [undefined, undefined, b.last_at ?? null, b.next_at ?? null],
       open: `builtin/${encodeURIComponent(b.name)}`,
     })))));
@@ -5667,7 +5668,7 @@ function openJob(name) {
   const sg = Array.isArray(row?.signals) ? row.signals.filter((x) => x && typeof x === 'object') : [];
   if (sg.length || runs?.length) recBind();
   const noticed = sg.length ? psect('What the loop noticed', pageTable('job:signals', ['Signal', 'Since', 'What it saw', 'What it may propose'], sg.map((x) => ({
-    cells: [`<span class="badge medium">${esc(REC_SIGNAL_WORDS[x.kind] ?? x.kind ?? '')}</span>`, esc(x.since ? when(x.since) : ''), esc(x.text ?? ''), esc(x.may ?? '')],
+    cells: [`<span class="badge medium">${esc(recWord(REC_SIGNAL_WORDS, x.kind) ?? x.kind ?? '')}</span>`, esc(x.since ? when(x.since) : ''), esc(x.text ?? ''), esc(x.may ?? '')],
     sort: [undefined, x.since ?? null], open: null,
   })))) : '';
   const runCols = ['Result', 'When', 'Took', check ? 'What it printed (shown as data)' : 'Its chore'];
@@ -5683,17 +5684,18 @@ function openBuiltin(name) {
   // kit-166: a built-in job's peek (#builtin/<name>, ID builtin.<name>), from its upkeep.recurring.builtin row only:
   // what it does, how often, and the setting that sets it (its value read from every, in the setting's own unit)
   drawerFor('builtin', name);
+  PEEKS.set(peekKey('builtin', name), { error: 'not a record', missing: true });
   const b = recList('builtin').find((x) => x.name === name);
   if (!b) return notFound('builtin', `builtin.${name}`, null, 'No such job.', { noRecord: true });
   const m = /^(\d+)(h|d)$/.exec(String(b.every ?? ''));
   const front = [
-    attrRow('Title', esc(REC_BUILTIN[b.name] ?? b.name)),
+    attrRow('Title', esc(recWord(REC_BUILTIN, b.name) ?? b.name)),
     attrRow('What it does', esc(b.note ?? '')),
     attrRow('Every', esc(recEvery({ every: b.every }))),
     attrRow('Set by', b.setting ? `<code>${esc(b.setting)}</code>${m ? `: ${esc(m[1])}` : ''}` : 'each sensor’s own settings, on <a class="linkish" href="#sensors">the Sensors page</a>'),
     attrRow('Goal', '<a class="linkish" href="#goal/upkeep">Upkeep</a>', 'The goal it runs under.'),
   ].filter(Boolean);
-  showDrawer(`<h2 id="drawer-title">${esc(REC_BUILTIN[b.name] ?? b.name)}</h2>
+  showDrawer(`<h2 id="drawer-title">${esc(recWord(REC_BUILTIN, b.name) ?? b.name)}</h2>
     ${attrs({ id: `builtin.${name}`, idTip: 'The kit’s own name for it.', noRecord: true, kind: 'builtin', front: front.map((r) => [r[0], r, true]), computed: [
       ['Last', esc(b.last_at ? when(b.last_at) : '')],
       ['Next', esc(b.next_at ? when(b.next_at) : '')],
