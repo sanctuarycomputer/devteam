@@ -41,15 +41,16 @@ test('Settings with home\'s origin gone: the check fails, the card shows the pla
   const plain = await (await fetch(`http://127.0.0.1:${port}/api/fleet`)).json();
   assert.ok(plain.blockers.length > 0 && plain.blockers.some((b) => /neither parked nor drained/.test(b)), `a running fleet's plain read has blockers: ${JSON.stringify(plain.blockers)}`);
 
-  // every GET of /api/fleet and every check counted; __failFleet answers the plain read 500
+  // every GET of /api/fleet and every check counted; __failFleet answers the plain read 500, __throwFleet rejects it
   await p.ev(`(() => {
-    window.__fleetGets = 0; window.__checks = 0; window.__failFleet = false;
+    window.__fleetGets = 0; window.__checks = 0; window.__failFleet = false; window.__throwFleet = false;
     const real = window.fetch;
     window.fetch = (u, o) => {
       const url = String(u);
       if (url === '/api/fleet-check' && o && o.method === 'POST') window.__checks += 1;
       if (url === '/api/fleet' && (!o || !o.method || o.method === 'GET')) {
         window.__fleetGets += 1;
+        if (window.__throwFleet) return Promise.reject(new TypeError('Failed to fetch'));
         if (window.__failFleet) return Promise.resolve(new Response(JSON.stringify({ error: 'the read failed' }), { status: 500, headers: { 'content-type': 'application/json' } }));
       }
       return real(u, o);
@@ -63,7 +64,7 @@ test('Settings with home\'s origin gone: the check fails, the card shows the pla
   // C1: arriving checks; the check fails with nothing drawn, so the page reads plainly and draws its blockers under the error
   await p.ev("location.hash = '#settings'");
   await until(() => p.ev(`window.__checks >= 1 && !FLEET.busy && !!document.querySelector('${S} .ready-card .err')`), 'the arrival check answered and drawn');
-  assert.match(await err(), /^Couldn't check: home: could not fetch origin: .* What shows is a plain read, not checked against origin\.$/, 'the error, and that what shows is a plain read');
+  assert.match(await err(), /^Couldn't check: home: could not fetch origin: .*; what its sessions pushed is unchecked\. The fetch can't prompt: .* if the network was slow\. What shows is a plain read, not checked against origin\.$/, 'the error, and that what shows is a plain read');
   assert.equal(await p.ev('window.__fleetGets'), 1, 'one plain read after the failed check');
   await until(async () => (await blockers()) === JSON.stringify(plain.blockers), `the plain read's blockers on the card (have ${await blockers()})`);
   assert.match(await badge(), /^last check failed; this is from \S/, 'the badge says the check failed');
@@ -87,5 +88,12 @@ test('Settings with home\'s origin gone: the check fails, the card shows the pla
   assert.doesNotMatch(await err(), /the read failed|plain read/, 'the read\'s failure does not replace it');
   assert.equal(await blockers(), '[]', 'no blockers: nothing was read');
   assert.equal(await p.ev('FLEET.data'), null, 'no data');
+  // and a read whose fetch rejects (the network): the same
+  await p.ev('FLEET.data = null; FLEET.error = null; window.__fleetGets = 0; window.__checks = 0; window.__failFleet = false; window.__throwFleet = true; true');
+  await p.click(`${S} .ready-card [data-checknow]`);
+  await until(() => p.ev(`window.__checks === 1 && window.__fleetGets === 1 && !FLEET.busy && document.querySelector('${S} .ready-card [data-checknow]')?.disabled === false`), 'the check and the rejected read answered');
+  assert.match(await err(), /^Couldn't check: home: could not fetch origin: /, 'the check\'s error, not the rejection\'s');
+  assert.doesNotMatch(await err(), /Failed to fetch|plain read/, 'the rejection does not replace it');
+  assert.equal(await blockers(), '[]', 'no blockers: nothing was read');
   assert.deepEqual(JSON.parse(await p.ev('JSON.stringify(window.__errors)')), [], 'nothing thrown');
 });
