@@ -111,13 +111,14 @@ function frameOf(op, payload, { masked = true, fin = true, rsv = 0 } = {}) {
   return Buffer.concat([hdr, m, Buffer.from(payload).map((b, i) => b ^ m[i % 4])]);
 }
 // { status, head, msgs, bad, closed, pings, send(obj), raw(buf), wait(pred, ms, from), closedIn(ms), close() }.
-// It answers each ping with a pong unless pong is false.
+// It answers each ping with a pong unless pong is false; a number answers that many pings, then none
+// (lastPong: when it sent its last).
 // Each message from the server is checked against browser@1 as it comes (bad holds what failed); a
 // frame's data is kept only as its length and its first 64 characters, so a long test holds little.
 function ws(port, { host = `127.0.0.1:${port}`, origin = `http://${host}`, route = '/socket', cookie, headers = {}, pong = true } = {}) {
   return new Promise((resolve) => {
     const sock = net.connect(port, '127.0.0.1');
-    const c = { status: 0, head: '', msgs: [], bad: [], closed: null, pings: 0, sock };
+    const c = { status: 0, head: '', msgs: [], bad: [], closed: null, pings: 0, lastPong: 0, sock };
     let buf = Buffer.alloc(0), shaken = false, parts = [];
     const waiters = new Set();
     const poke = () => { for (const w of [...waiters]) w(); };
@@ -131,7 +132,7 @@ function ws(port, { host = `127.0.0.1:${port}`, origin = `http://${host}`, route
         const op = buf[0] & 15, fin = !!(buf[0] & 0x80), body = buf.subarray(at, at + len);
         buf = buf.subarray(at + len);
         if (op === 8) { c.closed = body.length >= 2 ? body.readUInt16BE(0) : 1005; poke(); continue; }
-        if (op === 9) { c.pings++; if (pong) sock.write(frameOf(10, body)); continue; }
+        if (op === 9) { c.pings++; if (pong === true || (typeof pong === 'number' && c.pings <= pong)) { sock.write(frameOf(10, body)); c.lastPong = Date.now(); } continue; }
         if (op === 10) continue;
         parts.push(body);
         if (!fin) continue;
@@ -512,6 +513,16 @@ test('R5 a viewer that answers no ping is closed, and the next one gets in', opt
     const t0 = Date.now();
     assert.notEqual(await silent.closedIn(2000), null, 'the silent one is closed within 2 s');
     assert.ok(Date.now() - t0 <= 2000);
+    // silence counts from the last byte heard, not from the ping ticks: one that answers one ping
+    // and then nothing is closed within twice the interval of its pong (1 s), with 250 ms to spare,
+    // where a check only at the ticks would take up to a whole interval more
+    await sleep(300);
+    const once = await ws(view.port, { pong: 1 });
+    assert.equal(once.status, 101);
+    await within(2000, () => once.lastPong, 'its one pong');
+    const closedAt = await once.closedIn(3000).then(() => Date.now());
+    assert.notEqual(once.closed, null, 'the one that fell silent after a pong is closed');
+    assert.ok(closedAt - once.lastPong <= 1250, `closed ${closedAt - once.lastPong} ms after its pong (at most 1250)`);
     const next = await ws(view.port);
     assert.equal(next.status, 101);
     await next.wait(isFrame, 2000);

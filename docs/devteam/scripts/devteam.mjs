@@ -27075,6 +27075,7 @@ const browserListen = (server, port) => new Promise((resolve, reject) => { serve
 // carrying Chrome's screencast to the page. Nothing a viewer sends is logged, written or echoed.
 const BROWSER_WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const BROWSER_WS_MAX = 262144; // a joined message, judged on each header's declared length
+const BROWSER_WS_FRAGMENTS = 1024; // fragments per message: empty ones would grow it with the size still 0
 const BROWSER_WS_BACKLOG = 2097152; // a frame message is dropped while more than this waits to be written
 const BROWSER_FRAME_DATA = /^\/9j\/[A-Za-z0-9+/]*={0,2}$/; // the contract's frame data
 const browserHook = (name, dflt) => { const n = Number(browserTestEnv(name)); return Number.isFinite(n) && n > 0 ? n : dflt; };
@@ -27090,9 +27091,10 @@ const browserViewHost = (req, port) => [`127.0.0.1:${port}`, `localhost:${port}`
 // A CDP call the view makes: never an unhandled rejection (a closing pipe answers with one).
 const browserViewCdp = (ctx, method, params, sid) => { ctx.cdp?.send(method, params, sid).catch(() => {}); };
 // One upgraded socket: its frame reader and writer. onText gets each joined text message; onClose runs
-// once, however it closed. A ping every pingMs; closed after twice that with nothing received.
+// once, however it closed. A ping every pingMs; closed 2 x pingMs after the last byte received (a timer
+// every byte resets, not a check at the ping ticks, which would let silence run up to pingMs longer).
 function browserSocket(sock, { onText, onClose, pingMs }) {
-  let buf = Buffer.alloc(0), parts = [], joined = 0, inMsg = false, closed = false, heard = Date.now();
+  let buf = Buffer.alloc(0), parts = [], joined = 0, inMsg = false, closed = false;
   const write = (op, payload) => {
     if (sock.destroyed || !sock.writable) return;
     const len = payload.length;
@@ -27105,6 +27107,7 @@ function browserSocket(sock, { onText, onClose, pingMs }) {
     if (closed) return;
     closed = true;
     clearInterval(timer);
+    clearTimeout(silence);
     buf = Buffer.alloc(0);
     parts = [];
     try { onClose?.(); } catch {}
@@ -27131,7 +27134,7 @@ function browserSocket(sock, { onText, onClose, pingMs }) {
         if (op > 10 || !fin || len > 125) return close(1002); // an unknown, fragmented or long control frame
       } else if (op === 2) return close(1003); // binary
       else if (op === 0 ? !inMsg : op === 1 ? inMsg : true) return close(1002); // a stray continuation, a text mid-message, an unknown opcode
-      else if (joined + len > BROWSER_WS_MAX) return close(1009); // on the header, before its payload is buffered
+      else if (joined + len > BROWSER_WS_MAX || parts.length >= BROWSER_WS_FRAGMENTS) return close(1009); // on the header, before its payload is buffered
       if (buf.length < at + 4 + len) return;
       const mask = buf.subarray(at, at + 4), body = Buffer.from(buf.subarray(at + 4, at + 4 + len));
       for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3];
@@ -27151,20 +27154,19 @@ function browserSocket(sock, { onText, onClose, pingMs }) {
   };
   const feed = (chunk) => {
     if (closed) return;
-    heard = Date.now();
+    silence.refresh();
     buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
     try { read(); } catch { close(1011); }
   };
   sock.setKeepAlive(true);
   sock.setNoDelay(true);
+  const silence = setTimeout(() => close(1001), 2 * pingMs);
+  silence.unref?.();
+  const timer = setInterval(() => write(9, Buffer.alloc(0)), pingMs);
+  timer.unref?.();
   sock.on('data', feed);
   sock.on('end', () => close(0));
   sock.on('close', finish);
-  const timer = setInterval(() => {
-    if (Date.now() - heard >= 2 * pingMs) return close(1001);
-    write(9, Buffer.alloc(0));
-  }, pingMs);
-  timer.unref?.();
   return {
     feed,
     close,
