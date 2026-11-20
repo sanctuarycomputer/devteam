@@ -2814,7 +2814,8 @@ http.createServer((req, res) => {
           spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', live, '-c', lw]);
           try {
             assert.equal(must(['settings', '--get', 'tmux_session']), 'devteam');
-            assert.equal(fs.readFileSync(f, 'utf8').trim(), 'devteam', 'a legacy name is saved the moment it is found, so it cannot flip');
+            // a read finds it and saves nothing (kit-339): only a start (tmuxSession({ save: true })) saves the name
+            assert.ok(!fs.existsSync(f), 'a read finds the legacy name and saves nothing');
           } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam']); fs.rmSync(f, { force: true }); }
         } finally { if (made) fs.rmSync(lw, { recursive: true, force: true }); }
       }
