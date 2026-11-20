@@ -27801,7 +27801,7 @@ async function browserInput(ctx, tab, act, said) {
   // and its document reads complete: a history call the page being left makes before it navigates (an
   // onclick saving its state) is then followed by that load's start, which clears it, and one the new page
   // makes as it boots reads loading. Each read is bounded.
-  tab.within = () => { inDocAt = Date.now(); };
+  tab.within = () => { inDocAt ||= Date.now(); };
   const docLoaded = () => Promise.race([
     ctx.cdp.send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true }, tab.sessionId).then((r) => r.result?.value === 'complete', () => false),
     browserSleep(1000).then(() => false),
