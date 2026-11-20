@@ -82,7 +82,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' })]).split('\n')[0];
   { const th = threads().find((x) => x.id === T); assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']); }
   F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
-  // the keys log subtest 12 installs (:3408), which subtest 21's lastKey() reads
+  // the keys log subtest 12 installs (:3408), there from subtest 12 on in the base
   await p.ev(`(() => { if (window.__keys) return; window.__keys = []; addEventListener('keydown', (e) => { const { key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat } = e; window.__keys.push({ key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat }); }, true); })()`);
   // the page at #goals, the card closed and T's pin drawn, as subtest 19 leaves it (:3643's wait)
   await soon(`!!document.querySelector('${goalSel}') && !!document.querySelector('[data-tl-pin="${T}"]')`, 'the goal and its pin');

@@ -205,14 +205,14 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
 });
 
 test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 5 of 8: answered in the Inbox, a read landing late)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
-  const { F, p, soon, still, click, goalSel, threads, lastKey } = await openThreadsPage(t, 'threads-page-5');
+  const { F, p, soon, click, goalSel, threads } = await openThreadsPage(t, 'threads-page-5');
   let T;
   // T as the page makes it in subtest 6 (base :3328-3349: the owner's first words on the goal, with
   // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
   T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' })]).split('\n')[0];
   { const th = threads().find((x) => x.id === T); assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']); }
   F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
-  // the keys log subtest 12 installs (:3408), which subtest 21's lastKey() reads
+  // the keys log subtest 12 installs (:3408), there from subtest 12 on in the base
   await p.ev(`(() => { if (window.__keys) return; window.__keys = []; addEventListener('keydown', (e) => { const { key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat } = e; window.__keys.push({ key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat }); }, true); })()`);
   // the page at #goals, the card closed and T's pin drawn, as subtest 19 leaves it (:3643's wait)
   await soon(`!!document.querySelector('${goalSel}') && !!document.querySelector('[data-tl-pin="${T}"]')`, 'the goal and its pin');
