@@ -4119,15 +4119,20 @@ bindFleetSwitch(document.querySelector('.app'), {
   onConfirm: () => { if ((DATA?.fleet || {}).mode === 'park') { FLEET_UI.confirming = false; drawFleet(); return; } postFleet('park'); },
   onCancel: () => { FLEET_UI.confirming = false; drawFleet(); },
 });
-// A fetch (fetchToo: fetch from origin and check again) asked for while a read is out is kept in
-// FLEET.wantFetch and runs once that read ends, so arriving on Settings always checks again.
+// A check (fetchToo: fetch from origin and check again) is a POST, since a fetch moves refs and no
+// GET changes anything (kit-251). One refused (403: a view session may not POST, or a guard said no)
+// reads instead, so the card still shows, and says it wasn't checked. One asked for while a read is
+// out is kept in FLEET.wantFetch and runs once that read ends, so arriving on Settings always checks again.
 async function loadFleet(fetchToo = false) {
   if (FLEET.busy) { if (fetchToo) FLEET.wantFetch = true; return; }
   FLEET.busy = true;
   drawSettings(); // Check now disabled while the read is out
   try {
-    const r = await fetch(`/api/fleet${fetchToo ? '?fetch=1' : ''}`);
-    if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now(), error: null };
+    let r = await (fetchToo ? fetch('/api/fleet-check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }) : fetch('/api/fleet'));
+    // refused: a plain read instead, said to be one
+    let refused = null;
+    if (fetchToo && r.status === 403) { const e = (await r.json().catch(() => ({})))?.error; refused = typeof e === 'string' && e.trim() ? e.trim() : "This session can't run a check"; r = await fetch('/api/fleet'); }
+    if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now(), error: refused ? `${refused.replace(/\.$/, '')}. What shows is a plain read, not checked against origin.` : null };
     else { const j = await r.json().catch(() => ({})); FLEET.error = String(j.error ?? `HTTP ${r.status}`); }
   } catch (e) { FLEET.error = String(e?.message ?? e); }
   const wasReady = !!FLEET.prevReady;
