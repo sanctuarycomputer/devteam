@@ -453,10 +453,12 @@ async function boxGateway(t, extra = {}) {
   t.after(async () => { g.server.closeAllConnections?.(); await new Promise((r) => g.server.close(r)); fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
   const token = /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   let jar = '';
+  let flowJar = ''; // the flow cookie of a passkey ceremony, sent to the box's own name beside the session
   // on: 'term', 'public', 'box', or an instance's port (the default, P). Headers set to undefined are left out.
-  const req = (method, route, { body, headers = {}, cookie = jar, on = P } = {}) => new Promise((resolve, reject) => {
+  const req = (method, route, { body, headers = {}, cookie = jar, flow, on = P } = {}) => new Promise((resolve, reject) => {
     const self = on === 'box' ? publicUrl : on === 'term' ? term : on === 'public' ? site : inst(on);
-    const h = { host: new URL(self).host, ...(method !== 'GET' && method !== 'HEAD' ? { origin: self, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
+    const sent = [cookie, self === publicUrl ? (flow ?? flowJar) : ''].filter(Boolean).join('; ');
+    const h = { host: new URL(self).host, ...(method !== 'GET' && method !== 'HEAD' ? { origin: self, 'content-type': 'application/json' } : {}), ...(sent ? { cookie: sent } : {}), ...headers };
     for (const k of Object.keys(h)) if (h[k] === undefined) delete h[k];
     const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h, agent: false }, (res) => {
       const bufs = [];
@@ -464,6 +466,7 @@ async function boxGateway(t, extra = {}) {
       res.on('end', () => {
         const sc = res.headers['set-cookie']?.find((c) => c.startsWith('devteam_session='));
         if (sc) jar = sc.split(';')[0];
+        if (flow !== '') for (const c of res.headers['set-cookie'] ?? []) if (/^(?:__Host-)?devteam_flow=/.test(c)) flowJar = /;\s*Max-Age=0\b/i.test(c) ? '' : c.split(';')[0];
         const bytes = Buffer.concat(bufs);
         let j = null;
         try { j = JSON.parse(bytes.toString('utf8')); } catch {}

@@ -220,11 +220,15 @@ async function claimedGateway() {
   try {
   const token = /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   assert.ok(token, 'the gateway printed a claim link');
+  let flowJar = '';
   const post = (route, body) => new Promise((resolve, reject) => {
-    const r = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { host: `box.localhost:${port}`, origin: publicUrl, 'content-type': 'application/json' } }, (res) => {
+    const r = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { host: `box.localhost:${port}`, origin: publicUrl, 'content-type': 'application/json', ...(flowJar ? { cookie: flowJar } : {}) } }, (res) => {
       let b = '';
       res.on('data', (d) => { b += d; });
-      res.on('end', () => resolve({ status: res.statusCode, json: (() => { try { return JSON.parse(b); } catch { return null; } })(), cookie: res.headers['set-cookie']?.find((x) => x.startsWith('devteam_session='))?.split(';')[0] }));
+      res.on('end', () => {
+        for (const c of res.headers['set-cookie'] ?? []) if (/^(?:__Host-)?devteam_flow=/.test(c)) flowJar = /;\s*Max-Age=0\b/i.test(c) ? '' : c.split(';')[0];
+        resolve({ status: res.statusCode, json: (() => { try { return JSON.parse(b); } catch { return null; } })(), cookie: res.headers['set-cookie']?.find((x) => x.startsWith('devteam_session='))?.split(';')[0] });
+      });
     });
     r.on('error', reject);
     r.end(JSON.stringify(body));

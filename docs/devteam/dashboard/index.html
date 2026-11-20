@@ -1695,6 +1695,8 @@ const SHELL_ROUTES = {
     goal: 'goals', q: 'overview', talk: 'overview',
     act: 'loop', decision: 'loop', lesson: 'loop', problem: 'loop', signal: 'loop', learning: 'loop', observation: 'loop',
     sensor: 'sensors', retro: 'retros', class: 'trust',
+    // kit-166: a job's and a built-in job's peek open over Goals, where Upkeep's card is
+    recurring: 'goals', builtin: 'goals',
     artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library', lib: 'library',
   },
   files: [[/(^|\/)docs\/devteam\/(governance|process)\//, 'governance'], [/(^|\/)strategy\.md$/, 'governance']],
@@ -4686,7 +4688,7 @@ const TYPE_META = {
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
   q: ['circle-help', 'Question'], file: ['file-text', 'File'], sensor: ['activity', 'Sensor'],
   observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'], lib: ['library', 'Library item'],
-  class: ['shield-check', 'Kind of decision'],
+  class: ['shield-check', 'Kind of decision'], recurring: ['calendar-clock', 'Job'], builtin: ['box', 'Built in'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -4730,6 +4732,10 @@ const KEY_TIPS = {
   Checks: 'What it requests and what counts as up.', Uptime: 'The share of checks that passed.', 'Response time': 'p50 and p95 latency.', 'Last check': 'When it last checked.', Certificate: 'The TLS certificate, if any.',
   Now: 'How this kind of decision is made today.', 'At most': 'The furthest this kind may go without asking, whatever you answer.', Since: 'When its level last moved.',
   'Agreed with you': 'How often your answers went with its recommendation, over the questions it counts.', Levels: 'The three ways a kind of decision is made, the one it is on marked.',
+  Jobs: 'The checks and chores registered under Upkeep: how many, how many failing now, and how many due.', 'Proposed jobs': 'Jobs the supervisor asked you about, and your Yeses not landed yet.',
+  Every: 'How often it comes due.', Runs: 'The command a check runs, or the steps a chore follows.', 'Runs as': 'What a run may do.', 'Failing means': 'What counts as a failure.',
+  'Registered by': 'The yes that let it in.', Next: 'When it next comes due; a chore waits while Upkeep is drained or parked.', 'Fails in a row': 'Results that were not a pass since the last pass.',
+  'What it does': 'What it is for.', 'Set by': 'The setting that sets how often it runs.', Last: 'When it last ran.',
 };
 // none of the three: no tip (and the peek test's "every key has a tooltip" fails)
 const keyTip = (label, tip, field) => tip || KEY_TIPS[label] || (field ? `Stored on the record as ${field}.` : '');
@@ -4976,7 +4982,7 @@ let LAST_HTML = '';
 let AFTER = [];
 // The hash that opens a record's peek: #<kind>/<encoded id>; a file's is #file?path=<encoded path>.
 const peekFor = (kind, id) => (kind === 'file' ? `#file?path=${encodeURIComponent(id)}` : `#${kind}/${encodeURIComponent(id)}`);
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass, recurring: openJob, builtin: openBuiltin });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -5475,6 +5481,7 @@ async function openTicket(id) {
     ${gateTable(p.history)}
     ${spendChart(p.spend)}
     ${near.length > 1 ? psect('Dependencies', depGraph(near, { focus: id })) : ''}
+    ${peekArtSection(peekArtifacts(DATA, `ticket:${id}`, PEEK_ART_CTX()))}
     ${historySection(p, id)}`);
 }
 // A goal's impact: the words, why, who said so, and the owner's way to give it another value (a
@@ -5491,12 +5498,63 @@ function impactBlock(g) {
 /* goal-peek start */
 // The section cards under a goal's properties, and under Upkeep's (kit-90 spec §5): GOAL_PEEK names them
 // in order, GOAL_PEEK_SECTIONS[id](g, ctx) draws each (a section card, or '' when it has nothing). The goal's
-// History stays last, outside this block. recurring-upkeep adds Recurring, Built-in and Proposals to upkeep
-// by editing only this block. ctx: what openGoal worked out (s, R, p, feats, items, readings, marks, unit,
+// History stays last, outside this block. recurring-upkeep (kit-166) adds Jobs, Built in and Proposed jobs to
+// upkeep by editing only this block. ctx: what openGoal worked out (s, R, p, feats, items, readings, marks, unit,
 // problems, calls); for Upkeep, { u, days }.
 const GOAL_PEEK = {
   goal: ['steps', 'readings', 'tldr', 'problems', 'decisions', 'progress'],
-  upkeep: ['heartbeat', 'chores'],
+  upkeep: ['heartbeat', 'chores', 'jobs', 'builtin', 'proposals'],
+};
+// kit-166: Upkeep's jobs, from /api/data's upkeep.recurring (C5: entries, builtin, proposals; null before kit-168
+// serves it), read by Upkeep's sections and Computed rows here and by the job and built-in peeks (openJob,
+// openBuiltin). Every word the owner reads says job; the kit's name for them (recurring) is only in ids and hashes.
+const recData = () => { const r = typeof DATA === 'undefined' ? null : DATA?.upkeep?.recurring; return r && typeof r === 'object' && !Array.isArray(r) ? r : null; };
+const recList = (k) => { const v = recData()?.[k]; return Array.isArray(v) ? v.filter((x) => x && typeof x === 'object') : []; };
+// a job's row in upkeep.recurring.entries, by name: what Next, Fails in a row, the held state and the signals are read from
+const recRow = (name) => recList('entries').find((e) => e.name === name) ?? null;
+const REC_SIGNAL_WORDS = { flapping: 'flapping', erroring: 'erroring', slow: 'slow', 'failing-long': 'failing a long time', idle: 'nothing to do', overdue: 'often late', quiet: 'never fails' };
+const REC_RESULT = { pass: ['passed', 'good'], fail: ['failed', 'high'], error: ['error', 'high'], started: ['started', ''], nothing: ['nothing to do', ''], abandoned: ['abandoned', 'medium'], done: ['done', 'good'] };
+const recWord = (table, k) => (Object.hasOwn(table, String(k)) ? table[k] : null);
+const recResult = (st) => { const [w, tone] = recWord(REC_RESULT, st) ?? [String(st ?? ''), '']; return `<span class="badge${tone ? ` ${tone}` : ''}">${esc(w)}</span>`; };
+const REC_DAYS = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
+const REC_UNIT = { h: ['hour', 'hours'], d: ['day', 'days'], w: ['week', 'weeks'], mo: ['month', 'months'] };
+const recOrd = (n) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
+// how often, in words: "every 6 hours", "every day at 02:00 UTC", "every week on Monday", "every month on the 19th";
+// short leaves out "every" (a table's cell); anything else (a built-in's "each cycle") as it is
+const recEvery = (e, short = false) => {
+  const m = /^(\d+)(h|d|w|mo)$/.exec(String(e?.every ?? ''));
+  if (!m) return String(e?.every ?? '');
+  const n = Number(m[1]), [one, many] = REC_UNIT[m[2]];
+  let t = n === 1 ? one : `${n} ${many}`;
+  if (e.on != null && e.on !== '') t += m[2] === 'w' ? ` on ${REC_DAYS[e.on] ?? e.on}` : ` on the ${recOrd(Number(e.on))}`;
+  if (e.at) t += ` at ${e.at} UTC`;
+  return short ? t : `every ${t}`;
+};
+const recKind = (e) => (e?.kind === 'check' ? 'check' : e?.kind === 'chore' ? (e.by === 'worker' ? 'chore, by a worker' : e.by === 'supervisor' ? 'chore, by the supervisor' : 'chore') : String(e?.kind ?? ''));
+// Next: a chore waits while Upkeep is drained or parked (its row's state is held); a check never waits
+const recNext = (row) => (!row ? '' : row.kind === 'chore' && row.state === 'held' ? 'waits for Upkeep' : row.next_at ? when(row.next_at) : '');
+const recTook = (sec) => (sec == null || !Number.isFinite(Number(sec)) ? '' : Number(sec) < 90 ? `${Math.round(Number(sec) * 10) / 10} s` : `${Math.round(Number(sec) / 60)} min`);
+const recLast = (last) => (last ? `${recResult(last.status)} ${esc(last.at ? when(last.at) : '')}` : 'not run yet');
+// the drawer's record tables bound once a draw (one REC_BIND on AFTER, however many tables): a header sorts and
+// redraws the peek, a row opens its record
+const REC_BIND = () => bindPageTables($('drawer-body'), redraw);
+const recBind = () => { if (!AFTER.includes(REC_BIND)) AFTER.push(REC_BIND); };
+const REC_BUILTIN = { retro: 'Retro', research: 'Research', 'kit-sync': 'Kit sync', sensors: 'Sensors' };
+const REC_PROPOSAL = { open: 'waiting on you', registering: 'you said Yes · being registered', stopping: 'you said Yes · being stopped' };
+// an open question, or a Yes not landed yet; an answered No lands nothing and is not listed
+const recProposals = () => recList('proposals').filter((x) => Object.hasOwn(REC_PROPOSAL, x.status));
+// Upkeep's Computed rows: Jobs and Proposed jobs, each only when it has any
+const upkeepJobsComputed = () => {
+  if (!recData()) return [];
+  const es = recList('entries'), ps = recProposals();
+  const n = (states) => es.filter((e) => states.includes(e.state)).length;
+  const out = [];
+  if (es.length) out.push(['Jobs', esc(`${es.length} registered · ${n(['failing'])} failing · ${n(['due', 'overdue'])} due`), KEY_TIPS.Jobs]);
+  if (ps.length) {
+    const k = (st) => ps.filter((x) => x.status === st).length;
+    out.push(['Proposed jobs', esc([[k('open'), 'waiting on you'], [k('registering'), 'being registered'], [k('stopping'), 'being stopped']].filter(([c]) => c).map(([c, w]) => `${c} ${w}`).join(' · ')), KEY_TIPS['Proposed jobs']]);
+  }
+  return out;
 };
 // each card names its id (data-gp), so the order can be read off the page
 const gpCard = (id, html) => String(html || '').replace(/<div class="card psect"/g, `<div class="card psect" data-gp="${id}"`);
@@ -5513,6 +5571,38 @@ const GOAL_PEEK_SECTIONS = {
     if (!days.length) return '';
     const busy = days.filter((d) => d.items.length || d.failed).reverse();
     return gpCard('heartbeat', psect('Heartbeat', `${heartbeat(days)}${busy.length ? `<ul class="hb-days">${busy.map((d) => `<li><b>${fmtDay(d.day)}</b>${d.failed ? ' <span class="badge high">failed</span>' : ''}${d.items.length ? `: ${d.items.map(esc).join('; ')}` : ''}</li>`).join('')}</ul>` : empty('None')}`));
+  },
+  // kit-166: the jobs (a row opens the job's peek), the kit's own built-ins, and the proposed jobs (a row opens its
+  // question: an open one's Inbox card, an answered one's peek, as openQuestion routes every question link)
+  jobs: (g, c) => {
+    const es = recList('entries');
+    if (!es.length) return '';
+    recBind();
+    return gpCard('jobs', psect('Jobs', pageTable('upkeep:jobs', ['Job', 'Kind', 'Every', 'Last run', 'Next'], es.map((e) => ({
+      cells: [esc(e.title || e.name), esc(recKind(e)), esc(recEvery(e, true)), recLast(e.last), esc(recNext(e))],
+      sort: [undefined, undefined, undefined, e.last?.at ?? null, e.kind === 'chore' && e.state === 'held' ? null : e.next_at ?? null],
+      open: `recurring/${encodeURIComponent(e.name)}`,
+    })))));
+  },
+  builtin: (g, c) => {
+    const bs = recList('builtin');
+    if (!bs.length) return '';
+    recBind();
+    return gpCard('builtin', psect('Built in', pageTable('upkeep:builtin', ['Job', 'Every', 'Last', 'Next'], bs.map((b) => ({
+      cells: [esc(recWord(REC_BUILTIN, b.name) ?? b.name), esc(recEvery({ every: b.every }, true)), esc(b.last_at ? when(b.last_at) : ''), esc(b.next_at ? when(b.next_at) : '')],
+      sort: [undefined, undefined, b.last_at ?? null, b.next_at ?? null],
+      open: `builtin/${encodeURIComponent(b.name)}`,
+    })))));
+  },
+  proposals: (g, c) => {
+    const ps = recProposals();
+    if (!ps.length) return '';
+    recBind();
+    return gpCard('proposals', psect('Proposed jobs', pageTable('upkeep:proposals', ['Proposed job', 'Status', 'Asked'], ps.map((x) => ({
+      cells: [esc(x.title || x.name), `<span class="badge${x.status === 'open' ? ' medium' : ''}">${esc(REC_PROPOSAL[x.status])}</span>`, esc(x.asked_at ? when(x.asked_at) : '')],
+      sort: [undefined, undefined, x.asked_at ?? null],
+      open: x.qid ? `q/${encodeURIComponent(x.qid)}` : null,
+    })))));
   },
   chores: (g, c) => { const cs = c.u.chores || []; return cs.length ? gpCard('chores', psect('Chores in flight', `<ul>${cs.map((x) => `<li><a class="linkish" href="#ticket/${encodeURIComponent(x.id)}">${esc(x.id)}</a>${x.title ? ` ${esc(x.title)}` : ''} <span class="muted">· ${esc(STAGE_WORDS[x.stage] || x.stage || '')}</span></li>`).join('')}</ul>`)) : ''; },
 };
@@ -5537,9 +5627,80 @@ function openUpkeep() {
     howItChanges('goal', { id: 'upkeep' }),
   ].filter(Boolean);
   const ctx = { u, days: DATA.upkeep_days };
+  const comp = upkeepJobsComputed(u);
   showDrawer(`<h2 id="drawer-title">Upkeep</h2>
-    <section class="attrs">${props(rows)}</section>
+    <section class="attrs">${props(rows)}${comp.length ? `<h4 class="attrs-h">Computed</h4>${props(comp)}` : ''}</section>
     ${GOAL_PEEK.upkeep.map((sid) => GOAL_PEEK_SECTIONS[sid](u, ctx)).join('')}`);
+}
+function openJob(name) {
+  // kit-166: a job's peek (#recurring/<name>, ID recurring.<name>): the entry and its last 20 runs from
+  // peek recurring <name> (kit-168), its row in upkeep.recurring.entries joined by name (Next, Fails in a row, the
+  // held state, its signals), so it agrees with Upkeep's Jobs. No control: it changes in a thread, with your yes.
+  drawerFor('recurring', name);
+  const p = peekOf('recurring', name);
+  const row = recRow(name);
+  const e = p && !p.error && p.entry && typeof p.entry === 'object' ? p.entry : null;
+  if (!row && !e) return p === undefined ? showDrawer(`<h2 id="drawer-title">${esc(name)}</h2><p class="loading">Loading…</p>`) : notFound('recurring', `recurring.${name}`, p, 'No such job.', { noRecord: true });
+  const j = { ...(row || {}), ...(e || {}), name };
+  const check = j.kind === 'check';
+  const runs = p && !p.error && Array.isArray(p.runs) ? p.runs.filter((r) => r && typeof r === 'object') : null;
+  const F = j.fail && typeof j.fail === 'object' ? j.fail : { exit: 'nonzero' };
+  const ll = F.last_line && typeof F.last_line === 'object' ? F.last_line : null;
+  const failWords = check
+    ? `${ll ? ('above' in ll ? `its last line is above ${ll.above}` : 'below' in ll ? `its last line is below ${ll.below}` : `its last line isn’t ${ll.is_not}`) : 'it exits with an error'}${Number(j.fail_after) > 1 ? `, ${j.fail_after} times in a row` : ''}; a timeout, or a command that can’t be run, is an error`
+    : `not done within ${j.grace_days ?? (j.by === 'worker' ? 3 : 1)} day${(j.grace_days ?? (j.by === 'worker' ? 3 : 1)) === 1 ? '' : 's'} of coming due`;
+  const front = [
+    attrRow('Title', esc(j.title || name)),
+    attrRow('Kind', esc(recKind(j)), 'A check runs a command; a chore is work the supervisor or a worker does.'),
+    attrRow('Every', esc(recEvery(j))),
+    attrRow('Runs', e ? (check ? `<code>${esc(j.run ?? '')}</code>` : `<p class="measure">${esc(j.prompt ?? '').replace(/\n/g, '<br>')}</p>`) : ''),
+    attrRow('Runs as', check ? 'a command that only looks, in a clean checkout of main' : j.kind === 'chore' ? (j.by === 'worker' ? 'an Upkeep chore ticket for a worker' : 'an Upkeep chore the supervisor does in its tick') : ''),
+    attrRow('Failing means', e ? esc(failWords) : ''),
+    attrRow('Registered by', j.registered?.qid ? `${qlink(j.registered.qid, 'your yes')}${j.registered.at ? ` · ${esc(when(j.registered.at))}` : ''}` : ''),
+    attrRow('Goal', '<a class="linkish" href="#goal/upkeep">Upkeep</a>', 'The goal it runs under.'),
+  ].filter(Boolean);
+  const last = runs?.[0] ?? row?.last ?? null;
+  const computed = [
+    ['Last run', recLast(last)],
+    ['Next', esc(recNext(row ?? j))],
+    ['Fails in a row', row ? esc(String(row.fails_in_a_row ?? 0)) : ''],
+  ];
+  const fixing = row && row.kind === 'check' && row.state === 'failing' && row.ticket ? psect('Being fixed', `<div>${tlink(row.ticket)}</div>`) : '';
+  const sg = Array.isArray(row?.signals) ? row.signals.filter((x) => x && typeof x === 'object') : [];
+  if (sg.length || runs?.length) recBind();
+  const noticed = sg.length ? psect('What the loop noticed', pageTable('job:signals', ['Signal', 'Since', 'What it saw', 'What it may propose'], sg.map((x) => ({
+    cells: [`<span class="badge medium">${esc(recWord(REC_SIGNAL_WORDS, x.kind) ?? x.kind ?? '')}</span>`, esc(x.since ? when(x.since) : ''), esc(x.text ?? ''), esc(x.may ?? '')],
+    sort: [undefined, x.since ?? null], open: null,
+  })))) : '';
+  const runCols = ['Result', 'When', 'Took', check ? 'What it printed (shown as data)' : 'Its chore'];
+  const recent = runs === null ? (p === undefined ? '<p class="loading">Loading…</p>' : empty('None')) : runs.length ? pageTable('job:runs', runCols, runs.map((r) => ({
+    cells: [recResult(r.status), esc(r.at ? when(r.at) : ''), esc(recTook(r.seconds)), check ? (r.excerpt != null ? `<code>${esc(r.excerpt)}</code>` : '') : (r.ref ? `<code>${esc(r.ref)}</code>` : '')],
+    sort: [undefined, r.at ?? null, r.seconds ?? null], open: null,
+  }))) : empty('None');
+  showDrawer(`<h2 id="drawer-title">${esc(j.title || name)}</h2>
+    ${attrs({ id: `recurring.${name}`, idTip: 'Its name among the jobs in the settings, as the kit writes it.', peek: p, noRecord: true, kind: 'recurring', front: front.map((r) => [r[0], r, true]), computed })}
+    ${fixing}${noticed}${psect('Recent runs', recent)}`);
+}
+function openBuiltin(name) {
+  // kit-166: a built-in job's peek (#builtin/<name>, ID builtin.<name>), from its upkeep.recurring.builtin row only:
+  // what it does, how often, and the setting that sets it (its value read from every, in the setting's own unit)
+  drawerFor('builtin', name);
+  PEEKS.set(peekKey('builtin', name), { error: 'not a record', missing: true });
+  const b = recList('builtin').find((x) => x.name === name);
+  if (!b) return notFound('builtin', `builtin.${name}`, null, 'No such job.', { noRecord: true });
+  const m = /^(\d+)(h|d)$/.exec(String(b.every ?? ''));
+  const front = [
+    attrRow('Title', esc(recWord(REC_BUILTIN, b.name) ?? b.name)),
+    attrRow('What it does', esc(b.note ?? '')),
+    attrRow('Every', esc(recEvery({ every: b.every }))),
+    attrRow('Set by', b.setting ? `<code>${esc(b.setting)}</code>${m ? `: ${esc(m[1])}` : ''}` : 'each sensor’s own settings, on <a class="linkish" href="#sensors">the Sensors page</a>'),
+    attrRow('Goal', '<a class="linkish" href="#goal/upkeep">Upkeep</a>', 'The goal it runs under.'),
+  ].filter(Boolean);
+  showDrawer(`<h2 id="drawer-title">${esc(recWord(REC_BUILTIN, b.name) ?? b.name)}</h2>
+    ${attrs({ id: `builtin.${name}`, idTip: 'The kit’s own name for it.', noRecord: true, kind: 'builtin', front: front.map((r) => [r[0], r, true]), computed: [
+      ['Last', esc(b.last_at ? when(b.last_at) : '')],
+      ['Next', esc(b.next_at ? when(b.next_at) : ''), 'When it next comes due.'],
+    ] })}`);
 }
 function openGoal(id) {
   if (id === 'upkeep') return openUpkeep();
@@ -5591,6 +5752,7 @@ function openGoal(id) {
       ['Questions', asks.length ? `<ul>${asks.map((q) => `<li>${qlink(q.id, q.question)}${q.status === 'open' ? ' <span class="badge medium">open</span>' : ''}</li>`).join('')}</ul>` : '', 'Questions asked for it, or about its tickets.'],
     ] })}
     ${GOAL_PEEK.goal.map((sid) => GOAL_PEEK_SECTIONS[sid](g, ctx)).join('')}
+    ${peekArtSection(peekArtifacts(DATA, `goal:${id}`, PEEK_ART_CTX()))}
     ${historySection(p, id)}`);
 }
 function openTicketSet({ kind, id, title, sub, computed = [], items, attr = {}, extra = '', q = {} }) {
@@ -5619,7 +5781,7 @@ function openFeature(f) {
     ['Waves', uniq(items.filter((t) => !isDone(t)).map((t) => t.wave)).sort((a, b) => a - b).map(wlink).join(', '), 'Waves its unfinished tickets are in.'],
     ['Planner', (DATA.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">planning now</a>` : '', 'A planner working on it now.'],
     ['Plan reviews', p?.plan_reviews ? reviewList(p.plan_reviews) || 'none yet' : '', 'Reviews of its plan PR while it is being planned.'],
-  ], extra: `${designBlock(p?.design)}${live.length > 1 && f !== 'chores' ? psect('Dependencies', depGraph(live, { groups: waves.map((w) => [w ? `Wave ${w}` : 'No wave', live.filter((t) => t.wave === w)]) })) : ''}` });
+  ], extra: `${designBlock(p?.design)}${live.length > 1 && f !== 'chores' ? psect('Dependencies', depGraph(live, { groups: waves.map((w) => [w ? `Wave ${w}` : 'No wave', live.filter((t) => t.wave === w)]) })) : ''}${peekArtSection(peekArtifacts(DATA, `feature:${f}`, PEEK_ART_CTX()))}` });
 }
 function openStory(sid) {
   const pr = DATA.progress, st = pr.stories[sid];
@@ -6018,6 +6180,7 @@ async function openThread(mid) {
   showDrawer(`<h2 id="drawer-title">${ticket ? `Thread on ${tlink(ticket)}` : 'Message'}</h2>
     ${attrs({ id: mid, peek: p, type: 'message', computed: [['From', esc(who(by)), 'Who sent it.']] })}
     ${!ticket ? '<p class="muted">Its thread is on the ticket\'s timeline.</p>' : tp === undefined ? '<p class="muted">Loading the thread…</p>' : tp.error ? `<p class="err">Could not load the thread: ${esc(tp.error)}</p>` : thread.length ? psect('The thread', thread.map((m) => `<div class="card small ${m.id === mid ? 'qcard' : ''}"><div class="meta">${esc(who(m.by))} → ${esc(who(m.to))} · ${esc(words(m.kind || 'message'))} · ${esc(when(m.at))}</div><div>${linkify(m.text)}</div></div>`).join('')) : `<p class="muted">Not on ${esc(ticket)}'s timeline.</p>`}
+    ${ticket ? peekArtSection(peekArtifacts(DATA, `ticket:${ticket}`, PEEK_ART_CTX())) : ''}
     ${historySection(p, mid)}`);
 }
 function openPlanner(feature) {
@@ -6542,7 +6705,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // (at once: the card replaces the peek, with no slide)
   // (its own head first: a card on a framed page opens the viewer before this route ends)
   if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); LAST_HEAD = location.hash; return void tlRoute(h.slice(5)); }
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass, recurring: openJob, builtin: openBuiltin };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -6920,6 +7083,41 @@ const libThumb = (x, pvHere) => {
   return `<a class="lib-thumb"${libGo(x)} tabindex="-1" aria-hidden="true" data-thumb-src="${esc(src)}">${x.link && x.host ? `<img src="https://${esc(x.host)}/favicon.ico" referrerpolicy="no-referrer" alt=""><span class="lib-host small muted">${esc(x.host)}</span>` : `<i class="icon-${icon}" aria-hidden="true"></i>`}</a>`;
 };
 /* library-items end */
+/* peek-artifacts start */
+// The artifacts a goal's, feature's, ticket's or thread's side peek lists (kit-320): kit-92's Library items,
+// tied by the shown row's for refs, compared whole. Uses only its arguments and esc, psect, LIB_KINDS, libraryItems.
+// The artifact items (mock, diagram, docs) tied to ref (goal:<g>, feature:<f>, ticket:<t>), in libraryItems' order; [] for any other ref.
+function peekArtifacts(data, ref, ctx) {
+  const m = /^(goal|feature|ticket):(.+)$/.exec(String(ref ?? ''));
+  if (!m) return [];
+  const [, kind, id] = m;
+  const ticketFeat = new Map();
+  for (const t of [...(data?.tickets ?? []), ...(data?.progress?.tickets ?? [])]) if (t?.id && t.feature) ticketFeat.set(String(t.id), String(t.feature));
+  const isTicket = (r, t) => r === `ticket:${t}` || r === t;
+  const ofFeat = (r) => r === `feature:${id}` || r === `plan-${id}` || ticketFeat.get(r.startsWith('ticket:') ? r.slice(7) : r) === id;
+  const ties = (x) => {
+    if (kind === 'goal') return x.goals.includes(id);
+    const refs = (x.art?.for ?? []).map((r) => String(r ?? ''));
+    return kind === 'ticket' ? refs.some((r) => isTicket(r, id)) : refs.some(ofFeat);
+  };
+  return libraryItems(data, Date.now(), ctx).filter((x) => ['mock', 'diagram', 'docs'].includes(x.kind) && ties(x));
+}
+// The peek's Artifacts section: a card of links, each opening the viewer as the Library's title does (a broken one its
+// Library peek, badged), with its kind and the draft it opens; '' for none.
+function peekArtSection(items) {
+  if (!items?.length) return '';
+  const li = (x) => {
+    const word = LIB_KINDS.find(([k]) => k === x.kind)?.[1] ?? '';
+    const link = x.error
+      ? `<a class="linkish" href="${esc(`#lib/${encodeURIComponent(`artifact:${x.art.slug}`)}`)}">${esc(x.art.slug)}</a> <span class="badge high">broken</span>`
+      : `<a class="linkish" href="${esc(x.href)}">${esc(x.title)}</a>`;
+    return `<li>${link} <span class="muted">· ${esc(word)}${x.at !== 'main' ? ` · draft in ${esc(x.at)}` : ''}</span></li>`;
+  };
+  return psect('Artifacts', `<ul>${items.map(li).join('')}</ul>`).replace(/^<div class="card psect"/, '<div class="card psect" data-peek-arts');
+}
+// The ctx renderLibrary passes libraryItems, read from the page's globals when called.
+const PEEK_ART_CTX = () => ({ previewState, artHref, artViewer, pvViewer, fileHref });
+/* peek-artifacts end */
 // The Library (kit-92): one .cards grid of libraryItems kept by the page's Kind and Goal filters, in kind order;
 // above it, only when there is something to say, #lib-top: where publishing happens, or one confirm for every
 // published artifact not live on this box, and the notice for a box whose gateway doesn't serve previews.
