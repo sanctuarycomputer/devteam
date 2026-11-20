@@ -1179,6 +1179,8 @@ try {
   .file-chip .chip-gone { flex: none; }
   /* a dropped image on the viewer's stage, in the dashboard's own page */
   #av-img { display: block; margin: auto; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; object-fit: contain; }
+  /* a viewer tab hides its × (css-viewer); while an image is up it is the way out without a keyboard */
+  .viewer.av-upload #av-close { display: inline-flex !important; }
 /* css-attachments end */
 /* css-goals start */
   /* Goals (kit-90): the tabs, then the cards two across on the shell's grid; a card spans its columns, its
@@ -7214,6 +7216,8 @@ function avUnderTake() {
   return {
     av: AV, ts, rects: new Map(rects), keyOf: new Map(keyOf), watching: new Set(watching),
     frames: ['av-frame', 'pv-frame'].map((id) => $(id).hidden),
+    // the page around the stage, as showUpload changes it (a viewer tab has none of these on: TR4-1)
+    page: { cls: ['av-open', 'overlay-open', 'th-under-av'].filter((c) => document.body.classList.contains(c)), scrim: $('scrim').hidden, overflow: document.body.style.overflow },
     bar: { title: $('av-title').textContent, icon: document.querySelector('.av-bar > i.av-kind').className, kind: $('av-kind').textContent, kindHidden: $('av-kind').hidden, note: $('av-note').textContent, noteHidden: $('av-note').hidden, tab: $('av-tab').getAttribute('href'), reload: $('av-reload').hidden, hint: $('av-hint').hidden, errId: err.id, err: err.textContent },
   };
 }
@@ -7228,6 +7232,9 @@ function avUnderGive() {
   TS.watching.clear();
   for (const v of u.watching) TS.watching.add(v);
   ['av-frame', 'pv-frame'].forEach((id, i) => { $(id).hidden = u.frames[i]; });
+  for (const c of ['av-open', 'overlay-open', 'th-under-av']) document.body.classList.toggle(c, u.page.cls.includes(c));
+  $('scrim').hidden = u.page.scrim;
+  document.body.style.overflow = u.page.overflow;
   const b = u.bar, err = document.querySelector('.av-run-err');
   $('av-title').textContent = b.title;
   document.querySelector('.av-bar > i.av-kind').className = b.icon;
@@ -7296,6 +7303,8 @@ function showUpload(url, name) {
   fetch(url, { method: 'HEAD' }).then((r) => { if (r.status === 404) gone(); }, () => {});
   img.src = url;
   $('av-stage').prepend(img);
+  // while an image is up: a viewer tab shows its × (it has none of its own: no way out without a keyboard otherwise)
+  document.documentElement.classList.add('av-upload');
   $('artifact-view').hidden = false;
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
@@ -7309,6 +7318,7 @@ function showUpload(url, name) {
 // gone, the bar's controls back.
 function avUploadOff() {
   AV_UNDER = null;
+  document.documentElement.classList.remove('av-upload');
   $('av-img')?.remove();
   document.querySelector('.av-ver-wrap').hidden = false;
   document.querySelector('.av-pub-wrap').hidden = false;
