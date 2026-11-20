@@ -9217,8 +9217,10 @@ function tlSend() {
       // after the words an earlier refusal put back, never over them
       if (box && text) { box.value = box.value.trim() ? `${box.value}\n${text}` : text; tlDraftSet(tlEl('tl-card').dataset.key, box.value); tlBytes(); }
       // the files come back with the words, into the box they go to; a new thread's, with any dropped while it
-      // was pending (under its pending key) after them
-      const home = `tl:${box ? tlEl('tl-card').dataset.key : key}`;
+      // was pending (under its pending key) after them. With the card closed (hidden, no key) they go back under
+      // the key they were taken from (its thread's id once a pending one was named), where its box will draw them.
+      const shown = tlEl('tl-card');
+      const home = `tl:${box && shown && !shown.hidden && shown.dataset.key ? shown.dataset.key : key === p.thread && p.real ? p.real : key}`;
       putAttach(home, taken);
       taken = null;
       if (!t) moveAttach(`tl:${p.thread}`, home);
