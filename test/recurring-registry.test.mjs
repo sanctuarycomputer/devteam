@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { monoFixture, multiFixture, write, json, kit, gitShim, REAL_GIT } from './lib/kit.mjs';
 
@@ -943,8 +943,9 @@ history('refused under rebase: with diff.relative and diff.ignoreSubmodules=all,
   T.commitIn(wt, 'chore-subflip', () => {}, 'and back');
   T.onMainFile('README.md', 'main moves\n');
   assert.match(T.g(['ls-tree', 'origin/chore-subflip', '--', PROJ]), /^040000 tree /, 'the head\'s project dir is a directory');
-  const docs = path.join(T.old, 'docs');
-  refused(T.run(['merge', '--chore', 'subflip', '--dry-run'], SUP, docs), BEHIND);
+  // the kit run from docs/, where diff.relative would print names relative to it
+  const sub = spawnSync(process.execPath, [path.join(T.old, 'docs/devteam/scripts/devteam.mjs'), 'merge', '--chore', 'subflip', '--dry-run'], { cwd: path.join(T.old, 'docs'), env: { ...process.env, ...SUP }, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
+  refused({ status: sub.status, text: `${sub.stdout}\n${sub.stderr}` }, BEHIND);
   refused(T.dry('subflip'), BEHIND);
 }, ['rebase']);
 
@@ -1115,7 +1116,7 @@ test('A16: git failing is never read as no jobs, and a jobs file this checkout c
     const m = T.run(['check-pr', '--head-ref', 'chore-notes', '--sha', T.headOf('chore-notes'), '--title', 'chore-notes: jobs'], { ...SUP, ...onlyEnv });
     refused(m, new RegExp(`recurring\\.json at ${mainSha.slice(0, 12)}: git cat-file failed, so the kit can't read the jobs`));
     assert.doesNotMatch(m.text, /main's recurring\.json doesn't read/, 'a git failure on main is not a broken file');
-    refused(T.dry('notes'), new RegExp(`recurring\\.json at ${mainSha.slice(0, 12)}: git cat-file failed`));
+    refused(T.merge('notes', ['--dry-run'], onlyEnv), new RegExp(`recurring\\.json at ${mainSha.slice(0, 12)}: git cat-file failed`));
   } finally { T.done(); }
 });
 
