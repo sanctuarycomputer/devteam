@@ -2504,7 +2504,7 @@ exit 0
       "value": [],
       "set": false,
       "default": [],
-      "owner_only": null
+      "owner_only": "recurring-edit"
     },
     {
       "key": "project",

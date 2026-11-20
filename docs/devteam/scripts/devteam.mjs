@@ -13869,7 +13869,8 @@ function cmdChore() {
     if (um !== 'run' && !isRecordKeeping(choreSlug(slugName)) && !flags.force) die(`Upkeep is ${holdWords(um)}: no new upkeep chore starts (goal hold upkeep run --owner, or --force, logged)`);
     const wt = choreWorktree(slugName, { setup: true });
     // the jobs' chore started past Upkeep's hold is the supervisor's call, so it is logged (kit-162)
-    if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: ['upkeep', 'chore-recurring'], reversible: true }, 'supervisor');
+    const holdRefs = ['upkeep', `chore-${slugName}`];
+    if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: holdRefs, reversible: true }, 'supervisor');
     return out(wt);
   }
   if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
@@ -23247,11 +23248,12 @@ const recurringRegistry = Object.freeze({
     const names = [...new Set([...Object.keys(A), ...Object.keys(B)])];
     return Object.fromEntries(names.filter((n) => Object.hasOwn(A, n) !== Object.hasOwn(B, n) || canonical(A[n]) !== canonical(B[n])).map((n) => [n, Object.hasOwn(B, n) ? B[n] : null]));
   },
-  // The keys a settings block's text repeats inside one object, at any depth, as [{ key, path }]
-  // (jsonDuplicateKeys' walk; none for text that isn't JSON, whose own error is reported). JSON.parse
-  // keeps the last of two, so the text reads canonically equal to one without the first while git
-  // merges the text it has: validate and check-pr refuse any (task-2-r2 F1-1).
-  duplicateKeys: (text) => (typeof text === 'string' ? jsonDuplicateKeys(text) ?? [] : []).map((p) => ({ key: String(p[p.length - 1]), path: p.join('.') })),
+  // The keys a settings block's text repeats in the jobs, as [{ key, path }]: a second top-level
+  // "recurring", or any key repeated inside its value, at any depth (jsonDuplicateKeys' walk; none
+  // for text that isn't JSON, whose own error is reported). JSON.parse keeps the last of two, so the
+  // text would say one job and the kit read another: validate and check-pr refuse any (task-2-r2
+  // F1-1). Other settings keep JSON's last-wins reading, as before this ticket.
+  duplicateKeys: (text) => (typeof text === 'string' ? jsonDuplicateKeys(text) ?? [] : []).filter((p) => p[0] === 'recurring').map((p) => ({ key: String(p[p.length - 1]), path: p.join('.') })),
   duplicateProblem: ({ key, path: at }) => `settings: "${key}" appears twice in one object (${at}): JSON keeps only the last, so the file would say one thing and the kit read another`,
   // settings.md's text with only the top-level "recurring" value of its json devteam block set to
   // value, as { text, problem }: a string-aware walk finds the value's span and it alone is
