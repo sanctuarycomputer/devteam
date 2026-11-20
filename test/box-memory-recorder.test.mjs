@@ -67,7 +67,7 @@ async function startHub(t, { proc = PROC, cgroup = CGROUP, roots = [], file = nu
   fs.mkdirSync(reg, { recursive: true });
   roots.forEach((r, i) => fs.writeFileSync(path.join(reg, `r${i}.json`), JSON.stringify({ root: r, at: iso(Date.now()) })));
   const f = memFile(home, port);
-  if (file) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, file); }
+  if (file !== null) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, file); }
   const e = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(port), DEVTEAM_PORT_BASE: String(PORTS + 50), DEVTEAM_PROC: proc, DEVTEAM_CGROUP: cgroup, DEVTEAM_MEMINFO: NOWHERE, ...env };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_HOME', 'DEVTEAM_IMAGE_HUB', 'TMUX', 'TMUX_PANE']) delete e[k];
   if (record) delete e.DEVTEAM_MEMORY_RECORD;
@@ -307,6 +307,18 @@ test('C3e2: the walk reads only through fs.promises: run with no sync fs in scop
   assert.equal(gone.procs, null, 'no /proc: null');
 });
 
+test('C3e3: the walk reads a cmdline only to its first 64 KB (plan-1 F5)', async () => {
+  const proc = procWith('proc-bigcmd', [[4600, { cmdline: `node\0${'y'.repeat(200000)}\0`, statm: statm(10), cwd: '/tmp' }]], { base: false });
+  // readFile of a cmdline is refused: a whole read of a huge command line can't pass
+  const promises = new Proxy(fs.promises, { get: (o, k) => (k === 'readFile' ? (f, ...a) => (String(f).endsWith('cmdline') ? Promise.reject(new Error('cmdline read whole')) : o.readFile(f, ...a)) : o[k]) });
+  const ctx = vm.createContext({ fs: { promises, constants: fs.constants }, path, Buffer, setImmediate, setTimeout });
+  const { memoryWalk } = vm.runInContext(`${region()}\n;({ memoryWalk })`, ctx);
+  const w = await memoryWalk(proc, { budgetMs: 2000, slowMs: 0, start: Date.now() });
+  assert.equal(w.procs.length, 1, 'the process is read');
+  assert.equal(w.procs[0].words[0], 'node');
+  assert.ok(w.procs[0].words.every((x) => x.length <= 65536), 'no word past 64 KB');
+});
+
 test('C3f: at start the file loses readings older than 8 days and torn lines; a torn tail never spoils the next line', async (t) => {
   const now = Date.now();
   const old = JSON.stringify({ v: 1, at: iso(now - 9 * DAY), working_set: 1 });
@@ -458,6 +470,37 @@ test('C4f: with no file the readings are empty; lines the check refuses are neve
   const h = await startHub(t, { file: text, record: false });
   const res = await get(h.port, '/memory.json');
   assert.deepEqual(res.json.readings, good);
+  // a zero-byte file, and one of torn lines only: no readings, never an error (plan-1 F5)
+  for (const [name, body] of [['zero bytes', ''], ['torn only', '{"v":1,"at":"20\n{"v":1\n{"v']]) {
+    const z = await startHub(t, { file: body, record: false });
+    const r = await get(z.port, '/memory.json');
+    assert.equal(r.status, 200, name);
+    assert.deepEqual(r.json, { v: 1, readings: [] }, name);
+  }
+});
+
+test('C4g: a hub that takes the port late (another held it) still records (plan-1 F2)', async (t) => {
+  const port = nextPort();
+  const holder = http.createServer((req, res) => { res.writeHead(200); res.end('{}'); });
+  await new Promise((r) => holder.listen(port, '127.0.0.1', r));
+  let closed = false;
+  t.after(() => (closed ? undefined : new Promise((r) => holder.close(r))));
+  const home = newHome();
+  const e = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(port), DEVTEAM_PORT_BASE: String(PORTS + 50), DEVTEAM_PROC: NOWHERE, DEVTEAM_CGROUP: CGROUP, DEVTEAM_MEMINFO: NOWHERE, DEVTEAM_HUB_RETRY_MS: '200' };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_HOME', 'DEVTEAM_IMAGE_HUB', 'TMUX', 'TMUX_PANE', 'DEVTEAM_MEMORY_RECORD']) delete e[k];
+  const p = spawn(process.execPath, [SCRIPT, 'hub'], { cwd: home, env: e, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  let out = '';
+  p.stdout.on('data', (b) => { out += b; });
+  p.stderr.on('data', (b) => { out += b; });
+  t.after(() => (p.exitCode !== null || p.signalCode !== null ? undefined : new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } })));
+  // a few failed listens first
+  await new Promise((r) => setTimeout(r, 1000));
+  const f = memFile(home, port);
+  assert.equal(linesOf(f).length, 0, 'nothing while another holds the port');
+  await new Promise((r) => holder.close(r));
+  closed = true;
+  await until(() => linesOf(f).length >= 1, `a line once the hub listens (${out})`);
+  assert.equal(memoryReadingProblem(linesOf(f)[0]), null);
 });
 
 // ===== D5: tests never read the machine =====
