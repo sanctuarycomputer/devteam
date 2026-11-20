@@ -15,11 +15,14 @@ const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const QID = /q-[0-9]+-[0-9]+-supervisor/;
 const BLOCK = /```json devteam\s*\n([\s\S]*?)\n```/;
 const HEADER = 'This answer approves exactly these job changes, and no other:';
-// main changed settings.md since the branch left it, and the branch touches it: the kit predicts no
-// merge of the file, so it is refused until main is merged in (ruling d-20261120-044235981)
-const MAIN_CHANGED = /settings\.md: main changed it since this branch left it, and so does the branch; merge main into the branch first/;
-// the same refusal under merge_method rebase, worded for it (final-5 F3)
-const MAIN_CHANGED_REBASE = /settings\.md: main changed it since this branch left it, and so does the branch; rebase the branch onto main first/;
+// the head's settings.md is not main's and the head doesn't contain main's checked tip: the kit
+// predicts no merge of the file, so it is refused until main is merged in (rulings
+// d-20261120-044235981, d-20261120-075327162)
+const DIFFERS = /settings\.md: this branch's settings\.md differs from main's and the branch doesn't contain main's tip; merge main into the branch first/;
+// under merge_method rebase only a head whose settings.md is main's is cleared
+const REBASE_EQUAL = /settings\.md: merge_method is rebase, which replays commits, so the branch's settings\.md must equal main's; land the change with merge or squash/;
+const MAIN_CHANGED = DIFFERS;
+const MAIN_CHANGED_REBASE = REBASE_EQUAL;
 
 // Jobs that hold RECURRING_ENTRY_SHAPE@1.
 const check = (extra = {}) => ({ kind: 'check', title: 'CI on main', what: 'the kit CI on main is green', every: '6h', run: 'gh run list --limit 1', ...extra });
@@ -970,7 +973,7 @@ test('RV4-OLDCONFLICT: old git, a settings.md prose line beside another file tha
 test('RV4-REBASE: under merge_method rebase, a stop-then-restore branch, a merge commit beside a settings change and an unreadable middle commit are refused (final-4 F2, final-4b B4-1)', () => {
   const T = setup('rv4rb');
   try {
-    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job', every: '6h' }), bb: check({ title: 'B job', every: '12h', run: 'echo bb' }), cc: chore({ title: 'C job', prompt: 'C.' }) }; j.merge_method = 'rebase'; });
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job', every: '6h' }), bb: check({ title: 'B job', every: '12h', run: 'echo bb' }), cc: chore({ title: 'C job', prompt: 'C.' }) }; });
     // cut before the stop: one commit stops bb (as main will), the next restores it, so the tip is
     // the base's; a rebase replays both onto main, and the restore brings bb back
     const fw = T.jobsChore('flip', (j) => { delete j.recurring.bb; });
@@ -980,12 +983,15 @@ test('RV4-REBASE: under merge_method rebase, a stop-then-restore branch, a merge
     const q = T.yes({ recurring: { bb: null } });
     T.jobsChore('stop-bb', (j) => { delete j.recurring.bb; });
     passes(T.merge('stop-bb', ['--approved', q]));
-    refused(T.dry('flip'), MAIN_CHANGED_REBASE);
+    // under rebase no job change lands from a branch (d-20261120-075327162), so the stop lands first
+    T.g(['fetch', '-q', 'origin'], T.old); T.g(['merge', '-q', '--ff-only', 'origin/main'], T.old);
+    T.onMain((j) => { j.merge_method = 'rebase'; }, 'rebase');
+    refused(T.dry('flip'), REBASE_EQUAL);
     // a prose line in settings.md, then main merged in (a merge commit the rebase would drop)
     const mw = T.choreBranch('mc', (wt) => rawEdit(wt, (t) => `${t}\nA prose line.\n`));
     onMainFile(T, NOTES, 'moved\n', 'main moves');
     T.g(['fetch', '-q', 'origin'], mw); T.g(['merge', '-q', '--no-ff', '--no-edit', 'origin/main'], mw); T.g(['push', '-q', 'origin', 'chore-mc'], mw);
-    refused(T.dry('mc'), /settings\.md: merge_method is rebase and this branch has merge commits beside a settings change; rebase the branch onto main instead/);
+    refused(T.dry('mc'), REBASE_EQUAL);
     // a merge commit with no settings change beside it is no concern of the jobs
     const nw = T.choreBranch('mc-notes', (wt) => write(path.join(wt, 'docs/devteam/project/other.md'), 'o\n'));
     onMainFile(T, NOTES, 'moved again\n', 'main moves again');
@@ -994,7 +1000,7 @@ test('RV4-REBASE: under merge_method rebase, a stop-then-restore branch, a merge
     // a middle commit whose block doesn't parse: a rebase lands it on main as it is
     const uw = T.choreBranch('mid', (wt) => rawEdit(wt, (t) => t.replace('  "recurring": {', '  "recurring": {{')));
     commitIn(T, uw, 'chore-mid', (wt) => rawEdit(wt, (t) => `${t.replace('  "recurring": {{', '  "recurring": {')}\nA prose line.\n`), 'fixed');
-    refused(T.dry('mid'), /settings\.md at [0-9a-f]{12}: its json devteam block can't be read \(missing or not valid JSON\); merge_method is rebase, which lands each commit on main, so each must read/);
+    refused(T.dry('mid'), REBASE_EQUAL);
   } finally { T.done(); }
 });
 
@@ -1049,7 +1055,7 @@ test('RV5-SKIP: rebase, a branch commit main already has (then undid): the rebas
 test('RV5-HIDDEN: rebase, a settings commit hidden behind a merge of an older main that keeps that main\'s file: refused (final-5 F4)', () => {
   const T = setup('rv5hid');
   try {
-    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job' }), bb: check({ title: 'B job', run: 'echo bb' }) }; j.merge_method = 'rebase'; });
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job' }), bb: check({ title: 'B job', run: 'echo bb' }) }; });
     T.g(['fetch', '-q', 'origin'], T.old);
     const O = T.g(['rev-parse', 'origin/main'], T.old);
     // c1 retitles aa; then the branch merges a side line off O (before the stop), taking O's settings.md
@@ -1057,6 +1063,8 @@ test('RV5-HIDDEN: rebase, a settings commit hidden behind a merge of an older ma
     const q = T.yes({ recurring: { bb: null } });
     T.jobsChore('stop-bb', (j) => { delete j.recurring.bb; });
     passes(T.merge('stop-bb', ['--approved', q]));
+    T.g(['fetch', '-q', 'origin'], T.old); T.g(['merge', '-q', '--ff-only', 'origin/main'], T.old);
+    T.onMain((j) => { j.merge_method = 'rebase'; }, 'rebase');
     write(path.join(wt, NOTES), 'side\n'); T.g(['add', '-A'], wt); T.g(['commit', '-qm', 'notes'], wt);
     const side = path.join(T.base, 'side');
     T.g(['worktree', 'add', '-q', '--detach', side, O], T.old); write(path.join(side, 'docs/devteam/project/other.md'), 'o\n'); T.g(['add', '-A'], side); T.g(['commit', '-qm', 'side'], side);
@@ -1134,7 +1142,7 @@ test('RV4-MOVED-GH: forge github, main moves after the checks: refused before gh
   } finally { T.done(); }
 });
 
-test('RV4-UNTOUCHED: a branch that never touches settings.md lands while main changed the jobs, and the jobs stay main\'s', () => {
+test('RV4-UNTOUCHED: a branch that never touches settings.md, cut before main changed the jobs: refused until it contains main (d-20261120-075327162), and the jobs stay main\'s', () => {
   const T = setup('rv4un');
   try {
     T.onMain((j) => { j.recurring = { aa: check({ title: 'A job', every: '6h' }), bb: check({ title: 'B job', every: '12h', run: 'echo bb' }) }; });
@@ -1142,6 +1150,12 @@ test('RV4-UNTOUCHED: a branch that never touches settings.md lands while main ch
     const q = T.yes({ recurring: { bb: null } });
     T.jobsChore('stop-bb', (j) => { delete j.recurring.bb; });
     passes(T.merge('stop-bb', ['--approved', q]));
+    refused(T.merge('notes'), DIFFERS);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.deepEqual(Object.keys(T.mainSettings().recurring), ['aa']);
+    // with main merged in, it lands
+    const nw = path.join(T.old, '.worktrees', 'chore-notes');
+    T.g(['fetch', '-q', 'origin'], nw); T.g(['merge', '-q', '--no-edit', 'origin/main'], nw); T.g(['push', '-q', 'origin', 'chore-notes'], nw);
     passes(T.merge('notes'));
     T.g(['fetch', '-q', 'origin'], T.old);
     assert.deepEqual(Object.keys(T.mainSettings().recurring), ['aa']);
@@ -1171,5 +1185,115 @@ test('RV4-BINDS: once main is merged into the branch, its job change binds again
     passes(T.merge('add-cc', ['--approved', q]));
     T.g(['fetch', '-q', 'origin'], T.old);
     assert.deepEqual(T.mainSettings().recurring, { bb: check({ title: 'B job', every: '12h', run: 'echo bb' }), zz, cc });
+  } finally { T.done(); }
+});
+
+// ---- round 6 (d-20261120-075327162): cleared only when the head's settings.md is main's, or the
+// head contains main's checked tip; under rebase only the first ----
+const OLDP = 'docs/devteam/project/settings-old.md';
+const jobsOf6 = (T, ref, p = SETP) => { const j = JSON.parse(BLOCK.exec(T.g(['show', `${ref}:${p}`], T.old))[1]); return j.recurring ?? {}; };
+const editAt = (wt, rel, fn) => { const f = path.join(wt, rel); const txt = fs.readFileSync(f, 'utf8'); const m = BLOCK.exec(txt); const j = JSON.parse(m[1]); fn(j); fs.writeFileSync(f, txt.replace(m[1], () => JSON.stringify(j, null, 2))); };
+
+for (const how of ['merge', 'squash', 'rebase']) {
+  test(`RV6-RENAME (${how}): settings.md missing at the base, main brings it back by a rename of the file the chore edits: refused, and the job doesn't land (final-6 F1)`, () => {
+    const T = setup(`rv6ren-${how}`);
+    try {
+      T.onMain((j) => { j.recurring = Object.fromEntries(['aa', 'bb', 'cc', 'dd', 'ee'].map((n) => [n, check({ title: `${n} job`, run: `echo ${n}` })])); if (how !== 'merge') j.merge_method = how; });
+      // main moves settings.md aside for a while; a chore cut then edits the file where main put it
+      T.g(['mv', SETP, OLDP], T.old); T.g(['commit', '-qm', 'settings aside'], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+      T.choreBranch('mig', (wt) => editAt(wt, OLDP, (j) => { j.recurring.zz = check({ title: 'Z job', run: 'echo zz' }); }));
+      // main puts it back (git's rename detection pairs it with the chore's edited file), then stops aa
+      T.g(['fetch', '-q', 'origin'], T.old); T.g(['reset', '-q', '--hard', 'origin/main'], T.old);
+      T.g(['mv', OLDP, SETP], T.old); T.g(['commit', '-qm', 'settings back'], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+      T.onMain((j) => { delete j.recurring.aa; }, 'stop aa');
+      const why = how === 'rebase' ? REBASE_EQUAL : DIFFERS;
+      refused(T.dry('mig'), why);
+      refused(T.merge('mig'), why);
+      T.g(['fetch', '-q', 'origin'], T.old);
+      assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'zz'), false, 'zz landed with no answer');
+    } finally { T.done(); }
+  });
+}
+
+test('RV6-REBASE-OURS: rebase, a branch cut before a stop merges main with -s ours, then main moves by another file: refused, the files differ (final-6b B6-1)', () => {
+  const T = setup('rv6ro');
+  try {
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job' }), bb: check({ title: 'B job', run: 'echo bb' }) }; j.merge_method = 'rebase'; });
+    const w = T.choreBranch('back', (wt) => write(path.join(wt, NOTES), 'n\n'));
+    // main stops bb (by hand: under rebase no branch lands a job change, d-20261120-075327162)
+    T.onMain((j) => { delete j.recurring.bb; }, 'stop bb');
+    T.g(['fetch', '-q', 'origin'], w); T.g(['merge', '-q', '-s', 'ours', '--no-edit', 'origin/main'], w); T.g(['push', '-q', 'origin', 'chore-back'], w);
+    onMainFile(T, 'docs/devteam/project/other.md', 'o\n', 'main moves, not settings');
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.notEqual(T.g(['rev-parse', `origin/chore-back:${SETP}`], T.old), T.g(['rev-parse', `origin/main:${SETP}`], T.old), 'the head\'s file is not main\'s');
+    // with an answer for bb back: a rebase lands main's file (bb stopped), not the head's
+    const q2 = T.yes({ recurring: { bb: check({ title: 'B job', run: 'echo bb' }) } });
+    refused(T.dry('back', q2), REBASE_EQUAL);
+    refused(T.dry('back'), REBASE_EQUAL);
+  } finally { T.done(); }
+});
+
+test('RV6-CRISS: a criss-cross whose two bases\' settings.md differ, the head\'s equal to one, then main stops a job: refused (final-6 F2, final-6b B6-3)', () => {
+  const T = setup('rv6criss');
+  try {
+    T.onMain((j) => { j.recurring = Object.fromEntries(['aa', 'bb', 'cc', 'dd'].map((n) => [n, check({ title: `${n} job`, run: `echo ${n}` })])); });
+    const wt = T.choreBranch('cx', (w) => write(path.join(w, NOTES), 'cx 1\n'));
+    const x1 = T.g(['rev-parse', 'HEAD'], wt);
+    // m1 changes settings.md (a tick), so the two bases' blobs differ
+    T.g(['fetch', '-q', 'origin'], T.old); T.g(['reset', '-q', '--hard', 'origin/main'], T.old);
+    T.onMain((j) => { j.tick_minutes = 7; }, 'm1: tick');
+    const m1 = T.g(['rev-parse', 'origin/main'], T.old);
+    // main merges x1; the chore merges m1 (not main's tip)
+    T.g(['merge', '-q', '--no-ff', '-m', 'main takes x1', x1], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+    T.g(['merge', '-q', '--no-ff', '-m', 'chore takes m1', m1], wt); T.g(['push', '-q', '-f', 'origin', 'chore-cx'], wt);
+    T.onMain((j) => { delete j.recurring.bb; }, 'stop bb');
+    T.g(['fetch', '-q', 'origin'], T.old);
+    const bases = T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cx'], T.old).split('\n');
+    assert.equal(bases.length, 2, 'two merge bases');
+    assert.notEqual(T.g(['rev-parse', `${bases[0]}:${SETP}`], T.old), T.g(['rev-parse', `${bases[1]}:${SETP}`], T.old), 'their settings.md differ');
+    refused(T.dry('cx'), DIFFERS);
+    refused(T.merge('cx'), DIFFERS);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'bb'), false, 'bb stays stopped');
+  } finally { T.done(); }
+});
+
+test('RV6-UPSTREAM-OURS: rebase, main merges with -s ours a side commit that cherry-picks a branch commit: refused, the files differ (final-6b B6-3)', () => {
+  const T = setup('rv6uo');
+  try {
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job' }), bb: check({ title: 'B job', run: 'echo bb' }) }; j.merge_method = 'rebase'; });
+    // the chore: c1 retitles aa
+    const wt = T.choreBranch('pick', (w) => rawEdit(w, (t) => t.replace('"title": "A job"', '"title": "A2"')));
+    const c1 = T.g(['rev-parse', 'HEAD'], wt);
+    // a side line off main cherry-picks c1; main merges it with -s ours, keeping main's file
+    T.g(['fetch', '-q', 'origin'], T.old); T.g(['reset', '-q', '--hard', 'origin/main'], T.old);
+    const side = path.join(T.base, 'side');
+    T.g(['worktree', 'add', '-q', '--detach', side, 'origin/main'], T.old); T.g(['cherry-pick', '-x', c1], side);
+    T.g(['merge', '-q', '-s', 'ours', '--no-edit', T.g(['rev-parse', 'HEAD'], side)], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(T.g(['rev-parse', `origin/main:${SETP}`], T.old), T.g(['rev-parse', `${c1}~1:${SETP}`], T.old), 'main\'s file is as the branch left it');
+    const q = T.yes({ recurring: { aa: check({ title: 'A2' }) } });
+    refused(T.dry('pick', q), REBASE_EQUAL);
+  } finally { T.done(); }
+});
+
+test('RV6-UNTOUCHED: a branch that never touches settings.md and doesn\'t contain main merges when main\'s file is still the one it has; once main changes the file, the files differ and it is refused', () => {
+  const T = setup('rv6un');
+  try {
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job' }), bb: check({ title: 'B job', run: 'echo bb' }) }; });
+    T.choreBranch('notes-a', (wt) => write(path.join(wt, NOTES), 'a\n'));
+    T.choreBranch('notes-b', (wt) => write(path.join(wt, 'docs/devteam/project/other.md'), 'b\n'));
+    // main moves by another file only: main's settings.md is still the branch's, so the same file lands
+    onMainFile(T, 'docs/devteam/project/third.md', 't\n', 'main moves, not settings');
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.throws(() => T.g(['merge-base', '--is-ancestor', 'origin/main', 'origin/chore-notes-a'], T.old), 'notes-a doesn\'t contain main');
+    passes(T.merge('notes-a'));
+    // main changes settings.md (a stop): notes-b's file is no longer main's, and it doesn't contain main
+    const q = T.yes({ recurring: { bb: null } });
+    T.jobsChore('stop-bb', (j) => { delete j.recurring.bb; });
+    passes(T.merge('stop-bb', ['--approved', q]));
+    refused(T.dry('notes-b'), DIFFERS);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(Object.hasOwn(T.mainSettings().recurring, 'bb'), false);
   } finally { T.done(); }
 });

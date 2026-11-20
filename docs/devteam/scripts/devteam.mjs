@@ -6964,7 +6964,8 @@ function cmdMerge() {
   const mainBranch0 = S.main_branch;
   R.git(['fetch', '--quiet', 'origin', mainBranch0]);
   // main as the checks judge it: the code lands onto exactly this commit, or not at all (final-4 F3)
-  const checkedMain = R.resolveCommit(`origin/${mainBranch0}`);
+  // home's is mainSha(), the main recurringRegistry.landing judges, so the landing and the land agree
+  const checkedMain = R.name === 'home' ? mainSha() : R.resolveCommit(`origin/${mainBranch0}`);
   if (checkedMain && R.git(['merge-base', '--is-ancestor', sha, checkedMain]) !== null) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
   // records in home: one pinned home commit, checked here and landed below. Decided once, at the
   // head, after fetching home's ticket/<id>, so records pushed from another clone count (home wins)
@@ -23912,31 +23913,24 @@ const recurringRegistry = Object.freeze({
     const timedOut = r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL';
     return { status: r.status, out: r.stdout ?? '', err: String(r.stderr ?? ''), timedOut, ok: r.status === 0 && !timedOut };
   },
-  // What the jobs would be once sha lands on home's main as it is now (final-1 F1). The kit no
-  // longer predicts a merge of settings.md (ruling d-20261120-044235981): span text, merge-file,
-  // merge-tree and a throwaway git merge each disagreed somewhere with what the forge lands (a decoy
-  // block, another diff algorithm, attributes read from another checkout, a rebase that replays
-  // commits one by one). It clears only the cases where what lands needs no text merge of the file,
-  // and refuses the rest. With settings.md's blob at main, the head and every merge base, judged
-  // from blobs, never from which commits rev-list happens to list (d-20261120-064519721):
-  // - main changed it (main's blob differs from some base's, or there is no base): refused unless
-  //   the head's blob is every base's and no commit in main..sha touches the file. A merge of main
-  //   that keeps the branch's file (-s ours) is TREESAME to a parent, so rev-list alone misses it
-  //   (final-5b B5-1). Then main's file lands under every merge method (tree level, no text merge),
-  //   and the jobs are main's. The refusal says merge main in, or under rebase, rebase onto main;
-  // - main didn't change it: the head's file lands (merge and squash take the changed side),
-  //   compared canonically with main's. A rebase drops a branch commit whose patch main already
-  //   has, even if main later put the file back (final-5 F1), so under rebase a branch commit that
-  //   touches the file beside any commit in sha..main that touches it is refused too.
-  // Under merge_method rebase the forge drops merge commits and lands every other commit on main:
-  // a merge commit beside a commit that touches the file is refused, and each touching commit's
-  // jobs must read and pass their shape. Every git call has a timeout; one that times out refuses.
+  // What the jobs would be once sha lands on home's main (final-1 F1), with no reasoning about merge
+  // bases (rulings d-20261120-044235981, d-20261120-075327162): six rounds found a hole in every
+  // prediction of what a three-way merge, rename detection or a rebase does with settings.md. Let M
+  // be main's sha as the checks read it (mainSha(); merge lands only onto it). Two cases are cleared:
+  // - the head's settings.md blob is M's, both present: the same file on both sides lands as it is,
+  //   and the jobs are main's (no job change);
+  // - M is an ancestor of the head: a merge or squash lands the head's tree, so the head's file
+  //   lands, compared canonically with main's (the binding decides any change).
+  // Anything else is refused. Under merge_method rebase only the first is cleared: a rebase replays
+  // commits, dropping merges and patches already upstream. Every git call has a timeout; one that
+  // times out refuses.
   // { now, merged, changed, problem }: changed when the landed jobs differ canonically from main's
   // now (a missing key reads {}); a problem counts as changed, failing closed.
   landing(sha) {
     const main = mainRef();
     if (!main) return { now: null, merged: null, changed: false, problem: null };
-    return memo(`recurring-landing\0${main}\0${mainSha()}\0${sha}`, () => {
+    const M = mainSha();
+    return memo(`recurring-landing\0${main}\0${M}\0${sha}`, () => {
       const g = recurringRegistry.git;
       const rel = `${projectRel}/settings.md`;
       const late = [];
@@ -23945,40 +23939,21 @@ const recurringRegistry = Object.freeze({
       const jobsIn = (text) => { const m = text == null ? null : String(text).match(/```json devteam\s*\n([\s\S]*?)\n```/); if (!m) return undefined; try { return jobsOf(JSON.parse(m[1])); } catch { return undefined; } };
       const jobsAt = (ref) => { const r = run(['show', `${ref}:${rel}`]); return jobsIn(r.ok ? r.out : null); };
       const blob = (ref) => { const r = run(['rev-parse', '--verify', '-q', `${ref}:${rel}`]); return r.ok ? r.out.trim() : null; };
-      const list = (args) => { const r = run(args); return r.ok ? r.out.split('\n').filter(Boolean) : null; };
-      const now = jobsAt(main);
+      const now = jobsAt(M);
       const lands = (merged, problem = null) => {
         if (late.length) problem = `settings.md: ${[...new Set(late)].join(', ')} timed out, so the kit can't tell what would land; check again`;
         if (!problem && merged === undefined && now !== undefined) problem = `settings: the json devteam block ${sha.slice(0, 12)} would land on ${main} can't be read (missing or not valid JSON), so neither can its jobs`;
         return { now, merged, changed: !!problem || canonical(merged) !== canonical(now), problem };
       };
-      const bases = list(['merge-base', '--all', main, sha]) ?? [];
-      const touching = list(['rev-list', `${main}..${sha}`, '--full-history', '--', rel]);
+      const [atMain, atHead] = [blob(M), blob(sha)];
       if (late.length) return lands(null);
-      if (touching === null) return lands(null, `settings.md: git rev-list ${main}..${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
-      const rebase = repo('home').settings.merge_method === 'rebase';
-      const both = `settings.md: main changed it since this branch left it, and so does the branch; ${rebase ? 'rebase the branch onto main first' : 'merge main into the branch first'}`;
-      const [atMain, atHead, atBases] = [blob(main), blob(sha), bases.map(blob)];
+      if (atMain && atHead && atMain === atHead) return lands(now);
+      if (repo('home').settings.merge_method === 'rebase') return lands(null, "settings.md: merge_method is rebase, which replays commits, so the branch's settings.md must equal main's; land the change with merge or squash");
+      const anc = run(['merge-base', '--is-ancestor', M, sha]);
       if (late.length) return lands(null);
-      const mainChanged = !bases.length || atBases.some((b) => b !== atMain);
-      if (mainChanged) return touching.length || !atBases.every((b) => b === atHead) ? lands(null, both) : lands(now);
-      if (rebase && touching.length) {
-        const upstream = list(['rev-list', `${sha}..${main}`, '--full-history', '--', rel]);
-        if (late.length) return lands(null);
-        if (upstream === null || upstream.length) return lands(null, both);
-        const merges = list(['rev-list', '--merges', `${main}..${sha}`]);
-        if (late.length) return lands(null);
-        if (merges === null || merges.length) return lands(null, 'settings.md: merge_method is rebase and this branch has merge commits beside a settings change; rebase the branch onto main instead');
-        for (const c of touching) {
-          const jobs = jobsAt(c);
-          if (late.length) return lands(null);
-          const why = jobs === undefined ? "its json devteam block can't be read (missing or not valid JSON)"
-            : !isObj(jobs) ? 'settings recurring: an object of { "<name>": { kind, title, what, every, … } }'
-              : Object.entries(jobs).flatMap(([n, e]) => recurringEntryProblems(n, e))[0];
-          if (why) return lands(null, `settings.md at ${c.slice(0, 12)}: ${why}; merge_method is rebase, which lands each commit on main, so each must read`);
-        }
-      }
-      return lands(jobsAt(sha));
+      if (anc.status === 0) return lands(jobsAt(sha));
+      if (anc.status === 1) return lands(null, "settings.md: this branch's settings.md differs from main's and the branch doesn't contain main's tip; merge main into the branch first");
+      return lands(null, `settings.md: git merge-base --is-ancestor ${M.slice(0, 12)} ${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
     });
   },
   // The .gitattributes lines that give settings.md a merge driver or a filter (final-3 F2): git's
