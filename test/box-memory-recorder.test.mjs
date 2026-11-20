@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { PORTS, bareProject, json, kit, startDashboard, testDir, until } from './lib/kit.mjs';
+import { PROCESSES } from './fixtures/box-memory/make-proc.mjs';
 
 const FIX = path.join(testDir, 'fixtures', 'box-memory');
 const PROC = path.join(FIX, 'proc');
@@ -21,8 +22,14 @@ const EXPECTED = json(fs.readFileSync(path.join(FIX, 'proc-expected.json'), 'utf
 const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
 const cut = (a, b) => { const i = src.indexOf(a), j = src.indexOf(b); assert.ok(i >= 0 && j > i, `${a} … ${b} marks a block in devteam.mjs`); return src.slice(i, j); };
 const region = () => cut('/* box-memory start */', '/* box-memory end */');
-// the region's names, evaluated with nothing in scope: a part that reaches outside throws when called
-const fns = (names) => vm.runInContext(`${region()}\n;({ ${names.join(', ')} })`, vm.createContext({}));
+// the region's names, evaluated with nothing in scope: a part that reaches outside throws when called.
+// What they return is cloned into this realm: assert's deepEqual compares prototypes, and the vm's
+// Object.prototype isn't this one's.
+const fns = (names) => {
+  const got = vm.runInContext(`${region()}\n;({ ${names.join(', ')} })`, vm.createContext({}));
+  const here = (v) => (v !== null && typeof v === 'object' ? structuredClone(v) : v);
+  return Object.fromEntries(Object.entries(got).map(([k, f]) => [k, typeof f === 'function' ? (...a) => here(f(...a)) : here(f)]));
+};
 const { memoryReadingProblem } = fns(['memoryReadingProblem']);
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-memrec-'));
@@ -184,6 +191,76 @@ test('C1f: the page size is the nearest of 4 KB, 16 KB and 64 KB to rss over res
   assert.equal(memoryPageSize(1000, 1000 * 65536), 65536);
   assert.equal(memoryPageSize(0, 123), 4096, 'nothing to go on: 4 KB');
   assert.equal(memoryPageSize(null, null), 4096);
+});
+
+test('T2: memoryFold over kit-590\'s fixture table is proc-expected.json\'s reading, in the contract\'s key order', () => {
+  const { memoryWords, memoryFold, MEMORY_READING_KEYS, MEMORY_KINDS } = fns(['memoryWords', 'memoryFold', 'MEMORY_READING_KEYS', 'MEMORY_KINDS']);
+  const procs = PROCESSES.map(([, argv, , cwd, pages]) => ({ words: memoryWords(argv.join('\0')), cwd, rss: pages * 4096 }));
+  const want = EXPECTED.reading;
+  const roots = Object.entries(EXPECTED.roots).map(([name, root]) => ({ root, name }));
+  // more command names than the fixture uses: 1490's --help still has none
+  const commands = new Set(['dashboard', 'wait', 'hello', 'gate', 'help', 'status', 'install', 'ci', 'test']);
+  const opts = { at: want.at, memory: { inUse: want.working_set, max: want.max, source: want.source }, ceiling: 0.8, roots, commands, partial: false };
+  const r = memoryFold(procs, opts);
+  assert.deepEqual(r, { ...want, ceiling: 0.8 });
+  assert.deepEqual(Object.keys(r), MEMORY_READING_KEYS.filter((k) => k in r), 'the contract\'s key order');
+  assert.deepEqual(Object.keys(r.kinds), MEMORY_KINDS.filter((k) => k in r.kinds), 'kinds in MEMORY_KINDS order');
+  assert.equal(memoryReadingProblem(JSON.stringify(r)), null);
+  assert.equal(memoryFold(procs, { ...opts, partial: true }).partial, true);
+  const none = memoryFold(null, opts);
+  for (const k of ['sessions', 'kinds', 'devteam', 'projects']) assert.ok(!(k in none), `no /proc: no ${k}`);
+  assert.deepEqual(none, { v: 1, at: want.at, working_set: want.working_set, max: want.max, ceiling: 0.8, source: want.source });
+  assert.equal(memoryReadingProblem(JSON.stringify(none)), null);
+});
+
+test('T2: memoryRootOf takes the longest root holding the cwd, and a worktree under its .worktrees/', () => {
+  const { memoryRootOf } = fns(['memoryRootOf']);
+  const roots = [{ root: '/c/a', name: 'a' }, { root: '/c/a/inner', name: 'inner' }];
+  assert.deepEqual(memoryRootOf('/c/a', roots), { name: 'a', worktree: false });
+  assert.deepEqual(memoryRootOf('/c/a/.worktrees/x/y', roots), { name: 'a', worktree: true });
+  assert.deepEqual(memoryRootOf('/c/a/.worktrees', roots), { name: 'a', worktree: false });
+  assert.deepEqual(memoryRootOf('/c/a/inner/.worktrees/t', roots), { name: 'inner', worktree: true });
+  assert.equal(memoryRootOf('/c/ab', roots), null, 'a sibling with the root as its prefix is outside');
+  assert.equal(memoryRootOf(null, roots), null);
+});
+
+test('T2: memoryQuery refuses each malformed or out-of-range query, and defaults to the last day thinned', () => {
+  const { memoryQuery } = fns(['memoryQuery']);
+  const now = Date.parse('2026-11-20T12:00:00Z');
+  const err = (q, loopback = true) => assert.equal(typeof memoryQuery(q, { now, loopback }).error, 'string', JSON.stringify(q));
+  // C4b
+  for (const since of ['9d', '24', '1w', '1000h', '0h', '']) err({ since });
+  err({ since: ['24h', '1h'] });
+  // C4c
+  err({ after: iso(now - 7 * HOUR) });
+  err({ after: iso(now + 5 * MIN) });
+  err({ after: 'yesterday' });
+  err({ after: '2026-02-30T00:00:00Z' });
+  // C4d
+  err({ thin: '0', since: '48h' });
+  err({ thin: '0', since: '2d' });
+  err({ thin: '1' });
+  err({ thin: '' });
+  err({ foo: '1' });
+  err({ thin: '0', since: '24h' }, false);
+  assert.deepEqual(memoryQuery({}, { now, loopback: false }), { from: now - DAY, thin: true });
+  assert.deepEqual(memoryQuery({ since: '8d' }, { now, loopback: false }), { from: now - 8 * DAY, thin: true });
+  assert.deepEqual(memoryQuery({ since: '24h', thin: '0' }, { now, loopback: true }), { from: now - DAY, thin: false });
+  const a = iso(now - 2 * HOUR);
+  assert.deepEqual(memoryQuery({ after: a, since: 'nonsense' }, { now, loopback: false }), { from: now - 2 * HOUR, after: now - 2 * HOUR, thin: false }, 'with after, since is ignored');
+});
+
+test('T2: memoryThin keeps a 5-minute bucket\'s peak past 6 hours, and every reading within them', () => {
+  const { memoryThin } = fns(['memoryThin']);
+  const now = Date.parse('2026-11-20T12:00:00Z');
+  const b = Math.floor((now - 7 * HOUR) / (5 * MIN)) * 5 * MIN;
+  const r = (t, ws) => ({ v: 1, at: iso(t), working_set: ws });
+  const old = [r(b + 10000, 5), r(b + 60000, 9), r(b + 120000, 9)];
+  const recent = [r(now - HOUR - MIN, 1), r(now - HOUR, 2)];
+  assert.deepEqual(memoryThin([...old, ...recent], now), [old[1], ...recent], 'the peak, the earliest of equals; the last hour whole');
+  // past 3 days a bucket is 30 minutes
+  const b30 = Math.floor((now - 4 * DAY) / (30 * MIN)) * 30 * MIN;
+  assert.deepEqual(memoryThin([r(b30, 3), r(b30 + 20 * MIN, 4)], now), [r(b30 + 20 * MIN, 4)]);
 });
 
 // ===== D2: nothing of a command line, the environment or a path is kept =====

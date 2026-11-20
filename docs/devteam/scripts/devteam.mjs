@@ -18593,6 +18593,161 @@ function memoryReadingProblem(line) {
   }
   return null;
 }
+// The recorder's pure parts (kit-591): they name nothing outside this region, so a test runs them alone.
+const MEMORY_AGENTS = ['claude', 'codex', 'opencode'];
+const MEMORY_BROWSERS = ['chrome', 'chromium', 'headless_shell'];
+const MEMORY_INSTALLERS = ['npm', 'pnpm', 'yarn', 'bundle', 'pip', 'uv'];
+const MEMORY_INSTALLER_SCRIPTS = ['npm-cli.js', 'pnpm.cjs', 'pnpm.js', 'yarn.js'];
+const MEMORY_INSTALLS = ['install', 'i', 'ci', 'add', 'sync'];
+const MEMORY_CMDLINE_MAX = 65536;
+const MEMORY_HOUR = 3600000, MEMORY_DAY = 86400000;
+const memoryBase = (p) => p.split('/').pop();
+// A cmdline's words: NUL-separated; a retitled process ("npm ci", "chromium --type=renderer") puts
+// its words in argv[0], so argv[0] alone is split on spaces and a later entry (a script path holding
+// a space) stays whole. Only the first 64 KB: the kind needs the first few words.
+function memoryWords(cmdline) {
+  const argv = String(cmdline).slice(0, MEMORY_CMDLINE_MAX).split('\0');
+  if (argv[0].includes(' ')) argv.splice(0, 1, ...argv[0].split(' '));
+  return argv.filter((w) => w !== '');
+}
+// { kind, subcommand? } by the contract's rules: the executable's basename, never comm; node's script
+// is its first word not an option; a subcommand only when it is a command name (commands, a Set).
+function memoryClassify(words, commands) {
+  if (!words.length) return { kind: 'other' };
+  const exe = memoryBase(words[0]);
+  if (MEMORY_AGENTS.includes(exe)) return { kind: 'agent' };
+  if (MEMORY_BROWSERS.includes(exe)) return { kind: 'browser' };
+  if (MEMORY_INSTALLERS.includes(exe)) return { kind: MEMORY_INSTALLS.includes(words[1]) ? 'install' : 'other' };
+  if (exe !== 'node') return { kind: 'other' };
+  const i = words.findIndex((w, j) => j > 0 && !w.startsWith('-'));
+  if (i < 0) return { kind: 'node' };
+  const script = memoryBase(words[i]), next = words[i + 1];
+  if (script === 'devteam.mjs') return next !== undefined && commands.has(next) ? { kind: 'devteam', subcommand: next } : { kind: 'devteam' };
+  if (MEMORY_INSTALLER_SCRIPTS.includes(script) && MEMORY_INSTALLS.includes(next)) return { kind: 'install' };
+  return { kind: 'node' };
+}
+// The known roots, the registry's and the hub's scan's, absolute only and once each, named by the
+// hello, else settings.md's project, else the folder; the reading's ceiling is the lowest valid one
+// among them (a root with none counts 0.8, as its gate does). settingsOf(root) is the root's settings
+// block or null.
+function memoryNameRoots(registry, scanned, settingsOf) {
+  const hello = new Map();
+  for (const s of scanned) if (s && typeof s.root === 'string' && typeof s.name === 'string' && s.name && !hello.has(s.root)) hello.set(s.root, s.name);
+  const all = [...new Set([...registry, ...scanned.map((s) => s && s.root)])].filter((r) => typeof r === 'string' && r.startsWith('/'));
+  const roots = [];
+  let ceiling = Infinity;
+  for (const root of all) {
+    const s = settingsOf(root) ?? {};
+    const c = s.machine_memory_ceiling;
+    ceiling = Math.min(ceiling, typeof c === 'number' && c >= MEMORY_CEILING_MIN && c <= MEMORY_CEILING_MAX ? c : 0.8);
+    const name = hello.get(root) ?? (typeof s.project === 'string' && s.project ? s.project : memoryBase(root.replace(/\/+$/, '')));
+    if (name) roots.push({ root, name });
+  }
+  return { roots, ceiling: ceiling === Infinity ? 0.8 : ceiling };
+}
+// statm counts pages and node has no page-size call: the nearest of the three sizes to rss over the
+// resident pages of the same process.
+function memoryPageSize(residentPages, rssBytes) {
+  if (!(residentPages > 0 && rssBytes > 0)) return 4096;
+  const per = rssBytes / residentPages;
+  return [4096, 16384, 65536].reduce((m, s) => (Math.abs(s - per) < Math.abs(m - per) ? s : m));
+}
+// The longest root holding cwd: { name, worktree }, worktree when cwd is in <root>/.worktrees/<name>.
+function memoryRootOf(cwd, roots) {
+  if (typeof cwd !== 'string') return null;
+  let best = null;
+  for (const r of roots) {
+    if (cwd !== r.root && !cwd.startsWith(`${r.root}/`)) continue;
+    if (!best || r.root.length > best.root.length) best = r;
+  }
+  if (!best) return null;
+  return { name: best.name, worktree: /^\.worktrees\/[^/]/.test(cwd.slice(best.root.length + 1)) };
+}
+// procs ({ words, cwd, rss }[], or null with no /proc) into a machine-memory@1 reading, its keys in
+// the contract's order; a field the machine couldn't read is left out, never zero.
+function memoryFold(procs, { at, memory, ceiling, roots, commands, partial }) {
+  const r = { v: 1, at, working_set: memory.inUse };
+  if (memory.max !== undefined && memory.max !== null) r.max = memory.max;
+  if (ceiling !== undefined) r.ceiling = ceiling;
+  if (memory.source !== undefined) r.source = memory.source;
+  if (partial) r.partial = true;
+  if (procs === null) return r;
+  let sessions = 0;
+  const kinds = {}, devteam = {}, projects = {};
+  for (const p of procs) {
+    const { kind, subcommand } = memoryClassify(p.words, commands);
+    const k = (kinds[kind] ??= { n: 0, rss: 0 }); k.n++; k.rss += p.rss;
+    if (subcommand) { const d = (devteam[subcommand] ??= { n: 0, rss: 0 }); d.n++; d.rss += p.rss; }
+    const at = memoryRootOf(p.cwd, roots);
+    if (!at) continue;
+    const session = kind === 'agent' && at.worktree;
+    if (session) sessions++;
+    const e = (projects[at.name] ??= { rss: 0, sessions: 0, devteam: {} });
+    e.rss += p.rss;
+    if (session) e.sessions++;
+    if (subcommand) e.devteam[subcommand] = (e.devteam[subcommand] ?? 0) + p.rss;
+  }
+  r.sessions = sessions;
+  r.kinds = {};
+  for (const k of MEMORY_KINDS) if (kinds[k]) r.kinds[k] = kinds[k];
+  r.devteam = devteam;
+  r.projects = {};
+  for (const [name, e] of Object.entries(projects)) {
+    const out = (r.projects[name] = { rss: e.rss });
+    if (e.sessions) out.sessions = e.sessions;
+    if (Object.keys(e.devteam).length) out.devteam = e.devteam;
+  }
+  return r;
+}
+// /memory.json's query (params: name to value, an array when repeated) as { from, after?, thin }, or
+// { error } in words, the guards in the spec's order. now is ms; loopback is the request's socket.
+function memoryQuery(params, { now, loopback }) {
+  const known = ['since', 'after', 'thin'];
+  const unknown = Object.keys(params).find((k) => !known.includes(k));
+  if (unknown !== undefined) return { error: `${unknown} is not a parameter of /memory.json: it takes ${known.join(', ')}` };
+  const repeated = Object.keys(params).find((k) => Array.isArray(params[k]));
+  if (repeated !== undefined) return { error: `${repeated} is given more than once: give it once` };
+  const { since, after, thin } = params;
+  let q;
+  if (after !== undefined) {
+    if (!memoryAtOk(after)) return { error: `after is ${memoryShown(after)}: it should be a reading's at, YYYY-MM-DDTHH:MM:SSZ in UTC` };
+    const t = Date.parse(after);
+    if (t > now + 60000) return { error: `after is ${after}, in the future: it should be a time up to 6 hours back` };
+    if (t < now - 6 * MEMORY_HOUR) return { error: `after is ${after}, more than 6 hours back: ask since=24h instead` };
+    q = { from: t, after: t, window: now - t };
+  } else {
+    const s = since ?? '24h';
+    const m = /^(\d{1,3})([hd])$/.exec(s);
+    if (!m) return { error: `since is ${memoryShown(s)}: it should be hours or days, 1 to 3 digits then h or d (24h, 8d)` };
+    const window = Number(m[1]) * (m[2] === 'h' ? MEMORY_HOUR : MEMORY_DAY);
+    if (window === 0) return { error: `since is ${s}: it should be more than 0` };
+    if (window > 8 * MEMORY_DAY) return { error: `since is ${s}: the window is at most 8 days` };
+    q = { from: now - window, window };
+  }
+  if (thin !== undefined && thin !== '0') return { error: `thin is ${memoryShown(thin)}: it should be 0, or left out` };
+  if (thin === '0' && !loopback) return { error: 'thin=0 is only for a loopback request' };
+  if (thin === '0' && q.window > MEMORY_DAY) return { error: 'thin=0 is only for a window of 24 hours or less' };
+  const out = { from: q.from };
+  if (q.after !== undefined) out.after = q.after;
+  out.thin = q.after === undefined && thin !== '0';
+  return out;
+}
+// Readings 6 hours old or less stay; older ones keep one per 5-minute bucket of their epoch time (30
+// past 3 days), the bucket's highest working_set and the earliest of equals, so a peak survives.
+function memoryThin(readings, now) {
+  const kept = [], best = new Map();
+  for (const r of readings) {
+    const t = Date.parse(r.at);
+    if (!Number.isFinite(t)) continue;
+    const age = now - t;
+    if (age <= 6 * MEMORY_HOUR) { kept.push([t, r]); continue; }
+    const size = age > 3 * MEMORY_DAY ? 30 * 60000 : 5 * 60000;
+    const key = `${size}:${Math.floor(t / size)}`;
+    const b = best.get(key);
+    if (!b || r.working_set > b[1].working_set || (r.working_set === b[1].working_set && t < b[0])) best.set(key, [t, r]);
+  }
+  return [...best.values(), ...kept].sort((a, b) => a[0] - b[0]).map(([, r]) => r);
+}
 /* box-memory end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
