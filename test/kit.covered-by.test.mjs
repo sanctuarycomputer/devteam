@@ -90,7 +90,7 @@ test('merge covered_by a list: the named checks green, the gate is not run, and 
   } finally { C.F.done(); }
 });
 
-test('merge covered_by: when coverage fails, the gate runs as today', async (t) => {
+test('merge covered_by: when coverage fails, the gate runs as today (part 1 of 2)', async (t) => {
   const C = coveredFixture('cov-runs');
   const green = [covRun('test')];
   // the gate ran here: its marker, one more gate line, and merge's reason
@@ -136,6 +136,24 @@ test('merge covered_by: when coverage fails, the gate runs as today', async (t) 
       assert.equal(C.ran(), false, r.text);
       assert.match(r.text, /not run here/);
     });
+  } finally { C.F.done(); }
+});
+
+test('merge covered_by: when coverage fails, the gate runs as today (part 2 of 2)', async (t) => {
+  const C = coveredFixture('cov-runs');
+  const green = [covRun('test')];
+  // the gate ran here: its marker, one more gate line, and merge's reason
+  const runs = (why, args = ['--dry-run']) => {
+    const before = C.gateLines();
+    const r = C.merge(args);
+    assert.equal(r.status, 0, r.text);
+    assert.equal(C.ran(), true, `the gate ran: ${r.text}`);
+    assert.equal(C.gateLines(), before + 1, 'a gate line for the run');
+    assert.match(r.text, /gate test runs here: /);
+    assert.match(r.text, why);
+    return r;
+  };
+  try {
     await t.test('covered_by: a PR that changes the forge\'s CI configuration runs the gate', () => {
       C.setGate();
       const sha2 = C.land('console-02-g', { 'src/main.js': 'again\n', '.github/workflows/test.yml': 'on: pull_request\n' });
