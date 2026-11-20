@@ -1389,6 +1389,25 @@ test('A15 landing: forge git, a push origin takes but answers after the timeout 
   } finally { T.done(); }
 });
 
+test('A15 landing: forge git, a landing merge that hangs is killed at its timeout and refused, with nothing pushed (final-11 F4)', { timeout: 300000 }, () => {
+  const T = setup('a15-merge-hangs');
+  try {
+    // a git whose landing merge never returns: exec, so the kill reaches the sleep itself
+    const dir = path.join(T.base, 'git-merge-hangs');
+    write(path.join(dir, 'git'), `#!/bin/sh\ncase " $* " in *" merge --no-ff --quiet "*) exec sleep 200 ;; esac\nexec "${REAL_GIT}" "$@"\n`);
+    fs.chmodSync(path.join(dir, 'git'), 0o755);
+    T.choreBranch('mhang', (w) => write(path.join(w, NOTES), 'mhang\n'));
+    const before = T.g(['rev-parse', 'origin/main']);
+    const acts = T.acts().length;
+    const t0 = Date.now();
+    refused(T.merge('mhang', [], { PATH: `${dir}${path.delimiter}${process.env.PATH}`, DEVTEAM_GIT_TIMEOUT_MS: '15000' }));
+    assert.ok(Date.now() - t0 < 100000, `refused at the timeout, before the hung merge returned (${Date.now() - t0} ms)`);
+    T.g(['fetch', '-q', 'origin']);
+    assert.equal(T.g(['rev-parse', 'origin/main']), before, 'nothing pushed');
+    assert.equal(T.acts().length, acts, 'nothing logged');
+  } finally { T.done(); }
+});
+
 // Records in home (links.console.records "home"): a console ticket's records land on home's main
 // from home's ticket/<id> (landRecords), ahead of its code. Records never change the jobs (final-11 F1).
 function recordsHome(name) {
