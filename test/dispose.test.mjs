@@ -66,3 +66,23 @@ test('escaped pipes (\\|) are no cell breaks: the row is disposed, its Fix kept'
   assert.ok(row.includes('| keep `x\\|y` here |'), `the Fix is kept: ${row}`);
   assert.match(row, /\| fixed in the next commit \|$/);
 });
+
+test("check-ticket's warning on a misshapen row says how to fix its shape before dispose, not that dispose keeps it", () => {
+  F.run(F.old, ['ticket', 'add', 'kit-01-cells', '--json', JSON.stringify({ title: 'kit-01-cells', feature: 'chores', component: 'kit', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['a.js'], done_when: ['a misshapen row is refused'], notes: 'n' })], { DEVTEAM_ROLE: 'supervisor' });
+  F.g(['checkout', '-qb', 'ticket/kit-01-cells'], F.old);
+  const rel = 'docs/devteam/project/tickets/kit-01-cells/reviews/final-1.md';
+  fs.mkdirSync(path.dirname(path.join(F.old, rel)), { recursive: true });
+  fs.writeFileSync(path.join(F.old, rel), record('| F1 | Minor | spec | a.js:1 | `a|b` splits the row | fix | |\n| F2 | Minor | spec | a.js:2 | the Fix cell went missing | |'));
+  F.g(['add', rel], F.old);
+  F.g(['commit', '-qm', 'a record with misshapen rows'], F.old);
+  const r = F.run(F.old, ['check-ticket', 'kit-01-cells'], { DEVTEAM_ROLE: 'supervisor' });
+  const w1 = r.err.split('\n').find((l) => /final-1\.md F1:/.test(l)) ?? '';
+  const w2 = r.err.split('\n').find((l) => /final-1\.md F2:/.test(l)) ?? '';
+  assert.match(w1, /8 cells and the header 7/, `a warning for the wide row: ${r.err}`);
+  assert.match(w1, /dispose refuses it/);
+  assert.ok(w1.includes('escape each as "\\|"'), `the wide row is told to escape its pipes: ${w1}`);
+  assert.match(w2, /6 cells and the header 7/, `a warning for the narrow row: ${r.err}`);
+  assert.match(w2, /dispose refuses it/);
+  assert.match(w2, /a cell is missing/);
+  assert.doesNotMatch(r.err, /keeps the row's shape/, 'no warning sends a misshapen row straight to dispose');
+});
