@@ -8434,6 +8434,10 @@ function anchorProblem(a) {
   }
   return null;
 }
+// A subject's key: one open thread per key (kit-97). An item by its ref, a page spot by its view and point,
+// an artifact's or a preview's spot by its page and the element the lens named, else the point. index.html's
+// tKey (with tFrameSpot) is the same function; test/thread-per-subject.test.mjs holds the two equal.
+const subjectKey = (s) => { const spot = () => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
 // What a thread or turn line holds beyond what the schema's walk can say: sizes in bytes, a title
 // of one line, a subject with only its kind's keys, and the supervisor's fields on its own turns.
 function threadLineProblems(o) {
@@ -8599,7 +8603,7 @@ function threadOpen(id, by) {
   if (t.status === 'resolved') die(by === 'owner' ? `${t.id} is resolved; reopen it first (thread reopen ${t.id} "<words>")` : `${t.id} is resolved: the owner closed it, and a reply goes nowhere until they reopen it`);
   return t;
 }
-const openThreadCount = () => threadViews(readLog().objects).filter((x) => x.status === 'open').length;
+const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open').length;
 // Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
 // owner's move), else waiting (on the supervisor).
 function threadCounts() {
@@ -8721,7 +8725,12 @@ function cmdThread() {
     const title = threadTitle(given ?? words);
     if (!title) die('--title: the thread needs a name');
     const files = filesFlag();
-    const n = openThreadCount();
+    const views = threadViews(readLog().objects);
+    // one open thread per subject (kit-97): a second is refused, naming the one to say it in
+    const key = subject === undefined ? null : subjectKey(subject);
+    const had = key === null ? null : views.find((x) => x.status === 'open' && x.subject && subjectKey(x.subject) === key);
+    if (had) die(`${had.id} is already open on this subject: say it there (thread say ${had.id} "<words>")`);
+    const n = openThreadCount(views);
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
     // both lines checked before the thread's is written: a refused first turn leaves no thread with none
     if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);

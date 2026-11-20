@@ -91,7 +91,9 @@ const AUTONOMY_PAGES = ((init = lib.autonomyFixture().init, peek = (extra) => `!
 // kit-96: the Loop
 const LOOP_PAGES = frameOnly(['loop']);
 // kit-97: one thread per subject (not THREADS_PAGES, the Threads panel's list below)
-const THREAD_PAGES = [];
+// a thread's card reopened by a Shift+click on Upkeep's card (its open thread, not a new one), floating on
+// Goals; page-top at 1440x900 only, as the Goals entries above (o-20261116-110914358)
+const THREAD_PAGES = [lib.reopenFixture()].map(({ hash, init, ready }) => ({ hash, init, ready, narrow: { view: '#no-such-view' } }));
 // kit-99: the Trust Score's suggestions
 const TRUST_SUGG_PAGES = [];
 // kit-171: attachments
