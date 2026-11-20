@@ -26931,6 +26931,7 @@ function browserShutdown(ctx, why) {
   if (why === 'signal') for (const s of [process.stdout, process.stderr]) { s.on('error', () => {}); }
   ctx.stopping = (async () => {
     clearTimeout(ctx.idle);
+    try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     const pid = ctx.chrome?.pid;
     if (pid && browserAlive(pid)) {
       await Promise.race([ctx.cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
@@ -27038,7 +27039,8 @@ function browserVerbs(ctx) {
 function browserControl(ctx, secret) {
   const want = Buffer.from(secret);
   let queue = Promise.resolve();
-  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => browserShutdown(ctx, 'idle'), browserIdleMs()); };
+  // with a viewer's socket open, the idle timer arms again rather than stop the daemon
+  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (ctx.viewer && !ctx.stopping ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
   const server = http.createServer((req, res) => {
     req.on('error', () => {});
     res.on('error', () => {});
@@ -27069,13 +27071,204 @@ function browserControl(ctx, secret) {
   return { server, arm };
 }
 const browserListen = (server, port) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(server.address().port); }); });
-// browser serve, in the preview's window: the 503 view placeholder bound first, then the profile and
+// --- the live view (kit-66): browser.html on the view port, and its one socket (RFC 6455, text only)
+// carrying Chrome's screencast to the page. Nothing a viewer sends is logged, written or echoed.
+const BROWSER_WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const BROWSER_WS_MAX = 262144; // a joined message, judged on each header's declared length
+const BROWSER_WS_BACKLOG = 2097152; // a frame message is dropped while more than this waits to be written
+const BROWSER_FRAME_DATA = /^\/9j\/[A-Za-z0-9+/]*={0,2}$/; // the contract's frame data
+const browserHook = (name, dflt) => { const n = Number(browserTestEnv(name)); return Number.isFinite(n) && n > 0 ? n : dflt; };
+const browserPingMs = () => browserHook('DEVTEAM_TEST_BROWSER_PING_MS', 15000);
+const browserCastMax = () => Math.min(1280, Math.round(browserHook('DEVTEAM_TEST_BROWSER_CAST_MAX', 1280)));
+// A header's one value, or null when it is missing or given more than once.
+function browserOneHeader(req, name) {
+  let v = null, n = 0;
+  for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === name) { v = req.rawHeaders[i + 1]; n++; }
+  return n === 1 ? v : null;
+}
+const browserViewHost = (req, port) => [`127.0.0.1:${port}`, `localhost:${port}`].includes(browserOneHeader(req, 'host'));
+// A CDP call the view makes: never an unhandled rejection (a closing pipe answers with one).
+const browserViewCdp = (ctx, method, params, sid) => { ctx.cdp?.send(method, params, sid).catch(() => {}); };
+// One upgraded socket: its frame reader and writer. onText gets each joined text message; onClose runs
+// once, however it closed. A ping every pingMs; closed after twice that with nothing received.
+function browserSocket(sock, { onText, onClose, pingMs }) {
+  let buf = Buffer.alloc(0), parts = [], joined = 0, inMsg = false, closed = false, heard = Date.now();
+  const write = (op, payload) => {
+    if (sock.destroyed || !sock.writable) return;
+    const len = payload.length;
+    let hdr;
+    if (len < 126) hdr = Buffer.from([0x80 | op, len]);
+    else if (len < 65536) { hdr = Buffer.alloc(4); hdr[0] = 0x80 | op; hdr[1] = 126; hdr.writeUInt16BE(len, 2); } else { hdr = Buffer.alloc(10); hdr[0] = 0x80 | op; hdr[1] = 127; hdr.writeBigUInt64BE(BigInt(len), 2); }
+    try { sock.write(Buffer.concat([hdr, payload])); } catch {}
+  };
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(timer);
+    buf = Buffer.alloc(0);
+    parts = [];
+    try { onClose?.(); } catch {}
+  };
+  // A close frame with code, then a FIN; destroyed 1 s later only if the peer hasn't closed.
+  const close = (code) => {
+    if (closed) return;
+    if (code) { const b = Buffer.alloc(2); b.writeUInt16BE(code); write(8, b); }
+    finish();
+    try { sock.end(); } catch {}
+    const t = setTimeout(() => sock.destroy(), 1000);
+    t.unref?.();
+    sock.once('close', () => clearTimeout(t));
+  };
+  const read = () => {
+    for (;;) {
+      if (closed || buf.length < 2) return;
+      const b0 = buf[0], b1 = buf[1], fin = !!(b0 & 0x80), op = b0 & 15;
+      if (b0 & 0x70) return close(1002); // a reserved bit
+      if (!(b1 & 0x80)) return close(1002); // unmasked
+      let len = b1 & 127, at = 2;
+      if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); at = 4; } else if (len === 127) { if (buf.length < 10) return; const big = buf.readBigUInt64BE(2); len = big > BigInt(BROWSER_WS_MAX) ? Infinity : Number(big); at = 10; }
+      if (op >= 8) {
+        if (op > 10 || !fin || len > 125) return close(1002); // an unknown, fragmented or long control frame
+      } else if (op === 2) return close(1003); // binary
+      else if (op === 0 ? !inMsg : op === 1 ? inMsg : true) return close(1002); // a stray continuation, a text mid-message, an unknown opcode
+      else if (joined + len > BROWSER_WS_MAX) return close(1009); // on the header, before its payload is buffered
+      if (buf.length < at + 4 + len) return;
+      const mask = buf.subarray(at, at + 4), body = Buffer.from(buf.subarray(at + 4, at + 4 + len));
+      for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3];
+      buf = buf.subarray(at + 4 + len);
+      if (op === 8) return close(1000);
+      if (op === 9) { write(10, body); continue; }
+      if (op === 10) continue;
+      parts.push(body);
+      joined += len;
+      inMsg = !fin;
+      if (!fin) continue;
+      const text = Buffer.concat(parts).toString('utf8');
+      parts = [];
+      joined = 0;
+      onText?.(text);
+    }
+  };
+  const feed = (chunk) => {
+    if (closed) return;
+    heard = Date.now();
+    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+    try { read(); } catch { close(1011); }
+  };
+  sock.setKeepAlive(true);
+  sock.setNoDelay(true);
+  sock.on('data', feed);
+  sock.on('end', () => close(0));
+  sock.on('close', finish);
+  const timer = setInterval(() => {
+    if (Date.now() - heard >= 2 * pingMs) return close(1001);
+    write(9, Buffer.alloc(0));
+  }, pingMs);
+  timer.unref?.();
+  return {
+    feed,
+    close,
+    get closed() { return closed; },
+    // false when it wasn't sent: a droppable message (a frame) while the socket's backlog is over 2 MiB
+    send(obj, droppable = false) {
+      if (closed || (droppable && sock.writableLength > BROWSER_WS_BACKLOG)) return false;
+      write(1, Buffer.from(JSON.stringify(obj)));
+      return true;
+    },
+  };
+}
+// The screencast, on the tab being cast: JPEG, quality 60, at most 1280 x 1280, every frame.
+function browserCast(ctx, tab, on) {
+  if (!tab?.sessionId) return;
+  if (!on) return browserViewCdp(ctx, 'Page.stopScreencast', {}, tab.sessionId);
+  const m = browserCastMax();
+  browserViewCdp(ctx, 'Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: m, maxHeight: m, everyNthFrame: 1 }, tab.sessionId);
+}
+// Every 250 ms while a viewer is open (and once at open): a new active tab moves the screencast to it;
+// a changed masked URL is sent. Nothing while Chrome isn't up (a forget restarting it).
+function browserViewTick(ctx, v) {
+  try {
+    if (!ctx.ready || ctx.stopping || ctx.viewer !== v || v.ws.closed) return;
+    const tab = ctx.active?.sessionId ? ctx.active : null;
+    if (tab !== v.tab) { browserCast(ctx, v.tab, false); v.tab = tab; browserCast(ctx, tab, true); }
+    const url = browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening);
+    if (url !== v.url) { v.url = url; v.ws.send({ t: 'url', url }); }
+  } catch {}
+}
+function browserViewClose(ctx, v) {
+  clearInterval(v.timer);
+  browserCast(ctx, v.tab, false);
+  v.tab = null;
+  if (ctx.viewer === v) ctx.viewer = null;
+}
+// Page.screencastFrame: acknowledged at once; sent as frame only when it comes from the tab being cast
+// to the open viewer, its data the contract's pattern and its size (CSS pixels) 1 to 8192. seq lives on
+// the viewer's own object, so it rises for as long as the socket lives.
+function browserViewFrame(ctx, params, sessionId) {
+  if (params?.sessionId !== undefined) browserViewCdp(ctx, 'Page.screencastFrameAck', { sessionId: params.sessionId }, sessionId);
+  const v = ctx.viewer;
+  if (!v || v.ws.closed || !v.tab?.sessionId || v.tab.sessionId !== sessionId) return;
+  const w = Math.round(params?.metadata?.deviceWidth), h = Math.round(params?.metadata?.deviceHeight);
+  if (typeof params.data !== 'string' || !BROWSER_FRAME_DATA.test(params.data) || !(w >= 1 && w <= 8192) || !(h >= 1 && h <= 8192)) return;
+  if (v.ws.send({ t: 'frame', data: params.data, w, h, seq: v.seq }, true)) v.seq++;
+}
+// The view server: GET or HEAD / (Host one of the two loopback forms) is browser.html, read once here;
+// an upgrade passes five guards in order, each refusal a short HTTP answer and a FIN. One viewer.
+function browserViewServer(ctx) {
+  const page = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dashboard', 'browser.html'));
+  const plain = (code) => `${http.STATUS_CODES[code].toLowerCase()}\n`;
+  const server = http.createServer((req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
+    req.resume();
+    const no = (code, extra = {}) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', connection: 'close', ...extra }); res.end(plain(code)); };
+    if (!browserViewHost(req, server.address()?.port)) return no(403);
+    if (String(req.url).split('?')[0] !== '/') return no(404);
+    if (req.method !== 'GET' && req.method !== 'HEAD') return no(405, { allow: 'GET, HEAD' });
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': page.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "frame-ancestors 'self'" });
+    res.end(req.method === 'HEAD' ? undefined : page);
+  });
+  server.on('clientError', (e, s) => s.destroy());
+  server.on('upgrade', (req, sock, head) => {
+    sock.on('error', () => sock.destroy());
+    try {
+      const port = server.address()?.port;
+      const refuse = (code) => {
+        const body = plain(code);
+        sock.end(`HTTP/1.1 ${code} ${http.STATUS_CODES[code]}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);
+        const t = setTimeout(() => sock.destroy(), 1000);
+        t.unref?.();
+        sock.once('close', () => clearTimeout(t));
+      };
+      if (req.url !== '/socket') return refuse(404);
+      if (!browserViewHost(req, port)) return refuse(403);
+      if (![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(browserOneHeader(req, 'origin'))) return refuse(403);
+      const key = browserOneHeader(req, 'sec-websocket-key');
+      if (req.method !== 'GET' || String(browserOneHeader(req, 'upgrade')).toLowerCase() !== 'websocket' || browserOneHeader(req, 'sec-websocket-version') !== '13' || !/^[A-Za-z0-9+/]{22}==$/.test(key ?? '')) return refuse(400);
+      if (!ctx.ready || ctx.stopping) return refuse(503);
+      const accept = crypto.createHash('sha1').update(key + BROWSER_WS_GUID).digest('base64');
+      sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
+      const v = { ws: null, seq: 0, tab: null, url: null, timer: null };
+      v.ws = browserSocket(sock, { pingMs: browserPingMs(), onText: () => {}, onClose: () => browserViewClose(ctx, v) }); // the page's input: Task 2
+      if (head?.length) v.ws.feed(head);
+      if (v.ws.closed) return;
+      if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
+      ctx.viewer = v;
+      v.ws.send({ t: 'held', qid: null });
+      browserViewTick(ctx, v);
+      v.timer = setInterval(() => browserViewTick(ctx, v), 250);
+      v.timer.unref?.();
+    } catch { try { sock.destroy(); } catch {} }
+  });
+  return server;
+}
+// browser serve, in the preview's window: the view server bound first, then the profile and
 // its start steps, the guard, Chrome, the CDP tabs, the control server, then state.json. It writes
 // nothing to its window once it is up. The bind comes before the start steps (kit-316 final-1b S1): a
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null, viewer: null, ready: false };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   const viewPort = Number(process.env.PORT);
   const rec = readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser' && r.port === viewPort);
@@ -27083,7 +27276,7 @@ async function browserServe({ chrome: bin }) {
   ctx.preview = rec.name;
   ctx.profile = browserProfile();
   try {
-    ctx.view = http.createServer((req, res) => { req.resume(); res.on('error', () => {}); res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' }); res.end("The supervisor's browser runs here; its live view comes with a later release.\n"); });
+    ctx.view = browserViewServer(ctx);
     // test hook: the first daemon to find this file missing makes it and fails its bind (T4-1)
     const failOnce = browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL');
     if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
@@ -27094,6 +27287,7 @@ async function browserServe({ chrome: bin }) {
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
     ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
     ctx.cdp = cdp;
+    ctx.cdp.on('Page.screencastFrame', (p, sid) => browserViewFrame(ctx, p, sid));
     ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
@@ -27103,6 +27297,7 @@ async function browserServe({ chrome: bin }) {
     ctx.control = server;
     const controlPort = await browserListen(server, 0);
     browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
+    ctx.ready = true; // the view's guard 5: Chrome is up
     arm();
     process.on('uncaughtException', () => browserShutdown(ctx, 'error'));
     process.on('unhandledRejection', () => browserShutdown(ctx, 'error'));
