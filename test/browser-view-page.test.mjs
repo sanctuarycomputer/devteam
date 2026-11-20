@@ -7,7 +7,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import { canDrive } from './lib/chrome.mjs';
-import { message } from './fixtures/browser/check.mjs';
 import { PAGE, FROM_SERVER, SMALL, BIG, sleep, until, startServer, open, shut, canvasState, drawn, text, noHandBack, ready, pt, sent, mouse, keyEvent, clip, ctrlV, go, viewPageFile } from './lib/browser-view-page-fixture.mjs';
 
 const QID = FROM_SERVER.find((m) => m.t === 'held' && m.qid).qid;

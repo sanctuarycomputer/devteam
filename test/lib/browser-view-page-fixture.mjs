@@ -1,6 +1,6 @@
 // browser-view-page's family (kit-223): the fake server, Chrome and the page helpers
 // test/browser-view-page.test.mjs and test/browser-view-page.input.test.mjs share, moved from the first
-// unchanged. Chrome, which the hooks open, is exported live (export let).
+// unchanged. Chrome, which the hooks open, stays in the fixture: only its own open() reads it.
 import { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
