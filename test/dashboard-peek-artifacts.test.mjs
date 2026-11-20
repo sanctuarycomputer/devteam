@@ -84,6 +84,9 @@ test('peek-artifacts: what ties an artifact to each peek', () => {
     row('prefix-ticket', 'main', [`ticket:${ids.tHeld}-x`, `${ids.tHeld}x`]),
     row('draft-adds', 'main', []),
     row('draft-adds', ids.wt2, [`ticket:${ids.tMerged}`]),
+    // the reverse: the landed row names a ticket, the newest draft (what opens) dropped it
+    row('draft-drops', 'main', [`ticket:${ids.tMerged}`]),
+    { ...row('draft-drops', ids.wt2, []), updated_at: '2026-11-19T00:00:00Z' },
     row('odd-refs', 'main', [null, 7, { x: 1 }]),
   ] } };
   assert.ok(slugs(`feature:${ids.feat1}`, more).includes('by-planner'), 'plan-<f> ties to its feature');
@@ -91,7 +94,9 @@ test('peek-artifacts: what ties an artifact to each peek', () => {
   assert.ok(slugs(`ticket:${ids.tHeld}`, more).includes('bare-ticket'), 'a bare ticket id ties to its ticket');
   assert.ok(!slugs(`ticket:${ids.tHeld}`, more).includes('prefix-ticket'), 'refs compare whole, never by prefix');
   assert.ok(!slugs(`feature:${ids.feat1}`, more).includes('prefix-ticket'), 'a near-miss ticket id is no ticket');
-  assert.ok(slugs(`ticket:${ids.tMerged}`, more).includes('draft-adds'), 'a draft\'s own ref counts');
+  assert.ok(slugs(`ticket:${ids.tMerged}`, more).includes('draft-adds'), 'the newest draft\'s ref counts');
+  assert.ok(!slugs(`ticket:${ids.tMerged}`, more).includes('draft-drops'), 'a landed row\'s ref the newest draft dropped does not (kit-92 reads the shown row)');
+  assert.ok(!slugs(`feature:${ids.feat1}`, more).includes('draft-drops'), 'nor through its ticket\'s feature');
   for (const r of [`goal:${ids.goal1}`, `feature:${ids.feat1}`, `ticket:${ids.tHeld}`]) assert.ok(!slugs(r, more).includes('odd-refs'), `odd refs tie to nothing (${r})`);
 
   // nothing for anything else, or with no library
@@ -194,7 +199,7 @@ const SHOWN = `(() => {
   const d = document.getElementById('drawer'), s = d.querySelector('[data-peek-arts]');
   const heads = [...d.querySelectorAll('.psect .card-head')].map((h) => h.textContent.trim());
   return { links: s ? [...s.querySelectorAll('a')].map((a) => [a.getAttribute('href'), a.textContent.trim()]) : null,
-    beforeHistory: heads.indexOf('Artifacts') >= 0 && heads.indexOf('Artifacts') === heads.indexOf('History') - 1, artHeads: heads.filter((h) => h === 'Artifacts').length };
+    next: heads.indexOf('Artifacts') >= 0 ? heads[heads.indexOf('Artifacts') + 1] : null, artHeads: heads.filter((h) => h === 'Artifacts').length };
 })()`;
 
 test('each of the four peeks lists its artifacts, a link opens the viewer', { ...CHROME, timeout: 300000 }, async (t) => {
@@ -209,7 +214,7 @@ test('each of the four peeks lists its artifacts, a link opens the viewer', { ..
     const s = await p.ev(SHOWN);
     assert.ok(linksOf(ref).length > 0, `${what}: the fixture ties some`);
     assert.deepEqual(s.links, linksOf(ref), `${what}: exactly its artifacts, as links, in order`);
-    assert.equal(s.beforeHistory, true, `${what}: just above History`);
+    assert.equal(s.next, what === 'feature' ? 'Progress' : 'History', `${what}: just above ${what === 'feature' ? 'Progress (openTicketSet draws extra, Progress, History)' : 'History'}`);
     assert.equal(s.artHeads, 1, `${what}: one section`);
   }
   // a link opens the large viewer on what it names (the drafted one: its newest draft)
