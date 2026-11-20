@@ -33,9 +33,10 @@ const mock = (title) => ({
 // /api/view read, with whether it landed; document.visibilityState as window.__hidden says; the lens's
 // ready titles, with their time.
 const PAGE = `(() => {
-  // a viewer tab framed by this test (C10) stands for the owner's wrapper, a parent of another origin,
-  // under which frameElement is null (so the page's own guard against a same-origin frame stays off)
-  if (window.parent !== window && location.pathname.startsWith('/view/')) Object.defineProperty(window, 'frameElement', { configurable: true, get: () => null });
+  // C10: a viewer tab whose address carries kit106-framed stands for one under the owner's wrapper, a
+  // parent of another origin: its window.parent is another window (a stand-in that takes messages and
+  // does nothing), and frameElement stays null, as under any parent of another origin
+  if (window.parent === window && location.pathname.startsWith('/view/') && new URLSearchParams(location.search).has('kit106-framed')) { const stand = { postMessage() {} }; Object.defineProperty(window, 'parent', { configurable: true, get: () => stand }); }
   window.__fake = { status: 200, fp: null, body: null, delay: 0 };
   window.__fpAsks = [];
   window.__reads = [];
@@ -291,18 +292,12 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
   });
 
   await t.test('C10: a framed viewer tab (the owner wrapper) on a draft makes no /api/artifact-fp ask', async () => {
-    // framed for real: the dashboard's own page (same origin, which the viewer's frame-ancestors allow)
-    // holds the viewer tab in an iframe, its frameElement read as null as under the wrapper (PAGE); the
-    // fake runs in that frame too, and logs its asks there
-    await go(`${B}/#library`);
-    await soon(`typeof PAGE_NOW === 'string' && PAGE_NOW === 'library'`, 'on #library');
-    await p.ev(`(() => { const f = document.createElement('iframe'); f.id = 'framed-viewer'; f.style.cssText = 'width:900px;height:600px'; f.src = ${J(`/view/artifact/${SLUG}?at=${WT}`)}; document.body.append(f); return true; })()`);
-    // read through the frame's window and document (the page's policy allows no eval there)
-    const W = `document.getElementById('framed-viewer')?.contentWindow`;
-    // its boot loads a whole dashboard page in a frame, beside the dashboard's own: up to 60 s on a busy runner
-    await soonIn(p, 60000)(`(() => { const w = ${W}; try { return w.document.documentElement.classList.contains('viewer') && w.document.getElementById('av-frame').getAttribute('src') === ${J(`/artifact/wt/${WT}/${SLUG}/`)} && w.__titles.length >= 1; } catch { return false; } })()`, 'the framed viewer up on the draft');
+    // the wrapper's parent is another origin, which no test here can serve within the viewer's
+    // frame-ancestors; the tab stands in for it with window.parent another window (PAGE, kit106-framed)
+    await open(`${VIEW}?at=${WT}&kit106-framed=1`, WT, 'v1');
+    assert.equal(await p.ev('window.parent !== window && window.frameElement === null'), true, 'setup: the tab reads as framed by another origin');
     await sleep(8000);
-    assert.equal(await p.ev(`${W}.__fpAsks.length`), 0, 'the framed viewer tab: no ask');
+    assert.equal(await asks(), 0, 'the framed viewer tab: no ask');
   });
 
   await t.test("C6: a draft never shows kit-206's outline; main keeps it, and its title", async () => {
