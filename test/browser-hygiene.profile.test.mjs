@@ -269,9 +269,16 @@ hygiene.push(['I3 the last hyphen splits', async (h) => {
 
 
 
-test('profile hygiene on every start and stop: F1 to F4, G1 to G3, H1 to H3, I1 to I3', { skip, timeout: 280000, concurrency: 2 }, async (t) => {
+test('profile hygiene on every start and stop: F1 to F4, G1 to G3, H1 to H3, I1 to I3 (part 1 of 2: F1 to F4 and H1 to H3)', { skip, timeout: 280000, concurrency: 2 }, async (t) => {
   const chain = (P, ids) => t.test(`on ${P.name}`, { concurrency: 1 }, async (c) => {
     for (const [name, fn] of hygiene.filter(([x]) => ids.test(x))) await c.test(name, { timeout: 120000 }, () => fn(P));
   });
-  await Promise.all([chain(h, /^[FG]/), chain(g, /^[HI]/)]);
+  await Promise.all([chain(h, /^F/), chain(g, /^H/)]);
+});
+
+test('profile hygiene on every start and stop: F1 to F4, G1 to G3, H1 to H3, I1 to I3 (part 2 of 2: G1 to G3 and I1 to I3)', { skip, timeout: 280000, concurrency: 2 }, async (t) => {
+  const chain = (P, ids) => t.test(`on ${P.name}`, { concurrency: 1 }, async (c) => {
+    for (const [name, fn] of hygiene.filter(([x]) => ids.test(x))) await c.test(name, { timeout: 120000 }, () => fn(P));
+  });
+  await Promise.all([chain(h, /^G/), chain(g, /^I/)]);
 });
