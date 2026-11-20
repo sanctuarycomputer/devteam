@@ -384,6 +384,12 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     assert.equal(g.plain, '', 'a hash without # is none');
     assert.equal(g.num, '', 'a number is none');
     assert.equal(g.nopath, null, 'no path: null');
+    // ready's hash is cleaned as nav's is (final-1 F1); a ready with no hash has none
+    const r = await V.p.ev(`(() => { const w = tsFrame().contentWindow, m = (x) => tLensMessage({ data: { lens: 1, type: 'ready', path: '/artifact/main/pages/a.html', title: 't', ...x }, source: w }, w, new Map()); const cap = '/c/1767225600000.abcdefghijklmnop.abcdefghijklmnopqrstuv'; return { bidi: m({ hash: '#a\u202eb\u0007c' }).hash, cap: m({ hash: '#go' + cap + '/artifact/x' }).hash, long: m({ hash: '#' + 'z'.repeat(299) }).hash, plain: m({ hash: 'tab2' }).hash, num: 'hash' in m({ hash: 7 }), none: 'hash' in m({}) }; })()`);
+    assert.deepEqual(r, { bidi: '#abc', cap: '#go[link removed]/artifact/x', long: '#' + 'z'.repeat(199), plain: '', num: false, none: false }, "ready's hash: cleaned as nav's; none when it is no string or there is none");
+    // a preview's stage ignores nav, even from its own frame and origin (final-1 F2)
+    const pv = await V.p.ev(`(() => { const k = TS.kind, o = TS.origin, before = [TS.path, TS.hash, AV_NAVS]; TS.kind = 'preview'; TS.origin = 'null'; try { dispatchEvent(new MessageEvent('message', { data: { lens: 1, type: 'nav', path: '/artifact/main/pages/b.html', hash: '#pv' }, origin: 'null', source: tsFrame().contentWindow })); } finally { TS.kind = k; TS.origin = o; } return JSON.stringify([TS.path, TS.hash, AV_NAVS]) === JSON.stringify(before); })()`);
+    assert.equal(pv, true, "a preview's stage takes no nav: path, hash and AV_NAVS unchanged");
     const held = await V.p.ev(`(() => { const w = tsFrame().contentWindow, say = (h) => dispatchEvent(new MessageEvent('message', { data: { lens: 1, type: 'nav', path: '/artifact/main/pages/a.html', hash: h }, source: w })); const n = AV_NAVS, h0 = TS.hash; TS.ready = false; say('#before-ready'); const dropped = [AV_NAVS - n, TS.hash === h0]; TS.ready = true; const m = AV_NAVS; say('#twice'); say('#twice'); return [...dropped, AV_NAVS - m]; })()`);
     assert.deepEqual(held, [0, true, 1], 'a nav before ready is dropped; the same nav twice counts once');
     // a changed nav lets go of where the last view's anchors were, at once (task-2 T2-4)
@@ -405,6 +411,32 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     await V.soon("TS.hash === '#section-2'", 'the viewer heard the move to #section-2');
     await V.p.ev(FRAMES);
     await pinsAre(V, [N.TB], 'on b.html#section-2');
+  });
+
+  // C12: a draft's live reload keeps the in-frame view (final-1b F1, the supervisor's ruling): moved to
+  // a.html#tab2 in the frame, a save reloads it at a.html#tab2, its ready names #tab2 (final-1b F2), the
+  // #tab2 pins stay, and the reload is no move for the close. The draft is the fixture copied into a
+  // worktree's artifacts; the fingerprint route is faked in the page, so the test says when it "changed".
+  await sub('C12: a live reload of a draft keeps the #hash the owner moved to', async () => {
+    const WT = 'kit142-views';
+    fs.cpSync(path.join(HERE, 'fixtures/artifact-pages/pages'), path.join(F.old, `.worktrees/${WT}/docs/devteam/project/artifacts/pages`), { recursive: true });
+    const V = await visit('#library');
+    await V.p.ev(`(() => { window.__fp = null; const f = window.fetch; window.fetch = (u, o) => { const s = u instanceof Request ? u.url : String(u); if (new URL(s, location.href).pathname === '/api/artifact-fp') return Promise.resolve(new Response(JSON.stringify({ fp: window.__fp ?? (TS.fp || 'a'.repeat(64)) }), { status: 200, headers: { 'content-type': 'application/json' } })); return f(u, o); }; })()`);
+    await V.p.ev(`location.hash = ${J(`#artifact/wt/${WT}/pages`)}; void 0`);
+    await V.soon(`${VIEWER_UP} && TS.kind === 'artifact' && TS.at === ${J(WT)} && TS.ready && !!TS.fp`, 'setup: the draft on the stage, its fingerprint known');
+    await V.frameClick('to-a', 'pages/a.html');
+    await V.frameClick('go-tab2', 'pages/a.html', { hash: '#tab2', load: false });
+    await V.soon("TS.hash === '#tab2'", 'setup: the viewer heard the move to #tab2');
+    await pinsAre(V, [N.TAL, N.TP, N.TP2], 'setup: on a.html#tab2');
+    // (a fresh frame is a clone of the last: the old one is told by being gone from the page)
+    const navs = await V.p.ev('(window.__kit142Old = tsFrame(), AV_NAVS)');
+    await V.p.ev(`(window.__fp = ${J('f'.repeat(64))}, true)`);
+    const back = await V.settle(`!window.__kit142Old.isConnected && TS.ready && TS.path === 'a.html'`, 15000);
+    assert.ok(back, `the draft reloaded in a fresh frame, its lens ready: ${await V.p.ev('JSON.stringify({ fp: TS.fp, fpNow: TS.fpNow, gone: TS.fpGone, vis: document.visibilityState, old: window.__kit142Old.isConnected, src: tsFrame().getAttribute("src"), ready: TS.ready, path: TS.path, hash: TS.hash, at: TS.at })')}`);
+    assert.match(await V.p.ev('tsFrame().getAttribute("src")'), /\/a\.html#tab2$/, 'reloaded at a.html#tab2');
+    assert.equal(await V.p.ev('TS.hash'), '#tab2', "the reload's ready names #tab2");
+    await pinsAre(V, [N.TAL, N.TP, N.TP2], 'after the reload, still the #tab2 pins');
+    assert.equal(await V.p.ev('AV_NAVS'), navs, 'a reload is no move for the close');
   });
 
   // C2: a move inside the frame with no load, then each closer: closed, on the head it was opened over
