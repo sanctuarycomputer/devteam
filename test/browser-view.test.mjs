@@ -330,6 +330,15 @@ test('V1 the view is a preview labelled browser, in its own window, listed in he
   await until(async () => (await (await fetch(`http://127.0.0.1:${port}/api/hello`)).json()).previews?.some((x) => x.name === view.name), 'hello to list the view');
 });
 
+// Hosts of the loopback forms the view must refuse: another port (p + 1, or p - 1 at the top), and the
+// view's port with more after it: one more digit while that is still a port, and a name that starts
+// with the port's digits. An exact match refuses each; a prefix or any-port match takes some.
+const extendsPort = (p) => [...(p * 10 + 1 <= 65535 ? [`${p}1`] : []), `${p}.evil.example`];
+const foreignHosts = (p) => {
+  const other = p === 65535 ? p - 1 : p + 1;
+  return [`127.0.0.1:${other}`, `localhost:${other}`, ...extendsPort(p).flatMap((x) => [`127.0.0.1:${x}`, `localhost:${x}`])];
+};
+
 test('V5 the view serves browser.html', opts, async () => {
   await running();
   for (const host of [`127.0.0.1:${view.port}`, `localhost:${view.port}`]) {
@@ -341,6 +350,9 @@ test('V5 the view serves browser.html', opts, async () => {
     assert.equal(r.headers['cache-control'], 'no-store');
   }
   assert.equal((await get(view.port, '/', 'evil.example')).status, 403, 'another Host');
+  // another port of either loopback form, and a Host whose port extends the view's (a prefix match
+  // would take it): each refused
+  for (const host of foreignHosts(view.port)) assert.equal((await get(view.port, '/', host)).status, 403, `Host ${host}`);
   assert.equal((await get(view.port, '/other', `127.0.0.1:${view.port}`)).status, 404);
 });
 
@@ -492,6 +504,9 @@ test('R1 a socket with a missing or foreign Origin, or another Host, is refused 
     { host: '127.0.0.1', origin: `http://127.0.0.1:${p}` },
     { host: `[::1]:${p}`, origin: `http://127.0.0.1:${p}` },
     { host: `127.0.0.1:${other}`, origin: `http://127.0.0.1:${p}` },
+    // an Origin or a Host whose port extends the view's: a prefix match would admit it
+    ...extendsPort(p).flatMap((x) => [{ origin: `http://127.0.0.1:${x}` }, { origin: `http://localhost:${x}` }]),
+    ...foreignHosts(p).map((host) => ({ host, origin: `http://127.0.0.1:${p}` })),
   ];
   for (const k of cases) {
     const c = await ws(p, { host: k.host ?? `127.0.0.1:${p}`, origin: k.origin });
@@ -551,6 +566,30 @@ test('R5 a viewer that answers no ping is closed, and the next one gets in', opt
     await next.wait(isFrame, 2000);
     assert.ok(!next.msgs.some((m) => m.t === 'bye'), 'no bye for the next one');
     next.close();
+  } finally {
+    await browser(a, ['stop']);
+    await running();
+  }
+});
+
+test('V10 the idle timer spares an open viewer; once it closes, the daemon stops', opts, async () => {
+  s1?.close();
+  await browser(a, ['stop']);
+  try {
+    const s = await running({ DEVTEAM_TEST_BROWSER_IDLE_MS: '1500' });
+    const c = await ws(view.port);
+    assert.equal(c.status, 101, `the viewer is let in before the first idle stop: ${c.head.split('\r\n')[0]}`);
+    // three idle periods with the socket open
+    await sleep(4500);
+    assert.ok(alive(s.daemon_pid), 'the daemon is up with a viewer open');
+    assert.equal(c.closed, null, 'the viewer\'s socket is still open');
+    const n = c.msgs.length;
+    await ok(a, ['open', `${site.origin}/`]);
+    await c.wait(isFrame, 3000, n);
+    c.close();
+    const t0 = Date.now();
+    await within(1500 + 3000, () => !alive(s.daemon_pid), 'the idle stop after the viewer closed');
+    assert.ok(Date.now() - t0 <= 4500, `stopped ${Date.now() - t0} ms after the viewer closed (at most 4500)`);
   } finally {
     await browser(a, ['stop']);
     await running();
