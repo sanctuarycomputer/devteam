@@ -14086,7 +14086,8 @@ function cmdChore() {
     if (um !== 'run' && !isRecordKeeping(choreSlug(slugName)) && !flags.force) die(`Upkeep is ${holdWords(um)}: no new upkeep chore starts (goal hold upkeep run --owner, or --force, logged)`);
     const wt = choreWorktree(slugName, { setup: true });
     // the jobs' chore started past Upkeep's hold is the supervisor's call, so it is logged (kit-162)
-    if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: ['upkeep', 'chore-recurring'], reversible: true }, 'supervisor');
+    const holdRefs = ['upkeep', 'chore-recurring'];
+    if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: holdRefs, reversible: true }, 'supervisor');
     return out(wt);
   }
   if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
