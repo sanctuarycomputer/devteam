@@ -40,6 +40,9 @@ test('an open question says when its linked page moved, once per log read', { ti
     CLAUDE_CONFIG_DIR: path.join(F.base, 'claude'), CODEX_HOME: path.join(F.base, 'codex'),
     // every GET waits for its own run, never the last run's data
     DEVTEAM_DATA_WAIT_MS: '600000',
+    // a build served again for 3 s after it ends (the kit's 20 s, kit-595, set back for tests): the
+    // second read below is timed to it
+    DEVTEAM_DATA_REUSE_MS: '3000',
     LM_COUNT: counts, NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import ${pathToFileURL(counter).href}`].filter(Boolean).join(' '),
   }));
   undo.push(() => dash.stop());
