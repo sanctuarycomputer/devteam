@@ -23879,9 +23879,9 @@ const recurringRegistry = Object.freeze({
   },
   // The jobs at a commit, as { jobs, problem }: {} when the file is absent. Each parent must be a
   // tree there (a symlink, a file or a gitlink in its place is a problem; a missing one means no
-  // file), and the file, read from its directory's tree object, a 100644 blob. Names come from
-  // ls-tree -z, which never quotes one. A git call that fails or times out is a problem: it never
-  // reads as no jobs. A project dir outside the repo has no file in git: {}.
+  // file), and the file, read from its directory's tree object (cat-file -p), a 100644 blob. A
+  // git call that fails or times out is a problem: it never reads as no jobs. A project dir
+  // outside the repo has no file in git: {}.
   read(ref) {
     if (!ref || !projectInRepo) return { jobs: {}, problem: null };
     const g = recurringRegistry.git;
@@ -23890,16 +23890,18 @@ const recurringRegistry = Object.freeze({
     if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) return { jobs: null, problem: `recurring.json at ${ref}: git can't read that commit${c.timedOut ? ' (timed out)' : ''}, so neither can the kit read its jobs` };
     const where = `at ${sha.slice(0, 12)}`;
     // the entry named name in the tree at dir ('' for the root): { mode, type, oid }, null when absent, or { failed }
+    // (core.quotePath=false prints a non-ASCII name as it is; a name git still quotes, one with a
+    // quote, a backslash or a control character, starts with " and matches no segment of the path)
     const entry = (dir, name) => {
-      const r = g(['ls-tree', '-z', `${sha}:${dir}`]);
+      const r = g(['-c', 'core.quotePath=false', 'cat-file', '-p', `${sha}:${dir}`]);
       if (!r.ok) return { failed: true, timedOut: r.timedOut };
-      for (const rec of r.out.split('\0')) {
+      for (const rec of r.out.split('\n')) {
         const tab = rec.indexOf('\t');
         if (tab > 0 && rec.slice(tab + 1) === name) { const [mode, type, oid] = rec.slice(0, tab).split(' '); return { mode, type, oid }; }
       }
       return null;
     };
-    const cant = (e) => ({ jobs: null, problem: `recurring.json ${where}: git ls-tree ${e.timedOut ? 'timed out' : 'failed'}, so the kit can't read the jobs` });
+    const cant = (e) => ({ jobs: null, problem: `recurring.json ${where}: git cat-file ${e.timedOut ? 'timed out' : 'failed'}, so the kit can't read the jobs` });
     let up = '';
     for (const dir of recurringRegistry.parents()) {
       const e = entry(up, path.posix.basename(dir));
