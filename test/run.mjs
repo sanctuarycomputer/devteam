@@ -49,8 +49,8 @@ import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(import.meta.url);
 export const ROOT = fs.realpathSync(path.resolve(path.dirname(here), '..'));
 export const ALONE = ['test/bounds.test.mjs'];
-// Files known to run longer than 300 s, until kit-210 splits it.
-export const LONG = { 'test/dashboard.test.mjs': 600 };
+// Files known to run longer than 300 s get a longer watchdog here; none do (kit-210 split dashboard.test.mjs).
+export const LONG = {};
 export const GROUPS = ['chain', 'alone', 'chrome', 'rest'];
 export class UsageError extends Error {}
 

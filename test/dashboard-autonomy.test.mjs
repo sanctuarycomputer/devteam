@@ -56,6 +56,9 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await soon("location.href === 'about:blank'", 'a blank page');
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
     await soon("typeof DATA !== 'undefined' && !!DATA && !document.querySelector('main.waiting')", 'the dashboard drawn');
+    // and its charts drawn at their width: fitCharts draws a chart on a later frame when its page wasn't shown yet,
+    // and a chart drawn after this would move what a test then clicks (a chart with no width is skipped, as there)
+    await soon("[...document.querySelectorAll('main.page > section.on .fit[data-fit]')].every((e) => !e.clientWidth || +e.dataset.w === Math.floor(e.clientWidth))", "the page's charts drawn");
   };
   // text, whitespace folded: of the first match, and of every match
   const text = (sel) => p.ev(`(document.querySelector(${JSON.stringify(sel)})?.textContent ?? '').replace(/\\s+/g, ' ').trim()`);
@@ -64,9 +67,8 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
   const ROWS = (sel) => `[...document.querySelectorAll(${JSON.stringify(`${sel} tbody tr`)})]`;
   const rowsOf = (sel) => p.ev(`${ROWS(sel)}.map((r) => [...r.cells].map((c) => c.textContent.replace(/\\s+/g, ' ').trim()))`);
   const drawerOpen = "!document.getElementById('drawer').hidden && document.body.classList.contains('peek-open')";
-  // row i of rowsOf(sel) opened by a click on a spot of it no link or button holds, or by Enter with
-  // the row focused: the drawer's kind and id once it shows, or null if nothing shows within 1 s
-  const openRow = async (sel, i, how = 'click') => {
+  // row i of rowsOf(sel) pressed: a click on a spot of it no link or button holds, or Enter with the row focused
+  const pressRow = async (sel, i, how) => {
     if (how === 'click') {
       const at = await p.ev(`(() => {
         const tr = ${ROWS(sel)}[${i}];
@@ -85,13 +87,23 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     } else if (how === 'enter') {
       assert.ok(await p.ev(`(() => { const tr = ${ROWS(sel)}[${i}]; if (!tr) return false; tr.scrollIntoView({ block: 'center' }); tr.focus(); return document.activeElement === tr; })()`), `row ${i} of ${sel}: not focusable`);
       await p.key('Enter');
-    } else assert.fail(`openRow: how is 'click' or 'enter', not ${how}`);
+    } else assert.fail(`pressRow: how is 'click' or 'enter', not ${how}`);
+  };
+  // row i pressed, then a wait on the page (no fixed delay: a loaded runner opens late) until the peek shows
+  // and names its record, a kind and an id, read in one look; the row's kind and id, or a failure if it never opens
+  const openRow = async (sel, i, how = 'click') => {
+    await pressRow(sel, i, how);
+    return soon(`(${drawerOpen} && !!DRAWER.kind && DRAWER.id != null) ? { kind: DRAWER.kind, id: DRAWER.id } : null`, `row ${i} of ${sel} opens a record`);
+  };
+  // row i pressed, then watched for 1 s: true if no peek showed (that nothing opens can only be watched for a while)
+  const opensNothing = async (sel, i, how = 'click') => {
+    await pressRow(sel, i, how);
     const end = Date.now() + 1000;
     while (Date.now() < end) {
-      if (await p.ev(`${drawerOpen} && !!DRAWER.kind`)) return p.ev('({ kind: DRAWER.kind, id: DRAWER.id })');
+      if (await p.ev(`${drawerOpen} && !!DRAWER.kind`)) return false;
       await new Promise((r) => setTimeout(r, 50));
     }
-    return null;
+    return true;
   };
   // the open peek closed (Escape), and gone
   const closePeek = async () => {
@@ -454,17 +466,10 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
   const govSec = (label) => p.ev(`(() => { const s = [...document.querySelectorAll('#governance .card .sec')].find((x) => x.querySelector('.lbl')?.textContent.trim() === ${JSON.stringify(label)}); return s ? [...s.querySelectorAll('tbody tr')].map((r) => [...r.cells].map((c) => c.textContent.replace(/\\s+/g, ' ').trim())) : null; })()`);
   const fileView = (path) => `#file?path=${encodeURIComponent(path)}`;
   const PEEK_MD = "!!document.querySelector('#drawer-body .md p')";
-  // the peek rendered and done redrawing (its history arrives after the file and redraws it): the same .md for 1 s
-  const peekSettled = async (what) => {
-    await soon(PEEK_MD, what);
-    const end = Date.now() + 15000;
-    for (;;) {
-      await p.ev("window.__md = document.querySelector('#drawer-body .md'); void 0");
-      await new Promise((r) => setTimeout(r, 1000));
-      if (await p.ev("window.__md === document.querySelector('#drawer-body .md') && !!window.__md?.isConnected")) return;
-      assert.ok(Date.now() < end, `${what}: the peek never settled`);
-    }
-  };
+  // the peek rendered and done redrawing: its history arrives after the file and redraws it (its properties grow, so
+  // what is under them moves), and until then the History card says Loading…; and done sliding in (its transform's
+  // transition, --dur, moves everything in it sideways until it ends)
+  const peekSettled = (what) => soon(`${PEEK_MD} && !document.querySelector('#drawer-body .loading') && document.getElementById('drawer').getAnimations().length === 0`, `${what}: the peek redrawn with its history, at rest`);
   // Shift held and the pointer moved over the i-th of the peek's rendered blocks matching sel (kept as window.__blk)
   const pointAt = async (sel, i) => {
     const at = await p.ev(`(() => { const e = document.querySelectorAll(${JSON.stringify(sel)})[${i}]; if (!e) return null; window.__blk = e; e.scrollIntoView({ block: 'center', behavior: 'instant' }); const r = e.getBoundingClientRect(); return { x: Math.round(r.left + Math.min(40, r.width / 2)), y: Math.round(r.top + r.height / 2) }; })()`);
@@ -535,8 +540,8 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     }
     // the not-written file: nothing to open, and no link in its row (A8)
     assert.equal(await p.ev(`(() => { const tr = ${ROWS(GOV_TBL('project'))}[0]; return !!tr && /not written yet/.test(tr.textContent) && !tr.querySelector('a'); })()`), true, 'the not-written row holds no link');
-    assert.equal(await openRow(GOV_TBL('project'), 0, 'click'), null);
-    assert.equal(await openRow(GOV_TBL('project'), 0, 'enter'), null);
+    assert.equal(await opensNothing(GOV_TBL('project'), 0, 'click'), true, 'the not-written row opens nothing by click');
+    assert.equal(await opensNothing(GOV_TBL('project'), 0, 'enter'), true, 'the not-written row opens nothing by enter');
     assert.deepEqual(await p.ev('window.__writes'), []);
   });
 
@@ -763,7 +768,7 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     // the fixture's set-aside subject is a check's name, no record: nothing opens
     await load(fx, '#sensors?st=fleet');
     await fleetDrawn();
-    assert.equal(await openRow(FLEET('aside'), 0, 'click'), null);
+    assert.equal(await opensNothing(FLEET('aside'), 0, 'click'), true, 'the set-aside check opens nothing');
     // one whose subject names a record (a sensor) opens it; the finding's ticket is a real one, listed in /api/data;
     // a subject shaped like a ticket, and a sensor or planner the data doesn't list, name no record (R2)
     fx.patch.metrics.acknowledged[0].subject = 'sensor:hub';
@@ -781,7 +786,7 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
       assert.equal(await selectedTab(), 'fleet', 'back on Fleet');
       // a commit names no record; a check and a test are figures
       for (const [sel, i] of [[FLEET('findings'), 1], [FLEET('findings'), 2], [FLEET('findings'), 3], [FLEET('findings'), 4], [FLEET('gates'), 0], [FLEET('gates'), 1], [FLEET('flaky'), 0], [FLEET('slowest'), 0]]) {
-        assert.equal(await openRow(sel, i, how), null, `${sel} row ${i} by ${how} opens nothing`);
+        assert.equal(await opensNothing(sel, i, how), true, `${sel} row ${i} by ${how} opens nothing`);
         assert.equal(await ROW_A(sel, i), 0, `${sel} row ${i} holds no link`);
       }
     }

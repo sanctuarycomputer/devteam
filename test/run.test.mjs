@@ -72,7 +72,7 @@ const runSync = (args, opts = {}) => spawnSync(process.execPath, [runMjs, ...arg
 test('groups by rule', () => {
   assert.equal(R.groupOf('test/kit.test.mjs', src('test/kit.test.mjs')), 'chain');
   assert.equal(R.groupOf('test/bounds.test.mjs', src('test/bounds.test.mjs')), 'alone');
-  assert.equal(R.groupOf('test/dashboard.test.mjs', src('test/dashboard.test.mjs')), 'chrome');
+  assert.equal(R.groupOf('test/dashboard.presses.test.mjs', src('test/dashboard.presses.test.mjs')), 'chrome');
   assert.equal(R.groupOf('test/search.test.mjs', src('test/search.test.mjs')), 'rest');
   assert.equal(R.groupOf('test/x.test.mjs', "const c = await import('./lib/chrome.mjs');\n"), 'chrome');
   assert.equal(R.groupOf('test/x.test.mjs', "// see './lib/chrome.mjs' for how\nimport fs from 'node:fs';\n"), 'rest');
@@ -147,7 +147,8 @@ test('parseArgs', () => {
 
 test('timeouts and rows', () => {
   assert.equal(R.timeoutOf('test/kit.test.mjs', 'chain', null), 600);
-  assert.equal(R.timeoutOf('test/dashboard.test.mjs', 'chrome', null), 600);
+  assert.equal(R.timeoutOf('test/dashboard.instances.test.mjs', 'rest', null), 300);
+  assert.equal(Object.keys(R.LONG).filter((f) => f.startsWith('test/dashboard')).length, 0);
   assert.equal(R.timeoutOf('test/search.test.mjs', 'rest', null), 300);
   assert.equal(R.timeoutOf('test/kit.test.mjs', 'chain', 7), 7);
   assert.equal(R.nearTimeout(251, 300), true);
@@ -213,10 +214,10 @@ test('childArgs', () => {
 });
 
 test('--list prints the plan and runs nothing', () => {
-  const r = runSync(['--list', 'test/kit.test.mjs', 'test/bounds.test.mjs', 'test/dashboard.test.mjs', 'test/search.test.mjs']);
+  const r = runSync(['--list', 'test/kit.test.mjs', 'test/bounds.test.mjs', 'test/dashboard.instances.test.mjs', 'test/search.test.mjs']);
   assert.equal(r.status, 0, r.stderr);
   const lines = r.stdout.trim().split('\n').map((l) => l.split(/\s+/));
-  assert.deepEqual(lines, [['test/bounds.test.mjs', 'alone', '300', 's'], ['test/kit.test.mjs', 'chain', '600', 's'], ['test/dashboard.test.mjs', 'chrome', '600', 's'], ['test/search.test.mjs', 'rest', '300', 's']]);
+  assert.deepEqual(lines, [['test/bounds.test.mjs', 'alone', '300', 's'], ['test/kit.test.mjs', 'chain', '600', 's'], ['test/dashboard.instances.test.mjs', 'rest', '300', 's'], ['test/search.test.mjs', 'rest', '300', 's']]);
   const listed = [1, 2].flatMap((i) => { const s = runSync(['--list', '--shard', `${i}/2`]); assert.equal(s.status, 0, s.stderr); return s.stdout.trim().split('\n').filter(Boolean).map((l) => l.split(/\s+/)[0]); });
   assert.deepEqual([...listed].sort(), allFiles());
   const bad = runSync(['--list', '--shard', '3/2']);
