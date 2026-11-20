@@ -47,7 +47,7 @@ test('a row with a cell fewer than its header is refused too, the record unchang
 });
 
 test('a widened row is refused for its width before its disposition is read', () => {
-  const text = record('| F3 | Important | spec | a.js:3 | a stray cell before the disposition | fix it | | fixed |');
+  const text = record('| F3 | Important | spec | a.js:3 | a stray cell after the disposition | fix it | fixed | |');
   const file = put('final-7.md', text);
   const r = dispose('final-7.md', 'F3', 'wrong after all');
   assert.notEqual(r.status, 0, `dispose wrote the row: ${r.out}`);
