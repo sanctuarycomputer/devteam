@@ -648,6 +648,8 @@ try {
 /* css-loop-tabs end */
 /* css-loop-tables start */
   /* Self Improvement's tables (kit-96): each tab one flush card holding its table, at the grid's width */
+  /* the tab bar is the Loop's first content: its tabs' text --page-top below the bar, as Goals' */
+  #loop > .tabbar:first-child { margin-top: -8px; }
   .loop-panel { margin-top: 12px; }
   .loop-panel .card.flush { max-width: none; }
   /* a valence, red to green */
@@ -2755,7 +2757,7 @@ function filtersHtml(page) {
     if (f.lt === 'decide') return toggle('data-dec="corrected"', LOOP_DEC.corrected, 'rotate-ccw', 'Only corrected') + toggle('data-dec="routine"', LOOP_DEC.routine, 'repeat', 'Include routine acts');
     return '';
   }
-  const goal =sel('goal', 'Goal', opt('', 'All goals', f.goal) + filterGoals().map((g) => opt(g.id, g.title || g.id, f.goal)).join(''));
+  const goal = sel('goal', 'Goal', opt('', 'All goals', f.goal) + filterGoals().map((g) => opt(g.id, g.title || g.id, f.goal)).join(''));
   if (page === 'library') return goal + sel('kind', 'Kind', opt('', 'All kinds', f.kind) + LIB_KINDS.map(([k, label]) => opt(k, label, f.kind)).join(''));
   if (page === 'board') {
     const p = DATA.progress;
@@ -4704,14 +4706,16 @@ function orientRows(o, f = {}) {
       `<b>${esc(signalTitle(c.key))}</b> ${linkify(c.latest ?? '')}`, `${signalTitle(c.key)} ${c.latest ?? ''}`, `signal/${encodeURIComponent(c.key)}`));
   }
   for (const p of o?.problems || []) {
-    const open = p.status === 'open' && p.created_at;
-    const h = open ? hoursSince(p.created_at) : null;
-    rows.push(row(Array.isArray(p.fingerprints) && p.fingerprints.length ? 'incident' : 'problem', p.status ?? '', (p.threatens || []).join(', '), open ? hoursWords(h) : '', h, open ? 'Needs orienting' : '',
+    const open = p.status === 'open';
+    const h = open && p.created_at ? hoursSince(p.created_at) : null;
+    rows.push(row(Array.isArray(p.fingerprints) && p.fingerprints.length ? 'incident' : 'problem', p.status ?? '', (p.threatens || []).join(', '), h !== null ? hoursWords(h) : '', h, open ? 'Needs orienting' : '',
       `<span${subj('problem', p.id, p.title)}>${linkify(p.title ?? '')}</span>`, String(p.title ?? ''), `problem/${encodeURIComponent(p.id)}`));
   }
   for (const x of o?.debt?.incidents || []) {
     const h = x.resolved_at ? hoursSince(x.resolved_at) : null;
-    const wait = x.days ? `${x.days} day${x.days === 1 ? '' : 's'}` : h !== null ? hoursWords(h) : '';
+    // days since it was fixed, even under a day; the sort key stays hours
+    const d = x.days ?? (h !== null ? Math.floor(h / 24) : null);
+    const wait = d !== null ? `${d} day${d === 1 ? '' : 's'}` : '';
     rows.push(row('incident', 'fixed', '', wait, h ?? (x.days ?? 0) * 24, 'What did it teach?',
       `<span${subj('problem', x.id, x.title)}>${linkify(x.title ?? '')}</span>`, String(x.title ?? ''), `problem/${encodeURIComponent(x.id)}`));
   }
@@ -5971,7 +5975,7 @@ function openDecision(id) {
     ${lineageBlock(p)}
     ${restsOn(r.under?.approved_by)}
     ${knowledgeCited(p, 'What it drew on (not its authority)')}
-    ${r.kind === 'decision' ? psect('Carried out by', acts.length ? `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>` : '<p class="muted">Nothing yet.</p>') : ''}
+    ${r.kind === 'decision' && acts.length ? psect('Carried out by', `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>`) : ''}
     ${historySection(p, id)}`);
 }
 // A retro's own date is its write-up's (retros/<date>.md); the closing line can come a day later.
@@ -6032,11 +6036,11 @@ function openLesson(id) {
   const evidence = pageTable('lesson:evidence', ['What', 'Kind', 'When'], (k.evidence ?? p?.record?.fields?.evidence ?? []).map((eid) => {
     const x = p?.cited?.[eid];
     return x
-      ? { cells: [esc(x.text ?? eid), esc(words(x.kind ?? x.type)), esc(x.created_at ? when(x.created_at) : '')], sort: [undefined, undefined, x.created_at ?? null], open: recordHref(eid) }
+      ? { cells: [esc(String(x.text ?? eid).slice(0, 160)), esc(words(x.kind ?? x.type)), esc(x.created_at ? when(x.created_at) : '')], sort: [undefined, undefined, x.created_at ?? null], open: recordHref(eid) }
       : { cells: [esc(eid), '', ''], open: recordHref(eid) };
   }));
   const since = (n) => (n == null ? 'no signal to follow' : n === 0 ? 'not seen since' : `seen again ${n} time${n === 1 ? '' : 's'} since`);
-  const given = p === undefined ? '<p class="loading">Loading…</p>' : pageTable('lesson:given', ['Session', 'Given', 'What changed after'], (p?.given_to || []).map((g) => ({
+  const given = p === undefined ? '<p class="loading">Loading…</p>' : p?.error ? '' : pageTable('lesson:given', ['Session', 'Given', 'What changed after'], (p?.given_to || []).map((g) => ({
     cells: [esc(g.session), esc(g.at ? when(g.at) : ''), esc(since(g.since))], sort: [undefined, g.at ?? null, g.since ?? null], open: `#act/${encodeURIComponent(g.act)}`,
   })));
   recBind();
@@ -6045,7 +6049,7 @@ function openLesson(id) {
       ['Goes to', k.status === 'accepted' ? whoGets(k) : `nobody yet: it is ${esc(k.status)}`, 'Whose instructions it is put into, from its scope; only accepted knowledge is.'],
     ] })}
     ${psect('Evidence', evidence)}
-    ${psect('Given to', given)}
+    ${given ? psect('Given to', given) : ''}
     ${k.plain ? `<p>${esc(k.plain)}</p>` : ''}
     ${ownerLesson(k) ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : k.status === 'candidate' ? '<p class="muted">About how the agents work: the supervisor keeps or retires it itself.</p>' : ''}
     ${['candidate', 'accepted'].includes(k.status) && !ownerLesson(k) ? `<div class="row-inline"><button type="button" class="ghost" data-thread-on="${esc(`lesson:${k.id}`)}">Retire it</button></div>` : ''}
