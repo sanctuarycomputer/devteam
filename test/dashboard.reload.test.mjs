@@ -7,8 +7,16 @@ import { write, dashboardOnFreePort, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { soonIn, landArtifact, COUNT_FETCH } from './lib/dashboard-page.mjs';
 
-// The reload button says when the artifact on the stage changed since its frame loaded, on the
-// page's real polls (never POLL_FAST: "within one poll" is the 10 s one), and only a press reloads.
+// The page's polls at a twentieth of their period: each setInterval of exactly 5000 or 10000 ms runs
+// through a 50 ms check that calls it once window.__scale of its period has passed since its last call
+// (250 ms and 500 ms), so the 2:1 ratio of the 5 s threads read to the 10 s check, which "a 10 s tick
+// gone by" counts on, is kept. Every other timer (the 500 ms hint, the 30 s hello, every setTimeout) is
+// the page's own. __scale is read on each look, so a page can be held at full period and let go.
+const SCALE_BY = 0.05;
+const SCALE = `(() => { window.__scale = ${SCALE_BY}; const si = window.setInterval; window.setInterval = (f, ms, ...a) => { if (ms !== 5000 && ms !== 10000) return si(f, ms, ...a); let last = performance.now(); return si(() => { if (performance.now() - last >= ms * window.__scale) { last = performance.now(); f(...a); } }, 50); }; })();`;
+
+// The reload button says when the stage's artifact changed since its frame loaded, on the page's polls
+// at a twentieth of their period (same 2:1 ratio, the one absolute window held); only a press reloads.
 test("the viewer's reload button says when a newer version is ready, and the press loads it", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const later = cleanup(t);
   const F = threadsFixture('reload-hint');
@@ -30,6 +38,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: SCALE });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: COUNT_FETCH });
   // every read the page makes, in the order it started, and whether its body has been read: what
   // "the page's next check has landed" waits on
@@ -87,12 +96,19 @@ test("the viewer's reload button says when a newer version is ready, and the pre
 
   await t.test('in a viewer tab: its own check of the draft, every 10 s; a press before any check still leaves the hint to come; a tree is never checked', async () => {
     edit('v1');
+    // "no check yet when pressed" reads an absolute window (the tab's first check not run between its
+    // boot and the press, two frame loads later): this tab's polls run at full period until it has run
+    const { identifier: hold } = await p.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__scale = 1;' });
     await p.send('Page.navigate', { url: `${B}/view/artifact/hint-mock?at=demo-01-draft` });
     await soon(`document.documentElement.classList.contains('viewer') && typeof __titles === 'object' && __titles.includes('v1')`, 'the draft in the viewer');
     // pressed before the tab's first check: only boot's ask so far
     await p.click('#av-reload');
     await soon(`__titles.filter((x) => x === 'v1').length === 2`, 'the draft again');
     assert.equal(await p.ev(`__asked.filter((u) => u.startsWith('/api/view?')).length`), 1, 'no check yet when pressed');
+    // the window has been read: back to a twentieth, here and on the tree's navigate below; the first
+    // check runs on the next 50 ms look
+    await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: hold });
+    await p.ev(`window.__scale = ${SCALE_BY}`);
     let b = await button();
     assert.deepEqual([b.stale, b.title], [false, FRESH]);
     edit('v3');
