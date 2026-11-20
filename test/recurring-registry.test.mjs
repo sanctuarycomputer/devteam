@@ -25,8 +25,10 @@ const GIT_TIMEOUT = 30000;
 const HOWS = ['merge', 'squash', 'rebase'];
 
 // the spec's refusals, verbatim
-const BEHIND = /recurring\.json: this branch doesn't contain main's tip, and it or main changed a recurring\.json since they parted; merge main into the branch first/;
-const MULTI_BASES = /recurring\.json: this branch doesn't contain main's tip and has \d+ merge bases with it; merge main into the branch first/;
+// (the advice follows merge_method: under rebase, the branch is rebased onto main, never merged; final-10 F7)
+const CATCH_UP = (how = 'merge') => (how === 'rebase' ? 'rebase it onto main' : 'merge main into the branch first');
+const BEHIND = (how) => new RegExp(`recurring\\.json: this branch doesn't contain main's tip, and it or main changed a recurring\\.json since they parted; ${CATCH_UP(how)}`);
+const MULTI_BASES = (how) => new RegExp(`recurring\\.json: this branch doesn't contain main's tip and has \\d+ merge bases with it; ${CATCH_UP(how)}`);
 const REBASE_MERGES = /recurring\.json: merge_method is rebase and this branch has merge commits since main; rebase it onto main instead/;
 const NOT_REGULAR = /recurring\.json (at [0-9a-f]{12}|in this checkout) is not a regular file/;
 const NOT_DIR = /recurring\.json (at [0-9a-f]{12}|in this checkout): \S+ is not a directory/;
@@ -203,7 +205,7 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     const stale = T.jobsChore('stale', (j) => { j.dd = check({ every: '8h' }); });
     T.onMain((j) => { j.aa = check({ title: 'A job' }); });
     const qd = T.yes({ recurring: { dd: check({ every: '8h' }) } });
-    refused(T.dry('stale', qd), BEHIND);
+    refused(T.dry('stale', qd), BEHIND());
     T.mergeMainInto(stale, 'chore-stale');
     passes(T.dry('stale', qd));
     // main reorders the jobs' text, the same value, with no answer needed: still a change to the file
@@ -212,7 +214,7 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     const qf = T.yes({ recurring: { ff: null } });
     const late = T.jobsChore('stop-ff', (j) => { delete j.ff; });
     T.onMain((j) => { const { ff, ...rest } = j; return { ff, ...rest }; }, 'main: the jobs reordered');
-    refused(T.dry('stop-ff', qf), BEHIND);
+    refused(T.dry('stop-ff', qf), BEHIND());
     T.mergeMainInto(late, 'chore-stop-ff');
     // the merge keeps main's moved ff, so the branch stops it again on top
     T.commitIn(late, 'chore-stop-ff', (wt) => putJobs(wt, (j) => { delete j.ff; }), 'stop ff again');
@@ -245,7 +247,7 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     assert.equal(T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cc']).split('\n').length, 2, 'two merge bases');
     const mb = T.g(['merge-base', 'origin/main', 'origin/chore-cc']);
     assert.equal(T.g(['rev-parse', `${mb}:${JOBS}`]), T.g(['rev-parse', `origin/main:${JOBS}`]), 'the named base has main\'s file');
-    refused(T.dry('cc', qe), MULTI_BASES);
+    refused(T.dry('cc', qe), MULTI_BASES());
   } finally { T.done(); }
 });
 
@@ -766,7 +768,7 @@ const behind = (T, branch) => assert.throws(() => T.g(['merge-base', '--is-ances
 const twoFiles = (cwd, dir) => { write(path.join(cwd, dir, 'alpha.md'), 'alpha one\nalpha two\nalpha three\nalpha four\n'); write(path.join(cwd, dir, 'beta.md'), 'beta one\nbeta two\nbeta three\nbeta four\n'); };
 const moveTwo = (T, cwd, from, to) => { for (const f of ['alpha.md', 'beta.md']) T.g(['mv', `${from}/${f}`, `${to}/${f}`], cwd); };
 
-history('cleared: an up-to-date answered chore lands exactly its answered change, merged with directory renames off', (T) => {
+history('cleared: an up-to-date answered chore lands exactly its answered change, merged with directory renames off', (T, how) => {
   T.onMain(() => ({ aa: check({ title: 'A job' }) }));
   T.jobsChore('up', (j) => { j.zz = ZZ; });
   refused(T.dry('up'), /recurring-edit/);
@@ -778,7 +780,7 @@ history('cleared: an up-to-date answered chore lands exactly its answered change
   assert.match(spy.calls(), /(^| )-c merge\.directoryRenames=conflict merge --no-ff/m);
 });
 
-history('cleared: a behind PR touching only docs/other.md and project/notes.md lands, main having moved by another file', (T) => {
+history('cleared: a behind PR touching only docs/other.md and project/notes.md lands, main having moved by another file', (T, how) => {
   T.onMain(() => FIVE());
   T.choreBranch('other', (wt) => { write(path.join(wt, 'docs/other.md'), 'o\n'); write(path.join(wt, NOTES), 'n\n'); });
   T.onMainFile('README.md', 'main moves\n');
@@ -801,19 +803,19 @@ history('refused: a behind chore adding a job', (T, how) => {
   T.onMainFile('README.md', 'main moves\n');
   behind(T, 'chore-add');
   reaches(plainLand(T, 'chore-add', how), 'zz');
-  refused(T.dry('add'), BEHIND);
+  refused(T.dry('add'), BEHIND(how));
   const q = T.yes({ recurring: { zz: ZZ } });
-  refused(T.dry('add', q), BEHIND);
-  refused(T.merge('add', ['--approved', q]), BEHIND);
+  refused(T.dry('add', q), BEHIND(how));
+  refused(T.merge('add', ['--approved', q]), BEHIND(how));
   assert.equal(Object.hasOwn(T.mainJobs(), 'zz'), false, 'zz did not land');
 });
 
-history('refused: a behind PR touching nothing, after main landed a job (no plain-git proof: plain git lands main\'s jobs)', (T) => {
+history('refused: a behind PR touching nothing, after main landed a job (no plain-git proof: plain git lands main\'s jobs)', (T, how) => {
   T.onMain(() => FIVE());
   T.choreBranch('notes', (wt) => write(path.join(wt, NOTES), 'n\n'));
   T.onMain((j) => { j.ff = check({ title: 'F job', run: 'echo ff' }); }, 'main: a job lands');
-  refused(T.dry('notes'), BEHIND);
-  refused(T.merge('notes'), BEHIND);
+  refused(T.dry('notes'), BEHIND(how));
+  refused(T.merge('notes'), BEHIND(how));
   assert.equal(T.has('origin/main', NOTES), false, 'the PR did not land');
 });
 
@@ -831,8 +833,8 @@ history('refused: a criss-cross, two merge bases', (T, how) => {
   T.g(['fetch', '-q', 'origin']);
   assert.equal(T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cx']).split('\n').length, 2, 'two merge bases');
   reaches(plainLand(T, 'chore-cx', how), 'zz');
-  refused(T.dry('cx'), MULTI_BASES);
-  refused(T.merge('cx'), MULTI_BASES);
+  refused(T.dry('cx'), MULTI_BASES(how));
+  refused(T.merge('cx'), MULTI_BASES(how));
   assert.equal(Object.hasOwn(T.mainJobs(), 'zz'), false, 'zz did not land');
 });
 
@@ -841,8 +843,8 @@ history('refused: the branch adds other/recurring.json while main renames other/
   T.choreBranch('other', (wt) => write(path.join(wt, 'other/recurring.json'), jobsText({ zz: ZZ })));
   T.onMainDo((cwd) => moveTwo(T, cwd, 'other', PROJ), 'main: other/ into project/');
   reaches(plainLand(T, 'chore-other', how, { renames: true }), 'zz');
-  refused(T.dry('other'), BEHIND);
-  refused(T.merge('other'), BEHIND);
+  refused(T.dry('other'), BEHIND(how));
+  refused(T.merge('other'), BEHIND(how));
   assert.equal(T.has('origin/main', JOBS), false, 'no jobs file landed');
 });
 
@@ -852,8 +854,8 @@ history('refused: the branch edits other/recurring.json while main renames other
   T.onMainDo((cwd) => { moveTwo(T, cwd, 'other', PROJ); T.g(['mv', 'other/recurring.json', JOBS], cwd); }, 'main: other/ into project/');
   assert.deepEqual(T.mainJobs(), FIVE(), 'main\'s jobs file is other/recurring.json moved');
   reaches(plainLand(T, 'chore-other-edit', how, { renames: true }), 'zz');
-  refused(T.dry('other-edit'), BEHIND);
-  refused(T.merge('other-edit'), BEHIND);
+  refused(T.dry('other-edit'), BEHIND(how));
+  refused(T.merge('other-edit'), BEHIND(how));
   assert.equal(Object.hasOwn(T.mainJobs(), 'zz'), false, 'zz did not land');
 });
 
@@ -862,8 +864,8 @@ history('refused: the branch renames other/ into project/ while main adds other/
   T.choreBranch('mirror', (wt) => moveTwo(T, wt, 'other', PROJ));
   T.onMainDo((cwd) => write(path.join(cwd, 'other/recurring.json'), jobsText({ zz: ZZ })), 'main: other/recurring.json');
   reaches(plainLand(T, 'chore-mirror', how, { renames: true }), 'zz');
-  refused(T.dry('mirror'), BEHIND);
-  refused(T.merge('mirror'), BEHIND);
+  refused(T.dry('mirror'), BEHIND(how));
+  refused(T.merge('mirror'), BEHIND(how));
   assert.equal(T.has('origin/main', JOBS), false, 'no jobs file landed');
 });
 
@@ -873,8 +875,8 @@ history('refused: main renames another file into the jobs file while the branch 
   T.choreBranch('draft', (wt) => putJson(wt, DRAFT, (j) => { j.zz = ZZ; }));
   T.onMainDo((cwd) => T.g(['mv', DRAFT, JOBS], cwd), 'main: the draft is the jobs file');
   reaches(plainLand(T, 'chore-draft', how), 'zz');
-  refused(T.dry('draft'), BEHIND);
-  refused(T.merge('draft'), BEHIND);
+  refused(T.dry('draft'), BEHIND(how));
+  refused(T.merge('draft'), BEHIND(how));
   assert.equal(Object.hasOwn(T.mainJobs(), 'zz'), false, 'zz did not land');
 });
 
@@ -883,8 +885,8 @@ history('refused: the branch renames another file into the jobs file while main 
   T.choreBranch('draft', (wt) => T.g(['mv', DRAFT, JOBS], wt));
   T.onMainDo((cwd) => putJson(cwd, DRAFT, (j) => { j.zz = ZZ; }), 'main: the draft edited');
   reaches(plainLand(T, 'chore-draft', how), 'zz');
-  refused(T.dry('draft'), BEHIND);
-  refused(T.merge('draft'), BEHIND);
+  refused(T.dry('draft'), BEHIND(how));
+  refused(T.merge('draft'), BEHIND(how));
   assert.equal(T.has('origin/main', JOBS), false, 'no jobs file landed');
 });
 
@@ -905,8 +907,8 @@ history('refused: main copies the jobs file away and back while the branch edits
   assert.equal(T.has(mb, JOBS), false, 'the base has no jobs file');
   assert.equal(T.g(['rev-parse', `${mb}~1:${JOBS}`]), before, 'the base\'s parent had it');
   reaches(plainLand(T, 'chore-aside', how), 'zz');
-  refused(T.dry('aside'), BEHIND);
-  refused(T.merge('aside'), BEHIND);
+  refused(T.dry('aside'), BEHIND(how));
+  refused(T.merge('aside'), BEHIND(how));
   assert.equal(Object.hasOwn(T.mainJobs(), 'zz'), false, 'zz did not land');
 });
 
@@ -918,8 +920,8 @@ history('refused: main renames old/recurring.json into the jobs file and breaks 
   T.onMainDo((cwd) => { T.g(['mv', OLD, JOBS], cwd); fs.writeFileSync(path.join(cwd, JOBS), broken); }, 'main: old/recurring.json into the jobs file, broken');
   assert.equal(T.g(['rev-parse', `origin/chore-copy:${JOBS}`]), T.g(['rev-parse', `origin/main:${JOBS}`]), 'the head\'s file is main\'s broken one');
   reaches(plainLand(T, 'chore-copy', how), 'zz');
-  refused(T.dry('copy'), BEHIND);
-  refused(T.merge('copy'), BEHIND);
+  refused(T.dry('copy'), BEHIND(how));
+  refused(T.merge('copy'), BEHIND(how));
   assert.equal(T.g(['show', `origin/main:${JOBS}`]).includes('"zz"'), false, 'zz did not land');
 });
 
@@ -928,8 +930,8 @@ history('refused: é/recurring.json carried into project/ by a directory rename 
   T.choreBranch('accent', (wt) => write(path.join(wt, 'é/recurring.json'), jobsText({ zz: ZZ })));
   T.onMainDo((cwd) => moveTwo(T, cwd, 'é', PROJ), 'main: é/ into project/');
   reaches(plainLand(T, 'chore-accent', how, { renames: true }), 'zz');
-  refused(T.dry('accent'), BEHIND);
-  refused(T.merge('accent'), BEHIND);
+  refused(T.dry('accent'), BEHIND(how));
+  refused(T.merge('accent'), BEHIND(how));
   assert.equal(T.has('origin/main', JOBS), false, 'no jobs file landed');
 });
 
@@ -965,12 +967,12 @@ history('refused: the branch moves project/ away while main adds the jobs file',
   assert.equal(pl.conflict, false, pl.why);
   assert.equal(pl.entry, null, 'plain git lands no jobs file');
   assert.ok(pl.has('docs/devteam/moved/recurring.json'), 'main\'s file lands elsewhere');
-  refused(T.dry('away'), BEHIND);
-  refused(T.merge('away'), BEHIND);
+  refused(T.dry('away'), BEHIND(how));
+  refused(T.merge('away'), BEHIND(how));
   assert.deepEqual(T.mainJobs(), { zz: ZZ }, 'main\'s job stays');
 });
 
-history('refused under rebase: a merge commit since main (no plain-git proof: a rebase drops the merge)', (T) => {
+history('refused under rebase: a merge commit since main (no plain-git proof: a rebase drops the merge)', (T, how) => {
   T.onMain(() => FIVE());
   const wt = T.choreBranch('mc', (w) => write(path.join(w, NOTES), 'n\n'));
   T.onMainFile('README.md', 'main moves\n');
@@ -979,19 +981,19 @@ history('refused under rebase: a merge commit since main (no plain-git proof: a 
   refused(T.merge('mc'), REBASE_MERGES);
 }, ['rebase']);
 
-history('refused under rebase: a behind branch whose commits add the jobs file and then delete it (no plain-git proof)', (T) => {
+history('refused under rebase: a behind branch whose commits add the jobs file and then delete it (no plain-git proof)', (T, how) => {
   const wt = T.jobsChore('flip', (j) => { j.zz = ZZ; });
   T.commitIn(wt, 'chore-flip', (w) => fs.rmSync(path.join(w, JOBS)), 'and delete it');
   T.onMainFile('README.md', 'main moves\n');
   assert.equal(T.has('origin/chore-flip', JOBS), false, 'the head has no jobs file');
-  refused(T.dry('flip'), BEHIND);
-  refused(T.merge('flip'), BEHIND);
+  refused(T.dry('flip'), BEHIND(how));
+  refused(T.merge('flip'), BEHIND(how));
 }, ['rebase']);
 
 // the user's git config can't hide a name from the scan (T3-3): diff.relative with merge run from
 // docs/, and diff.ignoreSubmodules=all, while a commit puts a gitlink at the project dir and the next
 // puts the directory back
-history('refused under rebase: with diff.relative and diff.ignoreSubmodules=all, a behind branch whose commits make docs/devteam/project a gitlink and then a directory again', (T) => {
+history('refused under rebase: with diff.relative and diff.ignoreSubmodules=all, a behind branch whose commits make docs/devteam/project a gitlink and then a directory again', (T, how) => {
   T.g(['config', 'diff.relative', 'true']);
   T.g(['config', 'diff.ignoreSubmodules', 'all']);
   const wt = T.choreBranch('subflip', (w) => {
@@ -1005,29 +1007,29 @@ history('refused under rebase: with diff.relative and diff.ignoreSubmodules=all,
   assert.match(T.g(['ls-tree', 'origin/chore-subflip', '--', PROJ]), /^040000 tree /, 'the head\'s project dir is a directory');
   // the kit run from docs/, where diff.relative would print names relative to it
   const sub = spawnSync(process.execPath, [path.join(T.old, 'docs/devteam/scripts/devteam.mjs'), 'merge', '--chore', 'subflip', '--dry-run'], { cwd: path.join(T.old, 'docs'), env: { ...process.env, ...SUP }, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
-  refused({ status: sub.status, text: `${sub.stdout}\n${sub.stderr}` }, BEHIND);
-  refused(T.dry('subflip'), BEHIND);
+  refused({ status: sub.status, text: `${sub.stdout}\n${sub.stderr}` }, BEHIND(how));
+  refused(T.dry('subflip'), BEHIND(how));
 }, ['rebase']);
 
 // the two above whose head refuses on its own (step 1), here with the head clean again: only the
 // commit scan sees the path under the jobs file, or the project dir turned into a link
-history('refused under rebase: a behind branch whose commits add docs/devteam/project/recurring.json/x and then delete it (no plain-git proof)', (T) => {
+history('refused under rebase: a behind branch whose commits add docs/devteam/project/recurring.json/x and then delete it (no plain-git proof)', (T, how) => {
   const wt = T.choreBranch('dirflip', (w) => write(path.join(w, JOBS, 'x'), jobsText({ zz: ZZ })));
   T.commitIn(wt, 'chore-dirflip', (w) => fs.rmSync(path.join(w, JOBS), { recursive: true }), 'and delete it');
   T.onMainFile('README.md', 'main moves\n');
   assert.equal(T.has('origin/chore-dirflip', JOBS), false, 'the head has nothing at the jobs file');
-  refused(T.dry('dirflip'), BEHIND);
-  refused(T.merge('dirflip'), BEHIND);
+  refused(T.dry('dirflip'), BEHIND(how));
+  refused(T.merge('dirflip'), BEHIND(how));
 }, ['rebase']);
 
-history('refused under rebase: a behind branch whose commits make docs/devteam/project a symlink and then a directory again (no plain-git proof)', (T) => {
+history('refused under rebase: a behind branch whose commits make docs/devteam/project a symlink and then a directory again (no plain-git proof)', (T, how) => {
   const real = 'docs/devteam/proj-real';
   const wt = T.choreBranch('linkflip', (w) => { fs.renameSync(path.join(w, PROJ), path.join(w, real)); fs.symlinkSync('proj-real', path.join(w, PROJ)); });
   T.commitIn(wt, 'chore-linkflip', (w) => { fs.unlinkSync(path.join(w, PROJ)); fs.renameSync(path.join(w, real), path.join(w, PROJ)); }, 'and back');
   T.onMainFile('README.md', 'main moves\n');
   assert.match(T.g(['ls-tree', 'origin/chore-linkflip', '--', PROJ]), /^040000 tree /, 'the head\'s project dir is a directory');
-  refused(T.dry('linkflip'), BEHIND);
-  refused(T.merge('linkflip'), BEHIND);
+  refused(T.dry('linkflip'), BEHIND(how));
+  refused(T.merge('linkflip'), BEHIND(how));
 }, ['rebase']);
 
 test('A15 landing: forge git, main moves between the checks and the landing: refused, and main is left as the mover left it (final-4 F3)', () => {

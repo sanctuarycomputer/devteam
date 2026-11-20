@@ -24163,12 +24163,14 @@ const recurringRegistry = Object.freeze({
     if (anc.timedOut || ![0, 1].includes(anc.status)) return refuse(cant('merge-base --is-ancestor', anc), warn);
     const merged = 'recurring.json: merge_method is rebase and this branch has merge commits since main; rebase it onto main instead';
     if (anc.status === 0) return rebase && merges ? refuse(merged, warn) : lands('head', headJobs);
-    // 3. behind: one merge base, and no watched path changed on either side since it
-    const behind = "recurring.json: this branch doesn't contain main's tip, and it or main changed a recurring.json since they parted; merge main into the branch first";
+    // 3. behind: one merge base, and no watched path changed on either side since it. The advice
+    // follows the method: under rebase a merge of main is refused too, so it says rebase (final-10 F7)
+    const catchUp = rebase ? 'rebase it onto main' : 'merge main into the branch first';
+    const behind = `recurring.json: this branch doesn't contain main's tip, and it or main changed a recurring.json since they parted; ${catchUp}`;
     const mb = g(['merge-base', '--all', main, sha]);
     if (mb.timedOut || ![0, 1].includes(mb.status)) return refuse(cant('merge-base --all', mb), warn);
     const bases = mb.status === 0 ? mb.out.split('\n').filter(Boolean) : [];
-    if (bases.length > 1) return refuse(`recurring.json: this branch doesn't contain main's tip and has ${bases.length} merge bases with it; merge main into the branch first`, warn);
+    if (bases.length > 1) return refuse(`recurring.json: this branch doesn't contain main's tip and has ${bases.length} merge bases with it; ${catchUp}`, warn);
     if (bases.length !== 1) return refuse(behind, warn);
     if (rebase && merges) return refuse(merged, warn);
     for (const side of [sha, main]) {
