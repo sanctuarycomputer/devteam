@@ -98,6 +98,38 @@ const THREAD_PAGES = [lib.reopenFixture()].map(({ hash, init, ready }) => ({ has
 const TRUST_SUGG_PAGES = [];
 // kit-171: attachments
 const ATTACH_PAGES = [];
+// kit-166: Upkeep's peek with its Jobs, Built in and Proposed jobs sections, two jobs' peeks (a check with what the
+// loop noticed and its runs, a worker chore with its instructions) and a built-in's, on the jobs fixtures
+// (test/fixtures/recurring/dashboard.json in /api/data's upkeep.recurring, peek.json for /api/peek?kind=recurring).
+// Each its own document at the three sizes; view and inbox match nothing, as for the other peeks (the page under
+// the peek is judged elsewhere; the drawer scrolls, so overflow and uneven leave it out by design).
+const JOBS_PAGES = ((
+  DASH_FX = fs.readFileSync(new URL('./fixtures/recurring/dashboard.json', import.meta.url), 'utf8'),
+  PEEK_FX = fs.readFileSync(new URL('./fixtures/recurring/peek.json', import.meta.url), 'utf8'),
+  init = `(() => {
+  const rec = ${DASH_FX}, peeks = ${PEEK_FX}, real = window.fetch;
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  window.fetch = async (u, o) => {
+    const url = String(u && u.url ? u.url : u);
+    if (String(o?.method || 'GET').toUpperCase() === 'GET' && url.startsWith('/api/peek?')) {
+      const q = new URLSearchParams(url.slice(10));
+      if (q.get('kind') === 'recurring') return peeks[q.get('id')] ? json(peeks[q.get('id')]) : json({ error: 'no such job' }, 404);
+    }
+    const r = await real(u, o);
+    if (!r.ok || !url.startsWith('/api/data')) return r;
+    const d = await r.json();
+    d.upkeep = { ...(d.upkeep || {}), recurring: rec };
+    return json(d);
+  };
+})();`,
+  rest = "!document.getElementById('drawer').hidden && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && !document.querySelector('#drawer-body .loading')",
+  sect = (head) => `[...document.querySelectorAll('#drawer-body > .card.psect > .card-head')].some((h) => h.textContent.trim() === ${JSON.stringify(head)})`,
+) => [
+  ['#goal/upkeep', `${rest} && !!document.querySelector('#drawer-body [data-gp="jobs"] table.db-t') && !!document.querySelector('#drawer-body [data-gp="proposals"] table.db-t')`],
+  ['#recurring/ci-main', `${rest} && ${sect('What the loop noticed')} && ${sect('Recent runs')} && !!document.querySelector('#drawer-body [data-tbl="job:runs"]')`],
+  ['#recurring/deps-bump', `${rest} && ${sect('Recent runs')} && !!document.querySelector('#drawer-body .measure')`],
+  ['#builtin/retro', `${rest} && DRAWER.kind === 'builtin' && !!document.querySelector('#drawer-body section.attrs dl.props')`],
+].map(([hash, ready]) => ({ hash, init, ready, narrow: { view: '#no-such-view' }, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } })))();
 const PAGES = [
   // kit-87: Settings, on the shell, whole
   { hash: '#settings', ready: READY },
@@ -119,6 +151,8 @@ const PAGES = [
   { hash: '#efficiency', init: lib.dataRewriteInit(lib.efficiencyFixture()), ready: "!!document.querySelector('#efficiency [data-fit] svg rect') && /kit-87/.test(document.querySelector('#efficiency').textContent)" },
   // kit-97, kit-99, kit-171: their pages, peeks and threads (empty until each adds its own)
   ...THREAD_PAGES, ...TRUST_SUGG_PAGES, ...ATTACH_PAGES,
+  // kit-166: Upkeep's jobs and a job's peek (each an init entry: a document of its own)
+  ...JOBS_PAGES,
 ];
 
 // kit-88: one peek of each kind (spec §2.6), on a second project seeded with test/lib/kit.mjs's
