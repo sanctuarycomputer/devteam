@@ -133,6 +133,19 @@ test('C1c: the ceiling is the lowest valid machine_memory_ceiling among the know
   assert.deepEqual(r.projects['named-not-folder'], { rss: 500 * 4096 });
 });
 
+test('C1g: a root only the hub\'s scan knows (a dashboard answering /api/hello) is a project, by the hello\'s name', async (t) => {
+  const root = path.join(scratch, 'hello-root');
+  fs.mkdirSync(root);
+  // a dashboard on the first port of the hub's scan block, as probeHello asks it
+  const dash = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ devteam: 1, root, name: 'from-hello', port: PORTS + 50 })); });
+  await new Promise((r) => dash.listen(PORTS + 50, '127.0.0.1', r));
+  t.after(() => new Promise((r) => dash.close(r)));
+  const proc = procWith('proc-hello', [[4500, { cmdline: 'bash\0', statm: statm(300), cwd: root }]]);
+  const h = await startHub(t, { proc });
+  const r = JSON.parse((await firstLine(h))[0]);
+  assert.deepEqual(r.projects, { 'from-hello': { rss: 300 * 4096 } }, 'the scan\'s root, under the hello\'s name, on the first tick');
+});
+
 test('C1d: the classifier skips node\'s options, keeps only command names, and needs an install subcommand', () => {
   const { memoryWords, memoryClassify } = fns(['memoryWords', 'memoryClassify']);
   const commands = new Set(['wait', 'gate', 'dashboard', 'hello']);
