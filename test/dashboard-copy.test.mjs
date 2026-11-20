@@ -53,7 +53,7 @@ const GONE_INDEX = [
   'No lesson was given to a worker or planner', 'It has no TL;DR yet', 'No checks in this range yet', 'Quiet: nothing ran',
   'Nothing merged yet', 'Its write-up has no numbers block', 'None yet.', 'Nothing yet.', 'Nothing merged in the last 8 weeks',
   'drawn by the dashboard from the stored result', 'drawn by the dashboard, not the page', 'The supervisor redraws the page and asks again',
-  'sizes only, dates once tickets merge', 'Nothing is posted', 'Or reply instead: a note for the supervisor',
+  'sizes only, dates once tickets merge', 'Its plan lands as one reviewed PR', 'Nothing is posted', 'Or reply instead: a note for the supervisor',
 ];
 const GONE_HUB = [
   'Hold Shift and click anything', 'or start one here', 'Enter sends', 'Shift+Enter is a new line',
