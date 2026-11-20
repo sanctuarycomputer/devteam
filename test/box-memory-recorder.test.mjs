@@ -309,14 +309,27 @@ test('C3e2: the walk reads only through fs.promises: run with no sync fs in scop
 
 test('C3e3: the walk reads a cmdline only to its first 64 KB (plan-1 F5)', async () => {
   const proc = procWith('proc-bigcmd', [[4600, { cmdline: `node\0${'y'.repeat(200000)}\0`, statm: statm(10), cwd: '/tmp' }]], { base: false });
-  // readFile of a cmdline is refused: a whole read of a huge command line can't pass
-  const promises = new Proxy(fs.promises, { get: (o, k) => (k === 'readFile' ? (f, ...a) => (String(f).endsWith('cmdline') ? Promise.reject(new Error('cmdline read whole')) : o.readFile(f, ...a)) : o[k]) });
+  // a whole read of a cmdline is refused (by path, or through its handle), and every byte read from
+  // one through a handle is counted: a walk that reads a huge command line whole can't pass (plan-2 P2-1)
+  let cmdBytes = 0;
+  const handleOf = (fh, cmd) => new Proxy(fh, { get: (h, k) => {
+    if (!cmd) return typeof h[k] === 'function' ? h[k].bind(h) : h[k];
+    if (k === 'readFile' || k === 'readLines' || k === 'createReadStream' || k === 'readableWebStream') return () => { throw new Error('cmdline read whole'); };
+    if (k === 'read') return async (...a) => { const r = await h.read(...a); cmdBytes += r.bytesRead; return r; };
+    return typeof h[k] === 'function' ? h[k].bind(h) : h[k];
+  } });
+  const promises = new Proxy(fs.promises, { get: (o, k) => {
+    if (k === 'readFile') return (f, ...a) => (String(f).endsWith('cmdline') ? Promise.reject(new Error('cmdline read whole')) : o.readFile(f, ...a));
+    if (k === 'open') return async (f, ...a) => handleOf(await o.open(f, ...a), String(f).endsWith('cmdline'));
+    return o[k];
+  } });
   const ctx = vm.createContext({ fs: { promises, constants: fs.constants }, path, Buffer, setImmediate, setTimeout });
   const { memoryWalk } = vm.runInContext(`${region()}\n;({ memoryWalk })`, ctx);
   const w = await memoryWalk(proc, { budgetMs: 2000, slowMs: 0, start: Date.now() });
   assert.equal(w.procs.length, 1, 'the process is read');
   assert.equal(w.procs[0].words[0], 'node');
   assert.ok(w.procs[0].words.every((x) => x.length <= 65536), 'no word past 64 KB');
+  assert.ok(cmdBytes > 0 && cmdBytes <= 65536, `${cmdBytes} bytes of the cmdline read`);
 });
 
 test('C3f: at start the file loses readings older than 8 days and torn lines; a torn tail never spoils the next line', async (t) => {
@@ -489,12 +502,19 @@ test('C4g: a hub that takes the port late (another held it) still records (plan-
   const e = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(port), DEVTEAM_PORT_BASE: String(PORTS + 50), DEVTEAM_PROC: NOWHERE, DEVTEAM_CGROUP: CGROUP, DEVTEAM_MEMINFO: NOWHERE, DEVTEAM_HUB_RETRY_MS: '200' };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_HOME', 'DEVTEAM_IMAGE_HUB', 'TMUX', 'TMUX_PANE', 'DEVTEAM_MEMORY_RECORD']) delete e[k];
   const p = spawn(process.execPath, [SCRIPT, 'hub'], { cwd: home, env: e, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  // the same watcher as startHub's: a test process killed outright leaves no hub behind (plan-2 P2-3)
+  const w = spawn(process.execPath, ['-e', HUB_WATCH, String(p.pid)], { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  w.on('error', () => {});
+  w.stdin.on('error', () => {});
+  w.unref();
+  w.stdin.unref();
   let out = '';
   p.stdout.on('data', (b) => { out += b; });
   p.stderr.on('data', (b) => { out += b; });
-  t.after(() => (p.exitCode !== null || p.signalCode !== null ? undefined : new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } })));
-  // a few failed listens first
-  await new Promise((r) => setTimeout(r, 1000));
+  t.after(() => { try { w.kill('SIGKILL'); } catch {} return p.exitCode !== null || p.signalCode !== null ? undefined : new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }); });
+  // its first listen has failed (the hub says so), so the one that follows is a late one (plan-2 P2-2)
+  await until(() => out.includes("isn't a devteam hub"), `the hub's refused listen (${out})`);
+  await new Promise((r) => setTimeout(r, 500));
   const f = memFile(home, port);
   assert.equal(linesOf(f).length, 0, 'nothing while another holds the port');
   await new Promise((r) => holder.close(r));
