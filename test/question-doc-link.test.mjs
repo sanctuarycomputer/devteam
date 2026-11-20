@@ -114,7 +114,7 @@ test('a home doc on a branch opens in the file peek at that branch (its merge co
 
 test('a ticket id inside a path, branch or filename is never a link of its own; a bare one still is', () => {
   const { linkify } = dashboard();
-  for (const s of ['the branch ticket/kit-12 is pushed', 'kit-12/x.md holds it', 'docs/kit-12.md holds it', 'pre-kit-12 and kit-12-old are other names', 'docs/kit-12.md', 'plan/kit-12']) {
+  for (const s of ['the branch ticket/kit-12 is pushed', 'kit-12/x.md holds it', 'docs/kit-12.md holds it', 'pre-kit-12 and kit-12-old are other names', 'docs/kit-12.md', 'plan/kit-12', 'kit-12.md is the file', 'kit-12.Next']) {
     assert.equal(anchors(linkify(s)).length, 0, `no link in "${s}": ${linkify(s)}`);
     assert.equal(linkify(s), s, `"${s}" as written`);
   }
