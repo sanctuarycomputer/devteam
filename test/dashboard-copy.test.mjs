@@ -62,7 +62,7 @@ const GONE_HUB = [
 // a hint that restates a key or a click, in any words
 const KEY_HINT = /Shift\+Enter|Enter (?:sends|is a new line|to send)|Press Enter|Hold Shift and click|Shift\+click anything/;
 // a heading sub-line: a heading or a panel head's name followed by a quieter span
-const SUB_LINE = /class="(?:sub|loop-intro)"|<h[1-6][^>]*>[^<]*<span class="[^"]*\b(?:dim|muted|sub)\b|<b>[A-Za-z][^<$]*<\/b><span class="[^"]*\b(?:dim|muted)\b[^"]*">[a-z]/;
+const SUB_LINE = /class="(?:sub|loop-intro)"|<h[1-6][^>]*>[^<]*<span class="[^"]*\b(?:dim|muted|sub)\b|<b>[A-Za-z][^<$]*<\/b>\s*<span class="[^"]*\b(?:dim|muted)\b[^"]*"[^>]*>\s*[a-z]/;
 // the keep list (spec K1-K7)
 const KEPT_INDEX = [
   '<div class="ctx">${qblock(q.context, q.links)}</div>', 'Opening it lets this question’s page open',
@@ -84,24 +84,26 @@ const KEPT_HUB = [
 // F2-2). A new "Nothing here yet." fails until it reads None.
 const NOT_EMPTY_STATES = [
   // errors, refusals, not found
-  'No kind of decision by that name.', /^No such [a-z]+( [a-z]+)?( in the Library)?\.$/, 'No sensor by that name in the settings.', 'Not saved:', 'Not sent:',
-  'Not started:', /^Not delivered: no supervisor terminal took it\. The supervisor (has checked since \(|sees it only when it next checks)/,
+  'No kind of decision by that name.', /^No such [a-z]+( [a-z]+)?( in the Library)?\.$/, 'No sensor by that name in the settings.', 'Not saved: …', 'Not sent: …',
+  'Not started: …', /^Not delivered: no supervisor terminal took it\. The supervisor (has checked since \(|sees it only when it next checks)/,
   /^Not done yet\. Change them above, or pick Can’t right now and say in the note why you’re leaving them\.$/, 'Not found',
   'Nothing can be answered here. Tell the supervisor to ask again.', 'Nothing recurs on this key now: it was explained, or never recurred.',
   'Not sent from this page: written on the box as yours', 'No operator is running on this machine. Your first message starts one.',
   // values, labels and states
-  'Not answering', 'Not agreed', 'None missing', 'None this week', 'No goal:', 'No default, because:', 'No page given', 'No result recorded',
-  'No limit', 'Nothing left before a move', 'Not in scope', 'No reason given', 'Not on the roadmap.', 'No wave', 'Not oriented yet', 'Not on',
+  'Not answering', 'Not agreed', 'None missing', 'None this week', 'No goal: … ·', 'No default, because:', 'No page given', 'No result recorded',
+  'No limit', 'Nothing left before a move', 'Not in scope', 'No reason given', 'Not on the roadmap.', 'No wave', 'Not oriented yet', 'Not on …\'s timeline.',
   'Not public', 'Not yet', 'Not the published version: this is the one on main', 'Not the draft: this is the one on main',
   'No measured rate yet', 'Nothing measured: spend shows only what agents reported', 'No goal approved yet', 'No tickets planned yet',
-  'No readings from', 'No projects running',
+  'No readings from … to …', 'No projects running',
   // consequences, and where to act instead
   'Nothing is planned or built for it; any planning stops.',
   /^Nothing to click here\. With account rotation set up, the dashboard restarts it once an account has room; otherwise answer it in the terminal\.$/,
 ];
 const allowed = (s) => NOT_EMPTY_STATES.some((k) => (typeof k === 'string' ? s === k : k.test(s)));
 // the text after a quote (single, double or backtick) or a tag's end, as far as the next quote, tag or ${
-const EMPTY_START = /(?:['"`>])((?:No|Nothing|None|Not)\b[^'"`<$]{0,160})/g;
+const EMPTY_START = /(?:['"`>])((?:No|Nothing|None|Not)\b(?:[^'"`<]|'(?=[a-z])){0,160})/g;
+// a ${…} inside text reads as …, so the words after it are read too (task-1 T1-1)
+const unTemplate = (t) => t.replace(/\$\{[^{}]*\}/g, (m) => `…${'\n'.repeat(m.split('\n').length - 1)}`);
 
 const lineOf = (text, i) => text.slice(0, i).split('\n').length;
 const found = (text, phrases) => phrases.filter((s) => text.includes(s)).map((s) => `${s} (line ${lineOf(text, text.indexOf(s))})`);
@@ -123,14 +125,15 @@ test('every empty state outside the Loop reads None', () => {
   const bad = [];
   for (const [name, t] of [['index.html', ix], ['hub.html', hub]]) {
     // any text that starts as an empty state does
-    for (const m of t.matchAll(EMPTY_START)) {
+    const u = unTemplate(t);
+    for (const m of u.matchAll(EMPTY_START)) {
       const s = m[1].trim();
-      if (s === 'None' || ['No', 'Not', 'Nothing'].includes(s) || allowed(s)) continue;
-      bad.push(`${name}:${lineOf(t, m.index)} ${s.slice(0, 80)}`);
+      if (s === 'None' || allowed(s)) continue;
+      bad.push(`${name}:${lineOf(u, m.index)} ${s.slice(0, 80)}`);
     }
     // an element of class empty, drawn as markup or with el(), holds None (or the helper's own argument)
-    for (const m of t.matchAll(/class="[^"]*\bempty\b[^"]*">([^<]*)</g)) if (!['None', '${html}', '${s}', 'Reading the threads…', 'Loading…'].includes(m[1].trim())) bad.push(`${name}:${lineOf(t, m.index)} ${m[1].slice(0, 80)}`);
-    for (const m of t.matchAll(/el\('[a-z0-9]+', '[^']*\bempty\b[^']*', ([^)]*)\)/g)) if (m[1].trim() !== "'None'") bad.push(`${name}:${lineOf(t, m.index)} ${m[1].slice(0, 80)}`);
+    for (const m of t.matchAll(/class="[^"]*\bempty\b[^"]*"[^>]*>([^<]*)</g)) if (!['None', '${html}', '${s}', 'Reading the threads…', 'Loading…'].includes(m[1].trim())) bad.push(`${name}:${lineOf(t, m.index)} ${m[1].slice(0, 80)}`);
+    for (const m of t.matchAll(/el\((['"])[a-z0-9]+\1, (['"])[^'"]*\bempty\b[^'"]*\2, ([^)]*)\)/g)) if (!['\'None\'', '"None"'].includes(m[3].trim())) bad.push(`${name}:${lineOf(t, m.index)} ${m[3].slice(0, 80)}`);
   }
   // empty(<arg>) and effNone(<arg>) on the dashboard: a literal None (the helpers' definitions have no `empty(`)
   for (const m of ix.matchAll(/\b(empty|effNone)\(([^)]*)\)/g)) {

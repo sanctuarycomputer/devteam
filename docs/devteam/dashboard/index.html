@@ -4324,7 +4324,6 @@ function renderGoals() {
   let body;
   if (GOALS_TAB === 'active') {
     const cards = [DATA.upkeep ? upkeepCardHtml(DATA.upkeep, DATA.upkeep_days) : '', ...live.map((g, i) => goalCardHtml(g, R, openQs, { i, n: live.length }))].filter(Boolean);
-    const ask = openQs.find((q) => q.kind === 'goal-definition');
     body = (cards.length ? grid(cards) : '') + (o.goals.length ? live.length ? '' : '<p class="empty">None</p>' : empty('None'));
   } else {
     const list = GOALS_TAB === 'met' ? met : gone;
