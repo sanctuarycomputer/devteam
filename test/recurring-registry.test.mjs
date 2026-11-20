@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { monoFixture, multiFixture, write, json, kit, gitShim } from './lib/kit.mjs';
+import { monoFixture, multiFixture, write, json, kit, gitShim, REAL_GIT } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const QID = /q-[0-9]+-[0-9]+-supervisor/;
@@ -1053,5 +1053,31 @@ test('A16: settings.md holds no jobs: no default, no words, and validate reads t
     fs.cpSync(path.join(T.old, PROJ), outside, { recursive: true });
     write(path.join(outside, 'recurring.json'), jobsText({ oo: check() }));
     refused(T.run(['validate'], { ...SUP, DEVTEAM_PROJECT: outside }), /the project dir is outside this repo: its recurring\.json is never read/);
+  } finally { T.done(); }
+});
+
+test('A16: git failing is never read as no jobs, and a jobs file this checkout can\'t read is a problem, not a throw (task-2 T2-1, T2-3)', () => {
+  const T = setup('read-fails');
+  try {
+    T.onMain(() => ({ aa: check() }));
+    // a git whose tree reads (cat-file -p) fail: ask refuses, and check-pr's landing fails closed
+    const dir = path.join(T.base, 'git-catfile-fails');
+    write(path.join(dir, 'git'), `#!/bin/sh\ncase " $* " in *" cat-file -p "*) echo "fatal: the test's git fails" >&2; exit 128 ;; esac\nexec "${REAL_GIT}" "$@"\n`);
+    fs.chmodSync(path.join(dir, 'git'), 0o755);
+    const env = { PATH: `${dir}${path.delimiter}${process.env.PATH}` };
+    const a = T.run(['ask', '--class', 'recurring-edit', '--question', 'Should I add this job?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { bb: chore() } })], { ...SUP, ...env });
+    refused(a, /recurring\.json: couldn't read main's jobs \(recurring\.json at [0-9a-f]{12}: git cat-file failed, so the kit can't read the jobs\); try again/);
+    T.choreBranch('notes', (wt) => write(path.join(wt, NOTES), 'n\n'));
+    const c = T.run(['check-pr', '--head-ref', 'chore-notes', '--sha', T.headOf('chore-notes'), '--title', 'chore-notes: jobs'], { ...SUP, ...env });
+    refused(c, /recurring\.json at [0-9a-f]{12}: git cat-file failed, so the kit can't read the jobs/);
+    passes(T.checkPr('chore-notes'));
+    // a jobs file this checkout can't read (EACCES): validate names it
+    T.syncMain();
+    fs.chmodSync(path.join(T.old, JOBS), 0o000);
+    try {
+      let readable = true;
+      try { fs.readFileSync(path.join(T.old, JOBS)); } catch { readable = false; }
+      if (!readable) refused(T.run(['validate']), /recurring\.json in this checkout: can't read it \(EACCES\)/);
+    } finally { fs.chmodSync(path.join(T.old, JOBS), 0o644); }
   } finally { T.done(); }
 });
