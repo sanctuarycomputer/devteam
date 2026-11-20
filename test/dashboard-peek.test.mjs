@@ -684,7 +684,7 @@ const howCases = (ids) => {
   const thread = (subject) => ({ sel: `button[type="button"][data-thread-on="${subject}"]` });
   return {
     // kit-96: Correct is the thread button, on the row and here (there is no row link to it any more)
-    act: { ...thread(`act:${ids.act}`), sel: `button.ghost.mini[data-thread-on="act:${ids.act}"]`, text: 'Correct' },
+    act: { sel: `button.ghost.mini[data-thread-on="act:${ids.act}"]`, text: 'Correct' },
     actUnderDecision: { sel: `a[href="#decision/${e(ids.decision)}"]`, text: 'Correct its decision' },
     actCorrected: { text: 'Corrected by' },
     decision: { sel: `button.ghost.mini[data-thread-on="decision:${ids.decision}"]`, text: 'Correct' },
@@ -1429,7 +1429,7 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
       await soon(`!!document.querySelector(${J(box + ' table.db-t')})`, `${box}: drawn`);
       const link = await p.ev(`(() => { ${DEC} const own = ${ROW_OWN};
         for (const tr of document.querySelectorAll(${J(box + ' tr[data-row]')})) { const o = own(tr); if (!o) continue; const a = [...tr.querySelectorAll('a[href^="#"]')].find((x) => { const h = dec(x.getAttribute('href')); return h !== dec(o) && /^#(ticket|goal|feature|lesson|decision|act|problem|observation)\\//.test(h); });
-          if (a) { window.__a = a; return { own: dec(o), href: dec(a.getAttribute('href')) }; } }
+          if (a) { window.__a = a; return { own: dec(o), href: dec(a.getAttribute('href')), box: ${J(box)} }; } }
         return null; })()`);
       if (link) return link;
     }
@@ -1504,13 +1504,13 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
       // Enter on a link inside a row: the link's own thing (a link to another record goes there), never the row's handler;
       // a real Enter on a focused link follows it (the observation rows hold no such link in the fixture, so the first Loop row with one)
       const link = await loopRowLink(on);
-      assert.ok(link, `${sel}: a row with a link to another record`);
+      assert.ok(link, 'a Loop row with a link to another record');
       assert.equal(await p.ev(`(() => { const a = window.__a; a.focus(); if (document.activeElement !== a) return 'not focused';
-        const ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }); a.dispatchEvent(ev); return ev.defaultPrevented ? 'the row took it' : true; })()`), true, `${sel}: Enter on a link is left to the link`);
+        const ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }); a.dispatchEvent(ev); return ev.defaultPrevented ? 'the row took it' : true; })()`), true, `${link.box}: Enter on a link is left to the link`);
       await p.ev('window.__a.click(); void 0');
-      await soon(`decodeURIComponent(location.hash) === ${J(link.href)}`, `${sel}: the link's own place: ${link.href}`);
+      await soon(`decodeURIComponent(location.hash) === ${J(link.href)}`, `${link.box}: the link's own place: ${link.href}`);
       await settle();
-      assert.equal(await p.ev('decodeURIComponent(location.hash)'), link.href, `${sel}: still the link's, not the row's (${link.own})`);
+      assert.equal(await p.ev('decodeURIComponent(location.hash)'), link.href, `${link.box}: still the link's, not the row's (${link.own})`);
     }
   });
 
