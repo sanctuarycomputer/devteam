@@ -204,7 +204,16 @@ const ATTACH_PAGES = (() => {
 })();`;
   const turnReady = `(() => {
   const c = document.getElementById('tl-card');
-  return TL.open === ${JSON.stringify(tid)} && !c.hidden && c.parentElement.id === 'tl' && document.querySelectorAll('#tl-c-turns .file-chip').length === 3;
+  if (!(TL.open === ${JSON.stringify(tid)} && !c.hidden && c.parentElement.id === 'tl' && document.querySelectorAll('#tl-c-turns .file-chip').length === 3)) return false;
+  // #tl-c-turns scrolls (overflow-y: auto) and measure.mjs skips what a scrolling container holds: as INBOX_READY does
+  // for #th-body, its width is fixed at its own and it overflows visible, so the turn and its chips are judged
+  // and #tl (the floating cards' layer) is .no-shell, which measure.mjs's ignore skips whole: the class is taken
+  // off it for the measure, so the card's turns are in the judged set
+  document.getElementById('tl').classList.remove('no-shell');
+  const t = document.getElementById('tl-c-turns');
+  t.style.width = ''; t.style.overflowY = '';
+  t.style.width = getComputedStyle(t).width; t.style.overflowY = 'visible';
+  return true;
 })()`;
   return [
     { hash: '#questions', init: lib.dataPatchInit({ questions: [q] }), ready: noteReady, narrow: { view: '#no-such-view' } },
