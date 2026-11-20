@@ -10,7 +10,7 @@
 // hub's list, scans nothing: only its hub port is bound, and that must be in the block.
 // Each file claims its own block, and tests in one file run one at a time, so their offsets may
 // overlap, but a port one test binds is one no test before it in that file can still be holding.
-// Offsets live in a "// Ports:" line at the top of each test file, but for two kept here by glob,
+// Offsets live in a "// Ports:" line at the top of each dashboard.*.test.mjs file; two more are kept here by glob,
 // true for any split of those files:
 // - +10/11 next-step's dashboard (next-step*.test.mjs; pinned)
 // - +70/71..95 accounts (accounts*.test.mjs)
