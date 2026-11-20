@@ -18564,8 +18564,10 @@ async function machineStatus() {
   for (const s of machineRecords().strays) out(`machine: stray hub record ${/^[\w.-]{1,80}$/.test(s.file) ? s.file : '?'} (${s.why}; ignored, remove it)`);
   const notes = notedIn();
   if (flagStr('notes')) { const r = lastReview(notes); out(r === utcDay() ? `machine: daily review done ${r}` : `machine: daily review due (last ${r ?? 'never'})`); }
-  // the operator's own PRs on the kit (operator.md, Pull requests upstream): one gh call, ? when it can't
-  if (flagStr('notes')) out(operatorPrsLine(sh('gh', ['pr', 'list', '-R', KIT_UPSTREAM, '--author', '@me', '--state', 'open', '--limit', '100', '--json', 'number,headRefName,headRefOid,createdAt,latestReviews,comments,statusCheckRollup'], { timeout: 15000 }))); // gh-direct: the kit's own repo, which no project here speaks for
+  // the operator's own PRs on the kit (operator.md, Pull requests upstream): one gh call, ? when it can't.
+  // The search keeps the reply to PRs whose body has the operator's line (no fleet or owner PRs and
+  // their comments); operatorPrsLine checks the line exactly, since search matches words, not lines
+  if (flagStr('notes')) out(`machine: ${operatorPrsLine(sh('gh', ['pr', 'list', '-R', KIT_UPSTREAM, '--author', '@me', '--state', 'open', '--search', `"${OPERATOR_PR_MARK}" in:body`, '--limit', '100', '--json', 'number,headRefName,body,isDraft,headRefOid,createdAt,latestReviews,comments,statusCheckRollup'], { timeout: 15000, maxBuffer: 16 * 1024 * 1024 }))}`); // gh-direct: the kit's own repo, which no project here speaks for
   const flagged = [];
   const latest = new Map();
   for (const root of roots) {
@@ -18638,15 +18640,22 @@ async function machineStatus() {
 // `Verdict: APPROVE|CHANGES <sha>` line in a review or comment (the operator's reviewers share its gh
 // login, so most are comments). A PR needs the operator when its latest verdict is CHANGES at its
 // head, when a check at its head failed, or when no verdict names its head a day after its last
-// comment or review, or its opening (a fix pushed and never looked at again). Branches the fleets and the kit's
-// own releases push (ticket/, plan/, chore-, release-prep-) aren't the operator's, though the same gh
-// login opened them. gh gives a PR's first 100 comments: a longer thread's latest verdict is unread.
+// comment or review, or its opening (a fix pushed and never looked at again). Drafts wait.
+// Which PRs are the operator's: the box's gh login is shared by the owner, the supervisors and other
+// sessions, so --author @me is not enough. The operator ends every PR body it opens with the line
+// OPERATOR_PR_MARK (operator.md, Pull requests upstream), and only a PR whose body has that line on
+// its own counts: it is set when the PR is opened, needs no records to agree, and a reader can see
+// it on the PR. Branches the fleets and the kit's own releases push (ticket/, plan/, chore-,
+// release-prep-) aren't the operator's even so. gh gives a PR's first 100 comments: a longer
+// thread's latest verdict is unread.
+const OPERATOR_PR_MARK = 'Opened by the box operator.';
 const OPERATOR_PR_WAIT_MS = 24 * 3600000;
 function operatorPrsLine(text, now = Date.now()) {
   let prs;
   try { prs = JSON.parse(text); } catch { return 'operator PRs: ?'; }
   if (!Array.isArray(prs)) return 'operator PRs: ?';
-  const mine = prs.filter((p) => p && Number.isInteger(p.number) && typeof p.headRefName === 'string' && !/^(ticket\/|plan\/|chore-|release-prep-)/.test(p.headRefName));
+  const marked = (body) => String(body ?? '').split(/\r?\n/).some((l) => l.trim() === OPERATOR_PR_MARK);
+  const mine = prs.filter((p) => p && Number.isInteger(p.number) && typeof p.headRefName === 'string' && !/^(ticket\/|plan\/|chore-|release-prep-)/.test(p.headRefName) && marked(p.body) && p.isDraft !== true);
   if (!mine.length) return 'operator PRs: none open';
   const atHead = (sha, head) => typeof sha === 'string' && typeof head === 'string' && sha.length >= 7 && head.toLowerCase().startsWith(sha.toLowerCase());
   const RED = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR']);
@@ -19092,7 +19101,7 @@ const IMAGE_RUNS = {
     // machine status, tell, alert, pane-state
     'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
     'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
-    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
+    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_MARK', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
     // operator threads
     'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
     'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
