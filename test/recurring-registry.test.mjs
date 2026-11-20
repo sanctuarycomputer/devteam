@@ -334,7 +334,8 @@ test('A8: the registry chore waits while Upkeep is drained or parked; --force go
       passes(T.run(['chore', 'start', 'recurring', '--force']));
       const forced = T.acts().filter((a) => a.class === 'goal-hold' && (a.refs ?? []).includes('chore-recurring'));
       assert.equal(forced.length, 1, JSON.stringify(T.acts()));
-      assert.match(forced[0].what, /--force/);
+      assert.equal(forced[0].what, `started chore-recurring while Upkeep is ${mode === 'drain' ? 'drained' : 'parked'}, with --force`);
+      assert.deepEqual(forced[0].refs, ['upkeep', 'chore-recurring']);
       T.g(['worktree', 'remove', '--force', path.join(T.old, '.worktrees/chore-recurring')]);
       T.g(['branch', '-D', 'chore-recurring']);
       T.jobsChore('recurring', () => ({ 'ci-main': check() }));
@@ -608,7 +609,10 @@ test('A12: recurring apply writes exactly the answered change into the chore wor
     const settingsBefore = fs.readFileSync(wtSettings);
     refused(apply(open), /answered/);
     T.answer(open);
-    passes(apply(open));
+    const applied = apply(open);
+    passes(applied);
+    assert.ok(applied.out.includes('devteam.mjs chore pr recurring --title "…"'), applied.text);
+    assert.ok(applied.out.includes(`devteam.mjs merge --chore recurring --approved ${open}`), applied.text);
     assert.equal(fs.readFileSync(wtJobs, 'utf8'), jobsText({ bb: chore(), aa: check({ every: '12h' }), ab: chore({ every: '2w' }) }), 'main\'s jobs with exactly the change, in the documented form');
     assert.deepEqual(fs.readFileSync(wtSettings), settingsBefore, 'settings.md is byte for byte as it was');
     // the worktree's jobs now differ from main's: a second answer can't be applied on top
@@ -665,7 +669,59 @@ test("A13: recurring list --json and show read main's jobs, with who registered 
     assert.equal(list.entries.find((e) => e.name === 'by-hand').registered, null);
     const show = T.ok(['recurring', 'show', 'ci-main'], {});
     assert.ok(show.includes(q) && show.includes('gh run list --limit 1'), show);
-    refused(T.run(['recurring', 'show', 'not-landed'], {}), /no job/);
+    refused(T.run(['recurring', 'show', 'not-landed'], {}), /no job not-landed on main; recurring list/);
+  } finally { T.done(); }
+});
+
+test("A13: list and show give the runs a day, the cap, the registering act and the pending rows; a hand edit on main unregisters; a broken main file exits 1; outside the repo, no jobs (task-4 T4-2)", () => {
+  const T = setup('list-more');
+  try {
+    T.jobsChore('recurring', (j) => { j['ci-main'] = check(); });
+    const q = T.yes({ recurring: { 'ci-main': check() } });
+    passes(T.merge('recurring', ['--approved', q]));
+    const act = T.acts().find((a) => a.class === 'merge-chore' && a.approved_by === q);
+    let list = json(T.ok(['recurring', 'list', '--json'], {}));
+    assert.deepEqual(list.entries.map((e) => [e.name, e.runs_a_day]), [['ci-main', 4]], 'every 6h: 4 runs a day');
+    assert.deepEqual(list.entries[0].registered, { qid: q, at: act.created_at, by: 'supervisor', act: act.id });
+    assert.equal(list.runs_a_day, 4);
+    assert.equal(list.cap, 100);
+    assert.deepEqual(list.pending, []);
+    // the pending rows: open, registering (a Yes not landed) and stopping (a Yes to a null), one per name
+    const open = T.asked({ recurring: { tidy: chore() } });
+    const reg = T.yes({ recurring: { 'ab-job': check({ every: '12h' }) } });
+    const stop = T.yes({ recurring: { 'ci-main': null } });
+    list = json(T.ok(['recurring', 'list', '--json'], {}));
+    assert.deepEqual(list.pending, [
+      { qid: open, name: 'tidy', change: chore(), status: 'open' },
+      { qid: reg, name: 'ab-job', change: check({ every: '12h' }), status: 'registering' },
+      { qid: stop, name: 'ci-main', change: null, status: 'stopping' },
+    ]);
+    const shown = json(T.ok(['recurring', 'show', 'ci-main', '--json'], {}));
+    assert.equal(shown.runs_a_day, 4);
+    assert.deepEqual(shown.pending, [{ qid: stop, name: 'ci-main', change: null, status: 'stopping' }]);
+    assert.ok(T.ok(['recurring', 'show', 'ci-main'], {}).includes(`pending: ${stop} stopping: ci-main stop`));
+    // main's entry edited by hand: no answer showed it, so it is not registered
+    T.onMain((j) => { j['ci-main'] = check({ every: '12h' }); }, 'main: ci-main edited by hand');
+    list = json(T.ok(['recurring', 'list', '--json'], {}));
+    assert.equal(list.entries[0].registered, null);
+    assert.equal(list.runs_a_day, 2);
+    // a file on main that doesn't read: list and show print the read problem and exit 1
+    T.onMainDo((cwd) => write(path.join(cwd, JOBS), '{ "ci-main": '), 'main: a broken jobs file');
+    for (const args of [['list'], ['list', '--json'], ['show', 'ci-main']]) {
+      const r = T.run(['recurring', ...args], {});
+      assert.equal(r.status, 1, r.text);
+      assert.match(r.text, NOT_JSON);
+      assert.match(r.text, /recurring\.json at [0-9a-f]{12}: not a JSON object/);
+    }
+    // a project dir outside the repo: git holds no jobs file for it
+    const outside = path.join(T.base, 'outside-proj');
+    fs.cpSync(path.join(T.old, PROJ), outside, { recursive: true });
+    const env = { DEVTEAM_PROJECT: outside };
+    const ol = T.run(['recurring', 'list'], env);
+    passes(ol);
+    assert.equal(ol.out.trim(), 'the project dir is outside this repo, so it has no jobs');
+    assert.deepEqual(json(T.ok(['recurring', 'list', '--json'], env)), { entries: [], runs_a_day: 0, cap: 100, pending: [] });
+    refused(T.run(['recurring', 'show', 'ci-main'], env), /^devteam: the project dir is outside this repo, so it has no jobs$/m);
   } finally { T.done(); }
 });
 

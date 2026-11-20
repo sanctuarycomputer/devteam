@@ -23942,11 +23942,12 @@ const recurringRegistry = Object.freeze({
   // settings.md holding the jobs, as validate and check-pr refuse it
   inSettings: () => `settings.md has "recurring": the jobs live in ${recurringRegistry.path()}; move them there (it lands with a recurring-edit answer, as any job change does)`,
   // git, bounded: every call the registry makes has a timeout and is killed at it; { status, out,
-  // err, timedOut, ok }. A timeout or a failure is never read as an answer.
-  git(args, { cwd = HOME_CWD, env } = {}) {
-    const r = spawnSync('git', args, { cwd, env: env ? { ...process.env, ...env } : process.env, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+  // err, timedOut, ok }. A timeout or a failure is never read as an answer. encoding null gives
+  // out as a Buffer (the bytes git printed).
+  git(args, { cwd = HOME_CWD, env, encoding = 'utf8' } = {}) {
+    const r = spawnSync('git', args, { cwd, env: env ? { ...process.env, ...env } : process.env, encoding: encoding ?? 'buffer', timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
     const timedOut = r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL';
-    return { status: r.status, out: r.stdout ?? '', err: String(r.stderr ?? ''), timedOut, ok: r.status === 0 && !timedOut };
+    return { status: r.status, out: r.stdout ?? (encoding === null ? Buffer.alloc(0) : ''), err: String(r.stderr ?? ''), timedOut, ok: r.status === 0 && !timedOut };
   },
   // The file's text as jobs: a JSON object with no key twice in one object, at any depth. where is
   // "at <ref12>" or "in this checkout".
@@ -24229,7 +24230,7 @@ function cmdRecurring() {
   if (sub === 'list' || sub === 'show') {
     if (sub === 'show' && !arg) die('usage: recurring show <name> [--json]');
     if (!projectInRepo) {
-      if (sub === 'show') die(`no job ${arg} on main: the project dir is outside this repo, so it has no jobs`);
+      if (sub === 'show') die('the project dir is outside this repo, so it has no jobs');
       return flags.json ? json({ entries: [], runs_a_day: 0, cap: R.CAP, pending: [] }) : out('the project dir is outside this repo, so it has no jobs');
     }
     const jobs = mainJobs();
@@ -24276,7 +24277,7 @@ function cmdRecurring() {
   const v = questionView(q);
   if (v.status !== 'answered') die(`recurring apply: ${arg} is not a question the owner answered (it is ${v.status})`);
   const change = R.shown(v);
-  if (!change) die(`${arg} showed no job change (no change.recurring): ask again with --change`);
+  if (!change) die(`${arg} showed no job change: ask again with --change`);
   const done = R.landed(arg);
   if (done) die(`${arg} already landed (${done.id})`);
   // words not read yet: ownerAnswer says how to read them
@@ -24289,19 +24290,16 @@ function cmdRecurring() {
   if (!projectInRepo) die('the project dir is outside this repo, so it has no jobs file to apply to');
   const wt = path.join(mainRoot, '.worktrees', 'chore-recurring');
   if (!fs.existsSync(wt)) die('no worktree .worktrees/chore-recurring; devteam.mjs chore start recurring');
-  if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die('.worktrees/chore-recurring is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start recurring');
+  const top = R.git(['rev-parse', '--show-toplevel'], { cwd: wt });
+  if (!top.ok || realPath(top.out.trim()) !== realPath(wt)) die('.worktrees/chore-recurring is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start recurring');
   const base = mainJobs();
   // main's file as bytes, or null when main has none (read() has checked it is a plain 100644 blob)
   const sha = mainSha();
-  const gb = (args) => {
-    const r = spawnSync('git', args, { cwd: mainRoot, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-    return { status: r.status, out: r.stdout ?? Buffer.alloc(0), ok: r.status === 0 && !r.error && !r.signal, timedOut: r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL' };
-  };
-  const has = gb(['rev-parse', '--verify', '-q', `${sha}:${P}`]);
+  const has = R.git(['rev-parse', '--verify', '-q', `${sha}:${P}`]);
   if (!has.ok && (has.timedOut || has.status !== 1)) die(`recurring apply: git rev-parse ${has.timedOut ? 'timed out' : 'failed'} reading main's ${P}; nothing was written`);
   let onMain = null;
   if (has.ok) {
-    const b = gb(['cat-file', 'blob', `${sha}:${P}`]);
+    const b = R.git(['cat-file', 'blob', `${sha}:${P}`], { encoding: null });
     if (!b.ok) die(`recurring apply: git cat-file ${b.timedOut ? 'timed out' : 'failed'} reading main's ${P}; nothing was written`);
     onMain = b.out;
   }
