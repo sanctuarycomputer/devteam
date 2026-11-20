@@ -8,9 +8,9 @@
   #always { left: 40px; top: 120px; width: 200px; }
   #only-tab1 { left: 40px; top: 200px; width: 160px; }
   #only-tab2 { left: 40px; top: 280px; width: 160px; }
-  /* a tabbed view: each view hides the other's elements */
-  body[data-view="tab2"] .tab1 { display: none; }
-  body:not([data-view="tab2"]) .tab2 { display: none; }
+  /* a tabbed view: each view hides the other's elements (important: the id rules above set display) */
+  body[data-view="tab2"] .tab1 { display: none !important; }
+  body:not([data-view="tab2"]) .tab2 { display: none !important; }
 </style></head>
 <body>
 <a id="go-tab1" href="#tab1">The first view</a>

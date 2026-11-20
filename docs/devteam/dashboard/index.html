@@ -6572,9 +6572,11 @@ const artViewer = (slug, at) => `/view/artifact/${encodeURIComponent(slug)}${at 
 // The stage's lens state (spec §4, §6): what is on the stage, where its lens's messages may go (an
 // artifact's opaque origin takes '*'; a preview's lens, its own origin), the ids minted for real
 // pointer events, the last reply, and where the lens says each pinned anchor is now (keyed by a
-// thread's id). A preview's: its name, the lens's origin, and its app's route, viewport and last
+// thread's id). An artifact's: the page and its #hash as the lens says them, so a note follows its
+// view. A preview's: its name, the lens's origin, and its app's route, viewport and last
 // errors as the lens said them; the session that offered it and whether it answers, for the bar.
-const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, fpNow: null, mainFpNow: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false, pinsPending: false };
+// draws: the layer's redraws (tsDrawSoon), counted so a flood of moves is seen to cost one a frame.
+const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, fpNow: null, mainFpNow: null, path: null, hash: '', draws: 0, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false, pinsPending: false };
 // What the lens was asked and has not answered, let go: a waiting click hears it is gone (the page it
 // pointed at is no longer there, so it starts nothing), and no reply to a question from before is taken.
 function tsForget() {
@@ -6587,7 +6589,7 @@ function tsSet(kind, info = {}) {
   tsForget();
   // fpSerial and fpGone: the draft poll's (avLiveReload) stage and whether a 404 stopped it, kept in TS so an
   // image over the stage (kit-171's avUnderTake/avUnderGive) keeps them with the rest
-  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, fpNow: null, mainFpNow: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, watch: '', last: null, fpSerial: avLiveReload.serial(), fpGone: false }, info);
+  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, fpNow: null, mainFpNow: null, path: null, hash: '', name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, watch: '', last: null, fpSerial: avLiveReload.serial(), fpGone: false }, info);
   for (const m of [TS.rects, TS.keyOf, TS.watching]) m.clear();
   avHint();
 }
@@ -8683,13 +8685,15 @@ const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!se
 // (source), of a kind a lens says, a hit-reply only to an id this page minted for a real pointer
 // event (minted), and rebuilt from that kind's fields, every string cut of a box's capability and
 // to the kit's cap. It is shown as text and starts nothing until the owner writes.
-const T_LENS_SAYS = ['ready', 'route', 'hit-reply', 'rects', 'key', 'errors'];
+const T_LENS_SAYS = ['ready', 'route', 'hit-reply', 'rects', 'key', 'errors', 'nav'];
 function tLensMessage(e, frameWin, minted) {
   if (!frameWin || e.source !== frameWin) return null;
   const m = e.data;
   if (!m || typeof m !== 'object' || m.lens !== 1 || !T_LENS_SAYS.includes(m.type)) return null;
   // a path or a route: the page's words, without what would have the owner's eye read them otherwise
   const str = (v, n) => (typeof v === 'string' ? tCut(tUncap(v.replace(T_UNSAFE, '')), n) : null);
+  // a page's #hash, the same way, and nothing unless it is one
+  const hash = (v) => { const h = str(v, 200); return h && h[0] === '#' ? h : ''; };
   if (m.type === 'hit-reply') {
     if (typeof m.id !== 'string' || !minted.has(m.id)) return null;
     const anchor = tAnchor(m.anchor);
@@ -8699,7 +8703,10 @@ function tLensMessage(e, frameWin, minted) {
   if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').flatMap((r) => { const rect = r.rect === null ? null : tBox(r.rect, ['x', 'y', 'w', 'h']); return r.rect === null || rect ? [{ key: r.key, rect, changed: r.changed === true }] : []; }) };
   // a keyup's key message is marked up (kit-141 design-change 1); the field is left out for a keydown's
   if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true, ...(m.up === true ? { up: true } : {}) };
-  if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
+  // ready's hash only when the lens sent one (a page with none says what it said before kit-142)
+  if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']), ...(typeof m.hash === 'string' ? { hash: hash(m.hash) } : {}) };
+  // a move inside the page (a #hash, pushState): where it is now
+  if (m.type === 'nav') return { type: 'nav', path: str(m.path, T_CAPS.path + 400), hash: hash(m.hash) };
   if (m.type === 'route') return { type: 'route', route: str(m.route, T_CAPS.route) };
   return { type: 'errors', errors: (Array.isArray(m.errors) ? m.errors : []).filter((x) => typeof x === 'string').slice(-T_ERRORS).map((x) => tCut(tUncap(x.replace(T_UNSAFE, '')), T_ERROR_MAX)) };
 }
@@ -8733,7 +8740,16 @@ function tFrameTitle(s) {
   return tLine(`${a.role || a.tag || 'element'}${named ? ` "${named}"` : ''}`, T_TITLE_MAX) || tLine(where, T_TITLE_MAX);
 }
 // Whether the stage shows a subject's page now: the same artifact and page, or the same preview and route.
-const tFrameOn = (s, stage) => !!s && s.kind === stage?.kind && (s.kind === 'artifact' ? s.slug === stage.slug && (s.path || 'index.html') === (stage.path || 'index.html') : s.kind === 'preview' && s.name === stage.name && (s.route ?? '') === (stage.route ?? ''));
+// An artifact note's path may hold the view it was placed on (file#hash): then the stage's hash too; one
+// with no hash (or a bare '#') is on its file whatever the view, as every note before kit-142 is.
+function tFrameOn(s, stage) {
+  if (!s || s.kind !== stage?.kind) return false;
+  if (s.kind === 'preview') return s.name === stage.name && (s.route ?? '') === (stage.route ?? '');
+  if (s.kind !== 'artifact' || s.slug !== stage.slug) return false;
+  const p = s.path || 'index.html', i = p.indexOf('#');
+  const file = i < 0 ? p : p.slice(0, i), hash = i < 0 ? '' : p.slice(i);
+  return file === (stage.path || 'index.html') && (hash.length <= 1 || hash === (stage.hash ?? ''));
+}
 /* threads-core end */
 
 /* threads-layer start */
@@ -10204,10 +10220,17 @@ function tsRaise(on) {
 }
 // A thread's subject for a spot on the stage: where the owner pointed, and the lens's anchor there
 // when it has one (none: no lens, an older kit, a page that ignores it, or an answer about somewhere
-// else), so the pin can be drawn at the point either way (spec §4 step 3).
+// else), so the pin can be drawn at the point either way (spec §4 step 3). A note with no element
+// the lens can find again (no anchor, or none with a selector) keeps the view it was placed on in its
+// path (file#hash); one past the path cap keeps the plain file (on every view, as an old note) rather
+// than a cut hash. An element's note follows its element, so its path is the file.
 function tsSubject(anchor, x, y) {
   const point = { x: Math.round(x), y: Math.round(y) };
-  if (TS.kind === 'artifact') return { kind: 'artifact', slug: TS.slug, at: TS.at, ...(TS.fp ? { fp: TS.fp } : {}), path: TS.path || 'index.html', ...(anchor ? { anchor } : {}), point };
+  if (TS.kind === 'artifact') {
+    const file = TS.path || 'index.html';
+    const path = TS.hash && !anchor?.selector && tBytes(file + TS.hash) <= T_CAPS.path ? file + TS.hash : file;
+    return { kind: 'artifact', slug: TS.slug, at: TS.at, ...(TS.fp ? { fp: TS.fp } : {}), path, ...(anchor ? { anchor } : {}), point };
+  }
   // a preview's route, viewport and last errors are its app's, as its lens said them
   if (TS.kind === 'preview') return { kind: 'preview', name: TS.name, ...(TS.route ? { route: TS.route } : {}), ...(TS.viewport ? { viewport: TS.viewport } : {}), ...(anchor ? { anchor } : {}), point, ...(TS.errors?.length ? { errors: TS.errors } : {}) };
   return null;
@@ -10280,11 +10303,11 @@ tsOver.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') tsP
 tsOver.addEventListener('click', (e) => { if (TS.via === 'mouse') tsPick(e); else e.preventDefault(); });
 // in pin mode (and with Shift held) the wheel scrolls the framed page, under the pointer
 tsOver.addEventListener('wheel', (e) => { e.preventDefault(); const at = tsAt(e); tsPost({ type: 'scroll-by', dx: e.deltaX, dy: e.deltaY, x: at.x, y: at.y }); }, { passive: false });
-// What a lens says redraws the layer once a frame, however much of it comes.
+// What a lens says redraws the layer once a frame, however much of it comes (each redraw counted in TS.draws).
 function tsDrawSoon() {
   if (TS.pinsPending) return;
   TS.pinsPending = true;
-  requestAnimationFrame(() => { TS.pinsPending = false; tsBar(); tlDraw(); });
+  requestAnimationFrame(() => { TS.pinsPending = false; TS.draws++; tsBar(); tlDraw(); });
 }
 // Each page the stage's frame loads is asked what it is: its lens answers ready. The other frame's
 // loads (one let go of) are nothing to the stage. Every load of a src after the frame's first is a move of the
@@ -10297,7 +10320,7 @@ function avFrameLoad(e) {
     if (n > 1) AV_NAVS++;
   }
   AV_FRAME_ESC = false;
-  tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' });
+  tsForget(); TS.ready = false; TS.path = null; TS.hash = ''; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' });
 }
 for (const id of ['av-frame', 'pv-frame']) $(id).addEventListener('load', avFrameLoad);
 window.addEventListener('message', (e) => {
@@ -10316,11 +10339,23 @@ window.addEventListener('message', (e) => {
     if (m.type === 'route') return;
   }
   if (m.type === 'errors') { if (TS.kind === 'preview') TS.errors = m.errors; return; }
-  // the page as its lens names it (ready.path), never the frame's src: a link in it goes elsewhere
+  // the page as its lens names it (ready.path and its #hash), never the frame's src: a link in it goes elsewhere
   // and once it has, what it watches for the pins is asked of it afresh. Once a load (the frame's
   // load lets it go): a page that says ready again and again would otherwise have every one redraw
   // and ask its lens to watch again, and a loop of them would hold the owner's tab.
-  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') TS.path = tArtPath(m.path, TS.slug); TS.watch = ''; tsDrawSoon(); return; }
+  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') { TS.path = tArtPath(m.path, TS.slug); TS.hash = m.hash ?? ''; } TS.watch = ''; tsDrawSoon(); return; }
+  // a move inside an artifact's page (a #hash, pushState) after its ready (one before it, a redirect
+  // while it loads, is dropped: ready gives the page): another view, so another set of pins, asked of
+  // the lens afresh. Taken only when it changes something, drawn once a frame, so a page saying moves
+  // as fast as it can costs a comparison each. A move of the frame's own, counted for the close (kit-141).
+  // A preview says its moves as route.
+  if (m.type === 'nav') {
+    if (TS.kind !== 'artifact' || !TS.ready) return;
+    const path = tArtPath(m.path, TS.slug);
+    if (path === TS.path && m.hash === TS.hash) return;
+    AV_NAVS++; TS.path = path; TS.hash = m.hash; TS.rects.clear(); TS.watch = ''; tsDrawSoon();
+    return;
+  }
   // where each watched anchor is now, for only the anchors asked about (a Set: no key a page makes
   // up, constructor or __proto__ among them, is one); the pins, and an open card beside its pin,
   // follow

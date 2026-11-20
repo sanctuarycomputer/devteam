@@ -331,6 +331,8 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     // where a new note's hash lives: on empty page, or an anchor with no selector, the path holds it
     const paths = await V.p.ev("[tsSubject(null, 10, 10).path, tsSubject({ tag: 'p', text: 'x', rect: { x: 0, y: 0, w: 5, h: 5 } }, 1, 1).path, tsSubject({ selector: '#only-tab2', tag: 'button', text: 'Plan B', rect: { x: 40, y: 280, w: 160, h: 40 } }, 50, 290).path]");
     assert.deepEqual(paths, ['a.html#tab2', 'a.html#tab2', 'a.html'], 'tsSubject on #tab2: empty page and no selector keep the hash; an element, the plain path');
+    // a file#hash past the path cap keeps the plain file, never a cut hash (Review focus 4)
+    assert.equal(await V.p.ev("(() => { const h = TS.hash; TS.hash = '#' + 'h'.repeat(299); const p = tsSubject(null, 1, 1).path; TS.hash = h; return p; })()"), 'a.html', 'tsSubject: a.html plus a 300-byte hash is past the cap, so the plain file');
     // back to the first view: as on a.html
     await V.frameClick('go-tab1', 'pages/a.html', { hash: '#tab1', load: false });
     await pinsAre(V, [N.TE, N.TAL, N.TP], 'on a.html#tab1');
