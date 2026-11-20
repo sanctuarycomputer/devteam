@@ -42,6 +42,17 @@ test('a row with a cell fewer than its header is refused too, the record unchang
   assert.match(r.err, /F2/);
   assert.match(r.err, /6 cells/);
   assert.match(r.err, /header has 7/);
+  assert.match(r.err, /a cell is missing/, 'a short row is told to add its cell, not to escape a pipe');
+  assert.equal(fs.readFileSync(file, 'utf8'), text, 'nothing is written');
+});
+
+test('a widened row is refused for its width before its disposition is read', () => {
+  const text = record('| F3 | Important | spec | a.js:3 | a stray cell before the disposition | fix it | | fixed |');
+  const file = put('final-7.md', text);
+  const r = dispose('final-7.md', 'F3', 'wrong after all');
+  assert.notEqual(r.status, 0, `dispose wrote the row: ${r.out}`);
+  assert.match(r.err, /8 cells/);
+  assert.doesNotMatch(r.err, /already has a disposition/, 'the width is checked first');
   assert.equal(fs.readFileSync(file, 'utf8'), text, 'nothing is written');
 });
 
