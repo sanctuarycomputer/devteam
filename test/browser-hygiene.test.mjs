@@ -497,7 +497,7 @@ test('T4-1 a view port taken before the daemon binds it: start retries', { skip,
   const s = readState(h);
   assert.equal(recs[0].port, s.view_port);
   assert.equal((await statusJson(h)).running, true, 'the daemon answers');
-  assert.equal((await fetch(`http://127.0.0.1:${s.view_port}/`)).status, 503, 'the daemon listens on the view port');
+  assert.equal((await fetch(`http://127.0.0.1:${s.view_port}/`)).status, 200, 'the daemon listens on the view port');
   await stopped(h);
 });
 

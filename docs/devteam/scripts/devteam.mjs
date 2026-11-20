@@ -9560,7 +9560,7 @@ async function previewRunIt(rec) {
 }
 // What hello and the Library say of one preview, every string capped: this goes into the hub's list.
 const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
-const previewHelloRow = (r, up) => ({ name: previewCap(r.name, 63), port: r.port, project: previewCap(r.project, 63), session: previewCap(r.session, 80), label: previewCap(r.label, PREVIEW_LABEL_MAX), at: previewCap(r.at, 40), up, run: !!r.run });
+const previewHelloRow = (r, up) => ({ name: previewCap(r.name, 63), port: r.port, project: previewCap(r.project, 63), session: previewCap(r.session, 80), label: browserPreviewShaped(r) ? "Supervisor's browser" : previewCap(r.label, PREVIEW_LABEL_MAX), at: previewCap(r.at, 40), up, run: !!r.run });
 // --- the preview lens: framed by the viewer at <preview>/.devteam/lens, on the app's own origin, it
 // reads the app's page for the viewer over postMessage (spec §7). On a box the gateway serves it; on a
 // laptop the dashboard's relay does. Copied from cloud/gateway.mjs, never edited here: a test holds
@@ -9937,7 +9937,10 @@ async function cmdPreview() {
     const rows = await Promise.all(recs.map(async ({ mtimeMs, ...r }) => ({ ...r, up: await probePort(r.port) })));
     if (flags.json) return json(rows);
     if (!rows.length) return out('no previews');
-    for (const r of rows) out(`${r.name}  port ${r.port}  ${r.up ? 'answers' : 'not answering'}  ${r.session}${r.label ? ` (${r.label})` : ''}  ${previewLink(r)}`);
+    for (const r of rows) {
+      const label = browserPreviewShaped(r) ? "Supervisor's browser" : r.label;
+      out(`${r.name}  port ${r.port}  ${r.up ? 'answers' : 'not answering'}  ${r.session}${label ? ` (${label})` : ''}  ${previewLink(r)}`);
+    }
     return undefined;
   }
   if (sub === 'url') {
@@ -9951,16 +9954,33 @@ async function cmdPreview() {
     if (flags.all) {
       const session = logWriter();
       const mine = readPreviews().filter((r) => r.session === session);
-      for (const r of mine) { killPreviewWindow(r); removePreview(r.name); }
+      // the caller's browser record as browser stop stops it (Chrome too), the others as ever
+      for (const r of mine) {
+        if (browserIsPreview(r)) await browserStop({ say: false, rec: r });
+        else { killPreviewWindow(r); removePreview(r.name); }
+      }
       return out(`stopped ${mine.length} preview${mine.length === 1 ? '' : 's'}`);
     }
     const r = previewNamed(arg ?? die('usage: preview stop <name> | --all'));
+    // the browser's record is browser stop, whoever's writer runs it: stopping takes nothing from anyone
+    if (browserIsPreview(r)) {
+      // the line only when Chrome was stopped: a failed kill has said why and set exit 1
+      if (await browserStop({ say: false, rec: r })) out(`preview ${r.name} stopped, and the supervisor's browser with it`);
+      return undefined;
+    }
     const killed = killPreviewWindow(r);
     removePreview(r.name);
     return out(`preview ${r.name} stopped${killed ? ' and its server shut down' : r.run ? '' : ' (unregistered; the server is yours to stop)'}`);
   }
   if (sub === 'start') {
     const r = previewNamed(arg ?? die('usage: preview start <name>'));
+    // the browser's record is browser start: its gates first (a worker refused before anything
+    // starts), then the start lock, the memory check and a fresh environment from this caller
+    if (browserIsPreview(r)) {
+      browserGates({ chrome: true });
+      const s = await browserEnsure();
+      return out(`browser running (preview ${s.preview}, profile ${browserKey()})`);
+    }
     if (!r.run) die(`preview ${r.name} has no command to run: it is a server you run yourself. Start it, then devteam.mjs preview ${r.port}${r.label ? ` --label "${r.label}"` : ''}`);
     if (!fs.existsSync(r.cwd)) die(`preview ${r.name}: its folder ${r.cwd} is gone`);
     killPreviewWindow(r);
@@ -9973,6 +9993,8 @@ async function cmdPreview() {
     if (/[\r\n\0]/.test(cmd)) die('preview --run is one line');
     const session = logWriter();
     const label = previewLabel();
+    // previewClaim keys on the label: this one would take over the browser's record and kill its window
+    if (label === 'browser') die("preview: the label browser is the supervisor's browser's; pick another");
     const { name, had } = await previewClaim(session, label);
     if (had?.run) killPreviewWindow(had);
     let port;
@@ -9989,6 +10011,7 @@ async function cmdPreview() {
     if (await previewPortIsDashboard(port)) die(`preview: ${port} is a devteam dashboard`);
     const session = logWriter();
     const label = previewLabel();
+    if (label === 'browser') die("preview: the label browser is the supervisor's browser's; pick another");
     const { name, had } = await previewClaim(session, label);
     // The kit's own window stays only while it is what's on this port; a window with no record
     // to answer for it would be swept by the next tick anyway.
@@ -26948,7 +26971,8 @@ function browserRootOf(dir) {
 // profile naming another root is a copied or moved checkout's, refused; a missing root.json is written.
 // One that is there but can't be read as a root (unparsable, relative, too long) is refused the same
 // way, never overwritten. Only the start path calls this: a verb a live daemon answers makes nothing.
-function browserProfile() {
+// fail: how a refused profile ends the caller (die; a forget's restart throws, to stop the daemon whole).
+function browserProfile({ fail = die } = {}) {
   const key = browserKey(), here = realPath(mainRoot), dir = path.join(browserHome(), key), file = path.join(dir, 'root.json');
   for (const d of [browserHome(), dir]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fs.chmodSync(d, 0o700); }
   const forget = 'Forget it (devteam.mjs browser forget) to start signed out';
@@ -26960,8 +26984,8 @@ function browserProfile() {
     try { fs.linkSync(tmp, file); } catch (e) { if (e.code !== 'EEXIST') throw e; } finally { fs.rmSync(tmp, { force: true }); }
   }
   const root = browserRootOf(dir);
-  if (root === null) die(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
-  if (root !== here) die(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
+  if (root === null) return fail(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
+  if (root !== here) return fail(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
   return dir;
 }
 // browser_idle_minutes in ms, read like machine_memory_ceiling: anything but a whole number from 1 to
@@ -27217,6 +27241,27 @@ function browserRunEnv({ headed }) {
   env.DEVTEAM_BROWSER_SERVE = '1';
   if (headed) { env.DEVTEAM_BROWSER_HEADED = '1'; for (const k of ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY']) if (process.env[k] !== undefined) env[k] = process.env[k]; }
   return env;
+}
+// A browser daemon's preview record by its shape: label browser and a run.cmd ending in ` browser
+// serve`. Hello's row checks only this (no loadSettings per row); browserIsPreview adds this checkout's
+// project, for preview stop and start.
+function browserPreviewShaped(r) { return r?.label === 'browser' && typeof r.run?.cmd === 'string' && r.run.cmd.endsWith(' browser serve'); }
+function browserIsPreview(r) { return browserPreviewShaped(r) && r.project === previewProject(); }
+// The hourly renewal (DEVTEAM_TEST_BROWSER_RENEW_MS in tests): the record as it is on disk, with a
+// fresh at and expires, under its lock taken by tryLock (never waits, takes a stale lock once, never
+// dies; withLock blocks the event loop up to 15 s and dies on its timeout, which would exit leaving
+// Chrome up): a held lock skips this round, and the lock goes in tryLock's finally. Only a record
+// still there, naming this daemon's port and a window, is rewritten, so a stopped one is never made
+// again. Any error skips the round, said nowhere.
+function browserRenew(ctx, port) {
+  if (ctx.stopping || !ctx.preview) return;
+  const file = previewFile(ctx.preview);
+  try {
+    tryLock(file, () => {
+      const r = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (isObj(r) && r.name === ctx.preview && r.port === port && typeof r.run?.window === 'string') writePreviewFile(previewFresh(r));
+    });
+  } catch {}
 }
 // This checkout's browser preview record (label browser), or undefined.
 const browserPreviewRec = () => readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser');
@@ -27746,9 +27791,80 @@ async function browserLaunchChrome(ctx, { headed }) {
     });
     if (r.cdp) return { cdp: r.cdp };
     try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
-    if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) { ctx.notes.push("Chrome's sandbox isn't available on this machine; it runs without it."); continue; }
+    if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) {
+      const note = "Chrome's sandbox isn't available on this machine; it runs without it.";
+      if (!ctx.notes.includes(note)) ctx.notes.push(note); // a forget's relaunch says it once
+      // a stop came meanwhile: no second Chrome (detached, it would outlive the daemon); the caller's
+      // own ctx.stopping check after the launch kills ctx.chrome and returns
+      if (ctx.stopping) return { cdp: null };
+      continue;
+    }
     throw new Error(r.late ? "browser: Chrome didn't open its DevTools pipe in 30 s" : 'browser: Chrome exited before its DevTools pipe opened');
   }
+}
+// One Chrome ended: Browser.close on its pipe, then (not gone in 5 s) its group SIGTERM, SIGKILL 2 s
+// later; its helpers killed with the group; its pipe closed. The stop path's and a forget's.
+async function browserEndChrome(cdp, pid) {
+  if (pid && browserAlive(pid)) {
+    await Promise.race([cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
+    if (!(await browserGone(pid, 5000))) {
+      try { process.kill(-pid, 'SIGTERM'); } catch {}
+      if (!(await browserGone(pid, 2000))) { try { process.kill(-pid, 'SIGKILL'); } catch {} await browserGone(pid, 3000); }
+    }
+  }
+  if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
+  cdp?.close();
+}
+// A Chrome and its pipe watched: its exit or its pipe closing stops the daemon only while it is the
+// current Chrome and not retired by a forget (whose old Chrome's end is expected). The view's
+// screencast frames are taken on this pipe.
+function browserWatchChrome(ctx, chrome, cdp) {
+  const gone = () => { if (chrome === ctx.chrome && !chrome.retired) browserShutdown(ctx, 'chrome exited'); };
+  chrome.once('exit', gone);
+  cdp.on('close', gone);
+  cdp.on('Page.screencastFrame', (p, sid) => browserViewFrame(ctx, p, sid));
+}
+// Sign out of everything (the view's forget), on the verbs' queue: the screencast stopped, the
+// current Chrome retired and ended, the profile folder (ctx.profile, the one the daemon runs on)
+// removed only once no process carries it, made again empty with this checkout's root.json, its start
+// steps, a fresh Chrome on about:blank, the tabs watched again, state.json rewritten with the new
+// chrome_pid, and the screencast started again on the same viewer (its seq goes on). The daemon,
+// guard, control port and preview stay. A stop meanwhile wins: after each await, ctx.stopping ends
+// it (browserShutdown kills ctx.chrome, whichever it is). Any failure stops the daemon.
+async function browserForgetRestart(ctx) {
+  if (ctx.stopping || !ctx.ready) return;
+  try {
+    ctx.ready = false; // the view's input dropped, its tick idle, a new socket 503
+    const v = ctx.viewer;
+    if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
+    const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
+    if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
+    const old = ctx.chrome;
+    old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
+    await browserEndChrome(ctx.cdp, old.pid);
+    if (ctx.stopping) return;
+    let procs = browserProcsOn(ctx.profile);
+    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(100);
+    if (ctx.stopping) return;
+    if (procs === null || procs.length) return void browserShutdown(ctx, 'error'); // nothing removed on a guess
+    fs.rmSync(ctx.profile, { recursive: true, force: true });
+    ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
+    await browserPrepareProfile(ctx.profile, []);
+    if (ctx.stopping) return;
+    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // launched while it stopped
+    ctx.cdp = cdp;
+    browserWatchChrome(ctx, ctx.chrome, cdp);
+    ctx.tabs = [];
+    ctx.active = null;
+    await browserWatchTabs(ctx);
+    for (let i = 0; i < 100 && !ctx.stopping && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
+    if (ctx.stopping) return;
+    ctx.state = { ...ctx.state, chrome_pid: ctx.chrome.pid };
+    browserWriteState(ctx.state);
+    ctx.ready = true;
+    if (ctx.viewer) browserViewTick(ctx, ctx.viewer); // the screencast again, on the same socket
+  } catch { browserShutdown(ctx, 'error'); }
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
 // hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
@@ -27758,16 +27874,9 @@ function browserShutdown(ctx, why) {
   if (why === 'signal') for (const s of [process.stdout, process.stderr]) { s.on('error', () => {}); }
   ctx.stopping = (async () => {
     clearTimeout(ctx.idle);
-    const pid = ctx.chrome?.pid;
-    if (pid && browserAlive(pid)) {
-      await Promise.race([ctx.cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
-      if (!(await browserGone(pid, 5000))) {
-        try { process.kill(-pid, 'SIGTERM'); } catch {}
-        if (!(await browserGone(pid, 2000))) { try { process.kill(-pid, 'SIGKILL'); } catch {} await browserGone(pid, 3000); }
-      }
-    }
-    if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
-    ctx.cdp?.close();
+    clearInterval(ctx.renew);
+    try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
+    await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
@@ -27861,11 +27970,23 @@ function browserVerbs(ctx) {
 }
 // The control server: POST / only, Host 127.0.0.1:<port>, JSON, and the secret (timingSafeEqual);
 // anything else 403 and nothing run. Verbs run one at a time; the idle timer is paused while one runs
-// and re-armed after it (ping leaves it alone).
+// and re-armed after it. ping, after the same checks, is answered at once off the queue and leaves the
+// idle timer alone.
 function browserControl(ctx, secret) {
   const want = Buffer.from(secret);
   let queue = Promise.resolve();
-  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => browserShutdown(ctx, 'idle'), browserIdleMs()); };
+  // with a viewer's socket open, the idle timer arms again rather than stop the daemon
+  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (ctx.viewer && !ctx.stopping ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
+  // ctx.serial(fn): fn on the verbs' queue (the view's forget), the idle timer paused as for a verb
+  ctx.serial = (fn) => {
+    const run = queue.then(async () => {
+      if (ctx.stopping) return;
+      clearTimeout(ctx.idle);
+      try { await fn(); } catch {} finally { if (!ctx.stopping) arm(); }
+    });
+    queue = run;
+    return run;
+  };
   const server = http.createServer((req, res) => {
     req.on('error', () => {});
     res.on('error', () => {});
@@ -27879,30 +28000,325 @@ function browserControl(ctx, secret) {
       let m;
       try { m = JSON.parse(body); } catch {}
       const verb = typeof m?.verb === 'string' && Object.hasOwn(ctx.verbs, m.verb) ? m.verb : null;
-      queue = queue.then(async () => {
+      const run = async () => {
         if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
         if (!verb) return { code: 1, out: `usage: ${BROWSER_USAGE}` };
         if (verb !== 'ping') clearTimeout(ctx.idle); // paused while the verb runs
         try { return await ctx.verbs[verb](isObj(m.args) ? m.args : {}); } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
-      }).then((r) => {
+      };
+      // ping reads nothing from Chrome and is answered at once, off the queue: a long verb or a forget
+      // never makes the daemon look dead to browserLive (and so a second daemon started over it)
+      const ping = verb === 'ping';
+      const answered = (ping ? run() : queue.then(run)).then((r) => {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(r));
+        if (ping) return; // ctx.after is the queued verb's (stop's), never taken by a ping
         const after = ctx.after;
         ctx.after = null;
         if (after) res.once('finish', after);
       }).catch(() => { try { res.destroy(); } catch {} }); // one bad answer never stops the queue
+      if (!ping) queue = answered;
     });
   });
   return { server, arm };
 }
 const browserListen = (server, port) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(server.address().port); }); });
-// browser serve, in the preview's window: the 503 view placeholder bound first, then the profile and
+// --- the live view (kit-66): browser.html on the view port, and its one socket (RFC 6455, text only)
+// carrying Chrome's screencast to the page. Nothing a viewer sends is logged, written or echoed.
+const BROWSER_WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const BROWSER_WS_MAX = 262144; // a joined message, judged on each header's declared length
+const BROWSER_WS_FRAGMENTS = 1024; // fragments per message: empty ones would grow it with the size still 0
+const BROWSER_WS_BACKLOG = 2097152; // a frame message is dropped while more than this waits to be written
+const BROWSER_FRAME_DATA = /^\/9j\/[A-Za-z0-9+/]*={0,2}$/; // the contract's frame data
+const browserHook = (name, dflt) => { const n = Number(browserTestEnv(name)); return Number.isFinite(n) && n > 0 ? n : dflt; };
+const browserPingMs = () => browserHook('DEVTEAM_TEST_BROWSER_PING_MS', 15000);
+const browserCastMax = () => Math.min(1280, Math.round(browserHook('DEVTEAM_TEST_BROWSER_CAST_MAX', 1280)));
+// A header's one value, or null when it is missing or given more than once.
+function browserOneHeader(req, name) {
+  let v = null, n = 0;
+  for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === name) { v = req.rawHeaders[i + 1]; n++; }
+  return n === 1 ? v : null;
+}
+const browserViewHost = (req, port) => [`127.0.0.1:${port}`, `localhost:${port}`].includes(browserOneHeader(req, 'host'));
+// A CDP call the view makes: never an unhandled rejection (a closing pipe answers with one).
+const browserViewCdp = (ctx, method, params, sid) => { ctx.cdp?.send(method, params, sid).catch(() => {}); };
+// One upgraded socket: its frame reader and writer. onText gets each joined text message; onClose runs
+// once, however it closed. A ping every pingMs; closed 2 x pingMs after the last byte received (a timer
+// every byte resets, not a check at the ping ticks, which would let silence run up to pingMs longer).
+function browserSocket(sock, { onText, onClose, pingMs }) {
+  let buf = Buffer.alloc(0), parts = [], joined = 0, inMsg = false, closed = false;
+  const write = (op, payload) => {
+    if (sock.destroyed || !sock.writable) return;
+    const len = payload.length;
+    let hdr;
+    if (len < 126) hdr = Buffer.from([0x80 | op, len]);
+    else if (len < 65536) { hdr = Buffer.alloc(4); hdr[0] = 0x80 | op; hdr[1] = 126; hdr.writeUInt16BE(len, 2); } else { hdr = Buffer.alloc(10); hdr[0] = 0x80 | op; hdr[1] = 127; hdr.writeBigUInt64BE(BigInt(len), 2); }
+    try { sock.write(Buffer.concat([hdr, payload])); } catch {}
+  };
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(timer);
+    clearTimeout(silence);
+    buf = Buffer.alloc(0);
+    parts = [];
+    try { onClose?.(); } catch {}
+  };
+  // A close frame with code, then a FIN; destroyed 1 s later only if the peer hasn't closed.
+  const close = (code) => {
+    if (closed) return;
+    if (code) { const b = Buffer.alloc(2); b.writeUInt16BE(code); write(8, b); }
+    finish();
+    try { sock.end(); } catch {}
+    const t = setTimeout(() => sock.destroy(), 1000);
+    t.unref?.();
+    sock.once('close', () => clearTimeout(t));
+  };
+  const read = () => {
+    for (;;) {
+      if (closed || buf.length < 2) return;
+      const b0 = buf[0], b1 = buf[1], fin = !!(b0 & 0x80), op = b0 & 15;
+      if (b0 & 0x70) return close(1002); // a reserved bit
+      if (!(b1 & 0x80)) return close(1002); // unmasked
+      let len = b1 & 127, at = 2;
+      if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); at = 4; } else if (len === 127) { if (buf.length < 10) return; const big = buf.readBigUInt64BE(2); len = big > BigInt(BROWSER_WS_MAX) ? Infinity : Number(big); at = 10; }
+      if (op >= 8) {
+        if (op > 10 || !fin || len > 125) return close(1002); // an unknown, fragmented or long control frame
+      } else if (op === 2) return close(1003); // binary
+      else if (op === 0 ? !inMsg : op === 1 ? inMsg : true) return close(1002); // a stray continuation, a text mid-message, an unknown opcode
+      else if (joined + len > BROWSER_WS_MAX || parts.length >= BROWSER_WS_FRAGMENTS) return close(1009); // on the header, before its payload is buffered
+      if (buf.length < at + 4 + len) return;
+      const mask = buf.subarray(at, at + 4), body = Buffer.from(buf.subarray(at + 4, at + 4 + len));
+      for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3];
+      buf = buf.subarray(at + 4 + len);
+      if (op === 8) return close(1000);
+      if (op === 9) { write(10, body); continue; }
+      if (op === 10) continue;
+      parts.push(body);
+      joined += len;
+      inMsg = !fin;
+      if (!fin) continue;
+      const text = Buffer.concat(parts).toString('utf8');
+      parts = [];
+      joined = 0;
+      onText?.(text);
+    }
+  };
+  const feed = (chunk) => {
+    if (closed) return;
+    silence.refresh();
+    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+    try { read(); } catch { close(1011); }
+  };
+  sock.setKeepAlive(true);
+  sock.setNoDelay(true);
+  const silence = setTimeout(() => close(1001), 2 * pingMs);
+  silence.unref?.();
+  const timer = setInterval(() => write(9, Buffer.alloc(0)), pingMs);
+  timer.unref?.();
+  sock.on('data', feed);
+  sock.on('end', () => close(0));
+  sock.on('close', finish);
+  return {
+    feed,
+    close,
+    get closed() { return closed; },
+    // false when it wasn't sent: a droppable message (a frame) while the socket's backlog is over 2 MiB
+    send(obj, droppable = false) {
+      if (closed || (droppable && sock.writableLength > BROWSER_WS_BACKLOG)) return false;
+      write(1, Buffer.from(JSON.stringify(obj)));
+      return true;
+    },
+  };
+}
+// The screencast, on the tab being cast: JPEG, quality 60, at most 1280 x 1280, every frame.
+function browserCast(ctx, tab, on) {
+  if (!tab?.sessionId) return;
+  if (!on) return browserViewCdp(ctx, 'Page.stopScreencast', {}, tab.sessionId);
+  const m = browserCastMax();
+  browserViewCdp(ctx, 'Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: m, maxHeight: m, everyNthFrame: 1 }, tab.sessionId);
+}
+// Every 250 ms while a viewer is open (and once at open): a new active tab moves the screencast to it;
+// a changed masked URL is sent. Nothing while Chrome isn't up (a forget restarting it).
+function browserViewTick(ctx, v) {
+  try {
+    if (!ctx.ready || ctx.stopping || ctx.viewer !== v || v.ws.closed) return;
+    const tab = ctx.active?.sessionId ? ctx.active : null;
+    if (tab !== v.tab) { browserCast(ctx, v.tab, false); v.tab = tab; browserCast(ctx, tab, true); }
+    const url = browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening);
+    if (url !== v.url) { v.url = url; v.ws.send({ t: 'url', url }); }
+  } catch {}
+}
+function browserViewClose(ctx, v) {
+  clearInterval(v.timer);
+  browserCast(ctx, v.tab, false);
+  v.tab = null;
+  if (ctx.viewer === v) ctx.viewer = null;
+}
+// Page.screencastFrame: acknowledged at once; sent as frame only when it comes from the tab being cast
+// to the open viewer, its data the contract's pattern and its size (CSS pixels) 1 to 8192. seq lives on
+// the viewer's own object, so it rises for as long as the socket lives.
+function browserViewFrame(ctx, params, sessionId) {
+  if (params?.sessionId !== undefined) browserViewCdp(ctx, 'Page.screencastFrameAck', { sessionId: params.sessionId }, sessionId);
+  const v = ctx.viewer;
+  if (!v || v.ws.closed || !v.tab?.sessionId || v.tab.sessionId !== sessionId) return;
+  const w = Math.round(params?.metadata?.deviceWidth), h = Math.round(params?.metadata?.deviceHeight);
+  if (typeof params.data !== 'string' || !BROWSER_FRAME_DATA.test(params.data) || !(w >= 1 && w <= 8192) || !(h >= 1 && h <= 8192)) return;
+  const scale = params.metadata.pageScaleFactor;
+  v.scale = typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1; // the input's x, y are divided by it
+  if (v.ws.send({ t: 'frame', data: params.data, w, h, seq: v.seq }, true)) v.seq++;
+}
+// The page's messages ($defs.view.from_page), checked by hand: closed field sets, types, bounds and
+// enums. Not the kit's schemaErrors, so no refusal text can ever carry a typed value; a message that
+// fails is null and dropped. Lengths are JSON Schema's (code points).
+const BROWSER_MODS = { type: 'int', min: 0, max: 15 };
+const BROWSER_XY = { type: 'num', min: 0, max: 8192 };
+const BROWSER_FROM_PAGE = {
+  mouse: { req: ['type', 'x', 'y'], f: { type: { enum: ['down', 'up', 'move', 'click'] }, x: BROWSER_XY, y: BROWSER_XY, button: { enum: ['none', 'left', 'middle', 'right'] }, clicks: { type: 'int', min: 0, max: 3 }, mods: BROWSER_MODS } },
+  wheel: { req: ['x', 'y', 'dx', 'dy'], f: { x: BROWSER_XY, y: BROWSER_XY, dx: { type: 'num', min: -100000, max: 100000 }, dy: { type: 'num', min: -100000, max: 100000 }, mods: BROWSER_MODS } },
+  key: { req: ['type', 'key'], f: { type: { enum: ['down', 'up', 'press'] }, key: { type: 'str', min: 1, max: 32 }, code: { type: 'str', min: 1, max: 32 }, text: { type: 'str', min: 1, max: 8 }, mods: BROWSER_MODS } },
+  paste: { req: ['text'], f: { text: { type: 'str', min: 1, max: 10000 } } },
+  nav: { req: ['url'], f: { url: { type: 'str', min: 1, max: 2048 } } },
+  back: { req: [], f: {} },
+  forget: { req: [], f: {} },
+};
+function browserViewMessage(m) {
+  if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string' || !Object.hasOwn(BROWSER_FROM_PAGE, m.t)) return null;
+  const shape = BROWSER_FROM_PAGE[m.t];
+  for (const k of shape.req) if (!Object.hasOwn(m, k)) return null;
+  for (const k of Object.keys(m)) {
+    if (k === 't') continue;
+    if (!Object.hasOwn(shape.f, k)) return null;
+    const s = shape.f[k], x = m[k];
+    if (s.enum) { if (!s.enum.includes(x)) return null; continue; }
+    if (s.type === 'str') {
+      if (typeof x !== 'string' || x.length < s.min || x.length > 2 * s.max) return null; // UTF-16 length bounds code points both ways
+      const n = [...x].length;
+      if (n < s.min || n > s.max) return null;
+    } else if (typeof x !== 'number' || !Number.isFinite(x) || (s.type === 'int' && !Number.isInteger(x)) || x < s.min || x > s.max) return null;
+  }
+  return m;
+}
+// windowsVirtualKeyCode for a key: the named keys, then KeyA-KeyZ and Digit0-9 from code. 0 if none.
+const BROWSER_VK = { Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18, Pause: 19, CapsLock: 20, Escape: 27, ' ': 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, ContextMenu: 93, ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, 112 + i])) };
+function browserVk(key, code) {
+  if (Object.hasOwn(BROWSER_VK, key)) return BROWSER_VK[key];
+  const c = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(code ?? '');
+  if (c) return (c[1] ?? c[2]).charCodeAt(0);
+  if (code === 'Space') return 32;
+  return 0;
+}
+const BROWSER_BUTTONS = { none: 0, left: 1, right: 2, middle: 4 };
+// One message from the page: parsed, checked, and handed to the active tab's session. Nothing about
+// it is logged, printed, stored or echoed; a failed CDP call is dropped (browserViewCdp catches it).
+// While Chrome isn't up (the start steps, a forget restarting it) or the daemon is stopping, every
+// message is dropped, a second forget among them, so nothing reads a null ctx.active.
+function browserViewInput(ctx, v, text) {
+  if (!ctx.ready || ctx.stopping || ctx.viewer !== v) return;
+  let m;
+  try { m = browserViewMessage(JSON.parse(text)); } catch { return; }
+  if (!m) return;
+  if (m.t === 'forget') { // Sign out of everything, on the verbs' queue; one queued at a time
+    if (ctx.forgetting) return;
+    ctx.forgetting = true;
+    return void ctx.serial(() => browserForgetRestart(ctx)).finally(() => { ctx.forgetting = false; });
+  }
+  const sid = ctx.active?.sessionId;
+  if (!sid) return; // a tab with no session: dropped
+  const cdp = (method, params) => browserViewCdp(ctx, method, params, sid);
+  const scale = v.scale > 0 ? v.scale : 1;
+  switch (m.t) {
+    case 'mouse': {
+      const button = m.button ?? 'none', base = { x: m.x / scale, y: m.y / scale, button, modifiers: m.mods ?? 0 };
+      const held = BROWSER_BUTTONS[button], clickCount = m.clicks ?? 1;
+      if (m.type === 'move') return cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...base, buttons: held, clickCount: 0 });
+      if (m.type === 'down' || m.type === 'click') cdp('Input.dispatchMouseEvent', { type: 'mousePressed', ...base, buttons: held, clickCount });
+      if (m.type === 'up' || m.type === 'click') cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base, buttons: 0, clickCount });
+      return;
+    }
+    case 'wheel':
+      return cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x: m.x / scale, y: m.y / scale, deltaX: m.dx, deltaY: m.dy, modifiers: m.mods ?? 0 });
+    case 'key': {
+      const base = { key: m.key, ...(m.code ? { code: m.code } : {}), windowsVirtualKeyCode: browserVk(m.key, m.code), modifiers: m.mods ?? 0 };
+      if (m.type === 'press') {
+        cdp('Input.dispatchKeyEvent', { type: 'keyDown', ...base, ...(m.text ? { text: m.text, unmodifiedText: m.text } : {}) });
+        return cdp('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+      }
+      return cdp('Input.dispatchKeyEvent', { type: m.type === 'down' ? 'rawKeyDown' : 'keyUp', ...base });
+    }
+    case 'paste':
+      return cdp('Input.insertText', { text: m.text });
+    case 'nav': {
+      let u;
+      try { u = new URL(m.url); } catch { return; }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return; // file:, javascript:, data:, chrome: … dropped
+      return cdp('Page.navigate', { url: u.href }); // not awaited: the guard answers whatever it is
+    }
+    case 'back':
+      ctx.cdp?.send('Page.getNavigationHistory', {}, sid).then((h) => {
+        const prev = h?.entries?.[h.currentIndex - 1];
+        if (h?.currentIndex > 0 && prev?.id !== undefined) cdp('Page.navigateToHistoryEntry', { entryId: prev.id });
+      }).catch(() => {});
+      return;
+  }
+}
+// The view server: GET or HEAD / (Host one of the two loopback forms) is browser.html, read once here;
+// an upgrade passes five guards in order, each refusal a short HTTP answer and a FIN. One viewer.
+function browserViewServer(ctx) {
+  const page = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dashboard', 'browser.html'));
+  const plain = (code) => `${http.STATUS_CODES[code].toLowerCase()}\n`;
+  const server = http.createServer((req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
+    req.resume();
+    const no = (code, extra = {}) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', connection: 'close', ...extra }); res.end(plain(code)); };
+    if (!browserViewHost(req, server.address()?.port)) return no(403);
+    if (String(req.url).split('?')[0] !== '/') return no(404);
+    if (req.method !== 'GET' && req.method !== 'HEAD') return no(405, { allow: 'GET, HEAD' });
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': page.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "frame-ancestors 'self'" });
+    res.end(req.method === 'HEAD' ? undefined : page);
+  });
+  server.on('clientError', (e, s) => s.destroy());
+  server.on('upgrade', (req, sock, head) => {
+    sock.on('error', () => sock.destroy());
+    try {
+      const port = server.address()?.port;
+      const refuse = (code) => {
+        const body = plain(code);
+        sock.end(`HTTP/1.1 ${code} ${http.STATUS_CODES[code]}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);
+        const t = setTimeout(() => sock.destroy(), 1000);
+        t.unref?.();
+        sock.once('close', () => clearTimeout(t));
+      };
+      if (req.url !== '/socket') return refuse(404);
+      if (!browserViewHost(req, port)) return refuse(403);
+      if (![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(browserOneHeader(req, 'origin'))) return refuse(403);
+      const key = browserOneHeader(req, 'sec-websocket-key');
+      if (req.method !== 'GET' || String(browserOneHeader(req, 'upgrade')).toLowerCase() !== 'websocket' || browserOneHeader(req, 'sec-websocket-version') !== '13' || !/^[A-Za-z0-9+/]{22}==$/.test(key ?? '')) return refuse(400);
+      if (!ctx.ready || ctx.stopping) return refuse(503);
+      const accept = crypto.createHash('sha1').update(key + BROWSER_WS_GUID).digest('base64');
+      sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
+      const v = { ws: null, seq: 0, tab: null, url: null, timer: null, scale: 1 };
+      v.ws = browserSocket(sock, { pingMs: browserPingMs(), onText: (text) => browserViewInput(ctx, v, text), onClose: () => browserViewClose(ctx, v) });
+      if (head?.length) v.ws.feed(head);
+      if (v.ws.closed) return;
+      if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
+      ctx.viewer = v;
+      v.ws.send({ t: 'held', qid: null });
+      browserViewTick(ctx, v);
+      v.timer = setInterval(() => browserViewTick(ctx, v), 250);
+      v.timer.unref?.();
+    } catch { try { sock.destroy(); } catch {} }
+  });
+  return server;
+}
+// browser serve, in the preview's window: the view server bound first, then the profile and
 // its start steps, the guard, Chrome, the CDP tabs, the control server, then state.json. It writes
 // nothing to its window once it is up. The bind comes before the start steps (kit-316 final-1b S1): a
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   const viewPort = Number(process.env.PORT);
   const rec = readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser' && r.port === viewPort);
@@ -27910,7 +28326,7 @@ async function browserServe({ chrome: bin }) {
   ctx.preview = rec.name;
   ctx.profile = browserProfile();
   try {
-    ctx.view = http.createServer((req, res) => { req.resume(); res.on('error', () => {}); res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' }); res.end("The supervisor's browser runs here; its live view comes with a later release.\n"); });
+    ctx.view = browserViewServer(ctx);
     // test hook: the first daemon to find this file missing makes it and fails its bind (T4-1)
     const failOnce = browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL');
     if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
@@ -27919,9 +28335,8 @@ async function browserServe({ chrome: bin }) {
     ctx.guard = await startBrowserGuard();
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
-    ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
     ctx.cdp = cdp;
-    ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
+    browserWatchChrome(ctx, ctx.chrome, cdp);
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
     ctx.verbs = browserVerbs(ctx);
@@ -27929,8 +28344,12 @@ async function browserServe({ chrome: bin }) {
     const { server, arm } = browserControl(ctx, secret);
     ctx.control = server;
     const controlPort = await browserListen(server, 0);
-    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
+    ctx.state = { browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview };
+    browserWriteState(ctx.state); // a forget rewrites it with its new chrome_pid
+    ctx.ready = true; // the view's guard 5: Chrome is up
     arm();
+    ctx.renew = setInterval(() => browserRenew(ctx, viewPort), Number(browserTestEnv('DEVTEAM_TEST_BROWSER_RENEW_MS')) || 3600000);
+    ctx.renew.unref();
     process.on('uncaughtException', () => browserShutdown(ctx, 'error'));
     process.on('unhandledRejection', () => browserShutdown(ctx, 'error'));
   } catch (e) {
@@ -27942,8 +28361,11 @@ async function browserServe({ chrome: bin }) {
 }
 // browser stop: the daemon told to stop, and up to 10 s for it to go. A dead daemon's Chrome is killed
 // here (only one proven by its --user-data-dir); then the session files, the window, the preview
-// record and state.json. It makes nothing: no profile, no run/browser.
-async function browserStop({ say = true } = {}) {
+// record and state.json. It makes nothing: no profile, no run/browser. rec: the record to remove
+// (preview stop hands its own, so any writer's stop takes it); this writer's by default. True back
+// unless a leftover Chrome couldn't be stopped (said, and exit 1).
+async function browserStop({ say = true, rec } = {}) {
+  let ok = true;
   const s = browserState();
   if (s) {
     try { await browserCall('stop', {}, { state: s, ms: 15000 }); } catch {}
@@ -27954,12 +28376,13 @@ async function browserStop({ say = true } = {}) {
     try {
       await browserKillChrome(profile, [...browserCandidates(profile), ...(browserProcsOn(profile) ?? [])]);
       browserDeleteSession(profile);
-    } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); process.exitCode = 1; }
+    } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); process.exitCode = 1; ok = false; }
   }
-  const rec = browserPreviewRec();
-  if (rec) { killPreviewWindow(rec); removePreview(rec.name); }
+  const r = rec ?? browserPreviewRec();
+  if (r) { killPreviewWindow(r); removePreview(r.name); }
   fs.rmSync(browserStateFile(), { force: true });
   if (say) out(s ? 'browser stopped' : "browser wasn't running");
+  return ok;
 }
 async function browserStatus() {
   const off = { browser: 1, instance: browserKey(), running: false, held: null };
