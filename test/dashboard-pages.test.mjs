@@ -780,14 +780,15 @@ test('settings page', { skip: SKIP, timeout: 600000 }, async (t) => {
   await p.click(checkBtn);
   await until(() => p.ev(`!document.querySelector('${S} .ready-card .err') && !FLEET.busy`), 'a good check clears the error');
 
-  // a check refused (403, a view session's answer for any POST): the card shows a plain read instead,
-  // with no error (kit-251)
+  // a check refused (403: a view session's answer for any POST, or an owner-side refusal): the card shows
+  // a plain read instead, and says it was not checked against origin, with the server's reason (kit-251)
   await p.ev("FLEET.data = null; window.__gets = []; window.__checks = 0; window.__refuseCheck = true; true");
   await p.click(checkBtn);
   await until(() => p.ev("window.__checks === 1 && window.__gets.includes('/api/fleet') && !FLEET.busy"), 'a plain read after the refused check');
   const plain = await api('/api/fleet');
   await until(async () => (await p.ev(`JSON.stringify([...document.querySelectorAll('${S} .ready-card .ready-blocker')].map((r) => r.textContent.trim()))`)) === JSON.stringify(plain.blockers), "the plain read's blockers on the card");
-  assert.equal(await p.ev(`!!document.querySelector('${S} .ready-card .err')`), false, 'no error for a refused check');
+  await until(() => p.ev(`/^Couldn't check: a view session changes nothing\\. What shows is a plain read, not checked against origin\\.$/.test(document.querySelector('${S} .ready-card .err')?.textContent ?? '')`), 'the card says the read was not checked against origin, and why');
+  assert.match(await badge(), /^last check failed; this is from \S/, 'the badge says the check failed');
   await p.ev('window.__refuseCheck = false');
 
   // every setting, once, under its group, in settings_all's order
