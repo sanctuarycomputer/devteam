@@ -174,6 +174,7 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
     await soon(`document.querySelector('${BOX.observe} table.db-t thead th:nth-child(3)')?.getAttribute('aria-sort') === 'ascending'`, 'sorted up');
     const up = await sev();
     assert.deepEqual(up, [...up].sort((a, b) => a - b));
+    assert.equal(await p.ev(`${cellsOf('observe', 2)}[0]`), '', 'a blank severity sorts first going up');
     await p.click(`${BOX.observe} table.db-t thead th:nth-child(3) button.sort`);
     await soon(`document.querySelector('${BOX.observe} table.db-t thead th:nth-child(3)')?.getAttribute('aria-sort') === 'descending'`, 'sorted down');
     const down = await sev();
@@ -266,6 +267,15 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
     const sect = (head) => `[...document.querySelectorAll('#drawer-body .psect')].find((s) => s.querySelector('.card-head')?.textContent.trim() === ${JSON.stringify(head)})`;
     await soon(`!!${sect('Evidence')}`, 'its Evidence section');
     assert.deepEqual(await p.ev(`[...${sect('Evidence')}.querySelectorAll('tbody tr[data-row]')].map((tr) => tr.children[0].textContent.trim()).sort()`), ['payments timed out', 'payments timed out again']);
+    // after several of the page's refreshes (every 300 ms here), one header click sorts one step: up, then down
+    await new Promise((r) => setTimeout(r, 1500));
+    const evH = `${sect('Evidence')}.querySelector('thead th:nth-child(1)')`;
+    await p.ev(`${evH}.querySelector('button.sort').click()`);
+    await soon(`${sect('Evidence')}?.querySelector('thead th:nth-child(1)')?.getAttribute('aria-sort') === 'ascending'`, 'the Evidence table sorted up by one click');
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.equal(await p.ev(`${evH}.getAttribute('aria-sort')`), 'ascending', 'still up after more refreshes');
+    await p.ev(`${evH}.querySelector('button.sort').click()`);
+    await soon(`${sect('Evidence')}?.querySelector('thead th:nth-child(1)')?.getAttribute('aria-sort') === 'descending'`, 'down by the next click');
     await soon(`!!${sect('Given to')}`, 'its Given to section');
     const given = await p.ev(`[...${sect('Given to')}.querySelectorAll('tbody tr[data-row]')].map((tr) => [...tr.children].map((c) => c.textContent.trim()))`);
     assert.equal(given.length, 1, JSON.stringify(given));
