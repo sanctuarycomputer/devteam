@@ -16189,6 +16189,9 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
     scanning ??= probeAll().then((list) => { scanned = { at: Date.now(), list }; return list; }).finally(() => { scanning = null; });
     return scanning;
   };
+  // the machine's memory, a reading a minute (kit-591): started when a listen succeeds, stopped only
+  // when the hub is closed for good
+  const recorder = memoryRecorder(log, scan);
   // What holds the hub port: 'hub', 'other' (a clean answer that isn't a hub), or 'unsure' (slow,
   // or gone between the bind and the ask), which is no reason to stop trying.
   const holder = () => new Promise((resolve) => {
@@ -16269,7 +16272,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   let stopped = false;
   // live presence on the hub's own pages (presence@1): its people, never a changed
   const presence = presenceRelay({ hub: true, okHost: ownHost, ownerCwd: actionCwd });
-  const handle = { close() { stopped = true; clearTimeout(again); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
+  const handle = { close() { stopped = true; clearTimeout(again); recorder.stop(); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
   const tryListen = () => {
     if (stopped) return;
     const hub = trackRequests(http.createServer(async (req, res) => {
@@ -16290,6 +16293,11 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       const site = req.headers['sec-fetch-site'];
       if (req.url === '/instances.json' && site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the list is for the hub\'s own page');
       if (req.url === '/instances.json') return send(200, 'application/json', JSON.stringify({ ...listHead, instances: await scan() }));
+      // the machine's memory readings (machine-memory@1), refused to another site's page as the list is
+      if (req.url === '/memory.json' || req.url.startsWith('/memory.json?')) {
+        if (site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the readings are for the hub\'s own page');
+        try { return await serveMemory(req, send); } catch (e) { return send(500, 'application/json', JSON.stringify({ error: e.message })); }
+      }
       // The operator's threads, for the Overview's dock: a GET carries no Origin, so it is refused
       // when the browser says another site's page asks (as a dashboard's /api/threads is).
       if (req.url === '/operator/threads') {
@@ -16322,7 +16330,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       if ((await holder()) !== 'other') { if (!stopped) (again = setTimeout(tryListen, retry)).unref(); }
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
-    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); });
+    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); recorder.start(); });
   };
   tryListen();
   return handle;
@@ -18755,6 +18763,215 @@ function memoryThin(readings, now) {
     if (!b || r.working_set > b[1].working_set || (r.working_set === b[1].working_set && t < b[0])) best.set(key, [t, r]);
   }
   return [...best.values(), ...kept].sort((a, b) => a[0] - b[0]).map(([, r]) => r);
+}
+// The recorder's I/O parts (kit-591): they name fs, path, os, process and the kit's helpers only
+// inside their bodies, run when the hub calls them, so the region still evaluates with nothing in
+// scope. memoryWalk names only fs.promises, fs.constants, path, Buffer, setImmediate and setTimeout.
+const MEMORY_BATCH = 50, MEMORY_BUDGET_MS = 2000, MEMORY_CHUNK = 262144;
+const memoryFile = () => path.join(os.homedir(), '.devteam', `machine-${HUB_PORT}`, 'memory.jsonl');
+// A root's settings.md json devteam block, read as a file in its working tree: null when missing,
+// unreadable or not a JSON object.
+async function memorySettings(root) {
+  try {
+    const text = await fs.promises.readFile(path.join(root, 'docs', 'devteam', 'project', 'settings.md'), 'utf8');
+    const b = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text)?.[1];
+    const o = b == null ? null : JSON.parse(b);
+    return memoryIsMap(o) ? o : null;
+  } catch { return null; }
+}
+// The known roots (the machine's registry and the hub's scan) named, and the reading's ceiling.
+async function memoryRoots(scanned) {
+  let registry = [];
+  try { registry = machineRepos(); } catch { registry = []; }
+  const list = (Array.isArray(scanned) ? scanned : []).filter((s) => memoryIsMap(s) && typeof s.root === 'string').map((s) => ({ root: s.root, name: typeof s.name === 'string' ? s.name : '' }));
+  // read as memoryNameRoots will ask: one spelling a root, absolute only
+  const all = [...new Set([...registry, ...list.map((s) => s.root)].filter((r) => typeof r === 'string').map((r) => r.replace(/\/+$/, '')))].filter((r) => r.startsWith('/'));
+  const settings = new Map(await Promise.all(all.map(async (r) => [r, await memorySettings(r)])));
+  return memoryNameRoots(registry, list, (r) => settings.get(r) ?? null);
+}
+// One /proc/<pid>: { words, cwd, pages }, or null when it is gone (cmdline or statm missing or
+// unreadable, or statm's resident field isn't an integer). The cmdline is read once, to 64 KB at most.
+async function memoryProc(dir) {
+  const cmdline = async () => {
+    const fh = await fs.promises.open(path.join(dir, 'cmdline'), fs.constants.O_RDONLY);
+    try {
+      const buf = Buffer.alloc(MEMORY_CMDLINE_MAX);
+      const { bytesRead } = await fh.read(buf, 0, MEMORY_CMDLINE_MAX, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } finally { await fh.close().catch(() => {}); }
+  };
+  const resident = async () => {
+    const f = (await fs.promises.readFile(path.join(dir, 'statm'), 'utf8')).trim().split(/\s+/)[1];
+    if (!/^\d+$/.test(f ?? '')) throw new Error('statm');
+    return Number(f);
+  };
+  const cwd = () => fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null);
+  try {
+    const [c, pages, wd] = await Promise.all([cmdline(), resident(), cwd()]);
+    return { words: memoryWords(c), cwd: wd, pages };
+  } catch { return null; }
+}
+// The walk: { procs: [{ words, cwd, pages }] | null, partial }. Numeric names only, in batches of 50
+// with a turn of the event loop between them; before each batch after the first, the seam's delay,
+// then the budget (from start, the tick's own start): past it the walk stops, partial. A procDir
+// that can't be listed gives procs null.
+async function memoryWalk(procDir, { budgetMs, slowMs, start }) {
+  let names;
+  try { names = await fs.promises.readdir(procDir); } catch { return { procs: null, partial: false }; }
+  const pids = names.filter((n) => /^\d+$/.test(n));
+  const procs = [];
+  for (let i = 0; i < pids.length; i += MEMORY_BATCH) {
+    if (i > 0) {
+      await new Promise((r) => setImmediate(r));
+      if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
+      if (Date.now() - start >= budgetMs) return { procs, partial: true };
+    }
+    for (const p of await Promise.all(pids.slice(i, i + MEMORY_BATCH).map((pid) => memoryProc(path.join(procDir, pid))))) if (p) procs.push(p);
+  }
+  return { procs, partial: false };
+}
+// A line at the end of the file, on a line of its own: a torn tail (no newline last) is ended first.
+async function memoryAppend(file, line) {
+  await fs.promises.mkdir(path.dirname(file), { recursive: true });
+  let torn = false;
+  let fh = null;
+  try {
+    fh = await fs.promises.open(file, 'r');
+    const { size } = await fh.stat();
+    if (size > 0) { const b = Buffer.alloc(1); await fh.read(b, 0, 1, size - 1); torn = b[0] !== 10; }
+  } catch (e) { if (e.code !== 'ENOENT') throw e; } finally { await fh?.close().catch(() => {}); }
+  await fs.promises.appendFile(file, `${torn ? '\n' : ''}${line}\n`);
+}
+// One tick: the reading taken now, checked, appended. The line written, or null when the check
+// refused it (said through say).
+async function recordMemory({ scan, slowMs = Number(process.env.DEVTEAM_MEMORY_SLOW_MS) || 0, say = () => {} }) {
+  const start = Date.now();
+  const at = new Date(start).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const memory = machineMemory() ?? { inUse: os.totalmem() - os.freemem(), max: os.totalmem(), source: 'os' };
+  let scanned = [];
+  try { scanned = await scan(); } catch { scanned = []; }
+  const { roots, ceiling } = await memoryRoots(scanned);
+  const proc = process.env.DEVTEAM_PROC ?? '/proc';
+  const walk = await memoryWalk(proc, { budgetMs: MEMORY_BUDGET_MS, slowMs, start });
+  let procs = null;
+  if (walk.procs) {
+    let own = null;
+    try { own = Number((await fs.promises.readFile(path.join(proc, 'self', 'statm'), 'utf8')).trim().split(/\s+/)[1]); } catch { own = null; }
+    const size = memoryPageSize(own, process.memoryUsage.rss());
+    procs = walk.procs.map((p) => ({ words: p.words, cwd: p.cwd, rss: p.pages * size }));
+  }
+  // only names the check takes as a subcommand: a command that isn't one is never kept
+  const commands = new Set(Object.keys(COMMANDS).filter((k) => MEMORY_SUBCOMMAND.test(k)));
+  const line = JSON.stringify(memoryFold(procs, { at, memory, ceiling, roots, commands, partial: walk.partial }));
+  const problem = memoryReadingProblem(line);
+  if (problem) { say(`a reading the check refuses, not written: ${problem}`); return null; }
+  await memoryAppend(memoryFile(), line);
+  return line;
+}
+// The file keeps 8 days: lines that are a JSON object with a valid at that recent, whatever their v;
+// torn and undatable lines go. Written to a temp file, then renamed over it.
+async function memoryTrim(file, now) {
+  let text;
+  try { text = await fs.promises.readFile(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  const keep = text.split('\n').filter((l) => {
+    let r;
+    try { r = JSON.parse(l); } catch { return false; }
+    return memoryIsMap(r) && memoryAtOk(r.at) && Date.parse(r.at) >= now - 8 * MEMORY_DAY;
+  });
+  const out = keep.map((l) => `${l}\n`).join('');
+  if (out === text) return;
+  const tmp = `${file}.tmp`;
+  await fs.promises.writeFile(tmp, out);
+  await fs.promises.rename(tmp, file);
+}
+// The readings at or after from (ms), oldest first, the ones the check passes: the file read from
+// its end in 256 KB chunks, until a chunk whose first complete dated line is before from.
+async function memoryWindow(file, from) {
+  let fh;
+  try { fh = await fs.promises.open(file, 'r'); } catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+  try {
+    let pos = (await fh.stat()).size;
+    let carry = Buffer.alloc(0);
+    const chunks = [];
+    while (pos > 0) {
+      const n = Math.min(MEMORY_CHUNK, pos);
+      pos -= n;
+      const b = Buffer.alloc(n);
+      let got = 0;
+      while (got < n) { const { bytesRead } = await fh.read(b, got, n - got, pos + got); if (!bytesRead) break; got += bytesRead; }
+      const buf = Buffer.concat([b.subarray(0, got), carry]);
+      const parts = [];
+      for (let s = 0, e; s <= buf.length; s = e + 1) { e = buf.indexOf(10, s); if (e < 0) e = buf.length; parts.push(buf.subarray(s, e)); }
+      // the first part may be the end of a line the next chunk back begins
+      carry = pos > 0 ? Buffer.from(parts.shift()) : Buffer.alloc(0);
+      const kept = [];
+      let first = null;
+      for (const part of parts) {
+        if (!part.length) continue;
+        let r;
+        try { r = JSON.parse(part.toString('utf8')); } catch { continue; }
+        if (!memoryIsMap(r) || !memoryAtOk(r.at)) continue;
+        const t = Date.parse(r.at);
+        if (first === null) first = t;
+        if (t >= from && memoryReadingProblem(r) === null) kept.push(r);
+      }
+      chunks.push(kept);
+      if (first !== null && first < from) break;
+    }
+    return chunks.reverse().flat();
+  } finally { await fh.close().catch(() => {}); }
+}
+// /memory.json: the query (a repeated key an array; every key its own, __proto__ included), the
+// window, thinned unless asked not to, as { v: 1, readings }.
+async function serveMemory(req, send) {
+  const params = Object.create(null);
+  for (const [k, v] of new URL(req.url, 'http://127.0.0.1').searchParams) memoryOwn(params, k, Object.hasOwn(params, k) ? [].concat(params[k], v) : v);
+  const now = Date.now();
+  const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+  const q = memoryQuery(params, { now, loopback });
+  if (q.error) return send(400, 'application/json', JSON.stringify({ error: q.error }));
+  let readings = await memoryWindow(memoryFile(), q.from);
+  if (q.after !== undefined) readings = readings.filter((r) => Date.parse(r.at) > q.after);
+  if (q.thin) readings = memoryThin(readings, now);
+  return send(200, 'application/json', JSON.stringify({ v: 1, readings }));
+}
+// The hub's recorder: a trim then a tick at start, a tick a minute and a trim a day after, one at a
+// time in one chain (a tick due while one is still running is skipped); each distinct error said once
+// in the hub's log, never thrown. Off (both no-ops) where DEVTEAM_MEMORY_RECORD is off (tests). The
+// timers are unref'd: the hub's server keeps the process alive. stop() is for good.
+function memoryRecorder(log, scan) {
+  if (process.env.DEVTEAM_MEMORY_RECORD === 'off') return { start() {}, stop() {} };
+  const said = new Set();
+  const say = (m) => { if (!said.has(m)) { said.add(m); log(`hub: memory: ${m}`); } };
+  const seam = (k, d) => { const v = process.env[k]; const n = Number(v); return v?.trim() && Number.isFinite(n) && n >= 0 ? n : d; };
+  let started = false, stopped = false, ticking = false, trimming = false, slowMs = 0;
+  let chain = Promise.resolve();
+  const timers = [];
+  const run = (job) => { chain = chain.then(() => (stopped ? undefined : job())).catch((e) => say(e?.message ?? String(e))); };
+  const trim = () => {
+    if (trimming || stopped) return;
+    trimming = true;
+    run(async () => { try { await memoryTrim(memoryFile(), Date.now()); } finally { trimming = false; } });
+  };
+  const tick = () => {
+    if (ticking || stopped) return;
+    ticking = true;
+    run(async () => { try { await recordMemory({ scan, slowMs, say }); } finally { ticking = false; } });
+  };
+  return {
+    start() {
+      if (started || stopped) return;
+      started = true;
+      const every = seam('DEVTEAM_MEMORY_EVERY_MS', 60000) || 60000;
+      const trimEvery = seam('DEVTEAM_MEMORY_TRIM_MS', 86400000) || 86400000;
+      slowMs = seam('DEVTEAM_MEMORY_SLOW_MS', 0);
+      trim();
+      tick();
+      timers.push(setInterval(tick, every), setInterval(trim, trimEvery));
+      for (const t of timers) t.unref();
+    },
+    stop() { stopped = true; for (const t of timers) clearInterval(t); timers.length = 0; },
+  };
 }
 /* box-memory end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while

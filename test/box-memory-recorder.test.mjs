@@ -454,7 +454,10 @@ test('C3f: at start the file loses readings older than 8 days and torn lines; a 
   // a newer recorder's line (v 2) with a recent at stays: readers skip it, a downgrade loses nothing
   const newer = JSON.stringify({ v: 2, at: iso(now - DAY), working_set: 3 });
   const h = await startHub(t, { proc: NOWHERE, file: `${old}\n${week}\n${newer}\n{"v":1,"at":"20`, env: { DEVTEAM_MEMORY_EVERY_MS: '300' } });
-  const ls = await firstLine(h, 3);
+  // the seed alone is 4 lines, so a count can't say the tick came: wait for the first tick's own line
+  // (recent and valid; the trim runs before it, in the same chain)
+  await until(() => linesOf(h.file).some((l) => memoryReadingProblem(l) === null && Date.now() - Date.parse(JSON.parse(l).at) < 5 * MIN), "the first tick's line");
+  const ls = linesOf(h.file);
   assert.deepEqual(ls.slice(0, 2), [week, newer], 'the 7-day reading and the newer line stay, first');
   assert.ok(!ls.includes(old), 'the 9-day reading is gone');
   for (const l of ls.slice(2)) assert.equal(memoryReadingProblem(l), null, l);
