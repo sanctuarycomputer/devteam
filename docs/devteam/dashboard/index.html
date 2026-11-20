@@ -7003,14 +7003,17 @@ function holdOverlay(id, mode) {
 // An answer, at once: the card says so, and the server is told. The answer names the question as
 // this page showed it; one changed since is refused, and the card comes back, saying why until the
 // owner dismisses it (REFUSED). stays: false keeps the caller's own one-off error line (a review's).
-function answerPress(id, card, errId, text, build, { stays = true, plain } = {}) {
+// files: the box's files that go with it (kit-171), out of the box while it is on its way, back with the words
+// if it is refused.
+function answerPress(id, card, errId, text, build, { stays = true, plain, files } = {}) {
   const f = cardFields(id, card);
+  let taken = null;
   return press(`q:${id}`, {
     build,
-    apply: () => { REFUSED.delete(id); markAnswered(id, text); },
-    undo: () => putBackCard(id, f),
+    apply: () => { REFUSED.delete(id); if (files?.length) taken = takeAttach(`q:${id}`); markAnswered(id, text); },
+    undo: () => { putBackCard(id, f); putAttach(`q:${id}`, taken); taken = null; },
     restore: () => putBackBoxes(id, f),
-    onOk: () => { REFUSED.delete(id); delete drafts[id]; delete picks[id]; [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); },
+    onOk: () => { taken = null; REFUSED.delete(id); delete drafts[id]; delete picks[id]; [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); },
     ...(stays ? { onError: (e) => REFUSED.set(id, { reason: e, n: ++REFUSALS }) } : {}),
     errId,
     plain,
@@ -7056,6 +7059,28 @@ function moveAttach(from, to) {
   if (ATTACH.has(from)) { ATTACH.set(to, [...(ATTACH.get(to) || []), ...ATTACH.get(from)]); ATTACH.delete(from); }
   for (const b of document.querySelectorAll('.dropbox[data-drop]')) if (b.dataset.drop === from) b.dataset.drop = to;
   drawPills(to);
+}
+// Files sent alone: the words the server records for them (devteam.mjs's answer and thread commands), which a
+// pending turn carries too, so it lands on the server's turn once.
+const filesWords = (n) => (n === 1 ? '1 file dropped' : `${n} files dropped`);
+// What a box sends: its taken files as the actions take them, or why it can't send yet (nothing is sent until
+// every file has uploaded and the refused ones are removed).
+function sendable(key) {
+  const list = ATTACH.get(key) || [];
+  const why = list.some((p) => p.state === 'up') ? 'Wait for the files to finish uploading.' : list.some((p) => p.state === 'refused') ? "Remove the files that weren't taken first." : '';
+  return { why, files: list.filter((p) => p.state === 'ok').map((p) => ({ name: p.sendName || attName(p), path: p.path, bytes: p.bytes })) };
+}
+// A press's apply takes the box's pills with the words; its undo puts them back ahead of any dropped since.
+function takeAttach(key) {
+  const list = ATTACH.get(key) || [];
+  ATTACH.delete(key);
+  drawPills(key);
+  return list;
+}
+function putAttach(key, list) {
+  if (!list?.length) return;
+  ATTACH.set(key, [...list, ...(ATTACH.get(key) || [])]);
+  drawPills(key);
 }
 // What a refused upload says: the route's own JSON error, else its text, else the status; a 403 on a page that
 // isn't a secure context (plain http on a --host name, no Sec-Fetch-Site) in plain words.
@@ -8272,7 +8297,8 @@ function tPins(threads) {
 }
 // The owner's turn, shown before the server has it, shaped as threadView gives one; a thread the
 // owner is starting likewise. Neither counts as seen or unread: a pending turn's clock is the page's.
-const tPendingTurn = (text, at) => ({ id: null, by: 'owner', at, text, refs: [], question: null, pending: true });
+// files: those sent with it (kit-171), as threadView gives a turn's.
+const tPendingTurn = (text, at, files) => ({ id: null, by: 'owner', at, text, refs: [], question: null, pending: true, files: files ?? [] });
 const tPendingThread = (id, title, subject, turn) => ({ id, title, subject: subject || null, status: 'open', outcome: null, ready: null, turns: [turn], questions: [], waiting: 'supervisor', created_at: turn.at, resolved_at: null, activity_at: turn.at, first_reply_ms: null, pending: true });
 // The threads as the owner's presses will leave them: each pending send's turn on its thread (or
 // its new thread), and a thread resolved or reopened, until the server's threads show it.
@@ -9135,30 +9161,42 @@ function tlSend() {
   const ta = tlEl('tl-c-text');
   const text = ta.value.trim();
   const err = tlEl('e-tl');
-  if (!text) return;
-  if (tBytes(text) > T_TURN_MAX) { err.textContent = `At most ${T_TURN_MAX} bytes; this is ${tBytes(text)}. Characters outside plain English take two to four each.`; return; }
-  if (tBytes(JSON.stringify(text)) - 2 > T_ENCODED_MAX) { err.textContent = 'This has too many quotation marks, backslashes or control characters to keep; shorten it.'; return; }
   const key = tlEl('tl-card').dataset.key;
   const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  const resolved = t?.status === 'resolved';
+  // the files dropped into the composer go with the words, or alone; none while one is uploading or refused,
+  // and none onto a resolved thread (thread reopen takes words only)
+  const s = sendable(`tl:${key}`);
+  if (s.why) { err.textContent = s.why; return; }
+  const files = s.files;
+  if (resolved && files.length) { err.textContent = 'Files go on an open thread: press Reopen, then send them.'; return; }
+  if (!text && !files.length) return;
+  if (tBytes(text) > T_TURN_MAX) { err.textContent = `At most ${T_TURN_MAX} bytes; this is ${tBytes(text)}. Characters outside plain English take two to four each.`; return; }
+  if (tBytes(JSON.stringify(text)) - 2 > T_ENCODED_MAX) { err.textContent = 'This has too many quotation marks, backslashes or control characters to keep; shorten it.'; return; }
   const draft = TL.draft;
   // the turn is in the card at once; a new thread opens with it, under an id of the page's own until
   // the server names it. A second Send waits for the first, and by then knows that name.
   // a thread the server has named is real, though the threads read may not show it yet; one still
   // being started is the first Send's, and this one says into it once that one has its name
   const named = t && !String(t.id).startsWith('pending-');
-  const p = { thread: t ? t.id : `pending-${++tlFresh}`, real: named ? t.id : null, turn: tPendingTurn(text, new Date().toISOString()), had: t ? tHad(t, text) : 0, fresh: t ? null : { title: draft?.title || tLine(text, T_TITLE_MAX), subject: draft?.subject || null }, confirmed: false };
+  // the pending turn's words are what the server will record (files alone: "1 file dropped"), so it lands on
+  // the server's turn once (tLanded, tOverlay); the words sent are as typed, empty for files alone
+  const words = text || filesWords(files.length);
+  const sent = files.length ? { files } : {};
+  const p = { thread: t ? t.id : `pending-${++tlFresh}`, real: named ? t.id : null, turn: tPendingTurn(words, new Date().toISOString(), files), had: t ? tHad(t, words) : 0, fresh: t ? null : { title: draft?.title || tLine(text || files[0].name, T_TITLE_MAX), subject: draft?.subject || null }, confirmed: false };
   if (t && !named) p.firstOf = TL.pend.find((x) => x.fresh && tPendId(x) === t.id);
-  const resolved = t?.status === 'resolved';
+  let taken = null;
   press(`tl:${p.thread}`, {
     build: () => {
       const id = p.real ?? p.firstOf?.real ?? null;
       // the first words were refused, so there is no thread to say this into
       if (!id && p.firstOf) throw new Error("the thread wasn't started (its first words weren't saved), so this wasn't sent either");
-      if (id) { p.real = id; return { action: resolved ? 'thread-reopen' : 'thread-say', body: { id, text } }; }
-      return { action: 'thread-new', body: { title: p.fresh.title, subject: p.fresh.subject || undefined, text } };
+      if (id) { p.real = id; return { action: resolved ? 'thread-reopen' : 'thread-say', body: { id, text, ...sent } }; }
+      return { action: 'thread-new', body: { title: p.fresh.title, subject: p.fresh.subject || undefined, text, ...sent } };
     },
     apply: () => {
       TL.pend.push(p);
+      if (files.length) taken = takeAttach(`tl:${key}`);
       err.textContent = '';
       lsDel(tlDraftKey(key));
       ta.value = '';
@@ -9177,12 +9215,21 @@ function tlSend() {
       tlDraw();
       const box = tlEl('tl-c-text');
       // after the words an earlier refusal put back, never over them
-      if (box) { box.value = box.value.trim() ? `${box.value}\n${text}` : text; tlDraftSet(tlEl('tl-card').dataset.key, box.value); tlBytes(); }
+      if (box && text) { box.value = box.value.trim() ? `${box.value}\n${text}` : text; tlDraftSet(tlEl('tl-card').dataset.key, box.value); tlBytes(); }
+      // the files come back with the words, into the box they go to; a new thread's, with any dropped while it
+      // was pending (under its pending key) after them
+      const home = `tl:${box ? tlEl('tl-card').dataset.key : key}`;
+      putAttach(home, taken);
+      taken = null;
+      if (!t) moveAttach(`tl:${p.thread}`, home);
     },
     // the first line of a thread command's output is the id; the second says whether a pane took it
     onOk: (out) => {
       p.confirmed = true;
+      taken = null;
       if (!p.real) p.real = String(out.out || '').split('\n')[0].trim();
+      // files dropped while the thread was being started go on with it, under its id (the box's key too)
+      if (p.real && p.real !== p.thread) moveAttach(`tl:${p.thread}`, `tl:${p.real}`);
       TL.typed[p.real] = /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || '');
       if (TL.open === p.thread && p.real !== p.thread) {
         TL.open = p.real;
@@ -10359,7 +10406,11 @@ document.addEventListener('click', async (ev) => {
     const picked = picks[id] && picks[id] !== '__other' ? picks[id] : '';
     const answer = picked ? (note ? `${picked} — ${note}` : picked) : note;
     const err = $(`e-${errId}`);
-    if (!answer) { if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
+    // the files dropped into the note go with it, or alone; none while one is uploading or refused
+    const s = sendable(`q:${id}`);
+    if (s.why) { if (err) err.textContent = s.why; return; }
+    const files = s.files;
+    if (!answer && !files.length) { if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
     if (err) err.textContent = '';
     const goalId = btn.dataset.goalAsk;
     const qv = DATA.questions.find((x) => x.id === id);
@@ -10382,9 +10433,10 @@ document.addEventListener('click', async (ev) => {
     const qText = qv?.question || '';
     const rule = asRule ? (note || `${picked}: the standing answer to questions like “${qText}”`) : undefined;
     const seen = seenHash(id);
-    answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer, () => (goalId
+    // files alone: the card says what the server records (no pick, and no words of the owner's)
+    answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer || filesWords(files.length), () => (goalId
       ? { action: 'goal-decide', body: { id: goalId, verdict: GOAL_VERDICTS[picked], notes: note || undefined } }
-      : { action: 'answer', body: { id, answer: apart ? note : answer, ...(apart ? { choice: picked || null } : {}), autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }), goalId ? { plain: GOAL_REFUSAL } : {});
+      : { action: 'answer', body: { id, answer: apart ? note : answer, ...(apart ? { choice: picked || null } : {}), autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen, ...(files.length ? { files } : {}) } }), goalId ? { plain: GOAL_REFUSAL } : { files });
     return;
   }
   // Keep it / Retire it on the Inbox's lesson card (a peek's Retire it starts a thread: kit-88 spec §2.3)
