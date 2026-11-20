@@ -288,7 +288,7 @@ test('A5: another class, a standing rule, or a question changed after its answer
     T.ok(['answer', sq, 'Posted 1 secret'], {});
     refused(T.dry('add', sq), /can't approve a job change: answered/);
     T.ok(['chore', 'start', 'recurring']);
-    refused(T.run(['recurring', 'apply', sq]), /can't approve|Yes/);
+    refused(T.run(['recurring', 'apply', sq]), new RegExp(`${sq} can't approve a job change: answered "Posted 1 secret", not Yes`));
   } finally { T.done(); }
 });
 
@@ -373,7 +373,7 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     refused(T.ask({ recurring: { 'ci-main': check({ every: '12h' }) } }), /not landed/);
     refused(T.ask(undefined), /--change/);
     refused(T.ask({ recurring: { tidy: chore() } }), /already has exactly this/);
-    refused(T.run(['ask', '--class', 'recurring-edit', '--question', 'Add it?', '--recommendation', 'Later', '--change', JSON.stringify({ recurring: { z1: chore() } })]), /Yes/);
+    refused(T.run(['ask', '--class', 'recurring-edit', '--question', 'Add it?', '--recommendation', 'Later', '--change', JSON.stringify({ recurring: { z1: chore() } })]), /--recommendation[^\n]*Yes/);
     refused(T.ask({ recurring: { z1: chore() } }, ['--choices', '[{"label":"Yes"},{"label":"No"}]']), /the kit writes its choices/);
     refused(T.ask({ recurring: { z2: chore() } }, ['--kind', 'owner-action', '--secrets', '[{"name":"API_KEY","sink":"rails-credentials:test:api.key"}]']), /a plain yes or no: --kind owner-decision and no --secrets/);
     refused(T.ask({ recurring: { z3: chore() } }, ['--context', `${HEADER}\nrecurring.z3: add {}`]), /may not hold a job approval line/);
@@ -489,6 +489,25 @@ test('A11: merge refuses a job that breaks the shape; validate and merge refuse 
     fs.rmSync(path.join(T.old, JOBS));
     T.jobsChore('over', () => many);
     refused(T.dry('over'), /101 runs a day[^\n]*hourly-1/);
+  } finally { T.done(); }
+});
+
+// the hourly four (96) and five daily ones: 101 runs a day
+const OVER = () => ({ ...Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`hourly-${i + 1}`, check({ every: '1h' })])), extra: chore({ every: '1d' }), more: chore({ every: '1d' }), most: chore({ every: '1d' }), last: chore({ every: '1d' }), final: chore({ every: '1d' }) });
+
+test('A11: check-pr refuses a landed job that breaks the shape, its message prefixed "at landing: "', () => {
+  const T = setup('cpr-shape');
+  try {
+    T.jobsChore('bad', () => ({ broken: check({ every: '5x' }) }));
+    refused(T.checkPr('chore-bad'), /^(fail: )?at landing: recurring\.json broken\.every: /m);
+  } finally { T.done(); }
+});
+
+test('A11: check-pr refuses landed jobs over 100 runs a day, naming every job', () => {
+  const T = setup('cpr-cap');
+  try {
+    T.jobsChore('over', () => OVER());
+    refused(T.checkPr('chore-over'), /^(fail: )?(at landing: )?recurring\.json: 101 runs a day, over the cap of 100 [^\n]*hourly-1 24[^\n]*final 1/m);
   } finally { T.done(); }
 });
 
@@ -608,7 +627,7 @@ test('A12: recurring apply writes exactly the answered change into the chore wor
     // declined, and another class
     const no = T.asked({ recurring: { ee: chore() } });
     T.answer(no, 'No');
-    refused(apply(no));
+    refused(apply(no), new RegExp(`${no} can't approve a job change: answered "No", not Yes`));
     const gr = T.run(['ask', '--class', 'governance-edit', '--question', 'Something else?', '--recommendation', 'Yes']);
     const gq = QID.exec(gr.out)[0];
     T.answer(gq);
@@ -767,6 +786,17 @@ history('refused: the branch adds other/recurring.json while main renames other/
   assert.equal(T.has('origin/main', JOBS), false, 'no jobs file landed');
 });
 
+history('refused: the branch edits other/recurring.json while main renames other/ into project/', (T, how) => {
+  T.onMainDo((cwd) => { twoFiles(cwd, 'other'); write(path.join(cwd, 'other/recurring.json'), jobsText(FIVE())); }, 'main: other/, with a recurring.json');
+  T.choreBranch('other-edit', (wt) => putJson(wt, 'other/recurring.json', (j) => { j.zz = ZZ; }));
+  T.onMainDo((cwd) => { moveTwo(T, cwd, 'other', PROJ); T.g(['mv', 'other/recurring.json', JOBS], cwd); }, 'main: other/ into project/');
+  assert.deepEqual(T.mainJobs(), FIVE(), 'main\'s jobs file is other/recurring.json moved');
+  reaches(plainLand(T, 'chore-other-edit', how, { renames: true }), 'zz');
+  refused(T.dry('other-edit'), BEHIND);
+  refused(T.merge('other-edit'), BEHIND);
+  assert.equal(Object.hasOwn(T.mainJobs(), 'zz'), false, 'zz did not land');
+});
+
 history('refused: the branch renames other/ into project/ while main adds other/recurring.json (the mirror)', (T, how) => {
   T.onMainDo((cwd) => twoFiles(cwd, 'other'), 'main: other/');
   T.choreBranch('mirror', (wt) => moveTwo(T, wt, 'other', PROJ));
@@ -799,11 +829,21 @@ history('refused: the branch renames another file into the jobs file while main 
 });
 
 const ASIDE = `${PROJ}/jobs-aside.json`;
-history('refused: main moves the jobs file away and back while the branch edits it where main put it', (T, how) => {
+history('refused: main copies the jobs file away and back while the branch edits the copy', (T, how) => {
   T.onMain(() => FIVE());
-  T.onMainDo((cwd) => T.g(['mv', JOBS, ASIDE], cwd), 'main: the jobs aside');
+  const before = T.g(['rev-parse', `origin/main:${JOBS}`]);
+  // copied away (both paths hold it), then the jobs file removed: the branch parts here
+  T.onMainDo((cwd) => fs.copyFileSync(path.join(cwd, JOBS), path.join(cwd, ASIDE)), 'main: the jobs copied aside');
+  assert.equal(T.g(['rev-parse', `origin/main:${ASIDE}`]), before, 'a byte copy beside the jobs file');
+  T.onMainDo((cwd) => fs.rmSync(path.join(cwd, JOBS)), 'main: the jobs file removed, the copy kept');
   T.choreBranch('aside', (wt) => putJson(wt, ASIDE, (j) => { j.zz = ZZ; }));
-  T.onMainDo((cwd) => T.g(['mv', ASIDE, JOBS], cwd), 'main: the jobs back');
+  // copied back from the aside file, which main then removes
+  T.onMainDo((cwd) => { fs.copyFileSync(path.join(cwd, ASIDE), path.join(cwd, JOBS)); fs.rmSync(path.join(cwd, ASIDE)); }, 'main: the jobs copied back');
+  // unlike the renamed draft: this path held the jobs before, and main's file is the same blob again
+  assert.equal(T.g(['rev-parse', `origin/main:${JOBS}`]), before, 'main\'s jobs file is the one it had before the copy');
+  const mb = T.g(['merge-base', 'origin/main', 'origin/chore-aside']);
+  assert.equal(T.has(mb, JOBS), false, 'the base has no jobs file');
+  assert.equal(T.g(['rev-parse', `${mb}~1:${JOBS}`]), before, 'the base\'s parent had it');
   reaches(plainLand(T, 'chore-aside', how), 'zz');
   refused(T.dry('aside'), BEHIND);
   refused(T.merge('aside'), BEHIND);
