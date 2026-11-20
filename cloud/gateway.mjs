@@ -1259,6 +1259,7 @@ export function createGateway(opts = {}) {
     const { raw, c } = clientDataOf(b64);
     if (c?.type !== type) throw new Error('wrong ceremony');
     if (c.origin !== PUB || c.crossOrigin === true) throw new Error('wrong origin');
+    // stateOf read the state from this same clientDataJSON; checked again so the row holds on its own
     if (c.challenge !== state) throw new Error('unknown or expired challenge');
     return raw;
   };
@@ -1449,8 +1450,9 @@ export function createGateway(opts = {}) {
       const held = stillHeld(s, { hash: rec.session });
       if (!held) return no(401, 'your session ended; sign in again', after);
       if (!fresh(held.session)) return no(403, NOT_FRESH, after);
-      // a top-level session is whoever owns the box now, so the person is checked by id as well
-      if ((held.person.id ?? null) !== (rec.person ?? null) || held.person.role !== rec.role) return no(409, 'your account changed since; start again', after);
+      // a top-level session is whoever owns the box now, so the person is checked by id as well; an
+      // add the stand-in owner started (no row yet) stays the owner's once the row is written
+      if ((rec.person != null && held.person.id !== rec.person) || held.person.role !== rec.role) return no(409, 'your account changed since; start again', after);
       person = held.person;
     } else {
       const found = inviteOf(s, rec.invite);
