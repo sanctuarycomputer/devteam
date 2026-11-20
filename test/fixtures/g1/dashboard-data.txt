@@ -2245,8 +2245,8 @@ exit 0
     {
       "key": "split_files",
       "group": "Merging and checks",
-      "name": "Files split by part",
-      "description": "big files whose tickets may name parts of them in touches; every other file is touched whole",
+      "name": "Shared big files",
+      "description": "files many tickets change: validate warns when a whole-file claim on one orders two tickets (any file may be named by part)",
       "shown": "value",
       "value": [],
       "set": false,
