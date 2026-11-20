@@ -27798,7 +27798,7 @@ async function browserInput(ctx, tab, act, said) {
   tab.loaded = () => { loaded = true; };
   // A same-document navigation (a fragment link, a history call) fires a load's start, then itself, and no
   // load: it takes the start just before it off the count (while a real load is pending, the page's
-  // history calls come with no start of their own and take nothing). The wait ends 500 ms after the
+  // history calls after the first come with no start of their own and take nothing). The wait ends 500 ms after the
   // first (as an input's own load is given 500 ms to start) when no start is left pending, before and
   // after the document reads complete. So a history call the page being left makes before it navigates
   // (an onclick saving its state), or while its load is pending (a timer), leaves that load's start
