@@ -110,7 +110,8 @@ const REQUESTS = (F) => ({
   'hub /instances.json': [[200, '/instances.json']],
   'hub /memory.json': [[200, '/memory.json']],
   'hub /memory.json?*': [[200, '/memory.json?since=8d'], [200, `/memory.json?after=${new Date(Date.now() - 3600000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`]],
-  'hub /operator/threads': [[200, '/operator/threads']],
+  // the thread written into this run's store, folded and answered (on a box, the boxed fold)
+  'hub /operator/threads': [[200, '/operator/threads', SAME, new RegExp(OPERATOR_THREAD)]],
 });
 // Keys the listing finds that are not routes of their own, each with why: what asks them.
 const NOT_ROUTES = {
@@ -287,11 +288,19 @@ function getSafeFixture() {
   return F;
 }
 const envOf = (F, extra = {}) => ({ ...F.env({}), HOME: F.home, NODE_OPTIONS: `--import=${F.preload}`, DT_A13_CMDS: F.cmds, DT_A13_TIMERS: 'off', DEVTEAM_DATA_WAIT_MS: '600000', DEVTEAM_KIT_WATCH_MS: '600000000', ...extra });
-// one operator thread, in the store the hub of this env reads (HOME's, by hub port; ~/operator on a box)
-const operatorThread = (F, env) => spawnSync(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'operator-thread', 'new', 'the importer looks slow tonight'], { cwd: F.old, env: { ...env, NODE_OPTIONS: '', HISTFILE: '' }, encoding: 'utf8' });
+// One operator thread with an owner's turn, written straight into the store each run's hub reads
+// (operatorDir: HOME/.devteam/operator-<hub port> on a laptop, HOME/operator on a box), in the shape
+// operator-thread new appends (operatorAppend; operatorLines keeps only that shape): no command run,
+// nothing left running.
+const OPERATOR_THREAD = 'ot-20261120-000000000-a13a13';
+const operatorThreads = (F) => {
+  const at = new Date(Date.now() - 60000).toISOString();
+  const lines = [{ v: 1, at, id: OPERATOR_THREAD, type: 'thread', op: 'new', by: 'owner', title: 'the importer looks slow tonight', subject: null }, { v: 1, at, id: 'ou-20261120-000000000-a13a13', type: 'turn', op: 'new', by: 'owner', thread: OPERATOR_THREAD, text: 'the importer looks slow tonight' }];
+  for (const dir of [path.join(F.home, '.devteam', `operator-${PORTS}`), path.join(F.home, 'operator')]) write(path.join(dir, 'threads.jsonl'), lines.map((l) => `${JSON.stringify(l)}\n`).join(''));
+};
 
-const request = (method, port, p, headers = {}) => new Promise((resolve, reject) => {
-  const r = http.request({ host: '127.0.0.1', port, path: p, method, headers: { host: `127.0.0.1:${port}`, ...headers } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+const request = (method, port, p, headers = {}, out = {}) => new Promise((resolve, reject) => {
+  const r = http.request({ host: '127.0.0.1', port, path: p, method, headers: { host: `127.0.0.1:${port}`, ...headers } }, (res) => { const b = []; res.on('data', (c) => b.push(c)); res.on('end', () => { out.body = Buffer.concat(b).toString('utf8'); resolve(res.statusCode); }); });
   r.on('error', reject);
   r.setTimeout(120000, () => r.destroy(new Error(`${method} ${p}: no answer in 2 min`)));
   r.end();
@@ -325,18 +334,19 @@ async function sweep(t, F, mode, env) {
     await until(async () => { try { return (await request('GET', PORTS, '/instances.json', SAME)) === 200; } catch { return false; } }, 'the hub');
     await settled(F, leaders);
     const failures = [];
-    const ask = async (key, method, [want, p, headers = SAME], checkStatus) => {
+    const ask = async (key, method, [want, p, headers = SAME, has = null], checkStatus) => {
       const at = key.startsWith('hub ') ? PORTS : port;
       const before = snapshot(F);
       fs.writeFileSync(F.cmds, '');
       let status;
-      try { status = await request(method, at, p, headers); } catch (e) { status = e.message; }
+      const out = {};
+      try { status = await request(method, at, p, headers, out); } catch (e) { status = e.message; }
       await settled(F, leaders);
       const changed = diff(before, snapshot(F));
       const writes = readCmds(F).map((c) => notRead(c)).filter(Boolean);
       const expect = typeof want === 'number' ? want : want[mode];
       t.diagnostic(`${mode}: ${status} ${method} ${key.split(' ')[0]} ${p}`);
-      const wrong = checkStatus && status !== expect ? [`answered ${status}, not ${expect}`] : [];
+      const wrong = checkStatus && status !== expect ? [`answered ${status}, not ${expect}`] : checkStatus && has && !has.test(out.body ?? '') ? [`its answer lacks ${has}`] : [];
       if (changed.length || writes.length || wrong.length) failures.push(`${mode}: ${method} ${key.split(' ')[0]} ${p} (${status}): ${[...wrong, ...changed, ...writes.map((w) => `started ${w}`)].join('; ')}`);
     };
     for (const [key, reqs] of Object.entries(REQUESTS(F))) {
@@ -369,7 +379,7 @@ test('org-access A13: no GET route of the dashboard or the hub changes durable s
     // a box: the public name set (and previews served on it), so the box's own branches run, and the
     // hub the image's (DEVTEAM_IMAGE_HUB: the dashboard leaves it to `devteam.mjs hub`, started alone)
     const box = envOf(F, { DEVTEAM_PUBLIC_URL: 'https://box.example.test', DEVTEAM_PREVIEWS: '1', PORT: String(PORTS + 41), DEVTEAM_IMAGE_HUB: String(PORTS) });
-    for (const env of [laptop, box]) operatorThread(F, env);
+    operatorThreads(F);
     const failures = [...(await sweep(t, F, 'laptop', laptop)), ...(await sweep(t, F, 'box', box))];
     assert.deepEqual(failures, [], 'every GET leaves durable state as it was, starts only reads and answers as it should');
   } finally { F.done(); }
