@@ -402,6 +402,13 @@ test('validate: a deep chain beside enough ready tickets is not serial, and name
     // 3 ready: 9 < 4 x 3, wide enough, no warning
     F.ticket('app-62-free', ['app/free-2.txt']);
     assert.deepEqual(serial(), []);
+    // a dependency that has merged, or been superseded, doesn't hold a ticket back: the three are still ready
+    F.ticket('app-30-merged', ['app/merged.txt']);
+    F.g(['commit', '-q', '--allow-empty', '-m', 'app-30-merged: work'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    F.ticket('app-31-old', ['app/old.txt'], { superseded_by: 'app-30-merged' });
+    for (const id of ['app-41-step', 'app-61-free', 'app-62-free']) F.ok(F.old, ['ticket', 'set', id, '--json', JSON.stringify({ depends_on: ['app-30-merged', 'app-31-old'] })], SUP);
+    assert.deepEqual(serial(), [], 'merged and superseded dependencies leave the width at 3');
     F.ok(F.old, ['ticket', 'set', 'app-62-free', '--json', JSON.stringify({ depends_on: ['app-61-free'] })], SUP);
     assert.equal(serial().length, 1, 'back to 2 ready: serial again');
     // every link names the same part on both sides: they really overlap, so none only serializes
