@@ -23922,7 +23922,9 @@ const recurringRegistry = Object.freeze({
   // - M is an ancestor of the head: a merge or squash lands the head's tree, so the head's file
   //   lands, compared canonically with main's (the binding decides any change);
   // - merge and squash: the branch left the file alone (present at every merge base, the head and
-  //   M, and the head's blob is every base's): M's file lands, and the jobs are main's.
+  //   M, and the head's blob is every base's): M's file lands, and the jobs are main's;
+  // - merge and squash: main left the file alone (the same presence, and M's blob is every
+  //   base's): the head's file lands, compared canonically with main's.
   // Anything else is refused. Under merge_method rebase only the first is cleared: a rebase replays
   // commits, dropping merges and patches already upstream. Every git call has a timeout; one that
   // times out refuses.
@@ -23964,6 +23966,10 @@ const recurringRegistry = Object.freeze({
         const atBases = bases.map(blob);
         if (late.length) return lands(null);
         if (atMain && atHead && bases.length && atBases.every((b) => b && b === atHead)) return lands(now);
+        // main left the file alone (merge and squash; d-20261120-085914614): present at every base,
+        // the head and M, and M's blob is every base's. git takes the head's file at tree level, and
+        // the binding compares its jobs with main's.
+        if (atMain && atHead && bases.length && atBases.every((b) => b && b === atMain)) return lands(jobsAt(sha));
       }
       if (anc.status === 1) return lands(null, "settings.md: this branch's settings.md differs from main's and the branch doesn't contain main's tip; merge main into the branch first");
       return lands(null, `settings.md: git merge-base --is-ancestor ${M.slice(0, 12)} ${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);

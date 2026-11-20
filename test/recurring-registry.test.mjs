@@ -1322,3 +1322,53 @@ test('RV6-CRISS2: a criss-cross whose head equals one base of two (the other has
     assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'bb'), false, 'bb stays stopped');
   } finally { T.done(); }
 });
+
+test('RV6-MAIN-ALONE: main moved by another file only; a chore that adds an answered job lands the head\'s file under merge, and is refused under rebase (d-20261120-085914614)', () => {
+  const T = setup('rv6ma');
+  try {
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job' }) }; });
+    const zz = check({ title: 'Z job', run: 'echo zz' });
+    T.jobsChore('add-zz', (j) => { j.recurring.zz = zz; });
+    T.jobsChore('add-yy', (j) => { j.recurring.yy = check({ title: 'Y job', run: 'echo yy' }); });
+    onMainFile(T, NOTES, 'main moves\n', 'main moves, not settings');
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.throws(() => T.g(['merge-base', '--is-ancestor', 'origin/main', 'origin/chore-add-zz'], T.old), 'the chore doesn\'t contain main');
+    refused(T.dry('add-zz'), /changes owner settings: recurring \(recurring-edit\)/);
+    const q = T.yes({ recurring: { zz } });
+    passes(T.merge('add-zz', ['--approved', q]));
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.deepEqual(T.mainSettings().recurring, { aa: check({ title: 'A job' }), zz });
+    // under rebase the same kind of chore is refused: only an equal file lands
+    T.g(['merge', '-q', '--ff-only', 'origin/main'], T.old);
+    T.onMain((j) => { j.merge_method = 'rebase'; }, 'rebase');
+    const qy = T.yes({ recurring: { yy: check({ title: 'Y job', run: 'echo yy' }) } });
+    refused(T.dry('add-yy', qy), REBASE_EQUAL);
+  } finally { T.done(); }
+});
+
+test('RV6-CRISS3: a criss-cross where main\'s settings.md equals one base of two and the head changed the file: refused (d-20261120-085914614)', () => {
+  const T = setup('rv6criss3');
+  try {
+    T.onMain((j) => { j.recurring = Object.fromEntries(['aa', 'bb'].map((n) => [n, check({ title: `${n} job`, run: `echo ${n}` })])); });
+    const wt = T.choreBranch('cx3', (w) => write(path.join(w, NOTES), 'cx 1\n'));
+    const x1 = T.g(['rev-parse', 'HEAD'], wt);
+    T.g(['fetch', '-q', 'origin'], T.old); T.g(['reset', '-q', '--hard', 'origin/main'], T.old);
+    T.onMain((j) => { j.tick_minutes = 7; }, 'm1: tick');
+    const m1 = T.g(['rev-parse', 'origin/main'], T.old);
+    // main merges x1 (its settings.md stays m1's); the chore merges m1, then adds zz
+    T.g(['merge', '-q', '--no-ff', '-m', 'main takes x1', x1], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+    T.g(['merge', '-q', '--no-ff', '-m', 'chore takes m1', m1], wt);
+    const zz = check({ title: 'Z job', run: 'echo zz' });
+    commitIn(T, wt, 'chore-cx3', (w) => T.edit((j) => { j.recurring.zz = zz; }, w), 'zz');
+    T.g(['fetch', '-q', 'origin'], T.old);
+    const bases = T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cx3'], T.old).split('\n');
+    assert.equal(bases.length, 2, 'two merge bases');
+    const main = T.g(['rev-parse', `origin/main:${SETP}`], T.old);
+    assert.deepEqual(bases.map((b) => T.g(['rev-parse', `${b}:${SETP}`], T.old) === main).sort(), [false, true], 'main equals one base only');
+    const q = T.yes({ recurring: { zz } });
+    refused(T.dry('cx3', q), DIFFERS);
+    refused(T.merge('cx3', ['--approved', q]), DIFFERS);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'zz'), false, 'zz did not land');
+  } finally { T.done(); }
+});
