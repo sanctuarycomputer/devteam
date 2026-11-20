@@ -18631,16 +18631,18 @@ function memoryClassify(words, commands) {
 // among them (a root with none counts 0.8, as its gate does). settingsOf(root) is the root's settings
 // block or null.
 function memoryNameRoots(registry, scanned, settingsOf) {
+  // one spelling a root: /c/a/ is /c/a; / itself becomes '' and is dropped as not absolute
+  const norm = (r) => (typeof r === 'string' ? r.replace(/\/+$/, '') : null);
   const hello = new Map();
-  for (const s of scanned) if (s && typeof s.root === 'string' && typeof s.name === 'string' && s.name && !hello.has(s.root)) hello.set(s.root, s.name);
-  const all = [...new Set([...registry, ...scanned.map((s) => s && s.root)])].filter((r) => typeof r === 'string' && r.startsWith('/'));
+  for (const s of scanned) if (s && typeof s.name === 'string' && s.name && norm(s.root) !== null && !hello.has(norm(s.root))) hello.set(norm(s.root), s.name);
+  const all = [...new Set([...registry, ...scanned.map((s) => s && s.root)].map(norm))].filter((r) => typeof r === 'string' && r.startsWith('/'));
   const roots = [];
   let ceiling = Infinity;
   for (const root of all) {
     const s = settingsOf(root) ?? {};
     const c = s.machine_memory_ceiling;
     ceiling = Math.min(ceiling, typeof c === 'number' && c >= MEMORY_CEILING_MIN && c <= MEMORY_CEILING_MAX ? c : 0.8);
-    const name = hello.get(root) ?? (typeof s.project === 'string' && s.project ? s.project : memoryBase(root.replace(/\/+$/, '')));
+    const name = hello.get(root) ?? (typeof s.project === 'string' && s.project ? s.project : memoryBase(root));
     if (name) roots.push({ root, name });
   }
   return { roots, ceiling: ceiling === Infinity ? 0.8 : ceiling };
@@ -18663,39 +18665,45 @@ function memoryRootOf(cwd, roots) {
   if (!best) return null;
   return { name: best.name, worktree: /^\.worktrees\/[^/]/.test(cwd.slice(best.root.length + 1)) };
 }
+// An own key on a plain object, whatever its name: a root named __proto__ or constructor is a
+// project like any other (plain assignment would reach Object.prototype instead).
+const memoryOwn = (o, k, v) => Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
+// Map entries into a plain object in the Map's order (or in `order`, those present).
+const memoryObject = (m, order = [...m.keys()]) => order.filter((k) => m.has(k)).reduce((o, k) => memoryOwn(o, k, m.get(k)), {});
 // procs ({ words, cwd, rss }[], or null with no /proc) into a machine-memory@1 reading, its keys in
 // the contract's order; a field the machine couldn't read is left out, never zero.
 function memoryFold(procs, { at, memory, ceiling, roots, commands, partial }) {
   const r = { v: 1, at, working_set: memory.inUse };
-  if (memory.max !== undefined && memory.max !== null) r.max = memory.max;
-  if (ceiling !== undefined) r.ceiling = ceiling;
-  if (memory.source !== undefined) r.source = memory.source;
+  if (memory.max != null) r.max = memory.max;
+  if (ceiling != null) r.ceiling = ceiling;
+  if (memory.source != null) r.source = memory.source;
   if (partial) r.partial = true;
   if (procs === null) return r;
   let sessions = 0;
-  const kinds = {}, devteam = {}, projects = {};
+  // Maps, not objects: the keys are names (projects, subcommands) and a name may be __proto__
+  const kinds = new Map(), devteam = new Map(), projects = new Map();
+  const add = (m, k, make) => { if (!m.has(k)) m.set(k, make()); return m.get(k); };
   for (const p of procs) {
     const { kind, subcommand } = memoryClassify(p.words, commands);
-    const k = (kinds[kind] ??= { n: 0, rss: 0 }); k.n++; k.rss += p.rss;
-    if (subcommand) { const d = (devteam[subcommand] ??= { n: 0, rss: 0 }); d.n++; d.rss += p.rss; }
-    const at = memoryRootOf(p.cwd, roots);
-    if (!at) continue;
-    const session = kind === 'agent' && at.worktree;
+    const k = add(kinds, kind, () => ({ n: 0, rss: 0 })); k.n++; k.rss += p.rss;
+    if (subcommand) { const d = add(devteam, subcommand, () => ({ n: 0, rss: 0 })); d.n++; d.rss += p.rss; }
+    const home = memoryRootOf(p.cwd, roots);
+    if (!home) continue;
+    const session = kind === 'agent' && home.worktree;
     if (session) sessions++;
-    const e = (projects[at.name] ??= { rss: 0, sessions: 0, devteam: {} });
+    const e = add(projects, home.name, () => ({ rss: 0, sessions: 0, devteam: new Map() }));
     e.rss += p.rss;
     if (session) e.sessions++;
-    if (subcommand) e.devteam[subcommand] = (e.devteam[subcommand] ?? 0) + p.rss;
+    if (subcommand) e.devteam.set(subcommand, (e.devteam.get(subcommand) ?? 0) + p.rss);
   }
   r.sessions = sessions;
-  r.kinds = {};
-  for (const k of MEMORY_KINDS) if (kinds[k]) r.kinds[k] = kinds[k];
-  r.devteam = devteam;
+  r.kinds = memoryObject(kinds, MEMORY_KINDS);
+  r.devteam = memoryObject(devteam);
   r.projects = {};
-  for (const [name, e] of Object.entries(projects)) {
-    const out = (r.projects[name] = { rss: e.rss });
+  for (const [name, e] of projects) {
+    const out = memoryOwn(r.projects, name, { rss: e.rss })[name];
     if (e.sessions) out.sessions = e.sessions;
-    if (Object.keys(e.devteam).length) out.devteam = e.devteam;
+    if (e.devteam.size) out.devteam = memoryObject(e.devteam);
   }
   return r;
 }

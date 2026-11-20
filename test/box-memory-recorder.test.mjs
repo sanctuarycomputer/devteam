@@ -213,6 +213,37 @@ test('T2: memoryFold over kit-590\'s fixture table is proc-expected.json\'s read
   assert.equal(memoryReadingProblem(JSON.stringify(none)), null);
 });
 
+test('T2: memoryFold keeps a project named __proto__ or constructor as its own key, and touches no prototype', () => {
+  // in the region's own realm, so its Object.prototype is the one a bad fold would write to
+  const { memoryFold, memoryWords, proto } = vm.runInContext(`${region()}\n;({ memoryFold, memoryWords, proto: Object.prototype })`, vm.createContext({}));
+  const roots = [{ root: '/c/p', name: '__proto__' }, { root: '/c/k', name: 'constructor' }, { root: '/c/h', name: 'hasOwnProperty' }];
+  const procs = [
+    { words: memoryWords('node\0/c/p/docs/devteam/scripts/devteam.mjs\0constructor\0'), cwd: '/c/p', rss: 4096 },
+    { words: memoryWords('claude\0'), cwd: '/c/p/.worktrees/x', rss: 8192 },
+    { words: memoryWords('bash\0'), cwd: '/c/k', rss: 12288 },
+    { words: memoryWords('bash\0'), cwd: '/c/h', rss: 16384 },
+  ];
+  const r = memoryFold(procs, { at: '2026-11-20T12:00:00Z', memory: { inUse: 1, max: 2, source: 'cgroup' }, ceiling: 0.8, roots, commands: new Set(['constructor']), partial: false });
+  assert.equal(proto.rss, undefined, 'Object.prototype.rss untouched');
+  assert.equal(proto.n, undefined, 'Object.prototype.n untouched');
+  assert.equal(({}).rss, undefined);
+  const line = JSON.stringify(r);
+  const back = JSON.parse(line);
+  assert.deepEqual(Object.keys(back.projects), ['__proto__', 'constructor', 'hasOwnProperty']);
+  assert.deepEqual(back.projects.__proto__, JSON.parse('{"rss":12288,"sessions":1,"devteam":{"constructor":4096}}'), 'its own key, not the prototype');
+  assert.deepEqual(back.projects.constructor, { rss: 12288 });
+  assert.deepEqual(back.projects.hasOwnProperty, { rss: 16384 });
+  // a subcommand can't be __proto__ (the check refuses it), but constructor is a command name's shape
+  assert.deepEqual(back.devteam, { constructor: { n: 1, rss: 4096 } });
+  assert.equal(memoryReadingProblem(line), null, line);
+});
+
+test('T2: memoryNameRoots reads a root with a trailing slash as the same root; / is none', () => {
+  const { memoryNameRoots } = fns(['memoryNameRoots']);
+  const got = memoryNameRoots(['/c/a/', '/'], [{ root: '/c/a', name: 'alpha-hello' }, { root: '/c/b//', name: '' }], () => null);
+  assert.deepEqual(got.roots, [{ root: '/c/a', name: 'alpha-hello' }, { root: '/c/b', name: 'b' }]);
+});
+
 test('T2: memoryRootOf takes the longest root holding the cwd, and a worktree under its .worktrees/', () => {
   const { memoryRootOf } = fns(['memoryRootOf']);
   const roots = [{ root: '/c/a', name: 'a' }, { root: '/c/a/inner', name: 'inner' }];
@@ -261,6 +292,13 @@ test('T2: memoryThin keeps a 5-minute bucket\'s peak past 6 hours, and every rea
   // past 3 days a bucket is 30 minutes
   const b30 = Math.floor((now - 4 * DAY) / (30 * MIN)) * 30 * MIN;
   assert.deepEqual(memoryThin([r(b30, 3), r(b30 + 20 * MIN, 4)], now), [r(b30 + 20 * MIN, 4)]);
+  // the edges: exactly 6 hours old is kept whole (beside an older peak in its 5-minute bucket);
+  // exactly 3 days old is in a 5-minute bucket (not the 30-minute one of a minute older)
+  const at2 = now + 2 * MIN;
+  const six = [r(at2 - 6 * HOUR - MIN, 9), r(at2 - 6 * HOUR, 1)];
+  assert.deepEqual(memoryThin(six, at2), six);
+  const three = [r(at2 - 3 * DAY - MIN, 9), r(at2 - 3 * DAY, 1)];
+  assert.deepEqual(memoryThin(three, at2), three);
 });
 
 // ===== D2: nothing of a command line, the environment or a path is kept =====
