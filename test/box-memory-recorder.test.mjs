@@ -545,8 +545,10 @@ test('C5c: a dashboard started through the helpers records nothing', { timeout: 
   const root = bareProject(base, 'recorder-off');
   const dash = startDashboard(root, env);
   t.after(() => dash.stop());
-  await until(() => /hub on http/.test(dash.out()) || dash.p.exitCode !== null, 'the dashboard\'s hub');
-  assert.match(dash.out(), /hub on http/);
+  // the dashboard's hub logs to its own file, not to the dashboard's output: it is up when it answers
+  await until(() => /dashboard on http/.test(dash.out()) || dash.p.exitCode !== null, 'the dashboard');
+  assert.match(dash.out(), /dashboard on http/);
+  await until(async () => { try { return (await get(HUB, '/instances.json')).status === 200; } catch { return false; } }, "the dashboard's hub");
   await new Promise((r) => setTimeout(r, 2000));
   assert.ok(!fs.existsSync(path.join(base, '.devteam', `machine-${HUB}`)), 'no machine-<port> folder');
 });
