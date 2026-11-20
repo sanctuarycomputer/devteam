@@ -233,7 +233,7 @@ test('the shape is a constant in devteam.mjs, with no new schema file', () => {
   const at = SRC.indexOf('\nconst RECURRING_ENTRY_SHAPE = Object.freeze({');
   assert.ok(at > 0, 'RECURRING_ENTRY_SHAPE is a frozen constant');
   assert.match(SRC.slice(at, at + 400), /\n {2}version: 1,/);
-  assert.match(SRC, /\nfunction recurringEntryProblems\(name, entry\) \{/);
+  assert.match(SRC, /\nfunction recurringEntryProblems\(name, entry(, prefix = 'recurring\.json')?\) \{/);
   assert.deepEqual(fs.readdirSync(path.join(kit, 'schema')).filter((f) => f.startsWith('recurring')), []);
 });
 
