@@ -6687,7 +6687,8 @@ const avLiveReload = (() => {
       e.preventDefault();
       const arts = DATA?.library?.artifacts ?? [];
       const mainFp = arts.find((x) => x.slug === slug && x.at === 'main')?.fp ?? null;
-      showArtifact(slug, 'main', { title: $('av-title').textContent, fp: mainFp, mainFp });
+      // the dashboard's bar is drawn from its data (as avPick's); a viewer tab has none, so it keeps its title
+      showArtifact(slug, 'main', { ...(VIEWER ? { title: $('av-title').textContent } : {}), fp: mainFp, mainFp });
     });
     n.replaceChildren('This draft was landed or removed: ', a);
     n.hidden = false;

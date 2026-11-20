@@ -235,7 +235,11 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     assert.equal((await titles())[0], 'v1#section', 'the page loaded at the anchor');
     const t0 = await change(NEW_FP);
     const got = await reloadedSince(t0, 'a reload after fp changed');
-    assert.equal(got.title, 'v1#section', 'reloaded at the anchor');
+    assert.equal(got.title, 'v1#section', 'reloaded at the anchor');    // a thread's hash (#talk/) or one over 200 characters is no anchor (the browser's hash never holds whitespace)
+    for (const h of ['#talk/t-20261120-000000000-owner', `#${'a'.repeat(201)}`]) {
+      await open(`${VIEW}?at=${WT}${h}`, WT);
+      assert.equal(await p.ev(`document.getElementById('av-frame').getAttribute('src')`), `/artifact/wt/${WT}/${SLUG}/`, `${h.slice(0, 24)}: no anchor`);
+    }
   });
 
   await t.test('C8: a reload keeps the page the owner followed a link to', async () => {
