@@ -89,7 +89,51 @@ const AUTONOMY_PAGES = ((init = lib.autonomyFixture().init, peek = (extra) => `!
   { hash: '#retros', narrow: { view: '#no-such-view' }, init: '/* no patch: a new document */', ready: "!window.__fx && !document.querySelector('main.waiting')" },
 ])();
 // kit-96: the Loop
-const LOOP_PAGES = frameOnly(['loop']);
+// On the shell, whole: its four tabs with a record of every kind in each table (some names long on purpose), patched
+// into /api/data, and a lesson's peek with its Evidence and Given to, /api/peek answered by the same fixture. page-top
+// at 1440x900 only, as every shell page's entry (narrow: its view a selector no element has); the peek takes the
+// peeks' options (PEEK_OPTS' values: the page under it is judged by the tab entries; the drawer scrolls).
+const LOOP_PAGES = ((now = Date.now(), ago = (h) => new Date(now - h * 3600000).toISOString(), LONG = 'the checkout end-to-end test takes forty seconds on the runner and times out under load when two suites share it') => {
+  const K = 'k-20261120-010000000-supervisor', O = ['o-20261120-010000000-supervisor', 'o-20261120-020000000-supervisor'], A = 'a-20261120-030000000-supervisor', D = 'd-20261120-040000000-supervisor', P = 'p-20261120-050000000-supervisor';
+  const ooda = {
+    observations: [
+      { id: O[0], type: 'observation', created_at: ago(2), created_by: 'supervisor', source: 'metrics', kind: 'slow-test', subject: 'app', detail: LONG, severity: 3, valence: -2 },
+      { id: O[1], type: 'observation', created_at: ago(3), created_by: 'owner', source: 'owner', kind: 'went-well', subject: 'docs', detail: 'the review caught the bug', severity: 0, valence: 1 },
+    ],
+    clusters: [{ key: 'metrics:flaky-gate:web/e2e', count: 3, valence: -1, ids: O, latest: 'web/e2e failed, then passed' }],
+    debt: { signals: [{ key: 'metrics:flaky-gate:web/e2e', count: 3, latest: 'web/e2e failed, then passed', first_at: ago(30), hours: 30 }], incidents: [{ id: 'p-20261118-010000000-supervisor', title: 'Hub refused connections for 6 minutes', resolved_at: ago(48), outcome: O[1], decision: null, days: 2 }] },
+    knowledge: [
+      { id: K, type: 'knowledge', kind: 'lesson', statement: `payments time out under load, so ${LONG}`, scope: 'project', status: 'accepted', created_by: 'supervisor', created_at: ago(5), evidence: O, valence: -1 },
+      { id: 'k-20261120-011000000-supervisor', type: 'knowledge', kind: 'fact', statement: 'the box runs no SSH server', scope: 'project', status: 'accepted', created_by: 'supervisor', created_at: ago(6), evidence: [] },
+    ],
+    problems: [{ id: P, type: 'problem', title: 'A typed answer sat unsubmitted in the pane', realized: true, severity: 2, status: 'open', created_at: ago(5), created_by: 'supervisor', threatens: [] }],
+    decisions: [
+      { id: D, at: ago(1), who: 'supervisor', kind: 'decision', class: 'rename-column', class_name: 'Renaming a column', what: `renamed the Owner column to Who: ${LONG}`, rationale: null, options: [], confidence: 0.6, refs: [], reversible: true, under: { authority: 'rung', rung: 2 }, acts: [], correction: null },
+      { id: 'k-20261120-012000000-owner', at: ago(2), who: 'owner', kind: 'rule', class: null, class_name: null, what: 'running text stays within half the grid', refs: [], under: { status: 'accepted' }, acts: [], correction: null },
+    ],
+    acts: [{ id: A, type: 'act', created_at: ago(1), created_by: 'supervisor', class: 'release-scope', class_name: 'Scoping a release', what: `tagged release v1.0.0 with ${LONG}`, refs: [], reversible: true }],
+  };
+  const peek = { kind: 'lesson', id: K, record: { id: K, type: 'knowledge', created_at: ago(5), created_by: 'supervisor', fields: { kind: 'lesson', statement: ooda.knowledge[0].statement, scope: 'project', status: 'accepted', evidence: O } }, stage: 'orient', history: [],
+    cited: { [O[0]]: { type: 'observation', created_at: ago(2), created_by: 'supervisor', kind: 'slow-test', status: null, text: LONG }, [O[1]]: { type: 'observation', created_at: ago(3), created_by: 'owner', kind: 'went-well', status: null, text: 'the review caught the bug' } },
+    related: [], given_to: [{ act: A, session: 'kit-01-a-worker-on-a-ticket-with-a-long-name-for-the-measure', role: 'worker', at: ago(1), since: 2 }] };
+  const init = `${lib.dataPatchInit({ ooda })}
+(() => {
+  const f = window.fetch, pk = ${JSON.stringify(peek)};
+  window.fetch = (u, o) => {
+    const at = new URL(String(u && u.url ? u.url : u), location.href);
+    return at.origin === location.origin && at.pathname === '/api/peek' && at.searchParams.get('id') === pk.id ? Promise.resolve(new Response(JSON.stringify(pk), { status: 200, headers: { 'content-type': 'application/json' } })) : f(u, o);
+  };
+})();`;
+  const rows = (box) => `!!document.querySelector('${box} table.db-t tbody tr[data-row]')`;
+  return [
+    ...[['#loop', '#observations'], ['#loop?lt=orient', '#knowledge'], ['#loop?lt=decide', '#decisions-feed'], ['#loop?lt=act', '#acts-feed']].map(([hash, box]) => ({ hash, init, narrow: { view: '#no-such-view' }, ready: rows(box) })),
+    { hash: `#lesson/${K}`, init, ready: `!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && [...document.querySelectorAll('#drawer-body .psect > .card-head')].some((h) => h.textContent.trim() === 'Given to')`, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } },
+    // a fresh, unpatched document, last, as AUTONOMY_PAGES ends: the entries after it (Overview's and the goal pages)
+    // load by a hash change alone in the last document, on the server's own data. The Loop on that data: its tables
+    // with what the test's project holds (None where nothing)
+    { hash: '#loop', init: '/* no patch: a new document */', narrow: { view: '#no-such-view' }, ready: "!window.__fx && !!document.querySelector('#observations table.db-t')" },
+  ];
+})();
 // kit-97: one thread per subject (not THREADS_PAGES, the Threads panel's list below)
 // a thread's card reopened by a Shift+click on Upkeep's card (its open thread, not a new one), floating on
 // Goals; page-top at 1440x900 only, as the Goals entries above (o-20261116-110914358)

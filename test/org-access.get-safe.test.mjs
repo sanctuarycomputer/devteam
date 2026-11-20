@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { PORTS, fleetFixture, dashboardOnFreePort, until, write } from './lib/kit.mjs';
@@ -93,7 +94,8 @@ const REQUESTS = (F) => ({
   'dash /api/schema': [[200, '/api/schema']],
   'dash /api/timeline': [[200, `/api/timeline?id=${F.ticket}`]],
   'dash /api/governance': [[200, '/api/governance']],
-  'dash /api/file': [[200, '/api/file?path=README.md'], [200, `/api/file?path=docs/devteam/project/artifacts/${F.slug}/index.html`]],
+  // a ref that would reach git show as an option is refused before git runs (kit-339)
+  'dash /api/file': [[200, '/api/file?path=README.md'], [200, `/api/file?path=docs/devteam/project/artifacts/${F.slug}/index.html`], [400, '/api/file?path=README.md&ref=-p']],
   // the result as TSV only once the owner answered: this question has none yet, so `review result` says so
   'dash /api/review': [[200, `/api/review?id=${F.review}`], [404, `/api/review?id=${F.review}&format=tsv`]],
   'dash /public-manifest/*': [[200, `/public-manifest/${F.slug}`]],
@@ -204,7 +206,9 @@ const SKIP = [
   /^old\/docs\/devteam\/run\/cache\//, /^old\/docs\/devteam\/run\/dashboard\.log$/,
   /^a13-(preload\.mjs|commands\.jsonl)$/,
 ];
-// sha256 of every file under dir, a file's hash kept while its stat is unchanged
+// Every directory (as rel/, with its mode) and file (its mode and sha256) under dir, a file's hash kept
+// while its stat is unchanged: an empty directory made, or a mode changed, is a change too (kit-339).
+// A directory is skipped as rel/, so a skipped tree's own directory is skipped with what it holds.
 const HASHES = new Map();
 const hashTree = (dir, base = dir, out = {}) => {
   let ents;
@@ -212,14 +216,14 @@ const hashTree = (dir, base = dir, out = {}) => {
   for (const e of ents) {
     const p = path.join(dir, e.name);
     const rel = path.relative(base, p);
-    if (SKIP.some((r) => r.test(rel))) continue;
-    if (e.isDirectory()) hashTree(p, base, out);
+    if (SKIP.some((r) => r.test(e.isDirectory() ? `${rel}/` : rel))) continue;
+    if (e.isDirectory()) { out[`${rel}/`] = `dir:${(fs.statSync(p).mode & 0o7777).toString(8)}`; hashTree(p, base, out); }
     else if (e.isSymbolicLink()) out[rel] = `link:${fs.readlinkSync(p)}`;
     else if (e.isFile()) {
       const st = fs.statSync(p, { bigint: true });
       const k = `${p}|${st.size}|${st.mtimeNs}|${st.ctimeNs}|${st.ino}`;
       if (!HASHES.has(k)) HASHES.set(k, crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'));
-      out[rel] = HASHES.get(k);
+      out[rel] = `${(Number(st.mode) & 0o7777).toString(8)}:${HASHES.get(k)}`;
     }
   }
   return out;
@@ -278,6 +282,15 @@ function getSafeFixture() {
   F.g(['commit', '-qm', 'ahead'], F.neu);
   F.g(['push', '-q', 'origin', 'main'], F.neu);
   fs.mkdirSync(F.home, { recursive: true });
+  // States a read once wrote into (kit-339): origin's supervisor claim, as a fetch left it, held by
+  // another machine, with no ~/.devteam/machine-id here (hostVerdict's default made one); and a legacy
+  // `devteam` tmux session with a window of this checkout's, with no run/tmux-session (tmuxSession
+  // saved the name it found). Each GET must leave both as they are.
+  const claim = JSON.stringify({ devteam_host: 1, machine: 'm-a13otherbox01', hostname: 'other-box', at: new Date().toISOString(), since: new Date().toISOString(), fleet: null });
+  const tree = spawnSync('git', ['mktree'], { cwd: F.old, input: '', encoding: 'utf8' }).stdout.trim();
+  F.g(['update-ref', 'refs/devteam/host-origin', F.g(['commit-tree', tree, '-m', claim], F.old)], F.old);
+  const legacy = spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', F.ticket, '-c', path.join(F.old, '.worktrees', F.wt), 'sleep 3600'], { env: F.env({}), encoding: 'utf8' });
+  assert.equal(legacy.status, 0, `a legacy tmux session: ${legacy.stderr}`);
   // a file dropped on the page, where a laptop's dashboard keeps it (laptopUploadsDir: under HOME, by the repo's real path)
   const real = fs.realpathSync(F.old);
   F.upload = `2026-11-20-${'a'.repeat(24)}/note.txt`;
@@ -334,6 +347,8 @@ async function sweep(t, F, mode, env) {
     await until(async () => { try { return (await request('GET', PORTS, '/instances.json', SAME)) === 200; } catch { return false; } }, 'the hub');
     await settled(F, leaders);
     const failures = [];
+    // the seeded states as seeded, once the instance is up: a start that wrote either would leave the sweep nothing to see
+    for (const f of [path.join(F.home, '.devteam', 'machine-id'), path.join(F.old, 'docs/devteam/run/tmux-session')]) if (fs.existsSync(f)) failures.push(`${mode}: ${path.relative(F.base, f)} exists before the sweep's first request (the start, or an earlier sweep, wrote it)`);
     const ask = async (key, method, [want, p, headers = SAME, has = null], checkStatus) => {
       const at = key.startsWith('hub ') ? PORTS : port;
       const before = snapshot(F);
@@ -426,6 +441,31 @@ test('org-access A13: Check now fetches by POST /api/fleet-check, from the page\
       assert.ok(Array.isArray(JSON.parse(ok.body).blockers), 'the answer is fleet status');
       assert.ok(readCmds(F).some((c) => path.basename(c.file) === 'git' && c.args.includes('fetch')), 'the check fetched from origin');
       assert.equal(gitOut(F.old, ['rev-parse', 'origin/main']).trim(), gitOut(F.org, ['rev-parse', 'main']).trim(), "origin/main moved to origin's main");
+      // home's origin gone: the check says it couldn't fetch, never a 200 that reads as checked (kit-339)
+      F.g(['remote', 'set-url', 'origin', path.join(F.base, 'gone.git')], F.old);
+      const gone = await post(port, '/api/fleet-check', own);
+      await settled(F, leaders);
+      assert.equal(gone.status, 502, `home's origin gone: ${gone.body}`);
+      assert.match(JSON.parse(gone.body).error ?? '', /could not fetch origin/, 'the answer says why');
+      // home's origin hung (it takes the connection and never answers): the check is stopped at its
+      // deadline, 12 s, and says so, never holding the request
+      const held = new Set();
+      const hang = net.createServer((s) => { held.add(s); s.on('error', () => {}); });
+      await new Promise((r) => hang.listen(0, '127.0.0.1', r));
+      try {
+        F.g(['remote', 'set-url', 'origin', `http://127.0.0.1:${hang.address().port}/origin.git`], F.old);
+        const t0 = Date.now();
+        const hung = await post(port, '/api/fleet-check', own);
+        const took = Date.now() - t0;
+        assert.equal(hung.status, 500, `home's origin hung: ${hung.body}`);
+        assert.match(JSON.parse(hung.body).error ?? '', /took over 12 s/, 'the answer says it was stopped');
+        assert.ok(took >= 11000 && took < 20000, `answered at the deadline, not before or long after: ${took} ms`);
+      } finally {
+        for (const s of held) s.destroy();
+        await new Promise((r) => hang.close(r));
+        F.g(['remote', 'set-url', 'origin', F.org], F.old);
+      }
+      await settled(F, leaders);
     } finally { await dash.stop(); }
   } finally { F.done(); }
 });
