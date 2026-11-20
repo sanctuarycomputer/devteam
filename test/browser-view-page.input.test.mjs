@@ -17,6 +17,7 @@ viewPageFile();
 if (mustRun && !canDrive) test('Chrome is needed on CI\'s Node 22+', () => assert.fail('Chrome is needed on CI\'s Node 22+: this test must run there, not skip'));
 
 // ----- Task 2: the owner's input ----------------------------------------------------------------
+
 test('a click, a double click and a Shift+click each send one click, at the frame\'s point', { skip, timeout: 60000 }, async () => {
   const srv = await startServer();
   const { p, c, s } = await ready(srv, { width: 700, height: 700 });
@@ -318,6 +319,7 @@ test('Ctrl+V on a non-Latin layout still pastes; a Cmd chord whose keyup never c
 });
 
 // ----- Task 3: the address bar, Back, Sign out of everything --------------------------------------
+
 test('the address bar sends http and https entries as nav, and refuses every other scheme', { skip, timeout: 60000 }, async () => {
   const srv = await startServer();
   const { p, c } = await ready(srv);
