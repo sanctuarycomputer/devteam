@@ -646,6 +646,18 @@ try {
   .loop-intro { color: var(--fg-2); max-width: var(--measure); margin: 0 0 12px; }
 
 /* css-loop-tabs end */
+/* css-loop-tables start */
+  /* Self Improvement's tables (kit-96): each tab one flush card holding its table, at the grid's width */
+  .loop-panel { margin-top: 12px; }
+  .loop-panel .card.flush { max-width: none; }
+  /* a valence, red to green */
+  .sign { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sign.s-2 { color: var(--red-fg); } .sign.s-1 { color: color-mix(in srgb, var(--red-fg) 70%, var(--muted)); } .sign.s0 { color: var(--muted); }
+  .sign.s1 { color: color-mix(in srgb, var(--green-fg) 70%, var(--muted)); } .sign.s2 { color: var(--green-fg); }
+  /* the header's toggles (Orient's Needs orienting, Decide's two), pressed as the Board's Needs attention */
+  .pagebar .extra button[data-f="orient"], .pagebar .extra button[data-dec] { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+  .pagebar .extra button[data-f="orient"][aria-pressed="true"], .pagebar .extra button[data-dec][aria-pressed="true"] { background: var(--well); color: var(--fg); border-color: var(--fg-2); }
+/* css-loop-tables end */
 /* css-goals-old start */
   /* goals */
   .goal h4 { font-size: 15px; font-weight: 600; margin: 6px 0 2px; }
@@ -1262,44 +1274,25 @@ try {
 <!-- html-library end -->
 
 <!-- html-loop start -->
-  <section id="loop" class="no-shell" data-page="loop">
-    <h2>Loop <span class="sub">how the supervisor notices, makes sense of, decides and acts</span></h2>
-    <div id="learning" class="learning" aria-label="Is the loop making the system smarter?"></div>
-    <div class="tabs" role="tablist" id="loop-tabs">
-      <button role="tab" data-tab="observe">Observe<span class="n" id="n-observe"></span></button>
-      <button role="tab" data-tab="orient">Orient<span class="n" id="n-orient"></span></button>
-      <button role="tab" data-tab="decide">Decide<span class="n" id="n-decide"></span></button>
-      <button role="tab" data-tab="act">Act<span class="n" id="n-act"></span></button>
+  <section id="loop" data-page="loop">
+    <div class="tabbar" role="tablist" id="loop-tabs">
+      <button type="button" role="tab" data-tab="observe">Observe<span class="n" id="n-observe"></span></button>
+      <button type="button" role="tab" data-tab="orient">Orient<span class="n" id="n-orient"></span></button>
+      <button type="button" role="tab" data-tab="decide">Decide<span class="n" id="n-decide"></span></button>
+      <button type="button" role="tab" data-tab="act">Act<span class="n" id="n-act"></span></button>
     </div>
     <div class="loop-panel" data-panel="observe">
-      <p class="loop-intro">What the workers and the supervisor noticed: findings from the metrics, estimates that missed, surprises in the code. Raw signal; nothing here is decided yet.</p>
-      <div id="observations"></div>
+      <div class="card flush"><div class="card-head"><i class="icon-eye" aria-hidden="true"></i>Observations<span class="grow" id="c-observe"></span></div><div id="observations"></div></div>
     </div>
     <div class="loop-panel" data-panel="orient" hidden>
-      <p class="loop-intro">What the signal adds up to. Things noticed more than once become recurring signals; real or likely trouble becomes a problem; lessons, facts and your preferences become knowledge, which goes into every agent's instructions once accepted.</p>
-      <h3>Orientation debt</h3>
-      <p class="small muted">Recurring signals nothing has explained for more than a day: each wants a lesson, a problem, or a ruling that it is noise. Then incidents fixed and verified in the last 30 days that nobody has learned from: each wants a lesson, or a ruling that there is nothing to keep.</p>
-      <div id="debt"></div>
-      <div class="two">
-        <div><h3>Recurring signals</h3><div id="clusters"></div></div>
-        <div><h3>Problems</h3><div id="problems"></div></div>
-      </div>
-      <h3 style="margin-top:14px">Knowledge</h3>
-      <div id="knowledge"></div>
+      <div class="card flush"><div class="card-head"><i class="icon-book-open" aria-hidden="true"></i>Knowledge<span class="grow" id="c-orient"></span></div><div id="knowledge"></div></div>
+      <div hidden><div id="debt"></div><div id="clusters"></div><div id="problems"></div></div>
     </div>
     <div class="loop-panel" data-panel="decide" hidden>
-      <p class="loop-intro">Every call, newest first: what was decided, by whom, and on what authority (its trust, your answer, a default, a standing rule). Yours are shown as you made them. If one of the supervisor's is wrong, correct it: its kind of decision drops back to "ask first" (<a class="linkish" href="#trust">Trust Ladder</a>).</p>
-      <div class="filters">
-        <label>Who <select id="dec-who"><option value="">anyone</option><option value="owner">you</option><option value="supervisor">the supervisor</option></select></label>
-        <label>Kind <select id="dec-class"><option value="">any</option></select></label>
-        <label class="small"><input type="checkbox" id="dec-corrected"> Only corrected</label>
-        <label class="small"><input type="checkbox" id="dec-mechanical"> Include routine acts</label>
-      </div>
-      <div class="feed" id="decisions-feed"></div>
+      <div class="card flush"><div class="card-head"><i class="icon-scale" aria-hidden="true"></i>Decisions<span class="grow" id="c-decide"></span></div><div id="decisions-feed"></div></div>
     </div>
     <div class="loop-panel" data-panel="act" hidden>
-      <p class="loop-intro">What the supervisor did, newest first, and the call each act carried out. An act under a decision is corrected through the decision (Decide); an act that was its own call is corrected here.</p>
-      <div class="feed" id="acts-feed"></div>
+      <div class="card flush"><div class="card-head"><i class="icon-zap" aria-hidden="true"></i>Acts<span class="grow" id="c-act"></span></div><div id="acts-feed"></div></div>
     </div>
   </section>
 
@@ -4562,15 +4555,12 @@ function renderOoda(o) {
   renderGoals();
 
   /* ooda-learning start */
-  // Is it learning: the chart above the tabs
-  $('learning').innerHTML = learningSection(o);
+  // The learning charts are Awareness's (learningSection): Self Improvement keeps its tables only
 
   /* ooda-learning end */
   /* ooda-observe start */
-  // Observe
-  $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 40).map((x) => `
-    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)} role="button" tabindex="0" data-open="observation/${esc(encodeURIComponent(x.id))}">${cardMenu('observation', x.id)}${titled(peekFor('observation', x.id), `<span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}`)}
-      <div>${linkify(x.detail)}</div>${x.place ? `<div class="place">${loopPlace(x.place)}</div>` : ''}<div class="meta">${esc(who(x.created_by))}, ${when(x.created_at)}</div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
+  // Observe: its table (loop-tables)
+  loopDraw('observe', o);
 
   /* ooda-observe end */
   /* ooda-orient start */
@@ -4603,20 +4593,12 @@ function renderOoda(o) {
 
   /* ooda-decide end */
   /* ooda-act start */
-  // Act
-  const feed = o.acts;
-  $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
-    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)} role="button" tabindex="0" data-open="act/${esc(encodeURIComponent(a.id))}">
-      <div><div class="act-head">${titled(peekFor('act', a.id), v.head)}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
-        <div class="meta">${when(a.created_at)} · ${actUnder(a)}${a.reversible === false ? ' · can’t be undone' : ''}</div>
-        ${a.correction ? `<div class="err">Corrected by ${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
-        <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="Reason"><button class="ghost" data-correct-send="${esc(a.id)}">Send</button><span class="err" id="e-${esc(a.id)}"></span></div>
-      </div>
-      <div class="card-side">${a.correction || a.decision ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct</button>`}${cardMenu('act', a.id)}</div>
-    </div>`; }).join('') : empty('None yet. Everything the supervisor does shows here.');
+  // Act: its table (loop-tables)
+  loopDraw('act', o);
 }
   /* ooda-act end */
-const DEC_KIND = { decision: 'Decided', act: 'Did, as its own call', answer: 'You answered', goal: 'Your call on a goal', rule: 'A standing rule you gave', correction: 'Corrected' };
+// A Decide row's Kind when its record has no kind of decision (class_name): the record's own kind, in words
+const DEC_KIND = { decision: 'decision', act: 'act', answer: 'answer', goal: 'goal call', rule: 'standing rule', correction: 'correction' };
 // The question's Matched row in words (kit-313): the owner's own pick, the supervisor's reading of
 // their words, or words not yet read; a reading matches, but it is not the owner's agreement
 function matchedWords(q) {
@@ -4641,37 +4623,97 @@ const routine = (r) => r.kind === 'act' && r.under?.authority === 'constitution'
 // The Decide tab draws at most this many rows; with its filters as they start (no routine acts, any
 // writer, any class), the rows it draws are decideRows(o): a call has its Correct only there.
 const DECIDE_SHOWN = 80;
-const decideRows = (o) => (o?.decisions || []).filter((r) => !routine(r)).slice(0, DECIDE_SHOWN);
+// the calls that have a Correct (on Decide, on Act and in their peeks): the supervisor's own, not yet corrected
+const decideRows = (o) => (o?.decisions || []).filter(mayCorrect);
 // A decision that is complete in itself: a noise ruling explains a signal, and no act carries it out.
 const NO_ACT_CLASSES = ['orient-noise'];
 function renderDecisions(o) {
-  const all = (o.decisions || []).filter((r) => $('dec-mechanical').checked || !routine(r));
-  const sel = $('dec-class');
-  const cur = sel.value;
-  const classes = [...new Set(all.map((r) => r.class).filter(Boolean))].sort();
-  sel.innerHTML = '<option value="">any</option>' + classes.map((c) => `<option value="${esc(c)}">${esc(words(c))}</option>`).join('');
-  sel.value = classes.includes(cur) ? cur : '';
-  const fw = $('dec-who').value;
-  const only = $('dec-corrected').checked;
-  const rows = all.filter((r) => (!fw || r.who === fw) && (!sel.value || r.class === sel.value) && (!only || r.correction || r.kind === 'correction'));
-  const key = (r) => `${r.kind}:${r.id}:${r.at}`;
-  $('decisions-feed').innerHTML = rows.length ? rows.slice(0, DECIDE_SHOWN).map((r) => {
-    const mine = r.who === 'supervisor' && ['decision', 'act'].includes(r.kind);
-    const open = r.kind === 'decision' ? `#decision/${encodeURIComponent(r.id)}` : r.kind === 'act' ? `#act/${encodeURIComponent(r.id)}` : r.kind === 'answer' ? `#q/${encodeURIComponent(r.id)}` : r.kind === 'goal' ? `#goal/${encodeURIComponent(r.id)}` : r.kind === 'rule' ? `#lesson/${encodeURIComponent(r.id)}` : r.id.startsWith('d-') ? `#decision/${encodeURIComponent(r.id)}` : `#act/${encodeURIComponent(r.id)}`;
-    const under = decisionUnder(r);
-    const evidence = (r.refs || []).length ? `about ${r.refs.slice(0, 4).map((x) => (ticketMap().has(x) ? tlink(x) : linkify(x))).join(', ')}` : '';
-    return `
-    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)} role="button" tabindex="0" data-open="${esc(open.slice(1))}">
-      <div><div class="act-head">${titled(open, `<span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}`)}</div>
-        ${r.rationale ? `<div class="act-detail">${linkify(r.rationale)}${r.options?.length > 1 ? ` <span class="muted">(weighed: ${r.options.map(esc).join(' / ')})</span>` : ''}${r.confidence != null ? ` <span class="muted">· ${Math.round(r.confidence * 100)}% sure</span>` : ''}</div>` : ''}
-        <div class="meta">${esc(when(r.at))} · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' && !NO_ACT_CLASSES.includes(r.class) ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
-        ${r.correction ? `<div class="err">Corrected by ${esc(who(r.correction.by))}: ${esc(r.correction.reason)}${r.correction.repaired ? ` · ${esc(r.correction.repaired)}` : ''}</div>` : ''}
-        ${mine ? `<div class="row-inline" hidden data-correct-form="dec:${esc(r.id)}"><input type="text" data-reason="dec:${esc(r.id)}" placeholder="Reason"><button class="ghost" data-correct-send="dec:${esc(r.id)}">Send</button><span class="err" id="e-dec:${esc(r.id)}"></span></div>` : ''}
-      </div>
-      <div class="card-side">${mine && !r.correction ? `<button class="ghost" data-correct="dec:${esc(r.id)}">Correct</button>` : ''}${cardMenu(open.slice(1, open.indexOf('/')), r.id)}</div>
-    </div>`; }).join('') : empty(all.length ? 'Nothing matches.' : 'None yet. Every call, the supervisor\'s and yours, shows here.');
+  // Decide: every call the data gives but routine acts (Include routine acts shows them), as a table (loop-tables)
+  loopDraw('decide', o);
 }
-for (const id of ['dec-who', 'dec-class', 'dec-corrected', 'dec-mechanical']) $(id).addEventListener('change', () => { if (DATA) renderDecisions(DATA.ooda); });
+/* loop-tables start */
+// Self Improvement (kit-96): each tab is one of the shell's record tables (pageTable), with no type column: the
+// tab picks the type. Each row's first cell holds its record's data-subject span (Shift+click, pins, Correct's
+// title); a row opens its record's peek.
+const LOOP_COLS = {
+  observe: ['What', 'Source', 'How much it matters', 'Good or bad', 'Seen by', 'When'],
+  decide: ['Decision', 'Kind', 'Who', 'Confidence', 'Corrected', 'When', ''],
+  act: ['Act', 'Kind', 'Reversible', 'When', ''],
+};
+const LOOP_BOX = { observe: 'observations', decide: 'decisions-feed', act: 'acts-feed' };
+// Decide's two header toggles, kept in page memory (STATE_KEYS.loop has no key for them)
+const LOOP_DEC = { corrected: false, routine: false };
+// a valence, -2..2, red to green; blank when there is none
+const signHtml = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? '' : `<span class="sign s${Number(v)}">${Number(v) > 0 ? `+${Number(v)}` : Number(v) < 0 ? `−${-Number(v)}` : '0'}</span>`);
+const loopWhen = (iso) => (iso ? esc(when(iso)) : '');
+// a call the owner may correct: the supervisor's own (a decision, or an act that was its own call), not corrected yet
+const mayCorrect = (r) => r.who === 'supervisor' && ['decision', 'act'].includes(r.kind) && !r.correction;
+// Correct is a thread on the record (fast-threads' item subject), titled with the record's own words (title, else
+// its row's subject): the owner's words there are the correction once the supervisor records them (correct
+// --from-turn); nothing is posted from the click
+const correctBtn = (kind, id, title = '') => `<button type="button" class="ghost mini" data-thread-on="${esc(`${kind}:${id}`)}"${title ? ` data-title="${esc(tLine(title, T_TITLE_MAX))}"` : ''}>Correct</button>`;
+function obsRows(o) {
+  return (o?.observations || []).map((x) => ({
+    cells: [`<span${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)}>${linkify(x.detail)}</span>`, esc(x.source ?? ''), x.severity === null || x.severity === undefined ? '' : esc(x.severity), signHtml(x.valence), esc(who(x.created_by)), loopWhen(x.created_at)],
+    sort: [String(x.detail ?? ''), String(x.source ?? ''), x.severity ?? null, x.valence ?? null, who(x.created_by), x.created_at ?? null],
+    open: `observation/${encodeURIComponent(x.id)}`,
+  }));
+}
+function decRows(o) {
+  return (o?.decisions || []).filter((r) => (LOOP_DEC.routine || !routine(r)) && (!LOOP_DEC.corrected || r.correction || r.kind === 'correction')).map((r) => {
+    const kind = decSubject(r);
+    const corrected = r.correction || r.kind === 'correction';
+    const kindWords = r.class_name || DEC_KIND[r.kind] || r.kind;
+    return {
+      cells: [`<span${subj(kind, r.id, r.what)}>${linkify(r.what)}</span>`, esc(kindWords), esc(who(r.who)), r.confidence === null || r.confidence === undefined ? '' : `${Math.round(r.confidence * 100)}%`, corrected ? 'yes' : '', loopWhen(r.at), mayCorrect(r) ? correctBtn(r.kind, r.id) : ''],
+      sort: [String(r.what ?? ''), kindWords, who(r.who), r.confidence ?? null, corrected ? 'yes' : '', r.at ?? null, null],
+      open: `${kind === 'question' ? 'q' : kind}/${encodeURIComponent(r.id)}`,
+    };
+  });
+}
+function actRows(o) {
+  return (o?.acts || []).map((a) => {
+    const v = actView(a);
+    return {
+      cells: [`<span${subj('act', a.id, a.what)}>${v.head}</span>${a.correction ? ' <span class="badge high">corrected</span>' : ''}`, esc(a.class_name ?? ''), a.reversible === false ? 'no' : 'yes', loopWhen(a.created_at), !a.correction && !a.decision ? correctBtn('act', a.id) : ''],
+      sort: [shellText(v.head), a.class_name ?? '', a.reversible === false ? 'no' : 'yes', a.created_at ?? null, null],
+      open: `act/${encodeURIComponent(a.id)}`,
+    };
+  });
+}
+const LOOP_ROWS = { observe: obsRows, decide: decRows, act: actRows };
+// One tab's table, written only when its HTML changed (focus and scroll kept), and its new wrapper bound: a header
+// sorts and redraws the page, a row opens its record. Its count on the tab and on its card's head.
+function loopDraw(tab, o = DATA?.ooda) {
+  const el = $(LOOP_BOX[tab]);
+  if (!el || !o) return;
+  const rows = LOOP_ROWS[tab](o);
+  for (const id of [`n-${tab}`, `c-${tab}`]) { const c = $(id); if (c && c.textContent !== String(rows.length || '')) c.textContent = rows.length || ''; }
+  const html = pageTable(`loop:${tab}`, LOOP_COLS[tab], rows);
+  if (el.__html === html) return;
+  el.__html = html;
+  el.innerHTML = html;
+  bindPageTables(el, renderLoop);
+}
+function renderLoop() { for (const tab of Object.keys(LOOP_BOX)) loopDraw(tab); }
+// Correct, on a row or in a peek: a thread titled with the record's own words (the button's data-title, else its
+// row's subject span's), placed at the button. Taken here, before the page's [data-thread-on] handler, which titles
+// a thread from the peek's bar (an act's peek bar holds its plain head, not its words).
+function loopCorrect(e) {
+  const b = e.target.closest?.('[data-thread-on]');
+  if (!b || !e.currentTarget.contains(b)) return;
+  const s = b.closest('tr')?.querySelector('[data-subject]');
+  const words = b.dataset.title || s?.dataset.title;
+  if (!words) return;
+  e.stopPropagation();
+  const ref = b.dataset.threadOn;
+  const title = tLine(words, T_TITLE_MAX) || T_KIND[ref.split(':')[0]];
+  const r = b.getBoundingClientRect();
+  tlStart({ subject: { kind: 'item', ref, quote: tCut(title, 300) }, title, el: s || b, x: r.left + r.width / 2, y: r.top + r.height / 2 });
+}
+$('loop').addEventListener('click', loopCorrect);
+$('drawer').addEventListener('click', loopCorrect);
+/* loop-tables end */
 
 
 // ---- sidepeek: every object opens the same way. The bar: its type's icon and name, then its title.
@@ -4891,22 +4933,21 @@ function howItChanges(kind, rec = {}) {
   const corrected = (c) => `Corrected${c.by ? ` by ${esc(who(c.by))}` : ''}: ${esc(c.reason)}`;
   // a correction from the dashboard's row, else from the record itself (one older than the dashboard holds)
   const fromRecord = () => { const c = rec.record?.fields?.corrected; return c ? { reason: c.reason, by: rec.record?.set_by?.corrected?.by ?? c.by ?? null } : null; };
-  const correctRow = (lt) => `Correct, on its row in Self Improvement: <a class="linkish" href="#loop?lt=${lt}">${lt === 'act' ? 'Act' : 'Decide'}</a>`;
   let html;
   switch (kind) {
     case 'act': {
       const a = (DATA?.ooda?.acts || []).find((x) => x.id === id) ?? rec;
       const dec = a.decision ?? rec.record?.fields?.decision;
       const ac = a.correction ?? fromRecord();
-      html = ac ? corrected(ac) : dec ? `Correct its decision: ${dlink(dec, decisionTitle(dec))}. <span class="muted">It went as decided, so the call is the decision's; if the act itself went wrong, that is a problem.</span>` : correctRow('act');
+      html = ac ? corrected(ac) : dec ? `Correct its decision: ${dlink(dec, decisionTitle(dec))}. <span class="muted">It went as decided, so the call is the decision's; if the act itself went wrong, that is a problem.</span>` : correctBtn('act', id, a.what ?? rec.record?.fields?.what);
       break;
     }
     case 'decision': {
-      // the owner may correct a call whose row the Decide tab draws with its Correct (today's mine, in decideRows)
+      // the owner may correct the supervisor's call with no correction yet (decideRows): a thread on it
       const call = (x) => x.id === id && ['decision', 'act'].includes(x.kind);
       const c = (DATA?.ooda?.decisions || []).find(call)?.correction ?? fromRecord();
       const r = decideRows(DATA?.ooda).find(call);
-      html = c ? corrected(c) : r && r.who === 'supervisor' ? correctRow('decide') : threadOn('decision', id);
+      html = c ? corrected(c) : r ? correctBtn('decision', id, r.what) : threadOn('decision', id);
       break;
     }
     case 'q': {
@@ -7710,12 +7751,9 @@ function render(d) {
   }
   renderLibrary(d.library);
   count('n-knowledge', o.knowledge.filter(ownerLesson).length);
-  $('n-observe').textContent = o.observations.length || '';
+  // Self Improvement's tab counts are the rows each table draws: loopDraw sets Observe's, Decide's and Act's
   $('n-orient').textContent = (o.clusters.length + o.problems.length + o.knowledge.length) || '';
-  const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
-  $('n-decide').textContent = (o.decisions || []).filter((r) => r.at > weekAgo && r.kind !== 'correction' && !routine(r)).length || '';
   navCounts(d);
-  $('n-act').textContent = o.acts.length || '';
   renderOverview();
 
   // Keep anything half-typed or half-open across refreshes.
