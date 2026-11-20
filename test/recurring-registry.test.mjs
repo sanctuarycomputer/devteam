@@ -1364,6 +1364,31 @@ test('A15 landing: forge git, a landing push that hangs is killed at its timeout
   } finally { T.done(); }
 });
 
+test('A15 landing: forge git, a push origin takes but answers after the timeout is landed: merge finds its own checked merge on origin\'s main, logs the act, and the answer counts as landed (final-11 F3)', { timeout: 300000 }, () => {
+  const T = setup('a15-slow-receive');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    T.jobsChore('slow', () => ({ aa: check() }));
+    // origin's post-receive outlasts the kit's git timeout (cut to 15 s): the ref is updated, and
+    // the push is killed before it answers
+    const hook = path.join(T.org, 'hooks', 'post-receive');
+    write(hook, '#!/bin/sh\nexec sleep 40 >/dev/null 2>&1\n');
+    fs.chmodSync(hook, 0o755);
+    const before = T.acts().length;
+    const r = T.merge('slow', ['--approved', q], { DEVTEAM_GIT_TIMEOUT_MS: '15000' });
+    fs.rmSync(hook, { force: true });
+    passes(r);
+    assert.match(r.text, /the push to main timed out, but origin's main is the landing merge the kit built and checked \([0-9a-f]{12}\): landed/);
+    const added = T.acts().slice(before);
+    assert.equal(added.length, 1, JSON.stringify(added));
+    assert.equal(added[0].class, 'merge-chore');
+    assert.equal(added[0].approved_by, q);
+    assert.deepEqual(T.mainJobs(), { aa: check() });
+    const s = json(T.ok(['recurring', 'show', 'aa', '--json']));
+    assert.equal(s.registered?.qid, q, 'registered through the answer');
+  } finally { T.done(); }
+});
+
 // Records in home (links.console.records "home"): a console ticket's records land on home's main
 // from home's ticket/<id> (landRecords), ahead of its code. Records never change the jobs (final-11 F1).
 function recordsHome(name) {

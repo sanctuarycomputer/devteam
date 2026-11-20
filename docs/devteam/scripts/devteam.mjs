@@ -7364,7 +7364,16 @@ function cmdMerge() {
           if (H.failed || (H.problem ? !kept : Object.keys(recurringRegistry.changed(landsJobs.jobs, H.jobs)).length > 0)) return `the landing merge at ${head.slice(0, 12)} lands other jobs (recurring.json) than the checks judged${H.problem ? ` (${H.problem})` : ''}; nothing pushed`;
         }
         // the checked commit, by sha: never HEAD, read again at push time (final-11 F5)
-        if (lg([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `${head}:refs/heads/${mainBranch}`], wt) === null) return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
+        const pushed = recurringRegistry.git([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `${head}:refs/heads/${mainBranch}`], { cwd: wt });
+        if (!pushed.ok) {
+          // origin may have taken it and only its answer failed or timed out (a slow post-receive): when
+          // origin's main is exactly the merge built and checked here, the code landed (final-11 F3)
+          if (lg(['fetch', '--quiet', 'origin', mainBranch], R.root) !== null && R.resolveCommit(`origin/${mainBranch}`) === head) {
+            out(`the push to ${mainBranch}${inR} ${recurringRegistry.why(pushed)}, but origin's ${mainBranch} is the landing merge the kit built and checked (${head.slice(0, 12)}): landed`);
+            return null;
+          }
+          return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
+        }
       } finally {
         R.git(['worktree', 'remove', '--force', wt], R.root);
       }
