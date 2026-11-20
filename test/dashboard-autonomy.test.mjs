@@ -132,7 +132,7 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
   });
   await t.test('nav order', async () => {
     await load(autonomyFixture(), '#trust');
-    assert.deepEqual(await p.ev("[...document.querySelectorAll('.side nav.nav[data-group=\"autonomy\"] a')].map((a) => a.getAttribute('href'))"), ['#trust', '#efficiency', '#awareness', '#governance', '#sensors', '#retros', '#loop']);
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('.side nav.nav[data-group=\"autonomy\"] a')].map((a) => a.getAttribute('href'))"), ['#trust', '#efficiency', '#awareness', '#governance', '#sensors', '#jobs', '#retros', '#loop']);
   });
 
   await t.test('#health redirects', async () => {

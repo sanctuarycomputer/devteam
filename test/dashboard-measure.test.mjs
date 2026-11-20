@@ -146,7 +146,8 @@ const ATTACH_PAGES = [];
 // loop noticed and its runs, a worker chore with its instructions) and a built-in's, on the jobs fixtures
 // (test/fixtures/recurring/dashboard.json in /api/data's upkeep.recurring, peek.json for /api/peek?kind=recurring).
 // Each its own document at the three sizes; view and inbox match nothing, as for the other peeks (the page under
-// the peek is judged elsewhere; the drawer scrolls, so overflow and uneven leave it out by design).
+// the peek is judged elsewhere; the drawer scrolls, so overflow and uneven leave it out by design). kit-169 adds the
+// Jobs page itself, on the same fixtures, judged whole like any shell page (its entry is marked 'page': no peek options).
 const JOBS_PAGES = ((
   DASH_FX = fs.readFileSync(new URL('./fixtures/recurring/dashboard.json', import.meta.url), 'utf8'),
   PEEK_FX = fs.readFileSync(new URL('./fixtures/recurring/peek.json', import.meta.url), 'utf8'),
@@ -173,7 +174,10 @@ const JOBS_PAGES = ((
   ['#recurring/ci-main', `${rest} && ${sect('What the loop noticed')} && ${sect('Recent runs')} && !!document.querySelector('#drawer-body [data-tbl="job:runs"]')`],
   ['#recurring/deps-bump', `${rest} && ${sect('Recent runs')} && !!document.querySelector('#drawer-body .measure')`],
   ['#builtin/retro', `${rest} && DRAWER.kind === 'builtin' && !!document.querySelector('#drawer-body section.attrs dl.props')`],
-].map(([hash, ready]) => ({ hash, init, ready, narrow: { view: '#no-such-view' }, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } })))();
+  // kit-169: the Jobs page under Autonomy, with rows in its Jobs and What the loop noticed tables. A page, not a peek:
+  // it takes no peek options, so every check judges it, page-top at 1440x900 only (narrow), as every shell page
+  ['#jobs', "!!document.querySelector('main.page > section#jobs.on') && !!document.querySelector('#jobs [data-jp=\"jobs\"] table.db-t tbody tr[data-row]') && !!document.querySelector('#jobs [data-jp=\"noticed\"] table.db-t tbody tr[data-row]')", 'page'],
+].map(([hash, ready, page]) => ({ hash, init, ready, narrow: { view: '#no-such-view' }, ...(page ? {} : { opts: { view: '#no-such-view', inbox: '#no-such-inbox' } }) })))();
 const PAGES = [
   // kit-87: Settings, on the shell, whole
   { hash: '#settings', ready: READY },
