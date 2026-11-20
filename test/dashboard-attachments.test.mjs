@@ -429,6 +429,34 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     await soon("document.getElementById('tl-card').hidden", 'the next Escape closes the card, as today');
   });
 
+  await t.test('B4: an image over an artifact in the viewer: × and Escape give the stage back to the artifact, unreloaded, in place', async () => {
+    // an artifact on main, and a thread on it whose first turn has an image (the setup's stored Pinned.png)
+    const dir = path.join(L.root, 'docs/devteam/project/artifacts/art-one');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'artifact.json'), JSON.stringify({ v: 1, title: 'Art one', summary: 'A page under an image', by: 'supervisor', for: [] }));
+    fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"><title>Art one</title></head><body><p>Art one</p></body></html>');
+    for (const a of [['add', '-A', 'docs/devteam/project/artifacts'], ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'art-one']]) { const r = spawnSync('git', a, { cwd: L.root, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); }
+    const TA = L.dt(['thread', 'new', '--title', 'About art one', '--subject', JSON.stringify({ kind: 'artifact', slug: 'art-one', at: 'main', path: 'index.html' }), '--files', JSON.stringify([{ name: 'Pinned.png', path: shot.json.path, bytes: shot.json.size }]), '--', 'under this']).split('\n')[0];
+    const frame = "document.getElementById('av-frame')";
+    await p.ev("location.hash = '#artifact/main/art-one'; void 0");
+    await soon(`!document.getElementById('artifact-view').hidden && TS.kind === 'artifact' && TS.slug === 'art-one' && AV_LOADS.get(${frame}) === 1`, 'the artifact in the viewer, loaded');
+    const src = await p.ev(`(() => { const f = ${frame}; f.__mark = 1; return f.getAttribute('src'); })()`);
+    assert.match(src, /\/artifact\/main\/art-one\/$/);
+    await p.ev(`tlOpen(${JSON.stringify(TA)}, false); void 0`);
+    await soon("!document.getElementById('tl-card').hidden && !!document.querySelector('#tl-c-turns button.file-chip')", "the thread's card over it, with its image chip");
+    const at = await p.ev('[location.href, history.length]');
+    const title = await p.ev("document.getElementById('av-title').textContent");
+    for (const [how, act] of [['×', "document.getElementById('av-close').click()"], ['Escape', "document.activeElement?.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))"]]) {
+      await p.ev("document.querySelector('#tl-c-turns button.file-chip').click(); void 0");
+      await soon(`!!document.getElementById('av-img') && ${frame}.hidden`, `${how}: the image open over the artifact`);
+      await p.ev(`${act}; void 0`);
+      await soon(`!document.getElementById('av-img') && !document.getElementById('artifact-view').hidden && !${frame}.hidden`, `${how}: the artifact shown again`);
+      await new Promise((r) => setTimeout(r, 300));
+      const s = await p.ev(`(() => { const f = ${frame}; return { mark: f.__mark === 1, src: f.getAttribute('src'), loads: AV_LOADS.get(f), kind: TS.kind, slug: TS.slug, title: document.getElementById('av-title').textContent, img: !!document.getElementById('av-img'), at: [location.href, history.length] }; })()`);
+      assert.deepEqual(s, { mark: true, src, loads: 1, kind: 'artifact', slug: 'art-one', title, img: false, at }, `closed by ${how}: the same frame, unreloaded, the bar and the address as before`);
+    }
+  });
+
   await t.test('B6: a swept file: the download chip says gone, the image viewer says so', async () => {
     await p.ev(`location.hash = '#talk/${T1}'; void 0`);
     await soon("[...document.querySelectorAll('#tl-c-turns .file-chip .chip-name')].some((c) => c.textContent === 'report.pdf')", 'the thread with its chips');
