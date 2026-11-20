@@ -4360,6 +4360,7 @@ function cmdValidate() {
       const own = ownText?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
       const blocks = recurringRegistry.blocksProblem(ownText);
       if (blocks) errors.push(blocks);
+      errors.push(...recurringRegistry.attrsProblems());
       errors.push(...recurringRegistry.duplicateKeys(own).map(recurringRegistry.duplicateProblem));
       let jobs;
       try { jobs = own == null ? undefined : JSON.parse(own).recurring; } catch { jobs = undefined; }
@@ -5755,6 +5756,9 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     // (final-2b B2-1)
     const blocks = recurringRegistry.blocksProblem(git(['show', `${sha}:${projectRel}/settings.md`]));
     if (blocks) fails.push(blocks);
+    // settings.md merges as plain text, at main and at the head: no merge driver, conversion or filter
+    // (final-3 F2)
+    for (const p of new Set([...(mainRef() ? recurringRegistry.attrsProblems(mainRef()) : []), ...recurringRegistry.attrsProblems(sha)])) fails.push(p);
     // the jobs that would land (kit-162, final-1 F1, final-2b B2-1): recurringRegistry.landing, read
     // from the whole settings file that would land, never canonically from the merge base against
     // the head, nor from the jobs' span. When they differ from main's now:
@@ -23323,6 +23327,13 @@ const recurringRegistry = Object.freeze({
     if (!m) return 0;
     return m[2] === 'h' && Number(m[1]) < 24 ? 24 / Number(m[1]) : 1;
   },
+  // git, bounded (final-3b B3-3): every call landing and the attribute check make has a timeout
+  // and is killed at it; { status, out, err, timedOut, ok }. A timeout is never read as an answer.
+  git(args, { cwd = HOME_CWD, env, encoding = 'utf8' } = {}) {
+    const r = spawnSync('git', args, { cwd, env: env ? { ...process.env, ...env } : process.env, encoding, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    const timedOut = r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL';
+    return { status: r.status, out: r.stdout ?? '', err: String(r.stderr ?? ''), timedOut, ok: r.status === 0 && !timedOut };
+  },
   // What the jobs would be once sha lands on home's main as it is now (final-1 F1), read from the
   // whole settings file that would land (final-2b B2-1): never a canonical merge base against the
   // head, which reads a moved-but-equal jobs text as no change while git's 3-way merge of it brings
@@ -23331,11 +23342,15 @@ const recurringRegistry = Object.freeze({
   // keeps the old text. With settings.md's blob at main, the head and every merge base:
   // - the head's is every base's: main's file lands (no tree work);
   // - main's is every base's: the head's file lands (no tree work);
-  // - both changed, one base blob: git merge-file -p <head> <base> <main> writes what git's merge
-  //   would (any git, no merge-tree); on a conflict git can't land it as it is, so the kit's
-  //   key-level view decides (settingsInForce(…).landed(), whose rules refuse what it can't say);
-  // - both changed, bases whose blobs differ (a criss-cross): merge-tree; a conflict, or a git that
-  //   can't merge-tree, is refused.
+  // - both changed: git's own merge decides, never a prediction with another diff (final-3b B3-1:
+  //   merge-file's Myers diff and merge-ort's histogram can put main's change in different lines).
+  //   merge-tree --write-tree is merge-ort, as git merge and the forge land it, with main's
+  //   attributes. Clean: its file lands. A conflict: git can't land the PR as it is (merge stops at
+  //   landing, the forge refuses), so the kit's key-level view judges it, as before. A git without
+  //   merge-tree --write-tree: the landing's own merge, git merge --no-ff --no-commit onto main in a
+  //   throwaway worktree, removed in a finally; any conflict there, or a merge that can't run, is
+  //   refused (fail closed).
+  // Every fail line names the engine that decided. A git call that times out refuses.
   // { now, merged, tree, headLands, changed, problem }: changed when the landed jobs differ
   // canonically from main's now (a missing key reads {}); headLands when the file that lands is the
   // head's byte for byte; a problem counts as changed, failing closed.
@@ -23343,42 +23358,80 @@ const recurringRegistry = Object.freeze({
     const main = mainRef();
     if (!main) return { now: null, merged: null, tree: null, headLands: false, changed: false, problem: null };
     return memo(`recurring-landing\0${main}\0${mainSha()}\0${sha}`, () => {
+      const g = recurringRegistry.git;
       const rel = `${projectRel}/settings.md`;
+      const late = [];
+      const run = (args, opts) => { const r = g(args, opts); if (r.timedOut) late.push(`git ${args.find((a) => !a.startsWith('-')) ?? args[0]}`); return r; };
       const jobsOf = (s) => (s && s.recurring === undefined ? {} : s?.recurring);
-      const jobsAt = (ref) => jobsOf(settingsAt(ref, { orNull: true }));
-      const jobsIn = (text) => { const m = String(text).match(/```json devteam\s*\n([\s\S]*?)\n```/); if (!m) return undefined; try { return jobsOf(JSON.parse(m[1])); } catch { return undefined; } };
+      const jobsIn = (text) => { const m = text == null ? null : String(text).match(/```json devteam\s*\n([\s\S]*?)\n```/); if (!m) return undefined; try { return jobsOf(JSON.parse(m[1])); } catch { return undefined; } };
+      const jobsAt = (ref) => { const r = run(['show', `${ref}:${rel}`]); return jobsIn(r.ok ? r.out : null); };
+      const blob = (ref) => { const r = run(['rev-parse', '--verify', '-q', `${ref}:${rel}`]); return r.ok ? r.out.trim() : null; };
       const now = jobsAt(main);
-      const blob = (ref) => git(['rev-parse', '--verify', '-q', `${ref}:${rel}`]);
-      const bases = (git(['merge-base', '--all', main, sha]) ?? '').split('\n').filter(Boolean);
+      const bases = (() => { const r = run(['merge-base', '--all', main, sha]); return r.ok ? r.out.split('\n').filter(Boolean) : []; })();
       const [atMain, atHead, atBases] = [blob(main), blob(sha), bases.map(blob)];
-      const asBases = (x) => atBases.length > 0 && atBases.every((b) => b === x);
-      const lands = (merged, { tree = null, headLands, problem = null }) => {
+      const lands = (merged, { tree = null, headLands, engine, problem = null }) => {
+        if (late.length) problem = `settings.md: ${[...new Set(late)].join(', ')} timed out, so the kit can't tell what would land; check again`;
         const unread = !problem && merged === undefined && now !== undefined;
-        return { now, merged, tree, headLands, changed: !!problem || unread || canonical(merged) !== canonical(now), problem: problem ?? (unread ? `settings: the json devteam block ${sha.slice(0, 12)} would land on ${main} can't be read (missing or not valid JSON), so neither can its jobs` : null) };
+        if (unread) problem = `settings: the json devteam block ${sha.slice(0, 12)} would land on ${main} can't be read (missing or not valid JSON), so neither can its jobs`;
+        return { now, merged, tree, headLands, changed: !!problem || canonical(merged) !== canonical(now), problem: problem && `${problem} (${engine})` };
       };
-      if (asBases(atHead)) return lands(now, { headLands: atMain === atHead });
-      if (asBases(atMain)) return lands(jobsAt(sha), { headLands: true });
-      if (atBases.length && new Set(atBases).size === 1) {
-        // the three files as git has them, byte for byte (a missing one is empty)
-        const raw = (oid) => (oid ? spawnSync('git', ['cat-file', 'blob', oid], { cwd: HOME_CWD, maxBuffer: 64 * 1024 * 1024 }).stdout ?? Buffer.alloc(0) : Buffer.alloc(0));
-        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-settings-merge-'));
-        try {
-          const [h, b, m] = ['head', 'base', 'main'].map((n) => path.join(dir, n));
-          const head = raw(atHead);
-          fs.writeFileSync(h, head);
-          fs.writeFileSync(b, raw(atBases[0]));
-          fs.writeFileSync(m, raw(atMain));
-          const r = spawnSync('git', ['merge-file', '-p', h, b, m], { cwd: HOME_CWD, maxBuffer: 64 * 1024 * 1024 });
-          if (r.status === 0) return lands(jobsIn(r.stdout.toString('utf8')), { headLands: Buffer.compare(r.stdout, head) === 0 });
-        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-        // a conflict: git can't land it as it is; the key-level view of what lands
+      if (late.length) return lands(null, { headLands: false, engine: 'reading settings.md' });
+      if (atBases.length && atBases.every((b) => b === atHead)) return lands(now, { headLands: atMain === atHead, engine: "main's file" });
+      if (atBases.length && atBases.every((b) => b === atMain)) return lands(jobsAt(sha), { headLands: true, engine: "the branch's file" });
+      const cant = 'settings.md: both main and this branch changed it, and the kit can\'t tell what would land; merge main into the branch first';
+      // a git that says it has no merge-tree --write-tree (before 2.38) is never asked for one
+      const mt = gitTooOld() ? { status: null, out: '', timedOut: false } : run(['merge-tree', '--write-tree', '--no-messages', main, sha]);
+      const tree = /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(mt.out.split('\n')[0]) ? mt.out.split('\n')[0] : null;
+      if (mt.timedOut) return lands(null, { headLands: false, engine: 'merge-tree' });
+      if (mt.status === 0 && tree) return lands(jobsAt(tree), { tree, headLands: blob(tree) === atHead, engine: 'merge-tree' });
+      if (mt.status === 1 && tree) {
+        // the real merge conflicts too, so nothing lands as it is; the key-level view judges the PR
+        if (!bases.length) return lands(null, { headLands: false, engine: 'merge-tree', problem: cant });
         const J = settingsInForce(bases[0], sha).landed();
-        return J.problem ? lands(null, { headLands: false, problem: J.problem }) : lands(jobsOf(J.settings), { headLands: false });
+        return J.problem ? lands(null, { headLands: false, engine: "merge-tree conflicts; the kit's key-level view", problem: J.problem }) : lands(jobsOf(J.settings), { headLands: false, engine: "merge-tree conflicts; the kit's key-level view" });
       }
-      const m = mergeTree(main, sha);
-      if (!m.tree) return lands(null, { headLands: false, problem: 'settings.md: both main and this branch changed it since different merge bases; merge main into the branch first' });
-      return lands(jobsAt(m.tree), { tree: m.tree, headLands: blob(m.tree) === atHead });
+      // no merge-tree --write-tree: git merge itself, onto main, in a throwaway worktree
+      const engine = 'git merge in a throwaway worktree';
+      const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-landing-'));
+      const wt = path.join(holder, 'merge');
+      try {
+        if (!run(['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, main]).ok) return lands(null, { headLands: false, engine, problem: cant });
+        const who = { GIT_AUTHOR_NAME: 'devteam', GIT_AUTHOR_EMAIL: 'devteam@localhost', GIT_COMMITTER_NAME: 'devteam', GIT_COMMITTER_EMAIL: 'devteam@localhost' };
+        const mg = run(['merge', '--no-ff', '--no-commit', '--quiet', sha], { cwd: wt, env: who });
+        if (mg.timedOut) return lands(null, { headLands: false, engine });
+        if (mg.status !== 0) {
+          const unmerged = run(['ls-files', '-u'], { cwd: wt });
+          run(['merge', '--abort'], { cwd: wt });
+          return lands(null, { headLands: false, engine, problem: unmerged.ok && unmerged.out.trim() ? 'settings.md: both main and this branch changed it, and git\'s merge of the branch conflicts; merge main into the branch first' : cant });
+        }
+        const file = path.join(wt, rel);
+        const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+        const hashed = text === null ? null : run(['hash-object', '--no-filters', file], { cwd: wt });
+        return lands(jobsIn(text), { headLands: !!hashed?.ok && hashed.out.trim() === atHead, engine });
+      } finally {
+        run(['worktree', 'remove', '--force', wt]);
+        fs.rmSync(holder, { recursive: true, force: true });
+        run(['worktree', 'prune']);
+      }
     });
+  },
+  // The .gitattributes lines that give settings.md a merge driver, text or eol conversion, or a
+  // filter (final-3 F2): git's merge honours them (merge=union keeps both sides' lines), so the file
+  // that lands is no longer what a plain text merge of it writes. At a commit (read through a
+  // throwaway index, since check-attr --source is git 2.40's), or with no ref, in this checkout.
+  // An attribute that can't be read is a problem (fail closed).
+  attrsProblems(ref) {
+    const g = recurringRegistry.git;
+    const rel = `${projectRel}/settings.md`;
+    const dir = ref ? fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-attrs-')) : null;
+    try {
+      const env = dir ? { GIT_INDEX_FILE: path.join(dir, 'index') } : undefined;
+      const cant = `.gitattributes: the attributes of ${rel}${ref ? ` at ${ref.slice(0, 12)}` : ''} can't be read`;
+      if (dir) { const rt = g(['read-tree', ref], { env }); if (!rt.ok) return [`${cant} (git read-tree${rt.timedOut ? ' timed out' : ''})`]; }
+      const r = g(['check-attr', ...(dir ? ['--cached'] : []), 'merge', 'text', 'eol', 'filter', '--', rel], { env });
+      if (!r.ok) return [`${cant} (git check-attr${r.timedOut ? ' timed out' : ''})`];
+      return r.out.split('\n').map((l) => /: (merge|text|eol|filter): (.*)$/.exec(l)).filter((m) => m && m[2] !== 'unspecified').map((m) => `.gitattributes sets ${m[1]} for ${rel}: the jobs must merge as plain text; remove it`);
+    } finally { if (dir) fs.rmSync(dir, { recursive: true, force: true }); }
   },
   // settings.md's text with more than one line opening a json devteam block (the kit's fence,
   // trailing spaces included): a problem, since the kit reads only the first while git may put a

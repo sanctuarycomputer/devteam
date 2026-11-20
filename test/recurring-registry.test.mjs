@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { monoFixture, multiFixture, write, json, kit } from './lib/kit.mjs';
+import { monoFixture, multiFixture, write, json, kit, gitShim } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const QID = /q-[0-9]+-[0-9]+-supervisor/;
@@ -289,6 +289,185 @@ test('A4c: text tricks beside the jobs, on a chore cut before a stop: none lands
     }
     assert.deepEqual(bad, [], 'a no-answer chore lands a job change');
     for (const n of ['dupblockbefore', 'decoy']) refused(dry[n], /settings\.md has 2 json devteam blocks: the kit reads only the first, so keep exactly one/);
+  } finally { T.done(); }
+});
+
+// git's own merge, for the tests that compare the kit's verdict with what lands (final-3b, final-3)
+const SETP = 'docs/devteam/project/settings.md';
+const rawEdit = (wt, fn) => { const f = path.join(wt, SETP); fs.writeFileSync(f, fn(fs.readFileSync(f, 'utf8'))); };
+const gx = (T, args, input) => execFileSync('git', args, { cwd: T.old, input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 20000 });
+// what merge-ort (git merge, merge-tree, the forge) lands for ref onto origin/main: { conflict, jobs }
+const gitLands = (T, ref) => {
+  T.g(['fetch', '-q', 'origin'], T.old);
+  let out;
+  try { out = gx(T, ['merge-tree', '--write-tree', '--no-messages', 'origin/main', ref]); } catch { return { conflict: true, jobs: null }; }
+  const j = JSON.parse(BLOCK.exec(gx(T, ['show', `${out.split('\n')[0].trim()}:${SETP}`]))[1]);
+  return { conflict: false, jobs: j.recurring === undefined ? {} : j.recurring };
+};
+// a ticket branch off origin/main whose worktree fn edits; returns its head
+const ticketBranch = (T, id, fn) => {
+  T.ok(['ticket', 'add', id, '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['its suite passes in CI'], notes: 'n' })]);
+  T.g(['fetch', '-q', 'origin'], T.old);
+  const wt = path.join(T.base, `ticket-${id}`);
+  T.g(['worktree', 'add', '-q', '-b', `ticket/${id}`, wt, 'origin/main'], T.old);
+  fn(wt);
+  T.g(['commit', '-qam', 'x'], wt);
+  T.g(['push', '-q', 'origin', `ticket/${id}`], wt);
+  return T.g(['rev-parse', 'HEAD'], wt);
+};
+// six jobs, and a search over reorders of them (job order and field order) against a stop of one:
+// the first reorder for which keep(merge-file clean, merge-tree result) holds, from a fixed seed
+const SIX = ['aa', 'bb', 'cc', 'dd', 'ee', 'ff'];
+const sixJobs = () => Object.fromEntries(SIX.map((n, i) => [n, i % 2 ? chore({ title: `${n} job`, prompt: `Do ${n}.`, every: ['1d', '1w', '2w'][i % 3] }) : check({ title: `${n} job`, run: `echo ${n}`, every: ['6h', '12h', '1d'][i % 3] })]));
+function findReorder(T, keep) {
+  const jobs = sixJobs();
+  let seed = 5;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const shuffle = (a) => { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+  const baseText = fs.readFileSync(path.join(T.old, SETP), 'utf8');
+  const withJobs = (rec) => { const m = BLOCK.exec(baseText); const j = JSON.parse(m[1]); j.recurring = rec; return baseText.replace(m[1], () => JSON.stringify(j, null, 2)); };
+  const commit = (text, parent) => { const b = gx(T, ['hash-object', '-w', '--stdin'], text).trim(); const t = gx(T, ['mktree'], `100644 blob ${b}\tx.md\n`).trim(); return gx(T, ['commit-tree', t, ...(parent ? ['-p', parent] : []), '-m', 'x']).trim(); };
+  const tmp = fs.mkdtempSync(path.join(T.base, 'mf-'));
+  for (let c = 0; c < 4000; c++) {
+    const stop = SIX[Math.floor(rnd() * SIX.length)];
+    const mainRec = Object.fromEntries(SIX.filter((n) => n !== stop).map((n) => [n, jobs[n]]));
+    const headRec = Object.fromEntries(shuffle(SIX).map((n) => [n, Object.fromEntries(shuffle(Object.keys(jobs[n])).map((k) => [k, jobs[n][k]]))]));
+    const [b, m, h] = [baseText, withJobs(mainRec), withJobs(headRec)];
+    for (const [f, t] of [['b', b], ['m', m], ['h', h]]) fs.writeFileSync(path.join(tmp, f), t);
+    let mfClean = true;
+    try { gx(T, ['merge-file', '-p', path.join(tmp, 'h'), path.join(tmp, 'b'), path.join(tmp, 'm')]); } catch { mfClean = false; }
+    const cb = commit(b);
+    let lands;
+    try { lands = JSON.parse(BLOCK.exec(gx(T, ['show', `${gx(T, ['merge-tree', '--write-tree', '--no-messages', commit(m, cb), commit(h, cb)]).split('\n')[0].trim()}:x.md`]))[1]).recurring; } catch { lands = null; }
+    if (keep(mfClean, lands, stop)) return { stop, headRec };
+  }
+  return null;
+}
+
+test('A4d: both sides changed: what lands is git\'s own merge (merge-tree), never merge-file\'s; on an old git, git merge in a throwaway worktree', () => {
+  // final-3b B3-1 (RVHIST): merge-file diffs with Myers, git's merge (merge-ort) with histogram. For
+  // a reorder-only chore cut before a stop, merge-file conflicts while git's merge is clean and
+  // brings the stopped job back; no lines are declared, so a key-level reading would clear it.
+  const T = setup('hist');
+  try {
+    T.onMain((j) => { j.recurring = sixJobs(); });
+    const found = findReorder(T, (mfClean, lands, stop) => !mfClean && lands && Object.hasOwn(lands, stop));
+    assert.ok(found, 'a reorder where merge-file conflicts and git lands the stopped job');
+    T.jobsChore('reorder', (j) => { j.recurring = found.headRec; });
+    const tsha = ticketBranch(T, 'api-01-x', (wt) => T.edit((j) => { j.recurring = found.headRec; }, wt));
+    const q = T.yes({ recurring: { [found.stop]: null } });
+    T.jobsChore('stop', (j) => { delete j.recurring[found.stop]; });
+    passes(T.merge('stop', ['--approved', q]));
+    assert.equal(Object.hasOwn(T.mainSettings().recurring, found.stop), false);
+    assert.equal(Object.hasOwn(gitLands(T, 'origin/chore-reorder').jobs, found.stop), true, 'git\'s merge brings it back');
+    // the chore: git's merge changes the jobs, so it needs an answer
+    refused(T.dry('reorder'), /changes owner settings: recurring \(recurring-edit\)/);
+    // the ticket: check-pr says it changes recurring
+    const tr = T.run(['check-pr', '--head-ref', 'ticket/api-01-x', '--sha', tsha, '--title', 'x']);
+    refused({ status: tr.status, text: T.text(tr) }, /ticket\/api-01-x changes recurring: jobs are the owner's/);
+    // a git without merge-tree --write-tree: the landing's own merge, in a throwaway worktree, sees
+    // the same; and the worktree is gone afterwards
+    const oldGit = gitShim(T, 'old');
+    const od = T.run(['merge', '--chore', 'reorder', '--dry-run'], { ...SUP, ...oldGit.env });
+    refused({ status: od.status, text: T.text(od) }, /changes owner settings: recurring \(recurring-edit\)/);
+    assert.match(oldGit.calls(), /^merge --no-ff --no-commit/m, 'the throwaway merge ran');
+    assert.doesNotMatch(T.g(['worktree', 'list', '--porcelain'], T.old), /devteam-landing-/, 'the throwaway worktree is removed');
+    const ot = T.run(['check-pr', '--head-ref', 'ticket/api-01-x', '--sha', tsha, '--title', 'x'], { ...SUP, ...oldGit.env });
+    refused({ status: ot.status, text: T.text(ot) }, /ticket\/api-01-x changes recurring: jobs are the owner's/);
+  } finally { T.done(); }
+});
+
+test('A4e: a merge git can\'t make lands nothing: merge --chore stops, and main\'s settings.md is as it was', () => {
+  // both sides changed settings.md and git's merge conflicts: whatever the kit's checks say, the
+  // landing merge itself fails, so no path puts the branch's text on main
+  const T = setup('conflict');
+  try {
+    T.onMain((j) => { j.recurring = sixJobs(); });
+    const found = findReorder(T, (mfClean, lands) => lands === null);
+    assert.ok(found, 'a reorder git can\'t merge with the stop');
+    T.jobsChore('conflicts', (j) => { j.recurring = found.headRec; });
+    const q = T.yes({ recurring: { [found.stop]: null } });
+    T.jobsChore('stop', (j) => { delete j.recurring[found.stop]; });
+    passes(T.merge('stop', ['--approved', q]));
+    assert.equal(gitLands(T, 'origin/chore-conflicts').conflict, true, 'git\'s merge conflicts');
+    const before = T.g(['rev-parse', 'origin/main'], T.old);
+    const blob = T.g(['rev-parse', `origin/main:${SETP}`], T.old);
+    const r = T.merge('conflicts');
+    assert.notEqual(r.status, 0, r.text);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(T.g(['rev-parse', `origin/main:${SETP}`], T.old), blob, 'main\'s settings.md is unchanged');
+    assert.equal(T.g(['rev-parse', 'origin/main'], T.old), before, 'main did not move');
+  } finally { T.done(); }
+});
+
+test('A4f: a copy of the block\'s body that merge-file and git\'s merge align differently (final-3 F1, RV3-DIVERGE)', () => {
+  const T = setup('diverge');
+  try {
+    T.lines(T.STD);
+    const five = { aa: check({ title: 'A job', every: '6h' }), bb: check({ title: 'B job', every: '12h', run: 'echo bb' }), cc: chore({ title: 'C job', prompt: 'C.' }), dd: check({ title: 'D job', every: '8h', run: 'echo dd' }), ee: chore({ title: 'E job', every: '2w', prompt: 'E.' }) };
+    T.onMain((j) => { j.recurring = five; });
+    // one block the kit reads (fence with a trailing space, closed by ````), and a plain ```json copy
+    // of its body placed by where
+    const shape = (where) => (t) => {
+      const m = BLOCK.exec(t);
+      const read = `\`\`\`json devteam \n${m[1]}\n\`\`\`\``;
+      const copy = `\`\`\`json\n${m[1]}\n\`\`\``;
+      const before = t.slice(0, m.index);
+      const after = t.slice(m.index + m[0].length);
+      if (where === 'top') return `${copy}\n\n${before}${read}${after}`;
+      if (where === 'line1') { const i = t.indexOf('\n'); return `${before.slice(0, i + 1)}\n${copy}\n${before.slice(i + 1)}${read}${after}`; }
+      const k = after.indexOf('\n\n', 2);
+      return `${before}${read}${after.slice(0, k)}\n\n${copy}${after.slice(k)}`;
+    };
+    const W = ['top', 'line1', 'below'];
+    for (const w of W) T.choreBranch(`dv-${w}`, (wt) => rawEdit(wt, shape(w)));
+    const tsha = ticketBranch(T, 'api-01-x', (wt) => rawEdit(wt, shape('top')));
+    const stop = T.yes({ recurring: { bb: null } });
+    T.jobsChore('stop-bb', (j) => { delete j.recurring.bb; });
+    passes(T.merge('stop-bb', ['--approved', stop]));
+    const now = T.mainSettings().recurring;
+    const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v));
+    const bad = [];
+    for (const w of W) {
+      const d = T.dry(`dv-${w}`);
+      const m = gitLands(T, `origin/chore-dv-${w}`);
+      if (d.status === 0 && !m.conflict && canon(m.jobs) !== canon(now)) bad.push(w);
+    }
+    assert.deepEqual(bad, [], 'a no-answer chore lands a job change');
+    assert.equal(Object.hasOwn(gitLands(T, 'origin/chore-dv-top').jobs, 'bb'), true, 'git\'s merge of the top copy brings bb back');
+    const tr = T.run(['check-pr', '--head-ref', 'ticket/api-01-x', '--sha', tsha, '--title', 'x']);
+    refused({ status: tr.status, text: T.text(tr) }, /ticket\/api-01-x changes recurring: jobs are the owner's/);
+  } finally { T.done(); }
+});
+
+test('A4g: a .gitattributes that sets merge, text, eol or filter for settings.md is refused, at main or at the head (final-3 F2, RV3-UNION)', () => {
+  const T = setup('union');
+  try {
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job', every: '6h' }), bb: check({ title: 'B job', every: '12h', run: 'echo bb' }), cc: chore({ title: 'C job', prompt: 'C.' }) }; });
+    // cut before the stop: only bb's opening line re-indented (canonically no change)
+    T.choreBranch('reindent', (wt) => rawEdit(wt, (t) => t.replace('\n    "bb": {\n', '\n      "bb": {\n')));
+    const stop = T.yes({ recurring: { bb: null } });
+    T.jobsChore('stop-bb', (j) => { delete j.recurring.bb; });
+    passes(T.merge('stop-bb', ['--approved', stop]));
+    const ATTR = /\.gitattributes sets merge for docs\/devteam\/project\/settings\.md: the jobs must merge as plain text; remove it/;
+    // at the head: the supervisor's own project/ chore adding the attribute is refused
+    T.choreBranch('attrs', (wt) => write(path.join(wt, 'docs/devteam/project/.gitattributes'), 'settings.md merge=union\n'));
+    refused(T.merge('attrs'), ATTR);
+    // a root .gitattributes setting eol is refused too
+    T.choreBranch('eol', (wt) => write(path.join(wt, '.gitattributes'), 'docs/devteam/project/*.md eol=crlf\n'));
+    refused(T.dry('eol'), /\.gitattributes sets eol for docs\/devteam\/project\/settings\.md/);
+    // at main (pushed by hand): git's merge honours main's merge=union, keeping both sides' lines,
+    // so the stale re-indent brings bb back; the kit refuses every PR while main has it
+    T.g(['fetch', '-q', 'origin'], T.old);
+    T.g(['merge', '-q', '--ff-only', 'origin/main'], T.old);
+    write(path.join(T.old, 'docs/devteam/project/.gitattributes'), 'settings.md merge=union\n');
+    T.g(['add', 'docs/devteam/project/.gitattributes'], T.old);
+    T.g(['commit', '-qm', 'attrs by hand'], T.old);
+    T.g(['push', '-q', 'origin', 'main'], T.old);
+    assert.equal(Object.hasOwn(gitLands(T, 'origin/chore-reindent').jobs, 'bb'), true, 'git\'s union merge brings bb back');
+    refused(T.dry('reindent'), ATTR);
+    const v = T.run(['validate']);
+    refused({ status: v.status, text: T.text(v) }, ATTR);
   } finally { T.done(); }
 });
 
