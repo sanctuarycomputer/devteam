@@ -27792,16 +27792,17 @@ async function browserSnapshot(ctx, tab, json) {
 // for as open's is (an error page's for 3 s), or a tab it opened (waited for, up to 10 s, to load).
 // The verb then prints said, plus where the page went or the guard's refusal.
 async function browserInput(ctx, tab, act, said) {
-  let started = false, loaded = false, inDocAt = 0;
+  let started = false, loaded = false, inDocAt = 0, pending = false;
   const had = new Set(ctx.tabs);
-  tab.started = () => { started = true; loaded = false; inDocAt = 0; tab.unreachable = null; tab.refs = new Map(); };
+  tab.started = () => { started = true; loaded = false; pending = true; tab.unreachable = null; tab.refs = new Map(); };
   tab.loaded = () => { loaded = true; };
-  // A same-document navigation (a fragment link, a history call) fires a load's start and no load. It ends
-  // the wait once no other load has started for 500 ms, as an input's own load is given 500 ms to start,
-  // and its document reads complete: a history call the page being left makes before it navigates (an
-  // onclick saving its state) is then followed by that load's start, which clears it, and one the new page
-  // makes as it boots reads loading. Each read is bounded.
-  tab.within = () => { inDocAt ||= Date.now(); };
+  // A same-document navigation (a fragment link, a history call) fires a load's start, then itself, and no
+  // load: the start it follows is its own. The wait ends 500 ms after the first (as an input's own load is
+  // given 500 ms to start) when no other start is pending and the document reads complete. A history call
+  // the page being left makes before it navigates (an onclick saving its state) is followed by that load's
+  // start, which stays pending until its load; one the new page makes as it boots reads loading; and a
+  // page that keeps calling (a scroll-spy) holds nothing. Each read is bounded.
+  tab.within = () => { inDocAt ||= Date.now(); pending = false; };
   const docLoaded = () => Promise.race([
     ctx.cdp.send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true }, tab.sessionId).then((r) => r.result?.value === 'complete', () => false),
     browserSleep(1000).then(() => false),
@@ -27810,7 +27811,7 @@ async function browserInput(ctx, tab, act, said) {
     await act();
     for (const t = Date.now(); !started && had.has(ctx.active) && Date.now() - t < 500;) await browserSleep(25);
     for (const t = Date.now(); started && !loaded && Date.now() - t < (tab.unreachable ? 3000 : 30000);) {
-      if (inDocAt && Date.now() - inDocAt >= 500 && await docLoaded()) break;
+      if (inDocAt && !pending && Date.now() - inDocAt >= 500 && await docLoaded()) break;
       await browserSleep(50);
     }
   } finally { tab.started = tab.loaded = tab.within = null; }
