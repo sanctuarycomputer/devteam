@@ -741,3 +741,28 @@ test('C5c: a dashboard started through the helpers records nothing', { timeout: 
   await new Promise((r) => setTimeout(r, 2000));
   assert.ok(!fs.existsSync(path.join(base, '.devteam', `machine-${HUB}`)), 'no machine-<port> folder');
 });
+
+test('C5d: a dashboard started after peekFixture\'s DEVTEAM_* sweep records nothing (final-1 F1)', { timeout: 300000 }, async (t) => {
+  // peekFixture's own sweep line, as test/lib/kit.mjs has it, run on this test's environment
+  const lib = fs.readFileSync(path.join(testDir, 'lib', 'kit.mjs'), 'utf8');
+  const at = lib.indexOf('export function peekFixture');
+  assert.ok(at >= 0, 'peekFixture in test/lib/kit.mjs');
+  const line = lib.slice(at).split('\n').find((l) => l.includes("startsWith('DEVTEAM_')"));
+  assert.ok(line, "peekFixture's DEVTEAM_* sweep");
+  const base = path.join(scratch, 'dash-peek');
+  fs.mkdirSync(base);
+  const HUB = nextPort();
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(PORTS + 50), DEVTEAM_MEMORY_EVERY_MS: '200', DEVTEAM_PROC: PROC, DEVTEAM_CGROUP: CGROUP };
+  // the sweep takes the fakes too: a recorder left on would read this machine, the case under test
+  new Function('env', line)(env);
+  for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'recorder-off-peek');
+  const dash = startDashboard(root, env);
+  t.after(() => dash.stop());
+  await until(() => /dashboard on http/.test(dash.out()) || dash.p.exitCode !== null, 'the dashboard');
+  assert.match(dash.out(), /dashboard on http/);
+  await until(async () => { try { return (await get(HUB, '/instances.json')).status === 200; } catch { return false; } }, "the dashboard's hub");
+  await new Promise((r) => setTimeout(r, 2000));
+  assert.ok(!fs.existsSync(path.join(base, '.devteam', `machine-${HUB}`, 'memory.jsonl')), 'no memory.jsonl');
+  assert.ok(!fs.existsSync(path.join(base, '.devteam', `machine-${HUB}`)), 'no machine-<port> folder');
+});

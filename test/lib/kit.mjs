@@ -1320,7 +1320,7 @@ export const PEEK_LONG = `Should the checkout keep the card form on one page, ${
 export function peekFixture(base, name = 'peek') {
   const root = bareProject(base, name);
   const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
-  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_BOX'].includes(k)) delete env[k];
+  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && k !== 'DEVTEAM_MEMORY_RECORD' && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_BOX'].includes(k)) delete env[k];
   for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
   const dt = (args, role = 'supervisor') => {
     const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: role ? { ...env, DEVTEAM_ROLE: role } : env, encoding: 'utf8' });
