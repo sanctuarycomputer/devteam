@@ -7204,16 +7204,66 @@ function chipsHtml(files) {
 // Files sent alone are recorded with the words filesWords gives (§4): a turn or an answer whose words are exactly
 // those, for that many files, shows its chips and not the words.
 const isFilled = (text, files) => Array.isArray(files) && files.length > 0 && text === filesWords(files.length);
+// The page an image covers (spec §6, task-4 T4-1): the artifact or preview on the stage when it opened, kept
+// loaded under it (its frame only hidden), with what the stage knew of it (AV, the lens's state, the bar), so every
+// way out of the image gives it back as it was. null: the image opened over nothing.
+let AV_UNDER = null;
+function avUnderTake() {
+  const { minted, waiters, rects, keyOf, watching, raised, ...ts } = TS;
+  const err = document.querySelector('.av-run-err');
+  return {
+    av: AV, ts, rects: new Map(rects), keyOf: new Map(keyOf), watching: new Set(watching),
+    frames: ['av-frame', 'pv-frame'].map((id) => $(id).hidden),
+    bar: { title: $('av-title').textContent, icon: document.querySelector('.av-bar > i.av-kind').className, kind: $('av-kind').textContent, kindHidden: $('av-kind').hidden, note: $('av-note').textContent, noteHidden: $('av-note').hidden, tab: $('av-tab').getAttribute('href'), reload: $('av-reload').hidden, hint: $('av-hint').hidden, errId: err.id, err: err.textContent },
+  };
+}
+function avUnderGive() {
+  const u = AV_UNDER;
+  AV = u.av;
+  // the image gone, AV_UNDER with it, the bar's version pill and Public wrap back
+  avUploadOff();
+  tsForget();
+  Object.assign(TS, u.ts);
+  for (const [m, from] of [[TS.rects, u.rects], [TS.keyOf, u.keyOf]]) { m.clear(); for (const [k, v] of from) m.set(k, v); }
+  TS.watching.clear();
+  for (const v of u.watching) TS.watching.add(v);
+  ['av-frame', 'pv-frame'].forEach((id, i) => { $(id).hidden = u.frames[i]; });
+  const b = u.bar, err = document.querySelector('.av-run-err');
+  $('av-title').textContent = b.title;
+  document.querySelector('.av-bar > i.av-kind').className = b.icon;
+  $('av-kind').textContent = b.kind;
+  $('av-kind').hidden = b.kindHidden;
+  $('av-note').textContent = b.note;
+  $('av-note').hidden = b.noteHidden;
+  if (b.tab === null) $('av-tab').removeAttribute('href'); else $('av-tab').setAttribute('href', b.tab);
+  if (b.errId) err.id = b.errId; else err.removeAttribute('id');
+  err.textContent = b.err;
+  avRunDraw();
+  avPubDraw();
+  avHint();
+  $('av-reload').hidden = b.reload;
+  $('av-hint').hidden = b.hint;
+  tsPins();
+}
+// Every way out of an image: the page it covered back on the stage, else the viewer closed (nothing routed either way).
+function uploadClose() {
+  if (!AV?.upload) return;
+  if (AV_UNDER) avUnderGive(); else closeArtifact();
+}
 // An image, in the artifact viewer's stage as an <img> of the dashboard's own page (never in the sandboxed frame,
 // whose loads would read as cross-site). Nothing routes: the hash stays, so AV_FROM and AV_RET are left as they
 // are, and every way out closes it in place (the listeners below).
 function showUpload(url, name) {
   if (!AV) avFocus = document.activeElement;
+  // over a page on the stage, that page is kept under the image (an image over an image keeps what the first covered)
+  if (AV && !AV.upload) AV_UNDER = avUnderTake();
   AV = { upload: url };
   avPopsClose();
   avRunDraw();
   avRunErr(null);
   tsSet(null);
+  // the covered page's pins go with it
+  tsPins();
   $('av-title').textContent = name;
   avKindDraw(null);
   document.querySelector('.av-bar > i.av-kind').className = 'av-kind icon-image';
@@ -7227,8 +7277,8 @@ function showUpload(url, name) {
   $('av-note').hidden = true;
   $('av-note').textContent = '';
   $('av-tab').href = url;
-  avFreshFrame('av-frame').hidden = true;
-  avFreshFrame('pv-frame').hidden = true;
+  // a covered page's frame only hidden, never emptied (it is shown again as it was); over nothing, both let go of
+  if (AV_UNDER) { $('av-frame').hidden = true; $('pv-frame').hidden = true; } else { avFreshFrame('av-frame').hidden = true; avFreshFrame('pv-frame').hidden = true; }
   $('av-img')?.remove();
   const img = document.createElement('img');
   img.id = 'av-img';
@@ -7258,6 +7308,7 @@ function showUpload(url, name) {
 // The stage given back to an artifact or a preview (showArtifact, showPreview) or closed (closeArtifact): the image
 // gone, the bar's controls back.
 function avUploadOff() {
+  AV_UNDER = null;
   $('av-img')?.remove();
   document.querySelector('.av-ver-wrap').hidden = false;
   document.querySelector('.av-pub-wrap').hidden = false;
@@ -7298,17 +7349,21 @@ window.addEventListener('click', (e) => {
   if (!t?.closest('#av-close, #scrim')) return;
   e.stopImmediatePropagation();
   e.preventDefault();
-  closeArtifact();
+  uploadClose();
 }, true);
 // Escape: the aiming cursor, pin mode or the raised overlay ends first, as the threads layer's Escape does, and the
-// image stays; else the image closes, and a floating thread card stays open (spec-2 F2-2).
+// image stays; else the image closes (the page it covered back), and a floating thread card stays open (spec-2 F2-2).
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || !AV?.upload) return;
   e.stopImmediatePropagation();
   e.preventDefault();
   if (tlShowing() || TL.pin || TS.raised) { tlHide(); tsRaise(false); if (TL.pin) tlPinMode(false); return; }
-  closeArtifact();
+  uploadClose();
 }, true);
+// A route taken while an image is up (a link, Back) closes the image first, the same way, before the router's own
+// hashchange listener runs (capture, at the window: ahead of it), so the router sees the viewer as it was under the
+// image: empty (its reset of AV_RET, AV_NAVS, AV_FRAME_ESC, AV_FROM runs) or the page the image covered (task-4 T4-2).
+window.addEventListener('hashchange', () => { if (AV?.upload) uploadClose(); }, true);
 /* attachments end */
 const seenHash = (id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
 // Once an answer is saved the card says so at once; the next refresh removes it.
