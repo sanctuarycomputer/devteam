@@ -24120,8 +24120,8 @@ const recurringRegistry = Object.freeze({
     // 2. up to date: every method lands the head's tree
     const anc = g(['merge-base', '--is-ancestor', main, sha]);
     if (anc.timedOut || ![0, 1].includes(anc.status)) return refuse(cant('merge-base --is-ancestor', anc), warn);
-    if (rebase && merges) return refuse('recurring.json: merge_method is rebase and this branch has merge commits since main; rebase it onto main instead', warn);
-    if (anc.status === 0) return lands('head', headJobs);
+    const merged = 'recurring.json: merge_method is rebase and this branch has merge commits since main; rebase it onto main instead';
+    if (anc.status === 0) return rebase && merges ? refuse(merged, warn) : lands('head', headJobs);
     // 3. behind: one merge base, and no watched path changed on either side since it
     const behind = "recurring.json: this branch doesn't contain main's tip, and it or main changed a recurring.json since they parted; merge main into the branch first";
     const mb = g(['merge-base', '--all', main, sha]);
@@ -24129,6 +24129,7 @@ const recurringRegistry = Object.freeze({
     const bases = mb.status === 0 ? mb.out.split('\n').filter(Boolean) : [];
     if (bases.length > 1) return refuse(`recurring.json: this branch doesn't contain main's tip and has ${bases.length} merge bases with it; merge main into the branch first`, warn);
     if (bases.length !== 1) return refuse(behind, warn);
+    if (rebase && merges) return refuse(merged, warn);
     for (const side of [sha, main]) {
       const d = g(['diff', '--no-renames', '--name-only', '-z', bases[0], side]);
       if (!d.ok) return refuse(cant('diff', d), warn);

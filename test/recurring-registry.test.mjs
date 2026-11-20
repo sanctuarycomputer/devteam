@@ -928,6 +928,27 @@ history('refused under rebase: a behind branch whose commits add the jobs file a
   refused(T.merge('flip'), BEHIND);
 }, ['rebase']);
 
+// the two above whose head refuses on its own (step 1), here with the head clean again: only the
+// commit scan sees the path under the jobs file, or the project dir turned into a link
+history('refused under rebase: a behind branch whose commits add docs/devteam/project/recurring.json/x and then delete it (no plain-git proof)', (T) => {
+  const wt = T.choreBranch('dirflip', (w) => write(path.join(w, JOBS, 'x'), jobsText({ zz: ZZ })));
+  T.commitIn(wt, 'chore-dirflip', (w) => fs.rmSync(path.join(w, JOBS), { recursive: true }), 'and delete it');
+  T.onMainFile('README.md', 'main moves\n');
+  assert.equal(T.has('origin/chore-dirflip', JOBS), false, 'the head has nothing at the jobs file');
+  refused(T.dry('dirflip'), BEHIND);
+  refused(T.merge('dirflip'), BEHIND);
+}, ['rebase']);
+
+history('refused under rebase: a behind branch whose commits make docs/devteam/project a symlink and then a directory again (no plain-git proof)', (T) => {
+  const real = 'docs/devteam/proj-real';
+  const wt = T.choreBranch('linkflip', (w) => { fs.renameSync(path.join(w, PROJ), path.join(w, real)); fs.symlinkSync('proj-real', path.join(w, PROJ)); });
+  T.commitIn(wt, 'chore-linkflip', (w) => { fs.unlinkSync(path.join(w, PROJ)); fs.renameSync(path.join(w, real), path.join(w, PROJ)); }, 'and back');
+  T.onMainFile('README.md', 'main moves\n');
+  assert.match(T.g(['ls-tree', 'origin/chore-linkflip', '--', PROJ]), /^040000 tree /, 'the head\'s project dir is a directory');
+  refused(T.dry('linkflip'), BEHIND);
+  refused(T.merge('linkflip'), BEHIND);
+}, ['rebase']);
+
 test('A15 landing: forge git, main moves between the checks and the landing: refused, and main is left as the mover left it (final-4 F3)', () => {
   const T = setup('a15-moved');
   try {
@@ -1016,5 +1037,21 @@ test('A16: settings.md holds no jobs: no default, no words, and validate reads t
     const moved = T.run(['validate'], { ...SUP, DEVTEAM_PROJECT: path.join(T.old, 'docs/proj') });
     refused(moved, /^error: recurring\.json pp\.every: /m);
     assert.doesNotMatch(moved.text, /recurring\.json dd\./, 'the default dir\'s file is not read');
+    // check-pr reads the moved dir's jobs file through git (read(ref) follows projectRel): a chore
+    // adding a bad job to docs/proj/recurring.json is refused at landing there, and passes as a
+    // plain file under the default dir
+    fs.rmSync(path.join(T.old, JOBS));
+    fs.rmSync(path.join(T.old, 'docs/proj/recurring.json'));
+    T.onMainDo(() => {}, 'main: docs/proj, a copy of the project dir');
+    T.choreBranch('proj-jobs', (wt) => write(path.join(wt, 'docs/proj/recurring.json'), jobsText({ pp: check({ every: '30m' }) })));
+    const head = T.headOf('chore-proj-jobs');
+    const cpr = (env) => T.run(['check-pr', '--head-ref', 'chore-proj-jobs', '--sha', head, '--title', 'chore-proj-jobs: jobs'], { ...SUP, ...env });
+    refused(cpr({ DEVTEAM_PROJECT: path.join(T.old, 'docs/proj') }), /^(fail: )?at landing: recurring\.json pp\.every: /m);
+    assert.doesNotMatch(cpr({}).text, /recurring\.json pp\./, 'the default dir reads no job from docs/proj');
+    // a project dir outside the repo: git holds no jobs file for it, so validate refuses one there
+    const outside = path.join(T.base, 'outside-proj');
+    fs.cpSync(path.join(T.old, PROJ), outside, { recursive: true });
+    write(path.join(outside, 'recurring.json'), jobsText({ oo: check() }));
+    refused(T.run(['validate'], { ...SUP, DEVTEAM_PROJECT: outside }), /the project dir is outside this repo: its recurring\.json is never read/);
   } finally { T.done(); }
 });
