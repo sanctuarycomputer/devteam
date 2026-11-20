@@ -192,7 +192,7 @@ test('A4b: what lands is judged on every home PR: a stale branch that only reord
   const T = setup('lands');
   try {
     T.lines(T.STD);
-    T.ok(['ticket', 'add', 'api-01-x', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['its suite passes in CI'], notes: 'n' })]);
+    for (const id of ['api-01-x', 'api-02-decoy']) T.ok(['ticket', 'add', id, '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['its suite passes in CI'], notes: 'n' })]);
     const jobs = { aa: check({ title: 'A job', every: '6h' }), bb: check({ title: 'B job', every: '12h', run: 'echo bb' }), cc: chore({ title: 'C job', prompt: 'C.' }), dd: check({ title: 'D job', every: '8h', run: 'echo dd' }), ee: chore({ title: 'E job', every: '2w', prompt: 'E.' }) };
     T.onMain((j) => { j.recurring = jobs; });
     const moveBb = (j) => { const { aa, bb, cc, dd, ee } = j.recurring; j.recurring = { aa, cc, dd, bb, ee }; };
@@ -205,6 +205,17 @@ test('A4b: what lands is judged on every home PR: a stale branch that only reord
     T.g(['commit', '-qam', 'jobs text moved'], tw);
     T.g(['push', '-q', 'origin', 'ticket/api-01-x'], tw);
     const tsha = T.g(['rev-parse', 'HEAD'], tw);
+    // the decoy (final-2b B2-1): a copy of the block above the original, its fence with a trailing
+    // space (still the kit's fence); git puts main's stop in the original, the kit reads the copy
+    const decoy = (t) => { const m = BLOCK.exec(t); return `${m[0].replace('```json devteam', '```json devteam ')}\n\n${t}`; };
+    const raw = (wt, fn) => { const f = path.join(wt, 'docs/devteam/project/settings.md'); fs.writeFileSync(f, fn(fs.readFileSync(f, 'utf8'))); };
+    T.choreBranch('decoy', (wt) => raw(wt, decoy));
+    const dw = path.join(T.base, 'ticket-api-02-decoy');
+    T.g(['worktree', 'add', '-q', '-b', 'ticket/api-02-decoy', dw, 'origin/main'], T.old);
+    raw(dw, decoy);
+    T.g(['commit', '-qam', 'jobs block copied'], dw);
+    T.g(['push', '-q', 'origin', 'ticket/api-02-decoy'], dw);
+    const dsha = T.g(['rev-parse', 'HEAD'], dw);
     // the owner stops bb, and it lands
     const stop = T.yes({ recurring: { bb: null } });
     T.jobsChore('stop-bb', (j) => { delete j.recurring.bb; });
@@ -212,7 +223,6 @@ test('A4b: what lands is judged on every home PR: a stale branch that only reord
     assert.equal(Object.hasOwn(T.mainSettings().recurring, 'bb'), false);
     // the chore: its merge would put bb back, so it changes the jobs and needs an answer
     refused(T.merge('sneak'), /changes owner settings: recurring \(recurring-edit\)/);
-    assert.equal(Object.hasOwn(T.mainSettings().recurring, 'bb'), false, 'bb stays stopped');
     // with an answer for ff alone: the binding reads main's jobs now against the merged result, so bb
     // (back by the merge, the merged file byte for byte the branch's) is a change it never showed
     const qff = T.yes({ recurring: { ff: chore({ title: 'F job', prompt: 'F.' }) } });
@@ -220,6 +230,65 @@ test('A4b: what lands is judged on every home PR: a stale branch that only reord
     // the ticket: a stale ticket branch that only moves the text is refused by check-pr
     const r = T.run(['check-pr', '--head-ref', 'ticket/api-01-x', '--sha', tsha, '--title', 'x']);
     refused({ status: r.status, text: T.text(r) }, /ticket\/api-01-x changes recurring: jobs are the owner's/);
+    // what lands is read from the whole settings file, never the jobs' span (final-2b B2-1): the decoy
+    // is refused as a job change, and for its second block
+    const dc = T.dry('decoy');
+    refused(dc, /changes owner settings: recurring \(recurring-edit\)/);
+    assert.match(dc.text, /settings\.md has 2 json devteam blocks: the kit reads only the first, so keep exactly one/);
+    const rd = T.run(['check-pr', '--head-ref', 'ticket/api-02-decoy', '--sha', dsha, '--title', 'x']);
+    refused({ status: rd.status, text: T.text(rd) }, /ticket\/api-02-decoy changes recurring: jobs are the owner's/);
+    // validate refuses a second block too
+    fs.writeFileSync(T.settingsFile, decoy(fs.readFileSync(T.settingsFile, 'utf8')));
+    const v = T.run(['validate']);
+    refused({ status: v.status, text: T.text(v) }, /settings\.md has 2 json devteam blocks: the kit reads only the first, so keep exactly one/);
+    T.g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], T.old);
+  } finally { T.done(); }
+});
+
+test('A4c: text tricks beside the jobs, on a chore cut before a stop: none lands a job change without an answer', () => {
+  // final-2 F2: git's merge must put main's change where the kit reads it, or the PR is refused
+  const T = setup('tricks');
+  const SET = 'docs/devteam/project/settings.md';
+  const raw = (wt, fn) => { const f = path.join(wt, SET); fs.writeFileSync(f, fn(fs.readFileSync(f, 'utf8'))); };
+  const recText = (body) => { const i = body.indexOf('  "recurring": {'); let d = 0, k = body.indexOf('{', i); for (; k < body.length; k++) { if (body[k] === '{') d++; else if (body[k] === '}') { d--; if (!d) break; } } return body.slice(i, k + 1); };
+  // what git's merge of the branch onto main lands: { conflict, jobs }
+  const merged = (branch) => {
+    T.g(['fetch', '-q', 'origin'], T.old);
+    let out;
+    try { out = execFileSync('git', ['merge-tree', '--write-tree', 'origin/main', `origin/${branch}`], { cwd: T.old, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); } catch { return { conflict: true, jobs: null }; }
+    const j = JSON.parse(BLOCK.exec(T.g(['show', `${out.split('\n')[0].trim()}:${SET}`], T.old))[1]);
+    return { conflict: false, jobs: j.recurring === undefined ? {} : j.recurring };
+  };
+  const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v));
+  try {
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job', every: '6h' }), bb: check({ title: 'B job', every: '12h', run: 'echo bb' }), cc: chore({ title: 'C job', prompt: 'C.' }), dd: check({ title: 'D job', every: '8h', run: 'echo dd' }), ee: chore({ title: 'E job', every: '2w', prompt: 'E.' }) }; });
+    const V = {
+      dupblockbefore: (wt) => raw(wt, (t) => { const m = BLOCK.exec(t); return t.slice(0, m.index) + m[0] + '\n\n' + t.slice(m.index); }),
+      moveblockfirst: (wt) => T.edit((j) => { const { recurring, ...rest } = j; for (const k of Object.keys(j)) delete j[k]; Object.assign(j, { recurring, ...rest }); }, wt),
+      copykeyafter: (wt) => raw(wt, (t) => { const r = recText(BLOCK.exec(t)[1]); return t.replace(r, () => `${r},\n${r.replace('"recurring"', '"zz_copy"')}`); }),
+      copykeybefore: (wt) => raw(wt, (t) => { const r = recText(BLOCK.exec(t)[1]); return t.replace(r, () => `${r.replace('"recurring"', '"zz_copy"')},\n${r}`); }),
+      keybefore: (wt) => raw(wt, (t) => t.replace('  "recurring": {', '  "zz_note": "x",\n  "recurring": {')),
+      keyafter: (wt) => raw(wt, (t) => { const r = recText(BLOCK.exec(t)[1]); return t.replace(r, () => `${r},\n  "zz_note": "x"`); }),
+      prosejobsbefore: (wt) => raw(wt, (t) => { const m = BLOCK.exec(t); return t.slice(0, m.index) + recText(m[1]) + '\n\n' + t.slice(m.index); }),
+      // final-2b B2-1's decoy (a copy above, its fence with a trailing space), and a one-block form
+      // of it (a copy above, the original's fence made a plain one)
+      decoy: (wt) => raw(wt, (t) => { const m = BLOCK.exec(t); return `${m[0].replace('```json devteam', '```json devteam ')}\n\n${t}`; }),
+      demote: (wt) => raw(wt, (t) => { const m = BLOCK.exec(t); return `${m[0]}\n\n${t.replace('```json devteam', '```json')}`; }),
+    };
+    for (const [n, fn] of Object.entries(V)) T.choreBranch(`t-${n}`, fn);
+    const stop = T.yes({ recurring: { bb: null } });
+    T.jobsChore('stop-bb', (j) => { delete j.recurring.bb; });
+    passes(T.merge('stop-bb', ['--approved', stop]));
+    const now = T.mainSettings().recurring;
+    const bad = [];
+    const dry = {};
+    for (const n of Object.keys(V)) {
+      const d = (dry[n] = T.dry(`t-${n}`));
+      const m = merged(`chore-t-${n}`);
+      if (d.status === 0 && !m.conflict && canon(m.jobs) !== canon(now)) bad.push(n);
+    }
+    assert.deepEqual(bad, [], 'a no-answer chore lands a job change');
+    for (const n of ['dupblockbefore', 'decoy']) refused(dry[n], /settings\.md has 2 json devteam blocks: the kit reads only the first, so keep exactly one/);
   } finally { T.done(); }
 });
 
@@ -387,6 +456,24 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     // main over the cap (a hand edit): a stop adds no runs, so the cap never refuses it (task-1 F3)
     T.onMain((j) => { j.recurring = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`hourly-${i + 1}`, check({ every: '1h' })])); });
     passes(T.ask({ recurring: { 'hourly-1': null } }));
+  } finally { T.done(); }
+});
+
+test('A9b: only the supervisor asks a recurring-edit question or applies one: a worker, a planner and the responder are refused', () => {
+  const T = setup('roles');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    const roles = { worker: { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'api-01-x' }, planner: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'chores' }, responder: { DEVTEAM_ROLE: 'responder' } };
+    // final-1b B3: each is refused by the kit's role check, before anything is asked or written
+    const before = T.g(['status', '--porcelain'], T.old);
+    for (const [who, role] of Object.entries(roles)) {
+      const a = T.run(['ask', '--class', 'recurring-edit', '--question', 'Should I add bb?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { bb: check() } })], role);
+      refused(a, /^devteam: ask: the supervisor does this/m);
+      const p = T.run(['recurring', 'apply', q], role);
+      refused(p, /^devteam: recurring apply: the supervisor does this/m);
+      assert.equal(T.g(['status', '--porcelain'], T.old), before, `${who}: nothing written`);
+    }
+    assert.equal(T.ask({ recurring: { bb: check() } }).status, 0, 'the supervisor asks it');
   } finally { T.done(); }
 });
 
@@ -574,7 +661,7 @@ test('A14: supervisor.md documents registering, changing and stopping a job, and
   assert.ok(s > at(/^## 3\. /m) && s < at(/^## 4\. /m), 'a level-2 section between §3 and §4');
   const end = doc.indexOf('\n## ', s + 1);
   const section = doc.slice(s, end);
-  for (const w of ['only looks', 'recurring-edit', 'thread ask', 'answer', '--from-turn', 'recurring apply', 'chore start recurring', 'merge --chore recurring --approved', 'null', 'recurring propose', '--stop', 'production']) assert.ok(section.includes(w), `the section says ${w}`);
+  for (const w of ['only looks', 'recurring-edit', 'thread ask', 'answer', '--from-turn', 'answer <qid> "Yes" --from-turn', 'recurring apply', 'chore start recurring', 'merge --chore recurring --approved', 'null', 'recurring propose', '--stop', 'production']) assert.ok(section.includes(w), `the section says ${w}`);
   const mon = doc.slice(at(/^### Monitoring$/m), at(/^## Recurring jobs$/m));
   assert.match(mon, /Recurring jobs/);
   const five = doc.slice(at(/^## 5\. /m), at(/^## 6\. /m));

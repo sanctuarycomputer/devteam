@@ -4356,7 +4356,10 @@ function cmdValidate() {
     // Jobs (recurring) as this checkout's settings.md writes them, not loadSettings': an owner's key
     // reads as main has it there, and a branch's edit to the jobs is what must be checked.
     {
-      const own = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
+      const ownText = readText(path.join(projectDir, 'settings.md'));
+      const own = ownText?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
+      const blocks = recurringRegistry.blocksProblem(ownText);
+      if (blocks) errors.push(blocks);
       errors.push(...recurringRegistry.duplicateKeys(own).map(recurringRegistry.duplicateProblem));
       let jobs;
       try { jobs = own == null ? undefined : JSON.parse(own).recurring; } catch { jobs = undefined; }
@@ -5748,14 +5751,18 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     if (a && b && ['sensors', 'sensor_defaults'].some((k) => canonical(a[k]) !== canonical(b[k]))) fails.push(...sensorProblems(b).map((e) => `settings at landing: ${e}`));
     // the head's settings text holds no key twice in one object (task-2-r2 F1-1)
     fails.push(...recurringRegistry.duplicateKeys(settingsBlockAt(sha)).map(recurringRegistry.duplicateProblem));
-    // the jobs that would land (kit-162, final-1 F1): recurringRegistry.landing, read from the
-    // recurring span as git's text merge takes it (merge-tree only when main and the head both changed
-    // it), never canonically from the merge base against the head. When they differ from main's now:
+    // one json devteam block: the kit reads the first, while git may put main's change in another
+    // (final-2b B2-1)
+    const blocks = recurringRegistry.blocksProblem(git(['show', `${sha}:${projectRel}/settings.md`]));
+    if (blocks) fails.push(blocks);
+    // the jobs that would land (kit-162, final-1 F1, final-2b B2-1): recurringRegistry.landing, read
+    // from the whole settings file that would land, never canonically from the merge base against
+    // the head, nor from the jobs' span. When they differ from main's now:
     // each landed entry's shape, and the cap on the landed jobs. A merged text holds no key twice
     // either: a 3-way merge can repeat a key neither side repeats.
     // a result with no recurring key has no jobs, as validate reads it (task-2 F2)
     const L = recurringRegistry.landing(sha);
-    if (L.problem) fails.push(L.problem);
+    if (L.problem && !fails.includes(L.problem)) fails.push(L.problem);
     if (L.tree) fails.push(...recurringRegistry.duplicateKeys(settingsBlockAt(L.tree)).map((d) => `settings at landing: ${recurringRegistry.duplicateProblem(d)}`));
     if (L.changed && !L.problem) {
       if (!isObj(L.merged)) fails.push('settings at landing: settings recurring: an object of { "<name>": { kind, title, what, every, … } }');
@@ -5773,7 +5780,7 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const files = (changedFiles(base0, sha) ?? []).filter((f) => f.startsWith(`${projectRel}/sensors/`));
     if (keys.length || files.length) fails.push(`${branch} changes ${[...keys, ...files].slice(0, 4).join(', ')}: sensors are the supervisor's, so they land in a chore PR (chore start …), not a ticket or plan`);
     // the jobs are the owner's: never from a ticket or plan (kit-162), judged on what lands (final-1 F1)
-    if (recurringRegistry.landing(sha).changed) fails.push(`${branch} changes recurring: jobs are the owner's, so they land only in the supervisor's chore PR with the owner's answer (recurring apply), never from a ticket or plan`);
+    if (recurringRegistry.landing(sha).changed && !recurringRegistry.landing(sha).problem) fails.push(`${branch} changes recurring: jobs are the owner's, so they land only in the supervisor's chore PR with the owner's answer (recurring apply), never from a ticket or plan`);
   }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records, inHome }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
@@ -6935,7 +6942,8 @@ function cmdMerge() {
     }
     // The jobs' binding: whenever --approved is a recurring-edit answer, the PR changing recurring
     // or not (it then lands none of what the answer showed), and whenever the PR changes recurring.
-    if (approved && (jobAnswer || jobsChanged)) fails.push(...recurringBindingFails(sha, approved));
+    // (checkPr already said a landing problem: each line once, final-2 F1)
+    if (approved && (jobAnswer || jobsChanged)) fails.push(...recurringBindingFails(sha, approved).filter((f) => !fails.includes(f)));
     // A change to the jobs, or the recurring chore, waits while Upkeep is drained or parked, whatever
     // its slug (record-keeping ones too); heldBy's own refusal, when it has one, is the one given.
     const jobsHold = chore === 'recurring' || jobsChanged ? goalMode(upkeepOrVirtual()) : 'run';
@@ -23292,41 +23300,69 @@ const recurringRegistry = Object.freeze({
     if (!m) return 0;
     return m[2] === 'h' && Number(m[1]) < 24 ? 24 / Number(m[1]) : 1;
   },
-  // What the jobs would be once sha lands on home's main as it is now (final-1 F1), never a canonical
-  // merge base against the head, which reads a moved-but-equal jobs text as no change while the
-  // 3-way merge of that text brings back a job main stopped. Read from the text of the recurring
-  // value (its span) at every merge base, main and the head, as git's text merge takes it: the head's
-  // span as the bases' lands main's jobs; main's as the bases' lands the head's; both changed (or
-  // bases that disagree), the jobs are read from merge-tree, and a conflict, or a git that can't
-  // merge-tree, is refused. merge-tree runs only then: a PR that leaves the span alone does no tree
-  // work. { now, merged, tree, changed, problem }: changed when the landed jobs differ canonically
-  // from main's now (a missing key reads {}); a problem counts as changed, failing closed.
+  // What the jobs would be once sha lands on home's main as it is now (final-1 F1), read from the
+  // whole settings file that would land (final-2b B2-1): never a canonical merge base against the
+  // head, which reads a moved-but-equal jobs text as no change while git's 3-way merge of it brings
+  // back a job main stopped, and never the jobs' span alone, since git merges lines and a copy of the
+  // block or of its lines elsewhere in the file can take main's change while the block the kit reads
+  // keeps the old text. With settings.md's blob at main, the head and every merge base:
+  // - the head's is every base's: main's file lands (no tree work);
+  // - main's is every base's: the head's file lands (no tree work);
+  // - both changed, one base blob: git merge-file -p <head> <base> <main> writes what git's merge
+  //   would (any git, no merge-tree); on a conflict git can't land it as it is, so the kit's
+  //   key-level view decides (settingsInForce(…).landed(), whose rules refuse what it can't say);
+  // - both changed, bases whose blobs differ (a criss-cross): merge-tree; a conflict, or a git that
+  //   can't merge-tree, is refused.
+  // { now, merged, tree, headLands, changed, problem }: changed when the landed jobs differ
+  // canonically from main's now (a missing key reads {}); headLands when the file that lands is the
+  // head's byte for byte; a problem counts as changed, failing closed.
   landing(sha) {
     const main = mainRef();
-    if (!main) return { now: null, merged: null, tree: null, changed: false, problem: null };
+    if (!main) return { now: null, merged: null, tree: null, headLands: false, changed: false, problem: null };
     return memo(`recurring-landing\0${main}\0${mainSha()}\0${sha}`, () => {
-      const jobsAt = (ref) => { const s = settingsAt(ref, { orNull: true }); return s && s.recurring === undefined ? {} : s?.recurring; };
+      const rel = `${projectRel}/settings.md`;
+      const jobsOf = (s) => (s && s.recurring === undefined ? {} : s?.recurring);
+      const jobsAt = (ref) => jobsOf(settingsAt(ref, { orNull: true }));
+      const jobsIn = (text) => { const m = String(text).match(/```json devteam\s*\n([\s\S]*?)\n```/); if (!m) return undefined; try { return jobsOf(JSON.parse(m[1])); } catch { return undefined; } };
       const now = jobsAt(main);
-      // a missing settings.md has no jobs: an empty span, as a missing key
-      const spanAt = (ref) => { const t = git(['show', `${ref}:${projectRel}/settings.md`]); return t === null ? '' : recurringRegistry.span(t); };
+      const blob = (ref) => git(['rev-parse', '--verify', '-q', `${ref}:${rel}`]);
       const bases = (git(['merge-base', '--all', main, sha]) ?? '').split('\n').filter(Boolean);
-      const [atMain, atHead, atBases] = [spanAt(main), spanAt(sha), bases.map(spanAt)];
+      const [atMain, atHead, atBases] = [blob(main), blob(sha), bases.map(blob)];
       const asBases = (x) => atBases.length > 0 && atBases.every((b) => b === x);
-      if (asBases(atHead)) return { now, merged: now, tree: null, changed: false, problem: null };
-      if (asBases(atMain)) {
-        const merged = jobsAt(sha);
-        const unread = merged === undefined && now !== undefined;
-        return { now, merged, tree: null, changed: canonical(merged) !== canonical(now), problem: unread ? `settings: the json devteam block at ${sha.slice(0, 12)} can't be read (missing or not valid JSON), so neither can the jobs it would land` : null };
+      const lands = (merged, { tree = null, headLands, problem = null }) => {
+        const unread = !problem && merged === undefined && now !== undefined;
+        return { now, merged, tree, headLands, changed: !!problem || unread || canonical(merged) !== canonical(now), problem: problem ?? (unread ? `settings: the json devteam block ${sha.slice(0, 12)} would land on ${main} can't be read (missing or not valid JSON), so neither can its jobs` : null) };
+      };
+      if (asBases(atHead)) return lands(now, { headLands: atMain === atHead });
+      if (asBases(atMain)) return lands(jobsAt(sha), { headLands: true });
+      if (atBases.length && new Set(atBases).size === 1) {
+        // the three files as git has them, byte for byte (a missing one is empty)
+        const raw = (oid) => (oid ? spawnSync('git', ['cat-file', 'blob', oid], { cwd: HOME_CWD, maxBuffer: 64 * 1024 * 1024 }).stdout ?? Buffer.alloc(0) : Buffer.alloc(0));
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-settings-merge-'));
+        try {
+          const [h, b, m] = ['head', 'base', 'main'].map((n) => path.join(dir, n));
+          const head = raw(atHead);
+          fs.writeFileSync(h, head);
+          fs.writeFileSync(b, raw(atBases[0]));
+          fs.writeFileSync(m, raw(atMain));
+          const r = spawnSync('git', ['merge-file', '-p', h, b, m], { cwd: HOME_CWD, maxBuffer: 64 * 1024 * 1024 });
+          if (r.status === 0) return lands(jobsIn(r.stdout.toString('utf8')), { headLands: Buffer.compare(r.stdout, head) === 0 });
+        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+        // a conflict: git can't land it as it is; the key-level view of what lands
+        const J = settingsInForce(bases[0], sha).landed();
+        return J.problem ? lands(null, { headLands: false, problem: J.problem }) : lands(jobsOf(J.settings), { headLands: false });
       }
       const m = mergeTree(main, sha);
-      if (!m.tree) {
-        const old = m.conflict ? null : gitTooOld();
-        return { now, merged: null, tree: null, changed: true, problem: `settings.md: both main and this branch changed recurring; merge main into the branch first${old ? `; ${old}` : ''}` };
-      }
-      const merged = jobsAt(m.tree);
-      const unread = merged === undefined && now !== undefined;
-      return { now, merged, tree: m.tree, changed: canonical(merged) !== canonical(now), problem: unread ? `settings: the json devteam block ${sha.slice(0, 12)} would land on ${main} can't be read (missing or not valid JSON), so neither can its jobs` : null };
+      if (!m.tree) return lands(null, { headLands: false, problem: 'settings.md: both main and this branch changed it since different merge bases; merge main into the branch first' });
+      return lands(jobsAt(m.tree), { tree: m.tree, headLands: blob(m.tree) === atHead });
     });
+  },
+  // settings.md's text with more than one line opening a json devteam block (the kit's fence,
+  // trailing spaces included): a problem, since the kit reads only the first while git may put a
+  // change in another (final-2b B2-1); null with one or none
+  blocksProblem(text) {
+    const n = (String(text ?? '').match(/```json devteam[^\S\n]*\n/g) ?? []).length;
+    return n > 1 ? `settings.md has ${n} json devteam blocks: the kit reads only the first, so keep exactly one` : null;
   },
   // a number of runs as a message prints it: at most two decimals
   runsWords: (n) => String(Math.round(n * 100) / 100),
@@ -23401,7 +23437,7 @@ const recurringRegistry = Object.freeze({
   // as it was, and every byte outside the span is unchanged.
   // The top-level keys of settings.md's json devteam block, by a string-aware walk of its text:
   // { body, base, before, keys: [{ key, s, e }], open } (s, e: each value's span in body, base: the
-  // body's offset in text), or { problem }. applied rewrites a span; span reads one.
+  // body's offset in text), or { problem }. applied rewrites one value's span.
   blockKeys(text) {
     const fail = (problem) => ({ problem });
     const BLOCK = /```json devteam\s*\n([\s\S]*?)\n```/;
@@ -23452,13 +23488,6 @@ const recurringRegistry = Object.freeze({
     }
     return { body, base, before, keys, open };
   },
-  // The raw text of the top-level "recurring" value in settings.md's text (its span): '' when the
-  // key is missing (no jobs), every span joined when it repeats, null when the block can't be read.
-  span(text) {
-    const k = recurringRegistry.blockKeys(text);
-    if (k.problem) return null;
-    return k.keys.filter((x) => x.key === 'recurring').map((x) => k.body.slice(x.s, x.e)).join('\0');
-  },
   applied(text, value) {
     const fail = (problem) => ({ text: null, problem });
     if (!isObj(value)) return fail('recurring is an object of jobs');
@@ -23487,24 +23516,16 @@ const recurringRegistry = Object.freeze({
 // against the head (final-1 F1). An answer of another class is the class check's to refuse.
 function recurringBindingFails(sha, approved) {
   const R = recurringRegistry;
-  // The jobs that land are recurringRegistry.landing's: read from the recurring span at the merge
-  // bases, main and the head, and from merge-tree (over every merge base) when both changed it, so a
-  // canonical compare of one base can't miss a reorder, nor a criss-cross base that matches main while
-  // the merge drops a stop (task-2 F1, task-2-r3 F1-1a, task-2-r4 F1-1b). When this PR lands a job
-  // change, the merged settings file must also be the head's byte for byte (its blob): the file the
-  // owner's change was reviewed in is the one that lands, and every other check that reads the
-  // head's settings reads what lands. A merge that isn't clean, or the file missing, refuses. A PR
-  // whose landed jobs are main's skips this (no tree work): the comparison below refuses it anyway.
+  // The jobs that land are recurringRegistry.landing's: read from the whole settings file that would
+  // land (final-2b B2-1), so a canonical compare of one base can't miss a reorder, nor a criss-cross
+  // base that matches main while the merge drops a stop (task-2 F1, task-2-r3 F1-1a, task-2-r4
+  // F1-1b). When this PR lands a job change, the file that lands must also be the head's byte for
+  // byte: the file the owner's change was reviewed in is the one that lands, and every other check
+  // that reads the head's settings reads what lands. A PR whose landed jobs are main's skips this:
+  // the comparison below refuses it anyway.
   const L = R.landing(sha);
   if (L.problem) return [L.problem];
-  if (L.changed) {
-    const blob = (ref) => (ref ? git(['rev-parse', '--verify', '-q', `${ref}:${projectRel}/settings.md`]) : null);
-    const tree = L.tree ?? (mainRef() ? mergeTree(mainRef(), sha).tree : null);
-    if (!tree) return [`${sha.slice(0, 12)} does not merge cleanly onto ${mainRef() ?? 'main'}${gitTooOld() ? ` (${gitTooOld()})` : ''}, so the settings it would land can't be read: merge main into it, then check again`];
-    const [lands, own] = [blob(tree), blob(sha)];
-    if (!lands || !own) return [`${projectRel}/settings.md is missing ${own ? 'from the merged result' : 'at the head'}, so the jobs it would land can't be read`];
-    if (lands !== own) return ["the merged settings (this branch merged onto main as it is now) differ from the branch's: merge main into it, then check again"];
-  }
+  if (L.changed && !L.headLands) return ["the merged settings (this branch merged onto main as it is now) differ from the branch's: merge main into it, then check again"];
   const q = logGet(approved);
   if (q?.type !== 'question' || q.class !== 'recurring-edit') return [];
   const v = questionView(q);
