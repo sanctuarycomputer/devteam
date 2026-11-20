@@ -6920,6 +6920,41 @@ const libThumb = (x, pvHere) => {
   return `<a class="lib-thumb"${libGo(x)} tabindex="-1" aria-hidden="true" data-thumb-src="${esc(src)}">${x.link && x.host ? `<img src="https://${esc(x.host)}/favicon.ico" referrerpolicy="no-referrer" alt=""><span class="lib-host small muted">${esc(x.host)}</span>` : `<i class="icon-${icon}" aria-hidden="true"></i>`}</a>`;
 };
 /* library-items end */
+/* peek-artifacts start */
+// The artifacts a goal's, feature's, ticket's or thread's side peek lists (kit-320): kit-92's Library items,
+// tied by the shown row's for refs, compared whole. Uses only its arguments and esc, psect, LIB_KINDS, libraryItems.
+// The artifact items (mock, diagram, docs) tied to ref (goal:<g>, feature:<f>, ticket:<t>), in libraryItems' order; [] for any other ref.
+function peekArtifacts(data, ref, ctx) {
+  const m = /^(goal|feature|ticket):(.+)$/.exec(String(ref ?? ''));
+  if (!m) return [];
+  const [, kind, id] = m;
+  const ticketFeat = new Map();
+  for (const t of [...(data?.tickets ?? []), ...(data?.progress?.tickets ?? [])]) if (t?.id && t.feature) ticketFeat.set(String(t.id), String(t.feature));
+  const isTicket = (r, t) => r === `ticket:${t}` || r === t;
+  const ofFeat = (r) => r === `feature:${id}` || r === `plan-${id}` || ticketFeat.get(r.startsWith('ticket:') ? r.slice(7) : r) === id;
+  const ties = (x) => {
+    if (kind === 'goal') return x.goals.includes(id);
+    const refs = (x.art?.for ?? []).map((r) => String(r ?? ''));
+    return kind === 'ticket' ? refs.some((r) => isTicket(r, id)) : refs.some(ofFeat);
+  };
+  return libraryItems(data, Date.now(), ctx).filter((x) => ['mock', 'diagram', 'docs'].includes(x.kind) && ties(x));
+}
+// The peek's Artifacts section: a card of links, each opening the viewer as the Library's title does (a broken one its
+// Library peek, badged), with its kind and the draft it opens; '' for none.
+function peekArtSection(items) {
+  if (!items?.length) return '';
+  const li = (x) => {
+    const word = LIB_KINDS.find(([k]) => k === x.kind)?.[1] ?? '';
+    const link = x.error
+      ? `<a class="linkish" href="${esc(`#lib/${encodeURIComponent(`artifact:${x.art.slug}`)}`)}">${esc(x.art.slug)}</a> <span class="badge high">broken</span>`
+      : `<a class="linkish" href="${esc(x.href)}">${esc(x.title)}</a>`;
+    return `<li>${link} <span class="muted">· ${esc(word)}${x.at !== 'main' ? ` · draft in ${esc(x.at)}` : ''}</span></li>`;
+  };
+  return psect('Artifacts', `<ul>${items.map(li).join('')}</ul>`).replace(/^<div class="card psect"/, '<div class="card psect" data-peek-arts');
+}
+// The ctx renderLibrary passes libraryItems, read from the page's globals when called.
+const PEEK_ART_CTX = () => ({ previewState, artHref, artViewer, pvViewer, fileHref });
+/* peek-artifacts end */
 // The Library (kit-92): one .cards grid of libraryItems kept by the page's Kind and Goal filters, in kind order;
 // above it, only when there is something to say, #lib-top: where publishing happens, or one confirm for every
 // published artifact not live on this box, and the notice for a box whose gateway doesn't serve previews.
