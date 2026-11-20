@@ -187,7 +187,8 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     const now = await p.ev('Date.now()');
     const at = last + Math.ceil((now - last + 200) / 2000) * 2000 + 1000;
     await sleep(at - now);
-    const t0 = await p.ev(`(window.__hidden = false, document.dispatchEvent(new Event('visibilitychange')), Date.now())`);
+    // the time taken before the event: the page's ask is logged while the event is dispatched
+    const t0 = await p.ev(`(() => { const t = Date.now(); window.__hidden = false; document.dispatchEvent(new Event('visibilitychange')); return t; })()`);
     await sleep(400);
     const first = await p.ev(`__fpAsks.find((x) => x.t >= ${t0})?.t ?? null`);
     assert.ok(first !== null && first - t0 <= 400, `an ask at once when shown again (${first === null ? 'none' : `${first - t0} ms`} after, the tick ~1000 ms away)`);
