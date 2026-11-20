@@ -422,7 +422,7 @@
   <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the operator" hidden></div>
   <div id="tl-dock" class="tl-dock">
     <div id="tl-panel" class="tl-panel" hidden>
-      <div class="tl-dock-head"><b>Threads</b><span class="small muted">with the operator</span><span class="grow"></span><button type="button" class="btn ghost" id="tl-pinbtn" aria-pressed="false" title="Point at something on the Overview to start a thread about it: for a phone, or for a long look around">Pin</button><button type="button" class="btn ghost" id="tl-new">New thread</button></div>
+      <div class="tl-dock-head"><b>Threads</b><span class="grow"></span><button type="button" class="btn ghost" id="tl-pinbtn" aria-pressed="false" title="Point at something on the Overview to start a thread about it: for a phone, or for a long look around">Pin</button><button type="button" class="btn ghost" id="tl-new">New thread</button></div>
       <div id="tl-op" class="tl-op" hidden></div>
       <div id="tl-list"></div>
     </div>
@@ -1966,7 +1966,7 @@ function tlCardFrame(card) {
   const ta = el('textarea');
   ta.id = 'tl-c-text';
   ta.rows = 2;
-  ta.placeholder = 'Write to the operator. Enter sends; Shift+Enter is a new line.';
+  ta.placeholder = 'Message';
   const row = el('div', 'row-inline');
   const bytes = el('span', 'small');
   bytes.id = 'tl-c-bytes';
@@ -2305,7 +2305,7 @@ function tlDock() {
   if (sig === TL.listSig || tlHeld(list)) return;
   TL.listSig = sig;
   const wasOpen = list.querySelector('.tl-closed')?.open;
-  list.replaceChildren(...(shown.length ? shown.map(row) : can ? [el('p', 'empty', 'No open threads. Hold Shift and click anything on the Overview, or start one here.')] : []));
+  list.replaceChildren(...(shown.length ? shown.map(row) : can ? [el('p', 'empty', 'None')] : []));
   if (closed.length) { const d = el('details', 'tl-closed'); d.open = !!wasOpen; d.append(el('summary', '', `Closed (${closed.length})`), ...closed.map(row)); list.append(d); }
 }
 // The box's alert (box-alert) is the machine's, not a project's: each project's hello carries it as
@@ -2496,7 +2496,7 @@ async function draw() {
   for (const it of items.values()) paintTab(it);
   paintOvTab();
   empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW || selected === SETTINGS;
-  if (!items.size) empty.textContent = 'No devteam dashboards are running on this machine.';
+  if (!items.size) empty.textContent = 'No projects running';
   if (!selected || (selected !== TERM && selected !== OVERVIEW && selected !== SETTINGS && !items.has(selected))) {
     const want = wanted();
     const ordered = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
