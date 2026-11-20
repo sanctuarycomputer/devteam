@@ -23415,23 +23415,30 @@ const recurringRegistry = Object.freeze({
       }
     });
   },
-  // The .gitattributes lines that give settings.md a merge driver, text or eol conversion, or a
-  // filter (final-3 F2): git's merge honours them (merge=union keeps both sides' lines), so the file
-  // that lands is no longer what a plain text merge of it writes. At a commit (read through a
-  // throwaway index, since check-attr --source is git 2.40's), or with no ref, in this checkout.
-  // An attribute that can't be read is a problem (fail closed).
+  // The .gitattributes lines that give settings.md a merge driver or a filter (final-3 F2): git's
+  // merge honours them (merge=union keeps both sides' lines), so the file that lands is no longer
+  // what a plain text merge of it writes. merge may be unspecified or text (the plain merge); filter
+  // must be unspecified. text and eol only normalise line endings (and -text makes a both-sides
+  // merge conflict, which lands nothing), so a repo-wide `* text=auto` or `* eol=lf` passes.
+  // At a commit, read through a throwaway index (check-attr --cached), so only that tree's
+  // .gitattributes count; with no ref, this checkout's. The user's core.attributesFile and the
+  // system file are left out; git has no way to leave out $GIT_DIR/info/attributes, which is the
+  // machine's own. An attribute that can't be read is a problem (fail closed).
   attrsProblems(ref) {
     const g = recurringRegistry.git;
     const rel = `${projectRel}/settings.md`;
-    const dir = ref ? fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-attrs-')) : null;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-attrs-'));
     try {
-      const env = dir ? { GIT_INDEX_FILE: path.join(dir, 'index') } : undefined;
+      const none = path.join(dir, 'none');
+      fs.writeFileSync(none, '');
+      const env = { GIT_ATTR_NOSYSTEM: '1', ...(ref ? { GIT_INDEX_FILE: path.join(dir, 'index') } : {}) };
       const cant = `.gitattributes: the attributes of ${rel}${ref ? ` at ${ref.slice(0, 12)}` : ''} can't be read`;
-      if (dir) { const rt = g(['read-tree', ref], { env }); if (!rt.ok) return [`${cant} (git read-tree${rt.timedOut ? ' timed out' : ''})`]; }
-      const r = g(['check-attr', ...(dir ? ['--cached'] : []), 'merge', 'text', 'eol', 'filter', '--', rel], { env });
+      if (ref) { const rt = g(['read-tree', ref], { env }); if (!rt.ok) return [`${cant} (git read-tree${rt.timedOut ? ' timed out' : ''})`]; }
+      const r = g(['-c', `core.attributesFile=${none}`, 'check-attr', ...(ref ? ['--cached'] : []), 'merge', 'filter', '--', rel], { env });
       if (!r.ok) return [`${cant} (git check-attr${r.timedOut ? ' timed out' : ''})`];
-      return r.out.split('\n').map((l) => /: (merge|text|eol|filter): (.*)$/.exec(l)).filter((m) => m && m[2] !== 'unspecified').map((m) => `.gitattributes sets ${m[1]} for ${rel}: the jobs must merge as plain text; remove it`);
-    } finally { if (dir) fs.rmSync(dir, { recursive: true, force: true }); }
+      const allowed = { merge: ['unspecified', 'text'], filter: ['unspecified'] };
+      return r.out.split('\n').map((l) => /: (merge|filter): (.*)$/.exec(l)).filter((m) => m && !allowed[m[1]].includes(m[2])).map((m) => `.gitattributes sets ${m[1]} for ${rel}: the jobs must merge as plain text; remove it`);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   },
   // settings.md's text with more than one line opening a json devteam block (the kit's fence,
   // trailing spaces included): a problem, since the kit reads only the first while git may put a

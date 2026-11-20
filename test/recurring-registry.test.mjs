@@ -440,7 +440,7 @@ test('A4f: a copy of the block\'s body that merge-file and git\'s merge align di
   } finally { T.done(); }
 });
 
-test('A4g: a .gitattributes that sets merge, text, eol or filter for settings.md is refused, at main or at the head (final-3 F2, RV3-UNION)', () => {
+test('A4g: a .gitattributes that sets a merge driver or a filter for settings.md is refused, at main or at the head; text and eol pass (final-3 F2, RV3-UNION)', () => {
   const T = setup('union');
   try {
     T.onMain((j) => { j.recurring = { aa: check({ title: 'A job', every: '6h' }), bb: check({ title: 'B job', every: '12h', run: 'echo bb' }), cc: chore({ title: 'C job', prompt: 'C.' }) }; });
@@ -453,13 +453,22 @@ test('A4g: a .gitattributes that sets merge, text, eol or filter for settings.md
     // at the head: the supervisor's own project/ chore adding the attribute is refused
     T.choreBranch('attrs', (wt) => write(path.join(wt, 'docs/devteam/project/.gitattributes'), 'settings.md merge=union\n'));
     refused(T.merge('attrs'), ATTR);
-    // a root .gitattributes setting eol is refused too
-    T.choreBranch('eol', (wt) => write(path.join(wt, '.gitattributes'), 'docs/devteam/project/*.md eol=crlf\n'));
-    refused(T.dry('eol'), /\.gitattributes sets eol for docs\/devteam\/project\/settings\.md/);
-    // at main (pushed by hand): git's merge honours main's merge=union, keeping both sides' lines,
-    // so the stale re-indent brings bb back; the kit refuses every PR while main has it
+    // a filter is refused too
+    T.choreBranch('filter', (wt) => write(path.join(wt, 'docs/devteam/project/.gitattributes'), 'settings.md filter=jobs\n'));
+    refused(T.dry('filter'), /\.gitattributes sets filter for docs\/devteam\/project\/settings\.md: the jobs must merge as plain text; remove it/);
+    // a repo-wide text=auto and eol=lf on main (pushed by hand) only normalise line endings: they pass
     T.g(['fetch', '-q', 'origin'], T.old);
     T.g(['merge', '-q', '--ff-only', 'origin/main'], T.old);
+    write(path.join(T.old, '.gitattributes'), '* text=auto\n* eol=lf\n');
+    T.g(['add', '.gitattributes'], T.old);
+    T.g(['commit', '-qm', 'line endings by hand'], T.old);
+    T.g(['push', '-q', 'origin', 'main'], T.old);
+    T.choreBranch('notes', (wt) => write(path.join(wt, 'docs/devteam/project/notes.md'), 'n\n'));
+    passes(T.dry('notes'));
+    const ok = T.run(['validate']);
+    assert.doesNotMatch(T.text(ok), /\.gitattributes/);
+    // at main (pushed by hand): git's merge honours main's merge=union, keeping both sides' lines,
+    // so the stale re-indent brings bb back; the kit refuses every PR while main has it
     write(path.join(T.old, 'docs/devteam/project/.gitattributes'), 'settings.md merge=union\n');
     T.g(['add', 'docs/devteam/project/.gitattributes'], T.old);
     T.g(['commit', '-qm', 'attrs by hand'], T.old);
