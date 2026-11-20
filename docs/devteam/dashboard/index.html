@@ -5672,11 +5672,13 @@ const GOAL_PEEK_SECTIONS = {
     const es = recList('entries');
     if (!es.length) return '';
     recBind();
-    return gpCard('jobs', psect('Jobs', pageTable('upkeep:jobs', ['Job', 'Kind', 'Every', 'Last run', 'Next'], es.map((e) => ({
+    const sect = psect('Jobs', pageTable('upkeep:jobs', ['Job', 'Kind', 'Every', 'Last run', 'Next'], es.map((e) => ({
       cells: [esc(e.title || e.name), esc(recKind(e)), esc(recEvery(e, true)), recLast(e.last), esc(recNext(e))],
       sort: [undefined, undefined, undefined, e.last?.at ?? null, e.kind === 'chore' && e.state === 'held' ? null : e.next_at ?? null],
       open: `recurring/${encodeURIComponent(e.name)}`,
-    })))));
+    }))));
+    // kit-169: the head links to the Jobs page (All jobs), after its label; the first match is the head's own
+    return gpCard('jobs', sect.replace('<span class="grow">Jobs</span>', '<span class="grow">Jobs</span><a class="linkish" href="#jobs">All jobs</a>'));
   },
   builtin: (g, c) => {
     const bs = recList('builtin');
