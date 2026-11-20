@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { canDrive, openChrome } from './lib/chrome.mjs';
+import { canDrive, chromePath, openChrome } from './lib/chrome.mjs';
 import { monoFixture, dashboardOnFreePort, until, tmuxShim, sessionOf } from './lib/kit.mjs';
 import { startSites } from './lib/sites.mjs';
 import { validate, schema } from './fixtures/browser/check.mjs';
@@ -139,6 +139,48 @@ function testBrowserPids() {
   return pids;
 }
 
+// kit-347: the first Chrome starts on a freshly booted CI runner can take longer than the daemon's 30 s
+// to open their DevTools pipe. The chrome shard's first files all start Chrome at once, reading it off a
+// cold, shared disk; B1's start, 5 s into the file, met that and failed with "Chrome didn't open its
+// DevTools pipe in 30 s", while later starts on the same runner take about a second. So before B1,
+// warmChrome launches Chrome much as the daemon does (DevTools on fds 3 and 4, a throwaway profile and
+// HOME, about:blank), again and again, until one answers Browser.getVersion within WARM_FAST_MS, for at
+// most WARM_BUDGET_MS in all: B1 then times the daemon's start, not the runner's first minute. It never
+// throws (a Chrome that can't start, or is still slow at the budget, is B1's to report) and it leaves
+// nothing running. It returns each launch's ms, a '!' after one that didn't answer.
+const WARM_FAST_MS = 5000, WARM_BUDGET_MS = 90000;
+async function warmChrome() {
+  const tries = [];
+  const home = fs.mkdtempSync(path.join(tmp, 'warm-home-'));
+  for (const end = Date.now() + WARM_BUDGET_MS; Date.now() < end;) {
+    const profile = fs.mkdtempSync(path.join(tmp, 'warm-'));
+    const t0 = Date.now();
+    let c;
+    // spawn throws some errors (ENOTDIR, say) rather than emitting them: a launch that didn't start
+    try { c = spawn(chromePath, ['--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-pipe', '--no-sandbox', '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--proxy-server=127.0.0.1:9', 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: home } }); } catch { tries.push(`${Date.now() - t0}!`); try { fs.rmSync(profile, { recursive: true, force: true }); } catch {} break; }
+    let gone = false;
+    const how = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve('late'), Math.max(0, end - Date.now()));
+      const done = (v) => { clearTimeout(timer); resolve(v); };
+      c.once('error', () => { gone = true; done('gone'); });
+      c.once('exit', () => { gone = true; done('gone'); });
+      if (!c.pid) return;
+      for (const p of [c.stdio[3], c.stdio[4]]) p.on('error', () => {});
+      c.stdio[4].on('data', (d) => { if (d.includes(0)) done('answered'); });
+      c.stdio[3].write(`${JSON.stringify({ id: 1, method: 'Browser.getVersion' })}\0`);
+    });
+    const ms = Date.now() - t0;
+    tries.push(how === 'answered' ? ms : `${ms}!`);
+    if (c.pid) { try { process.kill(-c.pid, 'SIGKILL'); } catch {} }
+    // its exit, for at most 5 s: a process in disk wait dies only once its read returns
+    if (c.pid && !gone) await new Promise((r) => { if (c.exitCode !== null || c.signalCode !== null) return r(); const t = setTimeout(r, 5000); c.once('exit', () => { clearTimeout(t); r(); }); });
+    for (const p of [c.stdio?.[3], c.stdio?.[4]]) p?.destroy(); // no stdio when spawn failed (EMFILE)
+    try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {} // after() removes tmp too
+    if (how === 'gone' || (how === 'answered' && ms < WARM_FAST_MS)) break;
+  }
+  return tries;
+}
+
 let e; // E1 to E4, D4, D5's planted form, Review Focus 1, B3: refusals that start nothing
 let a; // the long-lived browser
 let dash; // B4 to B6: a real dashboard on a's fixture
@@ -153,6 +195,7 @@ before(() => {
     standIn = await startStandIn();
     e = project('brw-e', newHome());
     a = project('brw-a', newHome());
+    console.log(`# kit-347 Chrome warm-up, ms per launch: ${(await warmChrome()).join(', ')}`);
   })();
   return setup;
 });
@@ -330,6 +373,19 @@ async function started(P, extra) {
   assert.match(r.out, /browser running \(preview [a-z]+-[a-z]+(-\d+)?, profile /);
   return r;
 }
+// B1 starts a; B2, S2, Review Focus 2 and E4 read the browser it left running. Each calls liveA first,
+// which starts a when it isn't running (B1's start failed), so one failed start is one red test, never
+// four more reading a state.json that isn't there (kit-347). It tries that once per file: after a failed
+// try, each later call fails at once with that try's error, so a runner still too slow for a start
+// costs one more start, not four, inside the file's watchdog.
+let liveAFailed = null;
+async function liveA() {
+  let s = null;
+  try { s = readState(a); } catch {}
+  if (s && alive(s.daemon_pid) && alive(s.chrome_pid)) return;
+  if (liveAFailed) throw liveAFailed;
+  try { await started(a); } catch (err) { liveAFailed = err; throw err; }
+}
 async function statusJson(P) {
   const r = await cli(P, ['status', '--json']);
   assert.equal(r.status, 0, r.err);
@@ -382,6 +438,7 @@ test('B1 Chrome runs in the preview window; D1 the profile folder; status while 
 });
 
 test('B2 Chrome\'s flags', opts, async () => {
+  await liveA();
   const s = readState(a);
   const args = cmdline(s.chrome_pid);
   for (const f of [`--proxy-server=127.0.0.1:${s.guard_port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic', `--user-data-dir=${a.profile}`]) assert.ok(args.includes(f), `${f} in ${args.join(' ')}`);
@@ -416,6 +473,7 @@ function socketsOf(pid) {
 const procNet = (f) => { try { return fs.readFileSync(`/proc/net/${f}`, 'utf8').split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((c) => c.length > 1); } catch { return []; } };
 
 test('S2 no DevTools port', opts, async () => {
+  await liveA();
   const s = readState(a);
   // P2: nothing in Chrome's group listens on TCP, on any address
   const group = groupOf(s.chrome_pid);
@@ -446,6 +504,7 @@ test('S2 no DevTools port', opts, async () => {
 });
 
 test('Review Focus 2: the control port answers only its own client', opts, async () => {
+  await liveA();
   const s = readState(a);
   assert.equal(await controlPost(s.control_port, { host: `127.0.0.1:${s.control_port}`, 'x-devteam-browser': '0'.repeat(64) }), 403);
   assert.equal(await controlPost(s.control_port, { host: 'evil.example', 'x-devteam-browser': s.control_secret }), 403);
@@ -464,6 +523,7 @@ test('E4 refuses only a cold start: a live browser keeps answering over the ceil
   const mem = path.join(tmp, 'meminfo-full');
   fs.writeFileSync(mem, 'MemTotal: 1000000 kB\nMemAvailable: 50000 kB\n');
   const full = { DEVTEAM_MEMINFO: mem, DEVTEAM_CGROUP: path.join(tmp, 'no-cgroup') };
+  await liveA();
   const before = readState(a);
   const r = await cli(a, ['start'], full);
   assert.equal(r.status, 0, r.err);

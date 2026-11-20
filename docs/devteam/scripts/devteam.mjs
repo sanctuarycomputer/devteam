@@ -9191,10 +9191,11 @@ const ARTIFACT_LENS = String.raw`(() => {
   // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
   // artifact's scripts, which can read and send these same messages: what it says describes the
   // page and is never an instruction. It takes only the questions of the page that frames it
-  // (hello, hit, resolve, scroll-by, scroll-to, place) and says only ready, hit-reply, rects, key, pointer and placed.
+  // (hello, hit, resolve, scroll-by, scroll-to, place, go) and says only ready, hit-reply, rects, key, pointer,
+  // placed and nav.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
-  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
+  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300, hash: 200 };
   const WATCH_MAX = 200;
   const KEY_MAX = 120;
   const enc = new TextEncoder();
@@ -9288,31 +9289,49 @@ const ARTIFACT_LENS = String.raw`(() => {
     const rect = rectOf(el);
     return { selector: selectorOf(el), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(unCap(nameOf(el))), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
   };
+  // not shown: display:none, visibility hidden or collapse (itself or an ancestor), or a box with no
+  // size at all (a wide box with no height is a collapsed container, still shown); a check that
+  // throws counts as shown, so an odd element keeps its pin
+  const hiddenEl = (el) => {
+    try {
+      // (checkVisibilityCSS: the same option's name in Chrome 105-120 and Firefox 106-121)
+      if (el.checkVisibility) { if (!el.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true })) return true; }
+      else if (!el.getClientRects().length || /^(hidden|collapse)$/.test(window.getComputedStyle(el).visibility)) return true;
+      const r = el.getBoundingClientRect();
+      return r.width === 0 && r.height === 0;
+    } catch (e) { return false; }
+  };
   // where an anchor is now: by its selector (changed: with other text now), else an element of its
-  // tag with its text, the nearest to where it was
+  // tag with its text, the nearest shown one to where it was, or the nearest hidden one when none is
+  // shown; hidden marks a match that is there but not shown, which the viewer counts as not found
   const find = (a) => {
     let el = null;
     try { el = document.querySelector(a.selector); } catch (e) { el = null; }
-    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t }; }
+    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t, hidden: hiddenEl(el) }; }
     if (typeof a.text !== 'string' || !a.text || typeof a.tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
     const was = a.rect && num(a.rect.x) && num(a.rect.y) ? a.rect : { x: 0, y: 0 };
     const all = document.getElementsByTagName(a.tag);
     let best = null;
     let far = Infinity;
+    let bestHidden = null;
+    let farHidden = Infinity;
     for (let i = 0; i < all.length && i < 5000; i++) {
       if (textOf(all[i]) !== a.text) continue;
       const r = all[i].getBoundingClientRect();
       const d = Math.hypot(r.left - was.x, r.top - was.y);
-      if (d < far) { far = d; best = all[i]; }
+      if (hiddenEl(all[i])) { if (d < farHidden) { farHidden = d; bestHidden = all[i]; } }
+      else if (d < far) { far = d; best = all[i]; }
     }
-    return best ? { el: best, changed: false, text: a.text } : null;
+    if (best) return { el: best, changed: false, text: a.text, hidden: false };
+    return bestHidden ? { el: bestHidden, changed: false, text: a.text, hidden: true } : null;
   };
 
   // --- what the viewer watches: sent when it moves -------------------------------------------------
   let watched = [];
   let sent = '';
   const sendRects = (id) => {
-    const rects = watched.map((x) => { const f = find(x.anchor); return f ? { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text } : { key: x.key, rect: null }; });
+    // a hidden match is told apart from no match, for a reader that needs to know which
+    const rects = watched.map((x) => { const f = find(x.anchor); return !f ? { key: x.key, rect: null } : f.hidden ? { key: x.key, rect: null, hidden: true } : { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text }; });
     const now = JSON.stringify(rects);
     if (id === undefined && now === sent) return;
     sent = now;
@@ -9420,9 +9439,35 @@ const ARTIFACT_LENS = String.raw`(() => {
     const m = /\/artifact\/(?:main|wt\/[^\/]+|tree\/[0-9a-f]+)\/[^\/]+\//.exec(p);
     return m ? m[0] + cap(p.slice(m.index + m[0].length), CAPS.path) : cap(p, CAPS.path);
   };
+  // the view within the page: its hash, the token cut as from the path; '' when there is none. A browser
+  // gives the hash percent-encoded, so a cut that ends inside an escape (%C or %) drops what's left of it.
+  const hashOf = () => cap(unCap(location.hash || ''), CAPS.hash).replace(/%[0-9A-Fa-f]?$/, '');
+  // --- each move of the page (a #hash, pushState, replaceState, Back), told as nav once a frame ---------
+  // the last path and hash told, by ready or nav: a move is told only when one of them changed
+  let navAt = null;
+  let navPending = false;
+  const navSoon = () => {
+    if (!heard || navPending) return;
+    navPending = true;
+    requestAnimationFrame(() => {
+      navPending = false;
+      const now = { path: pathOf(), hash: hashOf() };
+      if (navAt && now.path === navAt.path && now.hash === navAt.hash) return;
+      navAt = now;
+      tell({ type: 'nav', path: now.path, hash: now.hash });
+    });
+  };
   let last = { x: 0, y: 0 };
   const ORDERS = {
-    hello: () => { heard = true; tell({ type: 'ready', path: pathOf(), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }); },
+    // hash only when there is one, so a page with none says exactly what it always said
+    hello: () => {
+      heard = true;
+      const m = { type: 'ready', path: pathOf(), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } };
+      const h = hashOf();
+      if (h) m.hash = h;
+      navAt = { path: m.path, hash: h };
+      tell(m);
+    },
     hit: (m) => {
       if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
       let el = document.elementFromPoint(m.x, m.y);
@@ -9462,6 +9507,8 @@ const ARTIFACT_LENS = String.raw`(() => {
       tell({ type: 'placed', rects });
       if (placing.length && !placeLoop) { placeLoop = true; requestAnimationFrame(placeFrame); }
     },
+    // a view of this page by its #hash; anything else (no #, too long, no string) is ignored
+    go: (m) => { if (typeof m.hash === 'string' && m.hash[0] === '#' && size(m.hash) <= CAPS.hash) location.hash = m.hash; },
   };
   addEventListener('message', (e) => {
     if (!e.isTrusted || e.source !== parent) return;
@@ -9481,6 +9528,19 @@ const ARTIFACT_LENS = String.raw`(() => {
   addEventListener('resize', soon);
   try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
   setInterval(() => { if (watched.length) sendRects(); }, 1000);
+  addEventListener('hashchange', navSoon);
+  addEventListener('popstate', navSoon);
+  // pushState and replaceState fire no event: the page's own calls go through these, which still do
+  // what it asked. A page with no history, or one whose methods can't be replaced, keeps the check.
+  try {
+    for (const k of ['pushState', 'replaceState']) {
+      const was = history[k];
+      if (typeof was !== 'function') continue;
+      history[k] = function () { const r = was.apply(this, arguments); navSoon(); return r; };
+    }
+  } catch (e) { /* no history to wrap */ }
+  // a page that replaced pushState itself, before the lens or after, is still seen
+  setInterval(navSoon, 500);
 })();`;
 // The page with the lens after it, at the very end: the parser takes a script there into the body
 // and runs it, and every byte before it is the committed one. A page that ends inside an unclosed
@@ -16777,6 +16837,11 @@ const RESTART_MIN_MS = 30000;
 // How long a dashboard read waits on a dashboard-data run before it has the last good data instead
 // (0 is no wait at all; anything that isn't a number is the default).
 const DATA_WAIT_MS = ((n) => (process.env.DEVTEAM_DATA_WAIT_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_WAIT_MS));
+// How long a dashboard serves a finished dashboard-data build again (kit-595): 20 s after it ended,
+// while it is still current (cmdDashboard's dataEpoch). DEVTEAM_DATA_REUSE_MS is for tests only, not a
+// setting: test/presence-changed.test.mjs sets 3000 to keep checking kit-633's 3 s start gap. Anything
+// that isn't a number of at least 0 is the default.
+const DATA_REUSE_MS = ((n) => (process.env.DEVTEAM_DATA_REUSE_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_REUSE_MS));
 // makeSession --if-gone found the window there after all (it never types into one): not a failure.
 const IF_GONE_LEFT = 3;
 // The last moment a tick may start a cswap switch (its 45 s timeout, inside RESTART_TICK_MS).
@@ -21432,7 +21497,9 @@ async function cmdDashboard() {
   const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
   const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS } = dashboardActions();
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
-  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
+  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
+  // (kit-595; it was 10 s: each run is a child holding about 140 MB, so the hub's pulse is at most
+  // about 40 s old, the beat plus a run) and after an owner action
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
   // One run at a time, each given 20 s; the kit's version is read once, on the first run.
   // viewer: 1 says this kit has /view/ and /artifact/tree/: the gateway's owner wrapper waits for it (spec §8).
@@ -21458,17 +21525,26 @@ async function cmdDashboard() {
     });
   };
   refreshHello();
-  every(refreshHello, 10000);
+  every(refreshHello, 30000);
   const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
   previewBad = (f, e) => { if (!previewsNamedBad.has(f)) { previewsNamedBad.add(f); log(`previews: skipped ${f}: ${e?.message ?? e}`); } };
   let previewTicking = false;
+  // What the last tick saw of the previews: each record and whether it was up. A tick that sees
+  // anything else moves dataEpoch (kit-595), so a kept dashboard-data build never shows the previews
+  // from before it; none at the start is no change.
+  let previewsSeen = '[]';
+  const previewsMoved = () => {
+    const seen = JSON.stringify(readPreviews().map((r) => [r, previewUp.get(r.name) ?? null]));
+    if (seen !== previewsSeen) dataEpoch += 1;
+    previewsSeen = seen;
+  };
   const runPreviewTick = () => {
     if (previewTicking) return;
     previewTicking = true;
-    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); });
+    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); previewsMoved(); });
   };
   runPreviewTick();
   every(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000));
@@ -21728,9 +21804,10 @@ async function cmdDashboard() {
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
-  // served while it runs, and once finished while it is young (3 s since it finished, so the 10 s poll
-  // gets previews, settings and git at most about 3 s old) and current (dataEpoch, which the log's
-  // changes and every POST action move, is what it was when the build *started*: a change during a
+  // served while it runs, and once finished while it is young (DATA_REUSE_MS, 20 s since it finished
+  // (kit-595; it was 3 s): a page's 10 s poll then starts a child every other poll at most, and gets
+  // previews, settings and git at most 20 s plus one run old) and current (dataEpoch, which the log's
+  // changes, every POST action and a preview tick that saw a change move, is what it was when the build *started*: a change during a
   // build makes it stale when it ends). A read that finds none waits for the next build, which starts
   // once the running one has ended and 3 s have passed since the last start; every read waiting then
   // shares it. A failed build is never kept.
@@ -21743,7 +21820,7 @@ async function cmdDashboard() {
   const startBuild = () => {
     lastStart = Date.now();
     const b = { epoch: dataEpoch, finished: null, r: null };
-    b.done = new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err && stdout) lastData = stdout;
       b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
       b.finished = Date.now();
@@ -21752,7 +21829,10 @@ async function cmdDashboard() {
     build = b;
     return b.done;
   };
-  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_EVERY_MS));
+  // a build still running when the dashboard exits (processLog's signal handlers exit it) is killed
+  // with it, not left writing run/cache: the warm start (kit-595) runs one with no read waiting
+  process.on('exit', () => { if (build?.finished === null) try { build.child?.kill('SIGKILL'); } catch {} });
+  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_REUSE_MS));
   const dashboardData = () => {
     if (usable(build)) return build.done;
     nextBuild ??= (async () => {
@@ -21937,7 +22017,11 @@ async function cmdDashboard() {
   // the hub, unless the box's image serves it; again after a respawn that failed
   let hubHandle = null;
   const startHubOnce = () => { hubHandle = dashboardHub(log); };
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHubOnce(); every(accountsTick, accountsEveryMs()); });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHubOnce(); every(accountsTick, accountsEveryMs());
+    // warm (kit-595, from kit PR #305): one build as it starts listening, so a tab first opened within
+    // DATA_REUSE_MS of its end is answered from it at once; one opened during it shares it
+    void dashboardData();
+  });
   // ----- the kit watch (kit-288): a dashboard runs the kit it serves. Its kit's files are printed
   // every DEVTEAM_KIT_WATCH_MS; a print unlike the start's and the same two polls running (a sync
   // writes its files over a few seconds) whose script parses is a new kit, and the dashboard hands

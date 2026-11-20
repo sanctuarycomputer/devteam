@@ -49,9 +49,9 @@ import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(import.meta.url);
 export const ROOT = fs.realpathSync(path.resolve(path.dirname(here), '..'));
 export const ALONE = ['test/bounds.test.mjs'];
-// Files known to run longer than 300 s, until kit-210 splits it. recurring-registry nears it on CI's
-// slowest runner (281 s on Node 18; kit-162 final-11 F2).
-export const LONG = { 'test/dashboard.test.mjs': 600, 'test/recurring-registry.test.mjs': 600 };
+// Files known to run longer than 300 s get a longer watchdog here (kit-210 split dashboard.test.mjs).
+// recurring-registry nears 300 s on CI's slowest runner (281 s on Node 18; kit-162 final-11 F2).
+export const LONG = { 'test/recurring-registry.test.mjs': 600 };
 export const GROUPS = ['chain', 'alone', 'chrome', 'rest'];
 export class UsageError extends Error {}
 
