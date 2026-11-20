@@ -1065,6 +1065,11 @@ const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-sett
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
 const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records', 'worktree_copy', 'worktree_setup_always'];
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
+// what a repo link's maintain may turn on; linkMaintains(l, 'prs')
+const LINK_DUTIES = ['prs', 'releases'];
+// maintain.reviews: another name its review records may go under, run/reviews/<reviews>-pr-<n>/, besides the link's id
+const REVIEWS_PREFIX = /^[a-z0-9][a-z0-9_.-]{0,63}$/i;
+const linkMaintains = (l, duty) => !!l && typeof l === 'object' && !!l.maintain && typeof l.maintain === 'object' && l.maintain[duty] === true;
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
 // records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
 // "repo", in its own project folder, landing with its code; or "home", on home's ticket/<id> in
@@ -1095,7 +1100,7 @@ const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
   gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string', records: 'string',
-  worktree_copy: 'any', worktree_setup_always: 'boolean',
+  worktree_copy: 'any', worktree_setup_always: 'boolean', maintain: 'object',
 });
 const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
@@ -1152,7 +1157,9 @@ const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w
 // looks up: kind "constructor" is unknown, not Object's.
 const LINK_KINDS = Object.assign(Object.create(null), {
   repo: {
-    fields: { required: ['remote'], optional: ['path', ...REPO_KEYS] },
+    // maintain: { prs, releases }, duties the supervisor keeps for a repo it doesn't only merge
+    // tickets into (linkDutyFindings): the owner's, a governance-edit like the rest
+    fields: { required: ['remote'], optional: ['path', 'maintain', ...REPO_KEYS] },
     // where the checkout is on this machine is never the owner's; what a gate run sees is
     // gate-change; anything else about a repo devteam merges into is governance-edit
     ownerClass: (field) => (field === 'path' ? null : REPO_GATE_KEYS.includes(field) ? 'gate-change' : 'governance-edit'),
@@ -1173,6 +1180,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
       else ctx.remotes.set(k, ctx.id);
       if (l.project !== undefined && (typeof l.project !== 'string' || !REPO_PATH.test(l.project))) errs.push(`${at}: project is a path inside that repo`);
       if (l.records !== undefined && !RECORDS_WHERE.includes(l.records)) errs.push(`${at}: records is "repo" or "home"`);
+      if (l.maintain !== undefined && (!isObj(l.maintain) || Object.entries(l.maintain).some(([k, v]) => (k === 'reviews' ? typeof v !== 'string' || !REVIEWS_PREFIX.test(v) : !LINK_DUTIES.includes(k) || typeof v !== 'boolean')))) errs.push(`${at}: maintain is { "prs": true|false, "releases": true|false, "reviews": "<records prefix>" }`);
       return errs;
     },
     // local and cheap: metrics asks it live
@@ -3156,14 +3164,14 @@ function findCycle(ts) {
   for (const id of ts.keys()) if (!state.has(id)) { const c = dfs(id); if (c) return c; }
   return null;
 }
-// Longest dependency chain, weighted S = 1, M = 2.
-function criticalPath(ts) {
+// Longest dependency chain, weighted S = 1, M = 2 (or by w: () => 1 counts tickets).
+function criticalPath(ts, w = weight) {
   const best = new Map();
   const longest = (id) => {
     if (best.has(id)) return best.get(id);
     let top = { len: 0, path: [] };
     for (const d of ts.get(id).depends_on ?? []) if (ts.has(d)) { const r = longest(d); if (r.len > top.len) top = r; }
-    const res = { len: top.len + weight(ts.get(id)), path: [...top.path, id] };
+    const res = { len: top.len + w(ts.get(id)), path: [...top.path, id] };
     best.set(id, res);
     return res;
   };
@@ -4208,6 +4216,39 @@ function deriveStatus() {
   });
 }
 
+// A mostly serial graph (D4, D11): the longest chain of unmerged tickets is SERIAL_DEPTH or more
+// deep and at least SERIAL_RATIO times the ready width (unmerged tickets whose dependencies have
+// all merged). Every check passes on such a graph, yet only one or two tickets can ever run. When
+// most of the chain's links join tickets that share nothing but a whole-file touch of a file
+// split_files lists, the dependency only serializes: naming parts (path#name) lets them run at once.
+const SERIAL_DEPTH = 8, SERIAL_RATIO = 4;
+function serialGraphWarning(live, s = loadSettings()) {
+  const U = new Map(live.map((t) => [t.id, t]));
+  if (U.size < SERIAL_DEPTH) return null;
+  const chain = criticalPath(U, () => 1).path;
+  const depth = chain.length;
+  const width = live.filter((t) => !(t.depends_on ?? []).some((d) => U.has(d))).length;
+  if (depth < SERIAL_DEPTH || depth < SERIAL_RATIO * width) return null;
+  const msg = `the unmerged ticket graph is mostly serial: its longest dependency chain is ${depth} tickets deep (${chain[0]} … ${chain[depth - 1]}) while ${width} of ${U.size} are ready (no unmerged dependency) (D4, D11)`;
+  // a link that only serializes: every footprint the two share is a whole-file touch of a split file
+  const wholeSplit = (a, b) => {
+    const repo = repoOfTicketLink(a);
+    if (repo !== repoOfTicketLink(b)) return null;
+    const files = new Set();
+    for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) {
+      if (!touchesOverlap(ga, gb, repo, s)) continue;
+      const pa = trimSlash(touchPath(ga)), pb = trimSlash(touchPath(gb));
+      if (pa !== pb || hasWild(pa) || !isSplitFile(pa, s) || (touchPart(ga) && touchPart(gb))) return null;
+      files.add(pa);
+    }
+    return files.size ? [...files] : null;
+  };
+  const links = [];
+  for (let i = 1; i < depth; i++) { const f = wholeSplit(U.get(chain[i - 1]), U.get(chain[i])); if (f) links.push(`${chain[i]} on ${chain[i - 1]} (${f.join(', ')})`); }
+  if (links.length * 2 <= depth - 1) return `${msg}; find dependencies a contract ticket or a split could break`;
+  return `${msg}; ${links.length} of its ${depth - 1} links only serialize whole-file touches of a file split_files lists, e.g. ${links.slice(0, 2).join('; ')}: name the parts each changes (path#name) and drop the dependencies that only serialize`;
+}
+
 const onPlanBranch = () => (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
 function cmdValidate() {
@@ -4416,6 +4457,8 @@ function cmdValidate() {
       if (big) ordered.push(`${a.id} depends on ${b.id}, and they share only ${[...big].map(([f, n]) => `${f} (${n} lines)`).join(', ')}, claimed whole`);
     }
     if (ordered.length) warnings.push(`a whole-file claim on a big file orders ${ordered.length} pair(s) of tickets: ${ordered.slice(0, 5).join('; ')}${ordered.length > 5 ? ` (+${ordered.length - 5} more)` : ''}. If a dependency is only there for D4, name the parts each changes (path#name; planning.md D4) so they can run at once`);
+    const w = serialGraphWarning(live);
+    if (w) warnings.push(scope ? `${w}; not ${scope}'s to fix` : w);
   }
 
   // The registry and the lines. Labels-only components and an empty registry print nothing.
@@ -8358,6 +8401,10 @@ function anchorProblem(a) {
   }
   return null;
 }
+// A subject's key: one open thread per key (kit-97). An item by its ref, a page spot by its view and point,
+// an artifact's or a preview's spot by its page and the element the lens named, else the point. index.html's
+// tKey (with tFrameSpot) is the same function; test/thread-per-subject.test.mjs holds the two equal.
+const subjectKey = (s) => { const spot = () => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
 // What a thread or turn line holds beyond what the schema's walk can say: sizes in bytes, a title
 // of one line, a subject with only its kind's keys, and the supervisor's fields on its own turns.
 function threadLineProblems(o) {
@@ -8523,7 +8570,7 @@ function threadOpen(id, by) {
   if (t.status === 'resolved') die(by === 'owner' ? `${t.id} is resolved; reopen it first (thread reopen ${t.id} "<words>")` : `${t.id} is resolved: the owner closed it, and a reply goes nowhere until they reopen it`);
   return t;
 }
-const openThreadCount = () => threadViews(readLog().objects).filter((x) => x.status === 'open').length;
+const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open').length;
 // Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
 // owner's move), else waiting (on the supervisor).
 function threadCounts() {
@@ -8645,7 +8692,12 @@ function cmdThread() {
     const title = threadTitle(given ?? words);
     if (!title) die('--title: the thread needs a name');
     const files = filesFlag();
-    const n = openThreadCount();
+    const views = threadViews(readLog().objects);
+    // one open thread per subject (kit-97): a second is refused, naming the one to say it in
+    const key = subject === undefined ? null : subjectKey(subject);
+    const had = key === null ? null : views.find((x) => x.status === 'open' && x.subject && subjectKey(x.subject) === key);
+    if (had) die(`${had.id} is already open on this subject: say it there (thread say ${had.id} "<words>")`);
+    const n = openThreadCount(views);
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
     // both lines checked before the thread's is written: a refused first turn leaves no thread with none
     if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
@@ -9499,7 +9551,7 @@ async function previewRunIt(rec) {
 }
 // What hello and the Library say of one preview, every string capped: this goes into the hub's list.
 const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
-const previewHelloRow = (r, up) => ({ name: previewCap(r.name, 63), port: r.port, project: previewCap(r.project, 63), session: previewCap(r.session, 80), label: previewCap(r.label, PREVIEW_LABEL_MAX), at: previewCap(r.at, 40), up, run: !!r.run });
+const previewHelloRow = (r, up) => ({ name: previewCap(r.name, 63), port: r.port, project: previewCap(r.project, 63), session: previewCap(r.session, 80), label: browserPreviewShaped(r) ? "Supervisor's browser" : previewCap(r.label, PREVIEW_LABEL_MAX), at: previewCap(r.at, 40), up, run: !!r.run });
 // --- the preview lens: framed by the viewer at <preview>/.devteam/lens, on the app's own origin, it
 // reads the app's page for the viewer over postMessage (spec §7). On a box the gateway serves it; on a
 // laptop the dashboard's relay does. Copied from cloud/gateway.mjs, never edited here: a test holds
@@ -9876,7 +9928,10 @@ async function cmdPreview() {
     const rows = await Promise.all(recs.map(async ({ mtimeMs, ...r }) => ({ ...r, up: await probePort(r.port) })));
     if (flags.json) return json(rows);
     if (!rows.length) return out('no previews');
-    for (const r of rows) out(`${r.name}  port ${r.port}  ${r.up ? 'answers' : 'not answering'}  ${r.session}${r.label ? ` (${r.label})` : ''}  ${previewLink(r)}`);
+    for (const r of rows) {
+      const label = browserPreviewShaped(r) ? "Supervisor's browser" : r.label;
+      out(`${r.name}  port ${r.port}  ${r.up ? 'answers' : 'not answering'}  ${r.session}${label ? ` (${label})` : ''}  ${previewLink(r)}`);
+    }
     return undefined;
   }
   if (sub === 'url') {
@@ -9890,16 +9945,33 @@ async function cmdPreview() {
     if (flags.all) {
       const session = logWriter();
       const mine = readPreviews().filter((r) => r.session === session);
-      for (const r of mine) { killPreviewWindow(r); removePreview(r.name); }
+      // the caller's browser record as browser stop stops it (Chrome too), the others as ever
+      for (const r of mine) {
+        if (browserIsPreview(r)) await browserStop({ say: false, rec: r });
+        else { killPreviewWindow(r); removePreview(r.name); }
+      }
       return out(`stopped ${mine.length} preview${mine.length === 1 ? '' : 's'}`);
     }
     const r = previewNamed(arg ?? die('usage: preview stop <name> | --all'));
+    // the browser's record is browser stop, whoever's writer runs it: stopping takes nothing from anyone
+    if (browserIsPreview(r)) {
+      // the line only when Chrome was stopped: a failed kill has said why and set exit 1
+      if (await browserStop({ say: false, rec: r })) out(`preview ${r.name} stopped, and the supervisor's browser with it`);
+      return undefined;
+    }
     const killed = killPreviewWindow(r);
     removePreview(r.name);
     return out(`preview ${r.name} stopped${killed ? ' and its server shut down' : r.run ? '' : ' (unregistered; the server is yours to stop)'}`);
   }
   if (sub === 'start') {
     const r = previewNamed(arg ?? die('usage: preview start <name>'));
+    // the browser's record is browser start: its gates first (a worker refused before anything
+    // starts), then the start lock, the memory check and a fresh environment from this caller
+    if (browserIsPreview(r)) {
+      browserGates({ chrome: true });
+      const s = await browserEnsure();
+      return out(`browser running (preview ${s.preview}, profile ${browserKey()})`);
+    }
     if (!r.run) die(`preview ${r.name} has no command to run: it is a server you run yourself. Start it, then devteam.mjs preview ${r.port}${r.label ? ` --label "${r.label}"` : ''}`);
     if (!fs.existsSync(r.cwd)) die(`preview ${r.name}: its folder ${r.cwd} is gone`);
     killPreviewWindow(r);
@@ -9912,6 +9984,8 @@ async function cmdPreview() {
     if (/[\r\n\0]/.test(cmd)) die('preview --run is one line');
     const session = logWriter();
     const label = previewLabel();
+    // previewClaim keys on the label: this one would take over the browser's record and kill its window
+    if (label === 'browser') die("preview: the label browser is the supervisor's browser's; pick another");
     const { name, had } = await previewClaim(session, label);
     if (had?.run) killPreviewWindow(had);
     let port;
@@ -9928,6 +10002,7 @@ async function cmdPreview() {
     if (await previewPortIsDashboard(port)) die(`preview: ${port} is a devteam dashboard`);
     const session = logWriter();
     const label = previewLabel();
+    if (label === 'browser') die("preview: the label browser is the supervisor's browser's; pick another");
     const { name, had } = await previewClaim(session, label);
     // The kit's own window stays only while it is what's on this port; a window with no record
     // to answer for it would be swept by the next tick anyway.
@@ -11865,13 +11940,14 @@ async function cmdObserveMetrics() {
   // the tick's heartbeat: another machine live on this repo stops the tick here
   const hc = hostCheck();
   if (hc.refused) hostRefusedWhileRunning(hc);
-  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes
+  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes, then each GitHub repo link's open PRs
   const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
   const unfetched = await fetchLinkMains(end);
   const { skipped } = await probeLinks(end);
+  const unlisted = await fetchLinkPrs(end);
   const s = observeSpend();
   const learned = writeLearning();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
   // finished worktrees go, at most every 30 minutes (one line when any did)
   tidyFinishedWorktrees();
 }
@@ -11897,12 +11973,80 @@ async function fetchLinkMains(end) {
       const r = await runProbe({ cmd: 'git', args: ['fetch', '--quiet', 'origin', b], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: (code) => (code === 0 ? {} : { problem: `could not fetch origin ${b} from ${redactUrl(R.remote)} in ${R.root}; its main here is as last fetched` }) }, end);
       if (r === 'budget') { skipped.push(id); continue; }
       state[id] = { at: nowIso(), problem: r.problem ?? null };
+      // a repo whose releases are kept (maintain.releases) also gets its release tags, which a
+      // fetch of one branch doesn't bring, so a release cut elsewhere clears release-due; never
+      // forced, so a local tag that differs stays as it is
+      if (!r.problem && linkMaintains(loadSettings().links?.[id], 'releases') && Date.now() < end) await runProbe({ cmd: 'git', args: ['fetch', '--quiet', '--no-tags', 'origin', 'refs/tags/v*:refs/tags/v*'], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: () => ({}) }, end);
       if (!r.problem) R.resetCaches();
     }
   };
   await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, ids.length) }, one));
   for (const id of Object.keys(state)) if (!ids.includes(id)) delete state[id];
   writeJson(FETCH_FILE, state);
+  return skipped;
+}
+// The open PRs on each GitHub repo link that aren't the fleet's own (ticket/, plan/, chore- branches
+// in the repo itself land through merge and their records; a fork's branch of that name is an outside PR), read with gh inside the tick's budget, so metrics can say
+// when one waits unreviewed or with findings its author never saw (pr-unreviewed,
+// pr-changes-unanswered) without touching the network. A good read is reused for
+// LINK_PRS_REUSE_MS (the findings count hours). A failed read (gh missing, logged out, offline, a
+// query GitHub refuses) keeps the last PRs but marks the entry failing, with when it started and
+// gh's first line, so metrics raises no PR finding from stale data and says (link-prs-unread) when
+// reads have failed for LINK_PRS_UNREAD_HOURS. Kept per PR: its head, when that head was first seen
+// (the PR's updatedAt, which a push moves, when the head is new to us: never later than the push
+// is old, so never a false stall), the forge's reviews of that head and when it was last commented
+// on, leaving out bots. The query asks for no `commits`: gh's commits field nests authors under
+// commits under PRs and GitHub refuses it for its node count.
+const LINK_PRS_FILE = runPath('link-prs.json');
+const LINK_PRS_REUSE_MS = 30 * 60000;
+const LINK_PRS_UNREAD_HOURS = 6;
+const LINK_PRS_MAX_AGE_MS = 2 * 3600000;
+const FLEET_BRANCH = /^(ticket\/|plan\/|chore-)/;
+// gh's GraphQL logins drop the [bot] suffix an app has on the REST API, so the common apps are named too
+const BOT_LOGIN = /\[bot\]$|^(github-actions|copilot-pull-request-reviewer|copilot|dependabot|renovate|vercel|vercel-fleet-prod|netlify|coderabbitai|chatgpt-codex-connector|codecov|sonarcloud|sonarqubecloud|changeset-bot|linear|cursor|gemini-code-assist|sourcery-ai|deepsource-io|snyk-io|socket-security|mergify|graphite-app|pre-commit-ci)$/i;
+// gh asks for a PR's first 100 reviews and comments, the oldest: at 100 the newest may be missing
+const LINK_PR_PAGE = 100;
+const linkPrRepos = (s = loadSettings()) => Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents && linkMaintains(l, 'prs') && LINK_KINDS[l.kind].effectiveSettings(l, s).forge === 'github' && ghSpec(l.remote)).map(([id, l]) => [id, ghSpec(l.remote)]);
+const trimLinkPr = (p, before) => {
+  const head = p.headRefOid;
+  const human = (x) => !BOT_LOGIN.test(String(x?.author?.login ?? ''));
+  const times = (xs, k) => (xs ?? []).filter(human).map((x) => Date.parse(x?.[k])).filter((t) => !Number.isNaN(t));
+  const seen = before && before.head === head && before.head_at ? before.head_at : (() => { const t = Math.max(Date.parse(p.createdAt) || 0, Date.parse(p.updatedAt) || 0); return t ? new Date(t).toISOString() : null; })();
+  return {
+    number: p.number, title: String(p.title ?? '').slice(0, 200), url: p.url ?? null, head, branch: p.headRefName ?? null,
+    head_at: seen,
+    // its reviews or comments ran past one page: what's newest may be missing, so nothing is claimed about it
+    truncated: (p.reviews?.length ?? 0) >= LINK_PR_PAGE || (p.comments?.length ?? 0) >= LINK_PR_PAGE,
+    forge_reviews: (p.reviews ?? []).filter((r) => human(r) && r?.commit?.oid === head).map((r) => ({ state: r.state ?? null, at: r.submittedAt ?? null })),
+    last_comment_at: (() => { const t = Math.max(0, ...times(p.comments, 'createdAt'), ...times(p.reviews, 'submittedAt')); return t ? new Date(t).toISOString() : null; })(),
+  };
+};
+async function fetchLinkPrs(end) {
+  const repos = linkPrRepos();
+  let state = {};
+  try { state = readJson(LINK_PRS_FILE); } catch {}
+  if (state === null || typeof state !== 'object' || Array.isArray(state)) state = {};
+  const skipped = [];
+  const queue = repos.filter(([id]) => { const e = ownEntry(state, id); return !(e && !e.failing_since && Date.now() - Date.parse(e.at) < LINK_PRS_REUSE_MS); });
+  const one = async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      const [id, spec] = next;
+      if (Date.now() >= end) { skipped.push(id); continue; }
+      const r = await runProbe({ cmd: 'gh', args: ['pr', 'list', '-R', spec, '--state', 'open', '--limit', '100', '--json', 'number,title,url,headRefName,headRefOid,isCrossRepository,isDraft,createdAt,updatedAt,reviews,comments'], cwd: mainRoot, env: { ...process.env, GH_PROMPT_DISABLED: '1' }, stderr: true, judge: (code, text, err = '') => {
+        const why = () => (String(err).split('\n').map((x) => x.trim()).find(Boolean) ?? (code == null ? 'gh did not run or timed out' : `gh exited ${code}`)).slice(0, 300);
+        if (code !== 0) return { error: why() };
+        try { const list = JSON.parse(text); return Array.isArray(list) ? { list } : { error: 'gh printed no PR list' }; } catch { return { error: 'gh printed no PR list' }; }
+      } }, end);
+      if (r === 'budget') { skipped.push(id); continue; }
+      const prev = ownEntry(state, id);
+      if (r.error) { state[id] = { ...(prev ?? {}), failing_since: prev?.failing_since ?? nowIso(), failed_at: nowIso(), error: r.error }; continue; }
+      const before = new Map((Array.isArray(prev?.prs) ? prev.prs : []).map((p) => [p?.number, p]));
+      state[id] = { at: nowIso(), prs: r.list.filter((p) => p && !p.isDraft && !(p.isCrossRepository !== true && FLEET_BRANCH.test(p.headRefName ?? ''))).map((p) => trimLinkPr(p, before.get(p.number))) };
+    }
+  };
+  if (queue.length) await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, queue.length) }, one));
+  for (const id of Object.keys(state)) if (!repos.some(([r]) => r === id)) delete state[id];
+  if (repos.length || fs.existsSync(LINK_PRS_FILE)) writeJson(LINK_PRS_FILE, state);
   return skipped;
 }
 // Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
@@ -11913,7 +12057,8 @@ const PROBE_FILE = runPath('link-probes.json');
 // Probes run four at a time, each with its own 12 s deadline, inside a budget per tick (20 s;
 // DEVTEAM_PROBE_BUDGET_MS in tests): a probe the budget cuts short, or one never started, is "not
 // probed this tick", writes nothing, and is asked again next tick; it is never a finding.
-// A probe is a kind's { cmd, args, cwd?, env?, judge(code, stdout) → { problem?, note? } }, or null.
+// A probe is a kind's { cmd, args, cwd?, env?, stderr?, judge(code, stdout, stderr) → { problem?, note? } }, or null
+// (stderr is passed only when the spec asks for it).
 const PROBE_AT_ONCE = 4;
 const PROBE_EACH_MS = 12000;
 function runProbe(spec, end) {
@@ -11921,14 +12066,16 @@ function runProbe(spec, end) {
     const left = end - Date.now();
     const cut = left < PROBE_EACH_MS;
     let outText = '';
+    let errText = '';
     let done = false;
     // its own process group, so a kill takes git's ssh with it, and no controlling terminal to prompt on
-    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', spec.stderr ? 'pipe' : 'ignore'], detached: true });
     const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
     const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} finish(cut ? 'budget' : spec.judge(null, '')); }, Math.max(0, Math.min(left, PROBE_EACH_MS)));
     child.stdout.on('data', (d) => { outText += d; });
-    child.on('error', () => finish(spec.judge(null, '')));
-    child.on('close', (code) => finish(spec.judge(code, outText)));
+    if (spec.stderr) child.stderr.on('data', (d) => { if (errText.length < 4096) errText += d; });
+    child.on('error', (e) => finish(spec.judge(null, '', String(e?.message ?? e))));
+    child.on('close', (code) => finish(spec.judge(code, outText, errText)));
   });
 }
 async function probeLinks(end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000)) {
@@ -14492,6 +14639,103 @@ function efficiencyData(m, now = Date.now()) {
     suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: W12[11].start, end: W12[11].end, POINTS }) };
 }
 
+// A repo link the supervisor maintains: open PRs to review, fix, comment on and merge, and (with
+// its own release: "tag") releases to cut. Nothing else notices when that work stops, so:
+// pr-unreviewed, an open PR (not the fleet's own, not a draft) whose head has had no review for
+// LINK_PR_STALL_HOURS; pr-changes-unanswered, one whose latest review says CHANGES at its head that
+// long, with nothing posted on the PR since, so its author never saw the findings; release-due,
+// merges on the link's main waiting RELEASE_DUE_HOURS since its latest tag. A review is a record
+// under run/reviews/ in a folder or file named for the PR (…pr-<n>/…md, …pr-<n>…md) whose
+// "Verdict: APPROVE|CHANGES <full sha>" names the head (run/reviews/<link>-pr-<n>/, or
+// <maintain.reviews>-pr-<n>/, or a bare pr-<n> when there's one GitHub link), or a person's review
+// of that head on the forge. A PR whose reviews or comments ran past gh's page raises nothing.
+// The PRs come from the tick's read (fetchLinkPrs); with no good read nothing about PRs is raised,
+// and reads failing for LINK_PRS_UNREAD_HOURS are a low link-prs-unread.
+const LINK_PR_STALL_HOURS = 24;
+const RELEASE_DUE_HOURS = 6;
+function linkPrReviewRecords(ids, prefixes = new Map()) {
+  const root = path.join(runDir, 'reviews');
+  const byPr = new Map();
+  const put = (key, file) => {
+    let text, st;
+    try { st = fs.statSync(file); if (!st.isFile() || st.size > 1e6) return; text = fs.readFileSync(file, 'utf8'); } catch { return; }
+    const v = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-f]{40}(?:[0-9a-f]{24})?)[ \t]*$/gm)].pop();
+    // when the record was written: its birth time where the filesystem keeps one, so filling in a
+    // Disposition later doesn't move it past a comment already posted
+    const at = st.birthtimeMs > 0 ? Math.min(st.birthtimeMs, st.mtimeMs) : st.mtimeMs;
+    if (v) (byPr.get(key) ?? byPr.set(key, []).get(key)).push({ verdict: v[1], sha: v[2], at, file: path.relative(mainRoot, file) });
+  };
+  // <link>-pr-<n> names the link; a bare pr-<n> (not <other>-pr-<n>) counts only when there is one GitHub repo link
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const named = ids.flatMap((id) => [[id, id], ...(prefixes.has(id) ? [[id, prefixes.get(id)]] : [])]).sort((a, b) => b[1].length - a[1].length).map(([id, pre]) => [id, new RegExp(`(?:^|[^a-z0-9])${esc(pre)}-pr-(\\d+)(?![0-9])`, 'i')]);
+  const keyOf = (name) => {
+    for (const [id, re] of named) { const m = re.exec(name); if (m) return `${id}#${Number(m[1])}`; }
+    const m = /(?:^|[^a-z0-9-])pr-(\d+)(?![0-9])/i.exec(name);
+    return m && ids.length === 1 ? `${ids[0]}#${Number(m[1])}` : null;
+  };
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return byPr; }
+  for (const e of entries) {
+    const key = keyOf(e.name);
+    if (!key) continue;
+    if (e.isDirectory()) { let fs2 = []; try { fs2 = fs.readdirSync(path.join(root, e.name)); } catch {} for (const f of fs2) if (f.endsWith('.md')) put(key, path.join(root, e.name, f)); }
+    else if (e.name.endsWith('.md')) put(key, path.join(root, e.name));
+  }
+  return byPr;
+}
+function linkDutyFindings(settings, now, add) {
+  const stall = LINK_PR_STALL_HOURS * 3600000;
+  let read = {};
+  try { read = readJson(LINK_PRS_FILE); } catch {}
+  const repos = linkPrRepos(settings);
+  const records = repos.some(([id]) => ownEntry(read, id)) ? linkPrReviewRecords(repos.map(([id]) => id), new Map(repos.map(([id]) => [id, settings.links[id].maintain.reviews]).filter(([, p]) => typeof p === 'string'))) : new Map();
+  const hours = (ms) => Math.floor(ms / 3600000);
+  for (const [id, spec] of repos) {
+    const entry = ownEntry(read, id);
+    if (!entry) continue;
+    // a failing or old read (the tick's budget cut it) raises no PR finding from what it last saw,
+    // and says so once that has lasted
+    const age = now - (Date.parse(entry.at) || 0);
+    if (entry.failing_since || age > LINK_PRS_MAX_AGE_MS) {
+      const unread = entry.failing_since ? now - (Date.parse(entry.failing_since) || now) : age;
+      if (unread > LINK_PRS_UNREAD_HOURS * 3600000) add('low', 'link-prs-unread', id, `${id}'s open PRs haven't been read for ${hours(unread)} h${entry.at ? ` (last read ${entry.at})` : ''}: ${entry.failing_since ? entry.error ?? 'gh failed' : "the tick's time budget ran out first"}`, `check gh on this machine (gh auth status; gh pr list -R ${spec} --state open --limit 5): until it reads, pr-unreviewed and pr-changes-unanswered can't fire for ${id}`);
+      continue;
+    }
+    if (!Array.isArray(entry.prs)) continue;
+    for (const pr of entry.prs) {
+      if (!Number.isInteger(pr?.number) || typeof pr.head !== 'string' || pr.truncated) continue;
+      const subject = `${id}#${pr.number}`;
+      const mine = (records.get(subject) ?? []).sort((a, b) => a.at - b.at);
+      const atHead = mine.filter((r) => r.sha === pr.head);
+      const forgeAtHead = pr.forge_reviews ?? [];
+      const latest = mine.at(-1);
+      if (latest && latest.verdict === 'CHANGES' && latest.sha === pr.head) {
+        const since = now - latest.at;
+        const answered = pr.last_comment_at && Date.parse(pr.last_comment_at) > latest.at;
+        if (since > stall && !answered) add('medium', 'pr-changes-unanswered', subject, `review ${latest.file} asked for changes at its head ${pr.head.slice(0, 12)} ${hours(since)} h ago, and nothing has been posted on the PR since: its author hasn't seen the findings`, `comment the findings to its author on ${pr.url ?? `the PR`} (gh pr comment ${pr.number} --body-file ${latest.file}); a fix the fleet should make is a ticket in ${id}`);
+        continue;
+      }
+      if (atHead.length || forgeAtHead.length) continue;
+      const waited = now - (Date.parse(pr.head_at) || now);
+      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${settings.links[id].maintain.reviews ?? id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then comment the verdict to its author`);
+    }
+  }
+  // release-due: only for a repo link whose releases the supervisor keeps (maintain.releases) and
+  // that releases from a tag, read from its local main as the tick fetched it (with its v* tags),
+  // against the nearest release tag on it (v*, not a release candidate, as releasedInAt).
+  for (const [id, l] of Object.entries(settings.links ?? {})) {
+    if (!LINK_KINDS[l?.kind]?.hostsComponents || !linkMaintains(l, 'releases') || LINK_KINDS[l.kind].effectiveSettings(l, settings).release !== 'tag' || !repoReadable(id)) continue;
+    const R = repo(id);
+    const ref = R.mainRef();
+    if (!ref) continue;
+    const tag = R.git(['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', '*-rc*', ref]);
+    if (!tag) continue;
+    const rows = (R.git(['log', '--first-parent', '--format=%ct', `refs/tags/${tag}..${ref}`]) ?? '').split('\n').filter(Boolean);
+    if (!rows.length) continue;
+    const waited = now - Number(rows.at(-1)) * 1000;
+    if (waited > RELEASE_DUE_HOURS * 3600000) add('medium', 'release-due', id, `${rows.length} commit(s) on ${id}'s main since ${tag}, the oldest waiting ${hours(waited)} h`, `a tag on ${id} deploys to production, so a release is a release-production decision on its ladder (decide, or ask the owner), or record why it waits (observe)`);
+  }
+}
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -14880,6 +15124,44 @@ function collectMetrics(since) {
   if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
   if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
+  // A fleet with nothing running: no worker and no planner for FLEET_IDLE_MS while it is neither
+  // parked nor drained. idle-capacity speaks when a ticket can start, idle-planning when a goal
+  // waits for a planner, memory-full when the machine has no room for either; each names its own
+  // move, so this stays quiet when any of them spoke this pass. It speaks when nothing can start
+  // (every ready ticket waits on the owner, everything is held, nothing is planned), so the
+  // supervisor makes work instead of ticking over an empty fleet. The last sign of life is the
+  // newest line any ticket's worker or any planner wrote (a planner's branch and files too), or the
+  // log's first line when no session has ever run. A planner counts as running only while its
+  // window is open and it waits on no owner answer: a plan branch left behind, or a design parked
+  // on the owner's approval, is the stuck fleet this finding is for, once its stamps go quiet.
+  // stale_after_minutes (30 by default, two quiet ticks at the default tick_minutes): the silence
+  // after which a session reads as stuck reads the same for the fleet. A start takes a tick, so an
+  // idle tick between waves is normal; more is the fleet idling.
+  const FLEET_IDLE_MS = (settings.stale_after_minutes ?? 30) * 60000;
+  const spoken = f.some((x) => ['idle-capacity', 'idle-planning', 'memory-full'].includes(x.kind));
+  if (!drained && !fleetMode() && !active && !spoken && !planners().some((p) => !p.parked && p.window && !p.waiting_on_owner.length)) {
+    const lines = readLog().lines;
+    const stamps = lines.filter((l) => l.at && (ts.has(l.by) || String(l.by).startsWith('plan-'))).map((l) => l.at);
+    for (const p of planners()) if (p.last_seen) stamps.push(p.last_seen);
+    const lastAt = stamps.sort().pop() ?? lines.map((l) => l.at).filter(Boolean).sort()[0] ?? null;
+    const idleMs = lastAt ? now - Date.parse(lastAt) : 0;
+    if (idleMs > FLEET_IDLE_MS) {
+      // open tickets: not superseded, not merged, no worker running. Held: the ticket's held field,
+      // a goal not running, parked, or an open owner question naming it. Planned: the rest that
+      // aren't ready (waiting on a dependency or a running ticket's touches).
+      const open = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !countsAsWorker(t));
+      const heldT = open.filter((t) => isHeld(t) || ticketMode(t) !== 'run' || H.has(t.id) || workerState(t.id)?.phase === 'parked');
+      const heldIds = new Set(heldT.map((t) => t.id));
+      const readyT = ready.filter((t) => !heldIds.has(t.id));
+      const readyIds = new Set(readyT.map((t) => t.id));
+      const planned = open.filter((t) => !heldIds.has(t.id) && !readyIds.has(t.id)).length;
+      const L = ladder();
+      const noDefault = questions().filter((q) => q.status === 'open' && !q.goal_hold && !q.default && !['one-way-door', 'review', 'owner-action'].includes(q.kind) && !(q.reasons ?? []).includes('one-way-door') && !(L.owner_only ?? []).includes(q.class));
+      const chore = readyT.find((t) => t.kind === 'chore') ?? readyT[0];
+      const ids = (xs) => xs.slice(0, 3).map((x) => x.id).join(', ');
+      add('medium', 'fleet-idle', 'fleet', `no worker or planner has run for ${(idleMs / 3600000).toFixed(1)}h (last sign of life ${lastAt}); ${readyT.length} ticket${readyT.length === 1 ? '' : 's'} ready, ${heldT.length} held, ${planned} planned`, `in order: 1. ${chore ? `start a ready chore (worker ${chore.id})` : 'add a chore from what the metrics or the code point at'}; 2. split a held ticket so the part that doesn't need the owner runs (${heldT.length ? ids(heldT) : 'none held'}); 3. give an open no-default question a default (${noDefault.length ? ids(noDefault) : 'none open'}); 4. propose the next goal from strategy.md (a proposal question naming the "How it wins" line it serves, supervisor.md §9)`);
+    }
+  }
   // the owner asked for one of the supervisor's settings and main doesn't have it yet
   {
     const um = goalMode(upkeepOrVirtual());
@@ -15041,6 +15323,7 @@ function collectMetrics(since) {
       }
     }
   }
+  linkDutyFindings(settings, now, add);
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
@@ -18500,6 +18783,10 @@ async function machineStatus() {
   for (const s of machineRecords().strays) out(`machine: stray hub record ${/^[\w.-]{1,80}$/.test(s.file) ? s.file : '?'} (${s.why}; ignored, remove it)`);
   const notes = notedIn();
   if (flagStr('notes')) { const r = lastReview(notes); out(r === utcDay() ? `machine: daily review done ${r}` : `machine: daily review due (last ${r ?? 'never'})`); }
+  // the operator's own PRs on the kit (operator.md, Pull requests upstream): one gh call, ? when it can't.
+  // The search keeps the reply to PRs whose body has the operator's line (no fleet or owner PRs and
+  // their comments); operatorPrsLine checks the line exactly, since search matches words, not lines
+  if (flagStr('notes')) out(`machine: ${operatorPrsLine(sh('gh', ['pr', 'list', '-R', KIT_UPSTREAM, '--author', '@me', '--state', 'open', '--search', `"${OPERATOR_PR_MARK}" in:body`, '--limit', '100', '--json', 'number,headRefName,body,isDraft,headRefOid,createdAt,latestReviews,comments,statusCheckRollup'], { timeout: 15000, maxBuffer: 16 * 1024 * 1024 }))}`); // gh-direct: the kit's own repo, which no project here speaks for
   const flagged = [];
   const latest = new Map();
   for (const root of roots) {
@@ -18566,6 +18853,65 @@ async function machineStatus() {
   out(`changed since last reading: ${changed.join(' ')}`);
   const now = Math.floor(Date.now() / 1000);
   if (now - (last.at ?? 0) >= Number(process.env.DEVTEAM_STATUS_SECONDS ?? 1200)) writeText(statusLastFile(), [`at ${now}`, `disk ${free}`, ...seen].map((l) => `${l}\n`).join(''));
+}
+// The operator's open PRs on the kit, from gh pr list's JSON, as one digest line: those that need it
+// now. A PR's verdicts are its GitHub reviews that approve or request changes, and quality.md §3's
+// `Verdict: APPROVE|CHANGES <sha>` line in a review or comment (the operator's reviewers share its gh
+// login, so most are comments). A PR needs the operator when its latest verdict is CHANGES at its
+// head, when a check at its head failed, or when no verdict names its head a day after its last
+// comment or review, or its opening (a fix pushed and never looked at again). Drafts wait.
+// Which PRs are the operator's: the box's gh login is shared by the owner, the supervisors and other
+// sessions, so --author @me is not enough. The operator ends every PR body it opens with the line
+// OPERATOR_PR_MARK (operator.md, Pull requests upstream), and only a PR whose body has that line on
+// its own counts: it is set when the PR is opened, needs no records to agree, and a reader can see
+// it on the PR. Branches the fleets and the kit's own releases push (ticket/, plan/, chore-,
+// release-prep-) aren't the operator's even so. gh gives a PR's first 100 comments: a longer
+// thread's latest verdict is unread.
+const OPERATOR_PR_MARK = 'Opened by the box operator.';
+const OPERATOR_PR_WAIT_MS = 24 * 3600000;
+function operatorPrsLine(text, now = Date.now()) {
+  let prs;
+  try { prs = JSON.parse(text); } catch { return 'operator PRs: ?'; }
+  if (!Array.isArray(prs)) return 'operator PRs: ?';
+  const marked = (body) => String(body ?? '').split(/\r?\n/).some((l) => l.trim() === OPERATOR_PR_MARK);
+  const mine = prs.filter((p) => p && Number.isInteger(p.number) && typeof p.headRefName === 'string' && !/^(ticket\/|plan\/|chore-|release-prep-)/.test(p.headRefName) && marked(p.body) && p.isDraft !== true);
+  if (!mine.length) return 'operator PRs: none open';
+  const atHead = (sha, head) => typeof sha === 'string' && typeof head === 'string' && sha.length >= 7 && head.toLowerCase().startsWith(sha.toLowerCase());
+  const RED = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR']);
+  // the line's last verdict; reviewers may add a note after the sha ("Verdict: CHANGES <sha> (F1, F2)")
+  const verdictIn = (body, at) => {
+    const v = [...String(body ?? '').matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-fA-F]{7,40})(?![0-9a-zA-Z])[^\n]*$/gm)].pop();
+    return v ? { v: v[1], sha: v[2], at: String(at ?? '') } : null;
+  };
+  const need = [];
+  for (const p of mine) {
+    const verdicts = [];
+    for (const r of Array.isArray(p.latestReviews) ? p.latestReviews : []) {
+      if (!r) continue;
+      const v = verdictIn(r.body, r.submittedAt);
+      if (v) verdicts.push(v);
+      else if (r.state === 'CHANGES_REQUESTED' || r.state === 'APPROVED') verdicts.push({ v: r.state === 'APPROVED' ? 'APPROVE' : 'CHANGES', sha: r.commit?.oid, at: String(r.submittedAt ?? '') });
+    }
+    for (const c of Array.isArray(p.comments) ? p.comments : []) {
+      const v = c && verdictIn(c.body, c.createdAt);
+      if (v) verdicts.push(v);
+    }
+    const last = verdicts.sort((x, y) => x.at.localeCompare(y.at)).pop();
+    const why = [];
+    if (last?.v === 'CHANGES' && atHead(last.sha, p.headRefOid)) why.push('changes requested');
+    const checks = Array.isArray(p.statusCheckRollup) ? p.statusCheckRollup : [];
+    if (checks.some((c) => c && (RED.has(c.conclusion) || RED.has(c.state)))) why.push('CI red');
+    if (!last || !atHead(last.sha, p.headRefOid)) {
+      // from its newest word: the operator comments what it changed when it pushes (operator.md); any
+      // comment restarts the wait, so a thread kept busy without a verdict waits longer to be flagged
+      const said = [p.createdAt, ...(Array.isArray(p.comments) ? p.comments.map((c) => c?.createdAt) : []), ...(Array.isArray(p.latestReviews) ? p.latestReviews.map((r) => r?.submittedAt) : [])];
+      const since = Math.max(0, ...said.map((t) => Date.parse(t) || 0));
+      const waited = since ? now - since : 0;
+      if (waited >= OPERATOR_PR_WAIT_MS) why.push(`${last ? 'no review of its head' : 'no review'} ${Math.floor(waited / 3600000)}h`);
+    }
+    if (why.length) need.push(`#${p.number} ${why.join(' and ')}`);
+  }
+  return `operator PRs: ${mine.length} open, ${need.length ? `${need.length} need you (${need.join(', ')})` : 'none need you'}`;
 }
 function accountsState() {
   try {
@@ -18974,7 +19320,7 @@ const IMAGE_RUNS = {
     // machine status, tell, alert, pane-state
     'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
     'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
-    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'machineStatus',
+    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_MARK', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
     // operator threads
     'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
     'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
@@ -26240,7 +26586,8 @@ function browserRootOf(dir) {
 // profile naming another root is a copied or moved checkout's, refused; a missing root.json is written.
 // One that is there but can't be read as a root (unparsable, relative, too long) is refused the same
 // way, never overwritten. Only the start path calls this: a verb a live daemon answers makes nothing.
-function browserProfile() {
+// fail: how a refused profile ends the caller (die; a forget's restart throws, to stop the daemon whole).
+function browserProfile({ fail = die } = {}) {
   const key = browserKey(), here = realPath(mainRoot), dir = path.join(browserHome(), key), file = path.join(dir, 'root.json');
   for (const d of [browserHome(), dir]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fs.chmodSync(d, 0o700); }
   const forget = 'Forget it (devteam.mjs browser forget) to start signed out';
@@ -26252,8 +26599,8 @@ function browserProfile() {
     try { fs.linkSync(tmp, file); } catch (e) { if (e.code !== 'EEXIST') throw e; } finally { fs.rmSync(tmp, { force: true }); }
   }
   const root = browserRootOf(dir);
-  if (root === null) die(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
-  if (root !== here) die(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
+  if (root === null) return fail(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
+  if (root !== here) return fail(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
   return dir;
 }
 // browser_idle_minutes in ms, read like machine_memory_ceiling: anything but a whole number from 1 to
@@ -26509,6 +26856,27 @@ function browserRunEnv({ headed }) {
   env.DEVTEAM_BROWSER_SERVE = '1';
   if (headed) { env.DEVTEAM_BROWSER_HEADED = '1'; for (const k of ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY']) if (process.env[k] !== undefined) env[k] = process.env[k]; }
   return env;
+}
+// A browser daemon's preview record by its shape: label browser and a run.cmd ending in ` browser
+// serve`. Hello's row checks only this (no loadSettings per row); browserIsPreview adds this checkout's
+// project, for preview stop and start.
+function browserPreviewShaped(r) { return r?.label === 'browser' && typeof r.run?.cmd === 'string' && r.run.cmd.endsWith(' browser serve'); }
+function browserIsPreview(r) { return browserPreviewShaped(r) && r.project === previewProject(); }
+// The hourly renewal (DEVTEAM_TEST_BROWSER_RENEW_MS in tests): the record as it is on disk, with a
+// fresh at and expires, under its lock taken by tryLock (never waits, takes a stale lock once, never
+// dies; withLock blocks the event loop up to 15 s and dies on its timeout, which would exit leaving
+// Chrome up): a held lock skips this round, and the lock goes in tryLock's finally. Only a record
+// still there, naming this daemon's port and a window, is rewritten, so a stopped one is never made
+// again. Any error skips the round, said nowhere.
+function browserRenew(ctx, port) {
+  if (ctx.stopping || !ctx.preview) return;
+  const file = previewFile(ctx.preview);
+  try {
+    tryLock(file, () => {
+      const r = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (isObj(r) && r.name === ctx.preview && r.port === port && typeof r.run?.window === 'string') writePreviewFile(previewFresh(r));
+    });
+  } catch {}
 }
 // This checkout's browser preview record (label browser), or undefined.
 const browserPreviewRec = () => readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser');
@@ -27038,9 +27406,80 @@ async function browserLaunchChrome(ctx, { headed }) {
     });
     if (r.cdp) return { cdp: r.cdp };
     try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
-    if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) { ctx.notes.push("Chrome's sandbox isn't available on this machine; it runs without it."); continue; }
+    if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) {
+      const note = "Chrome's sandbox isn't available on this machine; it runs without it.";
+      if (!ctx.notes.includes(note)) ctx.notes.push(note); // a forget's relaunch says it once
+      // a stop came meanwhile: no second Chrome (detached, it would outlive the daemon); the caller's
+      // own ctx.stopping check after the launch kills ctx.chrome and returns
+      if (ctx.stopping) return { cdp: null };
+      continue;
+    }
     throw new Error(r.late ? "browser: Chrome didn't open its DevTools pipe in 30 s" : 'browser: Chrome exited before its DevTools pipe opened');
   }
+}
+// One Chrome ended: Browser.close on its pipe, then (not gone in 5 s) its group SIGTERM, SIGKILL 2 s
+// later; its helpers killed with the group; its pipe closed. The stop path's and a forget's.
+async function browserEndChrome(cdp, pid) {
+  if (pid && browserAlive(pid)) {
+    await Promise.race([cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
+    if (!(await browserGone(pid, 5000))) {
+      try { process.kill(-pid, 'SIGTERM'); } catch {}
+      if (!(await browserGone(pid, 2000))) { try { process.kill(-pid, 'SIGKILL'); } catch {} await browserGone(pid, 3000); }
+    }
+  }
+  if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
+  cdp?.close();
+}
+// A Chrome and its pipe watched: its exit or its pipe closing stops the daemon only while it is the
+// current Chrome and not retired by a forget (whose old Chrome's end is expected). The view's
+// screencast frames are taken on this pipe.
+function browserWatchChrome(ctx, chrome, cdp) {
+  const gone = () => { if (chrome === ctx.chrome && !chrome.retired) browserShutdown(ctx, 'chrome exited'); };
+  chrome.once('exit', gone);
+  cdp.on('close', gone);
+  cdp.on('Page.screencastFrame', (p, sid) => browserViewFrame(ctx, p, sid));
+}
+// Sign out of everything (the view's forget), on the verbs' queue: the screencast stopped, the
+// current Chrome retired and ended, the profile folder (ctx.profile, the one the daemon runs on)
+// removed only once no process carries it, made again empty with this checkout's root.json, its start
+// steps, a fresh Chrome on about:blank, the tabs watched again, state.json rewritten with the new
+// chrome_pid, and the screencast started again on the same viewer (its seq goes on). The daemon,
+// guard, control port and preview stay. A stop meanwhile wins: after each await, ctx.stopping ends
+// it (browserShutdown kills ctx.chrome, whichever it is). Any failure stops the daemon.
+async function browserForgetRestart(ctx) {
+  if (ctx.stopping || !ctx.ready) return;
+  try {
+    ctx.ready = false; // the view's input dropped, its tick idle, a new socket 503
+    const v = ctx.viewer;
+    if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
+    const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
+    if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
+    const old = ctx.chrome;
+    old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
+    await browserEndChrome(ctx.cdp, old.pid);
+    if (ctx.stopping) return;
+    let procs = browserProcsOn(ctx.profile);
+    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(100);
+    if (ctx.stopping) return;
+    if (procs === null || procs.length) return void browserShutdown(ctx, 'error'); // nothing removed on a guess
+    fs.rmSync(ctx.profile, { recursive: true, force: true });
+    ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
+    await browserPrepareProfile(ctx.profile, []);
+    if (ctx.stopping) return;
+    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // launched while it stopped
+    ctx.cdp = cdp;
+    browserWatchChrome(ctx, ctx.chrome, cdp);
+    ctx.tabs = [];
+    ctx.active = null;
+    await browserWatchTabs(ctx);
+    for (let i = 0; i < 100 && !ctx.stopping && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
+    if (ctx.stopping) return;
+    ctx.state = { ...ctx.state, chrome_pid: ctx.chrome.pid };
+    browserWriteState(ctx.state);
+    ctx.ready = true;
+    if (ctx.viewer) browserViewTick(ctx, ctx.viewer); // the screencast again, on the same socket
+  } catch { browserShutdown(ctx, 'error'); }
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
 // hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
@@ -27050,16 +27489,9 @@ function browserShutdown(ctx, why) {
   if (why === 'signal') for (const s of [process.stdout, process.stderr]) { s.on('error', () => {}); }
   ctx.stopping = (async () => {
     clearTimeout(ctx.idle);
-    const pid = ctx.chrome?.pid;
-    if (pid && browserAlive(pid)) {
-      await Promise.race([ctx.cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
-      if (!(await browserGone(pid, 5000))) {
-        try { process.kill(-pid, 'SIGTERM'); } catch {}
-        if (!(await browserGone(pid, 2000))) { try { process.kill(-pid, 'SIGKILL'); } catch {} await browserGone(pid, 3000); }
-      }
-    }
-    if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
-    ctx.cdp?.close();
+    clearInterval(ctx.renew);
+    try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
+    await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
@@ -27153,11 +27585,23 @@ function browserVerbs(ctx) {
 }
 // The control server: POST / only, Host 127.0.0.1:<port>, JSON, and the secret (timingSafeEqual);
 // anything else 403 and nothing run. Verbs run one at a time; the idle timer is paused while one runs
-// and re-armed after it (ping leaves it alone).
+// and re-armed after it. ping, after the same checks, is answered at once off the queue and leaves the
+// idle timer alone.
 function browserControl(ctx, secret) {
   const want = Buffer.from(secret);
   let queue = Promise.resolve();
-  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => browserShutdown(ctx, 'idle'), browserIdleMs()); };
+  // with a viewer's socket open, the idle timer arms again rather than stop the daemon
+  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (ctx.viewer && !ctx.stopping ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
+  // ctx.serial(fn): fn on the verbs' queue (the view's forget), the idle timer paused as for a verb
+  ctx.serial = (fn) => {
+    const run = queue.then(async () => {
+      if (ctx.stopping) return;
+      clearTimeout(ctx.idle);
+      try { await fn(); } catch {} finally { if (!ctx.stopping) arm(); }
+    });
+    queue = run;
+    return run;
+  };
   const server = http.createServer((req, res) => {
     req.on('error', () => {});
     res.on('error', () => {});
@@ -27171,30 +27615,325 @@ function browserControl(ctx, secret) {
       let m;
       try { m = JSON.parse(body); } catch {}
       const verb = typeof m?.verb === 'string' && Object.hasOwn(ctx.verbs, m.verb) ? m.verb : null;
-      queue = queue.then(async () => {
+      const run = async () => {
         if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
         if (!verb) return { code: 1, out: `usage: ${BROWSER_USAGE}` };
         if (verb !== 'ping') clearTimeout(ctx.idle); // paused while the verb runs
         try { return await ctx.verbs[verb](isObj(m.args) ? m.args : {}); } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
-      }).then((r) => {
+      };
+      // ping reads nothing from Chrome and is answered at once, off the queue: a long verb or a forget
+      // never makes the daemon look dead to browserLive (and so a second daemon started over it)
+      const ping = verb === 'ping';
+      const answered = (ping ? run() : queue.then(run)).then((r) => {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(r));
+        if (ping) return; // ctx.after is the queued verb's (stop's), never taken by a ping
         const after = ctx.after;
         ctx.after = null;
         if (after) res.once('finish', after);
       }).catch(() => { try { res.destroy(); } catch {} }); // one bad answer never stops the queue
+      if (!ping) queue = answered;
     });
   });
   return { server, arm };
 }
 const browserListen = (server, port) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(server.address().port); }); });
-// browser serve, in the preview's window: the 503 view placeholder bound first, then the profile and
+// --- the live view (kit-66): browser.html on the view port, and its one socket (RFC 6455, text only)
+// carrying Chrome's screencast to the page. Nothing a viewer sends is logged, written or echoed.
+const BROWSER_WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const BROWSER_WS_MAX = 262144; // a joined message, judged on each header's declared length
+const BROWSER_WS_FRAGMENTS = 1024; // fragments per message: empty ones would grow it with the size still 0
+const BROWSER_WS_BACKLOG = 2097152; // a frame message is dropped while more than this waits to be written
+const BROWSER_FRAME_DATA = /^\/9j\/[A-Za-z0-9+/]*={0,2}$/; // the contract's frame data
+const browserHook = (name, dflt) => { const n = Number(browserTestEnv(name)); return Number.isFinite(n) && n > 0 ? n : dflt; };
+const browserPingMs = () => browserHook('DEVTEAM_TEST_BROWSER_PING_MS', 15000);
+const browserCastMax = () => Math.min(1280, Math.round(browserHook('DEVTEAM_TEST_BROWSER_CAST_MAX', 1280)));
+// A header's one value, or null when it is missing or given more than once.
+function browserOneHeader(req, name) {
+  let v = null, n = 0;
+  for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === name) { v = req.rawHeaders[i + 1]; n++; }
+  return n === 1 ? v : null;
+}
+const browserViewHost = (req, port) => [`127.0.0.1:${port}`, `localhost:${port}`].includes(browserOneHeader(req, 'host'));
+// A CDP call the view makes: never an unhandled rejection (a closing pipe answers with one).
+const browserViewCdp = (ctx, method, params, sid) => { ctx.cdp?.send(method, params, sid).catch(() => {}); };
+// One upgraded socket: its frame reader and writer. onText gets each joined text message; onClose runs
+// once, however it closed. A ping every pingMs; closed 2 x pingMs after the last byte received (a timer
+// every byte resets, not a check at the ping ticks, which would let silence run up to pingMs longer).
+function browserSocket(sock, { onText, onClose, pingMs }) {
+  let buf = Buffer.alloc(0), parts = [], joined = 0, inMsg = false, closed = false;
+  const write = (op, payload) => {
+    if (sock.destroyed || !sock.writable) return;
+    const len = payload.length;
+    let hdr;
+    if (len < 126) hdr = Buffer.from([0x80 | op, len]);
+    else if (len < 65536) { hdr = Buffer.alloc(4); hdr[0] = 0x80 | op; hdr[1] = 126; hdr.writeUInt16BE(len, 2); } else { hdr = Buffer.alloc(10); hdr[0] = 0x80 | op; hdr[1] = 127; hdr.writeBigUInt64BE(BigInt(len), 2); }
+    try { sock.write(Buffer.concat([hdr, payload])); } catch {}
+  };
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(timer);
+    clearTimeout(silence);
+    buf = Buffer.alloc(0);
+    parts = [];
+    try { onClose?.(); } catch {}
+  };
+  // A close frame with code, then a FIN; destroyed 1 s later only if the peer hasn't closed.
+  const close = (code) => {
+    if (closed) return;
+    if (code) { const b = Buffer.alloc(2); b.writeUInt16BE(code); write(8, b); }
+    finish();
+    try { sock.end(); } catch {}
+    const t = setTimeout(() => sock.destroy(), 1000);
+    t.unref?.();
+    sock.once('close', () => clearTimeout(t));
+  };
+  const read = () => {
+    for (;;) {
+      if (closed || buf.length < 2) return;
+      const b0 = buf[0], b1 = buf[1], fin = !!(b0 & 0x80), op = b0 & 15;
+      if (b0 & 0x70) return close(1002); // a reserved bit
+      if (!(b1 & 0x80)) return close(1002); // unmasked
+      let len = b1 & 127, at = 2;
+      if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); at = 4; } else if (len === 127) { if (buf.length < 10) return; const big = buf.readBigUInt64BE(2); len = big > BigInt(BROWSER_WS_MAX) ? Infinity : Number(big); at = 10; }
+      if (op >= 8) {
+        if (op > 10 || !fin || len > 125) return close(1002); // an unknown, fragmented or long control frame
+      } else if (op === 2) return close(1003); // binary
+      else if (op === 0 ? !inMsg : op === 1 ? inMsg : true) return close(1002); // a stray continuation, a text mid-message, an unknown opcode
+      else if (joined + len > BROWSER_WS_MAX || parts.length >= BROWSER_WS_FRAGMENTS) return close(1009); // on the header, before its payload is buffered
+      if (buf.length < at + 4 + len) return;
+      const mask = buf.subarray(at, at + 4), body = Buffer.from(buf.subarray(at + 4, at + 4 + len));
+      for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3];
+      buf = buf.subarray(at + 4 + len);
+      if (op === 8) return close(1000);
+      if (op === 9) { write(10, body); continue; }
+      if (op === 10) continue;
+      parts.push(body);
+      joined += len;
+      inMsg = !fin;
+      if (!fin) continue;
+      const text = Buffer.concat(parts).toString('utf8');
+      parts = [];
+      joined = 0;
+      onText?.(text);
+    }
+  };
+  const feed = (chunk) => {
+    if (closed) return;
+    silence.refresh();
+    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+    try { read(); } catch { close(1011); }
+  };
+  sock.setKeepAlive(true);
+  sock.setNoDelay(true);
+  const silence = setTimeout(() => close(1001), 2 * pingMs);
+  silence.unref?.();
+  const timer = setInterval(() => write(9, Buffer.alloc(0)), pingMs);
+  timer.unref?.();
+  sock.on('data', feed);
+  sock.on('end', () => close(0));
+  sock.on('close', finish);
+  return {
+    feed,
+    close,
+    get closed() { return closed; },
+    // false when it wasn't sent: a droppable message (a frame) while the socket's backlog is over 2 MiB
+    send(obj, droppable = false) {
+      if (closed || (droppable && sock.writableLength > BROWSER_WS_BACKLOG)) return false;
+      write(1, Buffer.from(JSON.stringify(obj)));
+      return true;
+    },
+  };
+}
+// The screencast, on the tab being cast: JPEG, quality 60, at most 1280 x 1280, every frame.
+function browserCast(ctx, tab, on) {
+  if (!tab?.sessionId) return;
+  if (!on) return browserViewCdp(ctx, 'Page.stopScreencast', {}, tab.sessionId);
+  const m = browserCastMax();
+  browserViewCdp(ctx, 'Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: m, maxHeight: m, everyNthFrame: 1 }, tab.sessionId);
+}
+// Every 250 ms while a viewer is open (and once at open): a new active tab moves the screencast to it;
+// a changed masked URL is sent. Nothing while Chrome isn't up (a forget restarting it).
+function browserViewTick(ctx, v) {
+  try {
+    if (!ctx.ready || ctx.stopping || ctx.viewer !== v || v.ws.closed) return;
+    const tab = ctx.active?.sessionId ? ctx.active : null;
+    if (tab !== v.tab) { browserCast(ctx, v.tab, false); v.tab = tab; browserCast(ctx, tab, true); }
+    const url = browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening);
+    if (url !== v.url) { v.url = url; v.ws.send({ t: 'url', url }); }
+  } catch {}
+}
+function browserViewClose(ctx, v) {
+  clearInterval(v.timer);
+  browserCast(ctx, v.tab, false);
+  v.tab = null;
+  if (ctx.viewer === v) ctx.viewer = null;
+}
+// Page.screencastFrame: acknowledged at once; sent as frame only when it comes from the tab being cast
+// to the open viewer, its data the contract's pattern and its size (CSS pixels) 1 to 8192. seq lives on
+// the viewer's own object, so it rises for as long as the socket lives.
+function browserViewFrame(ctx, params, sessionId) {
+  if (params?.sessionId !== undefined) browserViewCdp(ctx, 'Page.screencastFrameAck', { sessionId: params.sessionId }, sessionId);
+  const v = ctx.viewer;
+  if (!v || v.ws.closed || !v.tab?.sessionId || v.tab.sessionId !== sessionId) return;
+  const w = Math.round(params?.metadata?.deviceWidth), h = Math.round(params?.metadata?.deviceHeight);
+  if (typeof params.data !== 'string' || !BROWSER_FRAME_DATA.test(params.data) || !(w >= 1 && w <= 8192) || !(h >= 1 && h <= 8192)) return;
+  const scale = params.metadata.pageScaleFactor;
+  v.scale = typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1; // the input's x, y are divided by it
+  if (v.ws.send({ t: 'frame', data: params.data, w, h, seq: v.seq }, true)) v.seq++;
+}
+// The page's messages ($defs.view.from_page), checked by hand: closed field sets, types, bounds and
+// enums. Not the kit's schemaErrors, so no refusal text can ever carry a typed value; a message that
+// fails is null and dropped. Lengths are JSON Schema's (code points).
+const BROWSER_MODS = { type: 'int', min: 0, max: 15 };
+const BROWSER_XY = { type: 'num', min: 0, max: 8192 };
+const BROWSER_FROM_PAGE = {
+  mouse: { req: ['type', 'x', 'y'], f: { type: { enum: ['down', 'up', 'move', 'click'] }, x: BROWSER_XY, y: BROWSER_XY, button: { enum: ['none', 'left', 'middle', 'right'] }, clicks: { type: 'int', min: 0, max: 3 }, mods: BROWSER_MODS } },
+  wheel: { req: ['x', 'y', 'dx', 'dy'], f: { x: BROWSER_XY, y: BROWSER_XY, dx: { type: 'num', min: -100000, max: 100000 }, dy: { type: 'num', min: -100000, max: 100000 }, mods: BROWSER_MODS } },
+  key: { req: ['type', 'key'], f: { type: { enum: ['down', 'up', 'press'] }, key: { type: 'str', min: 1, max: 32 }, code: { type: 'str', min: 1, max: 32 }, text: { type: 'str', min: 1, max: 8 }, mods: BROWSER_MODS } },
+  paste: { req: ['text'], f: { text: { type: 'str', min: 1, max: 10000 } } },
+  nav: { req: ['url'], f: { url: { type: 'str', min: 1, max: 2048 } } },
+  back: { req: [], f: {} },
+  forget: { req: [], f: {} },
+};
+function browserViewMessage(m) {
+  if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string' || !Object.hasOwn(BROWSER_FROM_PAGE, m.t)) return null;
+  const shape = BROWSER_FROM_PAGE[m.t];
+  for (const k of shape.req) if (!Object.hasOwn(m, k)) return null;
+  for (const k of Object.keys(m)) {
+    if (k === 't') continue;
+    if (!Object.hasOwn(shape.f, k)) return null;
+    const s = shape.f[k], x = m[k];
+    if (s.enum) { if (!s.enum.includes(x)) return null; continue; }
+    if (s.type === 'str') {
+      if (typeof x !== 'string' || x.length < s.min || x.length > 2 * s.max) return null; // UTF-16 length bounds code points both ways
+      const n = [...x].length;
+      if (n < s.min || n > s.max) return null;
+    } else if (typeof x !== 'number' || !Number.isFinite(x) || (s.type === 'int' && !Number.isInteger(x)) || x < s.min || x > s.max) return null;
+  }
+  return m;
+}
+// windowsVirtualKeyCode for a key: the named keys, then KeyA-KeyZ and Digit0-9 from code. 0 if none.
+const BROWSER_VK = { Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18, Pause: 19, CapsLock: 20, Escape: 27, ' ': 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, ContextMenu: 93, ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, 112 + i])) };
+function browserVk(key, code) {
+  if (Object.hasOwn(BROWSER_VK, key)) return BROWSER_VK[key];
+  const c = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(code ?? '');
+  if (c) return (c[1] ?? c[2]).charCodeAt(0);
+  if (code === 'Space') return 32;
+  return 0;
+}
+const BROWSER_BUTTONS = { none: 0, left: 1, right: 2, middle: 4 };
+// One message from the page: parsed, checked, and handed to the active tab's session. Nothing about
+// it is logged, printed, stored or echoed; a failed CDP call is dropped (browserViewCdp catches it).
+// While Chrome isn't up (the start steps, a forget restarting it) or the daemon is stopping, every
+// message is dropped, a second forget among them, so nothing reads a null ctx.active.
+function browserViewInput(ctx, v, text) {
+  if (!ctx.ready || ctx.stopping || ctx.viewer !== v) return;
+  let m;
+  try { m = browserViewMessage(JSON.parse(text)); } catch { return; }
+  if (!m) return;
+  if (m.t === 'forget') { // Sign out of everything, on the verbs' queue; one queued at a time
+    if (ctx.forgetting) return;
+    ctx.forgetting = true;
+    return void ctx.serial(() => browserForgetRestart(ctx)).finally(() => { ctx.forgetting = false; });
+  }
+  const sid = ctx.active?.sessionId;
+  if (!sid) return; // a tab with no session: dropped
+  const cdp = (method, params) => browserViewCdp(ctx, method, params, sid);
+  const scale = v.scale > 0 ? v.scale : 1;
+  switch (m.t) {
+    case 'mouse': {
+      const button = m.button ?? 'none', base = { x: m.x / scale, y: m.y / scale, button, modifiers: m.mods ?? 0 };
+      const held = BROWSER_BUTTONS[button], clickCount = m.clicks ?? 1;
+      if (m.type === 'move') return cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...base, buttons: held, clickCount: 0 });
+      if (m.type === 'down' || m.type === 'click') cdp('Input.dispatchMouseEvent', { type: 'mousePressed', ...base, buttons: held, clickCount });
+      if (m.type === 'up' || m.type === 'click') cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base, buttons: 0, clickCount });
+      return;
+    }
+    case 'wheel':
+      return cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x: m.x / scale, y: m.y / scale, deltaX: m.dx, deltaY: m.dy, modifiers: m.mods ?? 0 });
+    case 'key': {
+      const base = { key: m.key, ...(m.code ? { code: m.code } : {}), windowsVirtualKeyCode: browserVk(m.key, m.code), modifiers: m.mods ?? 0 };
+      if (m.type === 'press') {
+        cdp('Input.dispatchKeyEvent', { type: 'keyDown', ...base, ...(m.text ? { text: m.text, unmodifiedText: m.text } : {}) });
+        return cdp('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+      }
+      return cdp('Input.dispatchKeyEvent', { type: m.type === 'down' ? 'rawKeyDown' : 'keyUp', ...base });
+    }
+    case 'paste':
+      return cdp('Input.insertText', { text: m.text });
+    case 'nav': {
+      let u;
+      try { u = new URL(m.url); } catch { return; }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return; // file:, javascript:, data:, chrome: … dropped
+      return cdp('Page.navigate', { url: u.href }); // not awaited: the guard answers whatever it is
+    }
+    case 'back':
+      ctx.cdp?.send('Page.getNavigationHistory', {}, sid).then((h) => {
+        const prev = h?.entries?.[h.currentIndex - 1];
+        if (h?.currentIndex > 0 && prev?.id !== undefined) cdp('Page.navigateToHistoryEntry', { entryId: prev.id });
+      }).catch(() => {});
+      return;
+  }
+}
+// The view server: GET or HEAD / (Host one of the two loopback forms) is browser.html, read once here;
+// an upgrade passes five guards in order, each refusal a short HTTP answer and a FIN. One viewer.
+function browserViewServer(ctx) {
+  const page = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dashboard', 'browser.html'));
+  const plain = (code) => `${http.STATUS_CODES[code].toLowerCase()}\n`;
+  const server = http.createServer((req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
+    req.resume();
+    const no = (code, extra = {}) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', connection: 'close', ...extra }); res.end(plain(code)); };
+    if (!browserViewHost(req, server.address()?.port)) return no(403);
+    if (String(req.url).split('?')[0] !== '/') return no(404);
+    if (req.method !== 'GET' && req.method !== 'HEAD') return no(405, { allow: 'GET, HEAD' });
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': page.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "frame-ancestors 'self'" });
+    res.end(req.method === 'HEAD' ? undefined : page);
+  });
+  server.on('clientError', (e, s) => s.destroy());
+  server.on('upgrade', (req, sock, head) => {
+    sock.on('error', () => sock.destroy());
+    try {
+      const port = server.address()?.port;
+      const refuse = (code) => {
+        const body = plain(code);
+        sock.end(`HTTP/1.1 ${code} ${http.STATUS_CODES[code]}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);
+        const t = setTimeout(() => sock.destroy(), 1000);
+        t.unref?.();
+        sock.once('close', () => clearTimeout(t));
+      };
+      if (req.url !== '/socket') return refuse(404);
+      if (!browserViewHost(req, port)) return refuse(403);
+      if (![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(browserOneHeader(req, 'origin'))) return refuse(403);
+      const key = browserOneHeader(req, 'sec-websocket-key');
+      if (req.method !== 'GET' || String(browserOneHeader(req, 'upgrade')).toLowerCase() !== 'websocket' || browserOneHeader(req, 'sec-websocket-version') !== '13' || !/^[A-Za-z0-9+/]{22}==$/.test(key ?? '')) return refuse(400);
+      if (!ctx.ready || ctx.stopping) return refuse(503);
+      const accept = crypto.createHash('sha1').update(key + BROWSER_WS_GUID).digest('base64');
+      sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
+      const v = { ws: null, seq: 0, tab: null, url: null, timer: null, scale: 1 };
+      v.ws = browserSocket(sock, { pingMs: browserPingMs(), onText: (text) => browserViewInput(ctx, v, text), onClose: () => browserViewClose(ctx, v) });
+      if (head?.length) v.ws.feed(head);
+      if (v.ws.closed) return;
+      if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
+      ctx.viewer = v;
+      v.ws.send({ t: 'held', qid: null });
+      browserViewTick(ctx, v);
+      v.timer = setInterval(() => browserViewTick(ctx, v), 250);
+      v.timer.unref?.();
+    } catch { try { sock.destroy(); } catch {} }
+  });
+  return server;
+}
+// browser serve, in the preview's window: the view server bound first, then the profile and
 // its start steps, the guard, Chrome, the CDP tabs, the control server, then state.json. It writes
 // nothing to its window once it is up. The bind comes before the start steps (kit-316 final-1b S1): a
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   const viewPort = Number(process.env.PORT);
   const rec = readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser' && r.port === viewPort);
@@ -27202,7 +27941,7 @@ async function browserServe({ chrome: bin }) {
   ctx.preview = rec.name;
   ctx.profile = browserProfile();
   try {
-    ctx.view = http.createServer((req, res) => { req.resume(); res.on('error', () => {}); res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' }); res.end("The supervisor's browser runs here; its live view comes with a later release.\n"); });
+    ctx.view = browserViewServer(ctx);
     // test hook: the first daemon to find this file missing makes it and fails its bind (T4-1)
     const failOnce = browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL');
     if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
@@ -27211,9 +27950,8 @@ async function browserServe({ chrome: bin }) {
     ctx.guard = await startBrowserGuard();
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
-    ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
     ctx.cdp = cdp;
-    ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
+    browserWatchChrome(ctx, ctx.chrome, cdp);
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
     ctx.verbs = browserVerbs(ctx);
@@ -27221,8 +27959,12 @@ async function browserServe({ chrome: bin }) {
     const { server, arm } = browserControl(ctx, secret);
     ctx.control = server;
     const controlPort = await browserListen(server, 0);
-    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
+    ctx.state = { browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview };
+    browserWriteState(ctx.state); // a forget rewrites it with its new chrome_pid
+    ctx.ready = true; // the view's guard 5: Chrome is up
     arm();
+    ctx.renew = setInterval(() => browserRenew(ctx, viewPort), Number(browserTestEnv('DEVTEAM_TEST_BROWSER_RENEW_MS')) || 3600000);
+    ctx.renew.unref();
     process.on('uncaughtException', () => browserShutdown(ctx, 'error'));
     process.on('unhandledRejection', () => browserShutdown(ctx, 'error'));
   } catch (e) {
@@ -27234,8 +27976,11 @@ async function browserServe({ chrome: bin }) {
 }
 // browser stop: the daemon told to stop, and up to 10 s for it to go. A dead daemon's Chrome is killed
 // here (only one proven by its --user-data-dir); then the session files, the window, the preview
-// record and state.json. It makes nothing: no profile, no run/browser.
-async function browserStop({ say = true } = {}) {
+// record and state.json. It makes nothing: no profile, no run/browser. rec: the record to remove
+// (preview stop hands its own, so any writer's stop takes it); this writer's by default. True back
+// unless a leftover Chrome couldn't be stopped (said, and exit 1).
+async function browserStop({ say = true, rec } = {}) {
+  let ok = true;
   const s = browserState();
   if (s) {
     try { await browserCall('stop', {}, { state: s, ms: 15000 }); } catch {}
@@ -27246,12 +27991,13 @@ async function browserStop({ say = true } = {}) {
     try {
       await browserKillChrome(profile, [...browserCandidates(profile), ...(browserProcsOn(profile) ?? [])]);
       browserDeleteSession(profile);
-    } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); process.exitCode = 1; }
+    } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); process.exitCode = 1; ok = false; }
   }
-  const rec = browserPreviewRec();
-  if (rec) { killPreviewWindow(rec); removePreview(rec.name); }
+  const r = rec ?? browserPreviewRec();
+  if (r) { killPreviewWindow(r); removePreview(r.name); }
   fs.rmSync(browserStateFile(), { force: true });
   if (say) out(s ? 'browser stopped' : "browser wasn't running");
+  return ok;
 }
 async function browserStatus() {
   const off = { browser: 1, instance: browserKey(), running: false, held: null };

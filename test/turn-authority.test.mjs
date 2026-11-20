@@ -300,18 +300,20 @@ test('turn authority', async (t) => {
       // A15: the act that carried a decision out; a standalone act from a turn, and another from chat
       const D2 = call('decision');
       const A = call('act', { decision: D2 });
-      const { U: UA } = on(`act:${A}`, 'That act came from a bad call.');
+      const { T: TA, U: UA } = on(`act:${A}`, 'That act came from a bad call.');
       F.sup(['correct', D2, '--from-turn', UA, '--said', 'That act came from a bad call.']);
       assert.equal(set(D2).type, 'decision');
       refused(['correct', A, '--from-turn', UA, '--said', 'That act came from a bad call.'], new RegExp(`carried out ${D2}`));
       ok();
       const A2 = call('act');
-      const { U: UA2 } = on(`act:${A2}`, 'Undo that.');
+      const { T: TA2, U: UA2 } = on(`act:${A2}`, 'Undo that.');
       F.sup(['correct', A2, '--from-turn', UA2, '--said', 'Undo that']);
       assert.deepEqual([set(A2).type, set(A2).corrected], ['act', { reason: 'Undo that', said: 'Undo that', said_at: [0, 9], turn: UA2 }]);
       ok();
       // an act's thread corrects only the decision that act carried out, and a standalone act's only itself (task-4 T4-1)
       const D5 = call('decision');
+      // each act's first thread resolved: an act with an open thread takes no second one (kit-97)
+      for (const T of [TA, TA2]) F.owner(['thread', 'resolve', T]);
       const { U: UA5 } = on(`act:${A}`, 'Wrong call.');
       refused(['correct', D5, '--from-turn', UA5, '--said', 'Wrong call.'], new RegExp(`that thread is about act:${A}, not ${D5}`));
       const { U: UA6 } = on(`act:${A2}`, 'Wrong call.');

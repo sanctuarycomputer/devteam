@@ -116,13 +116,14 @@ test('the Efficiency page', { skip: canDrive ? false : 'needs Chrome and a Node 
   });
 
   await t.test('fleet keeps its own and loses the four', async () => {
-    await load(efficiencyFixture(), '#health');
-    await soon("!!document.querySelector('#findings .card')", 'the findings');
-    const heads = await texts('#health h3');
-    for (const h of ['Hours by phase', 'USD by phase', 'USD by model', 'Tokens']) assert.ok(!heads.includes(h), `${h} left Health: ${heads.join(' | ')}`);
-    assert.ok(heads.includes('Set aside'), heads.join(' | '));
-    assert.ok(heads.some((h) => h.startsWith('Checks before merge')), heads.join(' | '));
-    assert.match(await text('#findings'), /no phase line for 3 hours/);
+    // Health folded into Sensors › Fleet (kit-93): its own tables, none of the four
+    await load(efficiencyFixture(), '#sensors?st=fleet');
+    await soon("!!document.querySelector('#monitoring [data-tbl=\"fleet:findings\"] tr[data-row]')", 'the findings');
+    const heads = await p.ev("[...document.querySelectorAll('#monitoring .card > .card-head')].map((h) => [...h.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim())");
+    assert.deepEqual(heads, ['Findings', 'Set aside', 'Checks before merge', 'Flaky tests', 'Slowest tests']);
+    const all = await text('#monitoring');
+    for (const h of ['Hours by phase', 'USD by phase', 'USD by model', 'Tokens']) assert.ok(!all.includes(h), `${h} is not on Fleet`);
+    assert.match(await text('#monitoring [data-tbl="fleet:findings"]'), /no phase line for 3 hours/);
   });
 
   await t.test('efficiency missing: Where it goes from metrics, the rest None', async () => {
@@ -368,7 +369,7 @@ test('the Efficiency page', { skip: canDrive ? false : 'needs Chrome and a Node 
 
   await t.test("where a suggestion's thread lives", async () => {
     assert.equal(await p.ev("tWhere({ kind: 'page', view: '#efficiency?suggestion=eff-x' })"), 'Efficiency');
-    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#trust' })"), 'Trust Ladder');
+    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#trust' })"), 'Trust');
     assert.equal(await p.ev("tWhere({ kind: 'page', view: '#loop/decide' })"), 'Loop, Decide');
     const s = JSON.stringify(openThread().subject);
     assert.equal(await p.ev(`tlRowOf(${s}).el === ${ITEM('eff-costly-ticket-kit-87')}`), true);

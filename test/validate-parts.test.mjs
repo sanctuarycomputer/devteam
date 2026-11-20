@@ -581,3 +581,62 @@ test('planning.md, worker.md, supervisor.md and the schema say the same about pa
   const find = (o) => (o && typeof o === 'object' ? (o.touches?.description ?? Object.values(o).map(find).find(Boolean)) : undefined);
   assert.match(find(schema), /path#name names one part/);
 });
+
+test('validate: a mostly serial graph warns, and names the links that only serialize whole-file touches of a split file', () => {
+  const F = partsProject('parts-serial', [DT]);
+  try {
+    const serial = () => F.validate().split('\n').filter((l) => l.includes('mostly serial'));
+    const ids = Array.from({ length: 9 }, (_, i) => `app-${String(i + 41)}-step`);
+    ids.forEach((id, i) => F.ticket(id, [DT], { depends_on: i ? [ids[i - 1]] : [] }));
+    let w = serial();
+    assert.equal(w.length, 1, w.join(' | '));
+    assert.match(w[0], /^warning: the unmerged ticket graph is mostly serial: its longest dependency chain is 9 tickets deep \(app-41-step … app-49-step\)/);
+    assert.match(w[0], /8 of its 8 links only serialize whole-file touches of a file split_files lists, e\.g\. app-42-step on app-41-step \(docs\/devteam\/scripts\/devteam\.mjs\); app-43-step on app-42-step/);
+    assert.match(w[0], /name the parts each changes \(path#name\) and drop the dependencies that only serialize/);
+    assert.doesNotMatch(F.validate(), /^error: .*mostly serial/m, 'a warning, never an error');
+    // the same chain over a file split_files doesn't list: still serial, with no parts hint
+    for (const id of ids) F.touches(id, ['app/shared.txt']);
+    w = serial();
+    assert.equal(w.length, 1);
+    assert.doesNotMatch(w[0], /split_files/);
+    assert.match(w[0], /find dependencies a contract ticket or a split could break/);
+    // named parts and no serializing dependencies: wide, so no warning
+    ids.forEach((id) => F.ok(F.old, ['ticket', 'set', id, '--json', JSON.stringify({ touches: [`${DT}#+part${id.replace(/-/g, '')}`], depends_on: [] })], SUP));
+    assert.deepEqual(serial(), []);
+    // a short chain is not serial
+    ids.slice(1, 5).forEach((id, i) => F.ok(F.old, ['ticket', 'set', id, '--json', JSON.stringify({ depends_on: [ids[i]] })], SUP));
+    assert.deepEqual(serial(), []);
+  } finally { F.done(); }
+});
+
+test('validate: a deep chain beside enough ready tickets is not serial, and named parts that really overlap are not a serializing link', () => {
+  const F = partsProject('parts-serial-wide', [DT]);
+  try {
+    const serial = () => F.validate().split('\n').filter((l) => l.includes('mostly serial'));
+    const ids = Array.from({ length: 9 }, (_, i) => `app-${String(i + 41)}-step`);
+    ids.forEach((id, i) => F.ticket(id, [DT], { depends_on: i ? [ids[i - 1]] : [] }));
+    // 9 deep, 2 ready (app-41 and one free ticket): 9 >= 4 x 2, still serial
+    F.ticket('app-61-free', ['app/free-1.txt']);
+    let w = serial();
+    assert.equal(w.length, 1, w.join(' | '));
+    assert.match(w[0], /9 tickets deep .* while 2 of 10 are ready/);
+    // 3 ready: 9 < 4 x 3, wide enough, no warning
+    F.ticket('app-62-free', ['app/free-2.txt']);
+    assert.deepEqual(serial(), []);
+    // a dependency that has merged, or been superseded, doesn't hold a ticket back: the three are still ready
+    F.ticket('app-30-merged', ['app/merged.txt']);
+    F.g(['commit', '-q', '--allow-empty', '-m', 'app-30-merged: work'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    F.ticket('app-31-old', ['app/old.txt'], { superseded_by: 'app-30-merged' });
+    for (const id of ['app-41-step', 'app-61-free', 'app-62-free']) F.ok(F.old, ['ticket', 'set', id, '--json', JSON.stringify({ depends_on: ['app-30-merged', 'app-31-old'] })], SUP);
+    assert.deepEqual(serial(), [], 'merged and superseded dependencies leave the width at 3');
+    F.ok(F.old, ['ticket', 'set', 'app-62-free', '--json', JSON.stringify({ depends_on: ['app-61-free'] })], SUP);
+    assert.equal(serial().length, 1, 'back to 2 ready: serial again');
+    // every link names the same part on both sides: they really overlap, so none only serializes
+    for (const id of ids) F.touches(id, [`${DT}#cmdReady`]);
+    w = serial();
+    assert.equal(w.length, 1, w.join(' | '));
+    assert.doesNotMatch(w[0], /only serialize/);
+    assert.match(w[0], /find dependencies a contract ticket or a split could break/);
+  } finally { F.done(); }
+});
