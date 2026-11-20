@@ -371,9 +371,10 @@ function tmuxSession({ save = false } = {}) {
   // this checkout's path, so two clones of one repo (or two repos with one name) never share either.
   const keep = ourWindows('devteam').length > 0;
   const name = keep ? 'devteam' : `devteam-${slug(s.project ?? path.basename(mainRoot))}-${crypto.createHash('sha1').update(fs.realpathSync(mainRoot)).digest('hex').slice(0, 6)}`;
-  // A legacy name is saved the moment it is found: once this project's last window there closes it
-  // could no longer be told apart, and the next session would start somewhere else.
-  if (save || keep) { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(file, `${name}\n`); }
+  // A legacy name is found and used on every call, and saved only by a start (save: every caller that
+  // opens a window passes it), never by a read: a GET of the dashboard runs reads, and changes nothing
+  // (kit-339). A start while the legacy windows are open saves it, so it can't flip once they close.
+  if (save) { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(file, `${name}\n`); }
   return (tmuxSessionName = name);
 }
 // A window of this project's session, matched exactly: tmux would otherwise take a prefix, so
@@ -4272,7 +4273,7 @@ function cmdValidate() {
   let validateClosures = null;
   const linesOf = (link) => ({ comps: componentsOn(S0, link), dev: link === 'home' ? devteamLine() : [`${projectRelOf(link)}/**`] });
   for (const [id, t] of ts) {
-    if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
+    if (isActive(t) && !id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
     for (const g of t.touches ?? []) if (unbalanced(touchPath(g))) err(id, `touches entry "${g}" has unbalanced braces`);
     // Component lines: the component is declared, and every touches entry lies in its
     // line (or a touches_components member's) and no other, so a ticket's footprint is one line.
@@ -20856,7 +20857,7 @@ async function dashRoutesFiles(D, req, res, q) {
     const R = !rid || rid === 'home' ? repo('home') : repoReadable(rid) ? repo(rid) : null;
     if (!R) return send(res, 404, 'text/plain', `no checkout of ${rid} here`);
     const ref = u.searchParams.get('ref') || R.mainRef() || 'HEAD';
-    if (!/^(?!\/)(?!.*\.\.)[^\s]+$/.test(p) || !/^[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
+    if (!/^(?!\/)(?!.*\.\.)[^\s]+$/.test(p) || !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
     const body = await new Promise((resolve) => execFile('git', ['show', `${ref}:${p}`], { cwd: R.root, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
     if (!body) return send(res, 404, 'text/plain', `not found: ${p} at ${ref}`);
     const ext = path.extname(p).toLowerCase();
@@ -21037,8 +21038,14 @@ async function dashRoutesOwner(D, req, res, q) {
   // changes refs is: the body is read to its end (the cap above holds) and nothing in it is used.
   if (isCheck) return req.on('end', async () => {
     if (over) return;
-    const r = await run(['fleet', 'status', '--json']);
-    if (!res.headersSent) send(res, r.ok ? 200 : 500, 'application/json', r.ok ? r.stdout : JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+    // a deadline, as an action under the gateway's 15 s has (kit-339); home's origin unreachable is a
+    // failed check (502), never a 200 that reads as checked
+    const r = await run(['fleet', 'status', '--json'], { timeout: 12000 });
+    if (res.headersSent) return;
+    if (!r.ok) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+    let failed = null;
+    try { failed = JSON.parse(r.stdout)?.fetch_error ?? null; } catch {}
+    send(res, failed ? 502 : 200, 'application/json', failed ? JSON.stringify({ error: String(failed) }) : r.stdout);
   });
   if (isPane) {
     const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
@@ -23076,9 +23083,14 @@ function fleetStatus() {
   const repoLinks = Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents);
   const readableLinks = repoLinks.filter(([id]) => repoReadable(id)).map(([id]) => repo(id));
   // another repo's fetch failing is a blocker: its sessions' pushed state would be read from a stale origin
+  // home's too (kit-339): with no prompt and a deadline, and a failure said, never a check that reads as done
   const fetchFails = [];
+  let fetchError = null;
   if (!flags['no-fetch'] && commonDir) {
-    git(['fetch', '--quiet', 'origin']);
+    if (git(['config', '--get', 'remote.origin.url'], mainRoot)) {
+      const f = hostNet(['fetch', '--quiet', 'origin']);
+      if (f.status !== 0) fetchFails.push(fetchError = `home: could not fetch origin: ${f.status === null ? 'timed out' : redactUrl(firstLine(f.err)) || `exit ${f.status}`}; what its sessions pushed is unchecked`);
+    }
     for (const R of readableLinks) {
       if (R.git(['config', '--get', 'remote.origin.url'], R.root) === null) continue;
       const f = gitRun(['fetch', '--quiet', 'origin'], R.root);
@@ -23240,7 +23252,7 @@ function fleetStatus() {
   // which machine supervises this repo (origin's claim): the one a move hands over
   const host = hostHolder({ fetch: !flags['no-fetch'] });
   if (fm && host.holder?.mine && !host.holder.fleet) warnings.push(`the claim on origin doesn't say this fleet is ${fm === 'park' ? 'parked' : 'drained'} yet (it couldn't be written), so the new machine waits until it lapses, 45 minutes after this one was last seen: run fleet ${fm} again once origin answers`);
-  const r = { parity, ...(host.holder ? { host: host.holder } : {}), supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, ...(repoLinks.length ? { repos } : {}), blockers, warnings, ready, checklist, ...(recovery ? { recovery } : {}) };
+  const r = { parity, ...(host.holder ? { host: host.holder } : {}), supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, ...(repoLinks.length ? { repos } : {}), blockers, warnings, ready, checklist, ...(recovery ? { recovery } : {}), ...(fetchError ? { fetch_error: fetchError } : {}) };
   if (flags.json) return json(r);
   if (r.recovery) out(`recovery (to bring the supervisor back, from the main checkout): ${r.recovery}`);
   out(fm ? `${fm === 'park' ? 'parked' : 'draining'}${since ? ` since ${since}` : ''} (${r.fleet.op ?? 'every goal held one by one'}${r.fleet.host ? `, on ${r.fleet.host}` : ''})${r.fleet.reason ? `: ${r.fleet.reason}` : ''}` : 'neither parked nor drained');
@@ -23421,12 +23433,15 @@ const HOST_FILE = runPath('host-claim.json');
 // redeploys, so its id stays whatever its pod or hostname is called), never derived from the boot,
 // the container or the hostname, which change. DEVTEAM_MACHINE_ID sets it instead (an image that
 // rebuilds its home each deploy, or a test's stand-in for a second machine).
-function hostMachineId() {
+// keep false (a view: fleet status, fleet host) never makes one: with none yet it is null, which no
+// claim's machine matches (this machine has written no claim under an id it never kept).
+function hostMachineId({ keep = true } = {}) {
   const set = hostToken(process.env.DEVTEAM_MACHINE_ID);
   if (set) return set;
   const f = path.join(os.homedir(), '.devteam', 'machine-id');
   const had = readText(f)?.trim();
   if (/^[A-Za-z0-9._-]{8,80}$/.test(had ?? '')) return had;
+  if (!keep) return null;
   const id = `m-${crypto.randomBytes(8).toString('hex')}`;
   try { writeText(f, `${id}\n`); } catch {}
   return id;
@@ -23583,7 +23598,7 @@ function hostHolder({ fetch = true } = {}) {
   const c = r.claim;
   if (!c) return { known: true, holder: null, words: 'supervising machine: none (no machine has claimed this repo yet)' };
   if (c.unreadable) return { known: true, holder: null, words: 'supervising machine: none (origin\'s claim is unreadable; the next start takes it over)' };
-  const v = hostVerdict(c);
+  const v = hostVerdict(c, hostMachineId({ keep: false }));
   const state = v.mine ? 'this machine' : v.held ? 'live' : v.why;
   return {
     known: true, holder: { machine: c.machine, hostname: c.hostname, at: c.at, since: c.since, fleet: c.fleet, mine: !!v.mine, state },
