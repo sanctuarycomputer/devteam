@@ -27010,6 +27010,8 @@ async function browserForgetRestart(ctx) {
     ctx.ready = false; // the view's input dropped, its tick idle, a new socket 503
     const v = ctx.viewer;
     if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
+    const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
+    if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
     const old = ctx.chrome;
     old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
     await browserEndChrome(ctx.cdp, old.pid);
@@ -27141,7 +27143,8 @@ function browserVerbs(ctx) {
 }
 // The control server: POST / only, Host 127.0.0.1:<port>, JSON, and the secret (timingSafeEqual);
 // anything else 403 and nothing run. Verbs run one at a time; the idle timer is paused while one runs
-// and re-armed after it (ping leaves it alone).
+// and re-armed after it. ping, after the same checks, is answered at once off the queue and leaves the
+// idle timer alone.
 function browserControl(ctx, secret) {
   const want = Buffer.from(secret);
   let queue = Promise.resolve();
@@ -27170,18 +27173,24 @@ function browserControl(ctx, secret) {
       let m;
       try { m = JSON.parse(body); } catch {}
       const verb = typeof m?.verb === 'string' && Object.hasOwn(ctx.verbs, m.verb) ? m.verb : null;
-      queue = queue.then(async () => {
+      const run = async () => {
         if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
         if (!verb) return { code: 1, out: `usage: ${BROWSER_USAGE}` };
         if (verb !== 'ping') clearTimeout(ctx.idle); // paused while the verb runs
         try { return await ctx.verbs[verb](isObj(m.args) ? m.args : {}); } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
-      }).then((r) => {
+      };
+      // ping reads nothing from Chrome and is answered at once, off the queue: a long verb or a forget
+      // never makes the daemon look dead to browserLive (and so a second daemon started over it)
+      const ping = verb === 'ping';
+      const answered = (ping ? run() : queue.then(run)).then((r) => {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(r));
+        if (ping) return; // ctx.after is the queued verb's (stop's), never taken by a ping
         const after = ctx.after;
         ctx.after = null;
         if (after) res.once('finish', after);
       }).catch(() => { try { res.destroy(); } catch {} }); // one bad answer never stops the queue
+      if (!ping) queue = answered;
     });
   });
   return { server, arm };
