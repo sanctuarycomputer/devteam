@@ -273,7 +273,8 @@ test('the Library shows each landed artifact\'s publish state, from the log and 
   assert.match(html, /changed on main since: what goes up is main's version, not the one recorded\.` : ''\} \$\{tab\(L\.publish\([^`]*'Restore all'\)\}/);
   assert.doesNotMatch(html, /Review all|Review main's version/);
   assert.match(html, /<span class="lib-drift">changed on main since<\/span>/);
-  assert.match(html, /Publishing happens on the cloud box/);
+  // kit-95: the Library's line saying where publishing happens is gone (the Public pill's tooltip keeps it)
+  assert.doesNotMatch(html, />Publishing happens on the cloud box/);
 });
 
 test('the Library lists previews with the link for where the page is', () => {

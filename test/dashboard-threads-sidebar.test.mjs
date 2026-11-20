@@ -268,6 +268,8 @@ test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
   await p.click(`#tl-list [data-tl-open="${A}"]`);
   await soon(`location.hash === '#overview?th=open&t=${A}' && ${inPanel(A)}`, 'A in the panel');
   assert.match(await p.ev("document.getElementById('tl-c-turns').textContent"), /Here, I think\./, "A's turns");
+  // kit-95: the composer says Reply once a thread has a turn (the mock's word), Message on a new one
+  assert.equal(await p.ev("document.getElementById('tl-c-text').placeholder"), 'Reply', 'a thread with turns: Reply');
   assert.deepEqual(await p.ev(`[${seen('#tl-c-text')}, ${seen('#tl-c-title')}, ${seen('#tl-card [data-tl-close]')}, ${seen('#tl-c-acts [data-tl-resolve]')}, ${card}.getAttribute('role'), ${seen('#ask-threads')}, document.querySelectorAll('#tl-card').length]`),
     [true, false, false, true, null, false, 1], 'the composer and Resolve shown; its title, its × and the terminal ask hidden; no role; one card');
   await soon("document.activeElement?.matches('#th-pane [data-tl-back]')", 'the focus on the back arrow');
@@ -357,6 +359,7 @@ test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
   await p.click('#threads [data-tl-new]');
   await soon(`document.activeElement?.id === 'tl-c-text' && !!document.querySelector('#th-card-slot > #tl-card.in-panel') && !${card}.hidden`, 'an in-panel draft, focused');
   assert.equal(await p.ev('location.hash'), '#overview?th=open', 'the URL unchanged');
+  assert.equal(await p.ev("document.getElementById('tl-c-text').placeholder"), 'Message', 'a new thread: Message (kit-95)');
   assert.match(await p.ev("document.getElementById('th-pane').textContent"), /New thread/, 'its row says New thread');
   const len2 = await p.ev('history.length');
   await p.type('new one');
@@ -536,7 +539,7 @@ test('the counts as threads move', { skip: SKIP, timeout: 300000 }, async (t) =>
   assert.equal(await p.ev("document.querySelector('.pagebar .tt').getAttribute('title')"), '3 waiting on the supervisor');
   // none open: no thread count
   for (const id of [Y1, Y2, W]) F.owner(['thread', 'resolve', id]);
-  await soon("!document.querySelector('.pagebar .tt .n.th') && /No open threads\\. Hold Shift and click anything on the page, or start one with \\+\\./.test(document.getElementById('th-pane').textContent)", 'no thread count, the empty line');
+  await soon("!document.querySelector('.pagebar .tt .n.th') && [...document.querySelectorAll('#th-pane .empty')].some((e) => e.textContent === 'None')", 'no thread count, the empty line: None (kit-95)');
   await p.click('#th-close');
   await soon("!document.body.classList.contains('threads-open')", 'closed');
 });
