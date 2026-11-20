@@ -1065,6 +1065,11 @@ const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-sett
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
 const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records', 'worktree_copy', 'worktree_setup_always'];
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
+// what a repo link's maintain may turn on; linkMaintains(l, 'prs')
+const LINK_DUTIES = ['prs', 'releases'];
+// maintain.reviews: another name its review records may go under, run/reviews/<reviews>-pr-<n>/, besides the link's id
+const REVIEWS_PREFIX = /^[a-z0-9][a-z0-9_.-]{0,63}$/i;
+const linkMaintains = (l, duty) => !!l && typeof l === 'object' && !!l.maintain && typeof l.maintain === 'object' && l.maintain[duty] === true;
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
 // records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
 // "repo", in its own project folder, landing with its code; or "home", on home's ticket/<id> in
@@ -1095,7 +1100,7 @@ const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
   gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string', records: 'string',
-  worktree_copy: 'any', worktree_setup_always: 'boolean',
+  worktree_copy: 'any', worktree_setup_always: 'boolean', maintain: 'object',
 });
 const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
@@ -1152,7 +1157,9 @@ const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w
 // looks up: kind "constructor" is unknown, not Object's.
 const LINK_KINDS = Object.assign(Object.create(null), {
   repo: {
-    fields: { required: ['remote'], optional: ['path', ...REPO_KEYS] },
+    // maintain: { prs, releases }, duties the supervisor keeps for a repo it doesn't only merge
+    // tickets into (linkDutyFindings): the owner's, a governance-edit like the rest
+    fields: { required: ['remote'], optional: ['path', 'maintain', ...REPO_KEYS] },
     // where the checkout is on this machine is never the owner's; what a gate run sees is
     // gate-change; anything else about a repo devteam merges into is governance-edit
     ownerClass: (field) => (field === 'path' ? null : REPO_GATE_KEYS.includes(field) ? 'gate-change' : 'governance-edit'),
@@ -1173,6 +1180,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
       else ctx.remotes.set(k, ctx.id);
       if (l.project !== undefined && (typeof l.project !== 'string' || !REPO_PATH.test(l.project))) errs.push(`${at}: project is a path inside that repo`);
       if (l.records !== undefined && !RECORDS_WHERE.includes(l.records)) errs.push(`${at}: records is "repo" or "home"`);
+      if (l.maintain !== undefined && (!isObj(l.maintain) || Object.entries(l.maintain).some(([k, v]) => (k === 'reviews' ? typeof v !== 'string' || !REVIEWS_PREFIX.test(v) : !LINK_DUTIES.includes(k) || typeof v !== 'boolean')))) errs.push(`${at}: maintain is { "prs": true|false, "releases": true|false, "reviews": "<records prefix>" }`);
       return errs;
     },
     // local and cheap: metrics asks it live
@@ -1526,6 +1534,8 @@ function schemaErrors(schema, value, where) {
 // plan-<feature> (a planner's graph, landed by its plan PR), plan-<feature>-<yyyy-mm> (the same
 // planner's messages and observations, live), or a ticket id. Anything else counts for nothing.
 const MONTHLY = /^(owner|supervisor|plan-[a-z0-9]+(?:-[a-z0-9]+)*?)-\d{4}-\d{2}$/;
+// responder.jsonl is the responder's (responder-1): it falls to the last rule, and no ticket id can be
+// "responder", since a keyed ticket id carries a -NN- number.
 function writerOfFile(name) {
   const base = name.replace(/\.jsonl$/, '');
   const m = MONTHLY.exec(base);
@@ -1533,7 +1543,7 @@ function writerOfFile(name) {
   if (/^(owner|supervisor)(-|$)/.test(base)) return null;
   return /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(base) ? base : null;
 }
-const writerClass = (by) => (by === 'owner' || by === 'supervisor' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
+const writerClass = (by) => (by === 'owner' || by === 'supervisor' || by === 'responder' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
 const planFeature = (by) => (writerClass(by) === 'planner' ? by.slice('plan-'.length) : null);
 
 // The cheap checks every reader runs, so a line never grants more than its file's writer has: the
@@ -1561,6 +1571,24 @@ function integrity(o, file) {
       if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
     }
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
+    // responder-1: the responder answers the owner's turns and hands work over, and no more. It asks
+    // nothing, replies to no message (a reply's re closes what it names, in every reader of open
+    // messages), and its observations are its own and of no kind readers honour by kind alone.
+    if (cls === 'responder') {
+      if (o.type === 'turn' && o.question !== undefined) return "the responder's turns ask nothing";
+      if (o.type === 'message' && !['handoff', 'info'].includes(o.kind)) return 'the responder sends handoff and info messages only';
+      if (o.type === 'message' && o.re !== undefined && o.re !== null) return 'the responder replies to no message (re)';
+      if (o.type === 'observation' && o.source !== 'responder') return "the responder's observations have source responder";
+      if (o.type === 'observation' && [...SET_ASIDE_KINDS, 'outcome', 'escaped-defect', 'discovery', 'footprint-refusal'].includes(o.kind)) return `the responder doesn't write ${o.kind} observations`;
+      // a detector line is the kit's own (sensor, findings), which readers act on by detector alone
+      if (o.type === 'observation' && o.detector !== undefined && o.detector !== null) return "the responder's observations name no detector";
+    }
+    // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
+    if (o.type === 'message' && o.kind === 'handoff' && typeof o.thread !== 'string') return 'a handoff names its thread';
+    if (o.type === 'message' && o.kind === 'handoff' && o.to !== 'supervisor') return 'a handoff goes to the supervisor';
+    if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
+    if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
+    if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
     // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
     // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
     // (goal order), and of asking for one of the supervisor's settings (owner-setting). Nobody else
@@ -1888,8 +1916,10 @@ function currentTicketId() {
   const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   return b?.startsWith('ticket/') ? b.slice('ticket/'.length) : null;
 }
-// Who this process writes the log as: a ticket id, plan-<feature>, or supervisor. Never the owner.
+// Who this process writes the log as: the responder (its role wins over a ticket, a feature or a
+// branch), a ticket id, plan-<feature>, or supervisor. Never the owner.
 function logWriter() {
+  if (process.env.DEVTEAM_ROLE === 'responder') return 'responder';
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
@@ -1914,7 +1944,10 @@ function ownerWriter(hint) {
   return { by: 'owner' };
 }
 const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli');
+// What the responder is told when it runs a supervisor's command: who does it, and how to hand it over.
+const responderRefusal = (what) => `${what}: the supervisor does this; hand it over: send supervisor "…" --kind handoff --thread <t-id>`;
 const supervisorOnly = (what) => {
+  if (process.env.DEVTEAM_ROLE === 'responder' || logWriter() === 'responder') die(responderRefusal(what));
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`${what}: the supervisor does this`);
   rememberSupervisorPane();
   noteSupervisorSelf();
@@ -3093,7 +3126,7 @@ const memo = (key, fn) => { const l = readLog(); l.memo ??= new Map(); if (!l.me
 const tickets = () => memo('tickets', () => new Map(logObjects('ticket').map((t) => [t.id, t])));
 const features = () => memo('features', () => new Map(logObjects('feature').map((f) => [f.id, f])));
 const isActive = (t) => !t.superseded_by;
-// A held ticket is one the supervisor chose not to schedule yet (`ticket set <id> --json '{"held": "why"}'`; null releases it).
+// A held ticket is one the supervisor chose not to schedule yet (`ticket hold <id> --reason "why" --for <cause>…`; `ticket release <id>` lifts it).
 const isHeld = (t) => typeof t.held === 'string' && t.held.trim() !== '';
 const activeTickets = () => new Map([...tickets()].filter(([, t]) => isActive(t)));
 const weight = (t) => (t.size === 'M' ? 2 : 1);
@@ -4553,11 +4586,12 @@ function restartCommands(filter = () => true) {
   const windows = new Set((sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']) ?? '').split('\n').filter(Boolean));
   return liveSessions().filter((s) => lastPhaseOf(s.name)?.to === 'parked' && ['run', 'drain'].includes(sessionMode(s.name)) && filter(s)).map((s) => ({ name: s.name, cmd: `${s.role} ${s.id}${windows.has(s.name) && fs.existsSync(s.wt) ? ' --resume' : ''}`, handoff: !!handoffFor(s.name) }));
 }
-// Write one goal's hold, creating Upkeep's line the first time it is held.
-function writeHold(g, hold, by) {
+// Write one goal's hold, creating Upkeep's line the first time it is held. extra: top-level fields of
+// the hold line beside hold (a drain's hold_for and hold_until).
+function writeHold(g, hold, by, extra = {}) {
   let target = g;
   if (isUpkeep(g) && !upkeepGoal()) target = appendLog({ type: 'goal', kind: 'upkeep', title: 'Upkeep' }, by);
-  return appendLog({ type: 'goal', op: 'set', id: target.id, hold }, by);
+  return appendLog({ type: 'goal', op: 'set', id: target.id, hold, ...extra }, by);
 }
 const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', 'let-go': 'let go' }[m] ?? m);
 // The mode label a goal shows: drain splits into draining (work still running) and drained.
@@ -4696,7 +4730,7 @@ function cmdReady() {
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component, incident_slots: s.incident_slots } });
   out(`active workers: ${active.length}/${capWords(s.max_active_tickets)}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
   for (const r of rows.filter((x) => x.incident)) out(`fix first  ${r.id}  (incident ${r.incident}, severity ${r.severity})`);
-  for (const h of held) out(`held       ${h.id}  (${h.held})`);
+  for (const h of held) { const hf = ts.get(h.id).held_for; const hu = ts.get(h.id).held_until; out(`held       ${h.id}  (${h.held}${Array.isArray(hf) && hf.length ? `; for ${hf.join(', ')}` : ''}${hu ? `, until ${hu}` : ''})`); }
   for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${r.blocks ? `  (blocks p${r.blocks.priority})` : ''}${r.overlaps_active ? `  (touches overlap ${r.overlaps_active.join(', ')}: start it once that merges)` : ''}${capped(r) ? '  (component at cap)' : ''}`);
@@ -4744,13 +4778,146 @@ function cmdStatus() {
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}`);
 }
 
+// Why a hold the supervisor or a planner writes is refused, or null (kit-571; design
+// every-wait-names-its-cause-and-every-put, "Writers"): it names what it waits on (--for), each cause
+// in a known form (waitCause) and in the log, a date (--until) for a cause the kit can't follow, and
+// a date that is a real day from today to 30 days ahead (UTC). kind is ticket or goal, id the held
+// thing's, causes trimmed and de-duplicated, until a date or null, whole the --whole words or null.
+// Never applied to the owner's holds. Holds already in the log are never read through it.
+// A hold may not wait on itself (rule 6): for a ticket, on the ticket, one of its goals or a ticket
+// depending on it (transitively); for a goal, on the goal or one of its tickets; nor on a cause whose
+// own holds in force (a held ticket's held_for, a draining goal's hold_for) reach one of those.
+// A ticket held for a question names why the whole ticket waits (rule 7): whole, else split first.
+// ticket is the held ticket (for ticket add, its body: its feature gives its goals).
+function holdCause({ kind, id, causes, until, whole, ticket }) {
+  const FORMS = 'a q-… question, a ticket id, goal:<g-id>, chore:<slug>, pr:<link>#<n>, run:<link>:<run id> or external:<words>';
+  if (!causes.length) return until ? '--until goes with --for: name what the hold waits on' : `a hold names what it waits on: --for <cause>… (${FORMS})`;
+  const today = new Date().toISOString().slice(0, 10);
+  const dayAfter = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+  const latest = dayAfter(today, 30);
+  for (const c of causes) {
+    const w = waitCause(c);
+    if (!w) return `${c} is in no known form (${FORMS})`;
+    const there = w.form === 'q' ? logGet(w.id)?.type === 'question'
+      : w.form === 'ticket' ? tickets().has(w.id)
+      : w.form === 'goal' ? logGet(w.id)?.type === 'goal'
+      : w.form === 'chore' ? Boolean(resolveCommit(`refs/heads/chore-${w.id}`) || resolveCommit(`refs/remotes/origin/chore-${w.id}`) || logObjects('act').some((a) => (a.refs ?? []).includes(`chore-${w.id}`)))
+      : true;
+    if (!there) return w.form === 'chore' ? `${c} is not in the log (no chore-${w.id} branch here or on origin, and no act refs it)` : `${c} is not in the log`;
+    if (['pr', 'run', 'external'].includes(w.form) && !until) return `the kit can't follow ${c}: give it --until <date> (today to ${latest}) to look at it again`;
+  }
+  if (until !== null && until !== undefined) {
+    const real = /^\d{4}-\d{2}-\d{2}$/.test(until) && !Number.isNaN(Date.parse(`${until}T00:00:00Z`)) && new Date(Date.parse(`${until}T00:00:00Z`)).toISOString().slice(0, 10) === until;
+    if (!real) return `--until ${until} is not a date (YYYY-MM-DD)`;
+    if (until < today) return `--until ${until} is in the past (today is ${today}, UTC)`;
+    if (until > latest) return `--until ${until} is more than 30 days ahead (at most ${latest})`;
+  }
+  // rule 6: the subjects a hold of this thing may not wait on, each with why it is the thing itself
+  const self = new Map();
+  if (kind === 'ticket') {
+    self.set(id, null);
+    for (const g of ticketGoals(ticket)) self.set(`goal:${g.id}`, `goal:${g.id} is one of its goals`);
+    const all = [...tickets().values()];
+    const queue = [id];
+    const seen = new Set(queue);
+    while (queue.length) {
+      const at = queue.shift();
+      for (const t of all) {
+        if (seen.has(t.id) || !(t.depends_on ?? []).includes(at)) continue;
+        seen.add(t.id);
+        // a superseded or merged dependent waits on nothing (kit-572 reads it resolved or failed)
+        if (!isActive(t) || mergeShaFor(t.id)) continue;
+        queue.push(t.id);
+        self.set(t.id, `${t.id} depends on it`);
+      }
+    }
+  } else {
+    self.set(`goal:${id}`, null);
+    for (const t of tickets().values()) if (ticketGoals(t).some((g) => g.id === id)) self.set(t.id, `${t.id} is one of its tickets`);
+  }
+  // a cause as a subject the walk follows: a ticket's id or goal:<id>; anything else ends the walk
+  const subject = (c) => { const w = waitCause(c); return w?.form === 'ticket' ? w.id : w?.form === 'goal' ? `goal:${w.id}` : null; };
+  const next = (s) => {
+    if (s.startsWith('goal:')) { const g = logGet(s.slice(5)); return g?.type === 'goal' && goalMode(g) === 'drain' ? g.hold_for ?? [] : []; }
+    // only a hold in force: a superseded or merged ticket's stale held_for is not followed
+    const t = tickets().get(s);
+    return t && isHeld(t) && isActive(t) && !mergeShaFor(t.id) ? t.held_for ?? [] : [];
+  };
+  for (const c of causes) {
+    const start = subject(c);
+    if (!start) continue;
+    const from = new Map([[start, null]]);
+    const queue = [start];
+    while (queue.length) {
+      const at = queue.shift();
+      if (self.has(at)) {
+        const chain = [];
+        for (let s = at; s !== null; s = from.get(s)) chain.unshift(s);
+        const why = self.get(at);
+        return `${c} waits on ${id} itself${chain.length > 1 ? `, through ${chain.join(' -> ')}` : ''}${why ? ` (${why})` : ''}`;
+      }
+      for (const n of next(at)) {
+        const s = subject(n);
+        if (s && !from.has(s)) { from.set(s, at); queue.push(s); }
+      }
+    }
+  }
+  // rule 7: a question gates only part of a ticket, unless the hold says why it gates the whole
+  if (kind === 'ticket' && !whole) {
+    const q = causes.find((c) => waitCause(c)?.form === 'q');
+    if (q) return `${id} waits on ${q}: hold only the part the answer gates. Split first: ticket add a ticket with the touches and done-whens that don't need the answer, ticket set ${id} to what is left, then hold it; or, if no part can go ahead without the answer, pass --whole "<why>"`;
+  }
+  return null;
+}
+
 // ticket add <id> --json '{…}' | --file f ; ticket set <id> --json '{…}' ; feature add/set likewise.
-function cmdTicket() { graphEdit('ticket', SCHEMA['x-id'].keyed.ticket); }
+// ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole w] ; ticket release <id> [--reason r]:
+// a hold that names what it waits on (holdCause), and its release, each one ticket line.
+function cmdTicket() {
+  const [sub, id] = positional;
+  if (sub !== 'hold' && sub !== 'release') return graphEdit('ticket', SCHEMA['x-id'].keyed.ticket);
+  if (!id) die(sub === 'hold' ? 'usage: ticket hold <id> --reason "<why>" --for <cause>… [--until <YYYY-MM-DD>] [--whole "<why>"]' : 'usage: ticket release <id> [--reason "<why>"]');
+  const by = logWriter();
+  const cls = writerClass(by);
+  if (!['supervisor', 'planner'].includes(cls)) die('tickets are written by the supervisor or a planner (plan-<feature>)');
+  const t = logGet(id);
+  if (t?.type !== 'ticket') die(`no ticket ${id}`);
+  if (cls === 'planner') {
+    const f = planFeature(by);
+    if (t.feature !== f) die(`${by} may only change the feature "${f}" and its tickets`);
+    // the fold ranks a planner's held below the supervisor's and the owner's: once either wrote it, a
+    // planner's line would change nothing (a release with null keeps that rank too)
+    const over = readLog().lines.find((l) => l.type === 'ticket' && l.id === id && 'held' in l && ['supervisor', 'owner'].includes(writerClass(l.by)));
+    if (over) die(`${id}'s hold was set by the ${writerClass(over.by)}: a planner may not change it`);
+  }
+  const reason = flagStr('reason')?.trim() || null;
+  if (sub === 'release') {
+    if (!isHeld(t)) die(`${id} is not held`);
+    appendLog({ type: 'ticket', op: 'set', id, held: null, held_for: null, held_until: null }, by);
+    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'replan-within-feature', what: `released ticket ${id}${reason ? `: ${reason}` : ''}`, refs: [id], reversible: true }, 'supervisor');
+    return out(`released ${id}`);
+  }
+  if (!isActive(t)) die(`${id} is superseded: nothing to hold`);
+  if (mergeShaFor(id)) die(`${id} is merged: nothing to hold`);
+  if (!reason) die('ticket hold needs --reason "<why>"');
+  const causes = [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))];
+  const until = flagStr('until')?.trim() || null;
+  // a bare or blank --until is a date given and lost: refused, as goal hold refuses it
+  if (flags.until !== undefined && until === null) die('--until needs a date (YYYY-MM-DD)');
+  if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
+  const whole = flagStr('whole')?.trim() || null;
+  const why = holdCause({ kind: 'ticket', id, causes, until, whole, ticket: t });
+  if (why) die(why);
+  const held = whole ? `${reason} (whole: ${whole})` : reason;
+  appendLog({ type: 'ticket', op: 'set', id, held, held_for: causes, held_until: until }, by);
+  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'replan-within-feature', what: `held ticket ${id} for ${causes.join(', ')}`, refs: [id], reversible: true }, 'supervisor');
+  out(`held ${id}`);
+}
 function cmdFeature() { graphEdit('feature', SCHEMA['x-id'].keyed.feature); }
 function graphEdit(type, idRe) {
   const [sub, id] = positional;
   const by = logWriter();
-  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'   |   ${type} show <id>`);
+  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'${type === 'ticket' ? ' [--whole "<why>"]' : ''}   |   ${type} show <id>`);
   if (sub === 'show') return json(logGet(id) ?? die(`no ${type} ${id}`));
   if (!new RegExp(idRe).test(id)) die(`${type} id "${id}" must match ${idRe}`);
   if (!['supervisor', 'planner'].includes(writerClass(by))) die(`${type}s are written by the supervisor or a planner (plan-<feature>)`);
@@ -4775,6 +4942,34 @@ function graphEdit(type, idRe) {
   if (type === 'ticket' && RESERVED_LINKS.includes(body.component)) die(`component "${body.component}" is reserved (reserved: ${RESERVED_LINKS.join(', ')}): home is the repo that holds the kit, devteam the kit's own files; plan the ticket under another component`);
   // a mistyped feature can't be corrected afterwards (a ticket's feature is fixed), so it's caught here
   if (type === 'ticket' && sub === 'add' && by === 'supervisor' && body.feature !== CHORES && logGet(body.feature)?.type !== 'feature') die(`no feature "${body.feature}" (devteam.mjs feature add, or the feature's id as the log has it)`);
+  // a held body is held to ticket hold's rule (holdCause): a cause, a date in range, no wait on itself
+  if (type === 'ticket') {
+    // the fold ranks a planner's held below the supervisor's and the owner's, as ticket hold refuses
+    if (writerClass(by) === 'planner' && sub === 'set' && 'held' in body) {
+      const over = readLog().lines.find((l) => l.type === 'ticket' && l.id === id && 'held' in l && ['supervisor', 'owner'].includes(writerClass(l.by)));
+      if (over) die(`${id}'s hold was set by the ${writerClass(over.by)}: a planner may not change it`);
+    }
+    if (typeof body.held === 'string' && !body.held.trim()) die('release with null: {"held": null} (a blank held reads released yet keeps its cause)');
+    if (typeof body.held === 'string') {
+      const t = sub === 'add' ? { ...body, id } : { ...logGet(id), ...body };
+      if (!isActive(t)) die(`${id} is superseded: nothing to hold`);
+      if (mergeShaFor(id)) die(`${id} is merged: nothing to hold`);
+      if (body.held_for !== undefined && body.held_for !== null && !Array.isArray(body.held_for)) die('held_for is a list of causes');
+      body.held_for = [...new Set((body.held_for ?? []).map((c) => String(c).trim()).filter(Boolean))];
+      if (typeof body.held_until === 'string' && !body.held_until.trim()) die('--until needs a date (YYYY-MM-DD)');
+      body.held_until = typeof body.held_until === 'string' ? body.held_until.trim() : body.held_until ?? null;
+      if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
+      const whole = flagStr('whole')?.trim() || null;
+      const why = holdCause({ kind: 'ticket', id, causes: body.held_for, until: body.held_until, whole, ticket: t });
+      if (why) die(body.held_for.length ? why : `${why}; or ticket hold ${id} --for <cause>… --reason "<why>"`);
+      if (whole) body.held = `${body.held} (whole: ${whole})`;
+    } else if ((body.held_for ?? null) !== null || (body.held_until ?? null) !== null) {
+      die('held_for and held_until go with held: ticket hold <id> --reason "<why>" --for <cause>…');
+    } else if (body.held === null) {
+      body.held_for ??= null;
+      body.held_until ??= null;
+    }
+  }
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
@@ -7743,7 +7938,7 @@ function turnAnswer(what, v) {
   if (!TURN_ID.test(uid ?? '')) die(`${what} --from-turn <u-id>: the owner's turn whose words settle it`);
   const u = logGet(uid);
   if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
-  if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words settle a question`);
+  if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the ${u.created_by}'s; only the owner's words settle a question`);
   // --said: whole clauses of the turn the question was asked about (thread ask --turn), a span no
   // other binding on the turn overlaps, with what the owner wrote since the question read first
   if (flags.said !== undefined) {
@@ -8110,7 +8305,8 @@ function threadViews(objects) {
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
 function threadView(t, ts, qs) {
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null }));
+  // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null }));
   const status = t.status === 'resolved' ? 'resolved' : 'open';
   const last = turns[turns.length - 1] ?? null;
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
@@ -8314,15 +8510,15 @@ function cmdThread() {
     });
     return deliveredWords(typed);
   };
-  // Who writes a reply from this session: the supervisor (a responder's replies are written as the
-  // supervisor's until kit-102 gives it its own), or null where supervisorOnly would refuse one. The
-  // one place both reply and working's own-turn rule ask, so the two stay in step.
-  const replyWriter = () => (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
-  // Who holds a turn, as the stage names it: null for the owner's terminal and the dashboard, which
-  // never hold one; the responder says so itself until kit-102 makes logWriter say it.
+  // Who writes a reply from this session: the responder (its own turns), the supervisor, or null
+  // where supervisorOnly would refuse one. The one place both reply and working's own-turn rule ask,
+  // so the two stay in step.
+  const replyWriter = () => (logWriter() === 'responder' ? 'responder' : logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
+  // Who holds a turn, as the stage names it (the session's writer, the responder included): null for
+  // the owner's terminal and the dashboard, which never hold one.
   const sessionBy = () => {
     if (!process.env.DEVTEAM_ROLE || process.env.DEVTEAM_CHANNEL === 'dashboard') return null;
-    return process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : logWriter();
+    return logWriter();
   };
   // the holder spoke (or the owner closed the thread): its stage goes
   // a failed clear never fails a command already written (a retry would post twice): the card ignores a record older than the reply anyway
@@ -8352,16 +8548,17 @@ function cmdThread() {
     out(t.id);
     return out(deliver(t, u, words, files));
   }
-  // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
-  // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
+  // say is the owner's and reply the supervisor's or the responder's, never one falling through to the
+  // other: a reply with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the
+  // owner's file. The responder writes its own; anyone else goes through supervisorOnly.
   if (sub === 'say' || sub === 'reply') {
-    const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), replyWriter());
+    const by = sub === 'say' ? threadOwner().by : sub === 'reply' && logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply'), replyWriter());
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
     const words = turnText(wordsFrom(2));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
-    if (refs.length && by !== 'supervisor') die("--refs are on the supervisor's turns: what it did, as <type>:<id>");
+    if (refs.length && by !== 'supervisor' && by !== 'responder') die("--refs are on the supervisor's turns and the responder's: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
     const files = filesFlag();
@@ -8394,7 +8591,7 @@ function cmdThread() {
       if (!TURN_ID.test(uid ?? '')) die("thread ask --turn <u-id>: the owner's turn the question is about");
       const u = logGet(uid);
       if (u?.type !== 'turn') die(`--turn ${uid}: no such turn`);
-      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the supervisor's; a question is about the owner's words`);
+      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the ${u.created_by}'s; a question is about the owner's words`);
       if (u.thread !== t.id) die(`--turn ${uid}: that turn is in ${u.thread}, not ${t.id}; ask in its own thread`);
       if (flags.at !== undefined && flags['owner-said'] === undefined) die('--at goes with --owner-said: which match of a repeated clause');
       about = { about_turn: uid };
@@ -8533,7 +8730,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s or the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -9649,7 +9846,7 @@ const ARTIFACTS_REL = `${projectRel}/artifacts`;
 const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99})$/;
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
-const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for'];
+const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for', 'kind'];
 const artifactPathOk = (p) => /^[A-Za-z0-9._/-]+$/.test(p) && p.split('/').every((s) => s && !s.startsWith('.'));
 const ARTIFACT_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net', 'https://unpkg.com'];
 const ARTIFACT_FONT_HOSTS = ['https://fonts.googleapis.com', 'https://fonts.gstatic.com'];
@@ -9717,6 +9914,8 @@ function parseArtifactManifest(buf) {
   }
   if (typeof m.by !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(m.by)) errs.push('by is who drew it: supervisor, a ticket id, or plan-<feature>');
   if (m.for !== undefined && !(Array.isArray(m.for) && m.for.every((s) => scopeValid(s, 'artifact')))) errs.push(`for is a list of scopes (${SCOPE_HELP.artifact})`);
+  // what the Library files it under; with none it is a mock
+  if (m.kind !== undefined && !['mock', 'diagram', 'docs'].includes(m.kind)) errs.push('kind is mock, diagram or docs (or leave it out: a mock)');
   return errs.length ? { error: errs.join('; ') } : { manifest: { ...m, for: m.for ?? [] } };
 }
 // One artifact judged the same whether its entries come from disk or from a commit: errors refuse
@@ -9892,7 +10091,7 @@ function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
   const mtime = Math.max(0, ...src.entries.map((e) => e.mtime ?? 0));
   const m = p.manifest;
-  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], error: p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
+  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], kind: m?.kind ?? null, error: p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
 }
 function landedArtifacts() {
   const ref = mainRef();
@@ -9907,7 +10106,9 @@ function landedArtifacts() {
   // the cache holds what the tree says (describeArtifact); the row adds the tree id itself, for
   // publishing, and nothing that changes without the tree changing goes in the cache
   const res = rows.map(([, tree, slug]) => {
-    let d = cache[tree]?.slug === slug ? cache[tree] : null;
+    // a row with no kind key was written by a kit from before kinds, which calls a kinded manifest
+    // broken: describe it again rather than serve that (kit-319)
+    let d = cache[tree]?.slug === slug && 'kind' in cache[tree] ? cache[tree] : null;
     if (!d) { const src = artifactSource('main', slug); d = src ? describeArtifact(slug, 'main', src) : null; }
     if (!d) return null;
     next[tree] = d;
@@ -10010,21 +10211,24 @@ function artifactSubjectNow(s) {
   if (fingerprint(src.entries) === s.fp) return null;
   return tree ? `main has changed ${s.slug} since this published version` : `the artifact ${s.slug} has changed since this thread began`;
 }
-// artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
+// artifact new <slug> --title --summary [--for '[…]'] [--kind mock|diagram|docs]: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
   const [sub, ...args] = positional;
   const here = path.join(repoRoot, ARTIFACTS_REL);
   if (sub === 'new') {
-    const slugName = args[0] ?? die('usage: artifact new <slug> --title "…" --summary "…" [--for \'["goal:g"]\']');
+    const slugName = args[0] ?? die('usage: artifact new <slug> --title "…" --summary "…" [--for \'["goal:g"]\'] [--kind mock|diagram|docs]');
     if (!LINK_ID.test(slugName)) die(`${slugName}: a slug is lowercase words joined by - (mock-checkout)`);
     if (!commonDir || fs.realpathSync(repoRoot) === fs.realpathSync(mainRoot)) die('artifact new: draw an artifact in a worktree (a ticket\'s, a plan\'s, or devteam.mjs chore start artifact-<slug>), never on the main checkout');
     if (landedArtifacts().some((a) => a.slug === slugName)) die(`${slugName} has landed; edit ${ARTIFACTS_REL}/${slugName}/ in this worktree instead`);
     if (fs.existsSync(path.join(here, slugName))) die(`${ARTIFACTS_REL}/${slugName} already exists here`);
     const other = draftArtifacts().filter((a) => a.slug === slugName).map((a) => a.at);
     if (other.length) warn(`${slugName} is also being drawn in ${other.join(', ')}`);
-    const by = process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
-    const manifest = { v: 1, title: flagStr('title') ?? die('artifact new needs --title'), summary: flagStr('summary') ?? die('artifact new needs --summary'), by, for: jsonFlag('for') ?? [] };
+    const by = process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
+    // flags keep a repeated flag's last value; a kind given twice is refused rather than guessed
+    const own = argv.indexOf('--') < 0 ? argv : argv.slice(0, argv.indexOf('--'));
+    if (own.filter((a) => a === '--kind' || a.startsWith('--kind=')).length > 1) die('artifact new: give --kind once; kind is mock, diagram or docs');
+    const manifest = { v: 1, title: flagStr('title') ?? die('artifact new needs --title'), summary: flagStr('summary') ?? die('artifact new needs --summary'), by, for: jsonFlag('for') ?? [], ...(flags.kind !== undefined ? { kind: flagStr('kind') ?? '' } : {}) };
     const m = parseArtifactManifest(Buffer.from(JSON.stringify(manifest)));
     if (m.error) die(`artifact new: ${m.error}`);
     fs.mkdirSync(path.join(here, slugName), { recursive: true });
@@ -10093,7 +10297,7 @@ function cmdArtifact() {
     if (flags.json) return json(r);
     return out(r.versions.map((v) => (v.kind === 'draft' ? `draft ${v.worktree} ${v.time}` : `${v.kind} ${v.tree.slice(0, 12)} ${v.commit.slice(0, 12)} ${v.time}`)).join('\n'));
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -11177,7 +11381,7 @@ function citeTargets() {
   const [a, b] = positional;
   switch (command) {
     case 'merge': return [a, flagStr('chore') !== undefined ? `chore-${choreSlug(flagStr('chore'))}` : null, flagStr('plan'), flagStr('plan') ? `plan-${flagStr('plan')}` : null].filter(Boolean);
-    case 'ticket': return ['add', 'set'].includes(a) ? [b] : null;
+    case 'ticket': return ['add', 'set', 'hold', 'release'].includes(a) ? [b] : null;
     case 'withdraw': return [a];
     case 'goal': return a === 'hold' ? [b === 'upkeep' ? upkeepOrVirtual().id : b, b] : null;
     case 'worker': return [a, ...(features().get(tickets().get(a)?.feature)?.goals ?? [])];
@@ -11397,7 +11601,7 @@ function cmdCorrect() {
     if (!TURN_ID.test(uid ?? '')) die("correct --from-turn <u-id>: the owner's turn whose words correct it");
     const u = logGet(uid);
     if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
-    if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words correct a call`);
+    if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the ${u.created_by}'s; only the owner's words correct a call`);
     const ref = logGet(u.thread)?.subject?.ref ?? null;
     const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
     if (ref !== `${act.type}:${actId}` && !(via?.type === 'act' && via.decision === actId)) die(`--from-turn ${uid}: that thread is about ${ref ?? 'nothing in particular'}, not ${actId}; the owner's words correct the record the thread is on`);
@@ -11449,7 +11653,7 @@ const stageOf = (o) => { const s = Object.hasOwn(OODA.stages, o?.type ?? '') ? O
 // The sources each writer may name for itself (observe --source); sensor, metrics and spend are the
 // kit's own, read off its own lines, never given. The supervisor records what the owner said (an
 // answer, a thread, the chat), but never speaks as the owner.
-const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'] };
+const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner', 'responder'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'], responder: ['responder'] };
 // An owner-* source on a line someone else wrote is a claim about the owner's words, so it counts
 // only when its ref is the record that holds them: an answered question (the owner's answer) for
 // owner-answer, the owner's turn or thread for owner-thread, either for owner-chat. A ref that
@@ -11503,7 +11707,7 @@ function cmdObserve() {
   // a goal's reading (source repo, prod or owner) is the kit's, from goal check or an answer
   if (flagStr('kind') === 'reading' && ['repo', 'prod', 'owner'].includes(src)) die(`observe --kind reading --source ${src}: a goal's readings come from the kit itself (goal check, the owner's answer)`);
   const mine = SOURCE_FOR[writerClass(by)];
-  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: a ${{ ticket: 'worker', planner: 'planner', supervisor: 'supervisor', owner: 'owner' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
+  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: ${{ ticket: 'a worker', planner: 'a planner', supervisor: 'a supervisor', owner: 'a owner', responder: 'the responder' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
   if (writerClass(by) !== 'owner' && String(src).startsWith('owner-') && !ownerRefHolds(src, flagStr('ref'))) die(`observe --source ${src} needs --ref <id> naming where the owner said it: ${src === 'owner-answer' ? 'a question they answered' : src === 'owner-thread' ? 'their turn or the thread' : 'a question they answered, or their turn'}`);
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
@@ -11555,13 +11759,14 @@ async function cmdObserveMetrics() {
   // the tick's heartbeat: another machine live on this repo stops the tick here
   const hc = hostCheck();
   if (hc.refused) hostRefusedWhileRunning(hc);
-  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes
+  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes, then each GitHub repo link's open PRs
   const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
   const unfetched = await fetchLinkMains(end);
   const { skipped } = await probeLinks(end);
+  const unlisted = await fetchLinkPrs(end);
   const s = observeSpend();
   const learned = writeLearning();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
   // finished worktrees go, at most every 30 minutes (one line when any did)
   tidyFinishedWorktrees();
 }
@@ -11587,12 +11792,80 @@ async function fetchLinkMains(end) {
       const r = await runProbe({ cmd: 'git', args: ['fetch', '--quiet', 'origin', b], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: (code) => (code === 0 ? {} : { problem: `could not fetch origin ${b} from ${redactUrl(R.remote)} in ${R.root}; its main here is as last fetched` }) }, end);
       if (r === 'budget') { skipped.push(id); continue; }
       state[id] = { at: nowIso(), problem: r.problem ?? null };
+      // a repo whose releases are kept (maintain.releases) also gets its release tags, which a
+      // fetch of one branch doesn't bring, so a release cut elsewhere clears release-due; never
+      // forced, so a local tag that differs stays as it is
+      if (!r.problem && linkMaintains(loadSettings().links?.[id], 'releases') && Date.now() < end) await runProbe({ cmd: 'git', args: ['fetch', '--quiet', '--no-tags', 'origin', 'refs/tags/v*:refs/tags/v*'], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: () => ({}) }, end);
       if (!r.problem) R.resetCaches();
     }
   };
   await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, ids.length) }, one));
   for (const id of Object.keys(state)) if (!ids.includes(id)) delete state[id];
   writeJson(FETCH_FILE, state);
+  return skipped;
+}
+// The open PRs on each GitHub repo link that aren't the fleet's own (ticket/, plan/, chore- branches
+// in the repo itself land through merge and their records; a fork's branch of that name is an outside PR), read with gh inside the tick's budget, so metrics can say
+// when one waits unreviewed or with findings its author never saw (pr-unreviewed,
+// pr-changes-unanswered) without touching the network. A good read is reused for
+// LINK_PRS_REUSE_MS (the findings count hours). A failed read (gh missing, logged out, offline, a
+// query GitHub refuses) keeps the last PRs but marks the entry failing, with when it started and
+// gh's first line, so metrics raises no PR finding from stale data and says (link-prs-unread) when
+// reads have failed for LINK_PRS_UNREAD_HOURS. Kept per PR: its head, when that head was first seen
+// (the PR's updatedAt, which a push moves, when the head is new to us: never later than the push
+// is old, so never a false stall), the forge's reviews of that head and when it was last commented
+// on, leaving out bots. The query asks for no `commits`: gh's commits field nests authors under
+// commits under PRs and GitHub refuses it for its node count.
+const LINK_PRS_FILE = runPath('link-prs.json');
+const LINK_PRS_REUSE_MS = 30 * 60000;
+const LINK_PRS_UNREAD_HOURS = 6;
+const LINK_PRS_MAX_AGE_MS = 2 * 3600000;
+const FLEET_BRANCH = /^(ticket\/|plan\/|chore-)/;
+// gh's GraphQL logins drop the [bot] suffix an app has on the REST API, so the common apps are named too
+const BOT_LOGIN = /\[bot\]$|^(github-actions|copilot-pull-request-reviewer|copilot|dependabot|renovate|vercel|vercel-fleet-prod|netlify|coderabbitai|chatgpt-codex-connector|codecov|sonarcloud|sonarqubecloud|changeset-bot|linear|cursor|gemini-code-assist|sourcery-ai|deepsource-io|snyk-io|socket-security|mergify|graphite-app|pre-commit-ci)$/i;
+// gh asks for a PR's first 100 reviews and comments, the oldest: at 100 the newest may be missing
+const LINK_PR_PAGE = 100;
+const linkPrRepos = (s = loadSettings()) => Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents && linkMaintains(l, 'prs') && LINK_KINDS[l.kind].effectiveSettings(l, s).forge === 'github' && ghSpec(l.remote)).map(([id, l]) => [id, ghSpec(l.remote)]);
+const trimLinkPr = (p, before) => {
+  const head = p.headRefOid;
+  const human = (x) => !BOT_LOGIN.test(String(x?.author?.login ?? ''));
+  const times = (xs, k) => (xs ?? []).filter(human).map((x) => Date.parse(x?.[k])).filter((t) => !Number.isNaN(t));
+  const seen = before && before.head === head && before.head_at ? before.head_at : (() => { const t = Math.max(Date.parse(p.createdAt) || 0, Date.parse(p.updatedAt) || 0); return t ? new Date(t).toISOString() : null; })();
+  return {
+    number: p.number, title: String(p.title ?? '').slice(0, 200), url: p.url ?? null, head, branch: p.headRefName ?? null,
+    head_at: seen,
+    // its reviews or comments ran past one page: what's newest may be missing, so nothing is claimed about it
+    truncated: (p.reviews?.length ?? 0) >= LINK_PR_PAGE || (p.comments?.length ?? 0) >= LINK_PR_PAGE,
+    forge_reviews: (p.reviews ?? []).filter((r) => human(r) && r?.commit?.oid === head).map((r) => ({ state: r.state ?? null, at: r.submittedAt ?? null })),
+    last_comment_at: (() => { const t = Math.max(0, ...times(p.comments, 'createdAt'), ...times(p.reviews, 'submittedAt')); return t ? new Date(t).toISOString() : null; })(),
+  };
+};
+async function fetchLinkPrs(end) {
+  const repos = linkPrRepos();
+  let state = {};
+  try { state = readJson(LINK_PRS_FILE); } catch {}
+  if (state === null || typeof state !== 'object' || Array.isArray(state)) state = {};
+  const skipped = [];
+  const queue = repos.filter(([id]) => { const e = ownEntry(state, id); return !(e && !e.failing_since && Date.now() - Date.parse(e.at) < LINK_PRS_REUSE_MS); });
+  const one = async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      const [id, spec] = next;
+      if (Date.now() >= end) { skipped.push(id); continue; }
+      const r = await runProbe({ cmd: 'gh', args: ['pr', 'list', '-R', spec, '--state', 'open', '--limit', '100', '--json', 'number,title,url,headRefName,headRefOid,isCrossRepository,isDraft,createdAt,updatedAt,reviews,comments'], cwd: mainRoot, env: { ...process.env, GH_PROMPT_DISABLED: '1' }, stderr: true, judge: (code, text, err = '') => {
+        const why = () => (String(err).split('\n').map((x) => x.trim()).find(Boolean) ?? (code == null ? 'gh did not run or timed out' : `gh exited ${code}`)).slice(0, 300);
+        if (code !== 0) return { error: why() };
+        try { const list = JSON.parse(text); return Array.isArray(list) ? { list } : { error: 'gh printed no PR list' }; } catch { return { error: 'gh printed no PR list' }; }
+      } }, end);
+      if (r === 'budget') { skipped.push(id); continue; }
+      const prev = ownEntry(state, id);
+      if (r.error) { state[id] = { ...(prev ?? {}), failing_since: prev?.failing_since ?? nowIso(), failed_at: nowIso(), error: r.error }; continue; }
+      const before = new Map((Array.isArray(prev?.prs) ? prev.prs : []).map((p) => [p?.number, p]));
+      state[id] = { at: nowIso(), prs: r.list.filter((p) => p && !p.isDraft && !(p.isCrossRepository !== true && FLEET_BRANCH.test(p.headRefName ?? ''))).map((p) => trimLinkPr(p, before.get(p.number))) };
+    }
+  };
+  if (queue.length) await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, queue.length) }, one));
+  for (const id of Object.keys(state)) if (!repos.some(([r]) => r === id)) delete state[id];
+  if (repos.length || fs.existsSync(LINK_PRS_FILE)) writeJson(LINK_PRS_FILE, state);
   return skipped;
 }
 // Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
@@ -11603,7 +11876,8 @@ const PROBE_FILE = runPath('link-probes.json');
 // Probes run four at a time, each with its own 12 s deadline, inside a budget per tick (20 s;
 // DEVTEAM_PROBE_BUDGET_MS in tests): a probe the budget cuts short, or one never started, is "not
 // probed this tick", writes nothing, and is asked again next tick; it is never a finding.
-// A probe is a kind's { cmd, args, cwd?, env?, judge(code, stdout) → { problem?, note? } }, or null.
+// A probe is a kind's { cmd, args, cwd?, env?, stderr?, judge(code, stdout, stderr) → { problem?, note? } }, or null
+// (stderr is passed only when the spec asks for it).
 const PROBE_AT_ONCE = 4;
 const PROBE_EACH_MS = 12000;
 function runProbe(spec, end) {
@@ -11611,14 +11885,16 @@ function runProbe(spec, end) {
     const left = end - Date.now();
     const cut = left < PROBE_EACH_MS;
     let outText = '';
+    let errText = '';
     let done = false;
     // its own process group, so a kill takes git's ssh with it, and no controlling terminal to prompt on
-    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', spec.stderr ? 'pipe' : 'ignore'], detached: true });
     const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
     const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} finish(cut ? 'budget' : spec.judge(null, '')); }, Math.max(0, Math.min(left, PROBE_EACH_MS)));
     child.stdout.on('data', (d) => { outText += d; });
-    child.on('error', () => finish(spec.judge(null, '')));
-    child.on('close', (code) => finish(spec.judge(code, outText)));
+    if (spec.stderr) child.stderr.on('data', (d) => { if (errText.length < 4096) errText += d; });
+    child.on('error', (e) => finish(spec.judge(null, '', String(e?.message ?? e))));
+    child.on('close', (code) => finish(spec.judge(code, outText, errText)));
   });
 }
 async function probeLinks(end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000)) {
@@ -13129,9 +13405,9 @@ function cmdGoal() {
   // The goal's toggle (planning.md §1, holds): run, drain or park. The owner sets any; the
   // supervisor drains a running goal (with a reason) and releases only its own drain.
   if (sub === 'hold') {
-    const g = goalArg(id) ?? die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    const g = goalArg(id) ?? die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--for <cause>…] [--until <YYYY-MM-DD>] [--owner]');
     const mode = positional[2];
-    if (!['run', 'drain', 'park'].includes(mode)) die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    if (!['run', 'drain', 'park'].includes(mode)) die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--for <cause>…] [--until <YYYY-MM-DD>] [--owner]');
     const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal hold'), 'supervisor');
     if (g.status === 'met') die(`${g.id} is met; there is no work to hold`);
     if (g.status === 'abandoned') die(`${g.id} is let go: goal decide ${g.id} restore brings it back, parked`);
@@ -13139,12 +13415,26 @@ function cmdGoal() {
     if (why) die(`goal hold: ${why}`);
     const reason = flagStr('reason')?.trim();
     if (by === 'supervisor' && !reason) die('the supervisor says why: --reason "…"');
+    // a drain names what it waits on (holdCause): the supervisor's is checked, the owner's written as given
+    const causes = flags.for !== undefined ? [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))] : [];
+    // trimmed, as ticket hold reads it; a bare or blank --until is still a date given, for the shape rules
+    const until = flagStr('until')?.trim() || null;
+    const dated = flags.until !== undefined;
+    if (dated && !causes.length && by === 'supervisor') die('--until goes with --for: name what the hold waits on');
+    if ((causes.length || dated || flags.for !== undefined) && isUpkeep(g)) die("Upkeep's hold takes no cause (--for, --until)");
+    if ((causes.length || dated || flags.for !== undefined) && mode !== 'drain') die('--for goes with a drain');
+    if (dated && until === null) die('--until needs a date (YYYY-MM-DD)');
+    if (by === 'supervisor' && mode === 'drain' && !isUpkeep(g)) {
+      const refusal = holdCause({ kind: 'goal', id: g.id, causes, until, whole: null });
+      if (refusal) die(refusal);
+    }
+    const extra = { ...(causes.length ? { hold_for: causes } : {}), ...(causes.length || until !== null ? { hold_until: until } : {}) };
     const before = goalMode(g);
-    const line = writeHold(g, { mode, ...(reason ? { reason: reason.slice(0, 300) } : {}) }, by);
+    const line = writeHold(g, { mode, ...(reason ? { reason: reason.slice(0, 300) } : {}) }, by, extra);
     logCache = null;
     const name = isUpkeep(g) ? 'upkeep' : g.id;
     const now = goalArg(isUpkeep(g) ? 'upkeep' : g.id);
-    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}`, refs: [now.id], reversible: true }, 'supervisor');
+    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}${causes.length ? ` (for ${causes.join(', ')})` : ''}`, refs: [now.id], reversible: true }, 'supervisor');
     out(`${isUpkeep(g) ? 'Upkeep' : g.id} is ${holdWords(mode)} (${line.id})`);
     if (mode === 'park') {
       if (by === 'supervisor') { const sent = sendParkRulings({ goal: now }); out(sent.length ? `told ${sent.join(', ')} to commit, push, write a handoff and park` : 'no running session of it to tell'); }
@@ -14168,6 +14458,103 @@ function efficiencyData(m, now = Date.now()) {
     suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: W12[11].start, end: W12[11].end, POINTS }) };
 }
 
+// A repo link the supervisor maintains: open PRs to review, fix, comment on and merge, and (with
+// its own release: "tag") releases to cut. Nothing else notices when that work stops, so:
+// pr-unreviewed, an open PR (not the fleet's own, not a draft) whose head has had no review for
+// LINK_PR_STALL_HOURS; pr-changes-unanswered, one whose latest review says CHANGES at its head that
+// long, with nothing posted on the PR since, so its author never saw the findings; release-due,
+// merges on the link's main waiting RELEASE_DUE_HOURS since its latest tag. A review is a record
+// under run/reviews/ in a folder or file named for the PR (…pr-<n>/…md, …pr-<n>…md) whose
+// "Verdict: APPROVE|CHANGES <full sha>" names the head (run/reviews/<link>-pr-<n>/, or
+// <maintain.reviews>-pr-<n>/, or a bare pr-<n> when there's one GitHub link), or a person's review
+// of that head on the forge. A PR whose reviews or comments ran past gh's page raises nothing.
+// The PRs come from the tick's read (fetchLinkPrs); with no good read nothing about PRs is raised,
+// and reads failing for LINK_PRS_UNREAD_HOURS are a low link-prs-unread.
+const LINK_PR_STALL_HOURS = 24;
+const RELEASE_DUE_HOURS = 6;
+function linkPrReviewRecords(ids, prefixes = new Map()) {
+  const root = path.join(runDir, 'reviews');
+  const byPr = new Map();
+  const put = (key, file) => {
+    let text, st;
+    try { st = fs.statSync(file); if (!st.isFile() || st.size > 1e6) return; text = fs.readFileSync(file, 'utf8'); } catch { return; }
+    const v = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-f]{40}(?:[0-9a-f]{24})?)[ \t]*$/gm)].pop();
+    // when the record was written: its birth time where the filesystem keeps one, so filling in a
+    // Disposition later doesn't move it past a comment already posted
+    const at = st.birthtimeMs > 0 ? Math.min(st.birthtimeMs, st.mtimeMs) : st.mtimeMs;
+    if (v) (byPr.get(key) ?? byPr.set(key, []).get(key)).push({ verdict: v[1], sha: v[2], at, file: path.relative(mainRoot, file) });
+  };
+  // <link>-pr-<n> names the link; a bare pr-<n> (not <other>-pr-<n>) counts only when there is one GitHub repo link
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const named = ids.flatMap((id) => [[id, id], ...(prefixes.has(id) ? [[id, prefixes.get(id)]] : [])]).sort((a, b) => b[1].length - a[1].length).map(([id, pre]) => [id, new RegExp(`(?:^|[^a-z0-9])${esc(pre)}-pr-(\\d+)(?![0-9])`, 'i')]);
+  const keyOf = (name) => {
+    for (const [id, re] of named) { const m = re.exec(name); if (m) return `${id}#${Number(m[1])}`; }
+    const m = /(?:^|[^a-z0-9-])pr-(\d+)(?![0-9])/i.exec(name);
+    return m && ids.length === 1 ? `${ids[0]}#${Number(m[1])}` : null;
+  };
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return byPr; }
+  for (const e of entries) {
+    const key = keyOf(e.name);
+    if (!key) continue;
+    if (e.isDirectory()) { let fs2 = []; try { fs2 = fs.readdirSync(path.join(root, e.name)); } catch {} for (const f of fs2) if (f.endsWith('.md')) put(key, path.join(root, e.name, f)); }
+    else if (e.name.endsWith('.md')) put(key, path.join(root, e.name));
+  }
+  return byPr;
+}
+function linkDutyFindings(settings, now, add) {
+  const stall = LINK_PR_STALL_HOURS * 3600000;
+  let read = {};
+  try { read = readJson(LINK_PRS_FILE); } catch {}
+  const repos = linkPrRepos(settings);
+  const records = repos.some(([id]) => ownEntry(read, id)) ? linkPrReviewRecords(repos.map(([id]) => id), new Map(repos.map(([id]) => [id, settings.links[id].maintain.reviews]).filter(([, p]) => typeof p === 'string'))) : new Map();
+  const hours = (ms) => Math.floor(ms / 3600000);
+  for (const [id, spec] of repos) {
+    const entry = ownEntry(read, id);
+    if (!entry) continue;
+    // a failing or old read (the tick's budget cut it) raises no PR finding from what it last saw,
+    // and says so once that has lasted
+    const age = now - (Date.parse(entry.at) || 0);
+    if (entry.failing_since || age > LINK_PRS_MAX_AGE_MS) {
+      const unread = entry.failing_since ? now - (Date.parse(entry.failing_since) || now) : age;
+      if (unread > LINK_PRS_UNREAD_HOURS * 3600000) add('low', 'link-prs-unread', id, `${id}'s open PRs haven't been read for ${hours(unread)} h${entry.at ? ` (last read ${entry.at})` : ''}: ${entry.failing_since ? entry.error ?? 'gh failed' : "the tick's time budget ran out first"}`, `check gh on this machine (gh auth status; gh pr list -R ${spec} --state open --limit 5): until it reads, pr-unreviewed and pr-changes-unanswered can't fire for ${id}`);
+      continue;
+    }
+    if (!Array.isArray(entry.prs)) continue;
+    for (const pr of entry.prs) {
+      if (!Number.isInteger(pr?.number) || typeof pr.head !== 'string' || pr.truncated) continue;
+      const subject = `${id}#${pr.number}`;
+      const mine = (records.get(subject) ?? []).sort((a, b) => a.at - b.at);
+      const atHead = mine.filter((r) => r.sha === pr.head);
+      const forgeAtHead = pr.forge_reviews ?? [];
+      const latest = mine.at(-1);
+      if (latest && latest.verdict === 'CHANGES' && latest.sha === pr.head) {
+        const since = now - latest.at;
+        const answered = pr.last_comment_at && Date.parse(pr.last_comment_at) > latest.at;
+        if (since > stall && !answered) add('medium', 'pr-changes-unanswered', subject, `review ${latest.file} asked for changes at its head ${pr.head.slice(0, 12)} ${hours(since)} h ago, and nothing has been posted on the PR since: its author hasn't seen the findings`, `comment the findings to its author on ${pr.url ?? `the PR`} (gh pr comment ${pr.number} --body-file ${latest.file}); a fix the fleet should make is a ticket in ${id}`);
+        continue;
+      }
+      if (atHead.length || forgeAtHead.length) continue;
+      const waited = now - (Date.parse(pr.head_at) || now);
+      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${settings.links[id].maintain.reviews ?? id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then comment the verdict to its author`);
+    }
+  }
+  // release-due: only for a repo link whose releases the supervisor keeps (maintain.releases) and
+  // that releases from a tag, read from its local main as the tick fetched it (with its v* tags),
+  // against the nearest release tag on it (v*, not a release candidate, as releasedInAt).
+  for (const [id, l] of Object.entries(settings.links ?? {})) {
+    if (!LINK_KINDS[l?.kind]?.hostsComponents || !linkMaintains(l, 'releases') || LINK_KINDS[l.kind].effectiveSettings(l, settings).release !== 'tag' || !repoReadable(id)) continue;
+    const R = repo(id);
+    const ref = R.mainRef();
+    if (!ref) continue;
+    const tag = R.git(['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', '*-rc*', ref]);
+    if (!tag) continue;
+    const rows = (R.git(['log', '--first-parent', '--format=%ct', `refs/tags/${tag}..${ref}`]) ?? '').split('\n').filter(Boolean);
+    if (!rows.length) continue;
+    const waited = now - Number(rows.at(-1)) * 1000;
+    if (waited > RELEASE_DUE_HOURS * 3600000) add('medium', 'release-due', id, `${rows.length} commit(s) on ${id}'s main since ${tag}, the oldest waiting ${hours(waited)} h`, `a tag on ${id} deploys to production, so a release is a release-production decision on its ladder (decide, or ask the owner), or record why it waits (observe)`);
+  }
+}
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -14556,6 +14943,44 @@ function collectMetrics(since) {
   if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
   if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
+  // A fleet with nothing running: no worker and no planner for FLEET_IDLE_MS while it is neither
+  // parked nor drained. idle-capacity speaks when a ticket can start, idle-planning when a goal
+  // waits for a planner, memory-full when the machine has no room for either; each names its own
+  // move, so this stays quiet when any of them spoke this pass. It speaks when nothing can start
+  // (every ready ticket waits on the owner, everything is held, nothing is planned), so the
+  // supervisor makes work instead of ticking over an empty fleet. The last sign of life is the
+  // newest line any ticket's worker or any planner wrote (a planner's branch and files too), or the
+  // log's first line when no session has ever run. A planner counts as running only while its
+  // window is open and it waits on no owner answer: a plan branch left behind, or a design parked
+  // on the owner's approval, is the stuck fleet this finding is for, once its stamps go quiet.
+  // stale_after_minutes (30 by default, two quiet ticks at the default tick_minutes): the silence
+  // after which a session reads as stuck reads the same for the fleet. A start takes a tick, so an
+  // idle tick between waves is normal; more is the fleet idling.
+  const FLEET_IDLE_MS = (settings.stale_after_minutes ?? 30) * 60000;
+  const spoken = f.some((x) => ['idle-capacity', 'idle-planning', 'memory-full'].includes(x.kind));
+  if (!drained && !fleetMode() && !active && !spoken && !planners().some((p) => !p.parked && p.window && !p.waiting_on_owner.length)) {
+    const lines = readLog().lines;
+    const stamps = lines.filter((l) => l.at && (ts.has(l.by) || String(l.by).startsWith('plan-'))).map((l) => l.at);
+    for (const p of planners()) if (p.last_seen) stamps.push(p.last_seen);
+    const lastAt = stamps.sort().pop() ?? lines.map((l) => l.at).filter(Boolean).sort()[0] ?? null;
+    const idleMs = lastAt ? now - Date.parse(lastAt) : 0;
+    if (idleMs > FLEET_IDLE_MS) {
+      // open tickets: not superseded, not merged, no worker running. Held: the ticket's held field,
+      // a goal not running, parked, or an open owner question naming it. Planned: the rest that
+      // aren't ready (waiting on a dependency or a running ticket's touches).
+      const open = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !countsAsWorker(t));
+      const heldT = open.filter((t) => isHeld(t) || ticketMode(t) !== 'run' || H.has(t.id) || workerState(t.id)?.phase === 'parked');
+      const heldIds = new Set(heldT.map((t) => t.id));
+      const readyT = ready.filter((t) => !heldIds.has(t.id));
+      const readyIds = new Set(readyT.map((t) => t.id));
+      const planned = open.filter((t) => !heldIds.has(t.id) && !readyIds.has(t.id)).length;
+      const L = ladder();
+      const noDefault = questions().filter((q) => q.status === 'open' && !q.goal_hold && !q.default && !['one-way-door', 'review', 'owner-action'].includes(q.kind) && !(q.reasons ?? []).includes('one-way-door') && !(L.owner_only ?? []).includes(q.class));
+      const chore = readyT.find((t) => t.kind === 'chore') ?? readyT[0];
+      const ids = (xs) => xs.slice(0, 3).map((x) => x.id).join(', ');
+      add('medium', 'fleet-idle', 'fleet', `no worker or planner has run for ${(idleMs / 3600000).toFixed(1)}h (last sign of life ${lastAt}); ${readyT.length} ticket${readyT.length === 1 ? '' : 's'} ready, ${heldT.length} held, ${planned} planned`, `in order: 1. ${chore ? `start a ready chore (worker ${chore.id})` : 'add a chore from what the metrics or the code point at'}; 2. split a held ticket so the part that doesn't need the owner runs (${heldT.length ? ids(heldT) : 'none held'}); 3. give an open no-default question a default (${noDefault.length ? ids(noDefault) : 'none open'}); 4. propose the next goal from strategy.md (a proposal question naming the "How it wins" line it serves, supervisor.md §9)`);
+    }
+  }
   // the owner asked for one of the supervisor's settings and main doesn't have it yet
   {
     const um = goalMode(upkeepOrVirtual());
@@ -14717,6 +15142,7 @@ function collectMetrics(since) {
       }
     }
   }
+  linkDutyFindings(settings, now, add);
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
@@ -19552,7 +19978,7 @@ async function dashRoutesPage(D, req, res, q) {
   }
   return DASH_NEXT;
 }
-// /view/artifact/…, /view/preview/…, /api/view, /api/artifact-versions
+// /view/artifact/…, /view/preview/…, /api/artifact-fp, /api/view, /api/artifact-versions
 async function dashRoutesViewer(D, req, res, q) {
   const { u } = q;
   const { page, pageCsp, run, describing, versioning, send, previewStage } = D;
@@ -19578,11 +20004,32 @@ async function dashRoutesViewer(D, req, res, q) {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
     return res.end(fs.readFileSync(page));
   }
+  // A draft's fingerprint, for the viewer's 2 s draft poll (responder contract, artifact-fp@1): the
+  // same fp artifact describe gives, from stat calls and the oid cache (diskOid hashes only a file
+  // whose size or mtime moved), in this process: no child, no git. Drafts only: main or a published
+  // tree never changes under a viewer, so it is a 400. 404 when artifactSource finds nothing (an
+  // unknown slug or worktree, a reviewer's or scratch one, a symlinked folder). Same-origin only, as /api/threads.
+  if (req.method === 'GET' && u.pathname === '/api/artifact-fp') {
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+    const slug = u.searchParams.get('slug') ?? '';
+    const at = u.searchParams.get('at') ?? '';
+    if (!LINK_ID.test(slug) || !ARTIFACT_AT.test(at) || at === 'main' || at.startsWith('tree:')) return send(res, 400, 'application/json', JSON.stringify({ error: 'a slug, and at a draft\'s worktree (drafts only)' }));
+    // a draft that vanishes mid-walk is nothing there (404); any other failure (EACCES, EMFILE) is a 500, as /api/view keeps them apart
+    let src;
+    try { src = artifactSource(at, slug); } catch (e) {
+      if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') return send(res, 500, 'application/json', JSON.stringify({ error: `the draft's files: ${e?.code ?? 'error'}` }));
+      src = null;
+    }
+    if (!src) return send(res, 404, 'application/json', JSON.stringify({ error: `no draft of ${slug} at ${at}` }));
+    return send(res, 200, 'application/json', JSON.stringify({ fp: fingerprint(src.entries), at }));
+  }
   // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
-  // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
-  // never polled: a child process per ask, shared by asks for the same one while it runs. A GET
-  // carries no Origin: same-origin only, as /api/threads. 404 only when describe says nothing is
-  // there (the viewer then shows main); a timeout or a crash is a 500, never mistaken for that.
+  // viewer never waits on /api/data. Since kit-206 the viewer asks it every 10 s while it is seen:
+  // a child process per ask, one shared by asks for the same one while it runs. The cheap,
+  // stat-only route for the 2 s draft poll is /api/artifact-fp. A GET carries no Origin:
+  // same-origin only, as /api/threads. 404 only when describe says nothing is there (the viewer
+  // then shows main); a timeout or a crash is a 500, never mistaken for that.
   if (req.method === 'GET' && u.pathname === '/api/view') {
     const site = req.headers['sec-fetch-site'];
     if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
@@ -19859,11 +20306,16 @@ async function dashRoutesOwner(D, req, res, q) {
   res.writeHead = function (...a) { D.dataEpoch += 1; return head.apply(this, a); };
   const site = req.headers['sec-fetch-site'];
   const origin = req.headers.origin;
-  // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
-  // present. A sandboxed frame's request says Origin: null and is refused here too.
+  // A browser sends Origin on every fetch POST, and Sec-Fetch-Site to a loopback or https origin
+  // (not to a --host LAN address over http); a secret or a review is accepted only with both
+  // present. Every other owner action needs at least one of them saying this page, and neither
+  // saying another (kit-324): a client that sends neither (curl, an agent's fetch) is not the
+  // owner's browser. A sandboxed frame's request says Origin: null and is refused here too. Only a
+  // browser is held to this: a process on this machine can send both headers, and still gets in.
+  const own = `http://${req.headers.host}`;
   const strict = isSecret || isReview || isPane || isOwnerSetting;
-  const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
-  if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
+  const sameOrigin = strict ? site === 'same-origin' && origin === own : (site === 'same-origin' || origin === own) && (site === undefined || site === 'same-origin') && (origin === undefined || origin === own);
+  if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: "owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)" }));
   // A review's result or draft is up to 4 MB, plus its envelope.
   const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : isOwnerSetting ? 512 : 20000;
   // Bytes first, decoded once: a multibyte character split across chunks stays whole.
@@ -21026,20 +21478,33 @@ function cmdPane() {
 function cmdSend() {
   const [to, ...words] = positional;
   const text = words.join(' ').replace(/\s+/g, ' ').trim();
-  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s]');
+  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s] [--thread t-… (handoff)]');
   const kind = flagStr('kind') ?? 'info';
+  const thread = flagStr('thread') ?? null;
+  if (thread && kind !== 'handoff') die('--thread goes with --kind handoff only: a handoff names the thread it hands over');
   // --owner: the owner, in their own terminal, telling a session something. Logged as the owner's.
   const from = flags.owner ? ownerWriter().by : myAddress();
   if (from === 'owner' && kind !== 'info') die('the owner sends info messages; answers go through answer <qid>, rulings come from the supervisor');
   if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages`);
   const sha = flagStr('sha') ?? (kind === 'merge-request' ? cwdGit(['rev-parse', 'HEAD']) : null);
   const re = flagStr('re') ?? null;
+  // responder-1: a reply's re closes what it names in every reader of open messages, so the
+  // responder's never carries one (integrity refuses the line too; this says so before it is built)
+  if (re && from === 'responder') die('the responder replies to no message (re): a reply would close what it names; send info, or hand the thread over with --kind handoff --thread <t-id>');
+  if (kind === 'handoff') {
+    if (from !== 'responder' || to !== 'supervisor') die('a handoff is the responder\'s: the responder hands threads to the supervisor (send supervisor "…" --kind handoff --thread <t-id>, run as the responder)');
+    if (!thread) die('a handoff names its thread: --thread <t-id>');
+    const t = logGet(thread);
+    if (t?.type !== 'thread') die(`no thread ${thread} (devteam.mjs thread list)`);
+    // a resolved thread takes no supervisor turn, so its handoff could never settle
+    if (t.status === 'resolved') die(`${thread} is resolved: the owner closed it, so a handoff on it could never be answered there; ask the owner to reopen it, or send --kind info`);
+  }
   if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
-  out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()) }).id);
+  out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()), thread }).id);
 }
 // Log one message and type it into the recipient's pane. The log is the record; the pane is
 // delivery. A recipient whose pane is gone catches up with `messages`.
-function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }) {
+function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, thread = null }) {
   const target = to === 'supervisor' ? supervisorTarget() : tmuxTarget(to);
   const resolved = resolvePane(target);
   const { target: exact } = resolved;
@@ -21047,7 +21512,8 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }
   // never into the machine's operator, by its name or a window number (on a box a fleet's session
   // can be home): only the owner's threads reach it from the kit
   if (!problem && sh('tmux', ['display-message', '-p', '-t', exact, '#{window_name}']) === OPERATOR_WINDOW) problem = 'that is the machine\'s operator, which takes no messages from a fleet';
-  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null) }, from);
+  // thread only on a handoff's line, so every other message's line is as before
+  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null), ...(thread ? { thread } : {}) }, from);
   const typed = problem ? false : typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`);
   if (!typed) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   else if (typed !== true) warn(`${line.id} ${heldWords(typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`);
@@ -21056,7 +21522,23 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }
 // A request is settled when the work it is about has landed: a ticket's once it merged, a
 // planner's once its plan file is on main, a ticket's review request once it was approved. The
 // merge or the approval is the answer even if nobody replied.
+//
+// Every reader of open messages calls this (messages --open, metrics' unanswered-message and
+// messages.still_open, /api/data's open_messages, idsAwaitingReply), so the handoff rule lives here
+// and they all agree: a handoff is settled by a supervisor turn in its thread after it, and by
+// nothing else here (a responder turn or the owner's resolve never settles it; a reply citing it
+// with --re closes it through each reader's replied set, as for any message).
 function settledByLanding(m) {
+  if (m.kind === 'handoff') {
+    // the supervisor's newest turn per thread, worked out once per fold (readLog's object), not per message per read
+    const log = readLog();
+    if (settledByLanding.log !== log) {
+      const last = new Map();
+      for (const u of log.byType.get('turn') ?? []) if (u.created_by === 'supervisor' && typeof u.thread === 'string' && !(last.get(u.thread) >= u.created_at)) last.set(u.thread, u.created_at);
+      Object.assign(settledByLanding, { log, last });
+    }
+    return (settledByLanding.last.get(m.thread) ?? '') > m.created_at;
+  }
   const by = m.created_by ?? m.by;
   if (!by) return false;
   const cls = writerClass(by);
@@ -21096,6 +21578,7 @@ function cmdPhase() {
     ? { usd: flagNum('usd') ?? prev?.usd ?? 0, input_tokens: flagNum('in') ?? prev?.input_tokens ?? 0, output_tokens: flagNum('out') ?? prev?.output_tokens ?? 0 }
     : {};
   if (supervisor) {
+    supervisorOnly('phase supervisor');
     if (cost.usd === undefined) die('phase supervisor needs --usd (its cumulative spend)');
     appendLog({ type: 'phase', from: 'supervisor', to: 'supervisor', ...cost }, 'supervisor');
     return out('recorded supervisor cost');
@@ -22151,7 +22634,14 @@ function fleetUndo(mode) {
   const restored = [];
   for (const g of held.filter((x) => x.hold.fleet === op)) {
     const p = g.hold.prior ?? { mode: 'run' };
-    writeHold(g, { mode: p.mode, ...(p.reason ? { reason: p.reason } : {}), ...(p.fleet ? { fleet: p.fleet } : {}), undoes: op, host }, by);
+    // a supervisor's own drain comes back with its cause: the line that set it is the latest hold
+    // line before this op's (a park then a park --move writes two)
+    let extra = {};
+    if (p.mode === 'drain' && !p.fleet) {
+      const u = [...(g.updates ?? [])].reverse().find((x) => x.hold && x.hold.fleet !== op);
+      if (u?.hold.mode === 'drain' && !u.hold.fleet && u.hold_for) extra = { hold_for: u.hold_for, hold_until: u.hold_until ?? null };
+    }
+    writeHold(g, { mode: p.mode, ...(p.reason ? { reason: p.reason } : {}), ...(p.fleet ? { fleet: p.fleet } : {}), undoes: op, host }, by, extra);
     restored.push(`${isUpkeep(g) ? 'Upkeep' : g.title} → ${p.mode}`);
   }
   if (legacy) appendLog({ type: 'act', class: 'undrain', what: `undrained the fleet on ${host} (drained by ${legacy.id}${drainHost(legacy) ? ` on ${drainHost(legacy)}` : ''})`, refs: [legacy.id], reversible: true }, 'supervisor');
@@ -25988,7 +26478,8 @@ async function browserLive() {
 // lets it go.
 async function browserStartLock(file, fn) {
   const lock = `${file}.lock`, owner = path.join(lock, 'owner'), start = Date.now();
-  const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const mint = () => `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const token = mint();
   const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS')) || 60000;
   const prep = `${lock}.new.${token}`;
   const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
@@ -25998,15 +26489,17 @@ async function browserStartLock(file, fn) {
   const dead = (t) => { const p = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(t ?? '')?.[1]; return !!p && Number(p) !== process.pid && !browserAlive(Number(p)); };
   // The lock's token and mtime from one open of its owner, so both are one file's (a stat and then a
   // read can pair an old lock's mtime with a new lock's token). No readable owner: a null token and the
-  // folder's mtime. No lock: null.
+  // folder's mtime, and why the owner couldn't be read (`code`: ENOENT for a folder with none). No
+  // lock: null.
   const look = () => {
     let fd;
-    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch {
+    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch (e) {
       const st = fs.statSync(lock, { throwIfNoEntry: false });
-      return st ? { token: null, mtime: st.mtimeMs } : null;
+      return st ? { token: null, mtime: st.mtimeMs, code: e?.code } : null;
     } finally { if (fd !== undefined) fs.closeSync(fd); }
   };
   const stale = (l) => Math.abs(Date.now() - l.mtime) > 120000 || dead(l.token);
+  const keyOf = (seen) => crypto.createHash('sha256').update(seen ?? '').digest('hex').slice(0, 16);
   // Remove the lock holding `seen` (null: a folder with no owner) under a claim on it: the symlink
   // <lock>.take.<k>.<n> (k from seen's hash) pointing at the claimant's token. A dead claimant's claim
   // is passed over to n + 1, not removed while seen may still be on the path; any other means another
@@ -26017,7 +26510,7 @@ async function browserStartLock(file, fn) {
   // path is free either way.
   const drop = (seen) => {
     if (seen !== token && browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL')) return false;
-    const key = `${lock}.take.${crypto.createHash('sha256').update(seen ?? '').digest('hex').slice(0, 16)}.`;
+    const key = `${lock}.take.${keyOf(seen)}.`;
     let n = 0, claim = null, took = false;
     for (let tries = 0; tries < 64 && !claim; tries++) {
       try { fs.symlinkSync(token, key + n); claim = key + n; } catch (e) {
@@ -26032,14 +26525,15 @@ async function browserStartLock(file, fn) {
     try {
       if (seen === null) {
         // an empty folder goes at once; ENOENT is a free path, not a take. A non-empty folder is owned
-        // first: an exclusive write of our token as its owner works only on a folder with none (a live
-        // lock has one, a free path has no folder), and then it holds a live token, ours, which no one
-        // else removes and no starter can rename over, so the rename below moves exactly it. Reading
-        // "no owner" instead can't tell an ownerless folder from a path a release just freed (kit-321
-        // design-change-1).
+        // first: an exclusive write of a fresh token of ours as its owner works only on a folder with
+        // none (a live lock has one, a free path has no folder), and then it holds a live token, ours,
+        // which no one else removes and no starter can rename over, so the rename below moves exactly
+        // it. Reading "no owner" instead can't tell an ownerless folder from a path a release just freed
+        // (kit-321 design-change-1). Fresh, not our lock's token: so a token is on the path once, and
+        // once off it is gone for good, which drop's cleanup and the sweep rest on (kit-323 S1-1).
         try { fs.rmdirSync(lock); return (took = true); } catch (e) {
           if (e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST') return false;
-          try { fs.writeFileSync(owner, token, { flag: 'wx' }); } catch { return false; }
+          try { fs.writeFileSync(owner, mint(), { flag: 'wx' }); } catch { return false; }
         }
       } else {
         const l = look();
@@ -26055,6 +26549,39 @@ async function browserStartLock(file, fn) {
       try { fs.unlinkSync(claim); } catch {}
     }
   };
+  // The leftovers of starters that died (kit-323), each removed only when its token's pid is dead (a
+  // live pid, a reused one, ours, or a name that holds no token keeps it): a prepared folder
+  // <lock>.new.<token>, an aside <lock>.<token>.<8 hex>, and a claim <lock>.take.<k>.<n> whose link is
+  // the claimant's token. Neither folder is ever renamed onto the path but by its own live starter.
+  // The claims are listed before the lock is looked at, and those on the key of the token it then
+  // holds (an ownerless folder's: null's) stay: a dead claim there may stand between that token's
+  // live claimants, and drop removes it once the token is gone. A claim on any other token is
+  // removable, since its claimant read that token on the path before the listing, and a token that has
+  // left the path never comes back: each is minted fresh and put on the path once (null's claims need
+  // no order: the exclusive owner write keeps two takers of an ownerless folder apart). A claim is
+  // judged and then unlinked by name, so one made anew at that name in between can go too: harmless
+  // for the same reason, and drop's cleanup has the same gap. What can't be read or removed is left.
+  // Like the dead-owner rule, it takes every starter to share one pid namespace.
+  const sweep = () => {
+    const dir = path.dirname(lock), base = `${path.basename(lock)}.`;
+    let names;
+    try { names = fs.readdirSync(dir); } catch { return; }
+    const l = look(), held = l ? keyOf(l.token) : null;
+    // an owner that is there but unreadable (EMFILE, EIO, EACCES…) may hold a token: no claim goes
+    const claims = !l || l.token !== null || l.code === 'ENOENT';
+    for (const name of names) {
+      if (!name.startsWith(base)) continue;
+      const rest = name.slice(base.length), f = path.join(dir, name);
+      const folder = /^new\.(\d+-[0-9a-f]{16})$/.exec(rest)?.[1] ?? /^(\d+-[0-9a-f]{16})\.[0-9a-f]{8}$/.exec(rest)?.[1];
+      if (folder !== undefined) {
+        try { if (dead(folder) && fs.lstatSync(f).isDirectory()) fs.rmSync(f, { recursive: true, force: true }); } catch {}
+        continue;
+      }
+      const k = /^take\.([0-9a-f]{16})\.\d+$/.exec(rest)?.[1];
+      if (k !== undefined && claims && k !== held && dead(link(f))) try { fs.unlinkSync(f); } catch {}
+    }
+  };
+  sweep();
   // Each attempt rewrites the prepared owner (its mtime is the lock's age) and renames the folder onto
   // the path: EEXIST or ENOTEMPTY while a lock is held, and an empty leftover folder is replaced at
   // once. The prepared folder goes before a die() or a throw.
@@ -26065,7 +26592,7 @@ async function browserStartLock(file, fn) {
       try { fs.renameSync(prep, lock); break; } catch (e) { if (e.code !== 'EEXIST' && e.code !== 'ENOTEMPTY') throw e; }
       const l = look();
       if (!l || (stale(l) && drop(l.token))) continue;
-      if (Date.now() - start > wait) { fs.rmSync(prep, { recursive: true, force: true }); die(`browser: timed out waiting for ${lock}`); }
+      if (Date.now() - start > wait) { fs.rmSync(prep, { recursive: true, force: true }); die(`browser: timed out waiting for ${lock}; if no browser start is running, remove that folder and start again`); }
       await browserSleep(100);
     }
   } catch (e) { try { fs.rmSync(prep, { recursive: true, force: true }); } catch {} throw e; }
@@ -26936,7 +27463,7 @@ const HELP_SETUP = `Setup and roles
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists`;
 const HELP_HOLDS = `Holds and the fleet (planning.md §1, holds; supervisor.md §12)
-  goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
+  goal hold <g-id|upkeep> run|drain|park [--reason r] [--for <cause>…] [--until <date>] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason and --for, the cause it waits on; its drain needs --for; the date is optional, except that a pr:, run: or external: cause needs --until, at most 30 days ahead) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
@@ -26948,6 +27475,8 @@ const HELP_HOLDS = `Holds and the fleet (planning.md §1, holds; supervisor.md �
 const HELP_GRAPH = `The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
+  ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole "<why>"]   supervisor or planner: hold a ticket, naming what it waits on (q-…, a ticket, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id>, external:<words>; the last three need --until, at most 30 days ahead)
+  ticket release <id> [--reason r]       supervisor or planner: lift a ticket's hold
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
   moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
@@ -26960,7 +27489,7 @@ const HELP_CHECKS = `Checks and merging (quality.md)
 const HELP_SESSIONS = `Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
   gate <name> [--junit f] -- <cmd…>   run a gate and record it   |   gate --all: every settings gate here
-  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | messages [--open] [--to x] [--json]
+  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | send supervisor "<text>" --kind handoff --thread <t-id> (the responder's) | messages [--open] [--to x] [--json]
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line`;
 const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
@@ -26998,7 +27527,7 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first

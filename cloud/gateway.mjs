@@ -1946,14 +1946,18 @@ export function createGateway(opts = {}) {
   // One publish item's whole time on its instance (manifest, files, record): an instance that
   // answers slowly but within each request's deadline still runs out.
   const ITEM_MS = opts.publicItemMs ?? 120000;
-  // A request to an instance as a loopback client: its own Host, and no Origin, sec-fetch-* or
-  // cookie, so it never passes for the owner's browser. One deadline for the whole answer, and a
-  // cap on its size: whatever holds the port wrote it.
+  // A request to an instance as a loopback client: its own Host, no sec-fetch-* or cookie, and no
+  // Origin on a GET. A POST (the publish record) says the instance's own Origin, which the
+  // dashboard's owner actions need (kit-324), as any local process can say it. It never carries
+  // the owner's session or the box's signature. One deadline for the whole answer, and a cap on its
+  // size: whatever holds the port wrote it.
   const loopback = (port, method, p, { body = null, cap = 2 * 1024 * 1024, ms = LOOP_MS } = {}) => new Promise((resolve, reject) => {
     let deadline = null;
     let settled = false;
     const finish = (err, v) => { if (settled) return; settled = true; clearTimeout(deadline); if (err) reject(err); else resolve(v); };
-    const headers = { host: `127.0.0.1:${port}`, ...(body === null ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }) };
+    // a POST says the instance's own Origin, as its page does: the dashboard takes an owner action
+    // only with that (or Sec-Fetch-Site same-origin), never from a bare client (kit-324)
+    const headers = { host: `127.0.0.1:${port}`, ...(body === null ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), origin: `http://127.0.0.1:${port}` }) };
     const up = http.request({ host: '127.0.0.1', port, method, path: p, headers }, (ur) => {
       const chunks = [];
       let size = 0;

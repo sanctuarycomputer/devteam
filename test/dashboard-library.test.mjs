@@ -1070,6 +1070,30 @@ test('a card removed by a poll frees its slot', { ...CHROME, timeout: 300000 }, 
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
+test('a poll that reorders the items moves the kept cards, re-creating none', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { ids } = fx;
+  const { p, soon, items } = await libraryAll(t, { fx, init: READS_INIT });
+  // every card marked with its own id, to tell a kept node from a new one
+  await p.ev("for (const c of document.querySelectorAll('#lib-grid > .lib-card')) c.__mark = c.dataset.libId");
+  // the server lists the same rows in a new order: the first mock's row moves to the end, behind every other mock
+  const rows = fx.patch.library.artifacts, at = rows.findIndex((a) => a.slug === ids.mock);
+  const reordered = [...rows.slice(0, at), ...rows.slice(at + 1), rows[at]];
+  const want = itemsOf({ ...fx.patch, library: { ...fx.patch.library, artifacts: reordered } }).items.map((x) => x.id);
+  assert.notDeepEqual(want, items.map((x) => x.id), 'the new order differs from the old');
+  assert.deepEqual([...want].sort(), items.map((x) => x.id).sort(), 'the same items');
+  await p.ev(`window.__fx.library.artifacts = ${JSON.stringify(reordered)}`);
+  await soon(idsAre(want), 'the cards in the new order');
+  // every card is the node it was
+  assert.deepEqual(await p.ev("[...document.querySelectorAll('#lib-grid > .lib-card')].filter((c) => c.__mark !== c.dataset.libId).map((c) => c.dataset.libId)"), [], 'no card re-created');
+  // and later polls keep that order and those nodes
+  const reads = await p.ev('window.__dataReads');
+  await soon(`window.__dataReads >= ${reads + 3}`, 'two more polls');
+  assert.equal(await p.ev(idsAre(want)), true, 'the new order kept');
+  assert.deepEqual(await p.ev("[...document.querySelectorAll('#lib-grid > .lib-card')].filter((c) => c.__mark !== c.dataset.libId).length"), 0, 'still no card re-created');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
 test('no thumbnail frame while the viewer covers the grid', { ...CHROME, timeout: 300000 }, async (t) => {
   const { p, soon, ids } = await libraryOnce(t, libraryFixture());
   const frames = "document.querySelectorAll('.lib-thumb iframe').length";
