@@ -6,6 +6,7 @@
 import { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { dashboardOnFreePort, fleetFixture, PORTS } from './kit.mjs';
 import { LIMITS, openPresence, shapeErrors } from './presence-fake.mjs';
@@ -48,6 +49,22 @@ after(async () => {
   await dash.stop();
   F.done();
 });
+
+// A8 (d)'s look, for A7's parts (each on a dashboard of its own): with every connection closed, no
+// path under run/ names presence, no file there holds a zq7 word, and the dashboard's output holds none.
+async function nothingKept() {
+  const { runDir, dash } = await dashboard();
+  await closeEvery();
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.isFile() ? [path.join(d, e.name)] : []));
+  const files = walk(runDir);
+  assert.ok(files.length > 0, 'run/ has files to look in');
+  for (const f of files) {
+    const rel = path.relative(runDir, f);
+    assert.ok(!/presence/i.test(rel), `no path under run/ names presence (${rel})`);
+    assert.ok(!fs.readFileSync(f).includes('zq7'), `run/${rel} holds nothing of the test's presence`);
+  }
+  assert.ok(!dash.out().includes('zq7'), "the dashboard's output holds nothing of the test's presence");
+}
 
 // ---- the file's clients: every one through open(), which answers the relay's ping, and closed with its
 // close awaited at the end of each check (closeEvery), so no check starts with another's connections ----
@@ -141,4 +158,4 @@ async function onlyProbe(url) {
   clients.delete(probe);
 }
 
-export { between, check, clients, closedWithin, closeEvery, dashboard, fill200, hereMsg, HUB_PORT, json, kinds, onlyProbe, open, P, peopleIds, peopleWith, sentinel, until };
+export { between, check, clients, closedWithin, closeEvery, dashboard, fill200, hereMsg, HUB_PORT, json, kinds, nothingKept, onlyProbe, open, P, peopleIds, peopleWith, sentinel, until };

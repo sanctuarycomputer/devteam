@@ -1,7 +1,7 @@
 // The presence relay (presence@1), A7 part 1: the rate over ten seconds, what counts, and moves dropped.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { between, check, dashboard, hereMsg, json, kinds, open, P, peopleIds, sentinel } from './lib/presence-relay-fixture.mjs';
+import { between, check, dashboard, hereMsg, json, kinds, nothingKept, open, P, peopleIds, sentinel } from './lib/presence-relay-fixture.mjs';
 
 test('presence A7: the rate, the per-person and per-server caps, and the ping, each closing as the contract says (1 of 2: (a), (a3), (b))', check(async (t) => {
   const { url } = await dashboard();
@@ -69,4 +69,5 @@ test('presence A7: the rate, the per-person and per-server caps, and the ping, e
     assert.ok(xs.length >= 30 && xs.length <= 60, `30 to 60 of 200 moves in one write arrive (${xs.length})`);
     assert.deepEqual(xs, [...xs].sort((a, b) => a - b), 'in their order');
   });
+  await nothingKept();
 }));

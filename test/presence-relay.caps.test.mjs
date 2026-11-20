@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dashboardOnFreePort, fleetFixture, PORTS } from './lib/kit.mjs';
 import { LIMITS, openPresence } from './lib/presence-fake.mjs';
-import { check, clients, closedWithin, closeEvery, dashboard, fill200, hereMsg, json, onlyProbe, open, P, sentinel, until } from './lib/presence-relay-fixture.mjs';
+import { check, clients, closedWithin, closeEvery, dashboard, fill200, hereMsg, json, nothingKept, onlyProbe, open, P, sentinel, until } from './lib/presence-relay-fixture.mjs';
 
 test('presence A7: the rate, the per-person and per-server caps, and the ping, each closing as the contract says (2 of 2: (a2), (c), (d), (d2), (e))', check(async (t) => {
   const { url } = await dashboard();
@@ -88,4 +88,5 @@ test('presence A7: the rate, the per-person and per-server caps, and the ping, e
       F.done();
     }
   });
+  await nothingKept();
 }));
