@@ -18901,8 +18901,14 @@ async function memoryTrim(file, now) {
   const out = keep.map((l) => `${l}\n`).join('');
   if (out === text) return;
   const tmp = `${file}.tmp`;
-  await fs.promises.writeFile(tmp, out);
-  await fs.promises.rename(tmp, file);
+  // a write or rename that fails part-way leaves the file as it was, and no temp file beside it
+  try {
+    await fs.promises.writeFile(tmp, out);
+    await fs.promises.rename(tmp, file);
+  } catch (e) {
+    await fs.promises.unlink(tmp).catch(() => {});
+    throw e;
+  }
 }
 // The readings at or after from (ms), oldest first, the ones the check passes: the file read from
 // its end in 256 KB chunks, until a chunk whose first complete dated line is before from.

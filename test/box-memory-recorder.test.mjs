@@ -473,20 +473,71 @@ test('C3f: at start the file loses readings older than 8 days and torn lines; a 
   const week = JSON.stringify({ v: 1, at: iso(now - 7 * DAY), working_set: 2 });
   // a newer recorder's line (v 2) with a recent at stays: readers skip it, a downgrade loses nothing
   const newer = JSON.stringify({ v: 2, at: iso(now - DAY), working_set: 3 });
-  const h = await startHub(t, { proc: NOWHERE, file: `${old}\n${week}\n${newer}\n{"v":1,"at":"20`, env: { DEVTEAM_MEMORY_EVERY_MS: '300' } });
-  // the seed alone is 4 lines, so a count can't say the tick came: wait for the first tick's own line
+  // the 8-day edge, an hour either side of it (final-1 F2)
+  const edgeOut = JSON.stringify({ v: 1, at: iso(now - 8 * DAY - HOUR), working_set: 4 });
+  const edgeIn = JSON.stringify({ v: 1, at: iso(now - 7 * DAY - 23 * HOUR), working_set: 5 });
+  const h = await startHub(t, { proc: NOWHERE, file: `${old}\n${edgeOut}\n${edgeIn}\n${week}\n${newer}\n{"v":1,"at":"20`, env: { DEVTEAM_MEMORY_EVERY_MS: '300' } });
+  // the seed alone is 6 lines, so a count can't say the tick came: wait for the first tick's own line
   // (recent and valid; the trim runs before it, in the same chain)
   await until(() => linesOf(h.file).some((l) => memoryReadingProblem(l) === null && Date.now() - Date.parse(JSON.parse(l).at) < 5 * MIN), "the first tick's line");
   const ls = linesOf(h.file);
-  assert.deepEqual(ls.slice(0, 2), [week, newer], 'the 7-day reading and the newer line stay, first');
+  assert.deepEqual(ls.slice(0, 3), [edgeIn, week, newer], 'the readings under 8 days old and the newer line stay, first');
   assert.ok(!ls.includes(old), 'the 9-day reading is gone');
-  for (const l of ls.slice(2)) assert.equal(memoryReadingProblem(l), null, l);
+  assert.ok(!ls.includes(edgeOut), 'the reading 8 days and an hour old is gone');
+  for (const l of ls.slice(3)) assert.equal(memoryReadingProblem(l), null, l);
   // a hub killed mid-append leaves a torn tail: the next line starts on a line of its own
   const n = linesOf(h.file).length;
   fs.appendFileSync(h.file, '{"v":1,"at":"2026');
   const after = await firstLine(h, n + 2);
   assert.ok(after.includes('{"v":1,"at":"2026'), 'the torn line on its own');
   assert.equal(memoryReadingProblem(after.at(-1)), null, after.at(-1));
+});
+
+test('C3i: a stopped recorder writes no more lines; the hub\'s close stops it (final-1 F3)', async () => {
+  // the region's own recorder, in this process, with the outside names it reads at run time given
+  const home = newHome();
+  const logs = [];
+  const ctx = vm.createContext({
+    fs, path, Buffer, setImmediate, setTimeout, setInterval, clearInterval,
+    os: { homedir: () => home, totalmem: os.totalmem, freemem: os.freemem },
+    process: { env: { DEVTEAM_PROC: PROC, DEVTEAM_MEMORY_EVERY_MS: '100' }, memoryUsage: process.memoryUsage },
+    machineMemory: () => ({ inUse: 1, max: 2, source: 'cgroup' }), machineRepos: () => FIXTURE_ROOTS, COMMANDS: {}, HUB_PORT: 1,
+  });
+  const { memoryRecorder } = vm.runInContext(`${region()}\n;({ memoryRecorder })`, ctx);
+  const f = memFile(home, 1);
+  const rec = memoryRecorder((m) => logs.push(m), async () => []);
+  rec.start();
+  await until(() => linesOf(f).length >= 2, 'two ticks');
+  rec.stop();
+  // a tick already under way may still land; none after it
+  await new Promise((r) => setTimeout(r, 300));
+  const n = linesOf(f).length;
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.equal(linesOf(f).length, n, 'no line after stop');
+  for (const l of linesOf(f)) assert.equal(memoryReadingProblem(l), null, l);
+  assert.deepEqual(logs, [], 'nothing went wrong');
+  // only a dashboard's kit hand-over closes a hub, and its process ends after: what can be pinned
+  // here is that the hub's close() stops its recorder
+  const close = /const handle = \{ close\(\) \{([^\n]*)\} \};/.exec(cut('function startHub(', '\n// ===== account rotation'))?.[1] ?? '';
+  assert.match(close, /\brecorder\.stop\(\)/, "startHub's close() stops the recorder");
+});
+
+test('C3j: a trim that fails part-way leaves the file as it was and no temp file (final-1 F4)', async () => {
+  const d = path.join(scratch, 'trim-fails');
+  fs.mkdirSync(d);
+  const f = path.join(d, 'memory.jsonl');
+  const text = `${JSON.stringify({ v: 1, at: iso(Date.now() - 9 * DAY), working_set: 1 })}\n${JSON.stringify({ v: 1, at: iso(Date.now() - MIN), working_set: 2 })}\n`;
+  const trimWith = (promises) => vm.runInContext(`${region()}\n;({ memoryTrim })`, vm.createContext({ fs: { promises, constants: fs.constants }, path })).memoryTrim;
+  // the rename fails after the temp file is written
+  fs.writeFileSync(f, text);
+  const noRename = new Proxy(fs.promises, { get: (o, k) => (k === 'rename' ? () => Promise.reject(new Error('rename refused')) : o[k]) });
+  await assert.rejects(trimWith(noRename)(f, Date.now()), /rename refused/);
+  assert.equal(fs.readFileSync(f, 'utf8'), text, 'the file as it was');
+  assert.ok(!fs.existsSync(`${f}.tmp`), 'no temp file left');
+  // the write itself fails (the temp path is a folder): the file as it was
+  fs.mkdirSync(`${f}.tmp`);
+  await assert.rejects(trimWith(fs.promises)(f, Date.now()));
+  assert.equal(fs.readFileSync(f, 'utf8'), text, 'the file as it was');
 });
 
 test('C3g: the trim runs again each day while the hub runs', async (t) => {
