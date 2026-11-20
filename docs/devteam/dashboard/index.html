@@ -3213,6 +3213,10 @@ function questionCard(q, o, reasonText, copy = false) {
   const next = nextTime(q, cls, 'data-auto', pre);
   const goalAsk = q.kind === 'goal-approval';
   const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
+  // the note takes dropped files on a card whose button posts an answer (not a goal approval; a secrets card
+  // keeps its own note, below)
+  const note = `<textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`;
+  const noteBox = goalAsk ? note : dropBox(`q:${q.id}`, note);
   return `
     <div class="card qcard ${kindCls}${q.rank?.top ? ' top' : ''}" id="${pre}q-${esc(q.id)}" data-qcard="${esc(q.id)}"${copy ? '' : subj('question', q.id, qplain(q.question, q.links))}>
       ${cardHead(KIND_ICON[q.kind] || 'circle-help', `${copy ? '' : nextChip(q)}<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
@@ -3231,7 +3235,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${isOa(q) ? oaSuggest(q) + oaRows(q, pre) : ''}
       ${(q.secrets || []).length ? `${secretsForm(q)}
       <textarea data-q="${esc(q.id)}" placeholder="Add a note (optional)">${esc(drafts[q.id] || '')}</textarea>` : `${goalSuggest(q, list)}${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
-      ${((ta) => (goalAsk ? ta : dropBox(`q:${q.id}`, ta)))(`<textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`)}`}
+      ${noteBox}`}
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
@@ -7026,8 +7030,15 @@ const fileSize = (n) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).t
 const ATT_TOO_MANY = `At most ${FILES_MAX} files go with one message`;
 const ATT_CUT = "The upload was cut off: the file may be over this machine's limit, or the dashboard stopped.";
 const attPlainHttp = () => `This browser doesn't say which page an upload comes from over plain http, so the dashboard refuses it. On the machine running the dashboard, open it at http://127.0.0.1${location.port ? `:${location.port}` : ''} (start it without --host if that doesn't answer); from another device, files can't be dropped over plain http.`;
+// A file's name as it is sent and shown: the dropped name made one plain line (control and bidi characters to
+// spaces, cut to the 200 characters the server's attachedFiles takes), else the stored file's name (the raw
+// name until the upload answers).
+const attName = (p) => tLine(p.name, 200) || (p.path ? String(p.path).split('/').pop() : String(p.name ?? ''));
 function pillsHtml(key) {
-  return (ATTACH.get(key) || []).map((p) => `<span class="att-pill${p.state === 'refused' ? ' refused' : ''}" data-pill-state="${esc(p.state)}" data-pill-id="${esc(p.id)}"><i class="${fileIcon(p.name)}" aria-hidden="true"></i><span class="pill-name" title="${esc(p.name)}">${esc(p.name)}</span><span class="pill-size">${esc(fileSize(p.size))}</span>${p.state === 'up' ? '<span class="pill-up">uploading…</span>' : ''}<button type="button" data-pill-remove aria-label="Remove ${esc(p.name)}">×</button>${p.state === 'refused' ? `<span class="pill-why">${esc(p.why)}</span>` : ''}</span>`).join('');
+  return (ATTACH.get(key) || []).map((p) => {
+    const name = attName(p);
+    return `<span class="att-pill${p.state === 'refused' ? ' refused' : ''}" data-pill-state="${esc(p.state)}" data-pill-id="${esc(p.id)}"><i class="${fileIcon(name)}" aria-hidden="true"></i><span class="pill-name" title="${esc(name)}">${esc(name)}</span><span class="pill-size">${esc(fileSize(p.size))}</span>${p.state === 'up' ? '<span class="pill-up">uploading…</span>' : ''}<button type="button" data-pill-remove aria-label="Remove ${esc(name)}">×</button>${p.state === 'refused' ? `<span class="pill-why">${esc(p.why)}</span>` : ''}</span>`;
+  }).join('');
 }
 // A box: the textarea, then its pills under it, inside one border.
 const dropBox = (key, textareaHtml) => `<div class="dropbox" data-drop="${esc(key)}">${textareaHtml}<div class="pills">${pillsHtml(key)}</div></div>`;
@@ -7055,14 +7066,24 @@ async function reasonOf(res) {
   try { const j = JSON.parse(text); if (j && typeof j.error === 'string' && j.error.trim()) return j.error; } catch {}
   return text.trim() || `HTTP ${res.status}`;
 }
-async function upload(key, p, file) {
-  const set = (o) => { const q = (ATTACH.get(key) || []).find((x) => x.id === p.id); if (q) Object.assign(q, o); drawPills(key); };
+async function upload(p, file) {
+  // the pill wherever it sits now: the composer's key may have moved while it uploaded (moveAttach); a pill
+  // removed meanwhile is gone, and its answer changes nothing
+  const set = (o) => {
+    for (const [key, list] of ATTACH) {
+      const q = list.find((x) => x.id === p.id);
+      if (!q) continue;
+      Object.assign(q, o);
+      if (q.path) q.sendName = attName(q);
+      return void drawPills(key);
+    }
+  };
   try {
     const res = await fetch(`/upload?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
     if (res.ok) {
       let j = null;
       try { j = await res.json(); } catch {}
-      if (j && typeof j.path === 'string') set({ state: 'ok', path: j.path, bytes: typeof j.size === 'number' ? j.size : file.size, sendName: tLine(p.name, 200) || j.path.split('/').pop() });
+      if (j && typeof j.path === 'string') set({ state: 'ok', path: j.path, bytes: typeof j.size === 'number' ? j.size : file.size });
       else set({ state: 'refused', why: `HTTP ${res.status}` });
     } else set({ state: 'refused', why: await reasonOf(res) });
   } catch { set({ state: 'refused', why: ATT_CUT }); }
@@ -7071,12 +7092,11 @@ function addFiles(key, files) {
   if (!ATTACH.has(key)) ATTACH.set(key, []);
   const list = ATTACH.get(key);
   for (const file of files) {
-    // name: as dropped, for the pill; sendName (once taken): one plain line the server's attachedFiles takes,
-    // else the stored file's own name
-    const p = { id: String(++ATTACH_N), name: file.name, sendName: '', size: file.size, type: file.type, state: 'up', why: '', path: null, bytes: null };
+    // name: as dropped; sendName (once taken): attName, the name the pill shows
+    const p ={ id: String(++ATTACH_N), name: file.name, sendName: '', size: file.size, type: file.type, state: 'up', why: '', path: null, bytes: null };
     if (list.filter((x) => x.state !== 'refused').length >= FILES_MAX) { list.push({ ...p, state: 'refused', why: ATT_TOO_MANY }); continue; }
     list.push(p);
-    upload(key, p, file);
+    upload(p, file);
   }
   drawPills(key);
 }
@@ -7111,7 +7131,7 @@ document.addEventListener('click', (e) => {
   drawPills(key);
 });
 /* attachments end */
-const seenHash =(id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
+const seenHash = (id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
 // Once an answer is saved the card says so at once; the next refresh removes it.
 const ANSWERED = new Map();
 // An answer the server refused, per question: { reason, n }, drawn on every copy of its card until the
