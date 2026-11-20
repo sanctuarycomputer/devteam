@@ -208,7 +208,9 @@ test('a stale read is said on the page: a note at the top with the time of what 
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   // waiting no time at all on a run: every read after the first is the last good data, marked stale
-  const env = { ...process.env, DEVTEAM_DATA_WAIT_MS: '0', DEVTEAM_HUB_PORT: String(PORTS + 42), DEVTEAM_PORT_BASE: String(PORTS + 43), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  // a build served again for 3 s after it ends (the kit's 20 s, kit-595, set back for tests): a stale
+  // read is timed to come within this test's 30 s wait
+  const env = { ...process.env, DEVTEAM_DATA_WAIT_MS: '0', DEVTEAM_DATA_REUSE_MS: '3000', DEVTEAM_HUB_PORT: String(PORTS + 42), DEVTEAM_PORT_BASE: String(PORTS + 43), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'stale');
   const { dash, port } = await dashboardOnFreePort(root, env);

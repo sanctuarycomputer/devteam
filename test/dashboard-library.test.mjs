@@ -1506,15 +1506,20 @@ test('a tree opened by a link is the published version', { ...CHROME, timeout: 3
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
+// On main: a draft reloads by itself (kit-106) and never shows the outline; main keeps it.
 test('Reload: its stale outline on the pill', { ...CHROME, timeout: 300000 }, async (t) => {
   const { p, soon, go, made } = await versOn(t);
-  await go('#library');
-  await soon(`!!document.querySelector(${JSON.stringify(cardTitle(VERS))})`, 'the card');
-  await p.click(cardTitle(VERS));
-  await soon(`${frameIs(`/artifact/wt/${VERS_WT}/${VERS}/`)} && /^[0-9a-f]{64}$/.test(TS.fp ?? '')`, 'the draft in the viewer, with its fingerprint');
+  await go(`#artifact/main/${VERS}`);
+  await soon(`${frameIs(`/artifact/main/${VERS}/`)} && /^[0-9a-f]{64}$/.test(TS.fp ?? '')`, "main's version in the viewer, with its fingerprint");
   const button = () => p.ev("(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle, h: b.getBoundingClientRect().height }; })()");
   assert.equal((await button()).stale, false, 'nothing newer at open');
-  putFiles(made.draft, versFiles('d2'));
+  // main changes as versProject made it: a fourth commit (pushed too where the project has an origin, which mainRef reads first)
+  const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: made.root, encoding: 'utf8' }).trim();
+  const dir = path.join(made.root, 'docs/devteam/project/artifacts', VERS);
+  putFiles(dir, versFiles(4));
+  git('add', '-A', dir);
+  git('commit', '-qm', `${VERS} v4`);
+  if (git('remote').split('\n').includes('origin')) git('push', '-q', 'origin', 'HEAD:main');
   await soonIn(p, 60000)("document.getElementById('av-reload').classList.contains('stale')", 'the outline once a newer fingerprint is seen');
   const b = await button();
   assert.deepEqual([b.color, b.width, b.style, b.h], [await tokenColor(p, '--amber'), '1px', 'solid', 20], 'the --amber outline at the pill\'s border width (1px), on the 20px pill');
