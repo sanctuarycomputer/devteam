@@ -14943,6 +14943,44 @@ function collectMetrics(since) {
   if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
   if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
+  // A fleet with nothing running: no worker and no planner for FLEET_IDLE_MS while it is neither
+  // parked nor drained. idle-capacity speaks when a ticket can start, idle-planning when a goal
+  // waits for a planner, memory-full when the machine has no room for either; each names its own
+  // move, so this stays quiet when any of them spoke this pass. It speaks when nothing can start
+  // (every ready ticket waits on the owner, everything is held, nothing is planned), so the
+  // supervisor makes work instead of ticking over an empty fleet. The last sign of life is the
+  // newest line any ticket's worker or any planner wrote (a planner's branch and files too), or the
+  // log's first line when no session has ever run. A planner counts as running only while its
+  // window is open and it waits on no owner answer: a plan branch left behind, or a design parked
+  // on the owner's approval, is the stuck fleet this finding is for, once its stamps go quiet.
+  // stale_after_minutes (30 by default, two quiet ticks at the default tick_minutes): the silence
+  // after which a session reads as stuck reads the same for the fleet. A start takes a tick, so an
+  // idle tick between waves is normal; more is the fleet idling.
+  const FLEET_IDLE_MS = (settings.stale_after_minutes ?? 30) * 60000;
+  const spoken = f.some((x) => ['idle-capacity', 'idle-planning', 'memory-full'].includes(x.kind));
+  if (!drained && !fleetMode() && !active && !spoken && !planners().some((p) => !p.parked && p.window && !p.waiting_on_owner.length)) {
+    const lines = readLog().lines;
+    const stamps = lines.filter((l) => l.at && (ts.has(l.by) || String(l.by).startsWith('plan-'))).map((l) => l.at);
+    for (const p of planners()) if (p.last_seen) stamps.push(p.last_seen);
+    const lastAt = stamps.sort().pop() ?? lines.map((l) => l.at).filter(Boolean).sort()[0] ?? null;
+    const idleMs = lastAt ? now - Date.parse(lastAt) : 0;
+    if (idleMs > FLEET_IDLE_MS) {
+      // open tickets: not superseded, not merged, no worker running. Held: the ticket's held field,
+      // a goal not running, parked, or an open owner question naming it. Planned: the rest that
+      // aren't ready (waiting on a dependency or a running ticket's touches).
+      const open = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !countsAsWorker(t));
+      const heldT = open.filter((t) => isHeld(t) || ticketMode(t) !== 'run' || H.has(t.id) || workerState(t.id)?.phase === 'parked');
+      const heldIds = new Set(heldT.map((t) => t.id));
+      const readyT = ready.filter((t) => !heldIds.has(t.id));
+      const readyIds = new Set(readyT.map((t) => t.id));
+      const planned = open.filter((t) => !heldIds.has(t.id) && !readyIds.has(t.id)).length;
+      const L = ladder();
+      const noDefault = questions().filter((q) => q.status === 'open' && !q.goal_hold && !q.default && !['one-way-door', 'review', 'owner-action'].includes(q.kind) && !(q.reasons ?? []).includes('one-way-door') && !(L.owner_only ?? []).includes(q.class));
+      const chore = readyT.find((t) => t.kind === 'chore') ?? readyT[0];
+      const ids = (xs) => xs.slice(0, 3).map((x) => x.id).join(', ');
+      add('medium', 'fleet-idle', 'fleet', `no worker or planner has run for ${(idleMs / 3600000).toFixed(1)}h (last sign of life ${lastAt}); ${readyT.length} ticket${readyT.length === 1 ? '' : 's'} ready, ${heldT.length} held, ${planned} planned`, `in order: 1. ${chore ? `start a ready chore (worker ${chore.id})` : 'add a chore from what the metrics or the code point at'}; 2. split a held ticket so the part that doesn't need the owner runs (${heldT.length ? ids(heldT) : 'none held'}); 3. give an open no-default question a default (${noDefault.length ? ids(noDefault) : 'none open'}); 4. propose the next goal from strategy.md (a proposal question naming the "How it wins" line it serves, supervisor.md §9)`);
+    }
+  }
   // the owner asked for one of the supervisor's settings and main doesn't have it yet
   {
     const um = goalMode(upkeepOrVirtual());
