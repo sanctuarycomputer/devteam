@@ -436,6 +436,58 @@ try {
   .sugg-e { font-size: 12px; color: var(--green-fg); margin-top: 2px; }
 
 /* css-efficiency end */
+/* css-autonomy-pages start */
+  /* kit-93: the Autonomy pages. A page's cards stack with the grid's gap; its tables scroll inside their card */
+  #trust > .card + .card { margin-top: var(--gap); }
+  .tbl-wrap { overflow-x: auto; min-width: 0; }
+  .trust-card .stat > b { display: block; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .trust-card .trust-missing { margin: 10px 0 0; }
+  /* a kind's peek: its levels, the one it is on marked, any above its limit faded; its evidence rows open */
+  .lvls { display: flex; flex-direction: column; }
+  .lvl { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+  .lvl:last-child { border-bottom: 0; }
+  .lvl .t { flex: 1; min-width: 0; color: var(--fg-2); }
+  .lvl.now .t { color: var(--fg); font-weight: 600; }
+  .lvl.off { opacity: .55; }
+  .cls-ev .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .cls-ev .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .cls-ev .rowline[data-open]:hover .t, .cls-ev .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .cls-ev .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  /* Awareness: Efficiency's card, its four parts and four sparklines four across, two on a narrower screen, one on a phone */
+  .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: minmax(0, 1fr); } }
+  /* Governance: one flush card, its three sections inset as a card's body is; each table scrolls inside its section */
+  .gov-card > .sec { padding: 14px 16px; }
+  .gov-card > .sec:first-of-type { border-top: 0; }
+  .gov-card > .sec:last-child { border-bottom: 0; }
+  .gov-card .sec-b { min-width: 0; }
+  .gov-card > .err, .gov-card > .loading { margin: 14px 16px; }
+  /* Sensors: the tab bar first in its section (as Goals': the shell's first-child rule doesn't reach it), then
+     Production's incidents board (five columns) and a card a sensor, or Fleet's tables */
+  #monitoring > .tabbar:first-child { margin-top: -8px; margin-bottom: 14px; }
+  #incidents .board.inc { grid-template-columns: repeat(5, minmax(132px, 1fr)); }
+  .inc-card #incidents { min-width: 0; }
+  .sensor-card .sensor-src { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin: 8px 0 6px; }
+  .sensor-card .sensor-err { margin: 0 0 6px; font-size: 12px; color: var(--red-fg); overflow-wrap: anywhere; }
+  .sensor-card .sensor-stats, .sensor-card .sensor-levels { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; margin-bottom: 6px; }
+  .sensor-card .sensor-stats b, .sensor-card .sensor-levels b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sensor-card .sensor-levels > span { display: inline-flex; align-items: center; gap: 6px; }
+  .sensor-card .sensor-chart { min-width: 0; overflow-x: auto; }
+  .sensor-card .sensor-chart svg { max-width: 100%; height: auto; }
+  .sensor-card > .meta { margin-top: auto; }
+  /* a sensor's peek: its observations and incidents, rows that open their records */
+  .sensor-rows .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .sensor-rows .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .sensor-rows .rowline[data-open]:hover .t, .sensor-rows .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .sensor-rows .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+
+  /* a retro's card opens its peek */
+  .retro-card { cursor: pointer; }
+  .retro-card:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  .retro-card > p { margin: 0; }
+
+/* css-autonomy-pages end */
 /* css-progress start */
   /* progress */
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
@@ -1253,50 +1305,28 @@ try {
 
 <!-- html-loop end -->
 <!-- html-trust start -->
-  <section id="trust" class="no-shell" data-page="trust">
-    <h2>Trust Ladder <span class="sub">which of your decisions the supervisor may make, and how it earned or lost that</span></h2>
-    <p class="loop-intro">Some of your decisions can be handed to the supervisor one step at a time as it keeps recommending what you'd have chosen: first it asks, then it asks with a default, then it decides and tells you. A correction on one of its calls drops that kind back to asking. More trust is always your answer to a question in the Inbox.</p>
-    <div class="scroll"><table id="trust-table"></table></div>
-    <h3 style="margin-top:14px">How the rungs moved</h3>
-    <div class="feed" id="trust-history"></div>
-  </section>
+  <section id="trust" data-page="trust"></section>
 <!-- html-trust end -->
 
 <!-- html-efficiency start -->
   <!-- kit-174: the Efficiency Score card, beside Trust, on the shell (render() draws it: renderEfficiency) -->
   <section id="efficiency" data-page="efficiency"></section>
 <!-- html-efficiency end -->
+<!-- html-awareness start -->
+  <section id="awareness" data-page="awareness"></section>
+<!-- html-awareness end -->
+<!-- html-governance start -->
+  <section id="governance" data-page="governance"></section>
+<!-- html-governance end -->
 
 <!-- html-retros start -->
-  <section id="retros" class="no-shell" data-page="retros">
-    <h2>Retros <span class="sub">the supervisor's look back at how the work went, across every goal: what merged, what was slow or rejected, what it changed</span></h2>
-    <div id="retro-due"></div>
-    <div id="retro-list"></div>
-  </section>
+  <section id="retros" data-page="retros"></section>
 
 <!-- html-retros end -->
 <!-- html-health start -->
-  <section id="health" class="no-shell" data-page="health">
-    <h2>Health <span class="sub">what the supervisor is watching and working on; anything it needs from you comes to your Inbox</span></h2>
-    <div id="findings"></div>
-    <h3 style="margin-top:14px">Checks before merge <span class="sub">the automated checks every change must pass (settings <code>gates</code>)</span></h3>
-    <div id="gates"></div>
-    <div class="two" style="margin-top:14px" id="test-lists"></div>
-  </section>
-
 <!-- html-health end -->
 <!-- html-sensors start -->
-  <section id="monitoring" class="no-shell" data-page="sensors">
-    <h2>Sensors <span class="sub">each one takes samples of production, kept here; a meaningful change becomes an observation in the log, for the supervisor's loop and Health to act on</span></h2>
-    <div id="sensors"></div>
-    <h3 style="margin-top:14px">Incidents</h3>
-    <div id="incidents"></div>
-    <h3 style="margin-top:14px">Exceptions and errors</h3>
-    <div id="sensor-exceptions"></div>
-    <h3 style="margin-top:14px">Observations</h3>
-    <div class="feed" id="sensor-feed"></div>
-  </section>
-
+  <section id="monitoring" data-page="sensors"></section>
 <!-- html-sensors end -->
 <!-- html-settings start -->
   <section id="settings" data-page="settings"></section>
@@ -1656,21 +1686,20 @@ function saveFilters(page, state) {
 // The router's table (dashboard-shell@1, test/contracts/shell.md §6): the page ids, each link kind's home page (what a
 // link opens over on a cold load), file homes by path, and the redirects. The page's own, outside the
 // shared block, so the tickets that change it never touch the block.
-// until kit-93: health is its own page (it folds into Sensors) and governance is not a page yet (a
-// governance file's home below then opens over Overview); kit-93 swaps both
-const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'sensors', 'health', 'retros', 'loop', 'settings'];
+// kit-93: Health folds into Sensors (its head redirects) and Governance is a page, so a governance file opens over it
+const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'awareness', 'governance', 'sensors', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
   links: {
     ticket: 'board', feature: 'board', story: 'board', release: 'board', wave: 'board', milestone: 'board', planner: 'board', thread: 'board',
     goal: 'goals', q: 'overview', talk: 'overview',
     act: 'loop', decision: 'loop', lesson: 'loop', problem: 'loop', signal: 'loop', learning: 'loop', observation: 'loop',
-    sensor: 'sensors', retro: 'retros',
+    sensor: 'sensors', retro: 'retros', class: 'trust',
     artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library', lib: 'library',
   },
   files: [[/(^|\/)docs\/devteam\/(governance|process)\//, 'governance'], [/(^|\/)strategy\.md$/, 'governance']],
   redirects: {
-    monitoring: 'sensors',
+    monitoring: 'sensors', health: 'sensors?st=fleet',
     // permanent: the old Loop tab subjects open the Loop page (and its tab)
     'loop/observe': 'loop', 'loop/orient': 'loop?lt=orient', 'loop/decide': 'loop?lt=decide', 'loop/act': 'loop?lt=act',
     // the Inbox is the Threads panel's first tab (kit-100): its old heads open it over Overview
@@ -1687,11 +1716,11 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // Each page is today's section (its data-page); render() still draws every section on every read,
 // shown or not, so nothing a page holds is lost while another shows. A page's nav count is today's
 // element, which render() fills (PAGE_COUNT_ID: the count each nav item carries).
-const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
+const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', awareness: 'n-awareness', sensors: 'n-sensors', retros: 'n-retros', loop: 'n-knowledge' };
 for (const [id, title, group, icon] of [
   ['overview', 'Overview', 'project', 'layout-dashboard'], ['goals', 'Goals', 'project', 'target'],
   ['progress', 'Progress', 'project', 'chart-line'], ['board', 'Board', 'project', 'kanban'], ['library', 'Library', 'project', 'library'],
-  ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['health', 'Health', 'autonomy', 'heart-pulse'],
+  ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['awareness', 'Awareness', 'autonomy', 'eye'], ['governance', 'Governance', 'autonomy', 'scale'], ['sensors', 'Sensors', 'autonomy', 'activity'],
   ['retros', 'Retros', 'autonomy', 'history'], ['loop', 'Self Improvement', 'autonomy', 'repeat'], ['settings', 'Settings', 'settings', 'settings'],
 ]) registerPage({ id, title, group, icon, count: () => null, render: () => {} });
 for (const nav of document.querySelectorAll('.side nav.nav[data-group]')) {
@@ -1963,15 +1992,16 @@ const EFF_SUGG_WORDS = { 'review-depth': 'Fit review depth to the ticket', 'smal
 function effSuggestions(xs) {
   return suggestionsList(xs.map((x) => ({ id: String(x.id), title: Object.hasOwn(EFF_SUGG_WORDS, String(x.kind)) ? EFF_SUGG_WORDS[x.kind] : 'Suggestion', what: x.what ?? '', evidence: x.evidence ?? '', effect: x.effect ?? '' })));
 }
-// A suggestion's thread: on the page subject #efficiency?suggestion=<id> (tlStart opens the open one,
-// as a Settings row's); placed by the item, from the click's point or, by Enter, the item's right edge
+// A suggestion's thread: on the page subject #<page>?suggestion=<id>, its page the section it is on
+// (Efficiency, Awareness; tlStart opens the open one, as a Settings row's); placed by the item, from
+// the click's point or, by Enter, the item's right edge
 function effSuggGo(it, x, y) {
-  const view = suggView(it.dataset.sugg);
+  const view = suggView(it.dataset.sugg, it.closest('section[id]').id);
   const title = tLine(it.dataset.title, T_TITLE_MAX);
   tlStart({ subject: { kind: 'page', view, quote: tCut(title, 300) }, title, el: it, x, y });
 }
 document.addEventListener('click', (e) => {
-  const it = e.target.closest?.('#efficiency [data-sugg]');
+  const it = e.target.closest?.('#efficiency [data-sugg], #awareness [data-sugg]');
   if (!it || e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   if (String(window.getSelection?.() ?? '')) return;
   e.preventDefault();
@@ -1983,10 +2013,411 @@ document.addEventListener('keydown', (e) => {
   const space = e.key === ' ' && !!t?.matches?.('[data-open][role="button"][tabindex]');
   if ((e.key !== 'Enter' && !space) || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   // a focused suggestion starts its thread; a focused row with a record (data-open, focusable) opens it
-  if (t?.matches?.('#efficiency [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
+  if (t?.matches?.('#efficiency [data-sugg], #awareness [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
   if (t?.matches?.('[data-open][tabindex]')) { e.preventDefault(); location.hash = t.dataset.open; }
 });
 
+/* autonomy-pages start */
+// kit-93: the Autonomy pages' nav counts. Trust and Awareness carry this week's score; Sensors the
+// sensors down, else the findings, hot when one is down or a finding is high.
+function navCounts(d) {
+  const set = (id, txt, hot = false) => { const el = $(id); if (!el) return; el.textContent = txt; el.classList.toggle('hot', !!hot); };
+  const pct = (s) => (Number.isFinite(s?.this_week) ? `${s.this_week}%` : '');
+  set('n-trust', pct(d.autonomy?.decisions?.score));
+  set('n-awareness', pct(d.awareness?.score));
+  const down = (d.sensors || []).filter((m) => m.state === 'down');
+  const fs = d.metrics?.findings || [];
+  set('n-sensors', down.length ? `${down.length} down` : (fs.length || ''), down.length > 0 || fs.some((f) => f.severity === 'high'));
+}
+// A page's tables (plan D2): each sits in its own <div data-tbl="<page>:<name>">, its rows ({ cells, sort, open })
+// kept in TBL_ROWS by that key and its sort in TBL_SORT (kept across redraws). After each write of the page's
+// HTML, bindPageTables binds every wrapper: a header sorts and redraws the page, a row opens its open hash.
+const TBL_SORT = new Map();
+const TBL_ROWS = new Map();
+function pageTable(key, cols, rows) {
+  TBL_ROWS.set(key, rows);
+  return `<div class="tbl-wrap" data-tbl="${esc(key)}">${dbTable(cols, rows, { sort: TBL_SORT.get(key) ?? null })}</div>`;
+}
+function bindPageTables(root, redrawPage) {
+  for (const w of root.querySelectorAll('[data-tbl]')) {
+    const key = w.dataset.tbl;
+    bindDbTable(w, {
+      onSort: (col) => {
+        TBL_SORT.set(key, nextSort(TBL_SORT.get(key), col));
+        redrawPage();
+        // the page was written again: focus back on the header that sorted it
+        root.querySelector(`[data-tbl="${CSS.escape(key)}"] button.sort[data-col="${col}"]`)?.focus();
+      },
+      onOpen: (i) => { const open = TBL_ROWS.get(key)?.[i]?.open; if (open) location.hash = open; },
+    });
+  }
+}
+// ---- Trust (kit-93): the Trust Score card, the kinds of decision by plain name, How the levels moved ----
+// The levels in the design's words (the kit's RUNG_PLAIN; RUNG_WORDS stays for the pages that use it). A kind
+// is named by its class_name, never its class id (which sits only in a row's hash).
+const TRUST_LEVELS = { 1: 'Asks you first', 2: 'Asks, goes ahead at a deadline', 3: 'Decides and tells you' };
+const trustName = (t) => t?.class_name || cap(t?.about || '') || 'A kind of decision';
+const trustLevel = (r) => TRUST_LEVELS[r] ?? '–';
+const trustAgreed = (t) => (effNum(t.agreement) ? `${Math.round(t.agreement * 100)}% of the last ${(t.agreement_questions || []).length}` : '–');
+const trustCorrected = (t) => (t.corrections ? `${t.corrections} time${t.corrections > 1 ? 's' : ''}` : 'never');
+const TRUST_READY = '<span class="badge good" title="Enough answers went with its recommendation to ask you to raise it">ready to ask for more</span>';
+// a kind's Now: its level in words, and the badge when it can ask for more (the table's cell, the peek's row)
+const trustNow = (t) => `${esc(trustLevel(t.rung))}${t.can_ask ? ` ${TRUST_READY}` : ''}`;
+// the hash of a call by its id's kind: an act, a decision or a question; null for any other
+const callHash = (id) => { const s = String(id ?? ''); const k = /^a-/.test(s) ? 'act' : /^d-/.test(s) ? 'decision' : /^q-/.test(s) ? 'q' : null; return k ? `${k}/${encodeURIComponent(s)}` : null; };
+// Kinds of decision: a row a kind, opening its peek (class/<id>)
+function trustRows(trust) {
+  return (trust || []).map((t) => ({
+    cells: [esc(trustName(t)), trustNow(t), esc(trustLevel(t.ceiling)), esc(trustAgreed(t)), esc(trustCorrected(t))],
+    sort: [trustName(t), t.rung ?? null, t.ceiling ?? null, effNum(t.agreement) ? t.agreement : null, t.corrections ?? 0],
+    open: t.class ? `class/${encodeURIComponent(t.class)}` : null,
+  }));
+}
+// How the levels moved: every move of every kind, capped at its ceiling, newest first, at most 40; a row opens
+// the question that moved it (your answer) or the call you corrected
+function levelMoves(trust) {
+  return (trust || []).flatMap((t) => (t.history || []).map((e) => ({ t, e, rung: effNum(t.ceiling) ? Math.min(e.rung, t.ceiling) : e.rung })))
+    .sort((a, b) => String(b.e.at ?? '').localeCompare(String(a.e.at ?? ''))).slice(0, 40)
+    .map(({ t, e, rung }) => {
+      const why = e.by === 'correction' ? `your correction${e.why ? `: ${e.why}` : ''}` : e.by === 'answer' ? 'your answer' : words(e.by);
+      return {
+        cells: [esc(trustName(t)), esc(trustLevel(rung)), esc(why), e.at ? esc(when(e.at)) : ''],
+        sort: [trustName(t), rung ?? null, why, e.at ?? null],
+        open: e.by === 'answer' ? (e.id ? `q/${encodeURIComponent(e.id)}` : null) : callHash(e.id),
+      };
+    });
+}
+// A kind's evidence since it last moved (its newest history entry; all of it when it never moved): the answered
+// questions its agreement counts and its calls since its last correction, each looked up in what /api/data holds
+// (answered, acts, decisions). An id none of them holds is kept, as "a question" or "a call" with no date.
+function classEvidence(t, ooda) {
+  const since = (t?.history || []).reduce((m, e) => (e.at && e.at > m ? e.at : m), '');
+  const answered = new Map((ooda?.answered || []).map((q) => [q.id, q]));
+  const acts = new Map((ooda?.acts || []).map((a) => [a.id, a]));
+  const calls = new Map((ooda?.decisions || []).filter((r) => r.kind === 'decision' || r.kind === 'act').map((r) => [r.id, r]));
+  const qs = (t?.agreement_questions || []).map((id) => {
+    const q = answered.get(id);
+    return { what: q?.question || 'a question', kind: q ? (q.agreed_by_owner ? 'Agreed' : 'Not agreed') : null, at: q?.answered_at ?? null, open: `q/${encodeURIComponent(id)}` };
+  });
+  const cs = (t?.uncorrected_acts || []).map((id) => {
+    const a = acts.get(id), r = calls.get(id);
+    return { what: a?.what || r?.what || 'a call', kind: 'Call', at: a?.created_at ?? r?.at ?? null, open: a ? `act/${encodeURIComponent(id)}` : r ? `${r.kind}/${encodeURIComponent(id)}` : callHash(id) };
+  });
+  return [...qs, ...cs].filter((x) => !x.at || !since || x.at > since).sort((a, b) => String(b.at ?? '').localeCompare(String(a.at ?? '')));
+}
+// The Trust Score card's charts, drawn at the width they get: the score line and a bar a week split three ways
+let TRUST_WEEKS = [];
+const TRUST_SPLIT = [['alone', 'decided alone'], ['asked', 'asked you'], ['corrected', 'corrected']];
+function trustSplitBars(weeks, W = 560) {
+  const n = weeks.length, val = (w, k) => (effNum(w?.[k]) && w[k] > 0 ? w[k] : 0);
+  const tot = (w) => TRUST_SPLIT.reduce((s, [k]) => s + val(w, k), 0);
+  const max = Math.max(0, ...weeks.map(tot));
+  if (!n || !max) return effNone();
+  const H = 96, slot = W / n, bw = Math.max(1, slot - 6);
+  return `<svg class="split" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Decisions each week: decided alone, asked you, corrected">${weeks.map((w, i) => {
+    let y = H - 14;
+    return TRUST_SPLIT.map(([k, l], j) => { const v = val(w, k); if (!v) return ''; const h = ((H - 24) * v) / max; y -= h;
+      return `<rect data-i="${i}" x="${(i * slot).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" style="fill:${EFF_COLORS[j]}"><title>${esc(`${weekName(i, n)}: ${l} ${v} of ${tot(w)}`)}</title></rect>`; }).join('');
+  }).join('')}<text x="0" y="${H - 2}" class="lc-t">12 weeks ago</text><text x="${W - 6}" y="${H - 2}" text-anchor="end" class="lc-t">this week</text></svg>
+    <div class="legend small">${TRUST_SPLIT.map(([k, l], j) => `<span><i style="border-top-color:${EFF_COLORS[j]}"></i>${esc(l)} ${esc(val(weeks[n - 1], k))}</span>`).join('')}</div>`;
+}
+FIT_DRAW['trust-score'] = (el, W) => scoreLine(TRUST_WEEKS.map((w) => (effNum(w.score) ? w.score : null)), W, { min: 0, max: 100 });
+FIT_DRAW['trust-split'] = (el, W) => trustSplitBars(TRUST_WEEKS, W);
+// Score: this and last week's score, the line, a sparkline a count, the split, the lessons and the week's record
+function trustScore(a) {
+  const d = a.decisions || {}, weeks = Array.isArray(d.weeks) ? d.weeks : [], w = d.this_week || weeks[weeks.length - 1] || {};
+  TRUST_WEEKS = weeks;
+  const sc = (x) => (effNum(x) ? `${x}%` : '–'), num = (x) => (effNum(x) ? String(+x.toFixed(2)) : '–');
+  const col = (f) => weeks.map((x) => { const y = f(x); return effNum(y) ? y : null; });
+  const rec = w.with_recommendation || {};
+  const counts = [
+    ['decided alone', num(w.alone), col((x) => x.alone)],
+    ['asked you', num(w.asked), col((x) => x.asked)],
+    ['corrected', num(w.corrected), col((x) => x.corrected)],
+    ['changes merged per question answered', num(w.merged_per_answer), col((x) => x.merged_per_answer)],
+    ['questions asked again', effNum(w.asked_again) ? `${w.asked_again} (target 0)` : '–', col((x) => x.asked_again)],
+    ['hours waiting on you', num(w.hours_waiting), col((x) => x.hours_waiting)],
+    ['answers that went with the recommendation', effNum(rec.count) && effNum(rec.of) ? `${rec.count} of ${rec.of}${effNum(rec.share) ? ` · ${Math.round(rec.share * 100)}%` : ''}` : '–', col((x) => x.with_recommendation?.share)],
+  ];
+  const links = ['<a class="linkish" href="#loop?lt=orient&kind=lesson">the lessons it counted</a>', w.record ? `<a class="linkish" href="#learning/${esc(encodeURIComponent(w.record))}">this week's learning record</a>` : ''].filter(Boolean);
+  // the charts' data in their attributes, so new data is a new card (renderTrust compares the html)
+  const sig = esc(JSON.stringify(weeks.map((x) => [x.score, x.alone, x.asked, x.corrected])));
+  return `<div class="score"><b>${sc(d.score?.this_week)}</b><span class="dim">last week ${sc(d.score?.last_week)}</span></div>
+    <p class="score-w">decisions made without asking that you didn't correct · ${links.join(' · ')}</p>
+    <div class="score-mod"><h4 class="props-h">The score, 12 weeks</h4><div class="fit" data-fit="trust-score" data-v="${sig}"></div></div>
+    <div class="score-mod score-counts">${counts.map(([k, v, s]) => `<div class="stat mini"><span class="k">${esc(k)}</span><b>${esc(v)}</b>${spark(s, k)}</div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">Each week</h4><div class="fit" data-fit="trust-split" data-v="${sig}"></div></div>`;
+}
+const trustStat = (v, k) => `<div class="stat"><b>${esc(v)}</b><span class="dim">${esc(k)}</span></div>`;
+const trustCount = (x) => (effNum(x) ? String(x) : '–');
+function trustScoreCard(a) {
+  const tr = a?.trust || {}, se = a?.senses || {}, missing = Array.isArray(se.missing) ? se.missing : [];
+  const trust = `<div class="eff-parts">${trustStat(`${trustCount(tr.own)} of ${trustCount(tr.kinds)}`, 'kinds of decision decided on their own')}${trustStat(`${trustCount(tr.raised)} raised, ${trustCount(tr.dropped)} dropped`, 'this week')}</div>`;
+  const senses = `<div class="eff-parts">${[['needed', se.needed], ['has', se.has], ['working', se.working]].map(([k, v]) => `<div class="stat"><span class="k">${k}</span><b>${esc(trustCount(v))}</b></div>`).join('')}</div>
+    <p class="score-w trust-missing">${missing.length ? `Missing: ${esc(missing.join(', '))}` : 'None missing'}</p>`;
+  return `<div class="card eff-card trust-card">${cardHead('shield-check', 'Trust Score', { extra: '<span class="muted">this week</span>' })}${
+    effSection('Score', a ? trustScore(a) : effNone())}${effSection('Trust', a ? trust : effNone())}${effSection('Senses', a ? senses : effNone())}</div>`;
+}
+// The page, written into #trust only when its HTML changed, so a redraw keeps focus and a pin's element
+function renderTrust(d) {
+  const trust = d.ooda?.trust || [];
+  const html = `${trustScoreCard(d.autonomy || null)}<div class="card flush">${cardHead('shield-check', 'Kinds of decision')}${
+    pageTable('trust:kinds', ['Kind of decision', 'Now', 'At most', 'Agreed with you', 'Corrected'], trustRows(trust))}</div><div class="card flush">${cardHead('history', 'How the levels moved')}${
+    pageTable('trust:moves', ['Kind of decision', 'To', 'Why', 'When'], levelMoves(trust))}</div>`;
+  const el = $('trust');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
+  el.innerHTML = html;
+  bindPageTables(el, () => renderTrust(DATA));
+  fitCharts();
+}
+// A kind's peek (#class/<id>, home Trust): read-only, from DATA.ooda.trust (the server has no class peek, so it
+// is marked missing, as a Library item's is). Its properties (no ID row: the class id never shows), its three
+// levels with the one it is on marked, and the evidence since it last moved, each row opening its record.
+function openClass(id) {
+  drawerFor('class', id);
+  PEEKS.set(peekKey('class', id), { error: 'not a record', missing: true });
+  const t = (DATA?.ooda?.trust || []).find((x) => x.class === id);
+  // not notFound, which titles the peek with the id and gives it an ID row: the class id never shows (R2)
+  if (!t) return showDrawer('<h2 id="drawer-title">Not found</h2><p class="muted">No kind of decision by that name.</p>');
+  const last = (t.history || []).reduce((m, e) => (e.at && (!m || e.at > m.at) ? e : m), null);
+  const rows = [
+    attrRow('Now', trustNow(t)),
+    attrRow('At most', esc(trustLevel(t.ceiling))),
+    attrRow('Since', last ? esc(when(last.at)) : 'never moved'),
+    attrRow('Agreed with you', esc(trustAgreed(t))),
+    attrRow('Corrected', esc(trustCorrected(t)), 'How many times you corrected one of its calls.'),
+    attrRow('How it changes', 'Shift+click it and say so in a thread'),
+  ].filter(Boolean);
+  const levels = [1, 2, 3].map((r) => `<div class="lvl${r === t.rung ? ' now' : ''}${r > t.ceiling ? ' off' : ''}"><span class="t">${esc(TRUST_LEVELS[r])}</span>${
+    r === t.rung ? '<span class="badge low">now</span>' : r > t.ceiling ? '<span class="muted">beyond its limit</span>' : ''}</div>`).join('');
+  const ev = classEvidence(t, DATA?.ooda);
+  const evHtml = ev.length ? `<div class="rows cls-ev">${ev.map((x) => `<div class="rowline"${x.open ? ` data-open="${esc(x.open)}" tabindex="0" role="link"` : ''}><span class="dot${x.kind === 'Agreed' ? ' green' : x.kind === 'Not agreed' ? ' amber' : x.kind === 'Call' ? ' blue' : ''}"></span><span class="t">${esc(x.what)}</span><span class="r">${
+    esc([x.kind === 'Call' ? '' : x.kind, x.at ? when(x.at) : ''].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>` : effNone();
+  showDrawer(`<h2 id="drawer-title">${esc(trustName(t))}</h2><section class="attrs">${props(rows)}</section>${psect('Levels', `<div class="lvls">${levels}</div>`)}${psect('Since it last moved', evHtml)}`);
+}
+// ---- Awareness (kit-93): the Awareness Score card, drawn as Efficiency's, with its charts and suggestion list ----
+// A suggestion's page: the section its view names (efficiency, awareness), else null
+function suggPageOf(view) {
+  const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : '');
+  return m && parseSuggView(view) !== null ? m[1] : null;
+}
+// The four parts in plain words, and a suggestion's title by its kind
+const AW_PARTS = [['signals', 'signals explained within a day'], ['incidents', 'fixed incidents that left a lesson'], ['lessons', 'lessons sessions use'], ['starts', 'fresh starts given what they need']];
+const AW_SUGG_WORDS = { incident: 'Learn from a fixed incident', lessons: 'Retire lessons nobody is given', signal: 'Explain something that keeps happening' };
+// The score line, drawn at the width it gets
+let AW_WEEKS = [];
+FIT_DRAW['aw-score'] = (el, W) => scoreLine(AW_WEEKS.map((w) => (effNum(w.score) ? w.score : null)), W, { min: 0, max: 100 });
+// Score: this and last week's score, this week's four parts ("c of o · share", "none" with no share),
+// the 12-week line (a null week a gap) and a sparkline a part over its weekly share
+function awarenessScore(a) {
+  const weeks = Array.isArray(a.weeks) ? a.weeks : [];
+  AW_WEEKS = weeks;
+  const sc = (x) => (effNum(x) ? `${x}%` : '–'), pc = (s) => (effNum(s) ? `${Math.round(100 * s)}%` : 'none');
+  const part = (x) => (effNum(x?.share) ? `${x.count} of ${x.of} · ${pc(x.share)}` : 'none');
+  const share = (k) => weeks.map((w) => (effNum(w?.parts?.[k]?.share) ? w.parts[k].share : null));
+  // the chart's data in its attribute, so new data is a new card (renderAwareness compares the html)
+  const sig = esc(JSON.stringify(weeks.map((w) => [w?.score ?? null, ...AW_PARTS.map(([k]) => w?.parts?.[k]?.share ?? null)])));
+  return `<div class="score"><b>${sc(a.score?.this_week)}</b><span class="dim">last week ${sc(a.score?.last_week)}</span></div>
+    <p class="score-w">how well the fleet understands what happens: the mean of the four parts below</p>
+    <div class="eff-parts aw-parts">${AW_PARTS.map(([k, l]) => `<div class="stat"><span class="k">${esc(l)}</span><b>${esc(part(a.parts?.[k]))}</b></div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">The score, 12 weeks</h4><div class="fit" data-fit="aw-score" data-v="${sig}"></div></div>
+    <div class="score-mod score-counts">${AW_PARTS.map(([k, l]) => `<div class="stat mini"><span class="k">${esc(l)}</span><b>${esc(pc(a.parts?.[k]?.share))}</b>${spark(share(k), l)}</div>`).join('')}</div>`;
+}
+// Suggestions: Efficiency's list, each titled by its kind; a click or Enter starts or opens its thread (effSuggGo)
+const awSuggestions = (xs) => suggestionsList(xs.map((x) => ({ id: String(x.id), title: Object.hasOwn(AW_SUGG_WORDS, String(x.kind)) ? AW_SUGG_WORDS[x.kind] : 'Suggestion', what: x.what ?? '', evidence: x.evidence ?? '', effect: x.effect ?? '' })));
+function awarenessCard(a) {
+  return `<div class="card eff-card aw-card">${cardHead('eye', 'Awareness Score', { extra: '<span class="muted">this week</span>' })}${
+    effSection('Score', a ? awarenessScore(a) : effNone())}${
+    effSection('Suggestions', a ? awSuggestions(Array.isArray(a.suggestions) ? a.suggestions : []) : effNone())}</div>`;
+}
+// The page, written into #awareness only when its HTML changed, so a redraw keeps focus and a pin's element
+function renderAwareness(d) {
+  const html = awarenessCard(d.awareness || null);
+  const el = $('awareness');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
+  el.innerHTML = html;
+  fitCharts();
+}
+// ---- Governance (kit-93): /api/governance's files in three ruled sections, each opening the read-only file peek ----
+// GOV: the last listing's files (kept through a failed read: C8's "the last listing"), when it was read, its error,
+// and a read in flight. Read when the page is shown, again at most once a minute while it is (render, showHead).
+const GOV = { at: 0, files: null, error: null, pending: false };
+async function loadGovernance(force = false) {
+  if (GOV.pending || (!force && GOV.at && Date.now() - GOV.at < 60000)) return;
+  GOV.pending = true;
+  try {
+    const r = await fetch('/api/governance');
+    const j = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(j?.error || `${r.status} ${r.statusText}`.trim());
+    if (!Array.isArray(j?.files)) throw new Error('the reply was not a list of files');
+    GOV.files = j.files;
+    GOV.error = null;
+  } catch (e) { GOV.error = String(e?.message ?? e); }
+  finally { GOV.at = Date.now(); GOV.pending = false; }
+  renderGovernance();
+}
+const GOV_GROUPS = [['governance', 'Governance'], ['process', 'Process'], ['project', 'Project']];
+// A group's rows: File (its title, a badge from its state), Path, Last change (a date, else "—"); a written
+// file opens its peek, a not-written one nothing (C4)
+const GOV_BADGE = { 'changed here': 'amber', 'not written yet': 'low' };
+function governanceRows(files, group) {
+  return (files || []).filter((f) => f?.group === group).map((f) => {
+    const at = typeof f.last_change === 'string' && !Number.isNaN(Date.parse(f.last_change)) ? f.last_change : null;
+    const title = f.title || f.path || '';
+    return {
+      cells: [`${esc(title)}${f.state ? ` <span class="badge ${GOV_BADGE[f.state] || 'low'}">${esc(f.state)}</span>` : ''}`, `<code>${esc(f.path ?? '')}</code>`, at ? esc(fmtDay(at)) : '—'],
+      sort: [title, f.path ?? '', at],
+      open: f.written && f.path ? `#file?path=${encodeURIComponent(f.path)}&title=${encodeURIComponent(title)}` : null,
+    };
+  });
+}
+// The page, written into #governance only when its HTML changed, so a redraw keeps focus and a pin's element
+function renderGovernance() {
+  // a failed read's error, above the last listing when there is one (its paragraphs stay pinnable)
+  const err = GOV.error ? `<p class="err">The governance files didn't load: ${esc(GOV.error)}</p>` : '';
+  const body = err + (GOV.files ? GOV_GROUPS.map(([g, l]) => effSection(l, pageTable(`gov:${g}`, ['File', 'Path', 'Last change'], governanceRows(GOV.files, g)))).join('')
+    : err ? '' : '<p class="loading">Loading…</p>');
+  const html = `<div class="card flush gov-card">${cardHead('scale', 'Files')}${body}</div>`;
+  const el = $('governance');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  el.innerHTML = html;
+  bindPageTables(el, renderGovernance);
+}
+// A file peek is about a governance file when the last listing named its path (C8: any group; none before a listing)
+const govListed = (path) => typeof path === 'string' && !!GOV.files?.some((f) => f?.path === path);
+// The block of a governance file's rendered Markdown under el (a paragraph, an item, a heading, a quote, code), else
+// null; a file of another repo (its peek's repo) is not this project's governance file
+function govBlockAt(el) {
+  if (DRAWER.kind !== 'file' || !govListed(DRAWER.id) || DRAWER.arg?.get?.('repo')) return null;
+  const b = el?.closest?.('p, li, h1, h2, h3, h4, h5, h6, blockquote, pre');
+  return b && b.closest('#drawer-body .md') ? b : null;
+}
+// ---- Sensors (kit-93): Production (the incidents board, a card a sensor) and Fleet (Health's tables) ----
+// SENSOR_TAB: the tab shown, from the head's st (showHead): fleet, else production
+let SENSOR_TAB = 'production';
+// Selecting a tab is a new entry (#sensors, #sensors?st=fleet), so Back restores the tab before; drawn at once,
+// so the focus moves to the new tab's element
+bindTabBar($('monitoring'), { onSelect: (id) => {
+  if (!['production', 'fleet'].includes(id)) return;
+  const cur = parseHead(location.hash, SHELL_ROUTES);
+  const state = cur.link === undefined && cur.page === 'sensors' ? { ...cur.state } : {};
+  if (id === 'fleet') state.st = 'fleet'; else delete state.st;
+  SENSOR_TAB = id;
+  if (DATA) renderMonitoring(DATA);
+  location.hash = headFor({ page: 'sensors', state });
+} });
+// today's events by level (a probe's output, an error tracker's errors, C7), a dot and a count each; '' with none
+const SENSOR_LEVEL_DOT = { fatal: 'red', error: 'red', warning: 'amber', warn: 'amber' };
+function sensorLevels(by) {
+  const xs = Object.entries(by || {}).filter(([, n]) => Number.isFinite(n) && n > 0);
+  return xs.length ? `<div class="sensor-levels">${xs.map(([l, n]) => `<span><span class="dot ${SENSOR_LEVEL_DOT[l] || 'blue'}"></span>${esc(l)} <b>${esc(n)}</b></span>`).join(' ')}</div>` : '';
+}
+// One sensor's card (pure: series is its 24h latency, or null while loading): its name and state, what it reads,
+// its trouble (the last error and the retry), its figures, its live output, when it last ran; a click or Enter
+// opens its peek
+function sensorCard(m, series) {
+  const [tone, label] = monState(m);
+  const http = m.kind === 'http', t = m.today || {};
+  const failed = !!m.last && !m.last.ok;
+  const trouble = failed ? `${esc(m.last_error || m.last?.error || 'failed')}${m.backoff_minutes ? ` · trying again in ${esc(m.backoff_minutes)} min` : ''}` : '';
+  const msOr = (x) => (x == null ? '–' : `${x}ms`);
+  const src = http ? esc(m.url || '') : `${esc(m.kind)} · ${esc(m.probe || '')}${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}`;
+  const stats = http
+    ? [`24h <b>${esc(pctOr(m.uptime_24h))}</b> up`, `7d <b>${esc(pctOr(m.uptime_7d))}</b>`, `p50 <b>${esc(msOr(m.p50_24h))}</b>`, `p95 <b>${esc(msOr(m.p95_24h))}</b>`, ...(m.tls_days != null ? [`certificate <b>${esc(m.tls_days)}</b> days left`] : [])]
+    : [`today <b>${esc(t.events ?? 0)}</b> event(s)`, `<b>${esc(t.qualified ?? 0)}</b> new for triage`, `<b>${esc(m.fingerprints ?? 0)}</b> fingerprint(s)`, ...(t.mean_ms != null ? [`run <b>${esc(t.mean_ms < 1000 ? `${t.mean_ms}ms` : `${(t.mean_ms / 1000).toFixed(1)}s`)}</b>`] : [])];
+  const output = http ? `<div class="sensor-chart" data-mon-chart="${esc(m.name)}">${series ? sensorChart(series, m, true) : '<p class="muted small">Loading…</p>'}</div>` : sensorLevels(t.by_level);
+  const ran = http ? `checked ${m.last_at ? esc(when(m.last_at)) : 'never'}` : m.last_at ? `ran ${esc(when(m.last_at))}` : 'never run';
+  return `<div class="card c6 sensor-card" data-open="sensor/${esc(encodeURIComponent(m.name))}" tabindex="0" role="button" aria-label="Open the sensor ${esc(m.name)}">${cardHead('activity', esc(m.name), { extra: `<span class="badge ${tone}">${esc(label)}</span>` })}
+    <div class="sensor-src">${src}</div> ${trouble ? `<p class="sensor-err">${trouble}</p> ` : ''}
+    <div class="sensor-stats">${stats.map((s) => `<span>${s}</span>`).join(' ')}</div> ${output} <div class="meta">${ran}</div></div>`;
+}
+// Production: the incidents board first, then a card a sensor, two across
+function sensorsProduction(d) {
+  const ms = d.sensors || [], incs = d.incidents || [];
+  const open = incs.filter((x) => x.stage !== 'resolved').length;
+  return `<div class="g12"><div class="card c12 inc-card">${cardHead('siren', 'Incidents', { extra: open ? `<span class="muted">${open} open</span>` : '' })}<div id="incidents">${incidentBoard(incs)}</div></div>${
+    ms.map((m) => sensorCard(m, MON_SERIES.get(m.name)?.data ?? null)).join('')}${ms.length ? '' : '<p class="empty c12">None</p>'}</div>`;
+}
+// The hash of the record a finding's subject names, else null (R2), as linkify links them: a ticket, a sensor or a
+// planner only when /api/data lists it, a thread, a goal or another logged id by its prefix; a commit, a check or
+// anything else names none
+const SUBJ_KINDS = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk', o: 'observation', q: 'q' };
+function subjectOpen(subj) {
+  const s = String(subj ?? '');
+  if (/^thread:t-/.test(s)) return subjectOpen(s.slice(7));
+  if (ticketMap().has(s)) return `#ticket/${encodeURIComponent(s)}`;
+  if (/^sensor:/.test(s)) { const n = s.slice(7); return (DATA?.sensors || []).some((x) => x.name === n) ? `#sensor/${encodeURIComponent(n)}` : null; }
+  if (/^plan-/.test(s)) { const f = s.slice(5); return (DATA?.planners || []).some((x) => x.feature === f) ? `#planner/${encodeURIComponent(f)}` : null; }
+  const id = /^([gkapmodtq])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/.exec(s);
+  return id ? `#${SUBJ_KINDS[id[1]]}/${encodeURIComponent(s)}` : null;
+}
+// A subject as plain text (the row opens it): a ticket by its title, a sensor by its name, else as written
+const subjectText = (subj) => { const s = String(subj ?? ''); const t = ticketMap().get(s); return t ? esc(t.title) : /^sensor:/.test(s) ? esc(s.slice(7)) : s ? `<code>${esc(s)}</code>` : ''; };
+const SEV_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
+// Fleet's five tables, from metrics: the findings with the supervisor's next step, the ones set aside, the
+// configured checks (trouble first; the one-off checks only named, in gates.oneOff), the flaky and slowest tests.
+// Only a finding or a set-aside row with a record opens; checks and tests are figures (R2)
+function fleetTables(m, configured) {
+  const g = m?.gates || {}, all = g.gates || [];
+  const flakyG = new Set((g.flaky_gates || []).map((f) => f.gate));
+  const conf = new Set(configured || []);
+  const gl = all.filter((x) => !conf.size || conf.has(x.gate)), oneOff = all.filter((x) => conf.size && !conf.has(x.gate)).map((x) => x.gate);
+  const trouble = (x) => (flakyG.has(x.gate) ? 2 : 0) + (x.fail_rate >= 0.2 ? 1 : 0);
+  gl.sort((a, b) => trouble(b) - trouble(a) || b.runs - a.runs);
+  return {
+    findings: { cols: ['Finding', 'Severity', 'Next step for the supervisor', 'Subject'], rows: (m?.findings || []).map((f) => ({
+      cells: [`<b>${esc(words(f.kind))}</b> <span class="dim">${esc(f.detail ?? '')}</span>`, `<span class="badge ${esc(f.severity)}">${esc(f.severity)}</span>`, esc(f.suggestion ?? ''), subjectText(f.subject)],
+      sort: [words(f.kind), SEV_RANK[f.severity] ?? 0, f.suggestion ?? '', f.subject ?? ''],
+      open: subjectOpen(f.subject),
+    })) },
+    aside: { cols: ['Finding', 'Subject', 'Why', 'By', 'Until'], rows: (m?.acknowledged || []).map((f) => ({
+      cells: [esc(words(f.kind)), subjectText(f.subject), esc(f.ack?.reason ?? ''), esc(who(f.ack?.by)), f.ack?.until ? esc(when(f.ack.until)) : '—'],
+      sort: [words(f.kind), f.subject ?? '', f.ack?.reason ?? '', who(f.ack?.by), f.ack?.until ?? null],
+      open: subjectOpen(f.subject),
+    })) },
+    gates: { oneOff, cols: ['Check', 'Runs', 'Usually', 'Fails'], rows: gl.map((x) => ({
+      cells: [`<code>${esc(x.gate)}</code>${flakyG.has(x.gate) ? ' <span class="badge high">flaky</span>' : ''}${x.fail_rate >= 0.2 ? ' <span class="badge medium">often fails</span>' : ''}`, esc(x.runs), esc(dur(x.median_seconds)),
+        `${Math.round((x.fail_rate || 0) * 100)}%${x.preexisting_fails ? ` <span class="dim small">+ ${esc(x.preexisting_fails)} allowed because main failed too</span>` : ''}`],
+      sort: [x.gate, x.runs, x.median_seconds, x.fail_rate], open: null,
+    })) },
+    flaky: { cols: ['Test', 'Times'], rows: (g.flaky_tests || []).map((x) => ({ cells: [`<code>${esc(x.name)}</code>`, `${esc(x.times)}×`], sort: [x.name, x.times], open: null })) },
+    slowest: { cols: ['Test', 'Usually'], rows: (g.slowest_tests || []).map((x) => ({ cells: [`<code>${esc(x.name)}</code>`, esc(dur(x.median_seconds))], sort: [x.name, x.median_seconds], open: null })) },
+  };
+}
+// Fleet: a card a table (R1: no spend cards, they are Efficiency's); the checks' head counts the one-off checks
+function sensorsFleet(d) {
+  const t = fleetTables(d.metrics || {}, d.gates_configured || []);
+  const one = t.gates.oneOff;
+  const card = (cls, icon, label, key, opts = {}) => `<div class="card flush ${cls}">${cardHead(icon, label, opts)}${pageTable(`fleet:${key}`, t[key].cols, t[key].rows)}</div>`;
+  const oneOff = one.length ? `<span class="muted" title="${esc(`One-off checks workers ran by hand: ${one.slice(0, 4).join(', ')}${one.length > 4 ? ', …' : ''}`)}">+ ${one.length} one-off check${one.length === 1 ? '' : 's'}</span>` : '';
+  return `<div class="g12">${card('c12', 'heart-pulse', 'Findings', 'findings')}${card('c12', 'archive', 'Set aside', 'aside')}${card('c12', 'list-checks', 'Checks before merge', 'gates', { extra: oneOff })}${
+    card('c6', 'shuffle', 'Flaky tests', 'flaky')}${card('c6', 'timer', 'Slowest tests', 'slowest')}</div>`;
+}
+// A sensor's peek (C6, D1): the observations it made and its incidents, rows that open their records
+function sensorPeekRows(name, d) {
+  const obs = (d?.ooda?.observations || []).filter((o) => o.subject === `sensor:${name}`);
+  const incs = (d?.incidents || []).filter((x) => x.sensor === name);
+  const row = (open, dot, t, r) => `<div class="rowline" data-open="${esc(open)}" tabindex="0" role="link"><span class="dot ${dot}"></span><span class="t">${esc(t)}</span><span class="r">${esc(r)}</span></div>`;
+  const stage = (x) => { const c = INC_COLS.find(([, , st]) => st.includes(x.stage)); return x.stage === 'merged' ? 'fixing: merged, not yet verified' : x.stage === 'regressed' ? 'open: regressed' : c ? c[1].toLowerCase() : words(x.stage); };
+  return psect('Observations it made', obs.length ? `<div class="rows sensor-rows">${obs.map((o) => row(`observation/${encodeURIComponent(o.id)}`, o.severity >= 3 ? 'red' : o.severity === 2 ? 'amber' : 'blue', o.detail || words(o.kind),
+    [o.severity != null ? `severity ${o.severity}` : '', o.created_at ? when(o.created_at) : ''].filter(Boolean).join(' · '))).join('')}</div>` : effNone())
+    + psect('Incidents', incs.length ? `<div class="rows sensor-rows">${incs.map((x) => row(`problem/${encodeURIComponent(x.id)}`, x.stage === 'resolved' ? 'green' : x.stage === 'regressed' ? 'red' : 'amber', x.title || x.id,
+      [stage(x), x.severity != null ? `severity ${x.severity}` : '', x.created_at ? `opened ${when(x.created_at)}` : ''].filter(Boolean).join(' · '))).join('')}</div>` : effNone());
+}
+// Retros: the next one when due, then a card a retro (a click or Enter opens its peek)
+function retroCards(rt) {
+  const all = rt?.all || [];
+  const since = String(rt?.due_since || '').slice(0, 10);
+  const due = rt?.due ? `<div class="card">${cardHead('history', 'Next retro', { extra: since ? `<span class="badge medium">due since ${esc(since)}</span>` : '' })}<p>${esc((rt.reasons || []).join('; '))}</p></div>` : '';
+  const cards = all.map((r) => `<div class="card retro-card" data-open="retro/${esc(encodeURIComponent(r.id))}" tabindex="0" role="button" aria-label="Open the retro of ${esc(retroDate(r))}">${cardHead('history', esc(retroDate(r)))}<p>${esc(r.summary)}</p></div>`).join('');
+  return due || cards ? `<div class="cards">${due}${cards}</div>` : effNone();
+}
+/* autonomy-pages end */
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
 // Each is [value, label, group]; Progress's Narrow offers them (narrowViews), its goal held by the Goal filter.
 function views(p) {
@@ -4162,13 +4593,7 @@ function renderOoda(o) {
 
   /* ooda-orient end */
   /* ooda-trust start */
-  // Trust Ladder
-  $('trust-table').innerHTML = '<tr><th>Kind of decision</th><th>Now</th><th>At most</th><th>Agreed with you</th><th>Corrected</th></tr>' + o.trust.map((t) => `
-    <tr><td>${esc(cap(t.about || words(t.class)))}<div class="muted small">${esc(t.class)}</div></td><td>${esc(RUNG_WORDS[t.rung])}</td><td>${esc(RUNG_WORDS[t.ceiling])}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}% of the last ${esc(t.agreement_questions.length)}`}${t.can_ask ? '<div><span class="badge good">ready to ask you for more trust</span></div>' : ''}</td><td>${t.corrections ? `${esc(t.corrections)} time${t.corrections > 1 ? 's' : ''}` : 'never'}</td></tr>`).join('');
-
-  const moves = (o.trust || []).flatMap((t) => (t.history || []).map((e) => ({ ...e, rung: Math.min(e.rung, t.ceiling), class: t.class, about: t.about }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
-  $('trust-history').innerHTML = moves.length ? moves.map((e) => `<div class="card small${e.by === 'correction' ? ' corrected' : ''}"><div>${esc(cap(e.about || words(e.class)))}: <b>${esc(RUNG_WORDS[e.rung])}</b>
-    <div class="meta">${esc(when(e.at))} · ${e.by === 'correction' ? `a correction on ${linkify(e.id)}: ${esc(e.why)}` : `your answer to ${qlink(e.id)}`}</div></div></div>`).join('') : empty('No moves yet. Every kind of decision is on its starting rung.');
+  // Trust is its own page now (kit-93): renderTrust draws it from render, so the loop draws nothing here
 
   /* ooda-trust end */
   /* ooda-decide start */
@@ -4262,6 +4687,7 @@ const TYPE_META = {
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
   q: ['circle-help', 'Question'], file: ['file-text', 'File'], sensor: ['activity', 'Sensor'],
   observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'], lib: ['library', 'Library item'],
+  class: ['shield-check', 'Kind of decision'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -4303,6 +4729,8 @@ const KEY_TIPS = {
   Version: 'The ref the file is shown at.', Commits: 'How many commits changed it.', Reads: 'What it reads.', Triage: 'When a new error is sorted.', 'Last run': 'When it last ran, and how it went.', Today: 'What it read today.', 'Invalid lines': 'Lines it could not read.',
   'Measured by': 'What says it is met.', Opened: 'When it was created, and by whom.', 'Held because': 'Why it is held, while it is.', 'What it covers': 'The work it holds.', 'Chores in flight': 'Its chores not merged yet.',
   Checks: 'What it requests and what counts as up.', Uptime: 'The share of checks that passed.', 'Response time': 'p50 and p95 latency.', 'Last check': 'When it last checked.', Certificate: 'The TLS certificate, if any.',
+  Now: 'How this kind of decision is made today.', 'At most': 'The furthest this kind may go without asking, whatever you answer.', Since: 'When its level last moved.',
+  'Agreed with you': 'How often your answers went with its recommendation, over the questions it counts.', Levels: 'The three ways a kind of decision is made, the one it is on marked.',
 };
 // none of the three: no tip (and the peek test's "every key has a tooltip" fails)
 const keyTip = (label, tip, field) => tip || KEY_TIPS[label] || (field ? `Stored on the record as ${field}.` : '');
@@ -4549,7 +4977,7 @@ let LAST_HTML = '';
 let AFTER = [];
 // The hash that opens a record's peek: #<kind>/<encoded id>; a file's is #file?path=<encoded path>.
 const peekFor = (kind, id) => (kind === 'file' ? `#file?path=${encodeURIComponent(id)}` : `#${kind}/${encodeURIComponent(id)}`);
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -4955,51 +5383,36 @@ async function loadSensorSeries(name) {
   const m = (DATA.sensors || []).find((x) => x.name === name);
   if (el && m) el.innerHTML = sensorChart(MON_SERIES.get(name).data, m, true);
 }
-// Incidents as a board: new, triaged, fixing, merged, verifying, resolved (the last few), and
-// regressed in red.
-const INC_COLS = [['new', 'New'], ['triaged', 'Triaged'], ['fixing', 'Fixing'], ['merged', 'Merged'], ['verifying', 'Verifying'], ['resolved', 'Resolved'], ['regressed', 'Regressed']];
+// Incidents as a board in the design's five columns, each fed from incidentView's stages (kit-93 C1): Open
+// (new, and regressed in red), Investigating (triaged), Fixing (fixing, and merged: not yet verified),
+// Watching (verifying), Resolved (the last five).
+const INC_COLS = [['open', 'Open', ['new', 'regressed']], ['investigating', 'Investigating', ['triaged']], ['fixing', 'Fixing', ['fixing', 'merged']], ['watching', 'Watching', ['verifying']], ['resolved', 'Resolved', ['resolved']]];
 function incidentBoard(incs) {
-  if (!incs.length) return empty('No incidents. The supervisor folds what it triages into one when it is worth fixing or watching.');
-  return `<div class="board inc">${INC_COLS.map(([k, label]) => {
-    let cards = incs.filter((x) => x.stage === k);
+  if (!incs.length) return '<p class="empty">None</p>';
+  return `<div class="board inc">${INC_COLS.map(([k, label, stages]) => {
+    let cards = incs.filter((x) => stages.includes(x.stage));
     const total = cards.length;
     if (k === 'resolved') cards = cards.slice(-5);
     return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<div class="tcard${x.question?.status === 'open' || x.stage === 'regressed' ? ' blocked' : ''}"${subj('problem', x.id, x.title)} role="button" tabindex="0" data-open="problem/${esc(encodeURIComponent(x.id))}" aria-label="Open ${esc(x.title)}">${cardMenu('problem', x.id)}
       <div class="t"><a class="title-link" href="${esc(peekFor('problem', x.id))}"><b>${esc(x.title)}</b></a></div>
       <div class="muted">severity ${esc(x.severity)} · ${esc(x.events)} event(s)${x.component ? ` · ${esc(x.component)}` : ''}</div>
-      ${x.waiting ? `<div class="pills"><span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span></div>` : ''}
+      ${x.stage === 'merged' || x.stage === 'regressed' || x.waiting ? `<div class="pills">${x.stage === 'merged' ? '<span class="badge pill">merged, not yet verified</span>' : ''}${x.stage === 'regressed' ? '<span class="badge pill high">regressed</span>' : ''}${x.waiting ? `<span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span>` : ''}</div>` : ''}
     </div>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('')}</div>`;
 }
 function renderMonitoring(d) {
   const ms = d.sensors || [];
   const down = ms.filter((m) => m.state === 'down');
-  $('n-sensors').textContent = down.length ? `${down.length} down` : '';
-  $('n-sensors').classList.toggle('hot', down.length > 0);
   const banner = down.length ? `<i class="icon-triangle-alert" aria-hidden="true"></i> ${down.map((m) => `<a href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a> is down since ${esc(when(m.since))}${m.last?.error ? ` (${esc(m.last.error)})` : ''}`).join('; ')}` : '';
   // only when it changes, so a screen reader announces an outage once
   if ($('down-banner').innerHTML !== banner) { $('down-banner').innerHTML = banner; $('down-banner').hidden = !down.length; }
-  $('sensors').innerHTML = ms.length ? `<div class="mon-grid">${ms.map((m) => {
-    const [tone, label] = monState(m);
-    if (m.kind !== 'http') return `<div class="card mon-card">
-      <h4><a class="title-link" href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
-      <div class="mon-url">${esc(m.kind)} · ${esc(m.probe || '')}${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}</div>
-      <div class="mon-stats"><span>today <b>${esc(m.today.events)}</b> event(s)</span><span><b>${esc(m.today.qualified)}</b> new for triage</span><span><b>${esc(m.fingerprints)}</b> fingerprint(s)</span>${m.today.mean_ms != null ? `<span>run <b>${esc(m.today.mean_ms < 1000 ? `${m.today.mean_ms}ms` : `${(m.today.mean_ms / 1000).toFixed(1)}s`)}</b></span>` : ''}<span class="muted">${m.last_at ? `ran ${esc(when(m.last_at))}` : 'never run'}</span></div>
-      ${m.last && !m.last.ok ? `<p class="small">${esc(m.last_error || m.last.error || 'failed')}${m.backoff_minutes ? ` · trying again in ${esc(m.backoff_minutes)} min` : ''}</p>` : ''}
-    </div>`;
-    return `<div class="card mon-card">
-      <h4><a class="title-link" href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
-      <div class="mon-url">${esc(m.url || '')}</div>
-      <div class="mon-stats"><span>24h <b>${esc(pctOr(m.uptime_24h))}</b> up</span><span>7d <b>${esc(pctOr(m.uptime_7d))}</b></span><span>p50 <b>${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)}</b></span><span>p95 <b>${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)}</b></span>${m.tls_days != null ? `<span>certificate <b>${esc(m.tls_days)}d</b></span>` : ''}<span class="muted">checked ${m.last_at ? esc(when(m.last_at)) : 'never'}</span></div>
-      <div data-mon-chart="${esc(m.name)}">${MON_SERIES.get(m.name)?.data ? sensorChart(MON_SERIES.get(m.name).data, m, true) : '<p class="muted small">Loading…</p>'}</div>
-    </div>`;
-  }).join('')}</div>` : empty('No sensors yet. The supervisor starts one for each production URL, log and error tracker it finds (settings <code>sensors</code>), and polls them while it runs.');
-  for (const m of ms.filter((x) => x.kind === 'http')) loadSensorSeries(m.name);
-  $('incidents').innerHTML = incidentBoard(d.incidents || []);
-  const feed = d.sensor_feed || [];
-  $('sensor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
-  const obs = (d.ooda?.observations || []).filter((o) => /^sensor:/.test(o.subject || ''));
-  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)} role="button" tabindex="0" data-open="observation/${esc(encodeURIComponent(o.id))}"><div><div class="act-head">${titled(peekFor('observation', o.id), `${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}`)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div>${cardMenu('observation', o.id)}</div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+  // the page (kit-93): its tabs, then Production or Fleet, written only when its HTML changed (focus kept)
+  const fs = d.metrics?.findings || [];
+  const html = tabBar({ tabs: [{ id: 'production', label: 'Production', count: ms.length }, { id: 'fleet', label: 'Fleet', count: fs.length, waiting: true }], selected: SENSOR_TAB })
+    + (SENSOR_TAB === 'fleet' ? sensorsFleet(d) : sensorsProduction(d));
+  const el = $('monitoring');
+  if (el.__html !== html) { el.__html = html; el.innerHTML = html; bindPageTables(el, () => renderMonitoring(DATA)); }
+  if (SENSOR_TAB !== 'fleet') for (const m of ms.filter((x) => x.kind === 'http')) loadSensorSeries(m.name);
 }
 function openSensor(name) {
   drawerFor('sensor', name);
@@ -5018,7 +5431,8 @@ function openSensor(name) {
       ['Invalid lines', m.invalid ? esc(m.invalid.lines.map((l) => l.why).join('; ')) : '', 'Lines its last run printed that are not events: the provider may have changed its API (probe-drift).'],
     ] })}
     ${(p?.ignores || []).length ? psect('Ignored', `<ul>${p.ignores.map((x) => `<li><code>${esc(x.fingerprint)}</code>: ${esc(x.reason)} <span class="muted">(${esc(who(x.by))}, ${esc(when(x.at))}; lift with <code>sensor unignore ${esc(x.fingerprint)} --owner</code>)</span></li>`).join('')}</ul>`) : ''}
-    ${psect('What it read', (p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>')}
+    ${psect(m.fingerprints > 0 ? 'Fingerprints' : 'What it read', (p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>')}
+    ${sensorPeekRows(name, DATA)}
     ${historySection(p, `sensor:${name}`)}`);
   showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
     ${attrs({ id: name, idTip: 'Its name in the settings (sensors).', peek: p, noRecord: true, computed: [
@@ -5032,6 +5446,7 @@ function openSensor(name) {
     ] })}
     ${p?.series ? `${psect('Last 24 hours', sensorChart(p.series['24h'], m))}${psect('Last 7 days', sensorChart(p.series['7d'], m))}` : '<p class="loading">Loading…</p>'}
     ${fails.length ? psect('Failed checks', `<ul>${fails.map((s) => `<li>${esc(when(s.at))}: ${esc(s.error || 'failed')}${s.ms != null ? ` <span class="muted">(${esc(s.ms)}ms)</span>` : ''}</li>`).join('')}</ul>`) : ''}
+    ${sensorPeekRows(name, DATA)}
     ${historySection(p, `sensor:${name}`)}`);
 }
 
@@ -6058,6 +6473,10 @@ function showHead(p, opts) {
   showPage(p.page, opts);
   if (p.page === 'loop') { showTab(LOOP_TABS.includes(p.state?.lt) ? p.state.lt : 'observe'); tlPins(); }
   if (p.page === 'goals') { GOALS_TAB = GOALS_TABS.includes(p.state?.gt) ? p.state.gt : 'active'; renderGoals(); }
+  // Governance (kit-93): its listing read on arriving (unless read in the last minute), drawn meanwhile
+  if (p.page === 'governance') { renderGovernance(); loadGovernance(); }
+  // Sensors (kit-93): its tab from the head's st (fleet; none is Production), drawn again on every head change
+  if (p.page === 'sensors') { SENSOR_TAB = p.state?.st === 'fleet' ? 'fleet' : 'production'; if (DATA) renderMonitoring(DATA); }
   drawFilterPage(p.page);
 }
 // A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
@@ -6125,7 +6544,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // (at once: the card replaces the peek, with no slide)
   // (its own head first: a card on a framed page opens the viewer before this route ends)
   if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); LAST_HEAD = location.hash; return void tlRoute(h.slice(5)); }
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -7070,7 +7489,6 @@ function renderOverview() {
 function render(d) {
   DATA = d;
   const focus = focusMark();
-  const m = d.metrics;
   $('title').textContent = d.project && !String(d.project).startsWith('<') ? String(d.project) : 'devteam';
   const kit = $('kit'), local = /\+local$/.test(d.kit ?? '');
   kit.hidden = !d.kit;
@@ -7091,17 +7509,16 @@ function render(d) {
     const all = rt.all || [];
     count('n-retros', all.length);
     if (rt.due) { $('n-retros').textContent = 'due'; $('n-retros').classList.add('hot'); }
-    $('retro-due').innerHTML = rt.due ? `<div class="card"><span class="badge medium">due since ${esc((rt.due_since || '').slice(0, 10))}</span> <span class="small">${esc(rt.reasons.join('; '))}</span><p class="meta">The supervisor drafts it next (supervisor.md §10).</p></div>` : '';
-    $('retro-list').innerHTML = all.length ? all.map((r) => `<a class="card retro-row" href="#retro/${encodeURIComponent(r.id)}"><b>${esc(retroDate(r))}</b><span>${esc(r.summary)}</span></a>`).join('') : '<p class="empty">No retro yet.</p>';
+    const rEl = $('retros'), rHtml = retroCards(rt);
+    if (rEl && rEl.__html !== rHtml) { rEl.__html = rHtml; rEl.innerHTML = rHtml; }
   }
   renderLibrary(d.library);
-  count('n-findings', m.findings.length, m.findings.some((f) => f.severity === 'high'));
   count('n-knowledge', o.knowledge.filter(ownerLesson).length);
   $('n-observe').textContent = o.observations.length || '';
   $('n-orient').textContent = (o.clusters.length + o.problems.length + o.knowledge.length) || '';
   const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
   $('n-decide').textContent = (o.decisions || []).filter((r) => r.at > weekAgo && r.kind !== 'correction' && !routine(r)).length || '';
-  count('n-trust', o.trust.filter((t) => t.can_ask).length);
+  navCounts(d);
   $('n-act').textContent = o.acts.length || '';
   renderOverview();
 
@@ -7147,31 +7564,14 @@ function render(d) {
   renderProgress();
   drawFilters(PAGE_NOW);
 
-  const fkey = (f) => `${f.kind} ${f.subject}`;
-  $('findings').innerHTML = (m.findings.length ? m.findings.map((f) => `
-    <div class="card">${cardHead(f.severity === 'high' ? 'triangle-alert' : 'activity', `<span class="badge ${f.severity}">${esc(f.severity)}</span>${esc(words(f.kind))}`, { extra: subjectLink(f.subject) })}
-    <div>${linkify(f.detail)}</div><div class="muted">Next step for the supervisor: ${linkify(f.suggestion)}</div></div>`).join('') : empty('None. Blockers and slow spots show here, each with the supervisor’s next step.')) +
-    ((m.acknowledged || []).length ? `<h3 style="margin-top:14px">Set aside</h3>` + m.acknowledged.map((f) => `
-    <div class="card small"><b>${esc(words(f.kind))}</b> ${subjectLink(f.subject)} <span class="muted">· set aside by ${esc(who(f.ack.by))}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
-
+  // Health's findings, checks and tests are Sensors › Fleet's now (kit-93: renderMonitoring above)
   // Hours by phase, USD by phase, USD by model and Tokens are Efficiency's now (kit-174): Where it goes
   renderEfficiency(d);
-
-  // The configured checks, one plain line each, trouble first; one-off checks a worker ran by hand
-  // are counted, not listed.
-  const configured = new Set(DATA.gates_configured || []);
-  const flakyG = new Set(m.gates.flaky_gates.map((f) => f.gate));
-  const gl = m.gates.gates.filter((g) => !configured.size || configured.has(g.gate));
-  const adhoc = m.gates.gates.filter((g) => configured.size && !configured.has(g.gate));
-  const trouble = (g) => (flakyG.has(g.gate) ? 2 : 0) + (g.fail_rate >= 0.2 ? 1 : 0);
-  gl.sort((a, b) => trouble(b) - trouble(a) || b.runs - a.runs);
-  $('gates').innerHTML = gl.length
-    ? `<div class="card small">${gl.map((g) => `<div class="gate-row"><code>${esc(g.gate)}</code> <span class="muted">${g.runs} run${g.runs === 1 ? '' : 's'} · usually ${dur(g.median_seconds)} · fails ${Math.round(g.fail_rate * 100)}% of the time${g.preexisting_fails ? ` (plus ${g.preexisting_fails} allowed because main failed it too)` : ''}</span>${flakyG.has(g.gate) ? ' <span class="badge high">flaky</span>' : ''}${g.fail_rate >= 0.2 ? ' <span class="badge medium">often fails</span>' : ''}</div>`).join('')}${adhoc.length ? `<div class="muted" style="margin-top:6px">and ${adhoc.length} one-off check${adhoc.length === 1 ? '' : 's'} workers ran by hand (${adhoc.slice(0, 4).map((g) => esc(g.gate)).join(', ')}${adhoc.length > 4 ? ', …' : ''})</div>` : ''}</div>`
-    : empty('No checks have run yet.');
-  $('test-lists').innerHTML = [
-    m.gates.flaky_tests.length ? `<div><h3>Flaky tests</h3>${m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('')}</div>` : '',
-    m.gates.slowest_tests.length ? `<div><h3>Slowest tests</h3>${m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('')}</div>` : '',
-  ].join('');
+  renderTrust(d);
+  renderAwareness(d);
+  // Governance's listing is its own read (kit-93): read again at most once a minute while the page is shown
+  renderGovernance();
+  if (PAGE_NOW === 'governance') loadGovernance();
 
   refreshDrawer();
   // the records owner-action cards read by peek: again, so one changed elsewhere shows (a retired one stays retired)
@@ -7218,7 +7618,7 @@ const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a que
 // Threads panel's Inbox tab (#th-inbox #questions, kit-100 spec §2.6), not a page's section.
 const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
 // The sections' names, as the sidebar shows them.
-const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', efficiency: 'Efficiency', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
+const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust', awareness: 'Awareness', governance: 'Governance', efficiency: 'Efficiency', retros: 'Retros', health: 'Sensors', monitoring: 'Sensors' };
 // T_ENCODED_MAX: a turn as the log line holds it, JSON-escaped (a quotation mark is two bytes there,
 // a control character six), so a line of 4,096 bytes always has room for it.
 const T_TURN_MAX = 2000, T_ENCODED_MAX = 3800, T_SUBJECT_MAX = 2500, T_TITLE_MAX = 120, T_WAIT_MS = 10 * 60000;
@@ -7234,11 +7634,12 @@ const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').repla
 // A Settings row's view (#settings?key=<key>): its key, else null.
 const T_SETTING_VIEW = /^#settings\?key=([a-z][a-z0-9_]{0,63})$/;
 const parseSettingView = (view) => T_SETTING_VIEW.exec(typeof view === 'string' ? view : '')?.[1] ?? null;
-// A suggestion on Efficiency (kit-174): #efficiency?suggestion=<its id, URI-encoded>; its id, else null
-// (the prefix is 23 bytes: an encoded id of at most 177 keeps the view within the log's 200)
-const T_SUGG_VIEW = /^#efficiency\?suggestion=([^&#?]{1,177})$/;
-const suggView = (id) => `#efficiency?suggestion=${encodeURIComponent(String(id))}`;
-const parseSuggView = (view) => { const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : ''); if (!m) return null; try { return decodeURIComponent(m[1]); } catch { return null; } };
+// A suggestion on Efficiency (kit-174) or Awareness (kit-93): #<page>?suggestion=<its id, URI-encoded>;
+// its id, else null (the longer prefix is 23 bytes: an encoded id of at most 177 keeps the view within
+// the log's 200); its page is suggPageOf's
+const T_SUGG_VIEW = /^#(efficiency|awareness)\?suggestion=([^&#?]{1,177})$/;
+const suggView = (id, page = 'efficiency') => `#${page}?suggestion=${encodeURIComponent(String(id))}`;
+const parseSuggView = (view) => { const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : ''); if (!m) return null; try { return decodeURIComponent(m[2]); } catch { return null; } };
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
 // a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
 // box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
@@ -7252,11 +7653,12 @@ function tSubjectAt(el, x, y, sec) {
     const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
     return { subject: { kind: 'item', ref, quote: tCut(said, 300) }, title: title || T_KIND[ref.split(':')[0]], el: item };
   }
-  // a suggestion on Efficiency (kit-174): its page subject, the item its spot, its title the quote
-  const sg = el?.closest?.('#efficiency [data-sugg]');
+  // a suggestion on Efficiency (kit-174) or Awareness (kit-93): its page subject, the item its spot,
+  // its title the quote
+  const sg = el?.closest?.('#efficiency [data-sugg], #awareness [data-sugg]');
   if (sg) {
     const title = tLine(sg.dataset.title, T_TITLE_MAX);
-    return { subject: { kind: 'page', view: suggView(sg.dataset.sugg), quote: tCut(title, 300) }, title, el: sg };
+    return { subject: { kind: 'page', view: suggView(sg.dataset.sugg, sg.closest('section[id]').id), quote: tCut(title, 300) }, title, el: sg };
   }
   // a Settings row (spec §8): a page subject on #settings?key=<key>, the row (not a point) its spot,
   // its plain name the quote
@@ -7265,6 +7667,16 @@ function tSubjectAt(el, x, y, sec) {
   if (row && parseSettingView(`#settings?key=${key}`)) {
     const name = tLine(row.querySelector?.('.set-name')?.textContent, 300) || key;
     return { subject: { kind: 'page', view: `#settings?key=${key}`, quote: tCut(name, 300) }, title: tLine(`Setting · ${name} (${key})`, T_TITLE_MAX), el: row };
+  }
+  // a block of a governance file's rendered text, in its peek (kit-93 C5, C8): a page subject on the file (on
+  // #governance when that view is over the log's 200 bytes), the block its spot, its text the quote
+  // threads-core is also evaluated alone by test/dashboard.test.mjs, without the governance code
+  const block = typeof govBlockAt === 'function' ? govBlockAt(el) : null;
+  if (block) {
+    const path = DRAWER.id, view = `#file?path=${encodeURIComponent(path)}`;
+    const said = tLine(block.innerText ?? block.textContent, 300);
+    const name = GOV.files.find((f) => f?.path === path)?.title || path;
+    return { subject: { kind: 'page', view: tBytes(view) <= T_CAPS.view ? view : '#governance', quote: tCut(said, 300) }, title: tLine(`${name} · ${said.split(' ').slice(0, 6).join(' ')}`, T_TITLE_MAX), el: block };
   }
   const s = sec(el);
   if (!s) return null;
@@ -7399,7 +7811,7 @@ function tWhere(s) {
   // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
   if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
   // a Settings row: by the name it had when the thread began (the subject's quote), else its key
-  if (s.kind === 'page' && parseSuggView(s.view) !== null) return 'Efficiency';
+  if (s.kind === 'page' && parseSuggView(s.view) !== null) return T_SECTIONS[T_SUGG_VIEW.exec(s.view)[1]];
   if (s.kind === 'page' && parseSettingView(s.view)) return `Settings, ${tLine(s.quote, 300) || parseSettingView(s.view)}`;
   if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
@@ -7566,7 +7978,7 @@ function tlShow(x, y) {
   // nothing the layer can name here (the drawer, the sidebar, a bar): no pin, and the click is the page's
   if (!hit) { tlHide(); return; }
   tlCursor(x, y);
-  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view) || parseSuggView(hit.subject.view) !== null;
+  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view) || parseSuggView(hit.subject.view) !== null || (!!hit.el && govBlockAt(hit.el) === hit.el);
   const r = whole ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
   tlMark(r, !whole, hit.title, x, y);
 }
@@ -7726,8 +8138,8 @@ const settingRow = (key) => (key ? document.querySelector(`#settings [data-setti
 // The row a page subject is about, when it is a Settings row's: its key, and the row if drawn.
 const tlSettingOf = (s) => { const key = s?.kind === 'page' ? parseSettingView(s.view) : null; return key ? { key, el: settingRow(key) } : null; };
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
-// A suggestion's item on Efficiency, for its page subject (kit-174): its id, and the item if drawn
-const tlSuggOf = (s) => { const id = s?.kind === 'page' ? parseSuggView(s.view) : null; return id === null ? null : { key: id, el: document.querySelector(`#efficiency [data-sugg="${CSS.escape(id)}"]`) }; };
+// A suggestion's item on its page (Efficiency, Awareness), for its page subject: its id, and the item if drawn
+const tlSuggOf = (s) => { const id = s?.kind === 'page' ? parseSuggView(s.view) : null; return id === null ? null : { key: id, el: document.querySelector(`#${suggPageOf(s.view)} [data-sugg="${CSS.escape(id)}"]`) }; };
 // The row a page subject is about: a Settings row's, or a suggestion's
 const tlRowOf = (s) => tlSettingOf(s) ?? tlSuggOf(s);
 function tlTargetRect(s) {

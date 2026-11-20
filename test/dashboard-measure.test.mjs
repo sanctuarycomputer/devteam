@@ -54,7 +54,40 @@ const LIBRARY_PAGES = [
   { hash: '#library', narrow: { view: '#no-such-view' }, init: '/* no patch: a new document */', ready: "!window.__fx && document.querySelector('#lib-grid > .empty')?.textContent.trim() === 'None'" },
 ];
 // kit-93: the autonomy pages
-const AUTONOMY_PAGES = frameOnly(['trust', 'sensors', 'health', 'retros']);
+// On the shell, whole, with test/lib/kit.mjs's autonomyFixture (its scores, rules, sensors, incidents and retros exist
+// only with it; some of its names are long on purpose). As kit-90's, kit-91's and kit-92's entries (spec M1): page-top
+// at 1440x900 only (narrow: its view a selector no element has); prose, head-h, head-end, header-pad and tab-motion
+// everywhere. The three peeks use the peeks' options (PEEK_OPTS, below: the page under them and the moved Inbox button
+// are judged elsewhere), and overflow and uneven leave the drawer out by design (it scrolls); their waits are
+// PEEK_READY's (defined after this list) and each peek's own content drawn. #health redirects to Fleet (#sensors?st=fleet).
+// The file peek reads main (/api/file is git show), and this test's project has no commit: its init also answers
+// /api/file for quality.md with the kit's own copy, so the peek is measured on the real governance text.
+const AUTONOMY_PAGES = ((init = lib.autonomyFixture().init, peek = (extra) => `!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && ${extra}`, quality = fs.readFileSync(new URL('../docs/devteam/governance/quality.md', import.meta.url), 'utf8'), fileInit = `${init}
+(() => {
+  const f = window.fetch, md = ${JSON.stringify(quality)};
+  window.fetch = (u, o) => {
+    const at = new URL(String(u && u.url ? u.url : u), location.href);
+    return at.origin === location.origin && at.pathname === '/api/file' && at.searchParams.get('path') === 'docs/devteam/governance/quality.md' ? Promise.resolve(new Response(md, { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } })) : f(u, o);
+  };
+})();`) => [
+  ...[
+    ['#trust', "!!document.querySelector('#trust .fit svg')"],
+    ['#awareness', "!!document.querySelector('#awareness .fit svg')"],
+    ['#governance', "!!document.querySelector('#governance .db-t tr[data-row]')"],
+    ['#sensors', "!!document.querySelector('#monitoring .sensor-card')"],
+    ['#sensors?st=fleet', "document.querySelector('#monitoring .tabbar [aria-selected=\"true\"]')?.dataset.tab === 'fleet' && !!document.querySelector('#monitoring [data-tbl] .db-t')"],
+    ['#retros', "!!document.querySelector('#retros .cards .card')"],
+  ].map(([hash, ready]) => ({ hash, init, narrow: { view: '#no-such-view' }, ready })),
+  ...[
+    ['#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md', peek("!!document.querySelector('#drawer-body .md p')"), fileInit],
+    ['#class/new-feature', peek("!!document.querySelector('#drawer-body .lvls .lvl.now') && !document.querySelector('#drawer-body .loading')")],
+    ['#sensor/errors', peek("[...document.querySelectorAll('#drawer-body .psect > .card-head')].some((h) => h.textContent.trim() === 'Fingerprints')")],
+  ].map(([hash, ready, own]) => ({ hash, init: own ?? init, ready, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } })),
+  // a fresh, unpatched document (!window.__fx checks it), last: the entries after it (the Loop's, Overview's and the
+  // goal pages) load by a hash change alone (measureAt) in the last document, so they are measured on the server's own
+  // data, as LIBRARY_PAGES ends. Retros with no retros
+  { hash: '#retros', narrow: { view: '#no-such-view' }, init: '/* no patch: a new document */', ready: "!window.__fx && !document.querySelector('main.waiting')" },
+])();
 // kit-96: the Loop
 const LOOP_PAGES = frameOnly(['loop']);
 // kit-97: one thread per subject (not THREADS_PAGES, the Threads panel's list below)
