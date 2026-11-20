@@ -88,6 +88,12 @@ async function laptop(t, later) {
   const env = { ...process.env, HOME: home, DEVTEAM_BOX: 'off', DEVTEAM_UPLOAD_MAX: String(UPLOAD_MAX), DEVTEAM_HUB_PORT: String(PORTS + 62), DEVTEAM_PORT_BASE: String(PORTS + 63), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'DEVTEAM_GATEWAY', 'DEVTEAM_UPLOADS_DIR', 'DEVTEAM_UPLOAD_TOTAL', 'DEVTEAM_UPLOAD_FREE', 'DEVTEAM_UPLOAD_STALL_MS', 'DEVTEAM_UPLOAD_BODY_MS', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'attachui');
+  // an artifact on main before the dashboard starts (it reads main's ref once), for B4's image over an artifact
+  const art = path.join(root, 'docs/devteam/project/artifacts/art-one');
+  fs.mkdirSync(art, { recursive: true });
+  fs.writeFileSync(path.join(art, 'artifact.json'), JSON.stringify({ v: 1, title: 'Art one', summary: 'A page under an image', by: 'supervisor', for: [] }));
+  fs.writeFileSync(path.join(art, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"><title>Art one</title></head><body><p>Art one</p></body></html>');
+  for (const a of [['add', '-A', 'docs/devteam/project/artifacts'], ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'art-one']]) { const r = spawnSync('git', a, { cwd: root, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); }
   const dt = (args, role = {}) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8', timeout: 120000 }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
   const ask = (q, choices = null) => dt(['ask', '--question', q, ...(choices ? ['--choices', JSON.stringify(choices.map((label) => ({ label })))] : ['--kind', 'owner-decision'])], SUP).split('\n')[0];
   const thread = (words) => dt(['thread', 'new', '--title', words, '--', words]).split('\n')[0];
@@ -430,12 +436,7 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
   });
 
   await t.test('B4: an image over an artifact in the viewer: × and Escape give the stage back to the artifact, unreloaded, in place', async () => {
-    // an artifact on main, and a thread on it whose first turn has an image (the setup's stored Pinned.png)
-    const dir = path.join(L.root, 'docs/devteam/project/artifacts/art-one');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'artifact.json'), JSON.stringify({ v: 1, title: 'Art one', summary: 'A page under an image', by: 'supervisor', for: [] }));
-    fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"><title>Art one</title></head><body><p>Art one</p></body></html>');
-    for (const a of [['add', '-A', 'docs/devteam/project/artifacts'], ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'art-one']]) { const r = spawnSync('git', a, { cwd: L.root, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); }
+    // a thread on the setup's artifact, art-one, whose first turn has an image (the setup's stored Pinned.png)
     const TA = L.dt(['thread', 'new', '--title', 'About art one', '--subject', JSON.stringify({ kind: 'artifact', slug: 'art-one', at: 'main', path: 'index.html' }), '--files', JSON.stringify([{ name: 'Pinned.png', path: shot.json.path, bytes: shot.json.size }]), '--', 'under this']).split('\n')[0];
     const frame = "document.getElementById('av-frame')";
     await p.ev("location.hash = '#artifact/main/art-one'; void 0");
@@ -447,15 +448,51 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     const at = await p.ev('[location.href, history.length]');
     // the bar as the Library's data draws it (until that arrives it shows the slug)
     const title = await soon("document.getElementById('av-title').textContent === 'Art one' && 'Art one'", "the bar titled from the Library's data");
+    // the lens's state: ready, and the page it said it is on
+    const lensPath = await soon('TS.ready && TS.path', "the artifact's lens ready");
     for (const [how, act] of [['×', "document.getElementById('av-close').click()"], ['Escape', "document.activeElement?.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))"]]) {
       await p.ev("document.querySelector('#tl-c-turns button.file-chip').click(); void 0");
       await soon(`!!document.getElementById('av-img') && ${frame}.hidden`, `${how}: the image open over the artifact`);
       await p.ev(`${act}; void 0`);
       await soon(`!document.getElementById('av-img') && !document.getElementById('artifact-view').hidden && !${frame}.hidden`, `${how}: the artifact shown again`);
       await new Promise((r) => setTimeout(r, 300));
-      const s = await p.ev(`(() => { const f = ${frame}; return { mark: f.__mark === 1, src: f.getAttribute('src'), loads: AV_LOADS.get(f), kind: TS.kind, slug: TS.slug, title: document.getElementById('av-title').textContent, img: !!document.getElementById('av-img'), at: [location.href, history.length] }; })()`);
-      assert.deepEqual(s, { mark: true, src, loads: 1, kind: 'artifact', slug: 'art-one', title, img: false, at }, `closed by ${how}: the same frame, unreloaded, the bar and the address as before`);
+      const s = await p.ev(`(() => { const f = ${frame}; return { mark: f.__mark === 1, src: f.getAttribute('src'), loads: AV_LOADS.get(f), kind: TS.kind, slug: TS.slug, ready: TS.ready, path: TS.path, title: document.getElementById('av-title').textContent, img: !!document.getElementById('av-img'), at: [location.href, history.length] }; })()`);
+      assert.deepEqual(s, { mark: true, src, loads: 1, kind: 'artifact', slug: 'art-one', ready: true, path: lensPath, title, img: false, at }, `closed by ${how}: the same frame, unreloaded, the lens, the bar and the address as before`);
     }
+  });
+
+  await t.test('B4: in a viewer tab, an image over its artifact: its × is shown, and closing it gives back the artifact and the page around the stage as they were', async () => {
+    const TA = L.threadsNamed('About art one')[0]?.id;
+    assert.ok(TA, "setup: the art-one thread (the step before's)");
+    const v = await chrome.newPage();
+    later(() => v.close());
+    await v.send('Page.enable');
+    await v.send('Runtime.enable');
+    // at 390 wide, where the viewer's Threads button hides under av-open
+    await v.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+    await v.send('Page.navigate', { url: `http://127.0.0.1:${L.port}/view/artifact/art-one` });
+    const vsoon = soonIn(v, 30000, () => L.dash.out());
+    const frame = "document.getElementById('av-frame')";
+    await vsoon(`document.documentElement.classList.contains('viewer') && typeof TL === 'object' && TL.have > 0 && TS.kind === 'artifact' && AV_LOADS.get(${frame}) === 1 && TS.ready`, 'the viewer tab: its threads read, the artifact loaded, its lens ready');
+    await v.ev(`tlOpen(${JSON.stringify(TA)}, false); void 0`);
+    await vsoon("!!document.querySelector('#tl-c-turns button.file-chip')", "the thread's card, with its image chip");
+    // what showUpload changes around the stage, and the Threads button, as the page has them before the image
+    const page = `(() => { const t = getComputedStyle(document.getElementById('tt-peek')); return { cls: ['av-open', 'overlay-open', 'th-under-av'].filter((c) => document.body.classList.contains(c)), overflow: document.body.style.overflow, scrim: document.getElementById('scrim').hidden, threadsButton: [t.display, t.visibility] }; })()`;
+    const shown = (id) => `(() => { const e = document.getElementById(${JSON.stringify(id)}); const s = getComputedStyle(e); return s.display !== 'none' && s.visibility !== 'hidden' && e.getBoundingClientRect().width > 0; })()`;
+    const p0 = await v.ev(page);
+    assert.equal(await v.ev(shown('av-close')), false, 'setup: a viewer tab has no ×');
+    const src = await v.ev(`(() => { const f = ${frame}; f.__mark = 1; return f.getAttribute('src'); })()`);
+    const at = await v.ev('[location.href, history.length]');
+    const lensPath = await v.ev('TS.path');
+    await v.ev("document.querySelector('#tl-c-turns button.file-chip').click(); void 0");
+    await vsoon(`!!document.getElementById('av-img') && ${frame}.hidden`, 'the image open over the artifact');
+    assert.equal(await v.ev(shown('av-close')), true, 'the × shown while the image is up');
+    await v.ev("document.getElementById('av-close').click(); void 0");
+    await vsoon(`!document.getElementById('av-img') && !document.getElementById('artifact-view').hidden && !${frame}.hidden`, 'closed by ×: the artifact shown again');
+    await new Promise((r) => setTimeout(r, 300));
+    const s = await v.ev(`(() => { const f = ${frame}; return { mark: f.__mark === 1, src: f.getAttribute('src'), loads: AV_LOADS.get(f), kind: TS.kind, ready: TS.ready, path: TS.path, at: [location.href, history.length], page: ${page} }; })()`);
+    assert.deepEqual(s, { mark: true, src, loads: 1, kind: 'artifact', ready: true, path: lensPath, at, page: p0 }, 'closed by ×: the same frame, unreloaded, and the page around the stage as before the image');
+    assert.equal(await v.ev(shown('av-close')), false, 'the × gone with the image');
   });
 
   await t.test('B6: a swept file: the download chip says gone, the image viewer says so', async () => {
