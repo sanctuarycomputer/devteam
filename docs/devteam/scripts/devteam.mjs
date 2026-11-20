@@ -23918,21 +23918,25 @@ const recurringRegistry = Object.freeze({
     const timedOut = r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL';
     return { status: r.status, out: r.stdout ?? '', err: String(r.stderr ?? ''), timedOut, ok: r.status === 0 && !timedOut };
   },
-  // What the jobs would be once sha lands on home's main (final-1 F1), with no reasoning about merge
-  // bases (rulings d-20261120-044235981, d-20261120-075327162): six rounds found a hole in every
-  // prediction of what a three-way merge, rename detection or a rebase does with settings.md. Let M
-  // be main's sha as the checks read it (mainSha(); merge lands only onto it). Two cases are cleared:
+  // What the jobs would be once sha lands on home's main (final-1 F1), with no prediction of a merge
+  // (rulings d-20261120-044235981, d-20261120-075327162, d-20261120-083617902,
+  // d-20261120-085914614, d-20261120-102757339): six rounds found a hole in every prediction of what
+  // a three-way merge, rename detection or a rebase does with settings.md. Merge bases are read only
+  // to compare blobs at them. Let M be main's sha as the checks read it (mainSha(); merge lands only
+  // onto it). Under every method the head's settings.md must be a regular file (mode 100644): blob
+  // compares ignore the mode (final-7 F2). Four cases are cleared:
   // - the head's settings.md blob is M's, both present: the same file on both sides lands as it is,
-  //   and the jobs are main's (no job change);
+  //   and the jobs are main's (no job change). Under rebase only when M..sha has no merge commit
+  //   and no commit touching the file (final-7 F1, final-7b B7-1): a rebase drops merges and
+  //   patches already upstream, so an equal final file says nothing about where the replay ends;
   // - M is an ancestor of the head: a merge or squash lands the head's tree, so the head's file
   //   lands, compared canonically with main's (the binding decides any change);
   // - merge and squash: the branch left the file alone (present at every merge base, the head and
   //   M, and the head's blob is every base's): M's file lands, and the jobs are main's;
   // - merge and squash: main left the file alone (the same presence, and M's blob is every
   //   base's): the head's file lands, compared canonically with main's.
-  // Anything else is refused. Under merge_method rebase only the first is cleared: a rebase replays
-  // commits, dropping merges and patches already upstream. Every git call has a timeout; one that
-  // times out refuses.
+  // Anything else is refused. Under merge_method rebase only the first is cleared, with the
+  // conditions above. Every git call has a timeout; one that times out or fails refuses.
   // { now, merged, changed, problem }: changed when the landed jobs differ canonically from main's
   // now (a missing key reads {}); a problem counts as changed, failing closed.
   landing(sha) {
@@ -23956,8 +23960,30 @@ const recurringRegistry = Object.freeze({
       };
       const [atMain, atHead] = [blob(M), blob(sha)];
       if (late.length) return lands(null);
+      // a regular file at the head, under every method (d-20261120-102757339; final-7 F2): a
+      // symlink whose target text is an answered file would otherwise be bound by that text. The
+      // mode is the entry's in its directory's tree, the mode git ls-tree shows.
+      if (atHead) {
+        const dir = path.posix.dirname(rel); const name = path.posix.basename(rel);
+        const lt = run(['cat-file', '-p', `${sha}:${dir === '.' ? '' : dir}`]);
+        if (late.length) return lands(null);
+        if (!lt.ok) return lands(null, `settings.md: git cat-file ${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
+        const entry = lt.out.split('\n').find((l) => l.slice(l.indexOf('\t') + 1) === name && l.includes('\t'));
+        const mode = entry ? entry.split(' ')[0] : 'none';
+        if (mode !== '100644') return lands(null, `settings.md at the head is not a regular file (mode ${mode}); the kit reads only a plain file`);
+      }
+      const rebaseMsg = 'settings.md: merge_method is rebase, which replays commits, so the branch must leave settings.md alone; land the change with merge or squash';
+      if (repo('home').settings.merge_method === 'rebase') {
+        if (!(atMain && atHead && atMain === atHead)) return lands(null, rebaseMsg);
+        // a replay that never touches the file (d-20261120-102757339): no merge commit to drop and
+        // no commit on the path, so every replayed commit leaves main's file as it is
+        const merges = run(['rev-list', '--merges', `^${M}`, sha]);
+        const touch = run(['rev-list', '--full-history', `^${M}`, sha, '--', `:(top,literal)${rel}`]);
+        if (late.length) return lands(null);
+        if (!merges.ok || !touch.ok) return lands(null, `settings.md: git rev-list ${M.slice(0, 12)}..${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
+        return merges.out.trim() || touch.out.trim() ? lands(null, rebaseMsg) : lands(now);
+      }
       if (atMain && atHead && atMain === atHead) return lands(now);
-      if (repo('home').settings.merge_method === 'rebase') return lands(null, "settings.md: merge_method is rebase, which replays commits, so the branch's settings.md must equal main's; land the change with merge or squash");
       const anc = run(['merge-base', '--is-ancestor', M, sha]);
       if (late.length) return lands(null);
       if (anc.status === 0) return lands(jobsAt(sha));
