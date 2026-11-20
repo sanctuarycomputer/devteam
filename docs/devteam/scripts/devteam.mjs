@@ -5176,7 +5176,8 @@ function parseReview(file, text) {
     verdict: verdict ? verdict[1] : null, sha: verdict ? verdict[2] : null, shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
     reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors,
     records: recordsRaw && /^[0-9a-f]{40}$/.test(recordsRaw) ? recordsRaw : null,
-    date: Number.isFinite(dateMs) ? dateMs : null,
+    // a date after now is author-asserted and would sit in last_7d forever: undated
+    date: Number.isFinite(dateMs) && dateMs <= Date.now() + 5 * 60000 ? dateMs : null,
   };
 }
 const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
@@ -5231,10 +5232,14 @@ function reviewStats(since = 0) {
   for (const r of all) {
     for (const f of r.findings) { findings++; if (/^wrong/i.test(f.disposition)) wrong++; }
     if (r.pass !== 1 || r.variant || !r.verdict) continue;
-    byStage[r.stage] ??= { first_passes: 0, rejected: 0, undated: 0, last_7d: { first_passes: 0, rejected: 0 }, rules: {}, categories: {} };
+    byStage[r.stage] ??= { first_passes: 0, rejected: 0, undated: 0, last_7d: { first_passes: 0, rejected: 0, rules: {} }, rules: {}, categories: {} };
     if (r.date === null) byStage[r.stage].undated++;
     if (since && (r.date === null || r.date < since)) continue;
-    if (r.date !== null && r.date >= recentFrom) { byStage[r.stage].last_7d.first_passes++; if (r.verdict === 'CHANGES') byStage[r.stage].last_7d.rejected++; }
+    if (r.date !== null && r.date >= recentFrom) {
+      const l = byStage[r.stage].last_7d;
+      l.first_passes++; if (r.verdict === 'CHANGES') l.rejected++;
+      for (const f of r.findings) if (blocking(f.severity) && f.rule) { const k = ruleKey(f.rule); l.rules[k] = (l.rules[k] ?? 0) + 1; }
+    }
     byStage[r.stage].first_passes++;
     if (r.verdict === 'CHANGES') byStage[r.stage].rejected++;
     // what first passes keep blocking on, by the rule each blocking finding cites: what a new
@@ -5246,6 +5251,8 @@ function reviewStats(since = 0) {
   for (const s of Object.values(byStage)) {
     s.rejection_rate = s.first_passes ? +(s.rejected / s.first_passes).toFixed(2) : null;
     s.last_7d.rejection_rate = s.last_7d.first_passes ? +(s.last_7d.rejected / s.last_7d.first_passes).toFixed(2) : null;
+    s.last_7d.top_blocking_rules = Object.entries(s.last_7d.rules).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([rule, count]) => ({ rule, count }));
+    delete s.last_7d.rules;
     s.top_blocking_rules = Object.entries(s.rules).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([rule, count]) => ({ rule, count }));
     s.top_blocking_categories = Object.entries(s.categories).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([category, count]) => ({ category, count }));
     delete s.rules;
@@ -14770,7 +14777,9 @@ function linkDutyFindings(settings, now, add) {
     if (waited > RELEASE_DUE_HOURS * 3600000) add('medium', 'release-due', id, `${rows.length} commit(s) on ${id}'s main since ${tag}, the oldest waiting ${hours(waited)} h`, `a tag on ${id} deploys to production, so a release is a release-production decision on its ladder (decide, or ask the owner), or record why it waits (observe)`);
   }
 }
-function collectMetrics(since) {
+// reviewsSince: only `metrics --since` windows first passes by their dates; every other caller (the
+// retro, the dashboard) keeps all-time review counts, as before review records were dated.
+function collectMetrics(since, reviewsSince = 0) {
   const settings = loadSettings();
   const now = Date.now();
   const ts = tickets();
@@ -14857,7 +14866,7 @@ function collectMetrics(since) {
   const recentQs = questions().filter((q) => now - Date.parse(q.asked_at) <= 14 * DAY && q.status !== 'withdrawn' && !(q.status === 'open' && q.goal_hold) && (q.status !== 'open' || now - Date.parse(q.asked_at) > grace));
   const answeredRecent = recentQs.filter((q) => q.status === 'answered').length;
 
-  const reviews = reviewStats(since);
+  const reviews = reviewStats(reviewsSince);
   const gates = gateStats(logObjects('gate').filter((g) => Date.parse(g.created_at) >= since));
   const round = (o) => Object.fromEntries(Object.entries(o).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, +v.toFixed(2)]));
   const m = {
@@ -15311,7 +15320,7 @@ function collectMetrics(since) {
     // judged on the last 7 days once they hold enough first passes, so a fixed stage goes quiet
     // instead of carrying its history; else on every first pass, as before reviews were dated
     const recent = all?.last_7d?.first_passes >= EFF_MIN_PASSES();
-    const st = recent ? { ...all.last_7d, top_blocking_rules: all.top_blocking_rules } : all;
+    const st = recent ? all.last_7d : all;
     if (st && st.first_passes >= EFF_MIN_PASSES() && st.rejection_rate > 0.6) add('medium', 'review-churn', `${stage} review`, `${Math.round(100 * st.rejection_rate)}% of ${stage} first passes${recent ? ` in the last ${RECENT_DAYS} days` : ''} were rejected (${st.rejected} of ${st.first_passes})${st.top_blocking_rules?.length ? `; most cited: ${st.top_blocking_rules.slice(0, 3).map((x) => `${x.rule} ×${x.count}`).join(', ')}` : ''}`, `turn what first passes keep citing into what new sessions are told from the start: a lesson scoped to who writes the ${stage} (it reaches every new prompt), or a fix to the ${stage} template; or, if reviewers block on what isn't Critical or Important, fix the review prompt`);
   }
   const unpriced = Object.entries(m.cost.unpriced_models ?? {});
@@ -15492,7 +15501,7 @@ function efficiencyOf(m) {
 function cmdMetrics() {
   const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
   if (Number.isNaN(since)) die('--since must be a date');
-  const m = collectMetrics(since);
+  const m = collectMetrics(since, since);
   if (flags.json) return json(m);
   const kv = (o, unit = '') => Object.entries(o).map(([k, v]) => `${k} ${unit}${v}`).join(', ') || '-';
   // stages in the order work meets them: by_stage's own order follows an unsorted folder listing
@@ -15506,7 +15515,7 @@ function cmdMetrics() {
     `efficiency: waiting ${m.efficiency.wait_hours_pct ?? '-'}% of ticket hours, ${m.efficiency.wait_usd_pct ?? '-'}% of ticket dollars; ${m.efficiency.hours_per_point ?? '-'}h and $${m.efficiency.usd_per_point ?? '-'} per point; mis-rated ${m.efficiency.mis_rated.length}`,
     `cost by phase: ${kv(m.phase_usd, '$')}; total $${m.cost.usd_total}; per merged ticket ${m.cost.usd_per_merged_ticket === null ? '-' : `$${m.cost.usd_per_merged_ticket}`}`,
     `gates (median): ${m.gates.gates.map((g) => `${g.gate} ${g.median_seconds}s (fail ${Math.round(g.fail_rate * 100)}%)`).join(', ') || '-'}`,
-    `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}${v.last_7d?.first_passes ? ` (last ${RECENT_DAYS} days ${v.last_7d.rejected}/${v.last_7d.first_passes})` : ''}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
+    `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}${v.last_7d?.first_passes ? ` (last ${RECENT_DAYS} days ${v.last_7d.rejected}/${v.last_7d.first_passes})` : ''}${m.since && v.undated ? ` (${v.undated} undated left out)` : ''}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
     `blocking categories (first passes): ${categoryStages.map(([k, v]) => `${k} ${v.top_blocking_categories.slice(0, 3).map((c) => `${c.category} ${c.count}`).join(', ')}`).join('; ') || '-'}`,
     `messages: ${m.messages.still_open} of ${m.messages.expecting_reply} awaiting reply; median reply ${m.messages.median_reply_minutes ?? '-'} min`,
     `owner questions: ${m.owner_questions.open} open of ${m.owner_questions.asked}; median answer ${m.owner_questions.median_answer_hours ?? '-'}h; answer rate (14d) ${m.owner_questions.answer_rate_14d ?? '-'}`,
