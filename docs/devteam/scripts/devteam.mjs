@@ -7185,7 +7185,7 @@ function cmdMerge() {
       const wt = detachedWorktree(checkedMain, `land-${slug(branch)}`, R);
       try {
         if (R.git(['merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt) === null) return `${sha.slice(0, 12)} does not merge onto ${mainBranch}${inR}`;
-        if (R.git(['push', '--quiet', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) return moved() ?? `push to ${mainBranch}${inR} refused`;
+        if (R.git(['push', '--quiet', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
       } finally {
         R.git(['worktree', 'remove', '--force', wt], R.root);
       }
