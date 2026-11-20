@@ -245,7 +245,7 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
           if (how === 'click') await p.ev(`${rowsOf(tab)}[${i}].children[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))`);
           else await p.key('Enter');
           // its own record: the kind and id its row's subject names (a question is #q/…), a signal by its key
-          const want = await p.ev(`(() => { const tr = ${rowsOf(tab)}[${i}]; const s = tr.querySelector('[data-subject]')?.dataset.subject; if (!s) return /web\/e2e/.test(tr.textContent) ? ['signal', ${JSON.stringify(SIG)}] : null; const at = s.indexOf(':'); return [{ question: 'q' }[s.slice(0, at)] ?? s.slice(0, at), s.slice(at + 1)]; })()`);
+          const want = await p.ev(`(() => { const tr = ${rowsOf(tab)}[${i}]; const s = tr.querySelector('[data-subject]')?.dataset.subject; if (!s) return /web\\/e2e/.test(tr.textContent) ? ['signal', ${JSON.stringify(SIG)}] : null; const at = s.indexOf(':'); return [{ question: 'q' }[s.slice(0, at)] ?? s.slice(0, at), s.slice(at + 1)]; })()`);
           assert.ok(want, `${tab} row ${i} names its record`);
           await soon(`location.hash === ${JSON.stringify(`#${want[0]}/${encodeURIComponent(want[1])}`)} && !document.getElementById('drawer').hidden && DRAWER.id === ${JSON.stringify(want[1])}`, `${tab} row ${i} opens its own peek (${want.join('/')}) on ${how}`);
           await closePeek();
@@ -361,7 +361,8 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
     await soon(`!!document.querySelector(${JSON.stringify(sel)})`, 'Correct on the decision');
     await p.ev(`document.querySelector(${JSON.stringify(sel)}).click()`);
     await soon(`TL.draft?.subject?.ref === 'decision:${D1}'`, 'the draft');
-    const words = 'That was the wrong name: keep Owner.';
+    // no '.': the typing helper sends it as Delete (test/lib/chrome.mjs KEYS)
+    const words = 'That was the wrong name: keep Owner';
     await p.click('#tl-c-text');
     await p.type(words);
     await p.click('[data-tl-send]');
