@@ -154,14 +154,18 @@ async function standIn(t, answer) {
   return { seen, close: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }) };
 }
 
-// Readings one a minute from 8 days and 2 hours back to a minute ago, each with 19 projects (about
-// 2.2 KB a line, as a busy box writes): a day thinned (about 1.3 MB) is under 2 MB, 8 days (about 3 MB) over it.
+// Readings one a minute from 8 days and 2 hours back to a minute ago, each a whole reading as a box's
+// hub writes it with ten projects (the design's busy box; about 1.8 KB a line): a day thinned (about
+// 1 MB) is under 2 MB, 8 days thinned (about 2.5 MB) over it.
 const NOW = Date.now();
-const PROJECTS = Object.fromEntries(Array.from({ length: 19 }, (_, i) => [`project-${String(i).padStart(2, '0')}`, { rss: 123456789 + i, sessions: i % 4, devteam: { dashboard: 110000000, hello: 140000000, wait: 60000000 } }]));
+const PROJECTS = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`project-${String(i).padStart(2, '0')}`, { rss: 9315573760 + i, sessions: 10 + i, devteam: { dashboard: 110850048, wait: 336891904, fleet: 247758848 } }]));
+const n = (k, rss) => ({ n: k, rss });
+const KINDS = { agent: n(35, 13997387776), browser: n(8, 1031442432), devteam: n(18, 2801037312), node: n(26, 2129453056), other: n(156, 1877200896) };
+const DEVTEAM = { wait: n(5, 1113833472), sensor: n(1, 85176320), hub: n(1, 116973568), dashboard: n(6, 537415680), merge: n(1, 147361792), metrics: n(1, 230944768), fleet: n(1, 247758848), hello: n(2, 321572864) };
 const FIXTURE = (() => {
   const out = [];
   let i = 0;
-  for (let at = Math.ceil((NOW - 8 * DAY - 2 * HOUR) / MIN) * MIN; at <= NOW - MIN; at += MIN, i++) out.push(`${JSON.stringify({ v: 1, at: iso(at), working_set: 1e9 + ((i * 7919) % 1000) * 1e6, projects: PROJECTS })}\n`);
+  for (let at = Math.ceil((NOW - 8 * DAY - 2 * HOUR) / MIN) * MIN; at <= NOW - MIN; at += MIN, i++) out.push(`${JSON.stringify({ v: 1, at: iso(at), working_set: 20e9 + ((i * 7919) % 1000) * 1e6, max: 51539607552, ceiling: 0.8, source: 'cgroup', sessions: 29, kinds: KINDS, devteam: DEVTEAM, projects: PROJECTS })}\n`);
   return out.join('');
 })();
 
@@ -326,6 +330,9 @@ test('C6: the cap is 2 MB exactly, and only JSON from the hub goes back', async 
     (req, res) => { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); },
     (req, res) => { res.writeHead(401, { 'content-type': 'application/json' }); res.end('{"error":"who are you"}'); },
     (req, res) => { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{"nope":1}'); },
+    (req, res) => { res.writeHead(403, { 'content-type': 'application/json' }); res.end('{"error":"the readings are for the hub\'s own page"}'); },
+    (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('null'); },
+    (req, res) => { res.writeHead(500, { 'content-type': 'application/json' }); res.end('{"error":{"detail":"x"}}'); },
     (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"v":1,"readings":['); res.socket.destroy(); },
     (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"v":1,'); },
     () => {},
