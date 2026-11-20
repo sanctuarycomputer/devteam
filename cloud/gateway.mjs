@@ -1102,39 +1102,6 @@ export function createGateway(opts = {}) {
 
   const secret = crypto.randomBytes(32);
   const mac = (...parts) => crypto.createHmac('sha256', secret).update(parts.join('|')).digest().subarray(0, 16);
-  // A claim's or an added passkey's challenge: one use, five minutes, bound to what it was issued for.
-  const challenges = new Map();
-  const issue = (purpose, extra = {}) => {
-    const c = b64u(crypto.randomBytes(32));
-    challenges.set(c, { purpose, expires: Date.now() + CHALLENGE_MS, ...extra });
-    while (challenges.size > 100) challenges.delete(challenges.keys().next().value);
-    return c;
-  };
-  const redeem = (c, purpose) => {
-    const x = typeof c === 'string' ? challenges.get(c) : null;
-    if (!x) return null;
-    challenges.delete(c);
-    return x.purpose === purpose && x.expires > Date.now() ? x : null;
-  };
-  // Anyone may ask for a login challenge, so asking stores nothing: each carries its own expiry and
-  // MAC, and only a verified signature spends one, so no flood of requests can evict the owner's.
-  const spent = new Map();
-  const loginChallenge = () => {
-    const head = Buffer.alloc(24);
-    crypto.randomFillSync(head, 0, 16);
-    head.writeBigUInt64BE(BigInt(Date.now() + CHALLENGE_MS), 16);
-    return b64u(Buffer.concat([head, mac('login', head.toString('hex'))]));
-  };
-  const loginChallengeOk = (c) => {
-    const b = typeof c === 'string' ? unb64u(c) : null;
-    if (!b || b.length !== 40 || spent.has(c)) return false;
-    const head = b.subarray(0, 24);
-    return sameBytes(b.subarray(24), mac('login', head.toString('hex'))) && Number(head.readBigUInt64BE(16)) > Date.now();
-  };
-  const spend = (c) => {
-    for (const [k, t] of spent) if (t < Date.now()) spent.delete(k);
-    spent.set(c, Date.now() + CHALLENGE_MS);
-  };
 
   const isOwner = (person) => person?.role === 'owner';
   // A claimed file with no owner row (one restored from before people, read while running): its
@@ -1179,8 +1146,8 @@ export function createGateway(opts = {}) {
   // Cross-site requests are refused below by their Origin, and by the kit's own checks.
   const cookie = (value, maxAge) => `${COOKIE}=${value}; Domain=${NAME}; Path=/; HttpOnly; Max-Age=${maxAge}${SECURE ? '; Secure; SameSite=None' : '; SameSite=Lax'}`;
   // `method`: the one it was opened with, so removing that method can end it. The owner's go in
-  // top-level `sessions`, where an older gateway reads them; anyone else's in `peopleSessions`.
-  // sessionFor: the state with it, and its cookie, so a flow's finish writes it with the rest at once.
+  // top-level `sessions`, where an older gateway reads them; anyone else's in `peopleSessions`. The
+  // state with it, and its cookie, so a flow's finish writes it with the rest in one save.
   const sessionFor = (s, person, methodId) => {
     const tok = crypto.randomBytes(32);
     const hash = b64u(sha256(tok));
@@ -1189,11 +1156,6 @@ export function createGateway(opts = {}) {
       ? { ...s, sessions: [...s.sessions, { hash, method: methodId, at, expires: at + SESSION_MS }] }
       : { ...s, peopleSessions: [...(s.peopleSessions ?? []), { hash, person: person.id, method: methodId, at, expires: at + SESSION_MS }] };
     return { next, set: cookie(b64u(tok), SESSION_MS / 1000) };
-  };
-  const newSession = (person, methodId) => {
-    const { next, set } = sessionFor(store.load(), person, methodId);
-    store.save(next);
-    return set;
   };
   // The hash of every devteam_session the request carries, live or not.
   const sessionHashes = (req) => String(req.headers.cookie ?? '').split(';').flatMap((part) => {
@@ -1224,8 +1186,6 @@ export function createGateway(opts = {}) {
     return `${PUB}/`;
   };
 
-  // A person by id as it stands now; null is the stand-in owner's (a claimed file with no owner row).
-  const personOf = (s, id) => (id === null ? ownerRow(s) ?? STAND_IN : (s.people ?? []).find((p) => p.id === id) ?? null);
   // A person's own sign-in methods, without key material: the owner's are the top-level passkeys and
   // then their row's methods; anyone else's, their row's.
   const ownMethods = (s, person) => {
@@ -1269,84 +1229,10 @@ export function createGateway(opts = {}) {
     authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
     attestation: 'none', timeout: CHALLENGE_MS, excludeCredentials: allCredentialIds(store.load()).map((id) => ({ type: 'public-key', id })),
   });
-  const creationOptions = (purpose, person = STAND_IN) => {
-    const userId = b64u(crypto.randomBytes(16));
-    return createOptions(issue(purpose, { userId, person: person.id, role: person.role }), userId, person);
-  };
-  const clientData = (b64, type, purpose) => {
-    const raw = unb64u(b64);
-    if (!raw) throw new Error('no clientDataJSON');
-    const c = JSON.parse(raw.toString('utf8'));
-    if (c.type !== type) throw new Error('wrong ceremony');
-    if (c.origin !== PUB || c.crossOrigin === true) throw new Error('wrong origin');
-    const issued = purpose === 'login' ? loginChallengeOk(c.challenge) : redeem(c.challenge, purpose);
-    if (!issued) throw new Error('unknown or expired challenge');
-    return { raw, issued, challenge: c.challenge };
-  };
   const checkAuthData = (ad) => {
     if (!sameBytes(Buffer.from(ad.rpIdHash), sha256(RP_ID))) throw new Error('wrong relying party');
     if (!ad.up || !ad.uv) throw new Error('the passkey did not verify you (user presence and verification are required)');
   };
-  // A new passkey from navigator.credentials.create(): the attestation itself is not checked
-  // (attestation 'none'); what makes it trusted is who may register (the claim token, or a session).
-  const register = (body, purpose) => {
-    const { issued } = clientData(body?.clientDataJSON, 'webauthn.create', purpose);
-    const attBytes = unb64u(body?.attestationObject) ?? Buffer.alloc(0);
-    const { value: att, end } = cborDecode(attBytes);
-    if (end !== attBytes.length) throw new Error('bad attestationObject');
-    if (!(att instanceof Map) || !Buffer.isBuffer(att.get('authData'))) throw new Error('bad attestationObject');
-    const ad = parseAuthData(att.get('authData'));
-    checkAuthData(ad);
-    if (!ad.at) throw new Error('no credential in the response');
-    const rawId = unb64u(body?.rawId);
-    if (!rawId || !sameBytes(rawId, Buffer.from(ad.credentialId))) throw new Error('credential id mismatch');
-    const { jwk, alg } = coseToJwk(ad.cose);
-    const s = store.load();
-    if (allCredentialIds(s).includes(b64u(rawId))) throw new Error('that passkey is already registered');
-    const who = personOf(s, issued.person ?? null);
-    const mine = who ? ownMethods(s, who).filter((m) => m.type === 'passkey').length : 0;
-    const name = typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${mine + 1}`;
-    return { cred: { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, rp: RP_ID, createdAt: new Date().toISOString() }, issued };
-  };
-  // Where the route places it: the owner's goes top-level, where an older gateway reads it; anyone
-  // else's becomes a passkey method in their row.
-  const asMethod = ({ id: key, userId, jwk, alg, signCount, rp, name, createdAt }) => ({ id: newId('m-'), type: 'passkey', key, label: name, added_at: createdAt, last_used: null, data: { userId, jwk, alg, signCount, rp } });
-  // A credential wherever it lives: the owner's top-level passkeys (`pk`), or a person's passkey
-  // methods (`method`), the owner's row's included.
-  const findCredential = (s, credId) => {
-    if (typeof credId !== 'string') return null;
-    const pk = s.passkeys.find((p) => p.id === credId);
-    if (pk) return { person: ownerRow(s) ?? STAND_IN, method: null, pk };
-    for (const person of s.people ?? []) {
-      const method = (person.methods ?? []).find((m) => m.type === 'passkey' && m.key === credId);
-      if (method) return { person, method, pk: null };
-    }
-    return null;
-  };
-  const verifyAssertion = (body) => {
-    const s = store.load();
-    const found = findCredential(s, body?.rawId);
-    if (!found) throw new Error('unknown passkey');
-    const { person, method } = found;
-    const pk = found.pk ?? { id: method.key, ...method.data };
-    const { raw, challenge } = clientData(body?.clientDataJSON, 'webauthn.get', 'login');
-    const adBytes = unb64u(body?.authenticatorData);
-    const sig = unb64u(body?.signature);
-    if (!adBytes || !sig) throw new Error('bad assertion');
-    if (body?.userHandle && pk.userId && body.userHandle !== pk.userId) throw new Error('the passkey is for another account');
-    const ad = parseAuthData(adBytes);
-    checkAuthData(ad);
-    if (!verifySignature(pk, Buffer.concat([adBytes, sha256(raw)]), sig)) throw new Error('bad signature');
-    // A counter that stopped going up means a cloned authenticator; synced passkeys keep it at 0.
-    if ((ad.signCount || pk.signCount) && ad.signCount <= pk.signCount) throw new Error('the passkey\'s counter went backwards');
-    spend(challenge);
-    // the counter and last use where the credential lives, and last_seen (neither bumps rev)
-    const iso = new Date().toISOString();
-    const people = s.people?.map((p) => (p.id !== person.id ? p : { ...p, last_seen: iso, methods: method ? p.methods.map((m) => (m.id === method.id ? { ...m, last_used: iso, data: { ...m.data, signCount: ad.signCount } } : m)) : p.methods }));
-    store.save({ ...s, ...(found.pk ? { passkeys: s.passkeys.map((p) => (p.id === pk.id ? { ...p, signCount: ad.signCount, usedAt: iso } : p)) } : {}), ...(people ? { people } : {}) });
-    return { person, methodId: method ? method.id : pk.id };
-  };
-
   // --- sign-in methods: the table, pending flows, the flow cookie (spec kit-254) ----------------
   // The owner's passkeys stay top-level in today's shape; this is the one mapping between that and
   // a method's { key, data, label, added_at, last_used }, both ways.
@@ -1613,6 +1499,8 @@ export function createGateway(opts = {}) {
   };
   // A flow's answer: JSON, the session cookie (if any) first and the flow cookie second.
   const flowAnswer = (res, out) => json(res, out.status, out.body, out.cookies.length ? { 'set-cookie': out.cookies } : undefined);
+  // Today's routes never refused a body that wasn't an object; they read it as empty.
+  const asBody = (b) => (isObject(b) ? b : {});
 
   // --- requests that look local to the kit, and its headers mapped back to the public names ---
   const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'referer', 'forwarded', 'x-real-ip', 'true-client-ip', 'cf-connecting-ip']);
@@ -2593,32 +2481,22 @@ export function createGateway(opts = {}) {
           return flowAnswer(res, await finishFlow(req, type, body?.purpose, body, 'POST'));
         }
         if (p === '/auth/claim' && req.method === 'GET') return claimed ? redirect(res, '/auth/login') : page(res, PAGES.claim(PUB));
+        // Today's passkey routes are aliases of the passkey row, each naming its purpose (today's
+        // pages send none). The claim's keep today's 405 and 409 before reading the body.
         if (p === '/auth/claim/options' || p === '/auth/claim/verify') {
           if (req.method !== 'POST') return send(res, 405, 'text/plain', 'POST only');
           if (claimed) return json(res, 409, { error: 'this box is already claimed' });
-          const body = await readJson(req);
-          const live = store.load();
-          if (live.claimHash && !claimLive(live)) return json(res, 403, { error: 'this claim link has expired: restart the box, or run devteam-reclaim in a shell on it, for a new one' });
-          const want = unb64u(live.claimHash ?? '');
-          if (!want || !sameBytes(sha256(typeof body?.token === 'string' ? body.token : ''), want)) return json(res, 403, { error: 'that is not this box\'s claim token' });
-          if (p === '/auth/claim/options') return json(res, 200, creationOptions('claim'));
-          const { cred: pk } = register(body, 'claim');
-          if (store.load().passkeys.length) return json(res, 409, { error: 'this box is already claimed' });
-          store.save(stamped(withOwner({ ...store.load(), passkeys: [pk], claimHash: null, claimExpires: null, sessions: [], peopleSessions: [] })));
-          log(`claimed with passkey "${pk.name}"`);
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession(ownerRow(store.load()) ?? STAND_IN, pk.id) });
+          const body = asBody(await readJson(req));
+          return flowAnswer(res, p === '/auth/claim/options' ? await startFlow(req, 'passkey', 'claim', body, null) : await finishFlow(req, 'passkey', 'claim', body, 'POST'));
         }
         if (p === '/auth/login' && req.method === 'GET') return page(res, claimed ? PAGES.login(safeNext(url.searchParams.get('next'))) : PAGES.unclaimed());
-        if (p === '/auth/login/options' && req.method === 'POST') {
-          if (!claimed) return json(res, 409, { error: 'this box is not claimed yet' });
-          return json(res, 200, { challenge: loginChallenge(), rpId: RP_ID, userVerification: 'required', timeout: CHALLENGE_MS, allowCredentials: [] });
-        }
+        // as today, options reads no body
+        if (p === '/auth/login/options' && req.method === 'POST') return flowAnswer(res, await startFlow(req, 'passkey', 'sign-in', {}, null));
         if (p === '/auth/login/verify' && req.method === 'POST') {
-          const body = await readJson(req);
-          // as options: a challenge fetched before a reclaim must not open a session after it
+          const body = asBody(await readJson(req));
+          // as today, first: a challenge fetched before a reclaim must not open a session after it
           if (!store.load().passkeys.length) return json(res, 409, { error: 'this box is not claimed yet' });
-          const { person, methodId } = verifyAssertion(body);
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession(person, methodId) });
+          return flowAnswer(res, await finishFlow(req, 'passkey', 'sign-in', body, 'POST'));
         }
       }
       // What installing the hub fetches. Public: a browser asks for the manifest without the cookie, and
@@ -2670,21 +2548,10 @@ export function createGateway(opts = {}) {
         if (p === '/auth/method/list' && req.method === 'GET') return json(res, 200, { methods: ownMethods(store.load(), person) });
         if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(ownMethods(store.load(), person).filter((m) => m.type === 'passkey').map((m) => ({ id: m.id, name: m.label, createdAt: m.added_at })), PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
         if ((p.startsWith('/auth/passkeys/') || p === '/auth/method/remove') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
-        if (p === '/auth/passkeys/options' && req.method === 'POST') return json(res, 200, creationOptions(`add:${session.hash}`, person));
-        if (p === '/auth/passkeys/verify' && req.method === 'POST') {
-          const { cred, issued } = register(await readJson(req), `add:${session.hash}`);
-          const now = store.load();
-          if (!stillHeld(now, session)) return json(res, 401, { error: 'your session ended; sign in again' });
-          // the person as they stand now: an add started before they were removed or their role
-          // changed must not land where they were
-          const who = personOf(now, issued.person);
-          if (!who || who.role !== issued.role) return json(res, 409, { error: 'your account changed since; start again' });
-          store.save(isOwner(who)
-            ? stamped({ ...now, passkeys: [...now.passkeys, cred] })
-            : { ...now, people: now.people.map((x) => (x.id === who.id ? { ...x, methods: [...x.methods, asMethod(cred)], rev: x.rev + 1 } : x)) });
-          log(`passkey "${cred.name}" added`);
-          return json(res, 200, { ok: true });
-        }
+        // the passkey row's add, after the gate and the fresh rule above (today's place and answers);
+        // its finish re-checks the session, the person's role and freshness against the state as it is
+        if (p === '/auth/passkeys/options' && req.method === 'POST') return flowAnswer(res, await startFlow(req, 'passkey', 'add', {}, who));
+        if (p === '/auth/passkeys/verify' && req.method === 'POST') return flowAnswer(res, await finishFlow(req, 'passkey', 'add', asBody(await readJson(req)), 'POST'));
         if ((p === '/auth/method/remove' || p === '/auth/passkeys/remove') && req.method === 'POST') {
           const body = await readJson(req);
           const now = store.load();
