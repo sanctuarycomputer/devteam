@@ -1016,6 +1016,50 @@ test('RV4-MOVED: forge git, main moves between the checks and the landing: refus
   } finally { T.done(); }
 });
 
+test('RV4-MOVED-GH: forge github, main moves after the checks: refused before gh pr merge, main left as it is; unmoved, gh pr merge runs (final-4 F3)', () => {
+  const T = setup('rv4mvgh');
+  try {
+    // home's code lands through GitHub: settings forge "github", and a gh first on PATH that answers
+    // the calls merge makes (pr view: one open, clean PR at the head; pr merge: logged only)
+    T.onMain((j) => { j.forge = 'github'; });
+    const bin = path.join(T.base, 'bin-gh');
+    const log = path.join(T.base, 'gh.log');
+    const prFile = path.join(T.base, 'pr.json');
+    write(path.join(bin, 'gh'), `#!/bin/sh\necho "$@" >> "${log}"\n[ "$1 $2" = "pr view" ] && exec cat "${prFile}"\n[ "$1 $2" = "pr merge" ] && exit 0\nexit 1\n`);
+    fs.chmodSync(path.join(bin, 'gh'), 0o755);
+    const env = { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+    const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : []);
+    const prMerges = () => calls().filter((c) => c.startsWith('pr merge '));
+    const ghMerge = (slug, wt) => {
+      const sha = T.g(['rev-parse', 'HEAD'], wt);
+      write(prFile, JSON.stringify({ number: 7, headRefOid: sha, title: `chore-${slug}: jobs`, body: '## One-way doors\n\nNone.\n', isDraft: false, mergeStateStatus: 'CLEAN', url: 'https://example.test/pr/7', statusCheckRollup: [] }));
+      fs.rmSync(log, { force: true });
+      const r = T.run(['merge', '--chore', slug], env);
+      return { sha, r };
+    };
+    // a commit on top of main, on origin as another branch: the chore's gate pushes it to main, after
+    // the checks and before the landing
+    T.g(['fetch', '-q', 'origin'], T.old); T.g(['merge', '-q', '--ff-only', 'origin/main'], T.old);
+    write(path.join(T.old, NOTES), 'moved\n'); T.g(['add', NOTES], T.old); T.g(['commit', '-qm', 'main moves'], T.old);
+    const adv = T.g(['rev-parse', 'HEAD'], T.old);
+    T.g(['push', '-q', 'origin', `${adv}:refs/heads/advance`], T.old);
+    T.g(['reset', '-q', '--hard', 'HEAD~1'], T.old);
+    const moved = ghMerge('mover', T.jobsChore('mover', (j) => { j.gates = { ...(j.gates ?? {}), mover: `git push -q origin ${adv}:refs/heads/main` }; }));
+    refused(moved.r, /main moved since the checks \([0-9a-f]{12} to [0-9a-f]{12}\); run merge again/);
+    assert.ok(calls().some((c) => c.startsWith('pr view ')), 'the stand-in answered the PR');
+    assert.deepEqual(prMerges(), [], 'gh pr merge was never called');
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(T.g(['rev-parse', 'origin/main'], T.old), adv, 'main is as the mover left it');
+    assert.throws(() => T.g(['merge-base', '--is-ancestor', moved.sha, 'origin/main'], T.old), 'the chore did not land');
+    // control: the same kind of chore, a gate that leaves main alone: gh pr merge runs, at the head
+    const still = ghMerge('still', T.jobsChore('still', (j) => { j.gates = { ...(j.gates ?? {}), still: 'true' }; }));
+    passes(still.r);
+    assert.deepEqual(prMerges(), [`pr merge 7 --merge --match-head-commit ${still.sha}`]);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(T.g(['rev-parse', 'origin/main'], T.old), adv, 'the stand-in lands nothing');
+  } finally { T.done(); }
+});
+
 test('RV4-UNTOUCHED: a branch that never touches settings.md lands while main changed the jobs, and the jobs stay main\'s', () => {
   const T = setup('rv4un');
   try {
