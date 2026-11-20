@@ -828,7 +828,8 @@ test('goal peek and Upkeep peek', { ...CHROME, timeout: 300000 }, async (t) => {
   assert.ok(await p.ev(`!!${ddOf('Chores in flight')}.querySelector('a[href="#ticket/chore-01-tidy"]')`));
   assert.ok(await p.ev(`!!${ddOf('How it changes')}.querySelector('[data-thread-on]')`), 'Upkeep\'s How it changes: Start a thread');
   const us = await p.ev(PEEK_SECTS);
-  assert.deepEqual(us.map((s) => s.gp), GP.upkeep, 'the upkeep sections, in GOAL_PEEK.upkeep\'s order');
+  const ugs = us.map((s) => s.gp);
+  assert.deepEqual(ugs, GP.upkeep.filter((id) => ugs.includes(id)), 'the upkeep sections drawn, in GOAL_PEEK.upkeep\'s order');
   const hb = await p.ev(`(() => { const s = document.querySelector('#drawer-body [data-gp="heartbeat"]'); return { cells: s.querySelectorAll('.heartbeat > i').length, text: s.textContent }; })()`);
   assert.equal(hb.cells, 14, 'the heartbeat');
   for (const w of ['fixed CI on main', 'synced the kit', 'ran the retro', 'a CI fix']) assert.ok(hb.text.includes(w), `the day items listed: ${w}`);

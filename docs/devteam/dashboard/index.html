@@ -5651,7 +5651,7 @@ function openJob(name) {
     attrRow('Title', esc(j.title || name)),
     attrRow('Kind', esc(recKind(j)), 'A check runs a command; a chore is work the supervisor or a worker does.'),
     attrRow('Every', esc(recEvery(j))),
-    attrRow('Runs', e ? (check ? `<code>${esc(j.run ?? '')}</code>` : `<div class="measure">${esc(j.prompt ?? '').replace(/\n/g, '<br>')}</div>`) : ''),
+    attrRow('Runs', e ? (check ? `<code>${esc(j.run ?? '')}</code>` : `<p class="measure">${esc(j.prompt ?? '').replace(/\n/g, '<br>')}</p>`) : ''),
     attrRow('Runs as', check ? 'a command that only looks, in a clean checkout of main' : j.kind === 'chore' ? (j.by === 'worker' ? 'an Upkeep chore ticket for a worker' : 'an Upkeep chore the supervisor does in its tick') : ''),
     attrRow('Failing means', e ? esc(failWords) : ''),
     attrRow('Registered by', j.registered?.qid ? `${qlink(j.registered.qid, 'your yes')}${j.registered.at ? ` · ${esc(when(j.registered.at))}` : ''}` : ''),
