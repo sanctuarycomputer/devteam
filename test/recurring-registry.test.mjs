@@ -839,8 +839,9 @@ history('refused: the branch adds docs/devteam/project/recurring.json/x', (T, ho
   const pl = plainLand(T, 'chore-dir', how);
   assert.equal(pl.conflict, false, pl.why);
   assert.equal(pl.entry?.type, 'tree', 'plain git lands a directory at the jobs file');
-  refused(T.dry('dir'), BEHIND);
-  refused(T.merge('dir'), BEHIND);
+  // spec step 1 runs first: the head's jobs file doesn't read (a directory), so that is the refusal
+  refused(T.dry('dir'), NOT_REGULAR);
+  refused(T.merge('dir'), NOT_REGULAR);
   assert.equal(T.has('origin/main', JOBS), false, 'nothing landed at the jobs file');
 });
 
@@ -850,8 +851,9 @@ history('refused: the branch makes docs/devteam/project a symlink, with no jobs 
   const pl = plainLand(T, 'chore-link', how);
   assert.equal(pl.conflict, false, pl.why);
   assert.equal(pl.parent?.mode, '120000', 'plain git lands a link at the project dir');
-  refused(T.dry('link'), BEHIND);
-  refused(T.merge('link'), BEHIND);
+  // spec step 1 runs first: the head's project dir is not a directory, so that is the refusal
+  refused(T.dry('link'), NOT_DIR);
+  refused(T.merge('link'), NOT_DIR);
   assert.match(T.g(['ls-tree', 'origin/main', '--', PROJ]), /^040000 tree /, 'the project dir is still a directory');
 });
 
