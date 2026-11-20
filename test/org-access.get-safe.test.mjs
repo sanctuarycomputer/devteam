@@ -89,7 +89,7 @@ const REQUESTS = (F) => ({
   'hub /': ['/'],
   'hub /instances.json': ['/instances.json'],
   'hub /memory.json': ['/memory.json'],
-  'hub /memory.json?*': ['/memory.json?since=8d&thin=1', `/memory.json?after=${new Date(Date.now() - 3600000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`],
+  'hub /memory.json?*': ['/memory.json?since=8d', `/memory.json?after=${new Date(Date.now() - 3600000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`],
   'hub /operator/threads': ['/operator/threads'],
 });
 
