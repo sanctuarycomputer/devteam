@@ -2,8 +2,7 @@
 // Ports: none of its own (lib/kit.mjs's +0 hub, +1..25)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import path from 'node:path';
-import { write, dashboardOnFreePort, threadsFixture } from './lib/kit.mjs';
+import { dashboardOnFreePort, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { soonIn, landArtifact, COUNT_FETCH } from './lib/dashboard-page.mjs';
 
@@ -15,19 +14,19 @@ import { soonIn, landArtifact, COUNT_FETCH } from './lib/dashboard-page.mjs';
 const SCALE_BY = 0.05;
 const SCALE = `(() => { window.__scale = ${SCALE_BY}; const si = window.setInterval; window.setInterval = (f, ms, ...a) => { if (ms !== 5000 && ms !== 10000) return si(f, ms, ...a); let last = performance.now(); return si(() => { if (performance.now() - last >= ms * window.__scale) { last = performance.now(); f(...a); } }, 50); }; })();`;
 
-// The reload button says when the stage's artifact changed since its frame loaded, on the page's polls
-// at a twentieth of their period (same 2:1 ratio, the one absolute window held); only a press reloads.
+// The reload button says when the stage's artifact on main changed since its frame loaded, on the page's
+// polls at a twentieth of their period (same 2:1 ratio, the one absolute window held); only a press
+// reloads. A draft reloads by itself and never shows the hint (kit-106, test/artifact-live-reload.test.mjs).
 test("the viewer's reload button says when a newer version is ready, and the press loads it", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const later = cleanup(t);
   const F = threadsFixture('reload-hint');
   later(() => F.done());
   // the page's <title> is what its lens says when it is ready: how the test sees what the frame shows
   const mock = (title) => ({ 'artifact.json': JSON.stringify({ v: 1, title: 'Hint mock', summary: 'A page that changes', by: 'supervisor', for: [] }), 'index.html': `<!doctype html><html><head><title>${title}</title></head><body><p>${title}</p></body></html>` });
-  const T = landArtifact(F, 'hint-mock', mock('main'));
-  const draft = path.join(F.old, '.worktrees/demo-01-draft/docs/devteam/project/artifacts/hint-mock');
-  const edit = (title) => { for (const [rel, text] of Object.entries(mock(title))) write(path.join(draft, rel), text); };
-  // written before the dashboard starts: its first read already lists the draft
-  edit('v1');
+  // main changes as a merged PR changes it: a commit on main, pushed
+  const edit = (title) => landArtifact(F, 'hint-mock', mock(title));
+  // landed before the dashboard starts: its first read already lists it; the published tree is this one
+  const T = edit('v1');
   const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   const B = `http://127.0.0.1:${port}`;
   later(() => dash.stop());
@@ -63,15 +62,15 @@ test("the viewer's reload button says when a newer version is ready, and the pre
   const FRESH = 'Load the page again';
   const NEWER = 'A newer version is ready: reload to see it';
 
-  await t.test('on the dashboard: a draft changed on disk outlines reload in the warning colour, light and dark; the press loads it', async () => {
-    await p.send('Page.navigate', { url: `${B}/#artifact/wt/demo-01-draft/hint-mock` });
-    await soon(`typeof __titles === 'object' && __titles.includes('v1')`, 'the draft in the frame');
-    assert.deepEqual(await p.ev(`[TS.kind, TS.at, /^[0-9a-f]{64}$/.test(TS.fp ?? '')]`), ['artifact', 'demo-01-draft', true], 'opened with its fingerprint');
+  await t.test("on the dashboard: main changed outlines reload in the warning colour, light and dark; the press loads it", async () => {
+    await p.send('Page.navigate', { url: `${B}/#artifact/main/hint-mock` });
+    await soon(`typeof __titles === 'object' && __titles.includes('v1')`, "main's version in the frame");
+    assert.deepEqual(await p.ev(`[TS.kind, TS.at, /^[0-9a-f]{64}$/.test(TS.fp ?? '')]`), ['artifact', 'main', true], 'opened with its fingerprint');
     let b = await button();
     assert.deepEqual([b.stale, b.title], [false, FRESH], 'nothing newer at open');
     // a press on the version shown changes nothing (a press before any check is the viewer tab's, below)
     await p.click('#av-reload');
-    await soon(`__titles.filter((x) => x === 'v1').length === 2`, 'the draft again');
+    await soon(`__titles.filter((x) => x === 'v1').length === 2`, "main's again");
     assert.equal((await button()).stale, false);
     edit('v2');
     await soonData(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
@@ -94,16 +93,15 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     assert.equal(await p.ev('TS.fp === TS.fpNow'), true);
   });
 
-  await t.test('in a viewer tab: its own check of the draft, every 10 s; a press before any check still leaves the hint to come; a tree is never checked', async () => {
-    edit('v1');
+  await t.test("in a viewer tab: its own check of main, every 10 s; a press before any check still leaves the hint to come; a tree is never checked", async () => {
     // "no check yet when pressed" reads an absolute window (the tab's first check not run between its
     // boot and the press, two frame loads later): this tab's polls run at full period until the 'no check yet when pressed' assertion has run
     const { identifier: hold } = await p.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__scale = 1;' });
-    await p.send('Page.navigate', { url: `${B}/view/artifact/hint-mock?at=demo-01-draft` });
-    await soon(`document.documentElement.classList.contains('viewer') && typeof __titles === 'object' && __titles.includes('v1')`, 'the draft in the viewer');
+    await p.send('Page.navigate', { url: `${B}/view/artifact/hint-mock` });
+    await soon(`document.documentElement.classList.contains('viewer') && typeof __titles === 'object' && __titles.includes('v2')`, "main's version in the viewer");
     // pressed before the tab's first check: only boot's ask so far
     await p.click('#av-reload');
-    await soon(`__titles.filter((x) => x === 'v1').length === 2`, 'the draft again');
+    await soon(`__titles.filter((x) => x === 'v2').length === 2`, "main's again");
     assert.equal(await p.ev(`__asked.filter((u) => u.startsWith('/api/view?')).length`), 1, 'no check yet when pressed');
     // the window has been read: back to a twentieth, here and on the tree's navigate below; the first
     // check runs on a 50 ms look once 500 ms have passed since the check was set up
