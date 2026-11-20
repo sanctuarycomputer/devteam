@@ -7430,10 +7430,14 @@ window.addEventListener('keydown', (e) => {
   if (tlShowing() || TL.pin || TS.raised) { tlHide(); tsRaise(false); if (TL.pin) tlPinMode(false); return; }
   uploadClose();
 }, true);
-// A route taken while an image is up (a link, Back) closes the image first, the same way, before the router's own
-// hashchange listener runs (capture, at the window: ahead of it), so the router sees the viewer as it was under the
-// image: empty (its reset of AV_RET, AV_NAVS, AV_FRAME_ESC, AV_FROM runs) or the page the image covered (task-4 T4-2).
-window.addEventListener('hashchange', () => { if (AV?.upload) uploadClose(); }, true);
+// A route taken while an image is up (a link, Back) closes the image first, the same way, before the router runs, so
+// the router sees the viewer as it was under the image: empty (its reset of AV_RET, AV_NAVS, AV_FRAME_ESC, AV_FROM
+// runs) or the page the image covered (task-4 T4-2). On popstate, which a fragment navigation fires before its
+// hashchange: the router's hashchange listener is registered earlier and runs first at the window, capture or not
+// (final-1 F1); the hashchange one stays for a navigation that fires no popstate.
+const uploadRouted = () => { if (AV?.upload) uploadClose(); };
+window.addEventListener('popstate', uploadRouted, true);
+window.addEventListener('hashchange', uploadRouted, true);
 /* attachments end */
 const seenHash = (id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
 // Once an answer is saved the card says so at once; the next refresh removes it.
