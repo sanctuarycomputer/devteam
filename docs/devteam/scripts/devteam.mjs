@@ -1015,6 +1015,10 @@ function loadSettings() {
   else {
     try {
       settingsCache = { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) };
+      // model_tiers merges per tier: { "fast": "haiku" } keeps the default strong; a value off its
+      // shape falls back to the default (validate names it), so workers never get a malformed model
+      if (!SETTING_SHAPES.model_tiers(settingsCache.model_tiers)) { if (!process.env.DEVTEAM_QUIET_TIERS) { process.env.DEVTEAM_QUIET_TIERS = '1'; warn(`settings.md: model_tiers is ${JSON.stringify(settingsCache.model_tiers).slice(0, 80)}, not { "fast": <model>, "strong": <model> }; using the default ${JSON.stringify(SETTINGS_DEFAULTS.model_tiers)}`); } settingsCache.model_tiers = SETTINGS_DEFAULTS.model_tiers; }
+      else settingsCache.model_tiers = { ...SETTINGS_DEFAULTS.model_tiers, ...settingsCache.model_tiers };
     } catch (e) {
       die(`settings.md: the json devteam block is not valid JSON: ${e.message}`);
     }
@@ -14771,10 +14775,16 @@ function linkDutyFindings(settings, now, add) {
 // against what the build spent. Over recent tickets (merged in the last 14 days, or building in them)
 // whose plan has tier lines: fast and strong task counts, model misses (a fast task redone on strong), and each
 // ticket's build spend on a cheaper model than the dearest it used there, priced by output tokens. A
-// ticket is unrouted when its plan has fast tasks, its build cost at least $2, and under 5% of that
-// went to a cheaper model: the plan chose fast and the build ran it all on strong. Vendor-neutral:
+// ticket is unrouted when its plan has fast tasks not marked built here, its build cost at least $2,
+// none of it on an unpriced model, and under 5% of it went to a cheaper model: the plan chose fast
+// and the build ran it all on strong. A worker's own cheap subagents (reading, running tests) count
+// toward the 5% too, so a build can clear it with every fast task still built on strong: the
+// finding is a floor, not proof of routing. Vendor-neutral:
 // "cheaper" is read from prices, not from model names.
-const TIER_LINE = /^[\s>*_-]*(?:\*\*)?Model:(?:\*\*)?[ \t]*[`*_]*(fast|strong)\b/gim;
+const TIER_LINE = /^[\s>*_-]*(?:\*\*)?Model(?:\*\*)?:(?:\*\*)?[ \t]*[`*_]*(fast|strong)\b/gim;
+// a fast task built in the worker's own session on purpose: "- Built here: <why>" under it (worker.md
+// §3), or the "(inline)" older plans wrote on its Model line
+const BUILT_HERE = /^[\s>*_-]*Built here:|\binline\b/im;
 const TIER_WINDOW_DAYS = 14;
 function ticketRecordText(id, rel) {
   const b = ticketBranchRef(id);
@@ -14785,7 +14795,7 @@ function ticketRecordText(id, rel) {
 }
 function modelTierStats(items, now = Date.now()) {
   const from = now - TIER_WINDOW_DAYS * 86400000;
-  const out = { window_days: TIER_WINDOW_DAYS, tickets: 0, fast_tasks: 0, strong_tasks: 0, misses: 0, miss_rate: null, build_usd: 0, build_usd_cheaper: 0, cheaper_share: null, unrouted: [] };
+  const out = { window_days: TIER_WINDOW_DAYS, tickets: 0, fast_tasks: 0, strong_tasks: 0, fast_built_here: 0, misses: 0, miss_rate: null, build_usd: 0, build_usd_cheaper: 0, cheaper_share: null, unrouted: [] };
   const build = new Map();
   const builtAt = new Map();
   for (const it of items) if (it.phase === 'build') { builtAt.set(it.who, Math.max(builtAt.get(it.who) ?? 0, it.at)); const b = build.get(it.who) ?? {}; for (const [mdl, v] of Object.entries(it.by_model ?? {})) b[mdl] = (b[mdl] ?? 0) + v.usd; build.set(it.who, b); }
@@ -14795,19 +14805,27 @@ function modelTierStats(items, now = Date.now()) {
     if (merged ? merged < from : !isActive(t) || (builtAt.get(id) ?? 0) < from) continue;
     const plan = ticketRecordText(id, 'plan.md');
     if (!plan) continue;
-    const tiers = [...plan.matchAll(TIER_LINE)].map((x) => x[1].toLowerCase());
-    if (!tiers.length) continue;
-    const fast = tiers.filter((x) => x === 'fast').length;
-    out.tickets++; out.fast_tasks += fast; out.strong_tasks += tiers.length - fast;
+    // each task's text runs from its Model line to the next one
+    const marks = [...plan.matchAll(TIER_LINE)];
+    if (!marks.length) continue;
+    const tasks = marks.map((x, i) => ({ tier: x[1].toLowerCase(), text: plan.slice(x.index, marks[i + 1]?.index ?? plan.length) }));
+    const fastTasks = tasks.filter((x) => x.tier === 'fast');
+    const routable = fastTasks.filter((x) => !BUILT_HERE.test(x.text)).length;
+    out.tickets++; out.fast_tasks += fastTasks.length; out.strong_tasks += tasks.length - fastTasks.length; out.fast_built_here += fastTasks.length - routable;
+    // a miss is noted in that task's review (task-<n>-<pass>.md): once per task, however many passes
+    // or a final restating it
     const rb = ticketBranchRef(id);
-    out.misses += ticketReviews(id, rb && !mergeShaFor(id) ? { ref: rb } : WORKTREE).filter((r) => r.model_miss).length;
+    const missed = new Set(ticketReviews(id, rb && !mergeShaFor(id) ? { ref: rb } : WORKTREE).filter((r) => r.model_miss && /^task-\d+-\d+[a-z]?\.md$/.test(r.file)).map((r) => r.file.match(/^task-(\d+)-/)[1]));
+    out.misses += missed.size;
     const b = build.get(id) ?? {};
     const priced = Object.entries(b).map(([mdl, usd]) => ({ usd, out: priceFor(modelKey(mdl))?.output ?? null }));
+    // a build with spend on an unpriced model can't say what was cheaper: not judged (unpriced-model asks for prices)
+    const unpriced = priced.some((x) => x.out === null && x.usd > 0);
     const top = Math.max(0, ...priced.map((x) => x.out ?? 0));
     const usd = priced.reduce((a, x) => a + x.usd, 0);
     const cheaper = priced.filter((x) => x.out !== null && x.out < top).reduce((a, x) => a + x.usd, 0);
     out.build_usd += usd; out.build_usd_cheaper += cheaper;
-    if (fast && usd >= 2 && cheaper / usd < 0.05) out.unrouted.push({ id, fast_tasks: fast, tasks: tiers.length, build_usd: +usd.toFixed(2) });
+    if (routable && !unpriced && usd >= 2 && cheaper / usd < 0.05) out.unrouted.push({ id, fast_tasks: routable, tasks: tasks.length, build_usd: +usd.toFixed(2) });
   }
   out.miss_rate = out.fast_tasks ? +(out.misses / out.fast_tasks).toFixed(2) : null;
   out.cheaper_share = out.build_usd ? +(out.build_usd_cheaper / out.build_usd).toFixed(2) : null;
@@ -15356,7 +15374,7 @@ function collectMetrics(since) {
     if (st && st.first_passes >= EFF_MIN_PASSES() && st.rejection_rate > 0.6) add('medium', 'review-churn', `${stage} review`, `${Math.round(100 * st.rejection_rate)}% of ${stage} first passes were rejected (${st.rejected} of ${st.first_passes})${st.top_blocking_rules?.length ? `; most cited: ${st.top_blocking_rules.slice(0, 3).map((x) => `${x.rule} ×${x.count}`).join(', ')}` : ''}`, `turn what first passes keep citing into what new sessions are told from the start: a lesson scoped to who writes the ${stage} (it reaches every new prompt), or a fix to the ${stage} template; or, if reviewers block on what isn't Critical or Important, fix the review prompt`);
   }
   const mt = m.model_tiers;
-  if (mt && mt.unrouted.length >= TIER_MIN_TICKETS()) add('medium', 'fast-tasks-unrouted', 'build', `${mt.unrouted.length} of ${mt.tickets} recent tickets planned fast tasks (${mt.unrouted.reduce((a, x) => a + x.fast_tasks, 0)} of ${mt.unrouted.reduce((a, x) => a + x.tasks, 0)}) but spent under 5% of their build on a cheaper model: ${mt.unrouted.slice(0, 4).map((x) => x.id).join(', ')}${mt.unrouted.length > 4 ? ', …' : ''}`, `have workers hand each \`Model: fast\` task to a subagent on settings.model_tiers.fast (worker.md §3); building it in the worker's own session is the exception, with its reason in the plan. Model misses so far: ${mt.misses} of ${mt.fast_tasks} fast tasks`);
+  if (mt && mt.unrouted.length >= TIER_MIN_TICKETS()) add('medium', 'fast-tasks-unrouted', 'build', `${mt.unrouted.length} of ${mt.tickets} recent tickets planned fast tasks (${mt.unrouted.reduce((a, x) => a + x.fast_tasks, 0)} of ${mt.unrouted.reduce((a, x) => a + x.tasks, 0)}) but spent under 5% of their build on a cheaper model (a floor: a worker's own cheap subagents count toward it too): ${mt.unrouted.slice(0, 4).map((x) => x.id).join(', ')}${mt.unrouted.length > 4 ? ', …' : ''}`, `have workers hand each \`Model: fast\` task to a subagent on settings.model_tiers.fast (worker.md §3); building it in the worker's own session is the exception, with its reason in the plan. Model misses so far: ${mt.misses} of ${mt.fast_tasks} fast tasks`);
   const unpriced = Object.entries(m.cost.unpriced_models ?? {});
   if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
@@ -21881,7 +21899,7 @@ async function cmdDashboard() {
 /* cmdDashboard end */
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
-  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3). Build each plan task marked `Model: fast` in a subagent on the fast model (`settings --get model_tiers`), not in this session: you run on the strong one (worker.md §3).',
+  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3). Build each plan task marked `Model: fast` in a subagent on the fast model (`settings --get model_tiers`) unless the plan says `- Built here: <why>` under it (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
