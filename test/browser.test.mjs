@@ -352,6 +352,37 @@ function controlPost(port, headers, body = JSON.stringify({ verb: 'status', args
   });
 }
 
+// KIT-347 DIAGNOSTIC (temporary, not to land): Chrome launched as the daemon launches it, timed.
+test('KIT347 probe: cold Chrome starts over the pipe', { ...opts, timeout: 300000 }, async (t) => {
+  const { chromePath } = await import('./lib/chrome.mjs');
+  const rd = (f) => { try { return fs.readFileSync(f, 'utf8').trim().replace(/\n/g, ' | '); } catch { return '-'; } };
+  const say = (s) => { t.diagnostic(s); console.log(`KIT347 ${s}`); };
+  say(`node ${process.version} nproc ${os.cpus().length} chrome ${chromePath}`);
+  const v0 = Date.now(); const ver = spawnSync(chromePath, ['--version'], { encoding: 'utf8', timeout: 60000 }); say(`--version ${Date.now() - v0} ms: ${(ver.stdout || '').trim()}`);
+  for (let i = 0; i < 4; i++) {
+    const prof = fs.mkdtempSync(path.join(tmp, 'probe-'));
+    const noSandbox = i === 3;
+    const args = ['--headless=new', `--user-data-dir=${prof}`, '--remote-debugging-pipe', '--proxy-server=127.0.0.1:9', '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic', '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--password-store=basic', '--enable-logging=stderr', '--v=1', ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank'];
+    say(`#${i} load ${rd('/proc/loadavg')} cpu-psi ${rd('/proc/pressure/cpu')} io-psi ${rd('/proc/pressure/io')} mem ${rd('/proc/pressure/memory')}`);
+    const t0 = Date.now();
+    const c = spawn(chromePath, args, { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+    const lines = []; let last = t0, buf = '';
+    c.stderr.setEncoding('utf8');
+    c.stderr.on('data', (d) => { buf += d; let n; while ((n = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, n); buf = buf.slice(n + 1); const now = Date.now(); lines.push({ at: now - t0, gap: now - last, l: l.slice(0, 220) }); last = now; } });
+    let got = null;
+    c.stdio[4].on('data', (d) => { if (got === null && d.includes(0)) got = Date.now() - t0; });
+    c.stdio[3].write(`${JSON.stringify({ id: 1, method: 'Browser.getVersion' })}\0`);
+    let exited = null; c.once('exit', (code, sig) => { exited = `${code ?? sig} at ${Date.now() - t0}`; });
+    for (const end = Date.now() + 90000; got === null && exited === null && Date.now() < end;) await new Promise((r) => setTimeout(r, 50));
+    say(`#${i} sandbox=${!noSandbox} answer=${got} ms exited=${exited} stderr-lines=${lines.length} load-after ${rd('/proc/loadavg')}`);
+    for (const x of lines.filter((x) => x.gap > 700).slice(0, 15)) say(`#${i}   gap ${x.gap} ms before (+${x.at}) ${x.l}`);
+    for (const x of lines.slice(-6)) say(`#${i}   tail (+${x.at}) ${x.l}`);
+    try { process.kill(-c.pid, 'SIGKILL'); } catch {}
+    await new Promise((r) => (c.exitCode !== null || c.signalCode !== null ? r() : c.once('exit', r)));
+    fs.rmSync(prof, { recursive: true, force: true });
+  }
+});
+
 test('B1 Chrome runs in the preview window; D1 the profile folder; status while running', opts, async () => {
   await started(a);
   const st = fs.statSync(a.state);
