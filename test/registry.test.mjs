@@ -109,6 +109,11 @@ test('a url link lands only as a registry-edit act wrote it: matched by the entr
     ok(old, ['link', 'add', 'notion', '--kind', 'url', '--url', 'https://notion.test/r', '--title', 'Runbook'], SUP);
     g(['checkout', '-q', '--', settingsRel], old);
     chore('both', (w) => edit((j) => { j.links = { notion: { kind: 'url', url: 'https://notion.test/r', title: 'Runbook' }, figma: { ...j.links.figma, title: 'All designs' } }; }, w), { from: before });
+    // main changed settings.md since the branch left it: refused until main is merged in
+    // (kit-162, ruling d-20261120-044235981); then figma is as main has it and notion has its act
+    assert.match(merge('both', ['--dry-run']).text, /settings\.md: main changed it since this branch left it, and so does the branch; merge main into the branch first/);
+    const bw = path.join(old, '.worktrees', 'chore-both');
+    g(['fetch', '-q', 'origin'], bw); g(['merge', '-q', '--no-edit', 'origin/main'], bw); g(['push', '-q', 'origin', 'chore-both'], bw);
     const r = merge('both', ['--dry-run']);
     assert.equal(r.status, 0, `figma is as main has it and notion has its act: ${r.text}`);
     // a removal lands with the act that removed it (entry_hash null)
@@ -218,9 +223,13 @@ test('without lines, a key or link both main and the branch changed is refused, 
     edit((j) => { j.tick_minutes = 7; }); g(['commit', '-qam', 'tick 7'], old); g(['push', '-q', 'origin', 'main'], old);
     chore('tick9', (w) => edit((j) => { j.tick_minutes = 9; }, w), { from: mid });
     assert.match(merge('tick9', ['--dry-run']).text, /settings\.md: both main and this branch changed tick_minutes; merge main into the branch first/);
+    // the same change on both sides: settings.md is refused until the branch has main (kit-162, ruling
+    // d-20261120-044235981); the same edit cut from main lands
     chore('tick7', (w) => edit((j) => { j.tick_minutes = 7; j.stale_after_minutes = 40; }, w), { from: mid });
-    const same = merge('tick7', ['--dry-run']);
-    assert.equal(same.status, 0, `the same change on both sides: ${same.text}`);
+    assert.match(merge('tick7', ['--dry-run']).text, /settings\.md: main changed it since this branch left it, and so does the branch; merge main into the branch first/);
+    chore('tick7-now', (w) => edit((j) => { j.tick_minutes = 7; j.stale_after_minutes = 40; }, w));
+    const same = merge('tick7-now', ['--dry-run']);
+    assert.equal(same.status, 0, `the same change, from main: ${same.text}`);
   } finally { F.done(); }
 });
 
