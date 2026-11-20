@@ -401,7 +401,7 @@ test('pages and Threads tabs register once; a throwing tab shows its error', () 
 });
 
 test("the router's table: page ids and link kinds disjoint, and every legacy head goes to its home page", () => {
-  assert.deepEqual([...R.pages].sort(), ['awareness', 'board', 'efficiency', 'goals', 'governance', 'library', 'loop', 'overview', 'progress', 'retros', 'sensors', 'settings', 'trust']);
+  assert.deepEqual([...R.pages].sort(), ['awareness', 'board', 'efficiency', 'goals', 'governance', 'jobs', 'library', 'loop', 'overview', 'progress', 'retros', 'sensors', 'settings', 'trust']);
   for (const p of R.pages) { assert.doesNotMatch(p, /[/?]/); assert.ok(!Object.hasOwn(R.links, p), `${p} is not a link kind`); }
   // every link kind today's route() reads
   const route = INDEX.slice(INDEX.indexOf('function route()'), INDEX.indexOf('function hideDrawer()'));
