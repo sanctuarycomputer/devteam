@@ -17,10 +17,13 @@ const filesIn = (d) => fs.readdirSync(d, { recursive: true }).map(String).sort()
 test('importing the test helper leaves no session\'s DEVTEAM_* or tmux in the environment, only the harness\'s own knobs', () => {
   const decoy = decoyOf('env-decoy');
   const env = { ...process.env, ...workerEnv(decoy), DEVTEAM_FORK: path.join(decoy, 'fork'), DEVTEAM_TEST_KEEP: '1' };
-  const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(new URL('./lib/kit.mjs', import.meta.url).href)}); console.log(JSON.stringify(Object.keys(process.env).filter((k) => /^(DEVTEAM_|TMUX)/.test(k)).sort()))`], { cwd: tmp, env, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(new URL('./lib/kit.mjs', import.meta.url).href)}); console.log(JSON.stringify(Object.keys(process.env).filter((k) => /^(DEVTEAM_|TMUX)/.test(k)).sort())); console.log(process.env.DEVTEAM_MEMORY_RECORD ?? 'unset')`], { cwd: tmp, env, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  const names = JSON.parse(r.stdout.trim().split('\n').at(-1));
-  assert.deepEqual(names.filter((k) => !HARNESS_ENV.test(k)), ['DEVTEAM_BOX', 'DEVTEAM_CSWAP', 'DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_SUPERVISOR_UP', 'TMUX_TMPDIR']);
+  const said = r.stdout.trim().split('\n');
+  const names = JSON.parse(said.at(-2));
+  assert.deepEqual(names.filter((k) => !HARNESS_ENV.test(k)), ['DEVTEAM_BOX', 'DEVTEAM_CSWAP', 'DEVTEAM_HUB_PORT', 'DEVTEAM_MEMORY_RECORD', 'DEVTEAM_PORT_BASE', 'DEVTEAM_SUPERVISOR_UP', 'TMUX_TMPDIR']);
+  // the hub's memory recorder is off in every kit a test starts, through a helper or not (kit-591)
+  assert.equal(said.at(-1), 'off', 'DEVTEAM_MEMORY_RECORD is off');
   for (const k of ['DEVTEAM_FORK', 'DEVTEAM_TEST_KEEP', 'DEVTEAM_CGROUP', 'DEVTEAM_MEMINFO']) assert.ok(names.includes(k), `${k} survives: the harness reads it`);
   assert.deepEqual(filesIn(decoy), ['run']);
 });
