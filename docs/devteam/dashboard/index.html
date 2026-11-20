@@ -8045,10 +8045,12 @@ for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click',
 }, true);
 // A card for a thread about to start: its subject fitted to the log's cap; nothing is written until
 // the owner sends the first words.
-// A Settings row whose thread is open opens that thread (one per row; spec §8).
+// A subject with an open thread opens that thread instead (kit-97): one per subject, by tKey, as the kit
+// refuses a second (subjectKey); a Settings or suggestion row by its view alone, wherever on it (spec §8).
 function tlStart(hit) {
   const key = hit.subject.kind === 'page' ? parseSettingView(hit.subject.view) ?? parseSuggView(hit.subject.view) : null;
-  const had = key !== null ? TL.threads.find((t) => t.status === 'open' && t.subject?.kind === 'page' && t.subject.view === hit.subject.view) : null;
+  const k = tKey(tFit(hit.subject));
+  const had = TL.threads.find((t) => t.status === 'open' && t.subject && ((k !== null && tKey(t.subject) === k) || (key !== null && t.subject.kind === 'page' && t.subject.view === hit.subject.view)));
   if (had) return void tlOpen(had.id);
   TL.open = null;
   TL.resolving = false;
