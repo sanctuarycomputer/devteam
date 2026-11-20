@@ -386,6 +386,14 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     assert.equal(g.nopath, null, 'no path: null');
     const held = await V.p.ev(`(() => { const w = tsFrame().contentWindow, say = (h) => dispatchEvent(new MessageEvent('message', { data: { lens: 1, type: 'nav', path: '/artifact/main/pages/a.html', hash: h }, source: w })); const n = AV_NAVS, h0 = TS.hash; TS.ready = false; say('#before-ready'); const dropped = [AV_NAVS - n, TS.hash === h0]; TS.ready = true; const m = AV_NAVS; say('#twice'); say('#twice'); return [...dropped, AV_NAVS - m]; })()`);
     assert.deepEqual(held, [0, true, 1], 'a nav before ready is dropped; the same nav twice counts once');
+    // a changed nav lets go of where the last view's anchors were, at once (task-2 T2-4)
+    assert.equal(await V.p.ev(`(() => { const w = tsFrame().contentWindow; TS.rects.set('x', { rect: { x: 1, y: 1, w: 1, h: 1 } }); dispatchEvent(new MessageEvent('message', { data: { lens: 1, type: 'nav', path: '/artifact/main/pages/a.html', hash: '#cleared' }, source: w })); return TS.rects.size; })()`), 0, 'a changed nav clears the rects');
+    // which notes a view shows (tFrameOn): a bare trailing # is no hash (T2-1); a path that is only a hash is the index's (T2-2)
+    const on = await V.p.ev(`(() => { const n = (path) => ({ kind: 'artifact', slug: 'pages', at: 'main', path }), st = (path, hash) => ({ kind: 'artifact', slug: 'pages', path, hash }); return [tFrameOn(n('a.html#'), st('a.html', '#tab2')), tFrameOn(n('#tab2'), st('index.html', '#tab2')), tFrameOn(n('#tab2'), st('index.html', '')), tFrameOn(n('a.html#tab2'), st('a.html', '#tab2')), tFrameOn(n('a.html#tab2'), st('b.html', '#tab2'))]; })()`);
+    assert.deepEqual(on, [true, true, false, true, false], "tFrameOn: 'a.html#' on every hash; '#tab2' the index's #tab2; a hash note on its file and hash only");
+    // a point note's path at exactly the 300-byte cap keeps its hash; one byte over keeps the plain file (T2-3)
+    const caps = await V.p.ev(`(() => { const h = TS.hash, p = TS.path; TS.path = 'a.html'; TS.hash = '#' + 'h'.repeat(293); const at = tsSubject(null, 1, 1).path; TS.hash = '#' + 'h'.repeat(294); const over = tsSubject(null, 1, 1).path; TS.hash = h; TS.path = p; return [at.length, over]; })()`);
+    assert.deepEqual(caps, [300, 'a.html'], 'a 300-byte path keeps its hash; 301 bytes keeps the file');
   });
 
   await sub('C1: b.html: an element note shows with and without #section-2', async () => {

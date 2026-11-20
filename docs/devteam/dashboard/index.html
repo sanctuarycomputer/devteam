@@ -8748,7 +8748,8 @@ function tFrameOn(s, stage) {
   if (s.kind !== 'artifact' || s.slug !== stage.slug) return false;
   const p = s.path || 'index.html', i = p.indexOf('#');
   const file = i < 0 ? p : p.slice(0, i), hash = i < 0 ? '' : p.slice(i);
-  return file === (stage.path || 'index.html') && (hash.length <= 1 || hash === (stage.hash ?? ''));
+  // (a path that is only a hash, #tab2, is the index's: task-2 T2-2)
+  return (file || 'index.html') === (stage.path || 'index.html') && (hash.length <= 1 || hash === (stage.hash ?? ''));
 }
 /* threads-core end */
 
