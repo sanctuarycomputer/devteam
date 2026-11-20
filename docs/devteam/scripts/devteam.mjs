@@ -13780,7 +13780,10 @@ function cmdChore() {
     // posted secrets) never waits.
     const um = goalMode(upkeepOrVirtual());
     if (um !== 'run' && !isRecordKeeping(choreSlug(slugName)) && !flags.force) die(`Upkeep is ${holdWords(um)}: no new upkeep chore starts (goal hold upkeep run --owner, or --force, logged)`);
-    return out(choreWorktree(slugName, { setup: true }));
+    const wt = choreWorktree(slugName, { setup: true });
+    // the jobs' chore started past Upkeep's hold is the supervisor's call, so it is logged (kit-162)
+    if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: ['upkeep', 'chore-recurring'], reversible: true }, 'supervisor');
+    return out(wt);
   }
   if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
   supervisorOnly('chore');
@@ -23134,6 +23137,108 @@ function recurringBindingFails(base, sha, approved) {
   }
   return fails;
 }
+// recurring list | show | apply (kit-162). list and show read main's jobs (loadSettings, which pins
+// an owner setting to main) and never fail on a broken entry: it is printed with its problems. An
+// entry is registered by the latest merge-chore act citing an answered recurring-edit question that
+// showed exactly main's entry for the name. apply writes one live answer's exact change into the
+// recurring chore's worktree, rewriting only the recurring value (recurringRegistry.applied), and
+// only while that worktree's jobs are main's, so the PR carries this answer alone.
+function cmdRecurring() {
+  const R = recurringRegistry;
+  const [sub, arg] = positional;
+  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid>';
+  const BLOCK = /```json devteam\s*\n([\s\S]*?)\n```/;
+  const jobsOf = (s) => (s && s.recurring === undefined ? {} : s?.recurring);
+  if (sub === 'list' || sub === 'show') {
+    if (sub === 'show' && !arg) die('usage: recurring show <name> [--json]');
+    const raw = jobsOf(loadSettings());
+    const jobs = isObj(raw) ? raw : {};
+    const views = new Map(R.questions().map((v) => [v.id, v]));
+    const acts = logObjects('act').filter((a) => a.class === 'merge-chore' && typeof a.approved_by === 'string' && views.has(a.approved_by)).sort(byTime);
+    const registered = (name, entry) => {
+      for (const a of [...acts].reverse()) {
+        const v = views.get(a.approved_by);
+        const shown = R.shown(v);
+        if (v.status === 'answered' && shown && Object.hasOwn(shown, name) && shown[name] !== null && canonical(shown[name]) === canonical(entry)) return { qid: v.id, at: a.created_at, by: a.created_by, act: a.id };
+      }
+      return null;
+    };
+    const pending = R.pending().flatMap((p) => Object.keys(p.change).sort().map((name) => ({ qid: p.qid, name, change: p.change[name], status: p.status })));
+    const row = (name) => {
+      const entry = jobs[name];
+      const problems = recurringEntryProblems(name, entry);
+      return { name, entry, runs_a_day: R.runsADay(entry), registered: registered(name, entry), ...(problems.length ? { problems } : {}) };
+    };
+    const regWords = (r) => (r ? `registered ${dateOnly(r.at)} by ${r.by} (${r.qid})` : 'not registered through an answer');
+    const pendWords = (p) => `${p.qid} ${p.status}: ${p.name} ${p.change === null ? 'stop' : JSON.stringify(p.change)}`;
+    const broken = isObj(raw) ? [] : [`settings recurring: an object of jobs, not ${JSON.stringify(raw)}`];
+    if (sub === 'show') {
+      if (!Object.hasOwn(jobs, arg)) die(`no job ${arg} on main; recurring list`);
+      const r = { ...row(arg), pending: pending.filter((p) => p.name === arg) };
+      if (flags.json) return json(r);
+      return out([`${arg}`, JSON.stringify(r.entry, null, 2), `runs a day: ${R.runsWords(r.runs_a_day)}`, regWords(r.registered), ...(r.problems ?? []).map((p) => `problem: ${p}`), ...(r.pending.length ? r.pending.map((p) => `pending: ${pendWords(p)}`) : ['pending: none'])].join('\n'));
+    }
+    const entries = Object.keys(jobs).sort().map(row);
+    const total = entries.reduce((t, e) => t + e.runs_a_day, 0);
+    if (flags.json) return json({ entries, runs_a_day: total, cap: R.CAP, pending, ...(broken.length ? { problems: broken } : {}) });
+    const str = (x) => (typeof x === 'string' ? x : '?');
+    return out([
+      ...broken,
+      ...(entries.length ? entries.map((e) => `${e.name}  ${str(e.entry?.kind)}  every ${str(e.entry?.every)}  ${str(e.entry?.title)}  ${regWords(e.registered)}${(e.problems ?? []).map((p) => `\n  problem: ${p}`).join('')}`) : ['no jobs on main']),
+      `${R.runsWords(total)} runs a day, cap ${R.CAP}`,
+      ...(pending.length ? pending.map((p) => `pending: ${pendWords(p)}`) : ['pending: none']),
+    ].join('\n'));
+  }
+  if (sub !== 'apply') die(usage);
+  supervisorOnly('recurring apply');
+  if (!arg) die('usage: recurring apply <qid>');
+  const q = logGet(arg);
+  if (q?.type !== 'question') die(`no question ${arg}`);
+  if (q.class !== 'recurring-edit') die(`${arg} is a ${q.class ?? 'classless'} question; apply takes an answered recurring-edit question`);
+  const v = ownerAnswer(arg, 'recurring apply');
+  const change = R.shown(v);
+  if (!change) die(`${arg} showed no job change (no change.recurring): ask again with --change`);
+  const landed = R.landed(arg);
+  if (landed) die(`${arg} already landed (${landed.id})`);
+  if (!R.live(v)) {
+    const later = R.superseded(v);
+    die(`${arg} can't approve a job change: ${later ? `superseded by ${later.qid}, asked later about ${later.name}` : `answered "${String(v.answer ?? '').slice(0, 80)}", not Yes`}`);
+  }
+  const wt = path.join(mainRoot, '.worktrees', 'chore-recurring');
+  if (!fs.existsSync(wt)) die('no worktree .worktrees/chore-recurring; devteam.mjs chore start recurring');
+  if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die('.worktrees/chore-recurring is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start recurring');
+  const file = path.join(wt, projectRel, 'settings.md');
+  const text = readText(file) ?? '';
+  const m = BLOCK.exec(text);
+  if (!m) die('settings.md has no json devteam block');
+  let here;
+  try { here = JSON.parse(m[1]); } catch (e) { die(`settings.md: the json devteam block is not valid JSON: ${e.message}`); }
+  if (!isObj(here)) die('settings.md: the json devteam block is not an object');
+  const mainJobs = jobsOf(mainSettings());
+  const base = isObj(mainJobs) ? mainJobs : {};
+  if (canonical(jobsOf({ ...SETTINGS_DEFAULTS, ...here })) !== canonical(base)) die("the chore worktree's recurring already differs from main's: one answer per PR");
+  // main's jobs with the change: a stop deleted, an edit in its place, an addition last
+  const value = { ...base };
+  for (const [n, e] of Object.entries(change)) { if (e === null) delete value[n]; else value[n] = e; }
+  const r = R.applied(text, value);
+  if (r.problem) die(r.problem);
+  // checked again here before writing: the block parses, its recurring is the new value, every other
+  // key is as it was, and nothing outside the block moved
+  const m2 = BLOCK.exec(r.text);
+  let after = null;
+  try { after = m2 ? JSON.parse(m2[1]) : null; } catch { after = null; }
+  const rest = (o) => canonical(Object.fromEntries(Object.entries(o).filter(([k]) => k !== 'recurring')));
+  if (!isObj(after) || canonical(after.recurring) !== canonical(value) || rest(after) !== rest(here) || r.text.slice(0, m2.index) !== text.slice(0, m.index) || r.text.slice(m2.index + m2[0].length) !== text.slice(m.index + m[0].length)) die('settings.md: the rewritten json devteam block did not check out; nothing was written');
+  fs.writeFileSync(file, r.text);
+  const how = (n) => (change[n] === null ? 'stopped' : Object.hasOwn(base, n) ? 'changed' : 'added');
+  out([
+    `wrote ${arg}'s change into .worktrees/chore-recurring/${projectRel}/settings.md:`,
+    ...Object.keys(change).map((n) => `  recurring.${n}: ${how(n)}`),
+    'next:',
+    `  devteam.mjs chore pr recurring --title "…"`,
+    `  devteam.mjs merge --chore recurring --approved ${arg}`,
+  ].join('\n'));
+}
 
 // ===== sensors: production signals into the loop =====
 // A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
@@ -27658,10 +27763,14 @@ const HELP_DASHBOARD = `Dashboard and releases
   box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run]  (each [--dockerfile p])   in the kit's own checkout: the box image's tool pins in cloud/Dockerfile (Claude Code, claude-swap, gh, ttyd, mise, uv). verify checks them and the release stamp offline; check says which are behind upstream (exit 1 stale, 3 some unknown, 0 none, 2 no file or one that doesn't verify); bump moves every tool not held (a "# hold: <reason>" line above its _VERSION ARG) to its latest, with sums from the downloaded assets, and stamps the release. Only the top package of the npm and PyPI tools is pinned: their dependencies resolve when the image is built
   box-pins installed   inside the box image: each tool's version, asked at its path in the image (never through PATH), against DEVTEAM_BOX_TOOLS
   hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)`;
+const RECURRING_HELP = `Jobs under Upkeep (supervisor.md, Recurring jobs)
+  recurring list [--json]   main's jobs (settings recurring) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null }], runs_a_day, cap, pending: [{ qid, name, change, status }] }
+  recurring show <name> [--json]   one job on main in full, who registered it, and its pending questions
+  recurring apply <qid>   supervisor: write an answered recurring-edit question's exact change into .worktrees/chore-recurring's settings.md (chore start recurring first; its jobs must be main's), rewriting only the recurring value; then chore pr recurring and merge --chore recurring --approved <qid>`;
 /* helpSections end */
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
-${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, HELP_OBSERVE, HELP_GOALS, HELP_LOG, HELP_DASHBOARD].join('\n\n')}
+${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, HELP_OBSERVE, HELP_GOALS, RECURRING_HELP, HELP_LOG, HELP_DASHBOARD].join('\n\n')}
 `;
 
 /* HELP end */
@@ -27706,6 +27815,7 @@ const COMMANDS_DASHBOARD = {
 /* commandGroups end */
 const COMMANDS = {
   ...COMMANDS_SETUP, ...COMMANDS_GRAPH, ...COMMANDS_CHECKS, ...COMMANDS_SESSIONS, ...COMMANDS_DECIDE, ...COMMANDS_OBSERVE, ...COMMANDS_GOALS, ...COMMANDS_LOG, ...COMMANDS_HOLDS, ...COMMANDS_DASHBOARD,
+  recurring: cmdRecurring,
 };
 /* dispatch start */
 if (!command || command === 'help' || command === '--help') out(HELP);
