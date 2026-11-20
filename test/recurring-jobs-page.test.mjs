@@ -108,8 +108,11 @@ async function openOn(t, { rec, peeks = clone(PEEK_FX), width = 1440, height = 9
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
     await soon("!document.querySelector('main.waiting') && typeof DATA !== 'undefined' && !!DATA", 'the page with its data');
   };
+  // a real click, once the target has stopped moving: a fresh load can slide the Threads panel in (remembered open),
+  // which moves the page under it while the click's point is read
   const click = async (sel) => {
     await p.ev(`(() => { document.querySelector(${J(sel)}).scrollIntoView({ block: 'center', behavior: 'instant' }); })(); new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+    await soon(`(async () => { const at = () => JSON.stringify(document.querySelector(${J(sel)}).getBoundingClientRect()); const a = at(); await new Promise((r) => setTimeout(r, 150)); return a === at(); })()`, `${sel} at rest`);
     await p.click(sel);
   };
   return { p, soon, go, fx, click, port };
