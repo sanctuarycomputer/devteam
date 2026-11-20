@@ -20790,9 +20790,10 @@ async function dashRoutesThreads(D, req, res, q) {
 async function dashRoutesReads(D, req, res, q) {
   const { u } = q;
   const { run, send } = D;
-  // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
+  // Whether the fleet can move now: fleet status, never fetching, whatever the query says (no GET
+  // changes anything, kit-251: Settings' Check now fetches first by POST /api/fleet-check).
   if (req.method === 'GET' && u.pathname === '/api/fleet') {
-    const r = await run(['fleet', 'status', '--json', ...(u.searchParams.get('fetch') === '1' ? [] : ['--no-fetch'])]);
+    const r = await run(['fleet', 'status', '--json', '--no-fetch']);
     return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
   }
   // One record's stored fields, and the schema's words for each field (the sidepeek's attributes).
@@ -20977,17 +20978,18 @@ async function dashRoutesReviewPage(D, req, res, q) {
   }
   return DASH_NEXT;
 }
-// every POST /api/<name> (pane-answer, owner-setting, secret, review-draft and review-answer, the ACTIONS), and the 404 for everything else
+// every POST /api/<name> (pane-answer, owner-setting, secret, review-draft and review-answer, fleet-check, the ACTIONS), and the 404 for everything else
 async function dashRoutesOwner(D, req, res, q) {
   const { u } = q;
-  const { log, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer } = D;
+  const { log, run, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer } = D;
   const name = req.method === 'POST' && u.pathname.startsWith('/api/') ? u.pathname.slice(5) : null;
   const isSecret = name === 'secret';
   const isReview = name === 'review-draft' || name === 'review-answer';
   const isPane = name === 'pane-answer';
   const isOwnerSetting = name === 'owner-setting';
+  const isCheck = name === 'fleet-check';
   const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
-  if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
+  if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting && !isCheck) return send(res, 404, 'text/plain', 'not found');
   // an owner action, answered however it ends: the kept /api/data build is stale from its answer's
   // head on, before a byte of it reaches the page, so the page's next read waits for a new build
   const head = res.writeHead;
@@ -21026,6 +21028,12 @@ async function dashRoutesOwner(D, req, res, q) {
   const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
   // The owner's own process, with the body on its stdin (never in argv or the server's output).
   const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
+  // Check now (kit-251): fleet status after a fetch from origin. A POST, as every other request that
+  // changes refs is: the body is read to its end (the cap above holds) and nothing in it is used.
+  if (isCheck) return req.on('end', async () => {
+    const r = await run(['fleet', 'status', '--json']);
+    if (!res.headersSent) send(res, r.ok ? 200 : 500, 'application/json', r.ok ? r.stdout : JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+  });
   if (isPane) {
     const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
     return req.on('end', () => guarded(() => {
