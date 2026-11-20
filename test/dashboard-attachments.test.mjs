@@ -23,9 +23,11 @@ const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPh
 const PNG_BYTES = Buffer.from(PNG_B64, 'base64').length;
 const UPLOAD_MAX = 4096; // the test-only cap (kit-170), so a 6 KB file is refused for real
 const FORBIDDEN = "dropped files only from this dashboard's own page";
+// a name a file from the web can carry: shown as text, never run (window.__x stays unset)
+const HOSTILE = '"><img src=x onerror=window.__x=1>.png';
 
-// The page's fetch: every POST recorded (an upload's name and its body's size), a thread-say held while
-// window.__hold is set (released by window.__release()), and with window.__forbid an upload answered 403 as the
+// The page's fetch: every POST recorded (an upload's name and its body's size), a thread-say or thread-new held
+// while window.__hold names it ('say' or 'new') (released by window.__release()), and with window.__forbid an upload answered 403 as the
 // laptop route answers a page whose browser sent no Sec-Fetch-Site. window.__insecure makes isSecureContext false.
 const initScript = `(() => {
   const si = window.setInterval;
@@ -44,11 +46,11 @@ const initScript = `(() => {
     const url = String(u && u.url ? u.url : u);
     if (o?.method === 'POST' && url.startsWith('/upload')) {
       window.__uploads.push({ url, size: o.body?.size ?? null });
-      if (window.__forbid) return new Response(${JSON.stringify(FORBIDDEN)}, { status: 403, headers: { 'content-type': 'text/plain' } });
+      if (window.__forbid) return new Response(JSON.stringify({ error: ${JSON.stringify(FORBIDDEN)} }), { status: 403, headers: { 'content-type': 'application/json' } });
     }
     if (o?.method === 'POST' && url.startsWith('/api/')) {
       window.__posts.push({ url, body: o.body });
-      if (url === '/api/thread-say' && window.__hold) await new Promise((r) => { release = r; });
+      if ((url === '/api/thread-say' && window.__hold === 'say') || (url === '/api/thread-new' && window.__hold === 'new')) await new Promise((r) => { release = r; });
     }
     return real(u, o);
   };
@@ -168,6 +170,11 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
   const Q3 = L.ask('Which logo?');
   const Q4 = L.ask('Any of these?', ['This', 'That']);
   const T1 = L.thread('Where do we start?');
+  const T2 = L.thread('Another thread');
+  // a thread on Upkeep's card, so its card floats on Goals, with a file on its first turn
+  const shot = await L.upload('Pinned.png', Buffer.from(PNG_B64, 'base64'));
+  assert.equal(shot.status, 200, shot.text);
+  const T3 = L.dt(['thread', 'new', '--title', 'About upkeep', '--subject', JSON.stringify({ kind: 'item', ref: 'goal:upkeep' }), '--files', JSON.stringify([{ name: 'Pinned.png', path: shot.json.path, bytes: shot.json.size }]), '--', 'look at this']).split('\n')[0];
   const chrome = await openChrome();
   later(() => chrome.close());
   const p = await chrome.newPage();
@@ -179,7 +186,7 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
   await p.send('Page.navigate', { url: `http://127.0.0.1:${L.port}/#questions` });
   const soon = soonIn(p, 20000, () => L.dash.out());
   const box = (key) => `document.querySelector('.dropbox[data-drop="${key}"]')`;
-  const pills = (key) => `[...(${box(key)}?.querySelectorAll('.pill') ?? [])]`;
+  const pills = (key) => `[...(${box(key)}?.querySelectorAll('.att-pill') ?? [])]`;
   const posted = (url) => p.ev(`window.__posts.filter((x) => x.url === ${JSON.stringify(url)}).map((x) => JSON.parse(x.body))`);
   const card = (q) => `document.querySelector('#questions [data-qcard="${q}"]')`;
   await soon(`!!${card(Q1)} && !!${card(Q4)}`, 'the question cards');
@@ -214,19 +221,26 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     await soon(`!!${card(Q1)}`, 'back on the Inbox');
   });
 
-  await t.test('A2, A3, B1: an Inbox answer: two uploads, two pills inside the box under the text, one removed, sent with the words', async () => {
-    await p.ev(`window.__drop('#questions [data-qcard="${Q1}"] textarea[data-q]', [{ name: 'Shot 1.png', png: true }, { name: 'notes.txt', text: 'hello notes' }]); void 0`);
-    await soon(`${pills(`q:${Q1}`)}.length === 2 && ${pills(`q:${Q1}`)}.every((x) => x.dataset.pillState === 'ok')`, 'two taken pills');
-    assert.deepEqual(await p.ev('window.__uploads.map((x) => [decodeURIComponent(x.url.split("name=")[1]), x.size])'), [['Shot 1.png', PNG_BYTES], ['notes.txt', 11]], 'one POST /upload per file, its bytes');
-    assert.equal(L.uploads().length, 2, 'both stored in the project\'s uploads folder');
+  await t.test('A2, A3, A7, B1: an Inbox answer: three uploads, pills inside the box under the text, kept across redraws, two removed, sent with the words', async () => {
+    await p.ev(`window.__drop('#questions [data-qcard="${Q1}"] textarea[data-q]', [{ name: 'Shot 1.png', png: true }, { name: 'notes.txt', text: 'hello notes' }, { name: ${JSON.stringify(HOSTILE)}, png: true }]); void 0`);
+    await soon(`${pills(`q:${Q1}`)}.length === 3 && ${pills(`q:${Q1}`)}.every((x) => x.dataset.pillState === 'ok')`, 'three taken pills');
+    assert.deepEqual(await p.ev('window.__uploads.map((x) => [decodeURIComponent(x.url.split("name=")[1]), x.size])'), [['Shot 1.png', PNG_BYTES], ['notes.txt', 11], [HOSTILE, PNG_BYTES]], 'one POST /upload per file, its bytes');
+    assert.equal(L.uploads().length, 4, "all stored in the project's uploads folder (beside the setup's Pinned.png)");
     const got = await pillsOf(`q:${Q1}`);
-    assert.deepEqual(got.map((x) => [x.name, x.size, x.remove]), [['Shot 1.png', `${PNG_BYTES} B`, true], ['notes.txt', '11 B', true]]);
+    assert.deepEqual(got.map((x) => [x.name, x.size, x.remove]), [['Shot 1.png', `${PNG_BYTES} B`, true], ['notes.txt', '11 B', true], [HOSTILE, `${PNG_BYTES} B`, true]]);
     assert.match(got[0].icon, /\bicon-image\b/);
     assert.match(got[1].icon, /\bicon-file-text\b/);
+    assert.equal(await p.ev('window.__x'), undefined, 'the hostile name ran nothing');
     const where = await p.ev(`(() => { const b = ${box(`q:${Q1}`)}.getBoundingClientRect(), ta = ${box(`q:${Q1}`)}.querySelector('textarea').getBoundingClientRect(); return ${pills(`q:${Q1}`)}.map((x) => { const r = x.getBoundingClientRect(); return r.top >= ta.bottom - 0.5 && r.left >= b.left && r.right <= b.right && r.bottom <= b.bottom; }); })()`);
-    assert.deepEqual(where, [true, true], 'each pill inside the box, under the text');
+    assert.deepEqual(where, [true, true, true], 'each pill inside the box, under the text');
+    // A7: three forced redraws and a poll that rebuilds the card keep the pills
+    for (let i = 0; i < 3; i++) await p.ev('redrawNow(); void 0');
+    await p.ev(`document.activeElement?.blur(); ${card(Q1)}.__old = 1; void 0`);
+    await soon(`!${card(Q1)}?.__old`, 'a poll rebuilt the card');
+    assert.deepEqual((await pillsOf(`q:${Q1}`)).map((x) => x.name), ['Shot 1.png', 'notes.txt', HOSTILE], 'the pills kept across redraws');
+    await p.ev(`${pills(`q:${Q1}`)}[2].querySelector('button[data-pill-remove]').click(); void 0`);
     await p.ev(`${pills(`q:${Q1}`)}[1].querySelector('button[data-pill-remove]').click(); void 0`);
-    await soon(`${pills(`q:${Q1}`)}.length === 1`, 'the .txt removed');
+    await soon(`${pills(`q:${Q1}`)}.length === 1`, 'two removed');
     await p.ev(`(() => { const c = ${card(Q1)}; c.querySelector('input[data-pick][value="Yes"]').click(); const ta = c.querySelector('textarea[data-q]'); ta.value = 'see the shot'; ta.dispatchEvent(new Event('input', { bubbles: true })); c.querySelector('[data-answer]').click(); })()`);
     await soon(`window.__posts.some((x) => x.url === '/api/answer')`, 'the answer posted');
     const body = (await posted('/api/answer')).find((b) => b.id === Q1);
@@ -244,8 +258,11 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     await p.ev(`window.__drop('#questions [data-qcard="${Q2}"] textarea[data-q]', [{ name: 'big.bin', size: 6144 }]); void 0`);
     await soon(`${pills(`q:${Q2}`)}.some((x) => x.dataset.pillState === 'refused')`, 'the refused pill');
     const [pill] = await pillsOf(`q:${Q2}`);
-    assert.ok(pill.why.trim().length > 0, 'a reason');
-    assert.doesNotMatch(pill.why, /^HTTP \d+$/, "the server's own words, not a bare status");
+    // the server's own reason for that file, asked directly of the same dashboard
+    const direct = await L.upload('big.bin', Buffer.alloc(6144));
+    assert.equal(direct.status, 413, direct.text);
+    assert.ok(direct.json?.error, 'the route says why');
+    assert.equal(pill.why, direct.json.error, "the pill shows the server's own words");
     await p.ev(`(() => { const c = ${card(Q2)}; const ta = c.querySelector('textarea[data-q]'); ta.value = 'the second'; ta.dispatchEvent(new Event('input', { bubbles: true })); c.querySelector('[data-answer]').click(); })()`);
     await soon(`(document.getElementById('e-${Q2}')?.textContent ?? '').includes("Remove the files that weren't taken first.")`, 'the refusal line');
     assert.equal(await p.ev("window.__posts.filter((x) => x.url === '/api/answer').length"), before, 'nothing posted');
@@ -260,6 +277,7 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     const [plain] = await pillsOf(`q:${Q3}`);
     assert.match(plain.why, /^This browser doesn't say which page an upload comes from over plain http/);
     assert.ok(plain.why.includes(`http://127.0.0.1:${L.port}`), 'names the address to open');
+    assert.match(plain.why, /from another device, files can't be dropped over plain http/, 'says where that address works');
     await p.ev(`${pills(`q:${Q3}`)}[0].querySelector('button[data-pill-remove]').click(); window.__insecure = false; void 0`);
     await p.ev(`window.__drop('#questions [data-qcard="${Q3}"] textarea[data-q]', [{ name: 'b.txt', text: 'b' }]); void 0`);
     await soon(`${pills(`q:${Q3}`)}.some((x) => x.dataset.pillState === 'refused')`, 'refused again');
@@ -283,7 +301,11 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     assert.equal(await p.ev('window.__uploads.length'), n1, 'nothing uploaded');
   });
 
-  await t.test('B2: an Inbox answer of files alone, no pick and no note', async () => {
+  await t.test('B2: an Inbox answer of files alone, no pick and no note; with neither, refused on the page', async () => {
+    const n0 = await p.ev("window.__posts.filter((x) => x.url === '/api/answer').length");
+    await p.ev(`${card(Q4)}.querySelector('[data-answer]').click(); void 0`);
+    await soon(`(document.getElementById('e-${Q4}')?.textContent ?? '') === 'Pick a choice or write an answer.'`, 'the empty press refused');
+    assert.equal(await p.ev("window.__posts.filter((x) => x.url === '/api/answer').length"), n0, 'nothing posted');
     await p.ev(`window.__drop('#questions [data-qcard="${Q4}"] textarea[data-q]', [{ name: 'Only.png', png: true }]); void 0`);
     await soon(`${pills(`q:${Q4}`)}.length === 1 && ${pills(`q:${Q4}`)}[0].dataset.pillState === 'ok'`, 'taken');
     await p.ev(`${card(Q4)}.querySelector('[data-answer]').click(); void 0`);
@@ -295,44 +317,58 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     assert.equal(line?.answer, '1 file dropped');
   });
 
-  await t.test('A2, A3, B1, B3: a reply with words and two files, one removed; its pending turn and its turn show chips', async () => {
+  await t.test('A2, A3, A7, B1, B3: a reply with words and three files, one removed, kept across a thread switch; its pending turn and its turn show chips', async () => {
     await p.ev(`location.hash = '#talk/${T1}'; void 0`);
     await soon("!!document.querySelector('#tl-card:not([hidden]) #tl-c-text')", 'the thread card');
     const key = `tl:${T1}`;
-    await p.ev(`window.__drop('#tl-c-text', [{ name: 'Look.png', png: true }, { name: 'list.txt', text: 'one\\ntwo' }]); void 0`);
-    await soon(`${pills(key)}.length === 2 && ${pills(key)}.every((x) => x.dataset.pillState === 'ok')`, 'two taken pills in the composer');
+    await p.ev(`window.__drop('#tl-c-text', [{ name: 'Look.png', png: true }, { name: 'list.txt', text: 'one\\ntwo' }, { name: ${JSON.stringify(HOSTILE)}, png: true }]); void 0`);
+    await soon(`${pills(key)}.length === 3 && ${pills(key)}.every((x) => x.dataset.pillState === 'ok')`, 'three taken pills in the composer');
     const where = await p.ev(`(() => { const b = ${box(key)}.getBoundingClientRect(), ta = document.getElementById('tl-c-text').getBoundingClientRect(); return ${pills(key)}.map((x) => { const r = x.getBoundingClientRect(); return r.top >= ta.bottom - 0.5 && r.left >= b.left && r.right <= b.right && r.bottom <= b.bottom; }); })()`);
-    assert.deepEqual(where, [true, true], 'inside the composer, under the text');
+    assert.deepEqual(where, [true, true, true], 'inside the composer, under the text');
+    // A7: to another thread and back, the composer's pills are still there
+    await p.ev(`location.hash = '#talk/${T2}'; void 0`);
+    await soon(`document.getElementById('tl-card')?.dataset.key === ${JSON.stringify(T2)}`, 'the other thread');
+    assert.equal(await p.ev(`document.querySelectorAll('#tl-card .att-pill').length`), 0, "the other thread's composer has none");
+    await p.ev(`location.hash = '#talk/${T1}'; void 0`);
+    await soon(`document.getElementById('tl-card')?.dataset.key === ${JSON.stringify(T1)} && ${pills(key)}.length === 3`, 'back, with the pills');
     await p.ev(`${pills(key)}[1].querySelector('button[data-pill-remove]').click(); void 0`);
-    await soon(`${pills(key)}.length === 1`, 'removed');
-    await p.ev(`window.__drop('#tl-c-text', [{ name: 'list.txt', text: 'one\\ntwo' }]); void 0`);
-    await soon(`${pills(key)}.length === 2 && ${pills(key)}.every((x) => x.dataset.pillState === 'ok')`, 'dropped again');
-    await p.ev(`${pills(key)}[1].querySelector('button[data-pill-remove]').click(); void 0`);
-    await soon(`${pills(key)}.length === 1`, 'removed again');
-    await p.ev("window.__hold = true; (() => { const ta = document.getElementById('tl-c-text'); ta.value = 'here it is'; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-tl-send]').click(); })()");
+    await soon(`${pills(key)}.length === 2`, 'removed');
+    await p.ev("window.__hold = 'say'; (() => { const ta = document.getElementById('tl-c-text'); ta.value = 'here it is'; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-tl-send]').click(); })()");
     await soon("window.__posts.some((x) => x.url === '/api/thread-say')", 'the reply posted');
     const body = (await posted('/api/thread-say')).pop();
     assert.equal(body.text, 'here it is');
-    assert.deepEqual(body.files.map((f) => f.name), ['Look.png'], 'only the pill left');
-    // pending: the turn is in the card, with its chip, before the server answers
-    await soon("[...document.querySelectorAll('#tl-c-turns .tl-turn')].some((u) => u.textContent.includes('here it is') && u.querySelector('.file-chip'))", 'the pending turn with its chip');
+    assert.deepEqual(body.files.map((f) => f.name), ['Look.png', HOSTILE], 'only the pills left');
+    // pending: the turn is in the card, with its chips, before the server answers
+    await soon("[...document.querySelectorAll('#tl-c-turns .tl-turn')].some((u) => u.textContent.includes('here it is') && u.querySelectorAll('.file-chip').length === 2)", 'the pending turn with its chips');
     assert.equal(await p.ev(`${pills(key)}.length`), 0, 'the pills left the box with the words');
     await p.ev('window.__hold = false; window.__release(); void 0');
     const turn = await (async () => { for (let i = 0; i < 200; i++) { const u = L.turns(T1).find((x) => x.text === 'here it is'); if (u) return u; await new Promise((r) => setTimeout(r, 100)); } return null; })();
-    assert.deepEqual(turn?.files?.map((f) => [f.name, f.bytes]), [['Look.png', PNG_BYTES]], 'the log has the file');
+    assert.deepEqual(turn?.files?.map((f) => [f.name, f.bytes]), [['Look.png', PNG_BYTES], [HOSTILE, PNG_BYTES]], 'the log has the files');
     await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn')].some((u) => u.textContent.includes('here it is') && u.querySelector('.file-chip .chip-name')?.textContent === 'Look.png') && !(TL.pend || []).some((x) => !x.confirmed)`, "the server's turn, with its chip");
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('#tl-c-turns .tl-turn')].filter((u) => u.textContent.includes('here it is')).map((u) => [...u.querySelectorAll('.file-chip .chip-name')].map((c) => c.textContent))"), [['Look.png', HOSTILE]], 'one turn, the hostile name as text');
+    assert.equal(await p.ev('window.__x'), undefined, 'the hostile name ran nothing');
   });
 
-  await t.test('B2, B3: a reply of files alone shows its chips and not the words the kit gave it', async () => {
+  await t.test('B2, B3: a reply of files alone: pending and posted, one turn, its chips and not the words the kit gave it', async () => {
+    const n0 = await p.ev("window.__posts.filter((x) => x.url === '/api/thread-say').length");
+    await p.ev("document.querySelector('[data-tl-send]').click(); void 0");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await p.ev("window.__posts.filter((x) => x.url === '/api/thread-say').length"), n0, 'an empty Send posts nothing');
     await p.ev(`window.__drop('#tl-c-text', [{ name: 'report.pdf', text: '%PDF-1.4' }]); void 0`);
     await soon(`${pills(`tl:${T1}`)}.length === 1 && ${pills(`tl:${T1}`)}[0].dataset.pillState === 'ok'`, 'taken');
-    await p.ev("document.querySelector('[data-tl-send]').click(); void 0");
+    await p.ev("window.__hold = 'say'; document.querySelector('[data-tl-send]').click(); void 0");
     await soon("window.__posts.some((x) => x.url === '/api/thread-say' && !JSON.parse(x.body).text)", 'posted with no words');
+    const pdfTurns = "[...document.querySelectorAll('#tl-c-turns .tl-turn')].filter((u) => u.querySelector('.file-chip .chip-name')?.textContent === 'report.pdf')";
+    await soon(`${pdfTurns}.length === 1`, 'the pending turn');
+    assert.doesNotMatch(await p.ev(`${pdfTurns}[0].textContent`), /1 file dropped/, 'pending: the filled words hidden');
+    await p.ev('window.__hold = false; window.__release(); void 0');
     const turn = await (async () => { for (let i = 0; i < 200; i++) { const u = L.turns(T1).find((x) => x.files?.[0]?.name === 'report.pdf'); if (u) return u; await new Promise((r) => setTimeout(r, 100)); } return null; })();
     assert.equal(turn?.text, '1 file dropped');
-    await soon("[...document.querySelectorAll('#tl-c-turns .tl-turn')].some((u) => u.querySelector('.file-chip .chip-name')?.textContent === 'report.pdf')", 'its chip');
-    const shown = await p.ev("[...document.querySelectorAll('#tl-c-turns .tl-turn')].find((u) => u.querySelector('.file-chip .chip-name')?.textContent === 'report.pdf').textContent");
-    assert.doesNotMatch(shown, /1 file dropped/, 'the words the kit filled in are not shown');
+    // the server's threads have the turn (an id), the send is confirmed; a few card polls later still one turn drawn
+    await soon(`!(TL.pend || []).some((x) => !x.confirmed) && !!TL.threads.find((t) => t.id === ${JSON.stringify(T1)})?.turns.some((u) => u.id && u.files?.[0]?.name === 'report.pdf')`, 'the server has the turn');
+    await new Promise((r) => setTimeout(r, 4500));
+    assert.equal(await p.ev(`${pdfTurns}.length`), 1, 'one turn once the server has it, not two');
+    assert.doesNotMatch(await p.ev(`${pdfTurns}[0].textContent`), /1 file dropped/, 'posted: the filled words hidden');
   });
 
   await t.test('B4: an image chip opens the viewer with an <img> in the page; another file is a download', async () => {
@@ -345,8 +381,17 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     assert.equal(v.own, true, "the dashboard's own document");
     assert.match(v.src, /^\/upload\/\d{4}-\d{2}-\d{2}-[0-9a-f]{24}\/Look\.png$/);
     assert.deepEqual(v.frames, [[true, null], [true, null]], 'both frames hidden, empty');
-    await p.ev("document.getElementById('av-close').click(); void 0");
-    await soon("document.getElementById('artifact-view').hidden && !document.getElementById('av-img')", 'closed, the <img> gone');
+    // every way out closes it in place: ×, Escape, the scrim; the address and the history stay as they were
+    const at = await p.ev('[location.href, history.length]');
+    const open = async () => { await p.ev(`${img}.click(); void 0`); await soon("!document.getElementById('artifact-view').hidden && !!document.getElementById('av-img')", 'open again'); };
+    for (const [how, act] of [['×', "document.getElementById('av-close').click()"], ['Escape', "document.activeElement?.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))"], ['the scrim', "document.getElementById('scrim').click()"]]) {
+      if (how !== '×') await open();
+      await p.ev(`${act}; void 0`);
+      await soon("document.getElementById('artifact-view').hidden && !document.getElementById('av-img')", `closed by ${how}, the <img> gone`);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.deepEqual(await p.ev('[location.href, history.length]'), at, `closed by ${how}: the address and history unchanged`);
+      assert.equal(await p.ev("!document.getElementById('tl-card').hidden"), true, `closed by ${how}: the thread card still open`);
+    }
     const dl = await p.ev("(() => { const a = [...document.querySelectorAll('#tl-c-turns .file-chip')].find((c) => c.querySelector('.chip-name')?.textContent === 'report.pdf'); return a && { tag: a.tagName, download: a.getAttribute('download'), href: a.getAttribute('href') }; })()");
     assert.equal(dl?.tag, 'A');
     assert.equal(dl.download, 'report.pdf');
@@ -356,16 +401,54 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     assert.match(head[1] ?? '', /^attachment/);
   });
 
+  await t.test('B4: opened from a floating thread card, the first Escape closes the card, the second the image', async () => {
+    await p.ev(`location.hash = '#goals?t=${T3}'; void 0`);
+    await soon("!document.getElementById('tl-card').hidden && document.getElementById('tl-card').parentElement.id === 'tl' && !!document.querySelector('#tl-c-turns .file-chip')", 'the floating card with its chip');
+    await p.ev("document.querySelector('#tl-c-turns button.file-chip').click(); void 0");
+    await soon("!document.getElementById('artifact-view').hidden && !!document.getElementById('av-img')", 'the image open over the card');
+    const esc = "document.activeElement?.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); void 0";
+    await p.ev(esc);
+    await soon("document.getElementById('tl-card').hidden", 'the card closed first');
+    assert.equal(await p.ev("!document.getElementById('artifact-view').hidden && !!document.getElementById('av-img')"), true, 'the image still open');
+    await p.ev(esc);
+    await soon("document.getElementById('artifact-view').hidden && !document.getElementById('av-img')", 'then the image');
+  });
+
+  await t.test('B6: a swept file: the download chip says gone, the image viewer says so', async () => {
+    await p.ev(`location.hash = '#talk/${T1}'; void 0`);
+    await soon("[...document.querySelectorAll('#tl-c-turns .file-chip .chip-name')].some((c) => c.textContent === 'report.pdf')", 'the thread with its chips');
+    for (const f of L.uploads().filter((x) => /\/(report\.pdf|Look\.png)$/.test(x))) fs.rmSync(f);
+    const pdf = "[...document.querySelectorAll('#tl-c-turns .file-chip')].find((c) => c.querySelector('.chip-name')?.textContent === 'report.pdf')";
+    await p.ev(`${pdf}.click(); void 0`);
+    await soon(`${pdf}?.classList.contains('gone') && /gone/.test(${pdf}.textContent)`, 'the chip says gone');
+    await p.ev("[...document.querySelectorAll('#tl-c-turns .file-chip')].find((c) => c.querySelector('.chip-name')?.textContent === 'Look.png').click(); void 0");
+    await soon("!document.getElementById('av-note').hidden && document.getElementById('av-note').textContent === 'This file is gone: dropped files are kept 7 days'", "the viewer's note");
+    await p.ev("document.getElementById('av-close').click(); void 0");
+    await soon("document.getElementById('artifact-view').hidden", 'closed');
+  });
+
   await t.test('A2, A3, B1, B2: new threads, one with words and a file removed, one of files alone, titled by its file', async () => {
     await p.ev("document.querySelector('[data-tl-close]')?.click(); document.querySelector('[data-tl-new]').click(); void 0");
     const key = await soon("(() => { const k = document.querySelector('#tl-c-text')?.closest('.dropbox')?.dataset.drop; return k && k.startsWith('tl:new:') ? k : null; })()", 'the new-thread composer');
     await p.ev(`window.__drop('#tl-c-text', [{ name: 'Plan.png', png: true }, { name: 'drop-me.txt', text: 'x' }]); void 0`);
     await soon(`${pills(key)}.length === 2 && ${pills(key)}.every((x) => x.dataset.pillState === 'ok')`, 'two pills');
     await p.ev(`${pills(key)}[1].querySelector('button[data-pill-remove]').click(); void 0`);
-    await p.ev("(() => { const ta = document.getElementById('tl-c-text'); ta.value = 'a new plan'; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-tl-send]').click(); })()");
+    await p.ev("window.__hold = 'new'; (() => { const ta = document.getElementById('tl-c-text'); ta.value = 'a new plan'; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-tl-send]').click(); })()");
     await soon("window.__posts.some((x) => x.url === '/api/thread-new' && JSON.parse(x.body).text === 'a new plan')", 'posted');
     const body = (await posted('/api/thread-new')).find((b) => b.text === 'a new plan');
     assert.deepEqual(body.files.map((f) => f.name), ['Plan.png']);
+    // B7: a file dropped while the thread is pending, and one after it is named, go with the next Send
+    const pend = await soon("(() => { const k = document.querySelector('#tl-c-text')?.closest('.dropbox')?.dataset.drop; return k && k.startsWith('tl:pending-') ? k : null; })()", 'the composer under the pending key');
+    await p.ev(`window.__drop('#tl-c-text', [{ name: 'while-pending.txt', text: 'p' }]); void 0`);
+    await soon(`${pills(pend)}.length === 1 && ${pills(pend)}[0].dataset.pillState === 'ok'`, 'taken while pending');
+    await p.ev('window.__hold = false; window.__release(); void 0');
+    const named = await soon("(() => { const k = document.querySelector('#tl-c-text')?.closest('.dropbox')?.dataset.drop; return k && /^tl:t-/.test(k) ? k : null; })()", "the composer under the thread's id");
+    assert.equal(await p.ev(`${pills(named)}.length`), 1, 'the pending pill moved with the key');
+    await p.ev(`window.__drop('#tl-c-text', [{ name: 'after-named.txt', text: 'n' }]); void 0`);
+    await soon(`${pills(named)}.length === 2 && ${pills(named)}.every((x) => x.dataset.pillState === 'ok')`, 'taken after the name');
+    await p.ev("(() => { const ta = document.getElementById('tl-c-text'); ta.value = 'and these'; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-tl-send]').click(); })()");
+    await soon("window.__posts.some((x) => x.url === '/api/thread-say' && JSON.parse(x.body).text === 'and these')", 'the reply posted');
+    assert.deepEqual((await posted('/api/thread-say')).find((b) => b.text === 'and these').files.map((f) => f.name), ['while-pending.txt', 'after-named.txt'], 'both went');
     await soon("!!document.querySelector('[data-tl-close]')", 'its card');
     await p.ev("document.querySelector('[data-tl-close]').click(); document.querySelector('[data-tl-new]').click(); void 0");
     const k2 = await soon("(() => { const k = document.querySelector('#tl-c-text')?.closest('.dropbox')?.dataset.drop; return k && k.startsWith('tl:new:') ? k : null; })()", 'a fresh composer');
