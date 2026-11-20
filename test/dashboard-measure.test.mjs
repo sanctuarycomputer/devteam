@@ -138,6 +138,16 @@ const PEEKS_MEASURED = (ids) => {
     .concat([{ hash: `#file?path=${e(ids.file)}`, ready: PEEK_READY, opts: PEEK_OPTS }]);
 };
 
+// kit-95: every page the dashboard has (a data-page section) is on the list, but Self Improvement (the Loop),
+// whose entries are kit-96's; a page added without an entry fails here, with no browser needed
+test('the dashboard measure: every page but the Loop is listed', () => {
+  const html = fs.readFileSync(new URL('../docs/devteam/dashboard/index.html', import.meta.url), 'utf8');
+  const pages = [...new Set([...html.matchAll(/<section id="[^"]+"[^>]*\sdata-page="([a-z-]+)"/g)].map((m) => m[1]))].filter((id) => id !== 'loop');
+  assert.ok(pages.length >= 12, `the page sections are found: ${pages.join(' ')}`);
+  const listed = (id) => PAGES.some((pg) => pg.hash === `#${id}` || pg.hash.startsWith(`#${id}?`));
+  assert.deepEqual(pages.filter((id) => !listed(id)), []);
+});
+
 test('the dashboard measure: every listed page at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-'));
   const later = cleanup(t);

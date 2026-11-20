@@ -536,7 +536,7 @@ test('the counts as threads move', { skip: SKIP, timeout: 300000 }, async (t) =>
   assert.equal(await p.ev("document.querySelector('.pagebar .tt').getAttribute('title')"), '3 waiting on the supervisor');
   // none open: no thread count
   for (const id of [Y1, Y2, W]) F.owner(['thread', 'resolve', id]);
-  await soon("!document.querySelector('.pagebar .tt .n.th') && /No open threads\\. Hold Shift and click anything on the page, or start one with \\+\\./.test(document.getElementById('th-pane').textContent)", 'no thread count, the empty line');
+  await soon("!document.querySelector('.pagebar .tt .n.th') && [...document.querySelectorAll('#th-pane .empty')].some((e) => e.textContent === 'None')", 'no thread count, the empty line: None (kit-95)');
   await p.click('#th-close');
   await soon("!document.body.classList.contains('threads-open')", 'closed');
 });
