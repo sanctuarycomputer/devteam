@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+// the suite's shared env scrub, tmux shim and stand-ins (before anything that reads the environment)
 import { bareProject, dashboardOnFreePort } from './kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
