@@ -267,14 +267,15 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
     const sect = (head) => `[...document.querySelectorAll('#drawer-body .psect')].find((s) => s.querySelector('.card-head')?.textContent.trim() === ${JSON.stringify(head)})`;
     await soon(`!!${sect('Evidence')}`, 'its Evidence section');
     assert.deepEqual(await p.ev(`[...${sect('Evidence')}.querySelectorAll('tbody tr[data-row]')].map((tr) => tr.children[0].textContent.trim()).sort()`), ['payments timed out', 'payments timed out again']);
-    // after several of the page's refreshes (every 300 ms here), one header click sorts one step: up, then down
+    // after several of the page's refreshes (every 300 ms here), one header click redraws the peek once: each listener
+    // a poll stacked would write it again within the same click, which no poll can land inside (counted in one evaluation)
     await new Promise((r) => setTimeout(r, 1500));
     const evH = `${sect('Evidence')}.querySelector('thead th:nth-child(1)')`;
-    await p.ev(`${evH}.querySelector('button.sort').click()`);
-    await soon(`${sect('Evidence')}?.querySelector('thead th:nth-child(1)')?.getAttribute('aria-sort') === 'ascending'`, 'the Evidence table sorted up by one click');
+    const writesOnClick = () => p.ev(`(() => { const mo = new MutationObserver(() => {}); mo.observe(document.getElementById('drawer-body'), { childList: true }); ${evH}.querySelector('button.sort').click(); const n = mo.takeRecords().filter((r) => r.addedNodes.length).length; mo.disconnect(); return n; })()`);
+    assert.equal(await writesOnClick(), 1, 'one write for one click');
+    await soon(`${sect('Evidence')}?.querySelector('thead th:nth-child(1)')?.getAttribute('aria-sort') === 'ascending'`, 'the Evidence table sorted up');
     await new Promise((r) => setTimeout(r, 1000));
-    assert.equal(await p.ev(`${evH}.getAttribute('aria-sort')`), 'ascending', 'still up after more refreshes');
-    await p.ev(`${evH}.querySelector('button.sort').click()`);
+    assert.equal(await writesOnClick(), 1, 'one write for one click, after more refreshes');
     await soon(`${sect('Evidence')}?.querySelector('thead th:nth-child(1)')?.getAttribute('aria-sort') === 'descending'`, 'down by the next click');
     await soon(`!!${sect('Given to')}`, 'its Given to section');
     const given = await p.ev(`[...${sect('Given to')}.querySelectorAll('tbody tr[data-row]')].map((tr) => [...tr.children].map((c) => c.textContent.trim()))`);
