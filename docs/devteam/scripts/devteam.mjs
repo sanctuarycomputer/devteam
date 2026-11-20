@@ -27212,7 +27212,99 @@ function browserViewFrame(ctx, params, sessionId) {
   if (!v || v.ws.closed || !v.tab?.sessionId || v.tab.sessionId !== sessionId) return;
   const w = Math.round(params?.metadata?.deviceWidth), h = Math.round(params?.metadata?.deviceHeight);
   if (typeof params.data !== 'string' || !BROWSER_FRAME_DATA.test(params.data) || !(w >= 1 && w <= 8192) || !(h >= 1 && h <= 8192)) return;
+  const scale = params.metadata.pageScaleFactor;
+  v.scale = typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1; // the input's x, y are divided by it
   if (v.ws.send({ t: 'frame', data: params.data, w, h, seq: v.seq }, true)) v.seq++;
+}
+// The page's messages ($defs.view.from_page), checked by hand: closed field sets, types, bounds and
+// enums. Not the kit's schemaErrors, so no refusal text can ever carry a typed value; a message that
+// fails is null and dropped. Lengths are JSON Schema's (code points).
+const BROWSER_MODS = { type: 'int', min: 0, max: 15 };
+const BROWSER_XY = { type: 'num', min: 0, max: 8192 };
+const BROWSER_FROM_PAGE = {
+  mouse: { req: ['type', 'x', 'y'], f: { type: { enum: ['down', 'up', 'move', 'click'] }, x: BROWSER_XY, y: BROWSER_XY, button: { enum: ['none', 'left', 'middle', 'right'] }, clicks: { type: 'int', min: 0, max: 3 }, mods: BROWSER_MODS } },
+  wheel: { req: ['x', 'y', 'dx', 'dy'], f: { x: BROWSER_XY, y: BROWSER_XY, dx: { type: 'num', min: -100000, max: 100000 }, dy: { type: 'num', min: -100000, max: 100000 }, mods: BROWSER_MODS } },
+  key: { req: ['type', 'key'], f: { type: { enum: ['down', 'up', 'press'] }, key: { type: 'str', min: 1, max: 32 }, code: { type: 'str', min: 1, max: 32 }, text: { type: 'str', min: 1, max: 8 }, mods: BROWSER_MODS } },
+  paste: { req: ['text'], f: { text: { type: 'str', min: 1, max: 10000 } } },
+  nav: { req: ['url'], f: { url: { type: 'str', min: 1, max: 2048 } } },
+  back: { req: [], f: {} },
+  forget: { req: [], f: {} },
+};
+function browserViewMessage(m) {
+  if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string' || !Object.hasOwn(BROWSER_FROM_PAGE, m.t)) return null;
+  const shape = BROWSER_FROM_PAGE[m.t];
+  for (const k of shape.req) if (!Object.hasOwn(m, k)) return null;
+  for (const k of Object.keys(m)) {
+    if (k === 't') continue;
+    if (!Object.hasOwn(shape.f, k)) return null;
+    const s = shape.f[k], x = m[k];
+    if (s.enum) { if (!s.enum.includes(x)) return null; continue; }
+    if (s.type === 'str') {
+      if (typeof x !== 'string' || x.length < s.min || x.length > 2 * s.max) return null; // UTF-16 length bounds code points both ways
+      const n = [...x].length;
+      if (n < s.min || n > s.max) return null;
+    } else if (typeof x !== 'number' || !Number.isFinite(x) || (s.type === 'int' && !Number.isInteger(x)) || x < s.min || x > s.max) return null;
+  }
+  return m;
+}
+// windowsVirtualKeyCode for a key: the named keys, then KeyA-KeyZ and Digit0-9 from code. 0 if none.
+const BROWSER_VK = { Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18, Pause: 19, CapsLock: 20, Escape: 27, ' ': 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, ContextMenu: 93, ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, 112 + i])) };
+function browserVk(key, code) {
+  if (Object.hasOwn(BROWSER_VK, key)) return BROWSER_VK[key];
+  const c = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(code ?? '');
+  if (c) return (c[1] ?? c[2]).charCodeAt(0);
+  if (code === 'Space') return 32;
+  return 0;
+}
+const BROWSER_BUTTONS = { none: 0, left: 1, right: 2, middle: 4 };
+// One message from the page: parsed, checked, and handed to the active tab's session. Nothing about
+// it is logged, printed, stored or echoed; a failed CDP call is dropped (browserViewCdp catches it).
+// While Chrome isn't up (the start steps, a forget restarting it) or the daemon is stopping, every
+// message is dropped, a second forget among them, so nothing reads a null ctx.active.
+function browserViewInput(ctx, v, text) {
+  if (!ctx.ready || ctx.stopping || ctx.viewer !== v) return;
+  let m;
+  try { m = browserViewMessage(JSON.parse(text)); } catch { return; }
+  if (!m) return;
+  if (m.t === 'forget') return; // Sign out of everything: Task 3 runs it on the verbs' queue (ctx.serial)
+  const sid = ctx.active?.sessionId;
+  if (!sid) return; // a tab with no session: dropped
+  const cdp = (method, params) => browserViewCdp(ctx, method, params, sid);
+  const scale = v.scale > 0 ? v.scale : 1;
+  switch (m.t) {
+    case 'mouse': {
+      const button = m.button ?? 'none', base = { x: m.x / scale, y: m.y / scale, button, modifiers: m.mods ?? 0 };
+      const held = BROWSER_BUTTONS[button], clickCount = m.clicks ?? 1;
+      if (m.type === 'move') return cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...base, buttons: held, clickCount: 0 });
+      if (m.type === 'down' || m.type === 'click') cdp('Input.dispatchMouseEvent', { type: 'mousePressed', ...base, buttons: held, clickCount });
+      if (m.type === 'up' || m.type === 'click') cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base, buttons: 0, clickCount });
+      return;
+    }
+    case 'wheel':
+      return cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x: m.x / scale, y: m.y / scale, deltaX: m.dx, deltaY: m.dy, modifiers: m.mods ?? 0 });
+    case 'key': {
+      const base = { key: m.key, ...(m.code ? { code: m.code } : {}), windowsVirtualKeyCode: browserVk(m.key, m.code), modifiers: m.mods ?? 0 };
+      if (m.type === 'press') {
+        cdp('Input.dispatchKeyEvent', { type: 'keyDown', ...base, ...(m.text ? { text: m.text, unmodifiedText: m.text } : {}) });
+        return cdp('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+      }
+      return cdp('Input.dispatchKeyEvent', { type: m.type === 'down' ? 'rawKeyDown' : 'keyUp', ...base });
+    }
+    case 'paste':
+      return cdp('Input.insertText', { text: m.text });
+    case 'nav': {
+      let u;
+      try { u = new URL(m.url); } catch { return; }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return; // file:, javascript:, data:, chrome: … dropped
+      return cdp('Page.navigate', { url: u.href }); // not awaited: the guard answers whatever it is
+    }
+    case 'back':
+      ctx.cdp?.send('Page.getNavigationHistory', {}, sid).then((h) => {
+        const prev = h?.entries?.[h.currentIndex - 1];
+        if (h?.currentIndex > 0 && prev?.id !== undefined) cdp('Page.navigateToHistoryEntry', { entryId: prev.id });
+      }).catch(() => {});
+      return;
+  }
 }
 // The view server: GET or HEAD / (Host one of the two loopback forms) is browser.html, read once here;
 // an upgrade passes five guards in order, each refusal a short HTTP answer and a FIN. One viewer.
@@ -27250,8 +27342,8 @@ function browserViewServer(ctx) {
       if (!ctx.ready || ctx.stopping) return refuse(503);
       const accept = crypto.createHash('sha1').update(key + BROWSER_WS_GUID).digest('base64');
       sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
-      const v = { ws: null, seq: 0, tab: null, url: null, timer: null };
-      v.ws = browserSocket(sock, { pingMs: browserPingMs(), onText: () => {}, onClose: () => browserViewClose(ctx, v) }); // the page's input: Task 2
+      const v = { ws: null, seq: 0, tab: null, url: null, timer: null, scale: 1 };
+      v.ws = browserSocket(sock, { pingMs: browserPingMs(), onText: (text) => browserViewInput(ctx, v, text), onClose: () => browserViewClose(ctx, v) });
       if (head?.length) v.ws.feed(head);
       if (v.ws.closed) return;
       if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
