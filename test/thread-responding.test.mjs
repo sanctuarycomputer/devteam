@@ -160,9 +160,23 @@ test('thread working and the pickup: the record, who writes it, and what clears 
     assert.match(F.fails(['thread', 'working', T], DASH), /agent session/);
     F.owner(['thread', 'resolve', T]);
     assert.match(F.fails(['thread', 'working', T], F.SUP), /resolved/);
+    // A turnless thread written by hand, under an id no log line holds (kit-326): hand() stamps its id
+    // from the clock and skips appendLog's ordering, so `now - 1000` can be the very millisecond of T,
+    // made a second earlier and resolved, and the reply is then refused as resolved. Its id is the
+    // first millisecond from `from` back whose t-<stamp>-owner is in no live or durable log file.
+    const freshThread = (agoMs, from = Date.now() - agoMs) => {
+      const dirs = [F.logDir, path.join(F.old, 'docs/devteam/project/log')].filter((d) => fs.existsSync(d));
+      const taken = dirs.flatMap((d) => fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).map((f) => fs.readFileSync(path.join(d, f), 'utf8'))).join('\n');
+      for (let ms = from; ; ms--) {
+        const iso = new Date(ms).toISOString();
+        const id = `t-${iso.slice(0, 10).replace(/-/g, '')}-${iso.slice(11, 23).replace(/[:.]/g, '')}-owner`;
+        if (!taken.includes(`"${id}"`)) return F.hand('owner', { type: 'thread', title: 'No owner turn', id }, Date.now() - ms);
+      }
+    };
     const snap = F.snapLog();
     try {
-      const H = F.hand('owner', { type: 'thread', title: 'No owner turn' }, 1000);
+      const H = freshThread(1000);
+      assert.notEqual(H, T, 'the turnless thread is not T');
       assert.match(F.fails(['thread', 'working', H], F.SUP), /no owner turn/);
       assert.equal(rec()[H], undefined);
     } finally { F.restoreLog(snap); }
