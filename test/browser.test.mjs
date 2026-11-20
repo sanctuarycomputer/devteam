@@ -373,6 +373,19 @@ async function started(P, extra) {
   assert.match(r.out, /browser running \(preview [a-z]+-[a-z]+(-\d+)?, profile /);
   return r;
 }
+// B1 starts a; B2, S2, Review Focus 2 and E4 read the browser it left running. Each calls liveA first,
+// which starts a when it isn't running (B1's start failed), so one failed start is one red test, never
+// four more reading a state.json that isn't there (kit-347). It tries that once per file: after a failed
+// try, each later call fails at once with that try's error, so a runner still too slow for a start
+// costs one more start, not four, inside the file's watchdog.
+let liveAFailed = null;
+async function liveA() {
+  let s = null;
+  try { s = readState(a); } catch {}
+  if (s && alive(s.daemon_pid) && alive(s.chrome_pid)) return;
+  if (liveAFailed) throw liveAFailed;
+  try { await started(a); } catch (err) { liveAFailed = err; throw err; }
+}
 async function statusJson(P) {
   const r = await cli(P, ['status', '--json']);
   assert.equal(r.status, 0, r.err);
@@ -425,6 +438,7 @@ test('B1 Chrome runs in the preview window; D1 the profile folder; status while 
 });
 
 test('B2 Chrome\'s flags', opts, async () => {
+  await liveA();
   const s = readState(a);
   const args = cmdline(s.chrome_pid);
   for (const f of [`--proxy-server=127.0.0.1:${s.guard_port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic', `--user-data-dir=${a.profile}`]) assert.ok(args.includes(f), `${f} in ${args.join(' ')}`);
@@ -459,6 +473,7 @@ function socketsOf(pid) {
 const procNet = (f) => { try { return fs.readFileSync(`/proc/net/${f}`, 'utf8').split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((c) => c.length > 1); } catch { return []; } };
 
 test('S2 no DevTools port', opts, async () => {
+  await liveA();
   const s = readState(a);
   // P2: nothing in Chrome's group listens on TCP, on any address
   const group = groupOf(s.chrome_pid);
@@ -489,6 +504,7 @@ test('S2 no DevTools port', opts, async () => {
 });
 
 test('Review Focus 2: the control port answers only its own client', opts, async () => {
+  await liveA();
   const s = readState(a);
   assert.equal(await controlPost(s.control_port, { host: `127.0.0.1:${s.control_port}`, 'x-devteam-browser': '0'.repeat(64) }), 403);
   assert.equal(await controlPost(s.control_port, { host: 'evil.example', 'x-devteam-browser': s.control_secret }), 403);
@@ -507,6 +523,7 @@ test('E4 refuses only a cold start: a live browser keeps answering over the ceil
   const mem = path.join(tmp, 'meminfo-full');
   fs.writeFileSync(mem, 'MemTotal: 1000000 kB\nMemAvailable: 50000 kB\n');
   const full = { DEVTEAM_MEMINFO: mem, DEVTEAM_CGROUP: path.join(tmp, 'no-cgroup') };
+  await liveA();
   const before = readState(a);
   const r = await cli(a, ['start'], full);
   assert.equal(r.status, 0, r.err);
