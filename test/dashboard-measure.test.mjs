@@ -127,7 +127,7 @@ const JOBS_PAGES = ((
   ['#recurring/ci-main', `${rest} && ${sect('What the loop noticed')} && ${sect('Recent runs')} && !!document.querySelector('#drawer-body [data-tbl="job:runs"]')`],
   ['#recurring/deps-bump', `${rest} && ${sect('Recent runs')} && !!document.querySelector('#drawer-body .measure')`],
   ['#builtin/retro', `${rest} && DRAWER.kind === 'builtin' && !!document.querySelector('#drawer-body section.attrs dl.props')`],
-].map(([hash, ready]) => ({ hash, init, ready, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } })))();
+].map(([hash, ready]) => ({ hash, init, ready, narrow: { view: '#no-such-view' }, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } })))();
 const PAGES = [
   // kit-87: Settings, on the shell, whole
   { hash: '#settings', ready: READY },

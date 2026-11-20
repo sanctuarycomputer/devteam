@@ -5698,7 +5698,7 @@ function openBuiltin(name) {
   showDrawer(`<h2 id="drawer-title">${esc(recWord(REC_BUILTIN, b.name) ?? b.name)}</h2>
     ${attrs({ id: `builtin.${name}`, idTip: 'The kit’s own name for it.', noRecord: true, kind: 'builtin', front: front.map((r) => [r[0], r, true]), computed: [
       ['Last', esc(b.last_at ? when(b.last_at) : '')],
-      ['Next', esc(b.next_at ? when(b.next_at) : '')],
+      ['Next', esc(b.next_at ? when(b.next_at) : ''), 'When it next comes due.'],
     ] })}`);
 }
 function openGoal(id) {
