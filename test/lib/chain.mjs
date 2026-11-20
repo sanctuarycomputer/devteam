@@ -4329,7 +4329,7 @@ http.createServer((req, res) => {
     const port = await freePort();
     const base = `http://127.0.0.1:${port}`;
     const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
-    const act = (body, headers = {}) => fetch(`${base}/api/artifact-publish`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    const act = (body, headers = {}) => fetch(`${base}/api/artifact-publish`, { method: 'POST', headers: { 'content-type': 'application/json', origin: base, ...headers }, body: JSON.stringify(body) });
     try {
       await serverUp(`${base}/`);
       assert.equal((await act({ op: 'publish', slug: 'landed-tk' })).status, 400, 'a publish names its tree');
