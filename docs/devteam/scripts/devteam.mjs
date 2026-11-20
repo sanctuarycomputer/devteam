@@ -23942,26 +23942,22 @@ const recurringRegistry = Object.freeze({
     const timedOut = r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL';
     return { status: r.status, out: r.stdout ?? '', err: String(r.stderr ?? ''), timedOut, ok: r.status === 0 && !timedOut };
   },
-  // What the jobs would be once sha lands on home's main (final-1 F1), with no prediction of a merge
-  // (rulings d-20261120-044235981, d-20261120-075327162, d-20261120-083617902,
-  // d-20261120-085914614, d-20261120-102757339): six rounds found a hole in every prediction of what
-  // a three-way merge, rename detection or a rebase does with settings.md. Merge bases are read only
-  // to compare blobs at them. Let M be main's sha as the checks read it (mainSha(); merge lands only
-  // onto it). Under every method the head's settings.md must be a regular file (mode 100644): blob
-  // compares ignore the mode (final-7 F2). Four cases are cleared:
-  // - the head's settings.md blob is M's, both present: the same file on both sides lands as it is,
-  //   and the jobs are main's (no job change). Under merge and squash only when the file is also
-  //   present at every merge base (final-8b R1). Under rebase only when M..sha has no merge commit
-  //   and no commit touching the file (final-7 F1, final-7b B7-1): a rebase drops merges and
-  //   patches already upstream, so an equal final file says nothing about where the replay ends;
-  // - M is an ancestor of the head: a merge or squash lands the head's tree, so the head's file
-  //   lands, compared canonically with main's (the binding decides any change);
-  // - merge and squash: the branch left the file alone (present at every merge base, the head and
-  //   M, and the head's blob is every base's): M's file lands, and the jobs are main's;
-  // - merge and squash: main left the file alone (the same presence, and M's blob is every
-  //   base's): the head's file lands, compared canonically with main's.
-  // Anything else is refused. Under merge_method rebase only the first is cleared, with the
-  // conditions above. Every git call has a timeout; one that times out or fails refuses.
+  // What the jobs would be once sha lands on home's main (final-1 F1; rulings d-20261120-133940663
+  // and re m-20261120-134049211). The kit never predicts what git's merge, squash or rebase makes of
+  // settings.md: nine rounds found a hole in every rule built on merge bases (a decoy block, the diff
+  // algorithm, attributes, a replayed rebase, -s ours, upstream patches, a rename on main, a
+  // copy-back, a directory at a base, a criss-cross's virtual base). Let M be main's sha as the
+  // checks read it (mainSha(); merge lands only onto it):
+  // - the head's settings.md is a regular file (mode 100644, final-7 F2) or absent, always;
+  // - under merge_method rebase, M..sha holds no merge commit (a rebase drops merges);
+  // - up to date (M is an ancestor of the head): merge, squash and rebase all land exactly the
+  //   head's tree, so its jobs are compared canonically with main's and the binding decides;
+  // - behind main: cleared only at exactly one merge base (no virtual base, final-9b F9-2) with
+  //   settings.md a 100644 blob at the base, the head and M (no directory or gitlink standing in
+  //   for it, F9-1). The head's blob is the base's: git takes M's file, and the jobs are main's.
+  //   M's blob is the base's (merge and squash only): git takes the head's file, judged as above.
+  //   Under rebase all three must be equal and no commit in M..sha may touch the file.
+  // Anything else is refused. Every git call has a timeout; one that times out or fails refuses.
   // { now, merged, changed, problem }: changed when the landed jobs differ canonically from main's
   // now (a missing key reads {}); a problem counts as changed, failing closed.
   landing(sha) {
@@ -23971,76 +23967,74 @@ const recurringRegistry = Object.freeze({
     return memo(`recurring-landing\0${main}\0${M}\0${sha}`, () => {
       const g = recurringRegistry.git;
       const rel = `${projectRel}/settings.md`;
+      const dir = path.posix.dirname(rel); const name = path.posix.basename(rel);
       const late = [];
       const run = (args, opts) => { const r = g(args, opts); if (r.timedOut) late.push(`git ${args.find((a) => !a.startsWith('-')) ?? args[0]}`); return r; };
       const jobsOf = (s) => (s && s.recurring === undefined ? {} : s?.recurring);
       const jobsIn = (text) => { const m = text == null ? null : String(text).match(/```json devteam\s*\n([\s\S]*?)\n```/); if (!m) return undefined; try { return jobsOf(JSON.parse(m[1])); } catch { return undefined; } };
       const jobsAt = (ref) => { const r = run(['show', `${ref}:${rel}`]); return jobsIn(r.ok ? r.out : null); };
-      const blob = (ref) => { const r = run(['rev-parse', '--verify', '-q', `${ref}:${rel}`]); return r.ok ? r.out.trim() : null; };
+      const cant = (what) => `settings.md: git ${what} failed, so the kit can't tell what would land; check again`;
+      // settings.md's entry at ref, read from its directory's tree (the mode and type git ls-tree
+      // shows): { mode, type, oid }, null when absent, or { failed } when the tree can't be read
+      const entryAt = (ref) => {
+        const t = `${ref}:${dir === '.' ? '' : dir}`;
+        const r = run(['cat-file', '-p', t]);
+        if (!r.ok) { const e = run(['rev-parse', '--verify', '-q', t]); return !e.ok && e.status === 1 ? null : { failed: true }; }
+        const line = r.out.split('\n').find((l) => l.includes('\t') && l.slice(l.indexOf('\t') + 1) === name);
+        if (!line) return null;
+        const [mode, type, oid] = line.slice(0, line.indexOf('\t')).split(' ');
+        return { mode, type, oid };
+      };
+      const plain = (e) => !!e && !e.failed && e.mode === '100644' && e.type === 'blob';
       const now = jobsAt(M);
       const lands = (merged, problem = null) => {
         if (late.length) problem = `settings.md: ${[...new Set(late)].join(', ')} timed out, so the kit can't tell what would land; check again`;
         if (!problem && merged === undefined && now !== undefined) problem = `settings: the json devteam block ${sha.slice(0, 12)} would land on ${main} can't be read (missing or not valid JSON), so neither can its jobs`;
         return { now, merged, changed: !!problem || canonical(merged) !== canonical(now), problem };
       };
-      const [atMain, atHead] = [blob(M), blob(sha)];
       if (late.length) return lands(null);
-      // a regular file at the head, under every method (d-20261120-102757339; final-7 F2): a
-      // symlink whose target text is an answered file would otherwise be bound by that text. The
-      // mode is the entry's in its directory's tree, the mode git ls-tree shows.
-      if (atHead) {
-        const dir = path.posix.dirname(rel); const name = path.posix.basename(rel);
-        const lt = run(['cat-file', '-p', `${sha}:${dir === '.' ? '' : dir}`]);
-        if (late.length) return lands(null);
-        if (!lt.ok) return lands(null, `settings.md: git cat-file ${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
-        const entry = lt.out.split('\n').find((l) => l.slice(l.indexOf('\t') + 1) === name && l.includes('\t'));
-        const mode = entry ? entry.split(' ')[0] : 'none';
-        if (mode !== '100644') return lands(null, `settings.md at the head is not a regular file (mode ${mode}); the kit reads only a plain file`);
-      }
-      const rebaseMsg = 'settings.md: merge_method is rebase, which replays commits, so the branch must leave settings.md alone; land the change with merge or squash';
-      if (repo('home').settings.merge_method === 'rebase') {
-        if (!(atMain && atHead && atMain === atHead)) return lands(null, rebaseMsg);
-        // a replay that never touches the file (d-20261120-102757339): no merge commit to drop and
-        // no commit on the path, so every replayed commit leaves main's file as it is
+      // the head's settings.md: a 100644 blob or absent (final-7 F2, final-8b R2, final-9b F9-1)
+      const atHead = entryAt(sha);
+      if (late.length) return lands(null);
+      if (atHead?.failed) return lands(null, cant(`cat-file ${sha.slice(0, 12)}`));
+      if (atHead && !plain(atHead)) return lands(null, `settings.md at the head is not a regular file (mode ${atHead.mode}); the kit reads only a plain file`);
+      const rebase = repo('home').settings.merge_method === 'rebase';
+      if (rebase) {
         const merges = run(['rev-list', '--merges', `^${M}`, sha]);
-        const touch = run(['rev-list', '--full-history', `^${M}`, sha, '--', `:(top,literal)${rel}`]);
         if (late.length) return lands(null);
-        if (!merges.ok || !touch.ok) return lands(null, `settings.md: git rev-list ${M.slice(0, 12)}..${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
-        return merges.out.trim() || touch.out.trim() ? lands(null, rebaseMsg) : lands(now);
-      }
-      // the merge bases and settings.md's blob at each, read once; a failed read gives no bases
-      let basesRead;
-      const basesAt = () => {
-        if (!basesRead) { const mb = run(['merge-base', '--all', M, sha]); const bases = mb.ok ? mb.out.split('\n').filter(Boolean) : []; basesRead = { bases, atBases: bases.map(blob) }; }
-        return basesRead;
-      };
-      // the equal case under merge and squash also needs the file at every merge base
-      // (d-20261120-123629470; final-8b R1): a path missing at a base can be paired by rename
-      // detection on main's side, so the branch's edit of the old path would land through it. A
-      // path present at every base and on both sides is added on neither, so no rename targets it.
-      if (atMain && atHead && atMain === atHead) {
-        const { bases, atBases } = basesAt();
-        if (late.length) return lands(null);
-        if (bases.length && atBases.every(Boolean)) return lands(now);
+        if (!merges.ok) return lands(null, cant(`rev-list --merges ${M.slice(0, 12)}..${sha.slice(0, 12)}`));
+        if (merges.out.trim()) return lands(null, 'settings.md: merge_method is rebase and this branch has merge commits since main; rebase the branch onto main instead');
       }
       const anc = run(['merge-base', '--is-ancestor', M, sha]);
       if (late.length) return lands(null);
+      // up to date: the head's tree lands
       if (anc.status === 0) return lands(jobsAt(sha));
-      // the branch left the file alone (merge and squash; d-20261120-083617902): the file is present
-      // at every merge base, the head and M, and the head's blob is every base's. git takes M's file
-      // at tree level (no rename, the path is on every side; no text merge, one side is unchanged),
-      // and a merge of main with -s ours is caught by the blobs. The jobs are main's.
-      if (anc.status === 1) {
-        const { bases, atBases } = basesAt();
+      if (anc.status !== 1) return lands(null, cant(`merge-base --is-ancestor ${M.slice(0, 12)} ${sha.slice(0, 12)}`));
+      // behind main (ruling re m-20261120-134049211): one merge base, and a plain file on all three
+      const behind = "settings.md: this branch doesn't contain main's tip, and the kit can only judge settings.md that one side left alone at a single merge base; merge main into the branch first";
+      const mb = run(['merge-base', '--all', M, sha]);
+      if (late.length) return lands(null);
+      const bases = mb.ok ? mb.out.split('\n').filter(Boolean) : [];
+      if (!mb.ok && mb.status !== 1) return lands(null, cant(`merge-base --all ${M.slice(0, 12)} ${sha.slice(0, 12)}`));
+      // more than one base means git merges against a virtual base the kit can't read (final-9 F9-2's wording)
+      if (bases.length > 1) return lands(null, `settings.md: this branch doesn't contain main's tip and has ${bases.length} merge bases with it; merge main into the branch first`);
+      if (bases.length !== 1) return lands(null, behind);
+      const [atBase, atMain] = [entryAt(bases[0]), entryAt(M)];
+      if (late.length) return lands(null);
+      if (atBase?.failed || atMain?.failed) return lands(null, cant('cat-file'));
+      if (![atBase, atHead, atMain].every(plain)) return lands(null, behind);
+      if (rebase) {
+        if (!(atHead.oid === atBase.oid && atMain.oid === atBase.oid)) return lands(null, behind);
+        const touch = run(['rev-list', '--full-history', `^${M}`, sha, '--', `:(top,literal)${rel}`]);
         if (late.length) return lands(null);
-        if (atMain && atHead && bases.length && atBases.every((b) => b && b === atHead)) return lands(now);
-        // main left the file alone (merge and squash; d-20261120-085914614): present at every base,
-        // the head and M, and M's blob is every base's. git takes the head's file at tree level, and
-        // the binding compares its jobs with main's.
-        if (atMain && atHead && bases.length && atBases.every((b) => b && b === atMain)) return lands(jobsAt(sha));
+        if (!touch.ok) return lands(null, cant(`rev-list ${M.slice(0, 12)}..${sha.slice(0, 12)}`));
+        return touch.out.trim() ? lands(null, behind) : lands(now);
       }
-      if (anc.status === 1) return lands(null, "settings.md: this branch's settings.md differs from main's and the branch doesn't contain main's tip; merge main into the branch first");
-      return lands(null, `settings.md: git merge-base --is-ancestor ${M.slice(0, 12)} ${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
+      // the branch left the file alone: git takes M's file at tree level, and the jobs are main's
+      if (atHead.oid === atBase.oid) return lands(now);
+      // main left the file alone: git takes the head's file, judged against main's
+      if (atMain.oid === atBase.oid) return lands(jobsAt(sha));
+      return lands(null, behind);
     });
   },
   // The .gitattributes lines that give settings.md a merge driver or a filter (final-3 F2): git's

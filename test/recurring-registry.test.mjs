@@ -15,15 +15,21 @@ const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const QID = /q-[0-9]+-[0-9]+-supervisor/;
 const BLOCK = /```json devteam\s*\n([\s\S]*?)\n```/;
 const HEADER = 'This answer approves exactly these job changes, and no other:';
-// the head's settings.md is not main's and the head doesn't contain main's checked tip: the kit
-// predicts no merge of the file, so it is refused until main is merged in (rulings
-// d-20261120-044235981, d-20261120-075327162)
-const DIFFERS = /settings\.md: this branch's settings\.md differs from main's and the branch doesn't contain main's tip; merge main into the branch first/;
+// the head doesn't contain main's tip and no single merge base shows one side leaving settings.md
+// alone: refused until main is merged in (rulings d-20261120-044235981, d-20261120-133940663, re
+// m-20261120-134049211); under rebase the same message covers a replay that touches the file
+const DIFFERS = /settings\.md: this branch doesn't contain main's tip, and the kit can only judge settings\.md that one side left alone at a single merge base; merge main into the branch first/;
 // under merge_method rebase only a head whose settings.md is main's, with no merge commit and no
 // commit touching the file since main, is cleared (d-20261120-102757339)
-const REBASE_ALONE = /settings\.md: merge_method is rebase, which replays commits, so the branch must leave settings\.md alone; land the change with merge or squash/;
+const REBASE_ALONE = DIFFERS;
 // the head's settings.md is not mode 100644 (final-7 F2)
 const NOT_REGULAR = /settings\.md at the head is not a regular file \(mode \d+\); the kit reads only a plain file/;
+// rulings d-20261120-133940663 and re m-20261120-134049211: a head behind main is cleared only at a
+// single merge base where one side left settings.md alone; under rebase no merge commits since main
+const BEHIND = DIFFERS;
+// behind main with more than one merge base (final-9 F9-2's wording)
+const MULTI_BASES = /settings\.md: this branch doesn't contain main's tip and has \d+ merge bases with it; merge main into the branch first/;
+const REBASE_MERGES = /settings\.md: merge_method is rebase and this branch has merge commits since main; rebase the branch onto main instead/;
 const MAIN_CHANGED = DIFFERS;
 const MAIN_CHANGED_REBASE = REBASE_ALONE;
 
@@ -190,8 +196,8 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     assert.equal(T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cc'], T.old).split('\n').length, 2, 'two merge bases');
     const mb = T.g(['merge-base', 'origin/main', 'origin/chore-cc'], T.old);
     assert.equal(T.g(['rev-parse', `${mb}:docs/devteam/project/settings.md`], T.old), T.g(['rev-parse', 'origin/main:docs/devteam/project/settings.md'], T.old), 'the named base has main\'s settings blob');
-    // one base's blob is not main's: main changed the file, and the branch touches it
-    refused(T.dry('cc', qe), MAIN_CHANGED);
+    // two merge bases: git would merge against a virtual base the kit can't read
+    refused(T.dry('cc', qe), MULTI_BASES);
   } finally { T.done(); }
 });
 
@@ -994,18 +1000,24 @@ test('RV4-REBASE: under merge_method rebase, a stop-then-restore branch, a merge
     const mw = T.choreBranch('mc', (wt) => rawEdit(wt, (t) => `${t}\nA prose line.\n`));
     onMainFile(T, NOTES, 'moved\n', 'main moves');
     T.g(['fetch', '-q', 'origin'], mw); T.g(['merge', '-q', '--no-ff', '--no-edit', 'origin/main'], mw); T.g(['push', '-q', 'origin', 'chore-mc'], mw);
-    refused(T.dry('mc'), REBASE_ALONE);
+    refused(T.dry('mc'), REBASE_MERGES);
     // a merge commit with no settings change beside it: a rebase drops every merge, so any merge
     // commit since main is refused (d-20261120-102757339); with none, the branch passes
     const nw = T.choreBranch('mc-notes', (wt) => write(path.join(wt, 'docs/devteam/project/other.md'), 'o\n'));
     passes(T.dry('mc-notes'));
     onMainFile(T, NOTES, 'moved again\n', 'main moves again');
     T.g(['fetch', '-q', 'origin'], nw); T.g(['merge', '-q', '--no-ff', '--no-edit', 'origin/main'], nw); T.g(['push', '-q', 'origin', 'chore-mc-notes'], nw);
-    refused(T.dry('mc-notes'), REBASE_ALONE);
-    // a middle commit whose block doesn't parse: a rebase lands it on main as it is
+    refused(T.dry('mc-notes'), REBASE_MERGES);
+    // a middle commit whose block doesn't parse, on a branch that contains main with no merge
+    // commit: the rebase replays it, but ends at exactly the head's tree, whose jobs are main's
+    // (d-20261120-133940663), so it passes with no job change, and main's jobs stay as they were
     const uw = T.choreBranch('mid', (wt) => rawEdit(wt, (t) => t.replace('  "recurring": {', '  "recurring": {{')));
     commitIn(T, uw, 'chore-mid', (wt) => rawEdit(wt, (t) => `${t.replace('  "recurring": {{', '  "recurring": {')}\nA prose line.\n`), 'fixed');
-    refused(T.dry('mid'), REBASE_ALONE);
+    const before = T.mainSettings().recurring;
+    passes(T.dry('mid'));
+    passes(T.merge('mid'));
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.deepEqual(T.mainSettings().recurring, before, 'main\'s jobs are as they were');
   } finally { T.done(); }
 });
 
@@ -1079,7 +1091,7 @@ test('RV5-HIDDEN: rebase, a settings commit hidden behind a merge of an older ma
     // without --full-history, rev-list follows the TREESAME parent and hides c1
     assert.equal(T.g(['rev-list', 'origin/main..origin/chore-hid', '--', SETP], T.old), '');
     assert.notEqual(T.g(['rev-list', 'origin/main..origin/chore-hid', '--full-history', '--', SETP], T.old), '');
-    refused(T.dry('hid'), MAIN_CHANGED_REBASE);
+    refused(T.dry('hid'), REBASE_MERGES);
   } finally { T.done(); }
 });
 
@@ -1228,8 +1240,8 @@ test('RV6-REBASE-OURS: rebase, a branch cut before a stop merges main with -s ou
     assert.notEqual(T.g(['rev-parse', `origin/chore-back:${SETP}`], T.old), T.g(['rev-parse', `origin/main:${SETP}`], T.old), 'the head\'s file is not main\'s');
     // with an answer for bb back: a rebase lands main's file (bb stopped), not the head's
     const q2 = T.yes({ recurring: { bb: check({ title: 'B job', run: 'echo bb' }) } });
-    refused(T.dry('back', q2), REBASE_ALONE);
-    refused(T.dry('back'), REBASE_ALONE);
+    refused(T.dry('back', q2), REBASE_MERGES);
+    refused(T.dry('back'), REBASE_MERGES);
   } finally { T.done(); }
 });
 
@@ -1251,8 +1263,8 @@ test('RV6-CRISS: a criss-cross whose two bases\' settings.md differ, the head\'s
     const bases = T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cx'], T.old).split('\n');
     assert.equal(bases.length, 2, 'two merge bases');
     assert.notEqual(T.g(['rev-parse', `${bases[0]}:${SETP}`], T.old), T.g(['rev-parse', `${bases[1]}:${SETP}`], T.old), 'their settings.md differ');
-    refused(T.dry('cx'), DIFFERS);
-    refused(T.merge('cx'), DIFFERS);
+    refused(T.dry('cx'), MULTI_BASES);
+    refused(T.merge('cx'), MULTI_BASES);
     T.g(['fetch', '-q', 'origin'], T.old);
     assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'bb'), false, 'bb stays stopped');
   } finally { T.done(); }
@@ -1321,8 +1333,8 @@ test('RV6-CRISS2: a criss-cross whose head equals one base of two (the other has
     assert.equal(bases.length, 2, 'two merge bases');
     const head = T.g(['rev-parse', `origin/chore-cx2:${SETP}`], T.old);
     assert.deepEqual(bases.map((b) => T.g(['rev-parse', `${b}:${SETP}`], T.old) === head).sort(), [false, true], 'the head equals one base only');
-    refused(T.dry('cx2'), DIFFERS);
-    refused(T.merge('cx2'), DIFFERS);
+    refused(T.dry('cx2'), MULTI_BASES);
+    refused(T.merge('cx2'), MULTI_BASES);
     T.g(['fetch', '-q', 'origin'], T.old);
     assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'bb'), false, 'bb stays stopped');
   } finally { T.done(); }
@@ -1371,8 +1383,8 @@ test('RV6-CRISS3: a criss-cross where main\'s settings.md equals one base of two
     const main = T.g(['rev-parse', `origin/main:${SETP}`], T.old);
     assert.deepEqual(bases.map((b) => T.g(['rev-parse', `${b}:${SETP}`], T.old) === main).sort(), [false, true], 'main equals one base only');
     const q = T.yes({ recurring: { zz } });
-    refused(T.dry('cx3', q), DIFFERS);
-    refused(T.merge('cx3', ['--approved', q]), DIFFERS);
+    refused(T.dry('cx3', q), MULTI_BASES);
+    refused(T.merge('cx3', ['--approved', q]), MULTI_BASES);
     T.g(['fetch', '-q', 'origin'], T.old);
     assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'zz'), false, 'zz did not land');
   } finally { T.done(); }
@@ -1425,7 +1437,7 @@ test('RV7-EVIL: rebase, a chore adds zz, then merges main taking main\'s setting
     assert.equal(T.g(['rev-parse', `origin/main:${SETP}`], T.old), T.g(['rev-parse', `origin/chore-evil:${SETP}`], T.old), 'the head\'s file is main\'s');
     const d = T.dry('evil');
     assert.ok(Object.hasOwn(rebaseLands(T, 'chore-evil'), 'zz'), 'git rebase lands zz');
-    refused(d, REBASE_ALONE);
+    refused(d, REBASE_MERGES);
   } finally { T.done(); }
 });
 
@@ -1549,5 +1561,148 @@ test('RV8-COPYBACK-GOV: the copy-back chore with only a governance-edit answer: 
     refused(T.merge('cb', ['--approved', gq]), DIFFERS);
     T.g(['fetch', '-q', 'origin'], T.old);
     assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'zz'), false, 'zz landed under a governance-edit answer');
+  } finally { T.done(); }
+});
+
+// ---- round 9 (d-20261120-133940663): only a head that contains main's checked tip is judged ----
+// final-9b F9-1: final-8b R1's copy-back, with a directory at settings.md in the base
+const copyBackDir = (T, how) => {
+  T.onMain((j) => { j.recurring = Object.fromEntries(['aa', 'bb', 'cc', 'dd', 'ee'].map((n) => [n, check({ title: `${n} job`, run: `echo ${n}` })])); if (how !== 'merge') j.merge_method = how; });
+  T.g(['mv', SETP, OLDP], T.old);
+  fs.mkdirSync(path.join(T.old, SETP)); fs.writeFileSync(path.join(T.old, SETP, 'keep'), 'k\n');
+  T.g(['add', '-A'], T.old); T.g(['commit', '-qm', 'settings aside, a directory at its path'], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+  T.choreBranch('cbd', (wt) => { fs.rmSync(path.join(wt, SETP), { recursive: true, force: true }); fs.copyFileSync(path.join(wt, OLDP), path.join(wt, SETP)); editAt(wt, OLDP, (j) => { j.recurring.zz = check({ title: 'Z job', run: 'echo zz' }); }); });
+  T.g(['fetch', '-q', 'origin'], T.old); T.g(['reset', '-q', '--hard', 'origin/main'], T.old);
+  T.g(['rm', '-rq', SETP], T.old); T.g(['mv', OLDP, SETP], T.old); T.g(['commit', '-qm', 'settings back'], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+  T.g(['fetch', '-q', 'origin'], T.old);
+  assert.equal(T.g(['rev-parse', `origin/main:${SETP}`], T.old), T.g(['rev-parse', `origin/chore-cbd:${SETP}`], T.old), 'the head\'s file is main\'s');
+  const mb = T.g(['merge-base', 'origin/main', 'origin/chore-cbd'], T.old);
+  assert.equal(T.g(['cat-file', '-t', `${mb}:${SETP}`], T.old), 'tree', 'the base has a directory at settings.md');
+  const gl = gitLands(T, 'origin/chore-cbd');
+  assert.equal(!gl.conflict && Object.hasOwn(gl.jobs, 'zz'), true, 'git\'s merge lands zz');
+};
+
+test('RV9-COPYBACK-DIR-GOV: a directory at settings.md in the base, the copy-back chore with only a governance-edit answer: refused, and zz doesn\'t land (final-9b F9-1)', () => {
+  const T = setup('rv9cbdgov');
+  try {
+    copyBackDir(T, 'merge');
+    const gr = T.run(['ask', '--class', 'governance-edit', '--question', 'Should I put settings.md back where it was?', '--recommendation', 'Yes']);
+    assert.equal(gr.status, 0, gr.text);
+    const gq = (QID.exec(gr.out) ?? [null])[0];
+    T.answer(gq);
+    refused(T.dry('cbd', gq), BEHIND);
+    refused(T.merge('cbd', ['--approved', gq]), BEHIND);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'zz'), false, 'zz landed under a governance-edit answer');
+  } finally { T.done(); }
+});
+
+// final-9b F9-2: c0 holds the jobs at OLDP. b1 renames OLDP to SETP; b2 copies OLDP to SETP and drops
+// jj from OLDP. Main merges b1 and b2, the chore merges b2 and b1, both resolving to SETP = T (with
+// jj). Main then stops jj. Both real bases and the head hold T, but git's virtual base lacks jj, so
+// git's merge brings jj back.
+const forceMerge = (T, cwd, other, msg, T0) => {
+  try { T.g(['merge', '-q', '--no-commit', '--no-ff', other], cwd); } catch {}
+  fs.writeFileSync(path.join(cwd, SETP), T0); fs.rmSync(path.join(cwd, OLDP), { force: true });
+  T.g(['add', '-A'], cwd); T.g(['commit', '-q', '-m', msg], cwd);
+};
+const crissVirtual = (T, how) => {
+  T.onMain((j) => { j.recurring = Object.fromEntries(['aa', 'bb', 'jj', 'cc', 'dd'].map((n) => [n, check({ title: `${n} job`, run: `echo ${n}` })])); if (how !== 'merge') j.merge_method = how; });
+  T.g(['mv', SETP, OLDP], T.old); T.g(['commit', '-qm', 'c0: settings aside'], T.old);
+  const c0 = T.g(['rev-parse', 'HEAD'], T.old);
+  const T0 = fs.readFileSync(path.join(T.old, OLDP), 'utf8');
+  T.g(['checkout', '-q', '-b', 'b2', c0], T.old);
+  fs.writeFileSync(path.join(T.old, SETP), T0); editAt(T.old, OLDP, (j) => { delete j.recurring.jj; });
+  T.g(['add', '-A'], T.old); T.g(['commit', '-qm', 'b2: copy, drop jj in the old path'], T.old);
+  const b2 = T.g(['rev-parse', 'HEAD'], T.old);
+  T.g(['checkout', '-q', 'main'], T.old);
+  T.g(['mv', OLDP, SETP], T.old); T.g(['commit', '-qm', 'b1: settings back'], T.old);
+  const b1 = T.g(['rev-parse', 'HEAD'], T.old);
+  forceMerge(T, T.old, b2, 'm1: main takes b2', T0);
+  T.g(['push', '-q', 'origin', 'main'], T.old);
+  const wt = path.join(T.old, '.worktrees', 'chore-cx9');
+  T.g(['worktree', 'add', '-q', '-b', 'chore-cx9', wt, b2], T.old);
+  forceMerge(T, wt, b1, 'h1: the chore takes b1', T0);
+  T.g(['push', '-q', '-f', 'origin', 'chore-cx9'], wt);
+  write(path.join(T.old, 'docs/devteam/run/pr/chore-cx9.md'), '# chore-cx9: jobs\n\n## One-way doors\n\nNone.\n');
+  T.onMain((j) => { delete j.recurring.jj; }, 'stop jj');
+  T.g(['fetch', '-q', 'origin'], T.old);
+  const bases = T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cx9'], T.old).split('\n');
+  assert.equal(bases.length, 2, 'two merge bases');
+  for (const b of bases) assert.equal(T.g(['rev-parse', `${b}:${SETP}`], T.old), T.g(['rev-parse', `origin/chore-cx9:${SETP}`], T.old), 'every base holds the head\'s file');
+  const gl = gitLands(T, 'origin/chore-cx9');
+  assert.equal(!gl.conflict && Object.hasOwn(gl.jobs, 'jj'), true, 'git\'s merge brings jj back');
+};
+for (const how of ['merge']) {
+  test(`RV9-CRISS-VIRTUAL (${how}): both bases hold the head's file, main stops jj, git's virtual base lacks jj: refused, and jj stays stopped (final-9b F9-2)`, () => {
+    const T = setup(`rv9cv-${how}`);
+    try {
+      crissVirtual(T, how);
+      refused(T.dry('cx9'), MULTI_BASES);
+      refused(T.merge('cx9'), MULTI_BASES);
+      T.g(['fetch', '-q', 'origin'], T.old);
+      assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'jj'), false, 'jj came back with no answer');
+    } finally { T.done(); }
+  });
+}
+
+test('RV9-CRISS2: two merge bases, one without settings.md; main moves the old path back, the chore adds a byte copy and zz at the old path: refused, and zz doesn\'t land (final-9 F9-1, final-9b F9-3)', () => {
+  const T = setup('rv9c2');
+  try {
+    T.onMain((j) => { j.recurring = Object.fromEntries(['aa', 'bb', 'cc', 'dd', 'ee'].map((n) => [n, check({ title: `${n} job`, run: `echo ${n}` })])); });
+    const B0 = T.g(['rev-parse', 'HEAD'], T.old);
+    const T0 = fs.readFileSync(path.join(T.old, SETP), 'utf8');
+    const OTHER = 'docs/devteam/project/other.md';
+    // base1 keeps settings.md and puts a copy at the old path; base2 moves settings.md to the old path
+    T.g(['checkout', '-q', '-b', 'b1', B0], T.old);
+    fs.copyFileSync(path.join(T.old, SETP), path.join(T.old, OLDP)); write(path.join(T.old, NOTES), 'b1\n');
+    T.g(['add', '-A'], T.old); T.g(['commit', '-qm', 'base1: a copy aside'], T.old);
+    const X1 = T.g(['rev-parse', 'HEAD'], T.old);
+    T.g(['checkout', '-q', '-b', 'b2', B0], T.old);
+    T.g(['mv', SETP, OLDP], T.old); write(path.join(T.old, OTHER), 'b2\n');
+    T.g(['add', '-A'], T.old); T.g(['commit', '-qm', 'base2: settings aside'], T.old);
+    const X2 = T.g(['rev-parse', 'HEAD'], T.old);
+    // each side merges the two bases the same way: no settings.md, the old path as it was
+    const both = (cwd, other, msg) => {
+      try { T.g(['merge', '-q', '--no-commit', '--no-ff', other], cwd); } catch {}
+      fs.rmSync(path.join(cwd, SETP), { force: true }); fs.writeFileSync(path.join(cwd, OLDP), T0); write(path.join(cwd, NOTES), 'b1\n'); write(path.join(cwd, OTHER), 'b2\n');
+      T.g(['add', '-A'], cwd); T.g(['commit', '-q', '--allow-empty', '-m', msg], cwd);
+    };
+    T.g(['checkout', '-q', 'main'], T.old); T.g(['reset', '-q', '--hard', X1], T.old);
+    both(T.old, X2, 'main takes base2');
+    // main moves the old path back to settings.md
+    T.g(['mv', OLDP, SETP], T.old); T.g(['commit', '-qm', 'settings back'], T.old); T.g(['push', '-q', 'origin', 'main'], T.old);
+    // the chore: base2 merging base1, then settings.md as main has it and zz at the old path
+    const wt = path.join(T.old, '.worktrees', 'chore-c2');
+    T.g(['worktree', 'add', '-q', '-b', 'chore-c2', wt, X2], T.old);
+    both(wt, X1, 'the chore takes base1');
+    fs.writeFileSync(path.join(wt, SETP), T0); editAt(wt, OLDP, (j) => { j.recurring.zz = check({ title: 'Z job', run: 'echo zz' }); });
+    T.g(['add', '-A'], wt); T.g(['commit', '-qm', 'a byte copy, zz at the old path'], wt); T.g(['push', '-q', '-f', 'origin', 'chore-c2'], wt);
+    write(path.join(T.old, 'docs/devteam/run/pr/chore-c2.md'), '# chore-c2: jobs\n\n## One-way doors\n\nNone.\n');
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(T.g(['rev-parse', `origin/main:${SETP}`], T.old), T.g(['rev-parse', `origin/chore-c2:${SETP}`], T.old), 'the head\'s file is main\'s');
+    const bases = T.g(['merge-base', '--all', 'origin/main', 'origin/chore-c2'], T.old).split('\n');
+    assert.equal(bases.length, 2, 'two merge bases');
+    assert.deepEqual(bases.map((b) => { try { T.g(['rev-parse', '--verify', '-q', `${b}:${SETP}`], T.old); return true; } catch { return false; } }).sort(), [false, true], 'one base lacks settings.md');
+    const gl = gitLands(T, 'origin/chore-c2');
+    assert.equal(!gl.conflict && Object.hasOwn(gl.jobs, 'zz'), true, 'git\'s merge lands zz');
+    refused(T.dry('c2'), MULTI_BASES);
+    refused(T.merge('c2'), MULTI_BASES);
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.equal(Object.hasOwn(jobsOf6(T, 'origin/main'), 'zz'), false, 'zz landed with no answer');
+  } finally { T.done(); }
+});
+
+test('RV9-REBASE-UP: rebase, a chore that contains main and adds zz lands with the answer, exactly as answered (d-20261120-133940663)', () => {
+  const T = setup('rv9rbup');
+  try {
+    const zz = check({ title: 'Z job', run: 'echo zz' });
+    T.onMain((j) => { j.recurring = { aa: check({ title: 'A job' }) }; j.merge_method = 'rebase'; });
+    T.jobsChore('up', (j) => { j.recurring.zz = zz; });
+    refused(T.dry('up'), /recurring-edit/);
+    const q = T.yes({ recurring: { zz } });
+    passes(T.merge('up', ['--approved', q]));
+    T.g(['fetch', '-q', 'origin'], T.old);
+    assert.deepEqual(jobsOf6(T, 'origin/main'), { aa: check({ title: 'A job' }), zz });
   } finally { T.done(); }
 });
