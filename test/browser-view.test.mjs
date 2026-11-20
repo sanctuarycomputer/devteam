@@ -559,7 +559,8 @@ test('I6 forget signs the browser out and restarts it on an empty profile', opts
   fs.writeFileSync(marker, 'x');
   await sleep(500);
   c.send({ t: 'forget' });
-  await within(20000, () => { try { const s = readState(a); return s.chrome_pid !== old.chrome_pid; } catch { return false; } }, 'a new Chrome in state.json');
+  // state.json is replaced by a rename, never missing while the daemon lives: gone means it stopped
+  await within(20000, () => { if (!fs.existsSync(a.state)) assert.fail('the daemon stopped (state.json gone)'); try { const s = readState(a); return s.chrome_pid !== old.chrome_pid; } catch { return false; } }, 'a new Chrome in state.json');
   assert.equal(readState(a).daemon_pid, old.daemon_pid, 'the same daemon');
   await within(20000, () => !alive(old.chrome_pid), 'the old Chrome gone');
   assert.ok(alive(old.daemon_pid), 'the daemon stays');

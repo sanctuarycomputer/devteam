@@ -26121,7 +26121,8 @@ function browserRootOf(dir) {
 // profile naming another root is a copied or moved checkout's, refused; a missing root.json is written.
 // One that is there but can't be read as a root (unparsable, relative, too long) is refused the same
 // way, never overwritten. Only the start path calls this: a verb a live daemon answers makes nothing.
-function browserProfile() {
+// fail: how a refused profile ends the caller (die; a forget's restart throws, to stop the daemon whole).
+function browserProfile({ fail = die } = {}) {
   const key = browserKey(), here = realPath(mainRoot), dir = path.join(browserHome(), key), file = path.join(dir, 'root.json');
   for (const d of [browserHome(), dir]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fs.chmodSync(d, 0o700); }
   const forget = 'Forget it (devteam.mjs browser forget) to start signed out';
@@ -26133,8 +26134,8 @@ function browserProfile() {
     try { fs.linkSync(tmp, file); } catch (e) { if (e.code !== 'EEXIST') throw e; } finally { fs.rmSync(tmp, { force: true }); }
   }
   const root = browserRootOf(dir);
-  if (root === null) die(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
-  if (root !== here) die(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
+  if (root === null) return fail(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
+  if (root !== here) return fail(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
   return dir;
 }
 // browser_idle_minutes in ms, read like machine_memory_ceiling: anything but a whole number from 1 to
@@ -26922,6 +26923,9 @@ async function browserLaunchChrome(ctx, { headed }) {
     if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) {
       const note = "Chrome's sandbox isn't available on this machine; it runs without it.";
       if (!ctx.notes.includes(note)) ctx.notes.push(note); // a forget's relaunch says it once
+      // a stop came meanwhile: no second Chrome (detached, it would outlive the daemon); the caller's
+      // own ctx.stopping check after the launch kills ctx.chrome and returns
+      if (ctx.stopping) return { cdp: null };
       continue;
     }
     throw new Error(r.late ? "browser: Chrome didn't open its DevTools pipe in 30 s" : 'browser: Chrome exited before its DevTools pipe opened');
@@ -26971,7 +26975,7 @@ async function browserForgetRestart(ctx) {
     if (ctx.stopping) return;
     if (procs === null || procs.length) return void browserShutdown(ctx, 'error'); // nothing removed on a guess
     fs.rmSync(ctx.profile, { recursive: true, force: true });
-    ctx.profile = browserProfile();
+    ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
     await browserPrepareProfile(ctx.profile, []);
     if (ctx.stopping) return;
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
