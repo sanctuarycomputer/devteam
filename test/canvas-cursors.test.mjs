@@ -451,10 +451,13 @@ test('canvas cursors: a select made while the document is fetched after a restar
   await within(ctx, async () => (await body(A, 'kept')) === '0' && (await body(A, 'pending')) === '0', "A's edits all saved");
   fake.pause(SLUG);
   const x3 = await drawRect(ctx, A, 340, 120, 'X3');
+  // B's mark is taken before the click that causes its frame, as b0, b1 and b3 are (kit-326): X3's
+  // select opened the fake's 250 ms selections window, so the frame naming n-side can reach B before
+  // the test, polling for A's select, would look
+  const b2 = B.rec.order();
   await A.click('#layers .layer[data-node="n-side"]');
   await within(ctx, async () => ofKind(A.rec.sent, 'select').at(-1)?.m.ids.join(' ') === 'n-side', "A's select of n-side");
-  const b2 = B.rec.order();
-  await within(ctx, async () => anaSelections(B, b2).some((ids) => ids && ids.join(' ') === 'n-side'), "B's selections list Ana with n-side");
+  await within(ctx, async () => anaSelections(B, b2).some((ids) => ids && ids.join(' ') === 'n-side'), "B's selections list Ana with n-side", async () => JSON.stringify(anaSelections(B, b2)));
   A.rec.hold = (url) => url.includes('/api/canvas/doc?');
   const r2 = A.rec.order();
   const doc3 = fake.doc(SLUG);
