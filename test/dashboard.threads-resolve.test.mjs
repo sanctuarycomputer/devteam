@@ -132,12 +132,11 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   // the card open from its pin, as subtest 21 leaves it (:3644-3645)
   await click(`[data-tl-pin="${T}"]`);
   await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
-  // what subtest 24 leaves: its question on T (:3710) answered in the terminal (:3717), as the page then
-  // has it (:3730's wait), the card still open on T; subtest 26's warning counts T's open questions
-  const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to Canada too?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-  await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
-  F.owner(['answer', Q, 'Not this quarter']);
-  await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered' && /Not this quarter/.test(document.getElementById('tl-c-turns').textContent) && document.getElementById('tl-card').dataset.key === '${T}'`, 'the answer as the log has it');
+  // Of what subtest 24 leaves (:3709-3733), subtests 25-26 (:3735-3768) read only T's card, open on T
+  // (:3737's and :3746's reads of tl-c-turns and tl-c-ready), built above. Its question (:3710), answered
+  // in the terminal (:3717), isn't built: they never name it, and :3747's "1 question asked here is still
+  // open" counts T's open questions, which an answered one doesn't add to (25's own is answered at :3740,
+  // 26's Q2 is the one left open, :3744); the Not yet count is relative (:3749, :3756).
 
   await t.test('a secrets question in the thread is a link to the Inbox, never a second form', async () => {
     const Q = F.sup(['thread', 'ask', T, '--kind', 'owner-action', '--question', 'Post the API key', '--secrets', JSON.stringify([{ name: 'KEY', sink: 'file:secrets/key.txt' }]), '--goal', F.goal, '--stake', '1', '--urgency', '1']);
