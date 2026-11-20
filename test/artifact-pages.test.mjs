@@ -143,11 +143,19 @@ test('C5: the lens counts a match that is not shown as not found, and prefers a 
   const none = el('button', { text: 'Buy', display: false });
   const hidden = el('button', { text: 'Buy', visibility: 'hidden', noCheck: true });
   const empty = el('button', { text: 'Buy', rect: { x: 5, y: 5, w: 0, h: 0 } });
-  const L = lens({ by: { '#shown': shown, '#none': none, '#hidden': hidden, '#empty': empty } });
+  // a wide box with no height (a collapsed container) is still shown: only a box with no size at all is hidden
+  const flat = el('div', { text: 'Buy', rect: { x: 5, y: 5, w: 200, h: 0 } });
+  const L = lens({ by: { '#shown': shown, '#none': none, '#hidden': hidden, '#empty': empty, '#flat': flat } });
   L.hear({ type: 'hello' });
   const anchor = (selector) => ({ selector, tag: 'button', text: 'Buy', rect: { x: 10, y: 10, w: 100, h: 20 } });
-  L.hear({ type: 'resolve', id: 'r1', anchors: ['#shown', '#none', '#hidden', '#empty'].map((s) => ({ key: s, anchor: anchor(s) })) });
-  const rects = Object.fromEntries(L.posted.find((m) => m.type === 'rects' && m.id === 'r1').rects.map((r) => [r.key, r.rect]));
+  L.hear({ type: 'resolve', id: 'r1', anchors: ['#shown', '#none', '#hidden', '#empty', '#flat', '#absent'].map((s) => ({ key: s, anchor: anchor(s) })) });
+  const said = Object.fromEntries(L.posted.find((m) => m.type === 'rects' && m.id === 'r1').rects.map((r) => [r.key, r]));
+  const rects = Object.fromEntries(Object.entries(said).map(([k, r]) => [k, r.rect]));
+  // find's mark, on the wire: hidden for a match not shown, never for no match (kit-147's shooter tells them apart)
+  for (const k of ['#none', '#hidden', '#empty']) assert.equal(said[k].hidden, true, `${k}: marked hidden`);
+  for (const k of ['#shown', '#flat', '#absent']) assert.equal(said[k].hidden, undefined, `${k}: not marked hidden`);
+  assert.equal(rects['#absent'], null, 'no match: rect null');
+  assert.deepEqual(rects['#flat'], { x: 5, y: 5, w: 200, h: 0 }, 'a 200x0 box is shown');
   assert.deepEqual(rects['#shown'], { x: 10, y: 10, w: 100, h: 20 }, 'a shown element: its rect');
   assert.equal(rects['#none'], null, 'display:none: rect null');
   assert.equal(rects['#hidden'], null, 'visibility:hidden (no checkVisibility): rect null');
@@ -166,7 +174,7 @@ test('C5: the lens counts a match that is not shown as not found, and prefers a 
   const O = lens({ tags: { button: [near] } });
   O.hear({ type: 'hello' });
   O.hear({ type: 'resolve', id: 'r3', anchors: [{ key: 'k', anchor: { selector: '#gone', tag: 'button', text: 'Pay', rect: { x: 0, y: 0, w: 80, h: 20 } } }] });
-  assert.equal(O.posted.find((m) => m.id === 'r3').rects[0].rect, null, 'a hidden match alone: rect null');
+  assert.deepEqual(O.posted.find((m) => m.id === 'r3').rects[0], { key: 'k', rect: null, hidden: true }, 'a hidden match alone: rect null, marked hidden');
 });
 
 test('C6: the lens\'s go order sets location.hash to a #hash of at most 200 bytes, and ignores anything else', () => {
@@ -318,11 +326,6 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     await V.open(AV_P);
     await V.frameClick('to-a', 'pages/a.html');
     await pinsAre(V, [N.TE, N.TAL, N.TP], 'on a.html');
-    // C4b (ruling m-20261120-191501324): nav is a kind the viewer takes because T_LENS_SAYS lists it, and
-    // nothing outside that list gets through
-    const kinds = await V.p.ev("(() => { const w = tsFrame().contentWindow; return Object.fromEntries(['nav', 'go', 'hello', 'resolve', 'place', 'Nav', 'navs', 'constructor'].map((k) => [k, tLensMessage({ data: { lens: 1, type: k, hash: '#x', path: '/x' }, source: w }, w, new Map())?.type ?? null])); })()");
-    assert.deepEqual(kinds, { nav: 'nav', go: null, hello: null, resolve: null, place: null, Nav: null, navs: null, constructor: null }, 'tLensMessage takes nav and no kind outside T_LENS_SAYS');
-    assert.deepEqual(await V.p.ev('T_LENS_SAYS'), ['ready', 'route', 'hit-reply', 'rects', 'key', 'errors', 'nav'], "T_LENS_SAYS: today's kinds and nav");
     await V.frameClick('go-tab2', 'pages/a.html', { hash: '#tab2', load: false });
     await pinsAre(V, [N.TAL, N.TP, N.TP2], 'on a.html#tab2 (TP2 shows on #tab2; TE hides with its view)');
     // where a new note's hash lives: on empty page, or an anchor with no selector, the path holds it
@@ -331,10 +334,49 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     // back to the first view: as on a.html
     await V.frameClick('go-tab1', 'pages/a.html', { hash: '#tab1', load: false });
     await pinsAre(V, [N.TE, N.TAL, N.TP], 'on a.html#tab1');
-    // C4: a page that floods nav costs one redraw a frame (TS.draws, the test hook) and counts each move
-    const [draws, navs] = await V.p.ev(`(() => { const d = TS.draws, n = AV_NAVS, w = tsFrame().contentWindow; for (let i = 0; i < 100; i++) dispatchEvent(new MessageEvent('message', { data: { lens: 1, type: 'nav', path: '/artifact/main/pages/a.html', hash: '#f' + i }, source: w })); return new Promise((r) => requestAnimationFrame(() => r([TS.draws - d, AV_NAVS - n]))); })()`);
-    assert.equal(draws, 1, '100 navs in one task: one redraw by the next frame');
-    assert.equal(navs, 100, 'each a move');
+  });
+
+  await sub('C4b: the viewer takes nav, and no kind outside T_LENS_SAYS', async () => {
+    const V = await visit('#library');
+    await V.open(AV_P);
+    await V.frameClick('to-a', 'pages/a.html');
+    await pinsAre(V, [N.TE, N.TAL, N.TP], 'on a.html');
+    // C4b (ruling m-20261120-191501324): nav is a kind the viewer takes because T_LENS_SAYS lists it, and
+    // nothing outside that list gets through
+    const kinds = await V.p.ev("(() => { const w = tsFrame().contentWindow; return Object.fromEntries(['nav', 'go', 'hello', 'resolve', 'place', 'Nav', 'navs', 'constructor'].map((k) => [k, tLensMessage({ data: { lens: 1, type: k, hash: '#x', path: '/x' }, source: w }, w, new Map())?.type ?? null])); })()");
+    assert.deepEqual(kinds, { nav: 'nav', go: null, hello: null, resolve: null, place: null, Nav: null, navs: null, constructor: null }, 'tLensMessage takes nav and no kind outside T_LENS_SAYS');
+    assert.deepEqual(await V.p.ev('T_LENS_SAYS'), ['ready', 'route', 'hit-reply', 'rects', 'key', 'errors', 'nav'], "T_LENS_SAYS: today's kinds and nav");
+  });
+
+  await sub('C4: a page that floods nav costs one redraw a frame, and the same nav again is no move', async () => {
+    const V = await visit('#library');
+    await V.open(AV_P);
+    await V.frameClick('to-a', 'pages/a.html');
+    await pinsAre(V, [N.TE, N.TAL, N.TP], 'on a.html');
+    // C4: a page that floods nav costs one redraw a frame (TS.draws, the test hook) and counts each move once.
+    // Dispatched to the dashboard's window as the frame's (source: its window) in one task: posted from the frame,
+    // 100 messages arrive as 100 tasks, not reliably inside one frame. The viewer checks source, never isTrusted.
+    const flood = await V.p.ev(`(() => { const d = TS.draws, n = AV_NAVS, w = tsFrame().contentWindow; const say = (h) => dispatchEvent(new MessageEvent('message', { data: { lens: 1, type: 'nav', path: '/artifact/main/pages/a.html', hash: h }, source: w })); for (let i = 0; i < 100; i++) say('#f' + i); return new Promise((r) => requestAnimationFrame(() => { const one = [TS.draws - d, AV_NAVS - n]; const m = AV_NAVS; for (let i = 0; i < 50; i++) say('#f99'); r([...one, AV_NAVS - m]); })); })()`);
+    assert.equal(flood[0], 1, '100 navs in one task: one redraw by the next frame');
+    assert.equal(flood[1], 100, 'each a move');
+    assert.equal(flood[2], 0, 'the same nav again is no move');
+  });
+
+  await sub("C11: the viewer's own guards on nav", async () => {
+    const V = await visit('#library');
+    await V.open(AV_P);
+    await V.frameClick('to-a', 'pages/a.html');
+    await pinsAre(V, [N.TE, N.TAL, N.TP], 'on a.html');
+    // C11: the viewer's own guards on nav (a page's scripts can post it without the lens)
+    const g = await V.p.ev(`(() => { const w = tsFrame().contentWindow, m = (x) => tLensMessage({ data: { lens: 1, type: 'nav', path: '/artifact/main/pages/a.html', ...x }, source: w }, w, new Map()); const cap = '/c/1767225600000.abcdefghijklmnop.abcdefghijklmnopqrstuv'; return { bidi: m({ hash: '#a\u202eb\u0007c' }).hash, cap: m({ hash: '#go' + cap + '/artifact/x' }).hash, long: m({ hash: '#' + 'z'.repeat(299) }).hash, plain: m({ hash: 'tab2' }).hash, num: m({ hash: 7 }).hash, nopath: tLensMessage({ data: { lens: 1, type: 'nav', hash: '#q' }, source: w }, w, new Map()).path }; })()`);
+    assert.equal(g.bidi, '#abc', 'no bidi override or control character');
+    assert.equal(g.cap, '#go[link removed]/artifact/x', 'the capability cut');
+    assert.equal(g.long, '#' + 'z'.repeat(199), 'cut to 200 bytes');
+    assert.equal(g.plain, '', 'a hash without # is none');
+    assert.equal(g.num, '', 'a number is none');
+    assert.equal(g.nopath, null, 'no path: null');
+    const held = await V.p.ev(`(() => { const w = tsFrame().contentWindow, say = (h) => dispatchEvent(new MessageEvent('message', { data: { lens: 1, type: 'nav', path: '/artifact/main/pages/a.html', hash: h }, source: w })); const n = AV_NAVS, h0 = TS.hash; TS.ready = false; say('#before-ready'); const dropped = [AV_NAVS - n, TS.hash === h0]; TS.ready = true; const m = AV_NAVS; say('#twice'); say('#twice'); return [...dropped, AV_NAVS - m]; })()`);
+    assert.deepEqual(held, [0, true, 1], 'a nav before ready is dropped; the same nav twice counts once');
   });
 
   await sub('C1: b.html: an element note shows with and without #section-2', async () => {
