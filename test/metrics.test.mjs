@@ -124,6 +124,72 @@ test('a lower-priority ticket still starts while higher-priority work is blocked
   } finally { F.done(); }
 });
 
+// A goal waiting, directly or through others, on work of a goal 3 or more priority numbers worse
+// that nobody has started (startable now, or held) is a priority-inversion finding, one per blocked
+// goal. Work behind a held goal is blocked-by-goal-hold's; the finding clears once the edge is gone.
+test('priority-inversion: a goal waiting on unstarted work well below it, until the edge goes', () => {
+  const { F, g, ticket, findings } = priorityFixture('metrics-priority-inversion');
+  try {
+    // p2 waits on p9 work through another p9 ticket; p2 waits on p5 (a gap of 3); p3 on p5 (a gap of 2)
+    ticket('pi-01-low', 9);
+    ticket('pi-02-link', 9, ['pi-01-low']);
+    ticket('pi-03-high', 2, ['pi-02-link']);
+    ticket('pi-04-fifth', 5);
+    ticket('pi-05-middle', 3, ['pi-04-fifth']);
+    ticket('pi-06-gap', 2, ['pi-04-fifth']);
+    const inversions = () => findings().filter((x) => x.kind === 'priority-inversion');
+    let f = inversions();
+    assert.equal(f.length, 1, JSON.stringify(f));
+    assert.equal(f[0].subject, g[2]);
+    assert.equal(f[0].severity, 'medium');
+    // only what could start: pi-02-link waits on pi-01-low, so it is not named
+    assert.equal(f[0].detail, 'p2 "High": 2 tickets wait on lower-priority work nobody has started: pi-01-low (p9), pi-04-fifth (p5)');
+    assert.match(f[0].suggestion, /^start them now .*reverse it so the lower-priority ticket waits/);
+    assert.match(F.sup(['metrics']), /\[medium\] priority-inversion: /);
+
+    // a held blocker is named as held, with what to do about it
+    const until = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+    F.sup(['ticket', 'hold', 'pi-01-low', '--reason', 'waits on a vendor', '--for', 'external:the vendor', '--until', until]);
+    F.sup(['ticket', 'set', 'pi-06-gap', '--json', JSON.stringify({ depends_on: [] })]);
+    f = inversions();
+    assert.equal(f[0].detail, 'p2 "High": 1 ticket waits on lower-priority work nobody has started: pi-01-low (p9, held: waits on a vendor)');
+    assert.match(f[0].suggestion, /^release the held one if the hold no longer stands; /);
+    F.sup(['ticket', 'release', 'pi-01-low']);
+
+    // the blocker's goal held: blocked-by-goal-hold's, not this one's; the blocked goal held: none
+    F.sup(['goal', 'hold', g[9], 'drain', '--reason', 'paused', '--for', 'external:a pause', '--until', until]);
+    assert.deepEqual(inversions(), []);
+    assert.ok(findings().some((x) => x.kind === 'blocked-by-goal-hold' && x.subject === 'pi-03-high'));
+    F.sup(['goal', 'hold', g[9], 'run', '--reason', 'resumed']);
+    assert.equal(inversions().length, 1);
+    F.sup(['goal', 'hold', g[2], 'drain', '--reason', 'paused', '--for', 'external:a pause', '--until', until]);
+    assert.deepEqual(inversions(), []);
+    F.sup(['goal', 'hold', g[2], 'run', '--reason', 'resumed']);
+
+    // while the fleet drains nothing starts, so it is quiet (as idle-capacity is)
+    const snap = F.snapLog();
+    const stamp = (ago) => { const d = new Date(Date.now() - ago).toISOString(); return `${d.slice(0, 10).replace(/-/g, '')}-${d.slice(11, 23).replace(/[:.]/g, '')}`; };
+    F.hand('supervisor', { id: `a-${stamp(1000)}-supervisor`, type: 'act', class: 'drain', what: 'drained the fleet on here: a pause' }, 1000);
+    assert.equal(findings().find((x) => x.kind === 'idle-capacity'), undefined, 'the drain is in force');
+    assert.deepEqual(inversions(), []);
+    F.restoreLog(snap);
+
+    // the edge cut: nothing of p2's waits on p9 work
+    assert.equal(inversions().length, 1);
+    F.sup(['ticket', 'set', 'pi-03-high', '--json', JSON.stringify({ depends_on: [] })]);
+    assert.deepEqual(inversions(), []);
+
+    // work behind a running worker waits on that worker: a p2 ticket on a p9 one whose worker runs
+    // raises nothing; unstarted, it would
+    ticket('pi-07-running', 9);
+    ticket('pi-08-behind', 2, ['pi-07-running']);
+    assert.equal(inversions()[0]?.detail, 'p2 "High": 1 ticket waits on lower-priority work nobody has started: pi-07-running (p9)');
+    // a running worker by hand, as kit.test.mjs does: its phase lines (no tmux needed)
+    for (const [from, to, ago] of [[null, 'starting', 60000], ['starting', 'build', 30000]]) F.hand('pi-07-running', { id: `h-${stamp(ago)}-pi-07-running`, type: 'phase', from, to }, ago, 'pi-07-running.jsonl');
+    assert.deepEqual(inversions(), []);
+  } finally { F.done(); }
+});
+
 // Only running goals give or pass on priority: a met goal's leftover ticket, a parked goal's ticket
 // (nor a chain through one), a drained goal's ticket (nor a chain through one), and a held goal a
 // ticket also serves push nothing.

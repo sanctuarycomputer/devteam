@@ -4611,8 +4611,9 @@ function ownPriority(t) {
 // Each live ticket's effective priority: the best of its own and that of every live ticket that
 // depends on it, directly or through others. Work a higher-priority goal waits on goes first,
 // whatever goal it serves, so the goal isn't left waiting on work nobody pushes (ready, idle
-// capacity). Priority orders the queue, never gates it. Live: active, unmerged, its goal running
-// (a drained, parked or let-go goal's ticket starts nothing, so pushes nothing).
+// capacity, priority-inversion). Priority orders the queue, never gates it. Live: active,
+// unmerged, its goal running (a drained, parked or let-go goal's ticket starts nothing, so
+// pushes nothing).
 function effectivePriorities(ts) {
   const live = new Map([...ts].filter(([, t]) => isActive(t) && !mergeShaFor(t.id) && ticketMode(t) === 'run'));
   // over live tickets only: a chain through a held goal's ticket passes nothing on, and history costs nothing
@@ -14639,6 +14640,9 @@ function efficiencyData(m, now = Date.now()) {
     suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: W12[11].start, end: W12[11].end, POINTS }) };
 }
 
+// How many places below a goal's priority the unstarted work it waits on must be to be a finding.
+const PRIORITY_INVERSION_GAP = 3;
+
 // A repo link the supervisor maintains: open PRs to review, fix, comment on and merge, and (with
 // its own release: "tag") releases to cut. Nothing else notices when that work stops, so:
 // pr-unreviewed, an open PR (not the fleet's own, not a draft) whose head has had no review for
@@ -15044,6 +15048,47 @@ function collectMetrics(since) {
   let idlePlanning = 0;
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !(activeWorker(t.id) && !stoppedLaunch(t.id)) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
   holdFindings(add, settings);
+  // A goal's live ticket that waits, directly or through others, on work of a goal
+  // PRIORITY_INVERSION_GAP or more numbers worse that nobody has started: a ticket that could start
+  // now (its dependencies merged, no worker), or one held. Nothing else pushes that work, and a
+  // dependency added only to keep footprints apart (planning.md D4) can point the wrong way. One
+  // finding per blocked goal. The walk goes only through running goals' live tickets: work behind a
+  // held goal is blocked-by-goal-hold's, and work behind a running worker waits on that worker.
+  // Blockers with no priority (chores, unprioritised goals) are never lower, so never named.
+  // A held ticket that waits still counts as waiting, as it still passes its priority on in
+  // effectivePriorities: its hold is a pause, and the work it waits on is still behind when it lifts.
+  // While the fleet drains or memory is full nothing starts, so it is quiet, as idle-capacity is.
+  if (!drained && !memFull) {
+    const run = new Map([...ts].filter(([id, t]) => live(id) && ticketMode(t) === 'run'));
+    const clos = closures(run);
+    // the frontier nobody has started, with each ticket's own priority, worked out once
+    const frontier = new Map();
+    for (const [id, t] of run) {
+      if (countsAsWorker(t) || !(t.depends_on ?? []).every((d) => mergeShaFor(d))) continue;
+      const own = ownPriority(t);
+      if (own) frontier.set(id, { ...own, held: isHeld(t) ? t.held : null });
+    }
+    const goalsOf = new Map([...run].map(([id, t]) => [id, ticketGoals(t).map((x) => x.id)]));
+    for (const g of logObjects('goal').filter((x) => !['met', 'abandoned'].includes(x.status) && typeof x.priority === 'number' && goalMode(x) === 'run')) {
+      const waiting = new Set();
+      const on = new Map();
+      for (const [id] of run) {
+        if (!goalsOf.get(id).includes(g.id)) continue;
+        for (const d of clos.get(id) ?? []) {
+          const b = frontier.get(d);
+          if (!b || b.priority - g.priority < PRIORITY_INVERSION_GAP) continue;
+          waiting.add(id);
+          on.set(d, b);
+        }
+      }
+      if (!on.size) continue;
+      const list = [...on].sort((a, b) => b[1].priority - a[1].priority || a[0].localeCompare(b[0]));
+      const named = (xs) => xs.slice(0, 5).map(([id, b]) => `${id} (p${b.priority}${b.held ? `, held: ${b.held}` : ''})`).join(', ') + (xs.length > 5 ? `, and ${xs.length - 5} more` : '');
+      const startable = list.filter(([, b]) => !b.held);
+      const held = list.filter(([, b]) => b.held);
+      add('medium', 'priority-inversion', g.id, `p${g.priority} "${g.title}": ${plural(waiting.size, 'ticket')} wait${waiting.size === 1 ? 's' : ''} on lower-priority work nobody has started: ${named(list)}`, `${startable.length ? `start ${startable.length === 1 ? 'it' : 'them'} now (ready lists ${startable.length === 1 ? 'it' : 'them'} first, marked "blocks p${g.priority}")` : ''}${startable.length && held.length ? '; ' : ''}${held.length ? `release the held ${held.length === 1 ? 'one' : 'ones'} if the hold no longer stands` : ''}; where an edge only keeps footprints apart (planning.md D4), reverse it so the lower-priority ticket waits, or cut it by narrowing touches`);
+    }
+  }
   // What matters most: the strategy, each goal's impact, and the ratings the Inbox is ordered by.
   {
     const goals = logObjects('goal');
