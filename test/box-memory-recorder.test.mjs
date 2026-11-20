@@ -122,12 +122,15 @@ test('C1c: the ceiling is the lowest valid machine_memory_ceiling among the know
     fs.writeFileSync(path.join(d, 'settings.md'), `# Settings\n\n\`\`\`json devteam\n${JSON.stringify({ project: name, machine_memory_ceiling: ceiling })}\n\`\`\`\n`);
     return root;
   };
-  const low = settings(path.join(scratch, 'ceil-low'), 'ceil-low', 0.7);
+  // the project's name is settings.md's, not its folder's
+  const low = settings(path.join(scratch, 'ceil-low'), 'named-not-folder', 0.7);
   const bad = settings(path.join(scratch, 'ceil-bad'), 'ceil-bad', 0.3);
-  const h = await startHub(t, { roots: [...FIXTURE_ROOTS, low, bad] });
+  const proc = procWith('proc-named', [[4300, { cmdline: 'bash\0', statm: statm(500), cwd: low }]]);
+  const h = await startHub(t, { proc, roots: [...FIXTURE_ROOTS, low, bad] });
   const r = JSON.parse((await firstLine(h))[0]);
   assert.equal(r.ceiling, 0.7);
-  assert.deepEqual(Object.keys(r.projects).sort(), ['devteam-dev', 'mothership'], 'a root with no process is in no project');
+  assert.deepEqual(Object.keys(r.projects).sort(), ['devteam-dev', 'mothership', 'named-not-folder'], 'a root with no process is in no project');
+  assert.deepEqual(r.projects['named-not-folder'], { rss: 500 * 4096 });
 });
 
 test('C1d: the classifier skips node\'s options, keeps only command names, and needs an install subcommand', () => {
@@ -144,12 +147,38 @@ test('C1d: the classifier skips node\'s options, keeps only command names, and n
   assert.deepEqual(c('node\0/usr/lib/node_modules/npm/bin/npm-cli.js\0test\0'), { kind: 'node' });
   assert.deepEqual(c('/usr/lib/chromium/chromium --type=renderer\0'), { kind: 'browser' });
   assert.deepEqual(c(''), { kind: 'other' });
+  // only a retitled argv[0] (one entry holding spaces) is split on spaces: a script path may hold one
+  assert.deepEqual(c('node\0/home/a b/docs/devteam/scripts/devteam.mjs\0wait\0'), { kind: 'devteam', subcommand: 'wait' });
+  assert.deepEqual(c('/opt/my apps/claude\0--continue\0'), { kind: 'other' }, 'argv[0] split on its space: the limit the spec states');
+  // a 200 KB command line is read to its first 64 KB, quickly
+  const big = memoryWords(`node\0${'x'.repeat(200000)}\0`);
+  assert.ok(big.every((w) => w.length <= 65536));
+});
+
+test('C1e: roots: the registry and the hub\'s scan together, the hello\'s name first, then settings.md\'s, then the folder\'s; the lowest valid ceiling', () => {
+  const { memoryNameRoots } = fns(['memoryNameRoots']);
+  const settings = { '/c/a': { project: 'alpha', machine_memory_ceiling: 0.75 }, '/c/b': { machine_memory_ceiling: 0.96 }, '/c/s': { project: 'from-settings', machine_memory_ceiling: 0.6 } };
+  const got = memoryNameRoots(['/c/a', '/c/b', 'relative/x'], [{ root: '/c/s', name: 'from-hello' }, { root: '/c/a', name: 'alpha-hello' }], (r) => settings[r] ?? null);
+  assert.deepEqual(got.roots.map((x) => [x.root, x.name]).sort(), [['/c/a', 'alpha-hello'], ['/c/b', 'b'], ['/c/s', 'from-hello']]);
+  assert.equal(got.ceiling, 0.6, 'a scan-only root\'s ceiling counts; 0.96 is invalid');
+  assert.equal(memoryNameRoots([], [], () => null).ceiling, 0.8);
+});
+
+test('C1f: the page size is the nearest of 4 KB, 16 KB and 64 KB to rss over resident pages', () => {
+  const { memoryPageSize } = fns(['memoryPageSize']);
+  assert.equal(memoryPageSize(10000, 10000 * 4096 + 7000), 4096);
+  assert.equal(memoryPageSize(10000, 10000 * 16384 - 9000), 16384);
+  assert.equal(memoryPageSize(1000, 1000 * 65536), 65536);
+  assert.equal(memoryPageSize(0, 123), 4096, 'nothing to go on: 4 KB');
+  assert.equal(memoryPageSize(null, null), 4096);
 });
 
 // ===== D2: nothing of a command line, the environment or a path is kept =====
 
 test('C2: the line holds only field names, kinds, command names, project names, the source and the time', async (t) => {
-  const h = await startHub(t, { roots: FIXTURE_ROOTS, env: { DEVTEAM_MEMORY_COUNTS_CACHE: '1' } });
+  // and a process whose environment holds a secret
+  const proc = procWith('proc-environ', [[4400, { cmdline: 'claude\0--token=FIXTURE-TOKEN-ARG\0', statm: statm(10), cwd: `${FIXTURE_ROOTS[0]}/.worktrees/secret-worktree-name`, environ: 'API_KEY=FIXTURE-ENV-SECRET\0HOME=/fixture/home\0' }]]);
+  const h = await startHub(t, { proc, roots: FIXTURE_ROOTS, env: { DEVTEAM_MEMORY_COUNTS_CACHE: '1' } });
   const l = (await firstLine(h))[0];
   const r = JSON.parse(l);
   const allowed = new Set(['v', 'at', 'working_set', 'max', 'ceiling', 'source', 'partial', 'sessions', 'kinds', 'devteam', 'projects', 'n', 'rss',
@@ -159,7 +188,7 @@ test('C2: the line holds only field names, kinds, command names, project names, 
     else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { assert.ok(allowed.has(k), `${where}: key ${JSON.stringify(k)} is kept`); walk(x, `${where}.${k}`); }
   };
   walk(r, 'reading');
-  for (const s of ['FIXTURE-SECRET', '--', '/fixture', 'fixture', 'kit-1', 'm-2', 'npm test', 'server.js']) assert.ok(!l.includes(s), `the line holds ${s}`);
+  for (const s of ['FIXTURE-SECRET', 'FIXTURE-TOKEN', 'FIXTURE-ENV', 'API_KEY', 'secret-worktree', '--', '/fixture', 'fixture', 'kit-1', 'm-2', 'npm test', 'server.js']) assert.ok(!l.includes(s), `the line holds ${s}`);
 });
 
 // ===== D3: refusals, edges and the file =====
@@ -177,6 +206,7 @@ function procWith(name, extra, { base = true } = {}) {
     if (f.statm !== undefined) fs.writeFileSync(path.join(p, 'statm'), f.statm);
     if (f.cwd !== undefined) fs.symlinkSync(f.cwd, path.join(p, 'cwd'));
     if (f.cwdFile) fs.writeFileSync(path.join(p, 'cwd'), 'not a link');
+    if (f.environ !== undefined) fs.writeFileSync(path.join(p, 'environ'), f.environ);
   }
   return d;
 }
@@ -210,14 +240,17 @@ test('C3b: with /proc unreadable the line has no sessions, kinds or projects', a
 });
 
 test('C3c: with no /proc and no cgroup (macOS) the line is the host\'s in use and total, source os', async (t) => {
+  const before = os.totalmem() - os.freemem();
   const h = await startHub(t, { proc: NOWHERE, cgroup: NOWHERE });
   const l = (await firstLine(h))[0];
-  const used = os.totalmem() - os.freemem();
+  const now = os.totalmem() - os.freemem();
   assert.equal(memoryReadingProblem(l), null, l);
   const r = JSON.parse(l);
   assert.equal(r.source, 'os');
   assert.equal(r.max, os.totalmem());
-  assert.ok(Math.abs(r.working_set - used) <= 0.25 * os.totalmem(), `${r.working_set} near ${used}`);
+  // in use moves while the hub starts: between the two reads, give or take 2% of the total
+  const lo = Math.min(before, now) - 0.02 * os.totalmem(), hi = Math.max(before, now) + 0.02 * os.totalmem();
+  assert.ok(r.working_set >= lo && r.working_set <= hi, `${r.working_set} in [${lo}, ${hi}]`);
   for (const k of ['sessions', 'kinds', 'devteam', 'projects']) assert.equal(r[k], undefined, k);
 });
 
@@ -225,7 +258,9 @@ const many = (name) => procWith(name, Array.from({ length: 120 }, (_, i) => [300
 
 test('C3d: a tick past its 2 s budget writes what it has, partial', async (t) => {
   const proc = many('proc-many');
-  const slow = await startHub(t, { proc, cgroup: CGROUP, env: { DEVTEAM_MEMORY_SLOW_MS: '1200' } });
+  // the seam's wait, then the budget check, before each batch after the first: 1 s, under 2 s, a
+  // second batch; 2 s, the budget: so 100 whatever the tick spent before its walk (under 1 s)
+  const slow = await startHub(t, { proc, cgroup: CGROUP, env: { DEVTEAM_MEMORY_SLOW_MS: '1000' } });
   const r = JSON.parse((await firstLine(slow))[0]);
   assert.equal(r.partial, true);
   assert.deepEqual(r.kinds, { other: { n: 100, rss: 100 * 100 * 4096 } }, 'two batches of 50, then the budget');
@@ -249,15 +284,27 @@ test('C3e: the walk is async: the hub answers /instances.json while a slowed tic
   assert.equal(r.partial, true);
 });
 
+test('C3e2: the walk reads only through fs.promises: run with no sync fs in scope, it walks the fixture', async () => {
+  const ctx = vm.createContext({ fs: { promises: fs.promises, constants: fs.constants }, path, Buffer, setImmediate, setTimeout });
+  const { memoryWalk } = vm.runInContext(`${region()}\n;({ memoryWalk })`, ctx);
+  const w = await memoryWalk(PROC, { budgetMs: 2000, slowMs: 0, start: Date.now() });
+  assert.equal(w.partial, false);
+  assert.equal(w.procs.length, Object.keys(EXPECTED.processes).length, 'every fixture process');
+  const gone = await memoryWalk(NOWHERE, { budgetMs: 2000, slowMs: 0, start: Date.now() });
+  assert.equal(gone.procs, null, 'no /proc: null');
+});
+
 test('C3f: at start the file loses readings older than 8 days and torn lines; a torn tail never spoils the next line', async (t) => {
   const now = Date.now();
   const old = JSON.stringify({ v: 1, at: iso(now - 9 * DAY), working_set: 1 });
   const week = JSON.stringify({ v: 1, at: iso(now - 7 * DAY), working_set: 2 });
-  const h = await startHub(t, { proc: NOWHERE, file: `${old}\n${week}\n{"v":1,"at":"20`, env: { DEVTEAM_MEMORY_EVERY_MS: '300' } });
-  const ls = await firstLine(h, 2);
-  assert.equal(ls[0], week, 'the 7-day reading stays, first');
+  // a newer recorder's line (v 2) with a recent at stays: readers skip it, a downgrade loses nothing
+  const newer = JSON.stringify({ v: 2, at: iso(now - DAY), working_set: 3 });
+  const h = await startHub(t, { proc: NOWHERE, file: `${old}\n${week}\n${newer}\n{"v":1,"at":"20`, env: { DEVTEAM_MEMORY_EVERY_MS: '300' } });
+  const ls = await firstLine(h, 3);
+  assert.deepEqual(ls.slice(0, 2), [week, newer], 'the 7-day reading and the newer line stay, first');
   assert.ok(!ls.includes(old), 'the 9-day reading is gone');
-  for (const l of ls) assert.equal(memoryReadingProblem(l), null, l);
+  for (const l of ls.slice(2)) assert.equal(memoryReadingProblem(l), null, l);
   // a hub killed mid-append leaves a torn tail: the next line starts on a line of its own
   const n = linesOf(h.file).length;
   fs.appendFileSync(h.file, '{"v":1,"at":"2026');
@@ -362,7 +409,7 @@ test('C4c: ?after=<at> answers the newer readings unthinned, up to 6 hours back;
   const res = await get(h.port, `/memory.json?after=${encodeURIComponent(at)}`);
   assert.equal(res.status, 200, res.body);
   assert.deepEqual(res.json.readings, NINE.rs.slice(-119));
-  for (const q of [`after=${encodeURIComponent(iso(Date.now() - 7 * HOUR))}`, 'after=yesterday', 'after=2026-02-30T00:00:00Z']) assert.equal((await get(h.port, `/memory.json?${q}`)).status, 400, q);
+  for (const q of [`after=${encodeURIComponent(iso(Date.now() - 7 * HOUR))}`, `after=${encodeURIComponent(iso(Date.now() + 5 * MIN))}`, 'after=yesterday', 'after=2026-02-30T00:00:00Z']) assert.equal((await get(h.port, `/memory.json?${q}`)).status, 400, q);
 });
 
 test('C4d: ?thin=0 is unthinned for a loopback window of 24 hours or less, and refused otherwise', async (t) => {
