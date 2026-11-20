@@ -23920,7 +23920,9 @@ const recurringRegistry = Object.freeze({
   // - the head's settings.md blob is M's, both present: the same file on both sides lands as it is,
   //   and the jobs are main's (no job change);
   // - M is an ancestor of the head: a merge or squash lands the head's tree, so the head's file
-  //   lands, compared canonically with main's (the binding decides any change).
+  //   lands, compared canonically with main's (the binding decides any change);
+  // - merge and squash: the branch left the file alone (present at every merge base, the head and
+  //   M, and the head's blob is every base's): M's file lands, and the jobs are main's.
   // Anything else is refused. Under merge_method rebase only the first is cleared: a rebase replays
   // commits, dropping merges and patches already upstream. Every git call has a timeout; one that
   // times out refuses.
@@ -23952,6 +23954,17 @@ const recurringRegistry = Object.freeze({
       const anc = run(['merge-base', '--is-ancestor', M, sha]);
       if (late.length) return lands(null);
       if (anc.status === 0) return lands(jobsAt(sha));
+      // the branch left the file alone (merge and squash; d-20261120-083617902): the file is present
+      // at every merge base, the head and M, and the head's blob is every base's. git takes M's file
+      // at tree level (no rename, the path is on every side; no text merge, one side is unchanged),
+      // and a merge of main with -s ours is caught by the blobs. The jobs are main's.
+      if (anc.status === 1) {
+        const mb = run(['merge-base', '--all', M, sha]);
+        const bases = mb.ok ? mb.out.split('\n').filter(Boolean) : [];
+        const atBases = bases.map(blob);
+        if (late.length) return lands(null);
+        if (atMain && atHead && bases.length && atBases.every((b) => b && b === atHead)) return lands(now);
+      }
       if (anc.status === 1) return lands(null, "settings.md: this branch's settings.md differs from main's and the branch doesn't contain main's tip; merge main into the branch first");
       return lands(null, `settings.md: git merge-base --is-ancestor ${M.slice(0, 12)} ${sha.slice(0, 12)} failed, so the kit can't tell what would land; check again`);
     });
