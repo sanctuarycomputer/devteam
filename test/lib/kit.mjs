@@ -37,6 +37,8 @@ process.env.DEVTEAM_CGROUP ??= path.join(os.tmpdir(), 'dt-no-such-machine');
 process.env.DEVTEAM_MEMINFO ??= path.join(os.tmpdir(), 'dt-no-such-machine');
 // and counts that machine's page cache only where a test says so, not because the box image does
 delete process.env.DEVTEAM_MEMORY_COUNTS_CACHE;
+// and never records the machine's memory: a hub a test starts writes no memory.jsonl unless the test opts in
+process.env.DEVTEAM_MEMORY_RECORD = 'off';
 // tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
 // tmux falls back to the machine's default server when TMUX_TMPDIR names a directory that is gone,
 // and a kill-server there takes down every live fleet on the machine. So a shim first on PATH runs
@@ -1318,7 +1320,7 @@ export const PEEK_LONG = `Should the checkout keep the card form on one page, ${
 export function peekFixture(base, name = 'peek') {
   const root = bareProject(base, name);
   const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
-  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_BOX'].includes(k)) delete env[k];
+  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && k !== 'DEVTEAM_MEMORY_RECORD' && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_BOX'].includes(k)) delete env[k];
   for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
   const dt = (args, role = 'supervisor') => {
     const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: role ? { ...env, DEVTEAM_ROLE: role } : env, encoding: 'utf8' });

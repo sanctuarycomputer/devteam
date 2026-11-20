@@ -520,9 +520,9 @@ const SETTINGS_DEFAULTS = {
   // (often the owner's own gh login, which opens every fleet PR) can't give; merge's own checks still run first.
   // Home only: a repo link doesn't inherit it.
   merge_admin: false,
-  // Big files whose tickets may name parts of them in touches (path#name, planning.md D4): two tickets
-  // naming different parts of one listed file can run at once. Globs; every other file is touched
-  // whole. The supervisor's own setting; the merge gate reads it as main has it.
+  // Files many tickets change (globs): validate warns when a whole-file claim on one orders two
+  // tickets, as it does for any file of BIG_FILE_LINES or more. Any file may be named by part in
+  // touches (path#name, planning.md D4); this list no longer decides that. The supervisor's own.
   split_files: [],
   // Where PRs live: 'github' (gh pr view / gh pr merge --match-head-commit) or 'git' (no forge CLI:
   // merge takes --title and --body-file, merges the exact head on main and pushes; a moved main
@@ -673,7 +673,7 @@ const SETTINGS_WORDS = Object.freeze({
   model_prices: ['Agents and sessions', 'Model prices', 'prices for models the kit has none for, or overrides', 'names'],
   gates: ['Merging and checks', 'Checks before merge', "the commands that must pass at a ticket's head before it merges", 'names'],
   ignored_checks: ['Merging and checks', 'Ignored forge checks', "forge checks merge doesn't wait for", 'value'],
-  split_files: ['Merging and checks', 'Files split by part', 'big files whose tickets may name parts of them in touches; every other file is touched whole', 'value'],
+  split_files: ['Merging and checks', 'Shared big files', 'files many tickets change: validate warns when a whole-file claim on one orders two tickets (any file may be named by part)', 'value'],
   slow_gate_minutes: ['Merging and checks', 'Slow check after', "minutes a check may take before it's flagged slow", 'value'],
   main_branch: ['Merging and checks', 'Main branch', 'the branch work merges into', 'value'],
   merge_method: ['Merging and checks', 'Merge method', 'how PRs land: a merge commit, squash or rebase', 'value'],
@@ -3331,13 +3331,21 @@ function prefixOwners(entry, components, devteamLine) {
 }
 /* coverage end */
 /* parts start */
-// Parts of a file, read by line (spec: what a part is). A touches entry may name one: path#name, or
-// path#+name for a part the ticket adds; only files settings.split_files lists split this way.
+// Parts of a file, read by line (spec: what a part is). A touches entry may name one of any file:
+// path#name, or path#+name for a part the ticket adds.
 const PART_NAME = /^[A-Za-z0-9_$.-]+$/;
 const touchPath = (entry) => { const i = entry.indexOf('#'); return i === -1 ? entry : entry.slice(0, i); };
 const touchPart = (entry) => { const i = entry.indexOf('#'); if (i === -1) return null; const p = entry.slice(i + 1); return { name: p.replace(/^\+/, ''), added: p.startsWith('+') }; };
 const PART_MARK = /^\s*(?:\/\*|<!--)\s*([A-Za-z0-9_$.-]+)\s+(start|end)\s*(?:\*\/|-->)\s*$/;
-const PART_DECL = /^(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function(?:\s*\*\s*|\s+)([A-Za-z_$][\w$]*)|(?:const|let|var|class)\s+([A-Za-z_$][\w$]*))/;
+// a line comment's marker (# for Ruby, Python, shell, YAML; // and -- for others), outside Markdown,
+// where # name start is a heading
+const PART_MARK_LINE = /^\s*(?:#|\/\/|--)\s*([A-Za-z0-9_$.-]+)\s+(start|end)\s*$/;
+const isMarkdown = (file) => /\.(?:md|mdx|markdown|mdown|mkd)$/i.test(file);
+// files whose top-level JavaScript or TypeScript declarations are parts (other files: regions only)
+const hasDecls = (file) => /\.(?:[cm]?[jt]sx?|html?|vue|svelte|astro)$/i.test(file);
+const partMark = (line, file) => line.match(PART_MARK) ?? (isMarkdown(file) ? null : line.match(PART_MARK_LINE));
+// a top-level JavaScript or TypeScript declaration at column 0
+const PART_DECL = /^(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:(?:async\s+)?function(?:\s*\*\s*|\s+)([A-Za-z_$][\w$]*)|(?:(?:abstract\s+)?class|interface|(?:const\s+)?enum|type(?=\s+[A-Za-z_$][\w$]*\s*[=<])|const|let|var)\s+([A-Za-z_$][\w$]*))/;
 const PART_COMMENT = /^(?:\/\/|\/\*| ?\*)/;
 const headingSlug = (s) => s.trim().toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, '').replace(/ /g, '-');
 // { places: Map name -> [{from, to}] (1-based, inclusive), owner: line -> leaf key, lines, n }. The
@@ -3358,15 +3366,15 @@ function fileParts(text, file) {
   const open = new Map();
   const regions = [];
   for (let i = 1; i <= n; i++) {
-    const m = lines[i - 1].match(PART_MARK);
+    const m = partMark(lines[i - 1], file);
     if (!m) continue;
     if (m[2] === 'start') { if (!open.has(m[1])) open.set(m[1], i); }
     else if (open.has(m[1])) { regions.push({ name: m[1], from: open.get(m[1]), to: i }); add(m[1], open.get(m[1]), i); open.delete(m[1]); }
   }
-  const isMark = (i) => PART_MARK.test(lines[i - 1]);
+  const isMark = (i) => !!partMark(lines[i - 1], file);
   // only a marker at column 0 ends a declaration; an indented one sits inside a body
   const isMark0 = (i) => isMark(i) && !/^\s/.test(lines[i - 1]);
-  if (/\.md$/i.test(file)) {
+  if (isMarkdown(file)) {
     const heads = [];
     let fence = null;
     for (let i = 1; i <= n; i++) {
@@ -3374,8 +3382,13 @@ function fileParts(text, file) {
       const f = l.match(/^\s{0,3}(`{3,}|~{3,})/);
       if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; continue; }
       if (fence) continue;
-      const h = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
-      if (h) heads.push({ i, level: h[1].length, name: headingSlug(h[2]) });
+      // the title without its closing #s, trimmed by hand: a regex for it backtracks on long lines
+      const h = l.match(/^(#{1,6})\s+/);
+      if (h) {
+        let t = l.slice(h[0].length).trimEnd(), e = t.length;
+        while (e > 0 && t[e - 1] === '#') e--;
+        heads.push({ i, level: h[1].length, name: headingSlug(t.slice(0, e).trimEnd()) });
+      }
     }
     const above = [];
     for (let j = 0; j < heads.length; j++) {
@@ -3391,7 +3404,7 @@ function fileParts(text, file) {
   } else {
     const html = /\.html?$/i.test(file);
     const decls = [];
-    for (let i = 1; i <= n; i++) { const m = lines[i - 1].match(PART_DECL); if (m) decls.push({ i, name: m[1] ?? m[2] }); }
+    if (hasDecls(file)) for (let i = 1; i <= n; i++) { const m = lines[i - 1].match(PART_DECL); if (m) decls.push({ i, name: m[1] ?? m[2] }); }
     // a declaration starts at the comment lines directly above it
     for (const d of decls) { d.from = d.i; while (d.from > 1 && PART_COMMENT.test(lines[d.from - 2]) && !isMark(d.from - 1) && !PART_DECL.test(lines[d.from - 2])) d.from--; }
     for (let j = 0; j < decls.length; j++) {
@@ -3405,7 +3418,11 @@ function fileParts(text, file) {
     }
   }
   // the rest: lines no declaration or heading owns, by innermost region
-  const restKey = (i) => { let best = null; for (const r of regions) if (r.from <= i && i <= r.to && (!best || r.from >= best.from)) best = r; return best ? `r:${best.name}` : 'r:'; };
+  // keyed by the regions round it too, so a region moved into another is a different leaf
+  const restKey = (i) => {
+    const round = regions.filter((r) => r.from <= i && i <= r.to).sort((a, b) => a.from - b.from || b.to - a.to);
+    return round.length ? `r:${round.map((r) => r.name).join('/')}` : 'r:';
+  };
   for (let i = 1; i <= n; i++) if (!owner[i]) owner[i] = restKey(i);
   return { places, regions, owner, lines, n };
 }
@@ -3415,12 +3432,41 @@ function partLeaves(P, name) {
   for (const pl of P.places.get(name) ?? []) for (let i = pl.from; i <= pl.to; i++) s.add(P.owner[i]);
   return s;
 }
-// Each leaf's text, trailing blank lines dropped.
+// Whether a named part holds every leaf but the file's rest: naming it is naming the whole file,
+// so it overlaps every part, a new one too (a title heading, a region round everything).
+function wholeLike(P, name) {
+  P.wholeLike ??= new Map();
+  if (!P.wholeLike.has(name)) {
+    const L = partLeaves(P, name);
+    let all = L.size > 0;
+    for (let i = 1; all && i <= P.n; i++) all = P.owner[i] === 'r:' || L.has(P.owner[i]);
+    P.wholeLike.set(name, all);
+  }
+  return P.wholeLike.get(name);
+}
+// Each leaf's text, trailing blank lines dropped. A rest (the file's, a region's) is in runs, the
+// blank lines at a run's edges left out (inside one they are content: a YAML block, a heredoc), and
+// a mark where another leaf's lines come between two of its lines, so a part put in the middle of
+// the rest (between two imports, into a region's body) changes it.
 function leafTexts(P) {
   const m = new Map();
-  for (let i = 1; i <= P.n; i++) { const k = P.owner[i]; m.set(k, m.has(k) ? `${m.get(k)}\n${P.lines[i - 1]}` : P.lines[i - 1]); }
-  for (const [k, v] of m) m.set(k, v.replace(/(?:\n[ \t]*)+$/, ''));
+  let last = null;
+  for (let i = 1; i <= P.n; i++) {
+    const k = P.owner[i], l = P.lines[i - 1], blank = !l.trim();
+    if (k.startsWith('r:') && blank && last !== k) continue;
+    const cut = k.startsWith('r:') && m.has(k) && last !== k;
+    m.set(k, m.has(k) ? `${cut ? `${trimBlankEnd(m.get(k))}\n\u241e` : m.get(k)}\n${l}` : l);
+    if (!blank) last = k;
+  }
+  for (const [k, v] of m) m.set(k, trimBlankEnd(v));
   return m;
+}
+// A text without its trailing blank (whitespace-only) lines, its first line kept. A loop, not a
+// regex: /(?:\n\s*)+$/ backtracks exponentially on a run of blank lines followed by more text.
+function trimBlankEnd(s) {
+  let e = s.length;
+  for (let i = s.lastIndexOf('\n'); i >= 0 && !s.slice(i + 1, e).trim(); i = i ? s.lastIndexOf('\n', i - 1) : -1) e = i;
+  return s.slice(0, e);
 }
 // The leaves of a file that changed between two texts and that none of the named parts covers. A
 // leaf the base has is judged by the base: only a part named there covers it, so widening a part at
@@ -3435,13 +3481,60 @@ function partsChanged(baseText, headText, file, named) {
     if (!x.added) for (const k of partLeaves(B, x.name)) covB.add(k);
     if (!x.added || !B.places.has(x.name)) for (const k of partLeaves(H, x.name)) covH.add(k);
   }
-  return [...new Set([...tb.keys(), ...th.keys()])].filter((k) => tb.get(k) !== th.get(k) && !(tb.has(k) ? covB : covH).has(k));
+  const gap = new Set([...new Set([...tb.keys(), ...th.keys()])].filter((k) => tb.get(k) !== th.get(k) && !(tb.has(k) ? covB : covH).has(k)));
+  // What the leaves' texts miss is where the leaves are, judged by content, not by a diff. With no
+  // part named every changed or new leaf is in the gap already.
+  if (named.length) {
+    const names = new Set(named.filter((x) => !x.added).map((x) => x.name));
+    // A place's children in order, blank lines skipped: a leaf by kind, name and count (its path
+    // dropped, so a place moved whole reads the same), each run of one leaf's lines once.
+    const children = (P, pl) => {
+      const out = [];
+      let last = null;
+      for (let i = pl.from; i <= pl.to; i++) {
+        if (!P.lines[i - 1].trim()) continue;
+        const k = P.owner[i];
+        if (k === last) continue;
+        last = k;
+        out.push(k.startsWith('d:') ? `d:${k.slice(2).split('/').pop()}` : `r:${k.slice(2).split('/').pop()}`);
+      }
+      return out.join('\n');
+    };
+    // A place the ticket doesn't name whose children changed: a part added inside it (a region in
+    // another's region, a sub-heading under another's heading), one taken out, or its parts
+    // reordered. Not a place that holds the whole file (whole-like: naming it overlaps every part,
+    // so no other ticket runs beside it); a change inside it is still its parts'.
+    for (const [name, pls] of B.places) {
+      if (names.has(name) || wholeLike(B, name)) continue;
+      const hp = H.places.get(name) ?? [];
+      pls.forEach((pl, i) => { if (hp[i] && children(B, pl) !== children(H, hp[i])) gap.add(`p:${name}`); });
+    }
+    // The order of the leaves no named part covers at the base, through the whole file: moving
+    // one's own parts is free, moving another ticket's (into a named part too) is a change to it.
+    const keep = (k) => tb.has(k) && th.has(k) && !covB.has(k);
+    const order = (P) => { const out = []; for (let i = 1; i <= P.n; i++) { const k = P.owner[i]; if (P.lines[i - 1].trim() && keep(k) && out[out.length - 1] !== k) out.push(k); } return out; };
+    const ob = order(B), oh = order(H);
+    if (ob.join('\n') !== oh.join('\n') && ob.length * oh.length > 4e7) {
+      // too many leaves to find which moved (a table's worth): the first one out of place
+      let i = 0;
+      while (ob[i] === oh[i]) i++;
+      gap.add(`m:${ob[i] ?? oh[i]}`);
+    } else if (ob.join('\n') !== oh.join('\n')) {
+      // the base leaves off the longest common order: the ones that moved
+      const L = Array.from({ length: ob.length + 1 }, () => new Int32Array(oh.length + 1));
+      for (let i = ob.length - 1; i >= 0; i--) for (let j = oh.length - 1; j >= 0; j--) L[i][j] = ob[i] === oh[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+      for (let i = 0, j = 0; i < ob.length;) {
+        if (j < oh.length && ob[i] === oh[j]) { i++; j++; } else if (j < oh.length && L[i][j + 1] > L[i + 1][j]) j++; else gap.add(`m:${ob[i++]}`);
+      }
+    }
+  }
+  return [...gap];
 }
 // A leaf key in words: a declaration's or heading's name, or whose rest it is.
-const leafWords = (k) => (k === 'r:' ? "the file's rest" : k.startsWith('r:') ? `region ${k.slice(2)}'s rest` : k.slice(2).replace(/#\d+$/, ''));
+const leafWords = (k) => (k.startsWith('p:') ? `${k.slice(2)} (a part added, taken out or reordered inside it)` : k.startsWith('m:') ? `${leafWords(k.slice(2))} (moved)` : k === 'r:' ? "the file's rest" : k.startsWith('r:') ? `region ${k.slice(2)}'s rest` : k.slice(2).replace(/#\d+$/, ''));
 /* parts end */
-// Parts of a file at a repo's main, read once per process: null when this machine can't read the
-// repo or its main has no such file.
+// Parts of a file at a repo's main, read once per process and only for a file some entry names a
+// part of, or that a dependency's two tickets both claim (validate's big-file warning): null when this machine can't read the repo or its main has no such file (a folder too).
 const partsAtMainCache = new Map();
 function partsAtMain(repoName, file) {
   const k = `${repoName}\0${file}`;
@@ -3450,30 +3543,35 @@ function partsAtMain(repoName, file) {
     if (repoReadable(repoName)) {
       const R = repo(repoName);
       const ref = R.mainRef();
-      const text = ref ? R.git(['show', `${ref}:${file}`]) : null;
+      const text = ref ? R.git(['cat-file', 'blob', `${ref}:${file}`]) : null;
       if (text !== null) P = fileParts(text, file);
     }
     partsAtMainCache.set(k, P);
   }
   return partsAtMainCache.get(k);
 }
-// Whether settings.split_files lists a file (its tickets may name parts of it).
+// Whether settings.split_files lists a file: one the project expects many tickets to change, so a
+// whole-file claim on it that orders two tickets warns whatever its size (validate). Any file may be
+// named by part; this list no longer decides that.
 const isSplitFile = (file, s = loadSettings()) => Array.isArray(s.split_files) && s.split_files.some((g) => typeof g === 'string' && pathMatches(g, file));
+// A file this long at main is big: a whole-file claim on it that orders two tickets warns (validate).
+const BIG_FILE_LINES = 1500;
 // Whether two touches entries of tickets in one repo can collide (D4, ready). Paths that don't
-// overlap never do; a whole file, a glob, or a file split_files doesn't list overlaps as before.
-// Two parts of a listed file: names that exist at main collide when they cover a common leaf there;
-// a name not there yet (path#+name, or one a dependency adds) is compared by name, and never
-// collides with a part main has. A repo this machine can't read, or a file main lacks, collides.
-function touchesOverlap(a, b, repoName, s = loadSettings()) {
+// overlap never do; a whole file or a glob overlaps as before. Two parts of one file: names that
+// exist at main collide when they cover a common leaf there; a name not there yet (path#+name, or
+// one a dependency adds) is compared by name, and collides with a part main has only when that part
+// holds the whole file (wholeLike: a title heading, a region round everything). A repo this
+// machine can't read, or a file main lacks, collides.
+function touchesOverlap(a, b, repoName) {
   const pa = touchPath(a), pb = touchPath(b);
   if (!globsOverlap(pa, pb)) return false;
   const xa = touchPart(a), xb = touchPart(b);
-  if (!xa || !xb || trimSlash(pa) !== trimSlash(pb) || hasWild(pa) || !isSplitFile(pa, s)) return true;
+  if (!xa || !xb || trimSlash(pa) !== trimSlash(pb) || hasWild(pa)) return true;
   const P = partsAtMain(repoName, trimSlash(pa));
   if (!P) return true;
   const ma = !xa.added && P.places.has(xa.name), mb = !xb.added && P.places.has(xb.name);
   if (!ma && !mb) return xa.name === xb.name;
-  if (ma !== mb) return false;
+  if (ma !== mb) return wholeLike(P, ma ? xa.name : xb.name);
   const la = partLeaves(P, xa.name);
   for (const k of partLeaves(P, xb.name)) if (la.has(k)) return true;
   return false;
@@ -4198,7 +4296,7 @@ function cmdValidate() {
       }
     }
     if (isActive(t) && !mergeShaFor(id)) for (const l of t.links ?? []) if (!ownEntry(loadSettings().links, l)) err(id, `links "${l}" is not in settings links`);
-    // Parts (path#name): of a file split_files lists, named as main has them, or added (path#+name)
+    // Parts (path#name): of any file, named as main has them, or added (path#+name)
     // by this ticket or one it depends on. Written "<id>: …", so another ticket's gate only warns.
     if (isActive(t) && !mergeShaFor(id)) for (const entry of t.touches ?? []) {
       const x = touchPart(entry);
@@ -4207,14 +4305,13 @@ function cmdValidate() {
       const rn = repoOfTicketLink(t);
       if (hasWild(f)) err(id, `touches "${entry}": a part names one file, not a glob`);
       else if (!x.name || !PART_NAME.test(x.name)) err(id, `touches "${entry}": a part's name is letters, digits and _ $ . - (path#name, or path#+name for a part the ticket adds)`);
-      else if (!isSplitFile(f, S0)) err(id, `touches "${entry}": ${f} is not in settings.split_files, so it is touched whole; name it without #${x.added ? '+' : ''}${x.name}`);
       else if (!repoReadable(rn)) warnings.push(`${id}: touches "${entry}": its part is not checked, since repo ${rn} can't be read here`);
       else {
         const P = partsAtMain(rn, f);
         const added = () => [...(validateClosures ??= closures(ts)).get(id) ?? []].some((d) => { const o = ts.get(d); return o && isActive(o) && !mergeShaFor(d) && (o.touches ?? []).some((e) => { const y = touchPart(e); return y?.added && y.name === x.name && trimSlash(touchPath(e)) === f; }); });
-        if (!P) err(id, `touches "${entry}": ${f} is not on main; a ticket that creates a file names it whole`);
+        if (!P) err(id, `touches "${entry}": ${f} is not a file on main; a ticket that creates a file names it whole`);
         else if (x.added && P.places.has(x.name)) err(id, `touches "${entry}": ${f} already has a part ${x.name} at main; name it without +`);
-        else if (!x.added && !P.places.has(x.name) && !added()) err(id, `touches "${entry}": ${f} has no part ${x.name} at main (a part is a top-level function, const, let, var or class, a Markdown heading's slug, or a /* name start */ … /* name end */ region); one this ticket adds is #+${x.name}`);
+        else if (!x.added && !P.places.has(x.name) && !added()) err(id, `touches "${entry}": ${f} has no part ${x.name} at main (a part is a top-level function, const, let, var, class, interface, type or enum, a Markdown heading's slug, or a marked region: /* name start */ … /* name end */, <!-- -->, or a # // -- line comment); one this ticket adds is #+${x.name}`);
       }
     }
     for (const d of t.depends_on ?? []) {
@@ -4342,6 +4439,24 @@ function cmdValidate() {
       if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
       outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (touchesOverlap(ga, gb, repoOfTicketLink(a))) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
+    // A dependency whose only shared footprint is a big file (BIG_FILE_LINES at main, or one
+    // split_files lists) that one of them claims whole: if the edge is only there for D4, naming
+    // the parts each changes would let them run at once. A warning: the edge may be real.
+    const ordered = [];
+    for (const a of live) for (const d of a.depends_on ?? []) {
+      const b = ts.get(d);
+      if (!b || !isActive(b) || mergeShaFor(b.id) || repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
+      const rn = repoOfTicketLink(a);
+      let big = null;
+      for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) {
+        if (big === false || !touchesOverlap(ga, gb, rn)) continue;
+        const f = trimSlash(touchPath(ga));
+        const P = !hasWild(ga) && !hasWild(gb) && f === trimSlash(touchPath(gb)) && (!touchPart(ga) || !touchPart(gb)) && repoReadable(rn) ? partsAtMain(rn, f) : null;
+        big = P && (P.n >= BIG_FILE_LINES || isSplitFile(f, S0)) ? (big ?? new Map()).set(f, P.n) : false;
+      }
+      if (big) ordered.push(`${a.id} depends on ${b.id}, and they share only ${[...big].map(([f, n]) => `${f} (${n} lines)`).join(', ')}, claimed whole`);
+    }
+    if (ordered.length) warnings.push(`a whole-file claim on a big file orders ${ordered.length} pair(s) of tickets: ${ordered.slice(0, 5).join('; ')}${ordered.length > 5 ? ` (+${ordered.length - 5} more)` : ''}. If a dependency is only there for D4, name the parts each changes (path#name; planning.md D4) so they can run at once`);
     const w = serialGraphWarning(live);
     if (w) warnings.push(scope ? `${w}; not ${scope}'s to fix` : w);
   }
@@ -4496,8 +4611,9 @@ function ownPriority(t) {
 // Each live ticket's effective priority: the best of its own and that of every live ticket that
 // depends on it, directly or through others. Work a higher-priority goal waits on goes first,
 // whatever goal it serves, so the goal isn't left waiting on work nobody pushes (ready, idle
-// capacity). Priority orders the queue, never gates it. Live: active, unmerged, its goal running
-// (a drained, parked or let-go goal's ticket starts nothing, so pushes nothing).
+// capacity, priority-inversion). Priority orders the queue, never gates it. Live: active,
+// unmerged, its goal running (a drained, parked or let-go goal's ticket starts nothing, so
+// pushes nothing).
 function effectivePriorities(ts) {
   const live = new Map([...ts].filter(([, t]) => isActive(t) && !mergeShaFor(t.id) && ticketMode(t) === 'run'));
   // over live tickets only: a chain through a held goal's ticket passes nothing on, and history costs nothing
@@ -5469,16 +5585,15 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: 
     // records in home: nothing of the project's in the link, its own folder included
     const own = R.projectInRepo && !H ? `${R.projectRel}/tickets/${id}/` : null;
     const mineOwn = (f) => !!own && f.startsWith(own);
-    // A whole entry (no #part) covers a file as before; a file main's split_files lists is also inside
-    // touches when an entry names a part of it, and then only the parts named may change.
+    // A whole entry (no #part) covers a file as before; a file is also inside touches when an entry
+    // names a part of it, and then only the parts named may change.
     const entries = t.touches ?? [];
-    const sSplit = mainSettings() ?? {};
     const whole = (f) => entries.some((g) => !touchPart(g) && pathMatches(g, f));
-    const partsNamed = (f) => (isSplitFile(f, sSplit) ? entries.filter((g) => touchPart(g) && trimSlash(touchPath(g)) === f && !hasWild(touchPath(g))).map(touchPart) : []);
+    const partsNamed = (f) => entries.filter((g) => touchPart(g) && trimSlash(touchPath(g)) === f && !hasWild(touchPath(g))).map(touchPart);
     const outside = changed.filter((f) => !mineOwn(f) && !whole(f) && !partsNamed(f).length);
     for (const f of changed) {
       if (mineOwn(f) || whole(f) || !partsNamed(f).length) continue;
-      const show = (at) => R.git(['show', `${at}:${f}`]);
+      const show = (at) => R.git(['cat-file', 'blob', `${at}:${f}`]);
       const gap = partsChanged(show(base), show(sha), f, partsNamed(f));
       if (gap.length) fails.push(`changes parts of ${f} the ticket doesn't name: ${[...new Set(gap.map(leafWords))].slice(0, 10).join(', ')}${gap.length > 10 ? ` (+${gap.length - 10} more)` : ''} (the file's rest is the lines outside every declaration, heading and region); a part not named is a design-change to the supervisor (worker.md §3)`);
     }
@@ -14525,6 +14640,9 @@ function efficiencyData(m, now = Date.now()) {
     suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: W12[11].start, end: W12[11].end, POINTS }) };
 }
 
+// How many places below a goal's priority the unstarted work it waits on must be to be a finding.
+const PRIORITY_INVERSION_GAP = 3;
+
 // A repo link the supervisor maintains: open PRs to review, fix, comment on and merge, and (with
 // its own release: "tag") releases to cut. Nothing else notices when that work stops, so:
 // pr-unreviewed, an open PR (not the fleet's own, not a draft) whose head has had no review for
@@ -14930,6 +15048,47 @@ function collectMetrics(since) {
   let idlePlanning = 0;
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !(activeWorker(t.id) && !stoppedLaunch(t.id)) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
   holdFindings(add, settings);
+  // A goal's live ticket that waits, directly or through others, on work of a goal
+  // PRIORITY_INVERSION_GAP or more numbers worse that nobody has started: a ticket that could start
+  // now (its dependencies merged, no worker), or one held. Nothing else pushes that work, and a
+  // dependency added only to keep footprints apart (planning.md D4) can point the wrong way. One
+  // finding per blocked goal. The walk goes only through running goals' live tickets: work behind a
+  // held goal is blocked-by-goal-hold's, and work behind a running worker waits on that worker.
+  // Blockers with no priority (chores, unprioritised goals) are never lower, so never named.
+  // A held ticket that waits still counts as waiting, as it still passes its priority on in
+  // effectivePriorities: its hold is a pause, and the work it waits on is still behind when it lifts.
+  // While the fleet drains or memory is full nothing starts, so it is quiet, as idle-capacity is.
+  if (!drained && !memFull) {
+    const run = new Map([...ts].filter(([id, t]) => live(id) && ticketMode(t) === 'run'));
+    const clos = closures(run);
+    // the frontier nobody has started, with each ticket's own priority, worked out once
+    const frontier = new Map();
+    for (const [id, t] of run) {
+      if (countsAsWorker(t) || !(t.depends_on ?? []).every((d) => mergeShaFor(d))) continue;
+      const own = ownPriority(t);
+      if (own) frontier.set(id, { ...own, held: isHeld(t) ? t.held : null });
+    }
+    const goalsOf = new Map([...run].map(([id, t]) => [id, ticketGoals(t).map((x) => x.id)]));
+    for (const g of logObjects('goal').filter((x) => !['met', 'abandoned'].includes(x.status) && typeof x.priority === 'number' && goalMode(x) === 'run')) {
+      const waiting = new Set();
+      const on = new Map();
+      for (const [id] of run) {
+        if (!goalsOf.get(id).includes(g.id)) continue;
+        for (const d of clos.get(id) ?? []) {
+          const b = frontier.get(d);
+          if (!b || b.priority - g.priority < PRIORITY_INVERSION_GAP) continue;
+          waiting.add(id);
+          on.set(d, b);
+        }
+      }
+      if (!on.size) continue;
+      const list = [...on].sort((a, b) => b[1].priority - a[1].priority || a[0].localeCompare(b[0]));
+      const named = (xs) => xs.slice(0, 5).map(([id, b]) => `${id} (p${b.priority}${b.held ? `, held: ${b.held}` : ''})`).join(', ') + (xs.length > 5 ? `, and ${xs.length - 5} more` : '');
+      const startable = list.filter(([, b]) => !b.held);
+      const held = list.filter(([, b]) => b.held);
+      add('medium', 'priority-inversion', g.id, `p${g.priority} "${g.title}": ${plural(waiting.size, 'ticket')} wait${waiting.size === 1 ? 's' : ''} on lower-priority work nobody has started: ${named(list)}`, `${startable.length ? `start ${startable.length === 1 ? 'it' : 'them'} now (ready lists ${startable.length === 1 ? 'it' : 'them'} first, marked "blocks p${g.priority}")` : ''}${startable.length && held.length ? '; ' : ''}${held.length ? `release the held ${held.length === 1 ? 'one' : 'ones'} if the hold no longer stands` : ''}; where an edge only keeps footprints apart (planning.md D4), reverse it so the lower-priority ticket waits, or cut it by narrowing touches`);
+    }
+  }
   // What matters most: the strategy, each goal's impact, and the ratings the Inbox is ordered by.
   {
     const goals = logObjects('goal');
@@ -16198,6 +16357,9 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
     scanning ??= probeAll().then((list) => { scanned = { at: Date.now(), list }; return list; }).finally(() => { scanning = null; });
     return scanning;
   };
+  // the machine's memory, a reading a minute (kit-591): started when a listen succeeds, stopped only
+  // when the hub is closed for good
+  const recorder = memoryRecorder(log, scan);
   // What holds the hub port: 'hub', 'other' (a clean answer that isn't a hub), or 'unsure' (slow,
   // or gone between the bind and the ask), which is no reason to stop trying.
   const holder = () => new Promise((resolve) => {
@@ -16278,7 +16440,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   let stopped = false;
   // live presence on the hub's own pages (presence@1): its people, never a changed
   const presence = presenceRelay({ hub: true, okHost: ownHost, ownerCwd: actionCwd });
-  const handle = { close() { stopped = true; clearTimeout(again); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
+  const handle = { close() { stopped = true; clearTimeout(again); recorder.stop(); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
   const tryListen = () => {
     if (stopped) return;
     const hub = trackRequests(http.createServer(async (req, res) => {
@@ -16299,6 +16461,12 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       const site = req.headers['sec-fetch-site'];
       if (req.url === '/instances.json' && site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the list is for the hub\'s own page');
       if (req.url === '/instances.json') return send(200, 'application/json', JSON.stringify({ ...listHead, instances: await scan() }));
+      // the machine's memory readings (machine-memory@1), refused to another site's page as the list is
+      if (req.url === '/memory.json' || req.url.startsWith('/memory.json?')) {
+        if (site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the readings are for the hub\'s own page');
+        // the detail (it can name the hub's own file) goes to the hub's log, once, never to the page
+        try { return await serveMemory(req, send); } catch (e) { recorder.say(`/memory.json: ${e?.message ?? String(e)}`); return send(500, 'application/json', JSON.stringify({ error: 'memory readings unavailable' })); }
+      }
       // The operator's threads, for the Overview's dock: a GET carries no Origin, so it is refused
       // when the browser says another site's page asks (as a dashboard's /api/threads is).
       if (req.url === '/operator/threads') {
@@ -16331,7 +16499,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       if ((await holder()) !== 'other') { if (!stopped) (again = setTimeout(tryListen, retry)).unref(); }
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
-    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); });
+    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); recorder.start(); });
   };
   tryListen();
   return handle;
@@ -18601,6 +18769,396 @@ function memoryReadingProblem(line) {
     }
   }
   return null;
+}
+// The recorder's pure parts (kit-591): they name nothing outside this region, so a test runs them alone.
+const MEMORY_AGENTS = ['claude', 'codex', 'opencode'];
+const MEMORY_BROWSERS = ['chrome', 'chromium', 'headless_shell'];
+const MEMORY_INSTALLERS = ['npm', 'pnpm', 'yarn', 'bundle', 'pip', 'uv'];
+const MEMORY_INSTALLER_SCRIPTS = ['npm-cli.js', 'pnpm.cjs', 'pnpm.js', 'yarn.js'];
+const MEMORY_INSTALLS = ['install', 'i', 'ci', 'add', 'sync'];
+const MEMORY_CMDLINE_MAX = 65536;
+const MEMORY_HOUR = 3600000, MEMORY_DAY = 86400000;
+const memoryBase = (p) => p.split('/').pop();
+// A cmdline's words: NUL-separated; a retitled process ("npm ci", "chromium --type=renderer") puts
+// its words in argv[0], so argv[0] alone is split on spaces and a later entry (a script path holding
+// a space) stays whole. Only the first 64 KB: the kind needs the first few words.
+function memoryWords(cmdline) {
+  const argv = String(cmdline).slice(0, MEMORY_CMDLINE_MAX).split('\0');
+  if (argv[0].includes(' ')) argv.splice(0, 1, ...argv[0].split(' '));
+  return argv.filter((w) => w !== '');
+}
+// { kind, subcommand? } by the contract's rules: the executable's basename, never comm; node's script
+// is its first word not an option; a subcommand only when it is a command name (commands, a Set).
+function memoryClassify(words, commands) {
+  if (!words.length) return { kind: 'other' };
+  const exe = memoryBase(words[0]);
+  if (MEMORY_AGENTS.includes(exe)) return { kind: 'agent' };
+  if (MEMORY_BROWSERS.includes(exe)) return { kind: 'browser' };
+  if (MEMORY_INSTALLERS.includes(exe)) return { kind: MEMORY_INSTALLS.includes(words[1]) ? 'install' : 'other' };
+  if (exe !== 'node') return { kind: 'other' };
+  const i = words.findIndex((w, j) => j > 0 && !w.startsWith('-'));
+  if (i < 0) return { kind: 'node' };
+  const script = memoryBase(words[i]), next = words[i + 1];
+  if (script === 'devteam.mjs') return next !== undefined && commands.has(next) ? { kind: 'devteam', subcommand: next } : { kind: 'devteam' };
+  if (MEMORY_INSTALLER_SCRIPTS.includes(script) && MEMORY_INSTALLS.includes(next)) return { kind: 'install' };
+  return { kind: 'node' };
+}
+// The known roots, the registry's and the hub's scan's, absolute only and once each, named by the
+// hello, else settings.md's project, else the folder; the reading's ceiling is the lowest valid one
+// among them (a root with none counts 0.8, as its gate does). settingsOf(root) is the root's settings
+// block or null.
+function memoryNameRoots(registry, scanned, settingsOf) {
+  // one spelling a root: /c/a/ is /c/a; / itself becomes '' and is dropped as not absolute
+  const norm = (r) => (typeof r === 'string' ? r.replace(/\/+$/, '') : null);
+  const hello = new Map();
+  for (const s of scanned) if (s && typeof s.name === 'string' && s.name && norm(s.root) !== null && !hello.has(norm(s.root))) hello.set(norm(s.root), s.name);
+  const all = [...new Set([...registry, ...scanned.map((s) => s && s.root)].map(norm))].filter((r) => typeof r === 'string' && r.startsWith('/'));
+  const roots = [];
+  let ceiling = Infinity;
+  for (const root of all) {
+    const s = settingsOf(root) ?? {};
+    const c = s.machine_memory_ceiling;
+    ceiling = Math.min(ceiling, typeof c === 'number' && c >= MEMORY_CEILING_MIN && c <= MEMORY_CEILING_MAX ? c : 0.8);
+    const name = hello.get(root) ?? (typeof s.project === 'string' && s.project ? s.project : memoryBase(root));
+    if (name) roots.push({ root, name });
+  }
+  return { roots, ceiling: ceiling === Infinity ? 0.8 : ceiling };
+}
+// statm counts pages and node has no page-size call: the nearest of the three sizes to rss over the
+// resident pages of the same process.
+function memoryPageSize(residentPages, rssBytes) {
+  if (!(residentPages > 0 && rssBytes > 0)) return 4096;
+  const per = rssBytes / residentPages;
+  return [4096, 16384, 65536].reduce((m, s) => (Math.abs(s - per) < Math.abs(m - per) ? s : m));
+}
+// The longest root holding cwd: { name, worktree }, worktree when cwd is in <root>/.worktrees/<name>.
+function memoryRootOf(cwd, roots) {
+  if (typeof cwd !== 'string') return null;
+  let best = null;
+  for (const r of roots) {
+    if (cwd !== r.root && !cwd.startsWith(`${r.root}/`)) continue;
+    if (!best || r.root.length > best.root.length) best = r;
+  }
+  if (!best) return null;
+  return { name: best.name, worktree: /^\.worktrees\/[^/]/.test(cwd.slice(best.root.length + 1)) };
+}
+// An own key on a plain object, whatever its name: a root named __proto__ or constructor is a
+// project like any other (plain assignment would reach Object.prototype instead).
+const memoryOwn = (o, k, v) => Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
+// Map entries into a plain object in the Map's order (or in `order`, those present).
+const memoryObject = (m, order = [...m.keys()]) => order.filter((k) => m.has(k)).reduce((o, k) => memoryOwn(o, k, m.get(k)), {});
+// procs ({ words, cwd, rss }[], or null with no /proc) into a machine-memory@1 reading, its keys in
+// the contract's order; a field the machine couldn't read is left out, never zero.
+function memoryFold(procs, { at, memory, ceiling, roots, commands, partial }) {
+  const r = { v: 1, at, working_set: memory.inUse };
+  if (memory.max != null) r.max = memory.max;
+  if (ceiling != null) r.ceiling = ceiling;
+  if (memory.source != null) r.source = memory.source;
+  if (partial) r.partial = true;
+  if (procs === null) return r;
+  let sessions = 0;
+  // Maps, not objects: the keys are names (projects, subcommands) and a name may be __proto__
+  const kinds = new Map(), devteam = new Map(), projects = new Map();
+  const add = (m, k, make) => { if (!m.has(k)) m.set(k, make()); return m.get(k); };
+  for (const p of procs) {
+    const { kind, subcommand } = memoryClassify(p.words, commands);
+    const k = add(kinds, kind, () => ({ n: 0, rss: 0 })); k.n++; k.rss += p.rss;
+    if (subcommand) { const d = add(devteam, subcommand, () => ({ n: 0, rss: 0 })); d.n++; d.rss += p.rss; }
+    const home = memoryRootOf(p.cwd, roots);
+    if (!home) continue;
+    const session = kind === 'agent' && home.worktree;
+    if (session) sessions++;
+    const e = add(projects, home.name, () => ({ rss: 0, sessions: 0, devteam: new Map() }));
+    e.rss += p.rss;
+    if (session) e.sessions++;
+    if (subcommand) e.devteam.set(subcommand, (e.devteam.get(subcommand) ?? 0) + p.rss);
+  }
+  r.sessions = sessions;
+  r.kinds = memoryObject(kinds, MEMORY_KINDS);
+  r.devteam = memoryObject(devteam);
+  r.projects = {};
+  for (const [name, e] of projects) {
+    const out = memoryOwn(r.projects, name, { rss: e.rss })[name];
+    if (e.sessions) out.sessions = e.sessions;
+    if (e.devteam.size) out.devteam = memoryObject(e.devteam);
+  }
+  return r;
+}
+// /memory.json's query (params: name to value, an array when repeated) as { from, after?, thin }, or
+// { error } in words, the guards in the spec's order. now is ms; loopback is the request's socket.
+function memoryQuery(params, { now, loopback }) {
+  const known = ['since', 'after', 'thin'];
+  const unknown = Object.keys(params).find((k) => !known.includes(k));
+  if (unknown !== undefined) return { error: `${unknown} is not a parameter of /memory.json: it takes ${known.join(', ')}` };
+  const repeated = Object.keys(params).find((k) => Array.isArray(params[k]));
+  if (repeated !== undefined) return { error: `${repeated} is given more than once: give it once` };
+  const { since, after, thin } = params;
+  let q;
+  if (after !== undefined) {
+    if (!memoryAtOk(after)) return { error: `after is ${memoryShown(after)}: it should be a reading's at, YYYY-MM-DDTHH:MM:SSZ in UTC` };
+    const t = Date.parse(after);
+    if (t > now + 60000) return { error: `after is ${after}, in the future: it should be a time up to 6 hours back` };
+    if (t < now - 6 * MEMORY_HOUR) return { error: `after is ${after}, more than 6 hours back: ask since=24h instead` };
+    q = { from: t, after: t, window: now - t };
+  } else {
+    const s = since ?? '24h';
+    const m = /^(\d{1,3})([hd])$/.exec(s);
+    if (!m) return { error: `since is ${memoryShown(s)}: it should be hours or days, 1 to 3 digits then h or d (24h, 8d)` };
+    const window = Number(m[1]) * (m[2] === 'h' ? MEMORY_HOUR : MEMORY_DAY);
+    if (window === 0) return { error: `since is ${s}: it should be more than 0` };
+    if (window > 8 * MEMORY_DAY) return { error: `since is ${s}: the window is at most 8 days` };
+    q = { from: now - window, window };
+  }
+  if (thin !== undefined && thin !== '0') return { error: `thin is ${memoryShown(thin)}: it should be 0, or left out` };
+  if (thin === '0' && !loopback) return { error: 'thin=0 is only for a loopback request' };
+  if (thin === '0' && q.window > MEMORY_DAY) return { error: 'thin=0 is only for a window of 24 hours or less' };
+  const out = { from: q.from };
+  if (q.after !== undefined) out.after = q.after;
+  out.thin = q.after === undefined && thin !== '0';
+  return out;
+}
+// Readings 6 hours old or less stay; older ones keep one per 5-minute bucket of their epoch time (30
+// past 3 days), the bucket's highest working_set and the earliest of equals, so a peak survives.
+function memoryThin(readings, now) {
+  const kept = [], best = new Map();
+  for (const r of readings) {
+    const t = Date.parse(r.at);
+    if (!Number.isFinite(t)) continue;
+    const age = now - t;
+    if (age <= 6 * MEMORY_HOUR) { kept.push([t, r]); continue; }
+    const size = age > 3 * MEMORY_DAY ? 30 * 60000 : 5 * 60000;
+    const key = `${size}:${Math.floor(t / size)}`;
+    const b = best.get(key);
+    if (!b || r.working_set > b[1].working_set || (r.working_set === b[1].working_set && t < b[0])) best.set(key, [t, r]);
+  }
+  return [...best.values(), ...kept].sort((a, b) => a[0] - b[0]).map(([, r]) => r);
+}
+// The recorder's I/O parts (kit-591): they name fs, path, os, process and the kit's helpers only
+// inside their bodies, run when the hub calls them, so the region still evaluates with nothing in
+// scope. memoryWalk names only fs.promises, fs.constants, path, Buffer, setImmediate and setTimeout.
+const MEMORY_BATCH = 50, MEMORY_BUDGET_MS = 2000, MEMORY_CHUNK = 262144;
+const memoryFile = () => path.join(os.homedir(), '.devteam', `machine-${HUB_PORT}`, 'memory.jsonl');
+// A root's settings.md json devteam block, read as a file in its working tree: null when missing,
+// unreadable or not a JSON object.
+async function memorySettings(root) {
+  try {
+    const text = await fs.promises.readFile(path.join(root, 'docs', 'devteam', 'project', 'settings.md'), 'utf8');
+    const b = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text)?.[1];
+    const o = b == null ? null : JSON.parse(b);
+    return memoryIsMap(o) ? o : null;
+  } catch { return null; }
+}
+// The known roots (the machine's registry and the hub's scan) named, and the reading's ceiling.
+async function memoryRoots(scanned) {
+  let registry = [];
+  try { registry = machineRepos(); } catch { registry = []; }
+  const list = (Array.isArray(scanned) ? scanned : []).filter((s) => memoryIsMap(s) && typeof s.root === 'string').map((s) => ({ root: s.root, name: typeof s.name === 'string' ? s.name : '' }));
+  // read as memoryNameRoots will ask: one spelling a root, absolute only
+  const all = [...new Set([...registry, ...list.map((s) => s.root)].filter((r) => typeof r === 'string').map((r) => r.replace(/\/+$/, '')))].filter((r) => r.startsWith('/'));
+  const settings = new Map(await Promise.all(all.map(async (r) => [r, await memorySettings(r)])));
+  return memoryNameRoots(registry, list, (r) => settings.get(r) ?? null);
+}
+// One /proc/<pid>: { words, cwd, pages }, or null when it is gone (cmdline or statm missing or
+// unreadable, or statm's resident field isn't an integer). The cmdline is read once, to 64 KB at most.
+async function memoryProc(dir) {
+  const cmdline = async () => {
+    const fh = await fs.promises.open(path.join(dir, 'cmdline'), fs.constants.O_RDONLY);
+    try {
+      const buf = Buffer.alloc(MEMORY_CMDLINE_MAX);
+      const { bytesRead } = await fh.read(buf, 0, MEMORY_CMDLINE_MAX, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } finally { await fh.close().catch(() => {}); }
+  };
+  const resident = async () => {
+    const f = (await fs.promises.readFile(path.join(dir, 'statm'), 'utf8')).trim().split(/\s+/)[1];
+    if (!/^\d+$/.test(f ?? '')) throw new Error('statm');
+    return Number(f);
+  };
+  const cwd = () => fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null);
+  try {
+    const [c, pages, wd] = await Promise.all([cmdline(), resident(), cwd()]);
+    return { words: memoryWords(c), cwd: wd, pages };
+  } catch { return null; }
+}
+// The walk: { procs: [{ words, cwd, pages }] | null, partial }. Numeric names only, in batches of 50
+// with a turn of the event loop between them; before each batch after the first, the seam's delay,
+// then the budget (from start, the tick's own start): past it the walk stops, partial. Each batch
+// also races what is left of the budget, so a read that never settles (a process stuck in the
+// kernel, a hung mount) ends the walk there, partial, with what the batch has read. A procDir that
+// can't be listed gives procs null.
+async function memoryWalk(procDir, { budgetMs, slowMs, start }) {
+  let names;
+  try { names = await fs.promises.readdir(procDir); } catch { return { procs: null, partial: false }; }
+  const pids = names.filter((n) => /^\d+$/.test(n));
+  const procs = [];
+  for (let i = 0; i < pids.length; i += MEMORY_BATCH) {
+    if (i > 0) {
+      await new Promise((r) => setImmediate(r));
+      if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
+      if (Date.now() - start >= budgetMs) return { procs, partial: true };
+    }
+    const got = [];
+    const all = Promise.all(pids.slice(i, i + MEMORY_BATCH).map(async (pid) => { const p = await memoryProc(path.join(procDir, pid)); if (p) got.push(p); }));
+    // the race's timer is unref'd, so it never holds the process open (clearTimeout isn't one of the
+    // walk's names: C3e2 runs it with only setTimeout)
+    const late = new Promise((r) => { setTimeout(() => r(true), Math.max(0, budgetMs - (Date.now() - start))).unref?.(); });
+    const timedOut = await Promise.race([all.then(() => false), late]);
+    // a read still out is left to settle on its own: only what is read by now counts
+    procs.push(...got.splice(0));
+    if (timedOut) return { procs, partial: true };
+  }
+  return { procs, partial: false };
+}
+// A line at the end of the file, on a line of its own: a torn tail (no newline last) is ended first.
+async function memoryAppend(file, line) {
+  await fs.promises.mkdir(path.dirname(file), { recursive: true });
+  let torn = false;
+  let fh = null;
+  try {
+    fh = await fs.promises.open(file, 'r');
+    const { size } = await fh.stat();
+    if (size > 0) { const b = Buffer.alloc(1); await fh.read(b, 0, 1, size - 1); torn = b[0] !== 10; }
+  } catch (e) { if (e.code !== 'ENOENT') throw e; } finally { await fh?.close().catch(() => {}); }
+  await fs.promises.appendFile(file, `${torn ? '\n' : ''}${line}\n`);
+}
+// One tick: the reading taken now, checked, appended. The line written, or null when the check
+// refused it (said through say).
+async function recordMemory({ scan, slowMs = Number(process.env.DEVTEAM_MEMORY_SLOW_MS) || 0, say = () => {} }) {
+  const start = Date.now();
+  const at = new Date(start).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const memory = machineMemory() ?? { inUse: os.totalmem() - os.freemem(), max: os.totalmem(), source: 'os' };
+  let scanned = [];
+  try { scanned = await scan(); } catch { scanned = []; }
+  const { roots, ceiling } = await memoryRoots(scanned);
+  const proc = process.env.DEVTEAM_PROC ?? '/proc';
+  const walk = await memoryWalk(proc, { budgetMs: MEMORY_BUDGET_MS, slowMs, start });
+  let procs = null;
+  if (walk.procs) {
+    let own = null;
+    try { own = Number((await fs.promises.readFile(path.join(proc, 'self', 'statm'), 'utf8')).trim().split(/\s+/)[1]); } catch { own = null; }
+    const size = memoryPageSize(own, process.memoryUsage.rss());
+    procs = walk.procs.map((p) => ({ words: p.words, cwd: p.cwd, rss: p.pages * size }));
+  }
+  // only names the check takes as a subcommand: a command that isn't one is never kept
+  const commands = new Set(Object.keys(COMMANDS).filter((k) => MEMORY_SUBCOMMAND.test(k)));
+  const line = JSON.stringify(memoryFold(procs, { at, memory, ceiling, roots, commands, partial: walk.partial }));
+  const problem = memoryReadingProblem(line);
+  if (problem) { say(`a reading the check refuses, not written: ${problem}`); return null; }
+  await memoryAppend(memoryFile(), line);
+  return line;
+}
+// The file keeps 8 days: lines that are a JSON object with a valid at that recent, whatever their v;
+// torn and undatable lines go. Written to a temp file, then renamed over it.
+async function memoryTrim(file, now) {
+  let text;
+  try { text = await fs.promises.readFile(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  const keep = text.split('\n').filter((l) => {
+    let r;
+    try { r = JSON.parse(l); } catch { return false; }
+    return memoryIsMap(r) && memoryAtOk(r.at) && Date.parse(r.at) >= now - 8 * MEMORY_DAY;
+  });
+  const out = keep.map((l) => `${l}\n`).join('');
+  if (out === text) return;
+  const tmp = `${file}.tmp`;
+  // a write or rename that fails part-way leaves the file as it was, and no temp file beside it
+  try {
+    await fs.promises.writeFile(tmp, out);
+    await fs.promises.rename(tmp, file);
+  } catch (e) {
+    await fs.promises.unlink(tmp).catch(() => {});
+    throw e;
+  }
+}
+// The readings at or after from (ms), oldest first, the ones the check passes: the file read from
+// its end in 256 KB chunks, until a chunk whose first complete dated line is before from.
+async function memoryWindow(file, from) {
+  let fh;
+  try { fh = await fs.promises.open(file, 'r'); } catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+  try {
+    let pos = (await fh.stat()).size;
+    let carry = Buffer.alloc(0);
+    const chunks = [];
+    while (pos > 0) {
+      const n = Math.min(MEMORY_CHUNK, pos);
+      pos -= n;
+      const b = Buffer.alloc(n);
+      let got = 0;
+      while (got < n) { const { bytesRead } = await fh.read(b, got, n - got, pos + got); if (!bytesRead) break; got += bytesRead; }
+      const buf = Buffer.concat([b.subarray(0, got), carry]);
+      const parts = [];
+      for (let s = 0, e; s <= buf.length; s = e + 1) { e = buf.indexOf(10, s); if (e < 0) e = buf.length; parts.push(buf.subarray(s, e)); }
+      // the first part may be the end of a line the next chunk back begins
+      carry = pos > 0 ? Buffer.from(parts.shift()) : Buffer.alloc(0);
+      const kept = [];
+      let first = null;
+      for (const part of parts) {
+        if (!part.length) continue;
+        let r;
+        try { r = JSON.parse(part.toString('utf8')); } catch { continue; }
+        if (!memoryIsMap(r) || !memoryAtOk(r.at)) continue;
+        const t = Date.parse(r.at);
+        if (first === null) first = t;
+        if (t >= from && memoryReadingProblem(r) === null) kept.push(r);
+      }
+      chunks.push(kept);
+      if (first !== null && first < from) break;
+    }
+    return chunks.reverse().flat();
+  } finally { await fh.close().catch(() => {}); }
+}
+// /memory.json: the query (a repeated key an array; every key its own, __proto__ included), the
+// window, thinned unless asked not to, as { v: 1, readings }.
+async function serveMemory(req, send) {
+  const params = Object.create(null);
+  for (const [k, v] of new URL(req.url, 'http://127.0.0.1').searchParams) memoryOwn(params, k, Object.hasOwn(params, k) ? [].concat(params[k], v) : v);
+  const now = Date.now();
+  const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+  const q = memoryQuery(params, { now, loopback });
+  if (q.error) return send(400, 'application/json', JSON.stringify({ error: q.error }));
+  let readings = await memoryWindow(memoryFile(), q.from);
+  if (q.after !== undefined) readings = readings.filter((r) => Date.parse(r.at) > q.after);
+  if (q.thin) readings = memoryThin(readings, now);
+  return send(200, 'application/json', JSON.stringify({ v: 1, readings }));
+}
+// The hub's recorder: a trim then a tick at start, a tick a minute and a trim a day after, one at a
+// time in one chain (a tick due while one is still running is skipped); each distinct error said once
+// in the hub's log, never thrown. Off (both no-ops) where DEVTEAM_MEMORY_RECORD is off (tests). The
+// timers are unref'd: the hub's server keeps the process alive. stop() is for good. say is the
+// once-logger, for the route's own errors too (on whether the recorder is on or off).
+function memoryRecorder(log, scan) {
+  const said = new Set();
+  const say = (m) => { if (!said.has(m)) { said.add(m); log(`hub: memory: ${m}`); } };
+  if (process.env.DEVTEAM_MEMORY_RECORD === 'off') return { start() {}, stop() {}, say };
+  const seam = (k, d) => { const v = process.env[k]; const n = Number(v); return v?.trim() && Number.isFinite(n) && n >= 0 ? n : d; };
+  let started = false, stopped = false, ticking = false, trimming = false, slowMs = 0;
+  let chain = Promise.resolve();
+  const timers = [];
+  const run = (job) => { chain = chain.then(() => (stopped ? undefined : job())).catch((e) => say(e?.message ?? String(e))); };
+  const trim = () => {
+    if (trimming || stopped) return;
+    trimming = true;
+    run(async () => { try { await memoryTrim(memoryFile(), Date.now()); } finally { trimming = false; } });
+  };
+  const tick = () => {
+    if (ticking || stopped) return;
+    ticking = true;
+    run(async () => { try { await recordMemory({ scan, slowMs, say }); } finally { ticking = false; } });
+  };
+  return {
+    start() {
+      if (started || stopped) return;
+      started = true;
+      const every = seam('DEVTEAM_MEMORY_EVERY_MS', 60000) || 60000;
+      const trimEvery = seam('DEVTEAM_MEMORY_TRIM_MS', 86400000) || 86400000;
+      slowMs = seam('DEVTEAM_MEMORY_SLOW_MS', 0);
+      trim();
+      tick();
+      timers.push(setInterval(tick, every), setInterval(trim, trimEvery));
+      for (const t of timers) t.unref();
+    },
+    stop() { stopped = true; for (const t of timers) clearInterval(t); timers.length = 0; },
+    say,
+  };
 }
 /* box-memory end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while

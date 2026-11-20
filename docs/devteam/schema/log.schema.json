@@ -540,7 +540,7 @@
             "additionalProperties": false
           },
           "touches": {
-            "description": "The files and folders it may change; two tickets in flight never overlap. In a file settings.split_files lists, path#name names one part of it (a top-level declaration, a heading slug or a marked region) and path#+name a part the ticket adds (planning.md D4).",
+            "description": "The files and folders it may change; two tickets in flight never overlap. In any file, path#name names one part of it (a top-level declaration, a heading slug or a marked region) and path#+name a part the ticket adds (planning.md D4).",
             "type": "array",
             "items": {
               "type": "string",
