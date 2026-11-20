@@ -135,7 +135,9 @@ Any of the three that changes a setting the owner owns needs `--approved <qid>`,
 
 The jobs file, `docs/devteam/project/recurring.json`, is the owner's: a `recurring-edit` question. It lands only in a chore PR of its own, with `--approved <qid>` for an answer that showed exactly its change, and `merge` refuses a head that is behind a main whose jobs changed.
 
-With no forge CLI (no `gh`, a self-hosted git remote), set `forge: "git"`. the PR is a file, `run/pr/<branch>.md` (a `# <title>` line, then the body; or `--title` and `--body-file`). `merge` checks it as it would a PR, merges the exact verified sha onto origin's main with `--no-ff`, and pushes. If main moved, the push fails, which is the same guard as `--match-head-commit`.
+`merge` lands onto the main its checks judged (forge git: a lease push; GitHub: a re-fetch just before `gh pr merge`, which leaves the call itself as the one window).
+
+With no forge CLI (no `gh`, a self-hosted git remote), set `forge: "git"`. the PR is a file, `run/pr/<branch>.md` (a `# <title>` line, then the body; or `--title` and `--body-file`). `merge` checks it as it would a PR, merges the exact verified sha with `--no-ff` onto the main its checks judged, with no git hooks, and pushes with a lease on that main. If main moved, the push fails, which is the same guard as `--match-head-commit`.
 
 The head must be up to date with `main`. A head that moves after the request is a new request. The supervisor still reads the diff: `merge` proves the shape, the supervisor judges the content.
 
