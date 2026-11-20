@@ -9789,8 +9789,9 @@ async function cmdPreview() {
     const r = previewNamed(arg ?? die('usage: preview stop <name> | --all'));
     // the browser's record is browser stop, whoever's writer runs it: stopping takes nothing from anyone
     if (browserIsPreview(r)) {
-      await browserStop({ say: false, rec: r });
-      return out(`preview ${r.name} stopped, and the supervisor's browser with it`);
+      // the line only when Chrome was stopped: a failed kill has said why and set exit 1
+      if (await browserStop({ say: false, rec: r })) out(`preview ${r.name} stopped, and the supervisor's browser with it`);
+      return undefined;
     }
     const killed = killPreviewWindow(r);
     removePreview(r.name);
@@ -26420,18 +26421,20 @@ function browserRunEnv({ headed }) {
 function browserPreviewShaped(r) { return r?.label === 'browser' && typeof r.run?.cmd === 'string' && r.run.cmd.endsWith(' browser serve'); }
 function browserIsPreview(r) { return browserPreviewShaped(r) && r.project === previewProject(); }
 // The hourly renewal (DEVTEAM_TEST_BROWSER_RENEW_MS in tests): the record as it is on disk, with a
-// fresh at and expires, under its lock taken as withLock takes it but never waited for (withLock
-// blocks the event loop up to 15 s and dies on its timeout, which would exit leaving Chrome up): a
-// held lock skips this round. Only a record still there, naming this daemon's port and a window, is
-// rewritten, so a stopped one is never made again. Any error skips the round, said nowhere.
+// fresh at and expires, under its lock taken by tryLock (never waits, takes a stale lock once, never
+// dies; withLock blocks the event loop up to 15 s and dies on its timeout, which would exit leaving
+// Chrome up): a held lock skips this round, and the lock goes in tryLock's finally. Only a record
+// still there, naming this daemon's port and a window, is rewritten, so a stopped one is never made
+// again. Any error skips the round, said nowhere.
 function browserRenew(ctx, port) {
   if (ctx.stopping || !ctx.preview) return;
-  const file = previewFile(ctx.preview), lock = `${file}.lock`;
-  try { fs.mkdirSync(lock); } catch { return; }
+  const file = previewFile(ctx.preview);
   try {
-    const r = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (isObj(r) && r.name === ctx.preview && r.port === port && typeof r.run?.window === 'string') writePreviewFile(previewFresh(r));
-  } catch {} finally { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+    tryLock(file, () => {
+      const r = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (isObj(r) && r.name === ctx.preview && r.port === port && typeof r.run?.window === 'string') writePreviewFile(previewFresh(r));
+    });
+  } catch {}
 }
 // This checkout's browser preview record (label browser), or undefined.
 const browserPreviewRec = () => readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser');
@@ -27523,8 +27526,10 @@ async function browserServe({ chrome: bin }) {
 // browser stop: the daemon told to stop, and up to 10 s for it to go. A dead daemon's Chrome is killed
 // here (only one proven by its --user-data-dir); then the session files, the window, the preview
 // record and state.json. It makes nothing: no profile, no run/browser. rec: the record to remove
-// (preview stop hands its own, so any writer's stop takes it); this writer's by default.
+// (preview stop hands its own, so any writer's stop takes it); this writer's by default. True back
+// unless a leftover Chrome couldn't be stopped (said, and exit 1).
 async function browserStop({ say = true, rec } = {}) {
+  let ok = true;
   const s = browserState();
   if (s) {
     try { await browserCall('stop', {}, { state: s, ms: 15000 }); } catch {}
@@ -27535,12 +27540,13 @@ async function browserStop({ say = true, rec } = {}) {
     try {
       await browserKillChrome(profile, [...browserCandidates(profile), ...(browserProcsOn(profile) ?? [])]);
       browserDeleteSession(profile);
-    } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); process.exitCode = 1; }
+    } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); process.exitCode = 1; ok = false; }
   }
   const r = rec ?? browserPreviewRec();
   if (r) { killPreviewWindow(r); removePreview(r.name); }
   fs.rmSync(browserStateFile(), { force: true });
   if (say) out(s ? 'browser stopped' : "browser wasn't running");
+  return ok;
 }
 async function browserStatus() {
   const off = { browser: 1, instance: browserKey(), running: false, held: null };
