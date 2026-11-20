@@ -131,7 +131,7 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     T.jobsChore('stale', (j) => { j.recurring.dd = check({ every: '8h' }); });
     T.onMain((j) => { j.recurring.bb = chore({ every: '2w' }); });
     const qd = T.yes({ recurring: { dd: check({ every: '8h' }) } });
-    refused(T.dry('stale', qd), /main's settings changed since this branch: merge main into it, then check again/);
+    refused(T.dry('stale', qd), /the merged settings \(this branch merged onto main as it is now\) differ from the branch's: merge main into it, then check again/);
     const stale = path.join(T.old, '.worktrees/chore-stale');
     T.g(['fetch', '-q', 'origin'], stale);
     T.g(['merge', '-q', '--no-edit', 'origin/main'], stale);
@@ -143,7 +143,7 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     const qf = T.yes({ recurring: { ff: null } });
     const late = T.jobsChore('stop-ff', (j) => { delete j.recurring.ff; });
     T.onMain((j) => { const { ff, ...rest } = j.recurring; j.recurring = { ff, ...rest }; });
-    refused(T.dry('stop-ff', qf), /main's settings changed since this branch: merge main into it, then check again/);
+    refused(T.dry('stop-ff', qf), /the merged settings \(this branch merged onto main as it is now\) differ from the branch's: merge main into it, then check again/);
     T.g(['fetch', '-q', 'origin'], late);
     T.g(['merge', '-q', '--no-edit', 'origin/main'], late);
     // the merge keeps main's moved ff, so the branch stops it again on top
@@ -179,7 +179,45 @@ test('A4: an answer for one job lands nothing else; a null lands only that remov
     assert.equal(T.g(['merge-base', '--all', 'origin/main', 'origin/chore-cc'], T.old).split('\n').length, 2, 'two merge bases');
     const mb = T.g(['merge-base', 'origin/main', 'origin/chore-cc'], T.old);
     assert.equal(T.g(['rev-parse', `${mb}:docs/devteam/project/settings.md`], T.old), T.g(['rev-parse', 'origin/main:docs/devteam/project/settings.md'], T.old), 'the named base has main\'s settings blob');
-    refused(T.dry('cc', qe), /main's settings changed since this branch: merge main into it, then check again/);
+    refused(T.dry('cc', qe), /the merged settings \(this branch merged onto main as it is now\) differ from the branch's: merge main into it, then check again/);
+  } finally { T.done(); }
+});
+
+test('A4b: what lands is judged on every home PR: a stale branch that only reorders the jobs text cannot bring back a job main stopped', () => {
+  // A branch whose recurring text is moved but canonically unchanged reads as no change against its
+  // merge base, while git's 3-way merge of it onto a main that stopped a job puts the job back
+  // (final-1 F1). Whether a PR changes the jobs is read from main's jobs now against the merged result.
+  const T = setup('lands');
+  try {
+    T.lines(T.STD);
+    T.ok(['ticket', 'add', 'api-01-x', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['its suite passes in CI'], notes: 'n' })]);
+    const jobs = { aa: check({ title: 'A job', every: '6h' }), bb: check({ title: 'B job', every: '12h', run: 'echo bb' }), cc: chore({ title: 'C job', prompt: 'C.' }), dd: check({ title: 'D job', every: '8h', run: 'echo dd' }), ee: chore({ title: 'E job', every: '2w', prompt: 'E.' }) };
+    T.onMain((j) => { j.recurring = jobs; });
+    const moveBb = (j) => { const { aa, bb, cc, dd, ee } = j.recurring; j.recurring = { aa, cc, dd, bb, ee }; };
+    // cut now: a chore that only moves bb's text after dd, one that also adds ff, and a ticket that only moves it
+    T.jobsChore('sneak', moveBb);
+    T.jobsChore('sneak-ff', (j) => { moveBb(j); j.recurring.ff = chore({ title: 'F job', prompt: 'F.' }); });
+    const tw = path.join(T.base, 'ticket-api-01-x');
+    T.g(['worktree', 'add', '-q', '-b', 'ticket/api-01-x', tw, 'origin/main'], T.old);
+    T.edit(moveBb, tw);
+    T.g(['commit', '-qam', 'jobs text moved'], tw);
+    T.g(['push', '-q', 'origin', 'ticket/api-01-x'], tw);
+    const tsha = T.g(['rev-parse', 'HEAD'], tw);
+    // the owner stops bb, and it lands
+    const stop = T.yes({ recurring: { bb: null } });
+    T.jobsChore('stop-bb', (j) => { delete j.recurring.bb; });
+    passes(T.merge('stop-bb', ['--approved', stop]));
+    assert.equal(Object.hasOwn(T.mainSettings().recurring, 'bb'), false);
+    // the chore: its merge would put bb back, so it changes the jobs and needs an answer
+    refused(T.merge('sneak'), /changes owner settings: recurring \(recurring-edit\)/);
+    assert.equal(Object.hasOwn(T.mainSettings().recurring, 'bb'), false, 'bb stays stopped');
+    // with an answer for ff alone: the binding reads main's jobs now against the merged result, so bb
+    // (back by the merge, the merged file byte for byte the branch's) is a change it never showed
+    const qff = T.yes({ recurring: { ff: chore({ title: 'F job', prompt: 'F.' }) } });
+    refused(T.dry('sneak-ff', qff), /recurring\.bb is added here, which q-[0-9]+-[0-9]+-supervisor did not show the owner/);
+    // the ticket: a stale ticket branch that only moves the text is refused by check-pr
+    const r = T.run(['check-pr', '--head-ref', 'ticket/api-01-x', '--sha', tsha, '--title', 'x']);
+    refused({ status: r.status, text: T.text(r) }, /ticket\/api-01-x changes recurring: jobs are the owner's/);
   } finally { T.done(); }
 });
 
