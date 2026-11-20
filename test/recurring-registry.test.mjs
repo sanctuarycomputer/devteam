@@ -1168,6 +1168,23 @@ test('A15 landing: forge git, HEAD moved after the landing merge (as a hook that
   } finally { T.done(); }
 });
 
+test('A15 landing: forge git, main rewound between the checks and the landing: the lease refuses, and main is left as the rewinder left it (final-10 F2)', () => {
+  const T = setup('a15-rewound');
+  try {
+    // two commits on main, and the chore's gate force-pushes main back to the first, after the checks
+    // and before the landing: the landing merge still fast-forwards from there, so only the lease refuses it
+    T.onMainFile('README.md', 'one\n');
+    T.onMainFile('README.md', 'two\n');
+    const back = T.g(['rev-parse', 'origin/main~1']);
+    const wt = T.choreBranch('rewinder', (w) => T.edit((j) => { j.gates = { ...(j.gates ?? {}), rewinder: `git push -q -f origin ${back}:refs/heads/main` }; }, w));
+    const head = T.g(['rev-parse', 'HEAD'], wt);
+    refused(T.merge('rewinder'), /main moved since the checks \([0-9a-f]{12} to [0-9a-f]{12}\); run merge again/);
+    T.g(['fetch', '-q', 'origin']);
+    assert.equal(T.g(['rev-parse', 'origin/main']), back, 'main is as the rewinder left it');
+    assert.throws(() => T.g(['merge-base', '--is-ancestor', head, 'origin/main']), 'the chore did not land');
+  } finally { T.done(); }
+});
+
 test('A16: settings.md holds no jobs: no default, no words, and validate reads the jobs file of the project dir in use', () => {
   const T = setup('settings');
   try {
