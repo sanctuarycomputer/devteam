@@ -373,8 +373,18 @@ test('KIT347 probe: cold Chrome starts over the pipe', { ...opts, timeout: 30000
     c.stdio[4].on('data', (d) => { if (got === null && d.includes(0)) got = Date.now() - t0; });
     c.stdio[3].write(`${JSON.stringify({ id: 1, method: 'Browser.getVersion' })}\0`);
     let exited = null; c.once('exit', (code, sig) => { exited = `${code ?? sig} at ${Date.now() - t0}`; });
-    for (const end = Date.now() + 90000; got === null && exited === null && Date.now() < end;) await new Promise((r) => setTimeout(r, 50));
-    say(`#${i} sandbox=${!noSandbox} answer=${got} ms exited=${exited} stderr-lines=${lines.length} load-after ${rd('/proc/loadavg')}`);
+    // every 500 ms: the group's process count, states (R running, D in I/O wait, S asleep), read MB, CPU s
+    const tree = () => {
+      let n = 0, rb = 0, cpu = 0; const st = {};
+      for (const d of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+        try { const s = fs.readFileSync(`/proc/${d}/stat`, 'utf8'); const f = s.slice(s.lastIndexOf(')') + 2).split(' '); if (Number(f[2]) !== c.pid) continue; n++; st[f[0]] = (st[f[0]] ?? 0) + 1; cpu += Number(f[11]) + Number(f[12]); const io = fs.readFileSync(`/proc/${d}/io`, 'utf8'); rb += Number(/read_bytes: (\d+)/.exec(io)?.[1] ?? 0); } catch {}
+      }
+      return `procs=${n} ${Object.entries(st).map(([k, v]) => `${k}${v}`).join(',')} readMB=${(rb / 1e6).toFixed(1)} cpu=${(cpu / 100).toFixed(2)}s`;
+    };
+    const samples = [];
+    for (let k = 0, end = Date.now() + 90000; got === null && exited === null && Date.now() < end; k++) { await new Promise((r) => setTimeout(r, 50)); if (k % 10 === 9) samples.push(`+${Date.now() - t0} ${tree()} io-psi10=${/full avg10=([\d.]+)/.exec(rd('/proc/pressure/io'))?.[1]} cpu-psi10=${/some avg10=([\d.]+)/.exec(rd('/proc/pressure/cpu'))?.[1]}`); }
+    say(`#${i} sandbox=${!noSandbox} answer=${got} ms exited=${exited} stderr-lines=${lines.length} first-stderr=+${lines[0]?.at} load-after ${rd('/proc/loadavg')} at-answer ${tree()}`);
+    for (const s of samples.length > 12 ? [...samples.slice(0, 6), '…', ...samples.slice(-6)] : samples) say(`#${i}   sample ${s}`);
     for (const x of lines.filter((x) => x.gap > 700).slice(0, 15)) say(`#${i}   gap ${x.gap} ms before (+${x.at}) ${x.l}`);
     for (const x of lines.slice(-6)) say(`#${i}   tail (+${x.at}) ${x.l}`);
     try { process.kill(-c.pid, 'SIGKILL'); } catch {}
