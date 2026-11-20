@@ -43,6 +43,8 @@ const NOWHERE = path.join(os.tmpdir(), 'dt-no-such-machine');
 const machineless = (env) => ({ DEVTEAM_CGROUP: NOWHERE, DEVTEAM_MEMINFO: NOWHERE, ...(env ?? process.env) });
 // the box image counts the page cache (DEVTEAM_MEMORY_COUNTS_CACHE): a test does only when it says so
 delete process.env.DEVTEAM_MEMORY_COUNTS_CACHE;
+// and a hub a test starts records no memory reading unless the test opts in (DEVTEAM_MEMORY_RECORD)
+process.env.DEVTEAM_MEMORY_RECORD = 'off';
 
 export function runNode(script, args, { cwd, env, input, cold } = {}) {
   env = machineless(env);
