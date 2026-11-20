@@ -1065,6 +1065,11 @@ const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-sett
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
 const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records', 'worktree_copy', 'worktree_setup_always'];
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
+// what a repo link's maintain may turn on; linkMaintains(l, 'prs')
+const LINK_DUTIES = ['prs', 'releases'];
+// maintain.reviews: another name its review records may go under, run/reviews/<reviews>-pr-<n>/, besides the link's id
+const REVIEWS_PREFIX = /^[a-z0-9][a-z0-9_.-]{0,63}$/i;
+const linkMaintains = (l, duty) => !!l && typeof l === 'object' && !!l.maintain && typeof l.maintain === 'object' && l.maintain[duty] === true;
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
 // records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
 // "repo", in its own project folder, landing with its code; or "home", on home's ticket/<id> in
@@ -1095,7 +1100,7 @@ const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
   gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string', records: 'string',
-  worktree_copy: 'any', worktree_setup_always: 'boolean',
+  worktree_copy: 'any', worktree_setup_always: 'boolean', maintain: 'object',
 });
 const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
@@ -1152,7 +1157,9 @@ const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w
 // looks up: kind "constructor" is unknown, not Object's.
 const LINK_KINDS = Object.assign(Object.create(null), {
   repo: {
-    fields: { required: ['remote'], optional: ['path', ...REPO_KEYS] },
+    // maintain: { prs, releases }, duties the supervisor keeps for a repo it doesn't only merge
+    // tickets into (linkDutyFindings): the owner's, a governance-edit like the rest
+    fields: { required: ['remote'], optional: ['path', 'maintain', ...REPO_KEYS] },
     // where the checkout is on this machine is never the owner's; what a gate run sees is
     // gate-change; anything else about a repo devteam merges into is governance-edit
     ownerClass: (field) => (field === 'path' ? null : REPO_GATE_KEYS.includes(field) ? 'gate-change' : 'governance-edit'),
@@ -1173,6 +1180,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
       else ctx.remotes.set(k, ctx.id);
       if (l.project !== undefined && (typeof l.project !== 'string' || !REPO_PATH.test(l.project))) errs.push(`${at}: project is a path inside that repo`);
       if (l.records !== undefined && !RECORDS_WHERE.includes(l.records)) errs.push(`${at}: records is "repo" or "home"`);
+      if (l.maintain !== undefined && (!isObj(l.maintain) || Object.entries(l.maintain).some(([k, v]) => (k === 'reviews' ? typeof v !== 'string' || !REVIEWS_PREFIX.test(v) : !LINK_DUTIES.includes(k) || typeof v !== 'boolean')))) errs.push(`${at}: maintain is { "prs": true|false, "releases": true|false, "reviews": "<records prefix>" }`);
       return errs;
     },
     // local and cheap: metrics asks it live
@@ -3156,14 +3164,14 @@ function findCycle(ts) {
   for (const id of ts.keys()) if (!state.has(id)) { const c = dfs(id); if (c) return c; }
   return null;
 }
-// Longest dependency chain, weighted S = 1, M = 2.
-function criticalPath(ts) {
+// Longest dependency chain, weighted S = 1, M = 2 (or by w: () => 1 counts tickets).
+function criticalPath(ts, w = weight) {
   const best = new Map();
   const longest = (id) => {
     if (best.has(id)) return best.get(id);
     let top = { len: 0, path: [] };
     for (const d of ts.get(id).depends_on ?? []) if (ts.has(d)) { const r = longest(d); if (r.len > top.len) top = r; }
-    const res = { len: top.len + weight(ts.get(id)), path: [...top.path, id] };
+    const res = { len: top.len + w(ts.get(id)), path: [...top.path, id] };
     best.set(id, res);
     return res;
   };
@@ -4110,6 +4118,39 @@ function deriveStatus() {
   });
 }
 
+// A mostly serial graph (D4, D11): the longest chain of unmerged tickets is SERIAL_DEPTH or more
+// deep and at least SERIAL_RATIO times the ready width (unmerged tickets whose dependencies have
+// all merged). Every check passes on such a graph, yet only one or two tickets can ever run. When
+// most of the chain's links join tickets that share nothing but a whole-file touch of a file
+// split_files lists, the dependency only serializes: naming parts (path#name) lets them run at once.
+const SERIAL_DEPTH = 8, SERIAL_RATIO = 4;
+function serialGraphWarning(live, s = loadSettings()) {
+  const U = new Map(live.map((t) => [t.id, t]));
+  if (U.size < SERIAL_DEPTH) return null;
+  const chain = criticalPath(U, () => 1).path;
+  const depth = chain.length;
+  const width = live.filter((t) => !(t.depends_on ?? []).some((d) => U.has(d))).length;
+  if (depth < SERIAL_DEPTH || depth < SERIAL_RATIO * width) return null;
+  const msg = `the unmerged ticket graph is mostly serial: its longest dependency chain is ${depth} tickets deep (${chain[0]} … ${chain[depth - 1]}) while ${width} of ${U.size} are ready (no unmerged dependency) (D4, D11)`;
+  // a link that only serializes: every footprint the two share is a whole-file touch of a split file
+  const wholeSplit = (a, b) => {
+    const repo = repoOfTicketLink(a);
+    if (repo !== repoOfTicketLink(b)) return null;
+    const files = new Set();
+    for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) {
+      if (!touchesOverlap(ga, gb, repo, s)) continue;
+      const pa = trimSlash(touchPath(ga)), pb = trimSlash(touchPath(gb));
+      if (pa !== pb || hasWild(pa) || !isSplitFile(pa, s) || (touchPart(ga) && touchPart(gb))) return null;
+      files.add(pa);
+    }
+    return files.size ? [...files] : null;
+  };
+  const links = [];
+  for (let i = 1; i < depth; i++) { const f = wholeSplit(U.get(chain[i - 1]), U.get(chain[i])); if (f) links.push(`${chain[i]} on ${chain[i - 1]} (${f.join(', ')})`); }
+  if (links.length * 2 <= depth - 1) return `${msg}; find dependencies a contract ticket or a split could break`;
+  return `${msg}; ${links.length} of its ${depth - 1} links only serialize whole-file touches of a file split_files lists, e.g. ${links.slice(0, 2).join('; ')}: name the parts each changes (path#name) and drop the dependencies that only serialize`;
+}
+
 const onPlanBranch = () => (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
 function cmdValidate() {
@@ -4301,6 +4342,8 @@ function cmdValidate() {
       if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
       outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (touchesOverlap(ga, gb, repoOfTicketLink(a))) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
+    const w = serialGraphWarning(live);
+    if (w) warnings.push(scope ? `${w}; not ${scope}'s to fix` : w);
   }
 
   // The registry and the lines. Labels-only components and an empty registry print nothing.
@@ -11774,13 +11817,14 @@ async function cmdObserveMetrics() {
   // the tick's heartbeat: another machine live on this repo stops the tick here
   const hc = hostCheck();
   if (hc.refused) hostRefusedWhileRunning(hc);
-  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes
+  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes, then each GitHub repo link's open PRs
   const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
   const unfetched = await fetchLinkMains(end);
   const { skipped } = await probeLinks(end);
+  const unlisted = await fetchLinkPrs(end);
   const s = observeSpend();
   const learned = writeLearning();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
   // finished worktrees go, at most every 30 minutes (one line when any did)
   tidyFinishedWorktrees();
 }
@@ -11806,12 +11850,80 @@ async function fetchLinkMains(end) {
       const r = await runProbe({ cmd: 'git', args: ['fetch', '--quiet', 'origin', b], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: (code) => (code === 0 ? {} : { problem: `could not fetch origin ${b} from ${redactUrl(R.remote)} in ${R.root}; its main here is as last fetched` }) }, end);
       if (r === 'budget') { skipped.push(id); continue; }
       state[id] = { at: nowIso(), problem: r.problem ?? null };
+      // a repo whose releases are kept (maintain.releases) also gets its release tags, which a
+      // fetch of one branch doesn't bring, so a release cut elsewhere clears release-due; never
+      // forced, so a local tag that differs stays as it is
+      if (!r.problem && linkMaintains(loadSettings().links?.[id], 'releases') && Date.now() < end) await runProbe({ cmd: 'git', args: ['fetch', '--quiet', '--no-tags', 'origin', 'refs/tags/v*:refs/tags/v*'], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: () => ({}) }, end);
       if (!r.problem) R.resetCaches();
     }
   };
   await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, ids.length) }, one));
   for (const id of Object.keys(state)) if (!ids.includes(id)) delete state[id];
   writeJson(FETCH_FILE, state);
+  return skipped;
+}
+// The open PRs on each GitHub repo link that aren't the fleet's own (ticket/, plan/, chore- branches
+// in the repo itself land through merge and their records; a fork's branch of that name is an outside PR), read with gh inside the tick's budget, so metrics can say
+// when one waits unreviewed or with findings its author never saw (pr-unreviewed,
+// pr-changes-unanswered) without touching the network. A good read is reused for
+// LINK_PRS_REUSE_MS (the findings count hours). A failed read (gh missing, logged out, offline, a
+// query GitHub refuses) keeps the last PRs but marks the entry failing, with when it started and
+// gh's first line, so metrics raises no PR finding from stale data and says (link-prs-unread) when
+// reads have failed for LINK_PRS_UNREAD_HOURS. Kept per PR: its head, when that head was first seen
+// (the PR's updatedAt, which a push moves, when the head is new to us: never later than the push
+// is old, so never a false stall), the forge's reviews of that head and when it was last commented
+// on, leaving out bots. The query asks for no `commits`: gh's commits field nests authors under
+// commits under PRs and GitHub refuses it for its node count.
+const LINK_PRS_FILE = runPath('link-prs.json');
+const LINK_PRS_REUSE_MS = 30 * 60000;
+const LINK_PRS_UNREAD_HOURS = 6;
+const LINK_PRS_MAX_AGE_MS = 2 * 3600000;
+const FLEET_BRANCH = /^(ticket\/|plan\/|chore-)/;
+// gh's GraphQL logins drop the [bot] suffix an app has on the REST API, so the common apps are named too
+const BOT_LOGIN = /\[bot\]$|^(github-actions|copilot-pull-request-reviewer|copilot|dependabot|renovate|vercel|vercel-fleet-prod|netlify|coderabbitai|chatgpt-codex-connector|codecov|sonarcloud|sonarqubecloud|changeset-bot|linear|cursor|gemini-code-assist|sourcery-ai|deepsource-io|snyk-io|socket-security|mergify|graphite-app|pre-commit-ci)$/i;
+// gh asks for a PR's first 100 reviews and comments, the oldest: at 100 the newest may be missing
+const LINK_PR_PAGE = 100;
+const linkPrRepos = (s = loadSettings()) => Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents && linkMaintains(l, 'prs') && LINK_KINDS[l.kind].effectiveSettings(l, s).forge === 'github' && ghSpec(l.remote)).map(([id, l]) => [id, ghSpec(l.remote)]);
+const trimLinkPr = (p, before) => {
+  const head = p.headRefOid;
+  const human = (x) => !BOT_LOGIN.test(String(x?.author?.login ?? ''));
+  const times = (xs, k) => (xs ?? []).filter(human).map((x) => Date.parse(x?.[k])).filter((t) => !Number.isNaN(t));
+  const seen = before && before.head === head && before.head_at ? before.head_at : (() => { const t = Math.max(Date.parse(p.createdAt) || 0, Date.parse(p.updatedAt) || 0); return t ? new Date(t).toISOString() : null; })();
+  return {
+    number: p.number, title: String(p.title ?? '').slice(0, 200), url: p.url ?? null, head, branch: p.headRefName ?? null,
+    head_at: seen,
+    // its reviews or comments ran past one page: what's newest may be missing, so nothing is claimed about it
+    truncated: (p.reviews?.length ?? 0) >= LINK_PR_PAGE || (p.comments?.length ?? 0) >= LINK_PR_PAGE,
+    forge_reviews: (p.reviews ?? []).filter((r) => human(r) && r?.commit?.oid === head).map((r) => ({ state: r.state ?? null, at: r.submittedAt ?? null })),
+    last_comment_at: (() => { const t = Math.max(0, ...times(p.comments, 'createdAt'), ...times(p.reviews, 'submittedAt')); return t ? new Date(t).toISOString() : null; })(),
+  };
+};
+async function fetchLinkPrs(end) {
+  const repos = linkPrRepos();
+  let state = {};
+  try { state = readJson(LINK_PRS_FILE); } catch {}
+  if (state === null || typeof state !== 'object' || Array.isArray(state)) state = {};
+  const skipped = [];
+  const queue = repos.filter(([id]) => { const e = ownEntry(state, id); return !(e && !e.failing_since && Date.now() - Date.parse(e.at) < LINK_PRS_REUSE_MS); });
+  const one = async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      const [id, spec] = next;
+      if (Date.now() >= end) { skipped.push(id); continue; }
+      const r = await runProbe({ cmd: 'gh', args: ['pr', 'list', '-R', spec, '--state', 'open', '--limit', '100', '--json', 'number,title,url,headRefName,headRefOid,isCrossRepository,isDraft,createdAt,updatedAt,reviews,comments'], cwd: mainRoot, env: { ...process.env, GH_PROMPT_DISABLED: '1' }, stderr: true, judge: (code, text, err = '') => {
+        const why = () => (String(err).split('\n').map((x) => x.trim()).find(Boolean) ?? (code == null ? 'gh did not run or timed out' : `gh exited ${code}`)).slice(0, 300);
+        if (code !== 0) return { error: why() };
+        try { const list = JSON.parse(text); return Array.isArray(list) ? { list } : { error: 'gh printed no PR list' }; } catch { return { error: 'gh printed no PR list' }; }
+      } }, end);
+      if (r === 'budget') { skipped.push(id); continue; }
+      const prev = ownEntry(state, id);
+      if (r.error) { state[id] = { ...(prev ?? {}), failing_since: prev?.failing_since ?? nowIso(), failed_at: nowIso(), error: r.error }; continue; }
+      const before = new Map((Array.isArray(prev?.prs) ? prev.prs : []).map((p) => [p?.number, p]));
+      state[id] = { at: nowIso(), prs: r.list.filter((p) => p && !p.isDraft && !(p.isCrossRepository !== true && FLEET_BRANCH.test(p.headRefName ?? ''))).map((p) => trimLinkPr(p, before.get(p.number))) };
+    }
+  };
+  if (queue.length) await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, queue.length) }, one));
+  for (const id of Object.keys(state)) if (!repos.some(([r]) => r === id)) delete state[id];
+  if (repos.length || fs.existsSync(LINK_PRS_FILE)) writeJson(LINK_PRS_FILE, state);
   return skipped;
 }
 // Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
@@ -11822,7 +11934,8 @@ const PROBE_FILE = runPath('link-probes.json');
 // Probes run four at a time, each with its own 12 s deadline, inside a budget per tick (20 s;
 // DEVTEAM_PROBE_BUDGET_MS in tests): a probe the budget cuts short, or one never started, is "not
 // probed this tick", writes nothing, and is asked again next tick; it is never a finding.
-// A probe is a kind's { cmd, args, cwd?, env?, judge(code, stdout) → { problem?, note? } }, or null.
+// A probe is a kind's { cmd, args, cwd?, env?, stderr?, judge(code, stdout, stderr) → { problem?, note? } }, or null
+// (stderr is passed only when the spec asks for it).
 const PROBE_AT_ONCE = 4;
 const PROBE_EACH_MS = 12000;
 function runProbe(spec, end) {
@@ -11830,14 +11943,16 @@ function runProbe(spec, end) {
     const left = end - Date.now();
     const cut = left < PROBE_EACH_MS;
     let outText = '';
+    let errText = '';
     let done = false;
     // its own process group, so a kill takes git's ssh with it, and no controlling terminal to prompt on
-    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', spec.stderr ? 'pipe' : 'ignore'], detached: true });
     const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
     const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} finish(cut ? 'budget' : spec.judge(null, '')); }, Math.max(0, Math.min(left, PROBE_EACH_MS)));
     child.stdout.on('data', (d) => { outText += d; });
-    child.on('error', () => finish(spec.judge(null, '')));
-    child.on('close', (code) => finish(spec.judge(code, outText)));
+    if (spec.stderr) child.stderr.on('data', (d) => { if (errText.length < 4096) errText += d; });
+    child.on('error', (e) => finish(spec.judge(null, '', String(e?.message ?? e))));
+    child.on('close', (code) => finish(spec.judge(code, outText, errText)));
   });
 }
 async function probeLinks(end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000)) {
@@ -14401,6 +14516,103 @@ function efficiencyData(m, now = Date.now()) {
     suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: W12[11].start, end: W12[11].end, POINTS }) };
 }
 
+// A repo link the supervisor maintains: open PRs to review, fix, comment on and merge, and (with
+// its own release: "tag") releases to cut. Nothing else notices when that work stops, so:
+// pr-unreviewed, an open PR (not the fleet's own, not a draft) whose head has had no review for
+// LINK_PR_STALL_HOURS; pr-changes-unanswered, one whose latest review says CHANGES at its head that
+// long, with nothing posted on the PR since, so its author never saw the findings; release-due,
+// merges on the link's main waiting RELEASE_DUE_HOURS since its latest tag. A review is a record
+// under run/reviews/ in a folder or file named for the PR (…pr-<n>/…md, …pr-<n>…md) whose
+// "Verdict: APPROVE|CHANGES <full sha>" names the head (run/reviews/<link>-pr-<n>/, or
+// <maintain.reviews>-pr-<n>/, or a bare pr-<n> when there's one GitHub link), or a person's review
+// of that head on the forge. A PR whose reviews or comments ran past gh's page raises nothing.
+// The PRs come from the tick's read (fetchLinkPrs); with no good read nothing about PRs is raised,
+// and reads failing for LINK_PRS_UNREAD_HOURS are a low link-prs-unread.
+const LINK_PR_STALL_HOURS = 24;
+const RELEASE_DUE_HOURS = 6;
+function linkPrReviewRecords(ids, prefixes = new Map()) {
+  const root = path.join(runDir, 'reviews');
+  const byPr = new Map();
+  const put = (key, file) => {
+    let text, st;
+    try { st = fs.statSync(file); if (!st.isFile() || st.size > 1e6) return; text = fs.readFileSync(file, 'utf8'); } catch { return; }
+    const v = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-f]{40}(?:[0-9a-f]{24})?)[ \t]*$/gm)].pop();
+    // when the record was written: its birth time where the filesystem keeps one, so filling in a
+    // Disposition later doesn't move it past a comment already posted
+    const at = st.birthtimeMs > 0 ? Math.min(st.birthtimeMs, st.mtimeMs) : st.mtimeMs;
+    if (v) (byPr.get(key) ?? byPr.set(key, []).get(key)).push({ verdict: v[1], sha: v[2], at, file: path.relative(mainRoot, file) });
+  };
+  // <link>-pr-<n> names the link; a bare pr-<n> (not <other>-pr-<n>) counts only when there is one GitHub repo link
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const named = ids.flatMap((id) => [[id, id], ...(prefixes.has(id) ? [[id, prefixes.get(id)]] : [])]).sort((a, b) => b[1].length - a[1].length).map(([id, pre]) => [id, new RegExp(`(?:^|[^a-z0-9])${esc(pre)}-pr-(\\d+)(?![0-9])`, 'i')]);
+  const keyOf = (name) => {
+    for (const [id, re] of named) { const m = re.exec(name); if (m) return `${id}#${Number(m[1])}`; }
+    const m = /(?:^|[^a-z0-9-])pr-(\d+)(?![0-9])/i.exec(name);
+    return m && ids.length === 1 ? `${ids[0]}#${Number(m[1])}` : null;
+  };
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return byPr; }
+  for (const e of entries) {
+    const key = keyOf(e.name);
+    if (!key) continue;
+    if (e.isDirectory()) { let fs2 = []; try { fs2 = fs.readdirSync(path.join(root, e.name)); } catch {} for (const f of fs2) if (f.endsWith('.md')) put(key, path.join(root, e.name, f)); }
+    else if (e.name.endsWith('.md')) put(key, path.join(root, e.name));
+  }
+  return byPr;
+}
+function linkDutyFindings(settings, now, add) {
+  const stall = LINK_PR_STALL_HOURS * 3600000;
+  let read = {};
+  try { read = readJson(LINK_PRS_FILE); } catch {}
+  const repos = linkPrRepos(settings);
+  const records = repos.some(([id]) => ownEntry(read, id)) ? linkPrReviewRecords(repos.map(([id]) => id), new Map(repos.map(([id]) => [id, settings.links[id].maintain.reviews]).filter(([, p]) => typeof p === 'string'))) : new Map();
+  const hours = (ms) => Math.floor(ms / 3600000);
+  for (const [id, spec] of repos) {
+    const entry = ownEntry(read, id);
+    if (!entry) continue;
+    // a failing or old read (the tick's budget cut it) raises no PR finding from what it last saw,
+    // and says so once that has lasted
+    const age = now - (Date.parse(entry.at) || 0);
+    if (entry.failing_since || age > LINK_PRS_MAX_AGE_MS) {
+      const unread = entry.failing_since ? now - (Date.parse(entry.failing_since) || now) : age;
+      if (unread > LINK_PRS_UNREAD_HOURS * 3600000) add('low', 'link-prs-unread', id, `${id}'s open PRs haven't been read for ${hours(unread)} h${entry.at ? ` (last read ${entry.at})` : ''}: ${entry.failing_since ? entry.error ?? 'gh failed' : "the tick's time budget ran out first"}`, `check gh on this machine (gh auth status; gh pr list -R ${spec} --state open --limit 5): until it reads, pr-unreviewed and pr-changes-unanswered can't fire for ${id}`);
+      continue;
+    }
+    if (!Array.isArray(entry.prs)) continue;
+    for (const pr of entry.prs) {
+      if (!Number.isInteger(pr?.number) || typeof pr.head !== 'string' || pr.truncated) continue;
+      const subject = `${id}#${pr.number}`;
+      const mine = (records.get(subject) ?? []).sort((a, b) => a.at - b.at);
+      const atHead = mine.filter((r) => r.sha === pr.head);
+      const forgeAtHead = pr.forge_reviews ?? [];
+      const latest = mine.at(-1);
+      if (latest && latest.verdict === 'CHANGES' && latest.sha === pr.head) {
+        const since = now - latest.at;
+        const answered = pr.last_comment_at && Date.parse(pr.last_comment_at) > latest.at;
+        if (since > stall && !answered) add('medium', 'pr-changes-unanswered', subject, `review ${latest.file} asked for changes at its head ${pr.head.slice(0, 12)} ${hours(since)} h ago, and nothing has been posted on the PR since: its author hasn't seen the findings`, `comment the findings to its author on ${pr.url ?? `the PR`} (gh pr comment ${pr.number} --body-file ${latest.file}); a fix the fleet should make is a ticket in ${id}`);
+        continue;
+      }
+      if (atHead.length || forgeAtHead.length) continue;
+      const waited = now - (Date.parse(pr.head_at) || now);
+      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${settings.links[id].maintain.reviews ?? id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then comment the verdict to its author`);
+    }
+  }
+  // release-due: only for a repo link whose releases the supervisor keeps (maintain.releases) and
+  // that releases from a tag, read from its local main as the tick fetched it (with its v* tags),
+  // against the nearest release tag on it (v*, not a release candidate, as releasedInAt).
+  for (const [id, l] of Object.entries(settings.links ?? {})) {
+    if (!LINK_KINDS[l?.kind]?.hostsComponents || !linkMaintains(l, 'releases') || LINK_KINDS[l.kind].effectiveSettings(l, settings).release !== 'tag' || !repoReadable(id)) continue;
+    const R = repo(id);
+    const ref = R.mainRef();
+    if (!ref) continue;
+    const tag = R.git(['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', '*-rc*', ref]);
+    if (!tag) continue;
+    const rows = (R.git(['log', '--first-parent', '--format=%ct', `refs/tags/${tag}..${ref}`]) ?? '').split('\n').filter(Boolean);
+    if (!rows.length) continue;
+    const waited = now - Number(rows.at(-1)) * 1000;
+    if (waited > RELEASE_DUE_HOURS * 3600000) add('medium', 'release-due', id, `${rows.length} commit(s) on ${id}'s main since ${tag}, the oldest waiting ${hours(waited)} h`, `a tag on ${id} deploys to production, so a release is a release-production decision on its ladder (decide, or ask the owner), or record why it waits (observe)`);
+  }
+}
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -14789,6 +15001,44 @@ function collectMetrics(since) {
   if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
   if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
+  // A fleet with nothing running: no worker and no planner for FLEET_IDLE_MS while it is neither
+  // parked nor drained. idle-capacity speaks when a ticket can start, idle-planning when a goal
+  // waits for a planner, memory-full when the machine has no room for either; each names its own
+  // move, so this stays quiet when any of them spoke this pass. It speaks when nothing can start
+  // (every ready ticket waits on the owner, everything is held, nothing is planned), so the
+  // supervisor makes work instead of ticking over an empty fleet. The last sign of life is the
+  // newest line any ticket's worker or any planner wrote (a planner's branch and files too), or the
+  // log's first line when no session has ever run. A planner counts as running only while its
+  // window is open and it waits on no owner answer: a plan branch left behind, or a design parked
+  // on the owner's approval, is the stuck fleet this finding is for, once its stamps go quiet.
+  // stale_after_minutes (30 by default, two quiet ticks at the default tick_minutes): the silence
+  // after which a session reads as stuck reads the same for the fleet. A start takes a tick, so an
+  // idle tick between waves is normal; more is the fleet idling.
+  const FLEET_IDLE_MS = (settings.stale_after_minutes ?? 30) * 60000;
+  const spoken = f.some((x) => ['idle-capacity', 'idle-planning', 'memory-full'].includes(x.kind));
+  if (!drained && !fleetMode() && !active && !spoken && !planners().some((p) => !p.parked && p.window && !p.waiting_on_owner.length)) {
+    const lines = readLog().lines;
+    const stamps = lines.filter((l) => l.at && (ts.has(l.by) || String(l.by).startsWith('plan-'))).map((l) => l.at);
+    for (const p of planners()) if (p.last_seen) stamps.push(p.last_seen);
+    const lastAt = stamps.sort().pop() ?? lines.map((l) => l.at).filter(Boolean).sort()[0] ?? null;
+    const idleMs = lastAt ? now - Date.parse(lastAt) : 0;
+    if (idleMs > FLEET_IDLE_MS) {
+      // open tickets: not superseded, not merged, no worker running. Held: the ticket's held field,
+      // a goal not running, parked, or an open owner question naming it. Planned: the rest that
+      // aren't ready (waiting on a dependency or a running ticket's touches).
+      const open = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !countsAsWorker(t));
+      const heldT = open.filter((t) => isHeld(t) || ticketMode(t) !== 'run' || H.has(t.id) || workerState(t.id)?.phase === 'parked');
+      const heldIds = new Set(heldT.map((t) => t.id));
+      const readyT = ready.filter((t) => !heldIds.has(t.id));
+      const readyIds = new Set(readyT.map((t) => t.id));
+      const planned = open.filter((t) => !heldIds.has(t.id) && !readyIds.has(t.id)).length;
+      const L = ladder();
+      const noDefault = questions().filter((q) => q.status === 'open' && !q.goal_hold && !q.default && !['one-way-door', 'review', 'owner-action'].includes(q.kind) && !(q.reasons ?? []).includes('one-way-door') && !(L.owner_only ?? []).includes(q.class));
+      const chore = readyT.find((t) => t.kind === 'chore') ?? readyT[0];
+      const ids = (xs) => xs.slice(0, 3).map((x) => x.id).join(', ');
+      add('medium', 'fleet-idle', 'fleet', `no worker or planner has run for ${(idleMs / 3600000).toFixed(1)}h (last sign of life ${lastAt}); ${readyT.length} ticket${readyT.length === 1 ? '' : 's'} ready, ${heldT.length} held, ${planned} planned`, `in order: 1. ${chore ? `start a ready chore (worker ${chore.id})` : 'add a chore from what the metrics or the code point at'}; 2. split a held ticket so the part that doesn't need the owner runs (${heldT.length ? ids(heldT) : 'none held'}); 3. give an open no-default question a default (${noDefault.length ? ids(noDefault) : 'none open'}); 4. propose the next goal from strategy.md (a proposal question naming the "How it wins" line it serves, supervisor.md §9)`);
+    }
+  }
   // the owner asked for one of the supervisor's settings and main doesn't have it yet
   {
     const um = goalMode(upkeepOrVirtual());
@@ -14950,6 +15200,7 @@ function collectMetrics(since) {
       }
     }
   }
+  linkDutyFindings(settings, now, add);
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
@@ -18409,6 +18660,10 @@ async function machineStatus() {
   for (const s of machineRecords().strays) out(`machine: stray hub record ${/^[\w.-]{1,80}$/.test(s.file) ? s.file : '?'} (${s.why}; ignored, remove it)`);
   const notes = notedIn();
   if (flagStr('notes')) { const r = lastReview(notes); out(r === utcDay() ? `machine: daily review done ${r}` : `machine: daily review due (last ${r ?? 'never'})`); }
+  // the operator's own PRs on the kit (operator.md, Pull requests upstream): one gh call, ? when it can't.
+  // The search keeps the reply to PRs whose body has the operator's line (no fleet or owner PRs and
+  // their comments); operatorPrsLine checks the line exactly, since search matches words, not lines
+  if (flagStr('notes')) out(`machine: ${operatorPrsLine(sh('gh', ['pr', 'list', '-R', KIT_UPSTREAM, '--author', '@me', '--state', 'open', '--search', `"${OPERATOR_PR_MARK}" in:body`, '--limit', '100', '--json', 'number,headRefName,body,isDraft,headRefOid,createdAt,latestReviews,comments,statusCheckRollup'], { timeout: 15000, maxBuffer: 16 * 1024 * 1024 }))}`); // gh-direct: the kit's own repo, which no project here speaks for
   const flagged = [];
   const latest = new Map();
   for (const root of roots) {
@@ -18475,6 +18730,65 @@ async function machineStatus() {
   out(`changed since last reading: ${changed.join(' ')}`);
   const now = Math.floor(Date.now() / 1000);
   if (now - (last.at ?? 0) >= Number(process.env.DEVTEAM_STATUS_SECONDS ?? 1200)) writeText(statusLastFile(), [`at ${now}`, `disk ${free}`, ...seen].map((l) => `${l}\n`).join(''));
+}
+// The operator's open PRs on the kit, from gh pr list's JSON, as one digest line: those that need it
+// now. A PR's verdicts are its GitHub reviews that approve or request changes, and quality.md §3's
+// `Verdict: APPROVE|CHANGES <sha>` line in a review or comment (the operator's reviewers share its gh
+// login, so most are comments). A PR needs the operator when its latest verdict is CHANGES at its
+// head, when a check at its head failed, or when no verdict names its head a day after its last
+// comment or review, or its opening (a fix pushed and never looked at again). Drafts wait.
+// Which PRs are the operator's: the box's gh login is shared by the owner, the supervisors and other
+// sessions, so --author @me is not enough. The operator ends every PR body it opens with the line
+// OPERATOR_PR_MARK (operator.md, Pull requests upstream), and only a PR whose body has that line on
+// its own counts: it is set when the PR is opened, needs no records to agree, and a reader can see
+// it on the PR. Branches the fleets and the kit's own releases push (ticket/, plan/, chore-,
+// release-prep-) aren't the operator's even so. gh gives a PR's first 100 comments: a longer
+// thread's latest verdict is unread.
+const OPERATOR_PR_MARK = 'Opened by the box operator.';
+const OPERATOR_PR_WAIT_MS = 24 * 3600000;
+function operatorPrsLine(text, now = Date.now()) {
+  let prs;
+  try { prs = JSON.parse(text); } catch { return 'operator PRs: ?'; }
+  if (!Array.isArray(prs)) return 'operator PRs: ?';
+  const marked = (body) => String(body ?? '').split(/\r?\n/).some((l) => l.trim() === OPERATOR_PR_MARK);
+  const mine = prs.filter((p) => p && Number.isInteger(p.number) && typeof p.headRefName === 'string' && !/^(ticket\/|plan\/|chore-|release-prep-)/.test(p.headRefName) && marked(p.body) && p.isDraft !== true);
+  if (!mine.length) return 'operator PRs: none open';
+  const atHead = (sha, head) => typeof sha === 'string' && typeof head === 'string' && sha.length >= 7 && head.toLowerCase().startsWith(sha.toLowerCase());
+  const RED = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR']);
+  // the line's last verdict; reviewers may add a note after the sha ("Verdict: CHANGES <sha> (F1, F2)")
+  const verdictIn = (body, at) => {
+    const v = [...String(body ?? '').matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-fA-F]{7,40})(?![0-9a-zA-Z])[^\n]*$/gm)].pop();
+    return v ? { v: v[1], sha: v[2], at: String(at ?? '') } : null;
+  };
+  const need = [];
+  for (const p of mine) {
+    const verdicts = [];
+    for (const r of Array.isArray(p.latestReviews) ? p.latestReviews : []) {
+      if (!r) continue;
+      const v = verdictIn(r.body, r.submittedAt);
+      if (v) verdicts.push(v);
+      else if (r.state === 'CHANGES_REQUESTED' || r.state === 'APPROVED') verdicts.push({ v: r.state === 'APPROVED' ? 'APPROVE' : 'CHANGES', sha: r.commit?.oid, at: String(r.submittedAt ?? '') });
+    }
+    for (const c of Array.isArray(p.comments) ? p.comments : []) {
+      const v = c && verdictIn(c.body, c.createdAt);
+      if (v) verdicts.push(v);
+    }
+    const last = verdicts.sort((x, y) => x.at.localeCompare(y.at)).pop();
+    const why = [];
+    if (last?.v === 'CHANGES' && atHead(last.sha, p.headRefOid)) why.push('changes requested');
+    const checks = Array.isArray(p.statusCheckRollup) ? p.statusCheckRollup : [];
+    if (checks.some((c) => c && (RED.has(c.conclusion) || RED.has(c.state)))) why.push('CI red');
+    if (!last || !atHead(last.sha, p.headRefOid)) {
+      // from its newest word: the operator comments what it changed when it pushes (operator.md); any
+      // comment restarts the wait, so a thread kept busy without a verdict waits longer to be flagged
+      const said = [p.createdAt, ...(Array.isArray(p.comments) ? p.comments.map((c) => c?.createdAt) : []), ...(Array.isArray(p.latestReviews) ? p.latestReviews.map((r) => r?.submittedAt) : [])];
+      const since = Math.max(0, ...said.map((t) => Date.parse(t) || 0));
+      const waited = since ? now - since : 0;
+      if (waited >= OPERATOR_PR_WAIT_MS) why.push(`${last ? 'no review of its head' : 'no review'} ${Math.floor(waited / 3600000)}h`);
+    }
+    if (why.length) need.push(`#${p.number} ${why.join(' and ')}`);
+  }
+  return `operator PRs: ${mine.length} open, ${need.length ? `${need.length} need you (${need.join(', ')})` : 'none need you'}`;
 }
 function accountsState() {
   try {
@@ -18883,7 +19197,7 @@ const IMAGE_RUNS = {
     // machine status, tell, alert, pane-state
     'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
     'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
-    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'machineStatus',
+    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_MARK', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
     // operator threads
     'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
     'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
@@ -20113,11 +20427,16 @@ async function dashRoutesOwner(D, req, res, q) {
   res.writeHead = function (...a) { D.dataEpoch += 1; return head.apply(this, a); };
   const site = req.headers['sec-fetch-site'];
   const origin = req.headers.origin;
-  // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
-  // present. A sandboxed frame's request says Origin: null and is refused here too.
+  // A browser sends Origin on every fetch POST, and Sec-Fetch-Site to a loopback or https origin
+  // (not to a --host LAN address over http); a secret or a review is accepted only with both
+  // present. Every other owner action needs at least one of them saying this page, and neither
+  // saying another (kit-324): a client that sends neither (curl, an agent's fetch) is not the
+  // owner's browser. A sandboxed frame's request says Origin: null and is refused here too. Only a
+  // browser is held to this: a process on this machine can send both headers, and still gets in.
+  const own = `http://${req.headers.host}`;
   const strict = isSecret || isReview || isPane || isOwnerSetting;
-  const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
-  if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
+  const sameOrigin = strict ? site === 'same-origin' && origin === own : (site === 'same-origin' || origin === own) && (site === undefined || site === 'same-origin') && (origin === undefined || origin === own);
+  if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: "owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)" }));
   // A review's result or draft is up to 4 MB, plus its envelope.
   const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : isOwnerSetting ? 512 : 20000;
   // Bytes first, decoded once: a multibyte character split across chunks stays whole.
