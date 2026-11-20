@@ -111,7 +111,11 @@ async function openOn(t, { rec, peeks = clone(PEEK_FX), width = 1440, height = 9
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
     await soon("!document.querySelector('main.waiting') && typeof DATA !== 'undefined' && !!DATA", 'the page with its data');
   };
-  return { p, soon, go, fx };
+  const click = async (sel) => {
+    await p.ev(`(() => { document.querySelector(${J(sel)}).scrollIntoView({ block: 'center', behavior: 'instant' }); })(); new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+    await p.click(sel);
+  };
+  return { p, soon, go, fx, click };
 }
 
 // What the open peek shows, read in the page
@@ -129,8 +133,9 @@ const PEEK = {
 const WATCH = "window.__writes = 0; window.__wo?.disconnect(); window.__wo = new MutationObserver((ms) => { for (const m of ms) if (m.target.id === 'drawer-body' && m.addedNodes.length) window.__writes++; }); window.__wo.observe(document.getElementById('drawer-body'), { childList: true }); void 0";
 const heads = (sect) => `[...(${sect})?.querySelectorAll('table.db-t thead th') ?? []].map((th) => th.textContent.replace(/ [↑↓]$/, '').trim())`;
 const rows = (sect) => `[...(${sect})?.querySelectorAll('table.db-t tbody tr[data-row]') ?? []].map((tr) => [...tr.cells].map((td) => td.textContent.trim()))`;
-const upkeepReady = (more = 'true') => `location.hash.startsWith('#goal/upkeep') && DRAWER.kind === 'goal' && !document.getElementById('drawer').hidden && ${PEEK.keys}.includes('What it covers') && (${more})`;
-const jobReady = (name, more = 'true') => `DRAWER.kind === 'recurring' && DRAWER.id === ${J(name)} && !document.getElementById('drawer').hidden && !!${PEEK.sect('Recent runs')} && !${PEEK.sect('Recent runs')}.querySelector('.loading') && (${more})`;
+const AT_REST = "getComputedStyle(document.getElementById('drawer')).transform === 'none'";
+const upkeepReady = (more = 'true') => `location.hash.startsWith('#goal/upkeep') && DRAWER.kind === 'goal' && !document.getElementById('drawer').hidden && ${AT_REST} && ${PEEK.keys}.includes('What it covers') && (${more})`;
+const jobReady = (name, more = 'true') => `DRAWER.kind === 'recurring' && DRAWER.id === ${J(name)} && !document.getElementById('drawer').hidden && ${AT_REST} && !!${PEEK.sect('Recent runs')} && !${PEEK.sect('Recent runs')}.querySelector('.loading') && (${more})`;
 
 test('the goal-peek block names the jobs sections, and openUpkeep draws none of them itself (done-when 7)', () => {
   const a = INDEX.indexOf('/* goal-peek start */'), b = INDEX.indexOf('/* goal-peek end */');
@@ -145,7 +150,7 @@ test('the goal-peek block names the jobs sections, and openUpkeep draws none of 
 });
 
 test('Upkeep\'s peek: Jobs and Proposed jobs computed rows, then Jobs, Built in and Proposed jobs sections; its card unchanged (done-whens 2, 10)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
   // the card first, with and without the jobs data: the same
   await go('#goals');
   const CARD = "document.querySelector('#goals .card.goal.upkeep')";
@@ -189,27 +194,27 @@ test('Upkeep\'s peek: Jobs and Proposed jobs computed rows, then Jobs, Built in 
   assert.equal(await p.ev("document.querySelectorAll('#drawer-body section.attrs > dl.props').length"), 2, 'the properties and the Computed block are the shell\'s props');
   // sortable: Job's header sorts the rows, again reverses them
   await p.ev(WATCH);
-  await p.click(`#drawer-body [data-gp="jobs"] th:nth-child(1) button.sort`);
+  await click(`#drawer-body [data-gp="jobs"] th:nth-child(1) button.sort`);
   await soon(`${heads(JOBS)}.length && ${JOBS}.querySelector('th:nth-child(1)').getAttribute('aria-sort') === 'ascending'`, 'Jobs sorted by job');
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(await p.ev('window.__writes'), 1, 'one click sorts once: one redraw');
   const sorted = (await p.ev(rows(JOBS))).map((r) => r[0]);
   assert.deepEqual(sorted, [...DASH.entries.map((e) => e.title)].sort((a, b) => a.localeCompare(b)), 'sorted by job');
-  await p.click(`#drawer-body [data-gp="jobs"] th:nth-child(1) button.sort`);
+  await click(`#drawer-body [data-gp="jobs"] th:nth-child(1) button.sort`);
   await soon(`${JOBS}.querySelector('th:nth-child(1)').getAttribute('aria-sort') === 'descending'`, 'Jobs sorted the other way');
   assert.deepEqual((await p.ev(rows(JOBS))).map((r) => r[0]), [...sorted].reverse());
   // a row opens its record: the job's peek
-  await p.click(`#drawer-body [data-gp="jobs"] tbody tr[data-row="0"] td:nth-child(2)`);
+  await click(`#drawer-body [data-gp="jobs"] tbody tr[data-row="0"] td:nth-child(2)`);
   await soon(jobReady('ci-main'), 'ci-main\'s peek from its row');
   assert.equal(await p.ev('location.hash'), '#recurring/ci-main');
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
 test('a Built in row opens its peek; a job\'s peek has ID recurring.<name>; a proposal opens its question (done-when 3)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go, fx } = await openOn(t, { rec: (r) => { r.proposals.push({ qid: 'q-20261116-000000000', name: 'old-no', title: 'An answered No', asked_at: '2026-11-16T10:00:00Z', status: 'declined' }); return r; } });
+  const { p, soon, go, fx, click } = await openOn(t, { rec: (r) => { r.proposals.push({ qid: 'q-20261116-000000000', name: 'old-no', title: 'An answered No', asked_at: '2026-11-16T10:00:00Z', status: 'declined' }); return r; } });
   await go('#goal/upkeep');
   await soon(upkeepReady(`!!${PEEK.sect('Built in')}`), 'Upkeep\'s peek');
-  await p.click(`#drawer-body [data-gp="builtin"] tbody tr[data-row="0"] td:nth-child(1)`);
+  await click(`#drawer-body [data-gp="builtin"] tbody tr[data-row="0"] td:nth-child(1)`);
   await soon(`DRAWER.kind === 'builtin' && DRAWER.id === 'retro' && ${PEEK.keys}.includes('What it does')`, 'the retro\'s peek');
   assert.equal(await p.ev('location.hash'), '#builtin/retro');
   assert.equal(await p.ev(PEEK.type), 'Built in');
@@ -234,19 +239,19 @@ test('a Built in row opens its peek; a job\'s peek has ID recurring.<name>; a pr
   await soon(upkeepReady(`!!${PEEK.sect('Proposed jobs')}`), 'Upkeep\'s peek');
   assert.deepEqual((await p.ev(rows(PEEK.sect('Proposed jobs')))).map((r) => r[0]), ['The bundle stays under 300 kB', 'Stale issues are closed', 'The weekly report is sent'], 'the declined one is not listed');
   // an open question's row: its card in the Inbox, as every open question's link does
-  await p.click(`#drawer-body [data-gp="proposals"] tbody tr[data-row="0"] td:nth-child(1)`);
+  await click(`#drawer-body [data-gp="proposals"] tbody tr[data-row="0"] td:nth-child(1)`);
   await soon(`/[?&]th=inbox/.test(location.hash) && document.getElementById('drawer').hidden && !!document.getElementById(${J(`q-${fx.ids.open}`)})`, 'the open question\'s Inbox card');
   // a Yes still landing: the question's read-only peek
   await go('#goal/upkeep');
   await soon(upkeepReady(`!!${PEEK.sect('Proposed jobs')}`), 'Upkeep\'s peek');
-  await p.click(`#drawer-body [data-gp="proposals"] tbody tr[data-row="1"] td:nth-child(1)`);
+  await click(`#drawer-body [data-gp="proposals"] tbody tr[data-row="1"] td:nth-child(1)`);
   await soon(`DRAWER.kind === 'q' && DRAWER.id === ${J(fx.ids.registering)} && !document.getElementById('drawer').hidden`, 'the answered question\'s peek');
   assert.equal(await p.ev(`location.hash`), `#q/${encodeURIComponent(fx.ids.registering)}`);
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
 test('with no jobs, Upkeep\'s peek has no Jobs or Proposed jobs rows or sections, and Built in still shows (done-when 4)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go } = await openOn(t, { rec: (r) => ({ entries: [], builtin: r.builtin, proposals: [] }) });
+  const { p, soon, go, click } = await openOn(t, { rec: (r) => ({ entries: [], builtin: r.builtin, proposals: [] }) });
   await go('#goal/upkeep');
   await soon(upkeepReady(`!!${PEEK.sect('Built in')}`), 'Upkeep\'s peek with Built in');
   assert.deepEqual(await p.ev(PEEK.computed), [], 'no computed rows');
@@ -261,7 +266,7 @@ test('with no jobs, Upkeep\'s peek has no Jobs or Proposed jobs rows or sections
 });
 
 test('a job\'s peek: properties, computed rows, Being fixed, Recent runs; no control; running text within --measure (done-when 5)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
   await go('#recurring/ci-main');
   await soon(jobReady('ci-main'), 'ci-main\'s peek');
   assert.equal(await p.ev(PEEK.title), 'Main builds and its tests pass');
@@ -283,13 +288,13 @@ test('a job\'s peek: properties, computed rows, Being fixed, Recent runs; no con
   assert.deepEqual(rr.map((r) => r[3]), PEEK_FX['ci-main'].runs.map((x) => x.excerpt));
   assert.deepEqual(rr.slice(0, 2).map((r) => r[0]), ['error', 'failed']);
   await p.ev(WATCH);
-  await p.click(`#drawer-body .card.psect:last-of-type th:nth-child(3) button.sort`);
+  await click(`#drawer-body .card.psect:last-of-type th:nth-child(3) button.sort`);
   await soon(`${RR}.querySelector('th:nth-child(3)').getAttribute('aria-sort') === 'ascending'`, 'Recent runs sorted by took, ascending');
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(await p.ev('window.__writes'), 1, 'one click sorts once: one redraw');
   const took = (await p.ev(rows(RR))).map((r) => r[2]);
   assert.deepEqual(took, [...rr.map((r) => r[2])].sort((a, b) => parseFloat(a) * (/min/.test(a) ? 60 : 1) - parseFloat(b) * (/min/.test(b) ? 60 : 1)), 'sorted by how long it took');
-  await p.click(`#drawer-body .card.psect:last-of-type th:nth-child(3) button.sort`);
+  await click(`#drawer-body .card.psect:last-of-type th:nth-child(3) button.sort`);
   await soon(`${RR}.querySelector('th:nth-child(3)').getAttribute('aria-sort') === 'descending'`, 'and back, descending');
   // no control but the tables' sort headers: no form, input, select, textarea, or other button
   assert.deepEqual(await p.ev(`[...document.querySelectorAll('#drawer-body button:not(.sort), #drawer-body form, #drawer-body input, #drawer-body select, #drawer-body textarea')].map((e) => e.outerHTML.slice(0, 80))`), []);
@@ -316,7 +321,7 @@ test('a job\'s peek: properties, computed rows, Being fixed, Recent runs; no con
 });
 
 test('the job peek renders peek.json; How it changes ends its properties; a held chore waits for Upkeep (done-when 6)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
   await go('#recurring/deps-bump');
   await soon(jobReady('deps-bump'), 'deps-bump\'s peek');
   const keys = await p.ev(PEEK.keys);
@@ -337,11 +342,11 @@ test('the job peek renders peek.json; How it changes ends its properties; a held
 });
 
 test('every label kit-166 draws says job, none says recurring (done-when 8)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
   // every label: the type chip, property keys, section heads, table headers, Computed, the computed rows' keys
   const LABELS = `[...document.querySelectorAll('#drawer-bar-title .dtype .badge, #drawer-body dt, #drawer-body .card-head, #drawer-body th, #drawer-body h4')].map((x) => x.textContent.trim())`;
   // every text in the drawer but the ID row's value
-  const TEXT = `(() => { const c = document.getElementById('drawer-body').cloneNode(true); for (const dt of c.querySelectorAll('dt')) if (dt.textContent.trim() === 'ID') dt.nextElementSibling.remove(); for (const k of c.querySelectorAll('code')) if (/^[a-z][a-z0-9]*-\d+-[a-z0-9-]+$/.test(k.textContent.trim())) k.remove(); return document.querySelector('#drawer-bar-title').textContent + ' ' + c.textContent; })()`;
+  const TEXT = `(() => { const c = document.getElementById('drawer-body').cloneNode(true); for (const dt of c.querySelectorAll('dt')) if (dt.textContent.trim() === 'ID') dt.nextElementSibling.remove(); for (const k of c.querySelectorAll('code')) if (/^[a-z][a-z0-9]*-\\d+-[a-z0-9-]+$/.test(k.textContent.trim())) k.remove(); return document.querySelector('#drawer-bar-title').textContent + ' ' + c.textContent; })()`;
   const seen = [];
   for (const [hash, ready] of [['#goal/upkeep', upkeepReady(`!!${PEEK.sect('Proposed jobs')}`)], ['#recurring/ci-main', jobReady('ci-main')], ['#recurring/deps-bump', jobReady('deps-bump')], ['#builtin/retro', `DRAWER.kind === 'builtin' && ${PEEK.keys}.includes('Set by')`]]) {
     await go(hash);
@@ -355,7 +360,7 @@ test('every label kit-166 draws says job, none says recurring (done-when 8)', { 
 });
 
 test('a job\'s peek shows What the loop noticed when its row has signals, before Recent runs (done-when 11)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
   await go('#recurring/ci-main');
   await soon(jobReady('ci-main'), 'ci-main\'s peek');
   const sects = (await p.ev(PEEK.sects)).map((s) => s.head);
@@ -380,8 +385,9 @@ test('text from the data that holds HTML is shown as text, never drawn (done-whe
   const peeks = clone(PEEK_FX);
   peeks['ci-main'].runs[0].excerpt = BAD;
   peeks['ci-main'].entry.run = BAD;
+  peeks['ci-main'].entry.title = BAD;
   peeks['deps-bump'].entry.prompt = BAD;
-  const { p, soon, go } = await openOn(t, { peeks, rec: (r) => { r.entries[0].title = BAD; r.entries[0].signals[0].text = BAD; r.entries[0].signals[0].may = BAD; r.builtin[0].note = BAD; r.proposals[0].title = BAD; return r; } });
+  const { p, soon, go, click } = await openOn(t, { peeks, rec: (r) => { r.entries[0].title = BAD; r.entries[0].signals[0].text = BAD; r.entries[0].signals[0].may = BAD; r.builtin[0].note = BAD; r.proposals[0].title = BAD; return r; } });
   const clean = async (where) => {
     assert.equal(await p.ev("document.querySelectorAll('#drawer #xss, #drawer img[src=\"x\"]').length"), 0, `${where}: nothing drawn from the data`);
     assert.equal(await p.ev('window.__xss'), undefined, `${where}: nothing ran`);
