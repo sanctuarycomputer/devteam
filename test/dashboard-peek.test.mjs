@@ -289,7 +289,7 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
   await t.test('the header names the kind: its icon, then its type chip', async () => {
     const hashes = { ticket: `#ticket/${T}`, goal: `#goal/${ids.goal}`, feature: '#feature/pay', story: '#story/PAY-S1', release: '#release/v0.2.0', wave: '#wave/pay/wave-1', milestone: `#milestone/${ids.goal}/M1`,
       act: '#act/a-none', decision: '#decision/d-none', retro: '#retro/r-none', lesson: '#lesson/k-none', problem: '#problem/p-none', thread: '#thread/m-none', planner: '#planner/pay',
-      q: `#q/${ids.long}`, file: '#file?path=docs%2Fdevteam%2FREADME.md', sensor: '#sensor/none', observation: '#observation/o-none', signal: '#signal/none', learning: '#learning/l-none' };
+      q: `#q/${ids.long}`, file: '#file?path=docs%2Fdevteam%2FREADME.md', sensor: '#sensor/none', observation: '#observation/o-none', signal: '#signal/none', learning: '#learning/l-none', lib: '#lib/artifact%3Aframe-mock', class: '#class/new-feature' };
     const kinds = await p.ev('Object.keys(TYPE_META)');
     assert.deepEqual([...kinds].sort(), Object.keys(hashes).sort(), 'every TYPE_META kind has a hash here');
     for (const k of kinds) {
@@ -925,7 +925,8 @@ const inventory = (ids) => {
     ...['State', 'Reads', 'Triage', 'Last run', 'Today', 'Invalid lines'].map((k) => row('sensor', 'sensorReader', `reader: ${k}`, `dt:${k}`)),
     row('sensor', 'sensorReader', 'reader: the ignored list', 'sect:Ignored >> text:a crawler, not a person'),
     row('sensor', 'sensorReader', 'reader: its CLI command', 'sect:Ignored >> text:sensor unignore reader:exception:E2 --owner'),
-    row('sensor', 'sensorReader', 'reader: what it read', 'sect:What it read >> .fp-row'),
+    // the reader groups what it reads into fingerprints: an error tracker, its section titled so (kit-93 C7)
+    row('sensor', 'sensorReader', 'reader: what it read', 'sect:Fingerprints >> .fp-row'),
   ];
 };
 // In the page: an inventory row's selectorOrText, true when the peek's body holds it, else why not.
@@ -979,6 +980,15 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
   };
   await visit();
   const H = peekHashes(ids);
+  // lib: a Library item has no server record and no History section; its rows are tested in test/dashboard-library.test.mjs
+  // class: a kind of decision (kit-93) is a row of the trust table, with no record and no History; tested in test/dashboard-autonomy.test.mjs
+  const NOT_A_RECORD = ['lib', 'class'];
+  // TYPE_META's kinds less NOT_A_RECORD, each exception checked to be a TYPE_META kind (a stale one goes red)
+  const recordKinds = async () => {
+    const all = await p.ev('Object.keys(TYPE_META)');
+    for (const k of NOT_A_RECORD) assert.ok(all.includes(k), `NOT_A_RECORD: ${k} is a TYPE_META kind`);
+    return all.filter((k) => !NOT_A_RECORD.includes(k)).sort();
+  };
   const open = async (key) => {
     const [kind, hash] = H[key];
     if (await p.ev('window.__navn') > NAV_BUDGET) await visit();
@@ -997,7 +1007,7 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
 
   await t.test('the fixture draws every kind', async () => {
     const kinds = new Set(Object.values(H).map(([k]) => k));
-    assert.deepEqual([...kinds].sort(), (await p.ev('Object.keys(TYPE_META)')).sort(), 'every peek kind has a record');
+    assert.deepEqual([...kinds].sort(), await recordKinds(), 'every peek kind has a record');
     for (const key of Object.keys(H)) {
       const kind = await open(key);
       await soon(`!document.getElementById('drawer').hidden && DRAWER.kind === ${JSON.stringify(kind)} && !!document.querySelector('#drawer-body section.attrs')`, `${key}: its peek`);
@@ -1219,7 +1229,7 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     H.decisionRule = ['decision', `#decision/${encodeURIComponent(ids.decisionRule)}`];
     const rows = inventory(ids);
     const kinds = new Set(rows.map((r) => H[r.on]?.[0]));
-    assert.deepEqual([...kinds].sort(), (await p.ev('Object.keys(TYPE_META)')).sort(), 'the inventory covers every peek kind');
+    assert.deepEqual([...kinds].sort(), await recordKinds(), 'the inventory covers every peek kind');
     const groups = new Map();
     for (const r of rows) {
       assert.ok(H[r.on], `${r.item}: ${r.on} is a fixture record`);
@@ -1327,8 +1337,8 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     });
     // a record nobody logged: once its peek says so
     await p.ev("location.hash = '#ticket/kit-nope'");
-    await soon(`!document.getElementById('drawer').hidden && DRAWER.id === 'kit-nope' && !!PEEKS.get(peekKey('ticket', 'kit-nope'))?.missing && /Nothing logged yet/.test(document.getElementById('drawer-body').lastElementChild?.textContent ?? '')`, 'the missing ticket');
-    await frame('a missing record', /Nothing logged yet\./);
+    await soon(`!document.getElementById('drawer').hidden && DRAWER.id === 'kit-nope' && !!PEEKS.get(peekKey('ticket', 'kit-nope'))?.missing && /None$/.test(document.getElementById('drawer-body').lastElementChild?.textContent ?? '')`, 'the missing ticket');
+    await frame('a missing record', /None$/);
     // a peek fetch held open: the frame while it loads
     await load('#board');
     await p.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/peek*', requestStage: 'Request' }] });
@@ -1405,7 +1415,7 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
   });
 
   // each page's record cards, where they are drawn
-  const PLACES = [['#goals', '#goals-list'], ['#board', '#board-cols'], ['#loop?lt=observe', '#observations'], ['#loop?lt=orient', '#debt, #clusters, #problems, #knowledge'], ['#loop?lt=decide', '#decisions-feed'], ['#loop?lt=act', '#acts-feed'], ['#sensors', '#incidents, #sensor-feed']];
+  const PLACES = [['#goals', '#goals-list'], ['#board', '#board-cols'], ['#loop?lt=observe', '#observations'], ['#loop?lt=orient', '#debt, #clusters, #problems, #knowledge'], ['#loop?lt=decide', '#decisions-feed'], ['#loop?lt=act', '#acts-feed'], ['#sensors', '#incidents']];
   const cardsIn = (sel) => `[...document.querySelectorAll(${J(sel)})].flatMap((x) => [...x.querySelectorAll(${J(CARDS)})])`;
   const DEC = 'const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } };';
 
@@ -1461,8 +1471,9 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
       assert.equal(await enter(el), true);
       await opened(open, `${sel}: Enter on the focused card`);
     }
-    // a Loop card and a Sensors card (spec §2.5: a card that stands for a record, role=button, tabindex=0)
-    for (const [page, sel] of [['#loop?lt=observe', '#observations .card[data-open]'], ['#sensors', '#sensor-feed .card[data-open]']]) {
+    // a Loop card (spec §2.5: a card that stands for a record, role=button, tabindex=0); a sensor's observations
+    // are rows in its peek now (kit-93), checked by A12 in dashboard-autonomy.test.mjs
+    for (const [page, sel] of [['#loop?lt=observe', '#observations .card[data-open]']]) {
       await on(page);
       await soon(`!!document.querySelector(${J(sel)})`, `${sel}: drawn`);
       assert.equal(await p.ev(`[...document.querySelectorAll(${J(sel)})].every((c) => c.getAttribute('role') === 'button' && c.getAttribute('tabindex') === '0')`), true, `${sel}: every card a button to the keyboard`);
@@ -1559,14 +1570,17 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
   });
 
   await t.test('peekFor: every opener kind\'s hash, opened through route()', async () => {
-    const ON = { ticket: 'ticket', goal: 'goal', feature: 'feature', story: 'story', release: 'release', wave: 'wave', milestone: 'milestone', act: 'act', decision: 'decision', retro: 'retro', lesson: 'lesson', problem: 'problem', thread: 'thread', planner: 'planner', q: 'qAnswered', file: 'file', sensor: 'sensorHttp', observation: 'observation', signal: 'signal', learning: 'learning' };
+    const ON = { ticket: 'ticket', goal: 'goal', feature: 'feature', story: 'story', release: 'release', wave: 'wave', milestone: 'milestone', act: 'act', decision: 'decision', retro: 'retro', lesson: 'lesson', problem: 'problem', thread: 'thread', planner: 'planner', q: 'qAnswered', file: 'file', sensor: 'sensorHttp', observation: 'observation', signal: 'signal', learning: 'learning', lib: 'lib', class: 'class' };
     assert.deepEqual((await p.ev('Object.keys(OPENERS())')).sort(), Object.keys(ON).sort(), 'a fixture record for every opener kind');
-    const H = peekHashes(ids);
+    // lib and class are NOT_A_RECORD, so not in peekHashes: their hashes and ids here, the fixture's artifact peek-mock
+    // and its ladder's new-feature
+    const H = { ...peekHashes(ids), lib: ['lib', `#lib/${encodeURIComponent(`artifact:${ids.artifact}`)}`], class: ['class', '#class/new-feature'] };
+    const idOf = { ...ids, lib: `artifact:${ids.artifact}`, class: 'new-feature' };
     for (const [k, key] of Object.entries(ON)) {
-      const h = await p.ev(`peekFor(${J(k)}, ${J(ids[key])})`);
+      const h = await p.ev(`peekFor(${J(k)}, ${J(idOf[key])})`);
       assert.equal(h, H[key][1], `${k}: the opener's hash`);
       await on('#board');
-      await p.ev(`location.hash = peekFor(${J(k)}, ${J(ids[key])}); void 0`);
+      await p.ev(`location.hash = peekFor(${J(k)}, ${J(idOf[key])}); void 0`);
       await soon(`DRAWER.kind === ${J(k)} && !document.getElementById('drawer').hidden`, `${k}: route() opens its peek`);
     }
     assert.equal(await p.ev("peekFor('file', 'docs/a b.md')"), '#file?path=docs%2Fa%20b.md');

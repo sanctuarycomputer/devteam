@@ -436,6 +436,58 @@ try {
   .sugg-e { font-size: 12px; color: var(--green-fg); margin-top: 2px; }
 
 /* css-efficiency end */
+/* css-autonomy-pages start */
+  /* kit-93: the Autonomy pages. A page's cards stack with the grid's gap; its tables scroll inside their card */
+  #trust > .card + .card { margin-top: var(--gap); }
+  .tbl-wrap { overflow-x: auto; min-width: 0; }
+  .trust-card .stat > b { display: block; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .trust-card .trust-missing { margin: 10px 0 0; }
+  /* a kind's peek: its levels, the one it is on marked, any above its limit faded; its evidence rows open */
+  .lvls { display: flex; flex-direction: column; }
+  .lvl { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+  .lvl:last-child { border-bottom: 0; }
+  .lvl .t { flex: 1; min-width: 0; color: var(--fg-2); }
+  .lvl.now .t { color: var(--fg); font-weight: 600; }
+  .lvl.off { opacity: .55; }
+  .cls-ev .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .cls-ev .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .cls-ev .rowline[data-open]:hover .t, .cls-ev .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .cls-ev .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  /* Awareness: Efficiency's card, its four parts and four sparklines four across, two on a narrower screen, one on a phone */
+  .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: minmax(0, 1fr); } }
+  /* Governance: one flush card, its three sections inset as a card's body is; each table scrolls inside its section */
+  .gov-card > .sec { padding: 14px 16px; }
+  .gov-card > .sec:first-of-type { border-top: 0; }
+  .gov-card > .sec:last-child { border-bottom: 0; }
+  .gov-card .sec-b { min-width: 0; }
+  .gov-card > .err, .gov-card > .loading { margin: 14px 16px; }
+  /* Sensors: the tab bar first in its section (as Goals': the shell's first-child rule doesn't reach it), then
+     Production's incidents board (five columns) and a card a sensor, or Fleet's tables */
+  #monitoring > .tabbar:first-child { margin-top: -8px; margin-bottom: 14px; }
+  #incidents .board.inc { grid-template-columns: repeat(5, minmax(132px, 1fr)); }
+  .inc-card #incidents { min-width: 0; }
+  .sensor-card .sensor-src { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin: 8px 0 6px; }
+  .sensor-card .sensor-err { margin: 0 0 6px; font-size: 12px; color: var(--red-fg); overflow-wrap: anywhere; }
+  .sensor-card .sensor-stats, .sensor-card .sensor-levels { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; margin-bottom: 6px; }
+  .sensor-card .sensor-stats b, .sensor-card .sensor-levels b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sensor-card .sensor-levels > span { display: inline-flex; align-items: center; gap: 6px; }
+  .sensor-card .sensor-chart { min-width: 0; overflow-x: auto; }
+  .sensor-card .sensor-chart svg { max-width: 100%; height: auto; }
+  .sensor-card > .meta { margin-top: auto; }
+  /* a sensor's peek: its observations and incidents, rows that open their records */
+  .sensor-rows .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .sensor-rows .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .sensor-rows .rowline[data-open]:hover .t, .sensor-rows .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .sensor-rows .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+
+  /* a retro's card opens its peek */
+  .retro-card { cursor: pointer; }
+  .retro-card:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  .retro-card > p { margin: 0; }
+
+/* css-autonomy-pages end */
 /* css-progress start */
   /* progress */
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
@@ -843,24 +895,43 @@ try {
 
 /* css-review end */
 /* css-library start */
-  /* the Library: artifacts (a landed one with its drafts beneath it), drafts of new ones, the link registry */
-  #library h3 { margin: 18px 0 8px; }
-  #library h3:first-of-type { margin-top: 4px; }
-  .lib-list { max-width: var(--measure); }
-  .art-card .art-t { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-  .art-card .art-t a { font-weight: 600; color: var(--fg); }
-  .art-card .art-t a:hover { text-decoration: underline; text-underline-offset: 3px; }
-  .art-card .art-t .badge { margin-right: 0; }
-  .art-card .art-s { color: var(--fg-2); margin-top: 2px; }
-  .art-card .meta { margin-top: 4px; }
-  .art-card .meta a, .lib-link .meta a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
-  .art-card.draft { margin-left: 20px; background: var(--well); box-shadow: none; }
-  .art-card .pub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 6px; }
-  .art-card .pub a.ghost, .lib-pub a.ghost { display: inline-block; padding: 2px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--fg); font-size: 12px; text-decoration: none; }
-  .art-card .pub a.ghost:hover, .lib-pub a.ghost:hover { background: var(--hover); }
-  .art-wt { font-size: 12px; color: var(--fg-2); margin: 10px 0 6px; }
-  .lib-link .links { margin: 0; }
-  .lib-link .loc { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
+  /* the Library: one .cards grid of every item in kind order; above it, only when there is something to say, #lib-top */
+  #lib-top { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--gap); }
+  #lib-top[hidden] { display: none; }
+  #lib-top p { margin: 0; }
+  .lib-pub a.ghost { display: inline-block; padding: 2px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--fg); font-size: 12px; text-decoration: none; }
+  .lib-pub a.ghost:hover { background: var(--hover); }
+  #lib-grid > .empty { grid-column: 1 / -1; margin: 0; }
+  /* a card: the head (icon, title truncated to one line, badges, then ↗ and ⋯ pinned right), the thumbnail, the body */
+  .lib-card .card-head .lib-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
+  .lib-card .card-head a.lib-title[href]:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .lib-card .card-head > :not(.lib-title) { flex: none; }
+  .lib-card .card-head .lib-tab { margin-left: auto; display: inline-flex; color: var(--fg-2); }
+  .lib-card .card-head .lib-tab:hover { color: var(--fg); }
+  /* a review has no ↗: its ⋯ pins right itself */
+  .lib-card .card-head > :not(.lib-tab) + details.menu { margin-left: auto; }
+  .lib-thumb { position: relative; aspect-ratio: 16 / 9; border: 1px solid var(--line); border-radius: 6px; background: var(--well); overflow: hidden; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+  .lib-thumb > i { font-size: 28px; }
+  .lib-body { margin-top: 8px; min-width: 0; }
+  .lib-body .lib-sum { color: var(--fg-2); max-width: var(--measure); }
+  /* the thumbnail opens what the title opens; Public's globe; publish details, drift in amber; the details and meta lines */
+  a.lib-thumb { text-decoration: none; } a.lib-thumb[href] { cursor: pointer; }
+  /* a draft's "in <worktree>" shrinks too, after the title has given way (its shrink is the title's thousandth); at most
+     40% of the head, so a long worktree never squeezes the title to nothing */
+  .lib-card .card-head > .lib-title { flex-shrink: 1000; }
+  .lib-card .card-head > .lib-wt { flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lib-card .card-head .badge > i { font-size: 11px; margin-right: 4px; }
+  .lib-body > .lib-pub, .lib-body > .lib-meta, .lib-body > .err { margin-top: 6px; max-width: var(--measure); }
+  .lib-body .lib-drift { color: var(--amber-fg); }
+  .lib-body .lib-meta .badge { margin-right: 6px; }
+  .lib-body .lib-pub a.ghost { padding: 0 8px; }
+  /* a thumbnail's frame fills its 16:9 box over the kind's icon, inert; a link's box: its site's icon over its host */
+  .lib-thumb { flex-direction: column; gap: 6px; }
+  .lib-thumb > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
+  .lib-thumb > img { width: 32px; height: 32px; object-fit: contain; }
+  /* a closed ⋯ menu's pop out of layout, as the Inbox's and Goals' (Chrome boxes a closed <details>' content at the
+     summary's 26px, so the pop's key column would stick out of it: the measure) */
+  #library details.menu:not([open]) > .pop { display: none; }
 
 /* css-library end */
 /* css-viewer start */
@@ -871,17 +942,49 @@ try {
   /* a viewer opened over a review stays above it: the review sits above the panel (z 25, kit-100) */
   .app:has(main.reviewing) ~ #artifact-view:not([hidden]) { z-index: 26; }
 /* css-viewer-bar start */
-  .av-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
+  /* --head-h tall, one line (kit-92): what the page says gives way first (the title truncates), the pills never wrap; above
+     the stage, so the version list and the tile's menu open over it */
+  .av-bar { position: relative; z-index: 3; flex: none; display: flex; align-items: center; gap: 8px; height: var(--head-h); box-sizing: border-box; padding: 0 10px 0 14px; border-bottom: 1px solid var(--line); min-width: 0; }
   .av-bar > i { font-size: 15px; color: var(--muted); flex: none; }
-  .av-head { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12px; }
-  .av-head b { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-  .av-head .badge { margin-right: 0; }
+  .av-head { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 12px; white-space: nowrap; }
+  .av-head b { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+  .av-head .badge { margin: 0; flex: none; }
+  .av-head > #av-project, .av-head > #av-hint, .av-head > #av-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
   .av-bar button, .av-bar a.av-btn { flex: none; margin: 0; display: inline-flex; align-items: center; gap: 6px; }
-  .av-bar a.av-btn { height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); }
-  .av-bar a.av-btn:hover { background: var(--hover); }
-  /* the artifact changed since the frame loaded it; a keyboard's focus ring still shows over it */
-  #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: 1px; }
-  @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
+  /* the version pill: a badge that is a button, its label #av-where; plain (no chevron, not pressable) on a preview */
+  .av-ver-wrap { position: relative; display: inline-flex; flex: 0 1 auto; min-width: 0; }
+  .av-bar .ver-pill { height: auto; max-width: 340px; min-width: 0; margin: 0; padding: 0 7px; gap: 3px; font: inherit; font-size: 11px; font-weight: 500; line-height: 18px; cursor: pointer; }
+  .av-bar .ver-pill:hover { opacity: 1; background: color-mix(in srgb, var(--c) 16%, transparent); }
+  .av-bar .ver-pill > i { font-size: 10px; flex: none; }
+  .av-bar .ver-pill.plain { cursor: default; opacity: 1; background: color-mix(in srgb, var(--c) 9%, transparent); }
+  .av-bar .ver-pill.plain > i { display: none; }
+  #av-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the version list and the tile's menu: a pop under their pill */
+  .av-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 5; min-width: 240px; max-height: 60vh; overflow: auto; display: flex; flex-direction: column; padding: 4px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+  #av-pub-menu { left: auto; right: 0; min-width: 200px; }
+  .av-bar .av-pop > button, .av-bar .av-pop > a { display: block; height: auto; margin: 0; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font-size: 12.5px; font-weight: 400; text-align: left; white-space: nowrap; text-decoration: none; cursor: pointer; }
+  .av-bar .av-pop > button:hover, .av-bar .av-pop > a:hover, .av-bar .av-pop > [aria-selected="true"] { background: var(--hover); opacity: 1; }
+  .av-bar .av-pop > [aria-selected="true"] { font-weight: 600; }
+  .av-pop > .av-pop-msg { margin: 0; padding: 6px 10px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+  /* the right group: 20px pills (a badge's height); Reload, the tile, Start and Stop with words, open-in-tab and close icons only */
+  .av-bar .av-pill { height: 20px; padding: 0 7px; gap: 4px; border-radius: 999px; font-size: 11px; font-weight: 500; line-height: 18px; text-decoration: none; }
+  .av-bar a.av-pill { flex: none; display: inline-flex; align-items: center; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); }
+  .av-bar a.av-pill:hover { background: var(--hover); }
+  .av-bar .av-pill > i { font-size: 11px; }
+  .av-bar .av-pill.good { color: var(--green-fg); border-color: color-mix(in srgb, var(--green-fg) 35%, transparent); }
+  .av-bar .av-pill.amber { color: var(--amber-fg); border-color: color-mix(in srgb, var(--amber-fg) 35%, transparent); }
+  .av-pub-wrap { position: relative; display: inline-flex; flex: none; }
+  .av-pub-wrap:empty, #av-run:empty, .av-run-err:empty { display: none; }
+  #av-run { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+  .av-bar .av-run-err { flex: 0 1 auto; min-width: 0; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  /* open in a tab and close: icon pills, one hover rule */
+  .av-bar #av-tab, .av-bar #av-close { height: 20px; width: 24px; padding: 0; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font-size: 14px; }
+  .av-bar #av-tab .av-label { display: none; }
+  .av-bar #av-tab:hover, .av-bar #av-close:hover { background: var(--hover); color: var(--fg); opacity: 1; }
+  /* the artifact changed since the frame loaded it (kit-206): an outline at the pill's border width, over its border; a
+     keyboard's focus ring still shows over it */
+  #av-reload.stale:not(:focus-visible) { outline: 1px solid var(--amber); outline-offset: -1px; }
+  @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar .av-pill { padding: 0 6px; } }
 /* css-viewer-bar end */
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
@@ -1152,13 +1255,9 @@ try {
 <!-- html-board end -->
 
 <!-- html-library start -->
-  <section id="library" class="no-shell" data-page="library">
-    <h2>Library <span class="sub">pages the fleet drew to show an idea, and the links it works from</span></h2>
-    <div class="lib-list" id="previews"></div>
-    <h3>Artifacts</h3>
-    <div class="lib-list" id="artifacts"></div>
-    <h3>Links</h3>
-    <div class="lib-list" id="lib-links"></div>
+  <section id="library" data-page="library">
+    <div id="lib-top" hidden></div>
+    <div class="cards" id="lib-grid"></div>
   </section>
 <!-- html-library end -->
 
@@ -1206,50 +1305,28 @@ try {
 
 <!-- html-loop end -->
 <!-- html-trust start -->
-  <section id="trust" class="no-shell" data-page="trust">
-    <h2>Trust Ladder <span class="sub">which of your decisions the supervisor may make, and how it earned or lost that</span></h2>
-    <p class="loop-intro">Some of your decisions can be handed to the supervisor one step at a time as it keeps recommending what you'd have chosen: first it asks, then it asks with a default, then it decides and tells you. A correction on one of its calls drops that kind back to asking. More trust is always your answer to a question in the Inbox.</p>
-    <div class="scroll"><table id="trust-table"></table></div>
-    <h3 style="margin-top:14px">How the rungs moved</h3>
-    <div class="feed" id="trust-history"></div>
-  </section>
+  <section id="trust" data-page="trust"></section>
 <!-- html-trust end -->
 
 <!-- html-efficiency start -->
   <!-- kit-174: the Efficiency Score card, beside Trust, on the shell (render() draws it: renderEfficiency) -->
   <section id="efficiency" data-page="efficiency"></section>
 <!-- html-efficiency end -->
+<!-- html-awareness start -->
+  <section id="awareness" data-page="awareness"></section>
+<!-- html-awareness end -->
+<!-- html-governance start -->
+  <section id="governance" data-page="governance"></section>
+<!-- html-governance end -->
 
 <!-- html-retros start -->
-  <section id="retros" class="no-shell" data-page="retros">
-    <h2>Retros <span class="sub">the supervisor's look back at how the work went, across every goal: what merged, what was slow or rejected, what it changed</span></h2>
-    <div id="retro-due"></div>
-    <div id="retro-list"></div>
-  </section>
+  <section id="retros" data-page="retros"></section>
 
 <!-- html-retros end -->
 <!-- html-health start -->
-  <section id="health" class="no-shell" data-page="health">
-    <h2>Health <span class="sub">what the supervisor is watching and working on; anything it needs from you comes to your Inbox</span></h2>
-    <div id="findings"></div>
-    <h3 style="margin-top:14px">Checks before merge <span class="sub">the automated checks every change must pass (settings <code>gates</code>)</span></h3>
-    <div id="gates"></div>
-    <div class="two" style="margin-top:14px" id="test-lists"></div>
-  </section>
-
 <!-- html-health end -->
 <!-- html-sensors start -->
-  <section id="monitoring" class="no-shell" data-page="sensors">
-    <h2>Sensors <span class="sub">each one takes samples of production, kept here; a meaningful change becomes an observation in the log, for the supervisor's loop and Health to act on</span></h2>
-    <div id="sensors"></div>
-    <h3 style="margin-top:14px">Incidents</h3>
-    <div id="incidents"></div>
-    <h3 style="margin-top:14px">Exceptions and errors</h3>
-    <div id="sensor-exceptions"></div>
-    <h3 style="margin-top:14px">Observations</h3>
-    <div class="feed" id="sensor-feed"></div>
-  </section>
-
+  <section id="monitoring" data-page="sensors"></section>
 <!-- html-sensors end -->
 <!-- html-settings start -->
   <section id="settings" data-page="settings"></section>
@@ -1282,10 +1359,14 @@ try {
 <!-- html-viewer start -->
 <div id="artifact-view" class="no-shell" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
 <!-- html-viewer-bar start -->
+  <!-- --head-h tall: the kind, the title, the version pill (its list under it) and what the page says at the left; one group of
+       20px pills at the right (kit-92): Reload, the Public tile, a preview's Start and Stop with its error beside them, ↗, close -->
   <div class="av-bar">
-    <i class="icon-library" aria-hidden="true"></i>
-    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
-    <button class="ghost" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
+    <i class="av-kind icon-layout-dashboard" aria-hidden="true"></i>
+    <div class="av-head"><b id="av-title"></b><span class="badge" id="av-kind">Mock</span><span class="av-ver-wrap"><button type="button" class="badge ver-pill" id="av-ver" aria-haspopup="listbox" aria-expanded="false" title="Its versions"><span id="av-where"></span><i class="icon-chevron-down" aria-hidden="true"></i></button><div id="av-vers" class="av-pop" role="listbox" aria-label="Versions" hidden></div></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
+    <button class="ghost av-pill" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
+    <span class="av-pub-wrap"></span>
+    <span id="av-run"></span><span class="err av-run-err"></span>
     <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in a tab of its own, with its threads" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
     <button class="ghost icon-btn" id="av-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button>
   </div>
@@ -1605,21 +1686,20 @@ function saveFilters(page, state) {
 // The router's table (dashboard-shell@1, test/contracts/shell.md §6): the page ids, each link kind's home page (what a
 // link opens over on a cold load), file homes by path, and the redirects. The page's own, outside the
 // shared block, so the tickets that change it never touch the block.
-// until kit-93: health is its own page (it folds into Sensors) and governance is not a page yet (a
-// governance file's home below then opens over Overview); kit-93 swaps both
-const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'sensors', 'health', 'retros', 'loop', 'settings'];
+// kit-93: Health folds into Sensors (its head redirects) and Governance is a page, so a governance file opens over it
+const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'awareness', 'governance', 'sensors', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
   links: {
     ticket: 'board', feature: 'board', story: 'board', release: 'board', wave: 'board', milestone: 'board', planner: 'board', thread: 'board',
     goal: 'goals', q: 'overview', talk: 'overview',
     act: 'loop', decision: 'loop', lesson: 'loop', problem: 'loop', signal: 'loop', learning: 'loop', observation: 'loop',
-    sensor: 'sensors', retro: 'retros',
-    artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library',
+    sensor: 'sensors', retro: 'retros', class: 'trust',
+    artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library', lib: 'library',
   },
   files: [[/(^|\/)docs\/devteam\/(governance|process)\//, 'governance'], [/(^|\/)strategy\.md$/, 'governance']],
   redirects: {
-    monitoring: 'sensors',
+    monitoring: 'sensors', health: 'sensors?st=fleet',
     // permanent: the old Loop tab subjects open the Loop page (and its tab)
     'loop/observe': 'loop', 'loop/orient': 'loop?lt=orient', 'loop/decide': 'loop?lt=decide', 'loop/act': 'loop?lt=act',
     // the Inbox is the Threads panel's first tab (kit-100): its old heads open it over Overview
@@ -1636,11 +1716,11 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // Each page is today's section (its data-page); render() still draws every section on every read,
 // shown or not, so nothing a page holds is lost while another shows. A page's nav count is today's
 // element, which render() fills (PAGE_COUNT_ID: the count each nav item carries).
-const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
+const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', awareness: 'n-awareness', sensors: 'n-sensors', retros: 'n-retros', loop: 'n-knowledge' };
 for (const [id, title, group, icon] of [
   ['overview', 'Overview', 'project', 'layout-dashboard'], ['goals', 'Goals', 'project', 'target'],
   ['progress', 'Progress', 'project', 'chart-line'], ['board', 'Board', 'project', 'kanban'], ['library', 'Library', 'project', 'library'],
-  ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['health', 'Health', 'autonomy', 'heart-pulse'],
+  ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['awareness', 'Awareness', 'autonomy', 'eye'], ['governance', 'Governance', 'autonomy', 'scale'], ['sensors', 'Sensors', 'autonomy', 'activity'],
   ['retros', 'Retros', 'autonomy', 'history'], ['loop', 'Self Improvement', 'autonomy', 'repeat'], ['settings', 'Settings', 'settings', 'settings'],
 ]) registerPage({ id, title, group, icon, count: () => null, render: () => {} });
 for (const nav of document.querySelectorAll('.side nav.nav[data-group]')) {
@@ -1912,15 +1992,16 @@ const EFF_SUGG_WORDS = { 'review-depth': 'Fit review depth to the ticket', 'smal
 function effSuggestions(xs) {
   return suggestionsList(xs.map((x) => ({ id: String(x.id), title: Object.hasOwn(EFF_SUGG_WORDS, String(x.kind)) ? EFF_SUGG_WORDS[x.kind] : 'Suggestion', what: x.what ?? '', evidence: x.evidence ?? '', effect: x.effect ?? '' })));
 }
-// A suggestion's thread: on the page subject #efficiency?suggestion=<id> (tlStart opens the open one,
-// as a Settings row's); placed by the item, from the click's point or, by Enter, the item's right edge
+// A suggestion's thread: on the page subject #<page>?suggestion=<id>, its page the section it is on
+// (Efficiency, Awareness; tlStart opens the open one, as a Settings row's); placed by the item, from
+// the click's point or, by Enter, the item's right edge
 function effSuggGo(it, x, y) {
-  const view = suggView(it.dataset.sugg);
+  const view = suggView(it.dataset.sugg, it.closest('section[id]').id);
   const title = tLine(it.dataset.title, T_TITLE_MAX);
   tlStart({ subject: { kind: 'page', view, quote: tCut(title, 300) }, title, el: it, x, y });
 }
 document.addEventListener('click', (e) => {
-  const it = e.target.closest?.('#efficiency [data-sugg]');
+  const it = e.target.closest?.('#efficiency [data-sugg], #awareness [data-sugg]');
   if (!it || e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   if (String(window.getSelection?.() ?? '')) return;
   e.preventDefault();
@@ -1932,10 +2013,411 @@ document.addEventListener('keydown', (e) => {
   const space = e.key === ' ' && !!t?.matches?.('[data-open][role="button"][tabindex]');
   if ((e.key !== 'Enter' && !space) || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   // a focused suggestion starts its thread; a focused row with a record (data-open, focusable) opens it
-  if (t?.matches?.('#efficiency [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
+  if (t?.matches?.('#efficiency [data-sugg], #awareness [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
   if (t?.matches?.('[data-open][tabindex]')) { e.preventDefault(); location.hash = t.dataset.open; }
 });
 
+/* autonomy-pages start */
+// kit-93: the Autonomy pages' nav counts. Trust and Awareness carry this week's score; Sensors the
+// sensors down, else the findings, hot when one is down or a finding is high.
+function navCounts(d) {
+  const set = (id, txt, hot = false) => { const el = $(id); if (!el) return; el.textContent = txt; el.classList.toggle('hot', !!hot); };
+  const pct = (s) => (Number.isFinite(s?.this_week) ? `${s.this_week}%` : '');
+  set('n-trust', pct(d.autonomy?.decisions?.score));
+  set('n-awareness', pct(d.awareness?.score));
+  const down = (d.sensors || []).filter((m) => m.state === 'down');
+  const fs = d.metrics?.findings || [];
+  set('n-sensors', down.length ? `${down.length} down` : (fs.length || ''), down.length > 0 || fs.some((f) => f.severity === 'high'));
+}
+// A page's tables (plan D2): each sits in its own <div data-tbl="<page>:<name>">, its rows ({ cells, sort, open })
+// kept in TBL_ROWS by that key and its sort in TBL_SORT (kept across redraws). After each write of the page's
+// HTML, bindPageTables binds every wrapper: a header sorts and redraws the page, a row opens its open hash.
+const TBL_SORT = new Map();
+const TBL_ROWS = new Map();
+function pageTable(key, cols, rows) {
+  TBL_ROWS.set(key, rows);
+  return `<div class="tbl-wrap" data-tbl="${esc(key)}">${dbTable(cols, rows, { sort: TBL_SORT.get(key) ?? null })}</div>`;
+}
+function bindPageTables(root, redrawPage) {
+  for (const w of root.querySelectorAll('[data-tbl]')) {
+    const key = w.dataset.tbl;
+    bindDbTable(w, {
+      onSort: (col) => {
+        TBL_SORT.set(key, nextSort(TBL_SORT.get(key), col));
+        redrawPage();
+        // the page was written again: focus back on the header that sorted it
+        root.querySelector(`[data-tbl="${CSS.escape(key)}"] button.sort[data-col="${col}"]`)?.focus();
+      },
+      onOpen: (i) => { const open = TBL_ROWS.get(key)?.[i]?.open; if (open) location.hash = open; },
+    });
+  }
+}
+// ---- Trust (kit-93): the Trust Score card, the kinds of decision by plain name, How the levels moved ----
+// The levels in the design's words (the kit's RUNG_PLAIN; RUNG_WORDS stays for the pages that use it). A kind
+// is named by its class_name, never its class id (which sits only in a row's hash).
+const TRUST_LEVELS = { 1: 'Asks you first', 2: 'Asks, goes ahead at a deadline', 3: 'Decides and tells you' };
+const trustName = (t) => t?.class_name || cap(t?.about || '') || 'A kind of decision';
+const trustLevel = (r) => TRUST_LEVELS[r] ?? '–';
+const trustAgreed = (t) => (effNum(t.agreement) ? `${Math.round(t.agreement * 100)}% of the last ${(t.agreement_questions || []).length}` : '–');
+const trustCorrected = (t) => (t.corrections ? `${t.corrections} time${t.corrections > 1 ? 's' : ''}` : 'never');
+const TRUST_READY = '<span class="badge good" title="Enough answers went with its recommendation to ask you to raise it">ready to ask for more</span>';
+// a kind's Now: its level in words, and the badge when it can ask for more (the table's cell, the peek's row)
+const trustNow = (t) => `${esc(trustLevel(t.rung))}${t.can_ask ? ` ${TRUST_READY}` : ''}`;
+// the hash of a call by its id's kind: an act, a decision or a question; null for any other
+const callHash = (id) => { const s = String(id ?? ''); const k = /^a-/.test(s) ? 'act' : /^d-/.test(s) ? 'decision' : /^q-/.test(s) ? 'q' : null; return k ? `${k}/${encodeURIComponent(s)}` : null; };
+// Kinds of decision: a row a kind, opening its peek (class/<id>)
+function trustRows(trust) {
+  return (trust || []).map((t) => ({
+    cells: [esc(trustName(t)), trustNow(t), esc(trustLevel(t.ceiling)), esc(trustAgreed(t)), esc(trustCorrected(t))],
+    sort: [trustName(t), t.rung ?? null, t.ceiling ?? null, effNum(t.agreement) ? t.agreement : null, t.corrections ?? 0],
+    open: t.class ? `class/${encodeURIComponent(t.class)}` : null,
+  }));
+}
+// How the levels moved: every move of every kind, capped at its ceiling, newest first, at most 40; a row opens
+// the question that moved it (your answer) or the call you corrected
+function levelMoves(trust) {
+  return (trust || []).flatMap((t) => (t.history || []).map((e) => ({ t, e, rung: effNum(t.ceiling) ? Math.min(e.rung, t.ceiling) : e.rung })))
+    .sort((a, b) => String(b.e.at ?? '').localeCompare(String(a.e.at ?? ''))).slice(0, 40)
+    .map(({ t, e, rung }) => {
+      const why = e.by === 'correction' ? `your correction${e.why ? `: ${e.why}` : ''}` : e.by === 'answer' ? 'your answer' : words(e.by);
+      return {
+        cells: [esc(trustName(t)), esc(trustLevel(rung)), esc(why), e.at ? esc(when(e.at)) : ''],
+        sort: [trustName(t), rung ?? null, why, e.at ?? null],
+        open: e.by === 'answer' ? (e.id ? `q/${encodeURIComponent(e.id)}` : null) : callHash(e.id),
+      };
+    });
+}
+// A kind's evidence since it last moved (its newest history entry; all of it when it never moved): the answered
+// questions its agreement counts and its calls since its last correction, each looked up in what /api/data holds
+// (answered, acts, decisions). An id none of them holds is kept, as "a question" or "a call" with no date.
+function classEvidence(t, ooda) {
+  const since = (t?.history || []).reduce((m, e) => (e.at && e.at > m ? e.at : m), '');
+  const answered = new Map((ooda?.answered || []).map((q) => [q.id, q]));
+  const acts = new Map((ooda?.acts || []).map((a) => [a.id, a]));
+  const calls = new Map((ooda?.decisions || []).filter((r) => r.kind === 'decision' || r.kind === 'act').map((r) => [r.id, r]));
+  const qs = (t?.agreement_questions || []).map((id) => {
+    const q = answered.get(id);
+    return { what: q?.question || 'a question', kind: q ? (q.agreed_by_owner ? 'Agreed' : 'Not agreed') : null, at: q?.answered_at ?? null, open: `q/${encodeURIComponent(id)}` };
+  });
+  const cs = (t?.uncorrected_acts || []).map((id) => {
+    const a = acts.get(id), r = calls.get(id);
+    return { what: a?.what || r?.what || 'a call', kind: 'Call', at: a?.created_at ?? r?.at ?? null, open: a ? `act/${encodeURIComponent(id)}` : r ? `${r.kind}/${encodeURIComponent(id)}` : callHash(id) };
+  });
+  return [...qs, ...cs].filter((x) => !x.at || !since || x.at > since).sort((a, b) => String(b.at ?? '').localeCompare(String(a.at ?? '')));
+}
+// The Trust Score card's charts, drawn at the width they get: the score line and a bar a week split three ways
+let TRUST_WEEKS = [];
+const TRUST_SPLIT = [['alone', 'decided alone'], ['asked', 'asked you'], ['corrected', 'corrected']];
+function trustSplitBars(weeks, W = 560) {
+  const n = weeks.length, val = (w, k) => (effNum(w?.[k]) && w[k] > 0 ? w[k] : 0);
+  const tot = (w) => TRUST_SPLIT.reduce((s, [k]) => s + val(w, k), 0);
+  const max = Math.max(0, ...weeks.map(tot));
+  if (!n || !max) return effNone();
+  const H = 96, slot = W / n, bw = Math.max(1, slot - 6);
+  return `<svg class="split" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Decisions each week: decided alone, asked you, corrected">${weeks.map((w, i) => {
+    let y = H - 14;
+    return TRUST_SPLIT.map(([k, l], j) => { const v = val(w, k); if (!v) return ''; const h = ((H - 24) * v) / max; y -= h;
+      return `<rect data-i="${i}" x="${(i * slot).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" style="fill:${EFF_COLORS[j]}"><title>${esc(`${weekName(i, n)}: ${l} ${v} of ${tot(w)}`)}</title></rect>`; }).join('');
+  }).join('')}<text x="0" y="${H - 2}" class="lc-t">12 weeks ago</text><text x="${W - 6}" y="${H - 2}" text-anchor="end" class="lc-t">this week</text></svg>
+    <div class="legend small">${TRUST_SPLIT.map(([k, l], j) => `<span><i style="border-top-color:${EFF_COLORS[j]}"></i>${esc(l)} ${esc(val(weeks[n - 1], k))}</span>`).join('')}</div>`;
+}
+FIT_DRAW['trust-score'] = (el, W) => scoreLine(TRUST_WEEKS.map((w) => (effNum(w.score) ? w.score : null)), W, { min: 0, max: 100 });
+FIT_DRAW['trust-split'] = (el, W) => trustSplitBars(TRUST_WEEKS, W);
+// Score: this and last week's score, the line, a sparkline a count, the split, the lessons and the week's record
+function trustScore(a) {
+  const d = a.decisions || {}, weeks = Array.isArray(d.weeks) ? d.weeks : [], w = d.this_week || weeks[weeks.length - 1] || {};
+  TRUST_WEEKS = weeks;
+  const sc = (x) => (effNum(x) ? `${x}%` : '–'), num = (x) => (effNum(x) ? String(+x.toFixed(2)) : '–');
+  const col = (f) => weeks.map((x) => { const y = f(x); return effNum(y) ? y : null; });
+  const rec = w.with_recommendation || {};
+  const counts = [
+    ['decided alone', num(w.alone), col((x) => x.alone)],
+    ['asked you', num(w.asked), col((x) => x.asked)],
+    ['corrected', num(w.corrected), col((x) => x.corrected)],
+    ['changes merged per question answered', num(w.merged_per_answer), col((x) => x.merged_per_answer)],
+    ['questions asked again', effNum(w.asked_again) ? `${w.asked_again} (target 0)` : '–', col((x) => x.asked_again)],
+    ['hours waiting on you', num(w.hours_waiting), col((x) => x.hours_waiting)],
+    ['answers that went with the recommendation', effNum(rec.count) && effNum(rec.of) ? `${rec.count} of ${rec.of}${effNum(rec.share) ? ` · ${Math.round(rec.share * 100)}%` : ''}` : '–', col((x) => x.with_recommendation?.share)],
+  ];
+  const links = ['<a class="linkish" href="#loop?lt=orient&kind=lesson">the lessons it counted</a>', w.record ? `<a class="linkish" href="#learning/${esc(encodeURIComponent(w.record))}">this week's learning record</a>` : ''].filter(Boolean);
+  // the charts' data in their attributes, so new data is a new card (renderTrust compares the html)
+  const sig = esc(JSON.stringify(weeks.map((x) => [x.score, x.alone, x.asked, x.corrected])));
+  return `<div class="score"><b>${sc(d.score?.this_week)}</b><span class="dim">last week ${sc(d.score?.last_week)}</span></div>
+    <p class="score-w">decisions made without asking that you didn't correct · ${links.join(' · ')}</p>
+    <div class="score-mod"><h4 class="props-h">The score, 12 weeks</h4><div class="fit" data-fit="trust-score" data-v="${sig}"></div></div>
+    <div class="score-mod score-counts">${counts.map(([k, v, s]) => `<div class="stat mini"><span class="k">${esc(k)}</span><b>${esc(v)}</b>${spark(s, k)}</div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">Each week</h4><div class="fit" data-fit="trust-split" data-v="${sig}"></div></div>`;
+}
+const trustStat = (v, k) => `<div class="stat"><b>${esc(v)}</b><span class="dim">${esc(k)}</span></div>`;
+const trustCount = (x) => (effNum(x) ? String(x) : '–');
+function trustScoreCard(a) {
+  const tr = a?.trust || {}, se = a?.senses || {}, missing = Array.isArray(se.missing) ? se.missing : [];
+  const trust = `<div class="eff-parts">${trustStat(`${trustCount(tr.own)} of ${trustCount(tr.kinds)}`, 'kinds of decision decided on their own')}${trustStat(`${trustCount(tr.raised)} raised, ${trustCount(tr.dropped)} dropped`, 'this week')}</div>`;
+  const senses = `<div class="eff-parts">${[['needed', se.needed], ['has', se.has], ['working', se.working]].map(([k, v]) => `<div class="stat"><span class="k">${k}</span><b>${esc(trustCount(v))}</b></div>`).join('')}</div>
+    <p class="score-w trust-missing">${missing.length ? `Missing: ${esc(missing.join(', '))}` : 'None missing'}</p>`;
+  return `<div class="card eff-card trust-card">${cardHead('shield-check', 'Trust Score', { extra: '<span class="muted">this week</span>' })}${
+    effSection('Score', a ? trustScore(a) : effNone())}${effSection('Trust', a ? trust : effNone())}${effSection('Senses', a ? senses : effNone())}</div>`;
+}
+// The page, written into #trust only when its HTML changed, so a redraw keeps focus and a pin's element
+function renderTrust(d) {
+  const trust = d.ooda?.trust || [];
+  const html = `${trustScoreCard(d.autonomy || null)}<div class="card flush">${cardHead('shield-check', 'Kinds of decision')}${
+    pageTable('trust:kinds', ['Kind of decision', 'Now', 'At most', 'Agreed with you', 'Corrected'], trustRows(trust))}</div><div class="card flush">${cardHead('history', 'How the levels moved')}${
+    pageTable('trust:moves', ['Kind of decision', 'To', 'Why', 'When'], levelMoves(trust))}</div>`;
+  const el = $('trust');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
+  el.innerHTML = html;
+  bindPageTables(el, () => renderTrust(DATA));
+  fitCharts();
+}
+// A kind's peek (#class/<id>, home Trust): read-only, from DATA.ooda.trust (the server has no class peek, so it
+// is marked missing, as a Library item's is). Its properties (no ID row: the class id never shows), its three
+// levels with the one it is on marked, and the evidence since it last moved, each row opening its record.
+function openClass(id) {
+  drawerFor('class', id);
+  PEEKS.set(peekKey('class', id), { error: 'not a record', missing: true });
+  const t = (DATA?.ooda?.trust || []).find((x) => x.class === id);
+  // not notFound, which titles the peek with the id and gives it an ID row: the class id never shows (R2)
+  if (!t) return showDrawer('<h2 id="drawer-title">Not found</h2><p class="muted">No kind of decision by that name.</p>');
+  const last = (t.history || []).reduce((m, e) => (e.at && (!m || e.at > m.at) ? e : m), null);
+  const rows = [
+    attrRow('Now', trustNow(t)),
+    attrRow('At most', esc(trustLevel(t.ceiling))),
+    attrRow('Since', last ? esc(when(last.at)) : 'never moved'),
+    attrRow('Agreed with you', esc(trustAgreed(t))),
+    attrRow('Corrected', esc(trustCorrected(t)), 'How many times you corrected one of its calls.'),
+    attrRow('How it changes', 'Shift+click it and say so in a thread'),
+  ].filter(Boolean);
+  const levels = [1, 2, 3].map((r) => `<div class="lvl${r === t.rung ? ' now' : ''}${r > t.ceiling ? ' off' : ''}"><span class="t">${esc(TRUST_LEVELS[r])}</span>${
+    r === t.rung ? '<span class="badge low">now</span>' : r > t.ceiling ? '<span class="muted">beyond its limit</span>' : ''}</div>`).join('');
+  const ev = classEvidence(t, DATA?.ooda);
+  const evHtml = ev.length ? `<div class="rows cls-ev">${ev.map((x) => `<div class="rowline"${x.open ? ` data-open="${esc(x.open)}" tabindex="0" role="link"` : ''}><span class="dot${x.kind === 'Agreed' ? ' green' : x.kind === 'Not agreed' ? ' amber' : x.kind === 'Call' ? ' blue' : ''}"></span><span class="t">${esc(x.what)}</span><span class="r">${
+    esc([x.kind === 'Call' ? '' : x.kind, x.at ? when(x.at) : ''].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>` : effNone();
+  showDrawer(`<h2 id="drawer-title">${esc(trustName(t))}</h2><section class="attrs">${props(rows)}</section>${psect('Levels', `<div class="lvls">${levels}</div>`)}${psect('Since it last moved', evHtml)}`);
+}
+// ---- Awareness (kit-93): the Awareness Score card, drawn as Efficiency's, with its charts and suggestion list ----
+// A suggestion's page: the section its view names (efficiency, awareness), else null
+function suggPageOf(view) {
+  const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : '');
+  return m && parseSuggView(view) !== null ? m[1] : null;
+}
+// The four parts in plain words, and a suggestion's title by its kind
+const AW_PARTS = [['signals', 'signals explained within a day'], ['incidents', 'fixed incidents that left a lesson'], ['lessons', 'lessons sessions use'], ['starts', 'fresh starts given what they need']];
+const AW_SUGG_WORDS = { incident: 'Learn from a fixed incident', lessons: 'Retire lessons nobody is given', signal: 'Explain something that keeps happening' };
+// The score line, drawn at the width it gets
+let AW_WEEKS = [];
+FIT_DRAW['aw-score'] = (el, W) => scoreLine(AW_WEEKS.map((w) => (effNum(w.score) ? w.score : null)), W, { min: 0, max: 100 });
+// Score: this and last week's score, this week's four parts ("c of o · share", "none" with no share),
+// the 12-week line (a null week a gap) and a sparkline a part over its weekly share
+function awarenessScore(a) {
+  const weeks = Array.isArray(a.weeks) ? a.weeks : [];
+  AW_WEEKS = weeks;
+  const sc = (x) => (effNum(x) ? `${x}%` : '–'), pc = (s) => (effNum(s) ? `${Math.round(100 * s)}%` : 'none');
+  const part = (x) => (effNum(x?.share) ? `${x.count} of ${x.of} · ${pc(x.share)}` : 'none');
+  const share = (k) => weeks.map((w) => (effNum(w?.parts?.[k]?.share) ? w.parts[k].share : null));
+  // the chart's data in its attribute, so new data is a new card (renderAwareness compares the html)
+  const sig = esc(JSON.stringify(weeks.map((w) => [w?.score ?? null, ...AW_PARTS.map(([k]) => w?.parts?.[k]?.share ?? null)])));
+  return `<div class="score"><b>${sc(a.score?.this_week)}</b><span class="dim">last week ${sc(a.score?.last_week)}</span></div>
+    <p class="score-w">how well the fleet understands what happens: the mean of the four parts below</p>
+    <div class="eff-parts aw-parts">${AW_PARTS.map(([k, l]) => `<div class="stat"><span class="k">${esc(l)}</span><b>${esc(part(a.parts?.[k]))}</b></div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">The score, 12 weeks</h4><div class="fit" data-fit="aw-score" data-v="${sig}"></div></div>
+    <div class="score-mod score-counts">${AW_PARTS.map(([k, l]) => `<div class="stat mini"><span class="k">${esc(l)}</span><b>${esc(pc(a.parts?.[k]?.share))}</b>${spark(share(k), l)}</div>`).join('')}</div>`;
+}
+// Suggestions: Efficiency's list, each titled by its kind; a click or Enter starts or opens its thread (effSuggGo)
+const awSuggestions = (xs) => suggestionsList(xs.map((x) => ({ id: String(x.id), title: Object.hasOwn(AW_SUGG_WORDS, String(x.kind)) ? AW_SUGG_WORDS[x.kind] : 'Suggestion', what: x.what ?? '', evidence: x.evidence ?? '', effect: x.effect ?? '' })));
+function awarenessCard(a) {
+  return `<div class="card eff-card aw-card">${cardHead('eye', 'Awareness Score', { extra: '<span class="muted">this week</span>' })}${
+    effSection('Score', a ? awarenessScore(a) : effNone())}${
+    effSection('Suggestions', a ? awSuggestions(Array.isArray(a.suggestions) ? a.suggestions : []) : effNone())}</div>`;
+}
+// The page, written into #awareness only when its HTML changed, so a redraw keeps focus and a pin's element
+function renderAwareness(d) {
+  const html = awarenessCard(d.awareness || null);
+  const el = $('awareness');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
+  el.innerHTML = html;
+  fitCharts();
+}
+// ---- Governance (kit-93): /api/governance's files in three ruled sections, each opening the read-only file peek ----
+// GOV: the last listing's files (kept through a failed read: C8's "the last listing"), when it was read, its error,
+// and a read in flight. Read when the page is shown, again at most once a minute while it is (render, showHead).
+const GOV = { at: 0, files: null, error: null, pending: false };
+async function loadGovernance(force = false) {
+  if (GOV.pending || (!force && GOV.at && Date.now() - GOV.at < 60000)) return;
+  GOV.pending = true;
+  try {
+    const r = await fetch('/api/governance');
+    const j = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(j?.error || `${r.status} ${r.statusText}`.trim());
+    if (!Array.isArray(j?.files)) throw new Error('the reply was not a list of files');
+    GOV.files = j.files;
+    GOV.error = null;
+  } catch (e) { GOV.error = String(e?.message ?? e); }
+  finally { GOV.at = Date.now(); GOV.pending = false; }
+  renderGovernance();
+}
+const GOV_GROUPS = [['governance', 'Governance'], ['process', 'Process'], ['project', 'Project']];
+// A group's rows: File (its title, a badge from its state), Path, Last change (a date, else "—"); a written
+// file opens its peek, a not-written one nothing (C4)
+const GOV_BADGE = { 'changed here': 'amber', 'not written yet': 'low' };
+function governanceRows(files, group) {
+  return (files || []).filter((f) => f?.group === group).map((f) => {
+    const at = typeof f.last_change === 'string' && !Number.isNaN(Date.parse(f.last_change)) ? f.last_change : null;
+    const title = f.title || f.path || '';
+    return {
+      cells: [`${esc(title)}${f.state ? ` <span class="badge ${GOV_BADGE[f.state] || 'low'}">${esc(f.state)}</span>` : ''}`, `<code>${esc(f.path ?? '')}</code>`, at ? esc(fmtDay(at)) : '—'],
+      sort: [title, f.path ?? '', at],
+      open: f.written && f.path ? `#file?path=${encodeURIComponent(f.path)}&title=${encodeURIComponent(title)}` : null,
+    };
+  });
+}
+// The page, written into #governance only when its HTML changed, so a redraw keeps focus and a pin's element
+function renderGovernance() {
+  // a failed read's error, above the last listing when there is one (its paragraphs stay pinnable)
+  const err = GOV.error ? `<p class="err">The governance files didn't load: ${esc(GOV.error)}</p>` : '';
+  const body = err + (GOV.files ? GOV_GROUPS.map(([g, l]) => effSection(l, pageTable(`gov:${g}`, ['File', 'Path', 'Last change'], governanceRows(GOV.files, g)))).join('')
+    : err ? '' : '<p class="loading">Loading…</p>');
+  const html = `<div class="card flush gov-card">${cardHead('scale', 'Files')}${body}</div>`;
+  const el = $('governance');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  el.innerHTML = html;
+  bindPageTables(el, renderGovernance);
+}
+// A file peek is about a governance file when the last listing named its path (C8: any group; none before a listing)
+const govListed = (path) => typeof path === 'string' && !!GOV.files?.some((f) => f?.path === path);
+// The block of a governance file's rendered Markdown under el (a paragraph, an item, a heading, a quote, code), else
+// null; a file of another repo (its peek's repo) is not this project's governance file
+function govBlockAt(el) {
+  if (DRAWER.kind !== 'file' || !govListed(DRAWER.id) || DRAWER.arg?.get?.('repo')) return null;
+  const b = el?.closest?.('p, li, h1, h2, h3, h4, h5, h6, blockquote, pre');
+  return b && b.closest('#drawer-body .md') ? b : null;
+}
+// ---- Sensors (kit-93): Production (the incidents board, a card a sensor) and Fleet (Health's tables) ----
+// SENSOR_TAB: the tab shown, from the head's st (showHead): fleet, else production
+let SENSOR_TAB = 'production';
+// Selecting a tab is a new entry (#sensors, #sensors?st=fleet), so Back restores the tab before; drawn at once,
+// so the focus moves to the new tab's element
+bindTabBar($('monitoring'), { onSelect: (id) => {
+  if (!['production', 'fleet'].includes(id)) return;
+  const cur = parseHead(location.hash, SHELL_ROUTES);
+  const state = cur.link === undefined && cur.page === 'sensors' ? { ...cur.state } : {};
+  if (id === 'fleet') state.st = 'fleet'; else delete state.st;
+  SENSOR_TAB = id;
+  if (DATA) renderMonitoring(DATA);
+  location.hash = headFor({ page: 'sensors', state });
+} });
+// today's events by level (a probe's output, an error tracker's errors, C7), a dot and a count each; '' with none
+const SENSOR_LEVEL_DOT = { fatal: 'red', error: 'red', warning: 'amber', warn: 'amber' };
+function sensorLevels(by) {
+  const xs = Object.entries(by || {}).filter(([, n]) => Number.isFinite(n) && n > 0);
+  return xs.length ? `<div class="sensor-levels">${xs.map(([l, n]) => `<span><span class="dot ${SENSOR_LEVEL_DOT[l] || 'blue'}"></span>${esc(l)} <b>${esc(n)}</b></span>`).join(' ')}</div>` : '';
+}
+// One sensor's card (pure: series is its 24h latency, or null while loading): its name and state, what it reads,
+// its trouble (the last error and the retry), its figures, its live output, when it last ran; a click or Enter
+// opens its peek
+function sensorCard(m, series) {
+  const [tone, label] = monState(m);
+  const http = m.kind === 'http', t = m.today || {};
+  const failed = !!m.last && !m.last.ok;
+  const trouble = failed ? `${esc(m.last_error || m.last?.error || 'failed')}${m.backoff_minutes ? ` · trying again in ${esc(m.backoff_minutes)} min` : ''}` : '';
+  const msOr = (x) => (x == null ? '–' : `${x}ms`);
+  const src = http ? esc(m.url || '') : `${esc(m.kind)} · ${esc(m.probe || '')}${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}`;
+  const stats = http
+    ? [`24h <b>${esc(pctOr(m.uptime_24h))}</b> up`, `7d <b>${esc(pctOr(m.uptime_7d))}</b>`, `p50 <b>${esc(msOr(m.p50_24h))}</b>`, `p95 <b>${esc(msOr(m.p95_24h))}</b>`, ...(m.tls_days != null ? [`certificate <b>${esc(m.tls_days)}</b> days left`] : [])]
+    : [`today <b>${esc(t.events ?? 0)}</b> event(s)`, `<b>${esc(t.qualified ?? 0)}</b> new for triage`, `<b>${esc(m.fingerprints ?? 0)}</b> fingerprint(s)`, ...(t.mean_ms != null ? [`run <b>${esc(t.mean_ms < 1000 ? `${t.mean_ms}ms` : `${(t.mean_ms / 1000).toFixed(1)}s`)}</b>`] : [])];
+  const output = http ? `<div class="sensor-chart" data-mon-chart="${esc(m.name)}">${series ? sensorChart(series, m, true) : '<p class="muted small">Loading…</p>'}</div>` : sensorLevels(t.by_level);
+  const ran = http ? `checked ${m.last_at ? esc(when(m.last_at)) : 'never'}` : m.last_at ? `ran ${esc(when(m.last_at))}` : 'never run';
+  return `<div class="card c6 sensor-card" data-open="sensor/${esc(encodeURIComponent(m.name))}" tabindex="0" role="button" aria-label="Open the sensor ${esc(m.name)}">${cardHead('activity', esc(m.name), { extra: `<span class="badge ${tone}">${esc(label)}</span>` })}
+    <div class="sensor-src">${src}</div> ${trouble ? `<p class="sensor-err">${trouble}</p> ` : ''}
+    <div class="sensor-stats">${stats.map((s) => `<span>${s}</span>`).join(' ')}</div> ${output} <div class="meta">${ran}</div></div>`;
+}
+// Production: the incidents board first, then a card a sensor, two across
+function sensorsProduction(d) {
+  const ms = d.sensors || [], incs = d.incidents || [];
+  const open = incs.filter((x) => x.stage !== 'resolved').length;
+  return `<div class="g12"><div class="card c12 inc-card">${cardHead('siren', 'Incidents', { extra: open ? `<span class="muted">${open} open</span>` : '' })}<div id="incidents">${incidentBoard(incs)}</div></div>${
+    ms.map((m) => sensorCard(m, MON_SERIES.get(m.name)?.data ?? null)).join('')}${ms.length ? '' : '<p class="empty c12">None</p>'}</div>`;
+}
+// The hash of the record a finding's subject names, else null (R2), as linkify links them: a ticket, a sensor or a
+// planner only when /api/data lists it, a thread, a goal or another logged id by its prefix; a commit, a check or
+// anything else names none
+const SUBJ_KINDS = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk', o: 'observation', q: 'q' };
+function subjectOpen(subj) {
+  const s = String(subj ?? '');
+  if (/^thread:t-/.test(s)) return subjectOpen(s.slice(7));
+  if (ticketMap().has(s)) return `#ticket/${encodeURIComponent(s)}`;
+  if (/^sensor:/.test(s)) { const n = s.slice(7); return (DATA?.sensors || []).some((x) => x.name === n) ? `#sensor/${encodeURIComponent(n)}` : null; }
+  if (/^plan-/.test(s)) { const f = s.slice(5); return (DATA?.planners || []).some((x) => x.feature === f) ? `#planner/${encodeURIComponent(f)}` : null; }
+  const id = /^([gkapmodtq])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/.exec(s);
+  return id ? `#${SUBJ_KINDS[id[1]]}/${encodeURIComponent(s)}` : null;
+}
+// A subject as plain text (the row opens it): a ticket by its title, a sensor by its name, else as written
+const subjectText = (subj) => { const s = String(subj ?? ''); const t = ticketMap().get(s); return t ? esc(t.title) : /^sensor:/.test(s) ? esc(s.slice(7)) : s ? `<code>${esc(s)}</code>` : ''; };
+const SEV_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
+// Fleet's five tables, from metrics: the findings with the supervisor's next step, the ones set aside, the
+// configured checks (trouble first; the one-off checks only named, in gates.oneOff), the flaky and slowest tests.
+// Only a finding or a set-aside row with a record opens; checks and tests are figures (R2)
+function fleetTables(m, configured) {
+  const g = m?.gates || {}, all = g.gates || [];
+  const flakyG = new Set((g.flaky_gates || []).map((f) => f.gate));
+  const conf = new Set(configured || []);
+  const gl = all.filter((x) => !conf.size || conf.has(x.gate)), oneOff = all.filter((x) => conf.size && !conf.has(x.gate)).map((x) => x.gate);
+  const trouble = (x) => (flakyG.has(x.gate) ? 2 : 0) + (x.fail_rate >= 0.2 ? 1 : 0);
+  gl.sort((a, b) => trouble(b) - trouble(a) || b.runs - a.runs);
+  return {
+    findings: { cols: ['Finding', 'Severity', 'Next step for the supervisor', 'Subject'], rows: (m?.findings || []).map((f) => ({
+      cells: [`<b>${esc(words(f.kind))}</b> <span class="dim">${esc(f.detail ?? '')}</span>`, `<span class="badge ${esc(f.severity)}">${esc(f.severity)}</span>`, esc(f.suggestion ?? ''), subjectText(f.subject)],
+      sort: [words(f.kind), SEV_RANK[f.severity] ?? 0, f.suggestion ?? '', f.subject ?? ''],
+      open: subjectOpen(f.subject),
+    })) },
+    aside: { cols: ['Finding', 'Subject', 'Why', 'By', 'Until'], rows: (m?.acknowledged || []).map((f) => ({
+      cells: [esc(words(f.kind)), subjectText(f.subject), esc(f.ack?.reason ?? ''), esc(who(f.ack?.by)), f.ack?.until ? esc(when(f.ack.until)) : '—'],
+      sort: [words(f.kind), f.subject ?? '', f.ack?.reason ?? '', who(f.ack?.by), f.ack?.until ?? null],
+      open: subjectOpen(f.subject),
+    })) },
+    gates: { oneOff, cols: ['Check', 'Runs', 'Usually', 'Fails'], rows: gl.map((x) => ({
+      cells: [`<code>${esc(x.gate)}</code>${flakyG.has(x.gate) ? ' <span class="badge high">flaky</span>' : ''}${x.fail_rate >= 0.2 ? ' <span class="badge medium">often fails</span>' : ''}`, esc(x.runs), esc(dur(x.median_seconds)),
+        `${Math.round((x.fail_rate || 0) * 100)}%${x.preexisting_fails ? ` <span class="dim small">+ ${esc(x.preexisting_fails)} allowed because main failed too</span>` : ''}`],
+      sort: [x.gate, x.runs, x.median_seconds, x.fail_rate], open: null,
+    })) },
+    flaky: { cols: ['Test', 'Times'], rows: (g.flaky_tests || []).map((x) => ({ cells: [`<code>${esc(x.name)}</code>`, `${esc(x.times)}×`], sort: [x.name, x.times], open: null })) },
+    slowest: { cols: ['Test', 'Usually'], rows: (g.slowest_tests || []).map((x) => ({ cells: [`<code>${esc(x.name)}</code>`, esc(dur(x.median_seconds))], sort: [x.name, x.median_seconds], open: null })) },
+  };
+}
+// Fleet: a card a table (R1: no spend cards, they are Efficiency's); the checks' head counts the one-off checks
+function sensorsFleet(d) {
+  const t = fleetTables(d.metrics || {}, d.gates_configured || []);
+  const one = t.gates.oneOff;
+  const card = (cls, icon, label, key, opts = {}) => `<div class="card flush ${cls}">${cardHead(icon, label, opts)}${pageTable(`fleet:${key}`, t[key].cols, t[key].rows)}</div>`;
+  const oneOff = one.length ? `<span class="muted" title="${esc(`One-off checks workers ran by hand: ${one.slice(0, 4).join(', ')}${one.length > 4 ? ', …' : ''}`)}">+ ${one.length} one-off check${one.length === 1 ? '' : 's'}</span>` : '';
+  return `<div class="g12">${card('c12', 'heart-pulse', 'Findings', 'findings')}${card('c12', 'archive', 'Set aside', 'aside')}${card('c12', 'list-checks', 'Checks before merge', 'gates', { extra: oneOff })}${
+    card('c6', 'shuffle', 'Flaky tests', 'flaky')}${card('c6', 'timer', 'Slowest tests', 'slowest')}</div>`;
+}
+// A sensor's peek (C6, D1): the observations it made and its incidents, rows that open their records
+function sensorPeekRows(name, d) {
+  const obs = (d?.ooda?.observations || []).filter((o) => o.subject === `sensor:${name}`);
+  const incs = (d?.incidents || []).filter((x) => x.sensor === name);
+  const row = (open, dot, t, r) => `<div class="rowline" data-open="${esc(open)}" tabindex="0" role="link"><span class="dot ${dot}"></span><span class="t">${esc(t)}</span><span class="r">${esc(r)}</span></div>`;
+  const stage = (x) => { const c = INC_COLS.find(([, , st]) => st.includes(x.stage)); return x.stage === 'merged' ? 'fixing: merged, not yet verified' : x.stage === 'regressed' ? 'open: regressed' : c ? c[1].toLowerCase() : words(x.stage); };
+  return psect('Observations it made', obs.length ? `<div class="rows sensor-rows">${obs.map((o) => row(`observation/${encodeURIComponent(o.id)}`, o.severity >= 3 ? 'red' : o.severity === 2 ? 'amber' : 'blue', o.detail || words(o.kind),
+    [o.severity != null ? `severity ${o.severity}` : '', o.created_at ? when(o.created_at) : ''].filter(Boolean).join(' · '))).join('')}</div>` : effNone())
+    + psect('Incidents', incs.length ? `<div class="rows sensor-rows">${incs.map((x) => row(`problem/${encodeURIComponent(x.id)}`, x.stage === 'resolved' ? 'green' : x.stage === 'regressed' ? 'red' : 'amber', x.title || x.id,
+      [stage(x), x.severity != null ? `severity ${x.severity}` : '', x.created_at ? `opened ${when(x.created_at)}` : ''].filter(Boolean).join(' · '))).join('')}</div>` : effNone());
+}
+// Retros: the next one when due, then a card a retro (a click or Enter opens its peek)
+function retroCards(rt) {
+  const all = rt?.all || [];
+  const since = String(rt?.due_since || '').slice(0, 10);
+  const due = rt?.due ? `<div class="card">${cardHead('history', 'Next retro', { extra: since ? `<span class="badge medium">due since ${esc(since)}</span>` : '' })}<p>${esc((rt.reasons || []).join('; '))}</p></div>` : '';
+  const cards = all.map((r) => `<div class="card retro-card" data-open="retro/${esc(encodeURIComponent(r.id))}" tabindex="0" role="button" aria-label="Open the retro of ${esc(retroDate(r))}">${cardHead('history', esc(retroDate(r)))}<p>${esc(r.summary)}</p></div>`).join('');
+  return due || cards ? `<div class="cards">${due}${cards}</div>` : effNone();
+}
+/* autonomy-pages end */
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
 // Each is [value, label, group]; Progress's Narrow offers them (narrowViews), its goal held by the Goal filter.
 function views(p) {
@@ -1995,10 +2477,10 @@ function burnup(items, now, ui = PROGRESS_CHART()) {
   const el = ui.el;
   const setForecast = (s) => { if (ui.forecast) ui.forecast.textContent = s; };
   ui.legend.hidden = !items.some(isDone);
-  if (!items.length) { el.innerHTML = empty('No tickets yet. The chart starts when the supervisor or a planner adds them.'); setForecast(''); return; }
+  if (!items.length) { el.innerHTML = empty('None'); setForecast(''); return; }
   const scopePts = items.reduce((a, t) => a + t.weight, 0);
   if (!items.some(isDone)) {
-    el.innerHTML = empty(`Nothing merged yet: ${items.length} ticket${items.length > 1 ? 's' : ''}, ${scopePts} point${scopePts > 1 ? 's' : ''} of scope. The chart and the forecast start at the first merge.`);
+    el.innerHTML = empty('None');
     setForecast(`0/${scopePts} pts`);
     return;
   }
@@ -2112,7 +2594,7 @@ function widgets(p, now, show, { nameGoals = false, all = p } = {}) {
   const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
   const wmax = Math.max(1, ...weeks);
   $('w-throughput').innerHTML = weeks.map((v, i) => `<span title="${v} points, ${i === 7 ? 'this week' : `${7 - i} week(s) ago`}" style="height:${(100 * v) / wmax}%"></span>`).join('');
-  $('w-throughput-note').textContent = weeks.some((v) => v) ? `8 weeks · this week ${weeks[7]}` : 'Nothing merged in the last 8 weeks.';
+  $('w-throughput-note').textContent = weeks.some((v) => v) ? `8 weeks · this week ${weeks[7]}` : 'None';
 }
 
 // ---- kanban board ----
@@ -2204,7 +2686,7 @@ function boardCols(items, crit, { only = false, inert = false } = {}) {
 // ---- the Board's and Progress's header filters (kit-91): in the page bar's .extra, each in the URL ----
 // A page head's state is its filters (dashboard-shell@1's STATE_KEYS): Board goal, feat, repo, att; Progress goal,
 // narrow, show. Each change is a history entry (setFilters assigns the hash), so Back restores the earlier filter.
-const FILTER_PAGES = ['board', 'progress'];
+const FILTER_PAGES = ['board', 'progress', 'library'];
 const NARROW_GROUPS = ['Milestones', 'Features', 'Releases', 'Waves', 'Stories'];
 // the goals a filter can name: every goal not let go, by title
 const filterGoals = () => (DATA?.ooda?.goals || []).filter((g) => g.status !== 'abandoned').sort((a, b) => String(a.title ?? a.id).localeCompare(String(b.title ?? b.id)));
@@ -2235,11 +2717,12 @@ function filtersNow(page) {
     if (f.narrow && !(DATA && narrowViews(DATA.progress, f.goal).some(([k]) => k === f.narrow))) delete f.narrow;
     if (f.show && !['complete', 'all'].includes(f.show)) delete f.show;
   }
+  if (page === 'library' && f.kind && !LIB_KINDS.some(([k]) => k === f.kind)) delete f.kind;
   return f;
 }
 // A filter changed: the new state (a goal changed clears the feature and the narrow, which were the old goal's),
-// remembered (the shell's saveFilters: each page its own keys; a goal changed on Progress also drops the Board's
-// stored feature, so a later Board visit isn't emptied by it), then a new entry with the new head.
+// remembered (the shell's saveFilters: each page its own keys; a goal changed on Progress or Library also drops the
+// Board's stored feature, so a later Board visit isn't emptied by it), then a new entry with the new head.
 function setFilters(page, patch) {
   const h = pageHeadNow();
   const state = { ...filtersNow(page) };
@@ -2248,7 +2731,7 @@ function setFilters(page, patch) {
   for (const [k, v] of Object.entries(patch)) { if (v) state[k] = String(v); else delete state[k]; }
   if (goalChanged) { delete state.feat; delete state.narrow; }
   saveFilters(page, state);
-  if (page === 'progress' && goalChanged) saveFilters('board', { ...(storedFilters() || {}), goal: state.goal, feat: undefined });
+  if ((page === 'progress' || page === 'library') && goalChanged) saveFilters('board', { ...(storedFilters() || {}), goal: state.goal, feat: undefined });
   location.hash = headFor({ page, state });
 }
 // The page's filters drawn into the page bar's .extra; emptied on every other page. Written only when they
@@ -2265,6 +2748,7 @@ function filtersHtml(page) {
   const opt = (v, label, cur) => `<option value="${esc(v)}"${(cur || '') === v ? ' selected' : ''}>${esc(label)}</option>`;
   const sel = (k, label, inner) => `<select data-f="${k}" aria-label="${label}">${inner}</select>`;
   const goal = sel('goal', 'Goal', opt('', 'All goals', f.goal) + filterGoals().map((g) => opt(g.id, g.title || g.id, f.goal)).join(''));
+  if (page === 'library') return goal + sel('kind', 'Kind', opt('', 'All kinds', f.kind) + LIB_KINDS.map(([k, label]) => opt(k, label, f.kind)).join(''));
   if (page === 'board') {
     const p = DATA.progress;
     const gf = f.goal ? goalFeatures(f.goal) : null;
@@ -2289,7 +2773,7 @@ function drawFilterPage(page) {
   if (!DATA || !FILTER_PAGES.includes(page)) return void drawFilters(page);
   const m = focusMark();
   drawFilters(page);
-  if (page === 'board') renderBoard(); else renderProgress();
+  if (page === 'board') renderBoard(); else if (page === 'library') renderLibrary(DATA.library); else renderProgress();
   focusBack(m);
 }
 // Board and Progress on a route (in routeHead, once the entry is stamped): a fresh entry whose head has none of
@@ -2405,18 +2889,34 @@ const approvedBy = (id) => (id?.startsWith('q-') ? `with your answer to ${qlink(
 function linkify(text) {
   // One pass over the escaped text: each id becomes a link once, and nothing inside a link (its
   // href, its text) is scanned again, so an id holding a planner's name (m-…-plan-x) stays whole.
+  // A doc path, with the branch or commit written after it: one link to the file, the " on <ref>"
+  // left as text after it (kit-327). A ticket id only where it stands alone, never inside a path, a
+  // branch or a filename (ticket/<id>, <id>/x.md, docs/<id>.md).
   const h = esc(text ?? '');
   const ids = [...ticketMap().keys()].sort((a, b) => b.length - a.length);
+  const DOC = String.raw`(?<![^\s(\[\x7b,;>])(?<!&amp;|\w&#39;)(?:\.\.\/)?[A-Za-z_.][\w.-]*(?:\/[\w.-]+)*\/[\w.-]*\.[A-Za-z][A-Za-z0-9]*(?![\w\/-]|\.\w)(?: (?:on (?:(?:ticket|plan)\/[\w.-]*[A-Za-z0-9]|main)|at [0-9a-f]{40})(?![\w\/-]|\.\w))?`;
   const parts = [
     String.raw`\bq-\d{8}-\d{9}-[a-z0-9-]+`,
     String.raw`\b[gkapmodt]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
-    ...(ids.length ? [String.raw`\b(?:${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\b`] : []),
+    ...(ids.length ? [String.raw`(?<![\w./-])(?:${ids.map((x) => x.replace(/[-.]/g, '\\$&')).join('|')})(?![\w\/-]|\.[A-Za-z0-9])`] : []),
     String.raw`\bsensor:[A-Za-z0-9][A-Za-z0-9_.-]*`,
     String.raw`\bplan-[a-z0-9]+(?:-[a-z0-9]+)*\b`,
     String.raw`\b[0-9a-f]{40}\b`,
     String.raw`\bsanctuarycomputer\/devteam#\d+`,
   ];
-  return h.replace(new RegExp(parts.join('|'), 'g'), (m) => {
+  const rest = new RegExp(parts.join('|'), 'g');
+  const doc = (m) => {
+    const [, p, sep, ref] = /^(\S+?)(?:( (?:on|at) )(\S+))?$/.exec(m);
+    const repoHref = repoDocHref(p, ref);
+    // a home path keeps its ref, a merged home ticket's its merge commit; any other .. is no doc
+    const t = !repoHref && ref?.startsWith('ticket/') ? ticketMap().get(ref.slice('ticket/'.length)) : null;
+    const at = t?.merge_sha && t.repo === 'home' ? t.merge_sha : ref;
+    if (!repoHref && (!ref || p.split('/').includes('..'))) return m.replace(rest, one);
+    const href = repoHref || fileHref({ path: p, ref: at, title: p });
+    const after = sep ? `${sep}${ref}` : '';
+    return /^https:/.test(href) ? `<a class="linkish" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${p}</a>${after}` : `<a class="linkish" href="${esc(href)}">${p}</a>${after}`;
+  };
+  const one = (m) => {
     if (/^q-\d{8}-\d{9}-/.test(m)) return qlink(m);
     if (/^[gkapmodt]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
     if (ticketMap().has(m)) return tlink(m);
@@ -2425,7 +2925,8 @@ function linkify(text) {
     if (/^[0-9a-f]{40}$/.test(m)) return `<code>${m.slice(0, 12)}</code>`;
     const pr = m.split('#')[1];
     return `<a class="linkish" href="https://github.com/sanctuarycomputer/devteam/pull/${pr}" target="_blank" rel="noopener noreferrer">devteam #${pr}</a>`;
-  });
+  };
+  return h.replace(new RegExp(`(${DOC})|${rest.source}`, 'g'), (m, d) => (d !== undefined ? doc(m) : one(m)));
 }
 const FIELD_WORDS = { depends_on: 'what it waits on', touches: 'which files it may change', done_when: 'what “done” means', title: 'its title', held: 'whether it is on hold', superseded_by: 'what replaces it', serves: 'which stories it serves', risk: 'its risk', size: 'its size', kind: 'its kind', contracts: 'its contracts', one_way_doors: 'its hard-to-undo parts', notes: 'its notes' };
 const syncTag = (x) => x.replace(/^(v\d+)-(\d+)-(\d+)/, '$1.$2.$3');
@@ -2698,7 +3199,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${goalAsk ? (() => { const settled = (DATA.ooda.answered || []).filter((a) => a.goal === q.goal && a.kind !== 'goal-approval' && a.status === 'answered'); return settled.length ? `<div class="meta">Rests on your answers to: ${settled.map((a) => `${qlink(a.id, a.question)} (<b>${esc(a.answer)}</b>)`).join('; ')}</div>` : ''; })() : ''}
       ${isOa(q) ? oaSuggest(q) + oaRows(q, pre) : ''}
       ${(q.secrets || []).length ? `${secretsForm(q)}
-      <textarea data-q="${esc(q.id)}" placeholder="Or reply instead: a note for the supervisor (another way to do it, a question). Nothing is posted.">${esc(drafts[q.id] || '')}</textarea>` : `${goalSuggest(q, list)}${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
+      <textarea data-q="${esc(q.id)}" placeholder="Add a note (optional)">${esc(drafts[q.id] || '')}</textarea>` : `${goalSuggest(q, list)}${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
       <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`}
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
@@ -2725,7 +3226,31 @@ function cardHead(icon, label, { extra = '', id = null, rows = [], open = null, 
   return `<div class="card-head">${lead}<i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
 }
 const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap', review: 'list-checks' };
-const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
+const fileHref = (l) => (!l.repo && repoDocHref(l.path, l.ref)) || `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
+// Where a path into another repo opens, or null for a home path. Its first folder (after one ../, a
+// link's default checkout place) is a repo link's id or its remote's repository name. On GitHub: the
+// file's blob at ref (a ticket merged in that repo: its merge commit, since its branch may be gone;
+// no ref: the default branch), opened in a new tab by its callers; any other remote: that repo's peek.
+function repoDocHref(path, ref) {
+  if (typeof path !== 'string') return null;
+  const segs = path.split('/');
+  if (segs[0] === '..') segs.shift();
+  const [dir, ...rest] = segs;
+  if (!dir || !rest.length || rest.some((s) => !s || s === '.' || s === '..')) return null;
+  const name = (r) => String(r ?? '').replace(/\/+$/, '').replace(/\.git$/, '').split(/[/:]/).pop().toLowerCase();
+  const link = (DATA?.library?.links || []).find((x) => x?.kind === 'repo' && (String(x.id).toLowerCase() === dir.toLowerCase() || (x.remote && name(x.remote) === dir.toLowerCase())));
+  if (!link) return null;
+  if (ref != null && (typeof ref !== 'string' || ref.split('/').some((s) => !s || s === '.' || s === '..'))) return null;
+  const tid = /^ticket\/(.+)$/.exec(ref ?? '')?.[1];
+  const t = tid ? ticketMap().get(tid) : null;
+  const at = t?.merge_sha && t.repo === link.id ? t.merge_sha : ref || null;
+  const remote = String(link.remote ?? '').trim();
+  const gh = /^[A-Za-z0-9][\w.-]*\/[\w.-]+$/.test(remote) ? remote.replace(/\.git$/, '').split('/')
+    : (/^(?:https?:\/\/|ssh:\/\/(?:[^@/\s]+@)?|[^@/\s]+@)github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(remote) || []).slice(1);
+  const inner = rest.join('/');
+  if (gh.length === 2) return `https://github.com/${gh.map(encodeURIComponent).join('/')}/blob/${at ? at.split('/').map(encodeURIComponent).join('/') : 'HEAD'}/${rest.map(encodeURIComponent).join('/')}`;
+  return `#file?${new URLSearchParams({ path: inner, ...(at ? { ref: at } : {}), repo: link.id, title: inner })}`;
+}
 // An artifact link opens the viewer. The server resolves an open question's links (href, changed,
 // gone); a link it didn't resolve (an answered question's) opens the artifact where it was asked.
 const artHref = (slug, at) => `#artifact/${at === 'main' ? 'main' : `wt/${encodeURIComponent(at)}`}/${encodeURIComponent(slug)}`;
@@ -2735,7 +3260,7 @@ const artLinkOf = (l, inline = false) => {
   if (!href) return `<span>${esc(l.title)} <span class="muted">(no longer available)</span></span>`;
   return `<a href="${esc(href)}" data-av-note="${l.changed ? AV_CHANGED : ''}"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>${l.changed && !inline ? ' <span class="badge high">changed since asked</span>' : ''}`;
 };
-const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
+const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : l.path ? ((h) => (/^https:/.test(h) ? `<a href="${esc(h)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : `<a href="${esc(h)}">${esc(l.title)}</a>`))(fileHref(l)) : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
 // A question's text with each [[name]] drawn in place as that link (every link is still listed under
 // the question). The rest is linkified as before; a [[name]] that names no link stays as written.
 const NAME_REF = /\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/;
@@ -2947,7 +3472,7 @@ function reviewCard(q, o, reasonText) {
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
       ${nextTime(q, cls)}
       <div class="row-inline"><button data-open-review="${esc(q.id)}" ${ok ? '' : 'disabled'}>Open the review</button><button class="ghost" data-decline-open="${esc(q.id)}">Send it back</button><span class="err" id="e-${esc(q.id)}"></span></div>
-      <div data-decline-form="${esc(q.id)}" ${declineOpen ? '' : 'hidden'}><textarea data-q="${esc(q.id)}" placeholder="What should change? The supervisor redraws the page and asks again.">${esc(drafts[q.id] || '')}</textarea><div class="row-inline"><button class="ghost" data-decline="${esc(q.id)}">Send it back</button></div></div>
+      <div data-decline-form="${esc(q.id)}" ${declineOpen ? '' : 'hidden'}><textarea data-q="${esc(q.id)}" placeholder="What should change?">${esc(drafts[q.id] || '')}</textarea><div class="row-inline"><button class="ghost" data-decline="${esc(q.id)}">Send it back</button></div></div>
       ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
 }
@@ -3168,7 +3693,7 @@ function renderReviewActions() {
     <button data-rv-answer disabled>Answer</button>
     <span class="rv-why" id="rv-why"></span>
     <button class="ghost" data-rv-decline-open ${RV.preview ? 'disabled' : ''}>Send it back</button>
-    <div id="rv-decline-form" hidden><textarea id="rv-decline-note" placeholder="What should change? The supervisor redraws the page and asks again."></textarea><button class="ghost" data-rv-decline style="margin-top:6px">Send it back with this note</button></div>
+    <div id="rv-decline-form" hidden><textarea id="rv-decline-note" placeholder="What should change?"></textarea><button class="ghost" data-rv-decline style="margin-top:6px">Send it back with this note</button></div>
     <span class="err" id="e-rv"></span>`;
   updateAnswerButton();
 }
@@ -3200,12 +3725,12 @@ function renderReviewPreview() {
   const raw = (text, bytes, sha, what) => `<p class="meta">${what}: <b>${Number(bytes).toLocaleString()}</b> bytes, sha256 <code>${esc(sha.slice(0, 12))}</code>. <a class="linkish" data-rv-raw>${RV.rawOpen ? 'Hide' : 'Show'} raw JSON</a></p><pre class="rv-raw" ${RV.rawOpen ? '' : 'hidden'}>${esc(text)}</pre>`;
   if (!RV.preview && RV.readonly) {
     const doc = info.result_doc;
-    el.innerHTML = doc ? `<h3>Your answer, as recorded <span class="dim">drawn by the dashboard from the stored result</span></h3>${resultPreview(doc, info.data, true)}${raw(JSON.stringify(doc, null, 2), info.result.bytes, info.result.sha256, 'The stored result')}` : `<h3>${info.declined ? 'Sent back, with no result' : 'No result recorded'}</h3>`;
+    el.innerHTML = doc ? `<h3>Your answer, as recorded</h3>${resultPreview(doc, info.data, true)}${raw(JSON.stringify(doc, null, 2), info.result.bytes, info.result.sha256, 'The stored result')}` : `<h3>${info.declined ? 'Sent back, with no result' : 'No result recorded'}</h3>`;
     return;
   }
   const p = RV.proposal;
-  el.innerHTML = `<h3>What you’re answering <span class="dim">drawn by the dashboard, not the page</span></h3>
-    ${p ? resultPreview(p.obj, info.data, true) + raw(p.text, p.bytes, p.sha256, RV.preview ? 'What the page proposes (in a real question, what the agent would receive)' : 'This is exactly what the agent will receive') : '<p class="empty">Nothing proposed yet. Work through the page above; its answer shows here.</p>'}
+  el.innerHTML = `<h3>What you’re answering</h3>
+    ${p ? resultPreview(p.obj, info.data, true) + raw(p.text, p.bytes, p.sha256, RV.preview ? 'What the page proposes (in a real question, what the agent would receive)' : 'This is exactly what the agent will receive') : empty('None')}
     ${RV.dropped ? `<p class="meta">${RV.dropped} message${RV.dropped === 1 ? '' : 's'} from the page ${RV.dropped === 1 ? 'was' : 'were'} refused.</p>` : ''}`;
 }
 async function setProposal(result) {
@@ -3799,8 +4324,7 @@ function renderGoals() {
   let body;
   if (GOALS_TAB === 'active') {
     const cards = [DATA.upkeep ? upkeepCardHtml(DATA.upkeep, DATA.upkeep_days) : '', ...live.map((g, i) => goalCardHtml(g, R, openQs, { i, n: live.length }))].filter(Boolean);
-    const ask = openQs.find((q) => q.kind === 'goal-definition');
-    body = (cards.length ? grid(cards) : '') + (o.goals.length ? live.length ? '' : '<p class="empty">None</p>' : empty(ask ? `No goals yet. The supervisor has asked for them: <a class="linkish" href="#q/${encodeURIComponent(ask.id)}">answer it in the Inbox</a>.` : 'No goals yet. The supervisor asks the owner for them first (<code>process/planning.md</code> §1).'));
+    body = (cards.length ? grid(cards) : '') + (o.goals.length ? live.length ? '' : '<p class="empty">None</p>' : empty('None'));
   } else {
     const list = GOALS_TAB === 'met' ? met : gone;
     body = list.length ? grid(list.map((g) => closedGoalCardHtml(g, R, openQs))) : '<p class="empty">None</p>';
@@ -4068,13 +4592,7 @@ function renderOoda(o) {
 
   /* ooda-orient end */
   /* ooda-trust start */
-  // Trust Ladder
-  $('trust-table').innerHTML = '<tr><th>Kind of decision</th><th>Now</th><th>At most</th><th>Agreed with you</th><th>Corrected</th></tr>' + o.trust.map((t) => `
-    <tr><td>${esc(cap(t.about || words(t.class)))}<div class="muted small">${esc(t.class)}</div></td><td>${esc(RUNG_WORDS[t.rung])}</td><td>${esc(RUNG_WORDS[t.ceiling])}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}% of the last ${esc(t.agreement_questions.length)}`}${t.can_ask ? '<div><span class="badge good">ready to ask you for more trust</span></div>' : ''}</td><td>${t.corrections ? `${esc(t.corrections)} time${t.corrections > 1 ? 's' : ''}` : 'never'}</td></tr>`).join('');
-
-  const moves = (o.trust || []).flatMap((t) => (t.history || []).map((e) => ({ ...e, rung: Math.min(e.rung, t.ceiling), class: t.class, about: t.about }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
-  $('trust-history').innerHTML = moves.length ? moves.map((e) => `<div class="card small${e.by === 'correction' ? ' corrected' : ''}"><div>${esc(cap(e.about || words(e.class)))}: <b>${esc(RUNG_WORDS[e.rung])}</b>
-    <div class="meta">${esc(when(e.at))} · ${e.by === 'correction' ? `a correction on ${linkify(e.id)}: ${esc(e.why)}` : `your answer to ${qlink(e.id)}`}</div></div></div>`).join('') : empty('No moves yet. Every kind of decision is on its starting rung.');
+  // Trust is its own page now (kit-93): renderTrust draws it from render, so the loop draws nothing here
 
   /* ooda-trust end */
   /* ooda-decide start */
@@ -4167,7 +4685,8 @@ const TYPE_META = {
   wave: ['waves', 'Wave'], milestone: ['milestone', 'Milestone'], act: ['zap', 'Act'], decision: ['scale', 'Decision'], retro: ['history', 'Retro'],
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
   q: ['circle-help', 'Question'], file: ['file-text', 'File'], sensor: ['activity', 'Sensor'],
-  observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'],
+  observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'], lib: ['library', 'Library item'],
+  class: ['shield-check', 'Kind of decision'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -4209,6 +4728,8 @@ const KEY_TIPS = {
   Version: 'The ref the file is shown at.', Commits: 'How many commits changed it.', Reads: 'What it reads.', Triage: 'When a new error is sorted.', 'Last run': 'When it last ran, and how it went.', Today: 'What it read today.', 'Invalid lines': 'Lines it could not read.',
   'Measured by': 'What says it is met.', Opened: 'When it was created, and by whom.', 'Held because': 'Why it is held, while it is.', 'What it covers': 'The work it holds.', 'Chores in flight': 'Its chores not merged yet.',
   Checks: 'What it requests and what counts as up.', Uptime: 'The share of checks that passed.', 'Response time': 'p50 and p95 latency.', 'Last check': 'When it last checked.', Certificate: 'The TLS certificate, if any.',
+  Now: 'How this kind of decision is made today.', 'At most': 'The furthest this kind may go without asking, whatever you answer.', Since: 'When its level last moved.',
+  'Agreed with you': 'How often your answers went with its recommendation, over the questions it counts.', Levels: 'The three ways a kind of decision is made, the one it is on marked.',
 };
 // none of the three: no tip (and the peek test's "every key has a tooltip" fails)
 const keyTip = (label, tip, field) => tip || KEY_TIPS[label] || (field ? `Stored on the record as ${field}.` : '');
@@ -4455,7 +4976,7 @@ let LAST_HTML = '';
 let AFTER = [];
 // The hash that opens a record's peek: #<kind>/<encoded id>; a file's is #file?path=<encoded path>.
 const peekFor = (kind, id) => (kind === 'file' ? `#file?path=${encodeURIComponent(id)}` : `#${kind}/${encodeURIComponent(id)}`);
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -4626,13 +5147,13 @@ function historySection(peek, self) {
   const card = (html) => psect('History', html);
   if (peek === undefined) return card('<p class="loading">Loading…</p>');
   if (peek?.transient) return card(empty('Could not load it just now.'));
-  if (!peek || peek.error) return card(empty('Nothing logged yet.'));
+  if (!peek || peek.error) return card(empty('None'));
   if (DRAWER.kind === 'file') {
     const cs = peek.history || [];
-    return card(cs.length ? `<ol class="tl">${cs.map((c) => `<li><time>${esc(when(c.at))}</time>${esc(c.subject)} <span class="muted">· ${esc(c.author)} · <code>${esc(c.sha.slice(0, 12))}</code></span></li>`).join('')}</ol>` : empty('Not committed yet.'));
+    return card(cs.length ? `<ol class="tl">${cs.map((c) => `<li><time>${esc(when(c.at))}</time>${esc(c.subject)} <span class="muted">· ${esc(c.author)} · <code>${esc(c.sha.slice(0, 12))}</code></span></li>`).join('')}</ol>` : empty('None'));
   }
   const items = (peek.history || []).map((l) => [l, lineView(l, self)]).filter(([, x]) => x);
-  return card(items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('Nothing logged yet.'));
+  return card(items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('None'));
 }
 
 // ---- pieces the bodies share ----
@@ -4660,7 +5181,7 @@ function depGraph(ts, { focus = null, groups = null } = {}) {
 function designBlock(d, label = 'Design') {
   if (!d) return '';
   const href = fileHref({ title: label, path: d.path, ...(d.ref ? { ref: d.ref } : {}) });
-  const md = d.tldr && window.marked && window.DOMPurify ? DOMPurify.sanitize(marked.parse(d.tldr, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : d.tldr ? `<pre>${esc(d.tldr)}</pre>` : '<p class="muted">It has no TL;DR yet.</p>';
+  const md = d.tldr && window.marked && window.DOMPurify ? DOMPurify.sanitize(marked.parse(d.tldr, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : d.tldr ? `<pre>${esc(d.tldr)}</pre>` : empty('None');
   return psect(`${label}: the TL;DR`, `<div class="md tldr">${md}</div><p class="small"><a class="linkish" href="${esc(href)}">Read the whole design</a></p>`);
 }
 const reviewList = (rs) => (rs?.length ? `<ul>${rs.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || 'not done')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '');
@@ -4774,7 +5295,7 @@ function progressBlock(items) {
   return `<div class="no-shell">${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
     <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left${usd ? ` · $${usd.toFixed(2)} spent` : ''}</p>
     ${live.length ? `<div class="card chart peek-chart" id="peek-card"><div class="legend" id="peek-legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div><div id="peek-burnup"></div><div class="tip" id="peek-tip"></div></div>` : ''}
-    <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}</div>`;
+    <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : empty('None')}</div>`;
 }
 const uniq = (xs) => [...new Set(xs.filter((x) => x !== undefined && x !== null && x !== ''))];
 const notFound = (kind, id, peek, text, { noRecord = false, rec = null } = {}) => showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, peek, type: kind, noRecord, rec })}${peek?.transient ? `<p class="err">Could not load it just now (${esc(peek.error)}); trying again.</p>` : text ? `<p class="muted">${text}</p>` : ''}${historySection(peek, id)}`);
@@ -4821,7 +5342,7 @@ function spendChart(spend) {
   if (!spend?.length) return '';
   const roles = uniq(spend.map((s) => s.role || 'agent'));
   const series = roles.map((r) => { let sum = 0; return { name: `${r} ($${spend.filter((s) => (s.role || 'agent') === r).reduce((a, s) => a + (s.usd || 0), 0).toFixed(2)})`, points: spend.filter((s) => (s.role || 'agent') === r).map((s) => [Date.parse(s.at), +(sum += s.usd || 0).toFixed(2)]) }; });
-  return psect('Spend over time', `${lineChart(series, { unit: '', height: 140 })}<p class="small muted">Cumulative dollars by role, from the agents' session logs.</p>`);
+  return psect('Spend over time', `${lineChart(series, { unit: '', height: 140 })}`);
 }
 
 // ---- monitoring ----
@@ -4842,7 +5363,7 @@ const pctOr = (x) => (x == null ? '–' : `${x}%`);
 // A sensor's latency over a range, from its bucketed samples: p50 and p95, against its target.
 function sensorChart(series, m, compact = false) {
   const bs = series?.buckets || [];
-  if (!bs.length) return '<p class="muted small">No checks in this range yet.</p>';
+  if (!bs.length) return empty('None');
   const p50 = bs.filter((b) => b.p50 != null).map((b) => [b.t, b.p50]);
   const p95 = bs.filter((b) => b.p95 != null).map((b) => [b.t, b.p95]);
   const down = bs.filter((b) => b.ok < b.n).length;
@@ -4861,51 +5382,36 @@ async function loadSensorSeries(name) {
   const m = (DATA.sensors || []).find((x) => x.name === name);
   if (el && m) el.innerHTML = sensorChart(MON_SERIES.get(name).data, m, true);
 }
-// Incidents as a board: new, triaged, fixing, merged, verifying, resolved (the last few), and
-// regressed in red.
-const INC_COLS = [['new', 'New'], ['triaged', 'Triaged'], ['fixing', 'Fixing'], ['merged', 'Merged'], ['verifying', 'Verifying'], ['resolved', 'Resolved'], ['regressed', 'Regressed']];
+// Incidents as a board in the design's five columns, each fed from incidentView's stages (kit-93 C1): Open
+// (new, and regressed in red), Investigating (triaged), Fixing (fixing, and merged: not yet verified),
+// Watching (verifying), Resolved (the last five).
+const INC_COLS = [['open', 'Open', ['new', 'regressed']], ['investigating', 'Investigating', ['triaged']], ['fixing', 'Fixing', ['fixing', 'merged']], ['watching', 'Watching', ['verifying']], ['resolved', 'Resolved', ['resolved']]];
 function incidentBoard(incs) {
-  if (!incs.length) return empty('No incidents. The supervisor folds what it triages into one when it is worth fixing or watching.');
-  return `<div class="board inc">${INC_COLS.map(([k, label]) => {
-    let cards = incs.filter((x) => x.stage === k);
+  if (!incs.length) return '<p class="empty">None</p>';
+  return `<div class="board inc">${INC_COLS.map(([k, label, stages]) => {
+    let cards = incs.filter((x) => stages.includes(x.stage));
     const total = cards.length;
     if (k === 'resolved') cards = cards.slice(-5);
     return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<div class="tcard${x.question?.status === 'open' || x.stage === 'regressed' ? ' blocked' : ''}"${subj('problem', x.id, x.title)} role="button" tabindex="0" data-open="problem/${esc(encodeURIComponent(x.id))}" aria-label="Open ${esc(x.title)}">${cardMenu('problem', x.id)}
       <div class="t"><a class="title-link" href="${esc(peekFor('problem', x.id))}"><b>${esc(x.title)}</b></a></div>
       <div class="muted">severity ${esc(x.severity)} · ${esc(x.events)} event(s)${x.component ? ` · ${esc(x.component)}` : ''}</div>
-      ${x.waiting ? `<div class="pills"><span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span></div>` : ''}
+      ${x.stage === 'merged' || x.stage === 'regressed' || x.waiting ? `<div class="pills">${x.stage === 'merged' ? '<span class="badge pill">merged, not yet verified</span>' : ''}${x.stage === 'regressed' ? '<span class="badge pill high">regressed</span>' : ''}${x.waiting ? `<span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span>` : ''}</div>` : ''}
     </div>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('')}</div>`;
 }
 function renderMonitoring(d) {
   const ms = d.sensors || [];
   const down = ms.filter((m) => m.state === 'down');
-  $('n-sensors').textContent = down.length ? `${down.length} down` : '';
-  $('n-sensors').classList.toggle('hot', down.length > 0);
   const banner = down.length ? `<i class="icon-triangle-alert" aria-hidden="true"></i> ${down.map((m) => `<a href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a> is down since ${esc(when(m.since))}${m.last?.error ? ` (${esc(m.last.error)})` : ''}`).join('; ')}` : '';
   // only when it changes, so a screen reader announces an outage once
   if ($('down-banner').innerHTML !== banner) { $('down-banner').innerHTML = banner; $('down-banner').hidden = !down.length; }
-  $('sensors').innerHTML = ms.length ? `<div class="mon-grid">${ms.map((m) => {
-    const [tone, label] = monState(m);
-    if (m.kind !== 'http') return `<div class="card mon-card">
-      <h4><a class="title-link" href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
-      <div class="mon-url">${esc(m.kind)} · ${esc(m.probe || '')}${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}</div>
-      <div class="mon-stats"><span>today <b>${esc(m.today.events)}</b> event(s)</span><span><b>${esc(m.today.qualified)}</b> new for triage</span><span><b>${esc(m.fingerprints)}</b> fingerprint(s)</span>${m.today.mean_ms != null ? `<span>run <b>${esc(m.today.mean_ms < 1000 ? `${m.today.mean_ms}ms` : `${(m.today.mean_ms / 1000).toFixed(1)}s`)}</b></span>` : ''}<span class="muted">${m.last_at ? `ran ${esc(when(m.last_at))}` : 'never run'}</span></div>
-      ${m.last && !m.last.ok ? `<p class="small">${esc(m.last_error || m.last.error || 'failed')}${m.backoff_minutes ? ` · trying again in ${esc(m.backoff_minutes)} min` : ''}</p>` : ''}
-    </div>`;
-    return `<div class="card mon-card">
-      <h4><a class="title-link" href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
-      <div class="mon-url">${esc(m.url || '')}</div>
-      <div class="mon-stats"><span>24h <b>${esc(pctOr(m.uptime_24h))}</b> up</span><span>7d <b>${esc(pctOr(m.uptime_7d))}</b></span><span>p50 <b>${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)}</b></span><span>p95 <b>${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)}</b></span>${m.tls_days != null ? `<span>certificate <b>${esc(m.tls_days)}d</b></span>` : ''}<span class="muted">checked ${m.last_at ? esc(when(m.last_at)) : 'never'}</span></div>
-      <div data-mon-chart="${esc(m.name)}">${MON_SERIES.get(m.name)?.data ? sensorChart(MON_SERIES.get(m.name).data, m, true) : '<p class="muted small">Loading…</p>'}</div>
-    </div>`;
-  }).join('')}</div>` : empty('No sensors yet. The supervisor starts one for each production URL, log and error tracker it finds (settings <code>sensors</code>), and polls them while it runs.');
-  for (const m of ms.filter((x) => x.kind === 'http')) loadSensorSeries(m.name);
-  $('incidents').innerHTML = incidentBoard(d.incidents || []);
-  const feed = d.sensor_feed || [];
-  $('sensor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
-  const obs = (d.ooda?.observations || []).filter((o) => /^sensor:/.test(o.subject || ''));
-  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)} role="button" tabindex="0" data-open="observation/${esc(encodeURIComponent(o.id))}"><div><div class="act-head">${titled(peekFor('observation', o.id), `${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}`)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div>${cardMenu('observation', o.id)}</div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+  // the page (kit-93): its tabs, then Production or Fleet, written only when its HTML changed (focus kept)
+  const fs = d.metrics?.findings || [];
+  const html = tabBar({ tabs: [{ id: 'production', label: 'Production', count: ms.length }, { id: 'fleet', label: 'Fleet', count: fs.length, waiting: true }], selected: SENSOR_TAB })
+    + (SENSOR_TAB === 'fleet' ? sensorsFleet(d) : sensorsProduction(d));
+  const el = $('monitoring');
+  if (el.__html !== html) { el.__html = html; el.innerHTML = html; bindPageTables(el, () => renderMonitoring(DATA)); }
+  if (SENSOR_TAB !== 'fleet') for (const m of ms.filter((x) => x.kind === 'http')) loadSensorSeries(m.name);
 }
 function openSensor(name) {
   drawerFor('sensor', name);
@@ -4924,7 +5430,8 @@ function openSensor(name) {
       ['Invalid lines', m.invalid ? esc(m.invalid.lines.map((l) => l.why).join('; ')) : '', 'Lines its last run printed that are not events: the provider may have changed its API (probe-drift).'],
     ] })}
     ${(p?.ignores || []).length ? psect('Ignored', `<ul>${p.ignores.map((x) => `<li><code>${esc(x.fingerprint)}</code>: ${esc(x.reason)} <span class="muted">(${esc(who(x.by))}, ${esc(when(x.at))}; lift with <code>sensor unignore ${esc(x.fingerprint)} --owner</code>)</span></li>`).join('')}</ul>`) : ''}
-    ${psect('What it read', (p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>')}
+    ${psect(m.fingerprints > 0 ? 'Fingerprints' : 'What it read', (p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : empty('None'))}
+    ${sensorPeekRows(name, DATA)}
     ${historySection(p, `sensor:${name}`)}`);
   showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
     ${attrs({ id: name, idTip: 'Its name in the settings (sensors).', peek: p, noRecord: true, computed: [
@@ -4938,6 +5445,7 @@ function openSensor(name) {
     ] })}
     ${p?.series ? `${psect('Last 24 hours', sensorChart(p.series['24h'], m))}${psect('Last 7 days', sensorChart(p.series['7d'], m))}` : '<p class="loading">Loading…</p>'}
     ${fails.length ? psect('Failed checks', `<ul>${fails.map((s) => `<li>${esc(when(s.at))}: ${esc(s.error || 'failed')}${s.ms != null ? ` <span class="muted">(${esc(s.ms)}ms)</span>` : ''}</li>`).join('')}</ul>`) : ''}
+    ${sensorPeekRows(name, DATA)}
     ${historySection(p, `sensor:${name}`)}`);
 }
 
@@ -4973,7 +5481,7 @@ async function openTicket(id) {
 // correction of the goal-impact decision that carries the impact the owner gives; it stands).
 function impactBlock(g) {
   const i = g.impact;
-  if (!i) return ['ready', 'draft'].includes(g.status) ? '<span class="muted">Not judged yet. Its questions are ordered as if it were worth having.</span>' : '';
+  if (!i) return ['ready', 'draft'].includes(g.status) ? empty('None') : '';
   const key = `imp:${i.decision}`;
   return `<b>${esc(cap(i.words))}</b> <span class="muted">(${esc(i.level)} of 4)</span>${i.rationale ? `<div>${linkify(i.rationale)}</div>` : ''}
     <div class="muted">${i.by === 'owner' ? 'You set it' : 'Judged by the supervisor'} ${esc(when(i.at))} · ${dlink(i.decision, 'the decision')} · <a class="linkish" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy">the strategy</a>${i.rejudge ? ` · corrected (${esc(i.correction)}); the supervisor is judging it again` : ''}</div>
@@ -4994,7 +5502,7 @@ const GOAL_PEEK = {
 const gpCard = (id, html) => String(html || '').replace(/<div class="card psect"/g, `<div class="card psect" data-gp="${id}"`);
 const GOAL_PEEK_SECTIONS = {
   steps: (g, c) => { const bar = goalStepsOf(g, c.s, c.R); return bar || c.s.next ? gpCard('steps', psect('Steps', `${bar}${c.s.next ? `<p class="goal-next measure">${c.s.next}</p>` : ''}`)) : ''; },
-  readings: (g, c) => gpCard('readings', psect('Readings', c.readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: c.readings }], { marks: c.marks, unit: c.unit }) : '<p class="muted">No readings yet. The supervisor reads the measure on its tick (devteam.mjs goal reading).</p>')),
+  readings: (g, c) => gpCard('readings', psect('Readings', c.readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: c.readings }], { marks: c.marks, unit: c.unit }) : empty('None'))),
   tldr: (g, c) => gpCard('tldr', designBlock(c.p?.design)),
   problems: (g, c) => (c.problems.length ? gpCard('problems', psect('Problems that threaten it', c.problems.map((x) => `<div class="card small"><span class="badge ${sevBadge(x.severity)}">sev ${esc(x.severity)}</span> <a class="linkish" href="#problem/${encodeURIComponent(x.id)}">${esc(x.title)}</a> <span class="muted">· ${esc(x.status)}${x.realized ? '' : ' · a risk'}</span></div>`).join(''))) : ''),
   decisions: (g, c) => (c.calls.length ? gpCard('decisions', psect('Decisions and acts', `<ol class="tl">${c.calls.slice(0, 30).map((x) => `<li class="act"><time>${esc(when(x.at))}</time>${x.kind === 'decision' ? dlink(x.id, x.what) : `<a class="linkish" href="#act/${encodeURIComponent(x.id)}">${esc(x.what)}</a>`} <span class="muted">· ${authorityWords(x.under)}</span></li>`).join('')}</ol>`)) : ''),
@@ -5004,7 +5512,7 @@ const GOAL_PEEK_SECTIONS = {
     const days = heartbeatDays(c.days);
     if (!days.length) return '';
     const busy = days.filter((d) => d.items.length || d.failed).reverse();
-    return gpCard('heartbeat', psect('Heartbeat', `${heartbeat(days)}${busy.length ? `<ul class="hb-days">${busy.map((d) => `<li><b>${fmtDay(d.day)}</b>${d.failed ? ' <span class="badge high">failed</span>' : ''}${d.items.length ? `: ${d.items.map(esc).join('; ')}` : ''}</li>`).join('')}</ul>` : '<p class="muted">Quiet: nothing ran in these days.</p>'}`));
+    return gpCard('heartbeat', psect('Heartbeat', `${heartbeat(days)}${busy.length ? `<ul class="hb-days">${busy.map((d) => `<li><b>${fmtDay(d.day)}</b>${d.failed ? ' <span class="badge high">failed</span>' : ''}${d.items.length ? `: ${d.items.map(esc).join('; ')}` : ''}</li>`).join('')}</ul>` : empty('None')}`));
   },
   chores: (g, c) => { const cs = c.u.chores || []; return cs.length ? gpCard('chores', psect('Chores in flight', `<ul>${cs.map((x) => `<li><a class="linkish" href="#ticket/${encodeURIComponent(x.id)}">${esc(x.id)}</a>${x.title ? ` ${esc(x.title)}` : ''} <span class="muted">· ${esc(STAGE_WORDS[x.stage] || x.stage || '')}</span></li>`).join('')}</ul>`)) : ''; },
 };
@@ -5076,7 +5584,7 @@ function openGoal(id) {
     ${attrs({ id, peek: p, type: 'goal', rename: { Created: 'Opened' }, front, ctx: { unplanned: g.status === 'ready' ? (r?.unplanned || []).map((u) => u.n) : [] }, computed: [
       ['State', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, 'Where the goal is: defining, waiting for your approval, planning, building, measuring, met, held or let go.'],
       ['Design', design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a>` : '', 'The design document its features implement.'],
-      ['Forecast', (g.forecast?.milestones || []).length ? `<ol>${g.forecast.milestones.map((m) => `<li>${mlink(g.id, m.n, m.title)}: ${esc(m.target)}${unitOf(g.measure?.unit)}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet: sizes only, dates once tickets merge.</div>'}` : '', 'Each milestone: points left and an ETA at the recent rate.'],
+      ['Forecast', (g.forecast?.milestones || []).length ? `<ol>${g.forecast.milestones.map((m) => `<li>${mlink(g.id, m.n, m.title)}: ${esc(m.target)}${unitOf(g.measure?.unit)}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet</div>'}` : '', 'Each milestone: points left and an ETA at the recent rate.'],
       ['Features', feats.length ? `<ul>${feats.map((v) => `<li>${flink(v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul>` : '', 'The features planned for it, and how far each is.'],
       ['Planners', planningFor(g).length ? planningFor(g).map((x) => `<a href="#planner/${encodeURIComponent(x.feature)}">${esc(x.title)}</a> (${esc(ago(x.minutes_silent))})`).join(', ') : '', 'Planners working on its features now.'],
       ['Your verdicts', verdicts.length ? `<ul>${verdicts.map((d) => `<li><b>${esc(words(d.verdict))}</b>${d.notes ? `: ${esc(d.notes)}` : ''}</li>`).join('')}</ul>` : '', 'Every verdict you gave on its design, oldest first.'],
@@ -5139,7 +5647,7 @@ function openRelease(r) {
       <li>${items.filter((t) => !isDone(t)).length} ticket${items.filter((t) => !isDone(t)).length === 1 ? '' : 's'} not merged</li>
       ${gates.length && !tagged ? `<li>checks at the last merge into it (${p.last_merge?.ticket ? tlink(p.last_merge.ticket) : 'a ticket'}, <code>${esc(String(p.last_merge?.sha ?? '').slice(0, 12))}</code>): ${gates.map((g) => `<span class="gate-dot ${g.ok ? 'ok' : 'fail'}">${g.ok ? '✓' : '✗'}</span> ${esc(g.gate)}`).join(' · ')}</li>` : ''}
     </ul>`)}
-    ${psect('Changelog', merged.length ? `<ul>${merged.map((t) => `<li>${tlink(t.id)} <span class="muted">· merged ${esc(when(t.merged_at))}</span></li>`).join('')}</ul>` : '<p class="muted">Nothing merged yet.</p>')}` });
+    ${psect('Changelog', merged.length ? `<ul>${merged.map((t) => `<li>${tlink(t.id)} <span class="muted">· merged ${esc(when(t.merged_at))}</span></li>`).join('')}</ul>` : empty('None'))}` });
 }
 function openWave(w) {
   const items = DATA.progress.tickets.filter((t) => String(t.wave) === String(w));
@@ -5252,7 +5760,7 @@ function openRetro(id) {
       ['Write-up', file ? `<a class="linkish" href="${esc(fileHref(file))}">${esc(file.title)}</a>` : '', 'The retro\'s document.'],
     ] })}
     <p class="ctx measure">${linkify(r.summary)}</p>
-    ${keys.length ? psect('The numbers', `<div class="scroll"><table class="nums"><tr><th></th><th>This retro</th><th>The one before</th></tr>${keys.map((k) => `<tr><td>${esc(words(k))}</td><td>${val(nums.now[k])}</td><td>${val(nums.prev?.[k])}</td></tr>`).join('')}</table></div>`) : nums ? '<p class="muted">Its write-up has no numbers block.</p>' : ''}
+    ${keys.length ? psect('The numbers', `<div class="scroll"><table class="nums"><tr><th></th><th>This retro</th><th>The one before</th></tr>${keys.map((k) => `<tr><td>${esc(words(k))}</td><td>${val(nums.now[k])}</td><td>${val(nums.prev?.[k])}</td></tr>`).join('')}</table></div>`) : nums ? empty('None') : ''}
     <p class="meta">${[nav(all[i + 1], '← the one before,'), nav(all[i - 1], 'the next,')].filter(Boolean).join(' · ')}</p>
     ${historySection(p, id)}`);
 }
@@ -5420,9 +5928,9 @@ function openSignal(key) {
       ['Explained already', s?.explained?.length ? `${esc(s.explained.length)} earlier observation${s.explained.length > 1 ? 's' : ''} on this key` : '', 'Ones a lesson, a problem or a ruling already explains.'],
     ] })}
     ${c?.latest ? `<p class="ctx measure">${linkify(c.latest)}</p>` : ''}
-    ${psect('Its observations', items.length ? `<ul>${items.map((i) => `<li><a class="linkish" href="#observation/${encodeURIComponent(i.id)}">${esc(when(i.at))}</a> ${linkify(clip(i.detail, 160))} <span class="muted">· ${esc(who(i.by))}</span></li>`).join('')}</ul>` : p === undefined ? '<p class="loading">Loading…</p>' : empty('None unexplained.'))}
+    ${psect('Its observations', items.length ? `<ul>${items.map((i) => `<li><a class="linkish" href="#observation/${encodeURIComponent(i.id)}">${esc(when(i.at))}</a> ${linkify(clip(i.detail, 160))} <span class="muted">· ${esc(who(i.by))}</span></li>`).join('')}</ul>` : p === undefined ? '<p class="loading">Loading…</p>' : empty('None'))}
     ${lineageBlock(p)}
-    ${s?.explain?.length ? `<details><summary>How the supervisor explains it</summary><p class="small muted">With what it teaches, or a ruling that it is noise; you can correct either.</p>${s.explain.map((x) => `<pre>${esc(x)}</pre>`).join('')}</details>` : ''}
+    ${s?.explain?.length ? `<details><summary>How the supervisor explains it</summary>${s.explain.map((x) => `<pre>${esc(x)}</pre>`).join('')}</details>` : ''}
     ${historySection(p, key)}`);
 }
 // The weekly learning record: its figures, every record each counts (recomputed from the log as it
@@ -5450,9 +5958,9 @@ function openLearning(id) {
   showDrawer(`<h2 id="drawer-title">The week of ${esc(L?.from ? fmtDate(Date.parse(L.from)) : f.week)}</h2>
     ${attrs({ id, peek: p, type: 'observation' })}
     ${f.detail ? `<p class="ctx measure">${linkify(f.detail)}</p>` : ''}
-    ${psect('The figures', rows.length ? `<div class="scroll"><table class="nums" data-learning-figures><tr><th></th><th>Figure</th><th>Count</th><th>What it counted</th></tr>${rows.map(([g, k, v, xs]) => `<tr><td>${esc(g)}</td><td>${esc(k)}</td><td>${v}</td><td class="small">${L ? ids(xs) : '<span class="loading">Loading…</span>'}</td></tr>`).join('')}</table></div>` : empty('No figures on this record.'))}
-    ${psect('Lesson efficacy', `<p class="small muted">For each lesson a worker or planner was given: what was seen on the signals it came from in the four weeks before it was first given, and since. Counts and records, not a score.</p>
-    ${L ? (eff.length ? `<div class="scroll"><table class="nums" data-efficacy><tr><th>Lesson</th><th>First given</th><th>Before</th><th>Since</th></tr>${eff.map((e) => `<tr><td><a class="linkish" href="#lesson/${encodeURIComponent(e.id)}">${esc(clip(e.statement || e.id, 80))}</a>${e.keys.length ? `<div class="small muted">${e.keys.map((k) => `<code>${esc(k)}</code>`).join(' ')}</div>` : '<div class="small muted">its evidence names no observation</div>'}</td><td>${esc(when(e.first_given))}</td><td>${esc(e.before.count)}<div class="small">${ids(e.before.ids)}</div></td><td>${esc(e.since.count)}<div class="small">${ids(e.since.ids)}</div></td></tr>`).join('')}</table></div>` : empty('No lesson was given to a worker or planner by the end of this week.')) : p === undefined ? '<p class="loading">Loading…</p>' : ''}`)}
+    ${psect('The figures', rows.length ? `<div class="scroll"><table class="nums" data-learning-figures><tr><th></th><th>Figure</th><th>Count</th><th>What it counted</th></tr>${rows.map(([g, k, v, xs]) => `<tr><td>${esc(g)}</td><td>${esc(k)}</td><td>${v}</td><td class="small">${L ? ids(xs) : '<span class="loading">Loading…</span>'}</td></tr>`).join('')}</table></div>` : empty('None'))}
+    ${psect('Lesson efficacy', `
+    ${L ? (eff.length ? `<div class="scroll"><table class="nums" data-efficacy><tr><th>Lesson</th><th>First given</th><th>Before</th><th>Since</th></tr>${eff.map((e) => `<tr><td><a class="linkish" href="#lesson/${encodeURIComponent(e.id)}">${esc(clip(e.statement || e.id, 80))}</a>${e.keys.length ? `<div class="small muted">${e.keys.map((k) => `<code>${esc(k)}</code>`).join(' ')}</div>` : '<div class="small muted">its evidence names no observation</div>'}</td><td>${esc(when(e.first_given))}</td><td>${esc(e.before.count)}<div class="small">${ids(e.before.ids)}</div></td><td>${esc(e.since.count)}<div class="small">${ids(e.since.ids)}</div></td></tr>`).join('')}</table></div>` : empty('None')) : p === undefined ? '<p class="loading">Loading…</p>' : ''}`)}
     ${lineageBlock(p)}
     ${historySection(p, id)}`);
 }
@@ -5517,7 +6025,7 @@ function openPlanner(feature) {
   const pl = (DATA.planners || []).find((x) => x.feature === feature);
   const p = peekOf('planner', feature);
   const idTip = 'The planner\'s name: plan- and the feature it plans. Its tmux window and log file use it.';
-  if (!pl) return showDrawer(`<h2 id="drawer-title">${esc(feature)}</h2>${attrs({ id: `plan-${feature}`, idTip, peek: p, noRecord: true, rec: { id: feature } })}<p class="muted">No planner is working on it; its plan may have landed already.</p>${historySection(p, `plan-${feature}`)}`);
+  if (!pl) return showDrawer(`<h2 id="drawer-title">${esc(feature)}</h2>${attrs({ id: `plan-${feature}`, idTip, peek: p, noRecord: true, rec: { id: feature } })}${empty('None')}${historySection(p, `plan-${feature}`)}`);
   const draft = (p?.draft || []).map((t) => ({ ...t, stage: 'planned', depends_on: t.depends_on || [] }));
   showDrawer(`<h2 id="drawer-title">Planning ${esc(pl.title)}</h2>
     ${attrs({ id: `plan-${pl.feature}`, idTip, peek: p, noRecord: true, rec: { id: feature }, computed: [
@@ -5531,8 +6039,7 @@ function openPlanner(feature) {
       ['Branch', `<code>${esc(pl.branch)}</code>`, 'Where its plan is being written.'],
     ] })}
     ${designBlock(p?.design, 'Its design')}
-    ${draft.length ? psect('Its draft', `<p class="small muted">The tickets its plan holds so far; they reach the board when its plan PR lands.</p><div class="board board-peek" style="--cols:1">${boardCols(draft, new Set(), { only: true, inert: true })}</div>${draft.length > 1 ? depGraph(draft) : ''}`) : ''}
-    <p class="meta">Its plan lands as one reviewed PR; until then its tickets aren't on the board.</p>
+    ${draft.length ? psect('Its draft', `<div class="board board-peek" style="--cols:1">${boardCols(draft, new Set(), { only: true, inert: true })}</div>${draft.length > 1 ? depGraph(draft) : ''}`) : ''}
     ${historySection(p, `plan-${feature}`)}`);
 }
 function openQuestion(id) {
@@ -5676,9 +6183,13 @@ function avFreshFrame(id) {
   return f;
 }
 function avHeader() {
-  const a = (DATA?.library?.artifacts ?? []).find((x) => x.slug === AV.slug && x.at === AV.at);
-  $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
-  $('av-where').innerHTML = AV.at === 'main' ? 'landed' : `draft in ${linkify(AV.at)}`;
+  const rows = (DATA?.library?.artifacts ?? []).filter((x) => x.slug === AV.slug);
+  const a = rows.find((x) => x.at === AV.at);
+  // a picked earlier version has no row (it is a tree): the title it has stays, so a poll never resets it to the slug
+  if (!AV.picked?.earlier) $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
+  avKindDraw(rows.length ? (a ?? rows[0]).kind ?? 'mock' : null);
+  avVerDraw();
+  avPubDraw();
 }
 // Where an artifact's page is served: main, a draft's worktree, or a published version by its tree.
 const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).startsWith('tree:') ? `tree/${String(at).slice(5)}` : `wt/${encodeURIComponent(at)}`}/${slug}/`;
@@ -5706,15 +6217,25 @@ function tsSet(kind, info = {}) {
 }
 // The stage, in the dashboard or as a viewer tab: the page in its frame, the bar, and the lens's
 // state for it. title: the viewer's (from /api/view); the dashboard's comes from its data.
-function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null } = {}) {
+// picked: a version picked from the bar's list ({ at, label, earlier }), which keeps the versions this open has read.
+function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null, picked = null } = {}) {
   const src = artSrc(slug, at);
-  AV = { at, slug };
+  const keep = picked && AV?.slug === slug ? AV : null;
+  AV = { at, slug, picked, vers: keep?.vers ?? null, known: keep?.known ?? null };
+  // the bar's lists closed, a preview's buttons and error span gone
+  avPopsClose();
+  avRunDraw();
+  avRunErr(null);
   if (title) {
     $('av-title').textContent = title;
-    $('av-where').innerHTML = at === 'main' ? 'landed' : String(at).startsWith('tree:') ? 'the published version' : `draft in ${linkify(at)}`;
+    avKindDraw(null);
+    avVerDraw();
+    avPubDraw();
   } else avHeader();
-  $('av-note').hidden = !note;
-  $('av-note').textContent = note ?? '';
+  // an earlier version picked from the list is read-only, and says so
+  const said = picked?.earlier ? `Showing ${picked.label}, read-only` : note;
+  $('av-note').hidden = !said;
+  $('av-note').textContent = said ?? '';
   $('av-tab').href = artViewer(slug, at);
   // fp and mainFp are what the frame loads now; on the stage already shown its frame isn't loaded
   // again, so what it loaded stays, and what is given is only the latest seen
@@ -5735,6 +6256,8 @@ function avHint() {
   const b = $('av-reload');
   b.classList.toggle('stale', stale);
   b.title = stale ? 'A newer version is ready: reload to see it' : 'Load the page again';
+  // a picked earlier version is read-only: nothing to reload
+  b.hidden = !!AV?.picked?.earlier;
 }
 // The fingerprints just seen for an artifact there (null: not known), taken only while the stage
 // shows it; a published tree never changes, so it is never checked.
@@ -5750,6 +6273,11 @@ const pvViewer = (name) => `/view/preview/${encodeURIComponent(name)}`;
 function tsBar() {
   if (TS.kind !== 'preview') return;
   $('av-where').textContent = [TS.session ? `from ${TS.session}` : '', TS.route || '', TS.up === true ? 'live' : TS.up === false ? 'not answering' : ''].filter(Boolean).join(' · ');
+  // a preview has no versions: the pill is plain, not pressable
+  const v = $('av-ver');
+  v.disabled = true;
+  v.classList.add('plain');
+  v.classList.remove('amber');
 }
 // The stage on a preview: its lens where it is served (info: /api/view's, null when it said nothing),
 // framing the app at its root. A relay this page's own ask just opened is missing from the policy the
@@ -5761,6 +6289,12 @@ function showPreview(name, info) {
   if (info?.opened && VIEWER) { try { if (!sessionStorage.getItem(seen)) { sessionStorage.setItem(seen, '1'); location.reload(); return 'reload'; } } catch {} }
   else { try { sessionStorage.removeItem(seen); } catch {} }
   AV = { preview: name };
+  // the bar: no versions to list, no tile; Start and Stop from the data, the error span named for this preview
+  avPopsClose();
+  avKindDraw('preview');
+  avPubDraw();
+  avRunErr(name);
+  avRunDraw();
   $('av-title').textContent = info?.label || name;
   $('av-tab').href = pvViewer(name);
   const note = !info ? 'This preview is not offered here now' : !info.lens ? "This box's gateway doesn't show previews in a viewer yet; open its link instead" : info.opened ? 'Reload to view this preview' : null;
@@ -5937,6 +6471,10 @@ function showHead(p, opts) {
   showPage(p.page, opts);
   if (p.page === 'loop') { showTab(LOOP_TABS.includes(p.state?.lt) ? p.state.lt : 'observe'); tlPins(); }
   if (p.page === 'goals') { GOALS_TAB = GOALS_TABS.includes(p.state?.gt) ? p.state.gt : 'active'; renderGoals(); }
+  // Governance (kit-93): its listing read on arriving (unless read in the last minute), drawn meanwhile
+  if (p.page === 'governance') { renderGovernance(); loadGovernance(); }
+  // Sensors (kit-93): its tab from the head's st (fleet; none is Production), drawn again on every head change
+  if (p.page === 'sensors') { SENSOR_TAB = p.state?.st === 'fleet' ? 'fleet' : 'production'; if (DATA) renderMonitoring(DATA); }
   drawFilterPage(p.page);
 }
 // A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
@@ -6004,7 +6542,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // (at once: the card replaces the peek, with no slide)
   // (its own head first: a card on a framed page opens the viewer before this route ends)
   if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); LAST_HEAD = location.hash; return void tlRoute(h.slice(5)); }
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning, lib: openLib, class: openClass };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -6252,93 +6790,554 @@ const publicLinks = (me) => ({
   page: (slug) => `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`,
 });
 /* public-states end */
-// The Library: each landed artifact with its drafts beneath it, then drafts of slugs that haven't
-// landed (by worktree), then the link registry. A manifest that broke the rules shows its slug and
-// the error, never its title.
+/* library-items start */
+// The Library's items, pure: /api/data in, one card item per thing out, in kind order. Uses only its
+// arguments; the page passes its own href helpers and previewState in ctx, so none is copied here.
+// Each kind: [value, label, Lucide icon], in the grid's order.
+const LIB_KINDS = [['mock', 'Mock', 'layout-dashboard'], ['diagram', 'Diagram', 'workflow'], ['docs', 'Docs', 'book-open'], ['review', 'Review page', 'list-checks'], ['preview', 'Preview', 'monitor-play'], ['link', 'Link', 'link']];
+// A ref's goals: goal:<id> itself, ticket:<id> and a bare ticket id (a session) through its feature,
+// feature:<id> to the goals the roadmap gives it, plan-<feature> (a planner's session) by its feature
+// and its planner row; [] for anything else.
+function libraryGoalIndex(data) {
+  const rm = data?.ooda?.roadmap ?? {};
+  const featGoals = new Map();
+  const add = (f, g) => { if (f && g) featGoals.set(f, new Set([...(featGoals.get(f) ?? []), g])); };
+  for (const g of rm.goals ?? []) for (const f of g.features ?? []) add(f, g.id);
+  for (const [f, row] of Object.entries(rm.features ?? {})) for (const g of row?.goals ?? []) add(f, g);
+  for (const p of data?.planners ?? []) for (const g of p.goals ?? []) add(p.feature, g);
+  const ticketFeat = new Map();
+  for (const t of [...(data?.tickets ?? []), ...(data?.progress?.tickets ?? [])]) if (t?.id && t.feature) ticketFeat.set(t.id, t.feature);
+  const ofFeat = (f) => [...(featGoals.get(f) ?? [])];
+  return (ref) => {
+    const r = String(ref ?? '');
+    const m = /^(goal|ticket|feature):(.+)$/.exec(r);
+    if (m?.[1] === 'goal') return [m[2]];
+    if (m?.[1] === 'ticket') return ticketFeat.has(m[2]) ? ofFeat(ticketFeat.get(m[2])) : [];
+    if (m?.[1] === 'feature') return ofFeat(m[2]);
+    if (r.startsWith('plan-')) return ofFeat(r.slice(5));
+    return ticketFeat.has(r) ? ofFeat(ticketFeat.get(r)) : [];
+  };
+}
+// A link's host for its thumbnail: its url's, else its remote's (git@host:…, ssh://[user@]host/…,
+// https://host/…), else null.
+function linkHost(l) {
+  const of = (u) => { try { return new URL(u).host || null; } catch { return null; } };
+  if (l?.url) return of(l.url);
+  const r = String(l?.remote ?? '');
+  const scp = /^[^@/\s]+@([^:/\s]+):/.exec(r);
+  if (scp) return scp[1].toLowerCase();
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(r) ? of(r) : null;
+}
+// A remote's web page: an http(s) remote as given; git://host/path, git@host:org/repo and
+// ssh://[user@]host[:port]/org/repo as https://host/...; each less a trailing .git. A local path or a
+// file:// remote has none (null).
+function remoteWeb(remote) {
+  const r = String(remote ?? '').trim();
+  if (/^https?:\/\/[^/\s]/i.test(r)) return r.replace(/\.git$/, '');
+  const m = /^git:\/\/([^:/\s]+)(?::\d+)?\/(.+)$/i.exec(r) ?? /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(r) ?? /^ssh:\/\/(?:[^@/\s]+@)?([^:/\s]+)(?::\d+)?\/(.+)$/i.exec(r);
+  return m ? `https://${m[1].toLowerCase()}/${m[2].replace(/\.git$/, '').replace(/^\/+/, '')}` : null;
+}
+function libraryItems(data, now, ctx) {
+  const lib = data?.library ?? {};
+  const goalsOf = libraryGoalIndex(data);
+  const goals = (refs) => [...new Set((refs ?? []).flatMap(goalsOf))];
+  const by = Object.fromEntries(LIB_KINDS.map(([k]) => [k, []]));
+  // artifacts: one item per slug, in the server's order; the newest draft is what opens, the landed
+  // row (if any) gives the publish state
+  const slugs = new Map();
+  for (const a of lib.artifacts ?? []) slugs.set(a.slug, [...(slugs.get(a.slug) ?? []), a]);
+  for (const [slug, rows] of slugs) {
+    const landed = rows.find((a) => a.at === 'main') ?? null;
+    const drafts = rows.filter((a) => a.at !== 'main');
+    const newest = drafts.reduce((x, a) => (!x || (Date.parse(a.updated_at ?? '') || 0) > (Date.parse(x.updated_at ?? '') || 0) ? a : x), null);
+    const art = newest ?? landed;
+    const kind = ['mock', 'diagram', 'docs'].includes(art.kind) ? art.kind : 'mock';
+    // a broken manifest is shown by its slug and opens nothing here; its ↗ opens the viewer, which shows the error
+    by[kind].push({
+      id: `artifact:${slug}`, kind, title: art.error ? slug : art.title || slug,
+      href: art.error ? null : ctx.artHref(slug, art.at), tab: ctx.artViewer(slug, art.at),
+      summary: art.error ? null : art.summary ?? null, goals: goals(art.for), at: art.at, art, landed, drafts,
+      preview: null, pstate: null, review: null, link: null, host: null, error: art.error ?? null,
+    });
+  }
+  // a review page: each open review question, opened on its own page
+  for (const q of data?.questions ?? []) {
+    if (q?.kind !== 'review' || (q.status ?? 'open') !== 'open') continue;
+    by.review.push({
+      id: `review:${q.id}`, kind: 'review', title: q.review?.title ?? q.question, href: `#review/${encodeURIComponent(q.id)}`, tab: null,
+      summary: null, goals: q.goal ? [q.goal] : q.ticket ? goalsOf(`ticket:${q.ticket}`) : [], at: null, art: null, landed: null, drafts: [],
+      preview: null, pstate: null, review: q, link: null, host: null, error: null,
+    });
+  }
+  for (const p of lib.previews ?? []) {
+    by.preview.push({
+      id: `preview:${p.name}`, kind: 'preview', title: p.label || p.name, href: `#preview/${encodeURIComponent(p.name)}`, tab: ctx.pvViewer(p.name),
+      summary: null, goals: goals([p.session]), at: null, art: null, landed: null, drafts: [],
+      preview: p, pstate: ctx.previewState(p, now), review: null, link: null, host: null, error: null,
+    });
+  }
+  // a link opens its URL, or a path (with no remote) in the file peek, as linkOf does; in a new tab
+  // (its ↗) the same, or a remote's web page, else (a local or file:// remote) its own peek
+  for (const l of lib.links ?? []) {
+    const href = l.url || (l.path && !l.remote ? ctx.fileHref({ path: l.path, title: l.title }) : null);
+    by.link.push({
+      id: `link:${l.id}`, kind: 'link', title: l.title || l.id, href, tab: href || remoteWeb(l.remote) || `#lib/${encodeURIComponent(`link:${l.id}`)}`,
+      summary: l.notes ?? null, goals: goals(l.for), at: null, art: null, landed: null, drafts: [],
+      preview: null, pstate: null, review: null, link: l, host: linkHost(l), error: null,
+    });
+  }
+  return LIB_KINDS.flatMap(([k]) => by[k]);
+}
+// The Kind and Goal filters: an item with no goal is kept only when no goal is picked.
+const libraryKeep = (item, { kind, goal } = {}) => (!kind || item.kind === kind) && (!goal || item.goals.includes(goal));
+// An item's words as HTML, one copy for its card (renderLibrary) and its peek (openLib); these call the page's
+// helpers (esc, linkify, flink, ticketMap, when, artSrc, previewUrl) when called, so the block still loads alone.
+// a preview's state badge
+const LIB_PV_BADGE = { live: '<span class="badge good">live</span>', checking: '<span class="badge">checking</span>', 'not-running': '<span class="badge medium">not running</span>', 'not-answering': '<span class="badge medium">not answering</span>', expired: '<span class="badge">expired</span>' };
+// a for ref as a link, its kind prefix dropped: a feature to its peek (linkify knows no feature ids), a goal or
+// ticket as linkify makes it (its title), anything else as linkify leaves it
+const libForRef = (f) => { const m = /^(goal|ticket|feature):(.+)$/.exec(f ?? ''); return m?.[1] === 'feature' ? flink(m[2]) : linkify(m ? m[2] : f); };
+const libForRefs = (refs) => (refs ?? []).map(libForRef).join(', ');
+// a draft's worktree by its id, as the spec writes it: a link to its ticket (the title on hover), else the id
+const libWtLink = (at) => { const t = ticketMap().get(at); return t ? `<a class="linkish" href="#ticket/${esc(encodeURIComponent(at))}" title="${esc(t.title)}">${esc(at)}</a>` : esc(at); };
+// the publish state's badge (publicState's), and its details: where it is public, the record's date and channel
+// (a forged line can look the same), drift; the details only where there is a record
+const libPubBadge = (ps) => (ps?.state === 'public' ? '<span class="badge good"><i class="icon-globe" aria-hidden="true"></i>Public</span>' : ps?.state === 'published' ? '<span class="badge">published</span>' : ps?.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : '');
+const libPubWords = (ps) => [
+  ps.state === 'public' ? (ps.from ? `<span>from instance ${esc(ps.from)}</span>` : '<span>Public on this box</span>') : '',
+  `<span class="muted">recorded ${esc(when(ps.rec.at))} from the ${ps.rec.channel === 'dashboard' ? 'dashboard' : 'terminal'}</span>`,
+  ps.drift ? '<span class="lib-drift">changed on main since</span>' : '',
+];
+// a link's location: its URL, its remote and path, or its path
+const libLinkLoc = (l) => l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path || '');
+// what the title and the thumbnail open: the item's href; a link's URL in a new tab
+const libGo = (x) => `${x.href ? ` href="${esc(x.href)}"` : ''}${x.kind === 'link' && x.link?.url ? ' target="_blank" rel="noopener noreferrer"' : ''}`;
+// the thumbnail's box (an anchor opening what the title opens; data-thumb-src: the frame's src, or empty where only
+// the kind's icon shows); a link's: its site's icon (removed on error, thumbsWatch) and its host, with no host the kind's icon
+const libThumb = (x, pvHere) => {
+  const icon = LIB_KINDS.find(([k]) => k === x.kind)[2];
+  const src = x.art && !x.error ? artSrc(x.art.slug, x.art.at) : x.pstate?.state === 'live' ? previewUrl(pvHere, x.preview) : '';
+  return `<a class="lib-thumb"${libGo(x)} tabindex="-1" aria-hidden="true" data-thumb-src="${esc(src)}">${x.link && x.host ? `<img src="https://${esc(x.host)}/favicon.ico" referrerpolicy="no-referrer" alt=""><span class="lib-host small muted">${esc(x.host)}</span>` : `<i class="icon-${icon}" aria-hidden="true"></i>`}</a>`;
+};
+/* library-items end */
+// The Library (kit-92): one .cards grid of libraryItems kept by the page's Kind and Goal filters, in kind order;
+// above it, only when there is something to say, #lib-top: where publishing happens, or one confirm for every
+// published artifact not live on this box, and the notice for a box whose gateway doesn't serve previews.
 function renderLibrary(lib) {
-  const arts = lib?.artifacts ?? [];
-  const links = lib?.links ?? [];
-  const previews = lib?.previews ?? [];
-  $('n-library').textContent = arts.length + previews.length || '';
+  const items = libraryItems({ ...(DATA ?? {}), library: lib }, Date.now(), { previewState, artHref, artViewer, pvViewer, fileHref });
+  // one per artifact and preview card
+  $('n-library').textContent = items.filter((x) => x.art || x.preview).length || '';
   const pvHere = previewHere(location, PREVIEWS);
   const onBoxWithout = !PREVIEWS && /^\d{1,5}\.[a-z]/i.test(location.host);
-  // the running servers offered to the owner: what's live now, for this page's address
-  const pvBadge = { live: '<span class="badge good">live</span>', checking: '<span class="badge">checking</span>', 'not-running': '<span class="badge medium">not running</span>', 'not-answering': '<span class="badge medium">not answering</span>', expired: '<span class="badge">expired</span>' };
-  const pvCard = (p) => {
-    const s = previewState(p, Date.now());
-    const url = previewUrl(pvHere, p);
-    const act = {
-      open: () => `<a class="ghost av-open" href="${esc(pvViewer(p.name))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`,
-      copy: () => `<button class="ghost" data-copy="${esc(url)}">Copy link</button>`,
-      start: () => `<button class="ghost" data-preview-start="${esc(p.name)}">Start</button>`,
-      stop: () => `<button class="ghost" data-preview-stop="${esc(p.name)}"${p.run ? '' : ' title="Unregisters the link; the server stays up until its session stops it"'}>Stop</button>`,
-    };
-    const meta = [esc(p.project), linkify(p.session), p.label ? esc(p.label) : '', p.at ? `offered ${esc(when(p.at))}` : '', s.since ? `down since ${esc(when(s.since))}` : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card" data-preview="${esc(p.name)}"${subj('preview', p.name, p.label || p.name)}>
-      <div class="art-t"><a href="#preview/${esc(encodeURIComponent(p.name))}">${esc(p.label || p.name)}</a><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
-      <div class="meta">${meta}</div>
-      <div class="pub">${s.actions.map((a) => act[a]()).join('')}<span class="err" id="e-preview-${esc(p.name)}"></span></div>
-    </div>`;
-  };
-  $('previews').innerHTML = previews.length
-    ? `<h3>Previews <span class="dim">running servers, from a session</span></h3>${onBoxWithout ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : ''}${previews.map(pvCard).join('')}`
-    : '';
   const me = PUBLIC ? publicHere(location, lib) : null;
   const L = me ? publicLinks(me) : null;
   // the gateway's pages open in a new tab this page can't later redirect
   const tab = (href, label) => `<a class="ghost" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-  // a landed card's publish state, the record's date and channel beside it (a forged line can look the same)
-  const pubLine = (a) => {
-    const s = publicState(a, PUBLIC, me);
-    const badge = s.state === 'public' ? `<span class="badge good">public</span>${s.from ? `<span class="small muted">from instance ${esc(s.from)}</span>` : ''}`
-      : s.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : s.state === 'published' ? '<span class="badge">published</span>' : '';
-    const said = s.rec ? `<span class="small muted">recorded ${esc(when(s.rec.at))} from the ${s.rec.channel === 'dashboard' ? 'dashboard' : 'terminal'}</span>` : '';
-    const moved = !s.drift ? '' : `<span class="small err">${s.state === 'not-live' ? 'Changed on main since it was published: what goes up now is main\'s version, not the one recorded.' : s.state === 'public' ? 'Changed on main since it was published; the public still sees the published version.' : 'Changed on main since it was published.'}</span>`;
-    const act = {
-      publish: () => tab(L.publish([a.slug]), 'Publish'), update: () => tab(L.publish([a.slug]), 'Update'), restore: () => tab(L.publish([a.slug]), 'Restore'), review: () => tab(L.publish([a.slug]), 'Review main\'s version'),
-      unpublish: () => tab(L.unpublish(a.slug), 'Unpublish'), copy: () => `<button class="ghost" data-copy="${esc(L.page(a.slug))}">Copy link</button>`,
-      forget: () => `<button class="ghost" data-forget="${esc(a.slug)}">Forget</button>`,
-    };
-    const parts = [badge, said, moved, ...s.actions.map((x) => act[x]())].filter(Boolean);
-    return parts.length ? `<div class="pub">${parts.join('')}<span class="err" id="e-pub-${esc(a.slug)}"></span></div>` : '';
-  };
-  const card = (a, draft) => {
-    const name = a.error ? a.slug : a.title || a.slug;
-    const meta = [a.by ? `drawn by ${esc(who(a.by))}` : '', a.for?.length ? `for ${a.for.map((f) => linkify(f)).join(', ')}` : '', a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card${draft ? ' draft' : ''}"${subj('artifact', a.slug, a.title || a.slug)}>
-      <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : `<a class="av-open small" href="${esc(artViewer(a.slug, a.at))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`}</div>
-      ${a.error ? `<div class="err">${esc(a.error)}</div>` : a.summary ? `<div class="art-s">${esc(a.summary)}</div>` : ''}
-      ${meta ? `<div class="meta">${meta}</div>` : ''}
-      ${a.at === 'main' && !a.error ? pubLine(a) : ''}
-    </div>`;
-  };
-  const landed = arts.filter((a) => a.at === 'main');
-  const drafts = arts.filter((a) => a.at !== 'main');
-  const fresh = drafts.filter((d) => !landed.some((l) => l.slug === d.slug));
-  const byWt = new Map();
-  for (const d of fresh) byWt.set(d.at, [...(byWt.get(d.at) || []), d]);
-  // above the list: where publishing happens, or one confirm for everything not live on this box
-  const notLive = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live').map((a) => a.slug) : [];
-  const drifted = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live' && publicState(a, PUBLIC, me).drift).length : 0;
+  const landed = (lib?.artifacts ?? []).filter((a) => a.at === 'main' && !a.error);
+  const notLive = me ? landed.filter((a) => publicState(a, PUBLIC, me).state === 'not-live') : [];
+  const drifted = notLive.filter((a) => publicState(a, PUBLIC, me).drift).length;
+  // Restore all in both cases (R4): what goes up is main's version, and the sentence says so
   const pubHead = !landed.length ? ''
-    : !PUBLIC ? '<p class="small muted lib-pub">Publishing happens on the cloud box: there, the Library can make a landed artifact readable by anyone.</p>'
+    : !PUBLIC ? ''
     : !me?.project ? '<p class="small muted lib-pub">To publish from here, set <code>project</code> in settings.md: it is part of every public link.</p>'
-    : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50)), drifted ? 'Review all' : 'Restore all')}</p>` : '';
-  $('artifacts').innerHTML = arts.length
-    ? pubHead + landed.map((a) => card(a) + drafts.filter((d) => d.slug === a.slug).map((d) => card(d, true)).join('')).join('') +
-      (byWt.size ? `<h3>Drafts <span class="dim">not landed yet</span></h3>${[...byWt].map(([wt, ds]) => `<div class="art-wt">In ${linkify(wt)}</div>${ds.map((d) => card(d)).join('')}`).join('')}` : '')
-    : empty('No artifacts yet. Ask the supervisor to draw one (“draw me a mock of …”); it shows here as a draft, then lands.');
-  const loc = (l) => esc(l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path || ''));
-  $('lib-links').innerHTML = links.length
-    ? links.map((l) => `<div class="card small lib-link">
-      <div class="links">${linkOf({ title: l.title, url: l.url, path: l.remote ? null : l.path, remote: l.remote })}<span class="badge">${esc(l.kind)}</span></div>
-      ${l.notes ? `<div class="muted">${esc(l.notes)}</div>` : ''}
-      <div class="meta"><code>${esc(l.id)}</code>${loc(l) ? ` · <span class="loc">${loc(l)}</span>` : ''}${l.for?.length ? ` · for ${l.for.map((f) => linkify(f)).join(', ')}` : ''}</div>
-    </div>`).join('')
-    : empty('No links in the registry. The supervisor adds the docs, designs and dashboards the fleet works from.');
-  if (AV?.slug) avHeader();
+    : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50).map((a) => a.slug)), 'Restore all')}</p>` : '';
+  const pvNote = onBoxWithout && (lib?.previews ?? []).length ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : '';
+  const top = $('lib-top');
+  if (top.dataset.drawn !== pubHead + pvNote) { top.innerHTML = pubHead + pvNote; top.dataset.drawn = pubHead + pvNote; top.hidden = !(pubHead + pvNote); }
+  const KIND = Object.fromEntries(LIB_KINDS.map(([k, label, icon]) => [k, { label, icon }]));
+  // the worktree truncated in the head
+  const wtOf = (at) => `<span class="lib-wt small muted">in ${libWtLink(at)}</span>`;
+  const forOf = (refs) => (refs?.length ? `<span class="lib-for">for ${libForRefs(refs)}</span>` : '');
+  // a card: its head built in place (cardHead would put the trailing items in its grow span: kind icon, title,
+  // badges, a preview's Copy link, ↗, ⋯), the thumbnail's box (libThumb), the body (summary, details, meta)
+  const libraryCard = (x) => {
+    const k = KIND[x.kind];
+    const title = `<a class="lib-title"${libGo(x)}>${esc(x.title)}</a>`;
+    // the landed row gives the publish state, the shown row (the newest draft, else the landed) the rest
+    const ps = x.landed && !x.landed.error ? publicState(x.landed, PUBLIC, me) : null;
+    const badges = [
+      x.art && x.art.at !== 'main' ? `<span class="badge amber">draft</span>${wtOf(x.art.at)}` : '',
+      libPubBadge(ps),
+      x.pstate ? LIB_PV_BADGE[x.pstate.state] : '',
+      x.error ? '<span class="badge high">broken</span>' : '',
+    ].join('');
+    const copy = x.pstate?.actions.includes('copy') ? `<button class="ghost" data-copy="${esc(previewUrl(pvHere, x.preview))}">Copy link</button>` : '';
+    const open = x.kind !== 'review' && x.tab ? `<a class="lib-tab av-open" href="${esc(x.tab)}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own" aria-label="Open in a new tab"><i class="icon-external-link" aria-hidden="true"></i></a>` : '';
+    // ⋯: Copy public link on a public artifact, Forget on a not-live one (today's handler and its two steps)
+    const menuExtra = (ps?.state === 'public' ? `<button class="ghost" data-copy="${esc(L.page(x.landed.slug))}">Copy public link</button>` : '')
+      + (ps?.state === 'not-live' ? `<button class="ghost" data-forget="${esc(x.landed.slug)}">Forget</button>` : '');
+    const said = x.art ? subj('artifact', x.art.slug, x.art.title || x.art.slug) : x.preview ? subj('preview', x.preview.name, x.title) : '';
+    // publish details (libPubWords); on a not-live one Restore (main's version goes up, R4) and the span a refused
+    // Forget writes to
+    const pub = !ps?.rec ? '' : `<div class="lib-pub small">${[
+      ...libPubWords(ps),
+      ps.state === 'not-live' ? tab(L.publish([x.landed.slug]), 'Restore') : '',
+    ].filter(Boolean).join(' · ')}<span class="err" id="e-pub-${esc(x.landed.slug)}"></span></div>`;
+    const p = x.preview;
+    const details = x.error ? `<div class="err">${esc(x.error)}</div>`
+      : p ? `<div class="lib-meta small muted">${[`<code>${esc(p.name)}</code>`, esc(p.project), linkify(p.session), p.at ? `offered ${esc(when(p.at))}` : '', x.pstate.since ? `down since ${esc(when(x.pstate.since))}` : ''].filter(Boolean).join(' · ')}</div>`
+      : x.link ? (() => { const l = x.link, loc = libLinkLoc(l);
+        return `<div class="lib-meta small muted"><span class="badge">${esc(l.kind)}</span><code>${esc(l.id)}</code>${loc ? ` · <span class="loc">${esc(loc)}</span>` : ''}${l.for?.length ? ` · ${forOf(l.for)}` : ''}</div>`; })()
+      : '';
+    // an artifact's meta: the session that drew it (a link that opens it), what it is for, when
+    const a = x.art && !x.error ? x.art : null;
+    const meta = !a ? '' : [a.by ? `<span class="lib-by">drawn by ${linkify(a.by)}</span>` : '', forOf(a.for), a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
+    return `<div class="card lib-card" data-lib-id="${esc(x.id)}" data-kind="${esc(x.kind)}"${p ? ` data-preview="${esc(p.name)}"` : ''}${said}>`
+      + `<div class="card-head"><i class="icon-${k.icon}" aria-hidden="true"></i>${title}${badges}${copy}${open}${menuOf(x.id, [], `lib/${x.id}`, menuExtra)}</div>`
+      + libThumb(x, pvHere)
+      + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}${pub}${details}${meta ? `<div class="lib-meta small muted">${meta}</div>` : ''}</div></div>`;
+  };
+  const f = filtersNow('library');
+  const cards = items.filter((x) => libraryKeep(x, f)).map((x) => [x.id, libraryCard(x)]);
+  const grid = $('lib-grid');
+  const html = cards.map(([, h]) => h).join('');
+  // written only when it changes; then patched card by card, so an unchanged card keeps its node (its live frame,
+  // its open ⋯) and a changed one is replaced, its ⋯ opened again if it was open
+  if (grid._libHtml === html && grid.childElementCount) return void avBarPoll();
+  grid._libHtml = html;
+  if (!cards.length) grid.innerHTML = empty('None');
+  else {
+    const was = new Map([...grid.querySelectorAll(':scope > .lib-card')].map((el) => [el.dataset.libId, el]));
+    for (const el of [...grid.children]) if (!el.classList.contains('lib-card')) el.remove();
+    const want = new Set(cards.map(([id]) => id));
+    for (const [id, el] of was) if (!want.has(id)) el.remove();
+    const t = document.createElement('template');
+    let at = grid.firstElementChild;
+    for (const [id, h] of cards) {
+      let el = was.get(id);
+      if (!el || el._libHtml !== h) {
+        t.innerHTML = h;
+        const fresh = t.content.firstElementChild;
+        fresh._libHtml = h;
+        if (el?.querySelector('.card-head details.menu')?.open) fresh.querySelector('.card-head details.menu').open = true;
+        if (el) { if (at === el) at = fresh; el.replaceWith(fresh); }
+        el = fresh;
+      }
+      // in order: moveBefore keeps a moved frame alive where the browser has it (Chrome 133+)
+      if (el !== at) {
+        if (el.isConnected && typeof grid.moveBefore === 'function') grid.moveBefore(el, at); else grid.insertBefore(el, at);
+      }
+      at = el.nextElementSibling;
+    }
+  }
+  // new boxes watched; a box the patch removed frees its slot
+  thumbsWatch(grid);
+  avBarPoll();
 }
-
+/* library-thumbs start */
+// The Library's thumbnails (kit-92): a box with a frame source (data-thumb-src) gets a sandboxed, inert frame
+// while it is in view, at most THUMB_MAX at once in all (an open peek's box first, then the grid's, top first);
+// one whose load hasn't fired THUMB_WAIT ms after it went in, or that this page's policy refuses, is taken out
+// and the box keeps its icon until its card is drawn anew. data-thumb: icon | live | failed. Frames are only put
+// in and taken out here; a poll keeps the nodes.
+const THUMB_MAX = 12, THUMB_WAIT = 5000;
+// io: one IntersectionObserver; watched: the boxes it observes; seen: those in view; live: those holding a frame
+const THUMBS = { io: null, watched: new Set(), seen: new Set(), live: new Set() };
+// Watches every .lib-thumb under root once (a box seen before is left alone), then fills the free slots.
+function thumbsWatch(root) {
+  THUMBS.io ??= new IntersectionObserver((es) => {
+    for (const e of es) if (e.isIntersecting) THUMBS.seen.add(e.target); else THUMBS.seen.delete(e.target);
+    thumbsFill();
+  });
+  // a box no longer in the page (its card patched away), in view or not, framed or not: unobserved, so the
+  // observer doesn't keep the detached card alive; its frame's slot is freed
+  for (const b of THUMBS.watched) {
+    if (b.isConnected) continue;
+    THUMBS.io.unobserve(b);
+    THUMBS.watched.delete(b);
+    THUMBS.seen.delete(b);
+    if (THUMBS.live.has(b)) thumbOut(b, 'icon');
+  }
+  for (const b of root.querySelectorAll('.lib-thumb')) {
+    if (b._thumbs) continue;
+    b._thumbs = true;
+    b.dataset.thumb ||= 'icon';
+    // a link's site icon that fails goes, the link icon in its place
+    for (const img of b.querySelectorAll(':scope > img')) {
+      const gone = () => { const i = document.createElement('i'); i.className = 'icon-link'; i.setAttribute('aria-hidden', 'true'); img.replaceWith(i); };
+      if (img.complete && !img.naturalWidth && img.getAttribute('src')) gone(); else img.addEventListener('error', gone, { once: true });
+    }
+    if (b.dataset.thumbSrc) { THUMBS.io.observe(b); THUMBS.watched.add(b); }
+  }
+  thumbsFill();
+}
+// Frames out of boxes gone or out of view, then into the boxes in view, in page order, up to the cap. The large
+// viewer open over the page covers every box (the observer can't tell): no frame then, so none runs unseen, and no
+// copy of the page on the stage talks to this window beside the stage's own frame (a thumbnail's page says what the
+// stage's says, from a frame of another size).
+function thumbsFill() {
+  const covered = !$('artifact-view').hidden;
+  for (const b of THUMBS.seen) if (!b.isConnected) { THUMBS.seen.delete(b); THUMBS.io.unobserve(b); }
+  for (const b of THUMBS.live) if (covered || !b.isConnected || !THUMBS.seen.has(b)) thumbOut(b, 'icon');
+  if (covered) return;
+  const want = [...THUMBS.seen].filter((b) => !THUMBS.live.has(b) && b.dataset.thumb !== 'failed' && b.dataset.thumbSrc)
+    .sort((a, c) => (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+  // an open peek's box takes a slot first: with none free, the grid's frame farthest from the viewport's centre
+  // goes (its box stays seen, and takes a slot again once the peek's is freed)
+  const inPeek = (b) => !!b.closest('#drawer');
+  const far = (b) => { const r = b.getBoundingClientRect(); return Math.hypot((r.left + r.right - innerWidth) / 2, (r.top + r.bottom - innerHeight) / 2); };
+  for (const b of want.filter(inPeek)) {
+    if (THUMBS.live.size >= THUMB_MAX) {
+      const out = [...THUMBS.live].filter((x) => !inPeek(x)).sort((x, y) => far(y) - far(x))[0];
+      if (!out) break;
+      thumbOut(out, 'icon');
+    }
+    thumbIn(b);
+  }
+  for (const b of want) {
+    if (THUMBS.live.size >= THUMB_MAX) break;
+    if (!inPeek(b)) thumbIn(b);
+  }
+}
+function thumbIn(b) {
+  const f = document.createElement('iframe');
+  // scripts only: no same origin, so a frame of this dashboard's own origin can't reach the page
+  f.setAttribute('sandbox', 'allow-scripts');
+  f.setAttribute('loading', 'lazy');
+  f.setAttribute('tabindex', '-1');
+  f.setAttribute('aria-hidden', 'true');
+  f.src = b.dataset.thumbSrc;
+  let loaded = false;
+  f.addEventListener('load', () => { loaded = true; }, { once: true });
+  b._thumbFrame = f;
+  // when it went in (the page's clock), stamped before the wait starts
+  b.dataset.thumbAt = String(performance.now());
+  b._thumbTimer = setTimeout(() => { if (!loaded && b._thumbFrame === f) { thumbOut(b, 'failed'); thumbsFill(); } }, THUMB_WAIT);
+  b.append(f);
+  b.dataset.thumb = 'live';
+  THUMBS.live.add(b);
+}
+// A box's frame out; failed: not tried again (the box is no longer watched)
+function thumbOut(b, state) {
+  clearTimeout(b._thumbTimer);
+  b._thumbFrame?.remove();
+  b._thumbFrame = null;
+  THUMBS.live.delete(b);
+  b.dataset.thumb = state;
+  if (state === 'failed') { THUMBS.seen.delete(b); THUMBS.watched.delete(b); THUMBS.io?.unobserve(b); }
+}
+// a frame this page's frame-src refuses (on a laptop, a preview's own origin) goes at once, before Chrome's
+// error page shows in it: the blocked address's origin must be the frame's exactly
+document.addEventListener('securitypolicyviolation', (e) => {
+  if (!String(e.violatedDirective).startsWith('frame-src')) return;
+  let o;
+  try { o = new URL(e.blockedURI).origin; } catch { return; }
+  let out = false;
+  for (const b of [...THUMBS.live]) {
+    try { if (new URL(b.dataset.thumbSrc, location.href).origin === o) { thumbOut(b, 'failed'); out = true; } } catch {}
+  }
+  if (out) thumbsFill();
+});
+// the viewer opened or closed: its frames out, or back into the boxes in view
+new MutationObserver(() => { if (THUMBS.io) thumbsFill(); }).observe($('artifact-view'), { attributes: true, attributeFilter: ['hidden'] });
+/* library-thumbs end */
+/* library-peek start */
+// A Library item's side peek (kit-92): #lib/<id>, the item found by its id among libraryItems. Properties first, on
+// props/attrRow and not attrs (whose How it changes reads otherwise for a kind with no record, and which puts what is
+// computed under its own head): ID, Kind, Drawn by, For, Where, State, Published, Error, a link's Where, For and Notes,
+// Updated, How it changes; then the thumbnail's box at the peek's width (its frame, as on the card) and the summary.
+// An id no item has is not found.
+function openLib(id) {
+  drawerFor('lib', id);
+  // the server has no peek for an item (its words are all in /api/data): marked missing, so a refresh never asks it
+  PEEKS.set(peekKey('lib', id), { error: 'not a record', missing: true });
+  const lib = DATA?.library ?? {};
+  const x = libraryItems(DATA ?? {}, Date.now(), { previewState, artHref, artViewer, pvViewer, fileHref }).find((i) => i.id === id);
+  if (!x) return notFound('lib', id, null, 'No such item in the Library.', { noRecord: true });
+  const [, label, icon] = LIB_KINDS.find(([k]) => k === x.kind);
+  const me = PUBLIC ? publicHere(location, lib) : null;
+  // the shown row, a broken one too: a manifest that parsed but failed its checks still names by, for and its time
+  const a = x.art, p = x.preview, l = x.link, q = x.review;
+  const ps = x.landed && !x.landed.error ? publicState(x.landed, PUBLIC, me) : null;
+  // publish details: the card's badge and words (the actions stay on the card)
+  const pub = !ps?.rec ? '' : [libPubBadge(ps), ...libPubWords(ps)].filter(Boolean).join(' · ');
+  const where = a ? (a.at !== 'main' ? `<span class="badge amber">draft</span> in ${libWtLink(a.at)}${x.landed ? ' · Landed on main' : ''}` : 'Landed on main')
+    : l ? (() => { const loc = libLinkLoc(l); return loc ? `<code>${esc(loc)}</code>` : ''; })() : '';
+  const forRefs = a ? a.for : l ? l.for : q ? (q.goal ? [`goal:${q.goal}`] : q.ticket ? [`ticket:${q.ticket}`] : []) : [];
+  const updated = a?.updated_at ?? (p ? p.at : q ? q.asked_at : null);
+  const kindHtml = `<i class="icon-${esc(icon)}" aria-hidden="true"></i> ${esc(label)}${l?.kind ? ` · <span class="badge">${esc(l.kind)}</span>` : ''}`;
+  // a link's Where comes before its For, as on its card
+  const placed = l ? [attrRow('Where', where, 'Its URL, its remote and path, or its path in this repository.'), attrRow('For', libForRefs(forRefs), 'What it is for.')]
+    : [attrRow('For', libForRefs(forRefs), 'What it is for.'), attrRow('Where', where, 'Landed on main, or a draft in a worktree, the newest draft shown.')];
+  const rows = [
+    attrRow('ID', `<code>${esc(id)}</code>`, 'Its id in the Library: artifact:<slug>, review:<question>, preview:<name> or link:<id>. Copy ID copies exactly this.'),
+    attrRow('Kind', kindHtml, 'What sort of item it is.'),
+    attrRow('Drawn by', a?.by ? linkify(a.by) : p?.session ? linkify(p.session) : '', 'The session that drew it; open it to see that session.'),
+    ...placed,
+    attrRow('State', p ? `${LIB_PV_BADGE[x.pstate.state] ?? ''}${x.pstate.since ? ` down since ${esc(when(x.pstate.since))}` : ''}` : '', 'Whether the preview answers now.'),
+    attrRow('Published', pub, 'Its public record: where it is public, when it was recorded and from where.'),
+    attrRow('Error', x.error ? esc(x.error) : '', 'Why it can\'t be shown.'),
+    attrRow('Notes', l?.notes ? esc(l.notes) : '', 'What the link\'s author wrote about it.'),
+    attrRow('Updated', updated ? esc(when(updated)) : '', 'When it last changed.'),
+    attrRow('How it changes', 'Shift+click it and say so in a thread'),
+  ].filter(Boolean);
+  // the card's box, its frame within the cap of 12, ahead of the grid's (thumbsFill)
+  AFTER.push(() => thumbsWatch($('drawer-body')));
+  showDrawer(`<h2 id="drawer-title">${esc(x.title)}</h2><section class="attrs">${props(rows)}</section>${libThumb(x, previewHere(location, PREVIEWS))}${x.summary ? `<p class="measure lib-sum">${esc(x.summary)}</p>` : ''}`);
+}
+/* library-peek end */
+/* library-versions start */
+// The viewer bar's versions and actions (kit-92): the version pill (#av-ver, its label #av-where) and its list (#av-vers,
+// kit-172's /api/artifact-versions, read once per open), the Public tile (#av-pub), a preview's Start and Stop (#av-run).
+// A version picked from the list is AV.picked ({ at, label, earlier }); one earlier than main's is read-only: no Reload,
+// no tile, and the note says so. Read-only is the picked state, never keyed on tree: (a tree a link opens is "the
+// published version", and its threads work as ever).
+const avDay = (t) => { const d = new Date(t); return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); };
+// a version's words, as the pill and the list say them
+function avVersionLabel(v) {
+  if (v.kind === 'draft') return `Draft · live in ${v.worktree ?? v.at}`;
+  if (v.kind === 'landed') return `Landed on main${v.time ? ` · ${avDay(v.time)}` : ''}`;
+  return [avDay(v.time), String(v.commit ?? '').slice(0, 7)].filter(Boolean).join(' · ');
+}
+// where a version is shown: its draft's worktree, main, or its tree
+const avVersionAt = (v) => (v.kind === 'draft' ? v.worktree ?? v.at : v.kind === 'landed' ? 'main' : v.at);
+// the versions of the artifact on the stage, read once per open (a pick keeps them): { versions }, or null when the read
+// failed; AV.known keeps the list once read, for the pill's "Landed on main · <date>"
+function avVersions(slug) {
+  if (!AV || AV.slug !== slug) return Promise.resolve(null);
+  if (!AV.vers) {
+    const pr = (async () => {
+      try { const r = await fetch(`/api/artifact-versions?${new URLSearchParams({ slug })}`); const d = r.ok ? await r.json() : null; return Array.isArray(d?.versions) ? d : null; } catch { return null; }
+    })();
+    AV.vers = pr;
+    pr.then((d) => { if (AV?.vers === pr) AV.known = d?.versions ?? null; });
+  }
+  return AV.vers;
+}
+// the kind's icon and badge: an artifact's (R1: anything but diagram or docs reads as Mock), or a preview's; null when
+// it isn't known (a viewer tab has no Library row): the Library's icon and no badge, never a guess
+function avKindDraw(kind) {
+  const k = kind === null ? null : LIB_KINDS.find(([v]) => v === kind && ['mock', 'diagram', 'docs', 'preview'].includes(v)) ?? LIB_KINDS[0];
+  document.querySelector('.av-bar > i.av-kind').className = `av-kind icon-${k ? k[2] : 'library'}`;
+  $('av-kind').textContent = k ? k[1] : '';
+  $('av-kind').hidden = !k;
+}
+// the pill on an artifact: the version shown in full, amber on a draft; pressable in the dashboard only (a viewer tab
+// has no Library to show a pick against)
+function avVerDraw() {
+  const b = $('av-ver'), at = String(AV.at), p = AV.picked, tree = at.startsWith('tree:');
+  const landed = AV.known?.find((v) => v.kind === 'landed');
+  $('av-where').textContent = p?.earlier ? p.label : at === 'main' ? (landed ? avVersionLabel(landed) : 'Landed on main') : tree ? 'the published version' : `Draft · live in ${at}`;
+  b.classList.toggle('amber', !p?.earlier && at !== 'main' && !tree);
+  b.classList.toggle('plain', !!VIEWER);
+  b.disabled = !!VIEWER;
+}
+// a pop (the version list, the tile's menu) opened or closed, its pill saying so
+function avPop(el, open) {
+  el.hidden = !open;
+  (el.id === 'av-vers' ? $('av-ver') : $('av-pub'))?.setAttribute('aria-expanded', String(open));
+}
+function avPopsClose() { for (const id of ['av-vers', 'av-pub-menu']) { const el = $(id); if (el && !el.hidden) avPop(el, false); } }
+// the list: loading, then the versions in kit-172's order (drafts, landed, earlier), the shown one selected
+async function avVersOpen() {
+  const list = $('av-vers'), slug = AV?.slug;
+  if (!slug) return;
+  list.innerHTML = '<p class="av-pop-msg">Loading…</p>';
+  avPop(list, true);
+  const d = await avVersions(slug);
+  if (AV?.slug !== slug || list.hidden) return;
+  list.innerHTML = !d ? '<p class="av-pop-msg">Versions could not be read</p>'
+    : d.versions.map((v) => { const at = avVersionAt(v); return `<button type="button" role="option" data-at="${esc(at)}" data-earlier="${v.kind === 'earlier' ? '1' : ''}" aria-selected="${at === AV.at}">${esc(avVersionLabel(v))}</button>`; }).join('');
+  avVerDraw();
+}
+// a version picked: shown on the stage (showArtifact), its fingerprints from the Library's rows where it has one
+function avPick(o) {
+  const slug = AV.slug, at = o.dataset.at, earlier = o.dataset.earlier === '1';
+  avPop($('av-vers'), false);
+  if (at === AV.at) return;
+  const arts = DATA?.library?.artifacts ?? [];
+  const fp = earlier ? null : arts.find((x) => x.slug === slug && x.at === at)?.fp ?? null;
+  showArtifact(slug, at, { fp, mainFp: arts.find((x) => x.slug === slug && x.at === 'main')?.fp ?? null, picked: { at, label: o.textContent, earlier } });
+}
+// The Public tile (an artifact, its landed version shown, in the dashboard): publicState's word and the gateway's page
+// for it, in a new tab (its owner-only confirm page); with an update, a menu of Update and Unpublish (so Unpublish stays
+// reachable). Off a box or with no project: the recorded state, disabled, saying why. '' where it is hidden.
+function avPublicTile() {
+  if (VIEWER || !AV?.slug || AV.at !== 'main' || AV.picked?.earlier) return '';
+  const lib = DATA?.library;
+  const a = (lib?.artifacts ?? []).find((x) => x.slug === AV.slug && x.at === 'main' && !x.error);
+  if (!a) return '';
+  const me = PUBLIC ? publicHere(location, lib) : null;
+  const ps = publicState(a, PUBLIC, me);
+  const globe = '<i class="icon-globe" aria-hidden="true"></i>';
+  if (!me?.project) {
+    const why = !PUBLIC ? 'Publishing happens on the cloud box: there, the Library can make a landed artifact readable by anyone.' : 'To publish from here, set project in settings.md: it is part of every public link.';
+    return `<button type="button" class="ghost av-pill" id="av-pub" disabled title="${esc(why)}">${globe}${ps.rec ? 'Public' : 'Not public'}</button>`;
+  }
+  const L = publicLinks(me), slug = a.slug;
+  const go = (href, words) => `<a role="menuitem" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${words}</a>`;
+  if (ps.state === 'public' && ps.actions.includes('update')) {
+    return `<button type="button" class="ghost av-pill amber" id="av-pub" aria-haspopup="menu" aria-expanded="false" title="Main has changed since it was published">${globe}Public · update available</button>`
+      + `<div id="av-pub-menu" class="av-pop" role="menu" hidden>${go(L.publish([slug]), 'Update to main\'s version')}${go(L.unpublish(slug), 'Unpublish')}</div>`;
+  }
+  const tile = (cls, href, words, title) => `<a class="av-pill${cls}" id="av-pub" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${globe}${words}</a>`;
+  if (ps.state === 'public') return tile(' good', L.unpublish(slug), 'Public', 'Public: click to unpublish (the gateway asks you to confirm)');
+  if (ps.state === 'not-live') return tile(' amber', L.publish([slug]), 'Not public', 'Published, but not live on this box: click to publish main\'s version again');
+  return tile('', L.publish([slug]), 'Not public', 'Click to publish (the gateway shows what goes public and asks you to confirm)');
+}
+// drawn only when it changes, so a poll leaves an open menu alone
+function avPubDraw() {
+  const w = document.querySelector('.av-pub-wrap'), h = avPublicTile();
+  if (w._html === h) return;
+  w._html = h;
+  w.innerHTML = h;
+}
+// a preview's Start and Stop (today's data-preview-start|stop buttons, so the page's handler presses them), from
+// previewState's actions on this poll's row; none in a viewer tab (no row)
+function avRunButtons() {
+  if (VIEWER || !AV?.preview) return '';
+  const p = (DATA?.library?.previews ?? []).find((x) => x.name === AV.preview);
+  if (!p) return '';
+  const { actions } = previewState(p, Date.now()), n = esc(p.name);
+  return `${actions.includes('start') ? `<button type="button" class="ghost av-pill" data-preview-start="${n}">Start</button>` : ''}${actions.includes('stop') ? `<button type="button" class="ghost av-pill" data-preview-stop="${n}">Stop</button>` : ''}`;
+}
+// rewritten only when its HTML changes: a press's "Starting…" stays until the preview's state does
+function avRunDraw() {
+  const el = $('av-run'), h = avRunButtons();
+  if (el._html === h) return;
+  el._html = h;
+  el.innerHTML = h;
+}
+// the span beside Start and Stop that press writes a refusal to (e-preview-<name>, the page's only one): named and
+// emptied on every opening (showPreview, showArtifact), the same preview's too, never by a poll, so a refusal stays
+// while that preview is shown
+function avRunErr(name) {
+  const el = document.querySelector('.av-run-err');
+  if (name) el.id = `e-preview-${name}`; else el.removeAttribute('id');
+  el.textContent = '';
+}
+// each poll: the bar drawn again from the data (renderLibrary calls it)
+function avBarPoll() { if (AV?.slug) avHeader(); else if (AV?.preview) avRunDraw(); }
+// the pill opens its list, an option shows its version, the tile opens its menu; a click anywhere else closes them
+document.addEventListener('click', (e) => {
+  const t = e.target instanceof Element ? e.target : null;
+  if (!t) return;
+  const o = t.closest('#av-vers [role="option"]');
+  if (o) return void avPick(o);
+  const list = $('av-vers'), menu = $('av-pub-menu');
+  if (t.closest('#av-ver')) {
+    if (menu && !menu.hidden) avPop(menu, false);
+    return void (list.hidden ? avVersOpen() : avPop(list, false));
+  }
+  if (menu && t.closest('button#av-pub')) {
+    if (!list.hidden) avPop(list, false);
+    return void avPop(menu, menu.hidden);
+  }
+  if (!t.closest('.av-pop') || t.closest('#av-pub-menu a')) avPopsClose();
+});
+// Escape with a list open over the shown viewer closes only the list, never the viewer: ahead of every other Escape
+// (capture, on window); with the viewer hidden it holds nothing
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || $('artifact-view').hidden) return;
+  const open = ['av-vers', 'av-pub-menu'].map((id) => $(id)).filter((el) => el && !el.hidden);
+  if (!open.length) return;
+  e.stopImmediatePropagation();
+  e.preventDefault();
+  for (const el of open) avPop(el, false);
+}, true);
+// the viewer closed (however: X, Back, Escape, a route): its lists close with it
+new MutationObserver(() => { if ($('artifact-view').hidden) avPopsClose(); }).observe($('artifact-view'), { attributes: true, attributeFilter: ['hidden'] });
+/* library-versions end */
 /* score-of start */
 // The Overview's Autonomy row (kit-90): each tile's label, the path of its score record in /api/data,
 // and where in that record its % sits. The place is named per tile, never guessed: autonomy_score
@@ -6488,7 +7487,6 @@ function renderOverview() {
 function render(d) {
   DATA = d;
   const focus = focusMark();
-  const m = d.metrics;
   $('title').textContent = d.project && !String(d.project).startsWith('<') ? String(d.project) : 'devteam';
   const kit = $('kit'), local = /\+local$/.test(d.kit ?? '');
   kit.hidden = !d.kit;
@@ -6509,17 +7507,16 @@ function render(d) {
     const all = rt.all || [];
     count('n-retros', all.length);
     if (rt.due) { $('n-retros').textContent = 'due'; $('n-retros').classList.add('hot'); }
-    $('retro-due').innerHTML = rt.due ? `<div class="card"><span class="badge medium">due since ${esc((rt.due_since || '').slice(0, 10))}</span> <span class="small">${esc(rt.reasons.join('; '))}</span><p class="meta">The supervisor drafts it next (supervisor.md §10).</p></div>` : '';
-    $('retro-list').innerHTML = all.length ? all.map((r) => `<a class="card retro-row" href="#retro/${encodeURIComponent(r.id)}"><b>${esc(retroDate(r))}</b><span>${esc(r.summary)}</span></a>`).join('') : '<p class="empty">No retro yet.</p>';
+    const rEl = $('retros'), rHtml = retroCards(rt);
+    if (rEl && rEl.__html !== rHtml) { rEl.__html = rHtml; rEl.innerHTML = rHtml; }
   }
   renderLibrary(d.library);
-  count('n-findings', m.findings.length, m.findings.some((f) => f.severity === 'high'));
   count('n-knowledge', o.knowledge.filter(ownerLesson).length);
   $('n-observe').textContent = o.observations.length || '';
   $('n-orient').textContent = (o.clusters.length + o.problems.length + o.knowledge.length) || '';
   const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
   $('n-decide').textContent = (o.decisions || []).filter((r) => r.at > weekAgo && r.kind !== 'correction' && !routine(r)).length || '';
-  count('n-trust', o.trust.filter((t) => t.can_ask).length);
+  navCounts(d);
   $('n-act').textContent = o.acts.length || '';
   renderOverview();
 
@@ -6550,9 +7547,9 @@ function render(d) {
   for (const qid of [...REFUSED.keys()]) if (!d.questions.some((q) => q.id === qid) && !TL.threads.some((t) => t.questions?.some((q) => q.id === qid && q.status === 'open'))) REFUSED.delete(qid);
   d = { ...d, questions: d.questions.filter((q) => !ANSWERED.has(q.id)) };
   // questions first, in the kit's order (the first is the next best step); lessons to keep after them
-  $('questions').innerHTML = (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.')) + goalCards;
+  $('questions').innerHTML = (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('None')) + goalCards;
   $('answered-sum').textContent = `Answered (${o.answered.length})`;
-  $('answered').innerHTML = o.answered.length ? o.answered.map((q) => answeredCard(q)).join('') : empty('Nothing answered yet.');
+  $('answered').innerHTML = o.answered.length ? o.answered.map((q) => answeredCard(q)).join('') : empty('None');
 
   renderOoda(o);
   renderMonitoring(d);
@@ -6565,31 +7562,14 @@ function render(d) {
   renderProgress();
   drawFilters(PAGE_NOW);
 
-  const fkey = (f) => `${f.kind} ${f.subject}`;
-  $('findings').innerHTML = (m.findings.length ? m.findings.map((f) => `
-    <div class="card">${cardHead(f.severity === 'high' ? 'triangle-alert' : 'activity', `<span class="badge ${f.severity}">${esc(f.severity)}</span>${esc(words(f.kind))}`, { extra: subjectLink(f.subject) })}
-    <div>${linkify(f.detail)}</div><div class="muted">Next step for the supervisor: ${linkify(f.suggestion)}</div></div>`).join('') : empty('None. Blockers and slow spots show here, each with the supervisor’s next step.')) +
-    ((m.acknowledged || []).length ? `<h3 style="margin-top:14px">Set aside</h3>` + m.acknowledged.map((f) => `
-    <div class="card small"><b>${esc(words(f.kind))}</b> ${subjectLink(f.subject)} <span class="muted">· set aside by ${esc(who(f.ack.by))}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
-
+  // Health's findings, checks and tests are Sensors › Fleet's now (kit-93: renderMonitoring above)
   // Hours by phase, USD by phase, USD by model and Tokens are Efficiency's now (kit-174): Where it goes
   renderEfficiency(d);
-
-  // The configured checks, one plain line each, trouble first; one-off checks a worker ran by hand
-  // are counted, not listed.
-  const configured = new Set(DATA.gates_configured || []);
-  const flakyG = new Set(m.gates.flaky_gates.map((f) => f.gate));
-  const gl = m.gates.gates.filter((g) => !configured.size || configured.has(g.gate));
-  const adhoc = m.gates.gates.filter((g) => configured.size && !configured.has(g.gate));
-  const trouble = (g) => (flakyG.has(g.gate) ? 2 : 0) + (g.fail_rate >= 0.2 ? 1 : 0);
-  gl.sort((a, b) => trouble(b) - trouble(a) || b.runs - a.runs);
-  $('gates').innerHTML = gl.length
-    ? `<div class="card small">${gl.map((g) => `<div class="gate-row"><code>${esc(g.gate)}</code> <span class="muted">${g.runs} run${g.runs === 1 ? '' : 's'} · usually ${dur(g.median_seconds)} · fails ${Math.round(g.fail_rate * 100)}% of the time${g.preexisting_fails ? ` (plus ${g.preexisting_fails} allowed because main failed it too)` : ''}</span>${flakyG.has(g.gate) ? ' <span class="badge high">flaky</span>' : ''}${g.fail_rate >= 0.2 ? ' <span class="badge medium">often fails</span>' : ''}</div>`).join('')}${adhoc.length ? `<div class="muted" style="margin-top:6px">and ${adhoc.length} one-off check${adhoc.length === 1 ? '' : 's'} workers ran by hand (${adhoc.slice(0, 4).map((g) => esc(g.gate)).join(', ')}${adhoc.length > 4 ? ', …' : ''})</div>` : ''}</div>`
-    : empty('No checks have run yet.');
-  $('test-lists').innerHTML = [
-    m.gates.flaky_tests.length ? `<div><h3>Flaky tests</h3>${m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('')}</div>` : '',
-    m.gates.slowest_tests.length ? `<div><h3>Slowest tests</h3>${m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('')}</div>` : '',
-  ].join('');
+  renderTrust(d);
+  renderAwareness(d);
+  // Governance's listing is its own read (kit-93): read again at most once a minute while the page is shown
+  renderGovernance();
+  if (PAGE_NOW === 'governance') loadGovernance();
 
   refreshDrawer();
   // the records owner-action cards read by peek: again, so one changed elsewhere shows (a retired one stays retired)
@@ -6636,7 +7616,7 @@ const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a que
 // Threads panel's Inbox tab (#th-inbox #questions, kit-100 spec §2.6), not a page's section.
 const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
 // The sections' names, as the sidebar shows them.
-const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', efficiency: 'Efficiency', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
+const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust', awareness: 'Awareness', governance: 'Governance', efficiency: 'Efficiency', retros: 'Retros', health: 'Sensors', monitoring: 'Sensors' };
 // T_ENCODED_MAX: a turn as the log line holds it, JSON-escaped (a quotation mark is two bytes there,
 // a control character six), so a line of 4,096 bytes always has room for it.
 const T_TURN_MAX = 2000, T_ENCODED_MAX = 3800, T_SUBJECT_MAX = 2500, T_TITLE_MAX = 120, T_WAIT_MS = 10 * 60000;
@@ -6652,11 +7632,12 @@ const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').repla
 // A Settings row's view (#settings?key=<key>): its key, else null.
 const T_SETTING_VIEW = /^#settings\?key=([a-z][a-z0-9_]{0,63})$/;
 const parseSettingView = (view) => T_SETTING_VIEW.exec(typeof view === 'string' ? view : '')?.[1] ?? null;
-// A suggestion on Efficiency (kit-174): #efficiency?suggestion=<its id, URI-encoded>; its id, else null
-// (the prefix is 23 bytes: an encoded id of at most 177 keeps the view within the log's 200)
-const T_SUGG_VIEW = /^#efficiency\?suggestion=([^&#?]{1,177})$/;
-const suggView = (id) => `#efficiency?suggestion=${encodeURIComponent(String(id))}`;
-const parseSuggView = (view) => { const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : ''); if (!m) return null; try { return decodeURIComponent(m[1]); } catch { return null; } };
+// A suggestion on Efficiency (kit-174) or Awareness (kit-93): #<page>?suggestion=<its id, URI-encoded>;
+// its id, else null (the longer prefix is 23 bytes: an encoded id of at most 177 keeps the view within
+// the log's 200); its page is suggPageOf's
+const T_SUGG_VIEW = /^#(efficiency|awareness)\?suggestion=([^&#?]{1,177})$/;
+const suggView = (id, page = 'efficiency') => `#${page}?suggestion=${encodeURIComponent(String(id))}`;
+const parseSuggView = (view) => { const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : ''); if (!m) return null; try { return decodeURIComponent(m[2]); } catch { return null; } };
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
 // a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
 // box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
@@ -6670,11 +7651,12 @@ function tSubjectAt(el, x, y, sec) {
     const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
     return { subject: { kind: 'item', ref, quote: tCut(said, 300) }, title: title || T_KIND[ref.split(':')[0]], el: item };
   }
-  // a suggestion on Efficiency (kit-174): its page subject, the item its spot, its title the quote
-  const sg = el?.closest?.('#efficiency [data-sugg]');
+  // a suggestion on Efficiency (kit-174) or Awareness (kit-93): its page subject, the item its spot,
+  // its title the quote
+  const sg = el?.closest?.('#efficiency [data-sugg], #awareness [data-sugg]');
   if (sg) {
     const title = tLine(sg.dataset.title, T_TITLE_MAX);
-    return { subject: { kind: 'page', view: suggView(sg.dataset.sugg), quote: tCut(title, 300) }, title, el: sg };
+    return { subject: { kind: 'page', view: suggView(sg.dataset.sugg, sg.closest('section[id]').id), quote: tCut(title, 300) }, title, el: sg };
   }
   // a Settings row (spec §8): a page subject on #settings?key=<key>, the row (not a point) its spot,
   // its plain name the quote
@@ -6683,6 +7665,16 @@ function tSubjectAt(el, x, y, sec) {
   if (row && parseSettingView(`#settings?key=${key}`)) {
     const name = tLine(row.querySelector?.('.set-name')?.textContent, 300) || key;
     return { subject: { kind: 'page', view: `#settings?key=${key}`, quote: tCut(name, 300) }, title: tLine(`Setting · ${name} (${key})`, T_TITLE_MAX), el: row };
+  }
+  // a block of a governance file's rendered text, in its peek (kit-93 C5, C8): a page subject on the file (on
+  // #governance when that view is over the log's 200 bytes), the block its spot, its text the quote
+  // threads-core is also evaluated alone by test/dashboard.test.mjs, without the governance code
+  const block = typeof govBlockAt === 'function' ? govBlockAt(el) : null;
+  if (block) {
+    const path = DRAWER.id, view = `#file?path=${encodeURIComponent(path)}`;
+    const said = tLine(block.innerText ?? block.textContent, 300);
+    const name = GOV.files.find((f) => f?.path === path)?.title || path;
+    return { subject: { kind: 'page', view: tBytes(view) <= T_CAPS.view ? view : '#governance', quote: tCut(said, 300) }, title: tLine(`${name} · ${said.split(' ').slice(0, 6).join(' ')}`, T_TITLE_MAX), el: block };
   }
   const s = sec(el);
   if (!s) return null;
@@ -6817,7 +7809,7 @@ function tWhere(s) {
   // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
   if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
   // a Settings row: by the name it had when the thread began (the subject's quote), else its key
-  if (s.kind === 'page' && parseSuggView(s.view) !== null) return 'Efficiency';
+  if (s.kind === 'page' && parseSuggView(s.view) !== null) return T_SECTIONS[T_SUGG_VIEW.exec(s.view)[1]];
   if (s.kind === 'page' && parseSettingView(s.view)) return `Settings, ${tLine(s.quote, 300) || parseSettingView(s.view)}`;
   if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
@@ -6984,7 +7976,7 @@ function tlShow(x, y) {
   // nothing the layer can name here (the drawer, the sidebar, a bar): no pin, and the click is the page's
   if (!hit) { tlHide(); return; }
   tlCursor(x, y);
-  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view) || parseSuggView(hit.subject.view) !== null;
+  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view) || parseSuggView(hit.subject.view) !== null || (!!hit.el && govBlockAt(hit.el) === hit.el);
   const r = whole ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
   tlMark(r, !whole, hit.title, x, y);
 }
@@ -7053,10 +8045,12 @@ for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click',
 }, true);
 // A card for a thread about to start: its subject fitted to the log's cap; nothing is written until
 // the owner sends the first words.
-// A Settings row whose thread is open opens that thread (one per row; spec §8).
+// A subject with an open thread opens that thread instead (kit-97): one per subject, by tKey, as the kit
+// refuses a second (subjectKey); a Settings or suggestion row by its view alone, wherever on it (spec §8).
 function tlStart(hit) {
   const key = hit.subject.kind === 'page' ? parseSettingView(hit.subject.view) ?? parseSuggView(hit.subject.view) : null;
-  const had = key !== null ? TL.threads.find((t) => t.status === 'open' && t.subject?.kind === 'page' && t.subject.view === hit.subject.view) : null;
+  const k = tKey(tFit(hit.subject));
+  const had = TL.threads.find((t) => t.status === 'open' && t.subject && ((k !== null && tKey(t.subject) === k) || (key !== null && t.subject.kind === 'page' && t.subject.view === hit.subject.view)));
   if (had) return void tlOpen(had.id);
   TL.open = null;
   TL.resolving = false;
@@ -7144,8 +8138,8 @@ const settingRow = (key) => (key ? document.querySelector(`#settings [data-setti
 // The row a page subject is about, when it is a Settings row's: its key, and the row if drawn.
 const tlSettingOf = (s) => { const key = s?.kind === 'page' ? parseSettingView(s.view) : null; return key ? { key, el: settingRow(key) } : null; };
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
-// A suggestion's item on Efficiency, for its page subject (kit-174): its id, and the item if drawn
-const tlSuggOf = (s) => { const id = s?.kind === 'page' ? parseSuggView(s.view) : null; return id === null ? null : { key: id, el: document.querySelector(`#efficiency [data-sugg="${CSS.escape(id)}"]`) }; };
+// A suggestion's item on its page (Efficiency, Awareness), for its page subject: its id, and the item if drawn
+const tlSuggOf = (s) => { const id = s?.kind === 'page' ? parseSuggView(s.view) : null; return id === null ? null : { key: id, el: document.querySelector(`#${suggPageOf(s.view)} [data-sugg="${CSS.escape(id)}"]`) }; };
 // The row a page subject is about: a Settings row's, or a suggestion's
 const tlRowOf = (s) => tlSettingOf(s) ?? tlSuggOf(s);
 function tlTargetRect(s) {
@@ -7345,13 +8339,13 @@ function tArtFpNow(s) {
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
   <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted"><span id="tl-c-spin" aria-hidden="true" hidden style="display:inline-block;width:10px;height:10px;margin-right:6px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;vertical-align:-1px;animation:spin .9s linear infinite"></span><span id="tl-c-state" role="status" aria-live="polite"></span></div>
-  <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Shift+Enter sends; Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
+  <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Message"></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
 // The subject as one tight line (an icon, its name, where it is), opening to what was captured.
 // Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
 function tlCtx(s, title, note) {
   const icon = !s ? 'message-circle' : s.kind === 'item' ? 'mouse-pointer-click' : 'map-pin';
   const rows = s ? Object.entries(s).filter(([k]) => k !== 'kind').map(([k, v]) => `<span>${esc(words(k))}</span><code>${esc(typeof v === 'string' ? v : JSON.stringify(v))}</code>`).join('') : '';
-  return `<details class="tl-ctx"><summary><i class="icon-${icon}" aria-hidden="true"></i><b>${esc(title)}</b><span class="muted small">${esc(tWhere(s))}${note ? ` · ${esc(note)}` : ''}</span></summary>${rows ? `<div class="kv">${rows}</div>` : '<p class="small muted">Started from the dock, about nothing on the page.</p>'}</details>`;
+  return `<details class="tl-ctx"><summary><i class="icon-${icon}" aria-hidden="true"></i><b>${esc(title)}</b><span class="muted small">${esc(tWhere(s))}${note ? ` · ${esc(note)}` : ''}</span></summary>${rows ? `<div class="kv">${rows}</div>` : ''}</details>`;
 }
 // What a supervisor turn did, as links: "Goal Launch checkout", "Ticket …", "Act open it".
 function tlRef(r) {
@@ -7419,7 +8413,9 @@ function tlCardBody(t) {
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
     tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
-    turns.innerHTML = t ? tlTurns(t) : '<p class="small muted">Say what you want done about it. Nothing is sent until you do.</p>';
+    turns.innerHTML = t ? tlTurns(t) : '';
+    const box = tlEl('tl-c-text');
+    if (box) box.placeholder = t?.turns?.length ? 'Reply' : 'Message';
     turns.scrollTop = turns.scrollHeight;
   }
   const line = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
@@ -7926,7 +8922,7 @@ function thListHtml() {
   const rows = which === 'open' ? open : resolved;
   const body = !TL.have ? '<p class="empty">Reading the threads…</p>'
     : rows.length ? `<ul class="thread-list" id="tl-list">${rows.map((t) => thRow(t, nums)).join('')}</ul>`
-    : `<p class="empty">${which === 'open' ? 'No open threads. Hold Shift and click anything on the page, or start one with +.' : 'Nothing resolved yet.'}</p>`;
+    : empty('None');
   return `<div id="ask-threads"></div>${seg}${body}`;
 }
 // The Inbox tab (kit-100 spec §2.2), first: its count is the Inbox's (red, by a page rule: not `waiting`); its pane

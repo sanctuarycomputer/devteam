@@ -1065,6 +1065,11 @@ const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-sett
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
 const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records', 'worktree_copy', 'worktree_setup_always'];
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
+// what a repo link's maintain may turn on; linkMaintains(l, 'prs')
+const LINK_DUTIES = ['prs', 'releases'];
+// maintain.reviews: another name its review records may go under, run/reviews/<reviews>-pr-<n>/, besides the link's id
+const REVIEWS_PREFIX = /^[a-z0-9][a-z0-9_.-]{0,63}$/i;
+const linkMaintains = (l, duty) => !!l && typeof l === 'object' && !!l.maintain && typeof l.maintain === 'object' && l.maintain[duty] === true;
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
 // records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
 // "repo", in its own project folder, landing with its code; or "home", on home's ticket/<id> in
@@ -1095,7 +1100,7 @@ const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
   gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string', records: 'string',
-  worktree_copy: 'any', worktree_setup_always: 'boolean',
+  worktree_copy: 'any', worktree_setup_always: 'boolean', maintain: 'object',
 });
 const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
@@ -1152,7 +1157,9 @@ const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w
 // looks up: kind "constructor" is unknown, not Object's.
 const LINK_KINDS = Object.assign(Object.create(null), {
   repo: {
-    fields: { required: ['remote'], optional: ['path', ...REPO_KEYS] },
+    // maintain: { prs, releases }, duties the supervisor keeps for a repo it doesn't only merge
+    // tickets into (linkDutyFindings): the owner's, a governance-edit like the rest
+    fields: { required: ['remote'], optional: ['path', 'maintain', ...REPO_KEYS] },
     // where the checkout is on this machine is never the owner's; what a gate run sees is
     // gate-change; anything else about a repo devteam merges into is governance-edit
     ownerClass: (field) => (field === 'path' ? null : REPO_GATE_KEYS.includes(field) ? 'gate-change' : 'governance-edit'),
@@ -1173,6 +1180,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
       else ctx.remotes.set(k, ctx.id);
       if (l.project !== undefined && (typeof l.project !== 'string' || !REPO_PATH.test(l.project))) errs.push(`${at}: project is a path inside that repo`);
       if (l.records !== undefined && !RECORDS_WHERE.includes(l.records)) errs.push(`${at}: records is "repo" or "home"`);
+      if (l.maintain !== undefined && (!isObj(l.maintain) || Object.entries(l.maintain).some(([k, v]) => (k === 'reviews' ? typeof v !== 'string' || !REVIEWS_PREFIX.test(v) : !LINK_DUTIES.includes(k) || typeof v !== 'boolean')))) errs.push(`${at}: maintain is { "prs": true|false, "releases": true|false, "reviews": "<records prefix>" }`);
       return errs;
     },
     // local and cheap: metrics asks it live
@@ -1526,6 +1534,8 @@ function schemaErrors(schema, value, where) {
 // plan-<feature> (a planner's graph, landed by its plan PR), plan-<feature>-<yyyy-mm> (the same
 // planner's messages and observations, live), or a ticket id. Anything else counts for nothing.
 const MONTHLY = /^(owner|supervisor|plan-[a-z0-9]+(?:-[a-z0-9]+)*?)-\d{4}-\d{2}$/;
+// responder.jsonl is the responder's (responder-1): it falls to the last rule, and no ticket id can be
+// "responder", since a keyed ticket id carries a -NN- number.
 function writerOfFile(name) {
   const base = name.replace(/\.jsonl$/, '');
   const m = MONTHLY.exec(base);
@@ -1533,7 +1543,7 @@ function writerOfFile(name) {
   if (/^(owner|supervisor)(-|$)/.test(base)) return null;
   return /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(base) ? base : null;
 }
-const writerClass = (by) => (by === 'owner' || by === 'supervisor' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
+const writerClass = (by) => (by === 'owner' || by === 'supervisor' || by === 'responder' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
 const planFeature = (by) => (writerClass(by) === 'planner' ? by.slice('plan-'.length) : null);
 
 // The cheap checks every reader runs, so a line never grants more than its file's writer has: the
@@ -1561,6 +1571,24 @@ function integrity(o, file) {
       if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
     }
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
+    // responder-1: the responder answers the owner's turns and hands work over, and no more. It asks
+    // nothing, replies to no message (a reply's re closes what it names, in every reader of open
+    // messages), and its observations are its own and of no kind readers honour by kind alone.
+    if (cls === 'responder') {
+      if (o.type === 'turn' && o.question !== undefined) return "the responder's turns ask nothing";
+      if (o.type === 'message' && !['handoff', 'info'].includes(o.kind)) return 'the responder sends handoff and info messages only';
+      if (o.type === 'message' && o.re !== undefined && o.re !== null) return 'the responder replies to no message (re)';
+      if (o.type === 'observation' && o.source !== 'responder') return "the responder's observations have source responder";
+      if (o.type === 'observation' && [...SET_ASIDE_KINDS, 'outcome', 'escaped-defect', 'discovery', 'footprint-refusal'].includes(o.kind)) return `the responder doesn't write ${o.kind} observations`;
+      // a detector line is the kit's own (sensor, findings), which readers act on by detector alone
+      if (o.type === 'observation' && o.detector !== undefined && o.detector !== null) return "the responder's observations name no detector";
+    }
+    // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
+    if (o.type === 'message' && o.kind === 'handoff' && typeof o.thread !== 'string') return 'a handoff names its thread';
+    if (o.type === 'message' && o.kind === 'handoff' && o.to !== 'supervisor') return 'a handoff goes to the supervisor';
+    if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
+    if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
+    if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
     // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
     // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
     // (goal order), and of asking for one of the supervisor's settings (owner-setting). Nobody else
@@ -1888,8 +1916,10 @@ function currentTicketId() {
   const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   return b?.startsWith('ticket/') ? b.slice('ticket/'.length) : null;
 }
-// Who this process writes the log as: a ticket id, plan-<feature>, or supervisor. Never the owner.
+// Who this process writes the log as: the responder (its role wins over a ticket, a feature or a
+// branch), a ticket id, plan-<feature>, or supervisor. Never the owner.
 function logWriter() {
+  if (process.env.DEVTEAM_ROLE === 'responder') return 'responder';
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
@@ -1914,7 +1944,10 @@ function ownerWriter(hint) {
   return { by: 'owner' };
 }
 const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli');
+// What the responder is told when it runs a supervisor's command: who does it, and how to hand it over.
+const responderRefusal = (what) => `${what}: the supervisor does this; hand it over: send supervisor "…" --kind handoff --thread <t-id>`;
 const supervisorOnly = (what) => {
+  if (process.env.DEVTEAM_ROLE === 'responder' || logWriter() === 'responder') die(responderRefusal(what));
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`${what}: the supervisor does this`);
   rememberSupervisorPane();
   noteSupervisorSelf();
@@ -3093,7 +3126,7 @@ const memo = (key, fn) => { const l = readLog(); l.memo ??= new Map(); if (!l.me
 const tickets = () => memo('tickets', () => new Map(logObjects('ticket').map((t) => [t.id, t])));
 const features = () => memo('features', () => new Map(logObjects('feature').map((f) => [f.id, f])));
 const isActive = (t) => !t.superseded_by;
-// A held ticket is one the supervisor chose not to schedule yet (`ticket set <id> --json '{"held": "why"}'`; null releases it).
+// A held ticket is one the supervisor chose not to schedule yet (`ticket hold <id> --reason "why" --for <cause>…`; `ticket release <id>` lifts it).
 const isHeld = (t) => typeof t.held === 'string' && t.held.trim() !== '';
 const activeTickets = () => new Map([...tickets()].filter(([, t]) => isActive(t)));
 const weight = (t) => (t.size === 'M' ? 2 : 1);
@@ -3131,14 +3164,14 @@ function findCycle(ts) {
   for (const id of ts.keys()) if (!state.has(id)) { const c = dfs(id); if (c) return c; }
   return null;
 }
-// Longest dependency chain, weighted S = 1, M = 2.
-function criticalPath(ts) {
+// Longest dependency chain, weighted S = 1, M = 2 (or by w: () => 1 counts tickets).
+function criticalPath(ts, w = weight) {
   const best = new Map();
   const longest = (id) => {
     if (best.has(id)) return best.get(id);
     let top = { len: 0, path: [] };
     for (const d of ts.get(id).depends_on ?? []) if (ts.has(d)) { const r = longest(d); if (r.len > top.len) top = r; }
-    const res = { len: top.len + weight(ts.get(id)), path: [...top.path, id] };
+    const res = { len: top.len + w(ts.get(id)), path: [...top.path, id] };
     best.set(id, res);
     return res;
   };
@@ -4085,6 +4118,39 @@ function deriveStatus() {
   });
 }
 
+// A mostly serial graph (D4, D11): the longest chain of unmerged tickets is SERIAL_DEPTH or more
+// deep and at least SERIAL_RATIO times the ready width (unmerged tickets whose dependencies have
+// all merged). Every check passes on such a graph, yet only one or two tickets can ever run. When
+// most of the chain's links join tickets that share nothing but a whole-file touch of a file
+// split_files lists, the dependency only serializes: naming parts (path#name) lets them run at once.
+const SERIAL_DEPTH = 8, SERIAL_RATIO = 4;
+function serialGraphWarning(live, s = loadSettings()) {
+  const U = new Map(live.map((t) => [t.id, t]));
+  if (U.size < SERIAL_DEPTH) return null;
+  const chain = criticalPath(U, () => 1).path;
+  const depth = chain.length;
+  const width = live.filter((t) => !(t.depends_on ?? []).some((d) => U.has(d))).length;
+  if (depth < SERIAL_DEPTH || depth < SERIAL_RATIO * width) return null;
+  const msg = `the unmerged ticket graph is mostly serial: its longest dependency chain is ${depth} tickets deep (${chain[0]} … ${chain[depth - 1]}) while ${width} of ${U.size} are ready (no unmerged dependency) (D4, D11)`;
+  // a link that only serializes: every footprint the two share is a whole-file touch of a split file
+  const wholeSplit = (a, b) => {
+    const repo = repoOfTicketLink(a);
+    if (repo !== repoOfTicketLink(b)) return null;
+    const files = new Set();
+    for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) {
+      if (!touchesOverlap(ga, gb, repo, s)) continue;
+      const pa = trimSlash(touchPath(ga)), pb = trimSlash(touchPath(gb));
+      if (pa !== pb || hasWild(pa) || !isSplitFile(pa, s) || (touchPart(ga) && touchPart(gb))) return null;
+      files.add(pa);
+    }
+    return files.size ? [...files] : null;
+  };
+  const links = [];
+  for (let i = 1; i < depth; i++) { const f = wholeSplit(U.get(chain[i - 1]), U.get(chain[i])); if (f) links.push(`${chain[i]} on ${chain[i - 1]} (${f.join(', ')})`); }
+  if (links.length * 2 <= depth - 1) return `${msg}; find dependencies a contract ticket or a split could break`;
+  return `${msg}; ${links.length} of its ${depth - 1} links only serialize whole-file touches of a file split_files lists, e.g. ${links.slice(0, 2).join('; ')}: name the parts each changes (path#name) and drop the dependencies that only serialize`;
+}
+
 const onPlanBranch = () => (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
 function cmdValidate() {
@@ -4276,6 +4342,8 @@ function cmdValidate() {
       if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
       outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (touchesOverlap(ga, gb, repoOfTicketLink(a))) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
+    const w = serialGraphWarning(live);
+    if (w) warnings.push(scope ? `${w}; not ${scope}'s to fix` : w);
   }
 
   // The registry and the lines. Labels-only components and an empty registry print nothing.
@@ -4554,11 +4622,12 @@ function restartCommands(filter = () => true) {
   const windows = new Set((sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']) ?? '').split('\n').filter(Boolean));
   return liveSessions().filter((s) => lastPhaseOf(s.name)?.to === 'parked' && ['run', 'drain'].includes(sessionMode(s.name)) && filter(s)).map((s) => ({ name: s.name, cmd: `${s.role} ${s.id}${windows.has(s.name) && fs.existsSync(s.wt) ? ' --resume' : ''}`, handoff: !!handoffFor(s.name) }));
 }
-// Write one goal's hold, creating Upkeep's line the first time it is held.
-function writeHold(g, hold, by) {
+// Write one goal's hold, creating Upkeep's line the first time it is held. extra: top-level fields of
+// the hold line beside hold (a drain's hold_for and hold_until).
+function writeHold(g, hold, by, extra = {}) {
   let target = g;
   if (isUpkeep(g) && !upkeepGoal()) target = appendLog({ type: 'goal', kind: 'upkeep', title: 'Upkeep' }, by);
-  return appendLog({ type: 'goal', op: 'set', id: target.id, hold }, by);
+  return appendLog({ type: 'goal', op: 'set', id: target.id, hold, ...extra }, by);
 }
 const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', 'let-go': 'let go' }[m] ?? m);
 // The mode label a goal shows: drain splits into draining (work still running) and drained.
@@ -4697,7 +4766,7 @@ function cmdReady() {
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component, incident_slots: s.incident_slots } });
   out(`active workers: ${active.length}/${capWords(s.max_active_tickets)}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
   for (const r of rows.filter((x) => x.incident)) out(`fix first  ${r.id}  (incident ${r.incident}, severity ${r.severity})`);
-  for (const h of held) out(`held       ${h.id}  (${h.held})`);
+  for (const h of held) { const hf = ts.get(h.id).held_for; const hu = ts.get(h.id).held_until; out(`held       ${h.id}  (${h.held}${Array.isArray(hf) && hf.length ? `; for ${hf.join(', ')}` : ''}${hu ? `, until ${hu}` : ''})`); }
   for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${r.blocks ? `  (blocks p${r.blocks.priority})` : ''}${r.overlaps_active ? `  (touches overlap ${r.overlaps_active.join(', ')}: start it once that merges)` : ''}${capped(r) ? '  (component at cap)' : ''}`);
@@ -4745,13 +4814,146 @@ function cmdStatus() {
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}`);
 }
 
+// Why a hold the supervisor or a planner writes is refused, or null (kit-571; design
+// every-wait-names-its-cause-and-every-put, "Writers"): it names what it waits on (--for), each cause
+// in a known form (waitCause) and in the log, a date (--until) for a cause the kit can't follow, and
+// a date that is a real day from today to 30 days ahead (UTC). kind is ticket or goal, id the held
+// thing's, causes trimmed and de-duplicated, until a date or null, whole the --whole words or null.
+// Never applied to the owner's holds. Holds already in the log are never read through it.
+// A hold may not wait on itself (rule 6): for a ticket, on the ticket, one of its goals or a ticket
+// depending on it (transitively); for a goal, on the goal or one of its tickets; nor on a cause whose
+// own holds in force (a held ticket's held_for, a draining goal's hold_for) reach one of those.
+// A ticket held for a question names why the whole ticket waits (rule 7): whole, else split first.
+// ticket is the held ticket (for ticket add, its body: its feature gives its goals).
+function holdCause({ kind, id, causes, until, whole, ticket }) {
+  const FORMS = 'a q-… question, a ticket id, goal:<g-id>, chore:<slug>, pr:<link>#<n>, run:<link>:<run id> or external:<words>';
+  if (!causes.length) return until ? '--until goes with --for: name what the hold waits on' : `a hold names what it waits on: --for <cause>… (${FORMS})`;
+  const today = new Date().toISOString().slice(0, 10);
+  const dayAfter = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+  const latest = dayAfter(today, 30);
+  for (const c of causes) {
+    const w = waitCause(c);
+    if (!w) return `${c} is in no known form (${FORMS})`;
+    const there = w.form === 'q' ? logGet(w.id)?.type === 'question'
+      : w.form === 'ticket' ? tickets().has(w.id)
+      : w.form === 'goal' ? logGet(w.id)?.type === 'goal'
+      : w.form === 'chore' ? Boolean(resolveCommit(`refs/heads/chore-${w.id}`) || resolveCommit(`refs/remotes/origin/chore-${w.id}`) || logObjects('act').some((a) => (a.refs ?? []).includes(`chore-${w.id}`)))
+      : true;
+    if (!there) return w.form === 'chore' ? `${c} is not in the log (no chore-${w.id} branch here or on origin, and no act refs it)` : `${c} is not in the log`;
+    if (['pr', 'run', 'external'].includes(w.form) && !until) return `the kit can't follow ${c}: give it --until <date> (today to ${latest}) to look at it again`;
+  }
+  if (until !== null && until !== undefined) {
+    const real = /^\d{4}-\d{2}-\d{2}$/.test(until) && !Number.isNaN(Date.parse(`${until}T00:00:00Z`)) && new Date(Date.parse(`${until}T00:00:00Z`)).toISOString().slice(0, 10) === until;
+    if (!real) return `--until ${until} is not a date (YYYY-MM-DD)`;
+    if (until < today) return `--until ${until} is in the past (today is ${today}, UTC)`;
+    if (until > latest) return `--until ${until} is more than 30 days ahead (at most ${latest})`;
+  }
+  // rule 6: the subjects a hold of this thing may not wait on, each with why it is the thing itself
+  const self = new Map();
+  if (kind === 'ticket') {
+    self.set(id, null);
+    for (const g of ticketGoals(ticket)) self.set(`goal:${g.id}`, `goal:${g.id} is one of its goals`);
+    const all = [...tickets().values()];
+    const queue = [id];
+    const seen = new Set(queue);
+    while (queue.length) {
+      const at = queue.shift();
+      for (const t of all) {
+        if (seen.has(t.id) || !(t.depends_on ?? []).includes(at)) continue;
+        seen.add(t.id);
+        // a superseded or merged dependent waits on nothing (kit-572 reads it resolved or failed)
+        if (!isActive(t) || mergeShaFor(t.id)) continue;
+        queue.push(t.id);
+        self.set(t.id, `${t.id} depends on it`);
+      }
+    }
+  } else {
+    self.set(`goal:${id}`, null);
+    for (const t of tickets().values()) if (ticketGoals(t).some((g) => g.id === id)) self.set(t.id, `${t.id} is one of its tickets`);
+  }
+  // a cause as a subject the walk follows: a ticket's id or goal:<id>; anything else ends the walk
+  const subject = (c) => { const w = waitCause(c); return w?.form === 'ticket' ? w.id : w?.form === 'goal' ? `goal:${w.id}` : null; };
+  const next = (s) => {
+    if (s.startsWith('goal:')) { const g = logGet(s.slice(5)); return g?.type === 'goal' && goalMode(g) === 'drain' ? g.hold_for ?? [] : []; }
+    // only a hold in force: a superseded or merged ticket's stale held_for is not followed
+    const t = tickets().get(s);
+    return t && isHeld(t) && isActive(t) && !mergeShaFor(t.id) ? t.held_for ?? [] : [];
+  };
+  for (const c of causes) {
+    const start = subject(c);
+    if (!start) continue;
+    const from = new Map([[start, null]]);
+    const queue = [start];
+    while (queue.length) {
+      const at = queue.shift();
+      if (self.has(at)) {
+        const chain = [];
+        for (let s = at; s !== null; s = from.get(s)) chain.unshift(s);
+        const why = self.get(at);
+        return `${c} waits on ${id} itself${chain.length > 1 ? `, through ${chain.join(' -> ')}` : ''}${why ? ` (${why})` : ''}`;
+      }
+      for (const n of next(at)) {
+        const s = subject(n);
+        if (s && !from.has(s)) { from.set(s, at); queue.push(s); }
+      }
+    }
+  }
+  // rule 7: a question gates only part of a ticket, unless the hold says why it gates the whole
+  if (kind === 'ticket' && !whole) {
+    const q = causes.find((c) => waitCause(c)?.form === 'q');
+    if (q) return `${id} waits on ${q}: hold only the part the answer gates. Split first: ticket add a ticket with the touches and done-whens that don't need the answer, ticket set ${id} to what is left, then hold it; or, if no part can go ahead without the answer, pass --whole "<why>"`;
+  }
+  return null;
+}
+
 // ticket add <id> --json '{…}' | --file f ; ticket set <id> --json '{…}' ; feature add/set likewise.
-function cmdTicket() { graphEdit('ticket', SCHEMA['x-id'].keyed.ticket); }
+// ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole w] ; ticket release <id> [--reason r]:
+// a hold that names what it waits on (holdCause), and its release, each one ticket line.
+function cmdTicket() {
+  const [sub, id] = positional;
+  if (sub !== 'hold' && sub !== 'release') return graphEdit('ticket', SCHEMA['x-id'].keyed.ticket);
+  if (!id) die(sub === 'hold' ? 'usage: ticket hold <id> --reason "<why>" --for <cause>… [--until <YYYY-MM-DD>] [--whole "<why>"]' : 'usage: ticket release <id> [--reason "<why>"]');
+  const by = logWriter();
+  const cls = writerClass(by);
+  if (!['supervisor', 'planner'].includes(cls)) die('tickets are written by the supervisor or a planner (plan-<feature>)');
+  const t = logGet(id);
+  if (t?.type !== 'ticket') die(`no ticket ${id}`);
+  if (cls === 'planner') {
+    const f = planFeature(by);
+    if (t.feature !== f) die(`${by} may only change the feature "${f}" and its tickets`);
+    // the fold ranks a planner's held below the supervisor's and the owner's: once either wrote it, a
+    // planner's line would change nothing (a release with null keeps that rank too)
+    const over = readLog().lines.find((l) => l.type === 'ticket' && l.id === id && 'held' in l && ['supervisor', 'owner'].includes(writerClass(l.by)));
+    if (over) die(`${id}'s hold was set by the ${writerClass(over.by)}: a planner may not change it`);
+  }
+  const reason = flagStr('reason')?.trim() || null;
+  if (sub === 'release') {
+    if (!isHeld(t)) die(`${id} is not held`);
+    appendLog({ type: 'ticket', op: 'set', id, held: null, held_for: null, held_until: null }, by);
+    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'replan-within-feature', what: `released ticket ${id}${reason ? `: ${reason}` : ''}`, refs: [id], reversible: true }, 'supervisor');
+    return out(`released ${id}`);
+  }
+  if (!isActive(t)) die(`${id} is superseded: nothing to hold`);
+  if (mergeShaFor(id)) die(`${id} is merged: nothing to hold`);
+  if (!reason) die('ticket hold needs --reason "<why>"');
+  const causes = [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))];
+  const until = flagStr('until')?.trim() || null;
+  // a bare or blank --until is a date given and lost: refused, as goal hold refuses it
+  if (flags.until !== undefined && until === null) die('--until needs a date (YYYY-MM-DD)');
+  if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
+  const whole = flagStr('whole')?.trim() || null;
+  const why = holdCause({ kind: 'ticket', id, causes, until, whole, ticket: t });
+  if (why) die(why);
+  const held = whole ? `${reason} (whole: ${whole})` : reason;
+  appendLog({ type: 'ticket', op: 'set', id, held, held_for: causes, held_until: until }, by);
+  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'replan-within-feature', what: `held ticket ${id} for ${causes.join(', ')}`, refs: [id], reversible: true }, 'supervisor');
+  out(`held ${id}`);
+}
 function cmdFeature() { graphEdit('feature', SCHEMA['x-id'].keyed.feature); }
 function graphEdit(type, idRe) {
   const [sub, id] = positional;
   const by = logWriter();
-  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'   |   ${type} show <id>`);
+  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'${type === 'ticket' ? ' [--whole "<why>"]' : ''}   |   ${type} show <id>`);
   if (sub === 'show') return json(logGet(id) ?? die(`no ${type} ${id}`));
   if (!new RegExp(idRe).test(id)) die(`${type} id "${id}" must match ${idRe}`);
   if (!['supervisor', 'planner'].includes(writerClass(by))) die(`${type}s are written by the supervisor or a planner (plan-<feature>)`);
@@ -4776,6 +4978,34 @@ function graphEdit(type, idRe) {
   if (type === 'ticket' && RESERVED_LINKS.includes(body.component)) die(`component "${body.component}" is reserved (reserved: ${RESERVED_LINKS.join(', ')}): home is the repo that holds the kit, devteam the kit's own files; plan the ticket under another component`);
   // a mistyped feature can't be corrected afterwards (a ticket's feature is fixed), so it's caught here
   if (type === 'ticket' && sub === 'add' && by === 'supervisor' && body.feature !== CHORES && logGet(body.feature)?.type !== 'feature') die(`no feature "${body.feature}" (devteam.mjs feature add, or the feature's id as the log has it)`);
+  // a held body is held to ticket hold's rule (holdCause): a cause, a date in range, no wait on itself
+  if (type === 'ticket') {
+    // the fold ranks a planner's held below the supervisor's and the owner's, as ticket hold refuses
+    if (writerClass(by) === 'planner' && sub === 'set' && 'held' in body) {
+      const over = readLog().lines.find((l) => l.type === 'ticket' && l.id === id && 'held' in l && ['supervisor', 'owner'].includes(writerClass(l.by)));
+      if (over) die(`${id}'s hold was set by the ${writerClass(over.by)}: a planner may not change it`);
+    }
+    if (typeof body.held === 'string' && !body.held.trim()) die('release with null: {"held": null} (a blank held reads released yet keeps its cause)');
+    if (typeof body.held === 'string') {
+      const t = sub === 'add' ? { ...body, id } : { ...logGet(id), ...body };
+      if (!isActive(t)) die(`${id} is superseded: nothing to hold`);
+      if (mergeShaFor(id)) die(`${id} is merged: nothing to hold`);
+      if (body.held_for !== undefined && body.held_for !== null && !Array.isArray(body.held_for)) die('held_for is a list of causes');
+      body.held_for = [...new Set((body.held_for ?? []).map((c) => String(c).trim()).filter(Boolean))];
+      if (typeof body.held_until === 'string' && !body.held_until.trim()) die('--until needs a date (YYYY-MM-DD)');
+      body.held_until = typeof body.held_until === 'string' ? body.held_until.trim() : body.held_until ?? null;
+      if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
+      const whole = flagStr('whole')?.trim() || null;
+      const why = holdCause({ kind: 'ticket', id, causes: body.held_for, until: body.held_until, whole, ticket: t });
+      if (why) die(body.held_for.length ? why : `${why}; or ticket hold ${id} --for <cause>… --reason "<why>"`);
+      if (whole) body.held = `${body.held} (whole: ${whole})`;
+    } else if ((body.held_for ?? null) !== null || (body.held_until ?? null) !== null) {
+      die('held_for and held_until go with held: ticket hold <id> --reason "<why>" --for <cause>…');
+    } else if (body.held === null) {
+      body.held_for ??= null;
+      body.held_until ??= null;
+    }
+  }
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
@@ -7744,7 +7974,7 @@ function turnAnswer(what, v) {
   if (!TURN_ID.test(uid ?? '')) die(`${what} --from-turn <u-id>: the owner's turn whose words settle it`);
   const u = logGet(uid);
   if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
-  if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words settle a question`);
+  if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the ${u.created_by}'s; only the owner's words settle a question`);
   // --said: whole clauses of the turn the question was asked about (thread ask --turn), a span no
   // other binding on the turn overlaps, with what the owner wrote since the question read first
   if (flags.said !== undefined) {
@@ -8058,6 +8288,10 @@ function anchorProblem(a) {
   }
   return null;
 }
+// A subject's key: one open thread per key (kit-97). An item by its ref, a page spot by its view and point,
+// an artifact's or a preview's spot by its page and the element the lens named, else the point. index.html's
+// tKey (with tFrameSpot) is the same function; test/thread-per-subject.test.mjs holds the two equal.
+const subjectKey = (s) => { const spot = () => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
 // What a thread or turn line holds beyond what the schema's walk can say: sizes in bytes, a title
 // of one line, a subject with only its kind's keys, and the supervisor's fields on its own turns.
 function threadLineProblems(o) {
@@ -8111,7 +8345,8 @@ function threadViews(objects) {
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
 function threadView(t, ts, qs) {
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null }));
+  // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null }));
   const status = t.status === 'resolved' ? 'resolved' : 'open';
   const last = turns[turns.length - 1] ?? null;
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
@@ -8222,7 +8457,7 @@ function threadOpen(id, by) {
   if (t.status === 'resolved') die(by === 'owner' ? `${t.id} is resolved; reopen it first (thread reopen ${t.id} "<words>")` : `${t.id} is resolved: the owner closed it, and a reply goes nowhere until they reopen it`);
   return t;
 }
-const openThreadCount = () => threadViews(readLog().objects).filter((x) => x.status === 'open').length;
+const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open').length;
 // Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
 // owner's move), else waiting (on the supervisor).
 function threadCounts() {
@@ -8315,15 +8550,15 @@ function cmdThread() {
     });
     return deliveredWords(typed);
   };
-  // Who writes a reply from this session: the supervisor (a responder's replies are written as the
-  // supervisor's until kit-102 gives it its own), or null where supervisorOnly would refuse one. The
-  // one place both reply and working's own-turn rule ask, so the two stay in step.
-  const replyWriter = () => (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
-  // Who holds a turn, as the stage names it: null for the owner's terminal and the dashboard, which
-  // never hold one; the responder says so itself until kit-102 makes logWriter say it.
+  // Who writes a reply from this session: the responder (its own turns), the supervisor, or null
+  // where supervisorOnly would refuse one. The one place both reply and working's own-turn rule ask,
+  // so the two stay in step.
+  const replyWriter = () => (logWriter() === 'responder' ? 'responder' : logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE) ? null : 'supervisor');
+  // Who holds a turn, as the stage names it (the session's writer, the responder included): null for
+  // the owner's terminal and the dashboard, which never hold one.
   const sessionBy = () => {
     if (!process.env.DEVTEAM_ROLE || process.env.DEVTEAM_CHANNEL === 'dashboard') return null;
-    return process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : logWriter();
+    return logWriter();
   };
   // the holder spoke (or the owner closed the thread): its stage goes
   // a failed clear never fails a command already written (a retry would post twice): the card ignores a record older than the reply anyway
@@ -8344,7 +8579,12 @@ function cmdThread() {
     const title = threadTitle(given ?? words);
     if (!title) die('--title: the thread needs a name');
     const files = filesFlag();
-    const n = openThreadCount();
+    const views = threadViews(readLog().objects);
+    // one open thread per subject (kit-97): a second is refused, naming the one to say it in
+    const key = subject === undefined ? null : subjectKey(subject);
+    const had = key === null ? null : views.find((x) => x.status === 'open' && x.subject && subjectKey(x.subject) === key);
+    if (had) die(`${had.id} is already open on this subject: say it there (thread say ${had.id} "<words>")`);
+    const n = openThreadCount(views);
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
     // both lines checked before the thread's is written: a refused first turn leaves no thread with none
     if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
@@ -8353,16 +8593,17 @@ function cmdThread() {
     out(t.id);
     return out(deliver(t, u, words, files));
   }
-  // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
-  // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
+  // say is the owner's and reply the supervisor's or the responder's, never one falling through to the
+  // other: a reply with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the
+  // owner's file. The responder writes its own; anyone else goes through supervisorOnly.
   if (sub === 'say' || sub === 'reply') {
-    const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), replyWriter());
+    const by = sub === 'say' ? threadOwner().by : sub === 'reply' && logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply'), replyWriter());
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
     const words = turnText(wordsFrom(2));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
-    if (refs.length && by !== 'supervisor') die("--refs are on the supervisor's turns: what it did, as <type>:<id>");
+    if (refs.length && by !== 'supervisor' && by !== 'responder') die("--refs are on the supervisor's turns and the responder's: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
     const files = filesFlag();
@@ -8395,7 +8636,7 @@ function cmdThread() {
       if (!TURN_ID.test(uid ?? '')) die("thread ask --turn <u-id>: the owner's turn the question is about");
       const u = logGet(uid);
       if (u?.type !== 'turn') die(`--turn ${uid}: no such turn`);
-      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the supervisor's; a question is about the owner's words`);
+      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the ${u.created_by}'s; a question is about the owner's words`);
       if (u.thread !== t.id) die(`--turn ${uid}: that turn is in ${u.thread}, not ${t.id}; ask in its own thread`);
       if (flags.at !== undefined && flags['owner-said'] === undefined) die('--at goes with --owner-said: which match of a repeated clause');
       about = { about_turn: uid };
@@ -8534,7 +8775,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s or the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -9197,7 +9438,7 @@ async function previewRunIt(rec) {
 }
 // What hello and the Library say of one preview, every string capped: this goes into the hub's list.
 const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
-const previewHelloRow = (r, up) => ({ name: previewCap(r.name, 63), port: r.port, project: previewCap(r.project, 63), session: previewCap(r.session, 80), label: previewCap(r.label, PREVIEW_LABEL_MAX), at: previewCap(r.at, 40), up, run: !!r.run });
+const previewHelloRow = (r, up) => ({ name: previewCap(r.name, 63), port: r.port, project: previewCap(r.project, 63), session: previewCap(r.session, 80), label: browserPreviewShaped(r) ? "Supervisor's browser" : previewCap(r.label, PREVIEW_LABEL_MAX), at: previewCap(r.at, 40), up, run: !!r.run });
 // --- the preview lens: framed by the viewer at <preview>/.devteam/lens, on the app's own origin, it
 // reads the app's page for the viewer over postMessage (spec §7). On a box the gateway serves it; on a
 // laptop the dashboard's relay does. Copied from cloud/gateway.mjs, never edited here: a test holds
@@ -9574,7 +9815,10 @@ async function cmdPreview() {
     const rows = await Promise.all(recs.map(async ({ mtimeMs, ...r }) => ({ ...r, up: await probePort(r.port) })));
     if (flags.json) return json(rows);
     if (!rows.length) return out('no previews');
-    for (const r of rows) out(`${r.name}  port ${r.port}  ${r.up ? 'answers' : 'not answering'}  ${r.session}${r.label ? ` (${r.label})` : ''}  ${previewLink(r)}`);
+    for (const r of rows) {
+      const label = browserPreviewShaped(r) ? "Supervisor's browser" : r.label;
+      out(`${r.name}  port ${r.port}  ${r.up ? 'answers' : 'not answering'}  ${r.session}${label ? ` (${label})` : ''}  ${previewLink(r)}`);
+    }
     return undefined;
   }
   if (sub === 'url') {
@@ -9588,16 +9832,33 @@ async function cmdPreview() {
     if (flags.all) {
       const session = logWriter();
       const mine = readPreviews().filter((r) => r.session === session);
-      for (const r of mine) { killPreviewWindow(r); removePreview(r.name); }
+      // the caller's browser record as browser stop stops it (Chrome too), the others as ever
+      for (const r of mine) {
+        if (browserIsPreview(r)) await browserStop({ say: false, rec: r });
+        else { killPreviewWindow(r); removePreview(r.name); }
+      }
       return out(`stopped ${mine.length} preview${mine.length === 1 ? '' : 's'}`);
     }
     const r = previewNamed(arg ?? die('usage: preview stop <name> | --all'));
+    // the browser's record is browser stop, whoever's writer runs it: stopping takes nothing from anyone
+    if (browserIsPreview(r)) {
+      // the line only when Chrome was stopped: a failed kill has said why and set exit 1
+      if (await browserStop({ say: false, rec: r })) out(`preview ${r.name} stopped, and the supervisor's browser with it`);
+      return undefined;
+    }
     const killed = killPreviewWindow(r);
     removePreview(r.name);
     return out(`preview ${r.name} stopped${killed ? ' and its server shut down' : r.run ? '' : ' (unregistered; the server is yours to stop)'}`);
   }
   if (sub === 'start') {
     const r = previewNamed(arg ?? die('usage: preview start <name>'));
+    // the browser's record is browser start: its gates first (a worker refused before anything
+    // starts), then the start lock, the memory check and a fresh environment from this caller
+    if (browserIsPreview(r)) {
+      browserGates({ chrome: true });
+      const s = await browserEnsure();
+      return out(`browser running (preview ${s.preview}, profile ${browserKey()})`);
+    }
     if (!r.run) die(`preview ${r.name} has no command to run: it is a server you run yourself. Start it, then devteam.mjs preview ${r.port}${r.label ? ` --label "${r.label}"` : ''}`);
     if (!fs.existsSync(r.cwd)) die(`preview ${r.name}: its folder ${r.cwd} is gone`);
     killPreviewWindow(r);
@@ -9610,6 +9871,8 @@ async function cmdPreview() {
     if (/[\r\n\0]/.test(cmd)) die('preview --run is one line');
     const session = logWriter();
     const label = previewLabel();
+    // previewClaim keys on the label: this one would take over the browser's record and kill its window
+    if (label === 'browser') die("preview: the label browser is the supervisor's browser's; pick another");
     const { name, had } = await previewClaim(session, label);
     if (had?.run) killPreviewWindow(had);
     let port;
@@ -9626,6 +9889,7 @@ async function cmdPreview() {
     if (await previewPortIsDashboard(port)) die(`preview: ${port} is a devteam dashboard`);
     const session = logWriter();
     const label = previewLabel();
+    if (label === 'browser') die("preview: the label browser is the supervisor's browser's; pick another");
     const { name, had } = await previewClaim(session, label);
     // The kit's own window stays only while it is what's on this port; a window with no record
     // to answer for it would be swept by the next tick anyway.
@@ -9650,7 +9914,7 @@ const ARTIFACTS_REL = `${projectRel}/artifacts`;
 const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99})$/;
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
-const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for'];
+const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for', 'kind'];
 const artifactPathOk = (p) => /^[A-Za-z0-9._/-]+$/.test(p) && p.split('/').every((s) => s && !s.startsWith('.'));
 const ARTIFACT_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net', 'https://unpkg.com'];
 const ARTIFACT_FONT_HOSTS = ['https://fonts.googleapis.com', 'https://fonts.gstatic.com'];
@@ -9718,6 +9982,8 @@ function parseArtifactManifest(buf) {
   }
   if (typeof m.by !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(m.by)) errs.push('by is who drew it: supervisor, a ticket id, or plan-<feature>');
   if (m.for !== undefined && !(Array.isArray(m.for) && m.for.every((s) => scopeValid(s, 'artifact')))) errs.push(`for is a list of scopes (${SCOPE_HELP.artifact})`);
+  // what the Library files it under; with none it is a mock
+  if (m.kind !== undefined && !['mock', 'diagram', 'docs'].includes(m.kind)) errs.push('kind is mock, diagram or docs (or leave it out: a mock)');
   return errs.length ? { error: errs.join('; ') } : { manifest: { ...m, for: m.for ?? [] } };
 }
 // One artifact judged the same whether its entries come from disk or from a commit: errors refuse
@@ -9893,7 +10159,7 @@ function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
   const mtime = Math.max(0, ...src.entries.map((e) => e.mtime ?? 0));
   const m = p.manifest;
-  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], error: p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
+  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], kind: m?.kind ?? null, error: p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
 }
 function landedArtifacts() {
   const ref = mainRef();
@@ -9908,7 +10174,9 @@ function landedArtifacts() {
   // the cache holds what the tree says (describeArtifact); the row adds the tree id itself, for
   // publishing, and nothing that changes without the tree changing goes in the cache
   const res = rows.map(([, tree, slug]) => {
-    let d = cache[tree]?.slug === slug ? cache[tree] : null;
+    // a row with no kind key was written by a kit from before kinds, which calls a kinded manifest
+    // broken: describe it again rather than serve that (kit-319)
+    let d = cache[tree]?.slug === slug && 'kind' in cache[tree] ? cache[tree] : null;
     if (!d) { const src = artifactSource('main', slug); d = src ? describeArtifact(slug, 'main', src) : null; }
     if (!d) return null;
     next[tree] = d;
@@ -10011,21 +10279,24 @@ function artifactSubjectNow(s) {
   if (fingerprint(src.entries) === s.fp) return null;
   return tree ? `main has changed ${s.slug} since this published version` : `the artifact ${s.slug} has changed since this thread began`;
 }
-// artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
+// artifact new <slug> --title --summary [--for '[…]'] [--kind mock|diagram|docs]: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
   const [sub, ...args] = positional;
   const here = path.join(repoRoot, ARTIFACTS_REL);
   if (sub === 'new') {
-    const slugName = args[0] ?? die('usage: artifact new <slug> --title "…" --summary "…" [--for \'["goal:g"]\']');
+    const slugName = args[0] ?? die('usage: artifact new <slug> --title "…" --summary "…" [--for \'["goal:g"]\'] [--kind mock|diagram|docs]');
     if (!LINK_ID.test(slugName)) die(`${slugName}: a slug is lowercase words joined by - (mock-checkout)`);
     if (!commonDir || fs.realpathSync(repoRoot) === fs.realpathSync(mainRoot)) die('artifact new: draw an artifact in a worktree (a ticket\'s, a plan\'s, or devteam.mjs chore start artifact-<slug>), never on the main checkout');
     if (landedArtifacts().some((a) => a.slug === slugName)) die(`${slugName} has landed; edit ${ARTIFACTS_REL}/${slugName}/ in this worktree instead`);
     if (fs.existsSync(path.join(here, slugName))) die(`${ARTIFACTS_REL}/${slugName} already exists here`);
     const other = draftArtifacts().filter((a) => a.slug === slugName).map((a) => a.at);
     if (other.length) warn(`${slugName} is also being drawn in ${other.join(', ')}`);
-    const by = process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
-    const manifest = { v: 1, title: flagStr('title') ?? die('artifact new needs --title'), summary: flagStr('summary') ?? die('artifact new needs --summary'), by, for: jsonFlag('for') ?? [] };
+    const by = process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
+    // flags keep a repeated flag's last value; a kind given twice is refused rather than guessed
+    const own = argv.indexOf('--') < 0 ? argv : argv.slice(0, argv.indexOf('--'));
+    if (own.filter((a) => a === '--kind' || a.startsWith('--kind=')).length > 1) die('artifact new: give --kind once; kind is mock, diagram or docs');
+    const manifest = { v: 1, title: flagStr('title') ?? die('artifact new needs --title'), summary: flagStr('summary') ?? die('artifact new needs --summary'), by, for: jsonFlag('for') ?? [], ...(flags.kind !== undefined ? { kind: flagStr('kind') ?? '' } : {}) };
     const m = parseArtifactManifest(Buffer.from(JSON.stringify(manifest)));
     if (m.error) die(`artifact new: ${m.error}`);
     fs.mkdirSync(path.join(here, slugName), { recursive: true });
@@ -10094,7 +10365,7 @@ function cmdArtifact() {
     if (flags.json) return json(r);
     return out(r.versions.map((v) => (v.kind === 'draft' ? `draft ${v.worktree} ${v.time}` : `${v.kind} ${v.tree.slice(0, 12)} ${v.commit.slice(0, 12)} ${v.time}`)).join('\n'));
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -11178,7 +11449,7 @@ function citeTargets() {
   const [a, b] = positional;
   switch (command) {
     case 'merge': return [a, flagStr('chore') !== undefined ? `chore-${choreSlug(flagStr('chore'))}` : null, flagStr('plan'), flagStr('plan') ? `plan-${flagStr('plan')}` : null].filter(Boolean);
-    case 'ticket': return ['add', 'set'].includes(a) ? [b] : null;
+    case 'ticket': return ['add', 'set', 'hold', 'release'].includes(a) ? [b] : null;
     case 'withdraw': return [a];
     case 'goal': return a === 'hold' ? [b === 'upkeep' ? upkeepOrVirtual().id : b, b] : null;
     case 'worker': return [a, ...(features().get(tickets().get(a)?.feature)?.goals ?? [])];
@@ -11398,7 +11669,7 @@ function cmdCorrect() {
     if (!TURN_ID.test(uid ?? '')) die("correct --from-turn <u-id>: the owner's turn whose words correct it");
     const u = logGet(uid);
     if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
-    if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words correct a call`);
+    if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the ${u.created_by}'s; only the owner's words correct a call`);
     const ref = logGet(u.thread)?.subject?.ref ?? null;
     const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
     if (ref !== `${act.type}:${actId}` && !(via?.type === 'act' && via.decision === actId)) die(`--from-turn ${uid}: that thread is about ${ref ?? 'nothing in particular'}, not ${actId}; the owner's words correct the record the thread is on`);
@@ -11450,7 +11721,7 @@ const stageOf = (o) => { const s = Object.hasOwn(OODA.stages, o?.type ?? '') ? O
 // The sources each writer may name for itself (observe --source); sensor, metrics and spend are the
 // kit's own, read off its own lines, never given. The supervisor records what the owner said (an
 // answer, a thread, the chat), but never speaks as the owner.
-const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'] };
+const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner', 'responder'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'], responder: ['responder'] };
 // An owner-* source on a line someone else wrote is a claim about the owner's words, so it counts
 // only when its ref is the record that holds them: an answered question (the owner's answer) for
 // owner-answer, the owner's turn or thread for owner-thread, either for owner-chat. A ref that
@@ -11504,7 +11775,7 @@ function cmdObserve() {
   // a goal's reading (source repo, prod or owner) is the kit's, from goal check or an answer
   if (flagStr('kind') === 'reading' && ['repo', 'prod', 'owner'].includes(src)) die(`observe --kind reading --source ${src}: a goal's readings come from the kit itself (goal check, the owner's answer)`);
   const mine = SOURCE_FOR[writerClass(by)];
-  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: a ${{ ticket: 'worker', planner: 'planner', supervisor: 'supervisor', owner: 'owner' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
+  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: ${{ ticket: 'a worker', planner: 'a planner', supervisor: 'a supervisor', owner: 'a owner', responder: 'the responder' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
   if (writerClass(by) !== 'owner' && String(src).startsWith('owner-') && !ownerRefHolds(src, flagStr('ref'))) die(`observe --source ${src} needs --ref <id> naming where the owner said it: ${src === 'owner-answer' ? 'a question they answered' : src === 'owner-thread' ? 'their turn or the thread' : 'a question they answered, or their turn'}`);
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
@@ -11556,13 +11827,14 @@ async function cmdObserveMetrics() {
   // the tick's heartbeat: another machine live on this repo stops the tick here
   const hc = hostCheck();
   if (hc.refused) hostRefusedWhileRunning(hc);
-  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes
+  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes, then each GitHub repo link's open PRs
   const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
   const unfetched = await fetchLinkMains(end);
   const { skipped } = await probeLinks(end);
+  const unlisted = await fetchLinkPrs(end);
   const s = observeSpend();
   const learned = writeLearning();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
   // finished worktrees go, at most every 30 minutes (one line when any did)
   tidyFinishedWorktrees();
 }
@@ -11588,12 +11860,80 @@ async function fetchLinkMains(end) {
       const r = await runProbe({ cmd: 'git', args: ['fetch', '--quiet', 'origin', b], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: (code) => (code === 0 ? {} : { problem: `could not fetch origin ${b} from ${redactUrl(R.remote)} in ${R.root}; its main here is as last fetched` }) }, end);
       if (r === 'budget') { skipped.push(id); continue; }
       state[id] = { at: nowIso(), problem: r.problem ?? null };
+      // a repo whose releases are kept (maintain.releases) also gets its release tags, which a
+      // fetch of one branch doesn't bring, so a release cut elsewhere clears release-due; never
+      // forced, so a local tag that differs stays as it is
+      if (!r.problem && linkMaintains(loadSettings().links?.[id], 'releases') && Date.now() < end) await runProbe({ cmd: 'git', args: ['fetch', '--quiet', '--no-tags', 'origin', 'refs/tags/v*:refs/tags/v*'], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: () => ({}) }, end);
       if (!r.problem) R.resetCaches();
     }
   };
   await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, ids.length) }, one));
   for (const id of Object.keys(state)) if (!ids.includes(id)) delete state[id];
   writeJson(FETCH_FILE, state);
+  return skipped;
+}
+// The open PRs on each GitHub repo link that aren't the fleet's own (ticket/, plan/, chore- branches
+// in the repo itself land through merge and their records; a fork's branch of that name is an outside PR), read with gh inside the tick's budget, so metrics can say
+// when one waits unreviewed or with findings its author never saw (pr-unreviewed,
+// pr-changes-unanswered) without touching the network. A good read is reused for
+// LINK_PRS_REUSE_MS (the findings count hours). A failed read (gh missing, logged out, offline, a
+// query GitHub refuses) keeps the last PRs but marks the entry failing, with when it started and
+// gh's first line, so metrics raises no PR finding from stale data and says (link-prs-unread) when
+// reads have failed for LINK_PRS_UNREAD_HOURS. Kept per PR: its head, when that head was first seen
+// (the PR's updatedAt, which a push moves, when the head is new to us: never later than the push
+// is old, so never a false stall), the forge's reviews of that head and when it was last commented
+// on, leaving out bots. The query asks for no `commits`: gh's commits field nests authors under
+// commits under PRs and GitHub refuses it for its node count.
+const LINK_PRS_FILE = runPath('link-prs.json');
+const LINK_PRS_REUSE_MS = 30 * 60000;
+const LINK_PRS_UNREAD_HOURS = 6;
+const LINK_PRS_MAX_AGE_MS = 2 * 3600000;
+const FLEET_BRANCH = /^(ticket\/|plan\/|chore-)/;
+// gh's GraphQL logins drop the [bot] suffix an app has on the REST API, so the common apps are named too
+const BOT_LOGIN = /\[bot\]$|^(github-actions|copilot-pull-request-reviewer|copilot|dependabot|renovate|vercel|vercel-fleet-prod|netlify|coderabbitai|chatgpt-codex-connector|codecov|sonarcloud|sonarqubecloud|changeset-bot|linear|cursor|gemini-code-assist|sourcery-ai|deepsource-io|snyk-io|socket-security|mergify|graphite-app|pre-commit-ci)$/i;
+// gh asks for a PR's first 100 reviews and comments, the oldest: at 100 the newest may be missing
+const LINK_PR_PAGE = 100;
+const linkPrRepos = (s = loadSettings()) => Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents && linkMaintains(l, 'prs') && LINK_KINDS[l.kind].effectiveSettings(l, s).forge === 'github' && ghSpec(l.remote)).map(([id, l]) => [id, ghSpec(l.remote)]);
+const trimLinkPr = (p, before) => {
+  const head = p.headRefOid;
+  const human = (x) => !BOT_LOGIN.test(String(x?.author?.login ?? ''));
+  const times = (xs, k) => (xs ?? []).filter(human).map((x) => Date.parse(x?.[k])).filter((t) => !Number.isNaN(t));
+  const seen = before && before.head === head && before.head_at ? before.head_at : (() => { const t = Math.max(Date.parse(p.createdAt) || 0, Date.parse(p.updatedAt) || 0); return t ? new Date(t).toISOString() : null; })();
+  return {
+    number: p.number, title: String(p.title ?? '').slice(0, 200), url: p.url ?? null, head, branch: p.headRefName ?? null,
+    head_at: seen,
+    // its reviews or comments ran past one page: what's newest may be missing, so nothing is claimed about it
+    truncated: (p.reviews?.length ?? 0) >= LINK_PR_PAGE || (p.comments?.length ?? 0) >= LINK_PR_PAGE,
+    forge_reviews: (p.reviews ?? []).filter((r) => human(r) && r?.commit?.oid === head).map((r) => ({ state: r.state ?? null, at: r.submittedAt ?? null })),
+    last_comment_at: (() => { const t = Math.max(0, ...times(p.comments, 'createdAt'), ...times(p.reviews, 'submittedAt')); return t ? new Date(t).toISOString() : null; })(),
+  };
+};
+async function fetchLinkPrs(end) {
+  const repos = linkPrRepos();
+  let state = {};
+  try { state = readJson(LINK_PRS_FILE); } catch {}
+  if (state === null || typeof state !== 'object' || Array.isArray(state)) state = {};
+  const skipped = [];
+  const queue = repos.filter(([id]) => { const e = ownEntry(state, id); return !(e && !e.failing_since && Date.now() - Date.parse(e.at) < LINK_PRS_REUSE_MS); });
+  const one = async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      const [id, spec] = next;
+      if (Date.now() >= end) { skipped.push(id); continue; }
+      const r = await runProbe({ cmd: 'gh', args: ['pr', 'list', '-R', spec, '--state', 'open', '--limit', '100', '--json', 'number,title,url,headRefName,headRefOid,isCrossRepository,isDraft,createdAt,updatedAt,reviews,comments'], cwd: mainRoot, env: { ...process.env, GH_PROMPT_DISABLED: '1' }, stderr: true, judge: (code, text, err = '') => {
+        const why = () => (String(err).split('\n').map((x) => x.trim()).find(Boolean) ?? (code == null ? 'gh did not run or timed out' : `gh exited ${code}`)).slice(0, 300);
+        if (code !== 0) return { error: why() };
+        try { const list = JSON.parse(text); return Array.isArray(list) ? { list } : { error: 'gh printed no PR list' }; } catch { return { error: 'gh printed no PR list' }; }
+      } }, end);
+      if (r === 'budget') { skipped.push(id); continue; }
+      const prev = ownEntry(state, id);
+      if (r.error) { state[id] = { ...(prev ?? {}), failing_since: prev?.failing_since ?? nowIso(), failed_at: nowIso(), error: r.error }; continue; }
+      const before = new Map((Array.isArray(prev?.prs) ? prev.prs : []).map((p) => [p?.number, p]));
+      state[id] = { at: nowIso(), prs: r.list.filter((p) => p && !p.isDraft && !(p.isCrossRepository !== true && FLEET_BRANCH.test(p.headRefName ?? ''))).map((p) => trimLinkPr(p, before.get(p.number))) };
+    }
+  };
+  if (queue.length) await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, queue.length) }, one));
+  for (const id of Object.keys(state)) if (!repos.some(([r]) => r === id)) delete state[id];
+  if (repos.length || fs.existsSync(LINK_PRS_FILE)) writeJson(LINK_PRS_FILE, state);
   return skipped;
 }
 // Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
@@ -11604,7 +11944,8 @@ const PROBE_FILE = runPath('link-probes.json');
 // Probes run four at a time, each with its own 12 s deadline, inside a budget per tick (20 s;
 // DEVTEAM_PROBE_BUDGET_MS in tests): a probe the budget cuts short, or one never started, is "not
 // probed this tick", writes nothing, and is asked again next tick; it is never a finding.
-// A probe is a kind's { cmd, args, cwd?, env?, judge(code, stdout) → { problem?, note? } }, or null.
+// A probe is a kind's { cmd, args, cwd?, env?, stderr?, judge(code, stdout, stderr) → { problem?, note? } }, or null
+// (stderr is passed only when the spec asks for it).
 const PROBE_AT_ONCE = 4;
 const PROBE_EACH_MS = 12000;
 function runProbe(spec, end) {
@@ -11612,14 +11953,16 @@ function runProbe(spec, end) {
     const left = end - Date.now();
     const cut = left < PROBE_EACH_MS;
     let outText = '';
+    let errText = '';
     let done = false;
     // its own process group, so a kill takes git's ssh with it, and no controlling terminal to prompt on
-    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', spec.stderr ? 'pipe' : 'ignore'], detached: true });
     const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
     const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} finish(cut ? 'budget' : spec.judge(null, '')); }, Math.max(0, Math.min(left, PROBE_EACH_MS)));
     child.stdout.on('data', (d) => { outText += d; });
-    child.on('error', () => finish(spec.judge(null, '')));
-    child.on('close', (code) => finish(spec.judge(code, outText)));
+    if (spec.stderr) child.stderr.on('data', (d) => { if (errText.length < 4096) errText += d; });
+    child.on('error', (e) => finish(spec.judge(null, '', String(e?.message ?? e))));
+    child.on('close', (code) => finish(spec.judge(code, outText, errText)));
   });
 }
 async function probeLinks(end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000)) {
@@ -13130,9 +13473,9 @@ function cmdGoal() {
   // The goal's toggle (planning.md §1, holds): run, drain or park. The owner sets any; the
   // supervisor drains a running goal (with a reason) and releases only its own drain.
   if (sub === 'hold') {
-    const g = goalArg(id) ?? die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    const g = goalArg(id) ?? die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--for <cause>…] [--until <YYYY-MM-DD>] [--owner]');
     const mode = positional[2];
-    if (!['run', 'drain', 'park'].includes(mode)) die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    if (!['run', 'drain', 'park'].includes(mode)) die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--for <cause>…] [--until <YYYY-MM-DD>] [--owner]');
     const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal hold'), 'supervisor');
     if (g.status === 'met') die(`${g.id} is met; there is no work to hold`);
     if (g.status === 'abandoned') die(`${g.id} is let go: goal decide ${g.id} restore brings it back, parked`);
@@ -13140,12 +13483,26 @@ function cmdGoal() {
     if (why) die(`goal hold: ${why}`);
     const reason = flagStr('reason')?.trim();
     if (by === 'supervisor' && !reason) die('the supervisor says why: --reason "…"');
+    // a drain names what it waits on (holdCause): the supervisor's is checked, the owner's written as given
+    const causes = flags.for !== undefined ? [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))] : [];
+    // trimmed, as ticket hold reads it; a bare or blank --until is still a date given, for the shape rules
+    const until = flagStr('until')?.trim() || null;
+    const dated = flags.until !== undefined;
+    if (dated && !causes.length && by === 'supervisor') die('--until goes with --for: name what the hold waits on');
+    if ((causes.length || dated || flags.for !== undefined) && isUpkeep(g)) die("Upkeep's hold takes no cause (--for, --until)");
+    if ((causes.length || dated || flags.for !== undefined) && mode !== 'drain') die('--for goes with a drain');
+    if (dated && until === null) die('--until needs a date (YYYY-MM-DD)');
+    if (by === 'supervisor' && mode === 'drain' && !isUpkeep(g)) {
+      const refusal = holdCause({ kind: 'goal', id: g.id, causes, until, whole: null });
+      if (refusal) die(refusal);
+    }
+    const extra = { ...(causes.length ? { hold_for: causes } : {}), ...(causes.length || until !== null ? { hold_until: until } : {}) };
     const before = goalMode(g);
-    const line = writeHold(g, { mode, ...(reason ? { reason: reason.slice(0, 300) } : {}) }, by);
+    const line = writeHold(g, { mode, ...(reason ? { reason: reason.slice(0, 300) } : {}) }, by, extra);
     logCache = null;
     const name = isUpkeep(g) ? 'upkeep' : g.id;
     const now = goalArg(isUpkeep(g) ? 'upkeep' : g.id);
-    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}`, refs: [now.id], reversible: true }, 'supervisor');
+    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}${causes.length ? ` (for ${causes.join(', ')})` : ''}`, refs: [now.id], reversible: true }, 'supervisor');
     out(`${isUpkeep(g) ? 'Upkeep' : g.id} is ${holdWords(mode)} (${line.id})`);
     if (mode === 'park') {
       if (by === 'supervisor') { const sent = sendParkRulings({ goal: now }); out(sent.length ? `told ${sent.join(', ')} to commit, push, write a handoff and park` : 'no running session of it to tell'); }
@@ -14171,6 +14528,104 @@ function efficiencyData(m, now = Date.now()) {
 
 // How many places below a goal's priority the unstarted work it waits on must be to be a finding.
 const PRIORITY_INVERSION_GAP = 3;
+
+// A repo link the supervisor maintains: open PRs to review, fix, comment on and merge, and (with
+// its own release: "tag") releases to cut. Nothing else notices when that work stops, so:
+// pr-unreviewed, an open PR (not the fleet's own, not a draft) whose head has had no review for
+// LINK_PR_STALL_HOURS; pr-changes-unanswered, one whose latest review says CHANGES at its head that
+// long, with nothing posted on the PR since, so its author never saw the findings; release-due,
+// merges on the link's main waiting RELEASE_DUE_HOURS since its latest tag. A review is a record
+// under run/reviews/ in a folder or file named for the PR (…pr-<n>/…md, …pr-<n>…md) whose
+// "Verdict: APPROVE|CHANGES <full sha>" names the head (run/reviews/<link>-pr-<n>/, or
+// <maintain.reviews>-pr-<n>/, or a bare pr-<n> when there's one GitHub link), or a person's review
+// of that head on the forge. A PR whose reviews or comments ran past gh's page raises nothing.
+// The PRs come from the tick's read (fetchLinkPrs); with no good read nothing about PRs is raised,
+// and reads failing for LINK_PRS_UNREAD_HOURS are a low link-prs-unread.
+const LINK_PR_STALL_HOURS = 24;
+const RELEASE_DUE_HOURS = 6;
+function linkPrReviewRecords(ids, prefixes = new Map()) {
+  const root = path.join(runDir, 'reviews');
+  const byPr = new Map();
+  const put = (key, file) => {
+    let text, st;
+    try { st = fs.statSync(file); if (!st.isFile() || st.size > 1e6) return; text = fs.readFileSync(file, 'utf8'); } catch { return; }
+    const v = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-f]{40}(?:[0-9a-f]{24})?)[ \t]*$/gm)].pop();
+    // when the record was written: its birth time where the filesystem keeps one, so filling in a
+    // Disposition later doesn't move it past a comment already posted
+    const at = st.birthtimeMs > 0 ? Math.min(st.birthtimeMs, st.mtimeMs) : st.mtimeMs;
+    if (v) (byPr.get(key) ?? byPr.set(key, []).get(key)).push({ verdict: v[1], sha: v[2], at, file: path.relative(mainRoot, file) });
+  };
+  // <link>-pr-<n> names the link; a bare pr-<n> (not <other>-pr-<n>) counts only when there is one GitHub repo link
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const named = ids.flatMap((id) => [[id, id], ...(prefixes.has(id) ? [[id, prefixes.get(id)]] : [])]).sort((a, b) => b[1].length - a[1].length).map(([id, pre]) => [id, new RegExp(`(?:^|[^a-z0-9])${esc(pre)}-pr-(\\d+)(?![0-9])`, 'i')]);
+  const keyOf = (name) => {
+    for (const [id, re] of named) { const m = re.exec(name); if (m) return `${id}#${Number(m[1])}`; }
+    const m = /(?:^|[^a-z0-9-])pr-(\d+)(?![0-9])/i.exec(name);
+    return m && ids.length === 1 ? `${ids[0]}#${Number(m[1])}` : null;
+  };
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return byPr; }
+  for (const e of entries) {
+    const key = keyOf(e.name);
+    if (!key) continue;
+    if (e.isDirectory()) { let fs2 = []; try { fs2 = fs.readdirSync(path.join(root, e.name)); } catch {} for (const f of fs2) if (f.endsWith('.md')) put(key, path.join(root, e.name, f)); }
+    else if (e.name.endsWith('.md')) put(key, path.join(root, e.name));
+  }
+  return byPr;
+}
+function linkDutyFindings(settings, now, add) {
+  const stall = LINK_PR_STALL_HOURS * 3600000;
+  let read = {};
+  try { read = readJson(LINK_PRS_FILE); } catch {}
+  const repos = linkPrRepos(settings);
+  const records = repos.some(([id]) => ownEntry(read, id)) ? linkPrReviewRecords(repos.map(([id]) => id), new Map(repos.map(([id]) => [id, settings.links[id].maintain.reviews]).filter(([, p]) => typeof p === 'string'))) : new Map();
+  const hours = (ms) => Math.floor(ms / 3600000);
+  for (const [id, spec] of repos) {
+    const entry = ownEntry(read, id);
+    if (!entry) continue;
+    // a failing or old read (the tick's budget cut it) raises no PR finding from what it last saw,
+    // and says so once that has lasted
+    const age = now - (Date.parse(entry.at) || 0);
+    if (entry.failing_since || age > LINK_PRS_MAX_AGE_MS) {
+      const unread = entry.failing_since ? now - (Date.parse(entry.failing_since) || now) : age;
+      if (unread > LINK_PRS_UNREAD_HOURS * 3600000) add('low', 'link-prs-unread', id, `${id}'s open PRs haven't been read for ${hours(unread)} h${entry.at ? ` (last read ${entry.at})` : ''}: ${entry.failing_since ? entry.error ?? 'gh failed' : "the tick's time budget ran out first"}`, `check gh on this machine (gh auth status; gh pr list -R ${spec} --state open --limit 5): until it reads, pr-unreviewed and pr-changes-unanswered can't fire for ${id}`);
+      continue;
+    }
+    if (!Array.isArray(entry.prs)) continue;
+    for (const pr of entry.prs) {
+      if (!Number.isInteger(pr?.number) || typeof pr.head !== 'string' || pr.truncated) continue;
+      const subject = `${id}#${pr.number}`;
+      const mine = (records.get(subject) ?? []).sort((a, b) => a.at - b.at);
+      const atHead = mine.filter((r) => r.sha === pr.head);
+      const forgeAtHead = pr.forge_reviews ?? [];
+      const latest = mine.at(-1);
+      if (latest && latest.verdict === 'CHANGES' && latest.sha === pr.head) {
+        const since = now - latest.at;
+        const answered = pr.last_comment_at && Date.parse(pr.last_comment_at) > latest.at;
+        if (since > stall && !answered) add('medium', 'pr-changes-unanswered', subject, `review ${latest.file} asked for changes at its head ${pr.head.slice(0, 12)} ${hours(since)} h ago, and nothing has been posted on the PR since: its author hasn't seen the findings`, `comment the findings to its author on ${pr.url ?? `the PR`} (gh pr comment ${pr.number} --body-file ${latest.file}); a fix the fleet should make is a ticket in ${id}`);
+        continue;
+      }
+      if (atHead.length || forgeAtHead.length) continue;
+      const waited = now - (Date.parse(pr.head_at) || now);
+      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${settings.links[id].maintain.reviews ?? id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then comment the verdict to its author`);
+    }
+  }
+  // release-due: only for a repo link whose releases the supervisor keeps (maintain.releases) and
+  // that releases from a tag, read from its local main as the tick fetched it (with its v* tags),
+  // against the nearest release tag on it (v*, not a release candidate, as releasedInAt).
+  for (const [id, l] of Object.entries(settings.links ?? {})) {
+    if (!LINK_KINDS[l?.kind]?.hostsComponents || !linkMaintains(l, 'releases') || LINK_KINDS[l.kind].effectiveSettings(l, settings).release !== 'tag' || !repoReadable(id)) continue;
+    const R = repo(id);
+    const ref = R.mainRef();
+    if (!ref) continue;
+    const tag = R.git(['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', '*-rc*', ref]);
+    if (!tag) continue;
+    const rows = (R.git(['log', '--first-parent', '--format=%ct', `refs/tags/${tag}..${ref}`]) ?? '').split('\n').filter(Boolean);
+    if (!rows.length) continue;
+    const waited = now - Number(rows.at(-1)) * 1000;
+    if (waited > RELEASE_DUE_HOURS * 3600000) add('medium', 'release-due', id, `${rows.length} commit(s) on ${id}'s main since ${tag}, the oldest waiting ${hours(waited)} h`, `a tag on ${id} deploys to production, so a release is a release-production decision on its ladder (decide, or ask the owner), or record why it waits (observe)`);
+  }
+}
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -14600,6 +15055,44 @@ function collectMetrics(since) {
   if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
   if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
+  // A fleet with nothing running: no worker and no planner for FLEET_IDLE_MS while it is neither
+  // parked nor drained. idle-capacity speaks when a ticket can start, idle-planning when a goal
+  // waits for a planner, memory-full when the machine has no room for either; each names its own
+  // move, so this stays quiet when any of them spoke this pass. It speaks when nothing can start
+  // (every ready ticket waits on the owner, everything is held, nothing is planned), so the
+  // supervisor makes work instead of ticking over an empty fleet. The last sign of life is the
+  // newest line any ticket's worker or any planner wrote (a planner's branch and files too), or the
+  // log's first line when no session has ever run. A planner counts as running only while its
+  // window is open and it waits on no owner answer: a plan branch left behind, or a design parked
+  // on the owner's approval, is the stuck fleet this finding is for, once its stamps go quiet.
+  // stale_after_minutes (30 by default, two quiet ticks at the default tick_minutes): the silence
+  // after which a session reads as stuck reads the same for the fleet. A start takes a tick, so an
+  // idle tick between waves is normal; more is the fleet idling.
+  const FLEET_IDLE_MS = (settings.stale_after_minutes ?? 30) * 60000;
+  const spoken = f.some((x) => ['idle-capacity', 'idle-planning', 'memory-full'].includes(x.kind));
+  if (!drained && !fleetMode() && !active && !spoken && !planners().some((p) => !p.parked && p.window && !p.waiting_on_owner.length)) {
+    const lines = readLog().lines;
+    const stamps = lines.filter((l) => l.at && (ts.has(l.by) || String(l.by).startsWith('plan-'))).map((l) => l.at);
+    for (const p of planners()) if (p.last_seen) stamps.push(p.last_seen);
+    const lastAt = stamps.sort().pop() ?? lines.map((l) => l.at).filter(Boolean).sort()[0] ?? null;
+    const idleMs = lastAt ? now - Date.parse(lastAt) : 0;
+    if (idleMs > FLEET_IDLE_MS) {
+      // open tickets: not superseded, not merged, no worker running. Held: the ticket's held field,
+      // a goal not running, parked, or an open owner question naming it. Planned: the rest that
+      // aren't ready (waiting on a dependency or a running ticket's touches).
+      const open = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !countsAsWorker(t));
+      const heldT = open.filter((t) => isHeld(t) || ticketMode(t) !== 'run' || H.has(t.id) || workerState(t.id)?.phase === 'parked');
+      const heldIds = new Set(heldT.map((t) => t.id));
+      const readyT = ready.filter((t) => !heldIds.has(t.id));
+      const readyIds = new Set(readyT.map((t) => t.id));
+      const planned = open.filter((t) => !heldIds.has(t.id) && !readyIds.has(t.id)).length;
+      const L = ladder();
+      const noDefault = questions().filter((q) => q.status === 'open' && !q.goal_hold && !q.default && !['one-way-door', 'review', 'owner-action'].includes(q.kind) && !(q.reasons ?? []).includes('one-way-door') && !(L.owner_only ?? []).includes(q.class));
+      const chore = readyT.find((t) => t.kind === 'chore') ?? readyT[0];
+      const ids = (xs) => xs.slice(0, 3).map((x) => x.id).join(', ');
+      add('medium', 'fleet-idle', 'fleet', `no worker or planner has run for ${(idleMs / 3600000).toFixed(1)}h (last sign of life ${lastAt}); ${readyT.length} ticket${readyT.length === 1 ? '' : 's'} ready, ${heldT.length} held, ${planned} planned`, `in order: 1. ${chore ? `start a ready chore (worker ${chore.id})` : 'add a chore from what the metrics or the code point at'}; 2. split a held ticket so the part that doesn't need the owner runs (${heldT.length ? ids(heldT) : 'none held'}); 3. give an open no-default question a default (${noDefault.length ? ids(noDefault) : 'none open'}); 4. propose the next goal from strategy.md (a proposal question naming the "How it wins" line it serves, supervisor.md §9)`);
+    }
+  }
   // the owner asked for one of the supervisor's settings and main doesn't have it yet
   {
     const um = goalMode(upkeepOrVirtual());
@@ -14761,6 +15254,7 @@ function collectMetrics(since) {
       }
     }
   }
+  linkDutyFindings(settings, now, add);
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
@@ -18220,6 +18714,10 @@ async function machineStatus() {
   for (const s of machineRecords().strays) out(`machine: stray hub record ${/^[\w.-]{1,80}$/.test(s.file) ? s.file : '?'} (${s.why}; ignored, remove it)`);
   const notes = notedIn();
   if (flagStr('notes')) { const r = lastReview(notes); out(r === utcDay() ? `machine: daily review done ${r}` : `machine: daily review due (last ${r ?? 'never'})`); }
+  // the operator's own PRs on the kit (operator.md, Pull requests upstream): one gh call, ? when it can't.
+  // The search keeps the reply to PRs whose body has the operator's line (no fleet or owner PRs and
+  // their comments); operatorPrsLine checks the line exactly, since search matches words, not lines
+  if (flagStr('notes')) out(`machine: ${operatorPrsLine(sh('gh', ['pr', 'list', '-R', KIT_UPSTREAM, '--author', '@me', '--state', 'open', '--search', `"${OPERATOR_PR_MARK}" in:body`, '--limit', '100', '--json', 'number,headRefName,body,isDraft,headRefOid,createdAt,latestReviews,comments,statusCheckRollup'], { timeout: 15000, maxBuffer: 16 * 1024 * 1024 }))}`); // gh-direct: the kit's own repo, which no project here speaks for
   const flagged = [];
   const latest = new Map();
   for (const root of roots) {
@@ -18286,6 +18784,65 @@ async function machineStatus() {
   out(`changed since last reading: ${changed.join(' ')}`);
   const now = Math.floor(Date.now() / 1000);
   if (now - (last.at ?? 0) >= Number(process.env.DEVTEAM_STATUS_SECONDS ?? 1200)) writeText(statusLastFile(), [`at ${now}`, `disk ${free}`, ...seen].map((l) => `${l}\n`).join(''));
+}
+// The operator's open PRs on the kit, from gh pr list's JSON, as one digest line: those that need it
+// now. A PR's verdicts are its GitHub reviews that approve or request changes, and quality.md §3's
+// `Verdict: APPROVE|CHANGES <sha>` line in a review or comment (the operator's reviewers share its gh
+// login, so most are comments). A PR needs the operator when its latest verdict is CHANGES at its
+// head, when a check at its head failed, or when no verdict names its head a day after its last
+// comment or review, or its opening (a fix pushed and never looked at again). Drafts wait.
+// Which PRs are the operator's: the box's gh login is shared by the owner, the supervisors and other
+// sessions, so --author @me is not enough. The operator ends every PR body it opens with the line
+// OPERATOR_PR_MARK (operator.md, Pull requests upstream), and only a PR whose body has that line on
+// its own counts: it is set when the PR is opened, needs no records to agree, and a reader can see
+// it on the PR. Branches the fleets and the kit's own releases push (ticket/, plan/, chore-,
+// release-prep-) aren't the operator's even so. gh gives a PR's first 100 comments: a longer
+// thread's latest verdict is unread.
+const OPERATOR_PR_MARK = 'Opened by the box operator.';
+const OPERATOR_PR_WAIT_MS = 24 * 3600000;
+function operatorPrsLine(text, now = Date.now()) {
+  let prs;
+  try { prs = JSON.parse(text); } catch { return 'operator PRs: ?'; }
+  if (!Array.isArray(prs)) return 'operator PRs: ?';
+  const marked = (body) => String(body ?? '').split(/\r?\n/).some((l) => l.trim() === OPERATOR_PR_MARK);
+  const mine = prs.filter((p) => p && Number.isInteger(p.number) && typeof p.headRefName === 'string' && !/^(ticket\/|plan\/|chore-|release-prep-)/.test(p.headRefName) && marked(p.body) && p.isDraft !== true);
+  if (!mine.length) return 'operator PRs: none open';
+  const atHead = (sha, head) => typeof sha === 'string' && typeof head === 'string' && sha.length >= 7 && head.toLowerCase().startsWith(sha.toLowerCase());
+  const RED = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR']);
+  // the line's last verdict; reviewers may add a note after the sha ("Verdict: CHANGES <sha> (F1, F2)")
+  const verdictIn = (body, at) => {
+    const v = [...String(body ?? '').matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-fA-F]{7,40})(?![0-9a-zA-Z])[^\n]*$/gm)].pop();
+    return v ? { v: v[1], sha: v[2], at: String(at ?? '') } : null;
+  };
+  const need = [];
+  for (const p of mine) {
+    const verdicts = [];
+    for (const r of Array.isArray(p.latestReviews) ? p.latestReviews : []) {
+      if (!r) continue;
+      const v = verdictIn(r.body, r.submittedAt);
+      if (v) verdicts.push(v);
+      else if (r.state === 'CHANGES_REQUESTED' || r.state === 'APPROVED') verdicts.push({ v: r.state === 'APPROVED' ? 'APPROVE' : 'CHANGES', sha: r.commit?.oid, at: String(r.submittedAt ?? '') });
+    }
+    for (const c of Array.isArray(p.comments) ? p.comments : []) {
+      const v = c && verdictIn(c.body, c.createdAt);
+      if (v) verdicts.push(v);
+    }
+    const last = verdicts.sort((x, y) => x.at.localeCompare(y.at)).pop();
+    const why = [];
+    if (last?.v === 'CHANGES' && atHead(last.sha, p.headRefOid)) why.push('changes requested');
+    const checks = Array.isArray(p.statusCheckRollup) ? p.statusCheckRollup : [];
+    if (checks.some((c) => c && (RED.has(c.conclusion) || RED.has(c.state)))) why.push('CI red');
+    if (!last || !atHead(last.sha, p.headRefOid)) {
+      // from its newest word: the operator comments what it changed when it pushes (operator.md); any
+      // comment restarts the wait, so a thread kept busy without a verdict waits longer to be flagged
+      const said = [p.createdAt, ...(Array.isArray(p.comments) ? p.comments.map((c) => c?.createdAt) : []), ...(Array.isArray(p.latestReviews) ? p.latestReviews.map((r) => r?.submittedAt) : [])];
+      const since = Math.max(0, ...said.map((t) => Date.parse(t) || 0));
+      const waited = since ? now - since : 0;
+      if (waited >= OPERATOR_PR_WAIT_MS) why.push(`${last ? 'no review of its head' : 'no review'} ${Math.floor(waited / 3600000)}h`);
+    }
+    if (why.length) need.push(`#${p.number} ${why.join(' and ')}`);
+  }
+  return `operator PRs: ${mine.length} open, ${need.length ? `${need.length} need you (${need.join(', ')})` : 'none need you'}`;
 }
 function accountsState() {
   try {
@@ -18694,7 +19251,7 @@ const IMAGE_RUNS = {
     // machine status, tell, alert, pane-state
     'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
     'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
-    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'machineStatus',
+    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_MARK', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
     // operator threads
     'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
     'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
@@ -19596,7 +20153,7 @@ async function dashRoutesPage(D, req, res, q) {
   }
   return DASH_NEXT;
 }
-// /view/artifact/…, /view/preview/…, /api/view, /api/artifact-versions
+// /view/artifact/…, /view/preview/…, /api/artifact-fp, /api/view, /api/artifact-versions
 async function dashRoutesViewer(D, req, res, q) {
   const { u } = q;
   const { page, pageCsp, run, describing, versioning, send, previewStage } = D;
@@ -19622,11 +20179,32 @@ async function dashRoutesViewer(D, req, res, q) {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
     return res.end(fs.readFileSync(page));
   }
+  // A draft's fingerprint, for the viewer's 2 s draft poll (responder contract, artifact-fp@1): the
+  // same fp artifact describe gives, from stat calls and the oid cache (diskOid hashes only a file
+  // whose size or mtime moved), in this process: no child, no git. Drafts only: main or a published
+  // tree never changes under a viewer, so it is a 400. 404 when artifactSource finds nothing (an
+  // unknown slug or worktree, a reviewer's or scratch one, a symlinked folder). Same-origin only, as /api/threads.
+  if (req.method === 'GET' && u.pathname === '/api/artifact-fp') {
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+    const slug = u.searchParams.get('slug') ?? '';
+    const at = u.searchParams.get('at') ?? '';
+    if (!LINK_ID.test(slug) || !ARTIFACT_AT.test(at) || at === 'main' || at.startsWith('tree:')) return send(res, 400, 'application/json', JSON.stringify({ error: 'a slug, and at a draft\'s worktree (drafts only)' }));
+    // a draft that vanishes mid-walk is nothing there (404); any other failure (EACCES, EMFILE) is a 500, as /api/view keeps them apart
+    let src;
+    try { src = artifactSource(at, slug); } catch (e) {
+      if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') return send(res, 500, 'application/json', JSON.stringify({ error: `the draft's files: ${e?.code ?? 'error'}` }));
+      src = null;
+    }
+    if (!src) return send(res, 404, 'application/json', JSON.stringify({ error: `no draft of ${slug} at ${at}` }));
+    return send(res, 200, 'application/json', JSON.stringify({ fp: fingerprint(src.entries), at }));
+  }
   // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
-  // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
-  // never polled: a child process per ask, shared by asks for the same one while it runs. A GET
-  // carries no Origin: same-origin only, as /api/threads. 404 only when describe says nothing is
-  // there (the viewer then shows main); a timeout or a crash is a 500, never mistaken for that.
+  // viewer never waits on /api/data. Since kit-206 the viewer asks it every 10 s while it is seen:
+  // a child process per ask, one shared by asks for the same one while it runs. The cheap,
+  // stat-only route for the 2 s draft poll is /api/artifact-fp. A GET carries no Origin:
+  // same-origin only, as /api/threads. 404 only when describe says nothing is there (the viewer
+  // then shows main); a timeout or a crash is a 500, never mistaken for that.
   if (req.method === 'GET' && u.pathname === '/api/view') {
     const site = req.headers['sec-fetch-site'];
     if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
@@ -19903,11 +20481,16 @@ async function dashRoutesOwner(D, req, res, q) {
   res.writeHead = function (...a) { D.dataEpoch += 1; return head.apply(this, a); };
   const site = req.headers['sec-fetch-site'];
   const origin = req.headers.origin;
-  // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
-  // present. A sandboxed frame's request says Origin: null and is refused here too.
+  // A browser sends Origin on every fetch POST, and Sec-Fetch-Site to a loopback or https origin
+  // (not to a --host LAN address over http); a secret or a review is accepted only with both
+  // present. Every other owner action needs at least one of them saying this page, and neither
+  // saying another (kit-324): a client that sends neither (curl, an agent's fetch) is not the
+  // owner's browser. A sandboxed frame's request says Origin: null and is refused here too. Only a
+  // browser is held to this: a process on this machine can send both headers, and still gets in.
+  const own = `http://${req.headers.host}`;
   const strict = isSecret || isReview || isPane || isOwnerSetting;
-  const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
-  if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
+  const sameOrigin = strict ? site === 'same-origin' && origin === own : (site === 'same-origin' || origin === own) && (site === undefined || site === 'same-origin') && (origin === undefined || origin === own);
+  if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: "owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)" }));
   // A review's result or draft is up to 4 MB, plus its envelope.
   const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : isOwnerSetting ? 512 : 20000;
   // Bytes first, decoded once: a multibyte character split across chunks stays whole.
@@ -21070,20 +21653,33 @@ function cmdPane() {
 function cmdSend() {
   const [to, ...words] = positional;
   const text = words.join(' ').replace(/\s+/g, ' ').trim();
-  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s]');
+  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s] [--thread t-… (handoff)]');
   const kind = flagStr('kind') ?? 'info';
+  const thread = flagStr('thread') ?? null;
+  if (thread && kind !== 'handoff') die('--thread goes with --kind handoff only: a handoff names the thread it hands over');
   // --owner: the owner, in their own terminal, telling a session something. Logged as the owner's.
   const from = flags.owner ? ownerWriter().by : myAddress();
   if (from === 'owner' && kind !== 'info') die('the owner sends info messages; answers go through answer <qid>, rulings come from the supervisor');
   if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages`);
   const sha = flagStr('sha') ?? (kind === 'merge-request' ? cwdGit(['rev-parse', 'HEAD']) : null);
   const re = flagStr('re') ?? null;
+  // responder-1: a reply's re closes what it names in every reader of open messages, so the
+  // responder's never carries one (integrity refuses the line too; this says so before it is built)
+  if (re && from === 'responder') die('the responder replies to no message (re): a reply would close what it names; send info, or hand the thread over with --kind handoff --thread <t-id>');
+  if (kind === 'handoff') {
+    if (from !== 'responder' || to !== 'supervisor') die('a handoff is the responder\'s: the responder hands threads to the supervisor (send supervisor "…" --kind handoff --thread <t-id>, run as the responder)');
+    if (!thread) die('a handoff names its thread: --thread <t-id>');
+    const t = logGet(thread);
+    if (t?.type !== 'thread') die(`no thread ${thread} (devteam.mjs thread list)`);
+    // a resolved thread takes no supervisor turn, so its handoff could never settle
+    if (t.status === 'resolved') die(`${thread} is resolved: the owner closed it, so a handoff on it could never be answered there; ask the owner to reopen it, or send --kind info`);
+  }
   if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
-  out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()) }).id);
+  out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()), thread }).id);
 }
 // Log one message and type it into the recipient's pane. The log is the record; the pane is
 // delivery. A recipient whose pane is gone catches up with `messages`.
-function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }) {
+function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, thread = null }) {
   const target = to === 'supervisor' ? supervisorTarget() : tmuxTarget(to);
   const resolved = resolvePane(target);
   const { target: exact } = resolved;
@@ -21091,7 +21687,8 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }
   // never into the machine's operator, by its name or a window number (on a box a fleet's session
   // can be home): only the owner's threads reach it from the kit
   if (!problem && sh('tmux', ['display-message', '-p', '-t', exact, '#{window_name}']) === OPERATOR_WINDOW) problem = 'that is the machine\'s operator, which takes no messages from a fleet';
-  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null) }, from);
+  // thread only on a handoff's line, so every other message's line is as before
+  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null), ...(thread ? { thread } : {}) }, from);
   const typed = problem ? false : typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`);
   if (!typed) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   else if (typed !== true) warn(`${line.id} ${heldWords(typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`);
@@ -21100,7 +21697,23 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }
 // A request is settled when the work it is about has landed: a ticket's once it merged, a
 // planner's once its plan file is on main, a ticket's review request once it was approved. The
 // merge or the approval is the answer even if nobody replied.
+//
+// Every reader of open messages calls this (messages --open, metrics' unanswered-message and
+// messages.still_open, /api/data's open_messages, idsAwaitingReply), so the handoff rule lives here
+// and they all agree: a handoff is settled by a supervisor turn in its thread after it, and by
+// nothing else here (a responder turn or the owner's resolve never settles it; a reply citing it
+// with --re closes it through each reader's replied set, as for any message).
 function settledByLanding(m) {
+  if (m.kind === 'handoff') {
+    // the supervisor's newest turn per thread, worked out once per fold (readLog's object), not per message per read
+    const log = readLog();
+    if (settledByLanding.log !== log) {
+      const last = new Map();
+      for (const u of log.byType.get('turn') ?? []) if (u.created_by === 'supervisor' && typeof u.thread === 'string' && !(last.get(u.thread) >= u.created_at)) last.set(u.thread, u.created_at);
+      Object.assign(settledByLanding, { log, last });
+    }
+    return (settledByLanding.last.get(m.thread) ?? '') > m.created_at;
+  }
   const by = m.created_by ?? m.by;
   if (!by) return false;
   const cls = writerClass(by);
@@ -21140,6 +21753,7 @@ function cmdPhase() {
     ? { usd: flagNum('usd') ?? prev?.usd ?? 0, input_tokens: flagNum('in') ?? prev?.input_tokens ?? 0, output_tokens: flagNum('out') ?? prev?.output_tokens ?? 0 }
     : {};
   if (supervisor) {
+    supervisorOnly('phase supervisor');
     if (cost.usd === undefined) die('phase supervisor needs --usd (its cumulative spend)');
     appendLog({ type: 'phase', from: 'supervisor', to: 'supervisor', ...cost }, 'supervisor');
     return out('recorded supervisor cost');
@@ -22195,7 +22809,14 @@ function fleetUndo(mode) {
   const restored = [];
   for (const g of held.filter((x) => x.hold.fleet === op)) {
     const p = g.hold.prior ?? { mode: 'run' };
-    writeHold(g, { mode: p.mode, ...(p.reason ? { reason: p.reason } : {}), ...(p.fleet ? { fleet: p.fleet } : {}), undoes: op, host }, by);
+    // a supervisor's own drain comes back with its cause: the line that set it is the latest hold
+    // line before this op's (a park then a park --move writes two)
+    let extra = {};
+    if (p.mode === 'drain' && !p.fleet) {
+      const u = [...(g.updates ?? [])].reverse().find((x) => x.hold && x.hold.fleet !== op);
+      if (u?.hold.mode === 'drain' && !u.hold.fleet && u.hold_for) extra = { hold_for: u.hold_for, hold_until: u.hold_until ?? null };
+    }
+    writeHold(g, { mode: p.mode, ...(p.reason ? { reason: p.reason } : {}), ...(p.fleet ? { fleet: p.fleet } : {}), undoes: op, host }, by, extra);
     restored.push(`${isUpkeep(g) ? 'Upkeep' : g.title} → ${p.mode}`);
   }
   if (legacy) appendLog({ type: 'act', class: 'undrain', what: `undrained the fleet on ${host} (drained by ${legacy.id}${drainHost(legacy) ? ` on ${drainHost(legacy)}` : ''})`, refs: [legacy.id], reversible: true }, 'supervisor');
@@ -25896,7 +26517,8 @@ function browserRootOf(dir) {
 // profile naming another root is a copied or moved checkout's, refused; a missing root.json is written.
 // One that is there but can't be read as a root (unparsable, relative, too long) is refused the same
 // way, never overwritten. Only the start path calls this: a verb a live daemon answers makes nothing.
-function browserProfile() {
+// fail: how a refused profile ends the caller (die; a forget's restart throws, to stop the daemon whole).
+function browserProfile({ fail = die } = {}) {
   const key = browserKey(), here = realPath(mainRoot), dir = path.join(browserHome(), key), file = path.join(dir, 'root.json');
   for (const d of [browserHome(), dir]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fs.chmodSync(d, 0o700); }
   const forget = 'Forget it (devteam.mjs browser forget) to start signed out';
@@ -25908,8 +26530,8 @@ function browserProfile() {
     try { fs.linkSync(tmp, file); } catch (e) { if (e.code !== 'EEXIST') throw e; } finally { fs.rmSync(tmp, { force: true }); }
   }
   const root = browserRootOf(dir);
-  if (root === null) die(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
-  if (root !== here) die(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
+  if (root === null) return fail(`browser: the profile ${key}'s ${file} doesn't name a root this checkout (${here}) can read: a copied or moved checkout, or a damaged file. ${forget}`);
+  if (root !== here) return fail(`browser: the profile ${key} belongs to ${root}, not this checkout (${here}): a copied or moved checkout. ${forget}`);
   return dir;
 }
 // browser_idle_minutes in ms, read like machine_memory_ceiling: anything but a whole number from 1 to
@@ -26032,7 +26654,8 @@ async function browserLive() {
 // lets it go.
 async function browserStartLock(file, fn) {
   const lock = `${file}.lock`, owner = path.join(lock, 'owner'), start = Date.now();
-  const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const mint = () => `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const token = mint();
   const wait = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_WAIT_MS')) || 60000;
   const prep = `${lock}.new.${token}`;
   const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
@@ -26042,15 +26665,17 @@ async function browserStartLock(file, fn) {
   const dead = (t) => { const p = /^([1-9]\d*)-[0-9a-f]{16}$/.exec(t ?? '')?.[1]; return !!p && Number(p) !== process.pid && !browserAlive(Number(p)); };
   // The lock's token and mtime from one open of its owner, so both are one file's (a stat and then a
   // read can pair an old lock's mtime with a new lock's token). No readable owner: a null token and the
-  // folder's mtime. No lock: null.
+  // folder's mtime, and why the owner couldn't be read (`code`: ENOENT for a folder with none). No
+  // lock: null.
   const look = () => {
     let fd;
-    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch {
+    try { fd = fs.openSync(owner, 'r'); return { token: fs.readFileSync(fd, 'utf8'), mtime: fs.fstatSync(fd).mtimeMs }; } catch (e) {
       const st = fs.statSync(lock, { throwIfNoEntry: false });
-      return st ? { token: null, mtime: st.mtimeMs } : null;
+      return st ? { token: null, mtime: st.mtimeMs, code: e?.code } : null;
     } finally { if (fd !== undefined) fs.closeSync(fd); }
   };
   const stale = (l) => Math.abs(Date.now() - l.mtime) > 120000 || dead(l.token);
+  const keyOf = (seen) => crypto.createHash('sha256').update(seen ?? '').digest('hex').slice(0, 16);
   // Remove the lock holding `seen` (null: a folder with no owner) under a claim on it: the symlink
   // <lock>.take.<k>.<n> (k from seen's hash) pointing at the claimant's token. A dead claimant's claim
   // is passed over to n + 1, not removed while seen may still be on the path; any other means another
@@ -26061,7 +26686,7 @@ async function browserStartLock(file, fn) {
   // path is free either way.
   const drop = (seen) => {
     if (seen !== token && browserTestEnv('DEVTEAM_TEST_BROWSER_LOCK_TAKE_FAIL')) return false;
-    const key = `${lock}.take.${crypto.createHash('sha256').update(seen ?? '').digest('hex').slice(0, 16)}.`;
+    const key = `${lock}.take.${keyOf(seen)}.`;
     let n = 0, claim = null, took = false;
     for (let tries = 0; tries < 64 && !claim; tries++) {
       try { fs.symlinkSync(token, key + n); claim = key + n; } catch (e) {
@@ -26076,14 +26701,15 @@ async function browserStartLock(file, fn) {
     try {
       if (seen === null) {
         // an empty folder goes at once; ENOENT is a free path, not a take. A non-empty folder is owned
-        // first: an exclusive write of our token as its owner works only on a folder with none (a live
-        // lock has one, a free path has no folder), and then it holds a live token, ours, which no one
-        // else removes and no starter can rename over, so the rename below moves exactly it. Reading
-        // "no owner" instead can't tell an ownerless folder from a path a release just freed (kit-321
-        // design-change-1).
+        // first: an exclusive write of a fresh token of ours as its owner works only on a folder with
+        // none (a live lock has one, a free path has no folder), and then it holds a live token, ours,
+        // which no one else removes and no starter can rename over, so the rename below moves exactly
+        // it. Reading "no owner" instead can't tell an ownerless folder from a path a release just freed
+        // (kit-321 design-change-1). Fresh, not our lock's token: so a token is on the path once, and
+        // once off it is gone for good, which drop's cleanup and the sweep rest on (kit-323 S1-1).
         try { fs.rmdirSync(lock); return (took = true); } catch (e) {
           if (e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST') return false;
-          try { fs.writeFileSync(owner, token, { flag: 'wx' }); } catch { return false; }
+          try { fs.writeFileSync(owner, mint(), { flag: 'wx' }); } catch { return false; }
         }
       } else {
         const l = look();
@@ -26099,6 +26725,39 @@ async function browserStartLock(file, fn) {
       try { fs.unlinkSync(claim); } catch {}
     }
   };
+  // The leftovers of starters that died (kit-323), each removed only when its token's pid is dead (a
+  // live pid, a reused one, ours, or a name that holds no token keeps it): a prepared folder
+  // <lock>.new.<token>, an aside <lock>.<token>.<8 hex>, and a claim <lock>.take.<k>.<n> whose link is
+  // the claimant's token. Neither folder is ever renamed onto the path but by its own live starter.
+  // The claims are listed before the lock is looked at, and those on the key of the token it then
+  // holds (an ownerless folder's: null's) stay: a dead claim there may stand between that token's
+  // live claimants, and drop removes it once the token is gone. A claim on any other token is
+  // removable, since its claimant read that token on the path before the listing, and a token that has
+  // left the path never comes back: each is minted fresh and put on the path once (null's claims need
+  // no order: the exclusive owner write keeps two takers of an ownerless folder apart). A claim is
+  // judged and then unlinked by name, so one made anew at that name in between can go too: harmless
+  // for the same reason, and drop's cleanup has the same gap. What can't be read or removed is left.
+  // Like the dead-owner rule, it takes every starter to share one pid namespace.
+  const sweep = () => {
+    const dir = path.dirname(lock), base = `${path.basename(lock)}.`;
+    let names;
+    try { names = fs.readdirSync(dir); } catch { return; }
+    const l = look(), held = l ? keyOf(l.token) : null;
+    // an owner that is there but unreadable (EMFILE, EIO, EACCES…) may hold a token: no claim goes
+    const claims = !l || l.token !== null || l.code === 'ENOENT';
+    for (const name of names) {
+      if (!name.startsWith(base)) continue;
+      const rest = name.slice(base.length), f = path.join(dir, name);
+      const folder = /^new\.(\d+-[0-9a-f]{16})$/.exec(rest)?.[1] ?? /^(\d+-[0-9a-f]{16})\.[0-9a-f]{8}$/.exec(rest)?.[1];
+      if (folder !== undefined) {
+        try { if (dead(folder) && fs.lstatSync(f).isDirectory()) fs.rmSync(f, { recursive: true, force: true }); } catch {}
+        continue;
+      }
+      const k = /^take\.([0-9a-f]{16})\.\d+$/.exec(rest)?.[1];
+      if (k !== undefined && claims && k !== held && dead(link(f))) try { fs.unlinkSync(f); } catch {}
+    }
+  };
+  sweep();
   // Each attempt rewrites the prepared owner (its mtime is the lock's age) and renames the folder onto
   // the path: EEXIST or ENOTEMPTY while a lock is held, and an empty leftover folder is replaced at
   // once. The prepared folder goes before a die() or a throw.
@@ -26109,7 +26768,7 @@ async function browserStartLock(file, fn) {
       try { fs.renameSync(prep, lock); break; } catch (e) { if (e.code !== 'EEXIST' && e.code !== 'ENOTEMPTY') throw e; }
       const l = look();
       if (!l || (stale(l) && drop(l.token))) continue;
-      if (Date.now() - start > wait) { fs.rmSync(prep, { recursive: true, force: true }); die(`browser: timed out waiting for ${lock}`); }
+      if (Date.now() - start > wait) { fs.rmSync(prep, { recursive: true, force: true }); die(`browser: timed out waiting for ${lock}; if no browser start is running, remove that folder and start again`); }
       await browserSleep(100);
     }
   } catch (e) { try { fs.rmSync(prep, { recursive: true, force: true }); } catch {} throw e; }
@@ -26128,6 +26787,27 @@ function browserRunEnv({ headed }) {
   env.DEVTEAM_BROWSER_SERVE = '1';
   if (headed) { env.DEVTEAM_BROWSER_HEADED = '1'; for (const k of ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY']) if (process.env[k] !== undefined) env[k] = process.env[k]; }
   return env;
+}
+// A browser daemon's preview record by its shape: label browser and a run.cmd ending in ` browser
+// serve`. Hello's row checks only this (no loadSettings per row); browserIsPreview adds this checkout's
+// project, for preview stop and start.
+function browserPreviewShaped(r) { return r?.label === 'browser' && typeof r.run?.cmd === 'string' && r.run.cmd.endsWith(' browser serve'); }
+function browserIsPreview(r) { return browserPreviewShaped(r) && r.project === previewProject(); }
+// The hourly renewal (DEVTEAM_TEST_BROWSER_RENEW_MS in tests): the record as it is on disk, with a
+// fresh at and expires, under its lock taken by tryLock (never waits, takes a stale lock once, never
+// dies; withLock blocks the event loop up to 15 s and dies on its timeout, which would exit leaving
+// Chrome up): a held lock skips this round, and the lock goes in tryLock's finally. Only a record
+// still there, naming this daemon's port and a window, is rewritten, so a stopped one is never made
+// again. Any error skips the round, said nowhere.
+function browserRenew(ctx, port) {
+  if (ctx.stopping || !ctx.preview) return;
+  const file = previewFile(ctx.preview);
+  try {
+    tryLock(file, () => {
+      const r = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (isObj(r) && r.name === ctx.preview && r.port === port && typeof r.run?.window === 'string') writePreviewFile(previewFresh(r));
+    });
+  } catch {}
 }
 // This checkout's browser preview record (label browser), or undefined.
 const browserPreviewRec = () => readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser');
@@ -26657,9 +27337,80 @@ async function browserLaunchChrome(ctx, { headed }) {
     });
     if (r.cdp) return { cdp: r.cdp };
     try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
-    if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) { ctx.notes.push("Chrome's sandbox isn't available on this machine; it runs without it."); continue; }
+    if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) {
+      const note = "Chrome's sandbox isn't available on this machine; it runs without it.";
+      if (!ctx.notes.includes(note)) ctx.notes.push(note); // a forget's relaunch says it once
+      // a stop came meanwhile: no second Chrome (detached, it would outlive the daemon); the caller's
+      // own ctx.stopping check after the launch kills ctx.chrome and returns
+      if (ctx.stopping) return { cdp: null };
+      continue;
+    }
     throw new Error(r.late ? "browser: Chrome didn't open its DevTools pipe in 30 s" : 'browser: Chrome exited before its DevTools pipe opened');
   }
+}
+// One Chrome ended: Browser.close on its pipe, then (not gone in 5 s) its group SIGTERM, SIGKILL 2 s
+// later; its helpers killed with the group; its pipe closed. The stop path's and a forget's.
+async function browserEndChrome(cdp, pid) {
+  if (pid && browserAlive(pid)) {
+    await Promise.race([cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
+    if (!(await browserGone(pid, 5000))) {
+      try { process.kill(-pid, 'SIGTERM'); } catch {}
+      if (!(await browserGone(pid, 2000))) { try { process.kill(-pid, 'SIGKILL'); } catch {} await browserGone(pid, 3000); }
+    }
+  }
+  if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
+  cdp?.close();
+}
+// A Chrome and its pipe watched: its exit or its pipe closing stops the daemon only while it is the
+// current Chrome and not retired by a forget (whose old Chrome's end is expected). The view's
+// screencast frames are taken on this pipe.
+function browserWatchChrome(ctx, chrome, cdp) {
+  const gone = () => { if (chrome === ctx.chrome && !chrome.retired) browserShutdown(ctx, 'chrome exited'); };
+  chrome.once('exit', gone);
+  cdp.on('close', gone);
+  cdp.on('Page.screencastFrame', (p, sid) => browserViewFrame(ctx, p, sid));
+}
+// Sign out of everything (the view's forget), on the verbs' queue: the screencast stopped, the
+// current Chrome retired and ended, the profile folder (ctx.profile, the one the daemon runs on)
+// removed only once no process carries it, made again empty with this checkout's root.json, its start
+// steps, a fresh Chrome on about:blank, the tabs watched again, state.json rewritten with the new
+// chrome_pid, and the screencast started again on the same viewer (its seq goes on). The daemon,
+// guard, control port and preview stay. A stop meanwhile wins: after each await, ctx.stopping ends
+// it (browserShutdown kills ctx.chrome, whichever it is). Any failure stops the daemon.
+async function browserForgetRestart(ctx) {
+  if (ctx.stopping || !ctx.ready) return;
+  try {
+    ctx.ready = false; // the view's input dropped, its tick idle, a new socket 503
+    const v = ctx.viewer;
+    if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
+    const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
+    if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
+    const old = ctx.chrome;
+    old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
+    await browserEndChrome(ctx.cdp, old.pid);
+    if (ctx.stopping) return;
+    let procs = browserProcsOn(ctx.profile);
+    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(100);
+    if (ctx.stopping) return;
+    if (procs === null || procs.length) return void browserShutdown(ctx, 'error'); // nothing removed on a guess
+    fs.rmSync(ctx.profile, { recursive: true, force: true });
+    ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
+    await browserPrepareProfile(ctx.profile, []);
+    if (ctx.stopping) return;
+    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // launched while it stopped
+    ctx.cdp = cdp;
+    browserWatchChrome(ctx, ctx.chrome, cdp);
+    ctx.tabs = [];
+    ctx.active = null;
+    await browserWatchTabs(ctx);
+    for (let i = 0; i < 100 && !ctx.stopping && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
+    if (ctx.stopping) return;
+    ctx.state = { ...ctx.state, chrome_pid: ctx.chrome.pid };
+    browserWriteState(ctx.state);
+    ctx.ready = true;
+    if (ctx.viewer) browserViewTick(ctx, ctx.viewer); // the screencast again, on the same socket
+  } catch { browserShutdown(ctx, 'error'); }
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
 // hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
@@ -26669,16 +27420,9 @@ function browserShutdown(ctx, why) {
   if (why === 'signal') for (const s of [process.stdout, process.stderr]) { s.on('error', () => {}); }
   ctx.stopping = (async () => {
     clearTimeout(ctx.idle);
-    const pid = ctx.chrome?.pid;
-    if (pid && browserAlive(pid)) {
-      await Promise.race([ctx.cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
-      if (!(await browserGone(pid, 5000))) {
-        try { process.kill(-pid, 'SIGTERM'); } catch {}
-        if (!(await browserGone(pid, 2000))) { try { process.kill(-pid, 'SIGKILL'); } catch {} await browserGone(pid, 3000); }
-      }
-    }
-    if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
-    ctx.cdp?.close();
+    clearInterval(ctx.renew);
+    try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
+    await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
@@ -26772,11 +27516,23 @@ function browserVerbs(ctx) {
 }
 // The control server: POST / only, Host 127.0.0.1:<port>, JSON, and the secret (timingSafeEqual);
 // anything else 403 and nothing run. Verbs run one at a time; the idle timer is paused while one runs
-// and re-armed after it (ping leaves it alone).
+// and re-armed after it. ping, after the same checks, is answered at once off the queue and leaves the
+// idle timer alone.
 function browserControl(ctx, secret) {
   const want = Buffer.from(secret);
   let queue = Promise.resolve();
-  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => browserShutdown(ctx, 'idle'), browserIdleMs()); };
+  // with a viewer's socket open, the idle timer arms again rather than stop the daemon
+  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (ctx.viewer && !ctx.stopping ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
+  // ctx.serial(fn): fn on the verbs' queue (the view's forget), the idle timer paused as for a verb
+  ctx.serial = (fn) => {
+    const run = queue.then(async () => {
+      if (ctx.stopping) return;
+      clearTimeout(ctx.idle);
+      try { await fn(); } catch {} finally { if (!ctx.stopping) arm(); }
+    });
+    queue = run;
+    return run;
+  };
   const server = http.createServer((req, res) => {
     req.on('error', () => {});
     res.on('error', () => {});
@@ -26790,30 +27546,325 @@ function browserControl(ctx, secret) {
       let m;
       try { m = JSON.parse(body); } catch {}
       const verb = typeof m?.verb === 'string' && Object.hasOwn(ctx.verbs, m.verb) ? m.verb : null;
-      queue = queue.then(async () => {
+      const run = async () => {
         if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
         if (!verb) return { code: 1, out: `usage: ${BROWSER_USAGE}` };
         if (verb !== 'ping') clearTimeout(ctx.idle); // paused while the verb runs
         try { return await ctx.verbs[verb](isObj(m.args) ? m.args : {}); } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
-      }).then((r) => {
+      };
+      // ping reads nothing from Chrome and is answered at once, off the queue: a long verb or a forget
+      // never makes the daemon look dead to browserLive (and so a second daemon started over it)
+      const ping = verb === 'ping';
+      const answered = (ping ? run() : queue.then(run)).then((r) => {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(r));
+        if (ping) return; // ctx.after is the queued verb's (stop's), never taken by a ping
         const after = ctx.after;
         ctx.after = null;
         if (after) res.once('finish', after);
       }).catch(() => { try { res.destroy(); } catch {} }); // one bad answer never stops the queue
+      if (!ping) queue = answered;
     });
   });
   return { server, arm };
 }
 const browserListen = (server, port) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(server.address().port); }); });
-// browser serve, in the preview's window: the 503 view placeholder bound first, then the profile and
+// --- the live view (kit-66): browser.html on the view port, and its one socket (RFC 6455, text only)
+// carrying Chrome's screencast to the page. Nothing a viewer sends is logged, written or echoed.
+const BROWSER_WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const BROWSER_WS_MAX = 262144; // a joined message, judged on each header's declared length
+const BROWSER_WS_FRAGMENTS = 1024; // fragments per message: empty ones would grow it with the size still 0
+const BROWSER_WS_BACKLOG = 2097152; // a frame message is dropped while more than this waits to be written
+const BROWSER_FRAME_DATA = /^\/9j\/[A-Za-z0-9+/]*={0,2}$/; // the contract's frame data
+const browserHook = (name, dflt) => { const n = Number(browserTestEnv(name)); return Number.isFinite(n) && n > 0 ? n : dflt; };
+const browserPingMs = () => browserHook('DEVTEAM_TEST_BROWSER_PING_MS', 15000);
+const browserCastMax = () => Math.min(1280, Math.round(browserHook('DEVTEAM_TEST_BROWSER_CAST_MAX', 1280)));
+// A header's one value, or null when it is missing or given more than once.
+function browserOneHeader(req, name) {
+  let v = null, n = 0;
+  for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === name) { v = req.rawHeaders[i + 1]; n++; }
+  return n === 1 ? v : null;
+}
+const browserViewHost = (req, port) => [`127.0.0.1:${port}`, `localhost:${port}`].includes(browserOneHeader(req, 'host'));
+// A CDP call the view makes: never an unhandled rejection (a closing pipe answers with one).
+const browserViewCdp = (ctx, method, params, sid) => { ctx.cdp?.send(method, params, sid).catch(() => {}); };
+// One upgraded socket: its frame reader and writer. onText gets each joined text message; onClose runs
+// once, however it closed. A ping every pingMs; closed 2 x pingMs after the last byte received (a timer
+// every byte resets, not a check at the ping ticks, which would let silence run up to pingMs longer).
+function browserSocket(sock, { onText, onClose, pingMs }) {
+  let buf = Buffer.alloc(0), parts = [], joined = 0, inMsg = false, closed = false;
+  const write = (op, payload) => {
+    if (sock.destroyed || !sock.writable) return;
+    const len = payload.length;
+    let hdr;
+    if (len < 126) hdr = Buffer.from([0x80 | op, len]);
+    else if (len < 65536) { hdr = Buffer.alloc(4); hdr[0] = 0x80 | op; hdr[1] = 126; hdr.writeUInt16BE(len, 2); } else { hdr = Buffer.alloc(10); hdr[0] = 0x80 | op; hdr[1] = 127; hdr.writeBigUInt64BE(BigInt(len), 2); }
+    try { sock.write(Buffer.concat([hdr, payload])); } catch {}
+  };
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(timer);
+    clearTimeout(silence);
+    buf = Buffer.alloc(0);
+    parts = [];
+    try { onClose?.(); } catch {}
+  };
+  // A close frame with code, then a FIN; destroyed 1 s later only if the peer hasn't closed.
+  const close = (code) => {
+    if (closed) return;
+    if (code) { const b = Buffer.alloc(2); b.writeUInt16BE(code); write(8, b); }
+    finish();
+    try { sock.end(); } catch {}
+    const t = setTimeout(() => sock.destroy(), 1000);
+    t.unref?.();
+    sock.once('close', () => clearTimeout(t));
+  };
+  const read = () => {
+    for (;;) {
+      if (closed || buf.length < 2) return;
+      const b0 = buf[0], b1 = buf[1], fin = !!(b0 & 0x80), op = b0 & 15;
+      if (b0 & 0x70) return close(1002); // a reserved bit
+      if (!(b1 & 0x80)) return close(1002); // unmasked
+      let len = b1 & 127, at = 2;
+      if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); at = 4; } else if (len === 127) { if (buf.length < 10) return; const big = buf.readBigUInt64BE(2); len = big > BigInt(BROWSER_WS_MAX) ? Infinity : Number(big); at = 10; }
+      if (op >= 8) {
+        if (op > 10 || !fin || len > 125) return close(1002); // an unknown, fragmented or long control frame
+      } else if (op === 2) return close(1003); // binary
+      else if (op === 0 ? !inMsg : op === 1 ? inMsg : true) return close(1002); // a stray continuation, a text mid-message, an unknown opcode
+      else if (joined + len > BROWSER_WS_MAX || parts.length >= BROWSER_WS_FRAGMENTS) return close(1009); // on the header, before its payload is buffered
+      if (buf.length < at + 4 + len) return;
+      const mask = buf.subarray(at, at + 4), body = Buffer.from(buf.subarray(at + 4, at + 4 + len));
+      for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3];
+      buf = buf.subarray(at + 4 + len);
+      if (op === 8) return close(1000);
+      if (op === 9) { write(10, body); continue; }
+      if (op === 10) continue;
+      parts.push(body);
+      joined += len;
+      inMsg = !fin;
+      if (!fin) continue;
+      const text = Buffer.concat(parts).toString('utf8');
+      parts = [];
+      joined = 0;
+      onText?.(text);
+    }
+  };
+  const feed = (chunk) => {
+    if (closed) return;
+    silence.refresh();
+    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+    try { read(); } catch { close(1011); }
+  };
+  sock.setKeepAlive(true);
+  sock.setNoDelay(true);
+  const silence = setTimeout(() => close(1001), 2 * pingMs);
+  silence.unref?.();
+  const timer = setInterval(() => write(9, Buffer.alloc(0)), pingMs);
+  timer.unref?.();
+  sock.on('data', feed);
+  sock.on('end', () => close(0));
+  sock.on('close', finish);
+  return {
+    feed,
+    close,
+    get closed() { return closed; },
+    // false when it wasn't sent: a droppable message (a frame) while the socket's backlog is over 2 MiB
+    send(obj, droppable = false) {
+      if (closed || (droppable && sock.writableLength > BROWSER_WS_BACKLOG)) return false;
+      write(1, Buffer.from(JSON.stringify(obj)));
+      return true;
+    },
+  };
+}
+// The screencast, on the tab being cast: JPEG, quality 60, at most 1280 x 1280, every frame.
+function browserCast(ctx, tab, on) {
+  if (!tab?.sessionId) return;
+  if (!on) return browserViewCdp(ctx, 'Page.stopScreencast', {}, tab.sessionId);
+  const m = browserCastMax();
+  browserViewCdp(ctx, 'Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: m, maxHeight: m, everyNthFrame: 1 }, tab.sessionId);
+}
+// Every 250 ms while a viewer is open (and once at open): a new active tab moves the screencast to it;
+// a changed masked URL is sent. Nothing while Chrome isn't up (a forget restarting it).
+function browserViewTick(ctx, v) {
+  try {
+    if (!ctx.ready || ctx.stopping || ctx.viewer !== v || v.ws.closed) return;
+    const tab = ctx.active?.sessionId ? ctx.active : null;
+    if (tab !== v.tab) { browserCast(ctx, v.tab, false); v.tab = tab; browserCast(ctx, tab, true); }
+    const url = browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening);
+    if (url !== v.url) { v.url = url; v.ws.send({ t: 'url', url }); }
+  } catch {}
+}
+function browserViewClose(ctx, v) {
+  clearInterval(v.timer);
+  browserCast(ctx, v.tab, false);
+  v.tab = null;
+  if (ctx.viewer === v) ctx.viewer = null;
+}
+// Page.screencastFrame: acknowledged at once; sent as frame only when it comes from the tab being cast
+// to the open viewer, its data the contract's pattern and its size (CSS pixels) 1 to 8192. seq lives on
+// the viewer's own object, so it rises for as long as the socket lives.
+function browserViewFrame(ctx, params, sessionId) {
+  if (params?.sessionId !== undefined) browserViewCdp(ctx, 'Page.screencastFrameAck', { sessionId: params.sessionId }, sessionId);
+  const v = ctx.viewer;
+  if (!v || v.ws.closed || !v.tab?.sessionId || v.tab.sessionId !== sessionId) return;
+  const w = Math.round(params?.metadata?.deviceWidth), h = Math.round(params?.metadata?.deviceHeight);
+  if (typeof params.data !== 'string' || !BROWSER_FRAME_DATA.test(params.data) || !(w >= 1 && w <= 8192) || !(h >= 1 && h <= 8192)) return;
+  const scale = params.metadata.pageScaleFactor;
+  v.scale = typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1; // the input's x, y are divided by it
+  if (v.ws.send({ t: 'frame', data: params.data, w, h, seq: v.seq }, true)) v.seq++;
+}
+// The page's messages ($defs.view.from_page), checked by hand: closed field sets, types, bounds and
+// enums. Not the kit's schemaErrors, so no refusal text can ever carry a typed value; a message that
+// fails is null and dropped. Lengths are JSON Schema's (code points).
+const BROWSER_MODS = { type: 'int', min: 0, max: 15 };
+const BROWSER_XY = { type: 'num', min: 0, max: 8192 };
+const BROWSER_FROM_PAGE = {
+  mouse: { req: ['type', 'x', 'y'], f: { type: { enum: ['down', 'up', 'move', 'click'] }, x: BROWSER_XY, y: BROWSER_XY, button: { enum: ['none', 'left', 'middle', 'right'] }, clicks: { type: 'int', min: 0, max: 3 }, mods: BROWSER_MODS } },
+  wheel: { req: ['x', 'y', 'dx', 'dy'], f: { x: BROWSER_XY, y: BROWSER_XY, dx: { type: 'num', min: -100000, max: 100000 }, dy: { type: 'num', min: -100000, max: 100000 }, mods: BROWSER_MODS } },
+  key: { req: ['type', 'key'], f: { type: { enum: ['down', 'up', 'press'] }, key: { type: 'str', min: 1, max: 32 }, code: { type: 'str', min: 1, max: 32 }, text: { type: 'str', min: 1, max: 8 }, mods: BROWSER_MODS } },
+  paste: { req: ['text'], f: { text: { type: 'str', min: 1, max: 10000 } } },
+  nav: { req: ['url'], f: { url: { type: 'str', min: 1, max: 2048 } } },
+  back: { req: [], f: {} },
+  forget: { req: [], f: {} },
+};
+function browserViewMessage(m) {
+  if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string' || !Object.hasOwn(BROWSER_FROM_PAGE, m.t)) return null;
+  const shape = BROWSER_FROM_PAGE[m.t];
+  for (const k of shape.req) if (!Object.hasOwn(m, k)) return null;
+  for (const k of Object.keys(m)) {
+    if (k === 't') continue;
+    if (!Object.hasOwn(shape.f, k)) return null;
+    const s = shape.f[k], x = m[k];
+    if (s.enum) { if (!s.enum.includes(x)) return null; continue; }
+    if (s.type === 'str') {
+      if (typeof x !== 'string' || x.length < s.min || x.length > 2 * s.max) return null; // UTF-16 length bounds code points both ways
+      const n = [...x].length;
+      if (n < s.min || n > s.max) return null;
+    } else if (typeof x !== 'number' || !Number.isFinite(x) || (s.type === 'int' && !Number.isInteger(x)) || x < s.min || x > s.max) return null;
+  }
+  return m;
+}
+// windowsVirtualKeyCode for a key: the named keys, then KeyA-KeyZ and Digit0-9 from code. 0 if none.
+const BROWSER_VK = { Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18, Pause: 19, CapsLock: 20, Escape: 27, ' ': 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, ContextMenu: 93, ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, 112 + i])) };
+function browserVk(key, code) {
+  if (Object.hasOwn(BROWSER_VK, key)) return BROWSER_VK[key];
+  const c = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(code ?? '');
+  if (c) return (c[1] ?? c[2]).charCodeAt(0);
+  if (code === 'Space') return 32;
+  return 0;
+}
+const BROWSER_BUTTONS = { none: 0, left: 1, right: 2, middle: 4 };
+// One message from the page: parsed, checked, and handed to the active tab's session. Nothing about
+// it is logged, printed, stored or echoed; a failed CDP call is dropped (browserViewCdp catches it).
+// While Chrome isn't up (the start steps, a forget restarting it) or the daemon is stopping, every
+// message is dropped, a second forget among them, so nothing reads a null ctx.active.
+function browserViewInput(ctx, v, text) {
+  if (!ctx.ready || ctx.stopping || ctx.viewer !== v) return;
+  let m;
+  try { m = browserViewMessage(JSON.parse(text)); } catch { return; }
+  if (!m) return;
+  if (m.t === 'forget') { // Sign out of everything, on the verbs' queue; one queued at a time
+    if (ctx.forgetting) return;
+    ctx.forgetting = true;
+    return void ctx.serial(() => browserForgetRestart(ctx)).finally(() => { ctx.forgetting = false; });
+  }
+  const sid = ctx.active?.sessionId;
+  if (!sid) return; // a tab with no session: dropped
+  const cdp = (method, params) => browserViewCdp(ctx, method, params, sid);
+  const scale = v.scale > 0 ? v.scale : 1;
+  switch (m.t) {
+    case 'mouse': {
+      const button = m.button ?? 'none', base = { x: m.x / scale, y: m.y / scale, button, modifiers: m.mods ?? 0 };
+      const held = BROWSER_BUTTONS[button], clickCount = m.clicks ?? 1;
+      if (m.type === 'move') return cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...base, buttons: held, clickCount: 0 });
+      if (m.type === 'down' || m.type === 'click') cdp('Input.dispatchMouseEvent', { type: 'mousePressed', ...base, buttons: held, clickCount });
+      if (m.type === 'up' || m.type === 'click') cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base, buttons: 0, clickCount });
+      return;
+    }
+    case 'wheel':
+      return cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x: m.x / scale, y: m.y / scale, deltaX: m.dx, deltaY: m.dy, modifiers: m.mods ?? 0 });
+    case 'key': {
+      const base = { key: m.key, ...(m.code ? { code: m.code } : {}), windowsVirtualKeyCode: browserVk(m.key, m.code), modifiers: m.mods ?? 0 };
+      if (m.type === 'press') {
+        cdp('Input.dispatchKeyEvent', { type: 'keyDown', ...base, ...(m.text ? { text: m.text, unmodifiedText: m.text } : {}) });
+        return cdp('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+      }
+      return cdp('Input.dispatchKeyEvent', { type: m.type === 'down' ? 'rawKeyDown' : 'keyUp', ...base });
+    }
+    case 'paste':
+      return cdp('Input.insertText', { text: m.text });
+    case 'nav': {
+      let u;
+      try { u = new URL(m.url); } catch { return; }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return; // file:, javascript:, data:, chrome: … dropped
+      return cdp('Page.navigate', { url: u.href }); // not awaited: the guard answers whatever it is
+    }
+    case 'back':
+      ctx.cdp?.send('Page.getNavigationHistory', {}, sid).then((h) => {
+        const prev = h?.entries?.[h.currentIndex - 1];
+        if (h?.currentIndex > 0 && prev?.id !== undefined) cdp('Page.navigateToHistoryEntry', { entryId: prev.id });
+      }).catch(() => {});
+      return;
+  }
+}
+// The view server: GET or HEAD / (Host one of the two loopback forms) is browser.html, read once here;
+// an upgrade passes five guards in order, each refusal a short HTTP answer and a FIN. One viewer.
+function browserViewServer(ctx) {
+  const page = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dashboard', 'browser.html'));
+  const plain = (code) => `${http.STATUS_CODES[code].toLowerCase()}\n`;
+  const server = http.createServer((req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
+    req.resume();
+    const no = (code, extra = {}) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', connection: 'close', ...extra }); res.end(plain(code)); };
+    if (!browserViewHost(req, server.address()?.port)) return no(403);
+    if (String(req.url).split('?')[0] !== '/') return no(404);
+    if (req.method !== 'GET' && req.method !== 'HEAD') return no(405, { allow: 'GET, HEAD' });
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': page.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "frame-ancestors 'self'" });
+    res.end(req.method === 'HEAD' ? undefined : page);
+  });
+  server.on('clientError', (e, s) => s.destroy());
+  server.on('upgrade', (req, sock, head) => {
+    sock.on('error', () => sock.destroy());
+    try {
+      const port = server.address()?.port;
+      const refuse = (code) => {
+        const body = plain(code);
+        sock.end(`HTTP/1.1 ${code} ${http.STATUS_CODES[code]}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);
+        const t = setTimeout(() => sock.destroy(), 1000);
+        t.unref?.();
+        sock.once('close', () => clearTimeout(t));
+      };
+      if (req.url !== '/socket') return refuse(404);
+      if (!browserViewHost(req, port)) return refuse(403);
+      if (![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(browserOneHeader(req, 'origin'))) return refuse(403);
+      const key = browserOneHeader(req, 'sec-websocket-key');
+      if (req.method !== 'GET' || String(browserOneHeader(req, 'upgrade')).toLowerCase() !== 'websocket' || browserOneHeader(req, 'sec-websocket-version') !== '13' || !/^[A-Za-z0-9+/]{22}==$/.test(key ?? '')) return refuse(400);
+      if (!ctx.ready || ctx.stopping) return refuse(503);
+      const accept = crypto.createHash('sha1').update(key + BROWSER_WS_GUID).digest('base64');
+      sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
+      const v = { ws: null, seq: 0, tab: null, url: null, timer: null, scale: 1 };
+      v.ws = browserSocket(sock, { pingMs: browserPingMs(), onText: (text) => browserViewInput(ctx, v, text), onClose: () => browserViewClose(ctx, v) });
+      if (head?.length) v.ws.feed(head);
+      if (v.ws.closed) return;
+      if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
+      ctx.viewer = v;
+      v.ws.send({ t: 'held', qid: null });
+      browserViewTick(ctx, v);
+      v.timer = setInterval(() => browserViewTick(ctx, v), 250);
+      v.timer.unref?.();
+    } catch { try { sock.destroy(); } catch {} }
+  });
+  return server;
+}
+// browser serve, in the preview's window: the view server bound first, then the profile and
 // its start steps, the guard, Chrome, the CDP tabs, the control server, then state.json. It writes
 // nothing to its window once it is up. The bind comes before the start steps (kit-316 final-1b S1): a
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   const viewPort = Number(process.env.PORT);
   const rec = readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser' && r.port === viewPort);
@@ -26821,7 +27872,7 @@ async function browserServe({ chrome: bin }) {
   ctx.preview = rec.name;
   ctx.profile = browserProfile();
   try {
-    ctx.view = http.createServer((req, res) => { req.resume(); res.on('error', () => {}); res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' }); res.end("The supervisor's browser runs here; its live view comes with a later release.\n"); });
+    ctx.view = browserViewServer(ctx);
     // test hook: the first daemon to find this file missing makes it and fails its bind (T4-1)
     const failOnce = browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL');
     if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
@@ -26830,9 +27881,8 @@ async function browserServe({ chrome: bin }) {
     ctx.guard = await startBrowserGuard();
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
-    ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
     ctx.cdp = cdp;
-    ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
+    browserWatchChrome(ctx, ctx.chrome, cdp);
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
     ctx.verbs = browserVerbs(ctx);
@@ -26840,8 +27890,12 @@ async function browserServe({ chrome: bin }) {
     const { server, arm } = browserControl(ctx, secret);
     ctx.control = server;
     const controlPort = await browserListen(server, 0);
-    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
+    ctx.state = { browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview };
+    browserWriteState(ctx.state); // a forget rewrites it with its new chrome_pid
+    ctx.ready = true; // the view's guard 5: Chrome is up
     arm();
+    ctx.renew = setInterval(() => browserRenew(ctx, viewPort), Number(browserTestEnv('DEVTEAM_TEST_BROWSER_RENEW_MS')) || 3600000);
+    ctx.renew.unref();
     process.on('uncaughtException', () => browserShutdown(ctx, 'error'));
     process.on('unhandledRejection', () => browserShutdown(ctx, 'error'));
   } catch (e) {
@@ -26853,8 +27907,11 @@ async function browserServe({ chrome: bin }) {
 }
 // browser stop: the daemon told to stop, and up to 10 s for it to go. A dead daemon's Chrome is killed
 // here (only one proven by its --user-data-dir); then the session files, the window, the preview
-// record and state.json. It makes nothing: no profile, no run/browser.
-async function browserStop({ say = true } = {}) {
+// record and state.json. It makes nothing: no profile, no run/browser. rec: the record to remove
+// (preview stop hands its own, so any writer's stop takes it); this writer's by default. True back
+// unless a leftover Chrome couldn't be stopped (said, and exit 1).
+async function browserStop({ say = true, rec } = {}) {
+  let ok = true;
   const s = browserState();
   if (s) {
     try { await browserCall('stop', {}, { state: s, ms: 15000 }); } catch {}
@@ -26865,12 +27922,13 @@ async function browserStop({ say = true } = {}) {
     try {
       await browserKillChrome(profile, [...browserCandidates(profile), ...(browserProcsOn(profile) ?? [])]);
       browserDeleteSession(profile);
-    } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); process.exitCode = 1; }
+    } catch (e) { process.stderr.write(`devteam: ${e.message}\n`); process.exitCode = 1; ok = false; }
   }
-  const rec = browserPreviewRec();
-  if (rec) { killPreviewWindow(rec); removePreview(rec.name); }
+  const r = rec ?? browserPreviewRec();
+  if (r) { killPreviewWindow(r); removePreview(r.name); }
   fs.rmSync(browserStateFile(), { force: true });
   if (say) out(s ? 'browser stopped' : "browser wasn't running");
+  return ok;
 }
 async function browserStatus() {
   const off = { browser: 1, instance: browserKey(), running: false, held: null };
@@ -26980,7 +28038,7 @@ const HELP_SETUP = `Setup and roles
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists`;
 const HELP_HOLDS = `Holds and the fleet (planning.md §1, holds; supervisor.md §12)
-  goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
+  goal hold <g-id|upkeep> run|drain|park [--reason r] [--for <cause>…] [--until <date>] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason and --for, the cause it waits on; its drain needs --for; the date is optional, except that a pr:, run: or external: cause needs --until, at most 30 days ahead) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
@@ -26992,6 +28050,8 @@ const HELP_HOLDS = `Holds and the fleet (planning.md §1, holds; supervisor.md �
 const HELP_GRAPH = `The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
+  ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole "<why>"]   supervisor or planner: hold a ticket, naming what it waits on (q-…, a ticket, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id>, external:<words>; the last three need --until, at most 30 days ahead)
+  ticket release <id> [--reason r]       supervisor or planner: lift a ticket's hold
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
   moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
@@ -27004,7 +28064,7 @@ const HELP_CHECKS = `Checks and merging (quality.md)
 const HELP_SESSIONS = `Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
   gate <name> [--junit f] -- <cmd…>   run a gate and record it   |   gate --all: every settings gate here
-  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | messages [--open] [--to x] [--json]
+  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | send supervisor "<text>" --kind handoff --thread <t-id> (the responder's) | messages [--open] [--to x] [--json]
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line`;
 const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
@@ -27042,7 +28102,7 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first

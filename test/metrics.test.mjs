@@ -115,7 +115,7 @@ test('ready orders by effective goal priority: work a higher goal waits on goes 
 test('a lower-priority ticket still starts while higher-priority work is blocked or held', () => {
   const { F, ticket, idle, rows } = priorityFixture('ready-backfill');
   try {
-    ticket('bf-01-first', 2, [], { held: 'waits on the owner' });
+    ticket('bf-01-first', 2, [], { held: 'waits on the owner', held_for: ['external:the owner'], held_until: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10) });
     ticket('bf-02-then', 2, ['bf-01-first']);
     ticket('bf-03-low', 9);
     assert.deepEqual(rows(), [['bf-03-low', 9, null]]);
@@ -148,20 +148,21 @@ test('priority-inversion: a goal waiting on unstarted work well below it, until 
     assert.match(F.sup(['metrics']), /\[medium\] priority-inversion: /);
 
     // a held blocker is named as held, with what to do about it
-    F.sup(['ticket', 'set', 'pi-01-low', '--json', JSON.stringify({ held: 'waits on a vendor' })]);
+    const until = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+    F.sup(['ticket', 'hold', 'pi-01-low', '--reason', 'waits on a vendor', '--for', 'external:the vendor', '--until', until]);
     F.sup(['ticket', 'set', 'pi-06-gap', '--json', JSON.stringify({ depends_on: [] })]);
     f = inversions();
     assert.equal(f[0].detail, 'p2 "High": 1 ticket waits on lower-priority work nobody has started: pi-01-low (p9, held: waits on a vendor)');
     assert.match(f[0].suggestion, /^release the held one if the hold no longer stands; /);
-    F.sup(['ticket', 'set', 'pi-01-low', '--json', JSON.stringify({ held: null })]);
+    F.sup(['ticket', 'release', 'pi-01-low']);
 
     // the blocker's goal held: blocked-by-goal-hold's, not this one's; the blocked goal held: none
-    F.sup(['goal', 'hold', g[9], 'drain', '--reason', 'paused']);
+    F.sup(['goal', 'hold', g[9], 'drain', '--reason', 'paused', '--for', 'external:a pause', '--until', until]);
     assert.deepEqual(inversions(), []);
     assert.ok(findings().some((x) => x.kind === 'blocked-by-goal-hold' && x.subject === 'pi-03-high'));
     F.sup(['goal', 'hold', g[9], 'run', '--reason', 'resumed']);
     assert.equal(inversions().length, 1);
-    F.sup(['goal', 'hold', g[2], 'drain', '--reason', 'paused']);
+    F.sup(['goal', 'hold', g[2], 'drain', '--reason', 'paused', '--for', 'external:a pause', '--until', until]);
     assert.deepEqual(inversions(), []);
     F.sup(['goal', 'hold', g[2], 'run', '--reason', 'resumed']);
 
@@ -211,7 +212,7 @@ test('ready: met, parked and drained goals give no priority and pass none on', (
     // the p1 goal met (the owner's word), p3 parked, p5 drained
     F.hand('owner', { type: 'goal', op: 'set', id: F.goal, status: 'met' }, 1000);
     F.owner(['goal', 'hold', g[3], 'park', '--owner', '--reason', 'later']);
-    F.sup(['goal', 'hold', g[5], 'drain', '--reason', 'paused']);
+    F.sup(['goal', 'hold', g[5], 'drain', '--reason', 'paused', '--for', 'external:a pause', '--until', new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)]);
     assert.deepEqual(rows(), [['lv-01-low', 9, null], ['lv-03-low', 9, null], ['lv-06-low', 9, null], ['lv-08-both', 9, null]]);
     assert.doesNotMatch(F.sup(['ready']), /blocks p/);
   } finally { F.done(); }

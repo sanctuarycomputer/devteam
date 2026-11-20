@@ -106,6 +106,8 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
   const F = threadsFixture();
   t.after(() => F.done());
   const show = (id) => JSON.parse(F.owner(['thread', 'show', id, '--json']));
+  // a subject with an open thread takes no second one (kit-97): an earlier case's thread on it resolved first
+  const freeOn = (ref) => { for (const x of JSON.parse(F.owner(['thread', 'list', '--json']))) if (x.status === 'open' && x.subject?.ref === ref) F.owner(['thread', 'resolve', x.id]); };
 
   await t.test('the log takes a thread and turns from the owner, turns from the supervisor, and nothing else', () => {
     const T = 't-20261110-100000000-owner';
@@ -299,11 +301,11 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     const plainText = 'A/C units, see /c/docs, /c/123.abc.def, 3/c/4 and /c/1762900000000.AbCdEfGh.abcdefghijklmnopqrstuv';
     // nor a path or version that ends in /c/<n>.<more>: the gateway's expiry is 13 digits of milliseconds
     for (const ok of ['/blog/c/2.html', '/docs/c/1.md', '/products/c/12.json', 'Fix /c/3.0']) {
-      const [O] = F.owner(['thread', 'new', 'x', '--title', ok, '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: ok })]).split('\n');
+      const [O] = F.owner(['thread', 'new', 'x', '--title', ok, '--subject', JSON.stringify({ kind: 'item', ref: 'ticket:cap-path', quote: ok })]).split('\n');
       assert.deepEqual([show(O).title, show(O).subject.quote], [ok, ok]);
       F.owner(['thread', 'resolve', O]);
     }
-    const [P] = F.owner(['thread', 'new', 'x', '--title', plainText.slice(0, 100), '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: plainText })]).split('\n');
+    const [P] = F.owner(['thread', 'new', 'x', '--title', plainText.slice(0, 100), '--subject', JSON.stringify({ kind: 'item', ref: 'ticket:cap-text', quote: plainText })]).split('\n');
     assert.deepEqual([show(P).title, show(P).subject.quote], [plainText.slice(0, 100), plainText]);
     F.owner(['thread', 'resolve', P]);
   });
@@ -321,6 +323,7 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
   await t.test("an owner turn is typed into the supervisor's pane as one line: its kind and id, never its title or capture", { skip: hasTmux ? false : 'no tmux' }, async () => {
     const pane = F.standIn();
     const P = { DEVTEAM_SUPERVISOR: pane.target };
+    freeOn(`goal:${F.goal}`);
     const [T, said] = F.owner(['thread', 'new', 'Narrow this\nto the   EU\u001b[2J launch', '--title', 'TITLE-NOT-TYPED', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'CAPTURE-NOT-TYPED' })], P).split('\n');
     assert.equal(said, "sent to the supervisor's pane");
     const typed = await until(() => pane.typed().includes(T) && pane.typed(), 'the line in the pane');
@@ -356,7 +359,7 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
   });
 
   await t.test("thread ask asks an Inbox question exactly as ask does, plus its thread, and a turn naming it", () => {
-    const T = F.owner(['thread', 'new', 'Should we narrow this?', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]).split('\n')[0];
+    const T = F.owner(['thread', 'new', 'Should we narrow this?', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: 'ticket:thread-ask' })]).split('\n')[0];
     const ask = ['--question', 'Narrow the goal to EU orders?', '--choices', JSON.stringify([{ label: 'Yes' }, { label: 'Not yet' }]), '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1'];
     const Q1 = F.sup(['thread', 'ask', T, ...ask]);
     const Q2 = F.sup(['ask', ...ask]);
@@ -384,6 +387,7 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
   });
 
   await t.test('ready, Not yet, ready again, accept: the supervisor proposes, only the owner closes, and the loop gets an observation', () => {
+    freeOn(`goal:${F.goal}`);
     const T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]).split('\n')[0];
     F.sup(['thread', 'reply', T, 'Done: the goal says EU orders now.', '--refs', `goal:${F.goal}`]);
     assert.match(F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders']), /proposed resolving/);
@@ -440,7 +444,7 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     F.sup(['withdraw', Q, '--reason', 'test']);
   });
   await t.test("answer --from-turn: the owner's words from their turn, channel thread, one turn for one question bound to it", () => {
-    const T = F.owner(['thread', 'new', 'Narrow this?', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]).split('\n')[0];
+    const T = F.owner(['thread', 'new', 'Narrow this?', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: 'ticket:from-turn' })]).split('\n')[0];
     const T2 = F.owner(['thread', 'new', 'Something else']).split('\n')[0];
     const before = show(T).turns[0].id;
     const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
@@ -857,7 +861,7 @@ test('a held ticket or a stopped launch is not a stuck worker; a real stuck one 
     for (const id of ['w-01-held', 'w-02-stopped', 'w-04-held-stopped']) phaseLine(id, null, 'starting', 2 * H);
     phaseLine('w-03-stuck', null, 'starting', 2 * H + 60000);
     phaseLine('w-03-stuck', 'starting', 'build', 2 * H);
-    for (const id of ['w-01-held', 'w-04-held-stopped']) F.sup(['ticket', 'set', id, '--json', JSON.stringify({ held: 'waits for the cap' })]);
+    for (const id of ['w-01-held', 'w-04-held-stopped']) F.sup(['ticket', 'set', id, '--json', JSON.stringify({ held: 'waits for the cap', held_for: ['external:the cap'], held_until: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10) })]);
     // its worktree is here, so it is no stopped launch, window or not: a worker gone quiet (another
     // component, so the web counts below stay the four tickets')
     F.sup(['ticket', 'add', 'w-05-worktree', '--json', JSON.stringify({ title: 'w-05-worktree', feature: 'stops', component: 'api', kind: 'build', size: 'S', risk: 'normal', serves: ['ST-S1'], depends_on: [], touches: ['src/**'], done_when: ['the src test passes in CI'] })]);
@@ -921,7 +925,7 @@ test('a held ticket or a stopped launch is not a stuck worker; a real stuck one 
     assert.ok(r.ready.some((x) => x.id === 'w-02-stopped'));
     assert.match(F.sup(['ready']), /^active workers: 2\//m, 'w-03-stuck and w-05-worktree; neither held nor stopped');
     // worker <id> starts a stopped launch as a new start: a draining goal starts nothing new
-    F.sup(['goal', 'hold', F.goal, 'drain', '--reason', 'test']);
+    F.sup(['goal', 'hold', F.goal, 'drain', '--reason', 'test', '--for', 'external:test', '--until', new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)]);
     assert.match(F.fails(['worker', 'w-02-stopped'], F.SUP), /draining goal.*starts nothing new/);
     F.sup(['goal', 'hold', F.goal, 'run', '--reason', 'test']);
     assert.match(F.sup(['worker', 'w-02-stopped']), /made worker w-02-stopped/);

@@ -269,9 +269,12 @@ test('the Library shows each landed artifact\'s publish state, from the log and 
   assert.match(html, /target="_blank" rel="noopener noreferrer">\$\{label\}<\/a>/);
   assert.match(html, /action: 'artifact-publish', body: \{ op: 'unpublish', slug \}/);
   assert.match(html, /Restore all/);
-  assert.match(html, /Review all/);
-  assert.match(html, /Changed on main since it was published/);
-  assert.match(html, /Publishing happens on the cloud box/);
+  // kit-92 (R4): a drifted set is Restore all too, its sentence saying what goes up; no Review on the page; the card's drift words
+  assert.match(html, /changed on main since: what goes up is main's version, not the one recorded\.` : ''\} \$\{tab\(L\.publish\([^`]*'Restore all'\)\}/);
+  assert.doesNotMatch(html, /Review all|Review main's version/);
+  assert.match(html, /<span class="lib-drift">changed on main since<\/span>/);
+  // kit-95: the Library's line saying where publishing happens is gone (the Public pill's tooltip keeps it)
+  assert.doesNotMatch(html, />Publishing happens on the cloud box/);
 });
 
 test('the Library lists previews with the link for where the page is', () => {
@@ -589,12 +592,12 @@ test('an answer posts the pick and the words on the first press, with no which-c
   later(() => dash.stop());
   // a page loaded before the upgrade posts the old shape, the pick inside the text and no choice key:
   // still taken, as a line judged by its leading label
-  const old = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: D6, answer: 'Yes — fine' }), signal: AbortSignal.timeout(60000) });
+  const old = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ id: D6, answer: 'Yes — fine' }), signal: AbortSignal.timeout(60000) });
   assert.equal(old.status, 200, await old.clone().text());
   const d6 = JSON.parse(dt(['questions', '--id', D6, '--json']))[0];
   assert.deepEqual([d6.status, d6.answer, d6.choice, d6.matched], ['answered', 'Yes — fine', null, true], 'an old-shaped body still answers');
   // words, and a label, that start with "--" stay words and a label: never read as a flag (task-3 T3-1, T3-2)
-  const api = async (body) => { const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) }); assert.equal(r.status, 200, await r.clone().text()); return JSON.parse(dt(['questions', '--id', body.id, '--json']))[0]; };
+  const api = async (body) => { const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) }); assert.equal(r.status, 200, await r.clone().text()); return JSON.parse(dt(['questions', '--id', body.id, '--json']))[0]; };
   const d7 = await api({ id: D7, answer: '-- but only after the release', choice: 'No' });
   assert.deepEqual([d7.answer, d7.choice], ['No — -- but only after the release', 'No'], 'the words kept');
   const d8 = await api({ id: D8, answer: '--rule=always yes', choice: 'Yes' });
@@ -1426,8 +1429,10 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
   assert.equal((await fetch(`${B}/api/view?kind=lens&slug=viewer-mock`)).status, 400);
   assert.equal((await view({ slug: 'viewer-mock', at: 'main' }, { 'sec-fetch-site': 'cross-site' })).status, 403);
   assert.match(F.owner(['artifact', 'describe', 'viewer-mock']), /^viewer-mock at main: "Viewer mock", fingerprint [0-9a-f]{12}/);
-  // thread show says when the artifact a thread is about has changed since (decision 21)
-  const on = (s) => F.owner(['thread', 'new', 'About it', '--subject', JSON.stringify({ kind: 'artifact', slug: 'viewer-mock', path: 'index.html', point: { x: 1, y: 2 }, ...s })]).split('\n')[0];
+  // thread show says when the artifact a thread is about has changed since (decision 21); each at a spot of
+  // its own, since a spot with an open thread takes no second one (kit-97)
+  let spot = 0;
+  const on = (s) => F.owner(['thread', 'new', 'About it', '--subject', JSON.stringify({ kind: 'artifact', slug: 'viewer-mock', path: 'index.html', point: { x: 1, y: 2 + spot++ }, ...s })]).split('\n')[0];
   assert.doesNotMatch(F.sup(['thread', 'show', on({ at: 'main', fp: lib.fp })]), /changed since/, 'as it was');
   assert.match(F.sup(['thread', 'show', on({ at: 'main', fp: 'a'.repeat(64) })]), /^the artifact viewer-mock has changed since this thread began$/m);
   assert.doesNotMatch(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: lib.fp })]), /changed since/, 'a published tree main still has');
@@ -2129,7 +2134,8 @@ test("the viewer's reload button says when a newer version is ready, and the pre
   const soonChecks = soonIn(p, 90000);
   const checksFrom = async (prefix) => { const n0 = await p.ev('window.__reads2.length'); await soonChecks(`window.__reads2.filter((x) => x.n >= ${n0} && x.landed && x.u.startsWith(${JSON.stringify(prefix)})).length >= 2`, `two ${prefix} checks landed`); };
   const said = (title) => p.ev(`window.__titles.filter((x) => x === ${JSON.stringify(title)}).length`);
-  const button = () => p.ev(`(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), title: b.title, color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle }; })()`);
+  // kit-92: Reload is a pill; its outline sits at the pill's border width (border: what that width is)
+  const button = () => p.ev(`(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), title: b.title, color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle, border: s.borderTopWidth }; })()`);
   // the warning token as this scheme resolves it
   const amber = () => p.ev(`(() => { const e = document.createElement('span'); e.style.color = 'var(--amber)'; document.getElementById('artifact-view').append(e); const c = getComputedStyle(e).color; e.remove(); return c; })()`);
   const scheme = (value) => p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] });
@@ -2150,7 +2156,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     await soonData(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
     b = await button();
     const light = await amber();
-    assert.deepEqual([b.title, b.color, b.width, b.style], [NEWER, light, '2px', 'solid'], 'the warning colour, light');
+    assert.deepEqual([b.title, b.color, b.width, b.style, b.border], [NEWER, light, '1px', 'solid', '1px'], 'the warning colour, light, at the pill\'s border width');
     assert.equal(await said('v2'), 0, 'nothing reloaded by itself');
     await scheme('dark');
     const dark = await amber();
@@ -2180,7 +2186,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     edit('v3');
     await soonView(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
     b = await button();
-    assert.deepEqual([b.title, b.color, b.width], [NEWER, await amber(), '2px']);
+    assert.deepEqual([b.title, b.color, b.width, b.border], [NEWER, await amber(), '1px', '1px']);
     await checksFrom('/api/view?');
     assert.equal(await said('v3'), 0, 'nothing reloaded by itself');
     await p.click('#av-reload');
@@ -2691,7 +2697,8 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
 test('a popup the dashboard or a viewer opens never needs window.opener: the wrapper\'s opener policy severs it', () => {
   const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
   assert.doesNotMatch(html, /\bwindow\.opener\b|[^.\w]opener\s*[.=]/, 'nothing reads or sets an opener');
-  const tags = html.match(/<a\b[^>]*target="_blank"[^>]*>/g) ?? [];
+  // kit-92: and the attributes an <a> built elsewhere is given as one quoted piece (the Library's libGo, a url link's title and thumbnail)
+  const tags = [...(html.match(/<a\b[^>]*target="_blank"[^>]*>/g) ?? []), ...(html.match(/'[^'<>\n]*target="_blank"[^'<>\n]*'/g) ?? [])];
   assert.ok(tags.length >= 10, `the page's new-tab links: ${tags.length}`);
   assert.equal(tags.length, (html.match(/target="_blank"/g) ?? []).length, 'every target="_blank" in the file is in a tag the check matched');
   for (const a of tags) assert.match(a, /rel="noopener noreferrer"/, a);
@@ -2719,9 +2726,11 @@ test('the Library\'s Open and a question\'s [[name]] open the artifact\'s viewer
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
   const soon = soonIn(p);
   const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
-  await soon(`!!document.querySelector('[data-subject="artifact:viewer-mock"] a.av-open')`, 'the card\'s Open');
-  assert.deepEqual(await link('[data-subject="artifact:viewer-mock"] a.av-open'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open']);
-  assert.match((await link('[data-subject="artifact:viewer-mock"] .art-t > a'))[0], /^#artifact\/main\/viewer-mock$/, 'its title still opens the stage here');
+  // kit-92: the card's Open is its head's ↗ (.lib-tab), an icon named by its aria-label
+  const tab = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.getAttribute('aria-label')]; })()`);
+  await soon(`!!document.querySelector('.lib-card[data-lib-id="artifact:viewer-mock"] a.lib-tab.av-open')`, 'the card\'s Open');
+  assert.deepEqual(await tab('.lib-card[data-lib-id="artifact:viewer-mock"] a.lib-tab.av-open'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open in a new tab']);
+  assert.match((await link('.lib-card[data-lib-id="artifact:viewer-mock"] a.lib-title'))[0], /^#artifact\/main\/viewer-mock$/, 'its title still opens the stage here');
   await p.ev(`location.hash = '#inbox'`);
   await soon(`!!document.querySelector('.qref a')`, 'the question\'s [[mock]]');
   assert.deepEqual(await link('.qref a'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'The mock']);
@@ -4268,12 +4277,14 @@ test("the Library's preview card opens the stage here and the viewer in a tab; a
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
   const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
   const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
-  const card = `[data-preview="${name}"]`;
-  await soon(`!!document.querySelector('${card} a.av-open')`, 'the card');
-  const said = await soon(`(() => { const b = document.querySelector('${card} .art-t .badge'); return !!b && b.textContent !== 'checking' && b.textContent; })()`, "the card's first probe");
+  // kit-92: the card is a .lib-card; its state a badge in its head, its Open the head's ↗ (.lib-tab, named by its aria-label)
+  const card = `.lib-card[data-preview="${name}"]`;
+  const tab = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.getAttribute('aria-label')]; })()`);
+  await soon(`!!document.querySelector('${card} a.lib-tab.av-open')`, 'the card');
+  const said = await soon(`(() => { const b = document.querySelector('${card} .card-head .badge'); return !!b && b.textContent !== 'checking' && b.textContent; })()`, "the card's first probe");
   assert.equal(said, 'live', `an app answering on 127.0.0.1 reads live from the dashboard's first probe: ${said}`);
-  assert.deepEqual(await link(`${card} a.av-open`), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'Open']);
-  assert.deepEqual(await link(`${card} .art-t > a`), [`#preview/${name}`, '', '', 'Checkout']);
+  assert.deepEqual(await tab(`${card} a.lib-tab.av-open`), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'Open in a new tab']);
+  assert.deepEqual(await link(`${card} a.lib-title`), [`#preview/${name}`, '', '', 'Checkout']);
   assert.equal(await p.ev(`document.querySelector('${card} [data-copy]').dataset.copy`), `http://127.0.0.1:${app.port}/`, 'Copy link is still its own link');
   // where the stage was opened from is taken once the preview is known, and not at all for an ask the owner left
   await p.ev(`(() => { const f = window.fetch; window.fetch = (u, ...a) => (String(u).includes('/api/view') ? new Promise((r) => setTimeout(r, 400)).then(() => f(u, ...a)) : f(u, ...a)); return true; })()`);

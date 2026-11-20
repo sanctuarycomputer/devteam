@@ -42,13 +42,58 @@ const OVERVIEW_GOALS = [
 // selector no element has (see PAGES). A page ticket replaces its entries here with its own.
 const frameOnly = (ids) => ids.map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } }));
 // kit-92: the Library
-const LIBRARY_PAGES = frameOnly(['library']);
+const LIBRARY_PAGES = [
+  // on the shell, whole, with test/lib/kit.mjs's libraryFixture (every kind, state and publish record exists only
+  // with it); page-top at 1440x900 only, as kit-90's and kit-91's entries
+  { hash: '#library', narrow: { view: '#no-such-view' }, init: lib.dataPatchInit(lib.libraryFixture().patch), ready: "!!document.querySelector('#lib-grid .lib-card')" },
+  // one item's peek over it (the public mock: the most rows), with the peeks' options (PEEK_OPTS, below); its wait
+  // is PEEK_READY's (defined after this list) and the item's own ID in the first row, so not-found never passes
+  { hash: `#lib/${encodeURIComponent(`artifact:${lib.libraryFixture().ids.public}`)}`, init: lib.dataPatchInit(lib.libraryFixture().patch), ready: `!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && document.querySelector('#drawer-body section.attrs dd')?.textContent.trim() === ${JSON.stringify(`artifact:${lib.libraryFixture().ids.public}`)}`, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } },
+  // a fresh, unpatched document (an init entry loads one; !window.__fx checks it), and it must stay before the goal
+  // pages: those load by a hash change alone (measureAt) and the fixture's data has no seeded goal. The empty Library
+  { hash: '#library', narrow: { view: '#no-such-view' }, init: '/* no patch: a new document */', ready: "!window.__fx && document.querySelector('#lib-grid > .empty')?.textContent.trim() === 'None'" },
+];
 // kit-93: the autonomy pages
-const AUTONOMY_PAGES = frameOnly(['trust', 'sensors', 'health', 'retros']);
+// On the shell, whole, with test/lib/kit.mjs's autonomyFixture (its scores, rules, sensors, incidents and retros exist
+// only with it; some of its names are long on purpose). As kit-90's, kit-91's and kit-92's entries (spec M1): page-top
+// at 1440x900 only (narrow: its view a selector no element has); prose, head-h, head-end, header-pad and tab-motion
+// everywhere. The three peeks use the peeks' options (PEEK_OPTS, below: the page under them and the moved Inbox button
+// are judged elsewhere), and overflow and uneven leave the drawer out by design (it scrolls); their waits are
+// PEEK_READY's (defined after this list) and each peek's own content drawn. #health redirects to Fleet (#sensors?st=fleet).
+// The file peek reads main (/api/file is git show), and this test's project has no commit: its init also answers
+// /api/file for quality.md with the kit's own copy, so the peek is measured on the real governance text.
+const AUTONOMY_PAGES = ((init = lib.autonomyFixture().init, peek = (extra) => `!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && ${extra}`, quality = fs.readFileSync(new URL('../docs/devteam/governance/quality.md', import.meta.url), 'utf8'), fileInit = `${init}
+(() => {
+  const f = window.fetch, md = ${JSON.stringify(quality)};
+  window.fetch = (u, o) => {
+    const at = new URL(String(u && u.url ? u.url : u), location.href);
+    return at.origin === location.origin && at.pathname === '/api/file' && at.searchParams.get('path') === 'docs/devteam/governance/quality.md' ? Promise.resolve(new Response(md, { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } })) : f(u, o);
+  };
+})();`) => [
+  ...[
+    ['#trust', "!!document.querySelector('#trust .fit svg')"],
+    ['#awareness', "!!document.querySelector('#awareness .fit svg')"],
+    ['#governance', "!!document.querySelector('#governance .db-t tr[data-row]')"],
+    ['#sensors', "!!document.querySelector('#monitoring .sensor-card')"],
+    ['#sensors?st=fleet', "document.querySelector('#monitoring .tabbar [aria-selected=\"true\"]')?.dataset.tab === 'fleet' && !!document.querySelector('#monitoring [data-tbl] .db-t')"],
+    ['#retros', "!!document.querySelector('#retros .cards .card')"],
+  ].map(([hash, ready]) => ({ hash, init, narrow: { view: '#no-such-view' }, ready })),
+  ...[
+    ['#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md', peek("!!document.querySelector('#drawer-body .md p')"), fileInit],
+    ['#class/new-feature', peek("!!document.querySelector('#drawer-body .lvls .lvl.now') && !document.querySelector('#drawer-body .loading')")],
+    ['#sensor/errors', peek("[...document.querySelectorAll('#drawer-body .psect > .card-head')].some((h) => h.textContent.trim() === 'Fingerprints')")],
+  ].map(([hash, ready, own]) => ({ hash, init: own ?? init, ready, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } })),
+  // a fresh, unpatched document (!window.__fx checks it), last: the entries after it (the Loop's, Overview's and the
+  // goal pages) load by a hash change alone (measureAt) in the last document, so they are measured on the server's own
+  // data, as LIBRARY_PAGES ends. Retros with no retros
+  { hash: '#retros', narrow: { view: '#no-such-view' }, init: '/* no patch: a new document */', ready: "!window.__fx && !document.querySelector('main.waiting')" },
+])();
 // kit-96: the Loop
 const LOOP_PAGES = frameOnly(['loop']);
 // kit-97: one thread per subject (not THREADS_PAGES, the Threads panel's list below)
-const THREAD_PAGES = [];
+// a thread's card reopened by a Shift+click on Upkeep's card (its open thread, not a new one), floating on
+// Goals; page-top at 1440x900 only, as the Goals entries above (o-20261116-110914358)
+const THREAD_PAGES = [lib.reopenFixture()].map(({ hash, init, ready }) => ({ hash, init, ready, narrow: { view: '#no-such-view' } }));
 // kit-99: the Trust Score's suggestions
 const TRUST_SUGG_PAGES = [];
 // kit-171: attachments
@@ -94,6 +139,16 @@ const PEEKS_MEASURED = (ids) => {
   ].map(([kind, id]) => ({ hash: `#${kind}/${e(id)}`, ready: PEEK_READY, opts: PEEK_OPTS }))
     .concat([{ hash: `#file?path=${e(ids.file)}`, ready: PEEK_READY, opts: PEEK_OPTS }]);
 };
+
+// kit-95: every page the dashboard has (a data-page section) is on the list, but Self Improvement (the Loop),
+// whose entries are kit-96's; a page added without an entry fails here, with no browser needed
+test('the dashboard measure: every page but the Loop is listed', () => {
+  const html = fs.readFileSync(new URL('../docs/devteam/dashboard/index.html', import.meta.url), 'utf8');
+  const pages = [...new Set([...html.matchAll(/<section id="[^"]+"[^>]*\sdata-page="([a-z-]+)"/g)].map((m) => m[1]))].filter((id) => id !== 'loop');
+  assert.ok(pages.length >= 12, `the page sections are found: ${pages.join(' ')}`);
+  const listed = (id) => PAGES.some((pg) => pg.hash === `#${id}` || pg.hash.startsWith(`#${id}?`));
+  assert.deepEqual(pages.filter((id) => !listed(id)), []);
+});
 
 test('the dashboard measure: every listed page at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-'));

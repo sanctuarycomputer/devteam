@@ -207,7 +207,7 @@ test('the Overview in Chrome: the Threads dock, a pin on what it is about across
   await p.click('#tl-pill');
   await page('the dock open', `!document.getElementById('tl-panel').hidden && document.getElementById('tl-op').textContent.includes('No operator is running on this machine')`);
   assert.equal(await p.ev(`document.querySelector('#tl-op [data-tl-start]').textContent`), 'Start the operator');
-  assert.match(await p.ev(`document.getElementById('tl-list').textContent`), /No open threads\. Hold Shift and click anything on the Overview/);
+  assert.equal(await p.ev(`document.getElementById('tl-list').textContent`), 'None', 'no thread yet: None (kit-95)');
 
   // Pin, then a click on the project's name: a thread about it, and the name's own click (open the
   // project's dashboard) never happens
