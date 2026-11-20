@@ -5524,13 +5524,22 @@ const OFF_LINE = 'changes files outside the line of';
 // A records-in-home ticket's home branch holds only its records: every file it changes against
 // home's main, by merge-base as a ticket's footprint is read, is in its own records folder. This
 // keeps a link ticket from changing home's settings, log or strategy through its records branch.
+// Every merge base is read (final-11 F1): with more than one, git merges from a virtual base that
+// no diff against one of them shows, so a criss-cross could carry any file past the folder rule;
+// such a branch merges home's main in first. Records never change the jobs either: what the merge
+// lands at recurring.json is main's (recurringRegistry.landing), or the branch is refused.
 function recordsBranchFails(id, recSha) {
   const main = mainRef();
-  const base = main ? git(['merge-base', main, recSha]) : null;
-  if (!base) return [`cannot resolve home's main branch; home's ticket/${id} footprint not checked`];
+  const bases = main ? (git(['merge-base', '--all', main, recSha]) ?? '').split('\n').filter(Boolean) : [];
+  if (!bases.length) return [`cannot resolve home's main branch; home's ticket/${id} footprint not checked`];
+  if (bases.length > 1) return [`home's ticket/${id} has ${bases.length} merge bases with home's main, so what it lands is more than its changes show; merge home's main into it first`];
   const own = `${projectRel}/tickets/${id}/`;
-  const off = changedFiles(base, recSha).filter((x) => !x.startsWith(own));
-  return off.length ? [`home's ticket/${id} changes files outside its records folder ${own}: ${off.slice(0, 10).join(', ')}${off.length > 10 ? ` (+${off.length - 10} more)` : ''}`] : [];
+  const off = changedFiles(bases[0], recSha).filter((x) => !x.startsWith(own));
+  const fails = off.length ? [`home's ticket/${id} changes files outside its records folder ${own}: ${off.slice(0, 10).join(', ')}${off.length > 10 ? ` (+${off.length - 10} more)` : ''}`] : [];
+  const L = recurringRegistry.landing(mainSha(), recSha, loadSettings().merge_method);
+  if (L.problem) fails.push(`home's ticket/${id}: ${L.problem}`);
+  else if (Object.keys(L.changed).length) fails.push(`home's ticket/${id} changes the jobs (recurring.json: ${Object.keys(L.changed).join(', ')}): records never change them`);
+  return fails;
 }
 // Definition of done at an exact head, reading the files committed at that head. The forge's
 // check-pr passes approvals: false, because the supervisor's approval acts live in its log.
@@ -6928,11 +6937,28 @@ function landRecords(id, rec, linkName) {
   const subject = `${id}: records`;
   const body = `Merged home's ticket/${id} at ${rec.sha}: the records of ${id}, whose code lands in ${linkName}`;
   if (HS.forge === 'git') {
-    git(['fetch', '--quiet', 'origin', HS.main_branch]);
-    const wt = detachedWorktree(`origin/${HS.main_branch}`, `land-records-${slug(id)}`, HR, { seed: false });
+    // Onto the home main the checks judged (recordsBranchFails, at mainSha()), as the code lands
+    // (cmdMerge's landCode): no hook runs, directory renames are a conflict, the merge must be
+    // exactly the records onto that main with main's jobs, and it is pushed by sha, only while
+    // origin's main is still that commit. Each git call is bounded (final-11 F1).
+    const checked = mainSha();
+    if (!checked) return `no home ${HS.main_branch} to land on`;
+    const lg = (args, cwd) => recurringRegistry.git(args, { cwd });
+    const noHooks = ['-c', 'core.hooksPath=/dev/null'];
+    const wt = detachedWorktree(checked, `land-records-${slug(id)}`, HR, { seed: false });
     try {
-      if (git(['merge', '--no-ff', '--quiet', '-m', `${subject}\n\n${body}`, rec.sha], wt) === null) return `home's ticket/${id} at ${rec.sha.slice(0, 12)} does not merge onto home's ${HS.main_branch}`;
-      if (git(['push', '--quiet', 'origin', `HEAD:refs/heads/${HS.main_branch}`], wt) === null) return `push to home's ${HS.main_branch} refused (did main move?)`;
+      const m = lg([...noHooks, '-c', 'merge.directoryRenames=conflict', 'merge', '--no-ff', '--quiet', '-m', `${subject}\n\n${body}`, rec.sha], wt);
+      if (!m.ok) return m.timedOut ? `the merge of home's ticket/${id} at ${rec.sha.slice(0, 12)} onto home's ${HS.main_branch} timed out; nothing pushed` : `home's ticket/${id} at ${rec.sha.slice(0, 12)} does not merge onto home's ${HS.main_branch}`;
+      const h = lg(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], wt);
+      const head = h.ok ? h.out.trim() : '';
+      const p = head ? lg(['rev-list', '--parents', '-n', '1', head], wt) : null;
+      const parents = p?.ok ? p.out.trim().split(' ').slice(1) : [];
+      if (parents.length !== 2 || parents[0] !== checked || parents[1] !== rec.sha) return `the records merge${head ? ` at ${head.slice(0, 12)}` : ''} is not home's ticket/${id} at ${rec.sha.slice(0, 12)} onto home's ${HS.main_branch} at ${checked.slice(0, 12)}; nothing pushed`;
+      const M = recurringRegistry.read(checked);
+      const H = recurringRegistry.read(head);
+      const keeps = !H.failed && !M.failed && (H.problem || M.problem ? !!H.problem && !!M.problem && !!H.entry && H.entry === M.entry : !Object.keys(recurringRegistry.changed(M.jobs, H.jobs)).length);
+      if (!keeps) return `the records merge at ${head.slice(0, 12)} lands other jobs (recurring.json) than home's ${HS.main_branch} has; records never change them; nothing pushed`;
+      if (!lg([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${HS.main_branch}:${checked}`, 'origin', `${head}:refs/heads/${HS.main_branch}`], wt).ok) return `push to home's ${HS.main_branch} refused (did main move?)`;
     } finally {
       git(['worktree', 'remove', '--force', wt], mainRoot);
     }

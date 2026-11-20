@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { monoFixture, multiFixture, write, json, kit, gitShim, REAL_GIT } from './lib/kit.mjs';
+import { monoFixture, multiFixture, write, json, kit, gitShim, review, REAL_GIT } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const QID = /q-[0-9]+-[0-9]+-supervisor/;
@@ -1300,6 +1300,125 @@ test('A15 landing: forge git, a landing push that hangs is killed at its timeout
     T.g(['fetch', '-q', 'origin']);
     assert.equal(T.g(['rev-parse', 'origin/main']), before, 'nothing landed');
   } finally { T.done(); }
+});
+
+// Records in home (links.console.records "home"): a console ticket's records land on home's main
+// from home's ticket/<id> (landRecords), ahead of its code. Records never change the jobs (final-11 F1).
+function recordsHome(name) {
+  const F = multiFixture(name);
+  const links = json(F.okIn(F.old, ['settings'])).links;
+  F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, records: 'home' } } });
+  const { old, g } = F;
+  const date = (d) => ({ ...process.env, GIT_COMMITTER_DATE: d, GIT_AUTHOR_DATE: d });
+  const gd = (args, cwd, d) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: GIT_TIMEOUT, env: date(d) }).trim();
+  const text = (r) => ({ status: r.status, text: `${r.out}\n${r.err}` });
+  // console's ticket/<id>: the code
+  const code = (id) => {
+    F.ticket(id);
+    const w = path.join(old, '.worktrees', id);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/trunk'], F.console);
+    write(path.join(w, 'src/main.js'), `${id}\n`);
+    g(['add', '-A'], w); g(['commit', '-qm', `${id}: work`], w); g(['push', '-q', 'origin', `ticket/${id}`], w);
+    write(path.join(old, `docs/devteam/run/pr/ticket/${id}.md`), `# ${id}: work\n\n## One-way doors\n\nNone.\n`);
+    return g(['rev-parse', 'HEAD'], w);
+  };
+  // the records on home's ticket/<id> (its worktree rw, already at the history wanted): spec, plan and
+  // verification, approved, then a final review naming the code and the records
+  const records = (id, rw, codeSha) => {
+    const T = path.join(rw, 'docs/devteam/project/tickets', id);
+    write(path.join(T, 'spec.md'), '# spec\n'); write(path.join(T, 'plan.md'), '# plan\n\n## TL;DR\n\n- x\n');
+    write(path.join(T, 'verification.md'), '| Done-when | Command | Result |\n|---|---|---|\n| s | t | pass |\n');
+    g(['add', '-A'], rw); g(['commit', '-qm', `${id}: records`], rw);
+    const rec = g(['rev-parse', 'HEAD'], rw);
+    F.okIn(old, ['act', '--class', 'approve-spec', '--refs', id, '--', 'ok'], SUP);
+    F.okIn(old, ['act', '--class', 'approve-plan', '--refs', id, '--', 'ok'], SUP);
+    write(path.join(T, 'reviews/final-1.md'), `- Records: ${rec}\n${review('reviewer-b', codeSha)}`);
+    g(['add', '-A'], rw); g(['commit', '-qm', `${id}: final review`], rw); g(['push', '-q', '-f', 'origin', `ticket/${id}`], rw);
+    return g(['rev-parse', 'HEAD'], rw);
+  };
+  const mainNow = () => { g(['fetch', '-q', 'origin'], old); return g(['rev-parse', 'origin/main'], old); };
+  const jobsAt = (ref) => { try { return JSON.parse(g(['show', `${ref}:${JOBS}`], old)); } catch { return {}; } };
+  const done = () => { if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(F.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); };
+  return { ...F, gd, text, code, records, mainNow, jobsAt, done };
+}
+
+test('A15 landing: records in home, a criss-cross records branch that would land a stopped job again is refused, and home\'s main is left as it is (final-11 F1)', () => {
+  const F = recordsHome('recur-records-cc');
+  const { old, g, gd } = F;
+  const id = 'console-01-a';
+  try {
+    const codeSha = F.code(id);
+    // home's main: O holds a job, then Y1 stops it (the owner's answered stop; by hand here)
+    g(['fetch', '-q', 'origin'], old);
+    const m = path.join(old, '.worktrees', 'cc-main');
+    g(['worktree', 'add', '-q', '-b', 'cc-main', m, 'origin/main'], old);
+    write(path.join(m, JOBS), jobsText({ old: check() }));
+    g(['add', '-A'], m); g(['commit', '-qm', 'O: a job'], m);
+    const O = g(['rev-parse', 'HEAD'], m);
+    write(path.join(m, JOBS), jobsText({}));
+    g(['commit', '-qam', 'Y1: the job stopped'], m);
+    const Y1 = g(['rev-parse', 'HEAD'], m);
+    // X1, off O, touches only the ticket's own folder, with a later committer date (so git's single
+    // merge base is X1); main merges it
+    const x = path.join(old, '.worktrees', 'cc-side');
+    g(['worktree', 'add', '-q', '-b', 'cc-side', x, O], old);
+    write(path.join(x, `docs/devteam/project/tickets/${id}/earlier.md`), 'earlier\n');
+    g(['add', '-A'], x); gd(['commit', '-qm', 'X1: an earlier landing of the records'], x, '2030-01-05T00:00:00');
+    const X1 = g(['rev-parse', 'HEAD'], x);
+    g(['merge', '-q', '--no-ff', '--no-edit', X1], m);
+    g(['push', '-q', 'origin', 'HEAD:main'], m);
+    // the records branch: an evil merge of X1 and Y1 that keeps X1's jobs file, then the records
+    const rw = path.join(old, '.worktrees', `records-${id}`);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, rw, X1], old);
+    try { g(['merge', '-q', '--no-ff', '--no-commit', Y1], rw); } catch {}
+    g(['checkout', X1, '--', JOBS], rw);
+    g(['commit', '-qm', 'records (evil merge)'], rw);
+    const head = F.records(id, rw, codeSha);
+    const before = F.mainNow();
+    assert.deepEqual(F.jobsAt(before), {}, 'main has the job stopped');
+    assert.equal(g(['merge-base', '--all', before, head], old).split('\n').length, 2, 'a criss-cross: two merge bases');
+    // what plain git lands: the stopped job, back
+    g(['checkout', '-q', '-b', 'cc-plain', before], m);
+    g(['merge', '-q', '--no-ff', '--no-edit', head], m);
+    assert.ok(Object.hasOwn(F.jobsAt('cc-plain'), 'old'), 'plain git lands the stopped job again');
+    const MULTI = new RegExp(`home's ticket/${id} has 2 merge bases with home's main`);
+    refused(F.text(F.runIn(old, ['check-pr', '--head-ref', `ticket/${id}`, '--sha', head])), MULTI);
+    refused(F.text(F.runIn(old, ['merge', id], SUP)), MULTI);
+    assert.equal(F.mainNow(), before, "home's main is as it was");
+    assert.deepEqual(F.jobsAt('origin/main'), {}, 'no job landed');
+  } finally { F.done(); }
+});
+
+test('A15 landing: records in home behind a main that changed the jobs are refused until main is merged in; then they land, with main\'s jobs (final-11 F1)', () => {
+  const F = recordsHome('recur-records-behind');
+  const { old, g } = F;
+  const id = 'console-01-a';
+  try {
+    const codeSha = F.code(id);
+    g(['fetch', '-q', 'origin'], old);
+    const rw = path.join(old, '.worktrees', `records-${id}`);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, rw, 'origin/main'], old);
+    // main gains a job after the records branch parts from it
+    const m = path.join(old, '.worktrees', 'jobs-main');
+    g(['worktree', 'add', '-q', '-b', 'jobs-main', m, 'origin/main'], old);
+    write(path.join(m, JOBS), jobsText({ aa: check() }));
+    g(['add', '-A'], m); g(['commit', '-qm', 'main: a job'], m); g(['push', '-q', 'origin', 'HEAD:main'], m);
+    F.records(id, rw, codeSha);
+    const before = F.mainNow();
+    refused(F.text(F.runIn(old, ['merge', id, '--dry-run'], SUP)), new RegExp(`home's ticket/${id}: recurring\\.json: this branch doesn't contain main's tip, and it or main changed a recurring\\.json since they parted; merge main into the branch first`));
+    assert.equal(F.mainNow(), before);
+    // main merged in: the records land, and the jobs are main's
+    g(['fetch', '-q', 'origin'], rw);
+    g(['merge', '-q', '--no-ff', '--no-edit', 'origin/main'], rw);
+    const T = path.join(rw, 'docs/devteam/project/tickets', id, 'reviews/final-2.md');
+    write(T, `- Records: ${g(['rev-parse', 'HEAD'], rw)}\n${review('reviewer-c', codeSha)}`);
+    g(['add', '-A'], rw); g(['commit', '-qm', `${id}: final review again`], rw); g(['push', '-q', 'origin', `ticket/${id}`], rw);
+    const ok = F.runIn(old, ['merge', id], SUP);
+    assert.equal(ok.status, 0, `${ok.out}\n${ok.err}`);
+    assert.match(ok.out, /landed the records of console-01-a/);
+    g(['cat-file', '-e', `origin/main:docs/devteam/project/tickets/${id}/spec.md`], old);
+    assert.deepEqual(F.jobsAt('origin/main'), { aa: check() }, "main's jobs, as they were");
+  } finally { F.done(); }
 });
 
 test('A16: settings.md holds no jobs: no default, no words, and validate reads the jobs file of the project dir in use', () => {
