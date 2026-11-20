@@ -372,9 +372,12 @@ test('A9: ask --class recurring-edit --change takes the C3 shape and nothing els
     refused(T.ask({ recurring: { xx: check() }, gates: {} }), /only "recurring"/);
     refused(T.ask({ recurring: { xx: check({ every: '30m' }) } }), /recurring\.json xx\.every/);
     refused(T.ask({ recurring: { ghost: null } }), /no such job/);
-    refused(T.ask({ recurring: { 'ci-main': check({ every: '12h' }) } }), new RegExp(`${add.qid}`));
+    const open1 = T.ask({ recurring: { 'ci-main': check({ every: '12h' }) } });
+    refused(open1, new RegExp(`${add.qid}`));
+    assert.match(open1.text, /\(open\): one question per job at a time; withdraw it, or wait for its answer and land it/);
     T.answer(add.qid);
-    refused(T.ask({ recurring: { 'ci-main': check({ every: '12h' }) } }), /not landed/);
+    // an answered question can't be withdrawn: the advice says what can be done (final-10b F3)
+    refused(T.ask({ recurring: { 'ci-main': check({ every: '12h' }) } }), /\(answered Yes, not landed yet\): one question per job at a time; an answered question can't be withdrawn: land it first \(recurring apply, then merge --chore recurring --approved\), or wait for its reopen/);
     refused(T.ask(undefined), /--change/);
     refused(T.ask({ recurring: { tidy: chore() } }), /already has exactly this/);
     refused(T.run(['ask', '--class', 'recurring-edit', '--question', 'Add it?', '--recommendation', 'Later', '--change', JSON.stringify({ recurring: { z1: chore() } })]), /--recommendation[^\n]*Yes/);

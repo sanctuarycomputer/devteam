@@ -7818,7 +7818,7 @@ function askLine({ thread, about } = {}) {
     // one pending question per job
     for (const p of R.pending()) {
       const n = Object.keys(change).find((x) => Object.hasOwn(p.change, x));
-      if (n) die(`recurring.${n} already has ${p.qid} (${p.status === 'open' ? 'open' : 'answered Yes, not landed yet'}): one question per job at a time; withdraw it or land it first`);
+      if (n) die(`recurring.${n} already has ${p.qid} (${p.status === 'open' ? 'open' : 'answered Yes, not landed yet'}): one question per job at a time; ${p.status === 'open' ? 'withdraw it, or wait for its answer and land it' : 'an answered question can\'t be withdrawn: land it first (recurring apply, then merge --chore recurring --approved), or wait for its reopen'}`);
     }
     // asked again: the decision is the change, not the words (ask's check on words is skipped below),
     // so exactly this change, answered other than a Yes and not superseded, needs --new-because

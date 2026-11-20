@@ -124,7 +124,7 @@ The file is the owner's. A job lands only with an answer that showed exactly its
 - **Stopping one.** Ask the same question with the name set to `null`: `--change '{"recurring":{"<name>":null}}'`. Once the kit has `recurring propose`, `recurring propose <name> --stop` asks it for you. A stop frees no runs until it lands.
 - **Moving jobs from settings.** An older instance may hold jobs under `recurring` in settings.md. `validate` names that key and the file. Move them in one recurring chore: take the key out of settings.md and write the file. Against a main with no file every job is an addition, so one question shows them all, and one answer lands the move.
 - **One answer, one PR.** A PR that changes the jobs may change nothing else the owner owns, and lands with the one answer whose change equals, name by name, exactly what it changes. `recurring apply` refuses a chore worktree whose file is not main's.
-- **One pending question per job.** Withdraw or land the open one first.
+- **One pending question per job.** Withdraw an open one, or wait for its answer and land it. An answered one can't be withdrawn: land it, or wait for its reopen.
 - **The cap.** The jobs may not run more than 100 times a day, each counted at the most it could run whichever way the pending questions are answered. A change that adds no runs (a stop, a slower schedule) is never refused by the cap, so the owner can be asked to bring a registry back under it.
 - **Holds.** `chore start recurring` and a merge that changes the jobs wait while Upkeep is drained or parked. `--force` goes ahead and is logged.
 - **Never from a ticket or a plan.** A ticket or plan branch that changes the file is refused. Jobs change only through a chore.
