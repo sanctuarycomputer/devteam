@@ -14084,7 +14084,10 @@ function cmdChore() {
     // posted secrets) never waits.
     const um = goalMode(upkeepOrVirtual());
     if (um !== 'run' && !isRecordKeeping(choreSlug(slugName)) && !flags.force) die(`Upkeep is ${holdWords(um)}: no new upkeep chore starts (goal hold upkeep run --owner, or --force, logged)`);
-    return out(choreWorktree(slugName, { setup: true }));
+    const wt = choreWorktree(slugName, { setup: true });
+    // the jobs' chore started past Upkeep's hold is the supervisor's call, so it is logged (kit-162)
+    if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: ['upkeep', 'chore-recurring'], reversible: true }, 'supervisor');
+    return out(wt);
   }
   if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
   supervisorOnly('chore');
@@ -24203,6 +24206,143 @@ function recurringBindingFails(main, landed, approved) {
   return fails;
 }
 
+// recurring list | show | apply (kit-162). list and show read main's jobs file (recurringRegistry.read
+// at mainRef(), never this checkout's): a file on main that doesn't read is printed and exits 1, and
+// a broken entry is printed with its problems. An entry is registered by the latest merge-chore act
+// citing an answered recurring-edit question that showed exactly main's entry for the name. apply
+// writes one live answer's exact change into the recurring chore worktree's jobs file, only while
+// that file is byte for byte main's (or both are absent), so the PR carries this answer alone; it
+// writes that one file and nothing else.
+function cmdRecurring() {
+  const R = recurringRegistry;
+  const [sub, arg] = positional;
+  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid>';
+  const P = R.path();
+  // main's jobs, as read(ref) reads them: a problem (a broken file, or git failing) stops here
+  const mainJobs = () => {
+    const ref = mainRef();
+    if (!ref) die(`no ${loadSettings().main_branch} branch to read the jobs from`);
+    const r = R.read(ref);
+    if (r.problem) die(r.problem);
+    return r.jobs;
+  };
+  if (sub === 'list' || sub === 'show') {
+    if (sub === 'show' && !arg) die('usage: recurring show <name> [--json]');
+    if (!projectInRepo) {
+      if (sub === 'show') die(`no job ${arg} on main: the project dir is outside this repo, so it has no jobs`);
+      return flags.json ? json({ entries: [], runs_a_day: 0, cap: R.CAP, pending: [] }) : out('the project dir is outside this repo, so it has no jobs');
+    }
+    const jobs = mainJobs();
+    const views = new Map(R.questions().map((v) => [v.id, v]));
+    const acts = logObjects('act').filter((a) => a.class === 'merge-chore' && typeof a.approved_by === 'string' && views.has(a.approved_by)).sort(byTime);
+    const registered = (name, entry) => {
+      for (const a of [...acts].reverse()) {
+        const v = views.get(a.approved_by);
+        const shown = R.shown(v);
+        if (v.status === 'answered' && shown && Object.hasOwn(shown, name) && shown[name] !== null && canonical(shown[name]) === canonical(entry)) return { qid: v.id, at: a.created_at, by: a.created_by, act: a.id };
+      }
+      return null;
+    };
+    const pending = R.pending().flatMap((p) => Object.keys(p.change).sort().map((name) => ({ qid: p.qid, name, change: p.change[name], status: p.status })));
+    const row = (name) => {
+      const entry = jobs[name];
+      const problems = recurringEntryProblems(name, entry);
+      return { name, entry, runs_a_day: R.runsADay(entry), registered: registered(name, entry), ...(problems.length ? { problems } : {}) };
+    };
+    const regWords = (r) => (r ? `registered ${dateOnly(r.at)} by ${r.by} (${r.qid})` : 'not registered through an answer');
+    const pendWords = (p) => `${p.qid} ${p.status}: ${p.name} ${p.change === null ? 'stop' : JSON.stringify(p.change)}`;
+    if (sub === 'show') {
+      if (!Object.hasOwn(jobs, arg)) die(`no job ${arg} on main; recurring list`);
+      const r = { ...row(arg), pending: pending.filter((p) => p.name === arg) };
+      if (flags.json) return json(r);
+      return out([arg, JSON.stringify(r.entry, null, 2), `runs a day: ${R.runsWords(r.runs_a_day)}`, regWords(r.registered), ...(r.problems ?? []).map((p) => `problem: ${p}`), ...(r.pending.length ? r.pending.map((p) => `pending: ${pendWords(p)}`) : ['pending: none'])].join('\n'));
+    }
+    const entries = Object.keys(jobs).sort().map(row);
+    const total = entries.reduce((t, e) => t + e.runs_a_day, 0);
+    if (flags.json) return json({ entries, runs_a_day: total, cap: R.CAP, pending });
+    const str = (x) => (typeof x === 'string' ? x : '?');
+    return out([
+      ...(entries.length ? entries.map((e) => `${e.name}  ${str(e.entry?.kind)}  every ${str(e.entry?.every)}  ${str(e.entry?.title)}  ${regWords(e.registered)}${(e.problems ?? []).map((p) => `\n  problem: ${p}`).join('')}`) : ['no jobs on main']),
+      `${R.runsWords(total)} runs a day, cap ${R.CAP}`,
+      ...(pending.length ? pending.map((p) => `pending: ${pendWords(p)}`) : ['pending: none']),
+    ].join('\n'));
+  }
+  if (sub !== 'apply') die(usage);
+  supervisorOnly('recurring apply');
+  if (!arg) die('usage: recurring apply <qid>');
+  const q = logGet(arg);
+  if (q?.type !== 'question') die(`no question ${arg}`);
+  if (q.class !== 'recurring-edit') die(`${arg} is a ${q.class ?? 'classless'} question; apply takes an answered recurring-edit question`);
+  const v = questionView(q);
+  if (v.status !== 'answered') die(`recurring apply: ${arg} is not a question the owner answered (it is ${v.status})`);
+  const change = R.shown(v);
+  if (!change) die(`${arg} showed no job change (no change.recurring): ask again with --change`);
+  const done = R.landed(arg);
+  if (done) die(`${arg} already landed (${done.id})`);
+  // words not read yet: ownerAnswer says how to read them
+  if (v.in_words && !v.reading) ownerAnswer(arg, 'recurring apply');
+  if (!R.live(v)) {
+    const later = R.superseded(v);
+    die(`${arg} can't approve a job change: ${later ? `superseded by ${later.qid}, asked later about ${later.name}` : `answered "${String(v.answer ?? '').slice(0, 80)}", not Yes`}`);
+  }
+  ownerAnswer(arg, 'recurring apply');
+  if (!projectInRepo) die('the project dir is outside this repo, so it has no jobs file to apply to');
+  const wt = path.join(mainRoot, '.worktrees', 'chore-recurring');
+  if (!fs.existsSync(wt)) die('no worktree .worktrees/chore-recurring; devteam.mjs chore start recurring');
+  if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die('.worktrees/chore-recurring is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start recurring');
+  const base = mainJobs();
+  // main's file as bytes, or null when main has none (read() has checked it is a plain 100644 blob)
+  const sha = mainSha();
+  const gb = (args) => {
+    const r = spawnSync('git', args, { cwd: mainRoot, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    return { status: r.status, out: r.stdout ?? Buffer.alloc(0), ok: r.status === 0 && !r.error && !r.signal, timedOut: r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL' };
+  };
+  const has = gb(['rev-parse', '--verify', '-q', `${sha}:${P}`]);
+  if (!has.ok && (has.timedOut || has.status !== 1)) die(`recurring apply: git rev-parse ${has.timedOut ? 'timed out' : 'failed'} reading main's ${P}; nothing was written`);
+  let onMain = null;
+  if (has.ok) {
+    const b = gb(['cat-file', 'blob', `${sha}:${P}`]);
+    if (!b.ok) die(`recurring apply: git cat-file ${b.timedOut ? 'timed out' : 'failed'} reading main's ${P}; nothing was written`);
+    onMain = b.out;
+  }
+  // the worktree's file: every directory down to it a real one (never a symlink, which would write
+  // elsewhere), and the file a plain one or absent
+  const segs = P.split('/');
+  for (let i = 1; i < segs.length; i++) {
+    const dir = segs.slice(0, i).join('/');
+    let s = null;
+    try { s = fs.lstatSync(path.join(wt, ...segs.slice(0, i))); } catch (e) { if (e.code !== 'ENOENT') die(`recurring apply: can't read .worktrees/chore-recurring/${dir} (${e.code ?? e.message})`); }
+    if (!s || !s.isDirectory()) die(`recurring apply: .worktrees/chore-recurring/${dir} is ${s ? 'not a directory' : 'missing'}; devteam.mjs chore start recurring`);
+  }
+  const file = path.join(wt, ...segs);
+  let here = null;
+  let st = null;
+  try { st = fs.lstatSync(file); } catch (e) { if (e.code !== 'ENOENT') die(`recurring apply: can't read .worktrees/chore-recurring/${P} (${e.code ?? e.message})`); }
+  if (st) {
+    if (!st.isFile() || st.mode & 0o111) die(`recurring apply: .worktrees/chore-recurring/${P} is not a plain file`);
+    try { here = fs.readFileSync(file); } catch (e) { die(`recurring apply: can't read .worktrees/chore-recurring/${P} (${e.code ?? e.message})`); }
+  }
+  if (!(here === null && onMain === null) && !(here !== null && onMain !== null && here.equals(onMain))) die("the chore worktree's recurring.json already differs from main's: one answer per PR");
+  // main's jobs with the change: a stop deleted, an edit in its place, an addition last
+  const value = { ...base };
+  for (const [n, e] of Object.entries(change)) { if (e === null) delete value[n]; else value[n] = e; }
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  fs.writeFileSync(file, text);
+  // read back: the file holds exactly that text, and it reads as exactly that value
+  let back = null;
+  try { back = fs.readFileSync(file, 'utf8'); } catch {}
+  const parsed = back === null ? null : R.parse(back, 'in the chore worktree');
+  if (back !== text || parsed.problem || canonical(parsed.jobs) !== canonical(value)) die(`recurring apply: .worktrees/chore-recurring/${P} did not read back as written; check it, then devteam.mjs chore start recurring`);
+  const how = (n) => (change[n] === null ? 'stopped' : Object.hasOwn(base, n) ? 'changed' : 'added');
+  out([
+    `wrote ${arg}'s change into .worktrees/chore-recurring/${P}:`,
+    ...Object.keys(change).map((n) => `  ${n}: ${how(n)}`),
+    'next:',
+    '  devteam.mjs chore pr recurring --title "…"',
+    `  devteam.mjs merge --chore recurring --approved ${arg}`,
+  ].join('\n'));
+}
+
 // ===== sensors: production signals into the loop =====
 // A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
 // A meaningful change becomes an observation in the log on subject sensor:<name>, and the
@@ -29125,6 +29265,10 @@ const HELP_GOALS = `Goals and retros
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR`;
+const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
+  recurring list [--json]   main's jobs (project/recurring.json at main) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions; a file on main that doesn't read prints its problem and exits 1. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null, problems?: ["…"] }], runs_a_day, cap, pending: [{ qid, name, change, status }] }; problems is there only when an entry breaks the shape (validate says the same)
+  recurring show <name> [--json]   one job on main in full, who registered it, its problems if it breaks the shape, and its pending questions
+  recurring apply <qid>   supervisor: write an answered recurring-edit question's exact change into .worktrees/chore-recurring's recurring.json (chore start recurring first; its file must be main's), main's jobs with each null removed, each edit in its place and each addition last; then chore pr recurring and merge --chore recurring --approved <qid>`;
 const HELP_LOG = `The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
@@ -29140,7 +29284,7 @@ const HELP_DASHBOARD = `Dashboard and releases
 /* helpSections end */
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
-${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, HELP_OBSERVE, HELP_GOALS, HELP_LOG, HELP_DASHBOARD].join('\n\n')}
+${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, HELP_OBSERVE, HELP_GOALS, HELP_RECURRING, HELP_LOG, HELP_DASHBOARD].join('\n\n')}
 `;
 
 /* HELP end */
@@ -29182,9 +29326,12 @@ const COMMANDS_HOLDS = {
 const COMMANDS_DASHBOARD = {
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard, browser: cmdBrowser,
 };
+const COMMANDS_RECURRING = {
+  recurring: cmdRecurring,
+};
 /* commandGroups end */
 const COMMANDS = {
-  ...COMMANDS_SETUP, ...COMMANDS_GRAPH, ...COMMANDS_CHECKS, ...COMMANDS_SESSIONS, ...COMMANDS_DECIDE, ...COMMANDS_OBSERVE, ...COMMANDS_GOALS, ...COMMANDS_LOG, ...COMMANDS_HOLDS, ...COMMANDS_DASHBOARD,
+  ...COMMANDS_SETUP, ...COMMANDS_GRAPH, ...COMMANDS_CHECKS, ...COMMANDS_SESSIONS, ...COMMANDS_DECIDE, ...COMMANDS_OBSERVE, ...COMMANDS_GOALS, ...COMMANDS_LOG, ...COMMANDS_HOLDS, ...COMMANDS_DASHBOARD, ...COMMANDS_RECURRING,
 };
 /* dispatch start */
 if (!command || command === 'help' || command === '--help') out(HELP);
