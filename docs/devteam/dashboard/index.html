@@ -7037,7 +7037,7 @@ const attName = (p) => tLine(p.name, 200) || (p.path ? String(p.path).split('/')
 function pillsHtml(key) {
   return (ATTACH.get(key) || []).map((p) => {
     const name = attName(p);
-    return `<span class="att-pill${p.state === 'refused' ? ' refused' : ''}" data-pill-state="${esc(p.state)}" data-pill-id="${esc(p.id)}"><i class="${fileIcon(name)}" aria-hidden="true"></i><span class="pill-name" title="${esc(name)}">${esc(name)}</span><span class="pill-size">${esc(fileSize(p.size))}</span>${p.state === 'up' ? '<span class="pill-up">uploading…</span>' : ''}<button type="button" data-pill-remove aria-label="Remove ${esc(name)}">×</button>${p.state === 'refused' ? `<span class="pill-why">${esc(p.why)}</span>` : ''}</span>`;
+    return `<span class="att-pill${p.state === 'refused' ? ' refused' : ''}" data-pill-state="${esc(p.state)}" data-pill-id="${esc(p.id)}"><i class="${fileIcon(p.name)}" aria-hidden="true"></i><span class="pill-name" title="${esc(name)}">${esc(name)}</span><span class="pill-size">${esc(fileSize(p.size))}</span>${p.state === 'up' ? '<span class="pill-up">uploading…</span>' : ''}<button type="button" data-pill-remove aria-label="Remove ${esc(name)}">×</button>${p.state === 'refused' ? `<span class="pill-why">${esc(p.why)}</span>` : ''}</span>`;
   }).join('');
 }
 // A box: the textarea, then its pills under it, inside one border.
@@ -7093,7 +7093,7 @@ function addFiles(key, files) {
   const list = ATTACH.get(key);
   for (const file of files) {
     // name: as dropped; sendName (once taken): attName, the name the pill shows
-    const p ={ id: String(++ATTACH_N), name: file.name, sendName: '', size: file.size, type: file.type, state: 'up', why: '', path: null, bytes: null };
+    const p = { id: String(++ATTACH_N), name: file.name, sendName: '', size: file.size, type: file.type, state: 'up', why: '', path: null, bytes: null };
     if (list.filter((x) => x.state !== 'refused').length >= FILES_MAX) { list.push({ ...p, state: 'refused', why: ATT_TOO_MANY }); continue; }
     list.push(p);
     upload(p, file);
