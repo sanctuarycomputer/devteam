@@ -549,7 +549,9 @@ test('T5-1 the screenshot fails closed; T5-2 an image title; T5-4 type and --; T
   // T5-7: back to an entry of the same page settles at once
   const ref = /^(e\d+) link "Part"/m.exec((await cli(h, ['snapshot'])).out)?.[1];
   assert.ok(ref, 'the Part link');
+  const tc = Date.now();
   assert.equal((await cli(h, ['click', ref])).status, 0);
+  assert.ok(Date.now() - tc < 10000, `click took ${Date.now() - tc} ms`);
   const t0 = Date.now();
   const back = await cli(h, ['back']);
   assert.equal(back.status, 0, back.err);

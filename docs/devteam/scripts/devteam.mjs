@@ -27792,15 +27792,26 @@ async function browserSnapshot(ctx, tab, json) {
 // for as open's is (an error page's for 3 s), or a tab it opened (waited for, up to 10 s, to load).
 // The verb then prints said, plus where the page went or the guard's refusal.
 async function browserInput(ctx, tab, act, said) {
-  let started = false, loaded = false;
+  let started = false, loaded = false, inDoc = false;
   const had = new Set(ctx.tabs);
   tab.started = () => { started = true; loaded = false; tab.unreachable = null; tab.refs = new Map(); };
   tab.loaded = () => { loaded = true; };
+  // A same-document navigation (a fragment link, a pushState) fires no load: it ends the wait once the
+  // document it moved in is loaded, whichever of it and the load's start came first. One made while a
+  // real load runs (a replaceState as the page boots) leaves the wait to that load. Each read is bounded.
+  tab.within = () => { inDoc = true; };
+  const docLoaded = () => Promise.race([
+    ctx.cdp.send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true }, tab.sessionId).then((r) => r.result?.value === 'complete', () => false),
+    browserSleep(1000).then(() => false),
+  ]);
   try {
     await act();
     for (const t = Date.now(); !started && had.has(ctx.active) && Date.now() - t < 500;) await browserSleep(25);
-    for (const t = Date.now(); started && !loaded && Date.now() - t < (tab.unreachable ? 3000 : 30000);) await browserSleep(50);
-  } finally { tab.started = tab.loaded = null; }
+    for (const t = Date.now(); started && !loaded && Date.now() - t < (tab.unreachable ? 3000 : 30000);) {
+      if (inDoc && await docLoaded()) break;
+      await browserSleep(50);
+    }
+  } finally { tab.started = tab.loaded = tab.within = null; }
   const pop = ctx.active && !had.has(ctx.active) ? ctx.active : null;
   if (pop) {
     for (const t = Date.now(); Date.now() - t < 10000; await browserSleep(100)) {
