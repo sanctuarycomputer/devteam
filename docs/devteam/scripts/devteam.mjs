@@ -26187,6 +26187,17 @@ function peekView(kind, id) {
     // every record each counts (the line's refs are capped), and what each lesson given did since
     if (o.type === 'observation' && o.kind === 'learning' && /^\d{4}-W\d{2}$/.test(o.week ?? '')) { const r = learningFigures(o.week); v.learning = { week: r.week, from: r.from, cut: r.cut, figures: r.figures, lists: r.lists, efficacy: lessonEfficacy(r.cut) }; }
     if (o.type === 'problem' || o.type === 'knowledge') v.related = logObjects('observation').filter((x) => (x.refs ?? []).includes(id) || x.subject === id || (o.evidence ?? []).includes(x.id)).sort(byTime).map((x) => ({ id: x.id, at: x.created_at, by: x.created_by, kind: x.kind, detail: x.detail, severity: x.severity ?? null }));
+    // a lesson's Given to: the session starts whose prompts carried it, newest first (40 at most), each
+    // with how often its signal came back since: the observations on its evidence's signal keys, keyed
+    // and skipped as lessonEfficacy does them; null when its evidence holds no observation to follow
+    if (o.type === 'knowledge') {
+      const keys = new Set((o.evidence ?? []).map(logGet).filter((x) => x?.type === 'observation').map(signalKeyOf));
+      const seen = keys.size ? logObjects('observation').filter((x) => !['reading', 'retro', 'outcome', 'link', 'learning'].includes(x.kind) && keys.has(signalKeyOf(x))).map((x) => x.created_at) : null;
+      v.given_to = logObjects('act').filter((a) => a.class === 'worker-slots' && Array.isArray(a.knowledge) && a.knowledge.includes(id)).sort(byTime).reverse().slice(0, 40).map((a) => {
+        const m = /^(?:made|resumed) (\S+) (\S+)/.exec(a.what ?? '');
+        return { act: a.id, session: m ? m[2] : a.id, role: m ? m[1] : null, at: a.created_at, since: seen ? seen.filter((at) => at >= a.created_at).length : null };
+      });
+    }
     // an incident: its view, what its fingerprints raised, and the latest event of each
     // (production data, scrubbed; the drawer frames it as untrusted)
     if (isIncident(o)) {
