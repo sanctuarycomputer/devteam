@@ -1,5 +1,6 @@
-// A dead machine's workers and planners come back, work in progress first, up to 3 a tick (none
-// while the machine's memory is at its ceiling): the guards, the order, the race, the caps.
+// A dead machine's workers and planners come back (none while the machine's memory is at its
+// ceiling): the guards, the race, the caps. The order and the 3-a-tick limit are in
+// recovery.relaunch.order; a worktree_setup's deadline and its slots in .setup and .slots.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
