@@ -16605,6 +16605,11 @@ const RESTART_MIN_MS = 30000;
 // How long a dashboard read waits on a dashboard-data run before it has the last good data instead
 // (0 is no wait at all; anything that isn't a number is the default).
 const DATA_WAIT_MS = ((n) => (process.env.DEVTEAM_DATA_WAIT_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_WAIT_MS));
+// How long a dashboard serves a finished dashboard-data build again (kit-595): 20 s after it ended,
+// while it is still current (cmdDashboard's dataEpoch). DEVTEAM_DATA_REUSE_MS is for tests only, not a
+// setting: test/presence-changed.test.mjs sets 3000 to keep checking kit-633's 3 s start gap. Anything
+// that isn't a number of at least 0 is the default.
+const DATA_REUSE_MS = ((n) => (process.env.DEVTEAM_DATA_REUSE_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_REUSE_MS));
 // makeSession --if-gone found the window there after all (it never types into one): not a failure.
 const IF_GONE_LEFT = 3;
 // The last moment a tick may start a cswap switch (its 45 s timeout, inside RESTART_TICK_MS).
@@ -21260,7 +21265,9 @@ async function cmdDashboard() {
   const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
   const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS } = dashboardActions();
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
-  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
+  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
+  // (kit-595; it was 10 s: each run is a child holding about 140 MB, so the hub's pulse is at most
+  // about 40 s old, the beat plus a run) and after an owner action
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
   // One run at a time, each given 20 s; the kit's version is read once, on the first run.
   // viewer: 1 says this kit has /view/ and /artifact/tree/: the gateway's owner wrapper waits for it (spec §8).
@@ -21286,17 +21293,26 @@ async function cmdDashboard() {
     });
   };
   refreshHello();
-  every(refreshHello, 10000);
+  every(refreshHello, 30000);
   const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
   previewBad = (f, e) => { if (!previewsNamedBad.has(f)) { previewsNamedBad.add(f); log(`previews: skipped ${f}: ${e?.message ?? e}`); } };
   let previewTicking = false;
+  // What the last tick saw of the previews: each record and whether it was up. A tick that sees
+  // anything else moves dataEpoch (kit-595), so a kept dashboard-data build never shows the previews
+  // from before it; none at the start is no change.
+  let previewsSeen = '[]';
+  const previewsMoved = () => {
+    const seen = JSON.stringify(readPreviews().map((r) => [r, previewUp.get(r.name) ?? null]));
+    if (seen !== previewsSeen) dataEpoch += 1;
+    previewsSeen = seen;
+  };
   const runPreviewTick = () => {
     if (previewTicking) return;
     previewTicking = true;
-    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); });
+    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); previewsMoved(); });
   };
   runPreviewTick();
   every(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000));
@@ -21556,9 +21572,10 @@ async function cmdDashboard() {
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
-  // served while it runs, and once finished while it is young (3 s since it finished, so the 10 s poll
-  // gets previews, settings and git at most about 3 s old) and current (dataEpoch, which the log's
-  // changes and every POST action move, is what it was when the build *started*: a change during a
+  // served while it runs, and once finished while it is young (DATA_REUSE_MS, 20 s since it finished
+  // (kit-595; it was 3 s): a page's 10 s poll then starts a child every other poll at most, and gets
+  // previews, settings and git at most 20 s plus one run old) and current (dataEpoch, which the log's
+  // changes, every POST action and a preview tick that saw a change move, is what it was when the build *started*: a change during a
   // build makes it stale when it ends). A read that finds none waits for the next build, which starts
   // once the running one has ended and 3 s have passed since the last start; every read waiting then
   // shares it. A failed build is never kept.
@@ -21571,7 +21588,7 @@ async function cmdDashboard() {
   const startBuild = () => {
     lastStart = Date.now();
     const b = { epoch: dataEpoch, finished: null, r: null };
-    b.done = new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err && stdout) lastData = stdout;
       b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
       b.finished = Date.now();
@@ -21580,7 +21597,10 @@ async function cmdDashboard() {
     build = b;
     return b.done;
   };
-  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_EVERY_MS));
+  // a build still running when the dashboard exits (processLog's signal handlers exit it) is killed
+  // with it, not left writing run/cache: the warm start (kit-595) runs one with no read waiting
+  process.on('exit', () => { if (build?.finished === null) try { build.child?.kill('SIGKILL'); } catch {} });
+  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_REUSE_MS));
   const dashboardData = () => {
     if (usable(build)) return build.done;
     nextBuild ??= (async () => {
@@ -21765,7 +21785,11 @@ async function cmdDashboard() {
   // the hub, unless the box's image serves it; again after a respawn that failed
   let hubHandle = null;
   const startHubOnce = () => { hubHandle = dashboardHub(log); };
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHubOnce(); every(accountsTick, accountsEveryMs()); });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHubOnce(); every(accountsTick, accountsEveryMs());
+    // warm (kit-595, from kit PR #305): one build as it starts listening, so a tab first opened within
+    // DATA_REUSE_MS of its end is answered from it at once; one opened during it shares it
+    void dashboardData();
+  });
   // ----- the kit watch (kit-288): a dashboard runs the kit it serves. Its kit's files are printed
   // every DEVTEAM_KIT_WATCH_MS; a print unlike the start's and the same two polls running (a sync
   // writes its files over a few seconds) whose script parses is a new kit, and the dashboard hands
