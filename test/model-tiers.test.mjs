@@ -42,7 +42,9 @@ test('model_tiers: plans against builds, built here and unpriced left out, misse
     ];
     for (const [id, tiers, by] of merged) { add(id); fs.mkdirSync(path.join(dir(id), 'reviews'), { recursive: true }); fs.writeFileSync(path.join(dir(id), 'plan.md'), plan(tiers)); spend(id, by); }
     // ti-02's fast task missed: noted in two passes of its task review and restated in the final, one miss
-    for (const f of ['task-1-1.md', 'task-1-2.md', 'final-1.md']) fs.writeFileSync(path.join(dir('ti-02-one-fast'), 'reviews', f), review('- Model miss: fast\n'));
+    for (const f of ['task-1.md', 'task-1-2.md', 'final-1.md']) fs.writeFileSync(path.join(dir('ti-02-one-fast'), 'reviews', f), review('- Model miss: fast\n'));
+    // ti-03's second task missed, noted only in its first review (task-2.md, the usual place)
+    fs.writeFileSync(path.join(dir('ti-03-routed'), 'reviews', 'task-2.md'), review('- Model miss: fast\n'));
     // one merged 20 days ago, out of the window
     add('ti-08-old-merge'); fs.mkdirSync(dir('ti-08-old-merge'), { recursive: true }); fs.writeFileSync(path.join(dir('ti-08-old-merge'), 'plan.md'), plan(['fast'])); spend('ti-08-old-merge', { 'claude-opus-5-5': 10 }, 21 * DAY);
     F.g(['add', '-A'], F.old);
@@ -65,7 +67,7 @@ test('model_tiers: plans against builds, built here and unpriced left out, misse
     assert.equal(mt.fast_tasks, 10);
     assert.equal(mt.strong_tasks, 3);
     assert.equal(mt.fast_built_here, 1);
-    assert.equal(mt.misses, 1, 'one task missed, however many records say so');
+    assert.equal(mt.misses, 2, 'ti-02 missed once however many records say so, and ti-03 in a first review');
     assert.deepEqual(mt.unrouted.map((x) => x.id), ['ti-01-all-strong-build', 'ti-02-one-fast', 'ti-09-on-branch'], 'not routed, strong only, under $2, built here or unpriced');
     const f = m.findings.find((x) => x.kind === 'fast-tasks-unrouted');
     assert.ok(f, JSON.stringify(m.findings.map((x) => x.kind)));

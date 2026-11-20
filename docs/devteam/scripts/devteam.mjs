@@ -14812,10 +14812,10 @@ function modelTierStats(items, now = Date.now()) {
     const fastTasks = tasks.filter((x) => x.tier === 'fast');
     const routable = fastTasks.filter((x) => !BUILT_HERE.test(x.text)).length;
     out.tickets++; out.fast_tasks += fastTasks.length; out.strong_tasks += tasks.length - fastTasks.length; out.fast_built_here += fastTasks.length - routable;
-    // a miss is noted in that task's review (task-<n>-<pass>.md): once per task, however many passes
+    // a miss is noted in that task's review (task-<n>.md, a later pass task-<n>-<pass>.md): once per task, however many passes
     // or a final restating it
     const rb = ticketBranchRef(id);
-    const missed = new Set(ticketReviews(id, rb && !mergeShaFor(id) ? { ref: rb } : WORKTREE).filter((r) => r.model_miss && /^task-\d+-\d+[a-z]?\.md$/.test(r.file)).map((r) => r.file.match(/^task-(\d+)-/)[1]));
+    const missed = new Set(ticketReviews(id, rb && !mergeShaFor(id) ? { ref: rb } : WORKTREE).filter((r) => r.model_miss && /^task-\d+(?:-\d+)?[a-z]?\.md$/.test(r.file)).map((r) => r.file.match(/^task-(\d+)/)[1]));
     out.misses += missed.size;
     const b = build.get(id) ?? {};
     const priced = Object.entries(b).map(([mdl, usd]) => ({ usd, out: priceFor(modelKey(mdl))?.output ?? null }));
