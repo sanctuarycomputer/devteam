@@ -447,6 +447,13 @@ test('org-access A13: Check now fetches by POST /api/fleet-check, from the page\
       await settled(F, leaders);
       assert.equal(gone.status, 502, `home's origin gone: ${gone.body}`);
       assert.match(JSON.parse(gone.body).error ?? '', /could not fetch origin/, 'the answer says why');
+      // and how to clear it (kit-341): the fetch can't prompt, so an ssh agent, a saved https login, or again
+      const HINT = /^home: could not fetch origin: .*; what its sessions pushed is unchecked\. The fetch can't prompt: load the ssh key into an agent \(ssh-add\) or save an https login \(a git credential helper\), or check again if the network was slow$/;
+      assert.match(JSON.parse(gone.body).error ?? '', HINT, 'the answer says how to clear it');
+      // the CLI's blocker is the same words
+      const cli = F.run(F.old, ['fleet', 'status', '--json'], { HOME: F.home });
+      assert.equal(cli.status, 0, `fleet status: ${cli.err}`);
+      assert.ok(JSON.parse(cli.out).blockers.some((b) => HINT.test(b)), `the CLI's blocker says how to clear it: ${cli.out}`);
       // home's origin hung (it takes the connection and never answers): the check is stopped at its
       // deadline, 12 s, and says so, never holding the request
       const held = new Set();
