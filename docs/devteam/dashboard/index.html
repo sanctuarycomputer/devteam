@@ -1143,6 +1143,27 @@ try {
   .tl-card .ask-q, #ask-threads .ask-q { max-height: 120px; }
   @media (pointer: coarse) { .threads-head .end .icon-btn { height: 36px; width: 36px; } }
 /* css-threads end */
+/* css-attachments start */
+  /* a box that takes dropped files (kit-171): the box draws the textarea's border and its focus ring, the
+     pills sit inside it under the text; a drag of files over it turns its border dashed blue */
+  .dropbox { margin-top: 8px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); min-width: 0; }
+  .tl-compose .dropbox { margin-top: 6px; }
+  .dropbox textarea, .tl-compose .dropbox textarea { display: block; margin: 0; border: 0; border-radius: 6px; background: transparent; }
+  .dropbox textarea:focus { box-shadow: none; border: 0; }
+  .dropbox:focus-within { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+  .dropbox.drop-over { border: 1px dashed var(--blue); }
+  .dropbox > .pills { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px; min-width: 0; }
+  .dropbox > .pills:not(:empty) { padding-bottom: 8px; }
+  .att-pill { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; max-width: 100%; min-width: 0; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 2px 0 7px; border-radius: 999px; white-space: nowrap;
+    --c: var(--fg-2); color: var(--c); background: color-mix(in srgb, var(--c) 9%, transparent); border: 1px solid color-mix(in srgb, var(--c) 22%, transparent); }
+  .att-pill i { flex: none; }
+  .att-pill .pill-name { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+  .att-pill .pill-size, .att-pill .pill-up { flex: none; color: var(--muted); }
+  .att-pill button[data-pill-remove] { flex: none; height: 18px; width: 18px; margin: 0; padding: 0; border: 0; border-radius: 50%; background: none; color: inherit; line-height: 18px; font-size: 13px; }
+  .att-pill button[data-pill-remove]:hover { background: var(--hover); opacity: 1; }
+  .att-pill.refused { --c: var(--red-fg); white-space: normal; border-radius: 9px; padding-right: 7px; }
+  .att-pill.refused .pill-why { flex: 1 0 100%; min-width: 0; overflow-wrap: anywhere; padding-bottom: 2px; }
+/* css-attachments end */
 /* css-goals start */
   /* Goals (kit-90): the tabs, then the cards two across on the shell's grid; a card spans its columns, its
      running text keeps the measure */
@@ -3210,7 +3231,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${isOa(q) ? oaSuggest(q) + oaRows(q, pre) : ''}
       ${(q.secrets || []).length ? `${secretsForm(q)}
       <textarea data-q="${esc(q.id)}" placeholder="Add a note (optional)">${esc(drafts[q.id] || '')}</textarea>` : `${goalSuggest(q, list)}${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
-      <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`}
+      ${((ta) => (goalAsk ? ta : dropBox(`q:${q.id}`, ta)))(`<textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`)}`}
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
@@ -6991,7 +7012,106 @@ function answerPress(id, card, errId, text, build, { stays = true, plain } = {})
     plain,
   });
 }
-const seenHash = (id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
+/* attachments start */
+// Files dropped into a box that sends to the supervisor (kit-171): an Inbox answer's note (q:<qid>, shared by
+// the Inbox's card and its copy in a thread) and the thread composer (tl:<the card's key>). Each file uploads at
+// once through POST /upload and is a pill inside the box. The pills live here, per key, and every box with that
+// key is drawn from it, so the Inbox's redraw and the card's rebuild keep them; the textarea is never redrawn.
+// key -> [{ id, name, sendName, size, type, state: 'up'|'ok'|'refused', why, path, bytes }]
+const ATTACH = new Map();
+const FILES_MAX = 10;
+let ATTACH_N = 0;
+const fileIcon = (name) => (/\.(png|jpe?g|gif|webp)$/i.test(String(name)) ? 'icon-image' : /\.(pdf|txt|md)$/i.test(String(name)) ? 'icon-file-text' : 'icon-file');
+const fileSize = (n) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`);
+const ATT_TOO_MANY = `At most ${FILES_MAX} files go with one message`;
+const ATT_CUT = "The upload was cut off: the file may be over this machine's limit, or the dashboard stopped.";
+const attPlainHttp = () => `This browser doesn't say which page an upload comes from over plain http, so the dashboard refuses it. On the machine running the dashboard, open it at http://127.0.0.1${location.port ? `:${location.port}` : ''} (start it without --host if that doesn't answer); from another device, files can't be dropped over plain http.`;
+function pillsHtml(key) {
+  return (ATTACH.get(key) || []).map((p) => `<span class="att-pill${p.state === 'refused' ? ' refused' : ''}" data-pill-state="${esc(p.state)}" data-pill-id="${esc(p.id)}"><i class="${fileIcon(p.name)}" aria-hidden="true"></i><span class="pill-name" title="${esc(p.name)}">${esc(p.name)}</span><span class="pill-size">${esc(fileSize(p.size))}</span>${p.state === 'up' ? '<span class="pill-up">uploading…</span>' : ''}<button type="button" data-pill-remove aria-label="Remove ${esc(p.name)}">×</button>${p.state === 'refused' ? `<span class="pill-why">${esc(p.why)}</span>` : ''}</span>`).join('');
+}
+// A box: the textarea, then its pills under it, inside one border.
+const dropBox = (key, textareaHtml) => `<div class="dropbox" data-drop="${esc(key)}">${textareaHtml}<div class="pills">${pillsHtml(key)}</div></div>`;
+function drawPills(key) {
+  const html = pillsHtml(key);
+  for (const b of document.querySelectorAll('.dropbox[data-drop]')) {
+    if (b.dataset.drop !== key) continue;
+    const ps = b.querySelector(':scope > .pills');
+    if (ps && ps.innerHTML !== html) ps.innerHTML = html;
+  }
+}
+// The composer's key moves with its draft (new:… to pending-…, then to the thread's id): its pills and its box go too.
+function moveAttach(from, to) {
+  if (from === to) return;
+  if (ATTACH.has(from)) { ATTACH.set(to, [...(ATTACH.get(to) || []), ...ATTACH.get(from)]); ATTACH.delete(from); }
+  for (const b of document.querySelectorAll('.dropbox[data-drop]')) if (b.dataset.drop === from) b.dataset.drop = to;
+  drawPills(to);
+}
+// What a refused upload says: the route's own JSON error, else its text, else the status; a 403 on a page that
+// isn't a secure context (plain http on a --host name, no Sec-Fetch-Site) in plain words.
+async function reasonOf(res) {
+  if (res.status === 403 && !window.isSecureContext) return attPlainHttp();
+  let text = '';
+  try { text = await res.text(); } catch {}
+  try { const j = JSON.parse(text); if (j && typeof j.error === 'string' && j.error.trim()) return j.error; } catch {}
+  return text.trim() || `HTTP ${res.status}`;
+}
+async function upload(key, p, file) {
+  const set = (o) => { const q = (ATTACH.get(key) || []).find((x) => x.id === p.id); if (q) Object.assign(q, o); drawPills(key); };
+  try {
+    const res = await fetch(`/upload?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
+    if (res.ok) {
+      let j = null;
+      try { j = await res.json(); } catch {}
+      if (j && typeof j.path === 'string') set({ state: 'ok', path: j.path, bytes: typeof j.size === 'number' ? j.size : file.size, sendName: tLine(p.name, 200) || j.path.split('/').pop() });
+      else set({ state: 'refused', why: `HTTP ${res.status}` });
+    } else set({ state: 'refused', why: await reasonOf(res) });
+  } catch { set({ state: 'refused', why: ATT_CUT }); }
+}
+function addFiles(key, files) {
+  if (!ATTACH.has(key)) ATTACH.set(key, []);
+  const list = ATTACH.get(key);
+  for (const file of files) {
+    // name: as dropped, for the pill; sendName (once taken): one plain line the server's attachedFiles takes,
+    // else the stored file's own name
+    const p = { id: String(++ATTACH_N), name: file.name, sendName: '', size: file.size, type: file.type, state: 'up', why: '', path: null, bytes: null };
+    if (list.filter((x) => x.state !== 'refused').length >= FILES_MAX) { list.push({ ...p, state: 'refused', why: ATT_TOO_MANY }); continue; }
+    list.push(p);
+    upload(key, p, file);
+  }
+  drawPills(key);
+}
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+const dropOf = (e) => e.target?.closest?.('.dropbox[data-drop]') ?? null;
+for (const kind of ['dragenter', 'dragover']) {
+  document.addEventListener(kind, (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    const b = dropOf(e);
+    if (b) { b.classList.add('drop-over'); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; } else if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+  });
+}
+document.addEventListener('dragleave', (e) => { const b = dropOf(e); if (b && !b.contains(e.relatedTarget)) b.classList.remove('drop-over'); });
+document.addEventListener('dragend', () => { for (const b of document.querySelectorAll('.dropbox.drop-over')) b.classList.remove('drop-over'); });
+document.addEventListener('drop', (e) => {
+  for (const b of document.querySelectorAll('.dropbox.drop-over')) b.classList.remove('drop-over');
+  if (!hasFiles(e)) return;
+  // a file dropped anywhere is held, so the browser never opens it in place of the dashboard
+  e.preventDefault();
+  const b = dropOf(e);
+  if (b && b.dataset.drop) addFiles(b.dataset.drop, [...(e.dataTransfer.files || [])]);
+});
+document.addEventListener('click', (e) => {
+  const x = e.target.closest?.('[data-pill-remove]');
+  if (!x) return;
+  const key = x.closest('.dropbox[data-drop]')?.dataset.drop;
+  const id = x.closest('.att-pill')?.dataset.pillId;
+  if (!key || !ATTACH.has(key)) return;
+  const left = ATTACH.get(key).filter((p) => p.id !== id);
+  if (left.length) ATTACH.set(key, left); else ATTACH.delete(key);
+  drawPills(key);
+});
+/* attachments end */
+const seenHash =(id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
 // Once an answer is saved the card says so at once; the next refresh removes it.
 const ANSWERED = new Map();
 // An answer the server refused, per question: { reason, n }, drawn on every copy of its card until the
@@ -8642,7 +8762,7 @@ function tArtFpNow(s) {
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
   <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted"><span id="tl-c-spin" aria-hidden="true" hidden style="display:inline-block;width:10px;height:10px;margin-right:6px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;vertical-align:-1px;animation:spin .9s linear infinite"></span><span id="tl-c-state" role="status" aria-live="polite"></span></div>
-  <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Message"></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
+  <div class="tl-compose">${dropBox('', '<textarea id="tl-c-text" rows="2" placeholder="Message"></textarea>')}<div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
 // The subject as one tight line (an icon, its name, where it is), opening to what was captured.
 // Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
 function tlCtx(s, title, note) {
@@ -8812,12 +8932,16 @@ function tlCard() {
     const words = tlEl('tl-c-text').value;
     lsDel(tlDraftKey(was));
     if (words) tlDraftSet(key, words);
+    moveAttach(`tl:${was}`, `tl:${key}`);
   }
   if (card.dataset.key !== key) {
     // the first words make the draft a thread, and the card its own: the composer keeps the focus
     const writing = document.activeElement?.id === 'tl-c-text';
     card.dataset.key = key;
     card.innerHTML = tlCardFrame();
+    // the composer's box takes the card's key, and its pills from the page's memory
+    tlEl('tl-c-text').closest('.dropbox').dataset.drop = `tl:${key}`;
+    drawPills(`tl:${key}`);
     tlEl('tl-c-text').value = tlDraftGet(key);
     tlBytes();
     TL.sig = '';
