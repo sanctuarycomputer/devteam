@@ -1356,7 +1356,9 @@ export function createGateway(opts = {}) {
   const said = (e) => String(e?.message ?? e);
   // A live invite for someone who isn't the owner; by its hash.
   const inviteOf = (s, hash) => {
-    const inv = (s.invites ?? []).find((x) => x.hash === hash && x.expires > Date.now());
+    // compared as bytes, as the claim token's hash is
+    const want = unb64u(hash);
+    const inv = want ? (s.invites ?? []).find((x) => { const got = unb64u(x.hash); return got && sameBytes(got, want) && x.expires > Date.now(); }) : undefined;
     const person = inv ? (s.people ?? []).find((p) => p.id === inv.person) : null;
     return person && !isOwner(person) ? { inv, person } : null;
   };
@@ -1478,7 +1480,8 @@ export function createGateway(opts = {}) {
     const base = owner ? withOwner(s, now) : s;
     const ownRow = owner ? ownerRow(base) : null;
     const count = ownMethods(base, owner ? ownRow ?? STAND_IN : person).filter((m) => m.type === type).length;
-    const label = String(row.describe({ key, data, body: input, count }) ?? '').slice(0, 60);
+    // one line: a label is logged, and an invitee chooses it
+    const label = String(row.describe({ key, data, body: input, count }) ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 60);
     const m = { id: newId('m-'), type, key, label, added_at: iso, last_used: p === 'invite' ? iso : null, data };
     // only the owner's passkey lands top-level, in today's shape
     const top = owner && type === 'passkey' ? methodToTop(m) : null;

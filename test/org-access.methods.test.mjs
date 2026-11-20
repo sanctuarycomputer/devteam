@@ -50,6 +50,7 @@ const T = {
   changed: 'your account changed since; start again',
   nobody: 'no one on this box signs in with that',
   taken: 'that sign-in method is already registered',
+  claimExpired: 'this claim link has expired: restart the box, or run devteam-reclaim in a shell on it, for a new one',
 };
 // people@1's documented keys
 const ROW_KEYS = ['id', 'name', 'role', 'level', 'methods', 'pushSubs', 'added_at', 'last_seen', 'notices', 'rev'];
@@ -586,6 +587,66 @@ test('org-access A17: what start rested on, gone by finish, is refused', async (
       assert.deepEqual(gw.state(), before2, 'nothing written');
     } finally { finishing = null; await gw.close(); }
   });
+});
+
+test('org-access A17: a claim whose link a reclaim replaced before its finish is refused', async () => {
+  const gw = await gateway('c5f');
+  try {
+    const b = browser(gw);
+    const key = authenticator();
+    const o = await b.post('/auth/claim/options', { token: gw.token });
+    ok(o, 'claim options with the first link');
+    // a reclaim meanwhile: a new link's hash and expiry, the box still unclaimed
+    const s = gw.state();
+    gw.write({ ...s, claimHash: u(sha(u(crypto.randomBytes(32)))), claimExpires: Date.now() + 864e5 });
+    const before = gw.state();
+    refused(await b.post('/auth/claim/verify', { token: gw.token, ...key.create(o.json, gw.publicUrl) }), 403, T.claimExpired, 'the old link\'s claim, finished after the reclaim');
+    assert.deepEqual(gw.state(), before, 'nothing written: the box stays unclaimed');
+    assert.deepEqual(gw.state().passkeys, []);
+  } finally { await gw.close(); }
+});
+
+test('org-access A17: an invite naming the owner adds nothing', async () => {
+  const { gw, owner } = await setup('c-owner-invite');
+  try {
+    const ownerId = gw.state().people.find((p) => p.role === 'owner').id;
+    const token = seedInvite(gw, ownerId);
+    const before = gw.state();
+    refused(await browser(gw).start('stub', { purpose: 'invite', token }), 403, T.invite, 'a stub invite naming the owner');
+    refused(await browser(gw).start('passkey', { purpose: 'invite', token }), 403, T.invite, 'a passkey invite naming the owner');
+    assert.deepEqual(gw.state(), before, 'nothing written');
+    assert.ok(owner.jar.session, 'the owner is signed in as before');
+  } finally { await gw.close(); }
+});
+
+test('org-access A17: an add the stand-in owner started lands once the owner row is written', async () => {
+  const { gw, owner } = await setup('c-stand-in');
+  try {
+    // a claimed file restored from before people: no rows; the owner's top-level session is the stand-in's
+    const { people, ...rest } = gw.state();
+    gw.write(rest);
+    const st = await owner.start('stub', { purpose: 'add' });
+    ok(st, 'the stand-in owner\'s add start');
+    // the owner row is written meanwhile (the next start's upgrade, or another add)
+    gw.write({ ...gw.state(), people });
+    ok(await owner.finish('stub', { purpose: 'add', state: st.json.state, key: 'k-stand-in' }), 'the add finishes as the owner\'s');
+    const row = gw.state().people.find((p) => p.role === 'owner');
+    assert.deepEqual(row.methods.map((m) => [m.type, m.key]), [['stub', 'k-stand-in']], 'in the owner\'s row');
+  } finally { await gw.close(); }
+});
+
+test('org-access A17: a label is kept to one line', async () => {
+  const { gw, ana } = await setup('c-label');
+  try {
+    const token = seedInvite(gw, ana.id);
+    const b = browser(gw);
+    const st = await b.start('stub', { purpose: 'invite', token });
+    ok(st, 'invite start');
+    ok(await b.finish('stub', { purpose: 'invite', state: st.json.state, key: 'k\nforged: line\r\u0007' }), 'invite finish');
+    const m = gw.state().people.find((p) => p.id === ana.id).methods.find((x) => x.type === 'stub');
+    assert.doesNotMatch(m.label, /[\u0000-\u001f\u007f]/, 'no control characters in the label');
+    assert.ok(gw.logs.every((l) => !/[\r\n\u0007]/.test(l)), 'nor in any log line');
+  } finally { await gw.close(); }
 });
 
 test('org-access A17: a claim with the stub is refused at start', async () => {
