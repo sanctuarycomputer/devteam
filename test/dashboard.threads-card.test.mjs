@@ -1,4 +1,4 @@
-// Threads on the dashboard page in Chrome: Shift and point, the card, the pins and the dock.
+// Threads on the dashboard page in Chrome, parts 1 and 2: Shift and point, the card, the first send, the reply; slow reads, the thread box's keys, #talk, pins and the panel.
 // Ports: none of its own (lib/kit.mjs's +0 hub, +1..25)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -6,16 +6,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { dashboardOnFreePort, until, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
-import { FRAMES, soonIn, POLL_FAST } from './lib/dashboard-page.mjs';
+import { soonIn, POLL_FAST } from './lib/dashboard-page.mjs';
 
-// The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
-// pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
-const NOT_DELIVERED_37 = 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it last checked 37 min ago.';
-test('threads on the dashboard page: Shift and point, the card, the pins and the dock', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+// The threads page's setup, the one test's own before it was cut in six (base :3177-3238: a fixture,
+// a dashboard, a Chrome page under POLL_FAST at #goals, and the steps its subtests share), for each
+// part; a part then builds the rest of the state its subtests read, through the kit's commands.
+async function openThreadsPage(t, name) {
   // stopped last-in first-out, each whatever the one before did: the fixture's files go only once the
   // dashboard writing into them has stopped, and one cleanup that throws leaves no Chrome running
   const later = cleanup(t);
-  const F = threadsFixture('threads-page');
+  const F = threadsFixture(name);
   later(() => F.done());
   const Q0 = F.sup(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
   const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
@@ -54,7 +54,6 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   const slid = () => `${shown('drawer')} && getComputedStyle(document.getElementById('drawer')).transform === 'none'`;
   await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
-  let T;
   // An Enter keyDown as a keyboard sends it, with its '\r' (p.key sends none), so a newline lands
   // unless the page cancels the key. It can be sent with Shift, Ctrl, Alt or Meta, as a key repeat, or as 229
   // (the Enter that ends an IME's composition). Each arrives in window.__keys, so a check knows the
@@ -74,6 +73,15 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   // (each poll waits for the read before it, so a loaded runner stretches them: 2 minutes to see 8)
   const soonTicks = soonIn(p, 120000);
   const ticks = async (n = 8) => { const at = await p.ev('window.__polls'); await soonTicks(`window.__polls >= ${at + n}`, `${n} polls`); };
+  return { F, Q0, dash, port, p, soon, still, released, click, onThreads, goalSel, shown, slid, threads, enter, composing, lastKey, posts, soonTicks, ticks, later };
+}
+
+// The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
+// pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
+const NOT_DELIVERED_37 = 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it last checked 37 min ago.';
+test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 1 of 6: pointing, the card, the first send, the reply)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+  const { F, Q0, p, soon, still, click, goalSel, shown, threads } = await openThreadsPage(t, 'threads-page-1');
+  let T;
 
   await t.test('Shift and point: the pin cursor, the goal outlined, a chip naming it; Shift up, the cursor back', async () => {
     await still(async () => {
@@ -225,6 +233,19 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`/At most 2000 bytes/.test(document.getElementById('e-tl').textContent)`, 'the refusal');
     await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()`);
   });
+});
+
+test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 2 of 6: slow reads, the thread box's keys, #talk, pins, the panel)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+  const { F, p, soon, still, click, onThreads, goalSel, shown, threads, enter, composing, lastKey, posts, ticks } = await openThreadsPage(t, 'threads-page-2');
+  let T;
+  // T as the page makes it in subtest 6 (base :3328-3349: the owner's first words on the goal, with
+  // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
+  T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' })]).split('\n')[0];
+  { const th = threads().find((x) => x.id === T); assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']); }
+  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
+  // its card open from the link, as subtests 7-10 leave it (:3443-3444)
+  await p.ev(`location.hash = '#talk/${T}'`);
+  await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the link');
 
   await t.test('reads of the threads slower than the 2 s poll: a reply still shows, and the owner can still send twice', async () => {
     await p.ev('window.__threadsDelay = 2500');
@@ -394,336 +415,5 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.equal(await p.ev(`[...document.querySelectorAll('.tl-pin')].some((b) => { const r = b.getBoundingClientRect(); return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('.tl-pin') === b; })`), false, 'none on top anywhere');
     await p.key('Escape');
     await soon(`document.getElementById('drawer').hidden`, 'the drawer closed');
-  });
-
-  await t.test("a question asked in the thread: the Inbox's card in the card (t-q-), one pick in both, answered there once, answered in the Inbox too", async () => {
-    await click(`[data-tl-pin="${T}"]`);
-    await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
-    const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
-    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}')`, 'both copies');
-    assert.equal(await p.ev(`document.getElementById('t-q-${Q}').querySelector('input[data-pick]').name`), `t-pick-${Q}`, 'its own radio group');
-    // the Inbox is another section: its copy is clicked as a script would
-    await p.ev(`document.querySelector('#q-${Q} input[data-pick="${Q}"][value="Not yet"]').click()`);
-    assert.ok(await p.ev(`document.querySelector('#t-q-${Q} input[value="Not yet"]').checked && document.querySelector('#t-q-${Q} input[value="Not yet"]').closest('.choice').classList.contains('picked')`), "the Inbox's pick shows in the thread's");
-    await click(`#t-q-${Q} input[data-pick="${Q}"][value="Yes"]`);
-    assert.deepEqual(await p.ev(`[document.querySelector('#q-${Q} input[value="Yes"]').checked, document.querySelector('#q-${Q} input[value="Not yet"]').checked, document.querySelectorAll('#q-${Q} .choice.picked').length]`), [true, false, 1], "the thread's pick shows in the Inbox's");
-    // held still from the press until both copies say so: answered at once, before any read lands
-    await still(async () => {
-      await p.click(`#t-q-${Q} button[data-answer="${Q}"]`);
-      await soon(`document.getElementById('t-q-${Q}')?.classList.contains('done') && document.getElementById('t-q-${Q}').textContent.includes('Yes')`, 'the thread copy marked answered at once');
-      await soon(`document.getElementById('q-${Q}')?.classList.contains('done') && document.getElementById('q-${Q}').textContent.includes('Yes')`, 'the Inbox copy marked answered at once');
-    });
-    const q = await until(() => { const x = JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0]; return x.status === 'answered' && x; }, 'the answer');
-    assert.deepEqual([q.answer, q.channel], ['Yes', 'dashboard']);
-    await soon(`!document.getElementById('q-${Q}') || document.getElementById('q-${Q}').classList.contains('done')`, 'the Inbox copy answered');
-    // answered at once in the card (its copy marked done) and, once the threads are read again, as the
-    // log has it (the question, its answer, where from): either way no form and no Inbox link left
-    await soon(`(() => {
-      const turns = document.getElementById('tl-c-turns'), live = document.getElementById('t-q-${Q}');
-      if ((live && !live.classList.contains('done')) || turns.querySelector('[data-answer="${Q}"], a[href="#q/${Q}"]')) return false;
-      return [...turns.querySelectorAll('.tl-q, .qcard.done')].some((c) => /answered/i.test(c.textContent) && /\\bYes\\b/.test(c.textContent));
-    })()`, 'the thread copy answered');
-  });
-
-  await t.test("Shift+Enter in a question box presses its Answer: posted once, with no which-choice step, in the Inbox and in the thread", async () => {
-    const qOf = (id) => JSON.parse(F.owner(['questions', '--id', id, '--json']))[0];
-    const box = (sel) => p.ev(`document.querySelector('${sel} textarea[data-q]').value`);
-    const asks = () => p.ev(`document.querySelectorAll('[data-which-for]').length`);
-    const Qa = F.sup(['ask', '--question', 'Ship on Friday?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    const Qb = F.sup(['ask', '--question', 'Ship on Monday?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    await p.ev(`location.hash = '#inbox'`);
-    await soon(`!!document.querySelector('#q-${Qa} textarea[data-q]') && !!document.querySelector('#q-${Qb} textarea[data-q]')`, 'their cards in the Inbox');
-    const sent = await posts();
-    await p.ev(`document.querySelector('#q-${Qa} textarea[data-q]').focus()`);
-    await p.type('after the demo');
-    // words and no pick: posted at once as the words alone, with no step; held down, the key posts once
-    await enter({ shift: true });
-    await enter({ shift: true, repeat: true });
-    const qa = await until(() => { const x = qOf(Qa); return x.status === 'answered' && x; }, 'the words\' answer');
-    assert.deepEqual([qa.answer, qa.choice, qa.matched, qa.channel], ['after the demo', null, false, 'dashboard']);
-    assert.equal(await asks(), 0, 'no which-choice step');
-    await ticks();
-    assert.equal(await posts(), sent + 1, 'posted once');
-    // a picked card: a Shift+Enter would post, so each key that must not post is tried on this one
-    await p.ev(`document.querySelector('#q-${Qb} input[data-pick][value="Yes"]').click()`);
-    await p.ev(`document.querySelector('#q-${Qb} textarea[data-q]').focus()`);
-    await p.type('after the demo');
-    const none = async (what) => { assert.deepEqual([await asks(), await p.ev(`document.getElementById('e-${Qb}').textContent`), await posts()], [0, '', sent + 1], what); };
-    await enter();
-    assert.equal(await box(`#q-${Qb}`), 'after the demo\n', 'Enter is a new line');
-    await none('Enter');
-    await enter({ shift: true, repeat: true });
-    assert.deepEqual([(await lastKey()).shiftKey, (await lastKey()).repeat], [true, true]);
-    assert.equal(await box(`#q-${Qb}`), 'after the demo\n', 'a repeat adds no line');
-    await none('a repeat');
-    await composing();
-    assert.equal((await lastKey()).isComposing, true);
-    await none('composing');
-    await enter({ shift: true, code: 229 });
-    assert.equal((await lastKey()).keyCode, 229);
-    await none('229');
-    for (const held of ['ctrl', 'alt', 'meta']) {
-      await enter({ shift: true, [held]: true });
-      assert.equal((await lastKey())[`${held}Key`], true, `${held} held`);
-      await none(`${held} held`);
-    }
-    await ticks();
-    assert.equal(qOf(Qb).status, 'open', 'still open');
-    await none('after a while');
-    await enter({ shift: true });
-    await enter({ shift: true, repeat: true });
-    const q = await until(() => { const x = qOf(Qb); return x.status === 'answered' && x; }, 'the answer');
-    assert.deepEqual([q.answer, q.choice, q.channel], ['Yes — after the demo', 'Yes', 'dashboard']);
-    await ticks();
-    assert.equal(await posts(), sent + 2, 'posted once');
-    // the thread's copy: back to the goal and its thread
-    await p.ev(`location.hash = '#goals'`);
-    await soon(`!!document.querySelector('${goalSel}') && !!document.querySelector('[data-tl-pin="${T}"]')`, 'the goal and its pin');
-    await click(`[data-tl-pin="${T}"]`);
-    await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
-    const Qt = F.sup(['thread', 'ask', T, '--question', 'Tell the team?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    await soon(`!!document.querySelector('#t-q-${Qt} textarea[data-q]')`, 'the thread copy');
-    await click(`#t-q-${Qt} input[data-pick="${Qt}"][value="No"]`);
-    await p.ev(`document.querySelector('#t-q-${Qt} textarea[data-q]').focus()`);
-    await p.type('next week');
-    await enter({ shift: true });
-    const qt = await until(() => { const x = qOf(Qt); return x.status === 'answered' && x; }, 'the thread copy\'s answer');
-    assert.deepEqual([qt.answer, qt.choice], ['No — next week', 'No']);
-    await p.ev('document.activeElement.blur()');
-  });
-
-  await t.test("answered in the Inbox, it shows answered in the thread; a hostile question and thread title are only text", async () => {
-    const H = '<img src=x onerror="window.__xss=1">';
-    const Q = F.sup(['thread', 'ask', T, '--question', `${H} Ship it?`, '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}')`, 'both copies');
-    assert.ok(await p.ev(`document.getElementById('t-q-${Q}').textContent.includes(${JSON.stringify(H)})`), 'the words as written');
-    assert.equal(await p.ev(`!!document.querySelector('#tl img') || !!document.querySelector('#q-${Q} img') || !!window.__xss`), false, 'no element made from them');
-    await p.ev(`(() => { const c = document.getElementById('q-${Q}'); c.querySelector('textarea[data-q]').value = 'ship it'; c.querySelector('button[data-answer="${Q}"]').click(); })()`);
-    await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
-    await soon(`!document.getElementById('t-q-${Q}')?.querySelector('textarea, button[data-answer]') && /ship it/.test(document.getElementById('tl-c-turns').textContent)`, 'answered in the thread too');
-    const X = F.owner(['thread', 'new', 'hello', '--title', `${H} hello`]).split('\n')[0];
-    // no subject: it opens in the panel, through the route
-    await p.ev(`location.hash = '#goals?th=open&t=${X}'`);
-    await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)} && !!document.querySelector('#th-card-slot #tl-card.in-panel')`, 'the title as written');
-    assert.equal(await p.ev(`!!document.querySelector('#tl img, #threads img') || !!window.__xss`), false, 'no element made from the title');
-    await soon(`getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
-    await click('[data-tl-back]');
-    // closed by its × (kit-89 T3: a nav to a head without keys would carry the remembered panel)
-    await soon(`location.hash === '#goals?th=open' && !!document.querySelector('#tl-list')`, 'the list');
-    await click('#th-close');
-    await soon(`!document.body.classList.contains('threads-open') && location.hash === '#goals'`, 'the panel closed');
-    F.owner(['thread', 'resolve', X]);
-    await p.ev('tlRefresh()');
-    await click(`[data-tl-pin="${T}"]`);
-    await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card again');
-  });
-
-  await t.test("a read of the threads begun before an answer, landing after the page has dropped the question, doesn't show it unanswered", async () => {
-    const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to the EU first?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
-    // every read of the threads from here held back once read; any Inbox link for the question drawn in the card noted
-    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver((records) => { const link = 'a[href="#q/${Q}"]'; if (records.some((m) => [...m.addedNodes].some((n) => n.nodeType === 1 && (n.matches(link) || !!n.querySelector(link)))) || document.querySelector('#tl-c-turns ' + link)) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
-    await soon('window.__threadsQueue.length > 0', 'a read saying the question is open, held');
-    // the reads held so far were all read before the answer: they say it is open
-    await p.ev(`(() => { window.__stale = window.__threadsQueue.length; const c = document.getElementById('q-${Q}'); c.querySelector('textarea[data-q]').value = 'EU first'; c.querySelector('button[data-answer="${Q}"]').click(); })()`);
-    try {
-      await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
-      await soon(`!DATA.questions.some((x) => x.id === '${Q}') && !document.getElementById('q-${Q}')`, 'the page redrawn without the question');
-      // the stale reads land, the newest of them drawn, and nothing newer yet
-      const have = await p.ev('TL.have');
-      await p.ev('window.__threadsQueue.splice(0, window.__stale).forEach((go) => go())');
-      await p.ev('window.__still()');
-      await p.ev('window.__stir()');
-      assert.ok(await p.ev('TL.have') > have, 'the stale read landed');
-      assert.equal(await p.ev(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status`), 'open', 'the card drew a read from before the answer');
-      assert.equal(await p.ev('window.__inboxLink'), false, 'never "Answer it in the Inbox" for an answered question');
-      assert.ok(await p.ev(`/Answered: EU first/.test(document.getElementById('tl-c-turns').textContent)`), 'still answered in the card');
-    } finally { await p.ev('(() => { const q = window.__threadsQueue || []; window.__threadsQueue = null; q.forEach((go) => go()); })()'); }
-    await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered' && /EU first/.test(document.getElementById('tl-c-turns').textContent)`, 'the answer as the log has it');
-    assert.equal(await p.ev('window.__inboxLink'), false, 'nor once the threads are read again');
-    await p.ev('window.__obs.disconnect(); void 0');
-  });
-
-  await t.test("answered elsewhere (the terminal), with the page's data newer than the card's read: its answer, never \"Answer it in the Inbox\"", async () => {
-    const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to Canada too?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
-    // a read of the threads let through and held, so it says open; any Inbox link drawn noted
-    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver((records) => { const link = 'a[href="#q/${Q}"]'; if (records.some((m) => [...m.addedNodes].some((n) => n.nodeType === 1 && (n.matches(link) || !!n.querySelector(link)))) || document.querySelector('#tl-c-turns ' + link)) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
-    await soon('window.__threadsQueue.length > 0', 'a read saying the question is open, held');
-    await p.ev('window.__stale = window.__threadsQueue.length; void 0');
-    try {
-      F.owner(['answer', Q, 'Not this quarter']);
-      // the page's data lands with the answer, while every read of the threads is still held
-      await p.ev('load({ force: true }); void 0');
-      await soon(`(DATA?.ooda?.answered || []).some((x) => x.id === '${Q}') && !document.getElementById('q-${Q}')`, 'the page\'s data, with the answer');
-      await soon(`/Not this quarter/.test(document.getElementById('tl-c-turns').textContent)`, 'the open card redrawn with it, before any read of the threads');
-      // the stale reads land: the card draws a copy from before the answer
-      await p.ev('window.__threadsQueue.splice(0, window.__stale).forEach((go) => go())');
-      await p.ev('window.__still()');
-      await p.ev('window.__stir()');
-      assert.equal(await p.ev(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status`), 'open', 'the card drew a read from before the answer');
-      assert.equal(await p.ev('window.__inboxLink'), false, 'never "Answer it in the Inbox" for an answered question');
-      assert.ok(await p.ev(`(() => { const s = document.getElementById('tl-c-turns').textContent; return /Not this quarter/.test(s) && /answered in your terminal/.test(s); })()`), 'its answer, and where from');
-    } finally { await p.ev('(() => { const q = window.__threadsQueue || []; window.__threadsQueue = null; q.forEach((go) => go()); })()'); }
-    await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered'`, 'the answer as the log has it');
-    assert.equal(await p.ev('window.__inboxLink'), false, 'nor once the threads are read again');
-    await p.ev('window.__obs.disconnect(); void 0');
-  });
-
-  await t.test('a secrets question in the thread is a link to the Inbox, never a second form', async () => {
-    const Q = F.sup(['thread', 'ask', T, '--kind', 'owner-action', '--question', 'Post the API key', '--secrets', JSON.stringify([{ name: 'KEY', sink: 'file:secrets/key.txt' }]), '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    await soon(`!!document.querySelector('#q-${Q} [data-secret]') && /Post the API key/.test(document.getElementById('tl-c-turns').textContent)`, 'the Inbox form, the thread turn');
-    assert.equal(await p.ev(`document.querySelectorAll('#tl [data-secret], #tl [data-post-secrets], #t-q-${Q}').length`), 0, 'no form in the thread');
-    assert.equal(await p.ev(`document.querySelector('#tl-c-turns a[href="#q/${Q}"]')?.textContent`), 'Answer it in the Inbox');
-    F.owner(['answer', Q, 'Can’t right now']);
-    await soon(`!document.querySelector('#tl-c-turns a[href="#q/${Q}"]')`, 'answered, the link gone');
-  });
-
-  await t.test('Ready to resolve: it warns of an open question, Not yet clears it, Resolve takes the proposal, unpins it and moves it to Resolved', async () => {
-    const Q2 = F.sup(['thread', 'ask', T, '--question', 'Tell the US team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders']);
-    await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('Goal narrowed to EU orders')`, 'the banner');
-    assert.match(await p.ev(`document.querySelector('#tl-c-ready .tl-ready').textContent`), /1 question asked here is still open; it stays in the Inbox/);
-    const notYets = () => threads().find((x) => x.id === T).turns.filter((u) => u.by === 'owner' && u.text === 'Not yet').length;
-    const n0 = notYets();
-    // a double click says it once
-    await p.ev(`(() => { const b = document.querySelector('[data-tl-notyet]'); b.click(); b.click(); })()`);
-    await until(() => threads().find((x) => x.id === T).ready === null, "cleared by the owner's Not yet");
-    await soon('!TL.pend.length && !SAVING', 'the request back');
-    const th = threads().find((x) => x.id === T);
-    assert.deepEqual([th.turns[th.turns.length - 1].by, th.turns[th.turns.length - 1].text], ['owner', 'Not yet']);
-    assert.equal(notYets(), n0 + 1, 'one Not yet for two clicks');
-    await soon(`!document.querySelector('#tl-c-ready .tl-ready')`, 'the banner gone');
-    F.sup(['thread', 'ready', T, '--outcome', 'EU only']);
-    await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('EU only')`, 'proposed again');
-    await click('[data-tl-accept]');
-    await until(() => threads().find((x) => x.id === T).status === 'resolved', 'resolved');
-    await soon(`!document.querySelector('[data-tl-pin="${T}"]') && document.getElementById('tl-card').hidden`, 'unpinned, the card closed');
-    await onThreads();
-    await click('#th-pane [data-thf="resolved"]');
-    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'listed under Resolved');
-    assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}` && o.detail === 'EU only'));
-    assert.equal(JSON.parse(F.owner(['questions', '--id', Q2, '--json']))[0].status, 'open', 'its question stays in the Inbox');
-  });
-
-  await t.test('a resolved thread reopens from its card', async () => {
-    await click(`#tl-list [data-tl-open="${T}"]`);
-    await soon(`!!document.querySelector('[data-tl-reopen]')`, 'Reopen in its header');
-    await click('[data-tl-reopen]');
-    await until(() => threads().find((x) => x.id === T).status === 'open', 'reopened');
-    await soon(`!!document.querySelector('[data-tl-pin="${T}"]')`, 'its pin back');
-    // the panel closed (by its ×, pressed in place: the card may sit over it)
-    await p.ev(`document.getElementById('th-close').click(); void 0`);
-    // and the page at rest after its slide back (the card on it placed again), so the next press lands where it was found
-    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'`, 'the panel closed');
-    await p.ev(FRAMES);
-  });
-
-  await t.test('a press on Resolve across a read still opens the form', async () => {
-    await soon(`!!document.querySelector('[data-tl-resolve]')`, 'Resolve in its header');
-    // held still from finding the button to pressing it, so the press lands on it; a read then lands
-    // under the press (the button itself isn't redrawn by it, so this shows the press survives a read,
-    // not that a redraw of the header is held)
-    const at = await still(async () => {
-      const xy = await p.at('[data-tl-resolve]');
-      await p.ev(`window.__rb = document.querySelector('[data-tl-resolve]'); void 0`);
-      await p.move(xy.x, xy.y);
-      await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...xy, button: 'left', buttons: 1, clickCount: 1 });
-      return xy;
-    });
-    await p.ev('tlRefresh()');
-    assert.ok(await p.ev('window.__rb.isConnected'), 'the pressed button kept, not drawn again');
-    await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', buttons: 0, clickCount: 1 });
-    // the card, grown by the form under the press, placed again only once the release is handled
-    await released();
-    await soon(`!!document.getElementById('tl-outcome')`, 'the form from the pressed button');
-    await click('[data-tl-resolve-cancel]');
-    await soon(`!document.getElementById('tl-outcome')`, 'the form gone');
-  });
-
-  await t.test('a #talk/ link followed with the drawer open closes the drawer and its scrim', async () => {
-    await click('[data-tl-close]');
-    await soon(`document.getElementById('tl-card').hidden`, 'closed');
-    await p.ev(`location.hash = '#goal/${F.goal}'`);
-    await soon(`${shown('drawer')} && ${shown('scrim')}`, 'the drawer');
-    await p.ev(`location.hash = '#talk/${T}'`);
-    await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card');
-    assert.deepEqual(await p.ev(`[document.getElementById('drawer').hidden, document.getElementById('scrim').hidden, document.body.style.overflow]`), [true, true, ''], 'nothing left over the card');
-  });
-
-  await t.test("a reply that lands while the tab is hidden isn't marked seen, so the dock can show its dot", async () => {
-    const last = () => p.ev(`TL.threads.find((x) => x.id === '${T}').turns.at(-1)`);
-    await p.ev(`Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); void 0`);
-    try {
-      F.sup(['thread', 'reply', T, 'While you were away.']);
-      await p.ev('tlRefresh()');
-      await soon(`TL.threads.find((x) => x.id === '${T}').turns.at(-1).text === 'While you were away.'`, 'read in');
-      assert.notEqual(await p.ev(`tlSeenAt('${T}')`), (await last()).at, 'not seen while hidden');
-    } finally { await p.ev('delete document.visibilityState; void 0'); }
-    await p.ev('tlRefresh()');
-    const at = (await last()).at;
-    await soon(`tlSeenAt('${T}') === ${JSON.stringify(at)}`, 'seen once the tab shows it');
-  });
-
-  await t.test("Resolve in the card's header: a line for how it ended, the open question's warning, Cancel keeps it open", async () => {
-    await soon(`!!document.querySelector('[data-tl-resolve]')`, 'Resolve in its header');
-    await click('[data-tl-resolve]');
-    await soon(`!!document.getElementById('tl-outcome')`, 'the form');
-    assert.match(await p.ev(`document.querySelector('#tl-c-ready .tl-ready').textContent`), /1 question asked here is still open; it stays in the Inbox/);
-    await click('[data-tl-resolve-cancel]');
-    await soon(`!document.getElementById('tl-outcome')`, 'the form gone');
-    assert.equal(threads().find((x) => x.id === T).status, 'open');
-    await click('[data-tl-resolve]');
-    await soon(`!!document.getElementById('tl-outcome')`, 'the form again');
-    await p.ev(`document.getElementById('tl-outcome').value = 'Kept to the EU'`);
-    await click('[data-tl-resolve-go]');
-    const r = await until(() => { const x = threads().find((y) => y.id === T); return x.status === 'resolved' && x; }, 'resolved');
-    assert.equal(r.outcome, 'Kept to the EU');
-  });
-
-  await t.test('Shift held over the drawer shows no pin, and its click is the drawer\'s', async () => {
-    await p.ev(`location.hash = '#goal/${F.goal}'`);
-    await soon(slid(), 'the drawer');
-    const at = await p.at('#drawer-close');
-    await p.hold('Shift', true);
-    await p.move(at.x, at.y, 8);
-    await p.ev(FRAMES);
-    assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'nothing there to point at');
-    await p.clickAt(at.x, at.y, 8);
-    await p.hold('Shift', false);
-    await soon(`document.getElementById('drawer').hidden`, 'the drawer closed by its own button');
-  });
-
-  await t.test('a thread on a spot in a Loop tab opens on that tab', async () => {
-    const [P] = F.owner(['thread', 'new', 'This decision', '--title', 'the dashboard · Loop', '--subject', JSON.stringify({ kind: 'page', view: '#loop/decide', at: { x: 0.5, y: 0.1 }, quote: 'Loop' })]).split('\n');
-    await p.ev(`showTab('observe')`);
-    await p.ev(`location.hash = '#talk/${P}'`);
-    await soon(`TAB === 'decide' && !document.getElementById('tl-card').hidden`, 'the Decide tab, and the card');
-    const pinned = () => p.ev(`[...document.querySelectorAll('#tl-pins .tl-pin')].some((b) => b.dataset.tlPin === '${P}')`);
-    await p.ev(`tlPins()`);
-    assert.equal(await pinned(), true, 'its pin is on the Decide tab');
-    await p.ev(`showTab('observe'); tlPins()`);
-    assert.equal(await pinned(), false, 'no pin on a tab that isn\'t shown');
-    await p.key('Escape');
-  });
-
-  await t.test('a half-typed resolution stays when a question in the thread is answered meanwhile', async () => {
-    const [R] = F.owner(['thread', 'new', 'Keep my note']).split('\n');
-    const Q = F.sup(['thread', 'ask', R, '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--stake', '1', '--urgency', '1']);
-    await p.ev(`location.hash = '#talk/${R}'`);
-    // its own card: the card already open has a Resolve too, until the read of the new thread lands
-    await soon(`document.getElementById('tl-card').dataset.key === '${R}' && !!document.querySelector('[data-tl-resolve]')`, 'its card');
-    // no subject: its card is in the Threads panel, which the link opened; pressed once it has slid in
-    await soon(`!!document.querySelector('#th-card-slot #tl-card.in-panel') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
-    await click('[data-tl-resolve]');
-    await soon(`!!document.getElementById('tl-outcome')`, 'the form');
-    await p.ev(`document.getElementById('tl-outcome').focus()`);
-    await p.type('Half typed');
-    // the ask lands with the next read; typing before it does is the point of the test, so wait for it
-    await soon(`/1 question asked here is still open/.test(document.querySelector('#tl-c-ready .tl-ready')?.textContent ?? '')`, 'the warning');
-    assert.deepEqual(await p.ev(`[document.getElementById('tl-outcome').value, document.activeElement?.id]`), ['Half typed', 'tl-outcome'], 'the words stay when the warning appears');
-    F.owner(['answer', Q, 'Yes']);
-    await soon(`!/still open/.test(document.querySelector('#tl-c-ready .tl-ready')?.textContent ?? 'still open')`, 'the warning gone');
-    assert.deepEqual(await p.ev(`[document.getElementById('tl-outcome').value, document.activeElement?.id]`), ['Half typed', 'tl-outcome'], 'the words and the caret stay');
   });
 });
