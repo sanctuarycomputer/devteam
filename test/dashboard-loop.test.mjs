@@ -167,7 +167,9 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
     assert.equal(good[0], '+1');
     assert.notEqual(bad[2], good[2], 'coloured by value');
     // sorting by How much it matters: ascending, then descending
-    const sev = () => p.ev(`${cellsOf('observe', 2)}.map(Number)`);
+    // an observation with no severity leaves its cell blank (not 0), and sorts first going up
+    assert.equal(await p.ev(`${rowsOf('observe')}.find((tr) => tr.children[0].textContent.trim() === 'payments timed out').children[2].textContent.trim()`), '');
+    const sev = () => p.ev(`${cellsOf('observe', 2)}.filter((x) => x !== '').map(Number)`);
     await p.click(`${BOX.observe} table.db-t thead th:nth-child(3) button.sort`);
     await soon(`document.querySelector('${BOX.observe} table.db-t thead th:nth-child(3)')?.getAttribute('aria-sort') === 'ascending'`, 'sorted up');
     const up = await sev();
@@ -241,7 +243,10 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
           await p.ev(`(() => { const tr = ${rowsOf(tab)}[${i}]; tr.scrollIntoView({ block: 'center' }); tr.focus(); })()`);
           if (how === 'click') await p.ev(`${rowsOf(tab)}[${i}].children[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))`);
           else await p.key('Enter');
-          await soon("location.hash !== '' && !location.hash.startsWith('#loop') && !document.getElementById('drawer').hidden", `${tab} row ${i} opens its peek on ${how}`);
+          // its own record: the kind and id its row's subject names (a question is #q/…), a signal by its key
+          const want = await p.ev(`(() => { const tr = ${rowsOf(tab)}[${i}]; const s = tr.querySelector('[data-subject]')?.dataset.subject; if (!s) return /web\/e2e/.test(tr.textContent) ? ['signal', ${JSON.stringify(SIG)}] : null; const at = s.indexOf(':'); return [{ question: 'q' }[s.slice(0, at)] ?? s.slice(0, at), s.slice(at + 1)]; })()`);
+          assert.ok(want, `${tab} row ${i} names its record`);
+          await soon(`location.hash === ${JSON.stringify(`#${want[0]}/${encodeURIComponent(want[1])}`)} && !document.getElementById('drawer').hidden && DRAWER.id === ${JSON.stringify(want[1])}`, `${tab} row ${i} opens its own peek (${want.join('/')}) on ${how}`);
           await closePeek();
         }
       }
@@ -295,7 +300,11 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
 
   await t.test('Correct on a decision or an act, on its row and in its peek, opens a thread about it; nothing is recorded from the click', async () => {
     const posts0 = await p.ev('window.__posts.length');
-    const draftOn = (ref) => `!!TL.draft && TL.draft.subject?.kind === 'item' && TL.draft.subject?.ref === ${JSON.stringify(ref)} && !TL.open`;
+    const draftOn = (ref, words) => `!!TL.draft && TL.draft.subject?.kind === 'item' && TL.draft.subject?.ref === ${JSON.stringify(ref)} && !TL.open && String(TL.draft.title).includes(${JSON.stringify(words)})`;
+    // a peek opened first, so a title left over from it would show (the row's Correct titles its thread from the row)
+    await go(`#lesson/${K}`);
+    await soon("!document.getElementById('drawer').hidden", 'another peek first');
+    await closePeek();
     const dropDraft = async () => { await p.key('Escape'); await soon('!TL.draft', 'the draft dropped'); };
     // on its row
     await go('#loop?lt=decide');
@@ -303,21 +312,21 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
     await soon(`!!document.querySelector(${JSON.stringify(corr(BOX.decide, `decision:${D1}`))})`, 'Correct on the decision\'s row');
     assert.equal(await p.ev(`document.querySelector(${JSON.stringify(corr(BOX.decide, `decision:${D1}`))}).textContent.trim()`), 'Correct');
     await p.ev(`document.querySelector(${JSON.stringify(corr(BOX.decide, `decision:${D1}`))}).click()`);
-    await soon(draftOn(`decision:${D1}`), 'a thread about to start on the decision');
+    await soon(draftOn(`decision:${D1}`, 'renamed the Owner column to Who'), 'a thread about to start on the decision, titled with its words');
     assert.equal(await p.ev("location.hash.startsWith('#loop')"), true, 'the row\'s own Correct opens no peek');
     await dropDraft();
     await go('#loop?lt=act');
     await soon(`!!document.querySelector(${JSON.stringify(corr(BOX.act, `act:${A1}`))})`, 'Correct on the act\'s row');
     await p.ev(`document.querySelector(${JSON.stringify(corr(BOX.act, `act:${A1}`))}).click()`);
-    await soon(draftOn(`act:${A1}`), 'a thread about to start on the act');
+    await soon(draftOn(`act:${A1}`, 'tagged release v1.0.0'), 'a thread about to start on the act, titled with its words');
     await dropDraft();
     // in its peek
-    for (const [kind, id] of [['decision', D1], ['act', A1]]) {
+    for (const [kind, id, words] of [['decision', D1, 'renamed the Owner column to Who'], ['act', A1, 'tagged release v1.0.0']]) {
       await go(`#${kind}/${id}`);
       await soon(`!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body [data-thread-on="${kind}:${id}"]')`, `Correct in the ${kind}'s peek`);
       assert.equal(await p.ev(`document.querySelector('#drawer-body [data-thread-on="${kind}:${id}"]').textContent.trim()`), 'Correct');
       await p.ev(`document.querySelector('#drawer-body [data-thread-on="${kind}:${id}"]').click()`);
-      await soon(draftOn(`${kind}:${id}`), `a thread about to start on the ${kind}, from its peek`);
+      await soon(draftOn(`${kind}:${id}`, words), `a thread about to start on the ${kind}, from its peek, titled with its words`);
       await dropDraft();
       await closePeek();
     }
@@ -357,7 +366,9 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
     assert.equal(c.length, 1);
     assert.deepEqual([c[0].by, c[0].channel, c[0].corrected.turn, c[0].corrected.said], ['owner', 'thread', U, words]);
     // and the row says so once the page reads it
-    await soon(`${rowsOf('decide')}.some((tr) => tr.children[0].textContent.includes('renamed the Owner column') && /yes/.test(tr.children[4].textContent))`, 'the row corrected');
+    // D1's own row (not the correction's row, which names it too): Corrected yes, and no Correct left on it
+    const own = `${rowsOf('decide')}.find((tr) => tr.querySelector('[data-subject="decision:${D1}"]') && tr.children[0].textContent.trim().startsWith('renamed the Owner column'))`;
+    await soon(`!!${own} && ${own}.children[4].textContent.trim() === 'yes' && !${own}.querySelector('[data-thread-on]')`, 'its own row corrected, its Correct gone');
   });
 
   await t.test('Self Improvement keeps its tables only: no learning charts or Informed card', async () => {
