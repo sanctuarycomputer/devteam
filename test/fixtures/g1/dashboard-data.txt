@@ -211,6 +211,7 @@ exit 0
       "autonomy": null,
       "standing_rule": null,
       "channel": null,
+      "files": [],
       "said": null,
       "turn": null,
       "answer_seen": null,
