@@ -134,8 +134,8 @@ const PEEK = {
   computed: "(() => { const h = document.querySelector('#drawer-body section.attrs > h4.attrs-h'); const dl = h && h.nextElementSibling; return dl ? [...dl.children].filter((x) => x.tagName === 'DT').map((x) => x.textContent.trim()) : []; })()",
   // a property's value (the first dl's, else the Computed one's), by its key
   dd: (k) => `(() => { for (const dl of document.querySelectorAll('#drawer-body section.attrs > dl.props')) for (const dt of dl.children) if (dt.tagName === 'DT' && dt.textContent.trim() === ${J(k)}) return dt.nextElementSibling; return null; })()`,
-  sects: "[...document.querySelectorAll('#drawer-body > .card.psect')].map((c) => ({ gp: c.dataset.gp || null, head: c.querySelector(':scope > .card-head')?.textContent.trim() }))",
-  sect: (head) => `[...document.querySelectorAll('#drawer-body > .card.psect')].find((c) => c.querySelector(':scope > .card-head')?.textContent.trim() === ${J(head)})`,
+  sects: "[...document.querySelectorAll('#drawer-body > .card.psect')].map((c) => ({ gp: c.dataset.gp || null, head: (() => { const h = c.querySelector(':scope > .card-head')?.cloneNode(true); for (const a of h?.querySelectorAll('a') ?? []) a.remove(); return h?.textContent.trim(); })() }))",
+  sect: (head) => `[...document.querySelectorAll('#drawer-body > .card.psect')].find((c) => { const h = c.querySelector(':scope > .card-head')?.cloneNode(true); for (const a of h?.querySelectorAll('a') ?? []) a.remove(); return h?.textContent.trim() === ${J(head)}; })`,
   type: "document.querySelector('#drawer-bar-title .dtype .badge')?.textContent.trim()",
   title: "document.querySelector('#drawer-bar-title .dtitle')?.textContent.trim()",
 };

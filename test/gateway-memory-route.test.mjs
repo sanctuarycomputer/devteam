@@ -162,10 +162,15 @@ const PROJECTS = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`proje
 const n = (k, rss) => ({ n: k, rss });
 const KINDS = { agent: n(35, 13997387776), browser: n(8, 1031442432), devteam: n(18, 2801037312), node: n(26, 2129453056), other: n(156, 1877200896) };
 const DEVTEAM = { wait: n(5, 1113833472), sensor: n(1, 85176320), hub: n(1, 116973568), dashboard: n(6, 537415680), merge: n(1, 147361792), metrics: n(1, 230944768), fleet: n(1, 247758848), hello: n(2, 321572864) };
+// Each reading's time, ms, as the loop writes it: C1 counts its 6 hours from these.
+const ATS = [];
 const FIXTURE = (() => {
   const out = [];
   let i = 0;
-  for (let at = Math.ceil((NOW - 8 * DAY - 2 * HOUR) / MIN) * MIN; at <= NOW - MIN; at += MIN, i++) out.push(`${JSON.stringify({ v: 1, at: iso(at), working_set: 20e9 + ((i * 7919) % 1000) * 1e6, max: 51539607552, ceiling: 0.8, source: 'cgroup', sessions: 29, kinds: KINDS, devteam: DEVTEAM, projects: PROJECTS })}\n`);
+  for (let at = Math.ceil((NOW - 8 * DAY - 2 * HOUR) / MIN) * MIN; at <= NOW - MIN; at += MIN, i++) {
+    ATS.push(at);
+    out.push(`${JSON.stringify({ v: 1, at: iso(at), working_set: 20e9 + ((i * 7919) % 1000) * 1e6, max: 51539607552, ceiling: 0.8, source: 'cgroup', sessions: 29, kinds: KINDS, devteam: DEVTEAM, projects: PROJECTS })}\n`);
+  }
   return out.join('');
 })();
 
@@ -185,15 +190,23 @@ test('C1: the real hub behind the real gateway: since and after pass through a s
   await startHub(t, FIXTURE);
   const gw = await signedIn(t, 'real');
   // C1a: since=6h is the hub's 6 hours, byte for byte, and not its default 24 hours
+  const t0 = Date.now();
   const six = await throughAndDirect(gw, '/memory.json?since=6h');
+  const t1 = Date.now();
   assert.equal(six.direct.status, 200, six.direct.body.slice(0, 300));
   assert.equal(six.through.status, 200, six.through.body.slice(0, 300));
   assert.equal(six.through.headers['content-type'], 'application/json');
   assert.equal(six.through.headers['x-content-type-options'], 'nosniff');
   assert.equal(six.through.headers['cache-control'], 'no-store');
   assert.equal(six.through.body, six.direct.body, 'the hub\'s body as it sent it');
+  // The hub counts 6 hours back from its own now, taken while it served the call (so between t0 and
+  // t1), and keeps the readings at or after now - 6h. The fixture's last reading is the whole minute
+  // before NOW's, so a fixed count is off by one whenever the call crosses a minute (NOW late in its
+  // minute, or a slow runner): CI run 44733786696 counted 358. The count is the fixture's readings in
+  // that window for a now in [t0, t1]: one number, or two adjacent ones when the call crosses a minute.
+  const inSix = (now) => ATS.filter((a) => a >= now - 6 * HOUR).length;
   const n6 = six.through.json.readings.length;
-  assert.ok(n6 >= 359 && n6 <= 361, `${n6} readings in 6 hours`);
+  assert.ok(n6 >= inSix(t1) && n6 <= inSix(t0), `${n6} readings in 6 hours (the fixture holds ${inSix(t1)} to ${inSix(t0)} for the hub's now)`);
   const day = await throughAndDirect(gw, '/memory.json');
   assert.equal(day.through.status, 200);
   assert.ok(Buffer.byteLength(day.direct.body) < CAP, 'a day is under the cap');
