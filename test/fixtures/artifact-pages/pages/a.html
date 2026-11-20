@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pages, A</title>
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  #go-tab1, #go-tab2, #always, #only-tab1, #only-tab2 { position: absolute; display: block; box-sizing: border-box; height: 40px; }
+  #go-tab1 { left: 40px; top: 40px; width: 160px; }
+  #go-tab2 { left: 240px; top: 40px; width: 160px; }
+  #always { left: 40px; top: 120px; width: 200px; }
+  #only-tab1 { left: 40px; top: 200px; width: 160px; }
+  #only-tab2 { left: 40px; top: 280px; width: 160px; }
+  /* a tabbed view: each view hides the other's elements (important: the id rules above set display) */
+  body[data-view="tab2"] .tab1 { display: none !important; }
+  body:not([data-view="tab2"]) .tab2 { display: none !important; }
+</style></head>
+<body>
+<a id="go-tab1" href="#tab1">The first view</a>
+<a id="go-tab2" href="#tab2">The second view</a>
+<h2 id="always">Pricing</h2>
+<button id="only-tab1" class="tab1" type="button">Plan A</button>
+<button id="only-tab2" class="tab2" type="button">Plan B</button>
+<script>
+const view = () => { document.body.dataset.view = location.hash === '#tab2' ? 'tab2' : 'tab1'; };
+view();
+const ids = ['go-tab1', 'go-tab2', 'always', 'only-tab1', 'only-tab2'];
+const rects = () => Object.fromEntries(ids.map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return [id, { x: r.left, y: r.top, w: r.width, h: r.height }]; }));
+const say = () => parent.postMessage({ own: 'at', page: 'pages/a.html', hash: location.hash, rects: rects() }, '*');
+addEventListener('load', () => { say(); requestAnimationFrame(() => requestAnimationFrame(say)); });
+addEventListener('resize', say);
+addEventListener('hashchange', () => { view(); say(); });
+</script>
+</body></html>
