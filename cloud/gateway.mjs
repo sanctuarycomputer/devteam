@@ -237,6 +237,19 @@ const resetPeople = (s, now = Date.now()) => {
   return { next: stamped({ ...s, people, peopleSessions: [], invites: [], sessions: s.sessions.filter((x) => !gone.has(x.method)) }), counts };
 };
 
+// --- sign-in methods: one table of types, passkey built in (createGateway's PASSKEY row) ---------
+// What a flow is for. A claim, an add and an invite keep a pending record; a sign-in keeps nothing.
+const PURPOSES = ['claim', 'sign-in', 'add', 'invite'];
+// The rows a caller adds (only tests do, by createGateway's `methodTypes`): checked before anything
+// starts, so a bad one, or one named `passkey`, stops the gateway rather than replacing the passkey.
+function methodRows(given = {}) {
+  return Object.entries(given ?? {}).map(([name, row]) => {
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(name) || name === 'passkey') throw new Error(`methodTypes: "${name}" can't name a sign-in method type`);
+    if (!['start', 'finish', 'describe'].every((k) => typeof row?.[k] === 'function')) throw new Error(`methodTypes: "${name}" needs start, finish and describe`);
+    return [name, row];
+  });
+}
+
 // The box's own address. Each instance is a subdomain of it, so its DNS needs the name and a
 // wildcard under it (box.example.com and *.box.example.com). http only for a *.localhost test.
 function publicUrl(raw = env.DEVTEAM_PUBLIC_URL) {
@@ -1040,6 +1053,9 @@ export function createGateway(opts = {}) {
   const maxSet = opts.publicMax ?? env.DEVTEAM_PUBLIC_MAX;
   const PUBLIC_MAX = maxSet === undefined ? 500 * 1024 * 1024 : Number(maxSet);
   if (!Number.isFinite(PUBLIC_MAX) || PUBLIC_MAX <= 0) throw new Error('DEVTEAM_PUBLIC_MAX must be a positive number of bytes');
+  const EXTRA_METHODS = methodRows(opts.methodTypes);
+  // How long a pending flow lives (records and sign-in states); only a test shortens it.
+  const CHALLENGE = opts.challengeMs ?? CHALLENGE_MS;
   const COOKIE = 'devteam_session';
   const dir = opts.dir ?? gatewayDir();
   const ttydPort = Number(opts.ttydPort ?? env.DEVTEAM_TTYD_PORT ?? 7681);
@@ -1086,39 +1102,6 @@ export function createGateway(opts = {}) {
 
   const secret = crypto.randomBytes(32);
   const mac = (...parts) => crypto.createHmac('sha256', secret).update(parts.join('|')).digest().subarray(0, 16);
-  // A claim's or an added passkey's challenge: one use, five minutes, bound to what it was issued for.
-  const challenges = new Map();
-  const issue = (purpose, extra = {}) => {
-    const c = b64u(crypto.randomBytes(32));
-    challenges.set(c, { purpose, expires: Date.now() + CHALLENGE_MS, ...extra });
-    while (challenges.size > 100) challenges.delete(challenges.keys().next().value);
-    return c;
-  };
-  const redeem = (c, purpose) => {
-    const x = typeof c === 'string' ? challenges.get(c) : null;
-    if (!x) return null;
-    challenges.delete(c);
-    return x.purpose === purpose && x.expires > Date.now() ? x : null;
-  };
-  // Anyone may ask for a login challenge, so asking stores nothing: each carries its own expiry and
-  // MAC, and only a verified signature spends one, so no flood of requests can evict the owner's.
-  const spent = new Map();
-  const loginChallenge = () => {
-    const head = Buffer.alloc(24);
-    crypto.randomFillSync(head, 0, 16);
-    head.writeBigUInt64BE(BigInt(Date.now() + CHALLENGE_MS), 16);
-    return b64u(Buffer.concat([head, mac('login', head.toString('hex'))]));
-  };
-  const loginChallengeOk = (c) => {
-    const b = typeof c === 'string' ? unb64u(c) : null;
-    if (!b || b.length !== 40 || spent.has(c)) return false;
-    const head = b.subarray(0, 24);
-    return sameBytes(b.subarray(24), mac('login', head.toString('hex'))) && Number(head.readBigUInt64BE(16)) > Date.now();
-  };
-  const spend = (c) => {
-    for (const [k, t] of spent) if (t < Date.now()) spent.delete(k);
-    spent.set(c, Date.now() + CHALLENGE_MS);
-  };
 
   const isOwner = (person) => person?.role === 'owner';
   // A claimed file with no owner row (one restored from before people, read while running): its
@@ -1163,17 +1146,23 @@ export function createGateway(opts = {}) {
   // Cross-site requests are refused below by their Origin, and by the kit's own checks.
   const cookie = (value, maxAge) => `${COOKIE}=${value}; Domain=${NAME}; Path=/; HttpOnly; Max-Age=${maxAge}${SECURE ? '; Secure; SameSite=None' : '; SameSite=Lax'}`;
   // `method`: the one it was opened with, so removing that method can end it. The owner's go in
-  // top-level `sessions`, where an older gateway reads them; anyone else's in `peopleSessions`.
-  const newSession = (person, methodId) => {
+  // top-level `sessions`, where an older gateway reads them; anyone else's in `peopleSessions`. The
+  // state with it, and its cookie, so a flow's finish writes it with the rest in one save.
+  const sessionFor = (s, person, methodId) => {
     const tok = crypto.randomBytes(32);
-    const s = store.load();
     const hash = b64u(sha256(tok));
     const at = Date.now();
-    store.save(isOwner(person)
+    const next = isOwner(person)
       ? { ...s, sessions: [...s.sessions, { hash, method: methodId, at, expires: at + SESSION_MS }] }
-      : { ...s, peopleSessions: [...(s.peopleSessions ?? []), { hash, person: person.id, method: methodId, at, expires: at + SESSION_MS }] });
-    return cookie(b64u(tok), SESSION_MS / 1000);
+      : { ...s, peopleSessions: [...(s.peopleSessions ?? []), { hash, person: person.id, method: methodId, at, expires: at + SESSION_MS }] };
+    return { next, set: cookie(b64u(tok), SESSION_MS / 1000) };
   };
+  // The hash of every devteam_session the request carries, live or not.
+  const sessionHashes = (req) => String(req.headers.cookie ?? '').split(';').flatMap((part) => {
+    const k = part.indexOf('=');
+    const tok = k < 0 || part.slice(0, k).trim() !== COOKIE ? null : unb64u(part.slice(k + 1).trim());
+    return tok?.length === 32 ? [b64u(sha256(tok))] : [];
+  });
 
   const hsts = SECURE ? { 'strict-transport-security': 'max-age=31536000' } : {};
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...hsts, ...extra }); res.end(body); };
@@ -1197,8 +1186,6 @@ export function createGateway(opts = {}) {
     return `${PUB}/`;
   };
 
-  // A person by id as it stands now; null is the stand-in owner's (a claimed file with no owner row).
-  const personOf = (s, id) => (id === null ? ownerRow(s) ?? STAND_IN : (s.people ?? []).find((p) => p.id === id) ?? null);
   // A person's own sign-in methods, without key material: the owner's are the top-level passkeys and
   // then their row's methods; anyone else's, their row's.
   const ownMethods = (s, person) => {
@@ -1235,34 +1222,52 @@ export function createGateway(opts = {}) {
     return { status: 200, next: top ? stamped(cleared) : cleared };
   };
   // The passkey's user names its person, so a password manager doesn't file anyone's as the owner's.
-  const creationOptions = (purpose, person = STAND_IN) => {
-    const userId = b64u(crypto.randomBytes(16));
-    return {
-      challenge: issue(purpose, { userId, person: person.id, role: person.role }), rp: { id: RP_ID, name: 'devteam' },
-      user: isOwner(person) ? { id: userId, name: `owner@${RP_ID}`, displayName: `devteam owner (${RP_ID})` } : { id: userId, name: `${person.name}@${RP_ID}`, displayName: `${person.name} (${RP_ID})` },
-      pubKeyCredParams: [-7, -8, -257].map((alg) => ({ type: 'public-key', alg })),
-      authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
-      attestation: 'none', timeout: CHALLENGE_MS, excludeCredentials: allCredentialIds(store.load()).map((id) => ({ type: 'public-key', id })),
-    };
-  };
-  const clientData = (b64, type, purpose) => {
-    const raw = unb64u(b64);
-    if (!raw) throw new Error('no clientDataJSON');
-    const c = JSON.parse(raw.toString('utf8'));
-    if (c.type !== type) throw new Error('wrong ceremony');
-    if (c.origin !== PUB || c.crossOrigin === true) throw new Error('wrong origin');
-    const issued = purpose === 'login' ? loginChallengeOk(c.challenge) : redeem(c.challenge, purpose);
-    if (!issued) throw new Error('unknown or expired challenge');
-    return { raw, issued, challenge: c.challenge };
-  };
+  const createOptions = (challenge, userId, person) => ({
+    challenge, rp: { id: RP_ID, name: 'devteam' },
+    user: isOwner(person) ? { id: userId, name: `owner@${RP_ID}`, displayName: `devteam owner (${RP_ID})` } : { id: userId, name: `${person.name}@${RP_ID}`, displayName: `${person.name} (${RP_ID})` },
+    pubKeyCredParams: [-7, -8, -257].map((alg) => ({ type: 'public-key', alg })),
+    authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
+    attestation: 'none', timeout: CHALLENGE_MS, excludeCredentials: allCredentialIds(store.load()).map((id) => ({ type: 'public-key', id })),
+  });
   const checkAuthData = (ad) => {
     if (!sameBytes(Buffer.from(ad.rpIdHash), sha256(RP_ID))) throw new Error('wrong relying party');
     if (!ad.up || !ad.uv) throw new Error('the passkey did not verify you (user presence and verification are required)');
   };
+  // --- sign-in methods: the table, pending flows, the flow cookie (spec kit-254) ----------------
+  // The owner's passkeys stay top-level in today's shape; this is the one mapping between that and
+  // a method's { key, data, label, added_at, last_used }, both ways.
+  const topToMethod = (p) => ({ key: p.id, data: { userId: p.userId, jwk: p.jwk, alg: p.alg, signCount: p.signCount, rp: p.rp }, label: p.name, added_at: p.createdAt, last_used: p.usedAt ?? null });
+  const methodToTop = (m) => ({ id: m.key, userId: m.data.userId, jwk: m.data.jwk, alg: m.data.alg, signCount: m.data.signCount, name: m.label, rp: m.data.rp, createdAt: m.added_at });
+  // Who holds (type, key) on the box: the owner's top-level passkeys, else anyone's row.
+  const holderOf = (s, type, key) => {
+    const pk = type === 'passkey' ? s.passkeys.find((p) => p.id === key) : null;
+    if (pk) return { person: ownerRow(s) ?? STAND_IN, method: topToMethod(pk), top: true };
+    for (const person of s.people ?? []) {
+      const method = (person.methods ?? []).find((m) => m.type === type && m.key === key);
+      if (method) return { person, method, top: false };
+    }
+    return null;
+  };
+
+  // The passkey row: today's ceremonies behind the table's interface. Its state is the challenge.
+  const clientDataOf = (b64) => {
+    const raw = unb64u(b64);
+    if (!raw) throw new Error('no clientDataJSON');
+    return { raw, c: JSON.parse(raw.toString('utf8')) };
+  };
+  const ceremony = (b64, type, state) => {
+    const { raw, c } = clientDataOf(b64);
+    if (c?.type !== type) throw new Error('wrong ceremony');
+    if (c.origin !== PUB || c.crossOrigin === true) throw new Error('wrong origin');
+    // stateOf read the state from this same clientDataJSON; checked again so the row holds on its own
+    if (c.challenge !== state) throw new Error('unknown or expired challenge');
+    return raw;
+  };
   // A new passkey from navigator.credentials.create(): the attestation itself is not checked
-  // (attestation 'none'); what makes it trusted is who may register (the claim token, or a session).
-  const register = (body, purpose) => {
-    const { issued } = clientData(body?.clientDataJSON, 'webauthn.create', purpose);
+  // (attestation 'none'); what makes it trusted is who may start the flow (a claim token, a fresh
+  // session, an invite). Its user id was made at start (`kept`).
+  const attested = (body, state, kept) => {
+    ceremony(body?.clientDataJSON, 'webauthn.create', state);
     const attBytes = unb64u(body?.attestationObject) ?? Buffer.alloc(0);
     const { value: att, end } = cborDecode(attBytes);
     if (end !== attBytes.length) throw new Error('bad attestationObject');
@@ -1273,35 +1278,13 @@ export function createGateway(opts = {}) {
     const rawId = unb64u(body?.rawId);
     if (!rawId || !sameBytes(rawId, Buffer.from(ad.credentialId))) throw new Error('credential id mismatch');
     const { jwk, alg } = coseToJwk(ad.cose);
-    const s = store.load();
-    if (allCredentialIds(s).includes(b64u(rawId))) throw new Error('that passkey is already registered');
-    const who = personOf(s, issued.person ?? null);
-    const mine = who ? ownMethods(s, who).filter((m) => m.type === 'passkey').length : 0;
-    const name = typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${mine + 1}`;
-    return { cred: { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, rp: RP_ID, createdAt: new Date().toISOString() }, issued };
+    return { key: b64u(rawId), data: { userId: kept?.userId, jwk, alg, signCount: ad.signCount, rp: RP_ID } };
   };
-  // Where the route places it: the owner's goes top-level, where an older gateway reads it; anyone
-  // else's becomes a passkey method in their row.
-  const asMethod = ({ id: key, userId, jwk, alg, signCount, rp, name, createdAt }) => ({ id: newId('m-'), type: 'passkey', key, label: name, added_at: createdAt, last_used: null, data: { userId, jwk, alg, signCount, rp } });
-  // A credential wherever it lives: the owner's top-level passkeys (`pk`), or a person's passkey
-  // methods (`method`), the owner's row's included.
-  const findCredential = (s, credId) => {
-    if (typeof credId !== 'string') return null;
-    const pk = s.passkeys.find((p) => p.id === credId);
-    if (pk) return { person: ownerRow(s) ?? STAND_IN, method: null, pk };
-    for (const person of s.people ?? []) {
-      const method = (person.methods ?? []).find((m) => m.type === 'passkey' && m.key === credId);
-      if (method) return { person, method, pk: null };
-    }
-    return null;
-  };
-  const verifyAssertion = (body) => {
-    const s = store.load();
-    const found = findCredential(s, body?.rawId);
-    if (!found) throw new Error('unknown passkey');
-    const { person, method } = found;
-    const pk = found.pk ?? { id: method.key, ...method.data };
-    const { raw, challenge } = clientData(body?.clientDataJSON, 'webauthn.get', 'login');
+  const asserted = (body, state, lookup) => {
+    const key = body?.rawId;
+    const pk = typeof key === 'string' ? lookup(key) : null;
+    if (!pk) throw new Error('unknown passkey');
+    const raw = ceremony(body?.clientDataJSON, 'webauthn.get', state);
     const adBytes = unb64u(body?.authenticatorData);
     const sig = unb64u(body?.signature);
     if (!adBytes || !sig) throw new Error('bad assertion');
@@ -1311,13 +1294,221 @@ export function createGateway(opts = {}) {
     if (!verifySignature(pk, Buffer.concat([adBytes, sha256(raw)]), sig)) throw new Error('bad signature');
     // A counter that stopped going up means a cloned authenticator; synced passkeys keep it at 0.
     if ((ad.signCount || pk.signCount) && ad.signCount <= pk.signCount) throw new Error('the passkey\'s counter went backwards');
-    spend(challenge);
-    // the counter and last use where the credential lives, and last_seen (neither bumps rev)
-    const iso = new Date().toISOString();
-    const people = s.people?.map((p) => (p.id !== person.id ? p : { ...p, last_seen: iso, methods: method ? p.methods.map((m) => (m.id === method.id ? { ...m, last_used: iso, data: { ...m.data, signCount: ad.signCount } } : m)) : p.methods }));
-    store.save({ ...s, ...(found.pk ? { passkeys: s.passkeys.map((p) => (p.id === pk.id ? { ...p, signCount: ad.signCount, usedAt: iso } : p)) } : {}), ...(people ? { people } : {}) });
-    return { person, methodId: method ? method.id : pk.id };
+    return { key, data: { ...pk, signCount: ad.signCount } };
   };
+  const PASSKEY = {
+    start: ({ purpose, state, person }) => {
+      if (purpose === 'sign-in') return { send: { challenge: state, rpId: RP_ID, userVerification: 'required', timeout: CHALLENGE_MS, allowCredentials: [] } };
+      const userId = b64u(crypto.randomBytes(16));
+      return { send: createOptions(state, userId, person), keep: { userId } };
+    },
+    stateOf: (body) => clientDataOf(body?.clientDataJSON).c?.challenge,
+    finish: ({ purpose, state, body, lookup, kept }) => (purpose === 'sign-in' ? asserted(body, state, lookup) : attested(body, state, kept)),
+    describe: ({ body, count }) => (typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${count + 1}`),
+  };
+  const METHODS = new Map([['passkey', PASSKEY], ...EXTRA_METHODS]);
+
+  // A claim, add or invite keeps a record under its state, in memory, one use (today's rule: at most
+  // 100, the oldest dropped). Only someone already let in (or the claimer) can start one.
+  const records = new Map();
+  const putRecord = (state, rec) => {
+    records.set(state, rec);
+    while (records.size > 100) records.delete(records.keys().next().value);
+  };
+  // A sign-in keeps nothing, so no flood of anonymous starts evicts anyone's: its state carries its
+  // own expiry and a MAC over the type and the browser's nonce; only a sign-in that succeeded is
+  // spent, and the spent-set holds each for its lifetime.
+  const signInMac = (type, head, nonceHash) => mac('sign-in', type, head.toString('hex'), b64u(nonceHash));
+  const signInState = (type, nonceHash) => {
+    const head = Buffer.alloc(24);
+    crypto.randomFillSync(head, 0, 16);
+    head.writeBigUInt64BE(BigInt(Date.now() + CHALLENGE), 16);
+    return b64u(Buffer.concat([head, signInMac(type, head, nonceHash)]));
+  };
+  // a sign-in state is 40 bytes, a record's 32: the length says which
+  const isSignIn = (state) => unb64u(state)?.length === 40;
+  const signInOk = (state, type, nonceHash) => { const b = unb64u(state); return sameBytes(b.subarray(24), signInMac(type, b.subarray(0, 24), nonceHash)); };
+  const signInLive = (state) => Number(unb64u(state).readBigUInt64BE(16)) > Date.now();
+  const usedSignIns = new Map();
+  const spendSignIn = (state) => {
+    for (const [k, t] of usedSignIns) if (t < Date.now()) usedSignIns.delete(k);
+    usedSignIns.set(state, Date.now() + CHALLENGE);
+  };
+
+  // The flow cookie binds a flow to the browser that started it: pairs <state>.<nonce>, the newest 4.
+  // Host-only on the box's name; on HTTPS only the __Host- name is read, which no instance's page can set.
+  const FLOW = SECURE ? '__Host-devteam_flow' : 'devteam_flow';
+  const PAIR = /^[\w-]{16,128}\.[\w-]{43}$/;
+  const flowPairs = (req) => String(req.headers.cookie ?? '').split(';').flatMap((part) => {
+    const k = part.indexOf('=');
+    return k < 0 || part.slice(0, k).trim() !== FLOW ? [] : part.slice(k + 1).trim().split('~').filter((x) => PAIR.test(x));
+  });
+  const flowCookie = (pairs) => `${FLOW}=${pairs.join('~')}; Path=/; HttpOnly;${SECURE ? ' Secure;' : ''} SameSite=Lax; Max-Age=${pairs.length ? CHALLENGE_MS / 1000 : 0}`;
+  const pairState = (x) => x.slice(0, x.lastIndexOf('.'));
+
+  const OTHER_BROWSER = 'unknown or expired challenge: this was started in another browser, or too long ago; start again';
+  const START_AGAIN = 'unknown or expired challenge: start again';
+  const INVITE_GONE = 'This invite has expired or was used; ask for a new one.';
+  const NOT_FRESH = 'sign in again to change your sign-in methods (reload this page)';
+  const CLAIM_EXPIRED = 'this claim link has expired: restart the box, or run devteam-reclaim in a shell on it, for a new one';
+  const isObject = (x) => Boolean(x) && typeof x === 'object' && !Array.isArray(x);
+  const no = (status, error, cookies = []) => ({ status, body: { error }, cookies });
+  const said = (e) => String(e?.message ?? e);
+  // A live invite for someone who isn't the owner; by its hash.
+  const inviteOf = (s, hash) => {
+    // compared as bytes, as the claim token's hash is
+    const want = unb64u(hash);
+    const inv = want ? (s.invites ?? []).find((x) => { const got = unb64u(x.hash); return got && sameBytes(got, want) && x.expires > Date.now(); }) : undefined;
+    const person = inv ? (s.people ?? []).find((p) => p.id === inv.person) : null;
+    return person && !isOwner(person) ? { inv, person } : null;
+  };
+
+  // Start, guards in the spec's order. `who`: the request's session (sessionOf), for an add.
+  const startFlow = async (req, type, purpose, body, who) => {
+    const row = METHODS.get(type);
+    if (!isObject(body)) return no(400, 'bad request');
+    if (!PURPOSES.includes(purpose)) return no(400, 'unknown purpose');
+    const s = store.load();
+    let person = null;
+    let restsOn = {};
+    if (purpose === 'claim') {
+      if (type !== 'passkey') return no(400, 'a box is claimed with a passkey');
+      if (s.passkeys.length) return no(409, 'this box is already claimed');
+      if (s.claimHash && !claimLive(s)) return no(403, CLAIM_EXPIRED);
+      const want = unb64u(s.claimHash ?? '');
+      if (!want || !sameBytes(sha256(typeof body.token === 'string' ? body.token : ''), want)) return no(403, 'that is not this box\'s claim token');
+      person = ownerRow(s) ?? STAND_IN;
+      restsOn = { claimHash: s.claimHash };
+    } else if (purpose === 'sign-in') {
+      if (!s.passkeys.length) return no(409, 'this box is not claimed yet');
+    } else if (purpose === 'add') {
+      if (!who) return no(401, 'sign in first');
+      if (!fresh(who.session)) return no(403, NOT_FRESH);
+      person = who.person;
+      restsOn = { session: who.session.hash, person: person.id, role: person.role };
+    } else {
+      if (!s.passkeys.length) return no(409, 'this box is not claimed yet');
+      const found = typeof body.token === 'string' ? inviteOf(s, b64u(sha256(body.token))) : null;
+      if (!found) return no(403, INVITE_GONE);
+      person = found.person;
+      restsOn = { invite: found.inv.hash };
+    }
+    const nonce = crypto.randomBytes(32);
+    const nonceHash = sha256(nonce);
+    const state = purpose === 'sign-in' ? signInState(type, nonceHash) : b64u(crypto.randomBytes(32));
+    let out;
+    try { out = await row.start({ purpose, state, person, body }); } catch (e) { return no(400, said(e)); }
+    // sign-in stores nothing, so a row that would keep something can't start one
+    if (purpose === 'sign-in' && out?.keep !== undefined) return no(500, 'this sign-in method can\'t start a sign-in');
+    if (purpose !== 'sign-in') putRecord(state, { type, purpose, expires: Date.now() + CHALLENGE, nonceHash, keep: out?.keep, ...restsOn });
+    return { status: 200, body: { ...(isObject(out?.send) ? out.send : {}), state }, cookies: [flowCookie([...flowPairs(req), `${state}.${b64u(nonce)}`].slice(-4))] };
+  };
+
+  // Finish, guards in the spec's order. `purpose`: the body's (POST), or null (GET: the flow's own).
+  // Everything before the type's finish is in memory; after it, one load, the re-checks and the
+  // write, with no await between, so a reclaim, revoke or removal meanwhile wins.
+  const finishFlow = async (req, type, purpose, input, method) => {
+    const row = METHODS.get(type);
+    if (!isObject(input)) return no(400, 'bad request');
+    if (method === 'POST' && !PURPOSES.includes(purpose)) return no(400, 'unknown purpose');
+    let state;
+    try { state = row.stateOf ? row.stateOf(input) : input.state; } catch (e) { return no(400, said(e)); }
+    if (typeof state !== 'string' || !/^[\w-]{16,128}$/.test(state)) return no(400, 'no sign-in state');
+    // 3. this browser: before anything is spent, so a state someone learns burns nobody's flow
+    const pairs = flowPairs(req);
+    const nonces = pairs.filter((x) => pairState(x) === state).map((x) => sha256(unb64u(x.slice(x.lastIndexOf('.') + 1))));
+    const signIn = isSignIn(state);
+    const rec = signIn ? null : records.get(state) ?? null;
+    const mine = signIn ? nonces.some((h) => signInOk(state, type, h)) : nonces.length > 0 && (!rec || nonces.some((h) => sameBytes(h, rec.nonceHash)));
+    if (!mine) return no(403, OTHER_BROWSER);
+    // 4. the flow: a record is spent here, once, whatever follows; a sign-in only when it succeeds
+    const dropped = [flowCookie(pairs.filter((x) => pairState(x) !== state).slice(-4))];
+    const after = rec ? dropped : [];
+    if (rec) records.delete(state);
+    const p = signIn ? 'sign-in' : rec?.purpose;
+    if (signIn ? usedSignIns.has(state) || !signInLive(state) : !rec || !(rec.expires > Date.now()) || rec.type !== type) return no(403, START_AGAIN, after);
+    if (method === 'POST' && purpose !== p) return no(403, START_AGAIN, after);
+    // 5. an add finishes in the session that started it (by hash, before asking if it's live)
+    if (p === 'add' && !sessionHashes(req).includes(rec.session)) return no(403, 'this challenge was issued to another session: finish it where you started it', after);
+    // 6. the type's own finish
+    const lookup = (key) => holderOf(store.load(), type, key)?.method.data ?? null;
+    let out;
+    try { out = await row.finish({ purpose: p, state, body: input, lookup, kept: rec?.keep }); } catch (e) { return no(400, said(e), after); }
+    const key = out?.key;
+    if (typeof key !== 'string' || !key || key.length > 512) return no(400, 'bad sign-in method', after);
+    let data;
+    try { data = JSON.parse(JSON.stringify(out.data ?? null)); } catch { return no(400, 'bad sign-in method', after); }
+    // 7. what start rested on, against the state as it is now
+    const s = store.load();
+    const now = Date.now();
+    const iso = new Date(now).toISOString();
+    let person = null;
+    if (p === 'claim') {
+      if (s.passkeys.length) return no(409, 'this box is already claimed', after);
+      if (!claimLive(s) || s.claimHash !== rec.claimHash) return no(403, CLAIM_EXPIRED, after);
+    } else if (p === 'sign-in') {
+      if (!s.passkeys.length) return no(409, 'this box is not claimed yet');
+    } else if (p === 'add') {
+      const held = stillHeld(s, { hash: rec.session });
+      if (!held) return no(401, 'your session ended; sign in again', after);
+      if (!fresh(held.session)) return no(403, NOT_FRESH, after);
+      // a top-level session is whoever owns the box now, so the person is checked by id as well; an
+      // add the stand-in owner started (no row yet) stays the owner's once the row is written
+      if ((rec.person != null && held.person.id !== rec.person) || held.person.role !== rec.role) return no(409, 'your account changed since; start again', after);
+      person = held.person;
+    } else {
+      const found = inviteOf(s, rec.invite);
+      if (!found) return no(403, INVITE_GONE, after);
+      person = found.person;
+    }
+    // 8. one write
+    const holder = holderOf(s, type, key);
+    if (p === 'sign-in') {
+      // another finish of this state may have landed while this one's finish was awaited
+      if (usedSignIns.has(state)) return no(403, START_AGAIN);
+      if (!holder) return no(403, 'no one on this box signs in with that');
+      const people = s.people?.map((x) => (x.id !== holder.person.id ? x : { ...x, last_seen: iso, methods: holder.top ? x.methods : x.methods.map((m) => (m.id === holder.method.id ? { ...m, data, last_used: iso } : m)) }));
+      // a top-level passkey takes back only its counter and last use, as today
+      const used = { ...s, ...(holder.top ? { passkeys: s.passkeys.map((x) => (x.id === key ? { ...x, signCount: data?.signCount, usedAt: iso } : x)) } : {}), ...(people ? { people } : {}) };
+      const { next, set } = sessionFor(used, holder.person, holder.top ? key : holder.method.id);
+      store.save(next);
+      spendSignIn(state);
+      return { status: 200, body: { ok: true }, cookies: [set, ...dropped] };
+    }
+    if (holder) return no(400, type === 'passkey' ? 'that passkey is already registered' : 'that sign-in method is already registered', after);
+    const owner = p === 'claim' || isOwner(person);
+    const base = owner ? withOwner(s, now) : s;
+    const ownRow = owner ? ownerRow(base) : null;
+    const count = ownMethods(base, owner ? ownRow ?? STAND_IN : person).filter((m) => m.type === type).length;
+    // one line: a label is logged, and an invitee chooses it
+    const label = String(row.describe({ key, data, body: input, count }) ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 60);
+    const m = { id: newId('m-'), type, key, label, added_at: iso, last_used: p === 'invite' ? iso : null, data };
+    // only the owner's passkey lands top-level, in today's shape
+    const top = owner && type === 'passkey' ? methodToTop(m) : null;
+    const rowId = owner ? ownRow?.id : person.id;
+    const addTo = (st) => (top ? st : { ...st, people: st.people.map((x) => (x.id !== rowId ? x : { ...x, methods: [...x.methods, m], rev: x.rev + 1, ...(p === 'invite' ? { last_seen: iso } : {}) })) });
+    if (p === 'claim') {
+      const claimed = stamped(withOwner({ ...s, passkeys: [top], claimHash: null, claimExpires: null, sessions: [], peopleSessions: [] }, now));
+      const { next, set } = sessionFor(claimed, ownerRow(claimed) ?? STAND_IN, top.id);
+      store.save(next);
+      log(`claimed with passkey "${top.name}"`);
+      return { status: 200, body: { ok: true }, cookies: [set, ...dropped] };
+    }
+    if (p === 'add') {
+      store.save(top ? stamped({ ...s, passkeys: [...s.passkeys, top] }) : addTo(base));
+      log(type === 'passkey' ? `passkey "${label}" added` : `a ${type} sign-in method "${label}" added`);
+      return { status: 200, body: { ok: true }, cookies: dropped };
+    }
+    // an invite: the method to its person, the invite gone in the same write, and a session
+    const { next, set } = sessionFor({ ...addTo(s), invites: (s.invites ?? []).filter((x) => x.hash !== rec.invite) }, person, m.id);
+    store.save(next);
+    log(`an invite added a ${type} sign-in method "${label}"`);
+    return { status: 200, body: { ok: true }, cookies: [set, ...dropped] };
+  };
+  // A flow's answer: JSON, the session cookie (if any) first and the flow cookie second.
+  const flowAnswer = (res, out) => json(res, out.status, out.body, out.cookies.length ? { 'set-cookie': out.cookies } : undefined);
+  // Today's routes never refused a body that wasn't an object; they read it as empty.
+  const asBody = (b) => (isObject(b) ? b : {});
 
   // --- requests that look local to the kit, and its headers mapped back to the public names ---
   const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'referer', 'forwarded', 'x-real-ip', 'true-client-ip', 'cf-connecting-ip']);
@@ -2276,33 +2467,44 @@ export function createGateway(opts = {}) {
       const claimed = s.passkeys.length > 0;
       if (isAuth) {
         if (p === '/auth' && req.method === 'GET') return redirect(res, '/auth/login');
+        // Every type's start and finish, for a claim, a sign-in, an invite, an add (which looks up its
+        // own session): before the session gate, since only an add has one.
+        const mt = /^\/auth\/method\/([^/]+)\/(start|finish)$/.exec(p);
+        if (mt) {
+          const [, type, step] = mt;
+          const row = METHODS.get(type);
+          if (!row) return json(res, 404, { error: 'no such sign-in method type' });
+          // a redirect type's provider sends the browser back by GET, state and the rest in the query
+          if (step === 'finish' && req.method === 'GET' && row.finishByGet) {
+            const q = Object.fromEntries(url.searchParams);
+            const out = await finishFlow(req, type, null, q, 'GET');
+            const head = out.cookies.length ? { 'set-cookie': out.cookies } : {};
+            if (out.status !== 200) return send(res, out.status, 'text/plain; charset=utf-8', out.body.error, head);
+            res.writeHead(302, { location: safeNext(q.next), 'cache-control': 'no-store', ...hsts, ...head });
+            return res.end();
+          }
+          if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
+          const body = await readJson(req);
+          if (step === 'start') return flowAnswer(res, await startFlow(req, type, body?.purpose, body, claimed ? sessionOf(req) : null));
+          return flowAnswer(res, await finishFlow(req, type, body?.purpose, body, 'POST'));
+        }
         if (p === '/auth/claim' && req.method === 'GET') return claimed ? redirect(res, '/auth/login') : page(res, PAGES.claim(PUB));
+        // Today's passkey routes are aliases of the passkey row, each naming its purpose (today's
+        // pages send none). The claim's keep today's 405 and 409 before reading the body.
         if (p === '/auth/claim/options' || p === '/auth/claim/verify') {
           if (req.method !== 'POST') return send(res, 405, 'text/plain', 'POST only');
           if (claimed) return json(res, 409, { error: 'this box is already claimed' });
-          const body = await readJson(req);
-          const live = store.load();
-          if (live.claimHash && !claimLive(live)) return json(res, 403, { error: 'this claim link has expired: restart the box, or run devteam-reclaim in a shell on it, for a new one' });
-          const want = unb64u(live.claimHash ?? '');
-          if (!want || !sameBytes(sha256(typeof body?.token === 'string' ? body.token : ''), want)) return json(res, 403, { error: 'that is not this box\'s claim token' });
-          if (p === '/auth/claim/options') return json(res, 200, creationOptions('claim'));
-          const { cred: pk } = register(body, 'claim');
-          if (store.load().passkeys.length) return json(res, 409, { error: 'this box is already claimed' });
-          store.save(stamped(withOwner({ ...store.load(), passkeys: [pk], claimHash: null, claimExpires: null, sessions: [], peopleSessions: [] })));
-          log(`claimed with passkey "${pk.name}"`);
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession(ownerRow(store.load()) ?? STAND_IN, pk.id) });
+          const body = asBody(await readJson(req));
+          return flowAnswer(res, p === '/auth/claim/options' ? await startFlow(req, 'passkey', 'claim', body, null) : await finishFlow(req, 'passkey', 'claim', body, 'POST'));
         }
         if (p === '/auth/login' && req.method === 'GET') return page(res, claimed ? PAGES.login(safeNext(url.searchParams.get('next'))) : PAGES.unclaimed());
-        if (p === '/auth/login/options' && req.method === 'POST') {
-          if (!claimed) return json(res, 409, { error: 'this box is not claimed yet' });
-          return json(res, 200, { challenge: loginChallenge(), rpId: RP_ID, userVerification: 'required', timeout: CHALLENGE_MS, allowCredentials: [] });
-        }
+        // as today, options reads no body
+        if (p === '/auth/login/options' && req.method === 'POST') return flowAnswer(res, await startFlow(req, 'passkey', 'sign-in', {}, null));
         if (p === '/auth/login/verify' && req.method === 'POST') {
-          const body = await readJson(req);
-          // as options: a challenge fetched before a reclaim must not open a session after it
+          const body = asBody(await readJson(req));
+          // as today, first: a challenge fetched before a reclaim must not open a session after it
           if (!store.load().passkeys.length) return json(res, 409, { error: 'this box is not claimed yet' });
-          const { person, methodId } = verifyAssertion(body);
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession(person, methodId) });
+          return flowAnswer(res, await finishFlow(req, 'passkey', 'sign-in', body, 'POST'));
         }
       }
       // What installing the hub fetches. Public: a browser asks for the manifest without the cookie, and
@@ -2354,21 +2556,10 @@ export function createGateway(opts = {}) {
         if (p === '/auth/method/list' && req.method === 'GET') return json(res, 200, { methods: ownMethods(store.load(), person) });
         if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(ownMethods(store.load(), person).filter((m) => m.type === 'passkey').map((m) => ({ id: m.id, name: m.label, createdAt: m.added_at })), PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
         if ((p.startsWith('/auth/passkeys/') || p === '/auth/method/remove') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
-        if (p === '/auth/passkeys/options' && req.method === 'POST') return json(res, 200, creationOptions(`add:${session.hash}`, person));
-        if (p === '/auth/passkeys/verify' && req.method === 'POST') {
-          const { cred, issued } = register(await readJson(req), `add:${session.hash}`);
-          const now = store.load();
-          if (!stillHeld(now, session)) return json(res, 401, { error: 'your session ended; sign in again' });
-          // the person as they stand now: an add started before they were removed or their role
-          // changed must not land where they were
-          const who = personOf(now, issued.person);
-          if (!who || who.role !== issued.role) return json(res, 409, { error: 'your account changed since; start again' });
-          store.save(isOwner(who)
-            ? stamped({ ...now, passkeys: [...now.passkeys, cred] })
-            : { ...now, people: now.people.map((x) => (x.id === who.id ? { ...x, methods: [...x.methods, asMethod(cred)], rev: x.rev + 1 } : x)) });
-          log(`passkey "${cred.name}" added`);
-          return json(res, 200, { ok: true });
-        }
+        // the passkey row's add, after the gate and the fresh rule above (today's place and answers);
+        // its finish re-checks the session, the person's role and freshness against the state as it is
+        if (p === '/auth/passkeys/options' && req.method === 'POST') return flowAnswer(res, await startFlow(req, 'passkey', 'add', {}, who));
+        if (p === '/auth/passkeys/verify' && req.method === 'POST') return flowAnswer(res, await finishFlow(req, 'passkey', 'add', asBody(await readJson(req)), 'POST'));
         if ((p === '/auth/method/remove' || p === '/auth/passkeys/remove') && req.method === 'POST') {
           const body = await readJson(req);
           const now = store.load();

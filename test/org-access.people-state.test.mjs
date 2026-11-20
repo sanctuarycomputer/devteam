@@ -118,9 +118,11 @@ async function gateway(name, extra = {}) {
   const token = given ?? /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   const file = path.join(dir, 'state.json');
   let jar = '';
-  const req = (method, route, { body, headers = {}, cookie = jar, on } = {}) => new Promise((resolve, reject) => {
+  let flowJar = ''; // the flow cookie of a passkey ceremony, sent to the box's own name beside the session
+  const req = (method, route, { body, headers = {}, cookie = jar, flow, on } = {}) => new Promise((resolve, reject) => {
     const self = on === 'term' ? term : on ? inst(on) : publicUrl;
-    const h = { host: new URL(self).host, ...(method !== 'GET' ? { origin: self, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
+    const sent = [cookie, self === publicUrl ? (flow ?? flowJar) : ''].filter(Boolean).join('; ');
+    const h = { host: new URL(self).host, ...(method !== 'GET' ? { origin: self, 'content-type': 'application/json' } : {}), ...(sent ? { cookie: sent } : {}), ...headers };
     for (const k of Object.keys(h)) if (h[k] === undefined) delete h[k];
     const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h }, (res) => {
       let b = '';
@@ -128,6 +130,7 @@ async function gateway(name, extra = {}) {
       res.on('end', () => {
         const sc = cookieOf(res);
         if (sc) jar = sc;
+        if (flow !== '') for (const c of res.headers['set-cookie'] ?? []) if (/^(?:__Host-)?devteam_flow=/.test(c)) flowJar = /;\s*Max-Age=0\b/i.test(c) ? '' : c.split(';')[0];
         let j = null;
         try { j = JSON.parse(b); } catch {}
         resolve({ status: res.statusCode, headers: res.headers, body: b, json: j });
@@ -150,7 +153,7 @@ async function gateway(name, extra = {}) {
   const state = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   const write = (s) => { const t = `${file}.test.tmp`; fs.writeFileSync(t, JSON.stringify(s, null, 2), { mode: 0o600 }); fs.renameSync(t, file); };
   const seed = (people) => { const { state: s, rows } = seedPeople(state(), people); write(s); return rows; };
-  return { g, port, publicUrl, inst, term, logs, token, dir, file, req, claim, login, state, write, seed, jar: () => jar, setJar: (v) => { jar = v; }, close: () => new Promise((r) => g.server.close(r)) };
+  return { g, port, publicUrl, inst, term, logs, token, dir, file, req, claim, login, state, write, seed, jar: () => jar, flow: () => flowJar, setJar: (v) => { jar = v; }, close: () => new Promise((r) => g.server.close(r)) };
 }
 
 test('people@1: seedPeople writes rows of the documented shape, unique by (type, key)', () => {
@@ -980,7 +983,7 @@ const slowPost = (gw, route, cookie, body) => {
   const text = JSON.stringify(body);
   let done;
   const answer = new Promise((resolve, reject) => { done = { resolve, reject }; });
-  const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: route, headers: { host: new URL(gw.publicUrl).host, origin: gw.publicUrl, 'content-type': 'application/json', 'content-length': Buffer.byteLength(text), cookie } }, (res) => {
+  const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: route, headers: { host: new URL(gw.publicUrl).host, origin: gw.publicUrl, 'content-type': 'application/json', 'content-length': Buffer.byteLength(text), cookie: [cookie, gw.flow()].filter(Boolean).join('; ') } }, (res) => {
     let b = '';
     res.on('data', (c) => { b += c; });
     res.on('end', () => done.resolve({ status: res.statusCode, body: b }));

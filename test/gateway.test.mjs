@@ -91,10 +91,12 @@ async function gateway(name, extra = {}) {
   await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
   const token = /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   let jar = '';
-  // on: an instance's port, for its subdomain; else the box's own name
-  const req = (method, route, { body, headers = {}, cookie = jar, on = route.startsWith('/auth/') ? 'auth' : undefined } = {}) => new Promise((resolve, reject) => {
+  let flowJar = ''; // the flow cookie of a passkey ceremony, sent to the box's own name beside the session
+  // on: an instance's port, for its subdomain; else the box's own name. flow: '' sends and stores no flow cookie
+  const req = (method, route, { body, headers = {}, cookie = jar, flow, on = route.startsWith('/auth/') ? 'auth' : undefined } = {}) => new Promise((resolve, reject) => {
     const self = on === 'auth' ? auth : on === 'term' ? term : on === 'public' ? site : on ? inst(on) : publicUrl;
-    const h = { host: new URL(self).host, ...(method !== 'GET' ? { origin: self, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
+    const sent = [cookie, self === publicUrl ? (flow ?? flowJar) : ''].filter(Boolean).join('; ');
+    const h = { host: new URL(self).host, ...(method !== 'GET' ? { origin: self, 'content-type': 'application/json' } : {}), ...(sent ? { cookie: sent } : {}), ...headers };
     for (const k of Object.keys(h)) if (h[k] === undefined) delete h[k];
     const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h }, (res) => {
       let b = '';
@@ -102,6 +104,7 @@ async function gateway(name, extra = {}) {
       res.on('end', () => {
         const sc = res.headers['set-cookie']?.find((c) => c.startsWith('devteam_session='));
         if (sc) jar = sc.split(';')[0];
+        if (flow !== '') for (const c of res.headers['set-cookie'] ?? []) { const m = /^(?:__Host-)?devteam_flow=([^;]*)/.exec(c); if (m) flowJar = /;\s*Max-Age=0\b/i.test(c) ? '' : c.split(';')[0]; }
         let j = null;
         try { j = JSON.parse(b); } catch {}
         resolve({ status: res.statusCode, headers: res.headers, body: b, json: j });
@@ -202,7 +205,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     // passkeys belong to the box's name, and a login challenge can't be flooded away or used twice
     const flood = await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' });
     assert.equal(flood.json.rpId, 'box.localhost');
-    for (let i = 0; i < 300; i++) await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' });
+    for (let i = 0; i < 300; i++) await gw.req('POST', '/auth/login/options', { body: {}, cookie: '', flow: '' });
     assert.match((await gw.req('POST', '/auth/login/verify', { body: a.get(flood.json, gw.inst(P), { counter: 19 }), cookie: '' })).json.error, /origin/, 'a dashboard\'s page may ask for the passkey, but its answer is no sign-in');
     const once = a.get(flood.json, gw.auth, { counter: 20 });
     assert.equal((await gw.req('POST', '/auth/login/verify', { body: once, cookie: '' })).status, 200, 'a pending sign-in survives anyone asking for challenges');
@@ -545,8 +548,10 @@ test('on https: the cookie is Secure and SameSite=None for every name, and HSTS 
   const g = G.createGateway({ publicUrl: 'https://box.localhost', dir, ttydPort: await freePort(), log: (m) => logs.push(m) });
   await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
   const token = /claim#([\w-]+)/.exec(logs.join(' '))[1];
+  let flowJar = '';
   const call = (host, method, route, body, headers = {}) => new Promise((resolve, reject) => {
-    const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: { host, ...(method === 'POST' ? { origin: `https://${host}`, 'content-type': 'application/json' } : {}), ...headers } }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, json: (() => { try { return JSON.parse(b); } catch { return null; } })() })); });
+    const sent = [headers.cookie, flowJar].filter(Boolean).join('; ');
+    const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: { host, ...(method === 'POST' ? { origin: `https://${host}`, 'content-type': 'application/json' } : {}), ...headers, ...(sent ? { cookie: sent } : {}) } }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => { for (const c of res.headers['set-cookie'] ?? []) if (/^(?:__Host-)?devteam_flow=/.test(c)) flowJar = /;\s*Max-Age=0\b/i.test(c) ? '' : c.split(';')[0]; resolve({ status: res.statusCode, headers: res.headers, json: (() => { try { return JSON.parse(b); } catch { return null; } })() }); }); });
     r.on('error', reject);
     r.end(body ? JSON.stringify(body) : undefined);
   });
