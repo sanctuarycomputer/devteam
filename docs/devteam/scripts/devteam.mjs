@@ -23084,13 +23084,16 @@ function fleetStatus() {
   const readableLinks = repoLinks.filter(([id]) => repoReadable(id)).map(([id]) => repo(id));
   // another repo's fetch failing is a blocker: its sessions' pushed state would be read from a stale origin
   // home's too (kit-339): with no prompt and a deadline, and a failure said, never a check that reads as done;
-  // and how to clear it (kit-341), since a key with a passphrase or an https password can't be asked for here
+  // and how to clear it (kit-341): the fetch can't prompt, so a key or a password it needed gets the agent and
+  // the saved login; every failure gets a fetch from a terminal, which shows why and clears the rest
   const fetchFails = [];
   let fetchError = null;
   if (!flags['no-fetch'] && commonDir) {
     if (git(['config', '--get', 'remote.origin.url'], mainRoot)) {
       const f = hostNet(['fetch', '--quiet', 'origin']);
-      if (f.status !== 0) fetchFails.push(fetchError = `home: could not fetch origin: ${f.status === null ? 'timed out' : redactUrl(firstLine(f.err)) || `exit ${f.status}`}; what its sessions pushed is unchecked. The fetch can't prompt: load the ssh key into an agent (ssh-add) or save an https login (a git credential helper), or check again if the network was slow`);
+      const needsLogin = f.status !== null && /Permission denied \(publickey|could not read (Username|Password)|Authentication failed|passphrase/i.test(f.err);
+      const clear = needsLogin ? "The fetch can't prompt: load the ssh key into an agent (ssh-add) or save an https login (a git credential helper), or run git fetch origin in a terminal, then check again" : 'Run git fetch origin in a terminal to see why, then check again';
+      if (f.status !== 0) fetchFails.push(fetchError = `home: could not fetch origin: ${f.status === null ? 'timed out' : redactUrl(firstLine(f.err)) || `exit ${f.status}`}; what its sessions pushed is unchecked. ${clear}`);
     }
     for (const R of readableLinks) {
       if (R.git(['config', '--get', 'remote.origin.url'], R.root) === null) continue;

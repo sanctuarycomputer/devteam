@@ -64,7 +64,7 @@ test('Settings with home\'s origin gone: the check fails, the card shows the pla
   // C1: arriving checks; the check fails with nothing drawn, so the page reads plainly and draws its blockers under the error
   await p.ev("location.hash = '#settings'");
   await until(() => p.ev(`window.__checks >= 1 && !FLEET.busy && !!document.querySelector('${S} .ready-card .err')`), 'the arrival check answered and drawn');
-  assert.match(await err(), /^Couldn't check: home: could not fetch origin: .*; what its sessions pushed is unchecked\. The fetch can't prompt: .* if the network was slow\. What shows is a plain read, not checked against origin\.$/, 'the error, and that what shows is a plain read');
+  assert.match(await err(), /^Couldn't check: home: could not fetch origin: .*; what its sessions pushed is unchecked\. Run git fetch origin in a terminal to see why, then check again\. What shows is a plain read, not checked against origin\.$/, 'the error, and that what shows is a plain read');
   assert.equal(await p.ev('window.__fleetGets'), 1, 'one plain read after the failed check');
   await until(async () => (await blockers()) === JSON.stringify(plain.blockers), `the plain read's blockers on the card (have ${await blockers()})`);
   assert.match(await badge(), /^last check failed; this is from \S/, 'the badge says the check failed');
@@ -77,6 +77,23 @@ test('Settings with home\'s origin gone: the check fails, the card shows the pla
   assert.match(await err(), /^Couldn't check: home: could not fetch origin: /, 'the check\'s error');
   assert.doesNotMatch(await err(), /plain read/, 'not said to be a plain read: nothing was read');
   assert.equal(await blockers(), JSON.stringify(plain.blockers), 'the drawn blockers stay');
+  assert.match(await badge(), /^last check failed; this is from \S/, 'marked old');
+
+  // C2b (final-1 F1): a good check, then a failed one: no read, the checked answer stays, marked old
+  F.g(['remote', 'set-url', 'origin', F.org], F.old);
+  await p.ev('FLEET.data = null; FLEET.error = null; true');
+  await p.click(`${S} .ready-card [data-checknow]`);
+  await until(() => p.ev(`!FLEET.busy && !!FLEET.data && !FLEET.error && document.querySelector('${S} .ready-card [data-checknow]')?.disabled === false`), 'a good check with origin back');
+  const checked = await blockers();
+  assert.ok(JSON.parse(checked).length > 0, `the good check's blockers drawn: ${checked}`);
+  assert.match(await badge(), /^(not )?ready to move$/, 'a good check: not marked old');
+  F.g(['remote', 'set-url', 'origin', path.join(F.base, 'gone.git')], F.old);
+  await p.ev('window.__fleetGets = 0; window.__checks = 0; true');
+  await p.click(`${S} .ready-card [data-checknow]`);
+  await until(() => p.ev(`window.__checks === 1 && !FLEET.busy && !!FLEET.error && document.querySelector('${S} .ready-card [data-checknow]')?.disabled === false`), 'the failed check after the good one');
+  assert.equal(await p.ev('window.__fleetGets'), 0, 'no plain read over a checked answer');
+  assert.equal(await blockers(), checked, 'the checked blockers stay');
+  assert.doesNotMatch(await err(), /plain read/, 'not said to be a plain read');
   assert.match(await badge(), /^last check failed; this is from \S/, 'marked old');
 
   // C3: nothing drawn and the plain read fails too: the check's error, no blockers, nothing thrown
