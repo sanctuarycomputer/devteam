@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { canDrive, openChrome } from './lib/chrome.mjs';
+import { canDrive, chromePath, openChrome } from './lib/chrome.mjs';
 import { monoFixture, dashboardOnFreePort, until, tmuxShim, sessionOf } from './lib/kit.mjs';
 import { startSites } from './lib/sites.mjs';
 import { validate, schema } from './fixtures/browser/check.mjs';
@@ -139,6 +139,46 @@ function testBrowserPids() {
   return pids;
 }
 
+// kit-347: the first Chrome starts on a freshly booted CI runner can take longer than the daemon's 30 s
+// to open their DevTools pipe. The chrome shard's first files all start Chrome at once, reading it off a
+// cold, shared disk; B1's start, 5 s into the file, met that and failed with "Chrome didn't open its
+// DevTools pipe in 30 s", while later starts on the same runner take about a second. So before B1,
+// warmChrome launches Chrome much as the daemon does (DevTools on fds 3 and 4, a throwaway profile and
+// HOME, about:blank), again and again, until one answers Browser.getVersion within WARM_FAST_MS, for at
+// most WARM_BUDGET_MS in all: B1 then times the daemon's start, not the runner's first minute. It never
+// throws (a Chrome that can't start, or is still slow at the budget, is B1's to report) and it leaves
+// nothing running. It returns each launch's ms, a '!' after one that didn't answer.
+const WARM_FAST_MS = 5000, WARM_BUDGET_MS = 90000;
+async function warmChrome() {
+  const tries = [];
+  const home = fs.mkdtempSync(path.join(tmp, 'warm-home-'));
+  for (const end = Date.now() + WARM_BUDGET_MS; Date.now() < end;) {
+    const profile = fs.mkdtempSync(path.join(tmp, 'warm-'));
+    const t0 = Date.now();
+    const c = spawn(chromePath, ['--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-pipe', '--no-sandbox', '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--proxy-server=127.0.0.1:9', 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: home } });
+    let gone = false;
+    const how = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve('late'), Math.max(0, end - Date.now()));
+      const done = (v) => { clearTimeout(timer); resolve(v); };
+      c.once('error', () => { gone = true; done('gone'); });
+      c.once('exit', () => { gone = true; done('gone'); });
+      if (!c.pid) return;
+      for (const p of [c.stdio[3], c.stdio[4]]) p.on('error', () => {});
+      c.stdio[4].on('data', (d) => { if (d.includes(0)) done('answered'); });
+      c.stdio[3].write(`${JSON.stringify({ id: 1, method: 'Browser.getVersion' })}\0`);
+    });
+    const ms = Date.now() - t0;
+    tries.push(how === 'answered' ? ms : `${ms}!`);
+    if (c.pid) { try { process.kill(-c.pid, 'SIGKILL'); } catch {} }
+    // its exit, for at most 5 s: a process in disk wait dies only once its read returns
+    if (c.pid && !gone) await new Promise((r) => { if (c.exitCode !== null || c.signalCode !== null) return r(); const t = setTimeout(r, 5000); c.once('exit', () => { clearTimeout(t); r(); }); });
+    for (const p of [c.stdio[3], c.stdio[4]]) p?.destroy();
+    try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {} // after() removes tmp too
+    if (how === 'gone' || (how === 'answered' && ms < WARM_FAST_MS)) break;
+  }
+  return tries;
+}
+
 let e; // E1 to E4, D4, D5's planted form, Review Focus 1, B3: refusals that start nothing
 let a; // the long-lived browser
 let dash; // B4 to B6: a real dashboard on a's fixture
@@ -153,6 +193,7 @@ before(() => {
     standIn = await startStandIn();
     e = project('brw-e', newHome());
     a = project('brw-a', newHome());
+    console.log(`# kit-347 Chrome warm-up, ms per launch: ${(await warmChrome()).join(', ')}`);
   })();
   return setup;
 });
