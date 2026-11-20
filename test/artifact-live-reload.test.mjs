@@ -251,13 +251,16 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
   await t.test("C9: the poll's guards: one ask at a time, given up at 5 s; a bad answer reloads nothing; an answer for a stage gone is dropped", async () => {
     await open(`${VIEW}?at=${WT}`, WT, 'v1');
     await soon('__fpAsks.length >= 1 && __fpAsks.every((x) => x.done)', 'the first ask answered');
-    // (a) held 7 s: no second ask while it is out; after the 5 s give-up the next tick asks again
-    await p.ev(`(window.__fake.delay = 7000, window.__fake.fp = ${J(NEW_FP)}, true)`);
+    // (a) a new fp held 12 s: no second ask while it is out; the 5 s give-up lets the next tick ask
+    // again well before the 12 s (within 5 s + one 2 s tick + slack); the held answer, given up, reloads nothing
+    await p.ev(`(window.__fake.delay = 12000, window.__fake.fp = ${J(NEW_FP)}, true)`);
     const held = await soonIn(p, 5000)('__fpAsks.find((x) => !x.done)?.t', 'a held ask');
     await p.ev(`(window.__fake.delay = 0, window.__fake.fp = null, true)`);
     await sleep(Math.max(0, held + 4500 - await p.ev('Date.now()')));
     assert.equal(await p.ev(`__fpAsks.filter((x) => x.t > ${held}).length`), 0, 'no second ask while one is out');
-    await soonIn(p, 5000)(`__fpAsks.some((x) => x.t >= ${held} + 5000)`, 'asked again after the 5 s give-up');
+    const again = await soonIn(p, 6000)(`__fpAsks.find((x) => x.t > ${held})?.t`, 'asked again after the 5 s give-up');
+    assert.ok(again - held >= 5000 && again - held <= 8000, `asked again ${again - held} ms after the held ask (the give-up at 5 s, the hold 12 s)`);
+    await sleep(Math.max(0, held + 12500 - await p.ev('Date.now()')));
     assert.equal((await titles()).length, 1, 'the given-up answer reloaded nothing');
     // (b) answers that aren't { fp: a string of 1 to 128 characters }
     const fp0 = await p.ev('TS.fp');
