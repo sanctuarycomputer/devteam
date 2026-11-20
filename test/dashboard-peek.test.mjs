@@ -1337,8 +1337,8 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     });
     // a record nobody logged: once its peek says so
     await p.ev("location.hash = '#ticket/kit-nope'");
-    await soon(`!document.getElementById('drawer').hidden && DRAWER.id === 'kit-nope' && !!PEEKS.get(peekKey('ticket', 'kit-nope'))?.missing && /Nothing logged yet/.test(document.getElementById('drawer-body').lastElementChild?.textContent ?? '')`, 'the missing ticket');
-    await frame('a missing record', /Nothing logged yet\./);
+    await soon(`!document.getElementById('drawer').hidden && DRAWER.id === 'kit-nope' && !!PEEKS.get(peekKey('ticket', 'kit-nope'))?.missing && /None$/.test(document.getElementById('drawer-body').lastElementChild?.textContent ?? '')`, 'the missing ticket');
+    await frame('a missing record', /None$/);
     // a peek fetch held open: the frame while it loads
     await load('#board');
     await p.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/peek*', requestStage: 'Request' }] });

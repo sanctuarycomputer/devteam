@@ -665,6 +665,47 @@ export function dataRewriteInit(fx) {
   };
 })();`;
 }
+// kit-97: a thread reopened by a Shift+click, for the measure (dashboard-measure.test.mjs's THREAD_PAGES):
+// { hash, init, ready, id }. init adds one open thread on Upkeep's card (goal:upkeep, on every project's
+// Goals page) to /api/threads, as dataRewriteInit adds fx's; ready, run until it holds, Shift+clicks the
+// card once (pointer events with Shift, as the layer reads a mouse's), then holds once that thread's own
+// card floats beside the card (TL.open its id, no draft, #tl-card in #tl, not the panel's).
+export function reopenFixture() {
+  const id = 't-20261120-000000001-owner';
+  const at = new Date(Date.now() - 3600000).toISOString();
+  const thread = { ...effThread({ id, subject: { kind: 'item', ref: 'goal:upkeep' }, title: 'About upkeep', turns: [{ id: 'u-20261120-000000001-owner', by: 'owner', writer: 'owner', at, text: 'Is upkeep on track this week?', refs: [], question: null }] }), waiting: 'supervisor' };
+  const init = `(() => {
+  const si = window.setInterval;
+  window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
+  const json = (r, body) => new Response(JSON.stringify(body), { status: r.status, statusText: r.statusText, headers: r.headers });
+  const real = window.fetch;
+  window.fetch = async (u, o) => {
+    const url = String(u && u.url ? u.url : u);
+    const r = await real(u, o);
+    if (String(o?.method || 'GET').toUpperCase() === 'GET' && r.ok && url.startsWith('/api/threads')) {
+      const j = await r.json();
+      return json(r, { ...j, threads: [...(j.threads || []), ${JSON.stringify(thread)}] });
+    }
+    return r;
+  };
+})();`;
+  const ready = `(() => {
+  const el = document.querySelector('#goals [data-subject="goal:upkeep"]');
+  if (!el || !el.getClientRects().length || typeof TL === 'undefined' || !TL.threads.some((t) => t.id === ${JSON.stringify(id)})) return false;
+  if (!window.__reopened) {
+    window.__reopened = true;
+    const b = el.getBoundingClientRect(), x = b.left + b.width / 2, y = b.top + b.height / 2;
+    const at = { clientX: x, clientY: y, bubbles: true, cancelable: true, shiftKey: true, button: 0, pointerType: 'mouse' };
+    el.dispatchEvent(new PointerEvent('pointermove', at));
+    el.dispatchEvent(new PointerEvent('pointerdown', at));
+    el.dispatchEvent(new MouseEvent('click', at));
+    return false;
+  }
+  const c = document.getElementById('tl-card');
+  return TL.open === ${JSON.stringify(id)} && !TL.draft && !c.hidden && c.parentElement.id === 'tl' && c.dataset.key === ${JSON.stringify(id)};
+})()`;
+  return { hash: '#goals', init, ready, id };
+}
 
 // kit-91: a script for Page.addScriptToEvaluateOnNewDocument, the dataRewriteInit pattern: /api/data
 // with each top-level key of patch put in place of the server's, except ooda, merged one level (and

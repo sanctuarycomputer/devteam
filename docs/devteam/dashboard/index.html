@@ -2477,10 +2477,10 @@ function burnup(items, now, ui = PROGRESS_CHART()) {
   const el = ui.el;
   const setForecast = (s) => { if (ui.forecast) ui.forecast.textContent = s; };
   ui.legend.hidden = !items.some(isDone);
-  if (!items.length) { el.innerHTML = empty('No tickets yet. The chart starts when the supervisor or a planner adds them.'); setForecast(''); return; }
+  if (!items.length) { el.innerHTML = empty('None'); setForecast(''); return; }
   const scopePts = items.reduce((a, t) => a + t.weight, 0);
   if (!items.some(isDone)) {
-    el.innerHTML = empty(`Nothing merged yet: ${items.length} ticket${items.length > 1 ? 's' : ''}, ${scopePts} point${scopePts > 1 ? 's' : ''} of scope. The chart and the forecast start at the first merge.`);
+    el.innerHTML = empty('None');
     setForecast(`0/${scopePts} pts`);
     return;
   }
@@ -2594,7 +2594,7 @@ function widgets(p, now, show, { nameGoals = false, all = p } = {}) {
   const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
   const wmax = Math.max(1, ...weeks);
   $('w-throughput').innerHTML = weeks.map((v, i) => `<span title="${v} points, ${i === 7 ? 'this week' : `${7 - i} week(s) ago`}" style="height:${(100 * v) / wmax}%"></span>`).join('');
-  $('w-throughput-note').textContent = weeks.some((v) => v) ? `8 weeks · this week ${weeks[7]}` : 'Nothing merged in the last 8 weeks.';
+  $('w-throughput-note').textContent = weeks.some((v) => v) ? `8 weeks · this week ${weeks[7]}` : 'None';
 }
 
 // ---- kanban board ----
@@ -3199,7 +3199,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${goalAsk ? (() => { const settled = (DATA.ooda.answered || []).filter((a) => a.goal === q.goal && a.kind !== 'goal-approval' && a.status === 'answered'); return settled.length ? `<div class="meta">Rests on your answers to: ${settled.map((a) => `${qlink(a.id, a.question)} (<b>${esc(a.answer)}</b>)`).join('; ')}</div>` : ''; })() : ''}
       ${isOa(q) ? oaSuggest(q) + oaRows(q, pre) : ''}
       ${(q.secrets || []).length ? `${secretsForm(q)}
-      <textarea data-q="${esc(q.id)}" placeholder="Or reply instead: a note for the supervisor (another way to do it, a question). Nothing is posted.">${esc(drafts[q.id] || '')}</textarea>` : `${goalSuggest(q, list)}${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
+      <textarea data-q="${esc(q.id)}" placeholder="Add a note (optional)">${esc(drafts[q.id] || '')}</textarea>` : `${goalSuggest(q, list)}${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
       <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`}
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
@@ -3472,7 +3472,7 @@ function reviewCard(q, o, reasonText) {
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
       ${nextTime(q, cls)}
       <div class="row-inline"><button data-open-review="${esc(q.id)}" ${ok ? '' : 'disabled'}>Open the review</button><button class="ghost" data-decline-open="${esc(q.id)}">Send it back</button><span class="err" id="e-${esc(q.id)}"></span></div>
-      <div data-decline-form="${esc(q.id)}" ${declineOpen ? '' : 'hidden'}><textarea data-q="${esc(q.id)}" placeholder="What should change? The supervisor redraws the page and asks again.">${esc(drafts[q.id] || '')}</textarea><div class="row-inline"><button class="ghost" data-decline="${esc(q.id)}">Send it back</button></div></div>
+      <div data-decline-form="${esc(q.id)}" ${declineOpen ? '' : 'hidden'}><textarea data-q="${esc(q.id)}" placeholder="What should change?">${esc(drafts[q.id] || '')}</textarea><div class="row-inline"><button class="ghost" data-decline="${esc(q.id)}">Send it back</button></div></div>
       ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
 }
@@ -3693,7 +3693,7 @@ function renderReviewActions() {
     <button data-rv-answer disabled>Answer</button>
     <span class="rv-why" id="rv-why"></span>
     <button class="ghost" data-rv-decline-open ${RV.preview ? 'disabled' : ''}>Send it back</button>
-    <div id="rv-decline-form" hidden><textarea id="rv-decline-note" placeholder="What should change? The supervisor redraws the page and asks again."></textarea><button class="ghost" data-rv-decline style="margin-top:6px">Send it back with this note</button></div>
+    <div id="rv-decline-form" hidden><textarea id="rv-decline-note" placeholder="What should change?"></textarea><button class="ghost" data-rv-decline style="margin-top:6px">Send it back with this note</button></div>
     <span class="err" id="e-rv"></span>`;
   updateAnswerButton();
 }
@@ -3725,12 +3725,12 @@ function renderReviewPreview() {
   const raw = (text, bytes, sha, what) => `<p class="meta">${what}: <b>${Number(bytes).toLocaleString()}</b> bytes, sha256 <code>${esc(sha.slice(0, 12))}</code>. <a class="linkish" data-rv-raw>${RV.rawOpen ? 'Hide' : 'Show'} raw JSON</a></p><pre class="rv-raw" ${RV.rawOpen ? '' : 'hidden'}>${esc(text)}</pre>`;
   if (!RV.preview && RV.readonly) {
     const doc = info.result_doc;
-    el.innerHTML = doc ? `<h3>Your answer, as recorded <span class="dim">drawn by the dashboard from the stored result</span></h3>${resultPreview(doc, info.data, true)}${raw(JSON.stringify(doc, null, 2), info.result.bytes, info.result.sha256, 'The stored result')}` : `<h3>${info.declined ? 'Sent back, with no result' : 'No result recorded'}</h3>`;
+    el.innerHTML = doc ? `<h3>Your answer, as recorded</h3>${resultPreview(doc, info.data, true)}${raw(JSON.stringify(doc, null, 2), info.result.bytes, info.result.sha256, 'The stored result')}` : `<h3>${info.declined ? 'Sent back, with no result' : 'No result recorded'}</h3>`;
     return;
   }
   const p = RV.proposal;
-  el.innerHTML = `<h3>What you’re answering <span class="dim">drawn by the dashboard, not the page</span></h3>
-    ${p ? resultPreview(p.obj, info.data, true) + raw(p.text, p.bytes, p.sha256, RV.preview ? 'What the page proposes (in a real question, what the agent would receive)' : 'This is exactly what the agent will receive') : '<p class="empty">Nothing proposed yet. Work through the page above; its answer shows here.</p>'}
+  el.innerHTML = `<h3>What you’re answering</h3>
+    ${p ? resultPreview(p.obj, info.data, true) + raw(p.text, p.bytes, p.sha256, RV.preview ? 'What the page proposes (in a real question, what the agent would receive)' : 'This is exactly what the agent will receive') : empty('None')}
     ${RV.dropped ? `<p class="meta">${RV.dropped} message${RV.dropped === 1 ? '' : 's'} from the page ${RV.dropped === 1 ? 'was' : 'were'} refused.</p>` : ''}`;
 }
 async function setProposal(result) {
@@ -4324,8 +4324,7 @@ function renderGoals() {
   let body;
   if (GOALS_TAB === 'active') {
     const cards = [DATA.upkeep ? upkeepCardHtml(DATA.upkeep, DATA.upkeep_days) : '', ...live.map((g, i) => goalCardHtml(g, R, openQs, { i, n: live.length }))].filter(Boolean);
-    const ask = openQs.find((q) => q.kind === 'goal-definition');
-    body = (cards.length ? grid(cards) : '') + (o.goals.length ? live.length ? '' : '<p class="empty">None</p>' : empty(ask ? `No goals yet. The supervisor has asked for them: <a class="linkish" href="#q/${encodeURIComponent(ask.id)}">answer it in the Inbox</a>.` : 'No goals yet. The supervisor asks the owner for them first (<code>process/planning.md</code> §1).'));
+    body = (cards.length ? grid(cards) : '') + (o.goals.length ? live.length ? '' : '<p class="empty">None</p>' : empty('None'));
   } else {
     const list = GOALS_TAB === 'met' ? met : gone;
     body = list.length ? grid(list.map((g) => closedGoalCardHtml(g, R, openQs))) : '<p class="empty">None</p>';
@@ -5148,13 +5147,13 @@ function historySection(peek, self) {
   const card = (html) => psect('History', html);
   if (peek === undefined) return card('<p class="loading">Loading…</p>');
   if (peek?.transient) return card(empty('Could not load it just now.'));
-  if (!peek || peek.error) return card(empty('Nothing logged yet.'));
+  if (!peek || peek.error) return card(empty('None'));
   if (DRAWER.kind === 'file') {
     const cs = peek.history || [];
-    return card(cs.length ? `<ol class="tl">${cs.map((c) => `<li><time>${esc(when(c.at))}</time>${esc(c.subject)} <span class="muted">· ${esc(c.author)} · <code>${esc(c.sha.slice(0, 12))}</code></span></li>`).join('')}</ol>` : empty('Not committed yet.'));
+    return card(cs.length ? `<ol class="tl">${cs.map((c) => `<li><time>${esc(when(c.at))}</time>${esc(c.subject)} <span class="muted">· ${esc(c.author)} · <code>${esc(c.sha.slice(0, 12))}</code></span></li>`).join('')}</ol>` : empty('None'));
   }
   const items = (peek.history || []).map((l) => [l, lineView(l, self)]).filter(([, x]) => x);
-  return card(items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('Nothing logged yet.'));
+  return card(items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('None'));
 }
 
 // ---- pieces the bodies share ----
@@ -5182,7 +5181,7 @@ function depGraph(ts, { focus = null, groups = null } = {}) {
 function designBlock(d, label = 'Design') {
   if (!d) return '';
   const href = fileHref({ title: label, path: d.path, ...(d.ref ? { ref: d.ref } : {}) });
-  const md = d.tldr && window.marked && window.DOMPurify ? DOMPurify.sanitize(marked.parse(d.tldr, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : d.tldr ? `<pre>${esc(d.tldr)}</pre>` : '<p class="muted">It has no TL;DR yet.</p>';
+  const md = d.tldr && window.marked && window.DOMPurify ? DOMPurify.sanitize(marked.parse(d.tldr, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : d.tldr ? `<pre>${esc(d.tldr)}</pre>` : empty('None');
   return psect(`${label}: the TL;DR`, `<div class="md tldr">${md}</div><p class="small"><a class="linkish" href="${esc(href)}">Read the whole design</a></p>`);
 }
 const reviewList = (rs) => (rs?.length ? `<ul>${rs.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || 'not done')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '');
@@ -5296,7 +5295,7 @@ function progressBlock(items) {
   return `<div class="no-shell">${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
     <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left${usd ? ` · $${usd.toFixed(2)} spent` : ''}</p>
     ${live.length ? `<div class="card chart peek-chart" id="peek-card"><div class="legend" id="peek-legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div><div id="peek-burnup"></div><div class="tip" id="peek-tip"></div></div>` : ''}
-    <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}</div>`;
+    <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : empty('None')}</div>`;
 }
 const uniq = (xs) => [...new Set(xs.filter((x) => x !== undefined && x !== null && x !== ''))];
 const notFound = (kind, id, peek, text, { noRecord = false, rec = null } = {}) => showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, peek, type: kind, noRecord, rec })}${peek?.transient ? `<p class="err">Could not load it just now (${esc(peek.error)}); trying again.</p>` : text ? `<p class="muted">${text}</p>` : ''}${historySection(peek, id)}`);
@@ -5343,7 +5342,7 @@ function spendChart(spend) {
   if (!spend?.length) return '';
   const roles = uniq(spend.map((s) => s.role || 'agent'));
   const series = roles.map((r) => { let sum = 0; return { name: `${r} ($${spend.filter((s) => (s.role || 'agent') === r).reduce((a, s) => a + (s.usd || 0), 0).toFixed(2)})`, points: spend.filter((s) => (s.role || 'agent') === r).map((s) => [Date.parse(s.at), +(sum += s.usd || 0).toFixed(2)]) }; });
-  return psect('Spend over time', `${lineChart(series, { unit: '', height: 140 })}<p class="small muted">Cumulative dollars by role, from the agents' session logs.</p>`);
+  return psect('Spend over time', `${lineChart(series, { unit: '', height: 140 })}`);
 }
 
 // ---- monitoring ----
@@ -5364,7 +5363,7 @@ const pctOr = (x) => (x == null ? '–' : `${x}%`);
 // A sensor's latency over a range, from its bucketed samples: p50 and p95, against its target.
 function sensorChart(series, m, compact = false) {
   const bs = series?.buckets || [];
-  if (!bs.length) return '<p class="muted small">No checks in this range yet.</p>';
+  if (!bs.length) return empty('None');
   const p50 = bs.filter((b) => b.p50 != null).map((b) => [b.t, b.p50]);
   const p95 = bs.filter((b) => b.p95 != null).map((b) => [b.t, b.p95]);
   const down = bs.filter((b) => b.ok < b.n).length;
@@ -5431,7 +5430,7 @@ function openSensor(name) {
       ['Invalid lines', m.invalid ? esc(m.invalid.lines.map((l) => l.why).join('; ')) : '', 'Lines its last run printed that are not events: the provider may have changed its API (probe-drift).'],
     ] })}
     ${(p?.ignores || []).length ? psect('Ignored', `<ul>${p.ignores.map((x) => `<li><code>${esc(x.fingerprint)}</code>: ${esc(x.reason)} <span class="muted">(${esc(who(x.by))}, ${esc(when(x.at))}; lift with <code>sensor unignore ${esc(x.fingerprint)} --owner</code>)</span></li>`).join('')}</ul>`) : ''}
-    ${psect(m.fingerprints > 0 ? 'Fingerprints' : 'What it read', (p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>')}
+    ${psect(m.fingerprints > 0 ? 'Fingerprints' : 'What it read', (p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : empty('None'))}
     ${sensorPeekRows(name, DATA)}
     ${historySection(p, `sensor:${name}`)}`);
   showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
@@ -5482,7 +5481,7 @@ async function openTicket(id) {
 // correction of the goal-impact decision that carries the impact the owner gives; it stands).
 function impactBlock(g) {
   const i = g.impact;
-  if (!i) return ['ready', 'draft'].includes(g.status) ? '<span class="muted">Not judged yet. Its questions are ordered as if it were worth having.</span>' : '';
+  if (!i) return ['ready', 'draft'].includes(g.status) ? empty('None') : '';
   const key = `imp:${i.decision}`;
   return `<b>${esc(cap(i.words))}</b> <span class="muted">(${esc(i.level)} of 4)</span>${i.rationale ? `<div>${linkify(i.rationale)}</div>` : ''}
     <div class="muted">${i.by === 'owner' ? 'You set it' : 'Judged by the supervisor'} ${esc(when(i.at))} · ${dlink(i.decision, 'the decision')} · <a class="linkish" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy">the strategy</a>${i.rejudge ? ` · corrected (${esc(i.correction)}); the supervisor is judging it again` : ''}</div>
@@ -5503,7 +5502,7 @@ const GOAL_PEEK = {
 const gpCard = (id, html) => String(html || '').replace(/<div class="card psect"/g, `<div class="card psect" data-gp="${id}"`);
 const GOAL_PEEK_SECTIONS = {
   steps: (g, c) => { const bar = goalStepsOf(g, c.s, c.R); return bar || c.s.next ? gpCard('steps', psect('Steps', `${bar}${c.s.next ? `<p class="goal-next measure">${c.s.next}</p>` : ''}`)) : ''; },
-  readings: (g, c) => gpCard('readings', psect('Readings', c.readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: c.readings }], { marks: c.marks, unit: c.unit }) : '<p class="muted">No readings yet. The supervisor reads the measure on its tick (devteam.mjs goal reading).</p>')),
+  readings: (g, c) => gpCard('readings', psect('Readings', c.readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: c.readings }], { marks: c.marks, unit: c.unit }) : empty('None'))),
   tldr: (g, c) => gpCard('tldr', designBlock(c.p?.design)),
   problems: (g, c) => (c.problems.length ? gpCard('problems', psect('Problems that threaten it', c.problems.map((x) => `<div class="card small"><span class="badge ${sevBadge(x.severity)}">sev ${esc(x.severity)}</span> <a class="linkish" href="#problem/${encodeURIComponent(x.id)}">${esc(x.title)}</a> <span class="muted">· ${esc(x.status)}${x.realized ? '' : ' · a risk'}</span></div>`).join(''))) : ''),
   decisions: (g, c) => (c.calls.length ? gpCard('decisions', psect('Decisions and acts', `<ol class="tl">${c.calls.slice(0, 30).map((x) => `<li class="act"><time>${esc(when(x.at))}</time>${x.kind === 'decision' ? dlink(x.id, x.what) : `<a class="linkish" href="#act/${encodeURIComponent(x.id)}">${esc(x.what)}</a>`} <span class="muted">· ${authorityWords(x.under)}</span></li>`).join('')}</ol>`)) : ''),
@@ -5513,7 +5512,7 @@ const GOAL_PEEK_SECTIONS = {
     const days = heartbeatDays(c.days);
     if (!days.length) return '';
     const busy = days.filter((d) => d.items.length || d.failed).reverse();
-    return gpCard('heartbeat', psect('Heartbeat', `${heartbeat(days)}${busy.length ? `<ul class="hb-days">${busy.map((d) => `<li><b>${fmtDay(d.day)}</b>${d.failed ? ' <span class="badge high">failed</span>' : ''}${d.items.length ? `: ${d.items.map(esc).join('; ')}` : ''}</li>`).join('')}</ul>` : '<p class="muted">Quiet: nothing ran in these days.</p>'}`));
+    return gpCard('heartbeat', psect('Heartbeat', `${heartbeat(days)}${busy.length ? `<ul class="hb-days">${busy.map((d) => `<li><b>${fmtDay(d.day)}</b>${d.failed ? ' <span class="badge high">failed</span>' : ''}${d.items.length ? `: ${d.items.map(esc).join('; ')}` : ''}</li>`).join('')}</ul>` : empty('None')}`));
   },
   chores: (g, c) => { const cs = c.u.chores || []; return cs.length ? gpCard('chores', psect('Chores in flight', `<ul>${cs.map((x) => `<li><a class="linkish" href="#ticket/${encodeURIComponent(x.id)}">${esc(x.id)}</a>${x.title ? ` ${esc(x.title)}` : ''} <span class="muted">· ${esc(STAGE_WORDS[x.stage] || x.stage || '')}</span></li>`).join('')}</ul>`)) : ''; },
 };
@@ -5585,7 +5584,7 @@ function openGoal(id) {
     ${attrs({ id, peek: p, type: 'goal', rename: { Created: 'Opened' }, front, ctx: { unplanned: g.status === 'ready' ? (r?.unplanned || []).map((u) => u.n) : [] }, computed: [
       ['State', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, 'Where the goal is: defining, waiting for your approval, planning, building, measuring, met, held or let go.'],
       ['Design', design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a>` : '', 'The design document its features implement.'],
-      ['Forecast', (g.forecast?.milestones || []).length ? `<ol>${g.forecast.milestones.map((m) => `<li>${mlink(g.id, m.n, m.title)}: ${esc(m.target)}${unitOf(g.measure?.unit)}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet: sizes only, dates once tickets merge.</div>'}` : '', 'Each milestone: points left and an ETA at the recent rate.'],
+      ['Forecast', (g.forecast?.milestones || []).length ? `<ol>${g.forecast.milestones.map((m) => `<li>${mlink(g.id, m.n, m.title)}: ${esc(m.target)}${unitOf(g.measure?.unit)}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet</div>'}` : '', 'Each milestone: points left and an ETA at the recent rate.'],
       ['Features', feats.length ? `<ul>${feats.map((v) => `<li>${flink(v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul>` : '', 'The features planned for it, and how far each is.'],
       ['Planners', planningFor(g).length ? planningFor(g).map((x) => `<a href="#planner/${encodeURIComponent(x.feature)}">${esc(x.title)}</a> (${esc(ago(x.minutes_silent))})`).join(', ') : '', 'Planners working on its features now.'],
       ['Your verdicts', verdicts.length ? `<ul>${verdicts.map((d) => `<li><b>${esc(words(d.verdict))}</b>${d.notes ? `: ${esc(d.notes)}` : ''}</li>`).join('')}</ul>` : '', 'Every verdict you gave on its design, oldest first.'],
@@ -5648,7 +5647,7 @@ function openRelease(r) {
       <li>${items.filter((t) => !isDone(t)).length} ticket${items.filter((t) => !isDone(t)).length === 1 ? '' : 's'} not merged</li>
       ${gates.length && !tagged ? `<li>checks at the last merge into it (${p.last_merge?.ticket ? tlink(p.last_merge.ticket) : 'a ticket'}, <code>${esc(String(p.last_merge?.sha ?? '').slice(0, 12))}</code>): ${gates.map((g) => `<span class="gate-dot ${g.ok ? 'ok' : 'fail'}">${g.ok ? '✓' : '✗'}</span> ${esc(g.gate)}`).join(' · ')}</li>` : ''}
     </ul>`)}
-    ${psect('Changelog', merged.length ? `<ul>${merged.map((t) => `<li>${tlink(t.id)} <span class="muted">· merged ${esc(when(t.merged_at))}</span></li>`).join('')}</ul>` : '<p class="muted">Nothing merged yet.</p>')}` });
+    ${psect('Changelog', merged.length ? `<ul>${merged.map((t) => `<li>${tlink(t.id)} <span class="muted">· merged ${esc(when(t.merged_at))}</span></li>`).join('')}</ul>` : empty('None'))}` });
 }
 function openWave(w) {
   const items = DATA.progress.tickets.filter((t) => String(t.wave) === String(w));
@@ -5761,7 +5760,7 @@ function openRetro(id) {
       ['Write-up', file ? `<a class="linkish" href="${esc(fileHref(file))}">${esc(file.title)}</a>` : '', 'The retro\'s document.'],
     ] })}
     <p class="ctx measure">${linkify(r.summary)}</p>
-    ${keys.length ? psect('The numbers', `<div class="scroll"><table class="nums"><tr><th></th><th>This retro</th><th>The one before</th></tr>${keys.map((k) => `<tr><td>${esc(words(k))}</td><td>${val(nums.now[k])}</td><td>${val(nums.prev?.[k])}</td></tr>`).join('')}</table></div>`) : nums ? '<p class="muted">Its write-up has no numbers block.</p>' : ''}
+    ${keys.length ? psect('The numbers', `<div class="scroll"><table class="nums"><tr><th></th><th>This retro</th><th>The one before</th></tr>${keys.map((k) => `<tr><td>${esc(words(k))}</td><td>${val(nums.now[k])}</td><td>${val(nums.prev?.[k])}</td></tr>`).join('')}</table></div>`) : nums ? empty('None') : ''}
     <p class="meta">${[nav(all[i + 1], '← the one before,'), nav(all[i - 1], 'the next,')].filter(Boolean).join(' · ')}</p>
     ${historySection(p, id)}`);
 }
@@ -5929,9 +5928,9 @@ function openSignal(key) {
       ['Explained already', s?.explained?.length ? `${esc(s.explained.length)} earlier observation${s.explained.length > 1 ? 's' : ''} on this key` : '', 'Ones a lesson, a problem or a ruling already explains.'],
     ] })}
     ${c?.latest ? `<p class="ctx measure">${linkify(c.latest)}</p>` : ''}
-    ${psect('Its observations', items.length ? `<ul>${items.map((i) => `<li><a class="linkish" href="#observation/${encodeURIComponent(i.id)}">${esc(when(i.at))}</a> ${linkify(clip(i.detail, 160))} <span class="muted">· ${esc(who(i.by))}</span></li>`).join('')}</ul>` : p === undefined ? '<p class="loading">Loading…</p>' : empty('None unexplained.'))}
+    ${psect('Its observations', items.length ? `<ul>${items.map((i) => `<li><a class="linkish" href="#observation/${encodeURIComponent(i.id)}">${esc(when(i.at))}</a> ${linkify(clip(i.detail, 160))} <span class="muted">· ${esc(who(i.by))}</span></li>`).join('')}</ul>` : p === undefined ? '<p class="loading">Loading…</p>' : empty('None'))}
     ${lineageBlock(p)}
-    ${s?.explain?.length ? `<details><summary>How the supervisor explains it</summary><p class="small muted">With what it teaches, or a ruling that it is noise; you can correct either.</p>${s.explain.map((x) => `<pre>${esc(x)}</pre>`).join('')}</details>` : ''}
+    ${s?.explain?.length ? `<details><summary>How the supervisor explains it</summary>${s.explain.map((x) => `<pre>${esc(x)}</pre>`).join('')}</details>` : ''}
     ${historySection(p, key)}`);
 }
 // The weekly learning record: its figures, every record each counts (recomputed from the log as it
@@ -5959,9 +5958,9 @@ function openLearning(id) {
   showDrawer(`<h2 id="drawer-title">The week of ${esc(L?.from ? fmtDate(Date.parse(L.from)) : f.week)}</h2>
     ${attrs({ id, peek: p, type: 'observation' })}
     ${f.detail ? `<p class="ctx measure">${linkify(f.detail)}</p>` : ''}
-    ${psect('The figures', rows.length ? `<div class="scroll"><table class="nums" data-learning-figures><tr><th></th><th>Figure</th><th>Count</th><th>What it counted</th></tr>${rows.map(([g, k, v, xs]) => `<tr><td>${esc(g)}</td><td>${esc(k)}</td><td>${v}</td><td class="small">${L ? ids(xs) : '<span class="loading">Loading…</span>'}</td></tr>`).join('')}</table></div>` : empty('No figures on this record.'))}
-    ${psect('Lesson efficacy', `<p class="small muted">For each lesson a worker or planner was given: what was seen on the signals it came from in the four weeks before it was first given, and since. Counts and records, not a score.</p>
-    ${L ? (eff.length ? `<div class="scroll"><table class="nums" data-efficacy><tr><th>Lesson</th><th>First given</th><th>Before</th><th>Since</th></tr>${eff.map((e) => `<tr><td><a class="linkish" href="#lesson/${encodeURIComponent(e.id)}">${esc(clip(e.statement || e.id, 80))}</a>${e.keys.length ? `<div class="small muted">${e.keys.map((k) => `<code>${esc(k)}</code>`).join(' ')}</div>` : '<div class="small muted">its evidence names no observation</div>'}</td><td>${esc(when(e.first_given))}</td><td>${esc(e.before.count)}<div class="small">${ids(e.before.ids)}</div></td><td>${esc(e.since.count)}<div class="small">${ids(e.since.ids)}</div></td></tr>`).join('')}</table></div>` : empty('No lesson was given to a worker or planner by the end of this week.')) : p === undefined ? '<p class="loading">Loading…</p>' : ''}`)}
+    ${psect('The figures', rows.length ? `<div class="scroll"><table class="nums" data-learning-figures><tr><th></th><th>Figure</th><th>Count</th><th>What it counted</th></tr>${rows.map(([g, k, v, xs]) => `<tr><td>${esc(g)}</td><td>${esc(k)}</td><td>${v}</td><td class="small">${L ? ids(xs) : '<span class="loading">Loading…</span>'}</td></tr>`).join('')}</table></div>` : empty('None'))}
+    ${psect('Lesson efficacy', `
+    ${L ? (eff.length ? `<div class="scroll"><table class="nums" data-efficacy><tr><th>Lesson</th><th>First given</th><th>Before</th><th>Since</th></tr>${eff.map((e) => `<tr><td><a class="linkish" href="#lesson/${encodeURIComponent(e.id)}">${esc(clip(e.statement || e.id, 80))}</a>${e.keys.length ? `<div class="small muted">${e.keys.map((k) => `<code>${esc(k)}</code>`).join(' ')}</div>` : '<div class="small muted">its evidence names no observation</div>'}</td><td>${esc(when(e.first_given))}</td><td>${esc(e.before.count)}<div class="small">${ids(e.before.ids)}</div></td><td>${esc(e.since.count)}<div class="small">${ids(e.since.ids)}</div></td></tr>`).join('')}</table></div>` : empty('None')) : p === undefined ? '<p class="loading">Loading…</p>' : ''}`)}
     ${lineageBlock(p)}
     ${historySection(p, id)}`);
 }
@@ -6026,7 +6025,7 @@ function openPlanner(feature) {
   const pl = (DATA.planners || []).find((x) => x.feature === feature);
   const p = peekOf('planner', feature);
   const idTip = 'The planner\'s name: plan- and the feature it plans. Its tmux window and log file use it.';
-  if (!pl) return showDrawer(`<h2 id="drawer-title">${esc(feature)}</h2>${attrs({ id: `plan-${feature}`, idTip, peek: p, noRecord: true, rec: { id: feature } })}<p class="muted">No planner is working on it; its plan may have landed already.</p>${historySection(p, `plan-${feature}`)}`);
+  if (!pl) return showDrawer(`<h2 id="drawer-title">${esc(feature)}</h2>${attrs({ id: `plan-${feature}`, idTip, peek: p, noRecord: true, rec: { id: feature } })}${empty('None')}${historySection(p, `plan-${feature}`)}`);
   const draft = (p?.draft || []).map((t) => ({ ...t, stage: 'planned', depends_on: t.depends_on || [] }));
   showDrawer(`<h2 id="drawer-title">Planning ${esc(pl.title)}</h2>
     ${attrs({ id: `plan-${pl.feature}`, idTip, peek: p, noRecord: true, rec: { id: feature }, computed: [
@@ -6040,8 +6039,7 @@ function openPlanner(feature) {
       ['Branch', `<code>${esc(pl.branch)}</code>`, 'Where its plan is being written.'],
     ] })}
     ${designBlock(p?.design, 'Its design')}
-    ${draft.length ? psect('Its draft', `<p class="small muted">The tickets its plan holds so far; they reach the board when its plan PR lands.</p><div class="board board-peek" style="--cols:1">${boardCols(draft, new Set(), { only: true, inert: true })}</div>${draft.length > 1 ? depGraph(draft) : ''}`) : ''}
-    <p class="meta">Its plan lands as one reviewed PR; until then its tickets aren't on the board.</p>
+    ${draft.length ? psect('Its draft', `<div class="board board-peek" style="--cols:1">${boardCols(draft, new Set(), { only: true, inert: true })}</div>${draft.length > 1 ? depGraph(draft) : ''}`) : ''}
     ${historySection(p, `plan-${feature}`)}`);
 }
 function openQuestion(id) {
@@ -6940,7 +6938,7 @@ function renderLibrary(lib) {
   const drifted = notLive.filter((a) => publicState(a, PUBLIC, me).drift).length;
   // Restore all in both cases (R4): what goes up is main's version, and the sentence says so
   const pubHead = !landed.length ? ''
-    : !PUBLIC ? '<p class="small muted lib-pub">Publishing happens on the cloud box: there, the Library can make a landed artifact readable by anyone.</p>'
+    : !PUBLIC ? ''
     : !me?.project ? '<p class="small muted lib-pub">To publish from here, set <code>project</code> in settings.md: it is part of every public link.</p>'
     : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50).map((a) => a.slug)), 'Restore all')}</p>` : '';
   const pvNote = onBoxWithout && (lib?.previews ?? []).length ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : '';
@@ -7549,9 +7547,9 @@ function render(d) {
   for (const qid of [...REFUSED.keys()]) if (!d.questions.some((q) => q.id === qid) && !TL.threads.some((t) => t.questions?.some((q) => q.id === qid && q.status === 'open'))) REFUSED.delete(qid);
   d = { ...d, questions: d.questions.filter((q) => !ANSWERED.has(q.id)) };
   // questions first, in the kit's order (the first is the next best step); lessons to keep after them
-  $('questions').innerHTML = (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.')) + goalCards;
+  $('questions').innerHTML = (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('None')) + goalCards;
   $('answered-sum').textContent = `Answered (${o.answered.length})`;
-  $('answered').innerHTML = o.answered.length ? o.answered.map((q) => answeredCard(q)).join('') : empty('Nothing answered yet.');
+  $('answered').innerHTML = o.answered.length ? o.answered.map((q) => answeredCard(q)).join('') : empty('None');
 
   renderOoda(o);
   renderMonitoring(d);
@@ -8047,10 +8045,12 @@ for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click',
 }, true);
 // A card for a thread about to start: its subject fitted to the log's cap; nothing is written until
 // the owner sends the first words.
-// A Settings row whose thread is open opens that thread (one per row; spec §8).
+// A subject with an open thread opens that thread instead (kit-97): one per subject, by tKey, as the kit
+// refuses a second (subjectKey); a Settings or suggestion row by its view alone, wherever on it (spec §8).
 function tlStart(hit) {
   const key = hit.subject.kind === 'page' ? parseSettingView(hit.subject.view) ?? parseSuggView(hit.subject.view) : null;
-  const had = key !== null ? TL.threads.find((t) => t.status === 'open' && t.subject?.kind === 'page' && t.subject.view === hit.subject.view) : null;
+  const k = tKey(tFit(hit.subject));
+  const had = TL.threads.find((t) => t.status === 'open' && t.subject && ((k !== null && tKey(t.subject) === k) || (key !== null && t.subject.kind === 'page' && t.subject.view === hit.subject.view)));
   if (had) return void tlOpen(had.id);
   TL.open = null;
   TL.resolving = false;
@@ -8339,13 +8339,13 @@ function tArtFpNow(s) {
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
   <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted"><span id="tl-c-spin" aria-hidden="true" hidden style="display:inline-block;width:10px;height:10px;margin-right:6px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;vertical-align:-1px;animation:spin .9s linear infinite"></span><span id="tl-c-state" role="status" aria-live="polite"></span></div>
-  <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Shift+Enter sends; Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
+  <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Message"></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
 // The subject as one tight line (an icon, its name, where it is), opening to what was captured.
 // Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
 function tlCtx(s, title, note) {
   const icon = !s ? 'message-circle' : s.kind === 'item' ? 'mouse-pointer-click' : 'map-pin';
   const rows = s ? Object.entries(s).filter(([k]) => k !== 'kind').map(([k, v]) => `<span>${esc(words(k))}</span><code>${esc(typeof v === 'string' ? v : JSON.stringify(v))}</code>`).join('') : '';
-  return `<details class="tl-ctx"><summary><i class="icon-${icon}" aria-hidden="true"></i><b>${esc(title)}</b><span class="muted small">${esc(tWhere(s))}${note ? ` · ${esc(note)}` : ''}</span></summary>${rows ? `<div class="kv">${rows}</div>` : '<p class="small muted">Started from the dock, about nothing on the page.</p>'}</details>`;
+  return `<details class="tl-ctx"><summary><i class="icon-${icon}" aria-hidden="true"></i><b>${esc(title)}</b><span class="muted small">${esc(tWhere(s))}${note ? ` · ${esc(note)}` : ''}</span></summary>${rows ? `<div class="kv">${rows}</div>` : ''}</details>`;
 }
 // What a supervisor turn did, as links: "Goal Launch checkout", "Ticket …", "Act open it".
 function tlRef(r) {
@@ -8413,7 +8413,9 @@ function tlCardBody(t) {
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
     tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
-    turns.innerHTML = t ? tlTurns(t) : '<p class="small muted">Say what you want done about it. Nothing is sent until you do.</p>';
+    turns.innerHTML = t ? tlTurns(t) : '';
+    const box = tlEl('tl-c-text');
+    if (box) box.placeholder = t?.turns?.length ? 'Reply' : 'Message';
     turns.scrollTop = turns.scrollHeight;
   }
   const line = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
@@ -8920,7 +8922,7 @@ function thListHtml() {
   const rows = which === 'open' ? open : resolved;
   const body = !TL.have ? '<p class="empty">Reading the threads…</p>'
     : rows.length ? `<ul class="thread-list" id="tl-list">${rows.map((t) => thRow(t, nums)).join('')}</ul>`
-    : `<p class="empty">${which === 'open' ? 'No open threads. Hold Shift and click anything on the page, or start one with +.' : 'Nothing resolved yet.'}</p>`;
+    : empty('None');
   return `<div id="ask-threads"></div>${seg}${body}`;
 }
 // The Inbox tab (kit-100 spec §2.2), first: its count is the Inbox's (red, by a page rule: not `waiting`); its pane

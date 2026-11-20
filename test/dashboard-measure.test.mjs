@@ -91,7 +91,9 @@ const AUTONOMY_PAGES = ((init = lib.autonomyFixture().init, peek = (extra) => `!
 // kit-96: the Loop
 const LOOP_PAGES = frameOnly(['loop']);
 // kit-97: one thread per subject (not THREADS_PAGES, the Threads panel's list below)
-const THREAD_PAGES = [];
+// a thread's card reopened by a Shift+click on Upkeep's card (its open thread, not a new one), floating on
+// Goals; page-top at 1440x900 only, as the Goals entries above (o-20261116-110914358)
+const THREAD_PAGES = [lib.reopenFixture()].map(({ hash, init, ready }) => ({ hash, init, ready, narrow: { view: '#no-such-view' } }));
 // kit-99: the Trust Score's suggestions
 const TRUST_SUGG_PAGES = [];
 // kit-171: attachments
@@ -137,6 +139,16 @@ const PEEKS_MEASURED = (ids) => {
   ].map(([kind, id]) => ({ hash: `#${kind}/${e(id)}`, ready: PEEK_READY, opts: PEEK_OPTS }))
     .concat([{ hash: `#file?path=${e(ids.file)}`, ready: PEEK_READY, opts: PEEK_OPTS }]);
 };
+
+// kit-95: every page the dashboard has (a data-page section) is on the list, but Self Improvement (the Loop),
+// whose entries are kit-96's; a page added without an entry fails here, with no browser needed
+test('the dashboard measure: every page but the Loop is listed', () => {
+  const html = fs.readFileSync(new URL('../docs/devteam/dashboard/index.html', import.meta.url), 'utf8');
+  const pages = [...new Set([...html.matchAll(/<section id="[^"]+"[^>]*\sdata-page="([a-z-]+)"/g)].map((m) => m[1]))].filter((id) => id !== 'loop');
+  assert.ok(pages.length >= 12, `the page sections are found: ${pages.join(' ')}`);
+  const listed = (id) => PAGES.some((pg) => pg.hash === `#${id}` || pg.hash.startsWith(`#${id}?`));
+  assert.deepEqual(pages.filter((id) => !listed(id)), []);
+});
 
 test('the dashboard measure: every listed page at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-'));
