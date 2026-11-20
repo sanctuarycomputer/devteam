@@ -7348,7 +7348,9 @@ function cmdMerge() {
       const noHooks = ['-c', 'core.hooksPath=/dev/null'];
       const wt = detachedWorktree(checkedMain, `land-${slug(branch)}`, R);
       try {
-        if (lg([...noHooks, '-c', 'merge.directoryRenames=conflict', 'merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt) === null) return `${sha.slice(0, 12)} does not merge onto ${mainBranch}${inR}`;
+        // one killed at the timeout says so, never that the head doesn't merge (final-11 F6)
+        const lm = recurringRegistry.git([...noHooks, '-c', 'merge.directoryRenames=conflict', 'merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], { cwd: wt });
+        if (!lm.ok) return lm.timedOut ? `the landing merge of ${sha.slice(0, 12)} onto ${mainBranch}${inR} timed out; nothing pushed` : `${sha.slice(0, 12)} does not merge onto ${mainBranch}${inR}`;
         // What is pushed is what was judged: one merge commit of exactly the checked main and the
         // head, in that order, whose jobs are the ones the checks said land. Anything that moved HEAD
         // is refused, and nothing is pushed.

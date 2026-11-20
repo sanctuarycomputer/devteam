@@ -1400,7 +1400,10 @@ test('A15 landing: forge git, a landing merge that hangs is killed at its timeou
     const before = T.g(['rev-parse', 'origin/main']);
     const acts = T.acts().length;
     const t0 = Date.now();
-    refused(T.merge('mhang', [], { PATH: `${dir}${path.delimiter}${process.env.PATH}`, DEVTEAM_GIT_TIMEOUT_MS: '15000' }));
+    // it says it timed out, never that the head doesn't merge (final-11 F6)
+    const r = T.merge('mhang', [], { PATH: `${dir}${path.delimiter}${process.env.PATH}`, DEVTEAM_GIT_TIMEOUT_MS: '15000' });
+    refused(r, /the landing merge of [0-9a-f]{12} onto main timed out; nothing pushed/);
+    assert.doesNotMatch(r.text, /does not merge/);
     assert.ok(Date.now() - t0 < 100000, `refused at the timeout, before the hung merge returned (${Date.now() - t0} ms)`);
     T.g(['fetch', '-q', 'origin']);
     assert.equal(T.g(['rev-parse', 'origin/main']), before, 'nothing pushed');
