@@ -26919,9 +26919,75 @@ async function browserLaunchChrome(ctx, { headed }) {
     });
     if (r.cdp) return { cdp: r.cdp };
     try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
-    if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) { ctx.notes.push("Chrome's sandbox isn't available on this machine; it runs without it."); continue; }
+    if (r.exited && !tries && /No usable sandbox|setuid sandbox/.test(r.buf)) {
+      const note = "Chrome's sandbox isn't available on this machine; it runs without it.";
+      if (!ctx.notes.includes(note)) ctx.notes.push(note); // a forget's relaunch says it once
+      continue;
+    }
     throw new Error(r.late ? "browser: Chrome didn't open its DevTools pipe in 30 s" : 'browser: Chrome exited before its DevTools pipe opened');
   }
+}
+// One Chrome ended: Browser.close on its pipe, then (not gone in 5 s) its group SIGTERM, SIGKILL 2 s
+// later; its helpers killed with the group; its pipe closed. The stop path's and a forget's.
+async function browserEndChrome(cdp, pid) {
+  if (pid && browserAlive(pid)) {
+    await Promise.race([cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
+    if (!(await browserGone(pid, 5000))) {
+      try { process.kill(-pid, 'SIGTERM'); } catch {}
+      if (!(await browserGone(pid, 2000))) { try { process.kill(-pid, 'SIGKILL'); } catch {} await browserGone(pid, 3000); }
+    }
+  }
+  if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
+  cdp?.close();
+}
+// A Chrome and its pipe watched: its exit or its pipe closing stops the daemon only while it is the
+// current Chrome and not retired by a forget (whose old Chrome's end is expected). The view's
+// screencast frames are taken on this pipe.
+function browserWatchChrome(ctx, chrome, cdp) {
+  const gone = () => { if (chrome === ctx.chrome && !chrome.retired) browserShutdown(ctx, 'chrome exited'); };
+  chrome.once('exit', gone);
+  cdp.on('close', gone);
+  cdp.on('Page.screencastFrame', (p, sid) => browserViewFrame(ctx, p, sid));
+}
+// Sign out of everything (the view's forget), on the verbs' queue: the screencast stopped, the
+// current Chrome retired and ended, the profile folder (ctx.profile, the one the daemon runs on)
+// removed only once no process carries it, made again empty with this checkout's root.json, its start
+// steps, a fresh Chrome on about:blank, the tabs watched again, state.json rewritten with the new
+// chrome_pid, and the screencast started again on the same viewer (its seq goes on). The daemon,
+// guard, control port and preview stay. A stop meanwhile wins: after each await, ctx.stopping ends
+// it (browserShutdown kills ctx.chrome, whichever it is). Any failure stops the daemon.
+async function browserForgetRestart(ctx) {
+  if (ctx.stopping || !ctx.ready) return;
+  try {
+    ctx.ready = false; // the view's input dropped, its tick idle, a new socket 503
+    const v = ctx.viewer;
+    if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
+    const old = ctx.chrome;
+    old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
+    await browserEndChrome(ctx.cdp, old.pid);
+    if (ctx.stopping) return;
+    let procs = browserProcsOn(ctx.profile);
+    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(100);
+    if (ctx.stopping) return;
+    if (procs === null || procs.length) return void browserShutdown(ctx, 'error'); // nothing removed on a guess
+    fs.rmSync(ctx.profile, { recursive: true, force: true });
+    ctx.profile = browserProfile();
+    await browserPrepareProfile(ctx.profile, []);
+    if (ctx.stopping) return;
+    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // launched while it stopped
+    ctx.cdp = cdp;
+    browserWatchChrome(ctx, ctx.chrome, cdp);
+    ctx.tabs = [];
+    ctx.active = null;
+    await browserWatchTabs(ctx);
+    for (let i = 0; i < 100 && !ctx.stopping && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
+    if (ctx.stopping) return;
+    ctx.state = { ...ctx.state, chrome_pid: ctx.chrome.pid };
+    browserWriteState(ctx.state);
+    ctx.ready = true;
+    if (ctx.viewer) browserViewTick(ctx, ctx.viewer); // the screencast again, on the same socket
+  } catch { browserShutdown(ctx, 'error'); }
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
 // hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
@@ -26932,16 +26998,7 @@ function browserShutdown(ctx, why) {
   ctx.stopping = (async () => {
     clearTimeout(ctx.idle);
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
-    const pid = ctx.chrome?.pid;
-    if (pid && browserAlive(pid)) {
-      await Promise.race([ctx.cdp?.send('Browser.close').catch(() => {}), browserSleep(5000)]);
-      if (!(await browserGone(pid, 5000))) {
-        try { process.kill(-pid, 'SIGTERM'); } catch {}
-        if (!(await browserGone(pid, 2000))) { try { process.kill(-pid, 'SIGKILL'); } catch {} await browserGone(pid, 3000); }
-      }
-    }
-    if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
-    ctx.cdp?.close();
+    await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
@@ -27041,6 +27098,16 @@ function browserControl(ctx, secret) {
   let queue = Promise.resolve();
   // with a viewer's socket open, the idle timer arms again rather than stop the daemon
   const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (ctx.viewer && !ctx.stopping ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
+  // ctx.serial(fn): fn on the verbs' queue (the view's forget), the idle timer paused as for a verb
+  ctx.serial = (fn) => {
+    const run = queue.then(async () => {
+      if (ctx.stopping) return;
+      clearTimeout(ctx.idle);
+      try { await fn(); } catch {} finally { if (!ctx.stopping) arm(); }
+    });
+    queue = run;
+    return run;
+  };
   const server = http.createServer((req, res) => {
     req.on('error', () => {});
     res.on('error', () => {});
@@ -27266,7 +27333,11 @@ function browserViewInput(ctx, v, text) {
   let m;
   try { m = browserViewMessage(JSON.parse(text)); } catch { return; }
   if (!m) return;
-  if (m.t === 'forget') return; // Sign out of everything: Task 3 runs it on the verbs' queue (ctx.serial)
+  if (m.t === 'forget') { // Sign out of everything, on the verbs' queue; one queued at a time
+    if (ctx.forgetting) return;
+    ctx.forgetting = true;
+    return void ctx.serial(() => browserForgetRestart(ctx)).finally(() => { ctx.forgetting = false; });
+  }
   const sid = ctx.active?.sessionId;
   if (!sid) return; // a tab with no session: dropped
   const cdp = (method, params) => browserViewCdp(ctx, method, params, sid);
@@ -27362,7 +27433,7 @@ function browserViewServer(ctx) {
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null, viewer: null, ready: false };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   const viewPort = Number(process.env.PORT);
   const rec = readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser' && r.port === viewPort);
@@ -27379,10 +27450,8 @@ async function browserServe({ chrome: bin }) {
     ctx.guard = await startBrowserGuard();
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
-    ctx.chrome.once('exit', () => browserShutdown(ctx, 'chrome exited'));
     ctx.cdp = cdp;
-    ctx.cdp.on('Page.screencastFrame', (p, sid) => browserViewFrame(ctx, p, sid));
-    ctx.cdp.on('close', () => browserShutdown(ctx, 'chrome exited'));
+    browserWatchChrome(ctx, ctx.chrome, cdp);
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
     ctx.verbs = browserVerbs(ctx);
@@ -27390,7 +27459,8 @@ async function browserServe({ chrome: bin }) {
     const { server, arm } = browserControl(ctx, secret);
     ctx.control = server;
     const controlPort = await browserListen(server, 0);
-    browserWriteState({ browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview });
+    ctx.state = { browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview };
+    browserWriteState(ctx.state); // a forget rewrites it with its new chrome_pid
     ctx.ready = true; // the view's guard 5: Chrome is up
     arm();
     process.on('uncaughtException', () => browserShutdown(ctx, 'error'));
