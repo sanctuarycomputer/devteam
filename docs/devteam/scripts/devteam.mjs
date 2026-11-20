@@ -7282,9 +7282,12 @@ function cmdMerge() {
     out(`landed the records of ${id} at ${rec.sha.slice(0, 12)} in home (${ra.id})`);
   }
   // The code lands onto the main the checks judged (kit-162): what they cleared holds only there.
-  // A fetch that fails or times out can't tell: it refuses, never clears (T3-1).
+  // A fetch that fails or times out can't tell: it refuses, never clears (T3-1). The landing's git
+  // calls are bounded (recurringRegistry.git: a timeout, then SIGKILL), and one that times out
+  // refuses like one that fails (final-10 F4).
+  const lg = (args, cwd) => { const r = recurringRegistry.git(args, { cwd }); return r.ok ? r.out.trim() : null; };
   const moved = () => {
-    if (R.git(['fetch', '--quiet', 'origin', mainBranch]) === null) return `couldn't fetch ${mainBranch}${inR} to check it hasn't moved since the checks; run merge again`;
+    if (lg(['fetch', '--quiet', 'origin', mainBranch], R.root) === null) return `couldn't fetch ${mainBranch}${inR} to check it hasn't moved since the checks; run merge again`;
     const tip = R.resolveCommit(`origin/${mainBranch}`);
     return tip === checkedMain ? null : `main moved since the checks (${String(checkedMain).slice(0, 12)} to ${String(tip).slice(0, 12)}); run merge again`;
   };
@@ -7298,13 +7301,13 @@ function cmdMerge() {
       const noHooks = ['-c', 'core.hooksPath=/dev/null'];
       const wt = detachedWorktree(checkedMain, `land-${slug(branch)}`, R);
       try {
-        if (R.git([...noHooks, '-c', 'merge.directoryRenames=conflict', 'merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt) === null) return `${sha.slice(0, 12)} does not merge onto ${mainBranch}${inR}`;
+        if (lg([...noHooks, '-c', 'merge.directoryRenames=conflict', 'merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt) === null) return `${sha.slice(0, 12)} does not merge onto ${mainBranch}${inR}`;
         // What is pushed is what was judged: one merge commit of exactly the checked main and the
         // head, in that order, whose jobs are the ones the checks said land. Anything that moved HEAD
         // is refused, and nothing is pushed.
-        const head = R.git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], wt);
+        const head = lg(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], wt);
         if (!head) return `couldn't read the landing merge's commit; nothing pushed`;
-        const parents = (R.git(['rev-list', '--parents', '-n', '1', head], wt) ?? '').split(' ').slice(1);
+        const parents = (lg(['rev-list', '--parents', '-n', '1', head], wt) ?? '').split(' ').slice(1);
         if (parents.length !== 2 || parents[0] !== checkedMain || parents[1] !== sha) return `the landing merge at ${head.slice(0, 12)} is not the merge of ${sha.slice(0, 12)} onto ${mainBranch}${inR} at ${checkedMain.slice(0, 12)} the checks judged; nothing pushed`;
         // (main's broken file, left as it is, lands as it was: its entry is main's, entry for entry)
         if (R.name === 'home' && landsJobs && !landsJobs.problem) {
@@ -7313,7 +7316,7 @@ function cmdMerge() {
           const kept = !!M?.problem && !!H.entry && H.entry === M.entry && !Object.keys(landsJobs.changed).length;
           if (H.failed || (H.problem ? !kept : Object.keys(recurringRegistry.changed(landsJobs.jobs, H.jobs)).length > 0)) return `the landing merge at ${head.slice(0, 12)} lands other jobs (recurring.json) than the checks judged${H.problem ? ` (${H.problem})` : ''}; nothing pushed`;
         }
-        if (R.git([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
+        if (lg([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${mainBranch}:${checkedMain}`, 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
       } finally {
         R.git(['worktree', 'remove', '--force', wt], R.root);
       }
@@ -23964,9 +23967,9 @@ const recurringRegistry = Object.freeze({
   inSettings: () => `settings.md has "recurring": the jobs live in ${recurringRegistry.path()}; move them there (it lands with a recurring-edit answer, as any job change does)`,
   // git, bounded: every call the registry makes has a timeout and is killed at it; { status, out,
   // err, timedOut, ok }. A timeout or a failure is never read as an answer. encoding null gives
-  // out as a Buffer (the bytes git printed).
+  // out as a Buffer (the bytes git printed). DEVTEAM_GIT_TIMEOUT_MS only for tests.
   git(args, { cwd = HOME_CWD, env, encoding = 'utf8' } = {}) {
-    const r = spawnSync('git', args, { cwd, env: env ? { ...process.env, ...env } : process.env, encoding: encoding ?? 'buffer', timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    const r = spawnSync('git', args, { cwd, env: env ? { ...process.env, ...env } : process.env, encoding: encoding ?? 'buffer', timeout: Number(process.env.DEVTEAM_GIT_TIMEOUT_MS) || 120000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
     const timedOut = r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGKILL';
     return { status: r.status, out: r.stdout ?? (encoding === null ? Buffer.alloc(0) : ''), err: String(r.stderr ?? ''), timedOut, ok: r.status === 0 && !timedOut };
   },

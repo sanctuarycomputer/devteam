@@ -1185,6 +1185,24 @@ test('A15 landing: forge git, main rewound between the checks and the landing: t
   } finally { T.done(); }
 });
 
+test('A15 landing: forge git, a landing push that hangs is killed at its timeout and refused, never waited on (final-10 F4)', { timeout: 300000 }, () => {
+  const T = setup('a15-hang');
+  try {
+    // a git whose push to main never returns (a hung remote): exec, so the kill reaches the sleep
+    // itself; the kit's git timeout cut to 20 s (DEVTEAM_GIT_TIMEOUT_MS), so the file stays short
+    const dir = path.join(T.base, 'git-push-hangs');
+    write(path.join(dir, 'git'), `#!/bin/sh\ncase " $* " in *" push --quiet --no-verify --force-with-lease="*) exec sleep 200 ;; esac\nexec "${REAL_GIT}" "$@"\n`);
+    fs.chmodSync(path.join(dir, 'git'), 0o755);
+    T.choreBranch('hang', (w) => write(path.join(w, NOTES), 'hang\n'));
+    const before = T.g(['rev-parse', 'origin/main']);
+    const t0 = Date.now();
+    refused(T.merge('hang', [], { PATH: `${dir}${path.delimiter}${process.env.PATH}`, DEVTEAM_GIT_TIMEOUT_MS: '20000' }), /push to main refused \(did main move\?\)/);
+    assert.ok(Date.now() - t0 < 100000, `refused at the timeout, before the hung push returned (${Date.now() - t0} ms)`);
+    T.g(['fetch', '-q', 'origin']);
+    assert.equal(T.g(['rev-parse', 'origin/main']), before, 'nothing landed');
+  } finally { T.done(); }
+});
+
 test('A16: settings.md holds no jobs: no default, no words, and validate reads the jobs file of the project dir in use', () => {
   const T = setup('settings');
   try {
