@@ -522,7 +522,8 @@ test('presses: the page answers before the server, and a refusal puts it back', 
     assert.equal(await p.ev(`${kcard}.querySelector('details[data-technical]').open`), false, 'the technical wording folded');
     assert.match(await p.ev(`${kcard}.querySelector('details[data-technical]').textContent`), /The build uses make/);
     assert.equal(await p.ev(`!!document.querySelector('#questions [data-know="${KA}"]')`), false, 'the agents\' own lesson is not in the Inbox');
-    assert.match(await p.ev(`document.getElementById('knowledge').textContent`), /The agents' own lessons, waiting for the supervisor \(1\)/, 'it is in the Loop, folded');
+    // kit-96: Knowledge is a table; the agents' own candidate is its row (first cell's [data-subject] names the record), Status "proposed"
+    assert.equal(await p.ev(`(() => { const tr = [...document.querySelectorAll('#knowledge tr[data-row]')].find((r) => r.querySelector('[data-subject$=":${KA}"]')); return tr ? tr.children[2].textContent.trim() : null; })()`), 'proposed', 'it is in the Loop, as a proposed row');
     await hold();
     await p.click(`[data-know="${K}"][data-status="accepted"]`);
     assert.equal(await p.ev(`!!${lesson}`), false, 'gone at once');
@@ -1463,7 +1464,8 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
 test('every item the dashboard draws says what it is; a question asked in a thread links to it; an answer from a thread says so', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
   for (const type of ['goal', 'question', 'ticket', 'planner', 'observation', 'problem', 'lesson', 'act', 'preview', 'artifact']) assert.match(html, new RegExp(`subj\\('${type}'`), `the ${type} renderer marks its item`);
-  assert.match(html, /subj\(decSubject\(r\)/, 'and the Decide feed, by kind');
+  // kit-96: the Decide table's rows (decRows) mark their kind through decSubject
+  assert.match(html, /const kind = decSubject\(r\);[\s\S]{0,300}subj\(kind, r\.id/, 'and the Decide table, by kind');
   const F = threadsFixture('threads-items');
   const later = cleanup(t);
   later(() => F.done());
@@ -4340,16 +4342,14 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   // A click with nothing landing from finding the card to the release's own work (pointerup's
   // setTimeout draws what the press held back), so a refresh can't move or replace what is clicked.
   const click = async (sel) => { await p.ev('window.__still()'); try { await p.click(sel); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
-  const card = (sel) => `#observations [data-open="observation/${sel}"]`;
-  await soon(`!!document.querySelector('${card(O1)}')`, 'the observation card');
-  // a young instance, no weekly learning record yet: tiles above the tabs, not charts
-  assert.match(await p.ev(`document.querySelector('#learning [data-learn="young"]')?.textContent ?? ''`), /The loop needs a few weeks of calls, answers and lessons before trends mean anything/);
-  assert.equal(await p.ev(`document.querySelectorAll('#learning svg').length`), 0);
-  assert.equal(await p.ev(`document.querySelector('${card(O1)} .place').textContent`), 'Part of a recurring signal (2 of 3)');
+  // kit-96: the Observe feed is a table, one row per observation, its first cell's [data-subject] naming the record; the
+  // card's place line and the young instance's tiles are gone (the place is the peek's Where it sits, checked below)
+  const card = (sel) => `#observations tr[data-row]:has([data-subject="observation:${sel}"])`;
+  await soon(`!!document.querySelector('${card(O1)}')`, 'the observation row');
   // an o- id in text links to its sidepeek
   assert.equal(await p.ev(`document.querySelector('${card(O2)}').querySelector('a[href="#observation/${O1}"]') !== null`), true, 'an o- id in text is a link');
-  // a click anywhere on the card (here its detail, no link in it) opens it
-  await click(`${card(O1)} > div`);
+  // a click anywhere on the row (here its first cell, no link in it) opens it
+  await click(`${card(O1)} td`);
   await soon(`location.hash === '#observation/${O1}' && !document.getElementById('drawer').hidden`, 'the observation sidepeek');
   // where it came from, under its properties (kit-88: every peek opens with its properties)
   await soon(`/From the supervisor/.test(document.querySelector('#drawer-body section.attrs + [data-from]')?.textContent ?? '')`, 'where it came from, under the properties');
@@ -4362,11 +4362,12 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   // closed once it has slid out (kit-88): until then it still covers the cards under it
   await soon(`document.getElementById('drawer').hidden`, 'the peek closed');
   await click('[data-tab="orient"]');
-  const sig = `#clusters [data-open="signal/${encodeURIComponent('metrics:flaky-gate:web/e2e')}"]`;
-  await soon(`!!document.querySelector(${JSON.stringify(sig)})`, 'the signal card');
-  // thirty hours unexplained: orientation debt, whose card opens the same signal
-  assert.match(await p.ev(`document.getElementById('debt').textContent`), /Metrics flaky-gate:web\/e2e · seen 3 times · unexplained for 30 hours/);
-  await click(`${sig} > div`);
+  // kit-96: the recurring signal is a row of the Knowledge table (its first cell holds the signal's detail, no data-subject);
+  // #debt is gone (the thirty hours unexplained are that table's Waiting column, checked by A3 in dashboard-loop.test.mjs)
+  const sigAt = `[...document.querySelectorAll('#knowledge tr[data-row]')].find((tr) => /web\\/e2e failed/.test(tr.children[0].textContent))`;
+  await soon(`!!(${sigAt})`, 'the signal row');
+  const sig = `#knowledge tr[data-row="${await p.ev(`${sigAt}.dataset.row`)}"]`;
+  await click(`${sig} td`);
   await soon(`decodeURIComponent(location.hash) === '#signal/metrics:flaky-gate:web/e2e' && !document.getElementById('drawer').hidden`, 'the signal sidepeek');
   await soon(`document.querySelectorAll('#drawer-body .psect-body > ul a[href^="#observation/"]').length === 3`, 'its three observations');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Recurring signal/);

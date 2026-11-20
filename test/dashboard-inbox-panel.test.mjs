@@ -231,11 +231,17 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.click('#th-close');
     await soon(`!${IS_OPEN}`, 'the panel closed');
 
-    // the Loop's "waiting for you in the Inbox": a modified click is the browser's (no preventDefault, no panel);
-    // a plain one opens the tab over Loop
+    // the Inbox link of an owner's proposed lesson's peek, opened from its row on Orient (kit-96: the Knowledge feed's own
+    // "waiting for you in the Inbox" line is gone with the feed; this is the link the Loop has now): a modified click is the
+    // browser's (no preventDefault, no panel); a plain one opens the tab over Loop, the peek staying
+    const LINK = '#drawer-body a[href="#inbox"]';
     await p.ev("location.hash = '#loop?lt=orient'");
-    await soon(`location.hash === '#loop?lt=orient' && ${ON_PAGE('loop')} && !document.body.classList.contains('peek-open') && !${IS_OPEN} && !!document.querySelector('#knowledge a[href="#inbox"]')?.getClientRects().length`, "Orient, the Loop's Inbox link");
-    const modified = await p.ev(`(() => { const a = document.querySelector('#knowledge a[href="#inbox"]'), seen = [];
+    await soon(`location.hash === '#loop?lt=orient' && ${ON_PAGE('loop')} && !document.body.classList.contains('peek-open') && !${IS_OPEN} && !!document.querySelector('#knowledge tr[data-row] [data-subject="lesson:${fx.L1}"]')?.getClientRects().length`, "Orient, the lesson's row");
+    await p.click(`#knowledge tr[data-row]:has([data-subject="lesson:${fx.L1}"]) td`);
+    await soon(`DRAWER.id === ${JSON.stringify(fx.L1)} && !!document.querySelector('${LINK}') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && PEEKS.has(peekKey('lesson', ${JSON.stringify(fx.L1)}))`, "the lesson's peek from its row, its Inbox link");
+    await soon(STEADY(LINK), "the peek's Inbox link still");
+    const lessonAt = await p.ev('location.hash');
+    const modified = await p.ev(`(() => { const a = document.querySelector('${LINK}'), seen = [];
       // after the page's handlers (window, bubbling): what they did, then the default stopped so nothing navigates
       const look = (e) => { seen.push(e.defaultPrevented); e.preventDefault(); };
       addEventListener('click', look);
@@ -244,14 +250,18 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
       // (a Shift+click is also the thread layer's: any draft it began is dropped)
       if (TL.draft) tlClose();
       return { seen, th: TH.th, at: INBOX_AT, hash: location.hash }; })()`);
-    assert.deepEqual(modified, { seen: [false, false, false, false], th: null, at: null, hash: '#loop?lt=orient' }, 'a modified click: not prevented, no panel');
+    assert.deepEqual(modified, { seen: [false, false, false, false], th: null, at: null, hash: lessonAt }, 'a modified click: not prevented, no panel');
     await p.ev('new Promise((r) => setTimeout(() => r(true), 300))');
     assert.equal(await p.ev(IS_OPEN), false, 'still closed');
-    await soon(STEADY('#knowledge a[href="#inbox"]'), "the Loop's Inbox link still");
-    await p.click('#knowledge a[href="#inbox"]');
-    await soon(`location.hash === '#loop?lt=orient&th=inbox' && ${ON_PAGE('loop')} && ${ON_INBOX}`, "the Loop's link: the panel on Inbox over Loop");
+    await soon(STEADY(LINK), "the peek's Inbox link still");
+    await p.click(LINK);
+    await soon(`history.state?.page === '#loop?lt=orient&th=inbox' && ${ON_PAGE('loop')} && ${ON_INBOX} && !document.getElementById('drawer').hidden`, "the peek's link: the panel on Inbox over Loop, the peek open");
+    assert.equal(await p.ev('location.hash'), lessonAt, 'the peek\'s head kept');
     await p.click('#th-close');
     await soon(`!${IS_OPEN}`, 'the panel closed');
+    await p.ev("document.getElementById('drawer-close').click()");
+    await soon("document.getElementById('drawer').hidden", 'the peek closed');
+
     await p.ev("location.hash = '#overview'");
     await soon(`location.hash === '#overview' && ${ON_PAGE('overview')} && !document.body.classList.contains('peek-open') && !${IS_OPEN}`, 'Overview');
 

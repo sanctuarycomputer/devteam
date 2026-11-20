@@ -683,10 +683,11 @@ const howCases = (ids) => {
   const e = encodeURIComponent;
   const thread = (subject) => ({ sel: `button[type="button"][data-thread-on="${subject}"]` });
   return {
-    act: { sel: 'a[href="#loop?lt=act"]', text: 'Correct, on its row in Self Improvement' },
+    // kit-96: Correct is the thread button, on the row and here (there is no row link to it any more)
+    act: { sel: `button.ghost.mini[data-thread-on="act:${ids.act}"]`, text: 'Correct' },
     actUnderDecision: { sel: `a[href="#decision/${e(ids.decision)}"]`, text: 'Correct its decision' },
     actCorrected: { text: 'Corrected by' },
-    decision: { sel: 'a[href="#loop?lt=decide"]', text: 'Correct, on its row in Self Improvement' },
+    decision: { sel: `button.ghost.mini[data-thread-on="decision:${ids.decision}"]`, text: 'Correct' },
     decisionNotMine: thread(`decision:${ids.decisionNotMine}`),
     qDefaulted: { sel: `a[href="#inbox"][data-answered-go="${ids.qDefaulted}"]`, text: 'Overrule it from its card in the Inbox' },
     qAnswered: { ...thread(`question:${ids.qAnswered}`), text: 'Settled; to raise it again' },
@@ -1068,26 +1069,26 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.deepEqual(untipped, [], 'every key has a tooltip');
   });
 
-  await t.test('may correct: only a call whose row the Decide tab draws', async () => {
-    // the last row the Decide tab draws and the first it doesn't, both the fixture's calls
-    const edge = await p.ev('(() => { const rs = DATA.ooda.decisions.filter((r) => !routine(r)); return { n: DECIDE_SHOWN, all: rs.length, last: rs[DECIDE_SHOWN - 1], first: rs[DECIDE_SHOWN], mine: rs.findIndex((r) => r.id === ' + JSON.stringify(ids.decisionNotMine) + ') }; })()');
-    assert.equal(edge.n, 80);
-    assert.ok(edge.all > edge.n, `more calls than the tab draws: ${edge.all}`);
-    assert.ok(edge.mine >= edge.n, `decisionNotMine is past the tab's rows: at ${edge.mine}`);
-    for (const r of [edge.last, edge.first]) assert.equal(r.kind, 'decision', `${r.id}: a decision`);
-    // on the tab: the last drawn row has its Correct, the first undrawn one has no row
-    await p.ev("location.hash = '#loop?lt=decide'");
-    await soon(`!!document.querySelector('#decisions-feed [data-correct="dec:${edge.last.id}"]')`, 'the 80th row with its Correct');
-    assert.equal(await p.ev(`!!document.querySelector('#decisions-feed [data-dec^="decision:${edge.first.id}:"]')`), false, 'no row for the 81st');
-    const howOf = async (id) => {
-      await p.ev("location.hash = '#board'");
-      await soon("!document.body.classList.contains('peek-open')", 'back on Board');
-      await p.ev(`location.hash = ${JSON.stringify(`#decision/${encodeURIComponent(id)}`)}`);
-      await soon(`DRAWER.id === ${JSON.stringify(id)} && !!document.querySelector('#drawer-body section.attrs')`, `${id}: its peek`);
+  // kit-96: the Decide tab has no 80-row cap now, so every uncorrected supervisor call has its Correct, whatever its place in
+  // the list (this test had checked the 80th row's Correct and the 81st's absence), and a corrected one says Corrected
+  await t.test('may correct: every uncorrected supervisor call has its Correct in its peek; a corrected one says Corrected', async () => {
+    const calls = await p.ev('(() => { const rs = DATA.ooda.decisions.filter((r) => r.who === "supervisor" && ["decision", "act"].includes(r.kind) && !(r.kind === "act" && r.decision)); return { all: rs.map((r) => [r.kind, r.id, !!r.correction]), mine: rs.findIndex((r) => r.id === ' + JSON.stringify(ids.decisionNotMine) + ') }; })()');
+    const open = calls.all.filter((c) => !c[2]), done = calls.all.filter((c) => c[2]);
+    assert.ok(open.length > 80, `more uncorrected calls than the old cap of 80: ${open.length}`);
+    assert.ok(calls.mine >= 80, `decisionNotMine is past the old cap: at ${calls.mine}`);
+    assert.ok(done.length > 0, 'a corrected call');
+    const howOf = async (kind, id) => {
+      // a peek to the next one (the page's own way, as from a link in a peek): a hop back to Board between a hundred of them raced its close
+      await p.ev(`location.hash = ${JSON.stringify(`#${kind}/${encodeURIComponent(id)}`)}`);
+      await soon(`decodeURIComponent(location.hash) === ${JSON.stringify(`#${kind}/${id}`)} && DRAWER.id === ${JSON.stringify(id)} && !!document.querySelector('#drawer-body section.attrs')`, `${id}: its peek`);
+      // drawn to its History before the next one: a peek still loading when the hash moves on is not the page's to finish
+      await soon(peekDrawn(kind), `${id}: drawn`);
       return p.ev("[...document.querySelectorAll('#drawer-body dt')].find((x) => x.textContent.trim() === 'How it changes').nextElementSibling.innerHTML");
     };
-    assert.match(await howOf(edge.last.id), /href="#loop\?lt=decide"/, 'the 80th: Correct, on its row');
-    assert.match(await howOf(edge.first.id), new RegExp(`data-thread-on="decision:${edge.first.id}"`), 'the 81st: Start a thread');
+    for (const [i, [kind, id]] of open.entries()) {
+      assert.match(await howOf(kind, id), new RegExp(`<button[^>]*class="ghost mini"[^>]*data-thread-on="${kind}:${id}"[^>]*>Correct</button>`), `call ${i} (${id}): Correct`);
+    }
+    assert.match(await howOf(done[0][0], done[0][1]), /Corrected/, 'a corrected call says Corrected');
     await p.ev("location.hash = '#board'");
     await soon("!document.body.classList.contains('peek-open')", 'back on Board');
   });
@@ -1415,8 +1416,25 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
     }
   });
 
-  // each page's record cards, where they are drawn
-  const PLACES = [['#goals', '#goals-list'], ['#board', '#board-cols'], ['#loop?lt=observe', '#observations'], ['#loop?lt=orient', '#debt, #clusters, #problems, #knowledge'], ['#loop?lt=decide', '#decisions-feed'], ['#loop?lt=act', '#acts-feed'], ['#sensors', '#incidents']];
+  // each page's record cards, where they are drawn (kit-96: the Loop's feeds are tables now, not cards with ⋯ menus, so they
+  // are not here; their rows are checked by A5 in dashboard-loop.test.mjs, and the Loop-row block of the test below)
+  const PLACES = [['#goals', '#goals-list'], ['#board', '#board-cols'], ['#sensors', '#incidents']];
+  // the Loop's tables (kit-96), one per tab: a row's own record is its first cell's [data-subject] (kind:id; a question is q/…)
+  const LOOP_ROWS = [['#loop?lt=observe', '#observations'], ['#loop?lt=orient', '#knowledge'], ['#loop?lt=decide', '#decisions-feed'], ['#loop?lt=act', '#acts-feed']];
+  const ROW_OWN = "(tr) => { const s = tr.querySelector('[data-subject]')?.dataset.subject; if (!s) return null; const i = s.indexOf(':'); return '#' + ({ question: 'q' }[s.slice(0, i)] ?? s.slice(0, i)) + '/' + s.slice(i + 1); }";
+  // the first row, on any Loop tab, with a link to another record (a link inside a row is its own, the row's click or Enter never)
+  const loopRowLink = async (go) => {
+    for (const [page, box] of LOOP_ROWS) {
+      await go(page);
+      await soon(`!!document.querySelector(${J(box + ' table.db-t')})`, `${box}: drawn`);
+      const link = await p.ev(`(() => { ${DEC} const own = ${ROW_OWN};
+        for (const tr of document.querySelectorAll(${J(box + ' tr[data-row]')})) { const o = own(tr); if (!o) continue; const a = [...tr.querySelectorAll('a[href^="#"]')].find((x) => { const h = dec(x.getAttribute('href')); return h !== dec(o) && /^#(ticket|goal|feature|lesson|decision|act|problem|observation)\\//.test(h); });
+          if (a) { window.__a = a; return { own: dec(o), href: dec(a.getAttribute('href')), box: ${J(box)} }; } }
+        return null; })()`);
+      if (link) return link;
+    }
+    return null;
+  };
   const cardsIn = (sel) => `[...document.querySelectorAll(${J(sel)})].flatMap((x) => [...x.querySelectorAll(${J(CARDS)})])`;
   const DEC = 'const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } };';
 
@@ -1436,7 +1454,8 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
         assert.deepEqual(c, { open: c.open, menus: 1, openIn: ['Open in side peek', true], copy: 'Copy ID', title: true, openLinks: 0 }, `${page}: ${c.open}`);
       }
     }
-    for (const k of ['goal', 'ticket', 'observation', 'signal', 'problem', 'lesson', 'act', 'decision']) assert.ok(kinds.has(k), `a ${k} card was checked: ${[...kinds].join(' ')}`);
+    // (kit-96: the observation, signal, problem, lesson, act and decision cards are the Loop's rows now)
+    for (const k of ['goal', 'ticket']) assert.ok(kinds.has(k), `a ${k} card was checked: ${[...kinds].join(' ')}`);
     // no goal card keeps an Open link (Upkeep's included)
     await on('#goals');
     assert.equal(await p.ev("[...document.querySelectorAll('#goals .card.goal a')].filter((a) => a.textContent.trim() === 'Open').length"), 0, 'no Open link on a goal card');
@@ -1472,30 +1491,26 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
       assert.equal(await enter(el), true);
       await opened(open, `${sel}: Enter on the focused card`);
     }
-    // a Loop card (spec §2.5: a card that stands for a record, role=button, tabindex=0); a sensor's observations
-    // are rows in its peek now (kit-93), checked by A12 in dashboard-autonomy.test.mjs
-    for (const [page, sel] of [['#loop?lt=observe', '#observations .card[data-open]']]) {
+    // a Loop row (kit-96: the feeds are tables; a row that stands for a record is tabindex=0 and opens on Enter, as the card
+    // did); a sensor's observations are rows in its peek now (kit-93), checked by A12 in dashboard-autonomy.test.mjs
+    for (const [page, sel] of [['#loop?lt=observe', '#observations tr[data-row]']]) {
       await on(page);
       await soon(`!!document.querySelector(${J(sel)})`, `${sel}: drawn`);
-      assert.equal(await p.ev(`[...document.querySelectorAll(${J(sel)})].every((c) => c.getAttribute('role') === 'button' && c.getAttribute('tabindex') === '0')`), true, `${sel}: every card a button to the keyboard`);
+      assert.equal(await p.ev(`[...document.querySelectorAll(${J(sel)})].every((c) => c.getAttribute('tabindex') === '0')`), true, `${sel}: every row focusable by the keyboard`);
       const el = `document.querySelector(${J(sel)})`;
-      const open = await p.ev(`${el}.dataset.open`);
+      const open = await p.ev(`${el}.querySelector('[data-subject]').dataset.subject.replace(':', '/')`);
       assert.equal(await enter(el), true);
-      await opened(open, `${sel}: Enter on the focused card`);
-      // Enter on a link inside one: the link's own thing (a link to another record goes there; the
-      // title link to its own), never the card's handler; a real Enter on a focused link follows it
-      await on(page);
-      const link = await p.ev(`(() => { ${DEC} const cs = [...document.querySelectorAll(${J(sel)})];
-        for (let i = 0; i < cs.length; i++) { const own = dec('#' + cs[i].dataset.open); const a = [...cs[i].querySelectorAll('a[href^="#"]')].filter((x) => !x.closest('details.menu')).find((x) => dec(x.getAttribute('href')) !== own) || cs[i].querySelector('a.title-link');
-          if (a) { window.__a = a; return { own, href: dec(a.getAttribute('href')) }; } }
-        return null; })()`);
-      assert.ok(link, `${sel}: a card with a link`);
+      await opened(open, `${sel}: Enter on the focused row`);
+      // Enter on a link inside a row: the link's own thing (a link to another record goes there), never the row's handler;
+      // a real Enter on a focused link follows it (the observation rows hold no such link in the fixture, so the first Loop row with one)
+      const link = await loopRowLink(on);
+      assert.ok(link, 'a Loop row with a link to another record');
       assert.equal(await p.ev(`(() => { const a = window.__a; a.focus(); if (document.activeElement !== a) return 'not focused';
-        const ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }); a.dispatchEvent(ev); return ev.defaultPrevented ? 'the card took it' : true; })()`), true, `${sel}: Enter on a link is left to the link`);
+        const ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }); a.dispatchEvent(ev); return ev.defaultPrevented ? 'the row took it' : true; })()`), true, `${link.box}: Enter on a link is left to the link`);
       await p.ev('window.__a.click(); void 0');
-      await soon(`decodeURIComponent(location.hash) === ${J(link.href)}`, `${sel}: the link's own place: ${link.href}`);
+      await soon(`decodeURIComponent(location.hash) === ${J(link.href)}`, `${link.box}: the link's own place: ${link.href}`);
       await settle();
-      assert.equal(await p.ev('decodeURIComponent(location.hash)'), link.href, `${sel}: still the link's, not the card's (${link.own})`);
+      assert.equal(await p.ev('decodeURIComponent(location.hash)'), link.href, `${link.box}: still the link's, not the row's (${link.own})`);
     }
   });
 
@@ -1550,7 +1565,9 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
         return null; })()`);
       if (found) break;
     }
-    assert.ok(found, 'a card with a link to another record');
+    // kit-96: the Loop's rows, which hold such links now (the cards above hold none)
+    if (!found) { found = await loopRowLink(on); if (found) await p.ev('window.__a.click(); void 0'); }
+    assert.ok(found, 'a card or row with a link to another record');
     await soon(`decodeURIComponent(location.hash) === ${J(found.href)}`, `the link's own peek: ${found.href}`);
     await settle();
     assert.equal(await p.ev('decodeURIComponent(location.hash)'), found.href, `not the card's own ${found.own}`);

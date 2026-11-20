@@ -646,6 +646,20 @@ try {
   .loop-intro { color: var(--fg-2); max-width: var(--measure); margin: 0 0 12px; }
 
 /* css-loop-tabs end */
+/* css-loop-tables start */
+  /* Self Improvement's tables (kit-96): each tab one flush card holding its table, at the grid's width */
+  /* the tab bar is the Loop's first content: its tabs' text --page-top below the bar, as Goals' */
+  #loop > .tabbar:first-child { margin-top: -8px; }
+  .loop-panel { margin-top: 12px; }
+  .loop-panel .card.flush { max-width: none; }
+  /* a valence, red to green */
+  .sign { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sign.s-2 { color: var(--red-fg); } .sign.s-1 { color: color-mix(in srgb, var(--red-fg) 70%, var(--muted)); } .sign.s0 { color: var(--muted); }
+  .sign.s1 { color: color-mix(in srgb, var(--green-fg) 70%, var(--muted)); } .sign.s2 { color: var(--green-fg); }
+  /* the header's toggles (Orient's Needs orienting, Decide's two), pressed as the Board's Needs attention */
+  .pagebar .extra button[data-f="orient"], .pagebar .extra button[data-dec] { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+  .pagebar .extra button[data-f="orient"][aria-pressed="true"], .pagebar .extra button[data-dec][aria-pressed="true"] { background: var(--well); color: var(--fg); border-color: var(--fg-2); }
+/* css-loop-tables end */
 /* css-goals-old start */
   /* goals */
   .goal h4 { font-size: 15px; font-weight: 600; margin: 6px 0 2px; }
@@ -1262,44 +1276,24 @@ try {
 <!-- html-library end -->
 
 <!-- html-loop start -->
-  <section id="loop" class="no-shell" data-page="loop">
-    <h2>Loop <span class="sub">how the supervisor notices, makes sense of, decides and acts</span></h2>
-    <div id="learning" class="learning" aria-label="Is the loop making the system smarter?"></div>
-    <div class="tabs" role="tablist" id="loop-tabs">
-      <button role="tab" data-tab="observe">Observe<span class="n" id="n-observe"></span></button>
-      <button role="tab" data-tab="orient">Orient<span class="n" id="n-orient"></span></button>
-      <button role="tab" data-tab="decide">Decide<span class="n" id="n-decide"></span></button>
-      <button role="tab" data-tab="act">Act<span class="n" id="n-act"></span></button>
+  <section id="loop" data-page="loop">
+    <div class="tabbar" role="tablist" id="loop-tabs">
+      <button type="button" role="tab" data-tab="observe">Observe<span class="n" id="n-observe"></span></button>
+      <button type="button" role="tab" data-tab="orient">Orient<span class="n" id="n-orient"></span></button>
+      <button type="button" role="tab" data-tab="decide">Decide<span class="n" id="n-decide"></span></button>
+      <button type="button" role="tab" data-tab="act">Act<span class="n" id="n-act"></span></button>
     </div>
     <div class="loop-panel" data-panel="observe">
-      <p class="loop-intro">What the workers and the supervisor noticed: findings from the metrics, estimates that missed, surprises in the code. Raw signal; nothing here is decided yet.</p>
-      <div id="observations"></div>
+      <div class="card flush"><div class="card-head"><i class="icon-eye" aria-hidden="true"></i>Observations<span class="grow" id="c-observe"></span></div><div id="observations"></div></div>
     </div>
     <div class="loop-panel" data-panel="orient" hidden>
-      <p class="loop-intro">What the signal adds up to. Things noticed more than once become recurring signals; real or likely trouble becomes a problem; lessons, facts and your preferences become knowledge, which goes into every agent's instructions once accepted.</p>
-      <h3>Orientation debt</h3>
-      <p class="small muted">Recurring signals nothing has explained for more than a day: each wants a lesson, a problem, or a ruling that it is noise. Then incidents fixed and verified in the last 30 days that nobody has learned from: each wants a lesson, or a ruling that there is nothing to keep.</p>
-      <div id="debt"></div>
-      <div class="two">
-        <div><h3>Recurring signals</h3><div id="clusters"></div></div>
-        <div><h3>Problems</h3><div id="problems"></div></div>
-      </div>
-      <h3 style="margin-top:14px">Knowledge</h3>
-      <div id="knowledge"></div>
+      <div class="card flush"><div class="card-head"><i class="icon-book-open" aria-hidden="true"></i>Knowledge<span class="grow" id="c-orient"></span></div><div id="knowledge"></div></div>
     </div>
     <div class="loop-panel" data-panel="decide" hidden>
-      <p class="loop-intro">Every call, newest first: what was decided, by whom, and on what authority (its trust, your answer, a default, a standing rule). Yours are shown as you made them. If one of the supervisor's is wrong, correct it: its kind of decision drops back to "ask first" (<a class="linkish" href="#trust">Trust Ladder</a>).</p>
-      <div class="filters">
-        <label>Who <select id="dec-who"><option value="">anyone</option><option value="owner">you</option><option value="supervisor">the supervisor</option></select></label>
-        <label>Kind <select id="dec-class"><option value="">any</option></select></label>
-        <label class="small"><input type="checkbox" id="dec-corrected"> Only corrected</label>
-        <label class="small"><input type="checkbox" id="dec-mechanical"> Include routine acts</label>
-      </div>
-      <div class="feed" id="decisions-feed"></div>
+      <div class="card flush"><div class="card-head"><i class="icon-scale" aria-hidden="true"></i>Decisions<span class="grow" id="c-decide"></span></div><div id="decisions-feed"></div></div>
     </div>
     <div class="loop-panel" data-panel="act" hidden>
-      <p class="loop-intro">What the supervisor did, newest first, and the call each act carried out. An act under a decision is corrected through the decision (Decide); an act that was its own call is corrected here.</p>
-      <div class="feed" id="acts-feed"></div>
+      <div class="card flush"><div class="card-head"><i class="icon-zap" aria-hidden="true"></i>Acts<span class="grow" id="c-act"></span></div><div id="acts-feed"></div></div>
     </div>
   </section>
 
@@ -2688,7 +2682,8 @@ function boardCols(items, crit, { only = false, inert = false } = {}) {
 // ---- the Board's and Progress's header filters (kit-91): in the page bar's .extra, each in the URL ----
 // A page head's state is its filters (dashboard-shell@1's STATE_KEYS): Board goal, feat, repo, att; Progress goal,
 // narrow, show. Each change is a history entry (setFilters assigns the hash), so Back restores the earlier filter.
-const FILTER_PAGES = ['board', 'progress', 'library'];
+// Self Improvement (kit-96) is drawn and read here only: REMEMBERED has no loop, so nothing of it is stored or applied
+const FILTER_PAGES = ['board', 'progress', 'library', 'loop'];
 const NARROW_GROUPS = ['Milestones', 'Features', 'Releases', 'Waves', 'Stories'];
 // the goals a filter can name: every goal not let go, by title
 const filterGoals = () => (DATA?.ooda?.goals || []).filter((g) => g.status !== 'abandoned').sort((a, b) => String(a.title ?? a.id).localeCompare(String(b.title ?? b.id)));
@@ -2720,6 +2715,12 @@ function filtersNow(page) {
     if (f.show && !['complete', 'all'].includes(f.show)) delete f.show;
   }
   if (page === 'library' && f.kind && !LIB_KINDS.some(([k]) => k === f.kind)) delete f.kind;
+  // Self Improvement: its tab (lt) kept; Kind and Needs orienting are Orient's only, a kind naming none dropped
+  if (page === 'loop') {
+    if (f.lt !== 'orient') { delete f.kind; delete f.orient; }
+    if (f.kind && !ORIENT_KINDS.includes(f.kind)) delete f.kind;
+    if (f.orient && f.orient !== '1') delete f.orient;
+  }
   return f;
 }
 // A filter changed: the new state (a goal changed clears the feature and the narrow, which were the old goal's),
@@ -2749,6 +2750,13 @@ function filtersHtml(page) {
   const f = filtersNow(page);
   const opt = (v, label, cur) => `<option value="${esc(v)}"${(cur || '') === v ? ' selected' : ''}>${esc(label)}</option>`;
   const sel = (k, label, inner) => `<select data-f="${k}" aria-label="${label}">${inner}</select>`;
+  const toggle = (attr, on, icon, label) => `<button type="button" class="ghost" ${attr} aria-pressed="${on ? 'true' : 'false'}"><i class="icon-${icon}" aria-hidden="true"></i>${label}</button>`;
+  // Self Improvement: on Orient its Kind and Needs orienting (in the URL); on Decide its two toggles (page memory)
+  if (page === 'loop') {
+    if (f.lt === 'orient') return sel('kind', 'Kind', opt('', 'Every kind', f.kind) + ORIENT_KINDS.map((k) => opt(k, cap(k), f.kind)).join('')) + toggle('data-f="orient"', f.orient, 'compass', 'Needs orienting');
+    if (f.lt === 'decide') return toggle('data-dec="corrected"', LOOP_DEC.corrected, 'rotate-ccw', 'Only corrected') + toggle('data-dec="routine"', LOOP_DEC.routine, 'repeat', 'Include routine acts');
+    return '';
+  }
   const goal = sel('goal', 'Goal', opt('', 'All goals', f.goal) + filterGoals().map((g) => opt(g.id, g.title || g.id, f.goal)).join(''));
   if (page === 'library') return goal + sel('kind', 'Kind', opt('', 'All kinds', f.kind) + LIB_KINDS.map(([k, label]) => opt(k, label, f.kind)).join(''));
   if (page === 'board') {
@@ -2775,7 +2783,7 @@ function drawFilterPage(page) {
   if (!DATA || !FILTER_PAGES.includes(page)) return void drawFilters(page);
   const m = focusMark();
   drawFilters(page);
-  if (page === 'board') renderBoard(); else if (page === 'library') renderLibrary(DATA.library); else renderProgress();
+  if (page === 'board') renderBoard(); else if (page === 'library') renderLibrary(DATA.library); else if (page === 'loop') renderLoop(); else renderProgress();
   focusBack(m);
 }
 // Board and Progress on a route (in routeHead, once the entry is stamped): a fresh entry whose head has none of
@@ -2973,7 +2981,7 @@ function actView(a) {
     case 'new-feature': return { head: 'Started planning a feature you hadn’t asked for', detail: linkify(a.what) };
     case 'priority-change': return { head: 'Changed what gets worked on first', detail: linkify(a.what) };
     case 'release-scope': return { head: 'Moved work to a later release', detail: linkify(a.what) };
-    default: return { head: words(a.class), detail: linkify(a.what) };
+    default: return { head: esc(words(a.class)), detail: linkify(a.what) };
   }
 }
 
@@ -4567,35 +4575,17 @@ function renderOoda(o) {
   renderGoals();
 
   /* ooda-learning start */
-  // Is it learning: the chart above the tabs
-  $('learning').innerHTML = learningSection(o);
+  // The learning charts are Awareness's (learningSection): Self Improvement keeps its tables only
 
   /* ooda-learning end */
   /* ooda-observe start */
-  // Observe
-  $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 40).map((x) => `
-    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)} role="button" tabindex="0" data-open="observation/${esc(encodeURIComponent(x.id))}">${cardMenu('observation', x.id)}${titled(peekFor('observation', x.id), `<span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}`)}
-      <div>${linkify(x.detail)}</div>${x.place ? `<div class="place">${loopPlace(x.place)}</div>` : ''}<div class="meta">${esc(who(x.created_by))}, ${when(x.created_at)}</div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
+  // Observe: its table (loop-tables)
+  loopDraw('observe', o);
 
   /* ooda-observe end */
   /* ooda-orient start */
-  // Orient
-  const debt = o.debt?.signals || [];
-  const taught = o.debt?.incidents || [];
-  $('debt').innerHTML = debt.length || taught.length ? debt.map((x) => `
-    <div class="card small" role="button" tabindex="0" data-open="signal/${esc(encodeURIComponent(x.key))}">${cardMenu('signal', x.key)}<a class="linkish title-link" href="#signal/${encodeURIComponent(x.key)}"><b>${esc(signalTitle(x.key))}</b></a> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') + taught.map((x) => `
-    <div class="card small"${subj('problem', x.id, x.title)} role="button" tabindex="0" data-open="problem/${esc(encodeURIComponent(x.id))}">${cardMenu('problem', x.id)}<span class="badge">incident</span><a class="linkish title-link" href="#problem/${encodeURIComponent(x.id)}"><b>${esc(x.title)}</b></a> <span class="muted">· fixed and verified ${x.days ? `${esc(x.days)} day${x.days > 1 ? 's' : ''} ago` : 'today'}</span><div>What did it teach? A lesson, or a ruling that there is nothing to keep. <span class="muted">${x.decision ? `The fix: ${linkify(x.decision)} · ` : ''}what came of it: ${linkify(x.outcome)}</span></div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old, and every fixed incident has been learned from.');
-  $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
-    <div class="card small" role="button" tabindex="0" data-open="signal/${esc(encodeURIComponent(c.key))}">${cardMenu('signal', c.key)}<a class="linkish title-link" href="#signal/${encodeURIComponent(c.key)}"><b>${esc(words(c.key.split(':')[0]))}</b></a> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
-  $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
-    <div class="card small"${subj('problem', p.id, p.title)} role="button" tabindex="0" data-open="problem/${esc(encodeURIComponent(p.id))}">${cardMenu('problem', p.id)}<span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish title-link" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
-  const cand = o.knowledge.filter(ownerLesson);
-  const agents = o.knowledge.filter((k) => k.status === 'candidate' && !ownerLesson(k));
-  const acc = o.knowledge.filter((k) => k.status === 'accepted');
-  $('knowledge').innerHTML = (cand.length ? `<p class="small">${cand.length} proposed lesson${cand.length > 1 ? 's are' : ' is'} waiting for you in the <a class="linkish" href="#inbox">Inbox</a>.</p>` : '') +
-    (agents.length ? `<details class="agents-lessons"><summary>The agents' own lessons, waiting for the supervisor (${agents.length})</summary><p class="small muted">About how the agents work: the supervisor keeps or retires these itself once the evidence is plain. You can read each one, and retire any lesson from its card.</p>${agents.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} role="button" tabindex="0" data-open="lesson/${esc(encodeURIComponent(k.id))}">${cardMenu('lesson', k.id)}${titled(peekFor('lesson', k.id), `<span class="badge">${esc(k.kind)}</span>${linkify(k.statement)}`)} <span class="muted">· applies to ${esc(scopeWords(k.scope))}</span></div>`).join('')}</details>` : '') +
-    (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} role="button" tabindex="0" data-open="lesson/${esc(encodeURIComponent(k.id))}">${cardMenu('lesson', k.id)}${titled(peekFor('lesson', k.id), `<span class="badge good">${esc(k.kind)}</span>${linkify(k.statement)}`)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
-    empty('None yet. Things noticed more than once become lessons: the supervisor keeps the ones about how the agents work, and sends you any that would change something you set.');
+  // Orient: its Knowledge table (loop-tables), filtered by the header's Kind and Needs orienting
+  loopDraw('orient', o);
 
   /* ooda-orient end */
   /* ooda-trust start */
@@ -4608,20 +4598,12 @@ function renderOoda(o) {
 
   /* ooda-decide end */
   /* ooda-act start */
-  // Act
-  const feed = o.acts;
-  $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
-    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)} role="button" tabindex="0" data-open="act/${esc(encodeURIComponent(a.id))}">
-      <div><div class="act-head">${titled(peekFor('act', a.id), v.head)}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
-        <div class="meta">${when(a.created_at)} · ${actUnder(a)}${a.reversible === false ? ' · can’t be undone' : ''}</div>
-        ${a.correction ? `<div class="err">Corrected by ${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
-        <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="Reason"><button class="ghost" data-correct-send="${esc(a.id)}">Send</button><span class="err" id="e-${esc(a.id)}"></span></div>
-      </div>
-      <div class="card-side">${a.correction || a.decision ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct</button>`}${cardMenu('act', a.id)}</div>
-    </div>`; }).join('') : empty('None yet. Everything the supervisor does shows here.');
+  // Act: its table (loop-tables)
+  loopDraw('act', o);
 }
   /* ooda-act end */
-const DEC_KIND = { decision: 'Decided', act: 'Did, as its own call', answer: 'You answered', goal: 'Your call on a goal', rule: 'A standing rule you gave', correction: 'Corrected' };
+// A Decide row's Kind when its record has no kind of decision (class_name): the record's own kind, in words
+const DEC_KIND = { decision: 'decision', act: 'act', answer: 'answer', goal: 'goal call', rule: 'standing rule', correction: 'correction' };
 // The question's Matched row in words (kit-313): the owner's own pick, the supervisor's reading of
 // their words, or words not yet read; a reading matches, but it is not the owner's agreement
 function matchedWords(q) {
@@ -4646,37 +4628,142 @@ const routine = (r) => r.kind === 'act' && r.under?.authority === 'constitution'
 // The Decide tab draws at most this many rows; with its filters as they start (no routine acts, any
 // writer, any class), the rows it draws are decideRows(o): a call has its Correct only there.
 const DECIDE_SHOWN = 80;
-const decideRows = (o) => (o?.decisions || []).filter((r) => !routine(r)).slice(0, DECIDE_SHOWN);
+// the calls that have a Correct (on Decide, on Act and in their peeks): the supervisor's own, not yet corrected
+const decideRows = (o) => (o?.decisions || []).filter(mayCorrect);
 // A decision that is complete in itself: a noise ruling explains a signal, and no act carries it out.
 const NO_ACT_CLASSES = ['orient-noise'];
 function renderDecisions(o) {
-  const all = (o.decisions || []).filter((r) => $('dec-mechanical').checked || !routine(r));
-  const sel = $('dec-class');
-  const cur = sel.value;
-  const classes = [...new Set(all.map((r) => r.class).filter(Boolean))].sort();
-  sel.innerHTML = '<option value="">any</option>' + classes.map((c) => `<option value="${esc(c)}">${esc(words(c))}</option>`).join('');
-  sel.value = classes.includes(cur) ? cur : '';
-  const fw = $('dec-who').value;
-  const only = $('dec-corrected').checked;
-  const rows = all.filter((r) => (!fw || r.who === fw) && (!sel.value || r.class === sel.value) && (!only || r.correction || r.kind === 'correction'));
-  const key = (r) => `${r.kind}:${r.id}:${r.at}`;
-  $('decisions-feed').innerHTML = rows.length ? rows.slice(0, DECIDE_SHOWN).map((r) => {
-    const mine = r.who === 'supervisor' && ['decision', 'act'].includes(r.kind);
-    const open = r.kind === 'decision' ? `#decision/${encodeURIComponent(r.id)}` : r.kind === 'act' ? `#act/${encodeURIComponent(r.id)}` : r.kind === 'answer' ? `#q/${encodeURIComponent(r.id)}` : r.kind === 'goal' ? `#goal/${encodeURIComponent(r.id)}` : r.kind === 'rule' ? `#lesson/${encodeURIComponent(r.id)}` : r.id.startsWith('d-') ? `#decision/${encodeURIComponent(r.id)}` : `#act/${encodeURIComponent(r.id)}`;
-    const under = decisionUnder(r);
-    const evidence = (r.refs || []).length ? `about ${r.refs.slice(0, 4).map((x) => (ticketMap().has(x) ? tlink(x) : linkify(x))).join(', ')}` : '';
-    return `
-    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)} role="button" tabindex="0" data-open="${esc(open.slice(1))}">
-      <div><div class="act-head">${titled(open, `<span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}`)}</div>
-        ${r.rationale ? `<div class="act-detail">${linkify(r.rationale)}${r.options?.length > 1 ? ` <span class="muted">(weighed: ${r.options.map(esc).join(' / ')})</span>` : ''}${r.confidence != null ? ` <span class="muted">· ${Math.round(r.confidence * 100)}% sure</span>` : ''}</div>` : ''}
-        <div class="meta">${esc(when(r.at))} · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' && !NO_ACT_CLASSES.includes(r.class) ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
-        ${r.correction ? `<div class="err">Corrected by ${esc(who(r.correction.by))}: ${esc(r.correction.reason)}${r.correction.repaired ? ` · ${esc(r.correction.repaired)}` : ''}</div>` : ''}
-        ${mine ? `<div class="row-inline" hidden data-correct-form="dec:${esc(r.id)}"><input type="text" data-reason="dec:${esc(r.id)}" placeholder="Reason"><button class="ghost" data-correct-send="dec:${esc(r.id)}">Send</button><span class="err" id="e-dec:${esc(r.id)}"></span></div>` : ''}
-      </div>
-      <div class="card-side">${mine && !r.correction ? `<button class="ghost" data-correct="dec:${esc(r.id)}">Correct</button>` : ''}${cardMenu(open.slice(1, open.indexOf('/')), r.id)}</div>
-    </div>`; }).join('') : empty(all.length ? 'Nothing matches.' : 'None yet. Every call, the supervisor\'s and yours, shows here.');
+  // Decide: every call the data gives but routine acts (Include routine acts shows them), as a table (loop-tables)
+  loopDraw('decide', o);
 }
-for (const id of ['dec-who', 'dec-class', 'dec-corrected', 'dec-mechanical']) $(id).addEventListener('change', () => { if (DATA) renderDecisions(DATA.ooda); });
+/* loop-tables start */
+// Self Improvement (kit-96): each tab is one of the shell's record tables (pageTable), with no type column: the
+// tab picks the type. Each row's first cell holds its record's data-subject span (Shift+click, pins, Correct's
+// title); a row opens its record's peek.
+const LOOP_COLS = {
+  observe: ['What', 'Source', 'How much it matters', 'Good or bad', 'Seen by', 'When'],
+  orient: ['What', 'Kind', 'Status', 'Applies to', 'Waiting', 'Needs orienting'],
+  decide: ['Decision', 'Kind', 'Who', 'Confidence', 'Corrected', 'When', ''],
+  act: ['Act', 'Kind', 'Reversible', 'When', ''],
+};
+const LOOP_BOX = { observe: 'observations', orient: 'knowledge', decide: 'decisions-feed', act: 'acts-feed' };
+// Orient's kinds, as its Kind filter offers them (the URL's kind on #loop?lt=orient)
+const ORIENT_KINDS = ['lesson', 'fact', 'preference', 'constraint', 'pointer', 'problem', 'incident', 'recurring signal'];
+const KNOW_STATUS = { accepted: 'kept', candidate: 'proposed', stale: 'stale' };
+// Decide's two header toggles, kept in page memory (STATE_KEYS.loop has no key for them)
+const LOOP_DEC = { corrected: false, routine: false };
+// a valence, -2..2, red to green; blank when there is none
+const signHtml = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? '' : `<span class="sign s${Number(v)}">${Number(v) > 0 ? `+${Number(v)}` : Number(v) < 0 ? `−${-Number(v)}` : '0'}</span>`);
+const loopWhen = (iso) => (iso ? esc(when(iso)) : '');
+// a call the owner may correct: the supervisor's own (a decision, or an act that was its own call), not corrected yet
+const mayCorrect = (r) => r.who === 'supervisor' && ['decision', 'act'].includes(r.kind) && !r.correction;
+// Correct is a thread on the record (fast-threads' item subject), titled with the record's own words (title, else
+// its row's subject): the owner's words there are the correction once the supervisor records them (correct
+// --from-turn); nothing is posted from the click
+const correctBtn = (kind, id, title = '') => `<button type="button" class="ghost mini" data-thread-on="${esc(`${kind}:${id}`)}"${title ? ` data-title="${esc(tLine(title, T_TITLE_MAX))}"` : ''}>Correct</button>`;
+function obsRows(o) {
+  return (o?.observations || []).map((x) => ({
+    cells: [`<span${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)}>${linkify(x.detail)}</span>`, esc(x.source ?? ''), x.severity === null || x.severity === undefined ? '' : esc(x.severity), signHtml(x.valence), esc(who(x.created_by)), loopWhen(x.created_at)],
+    sort: [String(x.detail ?? ''), String(x.source ?? ''), x.severity ?? null, x.valence ?? null, who(x.created_by), x.created_at ?? null],
+    open: `observation/${encodeURIComponent(x.id)}`,
+  }));
+}
+function decRows(o) {
+  return (o?.decisions || []).filter((r) => (LOOP_DEC.routine || !routine(r)) && (!LOOP_DEC.corrected || r.correction || r.kind === 'correction')).map((r) => {
+    const kind = decSubject(r);
+    const corrected = r.correction || r.kind === 'correction';
+    const kindWords = r.class_name || DEC_KIND[r.kind] || r.kind;
+    return {
+      cells: [`<span${subj(kind, r.id, r.what)}>${linkify(r.what)}</span>`, esc(kindWords), esc(who(r.who)), r.confidence === null || r.confidence === undefined ? '' : `${Math.round(r.confidence * 100)}%`, corrected ? 'yes' : '', loopWhen(r.at), mayCorrect(r) ? correctBtn(r.kind, r.id) : ''],
+      sort: [String(r.what ?? ''), kindWords, who(r.who), r.confidence ?? null, corrected ? 'yes' : '', r.at ?? null, null],
+      open: `${kind === 'question' ? 'q' : kind}/${encodeURIComponent(r.id)}`,
+    };
+  });
+}
+function actRows(o) {
+  return (o?.acts || []).map((a) => {
+    const v = actView(a);
+    return {
+      cells: [`<span${subj('act', a.id, a.what)}>${v.head}</span>${a.correction ? ' <span class="badge high">corrected</span>' : ''}`, esc(a.class_name ?? ''), a.reversible === false ? 'no' : 'yes', loopWhen(a.created_at), !a.correction && !a.decision ? correctBtn('act', a.id) : ''],
+      sort: [shellText(v.head), a.class_name ?? '', a.reversible === false ? 'no' : 'yes', a.created_at ?? null, null],
+      open: `act/${encodeURIComponent(a.id)}`,
+    };
+  });
+}
+// Orient, one Knowledge table: recurring signals, problems (an incident as one), fixed incidents nothing learned
+// from, then knowledge by its own kind. Needs orienting: a signal unexplained a day or more (debt.signals), an open
+// problem, a fixed incident owed a lesson (debt.incidents); each with how long it has waited. f: filtersNow('loop').
+function orientRows(o, f = {}) {
+  const now = Date.now();
+  const hoursSince = (iso) => Math.max(0, Math.floor((now - Date.parse(iso)) / 3600000));
+  const owed = new Map((o?.debt?.signals || []).map((x) => [x.key, x]));
+  const row = (kind, status, applies, wait, waitSort, flag, what, whatSort, open) => ({
+    kind,
+    flag,
+    cells: [what, esc(kind), esc(status), esc(applies), esc(wait), esc(flag)],
+    sort: [whatSort, kind, status, applies, waitSort, flag],
+    open,
+  });
+  const rows = [];
+  for (const c of o?.clusters || []) {
+    const d = owed.get(c.key);
+    rows.push(row('recurring signal', 'unexplained', '', d ? hoursWords(d.hours) : '', d ? d.hours : null, d ? 'Needs orienting' : '',
+      `<b>${esc(signalTitle(c.key))}</b> ${linkify(c.latest ?? '')}`, `${signalTitle(c.key)} ${c.latest ?? ''}`, `signal/${encodeURIComponent(c.key)}`));
+  }
+  for (const p of o?.problems || []) {
+    const open = p.status === 'open';
+    const h = open && p.created_at ? hoursSince(p.created_at) : null;
+    rows.push(row(Array.isArray(p.fingerprints) && p.fingerprints.length ? 'incident' : 'problem', p.status ?? '', (p.threatens || []).join(', '), h !== null ? hoursWords(h) : '', h, open ? 'Needs orienting' : '',
+      `<span${subj('problem', p.id, p.title)}>${linkify(p.title ?? '')}</span>`, String(p.title ?? ''), `problem/${encodeURIComponent(p.id)}`));
+  }
+  for (const x of o?.debt?.incidents || []) {
+    const h = x.resolved_at ? hoursSince(x.resolved_at) : null;
+    // days since it was fixed, even under a day; the sort key stays hours
+    const d = x.days ?? (h !== null ? Math.floor(h / 24) : null);
+    const wait = d !== null ? `${d} day${d === 1 ? '' : 's'}` : '';
+    rows.push(row('incident', 'fixed', '', wait, h ?? (x.days ?? 0) * 24, 'What did it teach?',
+      `<span${subj('problem', x.id, x.title)}>${linkify(x.title ?? '')}</span>`, String(x.title ?? ''), `problem/${encodeURIComponent(x.id)}`));
+  }
+  for (const k of o?.knowledge || []) {
+    rows.push(row(k.kind ?? '', KNOW_STATUS[k.status] ?? k.status ?? '', scopeWords(k.scope), '', null, '',
+      `<span${subj('lesson', k.id, k.statement)}>${linkify(k.statement ?? '')}</span>`, String(k.statement ?? ''), `lesson/${encodeURIComponent(k.id)}`));
+  }
+  return rows.filter((r) => (!f.kind || r.kind === f.kind) && (!f.orient || r.flag));
+}
+const LOOP_ROWS = { observe: obsRows, orient: (o) => orientRows(o, filtersNow('loop')), decide: decRows, act: actRows };
+// One tab's table, written only when its HTML changed (focus and scroll kept), and its new wrapper bound: a header
+// sorts and redraws the page, a row opens its record. Its count on the tab and on its card's head.
+function loopDraw(tab, o = DATA?.ooda) {
+  const el = $(LOOP_BOX[tab]);
+  if (!el || !o) return;
+  const rows = LOOP_ROWS[tab](o);
+  for (const id of [`n-${tab}`, `c-${tab}`]) { const c = $(id); if (c && c.textContent !== String(rows.length || '')) c.textContent = rows.length || ''; }
+  const html = pageTable(`loop:${tab}`, LOOP_COLS[tab], rows);
+  if (el.__html === html) return;
+  el.__html = html;
+  el.innerHTML = html;
+  bindPageTables(el, renderLoop);
+}
+function renderLoop() { for (const tab of Object.keys(LOOP_BOX)) loopDraw(tab); }
+// Correct, on a row or in a peek: a thread titled with the record's own words (the button's data-title, else its
+// row's subject span's), placed at the button. Taken here, before the page's [data-thread-on] handler, which titles
+// a thread from the peek's bar (an act's peek bar holds its plain head, not its words).
+function loopCorrect(e) {
+  const b = e.target.closest?.('[data-thread-on]');
+  if (!b || !e.currentTarget.contains(b)) return;
+  const s = b.closest('tr')?.querySelector('[data-subject]');
+  const ref = b.dataset.threadOn;
+  // a row's record with no words of its own (no what) is titled by its kind, never by a stale peek bar
+  const words = b.dataset.title || s?.dataset.title || (b.closest('tr') ? T_KIND[ref.split(':')[0]] : '');
+  if (!words) return;
+  e.stopPropagation();
+  const title = tLine(words, T_TITLE_MAX) || T_KIND[ref.split(':')[0]];
+  const r = b.getBoundingClientRect();
+  tlStart({ subject: { kind: 'item', ref, quote: tCut(title, 300) }, title, el: s || b, x: r.left + r.width / 2, y: r.top + r.height / 2 });
+}
+$('loop').addEventListener('click', loopCorrect);
+$('drawer').addEventListener('click', loopCorrect);
+/* loop-tables end */
 
 
 // ---- sidepeek: every object opens the same way. The bar: its type's icon and name, then its title.
@@ -4896,22 +4983,21 @@ function howItChanges(kind, rec = {}) {
   const corrected = (c) => `Corrected${c.by ? ` by ${esc(who(c.by))}` : ''}: ${esc(c.reason)}`;
   // a correction from the dashboard's row, else from the record itself (one older than the dashboard holds)
   const fromRecord = () => { const c = rec.record?.fields?.corrected; return c ? { reason: c.reason, by: rec.record?.set_by?.corrected?.by ?? c.by ?? null } : null; };
-  const correctRow = (lt) => `Correct, on its row in Self Improvement: <a class="linkish" href="#loop?lt=${lt}">${lt === 'act' ? 'Act' : 'Decide'}</a>`;
   let html;
   switch (kind) {
     case 'act': {
       const a = (DATA?.ooda?.acts || []).find((x) => x.id === id) ?? rec;
       const dec = a.decision ?? rec.record?.fields?.decision;
       const ac = a.correction ?? fromRecord();
-      html = ac ? corrected(ac) : dec ? `Correct its decision: ${dlink(dec, decisionTitle(dec))}. <span class="muted">It went as decided, so the call is the decision's; if the act itself went wrong, that is a problem.</span>` : correctRow('act');
+      html = ac ? corrected(ac) : dec ? `Correct its decision: ${dlink(dec, decisionTitle(dec))}. <span class="muted">It went as decided, so the call is the decision's; if the act itself went wrong, that is a problem.</span>` : correctBtn('act', id, a.what ?? rec.record?.fields?.what);
       break;
     }
     case 'decision': {
-      // the owner may correct a call whose row the Decide tab draws with its Correct (today's mine, in decideRows)
+      // the owner may correct the supervisor's call with no correction yet (decideRows): a thread on it
       const call = (x) => x.id === id && ['decision', 'act'].includes(x.kind);
       const c = (DATA?.ooda?.decisions || []).find(call)?.correction ?? fromRecord();
       const r = decideRows(DATA?.ooda).find(call);
-      html = c ? corrected(c) : r && r.who === 'supervisor' ? correctRow('decide') : threadOn('decision', id);
+      html = c ? corrected(c) : r ? correctBtn('decision', id, r.what) : threadOn('decision', id);
       break;
     }
     case 'q': {
@@ -5894,7 +5980,7 @@ function openDecision(id) {
     ${lineageBlock(p)}
     ${restsOn(r.under?.approved_by)}
     ${knowledgeCited(p, 'What it drew on (not its authority)')}
-    ${r.kind === 'decision' ? psect('Carried out by', acts.length ? `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>` : '<p class="muted">Nothing yet.</p>') : ''}
+    ${r.kind === 'decision' && acts.length ? psect('Carried out by', `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>`) : ''}
     ${historySection(p, id)}`);
 }
 // A retro's own date is its write-up's (retros/<date>.md); the closing line can come a day later.
@@ -5949,10 +6035,26 @@ function openLesson(id) {
   const p = peekOf('lesson', id);
   if (!k) return notFound('knowledge', id, p, p?.error ? 'No such record.' : 'Retired, or older than the dashboard shows; its record is above.');
   const obs = p?.related || [];
+  // its Evidence (what it names, from the peek's cited; an id the peek doesn't know stands alone) and Given to
+  // (the starts whose prompts carried it, and how often its signal came back since), as tables the drawer's
+  // one REC_BIND binds once a write
+  const evidence = pageTable('lesson:evidence', ['What', 'Kind', 'When'], (k.evidence ?? p?.record?.fields?.evidence ?? []).map((eid) => {
+    const x = p?.cited?.[eid];
+    return x
+      ? { cells: [esc(String(x.text ?? eid).slice(0, 160)), esc(words(x.kind ?? x.type)), esc(x.created_at ? when(x.created_at) : '')], sort: [undefined, undefined, x.created_at ?? null], open: recordHref(eid) }
+      : { cells: [esc(eid), '', ''], open: recordHref(eid) };
+  }));
+  const since = (n) => (n == null ? 'no signal to follow' : n === 0 ? 'not seen since' : `seen again ${n} time${n === 1 ? '' : 's'} since`);
+  const given = p === undefined ? '<p class="loading">Loading…</p>' : p?.error ? '' : pageTable('lesson:given', ['Session', 'Given', 'What changed after'], (p?.given_to || []).map((g) => ({
+    cells: [esc(g.session), esc(g.at ? when(g.at) : ''), esc(since(g.since))], sort: [undefined, g.at ?? null, g.since ?? null], open: `#act/${encodeURIComponent(g.act)}`,
+  })));
+  recBind();
   showDrawer(`<h2 id="drawer-title">${esc(k.statement.length > 80 ? `${k.statement.slice(0, 80)}…` : k.statement)}</h2>
     ${attrs({ id, peek: p, type: 'knowledge', computed: [
       ['Goes to', k.status === 'accepted' ? whoGets(k) : `nobody yet: it is ${esc(k.status)}`, 'Whose instructions it is put into, from its scope; only accepted knowledge is.'],
     ] })}
+    ${psect('Evidence', evidence)}
+    ${given ? psect('Given to', given) : ''}
     ${k.plain ? `<p>${esc(k.plain)}</p>` : ''}
     ${ownerLesson(k) ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : k.status === 'candidate' ? '<p class="muted">About how the agents work: the supervisor keeps or retires it itself.</p>' : ''}
     ${['candidate', 'accepted'].includes(k.status) && !ownerLesson(k) ? `<div class="row-inline"><button type="button" class="ghost" data-thread-on="${esc(`lesson:${k.id}`)}">Retire it</button></div>` : ''}
@@ -7715,12 +7817,10 @@ function render(d) {
   }
   renderLibrary(d.library);
   count('n-knowledge', o.knowledge.filter(ownerLesson).length);
-  $('n-observe').textContent = o.observations.length || '';
-  $('n-orient').textContent = (o.clusters.length + o.problems.length + o.knowledge.length) || '';
-  const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
-  $('n-decide').textContent = (o.decisions || []).filter((r) => r.at > weekAgo && r.kind !== 'correction' && !routine(r)).length || '';
+  // Self Improvement's tab counts are the rows each table draws (loopDraw sets each again, the same count): Orient's
+  // its rows under the header's filter, as its table and card head count them
+  $('n-orient').textContent = LOOP_ROWS.orient(o).length || '';
   navCounts(d);
-  $('n-act').textContent = o.acts.length || '';
   renderOverview();
 
   // Keep anything half-typed or half-open across refreshes.
@@ -9876,6 +9976,11 @@ document.querySelector('.pagebar .extra').addEventListener('change', (e) => {
 document.querySelector('.pagebar .extra').addEventListener('click', (e) => {
   const b = e.target.closest?.('button[data-f="att"]');
   if (b && PAGE_NOW === 'board') setFilters('board', { att: b.getAttribute('aria-pressed') === 'true' ? '' : '1' });
+  // Self Improvement: Orient's Needs orienting in the URL; Decide's two toggles in page memory, drawn again at once
+  const o = e.target.closest?.('button[data-f="orient"]');
+  if (o && PAGE_NOW === 'loop') setFilters('loop', { orient: o.getAttribute('aria-pressed') === 'true' ? '' : '1' });
+  const d = e.target.closest?.('button[data-dec]');
+  if (d && PAGE_NOW === 'loop' && Object.hasOwn(LOOP_DEC, d.dataset.dec)) { LOOP_DEC[d.dataset.dec] = !LOOP_DEC[d.dataset.dec]; drawFilterPage('loop'); }
 });
 
 document.addEventListener('click', async (ev) => {
