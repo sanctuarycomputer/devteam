@@ -7629,7 +7629,8 @@ function tSubjectAt(el, x, y, sec) {
   }
   // a block of a governance file's rendered text, in its peek (kit-93 C5, C8): a page subject on the file (on
   // #governance when that view is over the log's 200 bytes), the block its spot, its text the quote
-  const block = govBlockAt(el);
+  // threads-core is also evaluated alone by test/dashboard.test.mjs, without the governance code
+  const block = typeof govBlockAt === 'function' ? govBlockAt(el) : null;
   if (block) {
     const path = DRAWER.id, view = `#file?path=${encodeURIComponent(path)}`;
     const said = tLine(block.innerText ?? block.textContent, 300);
@@ -7769,7 +7770,7 @@ function tWhere(s) {
   // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
   if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
   // a Settings row: by the name it had when the thread began (the subject's quote), else its key
-  if (s.kind === 'page' && parseSuggView(s.view) !== null) return T_SECTIONS[suggPageOf(s.view)];
+  if (s.kind === 'page' && parseSuggView(s.view) !== null) return T_SECTIONS[T_SUGG_VIEW.exec(s.view)[1]];
   if (s.kind === 'page' && parseSettingView(s.view)) return `Settings, ${tLine(s.quote, 300) || parseSettingView(s.view)}`;
   if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
