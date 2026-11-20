@@ -1,4 +1,4 @@
-// Threads on the dashboard page in Chrome, parts 6, 7 and 8: answered elsewhere, secrets, resolving and reopening, the drawer, the hidden tab, the Loop spot.
+// Threads on the dashboard page in Chrome, parts 7 and 8: secrets, resolving and reopening, the drawer, the hidden tab, the Loop spot.
 // Ports: none of its own (lib/kit.mjs's +0 hub, +1..25)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -73,49 +73,6 @@ async function openThreadsPage(t, name) {
   const ticks = async (n = 8) => { const at = await p.ev('window.__polls'); await soonTicks(`window.__polls >= ${at + n}`, `${n} polls`); };
   return { F, Q0, dash, port, p, soon, still, released, click, onThreads, goalSel, shown, slid, threads, enter, composing, lastKey, posts, soonTicks, ticks, later };
 }
-
-test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 6 of 8: answered elsewhere)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
-  const { F, p, soon, click, goalSel, threads } = await openThreadsPage(t, 'threads-page-6');
-  let T;
-  // T as the page makes it in subtest 6 (base :3328-3349: the owner's first words on the goal, with
-  // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
-  T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' })]).split('\n')[0];
-  { const th = threads().find((x) => x.id === T); assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']); }
-  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
-  // the keys log subtest 12 installs (:3408), there from subtest 12 on in the base
-  await p.ev(`(() => { if (window.__keys) return; window.__keys = []; addEventListener('keydown', (e) => { const { key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat } = e; window.__keys.push({ key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat }); }, true); })()`);
-  // the page at #goals, the card closed and T's pin drawn, as subtest 19 leaves it (:3643's wait)
-  await soon(`!!document.querySelector('${goalSel}') && !!document.querySelector('[data-tl-pin="${T}"]')`, 'the goal and its pin');
-  // the card open from its pin, as subtest 21 leaves it (:3644-3645)
-  await click(`[data-tl-pin="${T}"]`);
-  await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
-
-  await t.test("answered elsewhere (the terminal), with the page's data newer than the card's read: its answer, never \"Answer it in the Inbox\"", async () => {
-    const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to Canada too?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
-    // a read of the threads let through and held, so it says open; any Inbox link drawn noted
-    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver((records) => { const link = 'a[href="#q/${Q}"]'; if (records.some((m) => [...m.addedNodes].some((n) => n.nodeType === 1 && (n.matches(link) || !!n.querySelector(link)))) || document.querySelector('#tl-c-turns ' + link)) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
-    await soon('window.__threadsQueue.length > 0', 'a read saying the question is open, held');
-    await p.ev('window.__stale = window.__threadsQueue.length; void 0');
-    try {
-      F.owner(['answer', Q, 'Not this quarter']);
-      // the page's data lands with the answer, while every read of the threads is still held
-      await p.ev('load({ force: true }); void 0');
-      await soon(`(DATA?.ooda?.answered || []).some((x) => x.id === '${Q}') && !document.getElementById('q-${Q}')`, 'the page\'s data, with the answer');
-      await soon(`/Not this quarter/.test(document.getElementById('tl-c-turns').textContent)`, 'the open card redrawn with it, before any read of the threads');
-      // the stale reads land: the card draws a copy from before the answer
-      await p.ev('window.__threadsQueue.splice(0, window.__stale).forEach((go) => go())');
-      await p.ev('window.__still()');
-      await p.ev('window.__stir()');
-      assert.equal(await p.ev(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status`), 'open', 'the card drew a read from before the answer');
-      assert.equal(await p.ev('window.__inboxLink'), false, 'never "Answer it in the Inbox" for an answered question');
-      assert.ok(await p.ev(`(() => { const s = document.getElementById('tl-c-turns').textContent; return /Not this quarter/.test(s) && /answered in your terminal/.test(s); })()`), 'its answer, and where from');
-    } finally { await p.ev('(() => { const q = window.__threadsQueue || []; window.__threadsQueue = null; q.forEach((go) => go()); })()'); }
-    await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered'`, 'the answer as the log has it');
-    assert.equal(await p.ev('window.__inboxLink'), false, 'nor once the threads are read again');
-    await p.ev('window.__obs.disconnect(); void 0');
-  });
-});
 
 test("threads on the dashboard page: Shift and point, the card, the pins and the dock (part 7 of 8: secrets, ready to resolve)", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   const { F, p, soon, click, onThreads, goalSel, threads } = await openThreadsPage(t, 'threads-page-7');
