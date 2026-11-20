@@ -176,3 +176,25 @@ export function noSecretPrinted() {
   site.sessions().forEach((v, i) => assert.ok(!all.includes(v), `session ${i} printed`));
   for (const [what, v] of [['the typed marker', 'zq-marker'], ['the typed text', '--force now'], ['the password', site.password], ['the code', site.code], ['a fixture field value', 'zqpwzqpw'], ['a fixture code value', 'ZQCODEZQ'], ['the late field value', 'zqlatezq']]) assert.ok(!all.includes(v), `${what} printed`);
 }
+
+// artifact-viewer-close's parts (kit-223): one artifact-viewer harness per file, built once by a file-level
+// before, for every part that calls H(t). The harness uses only after (through cleanup), diagnostic and
+// test (through sub) of the test it is given: here a stand-in whose after queues each cleanup for the
+// file's after (last first, the first error thrown when all have run, as cleanup's own), and whose
+// diagnostic and test go to the part running now. H(t) makes t that part and returns the harness's
+// object. A file whose parts skip builds nothing. One more cost: with --test-name-pattern filtering out
+// every part, the harness is still built (before runs).
+export function oneHarness(harness, fixture, skip) {
+  let made = null, current = null;
+  const queued = [];
+  const ctx = { after: (f) => { queued.push(f); }, diagnostic: (m) => current?.diagnostic(m), test: (...a) => current.test(...a) };
+  if (!skip) {
+    before(async () => { made = await harness(ctx, fixture); }, { timeout: 1500000 });
+    after(async () => {
+      let first = null;
+      for (const f of queued.reverse()) { try { await f(); } catch (e) { first ??= e; } }
+      if (first) throw first;
+    });
+  }
+  return async (t) => { current = t; return made; };
+}
