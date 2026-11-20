@@ -167,6 +167,9 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   F.sup(['thread', 'ready', T, '--outcome', 'EU only']);
   F.owner(['thread', 'resolve', T, '--accept']);
   assert.equal(threads().find((x) => x.id === T).status, 'resolved');
+  // the page has read T resolved before its panel is drawn, as it had in the base by its own press: a
+  // pane drawn before that read keeps its empty list (a later read doesn't draw it again)
+  await soon(`TL.threads.some((x) => x.id === '${T}' && x.status === 'resolved')`, 'the page has T resolved');
   // the card closed, the panel on Threads under Resolved with T listed, as subtest 26 leaves it (:3764-3766)
   await onThreads();
   await click('#th-pane [data-thf="resolved"]');
