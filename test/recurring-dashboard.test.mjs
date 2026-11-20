@@ -115,8 +115,18 @@ async function openOn(t, { rec, peeks = clone(PEEK_FX), width = 1440, height = 9
     await p.ev(`(() => { document.querySelector(${J(sel)}).scrollIntoView({ block: 'center', behavior: 'instant' }); })(); new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))`);
     await p.click(sel);
   };
-  return { p, soon, go, fx, click };
+  const change = async (js, has, hash, ready) => {
+    await p.ev(`${js}; void 0`);
+    await soon(has, 'the page\'s data has the change');
+    await p.ev("location.hash = '#board'; void 0");
+    await soon("!document.body.classList.contains('peek-open')", 'the peek closed');
+    await p.ev(`location.hash = ${J(hash)}; void 0`);
+    await soon(ready, `${hash} again`);
+  };
+  return { p, soon, go, fx, click, change };
 }
+// a job's row as the page has it
+const DROW = (name) => `DATA.upkeep.recurring.entries.find((e) => e.name === ${J(name)})`;
 
 // What the open peek shows, read in the page
 const PEEK = {
@@ -150,7 +160,7 @@ test('the goal-peek block names the jobs sections, and openUpkeep draws none of 
 });
 
 test('Upkeep\'s peek: Jobs and Proposed jobs computed rows, then Jobs, Built in and Proposed jobs sections; its card unchanged (done-whens 2, 10)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click, change } = await openOn(t, { rec: 'fixture' });
   // the card first, with and without the jobs data: the same
   await go('#goals');
   const CARD = "document.querySelector('#goals .card.goal.upkeep')";
@@ -251,7 +261,7 @@ test('a Built in row opens its peek; a job\'s peek has ID recurring.<name>; a pr
 });
 
 test('with no jobs, Upkeep\'s peek has no Jobs or Proposed jobs rows or sections, and Built in still shows (done-when 4)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go, click } = await openOn(t, { rec: (r) => ({ entries: [], builtin: r.builtin, proposals: [] }) });
+  const { p, soon, go, click, change } = await openOn(t, { rec: (r) => ({ entries: [], builtin: r.builtin, proposals: [] }) });
   await go('#goal/upkeep');
   await soon(upkeepReady(`!!${PEEK.sect('Built in')}`), 'Upkeep\'s peek with Built in');
   assert.deepEqual(await p.ev(PEEK.computed), [], 'no computed rows');
@@ -266,7 +276,7 @@ test('with no jobs, Upkeep\'s peek has no Jobs or Proposed jobs rows or sections
 });
 
 test('a job\'s peek: properties, computed rows, Being fixed, Recent runs; no control; running text within --measure (done-when 5)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click, change } = await openOn(t, { rec: 'fixture' });
   await go('#recurring/ci-main');
   await soon(jobReady('ci-main'), 'ci-main\'s peek');
   assert.equal(await p.ev(PEEK.title), 'Main builds and its tests pass');
@@ -302,12 +312,15 @@ test('a job\'s peek: properties, computed rows, Being fixed, Recent runs; no con
   await p.ev("window.__rec.entries.find((e) => e.name === 'ci-main').fails_in_a_row = 25; void 0");
   await soon(`${PEEK.dd('Fails in a row')}?.textContent.trim() === '25'`, 'fails in a row from the entry\'s row');
   // a failing check with no fix chore, and a passing one with a ticket: no Being fixed
-  await p.ev(`window.__peeks['nightly-e2e'] = { ...window.__peeks['ci-main'], name: 'nightly-e2e' }; window.__peeks['lint-docs'] = { ...window.__peeks['ci-main'], name: 'lint-docs' }; window.__rec.entries.find((e) => e.name === 'lint-docs').ticket = 'ci-09-old'; void 0`);
-  for (const n of ['nightly-e2e', 'lint-docs']) {
-    await go(`#recurring/${n}`);
-    await soon(jobReady(n), `${n}'s peek`);
-    assert.equal(await p.ev(`!!${PEEK.sect('Being fixed')}`), false, `${n}: no Being fixed`);
-  }
+  await go('#recurring/nightly-e2e');
+  await soon(jobReady('nightly-e2e'), 'nightly-e2e\'s peek');
+  assert.deepEqual(await p.ev(`(({ kind, state, ticket }) => ({ kind, state, ticket }))(${DROW('nightly-e2e')})`), { kind: 'check', state: 'failing', ticket: null }, 'nightly-e2e fails and has no fix chore');
+  assert.equal(await p.ev(`!!${PEEK.sect('Being fixed')}`), false, 'nightly-e2e: no Being fixed');
+  await go('#recurring/lint-docs');
+  await soon(jobReady('lint-docs'), 'lint-docs\'s peek');
+  await change(`${DROW('lint-docs').replace('DATA.upkeep.recurring', 'window.__rec')}.ticket = 'ci-09-old'`, `${DROW('lint-docs')}?.ticket === 'ci-09-old'`, '#recurring/lint-docs', jobReady('lint-docs'));
+  assert.deepEqual(await p.ev(`(({ kind, state, ticket }) => ({ kind, state, ticket }))(${DROW('lint-docs')})`), { kind: 'check', state: 'passing', ticket: 'ci-09-old' }, 'lint-docs passes and has a ticket');
+  assert.equal(await p.ev(`!!${PEEK.sect('Being fixed')}`), false, 'lint-docs: no Being fixed');
   // a worker chore: its runs as, failing means, the instructions as running text within --measure
   await go('#recurring/deps-bump');
   await soon(jobReady('deps-bump'), 'deps-bump\'s peek');
@@ -321,7 +334,7 @@ test('a job\'s peek: properties, computed rows, Being fixed, Recent runs; no con
 });
 
 test('the job peek renders peek.json; How it changes ends its properties; a held chore waits for Upkeep (done-when 6)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click, change } = await openOn(t, { rec: 'fixture' });
   await go('#recurring/deps-bump');
   await soon(jobReady('deps-bump'), 'deps-bump\'s peek');
   const keys = await p.ev(PEEK.keys);
@@ -330,19 +343,19 @@ test('the job peek renders peek.json; How it changes ends its properties; a held
   assert.match(await p.ev(`${PEEK.dd('Runs')}.textContent`), /Bump every dependency to its newest patch or minor version\./);
   assert.deepEqual((await p.ev(rows(PEEK.sect('Recent runs')))).map((r) => r[0]), ['started', 'nothing to do', 'abandoned', 'done']);
   // started, not held: Next is its time
-  assert.notEqual(await p.ev(`${PEEK.dd('Next')}.textContent.trim()`), 'waits for Upkeep');
+  assert.equal(await p.ev(`${PEEK.dd('Next')}.textContent.trim() === when(${DROW('deps-bump')}.next_at)`), true, 'deps-bump: Next is its next_at');
   // its row held (Upkeep drained or parked), by name: Next waits
   await p.ev("window.__rec.entries.find((e) => e.name === 'deps-bump').state = 'held'; void 0");
   await soon(`${PEEK.dd('Next')}?.textContent.trim() === 'waits for Upkeep'`, 'waits for Upkeep');
   // a check is never held: a check row's state alone doesn't make it wait
-  await p.ev("window.__rec.entries.find((e) => e.name === 'ci-main').state = 'held'; void 0");
   await go('#recurring/ci-main');
   await soon(jobReady('ci-main'), 'ci-main\'s peek');
-  assert.notEqual(await p.ev(`${PEEK.dd('Next')}.textContent.trim()`), 'waits for Upkeep');
+  await change("window.__rec.entries.find((e) => e.name === 'ci-main').state = 'held'", `${DROW('ci-main')}?.state === 'held'`, '#recurring/ci-main', jobReady('ci-main'));
+  assert.equal(await p.ev(`${PEEK.dd('Next')}.textContent.trim() === when(${DROW('ci-main')}.next_at)`), true, 'a held check: Next is its next_at');
 });
 
 test('every label kit-166 draws says job, none says recurring (done-when 8)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click, change } = await openOn(t, { rec: 'fixture' });
   // every label: the type chip, property keys, section heads, table headers, Computed, the computed rows' keys
   const LABELS = `[...document.querySelectorAll('#drawer-bar-title .dtype .badge, #drawer-body dt, #drawer-body .card-head, #drawer-body th, #drawer-body h4')].map((x) => x.textContent.trim())`;
   // every text in the drawer but the ID row's value
@@ -360,7 +373,7 @@ test('every label kit-166 draws says job, none says recurring (done-when 8)', { 
 });
 
 test('a job\'s peek shows What the loop noticed when its row has signals, before Recent runs (done-when 11)', { ...CHROME, timeout: 300000 }, async (t) => {
-  const { p, soon, go, click } = await openOn(t, { rec: 'fixture' });
+  const { p, soon, go, click, change } = await openOn(t, { rec: 'fixture' });
   await go('#recurring/ci-main');
   await soon(jobReady('ci-main'), 'ci-main\'s peek');
   const sects = (await p.ev(PEEK.sects)).map((s) => s.head);
@@ -387,7 +400,7 @@ test('text from the data that holds HTML is shown as text, never drawn (done-whe
   peeks['ci-main'].entry.run = BAD;
   peeks['ci-main'].entry.title = BAD;
   peeks['deps-bump'].entry.prompt = BAD;
-  const { p, soon, go, click } = await openOn(t, { peeks, rec: (r) => { r.entries[0].title = BAD; r.entries[0].signals[0].text = BAD; r.entries[0].signals[0].may = BAD; r.builtin[0].note = BAD; r.proposals[0].title = BAD; return r; } });
+  const { p, soon, go, click, change } = await openOn(t, { peeks, rec: (r) => { r.entries[0].title = BAD; r.entries[0].signals[0].text = BAD; r.entries[0].signals[0].may = BAD; r.builtin[0].note = BAD; r.proposals[0].title = BAD; return r; } });
   const clean = async (where) => {
     assert.equal(await p.ev("document.querySelectorAll('#drawer #xss, #drawer img[src=\"x\"]').length"), 0, `${where}: nothing drawn from the data`);
     assert.equal(await p.ev('window.__xss'), undefined, `${where}: nothing ran`);
