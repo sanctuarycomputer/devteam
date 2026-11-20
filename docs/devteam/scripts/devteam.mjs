@@ -4272,7 +4272,7 @@ function cmdValidate() {
   let validateClosures = null;
   const linesOf = (link) => ({ comps: componentsOn(S0, link), dev: link === 'home' ? devteamLine() : [`${projectRelOf(link)}/**`] });
   for (const [id, t] of ts) {
-    if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
+    if (isActive(t) && !id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
     for (const g of t.touches ?? []) if (unbalanced(touchPath(g))) err(id, `touches entry "${g}" has unbalanced braces`);
     // Component lines: the component is declared, and every touches entry lies in its
     // line (or a touches_components member's) and no other, so a ticket's footprint is one line.
