@@ -1,9 +1,11 @@
 // What machine.*.test.mjs share: the machine's commands (machine status|tell|alert|pane-state) and
 // recover --machine as a box runs it (cloud/Dockerfile's box-recover), every project on the machine,
 // real tmux on this file's own server, stand-in agents, and repos on kits from before recover, taken
-// from the release tags. Each part imports it, so each part (its own process) gets its own copy.
+// from the release tags; below them, box-pins' changed-repo and --smoke helpers (machine.box-pins*)
+// and statusFixture(), the check-in test's setup (machine.status*). Each part imports it, so each
+// part (its own process) gets its own copy.
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -182,4 +184,70 @@ function leftNothing(tmpd) {
   assert.deepEqual(dot.filter((n) => n.startsWith('repos-') || n.startsWith('status-last-')), [], 'nothing under the test HOME\'s ~/.devteam');
 }
 
-export { after, agent, baseEnv, box, cg, changed, changedKit, changedRepo, code, conversation, dtIn, fakeBins, home, KIT, kitAt, latestRelease, leftNothing, link, lsOr, machine, nextSmokeRun, nowhere, onBranch, pinsEnv, prompt, repo, REPO, rule, SCRIPT, shown, SID, smokeRun, testHome, tmp, tmuxSh };
+// "status says at a glance what a check-in needs, and reads no pane it needn't" (machine.status*.test.mjs), in parts (kit-221): its setup, the
+// original L41-L82, run once by each part. The project folder is a fresh one, so two parts in one
+// process never share one. status() keeps each reading's stdout, for readNothing(): what no reading
+// may do, checked at the end of every part over its own readings. done() is the original's finally.
+async function statusFixture() {
+  const notes = path.join(home, 'operator/NOTES.md');
+  fs.mkdirSync(path.dirname(notes), { recursive: true });
+  fs.rmSync(path.join(home, '.box/alert'), { force: true });
+  const last = path.join(home, '.devteam', `status-last-${process.env.DEVTEAM_HUB_PORT}`);
+  fs.rmSync(last, { force: true });
+  const sub = fs.mkdtempSync(path.join(tmp, 'status-code-'));
+  const r = repo('statused', { settings: { upstream_base: 'v0.1.0', worktree_files: ['config/master.key'] }, dir: sub });
+  const sib = repo('a-sib', { dir: sub });
+  repo('the-home', { links: { 'a-sib': link('a-sib') }, dir: sub });
+  const sup = { DEVTEAM_ROLE: 'supervisor', DEVTEAM_SUPERVISOR_UP: 'off' };
+  const q1 = dtIn(r, ['ask', '--question', 'first?', '--kind', 'owner-decision', '--class', 'design', '--reasons', 'x'], sup);
+  assert.equal(q1.status, 0, q1.stderr + q1.stdout);
+  assert.equal(dtIn(r, ['ask', '--question', 'second?', '--kind', 'owner-decision', '--class', 'design', '--reasons', 'x'], sup).status, 0);
+  // knowledge to harvest: the owner's rule, a lesson the supervisor tagged for the kit, one already noted, one still a candidate
+  const rule = dtIn(r, ['knowledge', 'add', '--kind', 'preference', '--statement', 'Ship banners without asking', '--owner']).stdout.trim();
+  const ob = dtIn(r, ['observe', '--subject', 'kit', '--kind', 'friction', '--detail', 'd', '--severity', '1', '--valence', '-1'], sup).stdout.trim();
+  const kitL = dtIn(r, ['knowledge', 'add', '--kind', 'lesson', '--statement', 'Fetch before the merge', '--evidence', ob, '--kit'], sup).stdout.trim();
+  const seenL = dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 'Seen already', '--evidence', ob], sup).stdout.trim();
+  dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 'Still a candidate'], sup);
+  for (const k of [kitL, seenL]) assert.equal(dtIn(r, ['knowledge', 'set', k, '--status', 'accepted'], sup).status, 0);
+  fs.writeFileSync(notes, `read ${q1.stdout.trim()}\n- ${seenL}: stays\nfriction: same as ${kitL}, in passing\n`);
+  fs.mkdirSync(path.join(r, '.worktrees/a/node_modules'), { recursive: true });
+  fs.writeFileSync(path.join(r, '.worktrees/a/node_modules/big'), Buffer.alloc(4096 * 256));
+  fs.writeFileSync(path.join(r, 'docs/devteam/run/accounts.json'), JSON.stringify({ at: new Date().toISOString(), cswap: true, active: 'a@b', active_no_room: false, exhausted: false, needs_login: ['c@d'], restart_gave_up: [], supervisor_limit: null, capacity: { accounts: 5, room: 1, unknown: 0, active_week_pct: 9, active_5h_pct: 31, runs_out_at: null, next_reset_at: '2026-11-16T21:00:00Z', gap: false } }));
+  // tmux, as the kit sees it, noting what it was asked
+  const logged = path.join(tmp, 'tmux-asked');
+  const spy = path.join(tmp, 'spy');
+  write(path.join(spy, 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(logged)}\nPATH=${JSON.stringify(process.env.PATH)} exec tmux "$@"\n`);
+  fs.chmodSync(path.join(spy, 'tmux'), 0o755);
+  const srv = spawn(process.execPath, ['-e', "require('http').createServer((q, r) => r.end('ok')).listen(0, '127.0.0.1', function () { console.log(this.address().port); });"], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const portUp = await new Promise((ok) => srv.stdout.once('data', (d) => ok(Number(String(d).trim()))));
+  const worker = path.join(tmp, 'statused-wt');
+  fs.mkdirSync(worker, { recursive: true });
+  const a = agent({ screens: [box(prompt), `✻ Ticking… (esc to interrupt)\n${box(prompt)}`], cwd: r, window: 'sup-statused' });
+  const shell = agent({ screens: ['secret in the owner\'s shell'], cwd: home, window: 'shell' });
+  const x = agent({ screens: [`line\n${box(prompt)}`, `other output now\n${box(prompt)}`], cwd: worker, window: 'worker-x' });
+  const y = agent({ screens: [`You've hit your limit · resets 3pm\n${box(prompt)}`], cwd: worker, window: 'worker-y' });
+  const status = (args = [], env = {}) => machine(['machine', 'status', '--in', sub, '--notes', notes, ...args], { PATH: `${spy}${path.delimiter}${baseEnv.PATH}`, ...env });
+  const outs = [];
+  const read = (...args) => { const o = status(...args); outs.push(o.stdout); return o; };
+  const readNothing = () => {
+    for (const out of outs) assert.doesNotMatch(out, new RegExp(`${shell.pane}\\b`), 'never the owner\'s shell');
+    assert.doesNotMatch(fs.readFileSync(logged, 'utf8'), new RegExp(`capture-pane .*-t ${shell.pane}$`, 'm'), 'not even read');
+    assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/run/supervisor-pane')), 'reading a project writes nothing of its');
+  };
+  const done = () => {
+    srv.kill();
+    for (const p of [a, shell, x, y]) p.kill();
+    fs.writeFileSync(latestRelease, 'v9.9.9\n');
+  };
+  try {
+    for (const p of [a, x, y]) await shown(p.pane, 'status');
+    fs.writeFileSync(path.join(r, 'docs/devteam/run/dashboard-port'), `${portUp}\n`);
+    fs.writeFileSync(logged, '');
+  } catch (e) {
+    done();
+    throw e;
+  }
+  return { a, done, kitL, last, logged, notes, portUp, r, readNothing, rule, shell, status: read, sup, x, y };
+}
+
+export { after, agent, baseEnv, box, cg, changed, changedKit, changedRepo, code, conversation, dtIn, fakeBins, home, KIT, kitAt, latestRelease, leftNothing, link, lsOr, machine, nextSmokeRun, nowhere, onBranch, pinsEnv, prompt, repo, REPO, rule, SCRIPT, shown, SID, smokeRun, statusFixture, testHome, tmp, tmuxSh };
