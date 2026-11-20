@@ -2353,7 +2353,7 @@ function questionView(q) {
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     labels, choice, words, in_words: keyed ? choice === null : null, label, reading, read_by: reading ? 'supervisor' : null, agreed_by_owner: agreedByOwner,
-    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
+    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, files: ans && Array.isArray(ans.files) ? ans.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
     about_turn: q.about_turn ?? null, seen: q.seen ?? null, owner_said_turn: q.owner_said_turn ?? null, owner_said_at: q.owner_said_at ?? null,
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
   };
@@ -8297,11 +8297,11 @@ function cmdAnswer() {
   if (flags.choice === true) die('answer <qid> ["<words>"] --choice "<label>": name the choice picked');
   if (picks && inWords) die('answer takes --choice or --in-words, not both: a pick (with any words), or words alone');
   if (pickFlag) for (const f of ['defaulted', 'from-chat', 'from-turn', 'review-result', 'decline']) if (flags[f] !== undefined) die(`answer --${pickFlag} records the owner's own pick or words: not with --${f}`);
-  if (inWords && !restWords.join(' ').trim()) die('answer <qid> "<words>" --in-words: the words are the answer; give them');
+  if (inWords && !restWords.join(' ').trim() && flags.files === undefined) die('answer <qid> "<words>" --in-words: the words are the answer; give them');
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
   // dropped files go with the owner's own words, never with a default, a review's result or reason, or words the supervisor recorded
   if (flags.files !== undefined && (flags.defaulted || flags['review-result'] !== undefined || decline || flags['from-chat'] || flags['from-turn'] !== undefined)) die("--files go with the owner's own answer");
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline && !picks)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]] [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> ["<words>"] --choice "<label>"   |   answer <qid> "<words>" --in-words   |   answer <qid> --defaulted   (supervisor)   |   answer <qid> --read "<label>" --cite "<words>" --class <class>   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline && !picks && flags.files === undefined)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]] [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> ["<words>"] --choice "<label>"   |   answer <qid> "<words>" --in-words   |   answer <qid> --defaulted   (supervisor)   |   answer <qid> --read "<label>" --cite "<words>" --class <class>   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -8356,7 +8356,9 @@ function cmdAnswer() {
     if (reviewResult && restWords.length) die('answer --review-result takes no text: the result is the answer');
     if (decline && !restWords.join(' ').trim()) die(`answer ${id} "<why>" --decline: say why it goes back`);
   }
-  const typed = restWords.join(' ').trim();
+  // files alone (no words, no pick): the log needs words, so the answer names the count, as the
+  // pane line does (droppedWords)
+  const typed = restWords.join(' ').trim() || (files?.length && !picked ? `${plural(files.length, 'file')} dropped` : '');
   // a pick is written as the set spells it, with the owner's words after it
   const answer = picked ? (typed ? `${picked} — ${typed}` : picked) : typed;
   let autonomy;
@@ -8604,7 +8606,7 @@ function threadViews(objects) {
 // supervisor out of it for good.
 function threadView(t, ts, qs) {
   // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null }));
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [] }));
   const status = t.status === 'resolved' ? 'resolved' : 'open';
   const last = turns[turns.length - 1] ?? null;
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
@@ -8821,9 +8823,15 @@ function cmdThread() {
   // the holder spoke (or the owner closed the thread): its stage goes
   // a failed clear never fails a command already written (a retry would post twice): the card ignores a record older than the reply anyway
   const spoke = (t) => { try { markThreadWorking(t.id, null); } catch {} };
+  // files alone (kit-171): with no words, the turn's words name the count (the log needs words), as
+  // the pane line does (droppedWords). The files are read first only then, so every other refusal
+  // comes in its usual order.
+  const alone = (i) => (!wordsFrom(i) && flags.files !== undefined ? filesFlag() : undefined);
+  const filled = (i, early) => (early ? `${plural(early.length, 'file')} dropped` : wordsFrom(i));
   if (sub === 'new') {
     const { by } = threadOwner();
-    const words = turnText(wordsFrom(1));
+    const early = alone(1);
+    const words = turnText(filled(1, early));
     let subject;
     if (flags.subject !== undefined) {
       try { subject = uncapped(JSON.parse(flagStr('subject'))); } catch { die('--subject is JSON: {"kind":"item","ref":"goal:g-…","quote":"…"}'); }
@@ -8834,9 +8842,10 @@ function cmdThread() {
     const given = uncapped(flagStr('title'));
     if (given !== undefined && given.length > THREAD_TITLE_MAX) die(`--title is at most ${THREAD_TITLE_MAX} characters`);
     if (given !== undefined && UNSAFE_TEXT.test(given)) die('--title is one line of plain text');
-    const title = threadTitle(given ?? words);
+    // a new thread of files alone is named by its first file, as words name it
+    const title = threadTitle(given ?? (early ? early[0].name : words));
     if (!title) die('--title: the thread needs a name');
-    const files = filesFlag();
+    const files = early ?? filesFlag();
     const views = threadViews(readLog().objects);
     // one open thread per subject (kit-97): a second is refused, naming the one to say it in
     const key = subject === undefined ? null : subjectKey(subject);
@@ -8859,12 +8868,13 @@ function cmdThread() {
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
-    const words = turnText(wordsFrom(2));
+    const early = by === 'owner' ? alone(2) : undefined;
+    const words = turnText(filled(2, early));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
     if (refs.length && by !== 'supervisor' && by !== 'responder') die("--refs are on the supervisor's turns and the responder's: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
-    const files = filesFlag();
+    const files = early ?? filesFlag();
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
     const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files };
@@ -20704,6 +20714,8 @@ function dashboardActions() {
   // The files dropped with an answer or a turn, passed on whole: only the list's shape is checked
   // here, the command checks everything (attachedFiles). None, or an empty list, is no files; any
   // other value is no action (null).
+  // files alone (kit-171): a non-empty list stands in for the words, which the command fills
+  const hasFiles = (b) => Array.isArray(b.files) && b.files.length > 0;
   const filesArgs = (b) => (b.files === undefined || (Array.isArray(b.files) && !b.files.length) ? [] : Array.isArray(b.files) && b.files.length <= FILES_MAX ? [`--files=${JSON.stringify(b.files)}`] : null);
   const ACTIONS = {
     answer: (b) => {
@@ -20714,7 +20726,7 @@ function dashboardActions() {
       if (!ID.test(b.id ?? '')) return null;
       if (picked && (b.decline !== undefined || (b.choice !== null && !text(b.choice, 300)))) return null;
       const words = text(b.answer) ? b.answer.trim() : '';
-      if (!words && !(typeof b.choice === 'string' && (b.answer === undefined || (typeof b.answer === 'string' && !b.answer.trim())))) return null;
+      if (!words && !((typeof b.choice === 'string' || hasFiles(b)) && (b.answer === undefined || (typeof b.answer === 'string' && !b.answer.trim())))) return null;
       if (b.decline !== undefined && b.decline !== true) return null;
       const files = filesArgs(b);
       if (!files) return null;
@@ -20750,9 +20762,9 @@ function dashboardActions() {
     // A capability is cut from the title and subject first, so not even the argv holds one.
     'thread-new': (b) => {
       const [title, subject, files] = [uncapped(b.title), uncapped(b.subject), filesArgs(b)];
-      return files && lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...files, '--', b.text.trim()] : null;
+      return files && lineOk(title, THREAD_TITLE_MAX) && (turnOk(b.text) || (hasFiles(b) && (b.text === undefined || (typeof b.text === 'string' && !b.text.trim())))) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...files, ...(turnOk(b.text) ? ['--', b.text.trim()] : [])] : null;
     },
-    'thread-say': (b) => { const files = filesArgs(b); return files && (typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, ...files, '--', b.text.trim()] : null; },
+    'thread-say': (b) => { const files = filesArgs(b); return files && (typeof b.id === 'string' && THREAD_ID.test(b.id)) && (turnOk(b.text) || (hasFiles(b) && (b.text === undefined || (typeof b.text === 'string' && !b.text.trim())))) ? ['thread', 'say', b.id, ...files, ...(turnOk(b.text) ? ['--', b.text.trim()] : [])] : null; },
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
     // bound to the proposal the card showed: a newer one is refused, so the owner reads it first
