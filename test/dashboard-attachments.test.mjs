@@ -445,7 +445,8 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
     await p.ev(`tlOpen(${JSON.stringify(TA)}, false); void 0`);
     await soon("!document.getElementById('tl-card').hidden && !!document.querySelector('#tl-c-turns button.file-chip')", "the thread's card over it, with its image chip");
     const at = await p.ev('[location.href, history.length]');
-    const title = await p.ev("document.getElementById('av-title').textContent");
+    // the bar as the Library's data draws it (until that arrives it shows the slug)
+    const title = await soon("document.getElementById('av-title').textContent === 'Art one' && 'Art one'", "the bar titled from the Library's data");
     for (const [how, act] of [['×', "document.getElementById('av-close').click()"], ['Escape', "document.activeElement?.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))"]]) {
       await p.ev("document.querySelector('#tl-c-turns button.file-chip').click(); void 0");
       await soon(`!!document.getElementById('av-img') && ${frame}.hidden`, `${how}: the image open over the artifact`);
