@@ -6653,8 +6653,9 @@ function avFpSeen(fp, mainFp, slug, at) {
 // seen, and at once when it is shown again, it asks /api/artifact-fp (a stat-only fingerprint, the
 // responder contract's artifact-fp@1), one ask at a time, given up after 5 s. A new fingerprint loads
 // the frame again in a fresh frame (no history entry, no move counted for the close: kit-141), at its
-// src (its anchor kept) or the page of the artifact its lens last named, at the view (#hash) it last
-// named (kit-142: a note placed on #tab2 keeps its pin across a save); the scroll position isn't kept
+// src (its anchor kept) or the page of the artifact its lens last named, and, when the src has no anchor
+// of its own, at the view (#hash) it last named (kit-142, d-20261120-205438165: a note placed on #tab2
+// keeps its pin across a save); the scroll position isn't kept
 // (the frame is opaque-origin). A 404 says the draft is gone, links main's version (shown in place),
 // and stops for this stage. main and a published tree are never asked about, nor a framed viewer tab
 // (the owner wrapper, which may hold a gone draft in place under its own note). An answer is the page's
@@ -6663,14 +6664,14 @@ const avLiveReload = (() => {
   let serial = 0, inFlight = false;
   const draft = (at) => !!at && at !== 'main' && !String(at).startsWith('tree:');
   const due = () => TS.kind === 'artifact' && draft(TS.at) && !(VIEWER && window.parent !== window) && document.visibilityState === 'visible' && !TS.fpGone && !inFlight;
-  // the frame again: its src, or the page and #hash its lens names when the owner has moved in it
+  // the frame again: its src, or the page (and, the src unanchored, the #hash) its lens names when the owner has moved in it
   function reload() {
     const f = $('av-frame'), src = f.getAttribute('src');
     if (!src) return;
     const base = artSrc(TS.slug, TS.at);
     const page = src.split('#')[0].startsWith(base) ? src.split('#')[0].slice(base.length) || 'index.html' : null;
-    const moved = TS.path && page !== null && (TS.path !== page || TS.hash);
-    avFreshFrame('av-frame').src = moved ? base + TS.path + TS.hash : src;
+    const hash = src.includes('#') ? '' : TS.hash;
+    avFreshFrame('av-frame').src = TS.path && page !== null && (TS.path !== page || hash) ? base + TS.path + hash : src;
   }
   function seen(fp) {
     if (!TS.fp) { TS.fp = TS.fpNow = fp; return; }
