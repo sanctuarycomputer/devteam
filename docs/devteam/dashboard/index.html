@@ -1361,6 +1361,9 @@ try {
 <!-- html-sensors start -->
   <section id="monitoring" data-page="sensors"></section>
 <!-- html-sensors end -->
+<!-- html-jobs start -->
+  <section id="jobs" data-page="jobs"></section>
+<!-- html-jobs end -->
 <!-- html-settings start -->
   <section id="settings" data-page="settings"></section>
 <!-- html-settings end -->
@@ -1720,7 +1723,7 @@ function saveFilters(page, state) {
 // link opens over on a cold load), file homes by path, and the redirects. The page's own, outside the
 // shared block, so the tickets that change it never touch the block.
 // kit-93: Health folds into Sensors (its head redirects) and Governance is a page, so a governance file opens over it
-const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'awareness', 'governance', 'sensors', 'retros', 'loop', 'settings'];
+const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'awareness', 'governance', 'sensors', 'jobs', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
   links: {
@@ -1751,11 +1754,11 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // Each page is today's section (its data-page); render() still draws every section on every read,
 // shown or not, so nothing a page holds is lost while another shows. A page's nav count is today's
 // element, which render() fills (PAGE_COUNT_ID: the count each nav item carries).
-const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', awareness: 'n-awareness', sensors: 'n-sensors', retros: 'n-retros', loop: 'n-knowledge' };
+const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', awareness: 'n-awareness', sensors: 'n-sensors', jobs: 'n-jobs', retros: 'n-retros', loop: 'n-knowledge' };
 for (const [id, title, group, icon] of [
   ['overview', 'Overview', 'project', 'layout-dashboard'], ['goals', 'Goals', 'project', 'target'],
   ['progress', 'Progress', 'project', 'chart-line'], ['board', 'Board', 'project', 'kanban'], ['library', 'Library', 'project', 'library'],
-  ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['awareness', 'Awareness', 'autonomy', 'eye'], ['governance', 'Governance', 'autonomy', 'scale'], ['sensors', 'Sensors', 'autonomy', 'activity'],
+  ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['awareness', 'Awareness', 'autonomy', 'eye'], ['governance', 'Governance', 'autonomy', 'scale'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['jobs', 'Jobs', 'autonomy', 'calendar-clock'],
   ['retros', 'Retros', 'autonomy', 'history'], ['loop', 'Self Improvement', 'autonomy', 'repeat'], ['settings', 'Settings', 'settings', 'settings'],
 ]) registerPage({ id, title, group, icon, count: () => null, render: () => {} });
 for (const nav of document.querySelectorAll('.side nav.nav[data-group]')) {
@@ -4167,17 +4170,27 @@ bindFleetSwitch(document.querySelector('.app'), {
 // GET changes anything (kit-251). One refused (403: a view session may not POST, or a guard said no)
 // reads instead, so the card still shows, and says it wasn't checked. One asked for while a read is
 // out is kept in FLEET.wantFetch and runs once that read ends, so arriving on Settings always checks again.
+// A check that failed otherwise (502: origin unreachable; 500) with nothing drawn yet reads too, so the card
+// still has its blockers under the error (kit-341); over an answer already drawn, that answer stays, marked old.
 async function loadFleet(fetchToo = false) {
   if (FLEET.busy) { if (fetchToo) FLEET.wantFetch = true; return; }
   FLEET.busy = true;
   drawSettings(); // Check now disabled while the read is out
+  const PLAIN = ' What shows is a plain read, not checked against origin.';
   try {
     let r = await (fetchToo ? fetch('/api/fleet-check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }) : fetch('/api/fleet'));
     // refused: a plain read instead, said to be one
     let refused = null;
     if (fetchToo && r.status === 403) { const e = (await r.json().catch(() => ({})))?.error; refused = typeof e === 'string' && e.trim() ? e.trim() : "This session can't run a check"; r = await fetch('/api/fleet'); }
-    if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now(), error: refused ? `${refused.replace(/\.$/, '')}. What shows is a plain read, not checked against origin.` : null };
-    else { const j = await r.json().catch(() => ({})); FLEET.error = String(j.error ?? `HTTP ${r.status}`); }
+    if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now(), error: refused ? `${refused.replace(/\.$/, '')}.${PLAIN}` : null };
+    else {
+      const j = await r.json().catch(() => ({}));
+      const error = String(j.error ?? `HTTP ${r.status}`);
+      // a read that fails (an answer, a throw, a body that isn't JSON) leaves the check's error alone
+      const plain = fetchToo && !refused && !FLEET.data ? await fetch('/api/fleet').then((p) => (p.ok ? p.json() : null)).catch(() => null) : null;
+      if (plain) FLEET = { ...FLEET, data: plain, at: Date.now(), error: `${error.replace(/\.?$/, '.')}${PLAIN}` };
+      else FLEET.error = error;
+    }
   } catch (e) { FLEET.error = String(e?.message ?? e); }
   const wasReady = !!FLEET.prevReady;
   FLEET.busy = false;
@@ -5713,11 +5726,13 @@ const GOAL_PEEK_SECTIONS = {
     const es = recList('entries');
     if (!es.length) return '';
     recBind();
-    return gpCard('jobs', psect('Jobs', pageTable('upkeep:jobs', ['Job', 'Kind', 'Every', 'Last run', 'Next'], es.map((e) => ({
+    const sect = psect('Jobs', pageTable('upkeep:jobs', ['Job', 'Kind', 'Every', 'Last run', 'Next'], es.map((e) => ({
       cells: [esc(e.title || e.name), esc(recKind(e)), esc(recEvery(e, true)), recLast(e.last), esc(recNext(e))],
       sort: [undefined, undefined, undefined, e.last?.at ?? null, e.kind === 'chore' && e.state === 'held' ? null : e.next_at ?? null],
       open: `recurring/${encodeURIComponent(e.name)}`,
-    })))));
+    }))));
+    // kit-169: the head links to the Jobs page (All jobs), after its label; the first match is the head's own
+    return gpCard('jobs', sect.replace('<span class="grow">Jobs</span>', '<span class="grow">Jobs</span><a class="linkish" href="#jobs">All jobs</a>'));
   },
   builtin: (g, c) => {
     const bs = recList('builtin');
@@ -5836,6 +5851,51 @@ function openBuiltin(name) {
       ['Last', esc(b.last_at ? when(b.last_at) : '')],
       ['Next', esc(b.next_at ? when(b.next_at) : ''), 'When it next comes due.'],
     ] })}`);
+}
+function renderJobs() {
+  // kit-169: the Jobs page under Autonomy (#jobs): every job, what the loop noticed (a row per signal), the kit's
+  // built-ins and the proposed jobs, four section cards whose record tables' rows open their peek. It reads only
+  // /api/data's upkeep.recurring, through kit-166's recList and recProposals. Its nav count is the jobs failing
+  // now, in the danger colour, else the number of jobs. The page is written only when its HTML changed, so a poll
+  // keeps focus and sort; each write binds its tables again (a header sorts and redraws, a row opens its record).
+  const el = $('jobs');
+  if (!el) return;
+  const es = recList('entries'), bs = recList('builtin'), ps = recProposals();
+  const failing = es.filter((e) => e.state === 'failing').length;
+  const nav = $('n-jobs');
+  if (nav) { nav.textContent = failing ? String(failing) : es.length ? String(es.length) : ''; nav.classList.toggle('hot', failing > 0); }
+  const sigs = (e) => (Array.isArray(e.signals) ? e.signals.filter((s) => s && typeof s === 'object') : []);
+  const sigBadge = (s) => `<span class="badge medium">${esc(recWord(REC_SIGNAL_WORDS, s.kind) ?? String(s.kind ?? ''))}</span>`;
+  const jobOpen = (e) => `recurring/${encodeURIComponent(e.name)}`;
+  const card = (jp, icon, label, body, extra = '') => `<div class="card flush c12" data-jp="${jp}">${cardHead(icon, label, { extra })}${body}</div>`;
+  const jobsBody = pageTable('jobs:jobs', ['Job', 'Kind', 'Every', 'Last run', 'Next', 'Fails in a row', 'Noticed'], es.map((e) => ({
+    cells: [esc(e.title || e.name), esc(recKind(e)), esc(recEvery(e, true)), recLast(e.last), esc(recNext(e)), esc(Number.isFinite(e.fails_in_a_row) ? e.fails_in_a_row : ''), sigs(e).length ? sigs(e).map(sigBadge).join(' ') : '—'],
+    sort: [undefined, undefined, undefined, e.last?.at ?? null, e.kind === 'chore' && e.state === 'held' ? null : e.next_at ?? null, undefined, undefined],
+    open: jobOpen(e),
+  })));
+  const noticed = es.flatMap((e) => sigs(e).map((s) => ({ e, s })));
+  const noticedBody = pageTable('jobs:noticed', ['Job', 'Signal', 'What it saw', 'What it may propose'], noticed.map(({ e, s }) => ({
+    cells: [esc(e.title || e.name), sigBadge(s), esc(s.text ?? ''), esc(s.may ?? '')],
+    open: jobOpen(e),
+  })));
+  const builtinBody = pageTable('jobs:builtin', ['Job', 'Every', 'Last', 'Next'], bs.map((b) => ({
+    cells: [esc(recWord(REC_BUILTIN, b.name) ?? b.name), esc(recEvery({ every: b.every }, true)), esc(b.last_at ? when(b.last_at) : ''), esc(b.next_at ? when(b.next_at) : '')],
+    sort: [undefined, undefined, b.last_at ?? null, b.next_at ?? null],
+    open: `builtin/${encodeURIComponent(b.name)}`,
+  })));
+  const proposalsBody = pageTable('jobs:proposals', ['Proposed job', 'Status', 'Asked'], ps.map((x) => ({
+    cells: [esc(x.title || x.name), `<span class="badge${x.status === 'open' ? ' medium' : ''}">${esc(REC_PROPOSAL[x.status])}</span>`, esc(x.asked_at ? when(x.asked_at) : '')],
+    sort: [undefined, undefined, x.asked_at ?? null],
+    open: x.qid ? `q/${encodeURIComponent(x.qid)}` : null,
+  })));
+  const waiting = ps.filter((x) => x.status === 'open').length;
+  const html = `<div class="g12">${card('jobs', 'calendar-clock', 'Jobs', jobsBody, es.length ? esc(`${es.length} · ${failing} failing`) : '')}${
+    card('noticed', 'radar', 'What the loop noticed', noticedBody)}${card('builtin', 'box', 'Built in', builtinBody)}${
+    card('proposals', 'lightbulb', 'Proposed jobs', proposalsBody, waiting ? esc(`${waiting} waiting on you`) : '')}</div>`;
+  if (el.__html === html) return;
+  el.__html = html;
+  el.innerHTML = html;
+  bindPageTables(el, renderJobs);
 }
 function openGoal(id) {
   if (id === 'upkeep') return openUpkeep();
@@ -8240,6 +8300,7 @@ function render(d) {
 
   renderOoda(o);
   renderMonitoring(d);
+  renderJobs();
   // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Settings
   drawFleet();
   drawSettings();
