@@ -809,7 +809,7 @@ test('goal peek and Upkeep peek', { ...CHROME, timeout: 300000 }, async (t) => {
   const GP = await (async () => { await go('#goals'); return p.ev('JSON.parse(JSON.stringify(GOAL_PEEK))'); })();
   assert.deepEqual(Object.keys(GP), ['goal', 'upkeep']);
   assert.equal(GP.goal[0], 'steps', 'the step bar first');
-  assert.deepEqual(GP.upkeep, ['heartbeat', 'chores']);
+  assert.deepEqual(GP.upkeep, ['heartbeat', 'chores', 'jobs', 'builtin', 'proposals']);
   assert.deepEqual(await p.ev('[...GOAL_PEEK.goal, ...GOAL_PEEK.upkeep].filter((id) => typeof GOAL_PEEK_SECTIONS[id] !== \'function\')'), [], 'a builder per id');
 
   // Upkeep's card on Goals opens Upkeep's peek (not a "not found" one)

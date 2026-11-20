@@ -4732,6 +4732,10 @@ const KEY_TIPS = {
   Checks: 'What it requests and what counts as up.', Uptime: 'The share of checks that passed.', 'Response time': 'p50 and p95 latency.', 'Last check': 'When it last checked.', Certificate: 'The TLS certificate, if any.',
   Now: 'How this kind of decision is made today.', 'At most': 'The furthest this kind may go without asking, whatever you answer.', Since: 'When its level last moved.',
   'Agreed with you': 'How often your answers went with its recommendation, over the questions it counts.', Levels: 'The three ways a kind of decision is made, the one it is on marked.',
+  Jobs: 'The checks and chores registered under Upkeep: how many, how many failing now, and how many due.', 'Proposed jobs': 'Jobs the supervisor asked you about, and your Yeses not landed yet.',
+  Every: 'How often it comes due.', Runs: 'The command a check runs, or the steps a chore follows.', 'Runs as': 'What a run may do.', 'Failing means': 'What counts as a failure.',
+  'Registered by': 'The yes that let it in.', Next: 'When it next comes due; a chore waits while Upkeep is drained or parked.', 'Fails in a row': 'Results that were not a pass since the last pass.',
+  'What it does': 'What it is for.', 'Set by': 'The setting that sets how often it runs.', Last: 'When it last ran.',
 };
 // none of the three: no tip (and the peek test's "every key has a tooltip" fails)
 const keyTip = (label, tip, field) => tip || KEY_TIPS[label] || (field ? `Stored on the record as ${field}.` : '');
@@ -5543,10 +5547,10 @@ const upkeepJobsComputed = () => {
   const es = recList('entries'), ps = recProposals();
   const n = (states) => es.filter((e) => states.includes(e.state)).length;
   const out = [];
-  if (es.length) out.push(['Jobs', esc(`${es.length} registered · ${n(['failing'])} failing · ${n(['due', 'overdue'])} due`), 'The checks and chores registered under Upkeep: how many, how many failing now, and how many due.']);
+  if (es.length) out.push(['Jobs', esc(`${es.length} registered · ${n(['failing'])} failing · ${n(['due', 'overdue'])} due`), KEY_TIPS.Jobs]);
   if (ps.length) {
     const k = (st) => ps.filter((x) => x.status === st).length;
-    out.push(['Proposed jobs', esc([[k('open'), 'waiting on you'], [k('registering'), 'being registered'], [k('stopping'), 'being stopped']].filter(([c]) => c).map(([c, w]) => `${c} ${w}`).join(' · ')), 'Jobs the supervisor asked you about, and your Yeses not landed yet.']);
+    out.push(['Proposed jobs', esc([[k('open'), 'waiting on you'], [k('registering'), 'being registered'], [k('stopping'), 'being stopped']].filter(([c]) => c).map(([c, w]) => `${c} ${w}`).join(' · ')), KEY_TIPS['Proposed jobs']]);
   }
   return out;
 };
@@ -5644,20 +5648,20 @@ function openJob(name) {
     ? `${ll ? ('above' in ll ? `its last line is above ${ll.above}` : 'below' in ll ? `its last line is below ${ll.below}` : `its last line isn’t ${ll.is_not}`) : 'it exits with an error'}${Number(j.fail_after) > 1 ? `, ${j.fail_after} times in a row` : ''}; a timeout, or a command that can’t be run, is an error`
     : `not done within ${j.grace_days ?? (j.by === 'worker' ? 3 : 1)} day${(j.grace_days ?? (j.by === 'worker' ? 3 : 1)) === 1 ? '' : 's'} of coming due`;
   const front = [
-    attrRow('Title', esc(j.title || name), 'Its name, one line.'),
+    attrRow('Title', esc(j.title || name)),
     attrRow('Kind', esc(recKind(j)), 'A check runs a command; a chore is work the supervisor or a worker does.'),
-    attrRow('Every', esc(recEvery(j)), 'How often it comes due.'),
-    attrRow('Runs', e ? (check ? `<code>${esc(j.run ?? '')}</code>` : `<div class="measure">${esc(j.prompt ?? '').replace(/\n/g, '<br>')}</div>`) : '', 'The command a check runs, or the steps a chore follows.'),
-    attrRow('Runs as', check ? 'a command that only looks, in a clean checkout of main' : j.kind === 'chore' ? (j.by === 'worker' ? 'an Upkeep chore ticket for a worker' : 'an Upkeep chore the supervisor does in its tick') : '', 'What a run may do.'),
-    attrRow('Failing means', e ? esc(failWords) : '', 'What counts as a failure.'),
-    attrRow('Registered by', j.registered?.qid ? `${qlink(j.registered.qid, 'your yes')}${j.registered.at ? ` · ${esc(when(j.registered.at))}` : ''}` : '', 'The yes that let it in.'),
+    attrRow('Every', esc(recEvery(j))),
+    attrRow('Runs', e ? (check ? `<code>${esc(j.run ?? '')}</code>` : `<div class="measure">${esc(j.prompt ?? '').replace(/\n/g, '<br>')}</div>`) : ''),
+    attrRow('Runs as', check ? 'a command that only looks, in a clean checkout of main' : j.kind === 'chore' ? (j.by === 'worker' ? 'an Upkeep chore ticket for a worker' : 'an Upkeep chore the supervisor does in its tick') : ''),
+    attrRow('Failing means', e ? esc(failWords) : ''),
+    attrRow('Registered by', j.registered?.qid ? `${qlink(j.registered.qid, 'your yes')}${j.registered.at ? ` · ${esc(when(j.registered.at))}` : ''}` : ''),
     attrRow('Goal', '<a class="linkish" href="#goal/upkeep">Upkeep</a>', 'The goal it runs under.'),
   ].filter(Boolean);
   const last = runs?.[0] ?? row?.last ?? null;
   const computed = [
-    ['Last run', recLast(last), 'Its newest result.'],
-    ['Next', esc(recNext(row ?? j)), 'When it next comes due; a chore waits while Upkeep is drained or parked.'],
-    ['Fails in a row', row ? esc(String(row.fails_in_a_row ?? 0)) : '', 'Results that were not a pass since the last pass.'],
+    ['Last run', recLast(last)],
+    ['Next', esc(recNext(row ?? j))],
+    ['Fails in a row', row ? esc(String(row.fails_in_a_row ?? 0)) : ''],
   ];
   const fixing = row && row.kind === 'check' && row.state === 'failing' && row.ticket ? psect('Being fixed', `<div>${tlink(row.ticket)}</div>`) : '';
   const sg = Array.isArray(row?.signals) ? row.signals.filter((x) => x && typeof x === 'object') : [];
@@ -5683,16 +5687,16 @@ function openBuiltin(name) {
   if (!b) return notFound('builtin', `builtin.${name}`, null, 'No such job.', { noRecord: true });
   const m = /^(\d+)(h|d)$/.exec(String(b.every ?? ''));
   const front = [
-    attrRow('Title', esc(REC_BUILTIN[b.name] ?? b.name), 'Its name, one line.'),
-    attrRow('What it does', esc(b.note ?? ''), 'What it is for.'),
-    attrRow('Every', esc(recEvery({ every: b.every })), 'How often it comes due.'),
-    attrRow('Set by', b.setting ? `<code>${esc(b.setting)}</code>${m ? `: ${esc(m[1])}` : ''}` : 'each sensor’s own settings, on <a class="linkish" href="#sensors">the Sensors page</a>', 'The setting that sets how often it runs.'),
+    attrRow('Title', esc(REC_BUILTIN[b.name] ?? b.name)),
+    attrRow('What it does', esc(b.note ?? '')),
+    attrRow('Every', esc(recEvery({ every: b.every }))),
+    attrRow('Set by', b.setting ? `<code>${esc(b.setting)}</code>${m ? `: ${esc(m[1])}` : ''}` : 'each sensor’s own settings, on <a class="linkish" href="#sensors">the Sensors page</a>'),
     attrRow('Goal', '<a class="linkish" href="#goal/upkeep">Upkeep</a>', 'The goal it runs under.'),
   ].filter(Boolean);
   showDrawer(`<h2 id="drawer-title">${esc(REC_BUILTIN[b.name] ?? b.name)}</h2>
     ${attrs({ id: `builtin.${name}`, idTip: 'The kit’s own name for it.', noRecord: true, kind: 'builtin', front: front.map((r) => [r[0], r, true]), computed: [
-      ['Last', esc(b.last_at ? when(b.last_at) : ''), 'When it last ran.'],
-      ['Next', esc(b.next_at ? when(b.next_at) : ''), 'When it next comes due.'],
+      ['Last', esc(b.last_at ? when(b.last_at) : '')],
+      ['Next', esc(b.next_at ? when(b.next_at) : '')],
     ] })}`);
 }
 function openGoal(id) {
