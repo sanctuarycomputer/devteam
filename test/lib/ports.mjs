@@ -7,18 +7,13 @@
 // Inside a block, a test names a hub port and an instance base. Only a dashboard that picks its own
 // port, or a hub asked for its list (/instances.json), scans base..base+24, so such a base must be
 // +75 or lower to stay in the block. A test that pins its dashboard with --port, and never asks the
-// hub's list, scans nothing: only its hub port is bound, and that must be in the block. Tests in one
-// file run one at a time, so their ranges may overlap, but a port one test binds should be one no
-// test before it in that file can still be holding.
-// The layout, by offset (each file has a block of its own; this is dashboard.test.mjs's, the most
-// crowded, unless a line names another file):
-// - +0 the file-wide hub, +1..25 its instances (lib/kit.mjs's defaults)
-// - +10/11 next-step's dashboard (next-step.test.mjs; pinned)
-// - +30/31..55 the ports and viewer tests
-// - +40/41, +42/43 the data-wait tests (pinned)
-// - +56/57 focus, +58/59 presses (pinned, never asking the hub's list: their bases scan nothing)
-// - +60/61..85 the hub test; the preview relays bind +62..79 inside it (never at once: serial only)
-// - +70/71..95 accounts (accounts.test.mjs)
+// hub's list, scans nothing: only its hub port is bound, and that must be in the block.
+// Each file claims its own block, and tests in one file run one at a time, so their offsets may
+// overlap, but a port one test binds is one no test before it in that file can still be holding.
+// Offsets live in a "// Ports:" line at the top of each dashboard.*.test.mjs file; two more are kept here by glob,
+// true for any split of those files:
+// - +10/11 next-step's dashboard (next-step*.test.mjs; pinned)
+// - +70/71..95 accounts (accounts*.test.mjs)
 // The gateway test claims no block: it picks ports of its own, outside 20000..32699.
 import fs from 'node:fs';
 import os from 'node:os';
