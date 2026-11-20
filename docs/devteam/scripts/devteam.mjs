@@ -21031,6 +21031,7 @@ async function dashRoutesOwner(D, req, res, q) {
   // Check now (kit-251): fleet status after a fetch from origin. A POST, as every other request that
   // changes refs is: the body is read to its end (the cap above holds) and nothing in it is used.
   if (isCheck) return req.on('end', async () => {
+    if (over) return;
     const r = await run(['fleet', 'status', '--json']);
     if (!res.headersSent) send(res, r.ok ? 200 : 500, 'application/json', r.ok ? r.stdout : JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
   });
