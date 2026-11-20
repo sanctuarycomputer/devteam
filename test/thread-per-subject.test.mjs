@@ -39,6 +39,8 @@ test('thread new on a subject with an open thread is refused, naming it, for eve
         assert.match(said, new RegExp(`${A}.*thread say ${A}`), `${kind}: the refusal of ${JSON.stringify(dup)} names the open thread`);
         assert.equal(threads(), before, `${kind}: a refused thread leaves nothing written`);
       }
+      // the subject's own checks run first: a malformed duplicate is told what is wrong with it
+      assert.match(F.fails(args({ ...s, extra: 1 }, 'Again')), /subject has no extra/, `${kind}: the shape's refusal first`);
       // another spot, ref or route: its own thread
       F.owner(args(other, 'Elsewhere'));
       // resolved: the subject is free again

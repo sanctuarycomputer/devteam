@@ -631,6 +631,38 @@ export function effThread({ id, subject, status = 'open', title = 'A thread', tu
 // server's, and /api/threads also fx's threads; window.__fx is read on every answer, so a test can
 // change it in the page. Every non-GET request is kept in window.__writes, every error in
 // window.__errors, and the 10 s poll runs every 300 ms.
+export function dataRewriteInit(fx) {
+  return `(() => {
+  const si = window.setInterval;
+  window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
+  window.__fx = ${JSON.stringify(fx)};
+  window.__writes = [];
+  window.__errors = [];
+  window.addEventListener('error', (e) => window.__errors.push(String(e.message || e.error || e)));
+  window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason && e.reason.message || e.reason)));
+  const json = (r, body) => new Response(JSON.stringify(body), { status: r.status, statusText: r.statusText, headers: r.headers });
+  const real = window.fetch;
+  window.fetch = async (u, o) => {
+    const url = String(u && u.url ? u.url : u);
+    const method = String(o?.method || 'GET').toUpperCase();
+    if (method !== 'GET') window.__writes.push({ url, method, body: o?.body ?? null });
+    const r = await real(u, o);
+    const fx = window.__fx;
+    if (method === 'GET' && r.ok && url.startsWith('/api/data')) {
+      const d = await r.json();
+      if (fx.efficiency) d.efficiency = fx.efficiency; else delete d.efficiency;
+      const m = d.metrics || {};
+      d.metrics = { ...m, ...fx.metrics, cost: { ...(m.cost || {}), ...(fx.metrics.cost || {}) } };
+      return json(r, d);
+    }
+    if (method === 'GET' && r.ok && url.startsWith('/api/threads')) {
+      const j = await r.json();
+      return json(r, { ...j, threads: [...(j.threads || []), ...(fx.threads || [])] });
+    }
+    return r;
+  };
+})();`;
+}
 // kit-97: a thread reopened by a Shift+click, for the measure (dashboard-measure.test.mjs's THREAD_PAGES):
 // { hash, init, ready, id }. init adds one open thread on Upkeep's card (goal:upkeep, on every project's
 // Goals page) to /api/threads, as dataRewriteInit adds fx's; ready, run until it holds, Shift+clicks the
@@ -671,38 +703,6 @@ export function reopenFixture() {
   return TL.open === ${JSON.stringify(id)} && !TL.draft && !c.hidden && c.parentElement.id === 'tl' && c.dataset.key === ${JSON.stringify(id)};
 })()`;
   return { hash: '#goals', init, ready, id };
-}
-export function dataRewriteInit(fx) {
-  return `(() => {
-  const si = window.setInterval;
-  window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
-  window.__fx = ${JSON.stringify(fx)};
-  window.__writes = [];
-  window.__errors = [];
-  window.addEventListener('error', (e) => window.__errors.push(String(e.message || e.error || e)));
-  window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason && e.reason.message || e.reason)));
-  const json = (r, body) => new Response(JSON.stringify(body), { status: r.status, statusText: r.statusText, headers: r.headers });
-  const real = window.fetch;
-  window.fetch = async (u, o) => {
-    const url = String(u && u.url ? u.url : u);
-    const method = String(o?.method || 'GET').toUpperCase();
-    if (method !== 'GET') window.__writes.push({ url, method, body: o?.body ?? null });
-    const r = await real(u, o);
-    const fx = window.__fx;
-    if (method === 'GET' && r.ok && url.startsWith('/api/data')) {
-      const d = await r.json();
-      if (fx.efficiency) d.efficiency = fx.efficiency; else delete d.efficiency;
-      const m = d.metrics || {};
-      d.metrics = { ...m, ...fx.metrics, cost: { ...(m.cost || {}), ...(fx.metrics.cost || {}) } };
-      return json(r, d);
-    }
-    if (method === 'GET' && r.ok && url.startsWith('/api/threads')) {
-      const j = await r.json();
-      return json(r, { ...j, threads: [...(j.threads || []), ...(fx.threads || [])] });
-    }
-    return r;
-  };
-})();`;
 }
 
 // kit-91: a script for Page.addScriptToEvaluateOnNewDocument, the dataRewriteInit pattern: /api/data
