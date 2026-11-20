@@ -565,13 +565,14 @@ test('I6 forget signs the browser out and restarts it on an empty profile', opts
   assert.ok(alive(old.daemon_pid), 'the daemon stays');
   assert.equal(fs.existsSync(marker), false, 'the profile was emptied');
   assert.equal(JSON.parse(fs.readFileSync(path.join(a.profile, 'root.json'), 'utf8')).root, fs.realpathSync(a.old));
-  // frames after the new Chrome is up and the old one gone: drawn by the new screencast
+  // frames after the new Chrome is up and the old one gone: drawn by the new screencast. A page is
+  // opened on the new Chrome so it paints: about:blank's one frame may come before n is taken
   const n = c.msgs.length;
+  await ok(a, ['open', `${site.origin}/account`]);
   await c.wait(isFrame, 10000, n);
   const seqs = c.msgs.filter(isFrame).map((m) => m.seq);
   for (let i = 1; i < seqs.length; i++) assert.ok(seqs[i] > seqs[i - 1], `the frame count keeps rising over the socket's life: ${seqs.slice(Math.max(0, i - 3), i + 2).join(', ')}`);
   assert.equal(c.closed, null, 'the socket stayed open');
-  await ok(a, ['open', `${site.origin}/account`]);
   assert.match(await ok(a, ['snapshot']), /Not signed in/);
   assert.equal(readState(a).preview, view.name);
 });
