@@ -940,7 +940,8 @@ try {
   .lib-body .lib-meta .badge { margin-right: 6px; }
   /* a thumbnail's frame fills its 16:9 box over the kind's icon, inert; a link's box: its site's icon over its host */
   .lib-thumb { flex-direction: column; gap: 6px; }
-  .lib-thumb > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
+  /* the page is laid out at desktop width and scaled to the box; the scale is 0 until measured */
+  .lib-thumb > iframe { position: absolute; top: 0; left: 0; width: 1280px; height: var(--thumb-h, 720px); border: 0; pointer-events: none; transform-origin: 0 0; transform: scale(var(--thumb-k, 0)); }
   .lib-thumb > img { width: 32px; height: 32px; object-fit: contain; }
   /* a closed ⋯ menu's pop out of layout, as the Inbox's and Goals' (Chrome boxes a closed <details>' content at the
      summary's 26px, so the pop's key column would stick out of it: the measure) */
@@ -7927,10 +7928,12 @@ const artRemotePing = (() => {
 // while it is in view, at most THUMB_MAX at once in all (an open peek's box first, then the grid's, top first);
 // one whose load hasn't fired THUMB_WAIT ms after it went in, or that this page's policy refuses, is taken out
 // and the box keeps its icon until its card is drawn anew. data-thumb: icon | live | failed. Frames are only put
-// in and taken out here; a poll keeps the nodes.
+// in and taken out here; a poll keeps the nodes. A frame is laid out at 1280 px wide (a desktop page) and scaled to
+// its box, the scale kept as the box resizes.
 const THUMB_MAX = 12, THUMB_WAIT = 5000;
-// io: one IntersectionObserver; watched: the boxes it observes; seen: those in view; live: those holding a frame
-const THUMBS = { io: null, watched: new Set(), seen: new Set(), live: new Set() };
+const THUMB_W = 1280;
+// io: one IntersectionObserver; ro: one ResizeObserver; watched: the boxes it observes; seen: those in view; live: those holding a frame
+const THUMBS = { io: null, ro: null, watched: new Set(), seen: new Set(), live: new Set() };
 // Watches every .lib-thumb under root once (a box seen before is left alone), then fills the free slots.
 function thumbsWatch(root) {
   THUMBS.io ??= new IntersectionObserver((es) => {
@@ -7987,6 +7990,12 @@ function thumbsFill() {
     if (!inPeek(b)) thumbIn(b);
   }
 }
+// A box's frame is 1280 px wide and as tall as the box is at that scale: --thumb-k scales it down to the box.
+function thumbScale(b) {
+  const k = b.clientWidth / THUMB_W;
+  b.style.setProperty('--thumb-k', String(k));
+  b.style.setProperty('--thumb-h', k > 0 ? `${b.clientHeight / k}px` : '720px');
+}
 function thumbIn(b) {
   const f = document.createElement('iframe');
   // scripts only: no same origin, so a frame of this dashboard's own origin can't reach the page
@@ -8001,6 +8010,9 @@ function thumbIn(b) {
   // when it went in (the page's clock), stamped before the wait starts
   b.dataset.thumbAt = String(performance.now());
   b._thumbTimer = setTimeout(() => { if (!loaded && b._thumbFrame === f) { thumbOut(b, 'failed'); thumbsFill(); } }, THUMB_WAIT);
+  thumbScale(b);
+  THUMBS.ro ??= new ResizeObserver((es) => { for (const e of es) thumbScale(e.target); });
+  THUMBS.ro.observe(b);
   b.append(f);
   b.dataset.thumb = 'live';
   THUMBS.live.add(b);
@@ -8010,6 +8022,7 @@ function thumbOut(b, state) {
   clearTimeout(b._thumbTimer);
   b._thumbFrame?.remove();
   b._thumbFrame = null;
+  THUMBS.ro?.unobserve(b);
   THUMBS.live.delete(b);
   b.dataset.thumb = state;
   if (state === 'failed') { THUMBS.seen.delete(b); THUMBS.watched.delete(b); THUMBS.io?.unobserve(b); }
