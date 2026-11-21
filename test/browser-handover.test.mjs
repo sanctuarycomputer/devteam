@@ -9,6 +9,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { canDrive } from './lib/chrome.mjs';
 import { monoFixture } from './lib/kit.mjs';
+import { handoverFile, project, kit, owner, answerLines } from './lib/browser-handover-fixture.mjs';
+
+handoverFile();
 
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
@@ -107,4 +110,19 @@ test('ask refuses browser-handover in another case', () => {
   // className reads Browser-Handover as browser-handover, so it is refused, not let past every check
   refused(ask('--kind', 'owner-action', '--class', 'Browser-Handover', '--scope', `browser:${KEY}`, '--choices', CHOICES, '--default', 'Done'), /ask: the class is browser-handover, in lower case/, n0, '--class Browser-Handover');
   refused(ask('--kind', 'owner-action', '--class', 'BROWSER-HANDOVER', '--scope', 'browser:upper-0123456789ab', '--choices', CHOICES), /ask: the class is browser-handover, in lower case/, n0, '--class BROWSER-HANDOVER');
+});
+
+test('fixture: owner answer is written by owner', async () => {
+  const P = project('h-sanity');
+  const q = await kit(P, ['ask', '--kind', 'owner-action', '--class', 'new-feature', '--question', 'Press Done once the fixture is set up', '--stake', '1', '--urgency', '1', '--choices', CHOICES]);
+  assert.equal(q.status, 0, q.err || q.out);
+  const qid = q.out.split('\n').find((l) => /^q-/.test(l));
+  assert.ok(qid, q.out);
+  const a = await owner(P, ['answer', qid, '--choice', 'Done']);
+  assert.equal(a.status, 0, a.err || a.out);
+  const lines = answerLines(P);
+  assert.equal(lines.length, 1, JSON.stringify(lines));
+  assert.equal(lines[0].id, qid);
+  assert.equal(lines[0].by, 'owner');
+  assert.equal(P.ownerAnswers, 1);
 });
