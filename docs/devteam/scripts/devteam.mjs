@@ -21293,7 +21293,11 @@ async function cmdDashboard() {
     });
   };
   refreshHello();
-  every(refreshHello, 30000);
+  // How often the dashboard looks again through the hello child (kit-595: 30 s). DEVTEAM_HELLO_MS is for
+  // tests only, not a setting: test/lib/pane-question-fixture.mjs sets 1000, so a question change shows
+  // in a second (kit-223). Anything that isn't a number of at least 0 is the default.
+  const HELLO_MS = ((n) => (process.env.DEVTEAM_HELLO_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 30000))(Number(process.env.DEVTEAM_HELLO_MS));
+  every(refreshHello, HELLO_MS);
   const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
@@ -27852,15 +27856,31 @@ async function browserSnapshot(ctx, tab, json) {
 // for as open's is (an error page's for 3 s), or a tab it opened (waited for, up to 10 s, to load).
 // The verb then prints said, plus where the page went or the guard's refusal.
 async function browserInput(ctx, tab, act, said) {
-  let started = false, loaded = false;
+  let started = false, loaded = false, inDocAt = 0, pending = 0, fresh = false;
   const had = new Set(ctx.tabs);
-  tab.started = () => { started = true; loaded = false; tab.unreachable = null; tab.refs = new Map(); };
+  tab.started = () => { started = true; loaded = false; pending++; fresh = true; tab.unreachable = null; tab.refs = new Map(); };
   tab.loaded = () => { loaded = true; };
+  // A same-document navigation (a fragment link, a history call) fires a load's start, then itself, and no
+  // load: it takes the start just before it off the count (while a real load is pending, the page's
+  // history calls after the first come with no start of their own and take nothing). The wait ends 500 ms after the
+  // first (as an input's own load is given 500 ms to start) when no start is left pending, before and
+  // after the document reads complete. So a history call the page being left makes before it navigates
+  // (an onclick saving its state), or while its load is pending (a timer), leaves that load's start
+  // pending until its load; one the new page makes as it boots reads loading; and a page that keeps
+  // calling (a scroll-spy) holds nothing. Each read is bounded.
+  tab.within = () => { inDocAt ||= Date.now(); if (fresh) pending--; fresh = false; };
+  const docLoaded = () => Promise.race([
+    ctx.cdp.send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true }, tab.sessionId).then((r) => r.result?.value === 'complete', () => false),
+    browserSleep(1000).then(() => false),
+  ]);
   try {
     await act();
     for (const t = Date.now(); !started && had.has(ctx.active) && Date.now() - t < 500;) await browserSleep(25);
-    for (const t = Date.now(); started && !loaded && Date.now() - t < (tab.unreachable ? 3000 : 30000);) await browserSleep(50);
-  } finally { tab.started = tab.loaded = null; }
+    for (const t = Date.now(); started && !loaded && Date.now() - t < (tab.unreachable ? 3000 : 30000);) {
+      if (inDocAt && !pending && Date.now() - inDocAt >= 500 && await docLoaded() && !pending) break;
+      await browserSleep(50);
+    }
+  } finally { tab.started = tab.loaded = tab.within = null; }
   const pop = ctx.active && !had.has(ctx.active) ? ctx.active : null;
   if (pop) {
     for (const t = Date.now(); Date.now() - t < 10000; await browserSleep(100)) {
