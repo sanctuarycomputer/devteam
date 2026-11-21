@@ -70,6 +70,9 @@ function dash(which) {
       CLAUDE_CONFIG_DIR: path.join(F.base, 'claude'), CODEX_HOME: path.join(F.base, 'codex'),
       // every GET waits for its own build, never the last good data
       DEVTEAM_DATA_WAIT_MS: '600000',
+      // a build served again for 3 s after it ends (the kit's 20 s, kit-595, set back for tests): these
+      // checks are of kit-633's 3 s start gap and freshness, timed to it
+      DEVTEAM_DATA_REUSE_MS: '3000',
       NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import ${pathToFileURL(files.probe).href}`].filter(Boolean).join(' '),
       ZQ_BUILDS: files.builds, ZQ_SLEEP: files.sleep, ZQ_WATCH: files.watch, ZQ_STUB: which === 's' ? '1' : '0',
     });
@@ -254,12 +257,16 @@ const GAP = 2700; // the spec's 3000 less room for one child's spawn to lag anot
 test('presence A13: one build, shared, young and fresh', { timeout: 300000 }, async () => {
   const S = await dash('s');
   setSleep(S, 0);
-  assert.equal(builds(S).length, 0, 'no build yet');
+  // the dashboard's own build as it starts listening (kit-595's warm start), ended and no longer young
+  await started(S, 0);
+  await aged(S);
+  const w = builds(S).length;
+  assert.equal(w, 1, 'one build as it started, none since');
 
   // (a) ten GETs at once: one build
   const ten = await Promise.all(Array.from({ length: 10 }, () => data(S)));
   ten.forEach((r, i) => good(r, `GET ${i + 1} of 10`));
-  assert.equal(builds(S).length, 1, 'ten GETs at once start one build');
+  assert.equal(builds(S).length, w + 1, 'ten GETs at once start one build');
   assert.equal(new Set(ten.map((r) => r.body)).size, 1, 'and share it');
 
   // (b) young and fresh: served from it
@@ -267,8 +274,8 @@ test('presence A13: one build, shared, young and fresh', { timeout: 300000 }, as
   const b = await data(S);
   good(b, '(b)');
   assert.equal(sig(S), s0, 'nothing wrote run/log between');
-  assert.ok(b.at - builds(S)[0].end < 3000, `(b) asked within 3 s of the build (${b.at - builds(S)[0].end} ms)`);
-  assert.equal(builds(S).length, 1, 'a GET within 3 s of a fresh build is served from it');
+  assert.ok(b.at - builds(S)[w].end < 3000, `(b) asked within 3 s of the build (${b.at - builds(S)[w].end} ms)`);
+  assert.equal(builds(S).length, w + 1, 'a GET within 3 s of a fresh build is served from it');
   assert.equal(b.body, ten[0].body, 'the same data');
 
   // (c) an append during a build: a GET after it waits for the next build. B sleeps 1 s and the

@@ -26,6 +26,13 @@ exit 0
       "final": {
         "first_passes": 1,
         "rejected": 0,
+        "undated": 1,
+        "last_7d": {
+          "first_passes": 0,
+          "rejected": 0,
+          "rejection_rate": null,
+          "top_blocking_rules": []
+        },
         "rejection_rate": 0,
         "top_blocking_rules": [],
         "top_blocking_categories": []
@@ -60,6 +67,19 @@ exit 0
       "final": 0
     },
     "mis_rated": []
+  },
+  "model_tiers": {
+    "window_days": 14,
+    "tickets": 0,
+    "fast_tasks": 0,
+    "strong_tasks": 0,
+    "fast_built_here": 0,
+    "misses": 0,
+    "miss_rate": null,
+    "build_usd": 0,
+    "build_usd_cheaper": 0,
+    "cheaper_share": null,
+    "unrouted": []
   },
   "findings": [
     {

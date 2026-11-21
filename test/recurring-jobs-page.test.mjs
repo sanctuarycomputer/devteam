@@ -84,7 +84,11 @@ function fixture(base) {
   return { root, env, ids, rec };
 }
 
-// The dashboard on the fixture and Chrome on it: { p, soon, go, fx, click }. go(hash) loads a fresh document at that head.
+// The dashboard on the fixture and Chrome on it: { p, soon, go, fx, click }. go(hash) loads a fresh document at that head
+// and waits until it is completely loaded (kit-350): until its load event (the fonts and scripts from the CDNs, slow on
+// a loaded runner, hold it while /api/data has long answered) a script's location.hash assignment, having no user
+// activation, replaces the current entry instead of adding one (HTML, the Location object's navigate), so a Back
+// after it would leave the page.
 async function openOn(t, { rec, peeks = clone(PEEK_FX), width = 1440, height = 900 }) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-jobs-page-'));
   const later = cleanup(t);
@@ -107,6 +111,7 @@ async function openOn(t, { rec, peeks = clone(PEEK_FX), width = 1440, height = 9
     await soon("location.href === 'about:blank'", 'about:blank');
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
     await soon("!document.querySelector('main.waiting') && typeof DATA !== 'undefined' && !!DATA", 'the page with its data');
+    await soon("document.readyState === 'complete'", 'the page completely loaded');
   };
   // a real click, once the target has stopped moving: a fresh load can slide the Threads panel in (remembered open),
   // which moves the page under it while the click's point is read
@@ -157,8 +162,11 @@ test('the shell registers the Jobs page under Autonomy, right after Sensors, wit
   assert.equal(nav[n - 1].href, '#sensors', 'after Sensors in the side nav');
   assert.deepEqual(nav[n], { href: '#jobs', title: 'Jobs', icon: 'icon-calendar-clock' });
   // #jobs opens it: its section alone, its title in the page bar, its nav item current
+  const entries = await p.ev('history.length');
   await p.ev("location.hash = '#jobs'; void 0");
   await soon(jobsReady(), 'the Jobs page');
+  // a new entry, not Sensors' replaced (kit-350): Back has Sensors to return to
+  assert.equal(await p.ev('history.length'), entries + 1, '#jobs added an entry');
   assert.equal(await p.ev("document.getElementById('page-title').textContent"), 'Jobs');
   assert.equal(await p.ev("document.querySelector('.side a[href=\"#jobs\"]').getAttribute('aria-current')"), 'page');
   assert.deepEqual(await p.ev("[...document.querySelectorAll('main.page > section[data-page].on')].map((s) => s.dataset.page)"), ['jobs']);

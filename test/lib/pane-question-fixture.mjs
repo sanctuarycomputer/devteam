@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { cleanup } from './chrome.mjs';
-import { write } from './kit.mjs';
+import { freePort, startDashboard, until, write } from './kit.mjs';
 
 // A stand-in for the supervisor's agent, drawing what Claude Code draws: in raw mode, so a key
 // reaches it as it is pressed, and every byte it is sent is written down. It goes through a list of
@@ -64,6 +64,28 @@ const heldDirOf = (F, pane) => path.join(F.old, 'docs/devteam/run/held', encodeU
 const heldFor = (F, pane) => { try { return fs.readdirSync(heldDirOf(F, pane)).filter((n) => n.endsWith('.json')).sort(); } catch { return []; } };
 const logLines = (F) => fs.readdirSync(F.logDir).flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
 
+// The pane-answer acts in F's log.
+const acts = (F) => logLines(F).filter((l) => l.type === 'act' && l.class === 'pane-answer');
+
+// A dashboard for a fixture whose supervisor is that pane; requests as the page's own (a browser
+// sends Origin and Sec-Fetch-Site on every fetch POST, and Sec-Fetch-Site on its reads).
+async function dash(later, F, pane, env = {}) {
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_SUPERVISOR: pane.target, DEVTEAM_HELLO_MS: '1000', ...env }), ['--port', String(port)]);
+  later(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const own = { origin: B, 'sec-fetch-site': 'same-origin' };
+  const asked = (headers = { 'sec-fetch-site': 'same-origin' }) => fetch(`${B}/api/threads`, { headers }).then((r) => r.json()).then((j) => j.supervisor.question);
+  const post = (body, headers = own) => fetch(`${B}/api/pane-answer`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) });
+  // the question now showing, once the dashboard's own look has it (another than `not`)
+  const question = (not = null) => until(async () => { const q = await asked(); return q && q.kind === 'menu' && q.digest !== not ? q : null; }, 'the question, from the hello child');
+  return { B, port, own, asked, post, question, out: d.out };
+}
+
+// Esc (kit-241): the owner's other answer to a numbered menu that says "Esc to cancel".
+const esc = (q) => ({ digest: q.digest, escape: true, token: q.token });
+
 // A test's stops: cleanup(t) from lib/chrome.mjs, last registered first, each on its own.
 
-export { cleanup, heldDirOf, heldFor, logLines, menuPane, nap };
+export { acts, cleanup, dash, esc, heldDirOf, heldFor, logLines, menuPane, nap };
