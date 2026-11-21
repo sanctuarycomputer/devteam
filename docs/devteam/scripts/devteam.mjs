@@ -602,6 +602,10 @@ const SETTINGS_DEFAULTS = {
   // Run worktree_setup on every session start, even when nothing it installs from changed. Session and chore worktrees only; gate checkouts never.
   worktree_setup_always: false,
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
+  // The thread responder (kit-103): a quick session that answers the owner's thread turns while the
+  // supervisor works. The supervisor's switch; false is the rollback (every turn goes to the supervisor).
+  // What it runs is the owner's responder_command (OWNER_SETTINGS; unset means agent_command).
+  responder: true,
   dashboard_port: null,
   upstream_repo: KIT_UPSTREAM,
   upstream_base: null,
@@ -623,7 +627,7 @@ const SETTINGS_DEFAULTS = {
 // release is how a tag reaches production; project names every public link and the gateway's binding.
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
-  autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
+  autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', responder_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
@@ -665,6 +669,8 @@ const SETTINGS_WORDS = Object.freeze({
   tmux_session: ['Fleet and capacity', 'Terminal session name', 'the tmux session the windows live in; none means one named after the project', 'value'],
   dashboard_port: ['Fleet and capacity', 'Dashboard port', "where this dashboard listens; none means a free port in the hub's range", 'value'],
   agent_command: ['Agents and sessions', 'Agent command', 'what starts each worker, planner and the supervisor', 'hidden'],
+  responder: ['Agents and sessions', 'Thread responder', 'a quick session that answers your thread messages at once; off sends them all to the supervisor', 'value'],
+  responder_command: ['Agents and sessions', 'Responder command', 'what starts the thread responder; unset means the agent command', 'hidden'],
   resume_command: ['Agents and sessions', 'Resume command', 'what brings a stopped session back on its own conversation', 'hidden'],
   agent_trust_command: ['Agents and sessions', 'Folder-trust answer', 'a command run before each agent starts so it trusts its worktree; empty runs nothing', 'hidden'],
   worker_denied_commands: ['Agents and sessions', 'Commands workers may not run', 'patterns refused in every worker and planner', 'value'],
@@ -712,6 +718,7 @@ const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'str
 const SETTING_SHAPES = Object.freeze({
   ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
+  responder: (v) => typeof v === 'boolean',
   worktree_setup_always: (v) => typeof v === 'boolean',
   forge: (v) => ['github', 'git'].includes(v),
   merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),

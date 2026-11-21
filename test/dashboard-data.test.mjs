@@ -480,7 +480,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
     'sensor_scrub',
   ]);
   // kit-162 moved `recurring` out of SETTINGS_DEFAULTS into project/recurring.json: one fewer than main's count
-  assert.equal(union.size, 49, 'every setting the kit reads, 49 today');
+  assert.equal(union.size, 51, 'every setting the kit reads, 51 today (kit-103: responder, responder_command)');
   // every direct read names a key in the union (spec §6, F3-3: its reach)
   const reads = [...src.matchAll(/loadSettings\(\)\.([a-z_]+)/g), ...src.matchAll(/settingsAt\([^)]*\)\??\.([a-z_]+)/g)].map((m) => m[1]);
   assert.ok(reads.length > 50, `the read sites found (${reads.length})`);
@@ -537,7 +537,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   const all = data(F).settings_all;
   assert.ok(Array.isArray(all), 'settings_all');
   // keys
-  assert.equal(all.length, 49);
+  assert.equal(all.length, 51);
   assert.deepEqual(new Set(all.map((e) => e.key)), union);
   // order: each group once, in the page's order
   const groups = all.map((e) => e.group).filter((g, i, a) => g !== a[i - 1]);
@@ -545,7 +545,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   // the show kinds (F3-4)
   const kinds = {};
   for (const e of all) kinds[e.shown] = (kinds[e.shown] ?? 0) + 1;
-  assert.deepEqual(kinds, { value: 33, hidden: 6, names: 7, count: 3 }); // kit-162: recurring left SETTINGS_DEFAULTS (it was a names kind)
+  assert.deepEqual(kinds, { value: 34, hidden: 7, names: 7, count: 3 }); // kit-162: recurring left SETTINGS_DEFAULTS (it was a names kind)
   for (const e of all) {
     for (const f of ['key', 'group', 'name', 'description', 'shown', 'value', 'set', 'default', 'owner_only']) assert.ok(f in e, `${e.key} has ${f}`);
     assert.equal(e.set, mainKeys.has(e.key), `${e.key}: set is whether main's file has it`);
