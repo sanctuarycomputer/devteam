@@ -236,6 +236,26 @@ test('library menu publish: no project in settings, a disabled Publish that says
   assert.equal(await p.ev(`${art(ids.docs)}.querySelector('.lib-menu-pub a[href]')`), null, 'no link');
 });
 
+test('library menu publish: a slug that needs escaping goes into every link and attribute whole', { ...CHROME, timeout: 300000 }, async (t) => {
+  const fx = libraryFixture();
+  const { ids, patch } = fx;
+  // three landed rows with slugs no LINK_ID would let through, one per state: unpublished, public, not live
+  const BAD = `x"y'z&a#b?c/d<b>e</b>`;
+  const like = (slug) => patch.library.artifacts.find((a) => a.slug === slug && a.at === 'main');
+  const bad = { none: `${BAD}-n`, public: `${BAD}-p`, notLive: `${BAD}-l` };
+  patch.library.artifacts.push({ ...like(ids.docs), slug: bad.none }, { ...like(ids.public), slug: bad.public }, { ...like(ids.notLive), slug: bad.notLive });
+  ids.served = { ...ids.served, [bad.public]: like(ids.public).tree };
+  const { p, soon, port } = await libraryAt(t, { fx, box: servedOf(ids) });
+  const find = (slug) => `[...document.querySelectorAll('#lib-grid > .lib-card')].find((c) => c.dataset.libId === ${JSON.stringify(`artifact:${slug}`)})`;
+  await soon(`!!${find(bad.notLive)}`, 'the hostile cards');
+  const box = `http://box.localhost:${port}`;
+  const e = encodeURIComponent;
+  const items = (slug) => p.ev(`(() => { const g = ${find(slug)}.querySelector('.card-head details.menu .lib-menu-pub'); return { injected: !!g.querySelector('b'), items: [...g.querySelectorAll(':scope > a, :scope > button')].map((x) => [x.textContent.trim(), x.getAttribute('href') ?? x.getAttribute('data-copy') ?? x.getAttribute('data-forget')]) }; })()`);
+  assert.deepEqual(await items(bad.none), { injected: false, items: [['Publish', `${box}/public/publish?port=4321&slug=${e(bad.none)}`]] }, 'unpublished: its href whole');
+  assert.deepEqual(await items(bad.public), { injected: false, items: [['Copy public link', `http://public.box.localhost:${port}/${ids.project}/${e(bad.public)}/`], ['Unpublish', `${box}/public/unpublish?port=4321&project=${ids.project}&slug=${e(bad.public)}`]] }, 'public: data-copy and href whole');
+  assert.deepEqual(await items(bad.notLive), { injected: false, items: [['Restore', `${box}/public/publish?port=4321&slug=${e(bad.notLive)}`], ['Forget', bad.notLive]] }, 'not live: href and data-forget whole');
+});
+
 test('library thumb desktop: a frame lays the page out at 1280 px and is scaled to its box', { ...CHROME, timeout: 300000 }, async (t) => {
   const fx = libraryFixture();
   const { p, soon, ids } = await libraryAt(t, { fx });
