@@ -10135,9 +10135,17 @@ async function cmdPreview() {
 // it). Landed is what main has, read from git; a draft is a session worktree's copy under
 // .worktrees/, read off disk as it is, so the owner sees it while it's drawn.
 const ARTIFACTS_REL = `${projectRel}/artifacts`;
+// A branch on origin a draft from another machine may come from (kit-750): a name git takes as a ref
+// and a URL path segment carries once encoded, at most 200 characters; never .., //, a segment that
+// starts with a dot or ends .lock, or a trailing / or dot (the class admits no @, { or :). Checked
+// before any git call names it.
+const BRANCH_AT = /^(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // Where a viewer may show an artifact: main, a draft's worktree (by name; draftWorktree says whether
-// it is one), or a published version by its tree id. The same forms a thread's artifact subject records.
-const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99})$/;
+// it is one), a draft on an origin branch fetched from another machine (origin:<branch>), or a
+// published version by its tree id. The same forms a thread's artifact subject records.
+// The origin: form is BRANCH_AT's body written out, so the line stands alone (tests read it alone);
+// artifact-remote's BRANCH_AT case holds the two to the same names.
+const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99}|origin:(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199})$/;
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
 const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for', 'kind'];
@@ -10259,14 +10267,29 @@ function draftWorktree(name) {
 // A draft's folder is where it says it is: no symlink on the way to it (the slug folder, artifacts/,
 // the project folder) carries the route or a fingerprint off somewhere else on the machine.
 const draftDirOk = (root, slug) => { const want = path.join(root, ARTIFACTS_REL, slug); try { return fs.realpathSync(want) === want; } catch { return false; } };
-// Where an artifact's files are: main's tree (at 'main') or a draft worktree's folder; null if none.
-// A worktree's project folder sits at the same path inside it as this checkout's.
+// Where an artifact's files are: main's tree (at 'main'), a draft worktree's folder, or a branch
+// fetched from origin (origin:<branch>, under refs/devteam-remote/, kit-750); null if none.
+// A worktree's project folder sits at the same path inside it as this checkout's. A branch's folder
+// is read from its tree by id, never a checkout, and carries the artifact checks' first error (a
+// submodule included), which nothing serves past. The dashboard server never calls this for a
+// branch: its reads are async (artifactRemoteRefs' resolve).
 function artifactSource(at, slug) {
   if (!LINK_ID.test(slug ?? '')) return null;
   if (at === 'main') {
     const ref = mainRef();
     const entries = ref ? treeEntries(ref, `${ARTIFACTS_REL}/${slug}`) : [];
     return entries.length ? { entries } : null;
+  }
+  if (String(at).startsWith('origin:')) {
+    const b = String(at).slice(7);
+    if (!BRANCH_AT.test(b)) return null;
+    const tree = treeNow(git(['ls-tree', `refs/devteam-remote/${b}`, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot));
+    if (!tree) return null;
+    const entries = treeIdEntries(tree);
+    if (!entries.length) return null;
+    const sub = entries.find((e) => e.type !== 'blob');
+    const error = sub ? `${slug}/${sub.path}: a submodule isn't served` : artifactProblems(slug, entries).errors[0] ?? null;
+    return { entries, tree, error };
   }
   const root = draftWorktree(at);
   if (!root) return null;
@@ -10338,6 +10361,7 @@ function artifactVersions(slug) {
       const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
       let commit = null;
       try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
+      if (a.remote) return { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: a.commit, time: a.updated_at, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
       return { kind: 'draft', at: a.at, worktree: a.at, commit, time: a.updated_at, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
     });
   const ref = mainRef();
@@ -10385,7 +10409,7 @@ function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
   const mtime = Math.max(0, ...src.entries.map((e) => e.mtime ?? 0));
   const m = p.manifest;
-  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], kind: m?.kind ?? null, error: p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
+  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], kind: m?.kind ?? null, error: src.error ?? p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
 }
 function landedArtifacts() {
   const ref = mainRef();
@@ -10417,7 +10441,8 @@ function draftArtifacts(landed = landedArtifacts()) {
   const fpOf = new Map(landed.map((a) => [a.slug, a.fp]));
   const res = [];
   let names = [];
-  try { names = fs.readdirSync(path.join(mainRoot, '.worktrees')); } catch { return res; }
+  // no .worktrees/ is no worktree drafts; drafts from other machines are still listed below
+  try { names = fs.readdirSync(path.join(mainRoot, '.worktrees')); } catch {}
   for (const w of names.sort()) {
     if (!draftWorktree(w)) continue;
     let slugs = [];
@@ -10429,7 +10454,83 @@ function draftArtifacts(landed = landedArtifacts()) {
       if (fpOf.get(s) !== d.fp) res.push(d);
     }
   }
-  return res;
+  // Drafts from other machines (kit-750): each branch the dashboard fetched into refs/devteam-remote/
+  // that isn't main and isn't merged into it, newest tip first, at most 200. Its slugs are the ones
+  // its own commits since it left main changed (every one, for a branch with no base), and only a
+  // folder whose tree main never had (now or in its history), so a squash- or rebase-merged branch
+  // kept on origin shows nothing. A branch's slugs are kept by its tip and main's (artifacts-remote),
+  // a description by tree id (artifacts-remote-trees). A worktree draft of the same slug wins, and
+  // names the branches it hides (remote_branches).
+  const ref = mainRef(), msha = mainSha(), mainB = loadSettings().main_branch;
+  const refs = ref ? git(['for-each-ref', '--sort=-committerdate', '--format=%(refname) %(objectname) %(committerdate:iso-strict)', 'refs/devteam-remote/'], mainRoot) : null;
+  if (!refs) return res;
+  // a branch this machine has too (refs/heads/<b>: its own pushed work) is not from another machine
+  const mine = new Set((git(['for-each-ref', '--format=%(refname:strip=2)', 'refs/heads/'], mainRoot) ?? '').split('\n').filter(Boolean));
+  const branches = refs.split('\n').map((l) => /^refs\/devteam-remote\/(\S+) ([0-9a-f]+) (\S+)$/.exec(l)).filter((m) => m && m[1] !== mainB && !mine.has(m[1]) && BRANCH_AT.test(m[1])).slice(0, 200);
+  const cacheFile = path.join(runDir, 'cache', 'artifacts-remote.json');
+  const treeFile = path.join(runDir, 'cache', 'artifacts-remote-trees.json');
+  let cache = {}, trees = {};
+  try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
+  try { trees = JSON.parse(fs.readFileSync(treeFile, 'utf8')); } catch {}
+  const nextCache = {}, nextTrees = {};
+  const onMain = new Map();
+  const mainHas = (slug, tree) => {
+    if (!onMain.has(slug)) { const a = treeFolderArgs(msha, slug); onMain.set(slug, { now: treeNow(git(a.now, mainRoot)), log: git(a.log, mainRoot) }); }
+    const m = onMain.get(slug);
+    return tree === m.now || treeInHistory(m.log, slug, tree);
+  };
+  const local = new Map();
+  for (const d of res) if (!local.has(d.slug)) local.set(d.slug, d);
+  const remote = [];
+  for (const [, b, sha, date] of branches) {
+    const key = `${sha} ${msha}`;
+    let kept = Array.isArray(cache[key]) ? cache[key] : null;
+    if (!kept) {
+      const merged = spawnSync('git', ['merge-base', '--is-ancestor', sha, msha], { cwd: mainRoot, stdio: 'ignore' }).status;
+      if (merged !== 0 && merged !== 1) continue;
+      kept = [];
+      if (merged === 1) {
+        const mb = spawnSync('git', ['merge-base', msha, sha], { cwd: mainRoot, encoding: 'utf8' });
+        if (mb.status !== 0 && mb.status !== 1) continue;
+        const base = mb.status === 0 ? mb.stdout.trim() : null;
+        let slugs;
+        if (base) {
+          // -z: a path with a non-ASCII byte comes as it is, never quoted
+          const names = git(['diff', '-z', '--name-only', '--no-renames', base, sha, '--', ARTIFACTS_REL], mainRoot);
+          if (names === null) continue;
+          slugs = names.split('\0').filter(Boolean).map((n) => n.slice(ARTIFACTS_REL.length + 1).split('/')[0]);
+        } else {
+          const ls = git(['ls-tree', sha, `${ARTIFACTS_REL}/`], mainRoot);
+          if (ls === null) continue;
+          slugs = ls.split('\n').map((l) => /^040000 tree [0-9a-f]+\t.*\/([^/]+)$/.exec(l)?.[1]);
+        }
+        for (const slug of [...new Set(slugs)].filter((x) => LINK_ID.test(x ?? '')).sort()) {
+          const tree = treeNow(git(['ls-tree', sha, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot));
+          if (tree && !mainHas(slug, tree)) kept.push([slug, tree]);
+        }
+      }
+    }
+    nextCache[key] = kept;
+    const at = `origin:${b}`;
+    for (const [slug, tree] of kept) {
+      let d = trees[tree]?.slug === slug && 'kind' in trees[tree] ? trees[tree] : null;
+      if (!d) {
+        const src = artifactSource(at, slug);
+        if (!src || src.tree !== tree) continue;
+        d = { ...describeArtifact(slug, at, src), error: src.error };
+      }
+      nextTrees[tree] = d;
+      const row = { ...d, at, branch: b, remote: true, tree, commit: sha, updated_at: new Date(date).toISOString() };
+      const l = local.get(slug);
+      if (l) (l.remote_branches ??= []).push(b);
+      else remote.push(row);
+    }
+  }
+  for (const l of local.values()) l.remote_branches?.sort();
+  const save = (file, next, was) => { if (canonical(next) !== canonical(was)) try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(next)); } catch {} };
+  save(cacheFile, nextCache, cache);
+  save(treeFile, nextTrees, trees);
+  return [...res, ...remote];
 }
 const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
 // ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
@@ -20727,6 +20828,128 @@ function dashboardHub(log) {
   if (imageHub() === HUB_PORT) { log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); return null; }
   return startHub(log, { kit: ownKitVersion() });
 }
+// ----- the Library's fetch of origin (kit-750): drafts and landings from other machines -----
+// While a Library or an artifact viewer asks (want()), the dashboard fetches origin once each FETCH_MS:
+// main into refs/remotes/origin/<main> (what mainRef reads), every branch into the kit's own
+// refs/devteam-remote/* (--refmap= so git writes no other ref, --prune drops a branch deleted there and
+// nowhere else). The timer decides when it fires: with no ask in WINDOW_MS it does nothing and arms
+// nothing, so a closed Library leaves no fetch and no timer. One fetch at a time, in its own process
+// group (no terminal, no prompt: GIT_TERMINAL_PROMPT=0, empty askpass, ssh in BatchMode unless the
+// user set an ssh command), SIGTERM at TIMEOUT_MS so git removes its locks, SIGKILL GRACE_MS later.
+// A failure waits BACKOFF_MS and is said (stale); a fetch that moved a ref calls onMoved. resolve()
+// reads a fetched branch's artifact folder for the server, async, its check kept by tree id.
+function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env } = {}) {
+  const ms = (k, d) => { const v = Number(env[k]); return env[k] !== undefined && env[k] !== '' && Number.isInteger(v) && v > 0 ? v : d; };
+  const FETCH_MS = ms('DEVTEAM_ARTIFACT_FETCH_MS', 30000);
+  const BACKOFF_MS = ms('DEVTEAM_ARTIFACT_FETCH_BACKOFF_MS', 300000);
+  const TIMEOUT_MS = ms('DEVTEAM_ARTIFACT_FETCH_TIMEOUT_MS', 20000);
+  const WINDOW_MS = Math.max(FETCH_MS, 10000) + 5000;
+  const GRACE_MS = 2000;
+  const GIT_ENV = { ...env, LC_ALL: 'C' };
+  // git, async, with its exit code: 0, git's own, or -1 (it never ran, or was killed)
+  const run = (args, encoding = 'utf8') => new Promise((resolve) => {
+    try {
+      execFile('git', args, { cwd: root, env: GIT_ENV, encoding, maxBuffer: 64 * 1024 * 1024 }, (err, out, errOut) => resolve({ code: err ? (typeof err.code === 'number' ? err.code : -1) : 0, out, err: String(errOut ?? '') }));
+    } catch (e) { resolve({ code: -1, out: encoding === 'utf8' ? '' : Buffer.alloc(0), err: String(e?.message ?? e) }); }
+  });
+  const url = git(['config', '--get', 'remote.origin.url'], root);
+  const remote = url !== null;
+  // the remote's host, for the page's words: scp form, a URL's; a local path or file:// has none
+  const host = (() => {
+    const s = String(url ?? '').trim();
+    const u = /^([a-z][a-z0-9+.-]*):\/\/(?:[^/\s]*@)?(\[[^\]\s]+\]|[^/:?#\s@]+)/i.exec(s);
+    if (u) return u[1].toLowerCase() === 'file' ? null : u[2].toLowerCase();
+    const scp = /^(?:[^@/\s]+@)?([^:/\s@]+):(?!\/\/)/.exec(s);
+    return scp ? scp[1].toLowerCase() : null;
+  })();
+  // running: a fetch is under way, from the refs read before it to the one after (child is set only
+  // while git runs), so a want() between them never arms a second
+  let lastWant = -Infinity, timer = null, child = null, running = false, rev = 0;
+  let startedAt = null, endedAt = null, lastOk = null, lastError = null;
+  const iso = (t) => (t === null ? null : new Date(t).toISOString());
+  const due = () => (endedAt === null ? Date.now() : endedAt + (lastOk ? FETCH_MS : BACKOFF_MS));
+  const refsNow = async () => { const r = await run(['for-each-ref', '--format=%(refname) %(objectname)', `refs/remotes/origin/${main}`, 'refs/devteam-remote/']); return r.code === 0 ? r.out : null; };
+  const fetchOnce = async () => {
+    const before = await refsNow();
+    startedAt = Date.now();
+    const ssh = env.GIT_SSH_COMMAND || git(['config', '--get', 'core.sshCommand'], root) ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
+    const r = await new Promise((resolve) => {
+      let errText = '', done = false, timedOut = false, term = null, kill = null;
+      // after a timeout the SIGKILL stays armed: what else in the group ignored SIGTERM goes too
+      const finish = (v) => { if (done) return; done = true; clearTimeout(term); if (!timedOut) clearTimeout(kill); child = null; resolve(v); };
+      try {
+        child = spawn('git', ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--prune', '--refmap=', 'origin', `+refs/heads/${main}:refs/remotes/origin/${main}`, '+refs/heads/*:refs/devteam-remote/*'], { cwd: root, env: { ...GIT_ENV, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+      } catch (e) { return finish({ ok: false, error: String(e?.message ?? e) }); }
+      const pid = child.pid;
+      child.stderr.on('data', (d) => { if (errText.length < 4096) errText += d; });
+      child.on('error', (e) => finish({ ok: false, error: String(e?.message ?? e) }));
+      // the group leader's close is the answer, or the SIGKILL below
+      child.on('close', (code) => finish(code === 0 && !timedOut ? { ok: true } : { ok: false, error: timedOut ? `no answer from origin in ${Math.round(TIMEOUT_MS / 1000)} s` : errText.trim().split('\n').filter(Boolean).pop() || `git fetch exited ${code}` }));
+      term = setTimeout(() => {
+        timedOut = true;
+        try { process.kill(-pid, 'SIGTERM'); } catch {}
+        kill = setTimeout(() => { try { process.kill(-pid, 0); process.kill(-pid, 'SIGKILL'); } catch {} kill = null; finish({ ok: false, error: `no answer from origin in ${Math.round(TIMEOUT_MS / 1000)} s` }); }, GRACE_MS);
+      }, TIMEOUT_MS);
+    });
+    endedAt = Date.now();
+    lastOk = r.ok;
+    lastError = r.ok ? null : redactUrl(r.error).replace(/\s+/g, ' ').trim().slice(0, 300) || 'the fetch failed';
+    if (r.ok) { const after = await refsNow(); if (after !== before) { rev += 1; try { onMoved(); } catch {} } }
+  };
+  const arm = () => {
+    if (!remote || timer || running) return;
+    timer = setTimeout(fire, Math.max(0, due() - Date.now()));
+    timer.unref?.();
+  };
+  function fire() {
+    timer = null;
+    if (Date.now() - lastWant > WINDOW_MS) return;
+    running = true;
+    void fetchOnce().catch(() => {}).finally(() => { running = false; arm(); });
+  }
+  // a fetched branch's artifact folder, for the server: { missing } | { failed } | { tree, fp, error }
+  const trees = new Map();
+  const checkTree = async (tree, slug) => {
+    const ls = await run(['ls-tree', '-r', '-l', '-z', tree]);
+    if (ls.code !== 0) return null;
+    const entries = ls.out.split('\0').filter(Boolean).map((l) => {
+      const tab = l.indexOf('\t');
+      const [mode, type, oid, size] = l.slice(0, tab).trim().split(/\s+/);
+      return { path: l.slice(tab + 1), mode, type, oid, size: Number(size) || 0, buf: null, read() { return this.buf; } };
+    });
+    for (const e of entries) {
+      if (e.type !== 'blob' || !['artifact.json', 'index.html'].includes(e.path) || e.size > ARTIFACT_FILE_MAX) continue;
+      const b = await run(['cat-file', 'blob', e.oid], 'buffer');
+      if (b.code !== 0) return null;
+      e.buf = b.out;
+    }
+    const sub = entries.find((e) => e.type !== 'blob');
+    const error = !entries.length ? `${slug}: empty` : sub ? `${slug}/${sub.path}: a submodule isn't served` : artifactProblems(slug, entries).errors[0] ?? null;
+    return { fp: fingerprint(entries), error };
+  };
+  async function resolve(branch, slug) {
+    if (!BRANCH_AT.test(branch ?? '') || !LINK_ID.test(slug ?? '')) return { missing: true };
+    const r = await run(['ls-tree', `refs/devteam-remote/${branch}`, '--', `${ARTIFACTS_REL}/${slug}`]);
+    // a ref that isn't there is nothing there; any other failure is a failure
+    if (r.code !== 0) return /not a valid object name/i.test(r.err) ? { missing: true } : { failed: true };
+    const tree = treeNow(r.out);
+    if (!tree) return { missing: true };
+    const key = `${slug}\0${tree}`;
+    // kept by tree id, which never changes; at most 500, then begun again
+    if (!trees.has(key)) { const c = await checkTree(tree, slug); if (!c) return { failed: true }; if (trees.size >= 500) trees.clear(); trees.set(key, c); }
+    return { tree, ...trees.get(key) };
+  }
+  return {
+    want() { lastWant = Date.now(); arm(); },
+    status() {
+      return { remote, host, started_at: iso(startedAt), fetched_at: iso(endedAt), ok: lastOk, stale: lastOk === false, error: lastError, next_at: remote ? iso(Math.max(due(), Date.now())) : null, rev };
+    },
+    resolve,
+    // at exit: a fetch under way gets SIGTERM, so git removes its own locks; it is its own group and
+    // ends by itself without us
+    stop() { clearTimeout(timer); timer = null; if (child) try { process.kill(-child.pid, 'SIGTERM'); } catch {} },
+  };
+}
 /* cmdDashboard start */
 /* dashboardRoutes start */
 // What a route group returns when none of its routes matched the request.
@@ -20859,7 +21082,7 @@ async function dashRoutesPage(D, req, res, q) {
 // /view/artifact/…, /view/preview/…, /api/artifact-fp, /api/view, /api/artifact-versions
 async function dashRoutesViewer(D, req, res, q) {
   const { u } = q;
-  const { page, pageCsp, run, describing, versioning, send, previewStage } = D;
+  const { page, pageCsp, run, describing, versioning, send, previewStage, remote } = D;
   // The viewer (spec §7): this page in viewer mode, one artifact on its stage. Its frames are this
   // dashboard's own pages. It may be framed by itself and the machine's hub, by policy alone and
   // never X-Frame-Options: on a box the gateway adds the public name to frame-ancestors for its
@@ -20893,6 +21116,14 @@ async function dashRoutesViewer(D, req, res, q) {
     const slug = u.searchParams.get('slug') ?? '';
     const at = u.searchParams.get('at') ?? '';
     if (!LINK_ID.test(slug) || !ARTIFACT_AT.test(at) || at === 'main' || at.startsWith('tree:')) return send(res, 400, 'application/json', JSON.stringify({ error: 'a slug, and at a draft\'s worktree (drafts only)' }));
+    // a draft from another machine (kit-750): its fetched tree, read async, its fp kept by tree id;
+    // a branch or folder that isn't there is gone (404), a git that fails a 500
+    if (at.startsWith('origin:')) {
+      const r = await remote.resolve(at.slice(7), slug);
+      if (r.failed) return send(res, 500, 'application/json', JSON.stringify({ error: "the draft's files: git failed" }));
+      if (!r.tree) return send(res, 404, 'application/json', JSON.stringify({ error: `no draft of ${slug} at ${at}` }));
+      return send(res, 200, 'application/json', JSON.stringify({ fp: r.fp, at }));
+    }
     // a draft that vanishes mid-walk is nothing there (404); any other failure (EACCES, EMFILE) is a 500, as /api/view keeps them apart
     let src;
     try { src = artifactSource(at, slug); } catch (e) {
@@ -20927,6 +21158,35 @@ async function dashRoutesViewer(D, req, res, q) {
     const r = await job;
     if (r.ok) return send(res, 200, 'application/json', r.stdout);
     return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
+  }
+  // The Library's fetch of origin (kit-750): when it last fetched, whether that failed (the Library
+  // then says remote drafts may be stale), and rev, which moves when a fetch moved a ref. A GET only
+  // reads (org-access A13: no GET starts a command that writes). The page's POST is the demand: a
+  // Library or an artifact viewer open keeps origin fetched each interval. It is held to the owner
+  // actions' same-origin rule (a browser's own page, a JSON body), as fleet-check, the other POST
+  // that fetches; a refused one changes nothing.
+  if (u.pathname === '/api/artifact-remote' && (req.method === 'GET' || req.method === 'POST')) {
+    const site = req.headers['sec-fetch-site'];
+    const origin = req.headers.origin;
+    const own = `http://${req.headers.host}`;
+    if (req.method === 'GET') {
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      return send(res, 200, 'application/json', JSON.stringify(remote.status()));
+    }
+    const sameOrigin = (site === 'same-origin' || origin === own) && (site === undefined || site === 'same-origin') && (origin === undefined || origin === own);
+    const no = () => send(res, 403, 'application/json', JSON.stringify({ error: "only from this dashboard's own page, in a browser, with an empty {} body" }));
+    if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) { req.resume(); return no(); }
+    // the body is {} and nothing else: read up to 64 bytes, the rest drained
+    const body = await new Promise((resolve) => {
+      let b = '', over = false;
+      req.setEncoding('utf8');
+      req.on('data', (c) => { if (over || b.length + c.length > 64) over = true; else b += c; });
+      req.on('end', () => resolve(over ? null : b));
+      req.on('error', () => resolve(null));
+    });
+    if (body?.trim() !== '{}') return no();
+    remote.want();
+    return send(res, 200, 'application/json', JSON.stringify(remote.status()));
   }
   // An artifact's versions (kit-172): the CLI's list, run in a child process shared by asks for the
   // same slug. Same-origin only, as /api/view. 404 only when the subcommand says nothing is there.
@@ -21066,7 +21326,7 @@ async function dashRoutesFiles(D, req, res, q) {
 // /public-manifest/…, /artifact/…
 async function dashRoutesArtifacts(D, req, res, q) {
   const { u } = q;
-  const { run, send } = D;
+  const { run, send, remote } = D;
   // An artifact's files: landed from main's tree, a published version from its tree by id (what the
   // gateway's owner wrapper frames, spec §8), a draft off its worktree's disk. Matched on the raw
   // path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
@@ -21083,30 +21343,48 @@ async function dashRoutesArtifacts(D, req, res, q) {
     return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
   }
   if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
-    const am = /^\/artifact\/(?:main|wt\/([^/]+)|tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\/([^/]+)(\/.*)?$/.exec(rawPath);
-    const at = am ? (am[2] ? `tree:${am[2]}` : am[1] ?? 'main') : null;
-    if (!am || (at !== 'main' && !am[2] && !draftWorktree(at)) || !LINK_ID.test(am[3])) return send(res, 404, 'text/plain', 'not found');
-    if (am[4] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
-    const rel = am[4] === '/' ? 'index.html' : am[4].slice(1);
-    if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
-    const blobAt = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
-    let bytes = null;
-    if (at === 'main') {
-      const ref = mainRef();
-      if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
-    } else if (am[2]) {
-      // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
-      // against a commit or the root tree as well, which would serve any committed file. A tree
-      // never changes: what was published is what is shown.
-      if (await artifactTreeOk(am[2], am[3])) bytes = await blobAt(`${am[2]}:${rel}`);
+    // A draft from another machine (kit-750): a fetched branch's folder, by the tree id that passed
+    // the artifact checks (artifactRemoteRefs' resolve), its files as blobs of that tree, so a fetch
+    // that moves the branch meanwhile never mixes two trees. Never a checkout; every refusal a 404.
+    const om = /^\/artifact\/origin\/([^/]+)\/([^/]+)(\/.*)?$/.exec(rawPath);
+    let bytes = null, rel, tail;
+    if (om) {
+      let b = null;
+      try { b = decodeURIComponent(om[1]); } catch {}
+      if (b === null || !BRANCH_AT.test(b) || !LINK_ID.test(om[2])) return send(res, 404, 'text/plain', 'not found');
+      if (om[3] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
+      tail = om[3];
+      rel = om[3] === '/' ? 'index.html' : om[3].slice(1);
+      if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
+      const r = await remote.resolve(b, om[2]);
+      if (!r.tree || r.error) return send(res, 404, 'text/plain', 'not found');
+      bytes = await new Promise((resolve) => execFile('git', ['cat-file', 'blob', `${r.tree}:${rel}`], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
     } else {
-      // the real path stays inside the artifact's folder: a symlink out of it is not found
-      try {
-        const root = draftWorktree(at);
-        const dir = path.join(root, ARTIFACTS_REL, am[3]);
-        const real = draftDirOk(root, am[3]) ? fs.realpathSync(path.join(dir, rel)) : null;
-        if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
-      } catch {}
+      const am = /^\/artifact\/(?:main|wt\/([^/]+)|tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\/([^/]+)(\/.*)?$/.exec(rawPath);
+      const at = am ? (am[2] ? `tree:${am[2]}` : am[1] ?? 'main') : null;
+      if (!am || (at !== 'main' && !am[2] && !draftWorktree(at)) || !LINK_ID.test(am[3])) return send(res, 404, 'text/plain', 'not found');
+      if (am[4] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
+      tail = am[4];
+      rel = am[4] === '/' ? 'index.html' : am[4].slice(1);
+      if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
+      const blobAt = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
+      if (at === 'main') {
+        const ref = mainRef();
+        if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
+      } else if (am[2]) {
+        // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
+        // against a commit or the root tree as well, which would serve any committed file. A tree
+        // never changes: what was published is what is shown.
+        if (await artifactTreeOk(am[2], am[3])) bytes = await blobAt(`${am[2]}:${rel}`);
+      } else {
+        // the real path stays inside the artifact's folder: a symlink out of it is not found
+        try {
+          const root = draftWorktree(at);
+          const dir = path.join(root, ARTIFACTS_REL, am[3]);
+          const real = draftDirOk(root, am[3]) ? fs.realpathSync(path.join(dir, rel)) : null;
+          if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
+        } catch {}
+      }
     }
     if (!bytes) return send(res, 404, 'text/plain', 'not found');
     const base = `http://${req.headers.host}`;
@@ -21116,7 +21394,7 @@ async function dashRoutesArtifacts(D, req, res, q) {
     // loopback fetch for a publish get the bytes as committed. Vary says so to anything that keeps
     // an answer, though no-store already keeps none.
     const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
-    res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
+    res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - tail.length)}/`) });
     return res.end(framed ? withArtifactLens(bytes) : bytes);
   }
   return DASH_NEXT;
@@ -21711,6 +21989,10 @@ async function cmdDashboard() {
   // a build still running when the dashboard exits (processLog's signal handlers exit it) is killed
   // with it, not left writing run/cache: the warm start (kit-595) runs one with no read waiting
   process.on('exit', () => { if (build?.finished === null) try { build.child?.kill('SIGKILL'); } catch {} });
+  // the Library's fetch of origin (kit-750): a fetch that moved a ref makes the kept build stale, so
+  // the next /api/data shows it; stopped only as the process ends, so a hand-over that fails serves on
+  const remote = artifactRemoteRefs({ root: mainRoot, main: loadSettings().main_branch, onMoved: () => { dataEpoch += 1; } });
+  process.on('exit', () => remote.stop());
   const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_REUSE_MS));
   const dashboardData = () => {
     if (usable(build)) return build.done;
@@ -21856,7 +22138,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
-  const D = dashContext({ log, page, pageCsp, run, describing, versioning, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   const server = http.createServer(async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)

@@ -1,0 +1,247 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { canDrive } from './lib/chrome.mjs';
+import { EVERY, EVERY_IMAGES, SAY, UNDO_SAY, ackOf, allSaved, ana, arrow, body, box, byProp, centre, count, ctrl, edits, editsTimed, fieldSet, focusField, hasRev, hideToast, hitAt, live, nameSet, near, nextEdit, noDialogs, noExceptions, open, refusedFrames, rename, rowName, selectRow, sendsNothing, shownText, slowDrag, toastSays, undoKey, within, zoomNow } from './lib/canvas-fixture.mjs';
+
+// ---- S3: each person's own undo ----
+
+test('S3.1 an own edit is undone', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const e = await rename(p, rec, 'title', 'Mine');
+  await ackOf(rec, e);
+  const n0 = edits(rec).length;
+  await undoKey(p);
+  const u = await nextEdit(rec, n0);
+  assert.deepEqual(u.ops, nameSet('title', EVERY.nodes.title.name), 'one set back to the name before');
+  await sendsNothing(rec, n0 + 1, 'after the undo');
+  await allSaved(p);
+  assert.equal(fake.doc('every').nodes.title.name, EVERY.nodes.title.name, "the fake's old name");
+  assert.equal(await rowName(p, 'title'), EVERY.nodes.title.name, 'drawn back');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test("S3.2 someone else's change since is skipped and said", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await selectRow(p, 'title');
+  const n0 = edits(rec).length;
+  await fieldSet(p, 'text', 'Mine');
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'set', id: 'title', prop: 'text', value: 'Mine' }], "one set of title's text");
+  await ackOf(rec, e);
+  const a = await ana(fake, later);
+  await a.edit([{ op: 'set', id: 'title', prop: 'text', value: "Ana's" }]);
+  await hasRev(p, fake);
+  await hideToast(p);
+  const n1 = edits(rec).length;
+  await undoKey(p);
+  await sendsNothing(rec, n1, 'the undo', 1000);
+  await toastSays(p, UNDO_SAY.all);
+  await allSaved(p);
+  assert.equal(fake.doc('every').nodes.title.text, "Ana's", "the fake's text stays Ana's");
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('S3.3 only own edits are undone', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await selectRow(p, 'dot');
+  const n0 = edits(rec).length;
+  await fieldSet(p, 'fill', '@hex');
+  await fieldSet(p, 'fill#hex', '#123456');
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'set', id: 'dot', prop: 'fill', value: '#123456' }], "one set of dot's fill");
+  await ackOf(rec, e);
+  await sendsNothing(rec, n0 + 1, 'after the fill');
+  const a = await ana(fake, later);
+  await a.edit(nameSet('title', 'By Ana'));
+  await hasRev(p, fake);
+  await hideToast(p);
+  const n1 = edits(rec).length;
+  await undoKey(p);
+  const u = await nextEdit(rec, n1);
+  assert.deepEqual(u.ops, [{ op: 'set', id: 'dot', prop: 'fill', value: EVERY.nodes.dot.fill }], "one frame setting dot's fill back, nothing about title");
+  await sendsNothing(rec, n1 + 1, 'after the undo');
+  assert.equal(await shownText(p, '#toast'), null, 'all kept: nothing said');
+  await allSaved(p);
+  assert.equal(fake.doc('every').nodes.title.name, 'By Ana', "Ana's name stays");
+  assert.deepEqual(fake.doc('every').nodes.dot.fill, EVERY.nodes.dot.fill, "dot's fill back");
+  await undoKey(p);
+  await toastSays(p, UNDO_SAY.none);
+  await sendsNothing(rec, n1 + 1, 'the second undo');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('S3.4 a part changed since is skipped', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec, later } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const start = { x: 12, y: -8 };
+  const a0 = centre(await box(p, '#surface [data-id="badge"]'));
+  const s0 = rec.sent.length;
+  let livesBefore = 0;
+  await slowDrag(p, a0, { x: a0.x + 40, y: a0.y + 30 }, 500, async () => { livesBefore = editsTimed(rec, s0).length; });
+  assert.ok(livesBefore >= 1, `live frames while dragging (${livesBefore})`);
+  await allSaved(p);
+  const d0 = fake.doc('every').nodes.badge;
+  assert.ok(d0.x !== start.x && d0.y !== start.y, `the drag moved both x and y (${d0.x}, ${d0.y})`);
+  const a = await ana(fake, later);
+  await a.edit([{ op: 'set', id: 'badge', prop: 'x', value: 99 }]);
+  await hasRev(p, fake);
+  await hideToast(p);
+  const n1 = edits(rec).length;
+  await undoKey(p);
+  const u = await nextEdit(rec, n1);
+  assert.deepEqual(u.ops, [{ op: 'set', id: 'badge', prop: 'y', value: start.y }], 'one frame holding only set y back to the start');
+  await toastSays(p, UNDO_SAY.part);
+  await sendsNothing(rec, n1 + 1, 'after the undo');
+  await allSaved(p);
+  assert.equal(fake.doc('every').nodes.badge.x, 99, "the fake's x stays Ana's");
+  assert.equal(fake.doc('every').nodes.badge.y, start.y, "the fake's y back");
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('S3.5 a drag is one undo', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const start = { x: 12, y: -8 };
+  const b0 = await box(p, '#surface [data-id="badge"]');
+  const a0 = centre(b0);
+  const s0 = rec.sent.length;
+  await slowDrag(p, a0, { x: a0.x + 60, y: a0.y + 20 }, 1000);
+  await allSaved(p);
+  const frames = editsTimed(rec, s0);
+  assert.ok(frames.length >= 3, `several live frames (${frames.length})`);
+  const d0 = fake.doc('every').nodes.badge;
+  assert.ok(d0.x !== start.x && d0.y !== start.y, `the drag moved badge (${d0.x}, ${d0.y})`);
+  const n1 = edits(rec).length;
+  await undoKey(p);
+  const u = await nextEdit(rec, n1);
+  assert.deepEqual(byProp(u.ops), [{ op: 'set', id: 'badge', prop: 'x', value: start.x }, { op: 'set', id: 'badge', prop: 'y', value: start.y }], 'one frame setting x and y to the start');
+  await sendsNothing(rec, n1 + 1, 'after the undo');
+  await allSaved(p);
+  assert.deepEqual([fake.doc('every').nodes.badge.x, fake.doc('every').nodes.badge.y], [start.x, start.y], "the fake's badge where it began");
+  const b1 = await box(p, '#surface [data-id="badge"]');
+  near(b1.l, b0.l, 0.5, 'drawn back: x');
+  near(b1.t, b0.t, 0.5, 'drawn back: y');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('S3.6 an add and a delete are undone', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const z = await zoomNow(p);
+  const loose = await box(p, '#surface [data-id="loose"]');
+  const pt = { x: Math.round(loose.l + 120 * z), y: Math.round(loose.t + 100 * z) };
+  assert.equal(await hitAt(p, pt), 'loose', 'the click is on loose');
+  let n0 = edits(rec).length;
+  await p.key('R');
+  await p.clickAt(pt.x, pt.y);
+  const e = await nextEdit(rec, n0);
+  assert.equal(e.ops.length, 1);
+  assert.equal(e.ops[0].op, 'add', 'a rectangle added');
+  const id = e.ops[0].node.id;
+  await ackOf(rec, e);
+  n0 = edits(rec).length;
+  await undoKey(p);
+  const u1 = await nextEdit(rec, n0);
+  assert.deepEqual(u1.ops, [{ op: 'del', id }], 'the undo deletes it');
+  await allSaved(p);
+  assert.equal(Object.hasOwn(fake.doc('every').nodes, id), false, "the fake's rectangle gone");
+  // a delete undone: rule put back as it was, where it was
+  await selectRow(p, 'rule');
+  n0 = edits(rec).length;
+  await p.key('Delete');
+  const del = await nextEdit(rec, n0);
+  assert.deepEqual(del.ops, [{ op: 'del', id: 'rule' }], 'one del of rule');
+  await ackOf(rec, del);
+  await allSaved(p);
+  n0 = edits(rec).length;
+  await undoKey(p);
+  const u2 = await nextEdit(rec, n0);
+  assert.ok(u2.ops.length >= 1 && u2.ops.every((o) => o.op === 'add'), `one edit of adds: ${JSON.stringify(u2.ops)}`);
+  await sendsNothing(rec, n0 + 1, 'after the undo');
+  await allSaved(p);
+  const d = fake.doc('every');
+  assert.deepEqual(d.nodes.rule, EVERY.nodes.rule, "the fake's rule as the fixture's");
+  assert.equal(d.nodes.card.children.indexOf('rule'), EVERY.nodes.card.children.indexOf('rule'), 'rule at its old place in card');
+  assert.deepEqual(d.nodes.card.children, EVERY.nodes.card.children, "card's children as before");
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('S3.7 a nudge is undone', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  await selectRow(p, 'badge');
+  await p.ev('(() => { document.activeElement?.blur(); return true; })()');
+  const n0 = edits(rec).length;
+  await arrow(p, 'ArrowRight');
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'set', id: 'badge', prop: 'x', value: 13 }], 'one nudge of badge');
+  await ackOf(rec, e);
+  await undoKey(p);
+  const u = await nextEdit(rec, n0 + 1);
+  assert.deepEqual(u.ops, [{ op: 'set', id: 'badge', prop: 'x', value: 12 }], 'set x back to the start');
+  await sendsNothing(rec, n0 + 2, 'after the undo');
+  await allSaved(p);
+  assert.equal(fake.doc('every').nodes.badge.x, 12, "the fake's badge.x back");
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
+
+test('S3.8 not in a field, not for refused edits', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  // in a field Ctrl+Z is the field's: nothing sent, the entry still there for the page
+  const e = await rename(p, rec, 'title', 'Field');
+  await ackOf(rec, e);
+  // the Name field rebuilt by the page (another row, then title's again), so it holds no typing
+  // history: Chrome's own field undo then has nothing to take back
+  await selectRow(p, 'dot');
+  await selectRow(p, 'title');
+  const nameValue = () => p.ev("document.querySelector('#props [data-prop=\"name\"]')?.value ?? null");
+  assert.equal(await nameValue(), 'Field', "title's Name field shows Field");
+  assert.equal(await focusField(p, 'name'), true, 'the Name field focused');
+  let n0 = edits(rec).length;
+  await ctrl(p, 'z');
+  assert.equal(await nameValue(), 'Field', "Ctrl+Z in the field changed nothing in it (no typing history)");
+  await sendsNothing(rec, n0, 'Ctrl+Z in the Name field');
+  await undoKey(p);
+  const u = await nextEdit(rec, n0);
+  assert.deepEqual(u.ops, nameSet('title', EVERY.nodes.title.name), 'the entry undone from the page');
+  await allSaved(p);
+  // a refused edit's entry goes with it
+  await p.click('#pages a[data-page="p-parts"]');
+  await within(async () => (await count(p, '#surface [data-id="button"]')) === 1, 'Parts shown');
+  await hideToast(p);
+  await selectRow(p, 'button-label');
+  n0 = edits(rec).length;
+  await p.key('Delete');
+  const del = await nextEdit(rec, n0);
+  assert.deepEqual(del.ops, [{ op: 'del', id: 'button-label' }], 'one del of button-label');
+  await toastSays(p, SAY.ref);
+  await within(async () => (await body(p, 'pending')) === '0', 'data-pending 0', async () => body(p, 'pending'));
+  await within(async () => (await count(p, '#surface [data-id="button-label"]')) === 1, 'button-label drawn again');
+  await hideToast(p);
+  n0 = edits(rec).length;
+  await undoKey(p);
+  await toastSays(p, UNDO_SAY.none);
+  await sendsNothing(rec, n0, 'Ctrl+Z after the refusal');
+  assert.ok(fake.doc('every').nodes['button-label'], 'button-label kept on the server');
+  assert.equal(refusedFrames(rec).length, 1, 'only the del refused');
+  noDialogs(rec);
+  noExceptions(rec);
+});
