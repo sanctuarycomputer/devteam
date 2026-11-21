@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { openCanvas, startCanvasFake } from './canvas-fake.mjs';
+import { openCanvas, startCanvasFake, docErrors } from './canvas-fake.mjs';
 import { cleanup, openChrome } from './chrome.mjs';
 import { until } from './kit.mjs';
 
@@ -550,3 +550,106 @@ export const toastSays = (p, words) => within(async () => (await shownText(p, '#
 export const hasRev = (p, fake) => within(async () => (await body(p, 'rev')) === String(fake.rev('every')), 'data-rev equals the fake rev', async () => `${await body(p, 'rev')} vs ${fake.rev('every')}`);
 
 export const byProp = (ops) => [...ops].sort((a, b) => String(a.prop).localeCompare(String(b.prop)));
+// ---- kit-669's helpers ----
+
+// Every edit frame the page sent from edits(rec)[from] on got its ack, and no `refused` came for any
+// of them (the page's own client: refused frames go only to the client that sent the edit).
+export async function accepted(rec, from, ms = 10000) {
+  const mine = edits(rec).slice(from);
+  assert.ok(mine.length > 0, `an edit frame from index ${from}`);
+  const answered = (e) => rec.got.some((m) => m && ((m.t === 'ops' && m.ack && m.ack.client === e.client && m.ack.seq === e.seq) || (m.t === 'refused' && m.client === e.client && m.seq === e.seq)));
+  await within(async () => mine.every(answered), `every edit from index ${from} answered`, async () => JSON.stringify(rec.got.slice(-4)), ms);
+  const client = mine[0].client;
+  assert.deepEqual(refusedFrames(rec).filter((m) => m.client === client && mine.some((e) => e.seq === m.seq)), [], `the edits from index ${from}: none refused`);
+}
+
+// A copy of `base` changed by `f`, checked valid by the fake's own rules (no image folder); its `refs`
+// errors allowed only when `refs` is true (a test that says so).
+export function docVariant(base, f, { refs = false } = {}) {
+  const d = structuredClone(base);
+  f(d);
+  const errs = docErrors(d, { images: null }).filter((e) => !(refs && e.rule === 'refs'));
+  assert.deepEqual(errs, [], 'the variant document is valid');
+  return d;
+}
+
+// A Shift+click in the middle of what `sel` finds: a press and release with modifiers 8.
+export async function shiftClick(p, sel) {
+  const at = await p.at(sel);
+  await p.move(at.x, at.y, 8);
+  await mouse(p, 'mousePressed', at.x, at.y, { modifiers: 8 });
+  await mouse(p, 'mouseReleased', at.x, at.y, { modifiers: 8 });
+}
+
+// One key as a keyboard sends it, Ctrl (modifiers 2) and Shift (8) held when asked; `commands` are the
+// editing commands it runs (['copy'], ['paste']), as Chrome's own key bindings would.
+export const KEY_VK = { Backspace: 8, Tab: 9, Enter: 13, Escape: 27, Delete: 46, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
+
+export async function key(p, k, { ctrl: c = false, shift = false, commands } = {}) {
+  const letter = /^[A-Za-z]$/.test(k);
+  const vk = KEY_VK[k] ?? k.toUpperCase().charCodeAt(0);
+  const e = { key: k, code: letter ? `Key${k.toUpperCase()}` : /^[0-9]$/.test(k) ? `Digit${k}` : k, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: (c ? 2 : 0) | (shift ? 8 : 0) };
+  await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...e, ...(commands ? { commands } : {}) });
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...e });
+}
+
+export const MINIMAL = fixture('doc-minimal.json');
+
+export const shownPage = (p) => p.ev("document.querySelector('#pages a[aria-current=\"page\"]')?.dataset.page ?? null");
+
+export const pageLink = (id) => `#pages a[data-page="${id}"]`;
+
+// The shown page's row button for `action` (page-rename, page-up, page-down, page-delete).
+export const rowButton = (action) => `#pages button[data-action="${action}"]`;
+
+// Show a page by its link, and wait until it is shown (marked current, in the address); with `row`,
+// until its row holds the buttons too.
+export async function showPageLink(p, id, { row = true } = {}) {
+  await p.click(pageLink(id));
+  await within(async () => (await shownPage(p)) === id && (await p.ev('location.hash')) === `#page=${encodeURIComponent(id)}`, `page ${id} shown`, async () => `${await shownPage(p)} ${await p.ev('location.hash')}`);
+  if (row) await within(async () => (await count(p, rowButton('page-delete'))) === 1 && (await p.ev(`!!document.querySelector(${JSON.stringify(pageLink(id))})?.closest('.prow')?.querySelector('[data-action="page-delete"]')`)), `${id}'s row holds the buttons`);
+}
+
+// PLACED: `every` with `tiles` at x 700, y 0, 100 × 100, clear of `card` and `loose`.
+export const PLACED = docVariant(EVERY, (d) => { Object.assign(d.nodes.tiles, { x: 700, y: 0, size: { w: 100, h: 100 } }); });
+
+// A canvas of rects `<prefix><n>` named `Rect <n>`, `count` of them on the first page in a grid of
+// `cols` columns, each `side` px square, `step` px apart; `more` changes it further.
+export function rectsCanvas(pagesList, { count, cols, side, step, prefix = 'r', parent = pagesList[0].id }, more = () => {}) {
+  const base = { canvas: 1, rev: 0, tokens: {}, pages: pagesList.map((pg) => ({ ...pg, children: [] })), nodes: {} };
+  return docVariant(base, (d) => {
+    const holder = d.pages.find((pg) => pg.id === parent);
+    for (let i = 1; i <= count; i++) {
+      const id = `${prefix}${i}`;
+      d.nodes[id] = { type: 'rect', parent, name: `Rect ${i}`, x: ((i - 1) % cols) * step, y: Math.floor((i - 1) / cols) * step, size: { w: side, h: side }, fill: '#d9d9d9' };
+      if (holder) holder.children.push(id);
+    }
+    more(d);
+  });
+}
+
+// The page's `select` frames with the browser's time each was sent (ms).
+export const selectsTimed = (rec, from = 0) => rec.sent.map((m, i) => ({ m, ts: rec.sentTs[i] * 1000, i })).slice(from).filter((x) => x.m && x.m.t === 'select');
+
+export const lastSelect = (rec) => { const s = selectsTimed(rec); return s.length ? s[s.length - 1].m.ids : null; };
+
+export const waitSelect = (rec, ids, what) => within(async () => JSON.stringify(lastSelect(rec)) === JSON.stringify(ids), what, async () => `last select ${JSON.stringify(lastSelect(rec))}`, 5000);
+
+export const selectedRows = (p) => p.ev("[...document.querySelectorAll('#layers .layer[aria-selected=\"true\"]')].map((r) => r.dataset.node)");
+
+export const waitRows = (p, ids, what) => within(async () => JSON.stringify(await selectedRows(p)) === JSON.stringify(ids), what, async () => JSON.stringify(await selectedRows(p)), 5000);
+
+// A page point (page px) on screen.
+export async function pagePt(p, x, y) {
+  const s = await box(p, '#surface');
+  const z = await zoomNow(p);
+  return { x: s.l + x * z, y: s.t + y * z };
+}
+
+// Focus on the page itself, so the arrows and Delete are the page's, not a row's.
+export const blurAll = (p) => p.ev('(() => { const a = document.activeElement; if (a && a !== document.body && typeof a.blur === \'function\') a.blur(); return true; })()');
+
+// The drag rectangle from page point a to page point b, in steps of at most 10 px.
+export async function marquee(p, a, b) {
+  await dragPath(p, [await pagePt(p, a.x, a.y), await pagePt(p, b.x, b.y)]);
+}
