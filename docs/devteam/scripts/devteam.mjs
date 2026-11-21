@@ -24808,13 +24808,14 @@ const recurringRegistry = Object.freeze({
   // words that start with the label Yes, read as --choice and --read read a label: any case
   // (final-12b F3), then the end, whitespace, or one of . , ! (final-13b F3). A Yes inside or next to
   // a quotation mark of any kind is none (d-20261121-072341505-supervisor, final-16b F3): any
-  // \p{Quotation_Mark} (" ' “ ” „ ‟ ‘ ’ ‚ ‛ « » ‹ › ＂ ＇ 「 」 『 』 …), and ″ and 「 」 named too,
+  // \p{Quotation_Mark} (" ' “ ” „ ‟ ‘ ’ ‚ ‛ « » ‹ › ＂ ＇ 「 」 『 』 …), and ″ ‶ ‷ 「 」 and the
+  // backtick named too (final-17b F6),
   // before it (so no quote wraps the turn, not even "Yes" alone) or in its word (Yes", Yes.”, Yes,„),
   // so reported speech ("Yes" is what you want me to say. No.) is no Yes, and the owner answers on
   // the card instead; a turn holding any format or combining character (a zero-width space, a soft
   // hyphen, an accent) is none either. The letters are spelled out, not /i, so no other letter that
   // folds to one of them (the long s, U+017F) passes for it.
-  QUOTE_MARK: /[\p{Quotation_Mark}\u2033\u300c\u300d]/u,
+  QUOTE_MARK: /[\p{Quotation_Mark}\u2033\u2036\u2037\u300c\u300d`]/u,
   saysYes: (said) => {
     const s = String(said ?? '');
     if (/[\p{Cf}\p{M}]/u.test(s)) return false;
