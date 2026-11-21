@@ -1,4 +1,4 @@
-// What test/recurring-registry.test.mjs and test/recurring-registry.landing.test.mjs share (kit-162,
+// What test/recurring-registry.test.mjs, test/recurring-registry.landing.test.mjs and test/recurring-registry.answer.test.mjs share (kit-162,
 // final-14 F2: the A15 landing tests run in a file of their own): the paths, a job of each kind,
 // the jobs file as the kit writes it, and the per-test fixture (a monoFixture with a bare origin and
 // forge "git", run through the kit's commands).
@@ -17,6 +17,7 @@ export const GIT_TIMEOUT = 30000;
 
 // Jobs that hold RECURRING_ENTRY_SHAPE@1.
 export const check = (extra = {}) => ({ kind: 'check', title: 'CI on main', what: 'the kit CI on main is green', every: '6h', run: 'gh run list --limit 1', ...extra });
+export const ZZ = check({ title: 'Z job', run: 'echo zz' });
 export const chore = (extra = {}) => ({ kind: 'chore', title: 'Tidy branches', what: 'merged branches are gone', every: '1w', by: 'supervisor', prompt: 'Delete merged branches.', ...extra });
 
 // The jobs file as the kit writes it.
