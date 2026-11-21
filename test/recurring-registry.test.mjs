@@ -1896,3 +1896,133 @@ test('A15 landing: records in home, a records push origin takes but answers afte
     assert.equal(acts.filter((a) => a.class === 'merge-word' && /the records of console-01-a/.test(a.what)).length, 1, 'the records\' act, once');
   } finally { F.done(); }
 });
+
+// ---- a push killed at the timeout that origin then takes (final-13 F1) ----
+// origin's pre-receive outlasts the kit's git timeout (cut to 10 s): the push is killed before
+// origin updates the ref, and origin then takes it. The first run says it may have landed; the rerun
+// recognises the kit's own landing merge and logs its act once.
+const PRE_SLEEP = 14;
+const PRE_TIMEOUT = '10000';
+const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const slowPreReceive = (origin) => { const hook = path.join(origin, 'hooks', 'pre-receive'); write(hook, `#!/bin/sh\ncat >/dev/null\nexec sleep ${PRE_SLEEP} >/dev/null 2>&1\n`); fs.chmodSync(hook, 0o755); return hook; };
+// until the bare origin's branch is no longer at `from` (or 40 s pass); returns where it is
+const refMoves = (origin, branch, from) => {
+  const at = () => execFileSync('git', ['rev-parse', `refs/heads/${branch}`], { cwd: origin, encoding: 'utf8', timeout: GIT_TIMEOUT }).trim();
+  for (let i = 0; i < 80 && at() === from; i++) nap(500);
+  return at();
+};
+const MAYBE = /may have landed[^\n]*timed out before origin answered[^\n]*run merge [^\n]*again; it recognises the kit's own/;
+
+test('A15 landing: forge git, a code push killed at the timeout that origin then takes: merge says it may have landed, and the rerun logs its act once, so the answer counts as landed (final-13 F1)', { timeout: 300000 }, () => {
+  const T = setup('a15-pre-receive');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    T.jobsChore('pre', () => ({ aa: check() }));
+    const main0 = T.g(['rev-parse', 'refs/heads/main'], T.org);
+    const hook = slowPreReceive(T.org);
+    const before = T.acts().length;
+    let r;
+    try {
+      r = T.merge('pre', ['--approved', q], { DEVTEAM_GIT_TIMEOUT_MS: PRE_TIMEOUT });
+      assert.notEqual(refMoves(T.org, 'main', main0), main0, 'origin took the push after the kill');
+    } finally { fs.rmSync(hook, { force: true }); }
+    refused(r, MAYBE);
+    assert.doesNotMatch(r.text, /nothing landed|verify from the start/);
+    assert.equal(T.acts().length, before, 'no act yet');
+    const r2 = T.merge('pre', ['--approved', q]);
+    passes(r2);
+    assert.match(r2.text, /in the kit's own landing merge [0-9a-f]{12}, with no act logged/);
+    const added = T.acts().slice(before);
+    assert.equal(added.length, 1, JSON.stringify(added));
+    assert.equal(added[0].class, 'merge-chore');
+    assert.equal(added[0].approved_by, q);
+    assert.deepEqual(T.mainJobs(), { aa: check() });
+    assert.equal(json(T.ok(['recurring', 'show', 'aa', '--json'])).registered?.qid, q, 'registered through the answer');
+    // a third run is a second run: nothing logged
+    assert.match(T.merge('pre', ['--approved', q]).text, /is already on main: nothing to merge, nothing logged/);
+    assert.equal(T.acts().length, before + 1);
+  } finally { T.done(); }
+});
+
+test('A15 landing: forge git, a merge on main that someone else made (another message, or other parents) is never taken as the kit\'s own landing (final-13 F1)', () => {
+  const T = setup('a15-hand-merge');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    const wt = T.jobsChore('hand', () => ({ aa: check() }));
+    const sha = T.g(['rev-parse', 'HEAD'], wt);
+    T.g(['fetch', '-q', 'origin']);
+    const main0 = T.g(['rev-parse', 'origin/main']);
+    const tree = T.g(['rev-parse', `${sha}^{tree}`]);
+    const before = T.acts().length;
+    // merge's own message: the PR's title, its text (the whole run/pr file), and the head
+    const KIT_MSG = `chore-hand: jobs\n\n# chore-hand: jobs\n\n## One-way doors\n\nNone.\n\nMerged chore-hand at ${sha}`;
+    const onOrigin = (c) => { T.g(['push', '-q', '-f', 'origin', `${c}:refs/heads/main`]); T.g(['fetch', '-q', 'origin']); };
+    // the same parents (main, then the head), another message
+    onOrigin(T.g(['commit-tree', tree, '-p', main0, '-p', sha, '-m', 'a hand merge']));
+    assert.match(T.merge('hand', ['--approved', q]).text, /chore-hand at [0-9a-f]{12} is already on main: nothing to merge, nothing logged/);
+    // merge's own message, the parents swapped
+    onOrigin(T.g(['commit-tree', tree, '-p', sha, '-p', main0, '-m', KIT_MSG]));
+    assert.match(T.merge('hand', ['--approved', q]).text, /is already on main: nothing to merge, nothing logged/);
+    // merge's own message and parents, but the head already on the first: not the merge that landed it
+    onOrigin(T.g(['commit-tree', tree, '-p', sha, '-p', sha, '-m', KIT_MSG]));
+    assert.match(T.merge('hand', ['--approved', q]).text, /is already on main: nothing to merge, nothing logged/);
+    assert.equal(T.acts().length, before, 'nothing logged');
+    // the control: merge's own message onto main0, and the act is logged once
+    onOrigin(T.g(['commit-tree', tree, '-p', main0, '-p', sha, '-m', KIT_MSG]));
+    const r = T.merge('hand', ['--approved', q]);
+    passes(r);
+    assert.match(r.text, /in the kit's own landing merge/);
+    assert.equal(T.acts().length, before + 1);
+  } finally { T.done(); }
+});
+
+test('A15 landing: records in home, a records push killed at the timeout that home\'s origin then takes: merge says they may have landed, and the rerun logs their act once and lands the code (final-13 F1)', { timeout: 300000 }, () => {
+  const F = recordsHome('recur-rec-pre');
+  try {
+    const { head } = recordsReady(F, RID);
+    const main0 = F.g(['rev-parse', 'refs/heads/main'], F.org);
+    const hook = slowPreReceive(F.org);
+    const acts0 = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length;
+    let r;
+    try {
+      r = F.text(F.runIn(F.old, ['merge', RID], SUP, { DEVTEAM_GIT_TIMEOUT_MS: PRE_TIMEOUT }));
+      assert.notEqual(refMoves(F.org, 'main', main0), main0, 'home\'s origin took the records push after the kill');
+    } finally { fs.rmSync(hook, { force: true }); }
+    assert.notEqual(r.status, 0, r.text);
+    assert.match(r.text, /the records of console-01-a may have landed in home \(the push to home's main timed out before origin answered/);
+    assert.doesNotMatch(r.text, /nothing landed|verify from the start/);
+    assert.equal(json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length, acts0, 'no act yet');
+    F.g(['merge-base', '--is-ancestor', head, F.mainNow()], F.old);
+    const r2 = F.text(F.runIn(F.old, ['merge', RID], SUP));
+    assert.equal(r2.status, 0, r2.text);
+    assert.match(r2.text, /in the kit's own records merge [0-9a-f]{12}, with no act logged/);
+    const acts = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).slice(acts0);
+    assert.equal(acts.filter((a) => a.class === 'merge-word' && /the records of console-01-a/.test(a.what)).length, 1, 'the records\' act, once');
+    assert.equal(acts.filter((a) => a.class === 'merge-word' && a.refs?.includes(RID)).length, 1, 'the code\'s act, once');
+  } finally { F.done(); }
+});
+
+test('A15 landing: records in home, a code push to the link killed at the timeout that its origin then takes: merge says it may have landed, and the rerun logs the merge act once (final-13 F1)', { timeout: 300000 }, () => {
+  const F = recordsHome('recur-code-pre');
+  try {
+    recordsReady(F, RID);
+    const trunk0 = F.g(['rev-parse', 'refs/heads/trunk'], F.consoleOrigin);
+    const hook = slowPreReceive(F.consoleOrigin);
+    const acts0 = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length;
+    let r;
+    try {
+      r = F.text(F.runIn(F.old, ['merge', RID], SUP, { DEVTEAM_GIT_TIMEOUT_MS: PRE_TIMEOUT }));
+      assert.notEqual(refMoves(F.consoleOrigin, 'trunk', trunk0), trunk0, 'the link\'s origin took the push after the kill');
+    } finally { fs.rmSync(hook, { force: true }); }
+    assert.notEqual(r.status, 0, r.text);
+    assert.match(r.text, MAYBE);
+    assert.doesNotMatch(r.text, /nothing landed|verify from the start/);
+    const r2 = F.text(F.runIn(F.old, ['merge', RID], SUP));
+    assert.equal(r2.status, 0, r2.text);
+    assert.match(r2.text, /in the kit's own landing merge [0-9a-f]{12}, with no act logged/);
+    const acts = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).slice(acts0);
+    assert.equal(acts.filter((a) => a.class === 'merge-word' && /the records of console-01-a/.test(a.what)).length, 1, 'the records\' act, once (the first run)');
+    assert.equal(acts.filter((a) => a.class === 'merge-word' && a.refs?.includes(RID)).length, 1, 'the code\'s act, once');
+    assert.match(F.text(F.runIn(F.old, ['merge', RID], SUP)).text, /already on trunk: nothing to merge, nothing logged/);
+  } finally { F.done(); }
+});

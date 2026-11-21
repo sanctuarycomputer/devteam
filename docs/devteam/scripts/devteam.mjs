@@ -6946,11 +6946,22 @@ function pinRecords(id) {
 // run/pr/, which is the link PR's). Home's mergeShaFor is never asked about a link ticket
 // (factsRepo routes it to its link), so the subject needn't avoid what findMergeSha reads; don't
 // add a fallback to home there. null, or why it didn't land.
+const recordsMergeMessage = (id, recSha, linkName) => `${id}: records\n\nMerged home's ticket/${id} at ${recSha}: the records of ${id}, whose code lands in ${linkName}`;
+// Whether tip is the kit's own landing merge of head (final-13 F1): exactly two parents, the second
+// head and the first one that doesn't already hold it (the main it landed on), and merge's own
+// message, as git keeps it (trailing spaces and repeated blank lines dropped). A merge anyone else
+// made, with other parents or another message, is not. g is the repo's git (output, or null).
+const kitMergeOf = (g, tip, head, message) => {
+  const norm = (m) => String(m ?? '').split('\n').map((l) => l.trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  const parents = (g(['rev-list', '--parents', '-n', '1', tip]) ?? '').trim().split(' ').slice(1);
+  if (parents.length !== 2 || parents[1] !== head) return null;
+  if (g(['merge-base', '--is-ancestor', head, parents[0]]) !== null) return null;
+  return norm(g(['log', '-1', '--format=%B', tip])) === norm(message) ? { onto: parents[0] } : null;
+};
 function landRecords(id, rec, linkName) {
   const HR = repo('home');
   const HS = HR.settings;
-  const subject = `${id}: records`;
-  const body = `Merged home's ticket/${id} at ${rec.sha}: the records of ${id}, whose code lands in ${linkName}`;
+  const [subject, body] = recordsMergeMessage(id, rec.sha, linkName).split('\n\n');
   if (HS.forge === 'git') {
     // Onto the home main the checks judged (recordsBranchFails, at mainSha()), as the code lands
     // (cmdMerge's landCode): no hook runs, directory renames are a conflict, the merge must be
@@ -6982,7 +6993,9 @@ function landRecords(id, rec, linkName) {
         // records landed, and their act is logged as for any landing (final-12 F3, as landCode's final-11 F3)
         const f = lg(['fetch', '--quiet', 'origin', HS.main_branch], wt);
         const o = f.ok ? lg(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${HS.main_branch}^{commit}`], wt) : null;
-        if (!(o?.ok && o.out.trim() === head)) return `push to home's ${HS.main_branch} refused (did main move?)`;
+        // killed at the timeout, origin may still take it (a slow pre-receive): it may have landed, and
+        // the rerun recognises the kit's own merge and logs the act then (final-13 F1)
+        if (!(o?.ok && o.out.trim() === head)) return pushed.timedOut ? { maybe: `the push to home's ${HS.main_branch} timed out before origin answered, and its ${HS.main_branch} isn't the records merge yet` } : `push to home's ${HS.main_branch} refused (did main move?)`;
         out(`the push of the records to home's ${HS.main_branch} ${recurringRegistry.why(pushed)}, but origin's ${HS.main_branch} is the records merge the kit built and checked (${head.slice(0, 12)}): landed`);
       }
     } finally {
@@ -7032,8 +7045,21 @@ function cmdMerge() {
   R.git(['fetch', '--quiet', 'origin', mainBranch0]);
   // main as the checks judge it: the code lands onto exactly this commit, or not at all (kit-162).
   // home's is mainSha(), the main checkPr's recurringRegistry.landing judges, so the landing and the land agree
-  const checkedMain = R.name === 'home' ? mainSha() : R.resolveCommit(`origin/${mainBranch0}`);
-  if (checkedMain && R.git(['merge-base', '--is-ancestor', sha, checkedMain]) !== null) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
+  let checkedMain = R.name === 'home' ? mainSha() : R.resolveCommit(`origin/${mainBranch0}`);
+  // A landing whose push timed out may still have landed (final-13 F1): when main is exactly the kit's
+  // own landing merge of this head (kitMergeOf) and no act for it was logged, this run checks the head
+  // onto the main it landed on, lands nothing, and logs its act as a normal landing. Anything else
+  // already on main is a second run: nothing lands, nothing is logged.
+  let relanded = null;
+  if (checkedMain && R.git(['merge-base', '--is-ancestor', sha, checkedMain]) !== null) {
+    const cls0 = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
+    const logged = logObjects('act').some((a) => a.class === cls0 && String(a.what ?? '').startsWith(`merged ${branch} at ${sha}`) && (a.repo ?? null) === (onR.repo ?? null));
+    const own = viaGit && !logged ? kitMergeOf((args) => R.git(args), checkedMain, sha, `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`) : null;
+    if (!own) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
+    relanded = { tip: checkedMain, onto: own.onto };
+    out(`${branch}${inR} at ${sha.slice(0, 12)} is on ${mainBranch0} in the kit's own landing merge ${checkedMain.slice(0, 12)}, with no act logged (a push that timed out, which origin took): checking it onto ${own.onto.slice(0, 12)}, the main it landed on, to log its landing`);
+    checkedMain = own.onto;
+  }
   // records in home: one pinned home commit, checked here and landed below. Decided once, at the
   // head, after fetching home's ticket/<id>, so records pushed from another clone count (home wins)
   if (id && tickets().has(id) && recordsHomeSetting(tickets().get(id))) gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${id}:refs/remotes/origin/ticket/${id}`]);
@@ -7345,8 +7371,20 @@ function cmdMerge() {
   // Records first: they land on home's main at exactly the pinned sha (once: a rerun finds them
   // landed), then the code. A code landing that fails after them leaves home with the records and
   // the link without the code, no act logged; merge again re-checks and lands only the code.
+  const recordsLanded = () => logObjects('act').some((a) => a.class === 'merge-word' && String(a.what ?? '').startsWith(`merged home's ticket/${id} at ${rec.sha}: the records of ${id},`));
+  // records landed by a push that timed out, with no act: logged now, when home's main is exactly the
+  // kit's own records merge of the pinned sha (final-13 F1)
+  if (rec?.landed && repo('home').settings.forge === 'git' && !recordsLanded()) {
+    const tip = resolveCommit(`origin/${repo('home').settings.main_branch}`);
+    if (tip && kitMergeOf((args) => git(args), tip, rec.sha, recordsMergeMessage(id, rec.sha, R.name))) {
+      const ra = appendLog({ type: 'act', class: 'merge-word', what: `merged home's ticket/${id} at ${rec.sha}: the records of ${id}, ahead of its code in ${R.name}`, refs: [], reversible: false }, 'supervisor');
+      out(`the records of ${id} at ${rec.sha.slice(0, 12)} are on home's ${repo('home').settings.main_branch} in the kit's own records merge ${tip.slice(0, 12)}, with no act logged (a push that timed out, which origin took): logged their landing (${ra.id})`);
+    }
+  }
+  const rerun = `merge ${id ? id : plan ? `--plan ${plan}` : `--chore ${chore}`}${approved ? ` --approved ${approved}` : ''}`;
   if (rec && !rec.landed) {
     const why = landRecords(id, rec, R.name);
+    if (why?.maybe) die(`the records of ${id} may have landed in home (${why.maybe}): run ${rerun} again; it recognises the kit's own records merge and logs their act, or lands them`);
     if (why) die(`the records of ${id} did not land in home (${why}); nothing landed: verify from the start`);
     // Its own act, logged as it lands: the merge it made on home's main is named by what merge did,
     // never inferred from git later (a subject, a tree or a parent is anything anyone can push). No
@@ -7400,6 +7438,8 @@ function cmdMerge() {
             out(`the push to ${mainBranch}${inR} ${recurringRegistry.why(pushed)}, but origin's ${mainBranch} is the landing merge the kit built and checked (${head.slice(0, 12)}): landed`);
             return null;
           }
+          // killed at the timeout, origin may still take it (a slow pre-receive): never "nothing landed" (final-13 F1)
+          if (pushed.timedOut) { pushTimedOut = true; return `the push to ${mainBranch}${inR} timed out before origin answered, and its ${mainBranch} isn't the landing merge yet, so it may still land`; }
           return moved() ?? `push to ${mainBranch}${inR} refused (did main move?)`;
         }
       } finally {
@@ -7413,7 +7453,9 @@ function cmdMerge() {
     const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
     return merged === null ? 'gh pr merge refused (did the head move?)' : null;
   };
-  const codeFail = landCode();
+  let pushTimedOut = false;
+  const codeFail = relanded ? null : landCode();
+  if (codeFail && pushTimedOut) die(`${rec ? `the records of ${id} landed in home at ${rec.sha.slice(0, 12)}; ` : ''}the code may have landed${inR} (${codeFail}): run ${rerun} again; it recognises the kit's own landing merge and logs its act, or lands it`);
   if (codeFail) die(rec ? `the records of ${id} landed in home at ${rec.sha.slice(0, 12)}; the code did not land in ${R.name} (${codeFail}): run merge ${id} again` : `${codeFail}; verify from the start`);
   R.git(['fetch', '--quiet', 'origin', mainBranch]);
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
