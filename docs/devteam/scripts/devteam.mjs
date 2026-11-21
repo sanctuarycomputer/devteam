@@ -25704,6 +25704,20 @@ const recurringRunDue = Object.freeze({
     const files = fs.readdirSync(dir).filter((f) => f.endsWith('.txt')).map((f) => { try { return [f, fs.statSync(path.join(dir, f)).mtimeMs]; } catch { return [f, 0]; } }).sort((a, b) => b[1] - a[1]);
     for (const [f] of files.slice(recurringRunDue.TAILS)) try { fs.unlinkSync(path.join(dir, f)); } catch {}
   },
+  // Start `recurring run --due` for wait: in the background of a shell that exits at once (under
+  // setsid where the machine has it, so the runner has a session of its own), output appended to
+  // run/recurring/runner.log. spawnSync reaps the shell and init the runner, so wait, whose loop
+  // blocks in Atomics.wait and never reaps a child, holds no zombie; whether a runner is running is
+  // read from the lock alone. True when the shell ran: the runner's own failures are in runner.log.
+  start(self) {
+    const dir = runPath('recurring');
+    const logFile = path.join(dir, 'runner.log');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.closeSync(fs.openSync(logFile, 'a'));
+    const script = 'if command -v setsid >/dev/null 2>&1; then setsid "$0" "$1" recurring run --due </dev/null >>"$2" 2>&1 & else "$0" "$1" recurring run --due </dev/null >>"$2" 2>&1 & fi';
+    const r = spawnSync('sh', ['-c', script, process.execPath, self, logFile], { cwd: mainRoot, env: process.env, timeout: 10000, stdio: 'ignore' });
+    return r.status === 0;
+  },
   // a SIGTERM or SIGINT mid-check kills its group, removes its checkout and releases the lock
   onSignals(me) {
     const stop = (code) => () => {
@@ -27536,7 +27550,33 @@ function cmdWait() {
       try { fs.appendFileSync(trace, `${JSON.stringify({ cycle: cycle++, at, children: started.splice(0), log_reads: r - reads, key, rss: process.memoryUsage().rss })}\n`); } catch {}
       reads = r;
     }
+    now.key = key;
     return now;
+  };
+  // Recurring checks (kit-163): when the earliest due time of main's checks has come, no live runner
+  // holds run/recurring/.lock and this wait started none in the last 60 s (an attempt that failed
+  // counts, so a broken start isn't retried every cycle), a detached `recurring run --due` is
+  // started and the wait carries on; results reach the supervisor as findings, never by waking it.
+  // The due time is worked out again only when the key snap() read the log at changes (it carries
+  // main's sha), from the log snap() just read, so a quiet cycle reads nothing more. A failure says
+  // so once on stderr.
+  let recurKey = null;
+  let nextAt = Infinity;
+  let lastStart = -Infinity;
+  let recurWarned = false;
+  const recurWarn = (why) => { if (!recurWarned) process.stderr.write(`devteam: recurring checks: ${why}\n`); recurWarned = true; };
+  const recur = (key) => {
+    try {
+      if (key !== recurKey) {
+        const c = recurringRunDue.checks();
+        nextAt = c.problem ? Infinity : Math.min(Infinity, ...c.checks.map((x) => Date.parse(x.next)));
+        recurKey = key;
+      }
+      if (!(Date.now() >= nextAt) || Date.now() - lastStart < 60000 || recurringLock.live(recurringLock.read())) return;
+      lastStart = Date.now();
+      if (trace) started.push(['recurring', 'run', '--due']);
+      if (!recurringRunDue.start(self)) recurWarn('the runner did not start (run/recurring/runner.log)');
+    } catch (e) { recurWarn(`the runner did not start: ${e?.message ?? e}`); }
   };
   // the heartbeat while the supervisor waits: at most every HOST_REFRESH_MS, so a long quiet wait
   // keeps its claim fresh, and another machine live on this repo ends the wait
@@ -27545,6 +27585,7 @@ function cmdWait() {
   const firstAlerts = poll();
   reads = readLog.reads ?? 0;
   const first = snap();
+  recur(first.key);
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
   const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
   // the owner's new lines, and a pointer to the threads when one of them is a thread or a turn
@@ -27563,6 +27604,7 @@ function cmdWait() {
     const alerts = poll();
     if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
     const now = snap();
+    recur(now.key);
     const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k) };
     const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
     const lines = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [ownerSaid(fresh('owner'))] : []), ...fresh('high').map((x) => `finding ${x}`)];
