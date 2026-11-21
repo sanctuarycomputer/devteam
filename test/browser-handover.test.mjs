@@ -6,10 +6,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { canDrive } from './lib/chrome.mjs';
 import { monoFixture } from './lib/kit.mjs';
-import { handoverFile, project, kit, owner, answerLines } from './lib/browser-handover-fixture.mjs';
+import { validate } from './fixtures/browser/check.mjs';
+import { handoverFile, project, kit, browser, owner, answerLines, appendLine, readLedger, site } from './lib/browser-handover-fixture.mjs';
 
 handoverFile();
 
@@ -125,4 +127,176 @@ test('fixture: owner answer is written by owner', async () => {
   assert.equal(lines[0].id, qid);
   assert.equal(lines[0].by, 'owner');
   assert.equal(P.ownerAnswers, 1);
+});
+
+// --- the hold (T3): project hA, one daemon; the checks run in order on one open handover, H1.
+let A, H1;
+const hA = () => (A ??= project('hA'));
+const REASON = 'Log in to the fixture site, then press Done';
+const qidOf = (r) => r.out.split('\n').find((l) => /^q-\d{8}-\d{9}-[a-z0-9-]+$/.test(l));
+const HELD_WORDS = (verb, qid) => new RegExp(`browser ${verb}: the owner has the browser \\(${qid}\\); browser wait says when it is back`);
+// every new question line in P's live log, in file order
+const questionLines = (P) => {
+  const dir = path.join(P.run, 'log');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort().flatMap((f) => fs.readFileSync(path.join(dir, f), 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))).filter((l) => l.type === 'question' && l.op === 'new');
+};
+const ok = async (P, args) => { const r = await browser(P, args); assert.equal(r.status, 0, `browser ${args.join(' ')}: exit ${r.status}: ${r.err || r.out}`); return r; };
+const statusJson = async (P) => { const s = JSON.parse((await ok(P, ['status', '--json'])).out); assert.deepEqual(validate('status', s), [], JSON.stringify(s)); return s; };
+// the control socket, skipping the CLI: the secret and port from state.json
+const direct = (P, verb, args = {}) => new Promise((resolve, reject) => {
+  const st = JSON.parse(fs.readFileSync(P.state, 'utf8'));
+  const body = JSON.stringify({ verb, args });
+  const req = http.request({ host: '127.0.0.1', port: st.control_port, method: 'POST', path: '/', timeout: 60000, headers: { host: `127.0.0.1:${st.control_port}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-devteam-browser': st.control_secret } }, (res) => {
+    let b = '';
+    res.setEncoding('utf8');
+    res.on('data', (c) => { b += c; });
+    res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
+  });
+  req.on('timeout', () => req.destroy(new Error('no answer in 60 s')));
+  req.on('error', reject);
+  req.end(body);
+});
+const handoverLine = (P, extra = {}) => ({ type: 'question', kind: 'owner-action', class: 'browser-handover', scope: `browser:${P.key}`, question: 'Log in (merged by hand)', choices: [{ label: 'Done' }, { label: "Can't right now" }], ...extra });
+const withdraw = async (P, qid) => { const r = await kit(P, ['withdraw', qid, '--reason', 'the test closes it']); assert.equal(r.status, 0, r.err || r.out); };
+
+test('C1 browser handover asks one owner-action question: class, scope, choices, a preview link by name', chromeOpts, async () => {
+  const P = hA();
+  await ok(P, ['start']);
+  await ok(P, ['open', `${site.origin}/login`]);
+  const r = await browser(P, ['handover', '--reason', REASON]);
+  assert.equal(r.status, 0, r.err || r.out);
+  H1 = qidOf(r);
+  assert.ok(H1, r.out);
+  const st = JSON.parse(fs.readFileSync(P.state, 'utf8'));
+  const line = questionLines(P).find((l) => l.id === H1);
+  assert.ok(line, `no question line ${H1}`);
+  assert.equal(line.kind, 'owner-action');
+  assert.equal(line.class, 'browser-handover');
+  assert.equal(line.scope, `browser:${P.key}`);
+  assert.equal(line.question, REASON);
+  assert.deepEqual(line.choices.map((c) => c.label), ['Done', "Can't right now"]);
+  assert.equal(line.stake, 2);
+  assert.equal(line.urgency, 2);
+  assert.equal(line.default, undefined);
+  assert.equal(line.links.length, 1, JSON.stringify(line.links));
+  assert.deepEqual(Object.keys(line.links[0]).sort(), ['preview', 'title'], 'a name only: no url, port or token key');
+  assert.equal(line.links[0].preview, st.preview);
+  const text = JSON.stringify(line);
+  assert.ok(!text.includes(st.control_secret), 'the line holds the control secret');
+  assert.doesNotMatch(text, new RegExp(`(?<![0-9])${st.view_port}(?![0-9])`), 'the line holds the view port');
+  // the site's host (with its port) as its own line, never a path
+  const lines = line.context.split('\n');
+  assert.ok(lines.includes(`The browser is on 127.0.0.1:${site.port}.`), line.context);
+  assert.doesNotMatch(line.context, /\/login/);
+  // the Inbox names the class in words
+  const d = JSON.parse((await kit(P, ['dashboard-data'])).out);
+  assert.equal(d.questions.find((q) => q.id === H1)?.class_name, 'Handing the browser to you for a login');
+});
+
+test('C4 while held every agent verb exits 3, status says held, profiles, stop and start run; the daemon refuses a direct call', chromeOpts, async () => {
+  const P = hA();
+  assert.ok(H1, 'C1 asked the handover');
+  for (const args of [['open', `${site.origin}/account`], ['snapshot'], ['click', 'e1'], ['type', 'e1', 'x'], ['press', 'Enter'], ['scroll', 'down'], ['back'], ['tabs'], ['tab', '1'], ['screenshot'], ['forget'], ['forget', '--profile', P.key], ['type', 'e1', '--stdin']]) {
+    const r = await browser(P, args);
+    assert.equal(r.status, 3, `browser ${args.join(' ')}: exit ${r.status}: ${r.err || r.out}`);
+    assert.match(r.err, HELD_WORDS(args[0], H1), `browser ${args.join(' ')}`);
+  }
+  assert.equal((await statusJson(P)).held, H1);
+  assert.match((await ok(P, ['status'])).out, new RegExp(`^held: ${H1} \\(the owner has the browser\\)$`, 'm'));
+  // the daemon refuses on its own, the CLI skipped
+  const d = await direct(P, 'snapshot', {});
+  assert.equal(d.code, 3, JSON.stringify(d));
+  assert.equal(d.out, `the owner has the browser (${H1})`);
+  assert.equal((await direct(P, 'tabs', {})).code, 3);
+  assert.equal((await direct(P, 'status', { json: true })).code, 0);
+  // allowed while held
+  await ok(P, ['profiles']);
+  await ok(P, ['stop']);
+  const off = await statusJson(P);
+  assert.equal(off.running, false);
+  assert.equal(off.held, H1, 'offline status says held too');
+  assert.match((await ok(P, ['status'])).out, new RegExp(`^held: ${H1} \\(the owner has the browser\\)$`, 'm'));
+  await ok(P, ['start']);
+  assert.equal((await statusJson(P)).held, H1);
+  assert.equal((await direct(P, 'snapshot', {})).code, 3, 'a new daemon refuses too');
+});
+
+test('C5 no file or restart releases the hold: state.json deleted, the daemon killed, stop then start', chromeOpts, async () => {
+  const P = hA();
+  assert.ok(H1, 'C1 asked the handover');
+  const refusedBoth = async (why) => {
+    for (const args of [['snapshot'], ['open', `${site.origin}/account`]]) {
+      const r = await browser(P, args);
+      assert.equal(r.status, 3, `${why}: browser ${args[0]}: exit ${r.status}: ${r.err || r.out}`);
+      assert.match(r.err, HELD_WORDS(args[0], H1), why);
+    }
+  };
+  const pid = JSON.parse(fs.readFileSync(P.state, 'utf8')).daemon_pid;
+  fs.rmSync(P.state);
+  await refusedBoth('state.json deleted');
+  process.kill(pid, 'SIGKILL');
+  await refusedBoth('the daemon killed');
+  await ok(P, ['stop']);
+  await ok(P, ['start']);
+  await refusedBoth('stop then start');
+  assert.equal((await statusJson(P)).held, H1);
+});
+
+test('C10 a second handover while one is open is refused, naming it, and adds no line', chromeOpts, async () => {
+  const P = hA();
+  assert.ok(H1, 'C1 asked the handover');
+  const n0 = questionLines(P).length;
+  const r = await browser(P, ['handover', '--reason', 'Log in again']);
+  assert.equal(r.status, 1, r.err || r.out);
+  assert.match(r.err, new RegExp(`browser handover: ${H1} is already open; wait for it \\(browser wait\\) or withdraw it`));
+  const a = await kit(P, ['ask', '--kind', 'owner-action', '--class', 'browser-handover', '--scope', `browser:${P.key}`, '--question', 'x', '--choices', CHOICES, '--stake', '2', '--urgency', '2']);
+  assert.equal(a.status, 1, a.err || a.out);
+  assert.match(a.err, new RegExp(H1));
+  assert.equal(questionLines(P).length, n0, 'no line is added');
+});
+
+test('handover takes --reason alone: non-blank, at most 2000 characters', chromeOpts, async () => {
+  const P = hA();
+  const n0 = questionLines(P).length;
+  for (const args of [[], ['--reason'], ['--reason', '   '], ['--reason='], ['--reason', 'x'.repeat(2001)], ['--reason', 'x', '--default', 'Done'], ['now', '--reason', 'x'], ['--reason', 'x', '--', 'more']]) {
+    const r = await browser(P, ['handover', ...args]);
+    assert.equal(r.status, 1, `handover ${args.join(' ').slice(0, 40)}: exit ${r.status}: ${r.err || r.out}`);
+    assert.match(r.err, /usage: browser handover --reason/, `handover ${args.join(' ').slice(0, 40)}`);
+  }
+  assert.equal(questionLines(P).length, n0, 'no line is added');
+});
+
+test('RF5 two open handovers: held by the oldest', chromeOpts, async () => {
+  const P = hA();
+  assert.ok(H1, 'C1 asked the handover');
+  const h1At = questionLines(P).find((l) => l.id === H1).at;
+  const newer = appendLine(P, handoverLine(P));
+  assert.equal((await statusJson(P)).held, H1, 'a newer one merged in: still H1');
+  const older = appendLine(P, handoverLine(P, { at: new Date(Date.parse(h1At) - 60000).toISOString() }));
+  assert.equal((await statusJson(P)).held, older.id, 'an older one merged in: held by it');
+  const r = await browser(P, ['snapshot']);
+  assert.equal(r.status, 3);
+  assert.match(r.err, HELD_WORDS('snapshot', older.id));
+  assert.equal((await direct(P, 'snapshot', {})).out, `the owner has the browser (${older.id})`);
+  await withdraw(P, older.id);
+  assert.equal((await statusJson(P)).held, H1, 'the older closed: H1 again');
+  await withdraw(P, newer.id);
+  assert.equal((await statusJson(P)).held, H1);
+});
+
+test('C22 another instance\'s handover never holds this browser', chromeOpts, async () => {
+  const P = hA();
+  assert.ok(H1, 'C1 asked the handover');
+  await withdraw(P, H1);
+  assert.equal((await statusJson(P)).held, null);
+  const other = appendLine(P, handoverLine(P, { scope: 'browser:other-0123456789ab' }));
+  await ok(P, ['open', `${site.origin}/account`]);
+  await ok(P, ['snapshot']);
+  assert.equal((await direct(P, 'snapshot', {})).code, 0);
+  assert.equal((await statusJson(P)).held, null);
+  assert.match((await ok(P, ['status'])).out, /^held: no$/m);
+  await withdraw(P, other.id);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.ok(!(readLedger(P)?.resets ?? []).some((e) => e.qid === other.id), 'its close enters this ledger');
 });

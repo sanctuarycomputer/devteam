@@ -27504,7 +27504,7 @@ async function cmdBrowserGuard() {
 // devteam.mjs browser (browser@1; design supervisors-can-use-a-browser-with-the-o, §2 and §3): the
 // supervisor's own Chrome, driven from its shell. One private profile per project (the owner's
 // answer to q-20261114-203933946-supervisor), at ~/.devteam/browser/<key>/, used by nobody else.
-const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | type <ref> --stdin | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>]';
+const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | type <ref> --stdin | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>] | handover --reason "<words>" | wait [--timeout <n>s|<n>m|<n>h]';
 // The instance key, the contract's instance pattern: <project slug>-<12 hex>. A path is built from a
 // key only once it matches, so no key can climb out of browserHome().
 const BROWSER_KEY = /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$/;
@@ -27544,6 +27544,58 @@ function browserKey() {
   const slug = String(loadSettings().project ?? path.basename(mainRoot)).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
   return `${slug}-${crypto.createHash('sha1').update(realPath(mainRoot)).digest('hex').slice(0, 12)}`;
 }
+// --- the handover (kit-67): the browser held for the owner while a browser-handover question of this
+// instance's scope is open. The hold comes from the log alone, read fresh: no file holds it.
+const browserScope = () => `browser:${browserKey()}`;
+// The verbs refused while held, in the CLI before anything starts (the daemon refuses every verb but
+// ping, status, stop and settle on its own).
+const BROWSER_HELD_VERBS = ['open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget'];
+// Set by browser serve: the daemon reads the log on every verb, so it keys the fold on the log files'
+// stat alone and on main's sha (a git call) only every 5 s.
+let browserIsDaemon = false;
+let browserLogSeen = null;
+let browserMainSeen = { at: 0, part: null };
+// Each log file's name, size and mtime under run/log and project/log, as logKey reads them.
+function browserLogStat() {
+  const parts = [];
+  for (const [tag, d] of [['run', liveLogDir()], ['project', durableLogDir()]]) {
+    let names = [];
+    try { names = fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).sort(); } catch {}
+    for (const f of names) { try { const st = fs.statSync(path.join(d, f)); parts.push(`${tag}/${f} ${st.size} ${st.mtimeMs}`); } catch {} }
+  }
+  return parts.join('\n');
+}
+// The fold dropped when the log changed since this process last read it: in a CLI by logKey(), as wait
+// does, so a long browser wait sees the owner's answer; in the daemon by the cheap key above.
+function browserFresh() {
+  let key;
+  if (browserIsDaemon) {
+    if (Date.now() - browserMainSeen.at >= 5000) { mainRefCache = undefined; browserMainSeen = { at: Date.now(), part: `main ${mainSha() ?? '-'}` }; }
+    key = `${browserMainSeen.part}\n${browserLogStat()}`;
+  } else key = logKey();
+  if (key !== browserLogSeen) { logCache = null; browserLogSeen = key; }
+}
+// A closed handover's outcome, from questionView: done only for the owner's own Done (the pick when the
+// answer line has a choice key, else its leading label; never the supervisor's reading), declined for
+// any other answer and a default, withdrawn for a withdraw; null while open.
+function browserOutcome(v) {
+  if (v.status === 'withdrawn') return 'withdrawn';
+  if (v.status === 'defaulted') return 'declined';
+  if (v.status !== 'answered') return null;
+  const label = v.in_words === null ? String(v.answer ?? '').split(' — ')[0] : v.in_words ? null : v.choice;
+  return String(label ?? '').trim().toLowerCase() === 'done' ? 'done' : 'declined';
+}
+// This scope's handovers in a fresh fold, oldest asked first. Only the class and scope's questions are
+// folded into views, so a refold costs only the handovers.
+function browserHandovers(scope = browserScope()) {
+  browserFresh();
+  return logObjects('question').filter((q) => q.class === 'browser-handover' && q.scope === scope).map(questionView)
+    .sort((a, b) => a.asked_at.localeCompare(b.asked_at) || a.id.localeCompare(b.id))
+    .map((v) => ({ qid: v.id, status: v.status, outcome: browserOutcome(v), closeAt: v.status === 'open' ? null : v.answered_at, asked_at: v.asked_at, context: v.context }));
+}
+// The qid holding the browser (the oldest open handover), or null.
+const browserHeld = (hs) => hs.find((h) => h.status === 'open')?.qid ?? null;
+const browserHeldLine = (held) => `held: ${held ? `${held} (the owner has the browser)` : 'no'}`;
 // The root a profile's root.json names, or null without a readable one.
 function browserRootOf(dir) {
   try { const r = JSON.parse(fs.readFileSync(path.join(dir, 'root.json'), 'utf8'))?.root; return typeof r === 'string' && path.isAbsolute(r) && r.length <= 4096 ? r : null; } catch { return null; }
@@ -27656,7 +27708,7 @@ function browserWriteState(s) {
   fs.renameSync(tmp, browserStateFile());
 }
 // The daemon's answer to one verb: { code, out }. Rejects when nothing answers in ms.
-function browserCall(verb, args = {}, { state = browserState(), ms = 60000 } = {}) {
+function browserCall(verb, args = {}, { state = browserState(), ms = 120000 } = {}) {
   return new Promise((resolve, reject) => {
     if (!state) return reject(new Error('the browser is not running'));
     const body = JSON.stringify({ verb, args });
@@ -28495,9 +28547,9 @@ function browserVerbs(ctx) {
   return {
     ping: async () => ({ code: 0, out: 'pong' }),
     status: async (args) => {
-      const s = { browser: 1, instance: browserKey(), running: true, held: null, preview: ctx.preview, url: browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening), tabs: ctx.tabs.length, restarted: ctx.restarted, notes: ctx.notes };
+      const s = { browser: 1, instance: browserKey(), running: true, held: browserHeld(browserHandovers()), preview: ctx.preview, url: browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening), tabs: ctx.tabs.length, restarted: ctx.restarted, notes: ctx.notes };
       if (args?.json) return { code: 0, out: JSON.stringify(s) };
-      return { code: 0, out: [`browser running (preview ${s.preview}, profile ${s.instance})`, `url: ${s.url}`, `tabs: ${s.tabs}`, `restarted: ${s.restarted ? 'yes' : 'no'}`, ...s.notes.map((n) => `note: ${n}`)].join('\n') };
+      return { code: 0, out: [`browser running (preview ${s.preview}, profile ${s.instance})`, `url: ${s.url}`, `tabs: ${s.tabs}`, `restarted: ${s.restarted ? 'yes' : 'no'}`, browserHeldLine(s.held), ...s.notes.map((n) => `note: ${n}`)].join('\n') };
     },
     stop: async () => { ctx.after = () => browserShutdown(ctx, 'stop'); return { code: 0, out: 'browser stopped' }; },
     open: async ({ url }) => {
@@ -28601,7 +28653,15 @@ function browserControl(ctx, secret) {
         if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
         if (!verb) return { code: 1, out: `usage: ${BROWSER_USAGE}` };
         if (verb !== 'ping') clearTimeout(ctx.idle); // paused while the verb runs
-        try { return await ctx.verbs[verb](isObj(m.args) ? m.args : {}); } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
+        try {
+          // the hold, read again here: a verb the CLI's check let by (or a call that skipped the CLI)
+          // is refused while the owner has the browser. settle serves nothing to the agent.
+          if (!['ping', 'status', 'stop', 'settle'].includes(verb)) {
+            const held = browserHeld(browserHandovers());
+            if (held) return { code: 3, out: `the owner has the browser (${held})` };
+          }
+          return await ctx.verbs[verb](isObj(m.args) ? m.args : {});
+        } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
       };
       // ping reads nothing from Chrome and is answered at once, off the queue: a long verb or a forget
       // never makes the daemon look dead to browserLive (and so a second daemon started over it)
@@ -28917,6 +28977,7 @@ function browserViewServer(ctx) {
 async function browserServe({ chrome: bin }) {
   const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
+  browserIsDaemon = true;
   const viewPort = Number(process.env.PORT);
   const rec = readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser' && r.port === viewPort);
   if (!rec) die(`browser serve: no browser preview record on port ${process.env.PORT}`);
@@ -28965,7 +29026,7 @@ async function browserStop({ say = true, rec } = {}) {
   let ok = true;
   const s = browserState();
   if (s) {
-    try { await browserCall('stop', {}, { state: s, ms: 15000 }); } catch {}
+    try { await browserCall('stop', {}, { state: s, ms: 120000 }); } catch {}
     await browserGone(s.daemon_pid, 10000);
   }
   const profile = path.join(browserHome(), browserKey());
@@ -28982,12 +29043,12 @@ async function browserStop({ say = true, rec } = {}) {
   return ok;
 }
 async function browserStatus() {
-  const off = { browser: 1, instance: browserKey(), running: false, held: null };
   const s = browserState();
   let r = null;
   if (s) { try { r = await browserCall('status', { json: !!flags.json }, { state: s }); } catch {} }
   if (r) { process.exitCode = r.code; return out(r.out); }
-  return out(flags.json ? JSON.stringify(off) : `browser isn't running (profile ${off.instance})`);
+  const off = { browser: 1, instance: browserKey(), running: false, held: browserHeld(browserHandovers()) };
+  return out(flags.json ? JSON.stringify(off) : `browser isn't running (profile ${off.instance})\n${browserHeldLine(off.held)}`);
 }
 // browser type --stdin's text: stdin read to its end, bounded in bytes (stops once past max + 2, room
 // for a \r\n) and in time, decoded once at the end so a character split across reads stays whole,
@@ -29015,9 +29076,42 @@ function browserReadStdin({ max, ms }) {
     });
   });
 }
+// browser handover --reason "<words>": one owner-action question handing the browser to the owner for a
+// login (class browser-handover, scope browser:<key>), linking the live view by its preview name only.
+// In order: exactly --reason (non-blank, at most 2000 characters; so no --default reaches ask from
+// here), not while one is open, the daemon ensured (the preview exists), the repeated-site warning,
+// then askLine's own checks. It prints the qid.
+const BROWSER_HANDOVER_USAGE = 'usage: browser handover --reason "<words>" (non-blank, at most 2000 characters)';
+const BROWSER_HANDOVER_DAYS = 7;
+async function browserHandover() {
+  const reason = flagStr('reason');
+  if (positional.length !== 1 || rest !== null || Object.keys(flags).some((k) => k !== 'reason') || reason === undefined || !reason.trim() || reason.length > 2000) die(BROWSER_HANDOVER_USAGE);
+  const scope = browserScope();
+  const open = browserHeld(browserHandovers(scope));
+  if (open) die(`browser handover: ${open} is already open; wait for it (browser wait) or withdraw it`);
+  const s = await browserEnsure();
+  // the site: the active tab's host (with its port), from the status verb; none on about:blank
+  let st = null;
+  try { const r = await browserCall('status', { json: true }, { state: s }); if (r.code === 0) st = JSON.parse(r.out); } catch {}
+  let site = null;
+  try { const u = new URL(st?.url ?? ''); if (u.protocol === 'http:' || u.protocol === 'https:') site = u.host; } catch {}
+  if (site) {
+    // an earlier handover of this site, asked within 7 days and after the profile's root.json was made
+    // (a forget, or Sign out of everything, makes it again): its session may not have lasted
+    const line = `The browser is on ${site}.`;
+    const made = fs.statSync(path.join(browserHome(), browserKey(), 'root.json'), { throwIfNoEntry: false })?.mtimeMs ?? 0;
+    const now = Date.now();
+    const seen = browserHandovers(scope).filter((h) => { const at = Date.parse(h.asked_at); return String(h.context).split(/\r\n|\r|\n/).includes(line) && now - at <= BROWSER_HANDOVER_DAYS * 86400000 && at > made; }).pop();
+    if (seen) process.stderr.write(`devteam: browser handover: ${site} was handed over on ${seen.asked_at.slice(0, 10)} (${seen.qid}) and not forgotten since; the session may not have lasted\n`);
+  }
+  const context = ["Open the browser from the link, do the step there, then press Done. Until you press Done, the supervisor can't use the browser.", site ? `The browser is on ${site}.` : null].filter(Boolean).join('\n\n');
+  for (const k of Object.keys(flags)) delete flags[k];
+  Object.assign(flags, { kind: 'owner-action', class: 'browser-handover', scope, question: reason, context, links: JSON.stringify([{ title: 'Open the browser', preview: s.preview }]), choices: JSON.stringify([{ label: 'Done' }, { label: "Can't right now" }]), stake: '2', urgency: '2' });
+  out(askLine().id);
+}
 // Which gates each verb runs: status, profiles and stop skip Chrome; the memory check is browserEnsure's.
 const BROWSER_VERBS = {
-  ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve'].map((v) => [v, { chrome: true }])),
+  ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve', 'handover', 'wait'].map((v) => [v, { chrome: true }])),
   status: { chrome: false }, stop: { chrome: false }, profiles: { chrome: false },
 };
 async function cmdBrowser() {
@@ -29025,6 +29119,11 @@ async function cmdBrowser() {
   if (!Object.hasOwn(BROWSER_VERBS, verb ?? '')) die(`usage: ${BROWSER_USAGE}`);
   if (verb === 'serve' && process.env.DEVTEAM_BROWSER_SERVE !== '1') die('browser serve is internal: browser start runs it in its own window');
   const { chrome } = browserGates(BROWSER_VERBS[verb]);
+  // the hold, before anything starts: no daemon touched, no stdin read, no profile removed
+  if (BROWSER_HELD_VERBS.includes(verb)) {
+    const held = browserHeld(browserHandovers());
+    if (held) die(`browser ${verb}: the owner has the browser (${held}); browser wait says when it is back`, 3);
+  }
   if (verb === 'profiles') return out(JSON.stringify({ browser: 1, profiles: browserProfiles() }));
   if (verb === 'forget') {
     if (flags.profile === true) die(`usage: ${BROWSER_USAGE}`);
@@ -29038,6 +29137,8 @@ async function cmdBrowser() {
   if (verb === 'status') return browserStatus();
   if (verb === 'stop') return browserStop();
   if (verb === 'start') { const s = await browserEnsure({ headed: !!flags.headed }); return out(`browser running (preview ${s.preview}, profile ${browserKey()})`); }
+  if (verb === 'handover') return browserHandover();
+  if (verb === 'wait') die('browser wait: not built yet');
   // open is refused before any daemon is touched unless its URL is http(s)
   if (verb === 'open' && (positional.length !== 2 || !browserHttp(positional[1]))) die('browser open takes an http: or https: URL');
   // Each verb's arguments, checked here so a wrong one starts nothing; a refusal never echoes a typed
