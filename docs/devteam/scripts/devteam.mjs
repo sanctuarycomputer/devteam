@@ -4269,6 +4269,9 @@ function serialGraphWarning(live, s = loadSettings()) {
 
 const onPlanBranch = () => (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
+// planning.md D13: the most open tickets a feature holds, how many waves deep they go, the most
+// features one milestone not yet reached has, and the most contracts one ticket consumes.
+const D13 = { tickets: 12, waves: 5, features: 4, consumes: 2 };
 function cmdValidate() {
   const ts = tickets();
   const fs_ = features();
@@ -4314,6 +4317,7 @@ function cmdValidate() {
       }
     }
     if (isActive(t) && !mergeShaFor(id)) for (const l of t.links ?? []) if (!ownEntry(loadSettings().links, l)) err(id, `links "${l}" is not in settings links`);
+    if (isActive(t) && !mergeShaFor(id) && (t.contracts?.consumes ?? []).length > D13.consumes) warnings.push(`${id}: consumes ${t.contracts.consumes.length} contracts, over the budget of ${D13.consumes}; split the ticket (D13)`);
     // Parts (path#name): of any file, named as main has them, or added (path#+name)
     // by this ticket or one it depends on. Written "<id>: …", so another ticket's gate only warns.
     if (isActive(t) && !mergeShaFor(id)) for (const entry of t.touches ?? []) {
@@ -4374,6 +4378,17 @@ function cmdValidate() {
     const served = new Set();
     for (const t of mine) for (const s of t.serves ?? []) { if (!stories.has(s)) err(t.id, `serves "${s}", which feature ${fid} does not define`); served.add(s); }
     for (const s of stories) if (!served.has(s)) errors.push(`feature ${fid}: story ${s} is served by no ticket (D6)`);
+    // D12: a story names the precondition it moves, one of its feature's; D13: a feature's open
+    // work stays small and shallow. Advice for the graph reviewer, so warnings.
+    for (const s of f.stories ?? []) if (s.makes_true && !(f.preconditions ?? []).includes(s.makes_true)) warnings.push(`feature ${fid}: story ${s.id} makes_true ${s.makes_true}, which is not one of the feature's preconditions (D12)`);
+    if ((f.stories ?? []).some((s) => s.makes_true)) for (const p of f.preconditions ?? []) if (!(f.stories ?? []).some((s) => s.makes_true === p)) warnings.push(`feature ${fid}: precondition ${p} has no story that makes it true (D12)`);
+    {
+      const open = mine.filter((t) => !mergeShaFor(t.id));
+      if (open.length > D13.tickets) warnings.push(`feature ${fid}: ${open.length} open tickets, over the budget of ${D13.tickets}; split the feature (D13)`);
+      const sub = new Map(open.map((t) => [t.id, { ...t, depends_on: (t.depends_on ?? []).filter((d) => open.some((x) => x.id === d)) }]));
+      const depth = sub.size && !findCycle(sub) ? Math.max(...levels(sub).values()) + 1 : 0;
+      if (depth > D13.waves) warnings.push(`feature ${fid}: its open tickets are ${depth} waves deep, over the budget of ${D13.waves}; split the feature or break a dependency with a contract ticket (D13)`);
+    }
     for (const s of stories) {
       const servers = mine.filter((t) => (t.serves ?? []).includes(s));
       const comps = new Set(servers.filter((t) => t.kind !== 'contract').map((t) => t.component));
@@ -4547,6 +4562,23 @@ function cmdValidate() {
     }
   }
 
+  // D13: a milestone not yet reached is served by a few features, read from the preconditions
+  // each feature makes true; a met or abandoned goal's milestones are past planning.
+  {
+    const per = new Map();
+    for (const [fid, f] of fs_) for (const g of f.goals ?? []) {
+      const o = logGet(g);
+      if (o?.type !== 'goal' || ['met', 'abandoned'].includes(o.status) || !(o.milestones ?? []).length) continue;
+      const cur = currentMilestone(o);
+      if (!cur) continue;
+      for (const p of f.preconditions ?? []) {
+        if (!p.startsWith(`${g}#`)) continue;
+        const n = o.milestones.findIndex((m) => (m.preconditions ?? []).includes(Number(p.slice(g.length + 1)))) + 1;
+        if (n >= cur.n) { const k = `${g}@${n}`; (per.get(k) ?? per.set(k, new Set()).get(k)).add(fid); }
+      }
+    }
+    for (const [k, fids] of per) if (fids.size > D13.features) warnings.push(`milestone ${k} is served by ${fids.size} features (${[...fids].sort().join(', ')}), over the budget of ${D13.features}; split the milestone (D13)`);
+  }
   for (const e of readLog().errors) warnings.push(`log ${e}`);
   for (const u of readLog().unknown) warnings.push(`log: a newer kit's line, or a mistyped name: upgrade, or check ${u}`);
   { const r = questionRewrites(); errors.push(...r.errors); warnings.push(...r.warnings); }
@@ -21964,7 +21996,7 @@ async function cmdDashboard() {
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3). Build each plan task marked `Model: fast` in a subagent on the fast model (`settings --get model_tiers`) unless the plan says `- Built here: <why>` under it (worker.md §3).',
-  planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
+  planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Before the graph review, check the chain yourself: every precondition you plan for has its evidence (<what must be true> — shown by: <test, command or reading>, P-1), in its wording or in the spine\'s reverse chain; if neither names any, say so in the plan PR body and tell the supervisor, and never rewrite the precondition; every story has acceptance checks and makes_true, the precondition it moves, and the ticket that checks the story end to end has those checks among its done-whens (D12); every build ticket resting on a named unknown depends on a timeboxed spike, and spikes and high-risk tickets come as early as their own dependencies allow (D9). Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
 const repoAbout = (name) => (name === 'home' ? repo('home') : { name, remote: ownEntry(loadSettings().links, name)?.remote, projectRel: projectRelOf(name) });
@@ -26807,9 +26839,19 @@ The whole system as planned now: the sum of every design so far. Written at boot
 | Domain | Store | Tier (code-style.md §4) | Notes |
 |---|---|---|---|
 
+Entities, invariants and lifecycles are in each goal's design (planning.md §2); list here every entity more than one feature's design reads.
+
+| Entity | Owned by | Invariants (the test that checks each) | Lifecycle (state machine in) |
+|---|---|---|---|
+
 ## 4. Dependencies and deployment
 
 | Dependency or vendor | Used for | One-way door? |
+|---|---|---|
+
+Decisions that outlive one design are ADRs, at \`project/designs/adr/<n>-<slug>.md\` (planning.md §2).
+
+| ADR | Decision | Supersedes |
 |---|---|---|
 
 ## 5. Distance from the code rules

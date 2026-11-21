@@ -428,6 +428,18 @@
                     "string",
                     "null"
                   ]
+                },
+                "acceptance": {
+                  "description": "The end-to-end checks that show the story works; the done-whens of the ticket that checks it include them (planning.md D12). Optional: stories planned before D12 have none.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "makes_true": {
+                  "description": "The goal precondition this story moves (<goal-id>#<n>), one of its feature's preconditions (planning.md D12). Optional: stories planned before D12 have none.",
+                  "type": "string",
+                  "pattern": "^.+#[0-9]+$"
                 }
               },
               "required": [
