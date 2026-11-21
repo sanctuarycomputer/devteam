@@ -1074,48 +1074,83 @@ test('A5: a recurring-edit Yes is refused once the owner has written again after
   } finally { T.done(); }
 });
 
-test('A5: a later owner turn bound to another question shown in the thread, or cited by its answer, doesn\'t block a recurring-edit Yes; a retraction still does (final-15b F2, H3)', () => {
+test('A5: once the owner has written anything after a recurring-edit Yes in its thread (a turn, whatever it answers, a resolve with an outcome, a reopen), the Yes is refused; recorded before the next question is shown, it stands (final-16b F1 to F4, d-20261121-072341505)', () => {
   const T = setup('turn-bound');
   try {
     const tAsk = (tid, name, job) => { const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]); passes(r); return QID.exec(r.out)[0]; };
-    const pAsk = (tid, words) => { const r = T.run(['thread', 'ask', tid, '--question', words, '--recommendation', 'Yes']); passes(r); return QID.exec(r.out)[0]; };
+    const pAsk = (tid, words, extra = []) => { const r = T.run(['thread', 'ask', tid, '--question', words, '--recommendation', 'Yes', ...extra]); passes(r); return QID.exec(r.out)[0]; };
     const say = (tid, w) => T.ok(['thread', 'say', tid, w], {}).split('\n')[0];
+    const newT = (title) => T.ok(['thread', 'new', title, '--title', title], {}).split('\n')[0];
     const job = (n) => check({ title: `${n} job`, run: `echo ${n}` });
-    // H3: q1, y1, then q2 (a recurring-edit question), y2; q2 recorded from y2, then q1 from y1
-    const t1 = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const AGAIN = (u, q, what) => new RegExp(`--from-turn ${u}: ${q} is a recurring-edit question, and the owner wrote again after that turn \\(${what}\\)`);
+    // H3: q1, y1, then q2 (a recurring-edit question), y2: q2 is recorded from y2, but q1 from y1 is
+    // refused, since y2 came after it
+    const t1 = newT('Jobs');
     const q1 = tAsk(t1, 'a1', job('a1'));
     const y1 = say(t1, 'Yes');
     const q2 = tAsk(t1, 'a2', job('a2'));
     const y2 = say(t1, 'Yes');
     passes(T.run(['answer', q2, 'Yes', '--from-turn', y2]));
-    passes(T.run(['answer', q1, 'Yes', '--from-turn', y1]));
-    // the same with q2 a plain question, and q1 recorded first: y2 is bound to q2 by the turn that showed it
-    const t2 = T.ok(['thread', 'new', 'Jobs 2?', '--title', 'Jobs 2'], {}).split('\n')[0];
+    refused(T.run(['answer', q1, 'Yes', '--from-turn', y1]), AGAIN(y1, q1, y2));
+    // recorded before the next question is shown, each stands
+    const t2 = newT('Jobs 2');
     const q3 = tAsk(t2, 'a3', job('a3'));
     const y3 = say(t2, 'Yes');
-    const q4 = pAsk(t2, 'Shall I merge kit-200 now?');
-    const y4 = say(t2, 'Yes');
     passes(T.run(['answer', q3, 'Yes', '--from-turn', y3]));
+    const q4 = tAsk(t2, 'a4', job('a4'));
+    const y4 = say(t2, 'Yes');
     passes(T.run(['answer', q4, 'Yes', '--from-turn', y4]));
-    // a plain q6 whose Yes came after a reply (so the showing turn doesn't bind it), recorded from it:
-    // its answer line cites that turn, so it doesn't block q5's Yes
-    const t3 = T.ok(['thread', 'new', 'Jobs 3?', '--title', 'Jobs 3'], {}).split('\n')[0];
+    // B3: a question asked right after the Yes, which the owner's retraction answers by position
+    const t3 = newT('Jobs 3');
     const q5 = tAsk(t3, 'a5', job('a5'));
     const y5 = say(t3, 'Yes');
-    const q6 = pAsk(t3, 'Shall I restart the dashboard?');
-    T.ok(['thread', 'reply', t3, 'It is safe: nothing is running.']);
-    const y6 = say(t3, 'Yes, go on');
-    passes(T.run(['answer', q6, 'Yes', '--from-turn', y6]));
-    passes(T.run(['answer', q5, 'Yes', '--from-turn', y5]));
-    // a retraction bound to nothing still blocks
-    const t4 = T.ok(['thread', 'new', 'Jobs 4?', '--title', 'Jobs 4'], {}).split('\n')[0];
-    const q7 = tAsk(t4, 'a7', job('a7'));
-    const y7 = say(t4, 'Yes');
-    const q8 = tAsk(t4, 'a8', job('a8'));
-    const y8 = say(t4, 'Yes');
-    const back = say(t4, 'Wait, no. Not the first one.');
-    refused(T.run(['answer', q7, 'Yes', '--from-turn', y7]), new RegExp(`--from-turn ${y7}: ${q7} is a recurring-edit question, and the owner wrote again after that turn \\(${back}\\)`));
-    refused(T.run(['answer', q8, 'Yes', '--from-turn', y8]), new RegExp(`the owner wrote again after that turn \\(${back}\\)`));
+    pAsk(t3, 'Anything else today?');
+    const back5 = say(t3, 'No. Actually cancel that job, do not add it.');
+    refused(T.run(['answer', q5, 'Yes', '--from-turn', y5]), AGAIN(y5, q5, back5));
+    // B5: a question about the retraction turn, answered from another clause of it
+    const t4 = newT('Jobs 4');
+    const q6 = tAsk(t4, 'a6', job('a6'));
+    const y6 = say(t4, 'Yes');
+    const back6 = say(t4, 'Cancel that job. Also restart the dashboard.');
+    const q7 = pAsk(t4, 'Restart the dashboard now?', ['--turn', back6]);
+    passes(T.run(['answer', q7, 'Yes', '--from-turn', back6, '--said', 'Also restart the dashboard.']));
+    refused(T.run(['answer', q6, 'Yes', '--from-turn', y6]), AGAIN(y6, q6, back6));
+    // B6: the retraction recorded, in its own words, as the answer to an older open plain question
+    const t5 = newT('Jobs 5');
+    const q8 = pAsk(t5, 'Shall I restart the dashboard?');
+    T.ok(['thread', 'reply', t5, 'Meanwhile, one more.']);
+    const q9 = tAsk(t5, 'a9', job('a9'));
+    const y9 = say(t5, 'Yes');
+    const back9 = say(t5, 'Wait, no. Cancel that job.');
+    passes(T.run(['answer', q8, 'Wait, no. Cancel that job.', '--from-turn', back9]));
+    refused(T.run(['answer', q9, 'Yes', '--from-turn', y9]), AGAIN(y9, q9, back9));
+    // B7: the owner resolves the thread with an outcome after the Yes
+    const t6 = newT('Jobs 6');
+    const q10 = tAsk(t6, 'b0', job('b0'));
+    const y10 = say(t6, 'Yes');
+    T.ok(['thread', 'resolve', t6, '--outcome', 'Never mind, do not add the job.'], {});
+    refused(T.run(['answer', q10, 'Yes', '--from-turn', y10]), AGAIN(y10, q10, `their resolve of ${t6} with an outcome[^)]*`));
+    // a reopen after the Yes (the resolve before it has no words)
+    const t7 = newT('Jobs 7');
+    const q11 = tAsk(t7, 'b1', job('b1'));
+    const y11 = say(t7, 'Yes');
+    T.ok(['thread', 'resolve', t7], {});
+    T.ok(['thread', 'reopen', t7], {});
+    refused(T.run(['answer', q11, 'Yes', '--from-turn', y11]), AGAIN(y11, q11, `their reopen of ${t7}[^)]*`));
+    for (const q of [q1, q5, q6, q9, q10, q11]) assert.equal(json(T.ok(['questions', '--id', q, '--json']))[0].status, 'open', `${q} stays open`);
+  } finally { T.done(); }
+});
+
+test('A5: thread reply --refs question:<id> names a question in the log, or it is refused (final-16b F1, B4)', () => {
+  const T = setup('refs-exist');
+  try {
+    const tid = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const q = T.asked({ recurring: { ok: check({ title: 'ok job', run: 'echo ok' }) } });
+    const r = T.run(['thread', 'reply', tid, 'Anything else?', '--refs', 'question:q-20200101-000000000-supervisor']);
+    refused(r, /--refs question:q-20200101-000000000-supervisor names no question in the log/);
+    assert.equal(json(T.ok(['log', '--type', 'turn', '--json'])).filter((x) => x.thread === tid).length, 1, 'no reply written');
+    refused(T.run(['thread', 'reply', tid, 'Anything else?', '--refs', 'goal:upkeep', `question:${q}x`]), new RegExp(`--refs question:${q}x names no question in the log`));
+    passes(T.run(['thread', 'reply', tid, 'Shall I add ok?', '--refs', `question:${q}`]));
   } finally { T.done(); }
 });
 
@@ -1202,6 +1237,10 @@ test('A14: supervisor.md documents registering, changing and stopping a job in r
   // and Recurring jobs says which turn binds and which words are a Yes (final-13b F1, F3)
   assert.match(section, /the owner's next turn after the one that shows the question \(the `thread ask`, or a reply with `--refs question:<qid>`, naming no other question\), with no line of the thread between them, of any type: a reply that asks something else, even in plain words, the owner's own No, a resolve proposal \(`thread ready`\), a resolve or a reopen comes between/);
   assert.match(section, /quotes count only when they wrap the whole turn/);
+  // and that a turn answer is refused once the owner wrote anything after it, so each answer is
+  // recorded before the next question is shown (final-16b F5, d-20261121-072341505)
+  assert.match(section, /refused once the owner has written anything after it in the thread \(a turn, whatever it answers, a resolve with an outcome, or a reopen\)/);
+  assert.match(section, /record each recurring-edit answer before you show the next question/);
   const q = fs.readFileSync(path.join(kit, 'governance/quality.md'), 'utf8');
   const four = q.slice(q.search(/^## 4\. /m), q.search(/^## 5\. /m));
   assert.match(four, /recurring-edit/);

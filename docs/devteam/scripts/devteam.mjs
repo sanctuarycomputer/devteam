@@ -8513,19 +8513,18 @@ function cmdAnswer() {
   if (fromTurn && v.kind === 'review') die(`${id} is a review: its answer is the owner's result, which a turn can't carry`);
   const turn = fromTurn ? turnAnswer('answer', v) : null;
   if (turn && v.class === 'recurring-edit' && !recurringRegistry.saysYes(turn.said)) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner's words there don't start with Yes ("${String(turn.said).slice(0, 80)}"): only the owner's own Yes approves a job change; ask back in its thread`);
-  // and never once the owner has written again after it in its thread: their next turn may take it
-  // back ("Wait, no"), so the Yes is shown again and their next turn taken (final-14b F3). A turn in
-  // the same millisecond counts as after it. Only a later owner turn not bound elsewhere counts
-  // (d-20261121-055611227-supervisor, final-15b F2): one that turnBinds binds to another question
-  // the supervisor showed in the thread (of any class), or that another question's answer cites, is
-  // the owner answering that question, not taking this Yes back.
+  // and never once the owner has written anything after it in its thread: their later words may take
+  // it back ("Wait, no"), so the Yes is shown again and their next turn taken (final-14b F3). Any
+  // later owner line counts, whatever it answers or binds (d-20261121-072341505-supervisor, final-16b
+  // F1 to F4): a turn, a resolve with an outcome (its words), or a reopen. A line in the same
+  // millisecond counts as after it. So each recurring-edit answer is recorded before the next
+  // question is shown.
   if (turn && v.class === 'recurring-edit') {
     const u = logGet(turn.turn);
-    const shownHere = u ? [...new Set(logObjects('turn').filter((x) => x.thread === u.thread && x.created_by === 'supervisor').flatMap((x) => [x.question, ...(Array.isArray(x.refs) ? x.refs : []).filter((r) => typeof r === 'string' && r.startsWith('question:')).map((r) => r.slice('question:'.length))]).filter((q) => typeof q === 'string' && q && q !== id))] : [];
-    const cited = new Set(logObjects('question').filter((q) => q.id !== id && typeof q.turn === 'string').map((q) => q.turn));
-    const boundElsewhere = (x) => cited.has(x.id) || shownHere.some((q) => !recurringRegistry.turnBinds(x, q));
-    const later = u ? logObjects('turn').filter((x) => x.thread === u.thread && x.id !== u.id && x.created_by === 'owner' && String(x.created_at ?? '') >= String(u.created_at ?? '') && !boundElsewhere(x)).sort(byTime).pop() : null;
-    if (later) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner wrote again after that turn (${later.id}): their later words may take the Yes back; show it again (thread reply <t-id> "…" --refs question:${id}) and take their next turn`);
+    const at = String(u?.created_at ?? '');
+    const later = u ? readLog().lines.filter((L) => L.by === 'owner' && String(L.at ?? '') >= at && ((L.type === 'turn' && L.thread === u.thread && L.id !== u.id) || (L.type === 'thread' && L.op === 'set' && L.id === u.thread && ((L.status === 'resolved' && typeof L.outcome === 'string' && L.outcome.trim() !== '') || L.status === 'open')))).sort((x, y) => String(x.at).localeCompare(String(y.at))).pop() : null;
+    const what = !later ? null : later.type === 'turn' ? later.id : `their ${later.status === 'open' ? 'reopen' : 'resolve'} of ${u.thread}${later.status === 'open' ? '' : ' with an outcome'}, at ${later.at}`;
+    if (later) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner wrote again after that turn (${what}): their later words may take the Yes back; show it again (thread reply <t-id> "…" --refs question:${id}) and take their next turn; record each recurring-edit answer before you show the next question`);
   }
   // and only the owner's very next turn after the supervisor's turn that shows it, so a Yes said to
   // another question, in a turn or in plain words, or after a No, binds nothing (final-13b F1, final-14b F1)
@@ -9063,6 +9062,9 @@ function cmdThread() {
     if (refs.length && by !== 'supervisor' && by !== 'responder') die("--refs are on the supervisor's turns and the responder's: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
+    // a question named must be one in the log: a reply showing a question that isn't there shows
+    // nothing (d-20261121-072341505-supervisor, final-16b B4)
+    for (const r of refs) if (r.startsWith('question:') && logGet(r.slice('question:'.length))?.type !== 'question') die(`--refs ${r} names no question in the log: name one asked (questions --json), or leave it out`);
     const files = early ?? filesFlag();
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
