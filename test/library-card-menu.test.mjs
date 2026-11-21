@@ -164,6 +164,15 @@ test('library menu publish: each landed card\'s ⋯ lists its publish actions, e
   assert.equal(await p.ev(`[...${art(ids.notLive)}.querySelectorAll('.lib-body a')].some((a) => a.textContent === 'Restore')`), false, 'no Restore in the body');
   assert.equal(await p.ev(`${art(ids.notLive)}.querySelector('.lib-body .lib-pub #e-pub-${ids.notLive}') !== null`), true, 'its error span');
   assert.match(await p.ev(`${art(ids.notLive)}.querySelector('.lib-body .lib-pub').textContent`), /recorded .+ from the dashboard/);
+  // a poll that changes the card while its ⋯ is open: the card is replaced, its ⋯ stays open, the group the same
+  const pc = `[data-lib-id="artifact:${ids.public}"]`;
+  const groupBefore = await p.ev(group(`artifact:${ids.public}`));
+  await p.click(`${pc} .card-head details.menu > summary`);
+  await soon(`document.querySelector('${pc} .card-head details.menu').open`, 'the public card\'s ⋯ open');
+  await p.ev(`(() => { DATA.library.artifacts.find((a) => a.slug === ${JSON.stringify(ids.public)} && a.at === 'main').title += ' (renamed)'; renderLibrary(DATA.library); })()`);
+  assert.deepEqual(await p.ev(`[document.querySelector('${pc} .lib-title').textContent.endsWith(' (renamed)'), document.querySelector('${pc} .card-head details.menu').open]`), [true, true], 'redrawn with its ⋯ still open');
+  assert.deepEqual(await p.ev(group(`artifact:${ids.public}`)), groupBefore, 'the same group');
+  await p.ev(`document.querySelector('${pc} .card-head details.menu').open = false`);
   // nothing publishes by itself: a click on each kind of link opens the gateway's page in a new tab, the page makes
   // no request but GETs (any transport, any origin), and stays where it is
   const here = await p.ev('location.href');
