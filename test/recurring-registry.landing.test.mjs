@@ -957,3 +957,30 @@ test('A15 landing: records in home, a planted record of the real records merge o
     assert.equal(F.g(['rev-parse', 'refs/heads/trunk'], F.consoleOrigin), trunk0, 'the code did not land');
   } finally { F.done(); }
 });
+
+test('A15 landing: forge git, with merge.directoryRenames=true in the repo\'s config, a planted record of a hand merge that moved the head\'s file into a renamed directory is never adopted: the kit\'s merge-tree takes a directory rename as a conflict (final-17 F2)', () => {
+  const T = setup('a15-dirren');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    T.onMainFile('old/a.txt', 'a\n', 'main: old/');
+    // the head adds aa and a file in old/; then main renames old/ to new/
+    const wt = T.choreBranch('hand', (w) => { putJobs(w, () => ({ aa: check() })); write(path.join(w, 'old/b.txt'), 'b\n'); });
+    const sha = T.g(['rev-parse', 'HEAD'], wt);
+    T.onMainDo((cwd) => T.g(['mv', 'old', 'new'], cwd), 'main: old/ is new/');
+    const main1 = T.g(['rev-parse', 'origin/main']);
+    // the repo's config applies directory renames: a hand merge moves old/b.txt to new/b.txt
+    T.g(['config', 'merge.directoryRenames', 'true']);
+    const m = path.join(T.old, '.worktrees', 'dirren');
+    T.g(['worktree', 'add', '-q', '--detach', m, main1]);
+    T.g(['merge', '-q', '--no-ff', '-m', 'a hand merge', sha], m);
+    const hand = T.g(['rev-parse', 'HEAD'], m);
+    assert.equal(T.has(hand, 'new/b.txt') && !T.has(hand, 'old/b.txt'), true, 'the hand merge applied the directory rename');
+    T.g(['push', '-q', '-f', 'origin', `${hand}:refs/heads/main`], m); T.g(['fetch', '-q', 'origin']);
+    plantLanding(T.old, 'home', 'chore-hand', sha, hand, main1);
+    const before = T.acts().length;
+    const r = T.merge('hand', ['--approved', q]);
+    refused(r, RECORDED_TREE(hand));
+    assert.match(r.text, /git merge-tree of its parents failed or conflicts/);
+    assert.equal(T.acts().length, before, 'nothing logged');
+  } finally { T.done(); }
+});
