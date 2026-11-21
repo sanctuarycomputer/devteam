@@ -6940,7 +6940,9 @@ function landRecords(id, rec, linkName) {
     // Onto the home main the checks judged (recordsBranchFails, at mainSha()), as the code lands
     // (cmdMerge's landCode): no hook runs, directory renames are a conflict, the merge must be
     // exactly the records onto that main with main's jobs, and it is pushed by sha, only while
-    // origin's main is still that commit. Each git call is bounded (final-11 F1).
+    // origin's main is still that commit. The merge, its checks, the push and the fetch after a
+    // failed push are bounded (recurringRegistry.git); the worktree's add and remove, and the fetch
+    // after landing, are not (final-12 F5).
     const checked = mainSha();
     if (!checked) return `no home ${HS.main_branch} to land on`;
     const lg = (args, cwd) => recurringRegistry.git(args, { cwd });
