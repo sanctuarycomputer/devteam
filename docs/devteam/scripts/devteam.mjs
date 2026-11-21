@@ -7049,6 +7049,7 @@ function cmdMerge() {
     const cls0 = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
     const logged = logObjects('act').some((a) => a.class === cls0 && String(a.what ?? '').startsWith(`merged ${branch} at ${sha}`) && (a.repo ?? null) === (onR.repo ?? null));
     const own = viaGit && !logged ? recurringRegistry.kitMergeOf((args) => R.git(args), checkedMain, sha, `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, recurringRegistry.landingFile(R.name, branch, sha), R.root, mainBranch0) : null;
+    if (own?.noReflog) die(recurringRegistry.noReflog(`${branch}${inR} at ${sha.slice(0, 12)}: main's tip ${checkedMain.slice(0, 12)} is a landing merge recorded for this head onto ${own.unseen.slice(0, 12)}`, mainBranch0));
     if (own?.unseen) die(`${branch}${inR} at ${sha.slice(0, 12)}: main's tip ${checkedMain.slice(0, 12)} is a landing merge recorded for this head onto ${own.unseen.slice(0, 12)}, which this clone never saw as origin's ${mainBranch0}: not the kit's own landing; nothing logged (${own.lookalike}). Someone else made that merge and planted its record: verify from the start`);
     if (own?.lookalike && own.recorded) die(`${branch}${inR} at ${sha.slice(0, 12)}: main's tip ${checkedMain.slice(0, 12)} is a landing merge recorded for this head, but not the tree the kit's merge of its parents builds: not the kit's own landing; nothing logged (${own.lookalike}). Someone else made that merge, or planted its record: verify from the start`);
     if (own?.lookalike) die(`${branch}${inR} at ${sha.slice(0, 12)}: main's tip ${checkedMain.slice(0, 12)} has the kit's landing message and parents, but it isn't the landing merge the kit recorded for this head before its push: not the kit's own landing; nothing logged (${own.lookalike}). Someone else made that merge: verify from the start`);
@@ -7072,6 +7073,7 @@ function cmdMerge() {
   if (rec?.landed && repo('home').settings.forge === 'git' && !recordsLanded()) {
     const tip = resolveCommit(`origin/${repo('home').settings.main_branch}`);
     const own = tip ? recurringRegistry.kitMergeOf((args) => git(args), tip, rec.sha, recurringRegistry.recordsMessage(id, rec.sha, R.name), recurringRegistry.landingFile('home', `records-${id}`, rec.sha), mainRoot, repo('home').settings.main_branch) : null;
+    if (own?.noReflog) die(recurringRegistry.noReflog(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} is a records merge recorded for them onto ${own.unseen.slice(0, 12)}`, repo('home').settings.main_branch));
     if (own?.unseen) die(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} is a records merge recorded for them onto ${own.unseen.slice(0, 12)}, which this clone never saw as origin's ${repo('home').settings.main_branch}: not the kit's own records merge; nothing logged (${own.lookalike}). Someone else made that merge and planted its record: verify from the start`);
     if (own?.lookalike && own.recorded) die(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} is a records merge recorded for them, but not the tree the kit's merge of its parents builds: not the kit's own records merge; nothing logged (${own.lookalike}). Someone else made that merge, or planted its record: verify from the start`);
     if (own?.lookalike) die(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} has the kit's records message and parents, but it isn't the records merge the kit recorded before its push: not the kit's own records merge; nothing logged (${own.lookalike}). Someone else made that merge: verify from the start`);
@@ -24777,6 +24779,9 @@ const recurringRegistry = Object.freeze({
     } catch (e) { return e.message; }
     return recurringRegistry.landingsOf(file).some((x) => x.merge === merge && x.onto === onto) ? null : 'it does not read back';
   },
+  // the refusal when the clone keeps no reflog of origin's main (kitMergeOf's noReflog, final-18 F2):
+  // it can't tell its own landing merge from a planted one, and that is no planter's doing
+  noReflog: (what, mainBranch) => `${what}; this clone keeps no reflog of refs/remotes/origin/${mainBranch} (core.logAllRefUpdates is false, or the reflog was expired or removed), so the kit can't tell its own landing merge from a planted one: nothing logged. Run git config core.logAllRefUpdates true in this clone so later landings can be told, and verify this one from the start`,
   // the message landRecords gives the records merge on home's main (final-13 F1 reads it back)
   recordsMessage: (id, recSha, linkName) => `${id}: records\n\nMerged home's ticket/${id} at ${recSha}: the records of ${id}, whose code lands in ${linkName}`,
   // Whether tip is the kit's own landing merge of head (final-13 F1): exactly two parents, the second
@@ -24788,7 +24793,8 @@ const recurringRegistry = Object.freeze({
   //   later; bounded, in cwd), which a planted record can't forge (final-16 F2), and only when that
   //   first parent is a commit this clone saw as origin's mainBranch (final-17 F1). A tree that
   //   differs, or a merge-tree that conflicts, fails or times out, is a look-alike: { lookalike: why,
-  //   recorded: true }; a first parent never seen as main is { lookalike: why, recorded: true, unseen: that first parent }.
+  //   recorded: true }; a first parent never seen as main is { lookalike: why, recorded: true, unseen: that first parent },
+  //   with noReflog: true when the clone keeps no reflog of origin's mainBranch, so it can't tell.
   // - one it never recorded is a look-alike when it carries merge's own message (as git keeps it:
   //   trailing spaces and repeated blank lines dropped), { lookalike: why, recorded: false }, and with
   //   another message is someone else's merge: null.
@@ -24816,7 +24822,10 @@ const recurringRegistry = Object.freeze({
     // update-ref, just as they can plant the landing record, and any main the clone ever saw passes,
     // an older one too. It closes only a first parent the clone never saw; the PR's Known limits
     // (H18-1, H18-2) say what is left open, and each case needs a push to main past the wall.
-    const seen = (g(['reflog', 'show', '--format=%H', `refs/remotes/origin/${mainBranch}`]) ?? '').split('\n').map((l) => l.trim());
+    const seen = (g(['reflog', 'show', '--format=%H', `refs/remotes/origin/${mainBranch}`]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+    // no reflog at all (core.logAllRefUpdates false, or it expired or was removed) proves nothing
+    // either way: the clone can't tell, and says so (final-18 F2)
+    if (!seen.length) return { lookalike: `the reflog of refs/remotes/origin/${mainBranch} is missing or empty`, recorded: true, unseen: parents[0], noReflog: true };
     if (!seen.includes(parents[0])) return { lookalike: `${parents[0].slice(0, 12)} is not in the reflog of refs/remotes/origin/${mainBranch}`, recorded: true, unseen: parents[0] };
     return { onto: parents[0] };
   },

@@ -1007,3 +1007,28 @@ test('A15 landing: forge git, a record of main\'s tip whose onto isn\'t the tip\
     assert.equal(T.acts().length, before, 'nothing logged');
   } finally { T.done(); }
 });
+
+test('A15 landing: forge git, a code push killed at the timeout that origin then takes, on a clone that keeps no reflog of origin\'s main (core.logAllRefUpdates=false, the reflog removed): the rerun says so, names core.logAllRefUpdates and the way out, blames no planter, and logs nothing (final-18 F2, H18-3)', { timeout: 300000 }, () => {
+  const T = setup('a15-no-reflog');
+  try {
+    T.g(['config', 'core.logAllRefUpdates', 'false']);
+    const common = path.resolve(T.old, T.g(['rev-parse', '--git-common-dir']));
+    fs.rmSync(path.join(common, 'logs', 'refs', 'remotes', 'origin', 'main'), { force: true });
+    const q = T.yes({ recurring: { aa: check() } });
+    T.jobsChore('pre', () => ({ aa: check() }));
+    const main0 = T.g(['rev-parse', 'refs/heads/main'], T.org);
+    const hook = slowPreReceive(T.org);
+    const before = T.acts().length;
+    let r;
+    try {
+      r = T.merge('pre', ['--approved', q], { DEVTEAM_GIT_TIMEOUT_MS: PRE_TIMEOUT });
+      assert.notEqual(refMoves(T.org, 'main', main0), main0, 'origin took the push after the kill');
+    } finally { fs.rmSync(hook, { force: true }); }
+    refused(r, MAYBE);
+    assert.equal(fs.existsSync(path.join(common, 'logs', 'refs', 'remotes', 'origin', 'main')) && fs.readFileSync(path.join(common, 'logs', 'refs', 'remotes', 'origin', 'main'), 'utf8').trim() !== '', false, 'the clone kept no reflog of origin\'s main');
+    const r2 = T.merge('pre', ['--approved', q]);
+    refused(r2, /this clone keeps no reflog of refs\/remotes\/origin\/main \(core\.logAllRefUpdates is false, or the reflog was expired or removed\), so the kit can't tell its own landing merge from a planted one: nothing logged[^\n]*git config core\.logAllRefUpdates true in this clone[^\n]*verify this one from the start/);
+    assert.doesNotMatch(r2.text, /planted its record|never saw as origin's/);
+    assert.equal(T.acts().length, before, 'nothing logged');
+  } finally { T.done(); }
+});
