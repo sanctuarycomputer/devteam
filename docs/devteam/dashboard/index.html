@@ -7783,8 +7783,13 @@ function renderLibrary(lib) {
     : !me?.project ? '<p class="small muted lib-pub">To publish from here, set <code>project</code> in settings.md: it is part of every public link.</p>'
     : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50).map((a) => a.slug)), 'Restore all')}</p>` : '';
   const pvNote = onBoxWithout && (lib?.previews ?? []).length ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : '';
+  // drafts from other machines (kit-750): the last fetch of origin failed; git's own words only in the title
+  if (PAGE_NOW === 'library') artRemotePing.now();
+  const rs = artRemotePing.status();
+  const staleNote = rs?.stale ? `<p class="small lib-pub" title="${esc(rs.error ?? '')}">Drafts from other machines may be out of date: this machine couldn't reach ${rs.host ? esc(rs.host) : "the project's remote"}${rs.fetched_at ? ` (last tried ${esc(when(rs.fetched_at))})` : ''}${rs.next_at ? `; it tries again ${esc(when(rs.next_at))}` : ''}.</p>` : '';
   const top = $('lib-top');
-  if (top.dataset.drawn !== pubHead + pvNote) { top.innerHTML = pubHead + pvNote; top.dataset.drawn = pubHead + pvNote; top.hidden = !(pubHead + pvNote); }
+  const topHtml = staleNote + pubHead + pvNote;
+  if (top.dataset.drawn !== topHtml) { top.innerHTML = topHtml; top.dataset.drawn = topHtml; top.hidden = !topHtml; }
   const KIND = Object.fromEntries(LIB_KINDS.map(([k, label, icon]) => [k, { label, icon }]));
   // the worktree truncated in the head
   const wtOf = (at) => `<span class="lib-wt small muted">in ${libWtLink(at)}</span>`;
@@ -7797,7 +7802,7 @@ function renderLibrary(lib) {
     // the landed row gives the publish state, the shown row (the newest draft, else the landed) the rest
     const ps = x.landed && !x.landed.error ? publicState(x.landed, PUBLIC, me) : null;
     const badges = [
-      x.art && x.art.at !== 'main' ? `<span class="badge amber">draft</span>${wtOf(x.art.at)}` : '',
+      x.art && x.art.at !== 'main' ? `<span class="badge amber">draft</span>${x.art.remote ? `<span class="lib-wt small muted">from another machine · <code>${esc(x.art.branch)}</code></span>` : wtOf(x.art.at)}` : '',
       libPubBadge(ps),
       x.pstate ? LIB_PV_BADGE[x.pstate.state] : '',
       x.error ? '<span class="badge high">broken</span>' : '',
@@ -7823,10 +7828,12 @@ function renderLibrary(lib) {
     // an artifact's meta: the session that drew it (a link that opens it), what it is for, when
     const a = x.art && !x.error ? x.art : null;
     const meta = !a ? '' : [a.by ? `<span class="lib-by">drawn by ${linkify(a.by)}</span>` : '', forOf(a.for), a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
+    // a worktree draft here that hides the same slug pushed from another machine (kit-750: local wins)
+    const alsoRemote = x.art?.remote_branches?.length ? `<div class="lib-meta small muted">Also pushed from another machine on ${x.art.remote_branches.map((b) => `<code>${esc(b)}</code>`).join(', ')}; this machine's worktree is shown.</div>` : '';
     return `<div class="card lib-card" data-lib-id="${esc(x.id)}" data-kind="${esc(x.kind)}"${p ? ` data-preview="${esc(p.name)}"` : ''}${said}>`
       + `<div class="card-head"><i class="icon-${k.icon}" aria-hidden="true"></i>${title}${badges}${copy}${open}${menuOf(x.id, [], `lib/${x.id}`, menuExtra)}</div>`
       + libThumb(x, pvHere)
-      + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}${pub}${details}${meta ? `<div class="lib-meta small muted">${meta}</div>` : ''}</div></div>`;
+      + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}${pub}${details}${meta ? `<div class="lib-meta small muted">${meta}</div>` : ''}${alsoRemote}</div></div>`;
   };
   const f = filtersNow('library');
   const cards = items.filter((x) => libraryKeep(x, f)).map((x) => [x.id, libraryCard(x)]);
@@ -7865,6 +7872,33 @@ function renderLibrary(lib) {
   thumbsWatch(grid);
   avBarPoll();
 }
+// The Library's ask of the dashboard's fetch of origin (kit-750): while the dashboard (never a viewer tab)
+// is seen and shows the Library or a stage, /api/artifact-remote every 10 s, one ask at a time, given
+// up after 5 s. The ask is the demand that keeps origin fetched; a closed or hidden page asks nothing,
+// so nothing is fetched. A moved rev (a fetch moved a ref) loads the data at once rather than at the
+// next poll; a change in stale draws the Library again. now() asks at once under the same guards,
+// when the last ask is over 10 s old (renderLibrary, so opening the Library doesn't wait).
+const artRemotePing = (() => {
+  let last = null, askedAt = 0, inFlight = false;
+  const tick = async () => {
+    if (VIEWER || document.visibilityState !== 'visible' || !(PAGE_NOW === 'library' || TS.kind === 'artifact') || inFlight) return;
+    inFlight = true;
+    askedAt = Date.now();
+    const c = new AbortController(), t = setTimeout(() => c.abort(), 5000);
+    try {
+      const r = await fetch('/api/artifact-remote', { signal: c.signal, cache: 'no-store' });
+      const j = r.ok ? await r.json() : null;
+      if (j && typeof j === 'object') {
+        const was = last;
+        last = j;
+        if (was && was.rev !== j.rev) load();
+        else if (!!was?.stale !== !!j.stale && PAGE_NOW === 'library' && DATA) renderLibrary(DATA.library);
+      }
+    } catch {} finally { clearTimeout(t); inFlight = false; }
+  };
+  if (!VIEWER) { setInterval(tick, 10000); document.addEventListener('visibilitychange', () => void tick()); }
+  return { now() { if (Date.now() - askedAt > 10000) void tick(); }, status: () => last };
+})();
 /* library-thumbs start */
 // The Library's thumbnails (kit-92): a box with a frame source (data-thumb-src) gets a sandboxed, inert frame
 // while it is in view, at most THUMB_MAX at once in all (an open peek's box first, then the grid's, top first);
