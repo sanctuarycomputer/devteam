@@ -14,6 +14,26 @@ const tagsMissing = () => [...OLD, 'v0.32.0'].filter((t) => !kitAt(t));
 const skipOld = () => { const m = tagsMissing(); if (m.length && process.env.CI) throw new Error(`no ${m.join(', ')} in this checkout`); return m.length ? `no ${m.join(', ')} in this checkout` : false; };
 const claudeCalls = (r) => (fs.existsSync(path.join(r, '.claude-calls')) ? fs.readFileSync(path.join(r, '.claude-calls'), 'utf8').trim().split('\n').filter(Boolean) : []);
 
+// kitAt on a shallow, tagless checkout (CI's): the tag comes from origin into a private repo, and the
+// checkout's .git is left as it was, so two files fetching at once never race on its shallow file (kit-760)
+test('kitAt fetches a tag the checkout lacks into a private repo, never into the checkout\'s .git', () => {
+  const d = fs.mkdtempSync(path.join(tmp, 'kitat-'));
+  const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const origin = path.join(d, 'origin');
+  write(path.join(origin, 'docs/devteam/kit.txt'), 'released\n');
+  g(d, 'init', '-q', '-b', 'main', origin); g(origin, 'add', '-A'); g(origin, 'commit', '-qm', 'release'); g(origin, 'tag', 'v1.0.0');
+  write(path.join(origin, 'docs/devteam/kit.txt'), 'next\n'); g(origin, 'commit', '-qam', 'next');
+  const clone = path.join(d, 'clone');
+  g(d, 'clone', '-q', '--depth=1', '--no-tags', `file://${origin}`, clone);
+  const dotGit = () => ({ shallow: fs.readFileSync(path.join(clone, '.git/shallow'), 'utf8'), refs: g(clone, 'for-each-ref') });
+  const before = dotGit();
+  const got = kitAt('v1.0.0', { from: clone });
+  assert.ok(got, 'kitAt got v1.0.0 from origin');
+  assert.equal(fs.readFileSync(path.join(got, 'kit.txt'), 'utf8'), 'released\n', 'the kit is the tag\'s, not main\'s');
+  assert.deepEqual(dotGit(), before, 'the checkout\'s .git is as it was: no shallow line, no ref');
+  assert.equal(kitAt('v9.9.9', { from: clone }), null, 'a tag origin lacks is null');
+});
+
 // recover --machine as the box runs it: box-recover's flags, a box's own folder of repos and its list.
 const boxCode = path.join(tmp, 'box-code');
 const upList = path.join(home, '.devteam-supervisors.boot');
