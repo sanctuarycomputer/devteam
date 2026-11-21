@@ -447,7 +447,7 @@ test('A5: once the owner has written anything after a recurring-edit Yes in its 
   } finally { T.done(); }
 });
 
-test('A5: the owner\'s card answer to another question of the Yes\'s thread counts as a later owner line; at merge a planted answer line after a later owner line lands nothing (final-17b F1, F3, d-20261121-103254180)', () => {
+test('A5: the owner\'s card answer to another question of the Yes\'s thread counts as a later owner line; at merge a planted answer line after a later owner line lands nothing; an owner line in another thread blocks nothing (final-17b F1, F3, F4, d-20261121-103254180)', () => {
   const T = setup('turn-later17');
   try {
     const tAsk = (tid, name, job) => { const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]); passes(r); return QID.exec(r.out)[0]; };
@@ -455,6 +455,7 @@ test('A5: the owner\'s card answer to another question of the Yes\'s thread coun
     const say = (tid, w) => T.ok(['thread', 'say', tid, w], {}).split('\n')[0];
     const newT = (title) => T.ok(['thread', 'new', title, '--title', title], {}).split('\n')[0];
     const job = (n) => check({ title: `${n} job`, run: `echo ${n}` });
+    const landed = {};
     // N1: a plain q2, then the recurring-edit q1, in thread t1; the owner says Yes to q1, then
     // answers q2's card with words that take it back: the Yes is refused, and nothing lands
     const t1 = newT('Jobs');
@@ -483,6 +484,31 @@ test('A5: the owner\'s card answer to another question of the Yes\'s thread coun
     refused(T.dry('n2', qn2), AFTER);
     refused(T.merge('n2', ['--approved', qn2]), AFTER);
     assert.equal(Object.hasOwn(T.mainJobs(), 'n2'), false, 'n2 did not land');
+    // another thread: after the Yes, the owner writes a turn in t4 and answers t4's question on its
+    // card; neither is in the Yes's thread, so the answer is accepted and lands
+    const t3 = newT('Jobs 3');
+    const t4 = newT('Elsewhere');
+    const q4 = pAsk(t4, 'Restart the dashboard?');
+    const q3 = tAsk(t3, 'n3', job('n3'));
+    const y3 = say(t3, 'Yes');
+    say(t4, 'Wait, no. Not that.');
+    T.ok(['answer', q4, 'No, cancel it.'], {});
+    passes(T.run(['answer', q3, 'Yes', '--from-turn', y3]));
+    T.jobsChore('n3', (j) => ({ ...j, n3: job('n3') }));
+    passes(T.merge('n3', ['--approved', q3]));
+    landed.n3 = job('n3');
+    // N6: Yes, the supervisor's reply, the answer recorded, then a later owner line in the thread:
+    // the answer was recorded first, so it stands and lands
+    const t5 = newT('Jobs 5');
+    const q6 = tAsk(t5, 'n6', job('n6'));
+    const y6 = say(t5, 'Yes, add it!');
+    T.ok(['thread', 'reply', t5, 'Thanks: I will add it.']);
+    passes(T.run(['answer', q6, 'Yes', '--from-turn', y6]));
+    say(t5, 'Thanks. Actually, wait, no.');
+    T.jobsChore('n6', (j) => ({ ...j, n6: job('n6') }));
+    passes(T.merge('n6', ['--approved', q6]));
+    landed.n6 = job('n6');
+    assert.deepEqual(T.mainJobs(), landed, 'only n3 and n6 landed');
   } finally { T.done(); }
 });
 
