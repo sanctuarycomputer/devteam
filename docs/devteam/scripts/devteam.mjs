@@ -30267,6 +30267,8 @@ function stopResponder() {
 function responderWindowRefusal(w) {
   if (!w.there) return null;
   if (!flags.resume) return `the responder is already running in ${w.shown} (responder --stop first, or --resume to restart it there)`;
+  // a fresh look, never the few-seconds pane cache: a start just before this one may have an agent up by now
+  paneTable(`=${w.session}`, { fresh: true });
   if (!resolvePane(w.target).problem) return `${w.shown} has a live agent; responder --stop first`;
   return null;
 }
@@ -30311,7 +30313,8 @@ function responderQueue(objects = readLog().objects) {
 }
 // responder [--resume | --stop]: the supervisor starts, restarts or stops the responder.
 function cmdResponder() {
-  if (flags.owner || process.env.DEVTEAM_CHANNEL === 'dashboard') die('responder: the supervisor starts the responder (settings.responder turns it off)');
+  // every channel is one of the owner's surfaces (the dashboard, the hub, the owner's terminal)
+  if (flags.owner || process.env.DEVTEAM_CHANNEL) die('responder: the supervisor starts the responder (settings.responder turns it off)');
   supervisorOnly('responder');
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
@@ -30330,14 +30333,25 @@ function cmdResponder() {
   const rc = s.responder_command;
   if (rc !== undefined && rc !== null && typeof rc !== 'string') die('responder_command is a shell command (a string): the owner fixes it on main through a PR');
   let cmd = typeof rc === 'string' && rc.trim() ? rc : s.agent_command;
-  // its worktree, detached at main, moved there at each start; a checkout git refuses (local edits) dies with git's words
+  // its worktree, detached at main, moved there at each start. A folder there that is no worktree of
+  // its own (git would walk up to the main checkout and detach it) is refused, and so is one with any
+  // local change, tracked or untracked (a refresh would keep what git doesn't have to overwrite, so a
+  // file left there would outlive the restart); nothing in it is touched.
   const R = repo('home');
   const mb = s.main_branch;
   const wt = path.join(mainRoot, '.worktrees', RESPONDER_NAME);
   R.git(['fetch', '--quiet', 'origin', mb]);
   const base = R.resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb;
   if (!fs.existsSync(wt)) R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, base], R.root);
-  else R.gitOrDie(['checkout', '--quiet', '--detach', base], wt);
+  else {
+    const top = sh('git', ['-C', wt, 'rev-parse', '--show-toplevel']);
+    if (!top || realPath(top) !== realPath(wt)) die(`${wt} is not a git worktree of its own: move it aside or remove it, then responder again`);
+    const dirty = sh('git', ['-C', wt, 'status', '--porcelain']);
+    if (dirty === null) die(`${wt}: git status failed there, so the responder's worktree is left as it is`);
+    if (dirty) die(`${wt} has local changes (${plural(dirty.split('\n').length, 'path')}, first ${dirty.split('\n')[0].slice(3)}): the responder starts from main, so clear them or remove the worktree, then responder again`);
+    const r = spawnSync('git', ['-C', wt, 'checkout', '--quiet', '--detach', base], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (r.status !== 0) die(`${wt}: could not move it to ${base}: ${String(r.stderr ?? '').trim() || `exit ${r.status}`}`);
+  }
   seedWorktree(wt, { setup: false });
   trustWorktree(wt, s, R);
   fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
@@ -30348,16 +30362,18 @@ function cmdResponder() {
   try {
     // the look at the window and the typing under one lock, so two starts at once can't both type
     withLock(path.join(runDir, `launch-${RESPONDER_NAME}`), () => {
-      const w = responderWindow(session);
+      let w = responderWindow(session);
       const late = responderWindowRefusal(w);
       if (late) refuse(late);
+      // a pane that has exited (remain-on-exit) takes no typing: its window is opened anew
+      if (w.there && /has exited/.test(resolvePane(w.target).problem ?? '')) { tmux(['kill-window', '-t', w.target]); w = responderWindow(session); }
       if (!w.has) { if (sh('tmux', ['new-session', '-d', '-s', session, '-n', RESPONDER_NAME, '-c', wt], { env: tmuxServerEnv() }) === null) refuse('could not start tmux'); }
       else if (!w.there && !tmux(['new-window', '-d', '-t', `=${session}`, '-n', RESPONDER_NAME, '-c', wt])) refuse(`could not open ${w.shown}`);
       const type = (line) => { if (!typeNow(w.target, line)) refuse(`could not type into ${w.shown}; responder --resume starts it`); };
-      // a ticket or feature from the tmux server's environment is never the responder's
-      type(`unset DEVTEAM_TICKET DEVTEAM_FEATURE; export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN=${shq(runDir)} DEVTEAM_ROLE='responder'`);
+      type(`export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN=${shq(runDir)} DEVTEAM_ROLE='responder'`);
       if (/^claude(\s|$)/.test(cmd)) cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(RESPONDER_NAME, s, mb)}'`);
-      type(`${sessionMarkerPrefix(session)}${cmd} ${shq(promptPointer(promptFile))}`);
+      // a ticket or feature from the tmux server's environment is never the responder's: env -u, which works in any shell
+      type(`env -u DEVTEAM_TICKET -u DEVTEAM_FEATURE ${sessionMarkerPrefix(session)}${cmd} ${shq(promptPointer(promptFile))}`);
       out(`${w.there ? 'restarted' : 'started'} the responder in ${w.shown} at ${wt}`);
     });
   } catch (e) {

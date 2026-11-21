@@ -101,6 +101,8 @@ test('R1: responder opens its window and detached worktree, runs responder_comma
     const v = F.run(F.old, ['artifact', 'versions', 'probe-art', '--json'], SUP);
     assert.doesNotMatch(`${v.out}\n${v.err}`, /"worktree":\s*"responder"/, `no draft from the responder's worktree: ${v.out}`);
     assert.doesNotMatch(F.ok(F.old, ['artifacts', '--json'], SUP), /"responder"/, 'artifacts lists none from it');
+    // left clean: a change in the responder's worktree refuses its next start (R2k)
+    fs.rmSync(path.join(F.wt, 'docs/devteam/project/artifacts/probe-art'), { recursive: true, force: true });
     });
     await t.test('R1c: agent_command when responder_command is unset; a working-tree edit never runs', () => {
 
@@ -140,6 +142,7 @@ test('R2: one at a time, --stop and --resume, its refusals, and the fleet holds'
       ['the responder', RESPONDER, [], /the supervisor does this; hand it over/],
       ['the owner', {}, ['--owner'], /the supervisor starts the responder/],
       ['the dashboard', { DEVTEAM_CHANNEL: 'dashboard' }, [], /the supervisor starts the responder/],
+      ['the hub', { DEVTEAM_CHANNEL: 'hub' }, [], /the supervisor starts the responder/],
     ]) {
       const r = F.run(F.old, ['responder', ...args], env);
       assert.notEqual(r.status, 0, `${who} is refused`);
@@ -258,6 +261,7 @@ test('R2: one at a time, --stop and --resume, its refusals, and the fleet holds'
     assert.equal(r.status, 0, r.err || r.out);
     assert.equal(F.ran(A).role, 'responder', 'the agent runs in a live pane');
     F.tmux(['kill-window', '-t', `=${F.session}:hold2`]);
+    assert.equal(F.run(F.old, ['responder', '--stop'], SUP).status, 0);
     });
     await t.test('R2g: --resume into a window left at a shell; --stop wins over --resume; a responder_command that is no string', () => {
     fs.rmSync(A.out, { force: true });
