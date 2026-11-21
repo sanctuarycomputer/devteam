@@ -984,3 +984,26 @@ test('A15 landing: forge git, with merge.directoryRenames=true in the repo\'s co
     assert.equal(T.acts().length, before, 'nothing logged');
   } finally { T.done(); }
 });
+
+test('A15 landing: forge git, a record of main\'s tip whose onto isn\'t the tip\'s first parent is no record of it: the real merge with the kit\'s message is refused, and nothing is logged (final-17 F1)', () => {
+  const T = setup('a15-onto');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    const wt = T.jobsChore('hand', () => ({ aa: check() }));
+    const sha = T.g(['rev-parse', 'HEAD'], wt);
+    T.g(['fetch', '-q', 'origin']);
+    const main0 = T.g(['rev-parse', 'origin/main']);
+    const KIT_MSG = `chore-hand: jobs\n\n# chore-hand: jobs\n\n## One-way doors\n\nNone.\n\nMerged chore-hand at ${sha}`;
+    const m = path.join(T.old, '.worktrees', 'onto');
+    T.g(['worktree', 'add', '-q', '--detach', m, main0]);
+    T.g(['-c', 'merge.directoryRenames=conflict', '-c', 'commit.cleanup=verbatim', '-c', 'merge.log=false', 'merge', '-q', '--no-ff', '-m', KIT_MSG, sha], m);
+    const hand = T.g(['rev-parse', 'HEAD'], m);
+    T.g(['push', '-q', '-f', 'origin', `${hand}:refs/heads/main`], m); T.g(['fetch', '-q', 'origin']);
+    // the record names the merge, but onto main0's parent: not the main this merge was built on
+    plantLanding(T.old, 'home', 'chore-hand', sha, hand, T.g(['rev-parse', `${main0}~1`]));
+    const before = T.acts().length;
+    const r = T.merge('hand', ['--approved', q]);
+    refused(r, NOT_RECORDED(hand));
+    assert.equal(T.acts().length, before, 'nothing logged');
+  } finally { T.done(); }
+});
