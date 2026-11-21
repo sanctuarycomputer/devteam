@@ -957,6 +957,10 @@ test('A14: supervisor.md documents registering, changing and stopping a job in r
   assert.match(mon, /Recurring jobs/);
   const five = doc.slice(at(/^## 5\. /m), at(/^## 6\. /m));
   assert.match(five, /recurring-edit/);
+  // §6's chat passage names the one question chat can't answer (final-12b F4)
+  const six = doc.slice(at(/^## 6\. /m), at(/^## 7\. /m));
+  const chat = six.slice(six.indexOf('**When the owner tells you in your own session.**'));
+  assert.match(chat.split('\n')[0], /except a recurring-edit question, which can't be answered from chat \(see Recurring jobs\)/);
   const q = fs.readFileSync(path.join(kit, 'governance/quality.md'), 'utf8');
   const four = q.slice(q.search(/^## 4\. /m), q.search(/^## 5\. /m));
   assert.match(four, /recurring-edit/);
