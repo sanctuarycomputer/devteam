@@ -24016,8 +24016,14 @@ function fleetStatus() {
   if (newer.length) blockers.push(`agent memory outside the repo changed after the supervisor's handoff landed (${newer.map((m) => path.basename(m.path)).join(', ')}): fold what the next session needs into knowledge or the handoff, and land it again`);
 
   // Nothing else of value only here: files put in run/ by hand, and worktrees with work not on the remote.
+  // run/recurring/ is the recurring runner's (its lock, tails and log): named here, as a fresh
+  // process may not have run the runner's code that names it
+  runPath('recurring');
   const loose = (fs.existsSync(runDir) ? fs.readdirSync(runDir) : []).filter((f) => !RUN_KNOWN.has(f) && !f.endsWith('.lock'));
   if (loose.length) blockers.push(`files in run/ the kit didn't make, which don't move: ${loose.join(', ')}: move what matters into ${projectRel}/ (a chore) and delete the rest`);
+  // a check running now would be cut off by the move, its checkout and lock left behind
+  const rl = recurringLock.read();
+  if (recurringLock.live(rl)) blockers.push(`a recurring check is running (runner pid ${rl.pid}${rl.current?.name ? `, ${rl.current.name}` : ''}): wait for it to finish before the move`);
   const wtRoot = path.join(mainRoot, '.worktrees');
   const strays = [];
   for (const n of fs.existsSync(wtRoot) ? fs.readdirSync(wtRoot) : []) {
