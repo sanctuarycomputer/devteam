@@ -24519,6 +24519,11 @@ const recurringRegistry = Object.freeze({
       if (norm(g(['log', '-1', '--format=%B', tip])) !== norm(message)) return null;
       return { lookalike: `no merge ${tip.slice(0, 12)} onto ${parents[0].slice(0, 12)} in ${path.relative(mainRoot, file)}`, recorded: false };
     }
+    const have = (g(['rev-parse', '--verify', '--quiet', `${tip}^{tree}`]) ?? '').trim();
+    const m = recurringRegistry.git([...recurringRegistry.MERGE_FLAGS, 'merge-tree', '--write-tree', '--no-messages', parents[0], head], { cwd });
+    if (!m.ok) return { lookalike: `git merge-tree of its parents ${m.timedOut ? 'timed out' : 'failed or conflicts (it needs git 2.38 or later)'}`, recorded: true };
+    const want = m.out.trim().split('\n')[0];
+    if (!have || have !== want) return { lookalike: `its tree ${have.slice(0, 12) || '(unread)'}, the merge's ${want.slice(0, 12)}`, recorded: true };
     return { onto: parents[0] };
   },
   // words that start with the label Yes, read as --choice and --read read a label: any case
