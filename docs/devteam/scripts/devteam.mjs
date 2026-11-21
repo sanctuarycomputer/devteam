@@ -24382,10 +24382,20 @@ const recurringRegistry = Object.freeze({
   // label (agreed_by_owner; never a reading of words, whatever line wrote it:
   // d-20261120-195829274-supervisor), not landed, not superseded
   live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && v.agreed_by_owner === true && !v.reading && !recurringRegistry.notOwnYes(v) && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
-  // words that start with the label Yes as a whole word, read as --choice and --read read a label:
-  // any case, past opening quotes (final-12b F3). The letters are spelled out, not /i, so no other
-  // letter that folds to one of them (the long s, U+017F) passes for it.
-  saysYes: (said) => /^["'\u2018\u201c\u201e\u00ab\s]*[Yy][Ee][Ss](?![\p{L}\p{N}])/u.test(String(said ?? '')),
+  // words that start with the label Yes, read as --choice and --read read a label: any case
+  // (final-12b F3), then the end, whitespace, or one of . , ! (final-13b F3). Quotes are taken off
+  // only when one matching pair wraps the whole trimmed turn, so reported speech ("Yes" is what you
+  // want me to say. No.) is no Yes; a turn holding any format or combining character (a zero-width
+  // space, a soft hyphen, an accent) is none either. The letters are spelled out, not /i, so no
+  // other letter that folds to one of them (the long s, U+017F) passes for it.
+  saysYes: (said) => {
+    const s = String(said ?? '');
+    if (/[\p{Cf}\p{M}]/u.test(s)) return false;
+    let t = s.trim();
+    const pair = [['"', '"'], ["'", "'"], ['\u201c', '\u201d'], ['\u2018', '\u2019'], ['\u00ab', '\u00bb']].find(([o, c]) => t.length >= 2 && t.startsWith(o) && t.endsWith(c));
+    if (pair) t = t.slice(1, -1);
+    return /^[Yy][Ee][Ss](?:$|[\s.,!])/u.test(t);
+  },
   // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1,
   // final-13b F1 and F2): one recorded from chat; from a turn whose words (the line's, or the turn's
   // own) don't start with Yes; from a clause of a turn (said_at); from a turn that isn't the owner's,

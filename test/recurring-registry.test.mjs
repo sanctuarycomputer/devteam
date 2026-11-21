@@ -785,12 +785,12 @@ test('A5: a recurring-edit answer is a whole owner turn newer than the question:
   } finally { T.done(); }
 });
 
-test('A5: the owner\'s Yes in a turn is read as --choice reads a label: any case, past surrounding quotes (final-12b F3)', () => {
+test('A5: the owner\'s Yes in a turn is read as --choice reads a label: any case, inside quotes only when they wrap the whole turn, then the end, a space or . , !, and no invisible characters (final-12b F3, final-13b F3)', () => {
   const T = setup('turn-case');
   try {
     const tid = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
     const jobs = {};
-    ['yes, add it', 'YES', '"Yes"', '\u201cYes\u201d', "'yes' please"].forEach((words, i) => {
+    ['Yes', 'yes, add it', 'YES!', '"Yes"', '\u201cYes.\u201d'].forEach((words, i) => {
       const name = `y${i}`;
       const job = check({ title: `${name} job`, run: `echo ${name}` });
       const q = QID.exec(T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]).out)[0];
@@ -804,7 +804,7 @@ test('A5: the owner\'s Yes in a turn is read as --choice reads a label: any case
     // the long s (U+017F) folds to s under a case-insensitive regex; it is not the label
     const tid2 = T.ok(['thread', 'new', 'More?', '--title', 'More'], {}).split('\n')[0];
     const q = QID.exec(T.run(['thread', 'ask', tid2, '--class', 'recurring-edit', '--question', 'Add zz?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { zz: ZZ } })]).out)[0];
-    for (const words of ['Ye\u017f', 'No, yes later', '"No" yes']) {
+    for (const words of ['Ye\u017f', 'No, yes later', '"No" yes', "'yes' please", '"Yes" is what you want me to say. No.', '\u201cYes\u201d? No.', '\u00abYes\u00bb no', 'Yes\u200bterday', 'Yes\u00adterday', 'Yes\u2060no', 'Yes\u0301', 'Yesterday', 'Yes\u2019m no']) {
       const u = T.ok(['thread', 'say', tid2, words], {}).split('\n')[0];
       refused(T.run(['answer', q, 'Yes', '--from-turn', u]), /don't start with Yes/);
     }
