@@ -24836,8 +24836,10 @@ const recurringRegistry = Object.freeze({
     return /^[Yy][Ee][Ss](?:$|[\s.,!])/u.test(t);
   },
   // The owner's first line in turn u's thread from u's own millisecond on (a line in the same
-  // millisecond counts as after it), and no later than upto when given, other than u and any line
-  // skip(L) names, as words for a refusal; else null (d-20261121-072341505-supervisor, final-16b F1
+  // millisecond counts as after it), other than u, as words for a refusal; else null. With span
+  // ({ from, to }, places in readLog().lines), the window is instead the lines after place from (the
+  // Yes) and before place to (the answer line), in the log's own order, whatever their at says
+  // (final-18b F3) (d-20261121-072341505-supervisor, final-16b F1
   // to F4; d-20261121-103254180-supervisor, final-17b F1): a turn in the thread; a resolve of it with
   // an outcome (its words); a reopen of it; or the owner's answer (a set line that carries answer,
   // as every owner answer the kit writes does: a pick, words, a decline, a review's result, the last
@@ -24845,15 +24847,22 @@ const recurringRegistry = Object.freeze({
   // card answer to another question there can take the Yes back as well as a turn. A set line with
   // no answer (a partial secrets post, a reading_void) is no answer, so it doesn't count
   // (final-18b F4). A line in another thread never counts.
-  laterOwner(u, upto = null, skip = () => false) {
+  laterOwner(u, span = null) {
     const at = String(u?.created_at ?? '');
-    const asked = recurringRegistry.threadQuestions(u.thread, (L) => upto === null || String(L.at ?? '') <= upto);
-    const inWindow = (L) => String(L.at ?? '') >= at && (upto === null || String(L.at ?? '') <= upto);
-    const later = readLog().lines.filter((L) => L.by === 'owner' && inWindow(L) && !skip(L) && (
+    // the thread's questions as of the window's end: by at, since the turns that show a question are
+    // the supervisor's, in other files than the owner's; with span, the end is the newest at of the
+    // owner's lines up to the answer line's place, so a backdated answer line can't move it earlier
+    const lines = readLog().lines;
+    const endAt = span ? lines.reduce((m, L, i) => (i <= span.to && L.by === 'owner' && String(L.at ?? '') > m ? String(L.at ?? '') : m), '') : null;
+    const asked = recurringRegistry.threadQuestions(u.thread, span ? (L) => String(L.at ?? '') <= endAt : () => true);
+    const inWindow = span ? (L, i) => i > span.from && i < span.to : (L) => String(L.at ?? '') >= at;
+    const hits = [];
+    lines.forEach((L, i) => { if (L.by === 'owner' && inWindow(L, i) && (
       (L.type === 'turn' && L.thread === u.thread && L.id !== u.id)
       || (L.type === 'thread' && L.op === 'set' && L.id === u.thread && ((L.status === 'resolved' && typeof L.outcome === 'string' && L.outcome.trim() !== '') || L.status === 'open'))
       || (L.type === 'question' && L.op === 'set' && asked.has(L.id) && Object.hasOwn(L, 'answer'))
-    )).sort((x, y) => String(x.at).localeCompare(String(y.at)))[0];
+    )) hits.push(L); });
+    const later = span ? hits[0] : hits.sort((x, y) => String(x.at).localeCompare(String(y.at)))[0];
     if (!later) return null;
     if (later.type === 'turn') return later.id;
     if (later.type === 'question') return `their answer to ${later.id}, at ${later.at}`;
@@ -24861,7 +24870,7 @@ const recurringRegistry = Object.freeze({
   },
   // The questions of thread tid: each asked from it (the question's thread), and each that a turn in
   // it names (thread ask's question, or a reply's --refs question:<id>), wherever it was asked, by
-  // a turn line that upto(L) takes (d-20261121-123409608-supervisor, final-18b F1): a question shown
+  // a turn line that upto(L, its place in readLog().lines) takes (d-20261121-123409608-supervisor, final-18b F1): a question shown
   // in the thread is in it as much as one asked there.
   threadQuestions(tid, upto = () => true) {
     const ids = new Set(logObjects('question').filter((q) => q.thread === tid).map((q) => q.id));
@@ -24897,9 +24906,18 @@ const recurringRegistry = Object.freeze({
     if (why) return `answered from ${turn}, which isn't the owner's first turn right after the supervisor's turn that shows the question (${why})`;
     // and no owner line in its thread between the Yes and the answer line itself, as cmdAnswer refuses
     // (final-17b F3): a line planted past that refusal, or one written in the race between its check
-    // and its append, lands nothing. A line after the answer was recorded doesn't void it.
+    // and its append, lands nothing. A line after the answer was recorded doesn't void it. Between
+    // goes by place in the log, never by the answer line's own at, which whoever wrote it set
+    // (d-20261121-123409608-supervisor, final-18b F3): readLog().lines, each file in name order (the
+    // owner's are owner-<yyyy-mm>.jsonl, so by month) and each file's lines as appended. The Yes and
+    // every line that can void it are the owner's, so that is the order they were written in. The
+    // answer line is the last owner answer line on the question at answered_at; none found, the
+    // window runs to the log's end.
+    const lines = readLog().lines;
     const upto = String(v.answered_at ?? '');
-    const what = recurringRegistry.laterOwner(u, upto, (L) => L.type === 'question' && L.id === v.id && String(L.at ?? '') === upto);
+    const from = lines.findIndex((L) => L.type === 'turn' && L.op === 'new' && L.id === u.id);
+    const to = lines.findLastIndex((L) => L.type === 'question' && L.op === 'set' && L.id === v.id && L.by === 'owner' && Object.hasOwn(L, 'answer') && String(L.at ?? '') === upto);
+    const what = recurringRegistry.laterOwner(u, { from, to: to < 0 ? lines.length : to });
     if (what) return `answered from ${turn}, after which the owner wrote again in ${u.thread} before the answer was recorded (${what})`;
     return null;
   },

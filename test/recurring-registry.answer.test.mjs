@@ -670,3 +670,23 @@ test('A5: only the owner\'s answer to a question of the Yes\'s thread refuses th
     assert.deepEqual(T.mainJobs(), { h4: job('h4') }, 'h4 landed');
   } finally { T.done(); }
 });
+
+test('A5: at merge, the later-owner window ends at the answer line\'s place in the log, not its own at: a planted answer line backdated to just after the Yes, appended after a retraction, lands nothing (final-18b F3, H2, d-20261121-123409608)', () => {
+  const T = setup('turn-backdate18');
+  try {
+    const { tAsk, say, newT, job, turnOf, plant } = threadKit(T);
+    const t = newT('Jobs');
+    const q = tAsk(t, 'h2', job('h2'));
+    const y = say(t, 'Yes');
+    const back = say(t, 'Wait, no. Cancel that job.');
+    refused(T.run(['answer', q, 'Yes', '--from-turn', y]), /the owner wrote again after that turn/);
+    const yt = turnOf(y);
+    plant(q, y, yt.text, new Date(Date.parse(yt.created_at) + 1).toISOString());
+    assert.equal(json(T.ok(['questions', '--id', q, '--json']))[0].matched, true, 'the view takes the planted line');
+    T.jobsChore('h2', (j) => ({ ...j, h2: job('h2') }));
+    const AFTER = new RegExp(`${q} can't approve a job change: answered from ${y}, after which the owner wrote again in ${t} before the answer was recorded \\(${back}\\)`);
+    refused(T.dry('h2', q), AFTER);
+    refused(T.merge('h2', ['--approved', q]), AFTER);
+    assert.equal(Object.hasOwn(T.mainJobs(), 'h2'), false, 'h2 did not land');
+  } finally { T.done(); }
+});
