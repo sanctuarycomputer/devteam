@@ -117,4 +117,38 @@ test('reload removed page: a viewer whose page the change removed reloads to the
     assert.deepEqual(await p.ev(`__titles.filter((x) => x.t > ${t0}).map((x) => x.title)`), [], 'no reload');
     assert.equal(await p.ev(`document.getElementById('av-frame').__before`), 1, 'the same frame');
   });
+  // the draft's frame on page2.html, reloaded once its fingerprint changes to `fp`
+  const draftFp = (fp) => p.ev(`(window.__fake.fp = ${J(fp)}, Date.now())`);
+  const DRAFT = `/artifact/wt/${WT}/${SLUG}/`;
+
+  await t.test('R7: a draft, two reloads asking at once: the later one wins, even when the earlier one\'s answer comes first (final-1 F1)', async () => {
+    put(draft, 'd2');
+    await open(`${VIEW}?at=${WT}`, WT, 'd2');
+    await follow(20, `TS.path === 'page2.html'`);
+    // the first reload's ask is held, then answers 200 (page2.html there); the second's is held, then
+    // answers 404 (removed since): the second chose from the newer state, so its fallback is what loads
+    await p.ev(`(window.__artStatus[${J(`${DRAFT}page2.html`)}] = [{ status: 200, hold: 'a' }, { status: 404, hold: 'b' }], true)`);
+    const t0 = await draftFp('1'.repeat(64));
+    await soon(`__artAsks.length === 1`, 'the first reload asking');
+    await draftFp('2'.repeat(64));
+    await soon(`__artAsks.length === 2`, 'the second reload asking');
+    await p.ev(`(__artRelease.a(), true)`);
+    // long enough for the first to load page2.html, were it let through
+    await sleep(1500);
+    await p.ev(`(__artRelease.b(), true)`);
+    const got = await soonIn(p, 10000)(`__titles.find((x) => x.t > ${t0})`, 'a reload');
+    assert.equal(got.title, 'd2', 'the later reload\'s page: the opened one');
+    assert.equal(await src(), DRAFT, "the frame's src");
+    await sleep(1500);
+    assert.deepEqual(await p.ev(`__titles.filter((x) => x.t > ${t0}).map((x) => x.title)`), ['d2'], 'one reload, no later one');
+  });
+
+  await t.test("R8: a draft, its ask failing (a network error): the owner's place kept (final-1 F2)", async () => {
+    put(draft, 'd3');
+    await open(`${VIEW}?at=${WT}`, WT, 'd3');
+    await follow(20, `TS.path === 'page2.html'`);
+    await p.ev(`(window.__artStatus[${J(`${DRAFT}page2.html`)}] = 0, true)`);
+    await changeAndSee(() => draftFp('3'.repeat(64)), 'd3', 'd3-page2', `${DRAFT}page2.html`);
+    assert.deepEqual(await p.ev('__artAsks'), [`${DRAFT}page2.html`], 'the reload asked for page2.html and its ask failed');
+  });
 });

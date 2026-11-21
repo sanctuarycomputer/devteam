@@ -14,8 +14,11 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // of the JSON; delay, ms held, given up when the page's signal aborts), and logs each ask (its time,
 // whether the page read as hidden then). Every other request goes on. Also: every /api/data and
 // /api/view read, with whether it landed; document.visibilityState as window.__hidden says; the lens's
-// ready titles, with their time. window.__artStatus ({ <path>: status }): a page's own fetch of that
-// /artifact/ path (a reload's ask, kit-755) answered with that status, and logged in __artAsks.
+// ready titles, with their time. window.__artStatus ({ <path>: answer }): a page's own fetch of that
+// /artifact/ path (a reload's ask, kit-755) logged in __artAsks and answered by `answer`: a status; 0, a
+// network error (fetch's TypeError); { status, hold }, held until the test calls __artRelease[hold]()
+// (a held ask its page gives up on rejects as fetch does); or an array of these, one taken per ask, the
+// request going on once it is empty.
 export const PAGE = `(() => {
   // C10: a viewer tab whose address carries kit106-framed stands for one under the owner's wrapper, a
   // parent of another origin: its window.parent is another window (a stand-in that takes messages and
@@ -43,7 +46,15 @@ export const PAGE = `(() => {
       const body = k.body ?? (k.status === 200 ? JSON.stringify({ fp, at: new URL(s, location.href).searchParams.get('at') }) : JSON.stringify({ error: 'no draft' }));
       return new Response(body, { status: k.status, headers: { 'content-type': 'application/json' } });
     }
-    if (window.__artStatus[pathname]) { window.__artAsks.push(pathname); return new Response('faked', { status: window.__artStatus[pathname] }); }
+    const art = window.__artStatus[pathname];
+    const k = Array.isArray(art) ? art.shift() : art;
+    if (k !== undefined) {
+      window.__artAsks.push(pathname);
+      const { status, hold = null } = typeof k === 'number' ? { status: k } : k;
+      if (hold) await new Promise((res, rej) => { (window.__artRelease ??= {})[hold] = res; o?.signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError'))); });
+      if (status === 0) throw new TypeError('Failed to fetch');
+      return new Response('faked', { status });
+    }
     const x = { u: s, landed: false };
     if (pathname === '/api/data' || pathname === '/api/view') window.__reads.push(x);
     const r = await f(u, o);
