@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   kit:
-    # named, so a check reads kit (22, rest 1/2): without a name GitHub joins every include key
+    # named, so a check reads kit (22, rest 1/3): without a name GitHub joins every include key
     # (key, groups, shard, alone, gitleaks) into it
     name: kit (${{ matrix.node }}, ${{ matrix.part }})
     # Projects run the kit on whatever Node they pin, so every supported major is tested. Every job
@@ -29,19 +29,23 @@ jobs:
       matrix:
         include:
           - { node: 18, part: chain, key: chain, groups: chain, shard: '' }
-          - { node: 18, part: rest 1/2, key: rest-1, groups: 'rest,chrome', shard: 1/2, alone: true, gitleaks: true }
-          - { node: 18, part: rest 2/2, key: rest-2, groups: 'rest,chrome', shard: 2/2, gitleaks: true }
+          - { node: 18, part: rest 1/3, key: rest-1, groups: 'rest,chrome', shard: 1/3, alone: true, gitleaks: true }
+          - { node: 18, part: rest 2/3, key: rest-2, groups: 'rest,chrome', shard: 2/3, gitleaks: true }
+          - { node: 18, part: rest 3/3, key: rest-3, groups: 'rest,chrome', shard: 3/3, gitleaks: true }
           - { node: 20, part: chain, key: chain, groups: chain, shard: '' }
-          - { node: 20, part: rest 1/2, key: rest-1, groups: 'rest,chrome', shard: 1/2, alone: true, gitleaks: true }
-          - { node: 20, part: rest 2/2, key: rest-2, groups: 'rest,chrome', shard: 2/2, gitleaks: true }
+          - { node: 20, part: rest 1/3, key: rest-1, groups: 'rest,chrome', shard: 1/3, alone: true, gitleaks: true }
+          - { node: 20, part: rest 2/3, key: rest-2, groups: 'rest,chrome', shard: 2/3, gitleaks: true }
+          - { node: 20, part: rest 3/3, key: rest-3, groups: 'rest,chrome', shard: 3/3, gitleaks: true }
           - { node: 22, part: chain, key: chain, groups: chain, shard: '' }
-          - { node: 22, part: rest 1/2, key: rest-1, groups: rest, shard: 1/2, alone: true, gitleaks: true }
-          - { node: 22, part: rest 2/2, key: rest-2, groups: rest, shard: 2/2, gitleaks: true }
+          - { node: 22, part: rest 1/3, key: rest-1, groups: rest, shard: 1/3, alone: true, gitleaks: true }
+          - { node: 22, part: rest 2/3, key: rest-2, groups: rest, shard: 2/3, gitleaks: true }
+          - { node: 22, part: rest 3/3, key: rest-3, groups: rest, shard: 3/3, gitleaks: true }
           - { node: 22, part: chrome 1/2, key: chrome-1, groups: chrome, shard: 1/2 }
           - { node: 22, part: chrome 2/2, key: chrome-2, groups: chrome, shard: 2/2 }
           - { node: 24, part: chain, key: chain, groups: chain, shard: '' }
-          - { node: 24, part: rest 1/2, key: rest-1, groups: rest, shard: 1/2, alone: true, gitleaks: true }
-          - { node: 24, part: rest 2/2, key: rest-2, groups: rest, shard: 2/2, gitleaks: true }
+          - { node: 24, part: rest 1/3, key: rest-1, groups: rest, shard: 1/3, alone: true, gitleaks: true }
+          - { node: 24, part: rest 2/3, key: rest-2, groups: rest, shard: 2/3, gitleaks: true }
+          - { node: 24, part: rest 3/3, key: rest-3, groups: rest, shard: 3/3, gitleaks: true }
           - { node: 24, part: chrome 1/2, key: chrome-1, groups: chrome, shard: 1/2 }
           - { node: 24, part: chrome 2/2, key: chrome-2, groups: chrome, shard: 2/2 }
     runs-on: ubuntu-latest
@@ -63,7 +67,7 @@ jobs:
       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
       # test/gitleaks.test.mjs runs the kit's gitleaks config through gitleaks itself: a pinned
       # release, checked against its published sha256, and required (DEVTEAM_TEST_GITLEAKS) so the
-      # test can't fall back to its regex-only check. In both rest jobs, wherever the shards put it.
+      # test can't fall back to its regex-only check. In every rest job, wherever the shards put it.
       - if: matrix.gitleaks
         run: |
           set -euo pipefail
@@ -92,7 +96,7 @@ jobs:
           overwrite: true
           retention-days: 7
       # alone: bounds.test.mjs times the kit's code, so nothing else's load should count; a step of
-      # its own, so it is in rest 1/2 whatever the shard weights say
+      # its own, so it is in rest 1/3 whatever the shard weights say
       - if: matrix.alone
         timeout-minutes: 11
         env:

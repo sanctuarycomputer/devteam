@@ -1,5 +1,5 @@
 // The recurring contract (kit-161; design recurring-checks-and-chores-under-upkeep, C1, C2, C3, C5):
-// RECURRING_ENTRY_SHAPE@1 in devteam.mjs and validate's check of settings.md's recurring block, the
+// RECURRING_ENTRY_SHAPE@1 in devteam.mjs and validate's check of the jobs file (project/recurring.json, kit-162), the
 // run records in log.schema.json, recurring-edit as an owner-only class, and the fixtures
 // test/fixtures/recurring/{slots,peek,dashboard}.json@1 that kit-162 to kit-169 and kit-175 build
 // against. devteam.mjs exports nothing, so its rules are tested through validate and log-check on a
@@ -39,9 +39,11 @@ function withSettings(dir, patch) {
   for (const [k, v] of Object.entries(patch)) if (v === undefined) delete o[k]; else o[k] = v;
   fs.writeFileSync(f, text.replace(BLOCK, () => `\`\`\`json devteam\n${JSON.stringify(o, null, 2)}\n\`\`\``));
 }
-const withRecurring = (dir, block) => withSettings(dir, { recurring: block });
+// the jobs file (kit-162: the jobs left settings.md): block written as the kit writes it; undefined removes the file
+const jobsFile = (dir) => path.join(dir, 'docs/devteam/project/recurring.json');
+const withRecurring = (dir, block) => { if (block === undefined) fs.rmSync(jobsFile(dir), { force: true }); else fs.writeFileSync(jobsFile(dir), `${JSON.stringify(block, null, 2)}\n`); };
 const validate = (dir) => cli(dir, ['validate']);
-const recurringLines = (out) => out.split('\n').filter((l) => /settings recurring/.test(l));
+const recurringLines = (out) => out.split('\n').filter((l) => /recurring\.json/.test(l));
 
 // A valid entry of each kind, with extra over it (a field set to undefined is left out).
 const check = (extra = {}) => ({ kind: 'check', title: 'T', what: 'W', every: '1d', run: 'npm test', ...extra });
@@ -176,53 +178,62 @@ test('validate refuses each case, naming the entry and field', () => {
   for (const [name, entry, field] of REFUSED) {
     withRecurring(dir, { 'fine-one': check(), [name]: entry });
     const r = validate(dir);
-    const want = `error: settings recurring.${name}${field ? `.${field}` : ''}: `;
+    const want = `error: recurring.json ${name}${field ? `.${field}` : ''}: `;
     assert.equal(r.status, 1, `${name}: ${r.out}`);
     assert.ok(r.out.split('\n').some((l) => l.startsWith(want)), `${name}: no line starting ${JSON.stringify(want)} in\n${r.out}`);
-    assert.ok(!r.out.includes('settings recurring.fine-one'), `${name}: the valid entry beside it is named\n${r.out}`);
+    assert.ok(!r.out.includes('recurring.json fine-one'), `${name}: the valid entry beside it is named\n${r.out}`);
   }
   for (const block of [[], 'x', 3, null]) {
     withRecurring(dir, block);
     const r = validate(dir);
     assert.equal(r.status, 1, `${JSON.stringify(block)}: ${r.out}`);
-    assert.ok(r.out.split('\n').some((l) => l.startsWith('error: settings recurring: ')), `${JSON.stringify(block)}: ${r.out}`);
+    assert.ok(r.out.split('\n').some((l) => l.startsWith('error: recurring.json in this checkout: not a JSON object')), `${JSON.stringify(block)}: ${r.out}`);
   }
   withRecurring(dir, undefined);
-  assert.equal(validate(dir).status, 0, 'no recurring key: nothing to check');
+  assert.equal(validate(dir).status, 0, 'no jobs file: nothing to check');
 });
 
 test('a run the owner\'s own scrub patterns would hide is refused, whatever their marker', () => {
   const dir = project('recur-scrub');
   withSettings(dir, {
     sensor_scrub: [{ pattern: 'ACME-[0-9a-z]{8}', as: '[ACME]' }, { pattern: 'ZED-[0-9]{4}', as: '[acme_id]' }, { pattern: 'QQ-[0-9]{4}', as: 'HIDDEN' }, 'PLAIN-[0-9]{4}', { pattern: 'GONE-[0-9]{4}', as: '' }, { pattern: 'KEEP-([0-9]{2})[0-9]{2}', as: 'KEEP-$1..' }, { pattern: 'LOC-[0-9]{4}', as: '[ip]' }],
-    recurring: { 'safe-one': check({ run: 'curl https://example.com/ACME' }) },
   });
+  withRecurring(dir, { 'safe-one': check({ run: 'curl https://example.com/ACME' }) });
   assert.equal(validate(dir).status, 0, 'a run with no match passes');
   for (const [name, run] of [['acme', 'tool --id ACME-1234abcd'], ['zed', 'tool --id ZED-1234'], ['qq', 'tool --id QQ-1234'], ['plain', 'tool --id PLAIN-1234'], ['gone', 'tool --id GONE-1234'], ['keep', 'tool --id KEEP-1234'], ['loc', 'tool --id LOC-1234']]) {
-    withSettings(dir, { recurring: { [name]: check({ run }) } });
+    withRecurring(dir, { [name]: check({ run }) });
     const r = validate(dir);
     assert.equal(r.status, 1, `${name}: ${r.out}`);
-    assert.match(r.out, new RegExp(`^error: settings recurring\\.${name}\\.run: `, 'm'), name);
+    assert.match(r.out, new RegExp(`^error: recurring\\.json ${name}\\.run: `, 'm'), name);
   }
 });
 
-test('validate checks this checkout\'s recurring block, whatever main has', () => {
+test('validate checks this checkout\'s jobs file, whatever main has', () => {
   const dir = project('recur-main');
   withRecurring(dir, { 'ci-main': check() });
   git(dir, ['add', '-A']);
   git(dir, ['commit', '-qm', 'a job on main']);
+  assert.equal(git(dir, ['ls-tree', '--name-only', 'HEAD', '--', 'docs/devteam/project/recurring.json']).trim(), 'docs/devteam/project/recurring.json', 'main has the jobs file');
   assert.equal(validate(dir).status, 0);
   withRecurring(dir, { 'ci-main': check({ every: '30m' }) });
   const r = validate(dir);
   assert.equal(r.status, 1, r.out);
-  assert.match(r.out, /^error: settings recurring\.ci-main\.every: /m);
+  assert.match(r.out, /^error: recurring\.json ci-main\.every: /m);
+});
+
+test('a "recurring" key in settings.md is refused: the jobs live in recurring.json', () => {
+  const dir = project('recur-in-settings');
+  withSettings(dir, { recurring: { 'ci-main': check() } });
+  const r = validate(dir);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^error: settings\.md has "recurring": the jobs live in docs\/devteam\/project\/recurring\.json; move them there/m);
 });
 
 test('the shape is a constant in devteam.mjs, with no new schema file', () => {
   const at = SRC.indexOf('\nconst RECURRING_ENTRY_SHAPE = Object.freeze({');
   assert.ok(at > 0, 'RECURRING_ENTRY_SHAPE is a frozen constant');
   assert.match(SRC.slice(at, at + 400), /\n {2}version: 1,/);
-  assert.match(SRC, /\nfunction recurringEntryProblems\(name, entry\) \{/);
+  assert.match(SRC, /\nfunction recurringEntryProblems\(name, entry(, prefix = 'recurring\.json')?\) \{/);
   assert.deepEqual(fs.readdirSync(path.join(kit, 'schema')).filter((f) => f.startsWith('recurring')), []);
 });
 
