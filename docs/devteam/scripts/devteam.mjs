@@ -27707,6 +27707,58 @@ function browserWriteState(s) {
   fs.writeFileSync(tmp, `${JSON.stringify(s)}\n`, { mode: 0o600, flag: 'wx' });
   fs.renameSync(tmp, browserStateFile());
 }
+// --- the reset ledger (kit-67): run/browser/resets.json, browser@1's resets. The daemon's record of
+// the closes it handled, oldest first; it never says how a handover ended (wait reads the fold).
+const browserLedgerFile = () => path.join(BROWSER_DIR(), 'resets.json');
+const BROWSER_QID = /^q-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const BROWSER_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const browserLedgerEntry = (e) => isObj(e) && Object.keys(e).every((k) => ['qid', 'outcome', 'reset', 'at', 'reopened'].includes(k)) && typeof e.qid === 'string' && BROWSER_QID.test(e.qid)
+  && ['done', 'declined', 'withdrawn'].includes(e.outcome) && typeof e.reset === 'boolean' && typeof e.at === 'string' && BROWSER_AT.test(e.at)
+  && (e.reopened === undefined || (Array.isArray(e.reopened) && e.reopened.every((u) => typeof u === 'string' && BROWSER_MASKED.test(u))));
+// Its entries. A file that can't be read, isn't JSON or is off the contract anywhere reads as [] (one
+// restart then handles every close it listed, and the file is written whole again).
+function browserLedger() {
+  try {
+    const j = JSON.parse(fs.readFileSync(browserLedgerFile(), 'utf8'));
+    if (isObj(j) && j.browser === 1 && Object.keys(j).length === 2 && Array.isArray(j.resets) && j.resets.every(browserLedgerEntry)) return j.resets;
+  } catch {}
+  return [];
+}
+// entries appended, written whole: a tmp file (0600), then renamed over it.
+function browserLedgerAdd(entries) {
+  browserDirMade();
+  const tmp = path.join(BROWSER_DIR(), `resets.json.${process.pid}.tmp`);
+  fs.rmSync(tmp, { force: true });
+  fs.writeFileSync(tmp, `${JSON.stringify({ browser: 1, resets: [...browserLedger(), ...entries] })}\n`, { mode: 0o600, flag: 'wx' });
+  fs.renameSync(tmp, browserLedgerFile());
+}
+// Whether the close of handover h (closed, from browserHandovers) is handled: the record of a close
+// this daemon handled (ctx.handled) with the same qid, close time and outcome; or the ledger's latest
+// entry for the qid (the last in file order) with the outcome the fold reads now and an at from the
+// close time up to the later of the close time and now, plus 60 s. The record or the entry, else null.
+// An entry written before the close, far ahead, or with another outcome doesn't count: handled again.
+function browserHandled(ctx, h, ledger, now) {
+  const mem = ctx.handled.get(h.qid);
+  if (mem && mem.closeAt === h.closeAt && mem.outcome === h.outcome) return mem;
+  const e = ledger.filter((x) => x.qid === h.qid).at(-1);
+  if (!e || e.outcome !== h.outcome) return null;
+  const at = Date.parse(e.at), closed = Date.parse(h.closeAt);
+  return at >= closed && at <= Math.max(closed, now) + 60000 ? e : null;
+}
+// The closes of this scope not yet handled, from the handovers hs.
+function browserUnhandled(ctx, hs) {
+  const ledger = browserLedger(), now = Date.now();
+  return hs.filter((h) => h.status !== 'open' && h.outcome && h.closeAt && !browserHandled(ctx, h, ledger, now));
+}
+// The entries for closes handled, written to the ledger and recorded in memory. at is the later of
+// now and the close time, so a close line dated ahead of this clock is handled once, never in a loop.
+// reopened (masked) on done only.
+function browserRecordCloses(ctx, closes, reopened) {
+  const now = Date.now();
+  const entries = closes.map((h) => ({ qid: h.qid, outcome: h.outcome, reset: h.outcome !== 'done', at: new Date(Math.max(now, Date.parse(h.closeAt))).toISOString(), ...(h.outcome === 'done' ? { reopened } : {}) }));
+  browserLedgerAdd(entries);
+  for (const h of closes) ctx.handled.set(h.qid, { qid: h.qid, closeAt: h.closeAt, outcome: h.outcome, ...(h.outcome === 'done' ? { reopened } : {}) });
+}
 // The daemon's answer to one verb: { code, out }. Rejects when nothing answers in ms.
 function browserCall(verb, args = {}, { state = browserState(), ms = 120000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -28409,7 +28461,9 @@ function browserUserAgent(bin) {
 // more with --no-sandbox, and a note. Its stderr is kept (the last 64 KiB) only until then, for the
 // sandbox check; after, it is drained and dropped: Chrome's log lines can carry page URLs.
 async function browserLaunchChrome(ctx, { headed }) {
-  const ua = browserUserAgent(ctx.bin);
+  // read once per daemon (a spawn of Chrome, most of a second): a close or a forget relaunches the same binary
+  if (ctx.ua === undefined) ctx.ua = browserUserAgent(ctx.bin);
+  const ua = ctx.ua;
   const args = [
     ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-pipe',
     `--proxy-server=127.0.0.1:${ctx.guard.port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
@@ -28473,13 +28527,48 @@ function browserWatchChrome(ctx, chrome, cdp) {
   cdp.on('close', gone);
   cdp.on('Page.screencastFrame', (p, sid) => browserViewFrame(ctx, p, sid));
 }
-// Sign out of everything (the view's forget), on the verbs' queue: the screencast stopped, the
-// current Chrome retired and ended, the profile folder (ctx.profile, the one the daemon runs on)
-// removed only once no process carries it, made again empty with this checkout's root.json, its start
-// steps, a fresh Chrome on about:blank, the tabs watched again, state.json rewritten with the new
-// chrome_pid, and the screencast started again on the same viewer (its seq goes on). The daemon,
-// guard, control port and preview stay. A stop meanwhile wins: after each await, ctx.stopping ends
-// it (browserShutdown kills ctx.chrome, whichever it is). Any failure stops the daemon.
+// The clean restart a forget and a close share, on the verbs' queue, with ctx.ready already false:
+// the current Chrome retired and ended, then up to 5 s until no process carries the profile; with
+// wipe, the profile folder (ctx.profile, the one the daemon runs on) removed and made again empty
+// with this checkout's root.json; its start steps (the session files deleted, a failed delete
+// throwing; the prefs), a fresh Chrome on about:blank, the tabs watched again and state.json
+// rewritten with the new chrome_pid. The daemon, guard, control port and preview stay. A stop
+// meanwhile wins: after each await, ctx.stopping ends it (browserShutdown kills ctx.chrome, whichever
+// it is). Processes that can't be listed, or one left, and any failure stop the daemon (the next start
+// cleans up). True once the fresh Chrome is up; false when it ended.
+async function browserRelaunch(ctx, { wipe }) {
+  try {
+    const old = ctx.chrome;
+    old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
+    await browserEndChrome(ctx.cdp, old.pid);
+    if (ctx.stopping) return false;
+    let procs = browserProcsOn(ctx.profile);
+    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(100);
+    if (ctx.stopping) return false;
+    if (procs === null || procs.length) { browserShutdown(ctx, 'error'); return false; } // nothing removed on a guess
+    if (wipe) {
+      fs.rmSync(ctx.profile, { recursive: true, force: true });
+      ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
+    }
+    await browserPrepareProfile(ctx.profile, []);
+    if (ctx.stopping) return false;
+    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return false; } // launched while it stopped
+    ctx.cdp = cdp;
+    browserWatchChrome(ctx, ctx.chrome, cdp);
+    ctx.tabs = [];
+    ctx.active = null;
+    await browserWatchTabs(ctx);
+    for (let i = 0; i < 100 && !ctx.stopping && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
+    if (ctx.stopping) return false;
+    ctx.state = { ...ctx.state, chrome_pid: ctx.chrome.pid };
+    browserWriteState(ctx.state);
+    return true;
+  } catch { browserShutdown(ctx, 'error'); return false; }
+}
+// Sign out of everything (the view's forget), on the verbs' queue: the screencast stopped, then the
+// clean restart with the profile wiped (browserRelaunch), and the screencast started again on the same
+// viewer (its seq goes on).
 async function browserForgetRestart(ctx) {
   if (ctx.stopping || !ctx.ready) return;
   try {
@@ -28488,32 +28577,75 @@ async function browserForgetRestart(ctx) {
     if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
     if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
-    const old = ctx.chrome;
-    old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
-    await browserEndChrome(ctx.cdp, old.pid);
-    if (ctx.stopping) return;
-    let procs = browserProcsOn(ctx.profile);
-    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(100);
-    if (ctx.stopping) return;
-    if (procs === null || procs.length) return void browserShutdown(ctx, 'error'); // nothing removed on a guess
-    fs.rmSync(ctx.profile, { recursive: true, force: true });
-    ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
-    await browserPrepareProfile(ctx.profile, []);
-    if (ctx.stopping) return;
-    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
-    if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // launched while it stopped
-    ctx.cdp = cdp;
-    browserWatchChrome(ctx, ctx.chrome, cdp);
-    ctx.tabs = [];
-    ctx.active = null;
-    await browserWatchTabs(ctx);
-    for (let i = 0; i < 100 && !ctx.stopping && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
-    if (ctx.stopping) return;
-    ctx.state = { ...ctx.state, chrome_pid: ctx.chrome.pid };
-    browserWriteState(ctx.state);
+    if (!(await browserRelaunch(ctx, { wipe: true }))) return;
     ctx.ready = true;
     if (ctx.viewer) browserViewTick(ctx, ctx.viewer); // the screencast again, on the same socket
   } catch { browserShutdown(ctx, 'error'); }
+}
+// --- the gate on a close (kit-67): the handovers this daemon hasn't handled since they closed, all in
+// one clean restart, on the verbs' queue. In order: (1) the owner cut off, before Chrome is touched:
+// ctx.ready false (the view drops all input) and the viewer sent bye, its socket closed; (2) the pages
+// to reopen, only when the batch is one done (pages, noted by the caller; none until they are noted);
+// (3, 4) Chrome stopped and started fresh on a clean session (browserRelaunch, no wipe); (5) on done,
+// those pages reopened; (6) one ledger entry per close, each recorded in memory too; then ctx.ready.
+// A stop meanwhile ends it at its next check, with no entry: the next start handles the close.
+async function browserCloseRestart(ctx, closes, { pages = [] } = {}) {
+  if (ctx.stopping || !closes.length) return;
+  try {
+    ctx.ready = false;
+    const v = ctx.viewer;
+    if (v) {
+      try { v.ws.send({ t: 'bye', why: 'The supervisor has the browser again.' }); v.ws.close(1000); } catch {}
+      browserViewClose(ctx, v);
+    }
+    const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
+    if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
+    const reopen = closes.length === 1 && closes[0].outcome === 'done' ? pages : []; // only one done reopens
+    if (!(await browserRelaunch(ctx, { wipe: false }))) return;
+    // step 5 (kit-67 T5): the pages in reopen opened by plain GET, and listed here masked; none until then
+    const reopened = [];
+    if (ctx.stopping) return;
+    browserRecordCloses(ctx, closes, reopened);
+    ctx.ready = true;
+  } catch { browserShutdown(ctx, 'error'); }
+}
+// The gate, run only from a job already on the verbs' queue (a verb's run, or the watch's job): it
+// folds afresh, keeps ctx.held, and runs one restart for every close not yet handled. It never queues
+// itself and never skips, so a later queued job finds nothing left.
+async function browserGate(ctx) {
+  if (ctx.stopping) return;
+  const hs = browserHandovers();
+  ctx.held = browserHeld(hs);
+  const closes = browserUnhandled(ctx, hs);
+  if (closes.length) await browserCloseRestart(ctx, closes, { pages: [] });
+}
+// At start, once the fresh Chrome is up and before the control server takes verbs: an entry for each
+// close not yet handled, with no reopen (a dead daemon's notes are gone: R1), so done gets reopened []
+// and no tab comes back. Chrome needs no restart: every start already deleted the session files.
+function browserStartGate(ctx) {
+  const hs = browserHandovers();
+  ctx.held = browserHeld(hs);
+  const closes = browserUnhandled(ctx, hs);
+  if (closes.length) browserRecordCloses(ctx, closes, []);
+}
+// The watch, from start to stop: every 500 ms a fresh fold (browserFresh keys it cheaply), ctx.held
+// kept, and a close not yet handled queued once on the verbs' queue (ctx.gateQueued, set when queued
+// and cleared when the job ends, so a close queued or running isn't queued again). With
+// DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0 (tests) it keeps ctx.held only: a close is then handled by a
+// verb's pre-verb read or wait's settle alone.
+function browserWatch(ctx) {
+  const t = setInterval(() => {
+    if (ctx.stopping) return;
+    let hs;
+    try { hs = browserHandovers(); } catch { return; }
+    ctx.held = browserHeld(hs);
+    if (browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_HANDLE') === '0' || ctx.gateQueued) return;
+    if (!browserUnhandled(ctx, hs).length) return;
+    ctx.gateQueued = true;
+    ctx.serial(() => browserGate(ctx)).finally(() => { ctx.gateQueued = false; });
+  }, 500);
+  t.unref();
+  return t;
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
 // hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
@@ -28524,6 +28656,7 @@ function browserShutdown(ctx, why) {
   ctx.stopping = (async () => {
     clearTimeout(ctx.idle);
     clearInterval(ctx.renew);
+    clearInterval(ctx.watch);
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
@@ -28552,12 +28685,28 @@ function browserVerbs(ctx) {
       return { code: 0, out: [`browser running (preview ${s.preview}, profile ${s.instance})`, `url: ${s.url}`, `tabs: ${s.tabs}`, `restarted: ${s.restarted ? 'yes' : 'no'}`, browserHeldLine(s.held), ...s.notes.map((n) => `note: ${n}`)].join('\n') };
     },
     stop: async () => { ctx.after = () => browserShutdown(ctx, 'stop'); return { code: 0, out: 'browser stopped' }; },
+    // internal (browser wait's): the gate, then every close of this scope that is handled, by this
+    // daemon's record or by the ledger, with reopened from that record
+    settle: async () => {
+      await browserGate(ctx);
+      if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
+      const ledger = browserLedger(), now = Date.now();
+      const handled = [];
+      for (const h of browserHandovers()) {
+        if (h.status === 'open' || !h.outcome || !h.closeAt) continue;
+        const r = browserHandled(ctx, h, ledger, now);
+        if (r) handled.push({ qid: h.qid, outcome: h.outcome, ...(Array.isArray(r.reopened) ? { reopened: r.reopened } : {}) });
+      }
+      return { code: 0, out: JSON.stringify({ handled }) };
+    },
     open: async ({ url }) => {
       if (!browserHttp(url)) return { code: 1, out: 'browser open takes an http: or https: URL' };
       const tab = ctx.active;
       if (!tab?.sessionId) return { code: 1, out: 'browser open: no tab to open it in' };
       Object.assign(tab, { opening: url, frameUrl: null, unreachable: null, refs: new Map() });
       const r = await browserLoad(tab, () => ctx.cdp.send('Page.navigate', { url }, tab.sessionId));
+      const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_OPEN_DELAY_MS')); // tests: a long open, landed
+      if (hold > 0) await browserSleep(hold);
       return browserLanded(ctx, tab, r, url, (u, title) => `opened ${u} (${title})`);
     },
     snapshot: async ({ json }) => ({ code: 0, out: await browserSnapshot(ctx, ctx.active, !!json) }),
@@ -28654,9 +28803,12 @@ function browserControl(ctx, secret) {
         if (!verb) return { code: 1, out: `usage: ${BROWSER_USAGE}` };
         if (verb !== 'ping') clearTimeout(ctx.idle); // paused while the verb runs
         try {
-          // the hold, read again here: a verb the CLI's check let by (or a call that skipped the CLI)
-          // is refused while the owner has the browser. settle serves nothing to the agent.
+          // a close first, so no verb runs ahead of one (settle runs the gate itself), then the hold,
+          // read again here: a verb the CLI's check let by (or a call that skipped the CLI) is refused
+          // while the owner has the browser. settle serves nothing to the agent.
           if (!['ping', 'status', 'stop', 'settle'].includes(verb)) {
+            await browserGate(ctx);
+            if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
             const held = browserHeld(browserHandovers());
             if (held) return { code: 3, out: `the owner has the browser (${held})` };
           }
@@ -28975,7 +29127,7 @@ function browserViewServer(ctx) {
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, gateQueued: false, watch: null };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   browserIsDaemon = true;
   const viewPort = Number(process.env.PORT);
@@ -28999,8 +29151,11 @@ async function browserServe({ chrome: bin }) {
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
     ctx.verbs = browserVerbs(ctx);
     const secret = crypto.randomBytes(32).toString('hex');
-    const { server, arm } = browserControl(ctx, secret);
+    const { server, arm } = browserControl(ctx, secret); // the verbs' queue (ctx.serial); ctx.handled is made above
     ctx.control = server;
+    // closes made while no daemon ran are handled before any verb is taken (kit-67), then the watch
+    browserStartGate(ctx);
+    ctx.watch = browserWatch(ctx);
     const controlPort = await browserListen(server, 0);
     ctx.state = { browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview };
     browserWriteState(ctx.state); // a forget rewrites it with its new chrome_pid
@@ -29115,6 +29270,52 @@ async function browserHandover() {
   Object.assign(flags, { kind: 'owner-action', class: 'browser-handover', scope, question: reason, context, links: JSON.stringify([{ title: 'Open the browser', preview: s.preview }]), choices: JSON.stringify([{ label: 'Done' }, { label: "Can't right now" }]), stake: '2', urgency: '2' });
   out(askLine().id);
 }
+// browser wait [--timeout <n>s|<n>m|<n>h]: how this scope's handover ended, as browser@1's wait. The
+// handover is the held one (the oldest open), else the most recently asked; only that qid is read.
+// While it is open: the fold every 500 ms, the daemon kept running (a dead one and its view started
+// again under the same preview name), and after --timeout {outcome: timeout} with the hold left.
+// Once it is closed: the daemon's settle (the daemon started if none runs; its start handles the close
+// too) until it lists the qid with the fold's outcome, up to 120 s; then the fold's outcome and, on
+// done, the entry's reopened. The outcome is always the fold's, never a run/ file's.
+const BROWSER_WAIT_USAGE = 'usage: browser wait [--timeout <n>s|<n>m|<n>h] (1 s to 24 h)';
+async function browserWait() {
+  if (positional.length !== 1 || rest !== null || Object.keys(flags).some((k) => k !== 'timeout')) die(BROWSER_WAIT_USAGE);
+  let limit = null;
+  if (flags.timeout !== undefined) {
+    const m = /^([1-9]\d{0,5})([smh])$/.exec(typeof flags.timeout === 'string' ? flags.timeout : '');
+    limit = m ? Number(m[1]) * { s: 1000, m: 60000, h: 3600000 }[m[2]] : 0;
+    if (!(limit >= 1000 && limit <= 86400000)) die(BROWSER_WAIT_USAGE);
+  }
+  const scope = browserScope();
+  const hs = browserHandovers(scope);
+  const qid = browserHeld(hs) ?? hs.at(-1)?.qid;
+  if (!qid) die('browser wait: no handover has been asked on this browser');
+  const start = Date.now();
+  const find = () => browserHandovers(scope).find((h) => h.qid === qid);
+  let h = find();
+  while (h.status === 'open') {
+    await browserEnsure();
+    if (limit !== null && Date.now() - start >= limit) return out(JSON.stringify({ browser: 1, qid, outcome: 'timeout' }));
+    await browserSleep(500);
+    h = find();
+  }
+  const bound = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WAIT_MS')) || 120000;
+  const closed = Date.now();
+  for (;;) {
+    let listed = null;
+    try {
+      const s = await browserEnsure();
+      const r = await browserCall('settle', {}, { state: s });
+      if (r.code === 0) listed = JSON.parse(r.out)?.handled?.find((x) => x?.qid === qid) ?? null;
+    } catch {}
+    h = find();
+    if (h.status !== 'open' && listed && listed.outcome === h.outcome) {
+      return out(JSON.stringify({ browser: 1, qid, outcome: h.outcome, ...(h.outcome === 'done' && Array.isArray(listed.reopened) ? { reopened: listed.reopened } : {}) }));
+    }
+    if (Date.now() - closed >= bound) die(`browser wait: the browser hasn't confirmed the reset after ${qid} closed; browser status says more`);
+    await browserSleep(500);
+  }
+}
 // Which gates each verb runs: status, profiles and stop skip Chrome; the memory check is browserEnsure's.
 const BROWSER_VERBS = {
   ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve', 'handover', 'wait'].map((v) => [v, { chrome: true }])),
@@ -29144,7 +29345,7 @@ async function cmdBrowser() {
   if (verb === 'stop') return browserStop();
   if (verb === 'start') { const s = await browserEnsure({ headed: !!flags.headed }); return out(`browser running (preview ${s.preview}, profile ${browserKey()})`); }
   if (verb === 'handover') return browserHandover();
-  if (verb === 'wait') die('browser wait: not built yet');
+  if (verb === 'wait') return browserWait();
   // open is refused before any daemon is touched unless its URL is http(s)
   if (verb === 'open' && (positional.length !== 2 || !browserHttp(positional[1]))) die('browser open takes an http: or https: URL');
   // Each verb's arguments, checked here so a wrong one starts nothing; a refusal never echoes a typed

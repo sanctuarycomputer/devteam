@@ -16,6 +16,7 @@ import path from 'node:path';
 import { monoFixture } from './kit.mjs';
 import { startSites } from './sites.mjs';
 import { ws } from './browser-view-fixture.mjs';
+import { validate } from '../fixtures/browser/check.mjs';
 
 export let tmp;
 // startSites(): { port, origin, username, password, code, posts(), events(), sessions(), close() }
@@ -85,6 +86,82 @@ export async function ownerVia(P, how, args) {
   const r = await kit(P, args, { DEVTEAM_ROLE: 'supervisor' });
   if (r.status === 0) P.ownerAnswers++;
   return r;
+}
+
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// fn's first truthy value within ms (polled every 50 ms), or a failure naming what.
+export async function until(fn, ms, what) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() > end) return assert.fail(`${what}: not within ${ms} ms`);
+    await sleep(50);
+  }
+}
+// P's state.json as written, or null.
+export const readState = (P) => { try { return JSON.parse(fs.readFileSync(P.state, 'utf8')); } catch { return null; } };
+// browser handover on P (the daemon started if need be): the qid it asked.
+export async function askHandover(P, reason = 'Log in to the fixture site, then press Done') {
+  const r = await browser(P, ['handover', '--reason', reason]);
+  assert.equal(r.status, 0, `browser handover: exit ${r.status}: ${r.err || r.out}`);
+  const qid = qidOf(r);
+  assert.ok(qid, r.out);
+  return qid;
+}
+// browser wait [args] on P: its output parsed, asserted to exit 0 and to validate as browser@1's wait.
+export async function waitJson(P, args = [], env) {
+  const r = await browser(P, ['wait', ...args], env);
+  assert.equal(r.status, 0, `browser wait ${args.join(' ')}: exit ${r.status}: ${r.err || r.out}`);
+  const w = JSON.parse(r.out);
+  assert.deepEqual(validate('wait', w), [], r.out);
+  return w;
+}
+// A browser-handover question line of P's scope, for appendLine; extra fields laid over it.
+export const handoverLine = (P, extra = {}) => ({ type: 'question', kind: 'owner-action', class: 'browser-handover', scope: `browser:${P.key}`, question: 'Log in (merged by hand)', choices: CHOICES, ...extra });
+// P's ledger entries for qid, oldest first.
+export const entriesFor = (P, qid) => (readLedger(P)?.resets ?? []).filter((e) => e.qid === qid);
+// P's ledger, when there is one, validates as browser@1's resets and is mode 0600.
+export function ledgerValid(P) {
+  if (!P || !fs.existsSync(P.ledger)) return;
+  const l = readLedger(P);
+  assert.deepEqual(validate('resets', l), [], JSON.stringify(l));
+  assert.equal(fs.statSync(P.ledger).mode & 0o777, 0o600, 'resets.json is mode 0600');
+}
+// The pids of processes whose command line carries P's profile as --user-data-dir.
+export function profilePids(P) {
+  const pids = [];
+  for (const d of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+    let cmd; try { cmd = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8'); } catch { continue; }
+    if (cmd.split('\0').some((a) => a === `--user-data-dir=${P.profile}` || a === `--user-data-dir=${P.profile}${path.sep}`)) pids.push(Number(d));
+  }
+  return pids;
+}
+// Alive and not a zombie.
+export function alive(pid) {
+  try { process.kill(pid, 0); } catch { return false; }
+  try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return st.slice(st.lastIndexOf(')') + 2)[0] !== 'Z'; } catch { return false; }
+}
+// kill -9 P's daemon (state.json's daemon_pid), waited until it is gone. Its Chrome is left running,
+// as a crash leaves it; the next start stops it.
+export async function killDaemon(P) {
+  const pid = readState(P)?.daemon_pid;
+  assert.ok(Number.isInteger(pid) && alive(pid), 'a live daemon to kill');
+  process.kill(pid, 'SIGKILL');
+  await until(() => !alive(pid), 5000, 'the killed daemon gone');
+}
+// The owner types text into the open /record page's note over the view: a socket, a frame, a click on
+// the page's button, Tab to the note, then a paste; resolved once the site recorded the whole value.
+// The socket is returned, still open.
+export async function typeNote(P, text) {
+  const v = await viewSocket(P);
+  await v.waitFor((m) => m.t === 'frame', 5000);
+  v.send({ t: 'mouse', type: 'click', x: 108, y: 120, button: 'left', clicks: 1 });
+  await sleep(200);
+  v.tab();
+  v.paste(text);
+  await until(() => site.events().some((e) => e.kind === 'input' && e.value === text), 5000, 'the typed note on the page');
+  return v;
 }
 
 // The owner at the view: a socket to P's view port (state.json's view_port) with the view's own Origin.

@@ -11,7 +11,7 @@ import path from 'node:path';
 import { canDrive } from './lib/chrome.mjs';
 import { monoFixture } from './lib/kit.mjs';
 import { validate } from './fixtures/browser/check.mjs';
-import { handoverFile, project, kit, browser, owner, answerLines, appendLine, readLedger, site, CHOICES, qidOf, ok, withdraw } from './lib/browser-handover-fixture.mjs';
+import { handoverFile, project, kit, browser, owner, ownerVia, answerLines, appendLine, site, CHOICES, qidOf, ok, withdraw, sleep, until, readState, askHandover, waitJson, handoverLine, entriesFor, ledgerValid, typeNote, viewSocket } from './lib/browser-handover-fixture.mjs';
 
 handoverFile();
 
@@ -19,7 +19,11 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // the Chrome checks take these (later tasks)
-const chromeOpts = { skip, timeout: 120000 };
+// The Chrome checks run as two chains at once, one per project (each its own daemon), checks in
+// order within a chain: hA's (C1 to C10, C22, RF5) and hB's (C11, RF1). onA and onB add a check.
+const hAChecks = [], hBChecks = [];
+const onA = (name, fn) => hAChecks.push([name, fn]);
+const onB = (name, fn) => hBChecks.push([name, fn]);
 if (mustRun && !canDrive) test('Chrome is needed on CI\'s Node 22+', () => assert.fail('Chrome is needed on CI\'s Node 22+: this file must run there, not skip'));
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -155,9 +159,8 @@ const direct = (P, verb, args = {}) => new Promise((resolve, reject) => {
   req.on('error', reject);
   req.end(body);
 });
-const handoverLine = (P, extra = {}) => ({ type: 'question', kind: 'owner-action', class: 'browser-handover', scope: `browser:${P.key}`, question: 'Log in (merged by hand)', choices: [{ label: 'Done' }, { label: "Can't right now" }], ...extra });
 
-test('C1 browser handover asks one owner-action question: class, scope, choices, a preview link by name', chromeOpts, async () => {
+onA('C1 browser handover asks one owner-action question: class, scope, choices, a preview link by name', async () => {
   const P = hA();
   await ok(P, ['start']);
   await ok(P, ['open', `${site.origin}/login`]);
@@ -191,11 +194,12 @@ test('C1 browser handover asks one owner-action question: class, scope, choices,
   assert.equal(d.questions.find((q) => q.id === H1)?.class_name, 'Handing the browser to you for a login');
 });
 
-test('C4 while held every agent verb exits 3, status says held, profiles, stop and start run; the daemon refuses a direct call', chromeOpts, async () => {
+onA('C4 while held every agent verb exits 3, status says held, profiles, stop and start run; the daemon refuses a direct call', async () => {
   const P = hA();
   assert.ok(H1, 'C1 asked the handover');
-  for (const args of [['open', `${site.origin}/account`], ['snapshot'], ['click', 'e1'], ['type', 'e1', 'x'], ['press', 'Enter'], ['scroll', 'down'], ['back'], ['tabs'], ['tab', '1'], ['screenshot'], ['forget'], ['forget', '--profile', P.key], ['forget', '--profile', 'other-0123456789ab'], ['type', 'e1', '--stdin']]) {
-    const r = await browser(P, args);
+  const refusedVerbs = [['open', `${site.origin}/account`], ['snapshot'], ['click', 'e1'], ['type', 'e1', 'x'], ['press', 'Enter'], ['scroll', 'down'], ['back'], ['tabs'], ['tab', '1'], ['screenshot'], ['forget'], ['forget', '--profile', P.key], ['forget', '--profile', 'other-0123456789ab'], ['type', 'e1', '--stdin']];
+  // each refused in the CLI before anything starts, so they run at once
+  for (const [args, r] of (await Promise.all(refusedVerbs.map(async (args) => [args, await browser(P, args)])))) {
     assert.equal(r.status, 3, `browser ${args.join(' ')}: exit ${r.status}: ${r.err || r.out}`);
     assert.match(r.err, HELD_WORDS(args[0], H1), `browser ${args.join(' ')}`);
   }
@@ -219,12 +223,11 @@ test('C4 while held every agent verb exits 3, status says held, profiles, stop a
   assert.equal((await direct(P, 'snapshot', {})).code, 3, 'a new daemon refuses too');
 });
 
-test('C5 no file or restart releases the hold: state.json deleted, the daemon killed, stop then start', chromeOpts, async () => {
+onA('C5 no file or restart releases the hold: state.json deleted, the daemon killed, stop then start', async () => {
   const P = hA();
   assert.ok(H1, 'C1 asked the handover');
   const refusedBoth = async (why) => {
-    for (const args of [['snapshot'], ['open', `${site.origin}/account`]]) {
-      const r = await browser(P, args);
+    for (const [args, r] of await Promise.all([['snapshot'], ['open', `${site.origin}/account`]].map(async (args) => [args, await browser(P, args)]))) {
       assert.equal(r.status, 3, `${why}: browser ${args[0]}: exit ${r.status}: ${r.err || r.out}`);
       assert.match(r.err, HELD_WORDS(args[0], H1), why);
     }
@@ -240,7 +243,7 @@ test('C5 no file or restart releases the hold: state.json deleted, the daemon ki
   assert.equal((await statusJson(P)).held, H1);
 });
 
-test('C10 a second handover while one is open is refused, naming it, and adds no line', chromeOpts, async () => {
+onA('C10 a second handover while one is open is refused, naming it, and adds no line', async () => {
   const P = hA();
   assert.ok(H1, 'C1 asked the handover');
   const n0 = questionLines(P).length;
@@ -253,11 +256,11 @@ test('C10 a second handover while one is open is refused, naming it, and adds no
   assert.equal(questionLines(P).length, n0, 'no line is added');
 });
 
-test('handover takes --reason alone: non-blank, at most 2000 characters', chromeOpts, async () => {
+onA('handover takes --reason alone: non-blank, at most 2000 characters', async () => {
   const P = hA();
   const n0 = questionLines(P).length;
-  for (const args of [[], ['--reason'], ['--reason', '   '], ['--reason='], ['--reason', 'x'.repeat(2001)], ['--reason', '\u{1F600}'.repeat(2001)], ['--reason', 'x', '--default', 'Done'], ['now', '--reason', 'x'], ['--reason', 'x', '--', 'more']]) {
-    const r = await browser(P, ['handover', ...args]);
+  const bad = [[], ['--reason'], ['--reason', '   '], ['--reason='], ['--reason', 'x'.repeat(2001)], ['--reason', '\u{1F600}'.repeat(2001)], ['--reason', 'x', '--default', 'Done'], ['now', '--reason', 'x'], ['--reason', 'x', '--', 'more']];
+  for (const [args, r] of (await Promise.all(bad.map(async (args) => [args, await browser(P, ['handover', ...args])])))) {
     assert.equal(r.status, 1, `handover ${args.join(' ').slice(0, 40)}: exit ${r.status}: ${r.err || r.out}`);
     assert.match(r.err, /usage: browser handover --reason/, `handover ${args.join(' ').slice(0, 40)}`);
   }
@@ -269,7 +272,7 @@ test('handover takes --reason alone: non-blank, at most 2000 characters', chrome
   assert.equal(questionLines(P).length, n0, 'no line is added');
 });
 
-test('RF5 two open handovers: held by the oldest', chromeOpts, async () => {
+onA('RF5 two open handovers: held by the oldest', async () => {
   const P = hA();
   assert.ok(H1, 'C1 asked the handover');
   const h1At = questionLines(P).find((l) => l.id === H1).at;
@@ -283,15 +286,25 @@ test('RF5 two open handovers: held by the oldest', chromeOpts, async () => {
   assert.equal((await direct(P, 'snapshot', {})).out, `the owner has the browser (${older.id})`);
   await withdraw(P, older.id);
   assert.equal((await statusJson(P)).held, H1, 'the older closed: H1 again');
+  await until(() => entriesFor(P, older.id).length, 10000, `the ledger entry for ${older.id}`);
+  // RF5's second half (T4): closing the newer of two open handovers is still a close. It gets its
+  // reset, a restart and its entry, and the hold stays on the older one (H1).
+  const pid0 = readState(P).chrome_pid;
   await withdraw(P, newer.id);
-  assert.equal((await statusJson(P)).held, H1);
+  const e = await until(() => entriesFor(P, newer.id)[0], 10000, `the ledger entry for ${newer.id}`);
+  assert.equal(e.outcome, 'withdrawn');
+  assert.equal(e.reset, true);
+  assert.equal((await statusJson(P)).held, H1, 'still held by the older one');
+  assert.notEqual(readState(P).chrome_pid, pid0, 'Chrome restarted for the newer one\'s close');
 });
 
-test('C22 another instance\'s handover never holds this browser', chromeOpts, async () => {
+onA('C22 another instance\'s handover never holds this browser', async () => {
   const P = hA();
   assert.ok(H1, 'C1 asked the handover');
   await withdraw(P, H1);
   assert.equal((await statusJson(P)).held, null);
+  // this scope's close does enter the ledger: so the other scope's absence below means something
+  await until(() => entriesFor(P, H1).length, 10000, `the ledger entry for ${H1}`);
   const other = appendLine(P, handoverLine(P, { scope: 'browser:other-0123456789ab' }));
   await ok(P, ['open', `${site.origin}/account`]);
   await ok(P, ['snapshot']);
@@ -299,6 +312,139 @@ test('C22 another instance\'s handover never holds this browser', chromeOpts, as
   assert.equal((await statusJson(P)).held, null);
   assert.match((await ok(P, ['status'])).out, /^held: no$/m);
   await withdraw(P, other.id);
-  await new Promise((r) => setTimeout(r, 1500));
-  assert.ok(!(readLedger(P)?.resets ?? []).some((e) => e.qid === other.id), 'its close enters this ledger');
+  await sleep(1500);
+  assert.equal(entriesFor(P, other.id).length, 0, 'its close enters this ledger');
+});
+
+// --- the close (T4): wait prints the fold's outcome once the daemon has handled the close.
+const marker = (what) => `zq-${what}-${Math.random().toString(36).slice(2, 10)}`;
+const tabUrls = async (P) => JSON.parse((await ok(P, ['tabs'])).out).tabs.map((t) => t.url);
+// the close as the ledger has it: its latest entry, with the outcome and reset it should have
+const entryIs = (P, qid, outcome) => {
+  const e = entriesFor(P, qid).at(-1);
+  assert.ok(e, `no ledger entry for ${qid}`);
+  assert.equal(e.outcome, outcome, JSON.stringify(e));
+  assert.equal(e.reset, outcome !== 'done', JSON.stringify(e));
+  return e;
+};
+// wait's answer for a closed qid: its outcome, and reopened on done only (the entry's)
+const waited = (P, w, qid, outcome) => {
+  assert.equal(w.qid, qid);
+  assert.equal(w.outcome, outcome, JSON.stringify(w));
+  const e = entryIs(P, qid, outcome);
+  if (outcome === 'done') assert.deepEqual(w.reopened, e.reopened, 'reopened is the entry\'s');
+  else assert.equal(w.reopened, undefined, 'reopened is on done only');
+};
+
+onA('C6 wait prints done for the owner\'s Done and a from-chat Done, declined for Can\'t right now and other words, withdrawn for a withdraw; a timeout keeps the hold', async () => {
+  const P = hA();
+  const cases = [
+    ['done', 'the owner picks Done', (q) => owner(P, ['answer', q, '--choice', 'Done'])],
+    ['done', 'a from-chat Done', (q) => ownerVia(P, 'from-chat', ['answer', q, 'Done', '--from-chat', '--said', 'Done'])],
+    ['declined', 'the owner picks Can\'t right now', (q) => owner(P, ['answer', q, '--choice', "Can't right now"])],
+    ['declined', 'the owner\'s words "maybe later"', (q) => owner(P, ['answer', q, 'maybe later'])],
+    ['withdrawn', 'a withdraw', (q) => kit(P, ['withdraw', q, '--reason', 'the test closes it'])],
+  ];
+  for (const [i, [outcome, how, close]] of cases.entries()) {
+    const q = await askHandover(P);
+    if (i === 0) {
+      const t = await waitJson(P, ['--timeout', '2s']);
+      assert.deepEqual(t, { browser: 1, qid: q, outcome: 'timeout' });
+      const r = await browser(P, ['snapshot']);
+      assert.equal(r.status, 3, `after the timeout: snapshot exit ${r.status}: ${r.err || r.out}`);
+      assert.match(r.err, HELD_WORDS('snapshot', q), 'the timeout leaves the hold');
+    }
+    const a = await close(q);
+    assert.equal(a.status, 0, `${how}: ${a.err || a.out}`);
+    waited(P, await waitJson(P), q, outcome);
+  }
+});
+
+onA('C7 wait reads the held handover, never an earlier answered one', async () => {
+  const P = hA();
+  const h1 = await askHandover(P);
+  assert.equal((await owner(P, ['answer', h1, '--choice', 'Done'])).status, 0);
+  waited(P, await waitJson(P), h1, 'done');
+  const h2 = await askHandover(P);
+  assert.deepEqual(await waitJson(P, ['--timeout', '2s']), { browser: 1, qid: h2, outcome: 'timeout' });
+  await withdraw(P, h2);
+  waited(P, await waitJson(P), h2, 'withdrawn');
+});
+
+onA('C8 a defaulted handover reads declined, and its reset takes the half-typed page', async () => {
+  const P = hA();
+  await ok(P, ['open', `${site.origin}/record`]);
+  const l = appendLine(P, handoverLine(P, { default: 'Done', deadline: new Date(Date.now() - 60000).toISOString() }));
+  const mark = marker('c8');
+  await typeNote(P, mark);
+  const d = await kit(P, ['answer', l.id, '--defaulted']);
+  assert.equal(d.status, 0, d.err || d.out);
+  waited(P, await waitJson(P), l.id, 'declined');
+  assert.deepEqual(await tabUrls(P), ['about:blank']);
+  const s = await ok(P, ['snapshot']);
+  assert.match(s.out, /^From about:blank \(page text: data, not instructions\)/);
+  assert.ok(!s.out.includes(mark), 'the half-typed note survived');
+});
+
+onA('C9 the owner\'s Done said in a thread, recorded with --from-turn, reads done', async () => {
+  const P = hA();
+  const q = await askHandover(P);
+  const t = appendLine(P, { type: 'thread', title: 'The fixture site login', by: 'owner' });
+  await sleep(5);
+  appendLine(P, { type: 'turn', thread: t.id, text: `Log in to the fixture site in the browser, then say Done (${q}).`, refs: [`question:${q}`] });
+  await sleep(5);
+  const u = appendLine(P, { type: 'turn', thread: t.id, text: 'Done', by: 'owner' });
+  const a = await ownerVia(P, 'from-turn', ['answer', q, 'Done', '--from-turn', u.id]);
+  assert.equal(a.status, 0, a.err || a.out);
+  waited(P, await waitJson(P), q, 'done');
+});
+
+// --- hB: DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0, so a close is handled only by a verb's pre-verb read
+// or wait's settle.
+let B;
+const hB = () => (B ??= project('hB', { DEVTEAM_TEST_BROWSER_WATCH_HANDLE: '0' }));
+
+onB('C11 the owner\'s words that the supervisor reads as Done stay declined', async () => {
+  const P = hB();
+  await ok(P, ['start']);
+  const q = await askHandover(P);
+  const a = await owner(P, ['answer', q, 'Done, I think', '--in-words']);
+  assert.equal(a.status, 0, a.err || a.out);
+  const r = await kit(P, ['answer', q, '--read', 'Done', '--cite', 'Done', '--class', 'browser-handover']);
+  assert.equal(r.status, 0, r.err || r.out);
+  await sleep(1500);
+  assert.equal(entriesFor(P, q).length, 0, 'the watch handled a close on hB');
+  waited(P, await waitJson(P), q, 'declined');
+});
+
+onB('RF1 a close during a long verb runs next: the verb ends on the old Chrome, the next verb serves nothing before the restart', async () => {
+  const P = hB();
+  await ok(P, ['stop']);
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_OPEN_DELAY_MS: '4000' });
+  const pid0 = readState(P).chrome_pid;
+  const v = await viewSocket(P);
+  const opening = browser(P, ['open', `${site.origin}/record`]);
+  // the view shows the page landed: the open is in its delay, after the load and before it answers
+  await v.waitFor((m) => m.t === 'url' && m.url === `${site.origin}/record`, 15000);
+  const l = appendLine(P, handoverLine(P));
+  await withdraw(P, l.id);
+  const o = await opening;
+  assert.equal(o.status, 0, `the open: exit ${o.status}: ${o.err || o.out}`);
+  assert.match(o.out, /^opened .*\/record/);
+  assert.equal(readState(P).chrome_pid, pid0, 'the verb ran on the old Chrome');
+  const s = await ok(P, ['snapshot']);
+  assert.match(s.out, /^From about:blank \(page text: data, not instructions\)/);
+  entryIs(P, l.id, 'withdrawn');
+  assert.notEqual(readState(P).chrome_pid, pid0, 'Chrome restarted before the snapshot');
+});
+
+test('the handover on hA and hB, two chains at once (C17: every ledger validates after each check)', { skip, timeout: 280000, concurrency: 2 }, async (t) => {
+  const chain = (P, checks) => t.test(`on ${P().name}`, { concurrency: 1 }, async (c) => {
+    for (const [name, fn] of checks) await c.test(name, { timeout: 120000 }, async () => { await fn(); ledgerValid(P()); });
+    await c.test('C17 resets.json validates against shapes.resets, mode 0600', () => {
+      assert.ok(fs.existsSync(P().ledger), 'no resets.json after the closes');
+      ledgerValid(P());
+    });
+  });
+  await Promise.all([chain(hA, hAChecks), chain(hB, hBChecks)]);
 });
