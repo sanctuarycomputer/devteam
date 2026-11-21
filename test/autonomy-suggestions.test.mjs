@@ -1,11 +1,13 @@
 // Autonomy suggestions (kit-99): a suggestion is something the dashboard can point at, and a thread can be about.
-// Ports: none
+// Ports: lib/kit.mjs's +0 hub, +1..25; the Trust page test's hub +4 and dashboard base +5 (+5..29)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
-import { kit, threadsFixture, fleetFixture, json, line } from './lib/kit.mjs';
+import os from 'node:os';
+import { kit, threadsFixture, fleetFixture, json, line, PORTS, bareProject, dashboardOnFreePort, effThread, suggestionsFixture } from './lib/kit.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const DAY = 86400000;
 const HOUR = 3600000;
@@ -307,4 +309,162 @@ test('edges: no question in the window, asked exactly 3, the effect words, the a
       assert.deepEqual([s.evidence, s.effect, s.weight], [evidence, effect, blocks.length], evidence);
     }
   } finally { F.done(); }
+});
+
+// A wait on a condition in the page.
+const soonIn = (p, ms = 15000) => async (expr, what) => {
+  const end = Date.now() + ms;
+  for (;;) {
+    let v, err = null;
+    try { v = await p.ev(expr); } catch (e) { err = e; }
+    if (v) return v;
+    if (Date.now() > end) assert.fail(`timed out: ${what}${err ? `; last: ${err.message}` : ''}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+};
+
+// The Trust page in real headless Chrome over a real bare-project dashboard; only the page's fetch is
+// wrapped (suggestionsFixture's init), so /api/data carries five known suggestions.
+test('the Trust page: Suggestions, and a thread on one', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-trust-sugg-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 4), DEVTEAM_PORT_BASE: String(PORTS + 5), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'trust-sugg');
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  const soon = soonIn(p);
+  let script = null;
+  const load = async (fx) => {
+    if (script) await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: script });
+    script = (await p.send('Page.addScriptToEvaluateOnNewDocument', { source: fx.init })).identifier;
+    await p.send('Page.navigate', { url: 'about:blank' });
+    await soon("location.href === 'about:blank'", 'a blank page');
+    await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#trust` });
+    await soon("!!window.__fx && !!DATA && !document.querySelector('main.waiting')", 'the dashboard drawn');
+    // the card and its charts drawn at their width (fitCharts' data-w): a click aimed before then can
+    // land where an item was
+    await soon("document.querySelectorAll('#trust .trust-card > .sec').length === 4 && [...document.querySelectorAll('#trust .fit[data-fit]')].every((f) => +f.dataset.w > 0)", 'the Trust Score card and its charts');
+  };
+  const SEC = "[...document.querySelectorAll('#trust .trust-card > .sec')].pop()";
+  const ITEM = (id) => `document.querySelector('#trust [data-sugg="' + CSS.escape(${JSON.stringify(id)}) + '"]')`;
+  const at = (id) => `#trust [data-sugg="${id}"] .sugg-go`;
+  const polls = async (n) => { const from = await p.ev('window.__polls'); await soon(`window.__polls >= ${from + n}`, `${n} more polls`); };
+  const TITLES = ['Answer the oldest question holding work', 'Raise a trust level', 'Set a standing rule', 'Connect a missing sense', 'Settle a strategy unknown'];
+
+  await t.test('the card ends with Suggestions', async () => {
+    const fx = suggestionsFixture();
+    await load(fx);
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('#trust .trust-card > .sec > .lbl')].map((l) => l.textContent.trim())"), ['Score', 'Trust', 'Senses', 'Suggestions']);
+    const items = await p.ev(`[...${SEC}.querySelectorAll('.sugg-i')].map((i) => ({ n: i.querySelector('.sugg-n').textContent.trim(), go: i.querySelector('.sugg-go').textContent.trim(), t: i.textContent.replace(/\\s+/g, ' '), ref: i.dataset.subject }))`);
+    assert.deepEqual(items.map((i) => i.n), ['1', '2', '3', '4', '5']);
+    assert.deepEqual(items.map((i) => i.go), TITLES);
+    fx.items.forEach((s, k) => {
+      for (const w of [s.what, s.evidence, `Estimated effect: ${s.effect}`]) assert.ok(items[k].t.includes(w), `${s.id}: ${w}`);
+      assert.equal(items[k].ref, `suggestion:${s.id}`);
+    });
+    assert.equal(await p.ev(`${SEC}.querySelectorAll('button').length`), 0);
+    // none, an older server's missing key, a non-array: None this week; an unknown kind reads Suggestion
+    for (const v of ['[]', 'undefined', "'x'"]) {
+      await p.ev(`window.__fx.patch.autonomy.suggestions = ${v}; void 0`);
+      await soon(`${SEC}.textContent.includes('None this week') && !${SEC}.querySelector('.sugg-i')`, `None this week for ${v}`);
+    }
+    await p.ev("window.__fx.patch.autonomy.suggestions = [{ id: 'tr-odd-x', kind: 'odd', what: 'w', evidence: 'e', effect: 'f', weight: 1 }]; void 0");
+    await soon(`${SEC}.querySelector('.sugg-go')?.textContent.trim() === 'Suggestion'`, 'an unknown kind');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('a click starts a thread on the item subject and writes nothing else', async () => {
+    const fx = suggestionsFixture();
+    const [s1, s2, s3, s4, s5] = fx.items;
+    await load(fx);
+    await p.ev('window.__writes.length = 0; void 0');
+    await p.click(at(s2.id));
+    await soon(`TL.draft?.subject?.ref === ${JSON.stringify(`suggestion:${s2.id}`)}`, 'a draft on item 2');
+    assert.equal(await p.ev('TL.draft.subject.kind'), 'item');
+    assert.ok((await p.ev('TL.draft.subject.quote')).startsWith(`${TITLES[1]} · `));
+    assert.deepEqual(await p.ev('window.__writes'), []);
+    await p.click('#tl-c-text');
+    await p.type('try it');
+    await p.click('[data-tl-send]');
+    await soon('window.__writes.length >= 1', 'the thread posted');
+    await new Promise((r) => setTimeout(r, 600));
+    const w = await p.ev('window.__writes');
+    assert.equal(w.length, 1, JSON.stringify(w));
+    assert.deepEqual([w[0].method, w[0].url], ['POST', '/api/thread-new']);
+    const body = JSON.parse(w[0].body);
+    assert.deepEqual([body.subject.kind, body.subject.ref], ['item', `suggestion:${s2.id}`]);
+    await p.ev('tlClose(); void 0');
+    // Enter on item 3
+    await p.ev(`(${ITEM(s3.id)}).focus(); void 0`);
+    await p.key('Enter');
+    await soon(`TL.draft?.subject?.ref === ${JSON.stringify(`suggestion:${s3.id}`)}`, 'a draft by Enter');
+    await p.ev('tlClose(); void 0');
+    // a Shift+click on item 4 gives the subject a click on it gives
+    await p.click(at(s4.id));
+    await soon(`TL.draft?.subject?.ref === ${JSON.stringify(`suggestion:${s4.id}`)}`, 'a draft on item 4');
+    const byClick = await p.ev('JSON.stringify(TL.draft.subject)');
+    await p.ev('tlClose(); void 0');
+    const pt = await p.at(at(s4.id));
+    await p.hold('Shift', true);
+    await p.move(pt.x, pt.y, 8);
+    await soon('tlShowing()', 'the thread layer pointing');
+    await p.clickAt(pt.x, pt.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.ref === ${JSON.stringify(`suggestion:${s4.id}`)}`, 'a draft on item 4 by Shift+click');
+    assert.equal(await p.ev('JSON.stringify(TL.draft.subject)'), byClick);
+    await p.ev('tlClose(); void 0');
+    // two redraws (the card's words changed twice), then one click: one start, the listener bound once
+    for (const n of [1, 2]) {
+      await p.ev(`window.__fx.patch.autonomy.suggestions[4].evidence = ${JSON.stringify(`${s5.evidence} (${n})`)}; void 0`);
+      await soon(`${SEC}.textContent.includes(${JSON.stringify(`(${n})`)})`, `redraw ${n}`);
+    }
+    await polls(2);
+    await p.ev('window.__starts = 0; window.__tlStart = tlStart; window.tlStart = (h) => { window.__starts += 1; return window.__tlStart(h); }; void 0');
+    await p.click(at(s1.id));
+    await soon(`TL.draft?.subject?.ref === ${JSON.stringify(`suggestion:${s1.id}`)}`, 'a draft on item 1');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await p.ev('window.__starts'), 1);
+    await p.ev('window.tlStart = window.__tlStart; tlClose(); void 0');
+    // an id over the cap (its ref over 120 bytes): nothing starts, nothing throws
+    const long = `tr-strategy-${'a'.repeat(103)}`;
+    assert.equal(long.length, 115);
+    await p.ev(`window.__fx.patch.autonomy.suggestions = [{ id: ${JSON.stringify(long)}, kind: 'strategy', what: 'w', evidence: 'e', effect: 'f', weight: 0.5 }]; void 0`);
+    await soon(`!!${ITEM(long)}`, 'the long item drawn');
+    await p.click(at(long));
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await p.ev('TL.draft'), null);
+    assert.equal(await p.ev('window.__writes.length'), 1);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('an open thread opens, not doubled', async () => {
+    const items = suggestionsFixture().items;
+    // item 3: the earlier test's thread was sent on item 2, and that one is open on the server now
+    const TH = 't-20261121-000000001-owner';
+    const fx = suggestionsFixture({ threads: [
+      effThread({ id: TH, subject: { kind: 'item', ref: `suggestion:${items[0].id}`, quote: 'x' }, title: 'About the oldest question' }),
+      effThread({ id: 't-20261121-000000002-owner', status: 'resolved', subject: { kind: 'item', ref: `suggestion:${items[2].id}`, quote: 'x' } }),
+    ] });
+    await load(fx);
+    await soon(`TL.threads.some((t) => t.id === ${JSON.stringify(TH)})`, 'the threads read');
+    await p.ev('window.__writes.length = 0; void 0');
+    await p.click(at(items[0].id));
+    await soon(`TL.open === ${JSON.stringify(TH)}`, 'the open thread opened');
+    assert.equal(await p.ev('TL.draft'), null);
+    await p.ev('tlClose(); void 0');
+    await p.click(at(items[2].id));
+    await soon(`TL.draft?.subject?.ref === ${JSON.stringify(`suggestion:${items[2].id}`)}`, 'a resolved thread does not count');
+    assert.deepEqual(await p.ev('window.__writes'), []);
+    await p.ev('tlClose(); void 0');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
 });
