@@ -607,3 +607,45 @@ test('A5: a recurring-edit line from a turn is read against that turn\'s own wor
     assert.deepEqual(T.mainJobs(), {}, 'no job landed');
   } finally { T.done(); }
 });
+
+// the helpers the round-18 tests share (final-18b)
+const threadKit = (T) => ({
+  tAsk: (tid, name, job) => { const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]); passes(r); return QID.exec(r.out)[0]; },
+  pAsk: (tid, words) => { const r = T.run(['thread', 'ask', tid, '--question', words, '--recommendation', 'Yes']); passes(r); return QID.exec(r.out)[0]; },
+  say: (tid, w) => T.ok(['thread', 'say', tid, w], {}).split('\n')[0],
+  newT: (title) => T.ok(['thread', 'new', title, '--title', title], {}).split('\n')[0],
+  job: (n) => check({ title: `${n} job`, run: `echo ${n}` }),
+  turnOf: (uid) => json(T.ok(['log', '--type', 'turn', '--json'])).find((x) => x.id === uid),
+  // an answer line from the Yes turn, as cmdAnswer writes it, appended by hand to the owner's log
+  plant: (qid, uid, text, at) => fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: qid, at, by: 'owner', answer: 'Yes', channel: 'thread', said: text, turn: uid })}\n`),
+});
+
+test('A5: a question shown in the Yes\'s thread by a turn (thread reply --refs question:<id>) is in that thread wherever it was asked: the owner\'s card answer to it after the Yes refuses the Yes, and a planted answer line lands nothing (final-18b F1, H1, H1b, d-20261121-123409608)', () => {
+  const T = setup('turn-shown18');
+  try {
+    const { tAsk, pAsk, say, newT, job, turnOf, plant } = threadKit(T);
+    const shownCase = (name, q2, t1) => {
+      T.ok(['thread', 'reply', t1, `About ${q2}: shall I restart it?`, '--refs', `question:${q2}`]);
+      const q1 = tAsk(t1, name, job(name));
+      const y = say(t1, 'Yes');
+      T.ok(['answer', q2, 'No. And cancel that job too, do not add it.'], {});
+      refused(T.run(['answer', q1, 'Yes', '--from-turn', y]), new RegExp(`--from-turn ${y}: ${q1} is a recurring-edit question, and the owner wrote again after that turn \\(their answer to ${q2}, at [^)]*\\)`));
+      assert.equal(json(T.ok(['questions', '--id', q1, '--json']))[0].status, 'open', `${q1} stays open`);
+      plant(q1, y, turnOf(y).text, new Date().toISOString());
+      assert.equal(json(T.ok(['questions', '--id', q1, '--json']))[0].matched, true, 'the view takes the planted line');
+      T.jobsChore(name, (j) => ({ ...j, [name]: job(name) }));
+      const AFTER = new RegExp(`${q1} can't approve a job change: answered from ${y}, after which the owner wrote again in ${t1} before the answer was recorded \\(their answer to ${q2}, at [^)]*\\)`);
+      refused(T.dry(name, q1), AFTER);
+      refused(T.merge(name, ['--approved', q1]), AFTER);
+      assert.equal(Object.hasOwn(T.mainJobs(), name), false, `${name} did not land`);
+    };
+    // H1: an Inbox question (no thread), shown in t1
+    const ra = T.run(['ask', '--question', 'Also restart the dashboard?', '--recommendation', 'Yes']);
+    passes(ra);
+    shownCase('h1', QID.exec(ra.out)[0], newT('Jobs'));
+    // H1b: a question asked in another thread, shown in t1
+    const t9 = newT('Other');
+    shownCase('h1b', pAsk(t9, 'Also restart the hub?'), newT('Jobs b'));
+    assert.deepEqual(T.mainJobs(), {}, 'nothing landed');
+  } finally { T.done(); }
+});

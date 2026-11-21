@@ -24840,12 +24840,11 @@ const recurringRegistry = Object.freeze({
   // skip(L) names, as words for a refusal; else null (d-20261121-072341505-supervisor, final-16b F1
   // to F4; d-20261121-103254180-supervisor, final-17b F1): a turn in the thread; a resolve of it with
   // an outcome (its words); a reopen of it; or an answer line (any set line of the owner's) on a
-  // question shown in or asked from the thread, as thread show lists its questions (the question's
-  // thread), whatever channel it came from: a card answer to another question there can take the Yes
-  // back as well as a turn. A line in another thread never counts.
+  // question of the thread (threadQuestions), whatever channel it came from: a card answer to another
+  // question there can take the Yes back as well as a turn. A line in another thread never counts.
   laterOwner(u, upto = null, skip = () => false) {
     const at = String(u?.created_at ?? '');
-    const asked = new Set(logObjects('question').filter((q) => q.thread === u.thread).map((q) => q.id));
+    const asked = recurringRegistry.threadQuestions(u.thread, (L) => upto === null || String(L.at ?? '') <= upto);
     const inWindow = (L) => String(L.at ?? '') >= at && (upto === null || String(L.at ?? '') <= upto);
     const later = readLog().lines.filter((L) => L.by === 'owner' && inWindow(L) && !skip(L) && (
       (L.type === 'turn' && L.thread === u.thread && L.id !== u.id)
@@ -24856,6 +24855,19 @@ const recurringRegistry = Object.freeze({
     if (later.type === 'turn') return later.id;
     if (later.type === 'question') return `their answer to ${later.id}, at ${later.at}`;
     return `their ${later.status === 'open' ? 'reopen' : 'resolve'} of ${u.thread}${later.status === 'open' ? '' : ' with an outcome'}, at ${later.at}`;
+  },
+  // The questions of thread tid: each asked from it (the question's thread), and each that a turn in
+  // it names (thread ask's question, or a reply's --refs question:<id>), wherever it was asked, by
+  // a turn line that upto(L) takes (d-20261121-123409608-supervisor, final-18b F1): a question shown
+  // in the thread is in it as much as one asked there.
+  threadQuestions(tid, upto = () => true) {
+    const ids = new Set(logObjects('question').filter((q) => q.thread === tid).map((q) => q.id));
+    readLog().lines.forEach((L, i) => {
+      if (L.type !== 'turn' || L.op !== 'new' || L.thread !== tid || !upto(L, i)) return;
+      if (typeof L.question === 'string') ids.add(L.question);
+      for (const r of Array.isArray(L.refs) ? L.refs : []) if (typeof r === 'string' && r.startsWith('question:')) ids.add(r.slice('question:'.length));
+    });
+    return ids;
   },
   // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1,
   // final-13b F1 and F2): one recorded from chat; from a turn whose words (the line's, or the turn's
