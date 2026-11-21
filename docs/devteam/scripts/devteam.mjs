@@ -29085,10 +29085,16 @@ const BROWSER_HANDOVER_USAGE = 'usage: browser handover --reason "<words>" (non-
 const BROWSER_HANDOVER_DAYS = 7;
 async function browserHandover() {
   const reason = flagStr('reason');
-  if (positional.length !== 1 || rest !== null || Object.keys(flags).some((k) => k !== 'reason') || reason === undefined || !reason.trim() || reason.length > 2000) die(BROWSER_HANDOVER_USAGE);
+  if (positional.length !== 1 || rest !== null || Object.keys(flags).some((k) => k !== 'reason') || reason === undefined || !reason.trim() || [...reason].length > 2000) die(BROWSER_HANDOVER_USAGE);
   const scope = browserScope();
   const open = browserHeld(browserHandovers(scope));
   if (open) die(`browser handover: ${open} is already open; wait for it (browser wait) or withdraw it`);
+  // root.json's mtime (a forget makes it again): only a missing file reads as none; any other error
+  // stops here, before anything starts. Read again once the daemon is up, which makes a missing one.
+  const rootMade = () => {
+    try { return fs.statSync(path.join(browserHome(), browserKey(), 'root.json')).mtimeMs; } catch (e) { if (e.code === 'ENOENT') return 0; return die(`browser handover: couldn't read the profile's root.json (${e.code ?? e.message})`); }
+  };
+  rootMade();
   const s = await browserEnsure();
   // the site: the active tab's host (with its port), from the status verb; none on about:blank
   let st = null;
@@ -29099,10 +29105,10 @@ async function browserHandover() {
     // an earlier handover of this site, asked within 7 days and after the profile's root.json was made
     // (a forget, or Sign out of everything, makes it again): its session may not have lasted
     const line = `The browser is on ${site}.`;
-    const made = fs.statSync(path.join(browserHome(), browserKey(), 'root.json'), { throwIfNoEntry: false })?.mtimeMs ?? 0;
+    const made = rootMade();
     const now = Date.now();
     const seen = browserHandovers(scope).filter((h) => { const at = Date.parse(h.asked_at); return String(h.context).split(/\r\n|\r|\n/).includes(line) && now - at <= BROWSER_HANDOVER_DAYS * 86400000 && at > made; }).pop();
-    if (seen) process.stderr.write(`devteam: browser handover: ${site} was handed over on ${seen.asked_at.slice(0, 10)} (${seen.qid}) and not forgotten since; the session may not have lasted\n`);
+    if (seen) warn(`browser handover: ${site} was handed over on ${seen.asked_at.slice(0, 10)} (${seen.qid}) and not forgotten since; the session may not have lasted`);
   }
   const context = ["Open the browser from the link, do the step there, then press Done. Until you press Done, the supervisor can't use the browser.", site ? `The browser is on ${site}.` : null].filter(Boolean).join('\n\n');
   for (const k of Object.keys(flags)) delete flags[k];

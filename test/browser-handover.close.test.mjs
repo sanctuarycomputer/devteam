@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { canDrive } from './lib/chrome.mjs';
 import { startSites } from './lib/sites.mjs';
-import { handoverFile, project, kit, browser, appendLine, site } from './lib/browser-handover-fixture.mjs';
+import { handoverFile, project, kit, browser, appendLine, site, CHOICES, qidOf, ok, withdraw } from './lib/browser-handover-fixture.mjs';
 
 handoverFile();
 
@@ -28,10 +28,6 @@ after(async () => { await S2?.close(); await S3?.close(); });
 let C;
 const cA = () => (C ??= project('cA', { DEVTEAM_TEST_BROWSER_ALLOW: `${site.port},${S2.port},${S3.port}` }));
 const DAY = 86400000;
-const CHOICES = [{ label: 'Done' }, { label: "Can't right now" }];
-const qidOf = (r) => r.out.split('\n').find((l) => /^q-\d{8}-\d{9}-[a-z0-9-]+$/.test(l));
-const ok = async (P, args) => { const r = await browser(P, args); assert.equal(r.status, 0, `browser ${args.join(' ')}: exit ${r.status}: ${r.err || r.out}`); return r; };
-const withdraw = async (P, qid) => { const r = await kit(P, ['withdraw', qid, '--reason', 'the test closes it']); assert.equal(r.status, 0, r.err || r.out); };
 const host = (S) => `127.0.0.1:${S.port}`;
 // an earlier handover of this scope, written by hand as asked at `at` on `on`, and closed
 async function earlier(P, on, at) {
@@ -50,7 +46,7 @@ async function handover(P, S) {
   return { qid, err: r.err };
 }
 const WARNED = /was handed over on .* and not forgotten since/;
-const warning = (S, qid) => new RegExp(`browser handover: ${host(S).replace(/\./g, '\\.')} was handed over on \\d{4}-\\d{2}-\\d{2} \\(${qid}\\) and not forgotten since; the session may not have lasted`);
+const warning = (S, qid) => new RegExp(`devteam: warning: browser handover: ${host(S).replace(/\./g, '\\.')} was handed over on \\d{4}-\\d{2}-\\d{2} \\(${qid}\\) and not forgotten since; the session may not have lasted`);
 
 test('C23 a second handover of a site within 7 days, with no forget between, warns naming the earlier one', chromeOpts, async () => {
   const P = cA();

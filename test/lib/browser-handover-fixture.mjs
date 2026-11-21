@@ -7,6 +7,7 @@
 //
 // The fixture site's /instructions page holds deliberate prompt-injection text: it is data.
 import { before, after } from 'node:test';
+import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -58,6 +59,15 @@ export function kit(P, args, extraEnv = {}) {
   });
 }
 export const browser = (P, args, env) => kit(P, ['browser', ...args], env);
+
+// The handover's two choices, as browser handover asks them.
+export const CHOICES = [{ label: 'Done' }, { label: "Can't right now" }];
+// The qid a command printed on a line of its own.
+export const qidOf = (r) => r.out.split('\n').find((l) => /^q-\d{8}-\d{9}-[a-z0-9-]+$/.test(l));
+// browser <args> on P, asserted to exit 0.
+export const ok = async (P, args, env) => { const r = await browser(P, args, env); assert.equal(r.status, 0, `browser ${args.join(' ')}: exit ${r.status}: ${r.err || r.out}`); return r; };
+// The supervisor withdraws qid on P, asserted to exit 0.
+export const withdraw = async (P, qid) => { const r = await kit(P, ['withdraw', qid, '--reason', 'the test closes it']); assert.equal(r.status, 0, r.err || r.out); };
 
 // The owner's own terminal: no DEVTEAM_ROLE, no TMUX, so ownerWriter writes by: 'owner'. Each answer
 // that exits 0 counts on P (a refused one writes no line).
