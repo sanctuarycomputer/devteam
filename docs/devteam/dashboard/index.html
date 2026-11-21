@@ -759,6 +759,10 @@ try {
 /* css-misc start */
   /* a key's tooltip on keyboard focus (the mouse has its title); Escape blurs it */
   .props dt[title] { position: relative; }
+  /* the fleet line's what-is-left, on focus or a tap (the mouse has its title): one box on the page's top layer, placed by fleetLeftPlace, so no strip clips it and nothing moves */
+  .fleet-state .fleet-left { cursor: help; text-decoration: underline dotted; }
+  #fleet-left-pop { position: fixed; z-index: 1000; box-sizing: border-box; width: min(280px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow-y: auto; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); }
+  #fleet-left-pop[hidden] { display: none; }
   .props dt[title]:focus-visible::after { content: attr(title); position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); white-space: normal; }
   .drawer-body .psect { margin: 0 0 12px; }
   .drawer-body .psect-body > :first-child { margin-top: 0; }
@@ -3980,12 +3984,15 @@ async function reviewDecline(id, note, errId, btn) {
   clearTimeout(me.saveTimer); me.pending = null; RV = null; openReview(location.hash.slice(1));
 }
 
-// A hold's state in words. Parking and draining are transitions, shown as such everywhere until they
-// finish; a goal the fleet op holds finishes only when the fleet is ready to move (fleet status).
+// A hold's state in words. Parking and draining are transitions, shown until that goal's own sessions
+// have settled. A goal whose sessions all have is Parked (or Drained) even while the fleet as a whole
+// isn't ready to move yet: what is still left for the move (the log landing, a session of another goal)
+// is the fleet line's to say, with what it is, not every goal card's (one unsettled session used to
+// turn every card into Parking… for days).
 const HOLD_STATE_WORDS = { running: 'Running', draining: 'Draining…', drained: 'Drained', parking: 'Parking…', parked: 'Parked', 'let go': 'Let go' };
+const fleetMoveReady = () => !!(FLEET.data && FLEET.data.ready);
 function holdState(h) {
   if (!h) return 'running';
-  if (h.fleet && ['parked', 'drained'].includes(h.state) && !(FLEET.data && FLEET.data.ready)) return h.state === 'parked' ? 'parking' : 'draining';
   return h.state;
 }
 /* goal-block start */
@@ -4025,7 +4032,7 @@ function goalState(g, R, openQs) {
   if (!h || h.mode === 'run' || h.mode === 'let-go') return s;
   const st = holdState(h);
   const words = HOLD_STATE_WORDS[st] || st;
-  const running = h.running.length ? ` (${h.running.length} ${h.mode === 'park' ? 'still settling' : 'still running'})` : st !== h.state ? ' (the fleet is still getting ready to move)' : '';
+  const running = h.running.length ? ` (${h.running.length} ${h.mode === 'park' ? 'still settling' : 'still running'})` : h.fleet && ['parked', 'drained'].includes(st) && FLEET.data && !fleetMoveReady() ? ' (the fleet isn\u2019t ready to move yet)' : '';
   const why = `${h.fleet ? 'the whole fleet' : h.by === 'supervisor' ? 'the supervisor' : 'you'}${h.reason ? `: ${esc(h.reason)}` : ''}`;
   return { ...s, label: `${words}${running} · ${s.label}`, tone: h.mode === 'park' ? 'high' : 'medium', next: `${h.mode === 'drain' ? 'Draining: what is running finishes and merges; nothing new starts' : 'Parked: its sessions stopped with their work pushed and a handoff; nothing starts and nothing merges'} (set by ${why}). ${s.next || ''}` };
 }
@@ -4136,13 +4143,49 @@ function fleetStateLine(f, st) {
   f = f || {};
   const settled = !!(st && st.ready);
   const words = f.mode === 'park' ? (settled ? 'parked' : 'parking…') : f.mode === 'drain' ? (settled ? 'drained' : 'draining…') : f.op ? 'partly held (a goal was set apart after the fleet op)' : 'running';
-  return `<b>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
+  // not ready yet: what is left (fleet status's blockers, each up to its first parenthesis) rides on
+  // the line's hover, so a park that stalls says on what without growing the line (it sits under the
+  // switch, which must not move)
+  // (from the last good answer only: after a failed check it would be old). It takes focus (Tab, or a
+  // tap on a phone) and shows on focus too, and screen readers hear it in its label.
+  const left = (f.mode === 'park' || f.mode === 'drain') && !settled && !FLEET.error && st && Array.isArray(st.blockers) && st.blockers.length ? st.blockers : null;
+  const leftWords = left ? `Left before the move: ${left.map((b) => String(b).split(/ \(|: run /)[0].slice(0, 120)).join('; ')}` : '';
+  const tip = left ? ` class="fleet-left" tabindex="0" title="${esc(leftWords)}" aria-label="${esc(`${words}. ${leftWords}`)}"` : '';
+  return `<b${tip}>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
 }
 // Every fleet slot on the page: the sidebar's ([data-fleet-slot="switch"] and "state"), and any other
 // page's copies with the same attribute. A slot is written only when its HTML changed (against the last
 // string written to it: innerHTML comes back re-serialised, as disabled="" or ' for &#39;), so focus,
 // a pending confirm and a click in progress stay; a rewrite keeps focus on the same button (the confirm is Park's), since
 // the binder's Escape needs focus inside the switch.
+// The fleet line's what-is-left for a keyboard or a tap: a box on the body, kept inside the window,
+// below the word or above it when there's no room.
+function fleetLeftPlace() {
+  const el = document.activeElement?.closest?.('.fleet-left');
+  let pop = document.getElementById('fleet-left-pop');
+  if (!el) { if (pop) pop.hidden = true; return; }
+  if (!pop) { pop = document.createElement('div'); pop.id = 'fleet-left-pop'; pop.setAttribute('role', 'tooltip'); document.body.appendChild(pop); }
+  pop.textContent = el.title;
+  pop.hidden = false;
+  const at = el.getBoundingClientRect(), box = pop.getBoundingClientRect(), W = document.documentElement.clientWidth, H = window.innerHeight;
+  pop.style.left = `${Math.max(8, Math.min(at.left, W - box.width - 8))}px`;
+  // under the switch too, when the word sits beside it (the phone's strip)
+  const sw = el.closest('#side-state') ? document.getElementById('side-fleet')?.getBoundingClientRect() : null;
+  const below = Math.max(at.bottom, sw?.bottom ?? 0) + 6;
+  pop.style.top = `${below + box.height <= H - 8 ? below : Math.max(8, at.top - 6 - box.height)}px`;
+}
+document.addEventListener('focusin', fleetLeftPlace);
+document.addEventListener('focusout', () => setTimeout(fleetLeftPlace));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.activeElement?.closest?.('.fleet-left')) document.activeElement.blur(); });
+window.addEventListener('resize', fleetLeftPlace);
+// the word scrolled with its strip or page: the box follows it, and closes once it is out of the window
+window.addEventListener('scroll', (e) => {
+  const pop = document.getElementById('fleet-left-pop'), el = document.activeElement?.closest?.('.fleet-left');
+  if (!el || !pop || pop.hidden || e.target === pop) return;
+  const r = el.getBoundingClientRect();
+  if (r.right < 0 || r.left > document.documentElement.clientWidth || r.bottom < 0 || r.top > innerHeight) el.blur();
+  else fleetLeftPlace();
+}, true);
 const FLEET_DRAWN = new WeakMap();
 function drawFleet() {
   const f = DATA?.fleet || {};
@@ -4155,10 +4198,13 @@ function drawFleet() {
     if (want === undefined || FLEET_DRAWN.get(el) === want) continue;
     const ae = document.activeElement;
     const had = ae && el.contains(ae) ? ae.dataset.fleet : null;
+    const hadLeft = !!(ae && el.contains(ae) && ae.classList.contains('fleet-left'));
     el.innerHTML = want;
     FLEET_DRAWN.set(el, want);
+    if (hadLeft) el.querySelector('.fleet-left')?.focus({ preventScroll: true });
     if (had) el.querySelector(`[data-fleet="${CSS.escape(had)}"]`)?.focus({ preventScroll: true });
   }
+  fleetLeftPlace();
 }
 // One fleet op through press(): the overlay shows the mode at once, the busy line holds the switch
 // while the request is out, and a refusal shows in the switch with the mode the data's again.
