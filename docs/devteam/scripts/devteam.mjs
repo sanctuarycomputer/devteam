@@ -22419,6 +22419,10 @@ async function cmdDashboard() {
   // once the running one has ended and 3 s have passed since the last start; every read waiting then
   // shares it. A failed build is never kept.
   const DATA_EVERY_MS = 3000;
+  // No time limit on a build by default: a big project's build can take minutes, and stopping it at a
+  // fixed limit left its dashboard with no data at all. Builds run one at a time, so a slow one never
+  // piles up; DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS sets a limit in ms when wanted (0 or unset: none).
+  const DASHBOARD_DATA_TIMEOUT_MS = Math.max(0, Number(process.env.DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS) || 0);
   let dataEpoch = 0;
   let build = null;
   let nextBuild = null;
@@ -22427,9 +22431,9 @@ async function cmdDashboard() {
   const startBuild = () => {
     lastStart = Date.now();
     const b = { epoch: dataEpoch, finished: null, r: null };
-    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: DASHBOARD_DATA_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err && stdout) lastData = stdout;
-      b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
+      b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
     }));
