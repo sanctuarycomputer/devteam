@@ -2,13 +2,13 @@
 // that follows it with resistance; let go past the threshold, the dashboard reads its data again at
 // once (load({ force: true })), the spinner spins until the read lands, then slides away. Real touch
 // events in headless Chrome (Input.dispatchTouchEvent, touch emulation on) at 390x844.
-// Ports: none of its own (dashboardOnFreePort, and freePort for the stand-in hub).
+// Ports: none of its own (dashboardOnFreePort, and port 0 for the stand-in hub).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { dashboardOnFreePort, freePort, kit, threadsFixture } from './lib/kit.mjs';
+import { dashboardOnFreePort, kit, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { FRAMES, soonIn } from './lib/dashboard-page.mjs';
 
@@ -79,6 +79,8 @@ async function pull(p, { x = 195, y = 200, dy = 220, steps = 12, lift = true } =
   if (lift) await touch(p, 'touchEnd', x, y + dy);
 }
 const reads = (p) => p.ev('window.__dataReads');
+// when no spinner shows: the scroll, a read in flight, and what is under the finger, up to the page
+const WHY = `(() => { const out = []; for (let e = document.elementFromPoint(195, 200); e && e !== document.body; e = e.parentElement) { const s = getComputedStyle(e); out.push(e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + ' ' + s.position + ' ' + s.overflowY); } return JSON.stringify({ scrollY, loading: !!loading, under: out }); })()`;
 // the page drawn and its first read landed; nothing in flight
 const ready = (p, soon) => soon(`typeof DATA === 'object' && DATA !== null && !loading && window.__dataReads >= 1`, 'the dashboard drawn');
 // a short wait for a read that should not come
@@ -251,6 +253,7 @@ test('pull to refresh with reduced motion: the spinner keeps still and leaves wi
   const { p, B, soon } = await setup(t, { reduce: true });
   await p.send('Page.navigate', { url: `${B}/#overview` });
   await ready(p, soon);
+  await fresh(p, soon);
   const n0 = await reads(p);
   await p.ev('window.__holdOn()');
   await pull(p, { dy: 100, lift: false });
@@ -259,7 +262,7 @@ test('pull to refresh with reduced motion: the spinner keeps still and leaves wi
   await touch(p, 'touchMove', 195, 400);
   await p.ev(FRAMES);
   const b = await p.ev(SPIN);
-  assert.ok(a && b, 'a spinner shows');
+  assert.ok(a && b, `a spinner shows (${await p.ev(WHY)})`);
   assert.equal(b.bottom, a.bottom, 'it does not follow the finger');
   await touch(p, 'touchEnd', 195, 400);
   await soon(`window.__dataReads === ${n0 + 1}`, 'the read');
@@ -284,10 +287,7 @@ test('pull to refresh in the hub\'s frame', CHROME, async (t) => {
   const later = cleanup(t);
   const F = threadsFixture('pull-refresh-hub');
   later(() => F.done());
-  const HUB = await freePort();
-  const { dash, port } = await dashboardOnFreePort(F.old, F.env({ DEVTEAM_HUB_PORT: String(HUB) }));
-  later(() => dash.stop());
-  const hello = { devteam: 1, name: 'alpha', root: F.old, port, kit: 'v0.57.0', viewer: 1, inbox: 0, threads: { you: 0, waiting: 0, ready: 0 }, fleet: { mode: 'run', workers: 0 }, pulse: null };
+  let hello = null;
   const hub = http.createServer((q, s) => {
     const u = new URL(q.url, 'http://x');
     if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8')); }
@@ -295,8 +295,12 @@ test('pull to refresh in the hub\'s frame', CHROME, async (t) => {
     s.writeHead(404, { 'content-type': 'application/json' });
     s.end('{}');
   });
-  await new Promise((r) => hub.listen(HUB, '127.0.0.1', r));
+  await new Promise((r) => hub.listen(0, '127.0.0.1', r));
   later(() => new Promise((r) => { hub.closeAllConnections?.(); hub.close(() => r()); }));
+  const HUB = hub.address().port;
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({ DEVTEAM_HUB_PORT: String(HUB) }));
+  later(() => dash.stop());
+  hello = { devteam: 1, name: 'alpha', root: F.old, port, kit: 'v0.57.0', viewer: 1, inbox: 0, threads: { you: 0, waiting: 0, ready: 0 }, fleet: { mode: 'run', workers: 0 }, pulse: null };
   const chrome = await openChrome();
   later(() => chrome.close());
   const p = await chrome.newPage();
@@ -315,6 +319,8 @@ test('pull to refresh in the hub\'s frame', CHROME, async (t) => {
   await soon(`document.querySelectorAll('iframe:not([hidden])').length === 1`, "alpha's frame");
   const end = Date.now() + 60000;
   while (!(await inFrame(`typeof DATA === 'object' && DATA !== null && !loading && window.__dataReads >= 1`))) { if (Date.now() > end) assert.fail('the framed dashboard never drew'); await settle(100); }
+  await inFrame('scrollTo(0, 0), true');
+  while (!(await inFrame('scrollY === 0 && !loading'))) { if (Date.now() > end) assert.fail('the framed dashboard never came to rest at its top'); await settle(100); }
   // the frame's top, in the hub page's coordinates
   const top = await p.ev(`Math.round(document.querySelector('iframe:not([hidden])').getBoundingClientRect().top)`);
   const n0 = await inFrame('window.__dataReads');
