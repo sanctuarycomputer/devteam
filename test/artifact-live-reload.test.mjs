@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canDrive } from './lib/chrome.mjs';
-import { J, SLUG, WT, sleep, soonIn, draftStage } from './lib/artifact-live.mjs';
+import { SLUG, WT, sleep, soonIn, draftStage } from './lib/artifact-live.mjs';
 
 test('a viewer on a draft reloads by itself when its fingerprint changes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 900000 }, async (t) => {
   const { tree, p, soon, VIEW, DRAFT_HEAD, DASH_MAIN, open, openOverLibrary, asks, titles, change, reloadedSince, NEW_FP } = await draftStage(t, 'live-reload');
