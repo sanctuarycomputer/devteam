@@ -13,10 +13,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canDrive } from './lib/chrome.mjs';
-import { SLUG, WT, sleep, soonIn, draftStage } from './lib/artifact-live.mjs';
+import path from 'node:path';
+import { write } from './lib/kit.mjs';
+import { J, SLUG, WT, sleep, soonIn, follower, draftStage } from './lib/artifact-live.mjs';
 
 test('a viewer on a draft reloads by itself when its fingerprint changes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 900000 }, async (t) => {
-  const { tree, p, soon, VIEW, DRAFT_HEAD, DASH_MAIN, open, openOverLibrary, asks, titles, change, reloadedSince, NEW_FP } = await draftStage(t, 'live-reload');
+  const { tree, draft, p, soon, VIEW, DRAFT_HEAD, DASH_MAIN, open, openOverLibrary, asks, titles, change, reloadedSince, NEW_FP } = await draftStage(t, 'live-reload');
 
   await t.test('C1: a viewer tab on a draft: fp unchanged for 20 s, no reload; fp changed, reloaded within 3 s, in a fresh frame', async () => {
     await open(`${VIEW}?at=${WT}`, WT, 'v1');
@@ -123,13 +125,55 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     }
   });
 
-  await t.test('C8: a reload keeps the page the owner followed a link to', async () => {
+  await t.test('C8: a reload keeps the page the owner followed a link to', async (st) => {
     await open(`${VIEW}?at=${WT}`, WT, 'v1');
-    const r = await p.ev(`(() => { const b = document.getElementById('av-frame').getBoundingClientRect(); return { x: b.left + 20, y: b.top + 15 }; })()`);
-    await p.clickAt(r.x, r.y);
-    await soon(`__titles.some((x) => x.title === 'page2') && TS.path === 'page2.html'`, "the second page, as the lens names it");
+    // the lib's follower: the click sent again (up to 3 times) while the lens names nothing new (kit-758, kit-757 final-1 F1)
+    await follower(p, st)(20, `__titles.some((x) => x.title === 'page2') && TS.path === 'page2.html'`);
     const t0 = await change(NEW_FP);
     const got = await reloadedSince(t0, 'a reload after fp changed');
     assert.equal(got.title, 'page2', 'reloaded on the second page');
+  });
+  // kit-758 (kit-757 final-1 F3): a reload that asks for the owner's page first (a page other than the
+  // opened src) is held (__artStatus { hold }) while the owner moves in the frame, then let go. Here the
+  // draft's page2 links to #tab2 (a move in the same document: the reload starts again from there, so the
+  // change still loads, at #tab2) and to page3 (a new load: the reload is dropped, page3 stays). The
+  // reload gives its ask up at 5 s, so each move must land well inside that.
+  await t.test('C11: a move the owner makes in the frame while the reload asks for its page wins', async (st) => {
+    const P2 = `/artifact/wt/${WT}/${SLUG}/page2.html`;
+    write(path.join(draft, 'page2.html'), '<!doctype html><html><head><title>page2</title></head><body style="margin:0"><a id="p3" href="page3.html" style="display:block;position:fixed;left:0;top:0;width:80px;height:40px;background:#ccc">page 3</a><a id="t2" href="#tab2" style="display:block;position:fixed;left:100px;top:0;width:80px;height:40px;background:#ccc">tab 2</a><p style="margin-top:60px">the second page</p><p id="tab2" style="margin-top:900px">tab 2</p></body></html>');
+    write(path.join(draft, 'page3.html'), '<!doctype html><html><head><title>page3</title></head><body><p>the third page</p></body></html>');
+    await open(`${VIEW}?at=${WT}`, WT, 'v1');
+    const follow = follower(p, st);
+    await follow(20, `__titles.some((x) => x.title === 'page2') && TS.path === 'page2.html'`);
+    const src = () => p.ev(`document.getElementById('av-frame').getAttribute('src')`);
+    // the reload's first ask for page2 held (one ask: any later one goes on), the owner's move, the ask let
+    // go 300 ms after the move; the time the ask was let go, in the page's clock
+    const held = async (fp, hold, move, lens, what) => {
+      await p.ev(`(window.__artStatus[${J(P2)}] = [{ status: 200, hold: ${J(hold)} }], true)`);
+      await change(fp);
+      const t0 = await soon(`window.__artRelease?.[${J(hold)}] && Date.now()`, `${what}: the reload's ask for page2, held`);
+      await follow(move, lens);
+      const t1 = await p.ev(`Date.now()`);
+      assert.ok(t1 - t0 <= 4000, `${what}: the move landed ${t1 - t0} ms into the hold (the reload gives its ask up at 5000)`);
+      await sleep(300);
+      return p.ev(`(window.__artRelease[${J(hold)}](), Date.now())`);
+    };
+    // (a) #tab2 in the same page: the change loads at #tab2, once
+    const ta = await held(NEW_FP, 'h1', 120, `TS.path === 'page2.html' && TS.hash === '#tab2'`, 'a move to #tab2 in the same page');
+    await soonIn(p, 10000)(`__titles.some((x) => x.t > ${ta}) && TS.ready && TS.path === 'page2.html'`, 'a move to #tab2: the change loaded after the ask was let go');
+    await sleep(2000);
+    assert.equal(await p.ev(`__titles.filter((x) => x.t > ${ta}).length`), 1, 'a move to #tab2: loaded once');
+    assert.deepEqual(await p.ev('[TS.path, TS.hash]'), ['page2.html', '#tab2'], 'a move to #tab2: loaded at #tab2, where the owner moved');
+    assert.equal(await src(), `/artifact/wt/${WT}/${SLUG}/page2.html#tab2`, "a move to #tab2: the fresh frame's src is the page at #tab2");
+    assert.equal(await p.ev('TS.fp'), NEW_FP, 'a move to #tab2: the stage names the new fingerprint');
+    // (b) a link to page3, a new load: the reload is dropped, page3 stays
+    // the frame element marked: a fresh frame (avFreshFrame) is another element, without the mark
+    await p.ev(`(document.getElementById('av-frame').__c11 = 1, true)`);
+    const tb = await held('e'.repeat(64), 'h2', 20, `__titles.some((x) => x.title === 'page3') && TS.path === 'page3.html'`, 'a link to page3');
+    await sleep(3000);
+    assert.equal(await p.ev(`__titles.filter((x) => x.t > ${tb}).length`), 0, 'a link to page3: no page loaded after the ask was let go');
+    assert.equal(await p.ev('TS.path'), 'page3.html', 'a link to page3: still on page3');
+    assert.equal(await p.ev(`document.getElementById('av-frame').__c11 ?? 0`), 1, 'a link to page3: no fresh frame set (the frame the owner moved in)');
+    assert.equal(await p.ev('TS.fp'), 'e'.repeat(64), 'a link to page3: the stage names the new fingerprint');
   });
 });
