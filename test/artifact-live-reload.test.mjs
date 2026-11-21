@@ -328,3 +328,93 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     assert.equal(await asks(), 0, 'main: no /api/artifact-fp ask');
   });
 });
+
+// main's viewer reloads by itself on a new fingerprint (kit-750, ruling A1); it keeps the owner's
+// place exactly as a draft's does (kit-142, kit-753): the page of the artifact they moved to, and the
+// #hash they moved to unless the address carried an anchor of its own, which stays. Each version's
+// pages carry its title, so a reload is told from the page it lands on: a link at the top left goes
+// to page2.html, one beside it to #tab2.
+const placed = (title) => ({
+  'artifact.json': J({ v: 1, title: 'Live mock', summary: 'A page that changes', by: 'supervisor', for: [] }),
+  'index.html': `<!doctype html><html><head><title>${title}</title></head><body style="margin:0"><a id="p2" href="page2.html" style="display:block;position:fixed;left:0;top:0;width:80px;height:40px;background:#ccc">page 2</a><a id="t2" href="#tab2" style="display:block;position:fixed;left:100px;top:0;width:80px;height:40px;background:#ccc">tab 2</a><p id="section" style="margin-top:60px">${title}</p><p id="tab2" style="margin-top:900px">tab 2</p><script>document.title = ${J(title)} + location.hash; addEventListener('hashchange', () => { document.title = ${J(title)} + location.hash; });</script></body></html>`,
+  'page2.html': `<!doctype html><html><head><title>${title}-page2</title></head><body><p>the second page</p></body></html>`,
+});
+
+test('main reload keeps place: a viewer on main reloads by itself on the page and #hash the owner moved to, its own anchor kept', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 900000 }, async (t) => {
+  const later = cleanup(t);
+  const F = threadsFixture('main-place');
+  later(() => F.done());
+  land(F, placed('m0'));
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  const B = `http://127.0.0.1:${port}`;
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: PAGE });
+  const soon = soonIn(p);
+  const VIEW = `${B}/view/artifact/${SLUG}`;
+  let n = 0;
+  // the page on the stage, from about:blank (a document of its own, its logs fresh), once its frame says ready
+  const open = async (url, title) => {
+    await p.send('Page.navigate', { url: 'about:blank' });
+    await soon(`location.href === 'about:blank'`, 'about:blank');
+    await p.send('Page.navigate', { url });
+    await soon(`typeof TS === 'object' && TS.kind === 'artifact' && TS.at === 'main' && TS.fp && (window.__titles ?? []).some((x) => x.title === ${J(title)})`, `${url}: main up at ${title}`);
+  };
+  // a click on one of the page's two links, and the lens naming where it went. The click goes where the
+  // frame is on top, and is sent again (up to 3 times, 5 s apart) while the lens names nothing new:
+  // a click sent just after the frame's ready sometimes moves nothing (about 1 run in 3 on the dashboard's
+  // stage, its rect and the element at the point unchanged; said as a diagnostic). A click sent again lands on the same link
+  // or, once it went, on nothing on page2.html or the same #tab2, so it moves nothing further.
+  const follow = async (dx, lens) => {
+    const at = `(() => { const f = document.getElementById('av-frame'), b = f.getBoundingClientRect(), x = b.left + ${dx}, y = b.top + 15; return JSON.stringify({ x, y, on: document.elementFromPoint(x, y) === f }); })()`;
+    for (let i = 1; ; i++) {
+      const r = JSON.parse(await p.ev(at));
+      assert.ok(r.on, `the frame is on top at the click point: ${J(r)}`);
+      await p.clickAt(r.x, r.y);
+      try { await soonIn(p, 5000)(lens, `the lens names ${lens}`); return; } catch (e) { if (i === 3) throw e; t.diagnostic(`click ${i} moved nothing on ${await p.ev('location.pathname + location.hash')}; sent again`); }
+    }
+  };
+  // main changes (a merged commit): the frame, marked, is replaced by a fresh one that says ready at `want`
+  const landAndSee = async (want) => {
+    const v = `m${++n}`;
+    await p.ev(`(document.getElementById('av-frame').__before = 1, true)`);
+    const t0 = await p.ev('Date.now()');
+    land(F, placed(v));
+    const got = await soonIn(p, 90000)(`__titles.find((x) => x.t > ${t0} && x.title.startsWith(${J(v)}))`, `main reloaded by itself to ${v}`);
+    assert.equal(got.title, want(v), 'reloaded at the owner\'s place');
+    assert.equal(await p.ev(`document.getElementById('av-frame').__before`), undefined, 'in a fresh frame');
+    return v;
+  };
+
+  await t.test("M1: a viewer tab on main: the owner went to page2.html; main's reload stays on it", async () => {
+    await open(VIEW, `m${n}`);
+    await follow(20, `TS.path === 'page2.html'`);
+    await landAndSee((v) => `${v}-page2`);
+  });
+
+  await t.test("M2: a viewer tab on main: the owner went to #tab2; main's reload stays at it", async () => {
+    await open(VIEW, `m${n}`);
+    await follow(140, `TS.path === 'index.html' && TS.hash === '#tab2'`);
+    await landAndSee((v) => `${v}#tab2`);
+  });
+
+  await t.test("M3: a viewer tab opened at #section (showArtifact's anchor): the reload keeps it; moved to page2.html, it stays there", async () => {
+    await open(`${VIEW}#section`, `m${n}#section`);
+    assert.match(await p.ev(`document.getElementById('av-frame').getAttribute('src')`), /#section$/, "the frame's src carries the anchor");
+    await landAndSee((v) => `${v}#section`);
+    await follow(20, `TS.path === 'page2.html'`);
+    await landAndSee((v) => `${v}-page2`);
+  });
+
+  await t.test("M4: the dashboard's stage on main: the owner went to page2.html; main's reload (seen in /api/data) stays on it", async () => {
+    await open(`${B}/#artifact/main/${SLUG}`, `m${n}`);
+    await follow(20, `TS.path === 'page2.html'`);
+    await landAndSee((v) => `${v}-page2`);
+  });
+});
