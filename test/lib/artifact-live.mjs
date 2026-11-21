@@ -1,8 +1,13 @@
-// Helpers the artifact viewer's live-reload tests share (artifact-live-reload.test.mjs and
+// Helpers the artifact viewer's live-reload tests share (artifact-live-reload.test.mjs, its split files
+// artifact-live-reload.guards.test.mjs and artifact-live-reload.main-place.test.mjs (kit-757), and
 // artifact-reload-removed.test.mjs, kit-755): the artifact's slug and draft, the page script that fakes
 // /api/artifact-fp and logs reads and lens readies, a poll for a page expression, the titled pages of
-// main's versions, and a click on one of their links.
+// main's versions, and a click on one of their links; the draft test's pages (mock), a landing on main
+// (land) and the draft test's stage (draftStage).
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { write, dashboardOnFreePort, threadsFixture } from './kit.mjs';
+import { cleanup, openChrome } from './chrome.mjs';
 
 export const J = JSON.stringify;
 export const SLUG = 'live-mock', WT = 'demo-01-draft';
@@ -103,3 +108,78 @@ export const follower = (p, t) => async (dx, lens) => {
     try { await soonIn(p, 5000)(lens, `the lens names ${lens}`); return; } catch (e) { if (i === 3) throw e; t.diagnostic(`click ${i} moved nothing on ${await p.ev('location.pathname + location.hash')}; sent again`); }
   }
 };
+
+// The page's own title says what it is and the anchor it loaded at (the lens's ready carries
+// document.title); a link at its top left goes to its second page.
+export const mock = (title) => ({
+  'artifact.json': J({ v: 1, title: 'Live mock', summary: 'A page that changes', by: 'supervisor', for: [] }),
+  'index.html': `<!doctype html><html><head><title>${title}</title></head><body style="margin:0"><a id="p2" href="page2.html" style="display:block;position:fixed;left:0;top:0;width:80px;height:40px;background:#ccc">page 2</a><p id="section" style="margin-top:60px">${title}</p><script>document.title = ${J(title)} + location.hash;</script></body></html>`,
+  'page2.html': '<!doctype html><html><head><title>page2</title></head><body><p>the second page</p></body></html>',
+});
+
+// An artifact landed on main, as a merged PR puts it there: its tree id.
+export function land(F, files) {
+  const dir = path.join(F.old, 'docs/devteam/project/artifacts', SLUG);
+  for (const [rel, text] of Object.entries(files)) write(path.join(dir, rel), text);
+  F.g(['add', '-A', dir], F.old);
+  F.g(['commit', '-qm', `artifact: ${SLUG}`], F.old);
+  F.g(['push', '-q', 'origin', 'main'], F.old);
+  return F.g(['rev-parse', `HEAD:docs/devteam/project/artifacts/${SLUG}`], F.old);
+}
+
+// The draft test's stage (kit-106), set up anew by each file that holds a part of its subtests
+// (artifact-live-reload.test.mjs and artifact-live-reload.guards.test.mjs, kit-757): its own fixture
+// with main's mock('main') landed (its tree id) and the draft at v1 before the dashboard starts, a
+// Chrome page with PAGE on every document, and the helpers the subtests use.
+export async function draftStage(t, name) {
+  const later = cleanup(t);
+  const F = threadsFixture(name);
+  later(() => F.done());
+  const tree = land(F, mock('main'));
+  const draft = path.join(F.old, `.worktrees/${WT}/docs/devteam/project/artifacts/${SLUG}`);
+  const edit = (title) => { for (const [rel, text] of Object.entries(mock(title))) write(path.join(draft, rel), text); };
+  // before the dashboard starts: its first read lists the draft
+  edit('v1');
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  const B = `http://127.0.0.1:${port}`;
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: PAGE });
+  const soon = soonIn(p);
+  const VIEW = `${B}/view/artifact/${SLUG}`;
+  const DRAFT_HEAD = `#artifact/wt/${WT}/${SLUG}`;
+  const DASH_DRAFT = `${B}/${DRAFT_HEAD}`;
+  const DASH_MAIN = `${B}/#artifact/main/${SLUG}`;
+  const up = (at, title) => `typeof TS === 'object' && TS.kind === 'artifact' && TS.at === ${J(at)} && window.__titles.length >= 1${title ? ` && __titles[0].title === ${J(title)}` : ''}`;
+  // a page on the stage, in a document of its own (from about:blank: a hash-only move would keep the
+  // last document and its logs), once its frame's lens has said ready (`title`, or any)
+  const go = async (url) => {
+    await p.send('Page.navigate', { url: 'about:blank' });
+    await soon(`location.href === 'about:blank'`, 'about:blank');
+    await p.send('Page.navigate', { url });
+  };
+  const open = async (url, at, title = null) => {
+    await go(url);
+    await soon(up(at, title), `${url}: the stage up, its frame ready`);
+  };
+  // the dashboard on #library, then the draft opened over it, as a link in the page opens it
+  const openOverLibrary = async () => {
+    await go(`${B}/#library`);
+    await soon(`typeof PAGE_NOW === 'string' && PAGE_NOW === 'library'`, 'on #library');
+    await p.ev(`(location.hash = ${J(DRAFT_HEAD)}, true)`);
+    await soon(up(WT, 'v1'), 'the draft over #library');
+  };
+  const asks = () => p.ev('__fpAsks.length');
+  const titles = () => p.ev('__titles.map((x) => x.title)');
+  // fp changed at the fake: the time it changed, in the page's clock
+  const change = (fp) => p.ev(`(window.__fake.fp = ${J(fp)}, Date.now())`);
+  const reloadedSince = (t0, what) => soonIn(p, 10000)(`__titles.find((x) => x.t > ${t0})`, what);
+  const NEW_FP = 'f'.repeat(64);
+  return { F, tree, draft, edit, B, p, soon, VIEW, DRAFT_HEAD, DASH_DRAFT, DASH_MAIN, up, go, open, openOverLibrary, asks, titles, change, reloadedSince, NEW_FP };
+}
