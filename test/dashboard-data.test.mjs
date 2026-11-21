@@ -1,12 +1,15 @@
 // Dashboard data derived on read and stored nowhere (kit-84): plain names for every kind of decision,
 // and the rest of what the overhaul's pages draw from. Each test builds its own fixture, drives the
-// CLI, and checks that its reads wrote nothing to the log.
+// CLI, and checks that its reads wrote nothing to the log. The last test (kit-595) drives a real
+// dashboard on a fake clock: when /api/data starts a dashboard-data child, and when it reuses a build. The one after it stops a
+// bare dashboard with SIGTERM while its warm build runs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { threadsFixture, fleetFixture, multiFixture, line, write, json, dashboardOnFreePort, PORTS, kit } from './lib/kit.mjs';
+import { execFileSync, spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+import { threadsFixture, fleetFixture, multiFixture, line, write, json, dashboardOnFreePort, PORTS, kit, freePort, serverUp } from './lib/kit.mjs';
 
 // `/api/data` serves exactly this
 const data = (F) => json(F.ok(F.old, ['dashboard-data']));
@@ -472,7 +475,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
     ...[...sourceBlock(src, 'const OWNER_SETTINGS = {').matchAll(/\b([a-z_]+): '/g)].map((m) => m[1]),
     'sensor_scrub',
   ]);
-  assert.equal(union.size, 49, 'every setting the kit reads, 49 today');
+  assert.equal(union.size, 50, 'every setting the kit reads, 50 today');
   // every direct read names a key in the union (spec §6, F3-3: its reach)
   const reads = [...src.matchAll(/loadSettings\(\)\.([a-z_]+)/g), ...src.matchAll(/settingsAt\([^)]*\)\??\.([a-z_]+)/g)].map((m) => m[1]);
   assert.ok(reads.length > 50, `the read sites found (${reads.length})`);
@@ -529,7 +532,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   const all = data(F).settings_all;
   assert.ok(Array.isArray(all), 'settings_all');
   // keys
-  assert.equal(all.length, 49);
+  assert.equal(all.length, 50);
   assert.deepEqual(new Set(all.map((e) => e.key)), union);
   // order: each group once, in the page's order
   const groups = all.map((e) => e.group).filter((g, i, a) => g !== a[i - 1]);
@@ -537,7 +540,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   // the show kinds (F3-4)
   const kinds = {};
   for (const e of all) kinds[e.shown] = (kinds[e.shown] ?? 0) + 1;
-  assert.deepEqual(kinds, { value: 32, hidden: 6, names: 8, count: 3 });
+  assert.deepEqual(kinds, { value: 33, hidden: 6, names: 8, count: 3 });
   for (const e of all) {
     for (const f of ['key', 'group', 'name', 'description', 'shown', 'value', 'set', 'default', 'owner_only']) assert.ok(f in e, `${e.key} has ${f}`);
     assert.equal(e.set, mainKeys.has(e.key), `${e.key}: set is whether main's file has it`);
@@ -622,4 +625,207 @@ test('each ticket row says its repo', { timeout: 300000 }, async (t) => {
   const one = data(F);
   assert.ok(one.tickets.length && one.progress.tickets.length, 'rows to check');
   for (const r of [...one.tickets, ...one.progress.tickets]) assert.equal(r.repo, 'home', `${r.id}: one repo, home`);
+});
+
+// ---- kit-595: dashboard-data reused for 20 s after a build, and one build as the dashboard starts ----
+// The seam (the same probe as test/box-memory-dashboard.test.mjs, which says how it works): every
+// node process loads it, and in the dashboard it puts interval timers and Date.now on a fake clock
+// the test moves (<dir>/clock), writes each child it starts to <dir>/kids (fake ms, command, timeout,
+// kill signal) and each end, and writes <dir>/ack every 20 ms (fake ms reached, children running).
+const CLOCK_PROBE = `import fs from 'node:fs';
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const dir = process.env.ZK_DIR;
+if (dir && process.argv[2] === 'dashboard') {
+  const say = (f, o) => fs.appendFileSync(dir + '/' + f, JSON.stringify(o) + '\\n');
+  const realNow = Date.now.bind(Date);
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  let fake = 0;
+  let seq = 0;
+  let live = 0;
+  Date.now = () => realNow() + fake;
+  const timers = new Set();
+  class FakeInterval {
+    constructor(f, ms, args) { this.f = f; this.ms = Math.max(1, Number(ms) || 1); this.args = args; this.due = fake + this.ms; timers.add(this); }
+    unref() { return this; }
+    ref() { return this; }
+    hasRef() { return false; }
+    refresh() { this.due = fake + this.ms; return this; }
+    close() { timers.delete(this); return this; }
+  }
+  globalThis.setInterval = (f, ms, ...args) => new FakeInterval(f, ms, args);
+  globalThis.clearInterval = (t) => (t instanceof FakeInterval ? void timers.delete(t) : realClearInterval(t));
+  for (const name of ['execFile', 'spawn']) {
+    const real = cp[name];
+    cp[name] = function (file, args, ...rest) {
+      const c = real.call(this, file, args, ...rest);
+      const o = rest.find((x) => x && typeof x === 'object') ?? {};
+      const node = file === process.execPath;
+      const cmd = node && Array.isArray(args) ? args.slice(1).join(' ') : String(file);
+      const id = ++seq;
+      live += 1;
+      say('kids', { ev: 'start', id, at: fake, node, cmd, timeout: o.timeout ?? null, kill: o.killSignal ?? null });
+      c.once('close', () => { live -= 1; say('kids', { ev: 'end', id, at: fake, node, cmd }); });
+      return c;
+    };
+  }
+  syncBuiltinESMExports();
+  let acks = 0;
+  realSetInterval(() => {
+    let target = NaN;
+    try { target = Number(fs.readFileSync(dir + '/clock', 'utf8')); } catch {}
+    if (Number.isFinite(target) && target > fake) {
+      for (;;) {
+        let next = null;
+        for (const t of timers) if (t.due <= target && (!next || t.due < next.due)) next = t;
+        if (!next) break;
+        fake = next.due;
+        next.due += next.ms;
+        try { next.f(...next.args); } catch (e) { say('errors', { at: fake, e: String(e?.stack ?? e) }); }
+      }
+      fake = target;
+    }
+    fs.writeFileSync(dir + '/ack.tmp', JSON.stringify({ n: ++acks, fake, live, rss: process.memoryUsage().rss }));
+    fs.renameSync(dir + '/ack.tmp', dir + '/ack');
+  }, 20).unref();
+}
+`;
+const zkLines = (f) => { try { return fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+const zkAck = (dir) => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'ack'), 'utf8')); } catch { return null; } };
+// the dashboard-data children the dashboard started
+const builds = (dir) => zkLines(path.join(dir, 'kids')).filter((k) => k.ev === 'start' && k.node && k.cmd.split(' ')[0] === 'dashboard-data');
+// the fake clock moved to ms, then settled: no child running, on three acks in a row
+async function zkSettle(dir, ms, said) {
+  fs.writeFileSync(path.join(dir, 'clock'), String(ms));
+  let quiet = 0;
+  let last = 0;
+  const end = Date.now() + 120000;
+  for (;;) {
+    const a = zkAck(dir);
+    if (a && a.n !== last) {
+      last = a.n;
+      quiet = a.fake === ms && a.live === 0 ? quiet + 1 : 0;
+      if (quiet >= 3) return a;
+    }
+    if (Date.now() > end) assert.fail(`timed out: the dashboard at fake ${ms} ms with no child running (${JSON.stringify(a)}; ${said()})`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+test('kit-595: one build as the dashboard listens; a build reused for 20 s after it ends, then a new one; concurrent reads share one; the 2-minute cap', { timeout: 300000 }, async (t) => {
+  const F = fleetFixture('dd-reuse');
+  const dir = path.join(F.base, 'probe');
+  fs.mkdirSync(dir);
+  const probe = path.join(F.base, 'probe.mjs');
+  write(probe, CLOCK_PROBE);
+  const env = F.env({
+    DEVTEAM_HUB_PORT: String(PORTS + 10), DEVTEAM_PORT_BASE: String(PORTS + 11), DEVTEAM_IMAGE_HUB: String(PORTS + 10),
+    CLAUDE_CONFIG_DIR: path.join(F.base, 'claude'), CODEX_HOME: path.join(F.base, 'codex'),
+    // every read waits for its own build, never the last good data
+    DEVTEAM_DATA_WAIT_MS: '600000',
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import ${pathToFileURL(probe).href}`].filter(Boolean).join(' '),
+    ZK_DIR: dir,
+  });
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'DEVTEAM_PROJECT', 'DEVTEAM_DATA_REUSE_MS', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const { dash, port } = await dashboardOnFreePort(F.old, env);
+  t.after(async () => { await dash.stop(); F.done(); });
+  const said = () => dash.out().slice(-400);
+  const get = async () => { const r = await fetch(`http://127.0.0.1:${port}/api/data`); return { status: r.status, stale: r.headers.get('x-devteam-stale'), body: await r.text() }; };
+  const fresh = (r, what) => { assert.equal(r.status, 200, `${what}: 200`); assert.equal(r.stale, null, `${what}: not marked stale`); assert.ok(JSON.parse(r.body).generated_at, `${what}: a dashboard-data body`); };
+  const log = () => { try { return fs.readdirSync(path.join(F.old, 'docs/devteam/run/log')).map((f) => `${f}:${fs.statSync(path.join(F.old, 'docs/devteam/run/log', f)).size}`).join('|'); } catch { return ''; } };
+
+  // (4) the warm start: one build as it listens, before any read
+  await zkSettle(dir, 0, said);
+  assert.equal(builds(dir).length, 1, `one dashboard-data build as the dashboard starts listening, before any read (${builds(dir).length})`);
+  const log0 = log();
+  // (4) a first read 5 s after it: that build, no child
+  await zkSettle(dir, 5000, said);
+  const w = await get();
+  fresh(w, 'the first read');
+  assert.equal(builds(dir).length, 1, 'a first read within 20 s of the warm build starts no child');
+
+  // (3b) a read 21 s after a build ended: a new one
+  await zkSettle(dir, 21000, said);
+  const b = await get();
+  fresh(b, 'the read 21 s on');
+  assert.equal(builds(dir).length, 2, 'a read 21 s after the last build ended starts a new one');
+  // (3a) a read 5 s after that build finished: its result, no child
+  await zkSettle(dir, 26000, said);
+  const a = await get();
+  fresh(a, 'the read 5 s on');
+  assert.equal(builds(dir).length, 2, 'a read 5 s after a build finished starts no child');
+  assert.equal(a.body, b.body, 'and gets that build\'s result');
+
+  // (3c) five reads at once, 21 s on: one new build, shared
+  await zkSettle(dir, 47000, said);
+  const five = await Promise.all(Array.from({ length: 5 }, () => get()));
+  five.forEach((r, i) => fresh(r, `read ${i + 1} of 5`));
+  assert.equal(builds(dir).length, 3, 'five reads at once start one build');
+  assert.equal(new Set(five.map((r) => r.body)).size, 1, 'and share it');
+
+  // (C13) a preview that appears, once the preview tick has seen it, makes the kept build stale: a
+  // read under 20 s after that build has the preview from a new one. Without that, every read for
+  // 20 s would be the build from before the record (the poll gives up after 5 s of real time).
+  const pvName = 'zqx-tiger';
+  const pvAt = new Date().toISOString();
+  write(path.join(F.old, 'docs/devteam/run/previews', `${pvName}.json`), JSON.stringify({ v: 1, name: pvName, project: 'dd-reuse', session: 'supervisor', label: '', port: 65020, cwd: fs.realpathSync(F.old), at: pvAt, expires: new Date(Date.now() + 7 * 864e5).toISOString() }));
+  const n4 = builds(dir).length;
+  await zkSettle(dir, 50000, said); // the preview tick, every 10 s of fake time
+  const pvEnd = Date.now() + 5000;
+  let seen = null;
+  for (;;) {
+    const r = await get();
+    fresh(r, 'a read after the preview tick');
+    if ((JSON.parse(r.body).library?.previews ?? []).some((p) => p.name === pvName)) { seen = r; break; }
+    if (Date.now() > pvEnd) break;
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  assert.ok(seen, `a read 3 s after the last build, once the preview tick saw a new record, has it (${builds(dir).length - n4} builds since)`);
+  assert.equal(builds(dir).length, n4 + 1, 'from one new build');
+
+  // (3d) every build keeps its 2-minute cap
+  for (const k of builds(dir)) assert.deepEqual([k.timeout, k.kill], [120000, 'SIGKILL'], `build at fake ${k.at} ms: killed after 2 minutes`);
+  assert.equal(log(), log0, 'nothing wrote run/log meanwhile (a change there would make a build stale, not old)');
+  assert.deepEqual(zkLines(path.join(dir, 'errors')), [], 'no timer threw');
+});
+
+// A dashboard-data child that holds for 30 s before it runs, and says its pid: a build still running
+// when its dashboard is stopped.
+const HOLD_PROBE = `import fs from 'node:fs';
+if (process.argv[2] === 'dashboard-data' && process.env.ZK_HOLD) {
+  fs.appendFileSync(process.env.ZK_HOLD, process.pid + '\\n');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);
+}
+`;
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+
+test('kit-595: a dashboard stopped by SIGTERM stops its running dashboard-data build, and still exits 0', { timeout: 120000 }, async (t) => {
+  const F = fleetFixture('dd-stop');
+  const probe = path.join(F.base, 'hold.mjs');
+  write(probe, HOLD_PROBE);
+  const pids = path.join(F.base, 'pids');
+  const env = F.env({
+    DEVTEAM_HUB_PORT: String(PORTS + 12), DEVTEAM_PORT_BASE: String(PORTS + 13), DEVTEAM_IMAGE_HUB: String(PORTS + 12),
+    CLAUDE_CONFIG_DIR: path.join(F.base, 'claude'), CODEX_HOME: path.join(F.base, 'codex'),
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import ${pathToFileURL(probe).href}`].filter(Boolean).join(' '),
+    ZK_HOLD: pids,
+  });
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'DEVTEAM_PROJECT', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const port = await freePort();
+  // spawned bare, as test/multirepo-views.test.mjs spawns one, and stopped with a plain kill: no group
+  const srv = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'dashboard', '--port', String(port)], { cwd: F.old, env, stdio: 'ignore' });
+  const read = () => { try { return fs.readFileSync(pids, 'utf8').split('\n').filter(Boolean).map(Number); } catch { return []; } };
+  let held = [];
+  t.after(() => { for (const pid of [srv.pid, ...held]) { try { process.kill(pid, 'SIGKILL'); } catch {} } F.done(); });
+  await serverUp(`http://127.0.0.1:${port}/`);
+  for (let i = 0; i < 300 && !read().length; i++) await new Promise((r) => setTimeout(r, 100));
+  held = read();
+  assert.equal(held.length, 1, 'the warm build is running');
+  const ended = new Promise((r) => srv.once('exit', (code, sig) => r({ code, sig })));
+  srv.kill('SIGTERM');
+  // processLog's handler: the stop logged, exit 0
+  assert.deepEqual(await ended, { code: 0, sig: null }, 'the dashboard ends as before on SIGTERM (exit 0)');
+  for (let i = 0; i < 30 && alive(held[0]); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(alive(held[0]), false, 'its dashboard-data build is gone within 3 s, not left writing run/cache');
 });

@@ -588,6 +588,12 @@ const SETTINGS_DEFAULTS = {
   usage_sources: ['claude-code', 'codex'],
   usage_command: null,
   model_prices: {},
+  // The model each plan tier runs on (worker.md §3): a task's `Model: fast | strong` line names a
+  // tier, and the worker starts that task's subagent on the model named here, as its harness takes
+  // a model name (Claude Code: sonnet, opus, haiku or a full id; another harness its own). Plans
+  // never name a vendor's model, so changing provider or version is this one setting. The
+  // supervisor's (a spend lever, supervisor.md §9), not the owner's.
+  model_tiers: { fast: 'sonnet', strong: 'opus' },
   // Files a fresh worktree needs that git doesn't carry (gitignored secrets, local env), copied from
   // the main checkout into every worker, planner, gate and chore worktree. Paths relative to the repo root.
   worktree_files: [],
@@ -672,6 +678,7 @@ const SETTINGS_WORDS = Object.freeze({
   usage_command: ['Agents and sessions', 'Usage command', "a command that reports spend for a harness the kit can't read", 'hidden'],
   usage_sources: ['Agents and sessions', 'Usage sources', "which agents' own logs spend is read from", 'value'],
   model_prices: ['Agents and sessions', 'Model prices', 'prices for models the kit has none for, or overrides', 'names'],
+  model_tiers: ['Agents and sessions', 'Models for fast and strong tasks', "the model a plan task marked fast, or strong, runs on", 'value'],
   gates: ['Merging and checks', 'Checks before merge', "the commands that must pass at a ticket's head before it merges", 'names'],
   ignored_checks: ['Merging and checks', 'Ignored forge checks', "forge checks merge doesn't wait for", 'value'],
   split_files: ['Merging and checks', 'Shared big files', 'files many tickets change: validate warns when a whole-file claim on one orders two tickets (any file may be named by part)', 'value'],
@@ -718,6 +725,8 @@ const SETTING_SHAPES = Object.freeze({
   main_branch: settingName, tmux_session: settingName, project: settingName,
   usage_sources: settingLines, ignored_checks: settingLines, split_files: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
   autonomy_ceilings: (v) => isObj(v) && Object.entries(v).every(([k, n]) => /^[a-z0-9-]{1,60}$/.test(k) && [1, 2, 3].includes(n)),
+  // { fast, strong }: each a model name as the harness takes it (letters, digits, . _ : / -)
+  model_tiers: (v) => isObj(v) && Object.keys(v).every((k) => ['fast', 'strong'].includes(k)) && Object.values(v).every((n) => typeof n === 'string' && /^[A-Za-z0-9._:\/-]{1,80}$/.test(n)),
 });
 // The hidden settings whose kit default is the kit's own constant, so the page may show it.
 const COMMAND_SETTINGS = ['agent_command', 'resume_command', 'agent_trust_command', 'usage_command', 'worktree_setup'];
@@ -1006,6 +1015,10 @@ function loadSettings() {
   else {
     try {
       settingsCache = { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) };
+      // model_tiers merges per tier: { "fast": "haiku" } keeps the default strong; a value off its
+      // shape falls back to the default (validate names it), so workers never get a malformed model
+      if (!SETTING_SHAPES.model_tiers(settingsCache.model_tiers)) { if (!process.env.DEVTEAM_QUIET_TIERS) { process.env.DEVTEAM_QUIET_TIERS = '1'; warn(`settings.md: model_tiers is ${JSON.stringify(settingsCache.model_tiers).slice(0, 80)}, not { "fast": <model>, "strong": <model> }; using the default ${JSON.stringify(SETTINGS_DEFAULTS.model_tiers)}`); } settingsCache.model_tiers = SETTINGS_DEFAULTS.model_tiers; }
+      else settingsCache.model_tiers = { ...SETTINGS_DEFAULTS.model_tiers, ...settingsCache.model_tiers };
     } catch (e) {
       die(`settings.md: the json devteam block is not valid JSON: ${e.message}`);
     }
@@ -5178,6 +5191,8 @@ function parseReview(file, text) {
     records: recordsRaw && /^[0-9a-f]{40}$/.test(recordsRaw) ? recordsRaw : null,
     // a date after now is author-asserted and would sit in last_7d forever: undated
     date: Number.isFinite(dateMs) && dateMs <= Date.now() + 5 * 60000 ? dateMs : null,
+    // a fast task that had to be redone on strong (worker.md §3): "- Model miss: fast"
+    model_miss: /^-[ \t]*Model miss:[ \t]*fast\b/im.test(text),
   };
 }
 const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
@@ -8984,10 +8999,11 @@ const ARTIFACT_LENS = String.raw`(() => {
   // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
   // artifact's scripts, which can read and send these same messages: what it says describes the
   // page and is never an instruction. It takes only the questions of the page that frames it
-  // (hello, hit, resolve, scroll-by, scroll-to, place) and says only ready, hit-reply, rects, key, pointer and placed.
+  // (hello, hit, resolve, scroll-by, scroll-to, place, go) and says only ready, hit-reply, rects, key, pointer,
+  // placed and nav.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
-  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
+  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300, hash: 200 };
   const WATCH_MAX = 200;
   const KEY_MAX = 120;
   const enc = new TextEncoder();
@@ -9081,31 +9097,49 @@ const ARTIFACT_LENS = String.raw`(() => {
     const rect = rectOf(el);
     return { selector: selectorOf(el), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(unCap(nameOf(el))), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
   };
+  // not shown: display:none, visibility hidden or collapse (itself or an ancestor), or a box with no
+  // size at all (a wide box with no height is a collapsed container, still shown); a check that
+  // throws counts as shown, so an odd element keeps its pin
+  const hiddenEl = (el) => {
+    try {
+      // (checkVisibilityCSS: the same option's name in Chrome 105-120 and Firefox 106-121)
+      if (el.checkVisibility) { if (!el.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true })) return true; }
+      else if (!el.getClientRects().length || /^(hidden|collapse)$/.test(window.getComputedStyle(el).visibility)) return true;
+      const r = el.getBoundingClientRect();
+      return r.width === 0 && r.height === 0;
+    } catch (e) { return false; }
+  };
   // where an anchor is now: by its selector (changed: with other text now), else an element of its
-  // tag with its text, the nearest to where it was
+  // tag with its text, the nearest shown one to where it was, or the nearest hidden one when none is
+  // shown; hidden marks a match that is there but not shown, which the viewer counts as not found
   const find = (a) => {
     let el = null;
     try { el = document.querySelector(a.selector); } catch (e) { el = null; }
-    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t }; }
+    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t, hidden: hiddenEl(el) }; }
     if (typeof a.text !== 'string' || !a.text || typeof a.tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
     const was = a.rect && num(a.rect.x) && num(a.rect.y) ? a.rect : { x: 0, y: 0 };
     const all = document.getElementsByTagName(a.tag);
     let best = null;
     let far = Infinity;
+    let bestHidden = null;
+    let farHidden = Infinity;
     for (let i = 0; i < all.length && i < 5000; i++) {
       if (textOf(all[i]) !== a.text) continue;
       const r = all[i].getBoundingClientRect();
       const d = Math.hypot(r.left - was.x, r.top - was.y);
-      if (d < far) { far = d; best = all[i]; }
+      if (hiddenEl(all[i])) { if (d < farHidden) { farHidden = d; bestHidden = all[i]; } }
+      else if (d < far) { far = d; best = all[i]; }
     }
-    return best ? { el: best, changed: false, text: a.text } : null;
+    if (best) return { el: best, changed: false, text: a.text, hidden: false };
+    return bestHidden ? { el: bestHidden, changed: false, text: a.text, hidden: true } : null;
   };
 
   // --- what the viewer watches: sent when it moves -------------------------------------------------
   let watched = [];
   let sent = '';
   const sendRects = (id) => {
-    const rects = watched.map((x) => { const f = find(x.anchor); return f ? { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text } : { key: x.key, rect: null }; });
+    // a hidden match is told apart from no match, for a reader that needs to know which
+    const rects = watched.map((x) => { const f = find(x.anchor); return !f ? { key: x.key, rect: null } : f.hidden ? { key: x.key, rect: null, hidden: true } : { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text }; });
     const now = JSON.stringify(rects);
     if (id === undefined && now === sent) return;
     sent = now;
@@ -9213,9 +9247,35 @@ const ARTIFACT_LENS = String.raw`(() => {
     const m = /\/artifact\/(?:main|wt\/[^\/]+|tree\/[0-9a-f]+)\/[^\/]+\//.exec(p);
     return m ? m[0] + cap(p.slice(m.index + m[0].length), CAPS.path) : cap(p, CAPS.path);
   };
+  // the view within the page: its hash, the token cut as from the path; '' when there is none. A browser
+  // gives the hash percent-encoded, so a cut that ends inside an escape (%C or %) drops what's left of it.
+  const hashOf = () => cap(unCap(location.hash || ''), CAPS.hash).replace(/%[0-9A-Fa-f]?$/, '');
+  // --- each move of the page (a #hash, pushState, replaceState, Back), told as nav once a frame ---------
+  // the last path and hash told, by ready or nav: a move is told only when one of them changed
+  let navAt = null;
+  let navPending = false;
+  const navSoon = () => {
+    if (!heard || navPending) return;
+    navPending = true;
+    requestAnimationFrame(() => {
+      navPending = false;
+      const now = { path: pathOf(), hash: hashOf() };
+      if (navAt && now.path === navAt.path && now.hash === navAt.hash) return;
+      navAt = now;
+      tell({ type: 'nav', path: now.path, hash: now.hash });
+    });
+  };
   let last = { x: 0, y: 0 };
   const ORDERS = {
-    hello: () => { heard = true; tell({ type: 'ready', path: pathOf(), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }); },
+    // hash only when there is one, so a page with none says exactly what it always said
+    hello: () => {
+      heard = true;
+      const m = { type: 'ready', path: pathOf(), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } };
+      const h = hashOf();
+      if (h) m.hash = h;
+      navAt = { path: m.path, hash: h };
+      tell(m);
+    },
     hit: (m) => {
       if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
       let el = document.elementFromPoint(m.x, m.y);
@@ -9255,6 +9315,8 @@ const ARTIFACT_LENS = String.raw`(() => {
       tell({ type: 'placed', rects });
       if (placing.length && !placeLoop) { placeLoop = true; requestAnimationFrame(placeFrame); }
     },
+    // a view of this page by its #hash; anything else (no #, too long, no string) is ignored
+    go: (m) => { if (typeof m.hash === 'string' && m.hash[0] === '#' && size(m.hash) <= CAPS.hash) location.hash = m.hash; },
   };
   addEventListener('message', (e) => {
     if (!e.isTrusted || e.source !== parent) return;
@@ -9274,6 +9336,19 @@ const ARTIFACT_LENS = String.raw`(() => {
   addEventListener('resize', soon);
   try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
   setInterval(() => { if (watched.length) sendRects(); }, 1000);
+  addEventListener('hashchange', navSoon);
+  addEventListener('popstate', navSoon);
+  // pushState and replaceState fire no event: the page's own calls go through these, which still do
+  // what it asked. A page with no history, or one whose methods can't be replaced, keeps the check.
+  try {
+    for (const k of ['pushState', 'replaceState']) {
+      const was = history[k];
+      if (typeof was !== 'function') continue;
+      history[k] = function () { const r = was.apply(this, arguments); navSoon(); return r; };
+    }
+  } catch (e) { /* no history to wrap */ }
+  // a page that replaced pushState itself, before the lens or after, is still seen
+  setInterval(navSoon, 500);
 })();`;
 // The page with the lens after it, at the very end: the parser takes a script there into the body
 // and runs it, and every byte before it is the committed one. A page that ends inside an unclosed
@@ -14777,6 +14852,67 @@ function linkDutyFindings(settings, now, add) {
     if (waited > RELEASE_DUE_HOURS * 3600000) add('medium', 'release-due', id, `${rows.length} commit(s) on ${id}'s main since ${tag}, the oldest waiting ${hours(waited)} h`, `a tag on ${id} deploys to production, so a release is a release-production decision on its ladder (decide, or ask the owner), or record why it waits (observe)`);
   }
 }
+// Model tiers (worker.md §3): each plan task's `Model: fast | strong` line, decided before the build,
+// against what the build spent. Over recent tickets (merged in the last 14 days, or building in them)
+// whose plan has tier lines: fast and strong task counts, model misses (a fast task redone on strong), and each
+// ticket's build spend on a cheaper model than the dearest it used there, priced by output tokens. A
+// ticket is unrouted when its plan has fast tasks not marked built here, its build cost at least $2,
+// none of it on an unpriced model, and under 5% of it went to a cheaper model: the plan chose fast
+// and the build ran it all on strong. A worker's own cheap subagents (reading, running tests) count
+// toward the 5% too, so a build can clear it with every fast task still built on strong: the
+// finding is a floor, not proof of routing. Vendor-neutral:
+// "cheaper" is read from prices, not from model names.
+const TIER_LINE = /^[\s>*_-]*(?:\*\*)?Model(?:\*\*)?:(?:\*\*)?[ \t]*[`*_]*(fast|strong)\b/gim;
+// a fast task built in the worker's own session on purpose: "- Built here: <why>" under it (worker.md
+// §3), or the "(inline)" older plans wrote on its Model line
+const BUILT_HERE = /^[\s>*_-]*Built here:|\binline\b/im;
+const TIER_WINDOW_DAYS = 14;
+function ticketRecordText(id, rel) {
+  const b = ticketBranchRef(id);
+  const src = b && !mergeShaFor(id) ? { ref: b } : WORKTREE;
+  if (recordsInHomeId(id)) { const ref = src.ref ? homeRecordsRef(id) : mainRef(); return ref ? srcRead({ ref }, `tickets/${id}/${rel}`) : null; }
+  const R = factsRepo(id);
+  return R ? srcRead(R.name === 'home' ? src : { ...src, repo: R }, `tickets/${id}/${rel}`) : null;
+}
+function modelTierStats(items, now = Date.now()) {
+  const from = now - TIER_WINDOW_DAYS * 86400000;
+  const out = { window_days: TIER_WINDOW_DAYS, tickets: 0, fast_tasks: 0, strong_tasks: 0, fast_built_here: 0, misses: 0, miss_rate: null, build_usd: 0, build_usd_cheaper: 0, cheaper_share: null, unrouted: [] };
+  const build = new Map();
+  const builtAt = new Map();
+  for (const it of items) if (it.phase === 'build') { builtAt.set(it.who, Math.max(builtAt.get(it.who) ?? 0, it.at)); const b = build.get(it.who) ?? {}; for (const [mdl, v] of Object.entries(it.by_model ?? {})) b[mdl] = (b[mdl] ?? 0) + v.usd; build.set(it.who, b); }
+  for (const [id, t] of tickets()) {
+    const merged = mergedAt(id);
+    // merged in the window, or not merged and building in it
+    if (merged ? merged < from : !isActive(t) || (builtAt.get(id) ?? 0) < from) continue;
+    const plan = ticketRecordText(id, 'plan.md');
+    if (!plan) continue;
+    // each task's text runs from its Model line to the next one
+    const marks = [...plan.matchAll(TIER_LINE)];
+    if (!marks.length) continue;
+    const tasks = marks.map((x, i) => ({ tier: x[1].toLowerCase(), text: plan.slice(x.index, marks[i + 1]?.index ?? plan.length) }));
+    const fastTasks = tasks.filter((x) => x.tier === 'fast');
+    const routable = fastTasks.filter((x) => !BUILT_HERE.test(x.text)).length;
+    out.tickets++; out.fast_tasks += fastTasks.length; out.strong_tasks += tasks.length - fastTasks.length; out.fast_built_here += fastTasks.length - routable;
+    // a miss is noted in that task's review (task-<n>.md, a later pass task-<n>-<pass>.md): once per task, however many passes
+    // or a final restating it
+    const rb = ticketBranchRef(id);
+    const missed = new Set(ticketReviews(id, rb && !mergeShaFor(id) ? { ref: rb } : WORKTREE).filter((r) => r.model_miss && /^task-\d+(?:-\d+)?[a-z]?\.md$/.test(r.file)).map((r) => r.file.match(/^task-(\d+)/)[1]));
+    out.misses += missed.size;
+    const b = build.get(id) ?? {};
+    const priced = Object.entries(b).map(([mdl, usd]) => ({ usd, out: priceFor(modelKey(mdl))?.output ?? null }));
+    // a build with spend on an unpriced model can't say what was cheaper: not judged (unpriced-model asks for prices)
+    const unpriced = priced.some((x) => x.out === null && x.usd > 0);
+    const top = Math.max(0, ...priced.map((x) => x.out ?? 0));
+    const usd = priced.reduce((a, x) => a + x.usd, 0);
+    const cheaper = priced.filter((x) => x.out !== null && x.out < top).reduce((a, x) => a + x.usd, 0);
+    out.build_usd += usd; out.build_usd_cheaper += cheaper;
+    if (routable && !unpriced && usd >= 2 && cheaper / usd < 0.05) out.unrouted.push({ id, fast_tasks: routable, tasks: tasks.length, build_usd: +usd.toFixed(2) });
+  }
+  out.miss_rate = out.fast_tasks ? +(out.misses / out.fast_tasks).toFixed(2) : null;
+  out.cheaper_share = out.build_usd ? +(out.build_usd_cheaper / out.build_usd).toFixed(2) : null;
+  out.build_usd = +out.build_usd.toFixed(2); out.build_usd_cheaper = +out.build_usd_cheaper.toFixed(2);
+  return out;
+}
 // reviewsSince: only `metrics --since` windows first passes by their dates; every other caller (the
 // retro, the dashboard) keeps all-time review counts, as before review records were dated.
 function collectMetrics(since, reviewsSince = 0) {
@@ -14893,6 +15029,7 @@ function collectMetrics(since, reviewsSince = 0) {
   // merged tickets' hours, start to merge, for hours per point (the tickets cost.per_point counts)
   m.cycle_hours_total = +(cycles.filter((c) => ticketUsd[c.id] !== undefined).reduce((a, c) => a + c.ms, 0) / 3600000).toFixed(2);
   m.efficiency = efficiencyOf(m);
+  m.model_tiers = modelTierStats(items, now);
   // Threads (supervisor.md §3): how many are open, how many wait on the supervisor, how long a first
   // reply takes. Only once there is one, so a project without threads reads as it did before.
   const threadsNow = threadViews(readLog().objects);
@@ -15323,6 +15460,8 @@ function collectMetrics(since, reviewsSince = 0) {
     const st = recent ? all.last_7d : all;
     if (st && st.first_passes >= EFF_MIN_PASSES() && st.rejection_rate > 0.6) add('medium', 'review-churn', `${stage} review`, `${Math.round(100 * st.rejection_rate)}% of ${stage} first passes${recent ? ` in the last ${RECENT_DAYS} days` : ''} were rejected (${st.rejected} of ${st.first_passes})${st.top_blocking_rules?.length ? `; most cited: ${st.top_blocking_rules.slice(0, 3).map((x) => `${x.rule} ×${x.count}`).join(', ')}` : ''}`, `turn what first passes keep citing into what new sessions are told from the start: a lesson scoped to who writes the ${stage} (it reaches every new prompt), or a fix to the ${stage} template; or, if reviewers block on what isn't Critical or Important, fix the review prompt`);
   }
+  const mt = m.model_tiers;
+  if (mt && mt.unrouted.length >= TIER_MIN_TICKETS()) add('medium', 'fast-tasks-unrouted', 'build', `${mt.unrouted.length} of ${mt.tickets} recent tickets planned fast tasks (${mt.unrouted.reduce((a, x) => a + x.fast_tasks, 0)} of ${mt.unrouted.reduce((a, x) => a + x.tasks, 0)}) but spent under 5% of their build on a cheaper model (a floor: a worker's own cheap subagents count toward it too): ${mt.unrouted.slice(0, 4).map((x) => x.id).join(', ')}${mt.unrouted.length > 4 ? ', …' : ''}`, `have workers hand each \`Model: fast\` task to a subagent on settings.model_tiers.fast (worker.md §3); building it in the worker's own session is the exception, with its reason in the plan. Model misses so far: ${mt.misses} of ${mt.fast_tasks} fast tasks`);
   const unpriced = Object.entries(m.cost.unpriced_models ?? {});
   if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
@@ -15475,6 +15614,7 @@ const EFFICIENCY_WAIT = ['awaiting-word', 'blocked', 'parked', 'starting'];
 const envInt = (k, d) => { const n = Number(process.env[k]); return Number.isInteger(n) && n > 0 ? n : d; };
 const EFF_MIN_MERGED = () => envInt('DEVTEAM_EFFICIENCY_MIN_MERGED', 5);
 const EFF_MIN_PASSES = () => envInt('DEVTEAM_CHURN_MIN_PASSES', 10);
+const TIER_MIN_TICKETS = () => envInt('DEVTEAM_TIER_MIN_TICKETS', 3);
 const EFFICIENCY_OVERHEAD = ['supervisor', 'planning', 'review'];
 function efficiencyOf(m) {
   const split = (o) => {
@@ -16572,6 +16712,11 @@ const RESTART_MIN_MS = 30000;
 // How long a dashboard read waits on a dashboard-data run before it has the last good data instead
 // (0 is no wait at all; anything that isn't a number is the default).
 const DATA_WAIT_MS = ((n) => (process.env.DEVTEAM_DATA_WAIT_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_WAIT_MS));
+// How long a dashboard serves a finished dashboard-data build again (kit-595): 20 s after it ended,
+// while it is still current (cmdDashboard's dataEpoch). DEVTEAM_DATA_REUSE_MS is for tests only, not a
+// setting: test/presence-changed.test.mjs sets 3000 to keep checking kit-633's 3 s start gap. Anything
+// that isn't a number of at least 0 is the default.
+const DATA_REUSE_MS = ((n) => (process.env.DEVTEAM_DATA_REUSE_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_REUSE_MS));
 // makeSession --if-gone found the window there after all (it never types into one): not a failure.
 const IF_GONE_LEFT = 3;
 // The last moment a tick may start a cswap switch (its 45 s timeout, inside RESTART_TICK_MS).
@@ -21227,7 +21372,9 @@ async function cmdDashboard() {
   const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
   const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS } = dashboardActions();
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
-  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
+  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
+  // (kit-595; it was 10 s: each run is a child holding about 140 MB, so the hub's pulse is at most
+  // about 40 s old, the beat plus a run) and after an owner action
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
   // One run at a time, each given 20 s; the kit's version is read once, on the first run.
   // viewer: 1 says this kit has /view/ and /artifact/tree/: the gateway's owner wrapper waits for it (spec §8).
@@ -21253,17 +21400,30 @@ async function cmdDashboard() {
     });
   };
   refreshHello();
-  every(refreshHello, 10000);
+  // How often the dashboard looks again through the hello child (kit-595: 30 s). DEVTEAM_HELLO_MS is for
+  // tests only, not a setting: test/lib/pane-question-fixture.mjs sets 1000, so a question change shows
+  // in a second (kit-223). Anything that isn't a number of at least 0 is the default.
+  const HELLO_MS = ((n) => (process.env.DEVTEAM_HELLO_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 30000))(Number(process.env.DEVTEAM_HELLO_MS));
+  every(refreshHello, HELLO_MS);
   const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
   previewBad = (f, e) => { if (!previewsNamedBad.has(f)) { previewsNamedBad.add(f); log(`previews: skipped ${f}: ${e?.message ?? e}`); } };
   let previewTicking = false;
+  // What the last tick saw of the previews: each record and whether it was up. A tick that sees
+  // anything else moves dataEpoch (kit-595), so a kept dashboard-data build never shows the previews
+  // from before it; none at the start is no change.
+  let previewsSeen = '[]';
+  const previewsMoved = () => {
+    const seen = JSON.stringify(readPreviews().map((r) => [r, previewUp.get(r.name) ?? null]));
+    if (seen !== previewsSeen) dataEpoch += 1;
+    previewsSeen = seen;
+  };
   const runPreviewTick = () => {
     if (previewTicking) return;
     previewTicking = true;
-    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); });
+    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); previewsMoved(); });
   };
   runPreviewTick();
   every(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000));
@@ -21523,9 +21683,10 @@ async function cmdDashboard() {
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
-  // served while it runs, and once finished while it is young (3 s since it finished, so the 10 s poll
-  // gets previews, settings and git at most about 3 s old) and current (dataEpoch, which the log's
-  // changes and every POST action move, is what it was when the build *started*: a change during a
+  // served while it runs, and once finished while it is young (DATA_REUSE_MS, 20 s since it finished
+  // (kit-595; it was 3 s): a page's 10 s poll then starts a child every other poll at most, and gets
+  // previews, settings and git at most 20 s plus one run old) and current (dataEpoch, which the log's
+  // changes, every POST action and a preview tick that saw a change move, is what it was when the build *started*: a change during a
   // build makes it stale when it ends). A read that finds none waits for the next build, which starts
   // once the running one has ended and 3 s have passed since the last start; every read waiting then
   // shares it. A failed build is never kept.
@@ -21538,7 +21699,7 @@ async function cmdDashboard() {
   const startBuild = () => {
     lastStart = Date.now();
     const b = { epoch: dataEpoch, finished: null, r: null };
-    b.done = new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err && stdout) lastData = stdout;
       b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
       b.finished = Date.now();
@@ -21547,7 +21708,10 @@ async function cmdDashboard() {
     build = b;
     return b.done;
   };
-  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_EVERY_MS));
+  // a build still running when the dashboard exits (processLog's signal handlers exit it) is killed
+  // with it, not left writing run/cache: the warm start (kit-595) runs one with no read waiting
+  process.on('exit', () => { if (build?.finished === null) try { build.child?.kill('SIGKILL'); } catch {} });
+  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_REUSE_MS));
   const dashboardData = () => {
     if (usable(build)) return build.done;
     nextBuild ??= (async () => {
@@ -21732,7 +21896,11 @@ async function cmdDashboard() {
   // the hub, unless the box's image serves it; again after a respawn that failed
   let hubHandle = null;
   const startHubOnce = () => { hubHandle = dashboardHub(log); };
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHubOnce(); every(accountsTick, accountsEveryMs()); });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHubOnce(); every(accountsTick, accountsEveryMs());
+    // warm (kit-595, from kit PR #305): one build as it starts listening, so a tab first opened within
+    // DATA_REUSE_MS of its end is answered from it at once; one opened during it shares it
+    void dashboardData();
+  });
   // ----- the kit watch (kit-288): a dashboard runs the kit it serves. Its kit's files are printed
   // every DEVTEAM_KIT_WATCH_MS; a print unlike the start's and the same two polls running (a sync
   // writes its files over a few seconds) whose script parses is a new kit, and the dashboard hands
@@ -21822,7 +21990,7 @@ async function cmdDashboard() {
 /* cmdDashboard end */
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
-  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
+  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3). Build each plan task marked `Model: fast` in a subagent on the fast model (`settings --get model_tiers`) unless the plan says `- Built here: <why>` under it (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
@@ -27795,15 +27963,31 @@ async function browserSnapshot(ctx, tab, json) {
 // for as open's is (an error page's for 3 s), or a tab it opened (waited for, up to 10 s, to load).
 // The verb then prints said, plus where the page went or the guard's refusal.
 async function browserInput(ctx, tab, act, said) {
-  let started = false, loaded = false;
+  let started = false, loaded = false, inDocAt = 0, pending = 0, fresh = false;
   const had = new Set(ctx.tabs);
-  tab.started = () => { started = true; loaded = false; tab.unreachable = null; tab.refs = new Map(); };
+  tab.started = () => { started = true; loaded = false; pending++; fresh = true; tab.unreachable = null; tab.refs = new Map(); };
   tab.loaded = () => { loaded = true; };
+  // A same-document navigation (a fragment link, a history call) fires a load's start, then itself, and no
+  // load: it takes the start just before it off the count (while a real load is pending, the page's
+  // history calls after the first come with no start of their own and take nothing). The wait ends 500 ms after the
+  // first (as an input's own load is given 500 ms to start) when no start is left pending, before and
+  // after the document reads complete. So a history call the page being left makes before it navigates
+  // (an onclick saving its state), or while its load is pending (a timer), leaves that load's start
+  // pending until its load; one the new page makes as it boots reads loading; and a page that keeps
+  // calling (a scroll-spy) holds nothing. Each read is bounded.
+  tab.within = () => { inDocAt ||= Date.now(); if (fresh) pending--; fresh = false; };
+  const docLoaded = () => Promise.race([
+    ctx.cdp.send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true }, tab.sessionId).then((r) => r.result?.value === 'complete', () => false),
+    browserSleep(1000).then(() => false),
+  ]);
   try {
     await act();
     for (const t = Date.now(); !started && had.has(ctx.active) && Date.now() - t < 500;) await browserSleep(25);
-    for (const t = Date.now(); started && !loaded && Date.now() - t < (tab.unreachable ? 3000 : 30000);) await browserSleep(50);
-  } finally { tab.started = tab.loaded = null; }
+    for (const t = Date.now(); started && !loaded && Date.now() - t < (tab.unreachable ? 3000 : 30000);) {
+      if (inDocAt && !pending && Date.now() - inDocAt >= 500 && await docLoaded() && !pending) break;
+      await browserSleep(50);
+    }
+  } finally { tab.started = tab.loaded = tab.within = null; }
   const pop = ctx.active && !had.has(ctx.active) ? ctx.active : null;
   if (pop) {
     for (const t = Date.now(); Date.now() - t < 10000; await browserSleep(100)) {
