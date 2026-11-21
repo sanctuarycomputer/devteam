@@ -7763,7 +7763,8 @@ const PEEK_ART_CTX = () => ({ previewState, artHref, artViewer, pvViewer, fileHr
 /* peek-artifacts end */
 // The Library (kit-92): one .cards grid of libraryItems kept by the page's Kind and Goal filters, in kind order;
 // above it, only when there is something to say, #lib-top: where publishing happens, or one confirm for every
-// published artifact not live on this box, and the notice for a box whose gateway doesn't serve previews.
+// published artifact not live on this box, the notice for a box whose gateway doesn't serve previews, and,
+// when the last fetch of origin failed, that drafts from other machines may be out of date (kit-750).
 function renderLibrary(lib) {
   const items = libraryItems({ ...(DATA ?? {}), library: lib }, Date.now(), { previewState, artHref, artViewer, pvViewer, fileHref });
   // one per artifact and preview card
@@ -7873,10 +7874,10 @@ function renderLibrary(lib) {
   avBarPoll();
 }
 // The Library's ask of the dashboard's fetch of origin (kit-750): while the dashboard (never a viewer tab)
-// is seen and shows the Library or a stage, /api/artifact-remote every 10 s, one ask at a time, given
+// is seen and shows the Library or an artifact on its stage, /api/artifact-remote every 10 s, one ask at a time, given
 // up after 5 s. The ask is the demand that keeps origin fetched; a closed or hidden page asks nothing,
-// so nothing is fetched. A moved rev (a fetch moved a ref) loads the data at once rather than at the
-// next poll; a change in stale draws the Library again. now() asks at once under the same guards,
+// so nothing is fetched. A moved rev (a fetch moved a ref) loads the data at once (forced, past a
+// read already out) rather than at the next poll; a change in stale draws the Library again. now() asks at once under the same guards,
 // when the last ask is over 10 s old (renderLibrary, so opening the Library doesn't wait).
 const artRemotePing = (() => {
   let last = null, askedAt = 0, inFlight = false;
@@ -7885,16 +7886,17 @@ const artRemotePing = (() => {
     inFlight = true;
     askedAt = Date.now();
     const c = new AbortController(), t = setTimeout(() => c.abort(), 5000);
+    let j = null;
+    // a failed or given-up ask is no answer: the next tick asks again
     try {
       const r = await fetch('/api/artifact-remote', { signal: c.signal, cache: 'no-store' });
-      const j = r.ok ? await r.json() : null;
-      if (j && typeof j === 'object') {
-        const was = last;
-        last = j;
-        if (was && was.rev !== j.rev) load();
-        else if (!!was?.stale !== !!j.stale && PAGE_NOW === 'library' && DATA) renderLibrary(DATA.library);
-      }
+      j = r.ok ? await r.json() : null;
     } catch {} finally { clearTimeout(t); inFlight = false; }
+    if (!j || typeof j !== 'object') return;
+    const was = last;
+    last = j;
+    if (was && was.rev !== j.rev) load({ force: true });
+    else if (!!was?.stale !== !!j.stale && PAGE_NOW === 'library' && DATA) renderLibrary(DATA.library);
   };
   if (!VIEWER) { setInterval(tick, 10000); document.addEventListener('visibilitychange', () => void tick()); }
   return { now() { if (Date.now() - askedAt > 10000) void tick(); }, status: () => last };
