@@ -8678,7 +8678,7 @@ const TURN_ID = /^u-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 // When a proposal was made, as the log stamps it: what the owner's accept names to bind to it.
 const READY_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 // What the dashboard can point at (data-subject="<type>:<id>"); index.html's T_TYPES is the same list.
-const SUBJECT_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
+const SUBJECT_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact', 'suggestion'];
 const SUBJECT_REF = new RegExp(`^(${SUBJECT_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`);
 const TURN_REF = /^[a-z]+:[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 // Each kind's keys, what it must have, and each string's cap in bytes. artifact and preview subjects

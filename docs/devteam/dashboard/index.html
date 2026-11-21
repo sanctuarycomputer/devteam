@@ -8533,16 +8533,16 @@ function showFailure(message) {
 // how big it is, where a card opens and what its state line says, the pins and the dock's words.
 // The kit's test loads this block by itself.
 // What the page can point at: the kit's SUBJECT_TYPES (a test holds the two lists equal).
-const T_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
+const T_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact', 'suggestion'];
 // The kit's SUBJECT_REF, the same way (a test holds the two equal): the page never sends a ref the log refuses.
 // T_REF_MAX: the kit's SUBJECT_CAPS.ref, in bytes; the pattern alone lets a long kind's ref past it.
 const T_REF = new RegExp(`^(${T_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`), T_REF_MAX = 120;
 // What each kind is called where an item has no name of its own (the owner never reads a ref).
-const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a question', ticket: 'a ticket', planner: 'a planning session', decision: 'a decision', lesson: 'a lesson', problem: 'a problem', act: 'an action', preview: 'a preview', artifact: 'an artifact' };
+const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a question', ticket: 'a ticket', planner: 'a planning session', decision: 'a decision', lesson: 'a lesson', problem: 'a problem', act: 'an action', preview: 'a preview', artifact: 'an artifact', suggestion: 'a suggestion' };
 // Where each kind of item lives: an item drawn in two places (an observation also in the Sensors
 // feed, a question in a Decide row) is pinned in its home section. A question's, 'inbox', is the
 // Threads panel's Inbox tab (#th-inbox #questions, kit-100 spec §2.6), not a page's section.
-const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
+const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library', suggestion: 'trust' };
 // The sections' names, as the sidebar shows them.
 const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust', awareness: 'Awareness', governance: 'Governance', efficiency: 'Efficiency', retros: 'Retros', health: 'Sensors', monitoring: 'Sensors' };
 // T_ENCODED_MAX: a turn as the log line holds it, JSON-escaped (a quotation mark is two bytes there,
@@ -8730,7 +8730,7 @@ function tPlace(r, w, h, vw, vh) {
   const top = Math.min(Math.max(8, r.top), Math.max(8, vh - h - 8));
   return { sheet: false, left: Math.round(left), top: Math.round(top) };
 }
-const T_WHERE = { goal: 'Goals', question: 'Inbox', ticket: 'Board', planner: 'Board', observation: 'Loop, Observe', problem: 'Loop, Orient', lesson: 'Loop, Orient', decision: 'Loop, Decide', act: 'Loop, Act', preview: 'Library', artifact: 'Library' };
+const T_WHERE = { goal: 'Goals', question: 'Inbox', ticket: 'Board', planner: 'Board', observation: 'Loop, Observe', problem: 'Loop, Orient', lesson: 'Loop, Orient', decision: 'Loop, Decide', act: 'Loop, Act', preview: 'Library', artifact: 'Library', suggestion: 'Trust' };
 // Where a thread's subject is, in the dock's words.
 function tWhere(s) {
   if (!s) return 'no subject';
