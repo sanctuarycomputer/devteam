@@ -12193,7 +12193,9 @@ async function fetchLinkMains(end) {
 const LINK_PRS_FILE = runPath('link-prs.json');
 const LINK_PRS_REUSE_MS = 10 * 60000;
 const LINK_PRS_UNREAD_HOURS = 6;
-const LINK_PRS_MAX_AGE_MS = 2 * 3600000;
+// a read older than this raises no PR finding: about two ticks, so findings counted in minutes
+// never come from a read the tick's budget kept from refreshing for longer than that
+const LINK_PRS_MAX_AGE_MS = 30 * 60000;
 const FLEET_BRANCH = /^(ticket\/|plan\/|chore-)/;
 // gh's GraphQL logins drop the [bot] suffix an app has on the REST API, so the common apps are named too
 const BOT_LOGIN = /\[bot\]$|^(github-actions|copilot-pull-request-reviewer|copilot|dependabot|renovate|vercel|vercel-fleet-prod|netlify|coderabbitai|chatgpt-codex-connector|codecov|sonarcloud|sonarqubecloud|changeset-bot|linear|cursor|gemini-code-assist|sourcery-ai|deepsource-io|snyk-io|socket-security|mergify|graphite-app|pre-commit-ci)$/i;
@@ -19617,7 +19619,7 @@ function operatorPrsLine(text, now = Date.now()) {
       const said = [p.createdAt, ...(Array.isArray(p.comments) ? p.comments.map((c) => c?.createdAt) : []), ...(Array.isArray(p.latestReviews) ? p.latestReviews.map((r) => r?.submittedAt) : [])];
       const since = Math.max(0, ...said.map((t) => Date.parse(t) || 0));
       const waited = since ? now - since : 0;
-      if (waited >= OPERATOR_PR_WAIT_MS) why.push(`${last ? 'no review of its head' : 'no review'} ${waited < 3600000 ? `${Math.floor(waited / 60000)}min` : `${Math.floor(waited / 3600000)}h`}`);
+      if (waited > OPERATOR_PR_WAIT_MS) why.push(`${last ? 'no review of its head' : 'no review'} ${waited < 3600000 ? `${Math.floor(waited / 60000)}min` : `${Math.floor(waited / 3600000)}h`}`);
     }
     if (why.length) need.push(`#${p.number} ${why.join(' and ')}`);
   }

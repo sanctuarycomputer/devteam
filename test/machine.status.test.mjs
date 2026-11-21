@@ -147,12 +147,15 @@ test('status lists the operator\'s own open kit PRs, and which need it now', () 
     pr(419, 'no-body', { body: null }),
     // pushed 40 minutes ago and nobody has looked: past the 15 minutes, in minutes
     pr(421, 'forty-minutes', { createdAt: ago(40 / 60) }),
+    // either side of the 15 minutes, with room for the test's own run time
+    pr(422, 'thirteen-minutes', { createdAt: ago(13 / 60) }),
+    pr(423, 'seventeen-minutes', { createdAt: ago(17 / 60) }),
     // a draft isn't up for review yet
     pr(420, 'a-draft', { isDraft: true }),
   ]));
   const st = status();
   assert.equal(st.status, 0, st.stderr);
-  assert.match(st.stdout, /^machine: operator PRs: 15 open, 10 need you \(#405 changes requested, #356 CI red, #401 changes requested, #404 no review 30h, #406 CI red and no review 30h, #410 changes requested, #411 no review of its head 26h, #412 changes requested, #414 no review 30h, #421 no review 40min\)$/m);
+  assert.match(st.stdout, /^machine: operator PRs: 17 open, 11 need you \(#405 changes requested, #356 CI red, #401 changes requested, #404 no review 30h, #406 CI red and no review 30h, #410 changes requested, #411 no review of its head 26h, #412 changes requested, #414 no review 30h, #421 no review 40min, #423 no review 17min\)$/m);
   // one gh call for it, on the kit's repo, by the gh login
   const calls = fs.readFileSync(asked, 'utf8').split('\n').filter((l) => l.startsWith('pr list'));
   assert.equal(calls.length, 1);
