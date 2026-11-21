@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { threadsFixture, fleetFixture, multiFixture, line, write, json, dashboardOnFreePort, PORTS, kit, freePort, serverUp } from './lib/kit.mjs';
+import { threadsFixture, fleetFixture, multiFixture, line, write, json, dashboardOnFreePort, PORTS, kit, freePort, serverUp, until } from './lib/kit.mjs';
 
 // `/api/data` serves exactly this
 const data = (F) => json(F.ok(F.old, ['dashboard-data']));
@@ -448,7 +448,11 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   assert.deepEqual(await get('/api/governance'), cli);
   const d = await get('/api/data');
   for (const k of ['class_words', 'threads', 'upkeep_days', 'settings_all']) assert.ok(k in d, `/api/data has ${k}`);
-  const h = await get('/api/hello');
+  // /api/hello answers at once from the dashboard's last `hello` child; until the first one lands, its
+  // threads, fleet and inbox are null (devteam.mjs refreshHello, helloBody). That child starts beside the
+  // warm dashboard-data build, and /api/data can answer first, so wait for the first hello: its fleet is
+  // never null (cmdHello). The assert below is unchanged.
+  const h = await until(async () => { const x = await get('/api/hello'); return x.fleet !== null && x; }, "the dashboard's first hello");
   for (const k of ['you', 'waiting', 'ready']) assert.equal(typeof h.threads?.[k], 'number', `/api/hello's threads.${k}`);
   assert.deepEqual(logAt(A.root), before, 'the dashboard\'s reads wrote nothing to the log');
 });
