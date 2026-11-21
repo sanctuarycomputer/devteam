@@ -1485,6 +1485,7 @@ const CLASS_WORDS = Object.freeze({
   'goal-approval': 'Approving a goal',
   'owner-setting': 'Asking for a setting',
   'settings-edit': 'Changing one of its own settings',
+  'browser-handover': 'Handing the browser to you for a login',
 });
 // A class in plain words; one the supervisor made up (decide --class, ask --class) shows as unnamed,
 // in its own words, so the gap is visible and the bare id never is. No class, no name.
@@ -7662,6 +7663,18 @@ function askLine({ thread, about } = {}) {
   // rules (no default, below; the Inbox's floor) hold. Refused, not rewritten: another kind given on purpose
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
+  // browser-handover (kit-67): the browser held for the owner's login until they answer. Only the
+  // owner's Done hands it back, so it has no default; it is one owner-action about one instance's
+  // browser (browser:<instance key>, BROWSER_KEY: initialised at load, long before this runs), and
+  // that browser has one handover open at a time. Checked in this order, before anything else.
+  if (cls === 'browser-handover') {
+    if (flags.default !== undefined) die('a browser-handover question has no --default: only the owner hands the browser back');
+    if (kind !== 'owner-action') die(`a browser-handover question is an owner-action (the owner logs in, then answers Done): ask it --kind owner-action, not --kind ${kind}`);
+    const hs = flagStr('scope') ?? null;
+    if (typeof hs !== 'string' || !hs.startsWith('browser:') || !BROWSER_KEY.test(hs.slice('browser:'.length))) die(`a browser-handover question's scope is browser:<instance key> (the browser it hands over, as browser status names it)${hs == null ? ', and this one has no --scope' : `, not ${hs}`}`);
+    const held = questions().filter((x) => x.class === 'browser-handover' && x.scope === hs && x.status === 'open');
+    if (held.length) die(`a browser-handover question for ${hs} is already open (${held.map((x) => x.id).join(', ')}): the browser is handed over once at a time; wait for the owner's answer, or withdraw it first`);
+  }
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
   if (asksGoalApproval({ goal: flagStr('goal'), kind, question: q, choices: jsonFlag('choices'), options: asList(flags.options), recommendation: flagStr('recommendation'), def: flagStr('default') })) die(`this asks the owner to approve ${flagStr('goal')} (a draft goal), but goal decide uses only a goal-approval answer, so a yes to a ${kind} question is wasted: ask it with ask --kind goal-approval --goal ${flagStr('goal')} --links '<the design>' (planning.md §1). If it decides one part of the design instead, ask that part in its own words, with choices that say what each does`);
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
@@ -7774,7 +7787,7 @@ function askLine({ thread, about } = {}) {
     if (hold && !flagStr('owner-said')) die(remediationHoldWords(r.name, rel[0] ?? null, hold, r.valid_minutes));
     ownerSaid = about?.owner_said ?? (flagStr('owner-said')?.trim() || null);
   }
-  if (!orderAsked && !flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
+  if (!orderAsked && cls !== 'browser-handover' && !flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
   // the answer approves each once and nothing else (constitution.md §3, one answer, one act).
   const approves = [...new Set(asList(flags.approves).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
