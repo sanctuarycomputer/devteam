@@ -12182,7 +12182,7 @@ async function fetchLinkMains(end) {
 // in the repo itself land through merge and their records; a fork's branch of that name is an outside PR), read with gh inside the tick's budget, so metrics can say
 // when one waits unreviewed or with findings its author never saw (pr-unreviewed,
 // pr-changes-unanswered) without touching the network. A good read is reused for
-// LINK_PRS_REUSE_MS (the findings count hours). A failed read (gh missing, logged out, offline, a
+// LINK_PRS_REUSE_MS (under the findings' 15 min). A failed read (gh missing, logged out, offline, a
 // query GitHub refuses) keeps the last PRs but marks the entry failing, with when it started and
 // gh's first line, so metrics raises no PR finding from stale data and says (link-prs-unread) when
 // reads have failed for LINK_PRS_UNREAD_HOURS. Kept per PR: its head, when that head was first seen
@@ -12191,7 +12191,7 @@ async function fetchLinkMains(end) {
 // on, leaving out bots. The query asks for no `commits`: gh's commits field nests authors under
 // commits under PRs and GitHub refuses it for its node count.
 const LINK_PRS_FILE = runPath('link-prs.json');
-const LINK_PRS_REUSE_MS = 30 * 60000;
+const LINK_PRS_REUSE_MS = 10 * 60000;
 const LINK_PRS_UNREAD_HOURS = 6;
 const LINK_PRS_MAX_AGE_MS = 2 * 3600000;
 const FLEET_BRANCH = /^(ticket\/|plan\/|chore-)/;
@@ -14838,7 +14838,7 @@ const PRIORITY_INVERSION_GAP = 3;
 // A repo link the supervisor maintains: open PRs to review, fix, comment on and merge, and (with
 // its own release: "tag") releases to cut. Nothing else notices when that work stops, so:
 // pr-unreviewed, an open PR (not the fleet's own, not a draft) whose head has had no review for
-// LINK_PR_STALL_HOURS; pr-changes-unanswered, one whose latest review says CHANGES at its head that
+// LINK_PR_STALL_MS; pr-changes-unanswered, one whose latest review says CHANGES at its head that
 // long, with nothing posted on the PR since, so its author never saw the findings; release-due,
 // merges on the link's main waiting RELEASE_DUE_HOURS since its latest tag. A review is a record
 // under run/reviews/ in a folder or file named for the PR (…pr-<n>/…md, …pr-<n>…md) whose
@@ -14847,7 +14847,9 @@ const PRIORITY_INVERSION_GAP = 3;
 // of that head on the forge. A PR whose reviews or comments ran past gh's page raises nothing.
 // The PRs come from the tick's read (fetchLinkPrs); with no good read nothing about PRs is raised,
 // and reads failing for LINK_PRS_UNREAD_HOURS are a low link-prs-unread.
-const LINK_PR_STALL_HOURS = 24;
+// 15 min: a supervisor that maintains a repo looks at a new head within a tick or two, not a day
+// later (a restart wipes its memory of what it meant to review, so the finding is what brings it back)
+const LINK_PR_STALL_MS = 15 * 60000;
 const RELEASE_DUE_HOURS = 6;
 function linkPrReviewRecords(ids, prefixes = new Map()) {
   const root = path.join(runDir, 'reviews');
@@ -14880,7 +14882,9 @@ function linkPrReviewRecords(ids, prefixes = new Map()) {
   return byPr;
 }
 function linkDutyFindings(settings, now, add) {
-  const stall = LINK_PR_STALL_HOURS * 3600000;
+  const stall = LINK_PR_STALL_MS;
+  // how long, in the unit that reads: minutes under an hour
+  const waitedFor = (ms) => (ms < 3600000 ? `${Math.max(1, Math.floor(ms / 60000))} min` : `${Math.floor(ms / 3600000)} h`);
   let read = {};
   try { read = readJson(LINK_PRS_FILE); } catch {}
   const repos = linkPrRepos(settings);
@@ -14908,12 +14912,12 @@ function linkDutyFindings(settings, now, add) {
       if (latest && latest.verdict === 'CHANGES' && latest.sha === pr.head) {
         const since = now - latest.at;
         const answered = pr.last_comment_at && Date.parse(pr.last_comment_at) > latest.at;
-        if (since > stall && !answered) add('medium', 'pr-changes-unanswered', subject, `review ${latest.file} asked for changes at its head ${pr.head.slice(0, 12)} ${hours(since)} h ago, and nothing has been posted on the PR since: its author hasn't seen the findings`, `comment the findings to its author on ${pr.url ?? `the PR`} (gh pr comment ${pr.number} --body-file ${latest.file}); a fix the fleet should make is a ticket in ${id}`);
+        if (since > stall && !answered) add('medium', 'pr-changes-unanswered', subject, `review ${latest.file} asked for changes at its head ${pr.head.slice(0, 12)} ${waitedFor(since)} ago, and nothing has been posted on the PR since: its author hasn't seen the findings`, `comment the findings to its author on ${pr.url ?? `the PR`} (gh pr comment ${pr.number} --body-file ${latest.file}); a fix the fleet should make is a ticket in ${id}`);
         continue;
       }
       if (atHead.length || forgeAtHead.length) continue;
       const waited = now - (Date.parse(pr.head_at) || now);
-      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${settings.links[id].maintain.reviews ?? id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then comment the verdict to its author`);
+      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${waitedFor(waited)} at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${settings.links[id].maintain.reviews ?? id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then comment the verdict to its author`);
     }
   }
   // release-due: only for a repo link whose releases the supervisor keeps (maintain.releases) and
@@ -19574,7 +19578,7 @@ async function machineStatus() {
 // release-prep-) aren't the operator's even so. gh gives a PR's first 100 comments: a longer
 // thread's latest verdict is unread.
 const OPERATOR_PR_MARK = 'Opened by the box operator.';
-const OPERATOR_PR_WAIT_MS = 24 * 3600000;
+const OPERATOR_PR_WAIT_MS = 15 * 60000;
 function operatorPrsLine(text, now = Date.now()) {
   let prs;
   try { prs = JSON.parse(text); } catch { return 'operator PRs: ?'; }
@@ -19613,7 +19617,7 @@ function operatorPrsLine(text, now = Date.now()) {
       const said = [p.createdAt, ...(Array.isArray(p.comments) ? p.comments.map((c) => c?.createdAt) : []), ...(Array.isArray(p.latestReviews) ? p.latestReviews.map((r) => r?.submittedAt) : [])];
       const since = Math.max(0, ...said.map((t) => Date.parse(t) || 0));
       const waited = since ? now - since : 0;
-      if (waited >= OPERATOR_PR_WAIT_MS) why.push(`${last ? 'no review of its head' : 'no review'} ${Math.floor(waited / 3600000)}h`);
+      if (waited >= OPERATOR_PR_WAIT_MS) why.push(`${last ? 'no review of its head' : 'no review'} ${waited < 3600000 ? `${Math.floor(waited / 60000)}min` : `${Math.floor(waited / 3600000)}h`}`);
     }
     if (why.length) need.push(`#${p.number} ${why.join(' and ')}`);
   }

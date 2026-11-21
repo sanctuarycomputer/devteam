@@ -28,7 +28,8 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
       pr(11, sha('a')), // never reviewed: pr-unreviewed
       pr(12, sha('b')), // CHANGES at its head two days ago, nothing posted: pr-changes-unanswered
       pr(13, sha('c'), { comments: [{ author: { login: 'someone' }, createdAt: iso(1) }] }), // CHANGES, then the findings were commented
-      pr(14, sha('d'), { pushedH: 2 }), // a fresh head
+      pr(14, sha('d'), { pushedH: 0.1 }), // a fresh head, pushed 6 min ago
+      pr(27, sha('b').slice(0, 39) + 'c', { pushedH: 0.5 }), // pushed 30 min ago, unreviewed: past the 15 min
       pr(15, sha('e'), { headRefName: 'ticket/console-01-a' }), // the fleet's own
       pr(16, sha('f'), { isDraft: true }),
       pr(17, sha('1'), { reviews: [{ author: { login: 'someone' }, state: 'COMMENTED', submittedAt: iso(48), commit: { oid: sha('1') } }] }), // reviewed on the forge
@@ -89,7 +90,7 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     const findings = json(okIn(old, ['metrics', '--json'])).findings;
     const of = (kind) => findings.filter((x) => x.kind === kind).map((x) => x.subject).sort();
     assert.ok(calls.find((c) => c.startsWith('pr list')).includes('isCrossRepository'), 'asks whether a head is a fork\'s');
-    assert.deepEqual(of('pr-unreviewed'), ['console#11', 'console#19', 'console#20', 'console#22', 'console#24']);
+    assert.deepEqual(of('pr-unreviewed'), ['console#11', 'console#19', 'console#20', 'console#22', 'console#24', 'console#27']);
     assert.deepEqual(of('pr-changes-unanswered'), ['console#12', 'console#21']);
     const ch = findings.find((x) => x.kind === 'pr-changes-unanswered' && x.subject === 'console#12');
     assert.match(ch.detail, /console-pr-12\/final-1\.md/);
@@ -103,7 +104,7 @@ test('link PR duties: unreviewed and unanswered PRs, and a release that is due',
     // a fresh read is reused: the next tick doesn't ask gh again
     const asked = () => fs.readFileSync(logf, 'utf8').trim().split('\n').filter((c) => c.startsWith('pr list')).length;
     okIn(old, ['observe-metrics'], SUP, withGh);
-    assert.equal(asked(), 1, 'a read under 30 min old is reused');
+    assert.equal(asked(), 1, 'a read under 10 min old is reused');
     const prsFile = path.join(old, 'docs/devteam/run/link-prs.json');
     const backdate = (k, h) => { const j = JSON.parse(fs.readFileSync(prsFile, 'utf8')); if (h === null) delete j.console[k]; else j.console[k] = iso(h); fs.writeFileSync(prsFile, JSON.stringify(j)); };
 
