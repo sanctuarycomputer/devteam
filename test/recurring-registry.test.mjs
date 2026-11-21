@@ -724,11 +724,11 @@ test('A5: a recurring-edit answer is never recorded from chat, and from a turn o
     refused(T.merge('chat', ['--approved', q]), new RegExp(`${q} can't approve a job change: answered from chat`));
     assert.equal(Object.hasOwn(T.mainJobs(), 'aa'), false, 'no job landed');
     // H6: in a thread, the owner says No; Yes recorded from that turn is refused, and so is a turn
-    // whose words don't start with the label Yes, as it is written
+    // whose words don't start with the label Yes (any case: final-12b F3)
     const bb = check({ title: 'bb job', run: 'echo bb' });
     const tid = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
     const q2 = QID.exec(T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', 'Add bb?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { bb } })]).out)[0];
-    for (const words of ['No, never add it', 'Yesterday I said no', 'yes, add it', 'Sure. Yes, add it']) {
+    for (const words of ['No, never add it', 'Yesterday I said no', 'Sure. Yes, add it', 'No, yes later', '"No", yes later']) {
       const u = T.ok(['thread', 'say', tid, words], {}).split('\n')[0];
       refused(T.run(['answer', q2, 'Yes', '--from-turn', u]), new RegExp(`--from-turn ${u}: ${q2} is a recurring-edit question, and the owner's words there don't start with Yes`));
     }
@@ -781,6 +781,32 @@ test('A5: a recurring-edit answer is a whole owner turn newer than the question:
     T.jobsChore('clause', () => ({ mem: check({ title: 'mem job', every: '1h', run: 'echo evil' }) }));
     refused(T.merge('clause', ['--approved', q2]), new RegExp(`${q2} can't approve a job change: answered from a clause of ${later} \\(said_at\\), which approves no job change`));
     assert.deepEqual(T.mainJobs(), {}, 'no job landed');
+  } finally { T.done(); }
+});
+
+test('A5: the owner\'s Yes in a turn is read as --choice reads a label: any case, past surrounding quotes (final-12b F3)', () => {
+  const T = setup('turn-case');
+  try {
+    const tid = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const jobs = {};
+    ['yes, add it', 'YES', '"Yes"', '\u201cYes\u201d', "'yes' please"].forEach((words, i) => {
+      const name = `y${i}`;
+      const job = check({ title: `${name} job`, run: `echo ${name}` });
+      const q = QID.exec(T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]).out)[0];
+      const u = T.ok(['thread', 'say', tid, words], {}).split('\n')[0];
+      passes(T.run(['answer', q, 'Yes', '--from-turn', u]));
+      T.jobsChore(name, (j) => ({ ...j, [name]: job }));
+      passes(T.merge(name, ['--approved', q]));
+      jobs[name] = job;
+    });
+    assert.deepEqual(T.mainJobs(), jobs, 'each Yes landed its own job');
+    // the long s (U+017F) folds to s under a case-insensitive regex; it is not the label
+    const tid2 = T.ok(['thread', 'new', 'More?', '--title', 'More'], {}).split('\n')[0];
+    const q = QID.exec(T.run(['thread', 'ask', tid2, '--class', 'recurring-edit', '--question', 'Add zz?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { zz: ZZ } })]).out)[0];
+    for (const words of ['Ye\u017f', 'No, yes later', '"No" yes']) {
+      const u = T.ok(['thread', 'say', tid2, words], {}).split('\n')[0];
+      refused(T.run(['answer', q, 'Yes', '--from-turn', u]), /don't start with Yes/);
+    }
   } finally { T.done(); }
 });
 

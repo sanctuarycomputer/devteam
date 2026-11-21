@@ -24281,8 +24281,10 @@ const recurringRegistry = Object.freeze({
   // label (agreed_by_owner; never a reading of words, whatever line wrote it:
   // d-20261120-195829274-supervisor), not landed, not superseded
   live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && v.agreed_by_owner === true && !v.reading && !recurringRegistry.notOwnYes(v) && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
-  // words that start with the label Yes, as it is written, as a whole word
-  saysYes: (said) => /^Yes(?![\p{L}\p{N}])/u.test(String(said ?? '').trimStart()),
+  // words that start with the label Yes as a whole word, read as --choice and --read read a label:
+  // any case, past opening quotes (final-12b F3). The letters are spelled out, not /i, so no other
+  // letter that folds to one of them (the long s, U+017F) passes for it.
+  saysYes: (said) => /^["'\u2018\u201c\u201e\u00ab\s]*[Yy][Ee][Ss](?![\p{L}\p{N}])/u.test(String(said ?? '')),
   // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1): one
   // recorded from chat; from a turn whose words don't start with Yes; from a clause of a turn
   // (said_at); or from a turn that isn't the owner's, in the log, and newer than the question; else null
