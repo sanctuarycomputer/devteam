@@ -4836,6 +4836,10 @@ function holdView(g) {
   return { mode, state, running, reason: g.hold?.reason ?? null, by: g.hold_by ?? null, fleet: g.hold?.fleet ?? null, since: (g.updates ?? []).filter((u) => u.hold !== undefined).pop()?.at ?? null };
 }
 
+// A session told to park that hasn't within this long is a park-unsettled finding: about two ticks
+// (DEVTEAM_PARK_SETTLE_MINUTES for tests).
+const PARK_SETTLE_ENV = process.env.DEVTEAM_PARK_SETTLE_MINUTES ? Number(process.env.DEVTEAM_PARK_SETTLE_MINUTES) : NaN;
+const PARK_SETTLE_MS = (Number.isFinite(PARK_SETTLE_ENV) ? PARK_SETTLE_ENV : 30) * 60000;
 // What holds need from the supervisor, as findings with a next step (supervisor.md §3): rulings a
 // park hasn't sent yet, sessions parked under a goal that runs again, tickets waiting on a held
 // goal's work, a drain that has finished, and a goal parked long enough to ask about.
@@ -4847,7 +4851,26 @@ function holdFindings(add, settings) {
     const mode = sessionMode(s.name);
     if (!parkedNow && ['park', 'let-go'].includes(mode)) {
       const c = currentCause(s.name);
-      if (c && !parkRulingSent(s.name, c.marker)) add('high', 'park-unsent', s.name, `its goal is ${holdWords(mode)} (${causeWords(c)}), and it hasn't been told`, `goal park-sessions ${isUpkeep(logGet(c.goal) ?? UPKEEP_VIRTUAL) ? 'upkeep' : c.goal}`);
+      const target = c ? (isUpkeep(logGet(c.goal) ?? UPKEEP_VIRTUAL) ? 'upkeep' : c.goal) : null;
+      if (c && !parkRulingSent(s.name, c.marker)) add('high', 'park-unsent', s.name, `its goal is ${holdWords(mode)} (${causeWords(c)}), and it hasn't been told`, `goal park-sessions ${target}`);
+      // told, and still not parked a while later: a park never waits on a reply or an owner answer
+      // (worker.md §9: commit WIP, a handoff naming what it waits on, phase parked), so one session
+      // left running doesn't hold the fleet in "parking" for days. Counted from the first ruling for
+      // this cause (a re-send that couldn't be delivered doesn't restart it), or from a later launch
+      // (a session started on purpose since gets its own time).
+      else if (c) {
+        const t = (x) => Date.parse(x?.created_at) || 0;
+        const first = logObjects('message').filter((m) => m.to === s.name && m.kind === 'ruling' && (m.text ?? '').includes(`[${c.marker}]`)).map(t).sort((a, b) => a - b)[0];
+        const launched = logObjects('phase').filter((x) => x.created_by === s.name && x.to === 'starting').map(t).sort((a, b) => b - a)[0] ?? 0;
+        const since = first ? Math.max(first, launched) : 0;
+        if (since && now - since >= PARK_SETTLE_MS) {
+          const gone = /^no tmux (session|window)/.test(resolvePane(tmuxTarget(s.name)).problem ?? '');
+          const next = gone
+            ? `its window is gone (a restart), so a ruling can't reach it: start it to park, ${s.role} ${s.id} --resume --force, then goal park-sessions ${target} --again (it commits its WIP, writes a handoff naming the questions it waits on, and parks)`
+            : `look at its window, then send the ruling again: goal park-sessions ${target} --again (it commits its WIP, writes a handoff naming the questions it waits on, and parks; it resumes from the handoff once they're answered)`;
+          add('medium', 'park-unsettled', s.name, `told to park ${Math.floor((now - since) / 60000)} min ago (${causeWords(c)}) and still ${lastPhaseOf(s.name)?.to ?? 'running'}: a park doesn't wait on a reply or an owner answer`, next);
+        }
+      }
     }
     if (parkedNow && ['run', 'drain'].includes(mode) && !draining()) add('medium', 'parked-under-run', s.name, `parked, and its goal is ${holdWords(mode)} again`, `${s.role} ${s.id} --resume${mode === 'drain' ? ' (a draining goal finishes what it started)' : ''}`);
   }
@@ -7006,13 +7029,28 @@ function landRecords(id, rec, linkName) {
         const o = f.ok ? lg(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${HS.main_branch}^{commit}`], wt) : null;
         // killed at the timeout, origin may still take it (a slow pre-receive): it may have landed, and
         // the rerun recognises the kit's own merge and logs the act then (final-13 F1)
-        if (!(o?.ok && o.out.trim() === head)) return pushed.timedOut ? { maybe: `the push to home's ${HS.main_branch} timed out before origin answered, and its ${HS.main_branch} isn't the records merge yet` } : `push to home's ${HS.main_branch} refused (did main move?)`;
+        if (!(o?.ok && o.out.trim() === head)) {
+          if (pushed.timedOut) return { maybe: `the push to home's ${HS.main_branch} timed out before origin answered, and its ${HS.main_branch} isn't the records merge yet` };
+          // a main that moved since the checks says so, with both shas, as landCode's moved() does (kit-332)
+          if (o?.ok && o.out.trim() !== checked) return `push to home's ${HS.main_branch} refused: home's ${HS.main_branch} moved since the checks (${checked.slice(0, 12)} to ${o.out.trim().slice(0, 12)}); run merge again`;
+          return `push to home's ${HS.main_branch} refused (did main move?)`;
+        }
         out(`the push of the records to home's ${HS.main_branch} ${recurringRegistry.why(pushed)}, but origin's ${HS.main_branch} is the records merge the kit built and checked (${head.slice(0, 12)}): landed`);
       }
     } finally {
       git(['worktree', 'remove', '--force', wt], mainRoot);
     }
-  } else if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+  } else {
+    // GitHub has no lease on the base: home's main is read again just before gh pr merge, and must
+    // still be the main the checks judged (mainSha(), read before this fetch), as landCode's moved()
+    // does for the code (kit-332). The fetch is bounded (recurringRegistry.git); one that fails refuses.
+    const checked = mainSha();
+    if (!checked) return `no home ${HS.main_branch} to land on`;
+    if (!recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot }).ok) return `couldn't fetch home's ${HS.main_branch} to check it hasn't moved since the checks; run merge again`;
+    const tip = resolveCommit(`refs/remotes/origin/${HS.main_branch}`);
+    if (tip !== checked) return `home's ${HS.main_branch} moved since the checks (${String(checked).slice(0, 12)} to ${String(tip).slice(0, 12)}); run merge again`;
+    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+  }
   git(['fetch', '--quiet', 'origin', HS.main_branch]);
   mainRefCache = undefined; mainLogCache = undefined; mergeShaCache.clear();
   return null;
@@ -7908,6 +7946,27 @@ function askLine({ thread, about } = {}) {
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  // --options takes each choice as its own value (or one JSON array of strings). One value holding
+  // several choices joined by | ("yes|no", "Merge it | Let it go") would show the owner a single choice
+  // that reads that way, so it is refused with the command it meant; on a decision, so is a value of
+  // whole words joined by , or / ("yes,no"), and a decision whose drawn choices (--choices, else
+  // --options) are one offers nothing to choose. Skipped where the kit writes the choices itself.
+  if (!(cls === 'goal-met' || cls === 'recurring-edit' || flags['link-change'] !== undefined)) {
+    const decision = ['owner-decision', 'one-way-door'].includes(kind);
+    const opts = flags.options === undefined ? [] : listFlag('options').map(String);
+    const labels = flags.choices !== undefined ? (jsonFlag('choices') ?? []).map((c) => String(c?.label ?? '')) : opts;
+    const joined = (v) => {
+      const pipe = v.split(/\s*\|\s*/).filter(Boolean);
+      if (pipe.length > 1) return pipe;
+      const words = v.split(/\s*[,/]\s*/).filter(Boolean);
+      return decision && words.length > 1 && words.every((x) => /^[A-Za-z][A-Za-z-]+$/.test(x)) ? words : null;
+    };
+    if (labels.length === 1) {
+      const parts = joined(labels[0]);
+      if (parts) die(flags.choices !== undefined ? `--choices has one choice labelled "${labels[0]}": give each choice its own entry (--choices '${JSON.stringify(parts.map((label) => ({ label })))}')` : `--options takes each choice as its own value: --options ${parts.map((x) => JSON.stringify(x)).join(' ')} (one value "${labels[0]}" shows the owner a single choice that reads "${labels[0]}")`);
+      if (decision) die(`${flags.choices !== undefined ? '--choices' : '--options'} "${labels[0]}" is one choice, so there is nothing to choose: give each choice its own value (--options "a" "b"), or leave the choices out and the owner answers in words`);
+    }
+  }
   if (asksGoalApproval({ goal: flagStr('goal'), kind, question: q, choices: jsonFlag('choices'), options: asList(flags.options), recommendation: flagStr('recommendation'), def: flagStr('default') })) die(`this asks the owner to approve ${flagStr('goal')} (a draft goal), but goal decide uses only a goal-approval answer, so a yes to a ${kind} question is wasted: ask it with ask --kind goal-approval --goal ${flagStr('goal')} --links '<the design>' (planning.md §1). If it decides one part of the design instead, ask that part in its own words, with choices that say what each does`);
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
@@ -8294,7 +8353,7 @@ function askLine({ thread, about } = {}) {
   if (cls !== 'recurring-edit') try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : orderAsked ? [context, goalOrderText(orderAsked)].filter(Boolean).join('\n\n') : context,
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : recurringChange ?? goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : cls === 'recurring-edit' ? [{ label: 'Yes' }, { label: 'No' }] : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined, no_default: noDefault,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : recurringChange ?? goalChangeFlag(cls), options: flags.options === undefined ? [] : listFlag('options'), choices: goalMet ? GOAL_MET_CHOICES : cls === 'recurring-edit' ? [{ label: 'Yes' }, { label: 'No' }] : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined, no_default: noDefault,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
@@ -22371,7 +22430,7 @@ async function cmdDashboard() {
       accountsSaid = said;
     }));
   };
-  // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes (a page
+  // One dashboard-data run at a time, shared by every page waiting on it, with no time limit by default (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS) (a page
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
@@ -22383,6 +22442,10 @@ async function cmdDashboard() {
   // once the running one has ended and 3 s have passed since the last start; every read waiting then
   // shares it. A failed build is never kept.
   const DATA_EVERY_MS = 3000;
+  // No time limit on a build by default: a big project's build can take minutes, and stopping it at a
+  // fixed limit left its dashboard with no data at all. Builds run one at a time, so a slow one never
+  // piles up; DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS sets a limit in ms when wanted (0 or unset: none).
+  const DASHBOARD_DATA_TIMEOUT_MS = Math.max(0, Number(process.env.DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS) || 0);
   let dataEpoch = 0;
   let build = null;
   let nextBuild = null;
@@ -22391,9 +22454,9 @@ async function cmdDashboard() {
   const startBuild = () => {
     lastStart = Date.now();
     const b = { epoch: dataEpoch, finished: null, r: null };
-    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: DASHBOARD_DATA_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err && stdout) lastData = stdout;
-      b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
+      b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${DASHBOARD_DATA_TIMEOUT_MS < 120000 ? `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 1000)} s` : `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes`} and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
     }));
@@ -30808,7 +30871,7 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
   ${BROWSER_USAGE}   supervisor: the supervisor's own Chrome (Node 22+), in a tmux window beside yours, with one private profile per project under ~/.devteam/browser/; profiles lists them as JSON, and forget removes one (every site in it signed out); a password or one-time code goes in on stdin, never as an argument (other local users can read a command line): browser type <ref> --stdin
   preview start <name>            run a kit-started preview again, on its name and port
-  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
+  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]' | --options "a" "b"… (each choice its own value, or one JSON array)] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
                                   supervisor: an agent-drawn page for rows the owner decides; pins page, data and result schema to a commit and their sha256s

@@ -718,7 +718,7 @@ async function zkSettle(dir, ms, said) {
   }
 }
 
-test('kit-595: one build as the dashboard listens; a build reused for 20 s after it ends, then a new one; concurrent reads share one; the 2-minute cap', { timeout: 300000 }, async (t) => {
+test('kit-595: one build as the dashboard listens; a build reused for 20 s after it ends, then a new one; concurrent reads share one; no time limit by default', { timeout: 300000 }, async (t) => {
   const F = fleetFixture('dd-reuse');
   const dir = path.join(F.base, 'probe');
   fs.mkdirSync(dir);
@@ -789,8 +789,8 @@ test('kit-595: one build as the dashboard listens; a build reused for 20 s after
   assert.ok(seen, `a read 3 s after the last build, once the preview tick saw a new record, has it (${builds(dir).length - n4} builds since)`);
   assert.equal(builds(dir).length, n4 + 1, 'from one new build');
 
-  // (3d) every build keeps its 2-minute cap
-  for (const k of builds(dir)) assert.deepEqual([k.timeout, k.kill], [120000, 'SIGKILL'], `build at fake ${k.at} ms: killed after 2 minutes`);
+  // (3d) no time limit on a build by default (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS sets one); killed with SIGKILL if one is set
+  for (const k of builds(dir)) assert.deepEqual([k.timeout, k.kill], [0, 'SIGKILL'], `build at fake ${k.at} ms: no time limit`);
   assert.equal(log(), log0, 'nothing wrote run/log meanwhile (a change there would make a build stale, not old)');
   assert.deepEqual(zkLines(path.join(dir, 'errors')), [], 'no timer threw');
 });
