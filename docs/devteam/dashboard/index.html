@@ -6672,26 +6672,42 @@ function avFpSeen(fp, mainFp, slug, at) {
 // the frame again in a fresh frame (no history entry, no move counted for the close: kit-141), at its
 // src (its anchor kept) or the page of the artifact its lens last named, and, when the src has no anchor
 // of its own, at the view (#hash) it last named (kit-142, d-20261120-205438165: a note placed on #tab2
-// keeps its pin across a save); the scroll position isn't kept
-// (the frame is opaque-origin). A 404 says the draft is gone, links main's version (shown in place),
+// keeps its pin across a save; a page the change removed loads the src opened instead, kit-755); the
+// scroll position isn't kept (the frame is opaque-origin). A 404 says the draft is gone, links main's version (shown in place),
 // and stops for this stage. main and a published tree are never asked about, nor a framed viewer tab
 // (the owner wrapper, which may hold a gone draft in place under its own note). An answer is the page's
 // only if its stage (TS.fpSerial) is still the one asked under, and only a { fp: string } is taken.
 const avLiveReload = (() => {
-  let serial = 0, inFlight = false;
+  let serial = 0, inFlight = false, reloads = 0;
   const draft = (at) => !!at && at !== 'main' && !String(at).startsWith('tree:');
   const due = () => TS.kind === 'artifact' && draft(TS.at) && !(VIEWER && window.parent !== window) && document.visibilityState === 'visible' && !TS.fpGone && !inFlight;
   // the frame again: its src, or the page (and, the src opened unanchored, the #hash) its lens names
   // when the owner has moved in it. The anchor is the opened src's (showArtifact's), not the frame's now:
-  // that holds the #hash the last reload added (kit-142 final-2 F1)
-  function reload() {
-    const f = $('av-frame'), src = f.getAttribute('src');
+  // that holds the #hash the last reload added (kit-142 final-2 F1). A page other than the opened src is
+  // asked for first (given up after 5 s): one the change removed (a 404) loads the opened src, with its
+  // anchor, in its place, never the server's plain 404, which has no lens to name a page (kit-755).
+  // Dropped once a later reload began (the latest wins: it chose from the newer state), or when the stage
+  // (TS.fpSerial) or its frame changed while it asked: a frame loaded under an image over the stage would
+  // have its load taken as the image's (avFrameLoad), and the stage given back would ignore its lens.
+  async function reload() {
+    const f = $('av-frame'), src = f.getAttribute('src'), mine = ++reloads, { fpSerial } = TS;
     if (!src) return;
-    const anchored = (f.dataset.opened ?? src).includes('#'), at = src.indexOf('#');
+    const opened = f.dataset.opened ?? src;
+    const anchored = opened.includes('#'), at = src.indexOf('#');
     const base = artSrc(TS.slug, TS.at), file = at < 0 ? src : src.slice(0, at);
     const page = file.startsWith(base) ? file.slice(base.length) || 'index.html' : null;
     const same = TS.path === page && (anchored || TS.hash === (at < 0 ? '' : src.slice(at)));
-    avFreshFrame('av-frame').src = !TS.path || page === null || same ? src : base + TS.path + (anchored ? '' : TS.hash);
+    let to = !TS.path || page === null || same ? src : base + TS.path + (anchored ? '' : TS.hash);
+    if (to !== opened) {
+      const stop = new AbortController(), late = setTimeout(() => stop.abort(), 5000);
+      try {
+        const r = await fetch(to, { cache: 'no-store', signal: stop.signal });
+        r.body?.cancel().catch(() => {});
+        if (r.status === 404) to = opened;
+      } catch {} finally { clearTimeout(late); }
+    }
+    if (mine !== reloads || $('av-frame') !== f || TS.fpSerial !== fpSerial) return;
+    avFreshFrame('av-frame').src = to;
   }
   function seen(fp) {
     if (!TS.fp) { TS.fp = TS.fpNow = fp; return; }
