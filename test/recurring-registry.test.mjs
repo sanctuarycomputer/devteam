@@ -1089,6 +1089,25 @@ test('A5: a planted line whose words aren\'t its Yes turn\'s, or whose turn is i
   } finally { T.done(); }
 });
 
+test('A5: a recurring-edit Yes is refused once the owner has written again after it in the thread: their next turn may take it back (final-14b F3)', () => {
+  const T = setup('turn-newer');
+  try {
+    const ev = check({ title: 'ev job', every: '1h', run: 'echo evil' });
+    const tid = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', 'Add ev?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { ev } })]);
+    passes(r);
+    const q = QID.exec(r.out)[0];
+    const yes = T.ok(['thread', 'say', tid, 'Yes'], {}).split('\n')[0];
+    const back = T.ok(['thread', 'say', tid, 'Wait, no. Cancel that, do not add it.'], {}).split('\n')[0];
+    refused(T.run(['answer', q, 'Yes', '--from-turn', yes]), new RegExp(`--from-turn ${yes}: ${q} is a recurring-edit question, and the owner wrote again after that turn \\(${back}\\)`));
+    assert.equal(json(T.ok(['questions', '--id', q, '--json']))[0].status, 'open', 'q stays open');
+    // the plain case in the same thread: shown again, Yes, and nothing after it
+    T.ok(['thread', 'reply', tid, 'Shall I add ev after all?', '--refs', `question:${q}`]);
+    const yes2 = T.ok(['thread', 'say', tid, 'Yes'], {}).split('\n')[0];
+    passes(T.run(['answer', q, 'Yes', '--from-turn', yes2]));
+  } finally { T.done(); }
+});
+
 test('A5: a planted line on a channel the kit never writes for an owner\'s answer lands nothing (final-14b F7)', () => {
   const T = setup('turn-channel');
   try {

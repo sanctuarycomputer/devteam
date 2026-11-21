@@ -8493,6 +8493,14 @@ function cmdAnswer() {
   if (fromTurn && v.kind === 'review') die(`${id} is a review: its answer is the owner's result, which a turn can't carry`);
   const turn = fromTurn ? turnAnswer('answer', v) : null;
   if (turn && v.class === 'recurring-edit' && !recurringRegistry.saysYes(turn.said)) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner's words there don't start with Yes ("${String(turn.said).slice(0, 80)}"): only the owner's own Yes approves a job change; ask back in its thread`);
+  // and never once the owner has written again after it in its thread: their next turn may take it
+  // back ("Wait, no"), so the Yes is shown again and their next turn taken (final-14b F3). A turn in
+  // the same millisecond counts as after it.
+  if (turn && v.class === 'recurring-edit') {
+    const u = logGet(turn.turn);
+    const later = u ? logObjects('turn').filter((x) => x.thread === u.thread && x.id !== u.id && x.created_by === 'owner' && String(x.created_at ?? '') >= String(u.created_at ?? '')).sort(byTime).pop() : null;
+    if (later) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner wrote again after that turn (${later.id}): their later words may take the Yes back; show it again (thread reply <t-id> "…" --refs question:${id}) and take their next turn`);
+  }
   // and only the owner's very next turn after the supervisor's turn that shows it, so a Yes said to
   // another question, in a turn or in plain words, or after a No, binds nothing (final-13b F1, final-14b F1)
   { const why = turn && v.class === 'recurring-edit' ? recurringRegistry.turnBinds(logGet(turn.turn), id) : null; if (why) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and that turn isn't the owner's first right after your turn that shows it (${why}): only the owner's Yes right after the question approves a job change; show it again (thread reply <t-id> "…" --refs question:${id}) and take their next turn`); }
