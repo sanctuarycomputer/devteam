@@ -26809,7 +26809,7 @@ The whole system as planned now: the sum of every design so far. Written at boot
 
 ## 4. Dependencies and deployment
 
-| Dependency or vendor | Used for | One-way door? |
+| Dependency or vendor | Used for | Appendix D default or acceptable alternative (code-style.md), checklist library, or its ADR |
 |---|---|---|
 
 ## 5. Distance from the code rules
