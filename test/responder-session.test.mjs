@@ -300,6 +300,9 @@ test('R3: the responder replies (--pending) and hands over; thread show, /api/th
   await t.test('R3b: thread show names responder beside its time', () => {
   const shown = F.ok(F.old, ['thread', 'show', T]);
   assert.match(shown, new RegExp(`^\\S+ responder \\(${U}\\)`, 'm'), `thread show names responder beside its time:\n${shown}`);
+  assert.match(shown, new RegExp(`^\\S+ responder \\(${U}\\) \\(pending\\):`, 'm'), 'and says it is pending');
+  // --pending is a reply's, never the owner's own turn
+  assert.match(F.fails(['thread', 'say', T, 'More.', '--pending']), /--pending goes with a reply/);
   });
   await t.test('R3c: /api/threads shows it as the supervisor\'s, writer responder', async () => {
   const api = await (await fetch(`http://127.0.0.1:${port}/api/threads`)).json();
@@ -313,6 +316,8 @@ test('R3: the responder replies (--pending) and hands over; thread show, /api/th
 
   });
   await t.test('R3e: thread list --waiting --responder: owed turns routed to it, oldest first', () => {
+  assert.equal(F.ok(F.old, ['thread', 'list', '--waiting', '--responder'], RESPONDER), 'no turn is waiting on the responder', 'an empty queue says so');
+  assert.match(F.fails(['thread', 'list', '--responder'], RESPONDER), /--responder goes with --waiting/);
   const thread = (title, ago) => F.hand('owner', { type: 'thread', title }, ago);
   const turn2 = (by, th, text, ago, extra = {}) => F.hand(by, { type: 'turn', thread: th, text, ...extra }, ago);
   const T2 = thread('second', 260000);
@@ -337,6 +342,7 @@ test('R3: the responder replies (--pending) and hands over; thread show, /api/th
   assert.deepEqual(list.map((x) => x.thread), [T1, T2]);
   const text = F.ok(F.old, ['thread', 'list', '--waiting', '--responder'], RESPONDER).split('\n');
   assert.ok(text[0].includes(q1) && text[1].includes(q2) && text.length === 2, text.join('\n'));
+  assert.match(text[0], new RegExp(`^${q1} in ${T1} \\(\\d+ min\\) "First in line"$`), 'each line: the turn, its thread, its age and its first words');
   });
 });
 
@@ -539,5 +545,22 @@ test('R6c: owner words after the supervisor\'s answer lift the guard: the respon
     F.owner(['thread', 'say', T, 'Thanks, and the favicon?']);
     const r = F.run(F.old, ['thread', 'reply', T, 'Looking at the favicon.'], RESPONDER);
     assert.equal(r.status, 0, `the owner spoke after the supervisor, so the responder may answer: ${r.err}`);
+  } finally { F.done(); }
+});
+
+test('R7c: an owner turn and a non-owner turn at the same millisecond: the owner turn counts as answered (as threadView decides whose move it is)', () => {
+  const F = fixture('responder-owed-tie');
+  try {
+    const at = new Date(Date.now() - 60000).toISOString();
+    const stamp = at.slice(0, 10).replace(/-/g, '') + '-' + at.slice(11, 23).replace(/[:.]/g, '');
+    const logDir = path.join(F.old, 'docs/devteam/run/log');
+    const T = F.hand('owner', { type: 'thread', title: 'tie' }, 120000);
+    const put = (by, o) => fs.appendFileSync(path.join(logDir, `${by}-${at.slice(0, 7)}.jsonl`), `${JSON.stringify({ op: 'new', ...(by === 'owner' ? { channel: 'cli' } : {}), ...o, id: `u-${stamp}-${by}`, at, by })}\n`);
+    put('owner', { type: 'turn', thread: T, text: 'Same moment', routed_to: 'responder' });
+    put('supervisor', { type: 'turn', thread: T, text: 'Same moment too' });
+    assert.deepEqual(json(F.ok(F.old, ['thread', 'list', '--waiting', '--responder', '--json'], RESPONDER)), [], 'a tie is answered: nothing owed');
+    const r = F.run(F.old, ['thread', 'reply', T, 'Anything else?'], SUP);
+    assert.equal(r.status, 0, r.err);
+    assert.doesNotMatch(r.err, /answering/, 'nothing printed as answered');
   } finally { F.done(); }
 });
