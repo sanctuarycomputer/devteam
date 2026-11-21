@@ -10116,14 +10116,15 @@ async function cmdPreview() {
 const ARTIFACTS_REL = `${projectRel}/artifacts`;
 // A branch on origin a draft from another machine may come from (kit-750): a name git takes as a ref
 // and a URL path segment carries once encoded, at most 200 characters; never .., //, a segment that
-// starts with a dot or ends .lock, @{, or a trailing / or dot. Checked before any git call names it.
-const BRANCH_AT = /^(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*@\{)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+// starts with a dot or ends .lock, or a trailing / or dot (the class admits no @, { or :). Checked
+// before any git call names it.
+const BRANCH_AT = /^(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // Where a viewer may show an artifact: main, a draft's worktree (by name; draftWorktree says whether
 // it is one), a draft on an origin branch fetched from another machine (origin:<branch>), or a
 // published version by its tree id. The same forms a thread's artifact subject records.
 // The origin: form is BRANCH_AT's body written out, so the line stands alone (tests read it alone);
 // artifact-remote's BRANCH_AT case holds the two to the same names.
-const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99}|origin:(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*@\{)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199})$/;
+const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99}|origin:(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199})$/;
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
 const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for', 'kind'];
@@ -10387,7 +10388,7 @@ function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
   const mtime = Math.max(0, ...src.entries.map((e) => e.mtime ?? 0));
   const m = p.manifest;
-  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], kind: m?.kind ?? null, error: p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
+  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], kind: m?.kind ?? null, error: src.error ?? p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
 }
 function landedArtifacts() {
   const ref = mainRef();
@@ -10442,7 +10443,9 @@ function draftArtifacts(landed = landedArtifacts()) {
   const ref = mainRef(), msha = mainSha(), mainB = loadSettings().main_branch;
   const refs = ref ? git(['for-each-ref', '--sort=-committerdate', '--format=%(refname) %(objectname) %(committerdate:iso-strict)', 'refs/devteam-remote/'], mainRoot) : null;
   if (!refs) return res;
-  const branches = refs.split('\n').map((l) => /^refs\/devteam-remote\/(\S+) ([0-9a-f]+) (\S+)$/.exec(l)).filter((m) => m && m[1] !== mainB && BRANCH_AT.test(m[1])).slice(0, 200);
+  // a branch this machine has too (refs/heads/<b>: its own pushed work) is not from another machine
+  const mine = new Set((git(['for-each-ref', '--format=%(refname:strip=2)', 'refs/heads/'], mainRoot) ?? '').split('\n').filter(Boolean));
+  const branches = refs.split('\n').map((l) => /^refs\/devteam-remote\/(\S+) ([0-9a-f]+) (\S+)$/.exec(l)).filter((m) => m && m[1] !== mainB && !mine.has(m[1]) && BRANCH_AT.test(m[1])).slice(0, 200);
   const cacheFile = path.join(runDir, 'cache', 'artifacts-remote.json');
   const treeFile = path.join(runDir, 'cache', 'artifacts-remote-trees.json');
   let cache = {}, trees = {};
@@ -20905,7 +20908,8 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
     const tree = treeNow(r.out);
     if (!tree) return { missing: true };
     const key = `${slug}\0${tree}`;
-    if (!trees.has(key)) { const c = await checkTree(tree, slug); if (!c) return { failed: true }; trees.set(key, c); }
+    // kept by tree id, which never changes; at most 500, then begun again
+    if (!trees.has(key)) { const c = await checkTree(tree, slug); if (!c) return { failed: true }; if (trees.size >= 500) trees.clear(); trees.set(key, c); }
     return { tree, ...trees.get(key) };
   }
   return {
@@ -21143,8 +21147,17 @@ async function dashRoutesViewer(D, req, res, q) {
       return send(res, 200, 'application/json', JSON.stringify(remote.status()));
     }
     const sameOrigin = (site === 'same-origin' || origin === own) && (site === undefined || site === 'same-origin') && (origin === undefined || origin === own);
-    req.resume();
-    if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: "only from this dashboard's own page, in a browser" }));
+    const no = () => send(res, 403, 'application/json', JSON.stringify({ error: "only from this dashboard's own page, in a browser, with an empty {} body" }));
+    if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) { req.resume(); return no(); }
+    // the body is {} and nothing else: read up to 64 bytes, the rest drained
+    const body = await new Promise((resolve) => {
+      let b = '', over = false;
+      req.setEncoding('utf8');
+      req.on('data', (c) => { if (over || b.length + c.length > 64) over = true; else b += c; });
+      req.on('end', () => resolve(over ? null : b));
+      req.on('error', () => resolve(null));
+    });
+    if (body?.trim() !== '{}') return no();
     remote.want();
     return send(res, 200, 'application/json', JSON.stringify(remote.status()));
   }

@@ -136,7 +136,7 @@ function otherMachine(F) {
 
 const getJson = async (B, route) => { const r = await fetch(`${B}${route}`); return { status: r.status, body: r.headers.get('content-type')?.includes('json') ? await r.json() : await r.text() }; };
 // the page's ask: a same-origin POST, which is the demand (a GET only reads, org-access A13)
-const askRemote = (B, headers = {}) => fetch(`${B}/api/artifact-remote`, { method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: B, ...headers }, body: '{}' });
+const askRemote = (B, headers = {}, body = '{}') => fetch(`${B}/api/artifact-remote`, { method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: B, ...headers }, body });
 const remoteStatus = async (B) => (await askRemote(B)).json();
 const library = async (B) => { const r = await fetch(`${B}/api/data`); assert.equal(r.status, 200, '/api/data'); return (await r.json()).library.artifacts; };
 const row = (arts, slug, at) => arts.find((a) => a.slug === slug && a.at === at) ?? null;
@@ -218,7 +218,7 @@ test('artifact remote safe: BRANCH_AT takes branch names git and a URL can carry
     assert.ok(BRANCH_AT.test(b), `S6: takes ${b}`);
     assert.ok(ARTIFACT_AT.test(`origin:${b}`), `S6: at origin:${b}`);
   }
-  for (const b of ['../x', 'a/../b', 'a//b', 'a.lock', 'a/b.lock', '@{u}', 'a@{1}', 'a/.b', '.a', 'a/', 'a.', '', '/x', `a${'b'.repeat(200)}`, 'a b', 'ça', 'a\nb', 'a~1', 'a^b', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b']) {
+  for (const b of ['../x', 'a/../b', 'a//b', 'a.lock', 'a/b.lock', '@{u}', 'a@{1}', 'a/.b', '.a', 'a/', 'a.', '', '/x', `a${'b'.repeat(200)}`, 'a b', 'ça', 'a\nb', 'a..b', 'x/a..b', 'a~1', 'a^b', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b']) {
     assert.equal(BRANCH_AT.test(b), false, `S6: refuses ${JSON.stringify(b)}`);
     assert.equal(ARTIFACT_AT.test(`origin:${b}`), false, `S6: at origin:${JSON.stringify(b)}`);
   }
@@ -301,6 +301,10 @@ test('artifact remote drafts: an origin branch that changes an artifact shows as
   F.g(['pull', '-q', 'origin', 'main'], F.old);
   // the checkout's own remote-tracking refs for every branch, as a supervisor's fetch leaves them
   F.g(['fetch', '-q', 'origin'], F.old);
+  // final-1 F5: a branch this machine has too is its own pushed work, never from another machine
+  other.push('ticket/mine', 'mine-mock', art('mine'));
+  F.g(['fetch', '-q', 'origin'], F.old);
+  F.g(['branch', '-q', 'ticket/mine', 'origin/ticket/mine'], F.old);
   const { B, L, LW } = await start();
   const stop = demand(B);
   t.after(stop);
@@ -313,6 +317,7 @@ test('artifact remote drafts: an origin branch that changes an artifact shows as
   assert.equal(r1.error, null, 'D1: no error');
   assert.equal(r1.title, 'far v1');
   assert.equal(r1.updated_at, other.tipTime('ticket/far-01'), "D1: updated_at is the tip's committer date");
+  assert.equal((await library(B)).find((a) => a.slug === 'mine-mock'), undefined, "F5: this machine's own branch is no draft from another machine");
   const page = await bytes(B, '/artifact/origin/ticket%2Ffar-01/far-mock/');
   assert.equal(page.status, 200, 'D1: served');
   assert.equal(page.text, F.g(['cat-file', 'blob', `${tree}:index.html`], other.dir), 'D1: the branch blob, byte for byte');
@@ -373,6 +378,11 @@ test('artifact remote safe: bounded, one at a time, backs off and says so, refs 
   // S5's branches, pushed before the dashboard starts
   const mb = (n) => 'x'.repeat(n * 1024 * 1024);
   other.push('bad/symlink', 'bad-link', art('link'), { symlinks: { 'evil.html': '/etc/passwd' } });
+  // a gitlink (a submodule) in the folder: final-1 F4
+  other.push('bad/sub', 'bad-sub', art('sub'));
+  other.g(['update-index', '--add', '--cacheinfo', `160000,${other.g(['rev-parse', 'HEAD']).trim()},${ARTS}/bad-sub/mod`]);
+  other.g(['commit', '-qm', 'a submodule']);
+  other.g(['push', '-q', '-f', 'origin', 'HEAD:refs/heads/bad/sub']);
   other.push('bad/big', 'bad-big', art('big', { 'big.bin': `${mb(8)}x` }));
   other.push('bad/total', 'bad-total', art('total', { 'a.bin': mb(7), 'b.bin': mb(7), 'c.bin': mb(7), 'd.bin': mb(7) }));
   other.push('bad/noindex', 'bad-noindex', { 'artifact.json': J({ v: 1, title: 'no index', summary: 's', by: 'supervisor' }) });
@@ -401,6 +411,11 @@ test('artifact remote safe: bounded, one at a time, backs off and says so, refs 
     assert.ok(r.error, `S5: ${slug} listed broken`);
     for (const f of files) assert.equal((await bytes(B, `/artifact/origin/${encodeURIComponent(branch)}/${slug}/${f}`)).status, 404, `S5: ${slug}/${f} not served`);
   }
+  const sub = row(arts, 'bad-sub', 'origin:bad/sub');
+  assert.match(sub?.error ?? '', /a submodule isn't served/, 'S5: a submodule listed broken');
+  for (const f of ['', 'index.html', 'mod']) assert.equal((await bytes(B, `/artifact/origin/bad%2Fsub/bad-sub/${f}`)).status, 404, `S5: bad-sub/${f} not served`);
+  const view = await (await fetch(`${B}/api/view?kind=artifact&slug=bad-sub&at=${encodeURIComponent('origin:bad/sub')}`, { headers: { 'sec-fetch-site': 'same-origin' } })).json();
+  assert.match(JSON.stringify(view), /a submodule isn't served/, `F4: the viewer says why (${JSON.stringify(view).slice(0, 200)})`);
   assert.equal(row(arts, 'cdn-mock', 'origin:ok/cdn').error, null, 'S5: a CDN warning is no error');
   assert.equal((await bytes(B, '/artifact/origin/ok%2Fcdn/cdn-mock/')).status, 200, 'S5: served, as a landed one is');
   // S6: bad at values
@@ -436,6 +451,9 @@ test('artifact remote safe: bounded, one at a time, backs off and says so, refs 
   // S7: a cross-site ask refused
   assert.equal((await fetch(`${B}/api/artifact-remote`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, 'S7: a cross-site read');
   for (const h of [{ 'sec-fetch-site': 'cross-site' }, { origin: 'http://evil.example' }, { 'content-type': 'text/plain' }]) assert.equal((await askRemote(B, h)).status, 403, `S7: a POST refused (${JSON.stringify(h)})`);
+  // the body is {} and nothing else (final-1 F2)
+  for (const body of ['{"x":1}', '[]', '', 'hello', `{}${' '.repeat(100)}`]) assert.equal((await askRemote(B, {}, body)).status, 403, `S7: a POST with the body ${JSON.stringify(body.slice(0, 12))} refused`);
+  assert.equal((await askRemote(B)).status, 200, 'S7: the page\'s {} still taken');
   // S2 at exit: a fetch under way when the dashboard ends is sent SIGTERM, so git removes its own
   // locks, never a bare SIGKILL (task-2 F1)
   const n1 = spy.fetches().length;

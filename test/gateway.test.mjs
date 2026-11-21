@@ -449,6 +449,20 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     assert.equal((await gw.req('GET', `${cap}/artifact/main/x/../../../api/data`, { on: P + 5, cookie: '', headers: opaque })).status, 403, 'and no way out of it');
     assert.equal((await gw.req('GET', `${cap}/artifact/main/x/a.js`, { on: P + 6, cookie: '', headers: opaque })).status, 403, 'on that instance only');
     assert.equal((await gw.req('POST', `${cap}/artifact/main/x/a.js`, { on: P + 5, cookie: '', body: {} })).status, 403, 'reads only');
+    // a draft fetched from another machine (kit-750): its branch encoded into one segment, under a
+    // capability of its own, so every file of a page with several loads in its sandboxed frame
+    const ao = await gw.req('GET', '/artifact/origin/ticket%2Ffar-01/x/?v=1', { on: P + 5, headers: { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' } });
+    assert.equal(ao.status, 302, 'a remote draft\'s frame goes under a capability');
+    const capO = /^(\/c\/[^/]+)\/artifact\/origin\/ticket%2Ffar-01\/x\/\?v=1$/.exec(ao.headers.location)?.[1];
+    assert.ok(capO, ao.headers.location);
+    for (const [f, dest] of [['style.css', 'style'], ['a.js', 'script'], ['img/p.png', 'image']]) {
+      const r = await gw.req('GET', `${capO}/artifact/origin/ticket%2Ffar-01/x/${f}`, { on: P + 5, cookie: '', headers: { ...opaque, 'sec-fetch-dest': dest } });
+      assert.equal(r.status, 200, `the remote draft's ${f}: ${r.body}`);
+      assert.equal(seenUrls.at(-1), `/artifact/origin/ticket%2Ffar-01/x/${f}`, 'the kit sees the plain path');
+    }
+    for (const other of ['/artifact/origin/ticket%2Fother/x/a.js', '/artifact/main/x/a.js', '/artifact/origin/ticket%2Ffar-01/y/a.js', '/artifact/origin/ticket%2Ffar-01/x/../../main/x/a.js'])
+      assert.equal((await gw.req('GET', `${capO}${other}`, { on: P + 5, cookie: '', headers: opaque })).status, 403, `that branch's folder only: ${other}`);
+    assert.equal((await xs('/artifact/origin/ticket%2Ffar-01/x/a.js', 'script')).status, 403, 'a remote draft\'s files, without its capability');
     assert.notEqual((await xs('/review/preview/devteam-ui.js', 'script')).status, 403);
     assert.equal((await gw.req('GET', '/', { on: P, headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } })).status, 200, 'a link from anywhere still opens it');
 
