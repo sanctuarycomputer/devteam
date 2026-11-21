@@ -174,6 +174,20 @@ test('pull to refresh: past the threshold reads at once, spins until the read la
     assert.equal(await reads(p), n0 + 1, 'no read queued behind it');
   });
 
+  await t.test('a second finger mid-pull cancels it: no read, the spinner goes, the next pull works', async () => {
+    const n0 = await reads(p);
+    await pull(p, { dy: 220, lift: false });
+    await p.ev(FRAMES);
+    assert.ok(await p.ev(SPIN), 'a spinner mid-pull');
+    await p.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 195, y: 420, id: 1 }, { x: 100, y: 500, id: 2 }] });
+    await touch(p, 'touchEnd', 195, 420);
+    await soon(`${SPIN} === null && pullRefresh.state() === 'idle'`, 'the spinner gone, the pull over');
+    await settle();
+    assert.equal(await reads(p), n0, 'no read');
+    await pull(p, { dy: 220 });
+    await soon(`window.__dataReads === ${n0 + 1}`, 'the next pull reads');
+  });
+
   await t.test('scrolled down: a pull scrolls, reads nothing', async () => {
     await p.ev('scrollTo(0, 400)');
     const n0 = await reads(p);

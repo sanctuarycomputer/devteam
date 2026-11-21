@@ -11282,6 +11282,8 @@ const pullRefresh = VIEWER ? null : (() => {
   const top = () => (document.scrollingElement?.scrollTop ?? scrollY) <= 0;
   document.addEventListener('touchstart', (e) => {
     armed = false;
+    // a second finger landing mid-pull cancels it
+    if (state === 'pulling') return away();
     if (state !== 'idle' || e.touches.length !== 1 || !top() || refused(e.target)) return;
     armed = true;
     y0 = e.touches[0].clientY;
@@ -11289,7 +11291,6 @@ const pullRefresh = VIEWER ? null : (() => {
   }, { passive: true });
   document.addEventListener('touchmove', (e) => {
     if (!armed) return;
-    if (e.touches.length !== 1) { armed = false; if (state === 'pulling') { state = 'going'; away(); } return; }
     const dy = e.touches[0].clientY - y0, dx = e.touches[0].clientX - x0;
     if (state === 'idle') {
       // a pull is down, more than across, from the top: anything else is the page's own gesture
