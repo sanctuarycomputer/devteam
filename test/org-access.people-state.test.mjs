@@ -805,15 +805,22 @@ test('org-access A9: push subscriptions are each person\'s own', async () => {
 // --- A11: the rollback, against the gateway before people (OLD) ---------------------------------
 const OLD_SHA = '7eebabfde62c642427c0c507f41fdb9db62bedc6';
 let oldFile = null;
-// OLD's cloud/gateway.mjs from git history, fetched when the checkout lacks it (CI's depth-1 clone).
-// Throws when it can't be had: the test fails, never skips.
+// OLD's cloud/gateway.mjs from git history. When the checkout lacks it (CI's depth-1 clone), it is fetched
+// from origin into a private repo under tmp, never into the checkout's .git: two files fetching into one
+// shallow clone at once fail on its shallow file (kit-220). Throws when it can't be had: the test fails,
+// never skips.
 const oldGateway = () => {
   if (oldFile) return oldFile;
-  const git = (args, opts = {}) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts });
-  try { git(['cat-file', '-e', `${OLD_SHA}^{commit}`]); } catch { git(['fetch', '--depth=1', '--no-tags', 'origin', OLD_SHA], { timeout: 120e3 }); }
+  const git = (cwd, args, opts = {}) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts });
+  let from = repo;
+  try { git(repo, ['cat-file', '-e', `${OLD_SHA}^{commit}`]); } catch {
+    from = path.join(tmp, 'old-repo');
+    execFileSync('git', ['init', '-q', from], { stdio: 'ignore' });
+    git(from, ['fetch', '--depth=1', '--no-tags', git(repo, ['remote', 'get-url', 'origin']).trim(), OLD_SHA], { timeout: 120e3 });
+  }
   const file = path.join(tmp, 'old', 'gateway.mjs');
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, git(['show', `${OLD_SHA}:cloud/gateway.mjs`], { maxBuffer: 64 << 20 }));
+  fs.writeFileSync(file, git(from, ['show', `${OLD_SHA}:cloud/gateway.mjs`], { maxBuffer: 64 << 20 }));
   oldFile = file;
   return file;
 };

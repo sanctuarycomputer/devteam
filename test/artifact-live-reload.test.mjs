@@ -6,82 +6,19 @@
 // a draft never shows. Headless Chrome against a real dashboard; the fingerprint route is faked in the
 // page (a fetch wrapper), so the test says when the draft "changed" and how the route answers.
 // Skipped where Chrome can't be driven, as the kit's other Chrome tests are.
+// Since kit-757 the draft test's later subtests (C9, C10, C6) are in artifact-live-reload.guards.test.mjs
+// and main's place-keeping test in artifact-live-reload.main-place.test.mjs, each file with a stage of
+// its own (lib/artifact-live.mjs's draftStage), so none nears CI's 300 s per-file watchdog.
 // Ports: none of its own (lib/kit.mjs's +0 hub, +1..25)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { canDrive } from './lib/chrome.mjs';
 import path from 'node:path';
-import { write, dashboardOnFreePort, threadsFixture } from './lib/kit.mjs';
-import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
-import { J, SLUG, WT, sleep, PAGE, soonIn, placed, follower } from './lib/artifact-live.mjs';
-
-// The page's own title says what it is and the anchor it loaded at (the lens's ready carries
-// document.title); a link at its top left goes to its second page.
-const mock = (title) => ({
-  'artifact.json': J({ v: 1, title: 'Live mock', summary: 'A page that changes', by: 'supervisor', for: [] }),
-  'index.html': `<!doctype html><html><head><title>${title}</title></head><body style="margin:0"><a id="p2" href="page2.html" style="display:block;position:fixed;left:0;top:0;width:80px;height:40px;background:#ccc">page 2</a><p id="section" style="margin-top:60px">${title}</p><script>document.title = ${J(title)} + location.hash;</script></body></html>`,
-  'page2.html': '<!doctype html><html><head><title>page2</title></head><body><p>the second page</p></body></html>',
-});
-
-// An artifact landed on main, as a merged PR puts it there: its tree id.
-function land(F, files) {
-  const dir = path.join(F.old, 'docs/devteam/project/artifacts', SLUG);
-  for (const [rel, text] of Object.entries(files)) write(path.join(dir, rel), text);
-  F.g(['add', '-A', dir], F.old);
-  F.g(['commit', '-qm', `artifact: ${SLUG}`], F.old);
-  F.g(['push', '-q', 'origin', 'main'], F.old);
-  return F.g(['rev-parse', `HEAD:docs/devteam/project/artifacts/${SLUG}`], F.old);
-}
+import { write } from './lib/kit.mjs';
+import { J, SLUG, WT, sleep, soonIn, follower, draftStage } from './lib/artifact-live.mjs';
 
 test('a viewer on a draft reloads by itself when its fingerprint changes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 900000 }, async (t) => {
-  const later = cleanup(t);
-  const F = threadsFixture('live-reload');
-  later(() => F.done());
-  const tree = land(F, mock('main'));
-  const draft = path.join(F.old, `.worktrees/${WT}/docs/devteam/project/artifacts/${SLUG}`);
-  const edit = (title) => { for (const [rel, text] of Object.entries(mock(title))) write(path.join(draft, rel), text); };
-  // before the dashboard starts: its first read lists the draft
-  edit('v1');
-  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
-  const B = `http://127.0.0.1:${port}`;
-  later(() => dash.stop());
-  const chrome = await openChrome();
-  later(() => chrome.close());
-  const p = await chrome.newPage();
-  later(() => p.close());
-  await p.send('Page.enable');
-  await p.send('Runtime.enable');
-  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
-  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: PAGE });
-  const soon = soonIn(p);
-  const VIEW = `${B}/view/artifact/${SLUG}`;
-  const DRAFT_HEAD = `#artifact/wt/${WT}/${SLUG}`;
-  const DASH_DRAFT = `${B}/${DRAFT_HEAD}`;
-  const DASH_MAIN = `${B}/#artifact/main/${SLUG}`;
-  const up = (at, title) => `typeof TS === 'object' && TS.kind === 'artifact' && TS.at === ${J(at)} && window.__titles.length >= 1${title ? ` && __titles[0].title === ${J(title)}` : ''}`;
-  // a page on the stage, in a document of its own (from about:blank: a hash-only move would keep the
-  // last document and its logs), once its frame's lens has said ready (`title`, or any)
-  const go = async (url) => {
-    await p.send('Page.navigate', { url: 'about:blank' });
-    await soon(`location.href === 'about:blank'`, 'about:blank');
-    await p.send('Page.navigate', { url });
-  };
-  const open = async (url, at, title = null) => {
-    await go(url);
-    await soon(up(at, title), `${url}: the stage up, its frame ready`);
-  };
-  // the dashboard on #library, then the draft opened over it, as a link in the page opens it
-  const openOverLibrary = async () => {
-    await go(`${B}/#library`);
-    await soon(`typeof PAGE_NOW === 'string' && PAGE_NOW === 'library'`, 'on #library');
-    await p.ev(`(location.hash = ${J(DRAFT_HEAD)}, true)`);
-    await soon(up(WT, 'v1'), 'the draft over #library');
-  };
-  const asks = () => p.ev('__fpAsks.length');
-  const titles = () => p.ev('__titles.map((x) => x.title)');
-  // fp changed at the fake: the time it changed, in the page's clock
-  const change = (fp) => p.ev(`(window.__fake.fp = ${J(fp)}, Date.now())`);
-  const reloadedSince = (t0, what) => soonIn(p, 10000)(`__titles.find((x) => x.t > ${t0})`, what);
-  const NEW_FP = 'f'.repeat(64);
+  const { tree, draft, p, soon, VIEW, DRAFT_HEAD, DASH_MAIN, open, openOverLibrary, asks, titles, change, reloadedSince, NEW_FP } = await draftStage(t, 'live-reload');
 
   await t.test('C1: a viewer tab on a draft: fp unchanged for 20 s, no reload; fp changed, reloaded within 3 s, in a fresh frame', async () => {
     await open(`${VIEW}?at=${WT}`, WT, 'v1');
@@ -188,155 +125,55 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     }
   });
 
-  await t.test('C8: a reload keeps the page the owner followed a link to', async () => {
+  await t.test('C8: a reload keeps the page the owner followed a link to', async (st) => {
     await open(`${VIEW}?at=${WT}`, WT, 'v1');
-    const r = await p.ev(`(() => { const b = document.getElementById('av-frame').getBoundingClientRect(); return { x: b.left + 20, y: b.top + 15 }; })()`);
-    await p.clickAt(r.x, r.y);
-    await soon(`__titles.some((x) => x.title === 'page2') && TS.path === 'page2.html'`, "the second page, as the lens names it");
+    // the lib's follower: the click sent again (up to 3 times) while the lens names nothing new (kit-758, kit-757 final-1 F1)
+    await follower(p, st)(20, `__titles.some((x) => x.title === 'page2') && TS.path === 'page2.html'`);
     const t0 = await change(NEW_FP);
     const got = await reloadedSince(t0, 'a reload after fp changed');
     assert.equal(got.title, 'page2', 'reloaded on the second page');
   });
-
-  await t.test("C9: the poll's guards: one ask at a time, given up at 5 s; a bad answer reloads nothing; an answer for a stage gone is dropped", async () => {
+  // kit-758 (kit-757 final-1 F3): a reload that asks for the owner's page first (a page other than the
+  // opened src) is held (__artStatus { hold }) while the owner moves in the frame, then let go. Here the
+  // draft's page2 links to #tab2 (a move in the same document: the reload starts again from there, so the
+  // change still loads, at #tab2) and to page3 (a new load: the reload is dropped, page3 stays). The
+  // reload gives its ask up at 5 s, so each move must land well inside that.
+  await t.test('C11: a move the owner makes in the frame while the reload asks for its page wins', async (st) => {
+    const P2 = `/artifact/wt/${WT}/${SLUG}/page2.html`;
+    write(path.join(draft, 'page2.html'), '<!doctype html><html><head><title>page2</title></head><body style="margin:0"><a id="p3" href="page3.html" style="display:block;position:fixed;left:0;top:0;width:80px;height:40px;background:#ccc">page 3</a><a id="t2" href="#tab2" style="display:block;position:fixed;left:100px;top:0;width:80px;height:40px;background:#ccc">tab 2</a><p style="margin-top:60px">the second page</p><p id="tab2" style="margin-top:900px">tab 2</p></body></html>');
+    write(path.join(draft, 'page3.html'), '<!doctype html><html><head><title>page3</title></head><body><p>the third page</p></body></html>');
     await open(`${VIEW}?at=${WT}`, WT, 'v1');
-    await soon('__fpAsks.length >= 1 && __fpAsks.every((x) => x.done)', 'the first ask answered');
-    // (a) a new fp held 12 s: no second ask while it is out; the 5 s give-up lets the next tick ask
-    // again well before the 12 s (within 5 s + one 2 s tick + slack); the held answer, given up, reloads nothing
-    await p.ev(`(window.__fake.delay = 12000, window.__fake.fp = ${J(NEW_FP)}, true)`);
-    const held = await soonIn(p, 5000)('__fpAsks.find((x) => !x.done)?.t', 'a held ask');
-    await p.ev(`(window.__fake.delay = 0, window.__fake.fp = null, true)`);
-    await sleep(Math.max(0, held + 4500 - await p.ev('Date.now()')));
-    assert.equal(await p.ev(`__fpAsks.filter((x) => x.t > ${held}).length`), 0, 'no second ask while one is out');
-    const again = await soonIn(p, 6000)(`__fpAsks.find((x) => x.t > ${held})?.t`, 'asked again after the 5 s give-up');
-    assert.ok(again - held >= 5000 && again - held <= 8000, `asked again ${again - held} ms after the held ask (the give-up at 5 s, the hold 12 s)`);
-    await sleep(Math.max(0, held + 12500 - await p.ev('Date.now()')));
-    assert.equal((await titles()).length, 1, 'the given-up answer reloaded nothing');
-    // (b) answers that aren't { fp: a string of 1 to 128 characters }
-    const fp0 = await p.ev('TS.fp');
-    for (const body of ['{}', '{"fp":null}', J({ fp: 'x'.repeat(129) }), J({ fp: '' }), 'not json']) {
-      await p.ev(`(window.__fake.body = ${J(body)}, true)`);
-      const n = await asks();
-      await soon(`__fpAsks.length >= ${n} + 2`, `two asks answered ${body.slice(0, 20)}`);
-      assert.equal((await titles()).length, 1, `${body.slice(0, 20)}: no reload`);
-      assert.equal(await p.ev('TS.fp'), fp0, `${body.slice(0, 20)}: TS.fp unchanged`);
-    }
-    await p.ev('(window.__fake.body = null, true)');
-    // (c) a new fp held 1.5 s; the stage goes to main in place while it is out: the answer is dropped
-    await p.ev(`(window.__fake.delay = 1500, window.__fake.fp = ${J(NEW_FP)}, true)`);
-    const n = await asks();
-    await soon(`__fpAsks.length > ${n} && !__fpAsks[__fpAsks.length - 1].done`, 'a held ask with the new fp');
-    // main's own fp, as /api/view gives it: since kit-750 (A1) a viewer on main reloads by itself on
-    // any other, so a made-up one would reload it at the next check
-    const mainFp = await p.ev(`fetch('/api/view?' + new URLSearchParams({ kind: 'artifact', slug: ${J(SLUG)}, at: 'main' })).then((r) => r.json()).then((j) => j.fp)`);
-    await p.ev(`(showArtifact(${J(SLUG)}, 'main', { fp: ${J(mainFp)} }), true)`);
-    await soon(`__titles.some((x) => x.title === 'main')`, "main's frame ready");
+    const follow = follower(p, st);
+    await follow(20, `__titles.some((x) => x.title === 'page2') && TS.path === 'page2.html'`);
+    const src = () => p.ev(`document.getElementById('av-frame').getAttribute('src')`);
+    // the reload's first ask for page2 held (one ask: any later one goes on), the owner's move, the ask let
+    // go 300 ms after the move; the time the ask was let go, in the page's clock
+    const held = async (fp, hold, move, lens, what) => {
+      await p.ev(`(window.__artStatus[${J(P2)}] = [{ status: 200, hold: ${J(hold)} }], true)`);
+      await change(fp);
+      const t0 = await soon(`window.__artRelease?.[${J(hold)}] && Date.now()`, `${what}: the reload's ask for page2, held`);
+      await follow(move, lens);
+      const t1 = await p.ev(`Date.now()`);
+      assert.ok(t1 - t0 <= 4000, `${what}: the move landed ${t1 - t0} ms into the hold (the reload gives its ask up at 5000)`);
+      await sleep(300);
+      return p.ev(`(window.__artRelease[${J(hold)}](), Date.now())`);
+    };
+    // (a) #tab2 in the same page: the change loads at #tab2, once
+    const ta = await held(NEW_FP, 'h1', 120, `TS.path === 'page2.html' && TS.hash === '#tab2'`, 'a move to #tab2 in the same page');
+    await soonIn(p, 10000)(`__titles.some((x) => x.t > ${ta}) && TS.ready && TS.path === 'page2.html'`, 'a move to #tab2: the change loaded after the ask was let go');
+    await sleep(2000);
+    assert.equal(await p.ev(`__titles.filter((x) => x.t > ${ta}).length`), 1, 'a move to #tab2: loaded once');
+    assert.deepEqual(await p.ev('[TS.path, TS.hash]'), ['page2.html', '#tab2'], 'a move to #tab2: loaded at #tab2, where the owner moved');
+    assert.equal(await src(), `/artifact/wt/${WT}/${SLUG}/page2.html#tab2`, "a move to #tab2: the fresh frame's src is the page at #tab2");
+    assert.equal(await p.ev('TS.fp'), NEW_FP, 'a move to #tab2: the stage names the new fingerprint');
+    // (b) a link to page3, a new load: the reload is dropped, page3 stays
+    // the frame element marked: a fresh frame (avFreshFrame) is another element, without the mark
+    await p.ev(`(document.getElementById('av-frame').__c11 = 1, true)`);
+    const tb = await held('e'.repeat(64), 'h2', 20, `__titles.some((x) => x.title === 'page3') && TS.path === 'page3.html'`, 'a link to page3');
     await sleep(3000);
-    assert.deepEqual(await titles(), ['v1', 'main'], "the answer for the draft didn't reload main's frame");
-    assert.equal(await p.ev('TS.fp'), mainFp, "main's fp unchanged");
-  });
-
-  await t.test('C10: a framed viewer tab (the owner wrapper) on a draft makes no /api/artifact-fp ask', async () => {
-    // the wrapper's parent is another origin, which no test here can serve within the viewer's
-    // frame-ancestors; the tab stands in for it with window.parent another window (PAGE, kit106-framed)
-    await open(`${VIEW}?at=${WT}&kit106-framed=1`, WT, 'v1');
-    assert.equal(await p.ev('window.parent !== window && window.frameElement === null'), true, 'setup: the tab reads as framed by another origin');
-    await sleep(8000);
-    assert.equal(await asks(), 0, 'the framed viewer tab: no ask');
-  });
-
-  await t.test("C6: a draft never shows kit-206's outline, and main now reloads by itself without it (kit-750, A1)", async () => {
-    const watchStale = `(() => { window.__wasStale = false; const b = document.getElementById('av-reload'); const look = () => { if (b.classList.contains('stale')) window.__wasStale = true; }; look(); new MutationObserver(look).observe(b, { attributes: true }); return true; })()`;
-    const row = `(DATA?.library?.artifacts ?? []).find((a) => a.slug === ${J(SLUG)} && a.at === ${J(WT)})?.fp ?? null`;
-    await open(DASH_DRAFT, WT, 'v1');
-    await soon(`!!(${row})`, "the Library's row for the draft");
-    const listed = await p.ev(row);
-    await p.ev(watchStale);
-    // the files change on disk: /api/data lists the new fp; the fake says nothing changed, so no reload
-    edit('v2');
-    await soonIn(p, 90000)(`(${row}) !== ${J(listed)}`, "the dashboard's read lists the draft's new fingerprint");
-    await sleep(1000);
-    assert.equal(await p.ev('window.__wasStale'), false, 'the draft never had the outline');
-    // main: a second commit changes main's fingerprint; the frame loads it again by itself, and the
-    // outline kit-206 had never shows (ruling A1, d-20261121-041756284)
-    await open(DASH_MAIN, 'main', 'main');
-    await p.ev(watchStale);
-    land(F, mock('main2'));
-    await soonIn(p, 90000)(`__titles.some((x) => x.title === 'main2')`, 'main reloaded to main2 by itself');
-    await sleep(1000);
-    assert.equal(await p.ev('window.__wasStale'), false, "main never had kit-206's outline");
-    assert.equal(await p.ev(`document.getElementById('av-reload').classList.contains('stale')`), false, 'no outline after the reload');
-    assert.equal(await asks(), 0, 'main: no /api/artifact-fp ask');
-  });
-});
-
-// main's viewer reloads by itself on a new fingerprint (kit-750, ruling A1); it keeps the owner's
-// place exactly as a draft's does (kit-142, kit-753): the page of the artifact they moved to, and the
-// #hash they moved to unless the address carried an anchor of its own, which stays. Each version's
-// pages carry its title, so a reload is told from the page it lands on: a link at the top left goes
-// to page2.html, one beside it to #tab2.
-test('main reload keeps place: a viewer on main reloads by itself on the page and #hash the owner moved to, its own anchor kept', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 900000 }, async (t) => {
-  const later = cleanup(t);
-  const F = threadsFixture('main-place');
-  later(() => F.done());
-  land(F, placed('m0'));
-  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
-  const B = `http://127.0.0.1:${port}`;
-  later(() => dash.stop());
-  const chrome = await openChrome();
-  later(() => chrome.close());
-  const p = await chrome.newPage();
-  later(() => p.close());
-  await p.send('Page.enable');
-  await p.send('Runtime.enable');
-  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
-  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: PAGE });
-  const soon = soonIn(p);
-  const VIEW = `${B}/view/artifact/${SLUG}`;
-  let n = 0;
-  // the page on the stage, from about:blank (a document of its own, its logs fresh), once its frame says ready
-  const open = async (url, title) => {
-    await p.send('Page.navigate', { url: 'about:blank' });
-    await soon(`location.href === 'about:blank'`, 'about:blank');
-    await p.send('Page.navigate', { url });
-    await soon(`typeof TS === 'object' && TS.kind === 'artifact' && TS.at === 'main' && TS.fp && (window.__titles ?? []).some((x) => x.title === ${J(title)})`, `${url}: main up at ${title}`);
-  };
-  const follow = follower(p, t);
-  // main changes (a merged commit): the frame, marked, is replaced by a fresh one that says ready at `want`
-  const landAndSee = async (want) => {
-    const v = `m${++n}`;
-    await p.ev(`(document.getElementById('av-frame').__before = 1, true)`);
-    const t0 = await p.ev('Date.now()');
-    land(F, placed(v));
-    const got = await soonIn(p, 90000)(`__titles.find((x) => x.t > ${t0} && x.title.startsWith(${J(v)}))`, `main reloaded by itself to ${v}`);
-    assert.equal(got.title, want(v), 'reloaded at the owner\'s place');
-    assert.equal(await p.ev(`document.getElementById('av-frame').__before`), undefined, 'in a fresh frame');
-    return v;
-  };
-
-  await t.test("M1: a viewer tab on main: the owner went to page2.html; main's reload stays on it", async () => {
-    await open(VIEW, `m${n}`);
-    await follow(20, `TS.path === 'page2.html'`);
-    await landAndSee((v) => `${v}-page2`);
-  });
-
-  await t.test("M2: a viewer tab on main: the owner went to #tab2; main's reload stays at it", async () => {
-    await open(VIEW, `m${n}`);
-    await follow(140, `TS.path === 'index.html' && TS.hash === '#tab2'`);
-    await landAndSee((v) => `${v}#tab2`);
-  });
-
-  await t.test("M3: a viewer tab opened at #section (showArtifact's anchor): the reload keeps it; moved to page2.html, it stays there", async () => {
-    await open(`${VIEW}#section`, `m${n}#section`);
-    assert.match(await p.ev(`document.getElementById('av-frame').getAttribute('src')`), /#section$/, "the frame's src carries the anchor");
-    await landAndSee((v) => `${v}#section`);
-    await follow(20, `TS.path === 'page2.html'`);
-    await landAndSee((v) => `${v}-page2`);
-  });
-
-  await t.test("M4: the dashboard's stage on main: the owner went to page2.html; main's reload (seen in /api/data) stays on it", async () => {
-    await open(`${B}/#artifact/main/${SLUG}`, `m${n}`);
-    await follow(20, `TS.path === 'page2.html'`);
-    await landAndSee((v) => `${v}-page2`);
+    assert.equal(await p.ev(`__titles.filter((x) => x.t > ${tb}).length`), 0, 'a link to page3: no page loaded after the ask was let go');
+    assert.equal(await p.ev('TS.path'), 'page3.html', 'a link to page3: still on page3');
+    assert.equal(await p.ev(`document.getElementById('av-frame').__c11 ?? 0`), 1, 'a link to page3: no fresh frame set (the frame the owner moved in)');
+    assert.equal(await p.ev('TS.fp'), 'e'.repeat(64), 'a link to page3: the stage names the new fingerprint');
   });
 });
