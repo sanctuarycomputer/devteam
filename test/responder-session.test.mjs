@@ -214,6 +214,51 @@ test('R2: one at a time, --stop and --resume, its refusals, and the fleet holds'
     assert.ok(!F.windows().includes('responder'), "the owner's park stops it");
     F.ok(F.old, ['fleet', 'unpark', '--owner'], {});
     });
+    await t.test('R2j: a .worktrees/responder that is no worktree of its own is refused; the main checkout keeps its branch', () => {
+    assert.equal(F.run(F.old, ['responder', '--stop'], SUP).status, 0);
+    const branch = F.g(['symbolic-ref', '--short', 'HEAD'], F.old);
+    const aside = `${F.wt}-aside`;
+    F.g(['worktree', 'move', F.wt, aside], F.old);
+    fs.mkdirSync(F.wt);
+    const r = F.run(F.old, ['responder'], SUP);
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /is not a git worktree of its own/);
+    assert.ok(r.err.includes(F.wt), 'the refusal names the folder');
+    assert.equal(F.g(['symbolic-ref', '--short', 'HEAD'], F.old), branch, 'the main checkout is still on its branch');
+    fs.rmdirSync(F.wt);
+    F.g(['worktree', 'move', aside, F.wt], F.old);
+    });
+    await t.test('R2k: local changes in .worktrees/responder, tracked or untracked, refuse the refresh and are kept', () => {
+    assert.equal(F.run(F.old, ['responder', '--stop'], SUP).status, 0);
+    const planted = path.join(F.wt, 'NOTES-FOR-NEXT-TIME.md');
+    fs.writeFileSync(planted, 'planted\n');
+    let r = F.run(F.old, ['responder'], SUP);
+    assert.notEqual(r.status, 0, 'an untracked file refuses');
+    assert.match(r.err, /has local changes/);
+    assert.ok(r.err.includes(F.wt), 'the refusal names the folder');
+    assert.ok(fs.existsSync(planted), 'nothing removed');
+    fs.rmSync(planted);
+    const tracked = F.g(['ls-files'], F.wt).split('\n')[0];
+    fs.appendFileSync(path.join(F.wt, tracked), 'edited\n');
+    r = F.run(F.old, ['responder'], SUP);
+    assert.notEqual(r.status, 0, 'a tracked edit refuses');
+    assert.match(r.err, /has local changes/);
+    F.g(['checkout', '--', tracked], F.wt);
+    assert.ok(!F.windows().includes('responder'), 'no window');
+    });
+    await t.test('R2l: --resume into a window whose pane has exited starts the agent anew', () => {
+    fs.rmSync(A.out, { force: true });
+    const has = F.tmux(['has-session', '-t', `=${F.session}`]).status === 0;
+    assert.equal(F.tmux(has ? ['new-window', '-d', '-t', `=${F.session}`, '-n', 'hold2', 'sleep 600'] : ['new-session', '-d', '-s', F.session, '-n', 'hold2', 'sleep 600']).status, 0);
+    assert.equal(F.tmux(['set-option', '-g', 'remain-on-exit', 'on']).status, 0);
+    assert.equal(F.tmux(['new-window', '-d', '-t', `=${F.session}`, '-n', 'responder', 'true']).status, 0);
+    for (let i = 0; i < 50 && (F.tmux(['display-message', '-p', '-t', `=${F.session}:responder`, '#{pane_dead}']).stdout ?? '').trim() !== '1'; i++) sleep(100);
+    F.tmux(['set-option', '-g', 'remain-on-exit', 'off']);
+    const r = F.run(F.old, ['responder', '--resume'], SUP);
+    assert.equal(r.status, 0, r.err || r.out);
+    assert.equal(F.ran(A).role, 'responder', 'the agent runs in a live pane');
+    F.tmux(['kill-window', '-t', `=${F.session}:hold2`]);
+    });
     await t.test('R2g: --resume into a window left at a shell; --stop wins over --resume; a responder_command that is no string', () => {
     fs.rmSync(A.out, { force: true });
     const has = F.tmux(['has-session', '-t', `=${F.session}`]).status === 0;
@@ -476,5 +521,16 @@ test('R7b: a turn before a resolve is owed nothing after a reopen with no words:
     const after = F.run(F.old, ['thread', 'reply', T2, 'Anything else?'], SUP);
     assert.equal(after.status, 0, after.err);
     assert.doesNotMatch(after.err, /answering/, 'a turn before a resolve is owed nothing after a bare reopen');
+  } finally { F.done(); }
+});
+
+test('R6c: owner words after the supervisor\'s answer lift the guard: the responder replies with no --anyway', () => {
+  const F = fixture('responder-anyway-owner-after');
+  try {
+    const T = F.owner(['thread', 'new', '--title', 'Logo', '--', 'Swap the logo.']).split('\n')[0];
+    F.sup(['thread', 'reply', T, 'Swapped.']);
+    F.owner(['thread', 'say', T, 'Thanks, and the favicon?']);
+    const r = F.run(F.old, ['thread', 'reply', T, 'Looking at the favicon.'], RESPONDER);
+    assert.equal(r.status, 0, `the owner spoke after the supervisor, so the responder may answer: ${r.err}`);
   } finally { F.done(); }
 });

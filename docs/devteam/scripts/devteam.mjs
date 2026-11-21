@@ -9103,6 +9103,9 @@ function cmdThread() {
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
+    // --pending (a reply that says work follows) is a reply's; --anyway is the responder's alone
+    if (flags.pending && by === 'owner') die('--pending goes with a reply (thread reply), not the owner\'s own turn');
+    if (flags.anyway && by !== 'responder') die("--anyway is the responder's: it replies after the supervisor answered only to add something new");
     const early = by === 'owner' ? alone(2) : undefined;
     const words = turnText(filled(2, early));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
@@ -9115,9 +9118,15 @@ function cmdThread() {
     const files = early ?? filesFlag();
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
-    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files };
-    if (refs.length && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
+    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined };
+    if ((refs.length || line.pending) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
+    if (by !== 'owner') {
+      const objects = readLog().objects;
+      if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
+      // the owner's turns this reply answers, before it is written: on stderr, so the id stays the first line out
+      for (const o of owedTurns(t.id, objects)) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+    }
     const u = appendLog(line, by);
     out(u.id);
     if (by === 'owner') out(deliver(t, u, words, files));
@@ -9261,8 +9270,10 @@ function cmdThread() {
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
     // the owner's words are theirs, as in your session; your own turns are yours
+    const lines = readLog().objects;
     for (const u of v.turns) {
-      out(`${u.at} ${u.by} (${u.id})${u.question ? `, asking ${u.question}` : ''}:`);
+      // the responder's turns name it (the view keeps them on the supervisor's side); a pending one says so
+      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${u.question ? `, asking ${u.question}` : ''}:`);
       // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
       // (an escape, a bidi override, a CR)
       out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
@@ -9274,6 +9285,14 @@ function cmdThread() {
     return;
   }
   if (sub === 'list') {
+    if (flags.responder && !flags.waiting) die('--responder goes with --waiting: thread list --waiting --responder');
+    if (flags.responder) {
+      const q = responderQueue();
+      if (flags.json) return json(q);
+      if (!q.length) return out('no turn is waiting on the responder');
+      for (const x of q) out(`${x.turn} in ${x.thread} (${Math.max(0, Math.round((Date.now() - Date.parse(x.at)) / 60000))} min) "${turnGist(x.text)}"`);
+      return;
+    }
     let vs = threadViews(readLog().objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
     if (flags.waiting) vs = vs.filter((x) => x.status === 'open' && x.waiting === 'supervisor');
     else if (!flags.all) vs = vs.filter((x) => x.status === 'open');
@@ -9282,7 +9301,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s or the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -30250,6 +30269,45 @@ function responderWindowRefusal(w) {
   if (!flags.resume) return `the responder is already running in ${w.shown} (responder --stop first, or --resume to restart it there)`;
   if (!resolvePane(w.target).problem) return `${w.shown} has a live agent; responder --stop first`;
   return null;
+}
+// A thread's turns from the log's own lines (created_by, created_at), never the view, which names
+// every non-owner turn the supervisor's; oldest first.
+const logTurns = (threadId, objects = readLog().objects) => [...objects.values()].filter((o) => o.type === 'turn' && o.thread === threadId).sort(byTime);
+// The owner's turns in a thread still owed an answer (the spine's single rule, as kit-103's
+// done-when 3 words it): any later non-owner turn answers an owner turn, and a resolve of the
+// thread after it leaves it owed nothing, by time, so a reopen with no words doesn't bring it back.
+// Every "the owner said it" here is a line's writer, never its text. routed_to plays no part yet:
+// kit-104, which writes it, brings it into the answered rule.
+function owedTurns(threadId, objects = readLog().objects) {
+  const ts = logTurns(threadId, objects);
+  const resolvedAt = (objects.get(threadId)?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  const answeredAt = ts.filter((u) => u.created_by !== 'owner').pop()?.created_at ?? '';
+  return ts.filter((u) => u.created_by === 'owner' && u.created_at > answeredAt && u.created_at > resolvedAt);
+}
+// The responder's guard: since its own last turn in the thread (or ever, with none) the supervisor
+// has written, and the owner has said nothing after that. A reply then would answer what the
+// supervisor already answered (both backstop cases of the spine's Failure modes).
+function supervisorAnswered(threadId, objects = readLog().objects) {
+  const ts = logTurns(threadId, objects);
+  const mine = ts.filter((u) => u.created_by === 'responder').pop()?.created_at ?? '';
+  const sup = ts.filter((u) => u.created_by === 'supervisor').pop();
+  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at);
+}
+// A turn's first n characters on one line, for a terminal: control characters and runs of
+// whitespace as one space, … when cut.
+function turnGist(text, n = 60) {
+  const flat = Array.from(String(text ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim());
+  return `${flat.slice(0, n).join('')}${flat.length > n ? '…' : ''}`;
+}
+// The responder's queue: owed owner turns routed to it (routed_to, written by kit-104), in open
+// threads, oldest first.
+function responderQueue(objects = readLog().objects) {
+  const q = [];
+  for (const t of objects.values()) {
+    if (t.type !== 'thread' || t.status === 'resolved') continue;
+    for (const u of owedTurns(t.id, objects)) if (u.routed_to === 'responder') q.push({ turn: u.id, thread: t.id, at: u.created_at, text: String(u.text ?? '') });
+  }
+  return q.sort((a, b) => a.at.localeCompare(b.at));
 }
 // responder [--resume | --stop]: the supervisor starts, restarts or stops the responder.
 function cmdResponder() {
