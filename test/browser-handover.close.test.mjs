@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { canDrive } from './lib/chrome.mjs';
 import { startSites } from './lib/sites.mjs';
-import { handoverFile, project, kit, browser, owner, appendLine, site, CHOICES, qidOf, ok, withdraw, sleep, until, readState, askHandover, waitJson, handoverLine, entriesFor, ledgerValid, typeNote, viewSocket, profilePids, alive, killDaemon, readLedger } from './lib/browser-handover-fixture.mjs';
+import { handoverFile, project, kit, browser, owner, appendLine, site, CHOICES, qidOf, ok, withdraw, sleep, until, readState, askHandover, waitJson, handoverLine, entriesFor, ledgerValid, typeNote, viewSocket, profilePids, alive, killDaemon, readLedger, answerLines, ownerLogIn, scanLoop, codeOnDisk } from './lib/browser-handover-fixture.mjs';
 
 handoverFile();
 
@@ -16,7 +16,7 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as two chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, RF3) and cB's (C18, RF4, T4-1, T4-3, T4-2).
+// a chain: cA's (C23, C15, C20, W1, C12, C13, C14, C16, RF3) and cB's (C18, RF4, T4-1, T4-3, T4-2).
 // onA and onB add a check.
 const cAChecks = [], cBChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
@@ -143,6 +143,129 @@ onA('W1 wait after a restart: a close made while the daemon was dead, and one ha
   const w3 = await waitJson(P, [], W);
   assert.deepEqual(w3, { browser: 1, qid: q2, outcome: 'done', reopened: e.reopened });
   assert.equal(entriesFor(P, q2).length, 1, 'the new daemon handled q2 again');
+});
+
+// --- the reopen and the secrets (T5) on cA, before RF3 (whose close dated ahead dates every later line)
+const SIGNED = 'Signed in as owner';
+// The close after a login, with C12's scan: the code shown on disk first; the scan running from before
+// the answer (close: the owner's Done or Can't right now, or the supervisor's withdraw); no secret in
+// any scan from 2 s after the answer on, and none after the first clean one, through wait and once
+// after. The answer's time is its log line's at. { w, ms }: wait's output, and answer to first clean.
+async function closeAndScan(P, q, close, label) {
+  await codeOnDisk(P, site.code);
+  const loop = scanLoop(P, [site.password, site.code]);
+  let w, answerAt, clean;
+  try {
+    await close();
+    const l = logAt(P, q);
+    answerAt = Date.parse(l);
+    assert.ok(Number.isFinite(answerAt), `the close line's at: ${l}`);
+    const end = Date.now() + 15000;
+    while (loop.firstCleanAfter(answerAt) === null) {
+      if (Date.now() > end) assert.fail(`${label}: no clean scan in 15 s after the answer; the last found ${JSON.stringify(loop.scans.at(-1)?.found)}`);
+      await sleep(50);
+    }
+    clean = loop.firstCleanAfter(answerAt);
+    w = await waitJson(P);
+  } finally { await loop.stop(); }
+  const late = loop.scans.filter((s) => s.found.length && (s.at >= answerAt + 2000 || s.at >= clean));
+  assert.deepEqual(late.map((s) => ({ after: s.at - answerAt, found: s.found })), [], `${label}: a secret on disk 2 s after the answer, or after a clean scan`);
+  const ms = clean - answerAt;
+  console.log(`# kit-67 ${label}: answer to first clean scan ${ms} ms (${loop.scans.length} scans)`);
+  return { w, ms };
+}
+// The at of the line that closed question q: its answer (an owner line) or its status set line.
+const logAt = (P, q) => [...answerLines(P), ...closeLines(P)].filter((l) => l.id === q).map((l) => l.at).sort().pop();
+const closeLines = (P) => {
+  const dir = path.join(P.run, 'log');
+  return fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).map((x) => { try { return JSON.parse(x); } catch { return {}; } }))
+    .filter((l) => l.type === 'question' && l.op === 'set' && ['withdrawn', 'defaulted'].includes(l.status));
+};
+
+onA('C12 a login over the view, then Done: the password and code leave the disk within 2 s, and the last GET (/account) comes back signed in', async () => {
+  const P = cA();
+  await ok(P, ['open', `${site.origin}/login`]);
+  const q = await askHandover(P);
+  const v = await ownerLogIn(P, { to: `${site.origin}/account` });
+  const { w } = await closeAndScan(P, q, async () => { const a = await owner(P, ['answer', q, '--choice', 'Done']); assert.equal(a.status, 0, a.err || a.out); }, 'C12');
+  v.close();
+  assert.deepEqual([w.qid, w.outcome, w.reopened], [q, 'done', [`${site.origin}/account`]]);
+  const s = await ok(P, ['snapshot']);
+  assert.ok(s.out.includes(SIGNED), `the page reopened isn't signed in: ${s.out.slice(0, 300)}`);
+  assert.deepEqual(await tabUrls(P), [`${site.origin}/account`]);
+  const e = entryIs(P, q, 'done');
+  assert.deepEqual(e.reopened, w.reopened);
+});
+
+onA('C13 the 200-page variant: the form page (/2fa?variant=•••) is the last GET, reopened signed in, and no POST replayed', async () => {
+  const P = cA();
+  await ok(P, ['open', `${site.origin}/login?variant=page`]);
+  const q = await askHandover(P);
+  const v = await ownerLogIn(P, { to: `${site.origin}/2fa` });
+  let posts;
+  const { w } = await closeAndScan(P, q, async () => {
+    posts = site.posts().posts;
+    const a = await owner(P, ['answer', q, '--choice', 'Done']);
+    assert.equal(a.status, 0, a.err || a.out);
+  }, 'C13');
+  v.close();
+  assert.deepEqual([w.qid, w.outcome, w.reopened], [q, 'done', [`${site.origin}/2fa?variant=•••`]]);
+  assert.equal(site.posts().posts, posts, 'a POST was replayed');
+  const s = await ok(P, ['snapshot']);
+  assert.ok(s.out.includes(SIGNED), `the form page reopened isn't signed in: ${s.out.slice(0, 300)}`);
+  assert.deepEqual(await tabUrls(P), [`${site.origin}/2fa?variant=•••`]);
+  assert.deepEqual(entryIs(P, q, 'done').reopened, w.reopened);
+});
+
+onA('C14 declined and withdrawn after a login: the secrets leave the disk, no tab is kept, and the session-only cookie outlives the restart', async () => {
+  const P = cA();
+  for (const [label, close, outcome] of [
+    ['C14 declined', (q) => async () => { const a = await owner(P, ['answer', q, '--choice', "Can't right now"]); assert.equal(a.status, 0, a.err || a.out); }, 'declined'],
+    ['C14 withdrawn', (q) => () => withdraw(P, q), 'withdrawn'],
+  ]) {
+    await ok(P, ['open', `${site.origin}/login`]);
+    const q = await askHandover(P);
+    const v = await ownerLogIn(P, { to: `${site.origin}/account` });
+    const { w } = await closeAndScan(P, q, close(q), label);
+    v.close();
+    assert.deepEqual([w.qid, w.outcome, w.reopened], [q, outcome, undefined], label);
+    assert.deepEqual(await tabUrls(P), ['about:blank'], label);
+    entryIs(P, q, outcome);
+    await ok(P, ['open', `${site.origin}/account`]);
+    const s = await ok(P, ['snapshot']);
+    assert.ok(s.out.includes(SIGNED), `${label}: the session was lost: ${s.out.slice(0, 300)}`);
+  }
+});
+
+onA('C16 a daemon killed mid-handover: wait brings it and the view back under the same name, and Done reopens the page by GET', async () => {
+  const P = cA();
+  await ok(P, ['open', `${site.origin}/login`]);
+  const q = await askHandover(P);
+  const v = await ownerLogIn(P, { to: `${site.origin}/account` });
+  v.close();
+  const st0 = readState(P);
+  await killDaemon(P);
+  const t = await waitJson(P, ['--timeout', '3s']);
+  assert.deepEqual(t, { browser: 1, qid: q, outcome: 'timeout' });
+  const st1 = readState(P);
+  assert.ok(st1 && st1.daemon_pid !== st0.daemon_pid && alive(st1.daemon_pid), 'wait did not start the daemon again');
+  assert.equal(st1.preview, st0.preview, 'the preview name changed');
+  // still held: the owner opens the account page in the view, signed in from before the kill
+  const v2 = await viewSocket(P);
+  assert.equal(v2.status, 101, 'the view port does not answer');
+  await v2.waitFor((m) => m.t === 'frame', 10000);
+  const from = v2.msgs.length;
+  v2.send({ t: 'nav', url: `${site.origin}/account` });
+  await v2.c.wait((m) => m.t === 'url' && m.url === `${site.origin}/account`, 15000, from);
+  await sleep(300);
+  const a = await owner(P, ['answer', q, '--choice', 'Done']);
+  assert.equal(a.status, 0, a.err || a.out);
+  const w = await waitJson(P);
+  v2.close();
+  assert.deepEqual([w.qid, w.outcome, w.reopened], [q, 'done', [`${site.origin}/account`]]);
+  assert.deepEqual(entryIs(P, q, 'done').reopened, w.reopened);
+  const s = await ok(P, ['snapshot']);
+  assert.ok(s.out.includes(SIGNED), `the page reopened isn't signed in: ${s.out.slice(0, 300)}`);
 });
 
 onA('RF3 a ledger entry dated ahead, and a close dated ahead of the clock: each handled once, never in a loop', async () => {

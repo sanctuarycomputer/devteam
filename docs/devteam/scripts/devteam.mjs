@@ -28164,9 +28164,24 @@ async function cdpBrowser(chrome) {
   await cdp.send('Browser.getVersion');
   return cdp;
 }
-// The tabs: page targets in the order they appeared, each attached flat with Page enabled. A page
-// opened by another (a popup) becomes active; a sixth is closed at once, with a note.
+// The tabs: page targets in the order they appeared, each attached flat with Page and Network enabled
+// (tab.ready settles once they are). A page opened by another (a popup) becomes active; a sixth is
+// closed at once, with a note.
+// Each tab's last GET (kit-67), the page a done reopens: tab.lastGet is the URL of the latest
+// main-frame document request whose method was GET (a redirect comes as a new request under the same
+// requestId, so the 302 after a POST makes its target the last GET; a POST answered with a page leaves
+// it where it was), and tab.gets the URLs seen so (the latest 200). A page restored from the
+// back-forward cache sends no request: its URL counts only when it was seen as a GET on that tab.
+// Network is enabled with maxPostDataSize 0 and postData is never read: no request body reaches the
+// daemon. The URLs are kept in memory only.
 const BROWSER_TAB_CAP = 5;
+const BROWSER_GETS_KEPT = 200;
+function browserSawGet(tab, url) {
+  tab.lastGet = url;
+  tab.gets.delete(url);
+  tab.gets.add(url);
+  if (tab.gets.size > BROWSER_GETS_KEPT) tab.gets.delete(tab.gets.values().next().value);
+}
 async function browserWatchTabs(ctx) {
   const { cdp } = ctx;
   cdp.on('Target.targetCreated', async ({ targetInfo: t }) => {
@@ -28175,13 +28190,17 @@ async function browserWatchTabs(ctx) {
       if (!ctx.notes.includes(`Closed a tab past the cap of ${BROWSER_TAB_CAP}.`)) ctx.notes.push(`Closed a tab past the cap of ${BROWSER_TAB_CAP}.`);
       return void cdp.send('Target.closeTarget', { targetId: t.targetId }).catch(() => {});
     }
-    const tab = { targetId: t.targetId, sessionId: null, url: t.url, opening: null, refs: new Map() };
+    const tab = { targetId: t.targetId, sessionId: null, url: t.url, opening: null, refs: new Map(), lastGet: null, gets: new Set() };
     ctx.tabs.push(tab);
     if (t.openerId || !ctx.active) ctx.active = tab;
-    try {
-      tab.sessionId = (await cdp.send('Target.attachToTarget', { targetId: t.targetId, flatten: true })).sessionId;
-      await cdp.send('Page.enable', {}, tab.sessionId);
-    } catch {}
+    tab.ready = (async () => {
+      try {
+        tab.sessionId = (await cdp.send('Target.attachToTarget', { targetId: t.targetId, flatten: true })).sessionId;
+        await cdp.send('Page.enable', {}, tab.sessionId);
+        await cdp.send('Network.enable', { maxPostDataSize: 0 }, tab.sessionId);
+      } catch {}
+    })();
+    await tab.ready;
   });
   // Chrome's target title is never kept: on a page without one it is the raw URL (browserTitle).
   cdp.on('Target.targetInfoChanged', ({ targetInfo: t }) => { const tab = ctx.tabs.find((x) => x.targetId === t?.targetId); if (tab) tab.url = t.url; });
@@ -28193,7 +28212,15 @@ async function browserWatchTabs(ctx) {
     if (!tab || !frame || frame.parentId) return;
     tab.url = tab.frameUrl = frame.url;
     tab.unreachable = frame.unreachableUrl ?? null;
-    if (type === 'BackForwardCacheRestore') tab.loaded?.();
+    if (type === 'BackForwardCacheRestore') {
+      if (tab.gets.has(frame.url)) browserSawGet(tab, frame.url);
+      tab.loaded?.();
+    }
+  });
+  // the main frame's document requests: only the method and URL are read (never postData)
+  cdp.on('Network.requestWillBeSent', ({ type, frameId, request }, sid) => {
+    const tab = bySession(sid);
+    if (tab && type === 'Document' && frameId === tab.targetId && request?.method === 'GET' && typeof request.url === 'string') browserSawGet(tab, request.url);
   });
   cdp.on('Page.frameStartedLoading', ({ frameId }, sid) => { const tab = bySession(sid); if (tab && frameId === tab.targetId) tab.started?.(); });
   // a same-document navigation (a fragment, pushState) loads nothing: back's wait takes it as its load
@@ -28598,11 +28625,11 @@ async function browserForgetRestart(ctx) {
 // --- the gate on a close (kit-67): the handovers this daemon hasn't handled since they closed, all in
 // one clean restart, on the verbs' queue. In order: (1) the owner cut off, before Chrome is touched:
 // ctx.ready false (the view drops all input) and the viewer sent bye, its socket closed; (2) the pages
-// to reopen, only when the batch is one done (pages, noted by the caller; none until they are noted);
-// (3, 4) Chrome stopped and started fresh on a clean session (browserRelaunch, no wipe); (5) on done,
-// those pages reopened; (6) one ledger entry per close, each recorded in memory too; then ctx.ready.
+// to reopen, only when the batch is one done (browserNotePages); (3, 4) Chrome stopped and started
+// fresh on a clean session (browserRelaunch, no wipe); (5) on done, those pages reopened by plain GET
+// (browserReopen); (6) one ledger entry per close, each recorded in memory too; then ctx.ready.
 // A stop meanwhile ends it at its next check, with no entry: the next start handles the close.
-async function browserCloseRestart(ctx, closes, { pages = [] } = {}) {
+async function browserCloseRestart(ctx, closes) {
   if (ctx.stopping || !closes.length) return;
   try {
     ctx.ready = false;
@@ -28613,14 +28640,57 @@ async function browserCloseRestart(ctx, closes, { pages = [] } = {}) {
     }
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
     if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
-    const reopen = closes.length === 1 && closes[0].outcome === 'done' ? pages : []; // only one done reopens
+    const reopen = closes.length === 1 && closes[0].outcome === 'done' ? browserNotePages(ctx) : []; // only one done reopens
     if (!(await browserRelaunch(ctx, { wipe: false }))) return;
-    // step 5 (kit-67 T5): the pages in reopen opened by plain GET, and listed here masked; none until then
-    const reopened = [];
+    const reopened = reopen.length ? await browserReopen(ctx, reopen) : [];
     if (ctx.stopping) return;
     browserRecordCloses(ctx, closes, reopened);
     ctx.ready = true;
   } catch (e) { browserShutdown(ctx, 'error', e?.message); }
+}
+// The pages a done reopens: each tab's last GET (browserWatchTabs), in tab order; a tab with none, or
+// one that isn't http(s) (about:blank), adds nothing. Raw URLs, in memory only.
+function browserNotePages(ctx) {
+  return ctx.tabs.map((t) => t.lastGet).filter((u) => typeof u === 'string' && browserHttp(u));
+}
+// The noted pages opened again on the fresh Chrome, within the 5-tab cap: the first in the first tab,
+// each other in a tab Target.createTarget opens on about:blank (navigated once its Page and Network
+// are on, so its own last GET is tracked too). Each is a plain Page.navigate GET; the loads are waited
+// on together, 15 s in all, and a load still running then is left to finish on its own. Back: the
+// URLs navigated, masked.
+const BROWSER_REOPEN_MS = 15000;
+async function browserReopen(ctx, urls) {
+  const end = Date.now() + BROWSER_REOPEN_MS, left = () => Math.max(0, end - Date.now());
+  const waits = [], opened = [];
+  // as browserLoad: done on the load event once Page.navigate answered, or on its error
+  const go = (tab, url) => {
+    let finish, nav = false, loaded = false;
+    const onLoad = () => { loaded = true; if (nav) finish(); };
+    const p = new Promise((resolve) => {
+      finish = () => { if (tab.loaded === onLoad) tab.loaded = null; resolve(); };
+      Object.assign(tab, { opening: url, frameUrl: null, unreachable: null, refs: new Map(), loaded: onLoad });
+      ctx.cdp.send('Page.navigate', { url }, tab.sessionId).then((r) => { nav = true; if (r?.errorText || !r?.loaderId || loaded) finish(); }, () => finish());
+    });
+    p.finish = () => finish();
+    waits.push(p);
+    opened.push(url);
+  };
+  for (const [i, url] of urls.slice(0, BROWSER_TAB_CAP).entries()) {
+    if (ctx.stopping || !left()) break;
+    let tab = null;
+    if (i === 0) tab = ctx.active?.sessionId ? ctx.active : ctx.tabs.find((t) => t.sessionId) ?? null;
+    else {
+      try {
+        const { targetId } = await Promise.race([ctx.cdp.send('Target.createTarget', { url: 'about:blank' }), browserSleep(left()).then(() => ({}))]);
+        while (targetId && !ctx.stopping && left() && !(tab = ctx.tabs.find((t) => t.targetId === targetId))) await browserSleep(50);
+      } catch { tab = null; }
+    }
+    if (tab) await Promise.race([tab.ready, browserSleep(left())]); // its Page and Network on: the load seen, its GET tracked
+    if (tab?.sessionId && !ctx.stopping && left()) go(tab, url);
+  }
+  await Promise.race([Promise.all(waits), browserSleep(left())]);
+  for (const w of waits) w.finish(); // any load still running: its wait let go, its tab.loaded freed
+  return opened.map((u) => browserMask(u));
 }
 // The gate, run only from a job already on the verbs' queue (a verb's run, or the watch's job): it
 // folds afresh, keeps ctx.held, and runs one restart for every close not yet handled. It never queues
@@ -28630,7 +28700,7 @@ async function browserGate(ctx) {
   const hs = browserHandovers();
   ctx.held = browserHeld(hs);
   const closes = browserUnhandled(ctx, hs);
-  if (closes.length) await browserCloseRestart(ctx, closes, { pages: [] });
+  if (closes.length) await browserCloseRestart(ctx, closes);
 }
 // At start, once the fresh Chrome is up and before the control server takes verbs: an entry for each
 // close not yet handled, with no reopen (a dead daemon's notes are gone: R1), so done gets reopened []

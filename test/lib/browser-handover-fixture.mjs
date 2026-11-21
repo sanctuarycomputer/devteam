@@ -164,6 +164,52 @@ export async function typeNote(P, text) {
   return v;
 }
 
+// The owner signs in to site S over the view, on a tab already at S's /login (either variant): a click
+// on the page's empty corner (the page focused, no field), Tab, a paste of the user, Tab, a paste of the
+// password, Enter; then, on the 2FA page once the view showed its URL and 500 ms passed, Tab, a paste
+// of the code, Enter. Resolved once S issued the session and, with to, the view shows that masked URL. The
+// socket is returned, still open.
+export async function ownerLogIn(P, { S = site, to } = {}) {
+  const v = await viewSocket(P);
+  await v.waitFor((m) => m.t === 'frame', 10000);
+  v.send({ t: 'mouse', type: 'click', x: 700, y: 4, button: 'left', clicks: 1 });
+  await sleep(150);
+  const from = v.msgs.length;
+  v.tab(); v.paste(S.username); v.tab(); v.paste(S.password); v.enter();
+  // the view's url comes from the commit (a 250 ms tick, so the page's first frame may come before
+  // it): the tiny page is parsed well within the settle after it
+  await v.c.wait((m) => m.t === 'url' && m.url.startsWith(`${S.origin}/2fa`), 15000, from);
+  await sleep(500);
+  const issued = S.sessions().length;
+  const before2 = v.msgs.length;
+  v.tab(); v.paste(S.code); v.enter();
+  await until(() => S.sessions().length > issued, 15000, 'the session issued for the code');
+  if (to) await v.c.wait((m) => m.t === 'url' && m.url === to, 15000, before2);
+  return v;
+}
+
+// C12's timed scan of P's profile for secrets (scanProfile), started before the answer: every 100 ms,
+// each scan dated by the time it started, until stop(), and once more after. firstCleanAfter(t): the
+// start of the first scan from t on that found nothing, or null. stop() resolves to every scan.
+export function scanLoop(P, secrets) {
+  const scans = [];
+  let stopped = false;
+  // a scan that throws counts as a find (named by its error): never clean by failing to read
+  const scan = () => { const at = Date.now(); let found; try { found = scanProfile(P, secrets); } catch (e) { found = [`(the scan failed: ${e.code ?? e.message})`]; } scans.push({ at, found }); return at; };
+  const loop = (async () => {
+    while (!stopped) { const at = scan(); await sleep(Math.max(0, 100 - (Date.now() - at))); }
+    scan();
+  })();
+  return {
+    scans,
+    firstCleanAfter: (t) => scans.find((s) => s.at >= t && !s.found.length)?.at ?? null,
+    stop: async () => { stopped = true; await loop; return scans; },
+  };
+}
+// The code typed into the profile's files at all: polled up to 15 s (Chrome's session save), so a clean
+// scan later means the code left, not that the scan can't find it. The files that held it.
+export const codeOnDisk = (P, code) => until(() => { const f = scanProfile(P, [code]); return f.length ? f : null; }, 15000, 'the code in some profile file (the scan shown able to find it)');
+
 // The owner at the view: a socket to P's view port (state.json's view_port) with the view's own Origin.
 // { status, msgs, send(obj), tab(n), paste(text), enter(), waitFor(pred, ms), close(), c }: tab sends n
 // Tab key presses (down, up) and paste the text in the page's pieces (at most 10 000 code points each),
