@@ -3980,12 +3980,15 @@ async function reviewDecline(id, note, errId, btn) {
   clearTimeout(me.saveTimer); me.pending = null; RV = null; openReview(location.hash.slice(1));
 }
 
-// A hold's state in words. Parking and draining are transitions, shown as such everywhere until they
-// finish; a goal the fleet op holds finishes only when the fleet is ready to move (fleet status).
+// A hold's state in words. Parking and draining are transitions, shown until that goal's own sessions
+// have settled. A goal whose sessions all have is Parked (or Drained) even while the fleet as a whole
+// isn't ready to move yet: what is still left for the move (the log landing, a session of another goal)
+// is the fleet line's to say, with what it is, not every goal card's (one unsettled session used to
+// turn every card into Parking… for days).
 const HOLD_STATE_WORDS = { running: 'Running', draining: 'Draining…', drained: 'Drained', parking: 'Parking…', parked: 'Parked', 'let go': 'Let go' };
+const fleetMoveReady = () => !!(FLEET.data && FLEET.data.ready);
 function holdState(h) {
   if (!h) return 'running';
-  if (h.fleet && ['parked', 'drained'].includes(h.state) && !(FLEET.data && FLEET.data.ready)) return h.state === 'parked' ? 'parking' : 'draining';
   return h.state;
 }
 /* goal-block start */
@@ -4025,7 +4028,7 @@ function goalState(g, R, openQs) {
   if (!h || h.mode === 'run' || h.mode === 'let-go') return s;
   const st = holdState(h);
   const words = HOLD_STATE_WORDS[st] || st;
-  const running = h.running.length ? ` (${h.running.length} ${h.mode === 'park' ? 'still settling' : 'still running'})` : st !== h.state ? ' (the fleet is still getting ready to move)' : '';
+  const running = h.running.length ? ` (${h.running.length} ${h.mode === 'park' ? 'still settling' : 'still running'})` : h.fleet && ['parked', 'drained'].includes(st) && FLEET.data && !fleetMoveReady() ? ' (the fleet isn\u2019t ready to move yet)' : '';
   const why = `${h.fleet ? 'the whole fleet' : h.by === 'supervisor' ? 'the supervisor' : 'you'}${h.reason ? `: ${esc(h.reason)}` : ''}`;
   return { ...s, label: `${words}${running} · ${s.label}`, tone: h.mode === 'park' ? 'high' : 'medium', next: `${h.mode === 'drain' ? 'Draining: what is running finishes and merges; nothing new starts' : 'Parked: its sessions stopped with their work pushed and a handoff; nothing starts and nothing merges'} (set by ${why}). ${s.next || ''}` };
 }
@@ -4136,7 +4139,12 @@ function fleetStateLine(f, st) {
   f = f || {};
   const settled = !!(st && st.ready);
   const words = f.mode === 'park' ? (settled ? 'parked' : 'parking…') : f.mode === 'drain' ? (settled ? 'drained' : 'draining…') : f.op ? 'partly held (a goal was set apart after the fleet op)' : 'running';
-  return `<b>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
+  // not ready yet: what is left (fleet status's blockers, each up to its first parenthesis) rides on
+  // the line's hover, so a park that stalls says on what without growing the line (it sits under the
+  // switch, which must not move)
+  const left = (f.mode === 'park' || f.mode === 'drain') && !settled && st && Array.isArray(st.blockers) && st.blockers.length ? st.blockers : null;
+  const tip = left ? ` title="${esc(`Left before the move: ${left.map((b) => String(b).split(' (')[0].slice(0, 120)).join('; ')}`)}"` : '';
+  return `<b${tip}>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
 }
 // Every fleet slot on the page: the sidebar's ([data-fleet-slot="switch"] and "state"), and any other
 // page's copies with the same attribute. A slot is written only when its HTML changed (against the last

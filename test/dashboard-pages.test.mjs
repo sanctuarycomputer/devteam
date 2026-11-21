@@ -646,6 +646,11 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await line({ mode: 'drain', op: 'f-1', reason: 'quiet week' }, null), 'draining… · quiet week');
   assert.equal(await line({ mode: 'drain', op: 'f-1', reason: 'quiet week' }, { ready: true, blockers: [] }), 'drained · quiet week');
   assert.equal(await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: false, blockers: ['x'] }), 'parking… · new laptop');
+  // what is left rides on the line's hover, each up to its first parenthesis, so the line (and the switch above it) stays put
+  await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: false, blockers: ['app-9-x: not parked (phase awaiting-word)', 'the live log is not on main yet (a.jsonl: 3 line(s))'] });
+  assert.equal(await p.ev(`document.querySelector('#side-state b').title`), 'Left before the move: app-9-x: not parked; the live log is not on main yet');
+  await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: true, blockers: [] });
+  assert.equal(await p.ev(`document.querySelector('#side-state b').title`), '', 'ready: no hover');
   assert.equal(await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: true, blockers: [] }), 'parked · new laptop');
   assert.equal(await line({ mode: null, op: 'f-1', reason: 'set apart' }, null), 'partly held (a goal was set apart after the fleet op) · set apart');
   await p.ev('FLEET.busy = false; redrawNow()');
