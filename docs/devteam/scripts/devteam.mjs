@@ -26794,6 +26794,12 @@ The whole system as planned now: the sum of every design so far. Written at boot
 
 ## 1. Components
 
+A Mermaid diagram of the components and what each talks to, kept current (project-docs.md L-DOCS-4).
+
+\`\`\`mermaid
+flowchart LR
+\`\`\`
+
 | Component | Path | Stack | Owns | Talks to |
 |---|---|---|---|---|
 
