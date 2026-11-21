@@ -1963,8 +1963,12 @@ test('A15 landing: forge git, a merge on main that someone else made (another me
     // merge's own message, the parents swapped
     onOrigin(T.g(['commit-tree', tree, '-p', sha, '-p', main0, '-m', KIT_MSG]));
     assert.match(T.merge('hand', ['--approved', q]).text, /is already on main: nothing to merge, nothing logged/);
-    // merge's own message and parents, but the head already on the first: not the merge that landed it
-    onOrigin(T.g(['commit-tree', tree, '-p', sha, '-p', sha, '-m', KIT_MSG]));
+    // merge's own message, the second parent a commit on top of the head, not the head
+    const child = T.g(['commit-tree', tree, '-p', sha, '-m', 'on top of the head']);
+    onOrigin(T.g(['commit-tree', tree, '-p', main0, '-p', child, '-m', KIT_MSG]));
+    assert.match(T.merge('hand', ['--approved', q]).text, /is already on main: nothing to merge, nothing logged/);
+    // merge's own message and the head second, but the first already holds the head: not the merge that landed it
+    onOrigin(T.g(['commit-tree', tree, '-p', child, '-p', sha, '-m', KIT_MSG]));
     assert.match(T.merge('hand', ['--approved', q]).text, /is already on main: nothing to merge, nothing logged/);
     assert.equal(T.acts().length, before, 'nothing logged');
     // the control: merge's own message onto main0, and the act is logged once
