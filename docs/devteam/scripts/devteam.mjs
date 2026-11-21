@@ -6946,22 +6946,10 @@ function pinRecords(id) {
 // run/pr/, which is the link PR's). Home's mergeShaFor is never asked about a link ticket
 // (factsRepo routes it to its link), so the subject needn't avoid what findMergeSha reads; don't
 // add a fallback to home there. null, or why it didn't land.
-const recordsMergeMessage = (id, recSha, linkName) => `${id}: records\n\nMerged home's ticket/${id} at ${recSha}: the records of ${id}, whose code lands in ${linkName}`;
-// Whether tip is the kit's own landing merge of head (final-13 F1): exactly two parents, the second
-// head and the first one that doesn't already hold it (the main it landed on), and merge's own
-// message, as git keeps it (trailing spaces and repeated blank lines dropped). A merge anyone else
-// made, with other parents or another message, is not. g is the repo's git (output, or null).
-const kitMergeOf = (g, tip, head, message) => {
-  const norm = (m) => String(m ?? '').split('\n').map((l) => l.trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  const parents = (g(['rev-list', '--parents', '-n', '1', tip]) ?? '').trim().split(' ').slice(1);
-  if (parents.length !== 2 || parents[1] !== head) return null;
-  if (g(['merge-base', '--is-ancestor', head, parents[0]]) !== null) return null;
-  return norm(g(['log', '-1', '--format=%B', tip])) === norm(message) ? { onto: parents[0] } : null;
-};
 function landRecords(id, rec, linkName) {
   const HR = repo('home');
   const HS = HR.settings;
-  const [subject, body] = recordsMergeMessage(id, rec.sha, linkName).split('\n\n');
+  const [subject, body] = recurringRegistry.recordsMessage(id, rec.sha, linkName).split('\n\n');
   if (HS.forge === 'git') {
     // Onto the home main the checks judged (recordsBranchFails, at mainSha()), as the code lands
     // (cmdMerge's landCode): no hook runs, directory renames are a conflict, the merge must be
@@ -7054,7 +7042,7 @@ function cmdMerge() {
   if (checkedMain && R.git(['merge-base', '--is-ancestor', sha, checkedMain]) !== null) {
     const cls0 = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
     const logged = logObjects('act').some((a) => a.class === cls0 && String(a.what ?? '').startsWith(`merged ${branch} at ${sha}`) && (a.repo ?? null) === (onR.repo ?? null));
-    const own = viaGit && !logged ? kitMergeOf((args) => R.git(args), checkedMain, sha, `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`) : null;
+    const own = viaGit && !logged ? recurringRegistry.kitMergeOf((args) => R.git(args), checkedMain, sha, `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`) : null;
     if (!own) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
     relanded = { tip: checkedMain, onto: own.onto };
     out(`${branch}${inR} at ${sha.slice(0, 12)} is on ${mainBranch0} in the kit's own landing merge ${checkedMain.slice(0, 12)}, with no act logged (a push that timed out, which origin took): checking it onto ${own.onto.slice(0, 12)}, the main it landed on, to log its landing`);
@@ -7376,7 +7364,7 @@ function cmdMerge() {
   // kit's own records merge of the pinned sha (final-13 F1)
   if (rec?.landed && repo('home').settings.forge === 'git' && !recordsLanded()) {
     const tip = resolveCommit(`origin/${repo('home').settings.main_branch}`);
-    if (tip && kitMergeOf((args) => git(args), tip, rec.sha, recordsMergeMessage(id, rec.sha, R.name))) {
+    if (tip && recurringRegistry.kitMergeOf((args) => git(args), tip, rec.sha, recurringRegistry.recordsMessage(id, rec.sha, R.name))) {
       const ra = appendLog({ type: 'act', class: 'merge-word', what: `merged home's ticket/${id} at ${rec.sha}: the records of ${id}, ahead of its code in ${R.name}`, refs: [], reversible: false }, 'supervisor');
       out(`the records of ${id} at ${rec.sha.slice(0, 12)} are on home's ${repo('home').settings.main_branch} in the kit's own records merge ${tip.slice(0, 12)}, with no act logged (a push that timed out, which origin took): logged their landing (${ra.id})`);
     }
@@ -24424,6 +24412,20 @@ const recurringRegistry = Object.freeze({
   // label (agreed_by_owner; never a reading of words, whatever line wrote it:
   // d-20261120-195829274-supervisor), not landed, not superseded
   live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && v.agreed_by_owner === true && !v.reading && !recurringRegistry.notOwnYes(v) && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
+  // the message landRecords gives the records merge on home's main (final-13 F1 reads it back)
+  recordsMessage: (id, recSha, linkName) => `${id}: records\n\nMerged home's ticket/${id} at ${recSha}: the records of ${id}, whose code lands in ${linkName}`,
+  // Whether tip is the kit's own landing merge of head (final-13 F1): exactly two parents, the second
+  // head and the first one that doesn't already hold it (the main it landed on), and merge's own
+  // message, as git keeps it (trailing spaces and repeated blank lines dropped). A merge anyone else
+  // made, with other parents or another message, is not. g is the repo's git (output, or null).
+  // { onto: the first parent } or null.
+  kitMergeOf(g, tip, head, message) {
+    const norm = (m) => String(m ?? '').split('\n').map((l) => l.trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    const parents = (g(['rev-list', '--parents', '-n', '1', tip]) ?? '').trim().split(' ').slice(1);
+    if (parents.length !== 2 || parents[1] !== head) return null;
+    if (g(['merge-base', '--is-ancestor', head, parents[0]]) !== null) return null;
+    return norm(g(['log', '-1', '--format=%B', tip])) === norm(message) ? { onto: parents[0] } : null;
+  },
   // words that start with the label Yes, read as --choice and --read read a label: any case
   // (final-12b F3), then the end, whitespace, or one of . , ! (final-13b F3). Quotes are taken off
   // only when one matching pair wraps the whole trimmed turn, so reported speech ("Yes" is what you
