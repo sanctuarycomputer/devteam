@@ -7705,11 +7705,33 @@ function markAnswered(id, text) {
 }
 
 /* preview-cards start */
-// A preview's link for where this page is. Through the gateway the dashboard is on <port>.<box>
-// and the preview on <name>.<box>; elsewhere it is 127.0.0.1:<port>, the owner's own machine.
-function previewHere(loc, served) {
-  const m = served ? /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(loc?.host || '') : null;
-  return m ? { proto: loc.protocol, box: m[2] } : null;
+// project-hosts@1's label rule, with its reserved labels.
+const PROJECT_LABEL = /^(?!\d+$)(?!(?:term|public|www)$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+// Who this dashboard is: /api/hello's answer; until it comes (or when it fails) the project the Library
+// names; else, on a page the gateway marked as served (only it can set x-devteam-previews), the host's
+// first label. The last two have no port.
+const pageHello = (loc) => {
+  const h = typeof HELLO === 'undefined' ? null : HELLO;
+  if (h?.name) return h;
+  const n = typeof DATA === 'undefined' ? null : DATA?.library?.public?.project;
+  if (n) return { name: n, port: null };
+  const served = typeof PREVIEWS !== 'undefined' && PREVIEWS;
+  return served ? { name: String(loc?.host ?? '').split('.')[0], port: null } : null;
+};
+// Where this page is on a box: <port>.<box>, or <project>.<box> when the first label is this
+// project's own name (so the box's own name, or another project's, is never read as this one).
+function hostHere(loc, name) {
+  const host = loc?.host || '';
+  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  if (m) return { box: m[2] };
+  const n = /^([^.]+)\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  return n && n[1] === name && PROJECT_LABEL.test(name) ? { box: n[2], named: true } : null;
+}
+// A preview's link for where this page is. Through the gateway the dashboard is on <port>.<box> or
+// <project>.<box> and the preview on <name>.<box>; elsewhere it is 127.0.0.1:<port>, the owner's own machine.
+function previewHere(loc, served, hello = pageHello(loc)) {
+  const h = served ? hostHere(loc, hello?.name) : null;
+  return h ? { proto: loc.protocol, box: h.box } : null;
 }
 const previewUrl = (me, p) => (me ? `${me.proto}//${p.name}.${me.box}/` : `http://127.0.0.1:${p.port}/`);
 // The Library card: what the state is and what the owner can do about it.
