@@ -162,6 +162,7 @@
     "test/recurring-contract.test.mjs": 16.7,
     "test/recurring-dashboard.test.mjs": 28.2,
     "test/recurring-jobs-page.test.mjs": 40.3,
+    "test/recurring-registry.test.mjs": 250,
     "test/registry-no-lines.test.mjs": 2.7,
     "test/registry.test.mjs": 27.8,
     "test/repo-links.test.mjs": 22.6,
