@@ -2109,21 +2109,24 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main') {
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
 // command that writes, asks git directly.
 let refCommits = null;
-function resolveCommit(ref) {
+function resolveCommit(ref, cwd = HOME_CWD) {
   if (gitReadCache && ref.startsWith('refs/')) {
-    if (!refCommits || refCommits.cache !== gitReadCache) {
+    if (!refCommits || refCommits.cache !== gitReadCache) refCommits = { cache: gitReadCache, byRepo: new Map() };
+    const k = cwd ?? '';
+    if (!refCommits.byRepo.has(k)) {
       const map = new Map();
-      for (const line of (git(['for-each-ref', '--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)']) ?? '').split('\n')) {
+      for (const line of (git(['for-each-ref', '--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)'], cwd) ?? '').split('\n')) {
         const [name, type, sha, ptype, psha] = line.split('\0');
         if (name) map.set(name, type === 'commit' ? sha : ptype === 'commit' ? psha : undefined);
       }
-      refCommits = { cache: gitReadCache, map };
+      refCommits.byRepo.set(k, map);
     }
-    if (!refCommits.map.has(ref)) return null;
-    const sha = refCommits.map.get(ref);
+    const map = refCommits.byRepo.get(k);
+    if (!map.has(ref)) return null;
+    const sha = map.get(ref);
     if (sha !== undefined) return sha;
   }
-  return git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  return git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], cwd);
 }
 
 // The durable copy of a file: main's committed version or this checkout's, whichever extends the
@@ -2891,7 +2894,7 @@ const parseMainLog = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => 
 const parseParents = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => l.split(' '));
 // The commit on main that landed a ticket, for any repo: a merge from ticket/<id>, a squash titled
 // "<id>: …", or a merge whose second parent contains the branch tip and whose first parent does not.
-function findMergeSha(id, { log, parents, resolve, ancestor, ref }) {
+function findMergeSha(id, { log, parents, resolve, ancestor, ref, landings }) {
   const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
   for (const { sha, subject } of log()) if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return sha;
@@ -2899,7 +2902,15 @@ function findMergeSha(id, { log, parents, resolve, ancestor, ref }) {
   const refSha = resolve(ref);
   for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
     const tip = resolve(r);
-    if (!tip || ancestor(tip, refSha) !== true) continue;
+    if (!tip) continue;
+    // a read-only command answers from one walk of main's history (mainLandings)
+    const walked = landings?.(refSha);
+    if (walked) {
+      const by = walked.get(tip);
+      if (by && parents().some(([sha, , p2]) => sha === by && p2)) return by;
+      continue;
+    }
+    if (ancestor(tip, refSha) !== true) continue;
     for (const [sha, p1, p2] of parents()) {
       if (p2 && ancestor(tip, p2) === true && ancestor(tip, p1) !== true) return sha;
     }
@@ -2907,6 +2918,42 @@ function findMergeSha(id, { log, parents, resolve, ancestor, ref }) {
   return null;
 }
 
+// For a read-only command: every commit in main's history, with the first-parent merge whose second
+// parent brought it in (null for a commit on the first-parent line, or one only a later parent of an
+// octopus brought). One rev-list in place of an ancestor check per ticket per merge. Null when git
+// can't list it, and the caller asks commit by commit.
+let landingsMemo = null;
+function mainLandings(sha, cwd = HOME_CWD) {
+  if (!gitReadCache || !FULL_SHA.test(sha ?? '')) return null;
+  if (landingsMemo?.cache !== gitReadCache) landingsMemo = { cache: gitReadCache, m: new Map() };
+  const k = `${gitCommonDirOf(cwd)}\0${sha}`;
+  if (landingsMemo.m.has(k)) return landingsMemo.m.get(k);
+  const o = git(['rev-list', '--parents', sha], cwd);
+  let by = null;
+  if (o !== null) {
+    const ps = new Map(o.split('\n').filter(Boolean).map((l) => { const [c, ...p] = l.split(' '); return [c, p]; }));
+    const line = [];
+    for (let c = sha; c && ps.has(c); c = ps.get(c)[0]) line.push(c);
+    by = new Map();
+    const walk = (from, label) => {
+      const todo = [from];
+      while (todo.length) {
+        const c = todo.pop();
+        if (by.has(c) || !ps.has(c)) continue;
+        by.set(c, label);
+        todo.push(...ps.get(c));
+      }
+    };
+    for (const c of line.reverse()) {
+      by.set(c, null);
+      const [, second, ...rest] = ps.get(c);
+      if (second) walk(second, c);
+      for (const x of rest) walk(x, null);
+    }
+  }
+  landingsMemo.m.set(k, by);
+  return by;
+}
 let mainLogCache;
 function mainLog() {
   if (mainLogCache) return mainLogCache;
@@ -2927,7 +2974,7 @@ function homeTicketBranchRef(id) {
 const mergeShaCache = new Map();
 function homeMergeShaFor(id) {
   if (mergeShaCache.has(id)) return mergeShaCache.get(id);
-  const v = findMergeSha(id, { log: mainLog, parents: mergeParents, resolve: resolveCommit, ancestor: (a, b) => ancestorOf(a, b), ref: mainRef() });
+  const v = findMergeSha(id, { log: mainLog, parents: mergeParents, resolve: resolveCommit, ancestor: (a, b) => ancestorOf(a, b), ref: mainRef(), landings: (x) => mainLandings(x) });
   mergeShaCache.set(id, v);
   return v;
 }
@@ -2972,14 +3019,61 @@ function srcRead(src, rel) {
 }
 // A ref as the commit it names, where that costs no git call of its own: a read-only command's ref
 // listing, or a ref that is already a full sha. Else null, and the caller asks by name, as before.
-const refAt = (ref, resolve = resolveCommit) => (FULL_SHA.test(ref) ? ref : gitReadCache && ref.startsWith('refs/') ? resolve(ref) : null);
+const refAt = (ref, resolve = resolveCommit) => (FULL_SHA.test(ref) ? ref : gitReadCache ? resolve(ref) : null);
 // A folder listed at a ref: its files are read at once, all in one git call, at the commit the ref
 // named (a dashboard refresh read each ticket branch's review files one call each).
 function listAndPrefetch(ref, dirPath, gitFn, cwd, resolve) {
-  const names = (gitFn(['ls-tree', '--name-only', `${ref}:${dirPath}`]) ?? '').split('\n').filter(Boolean);
   const sha = refAt(ref, resolve);
+  const index = sha ? treeIndexAt(sha, cwd) : null;
+  if (index) {
+    // every ticket's reviews at this commit in one read, the first time one ticket's are asked for
+    const m = /^(.*\/tickets\/)[^/]+\/reviews$/.exec(dirPath);
+    if (m && !index.fetched.has(m[1])) {
+      index.fetched.add(m[1]);
+      const inReviews = new RegExp(`^${m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^/]+/reviews/[^/]+\\.md$`);
+      prefetchAt(sha, [...index.paths].filter((p) => inReviews.test(p)), cwd);
+    }
+    const names = index.children.get(dirPath) ?? [];
+    if (names.length) prefetchAt(sha, names.map((n) => `${dirPath}/${n}`), cwd);
+    return names;
+  }
+  const names = (gitFn(['ls-tree', '--name-only', `${ref}:${dirPath}`]) ?? '').split('\n').filter(Boolean);
   if (sha && names.length) prefetchAt(sha, names.map((n) => `${dirPath}/${n}`), cwd);
   return names;
+}
+// For a read-only command: a commit's whole tree from one ls-tree, built the second time a command
+// asks about that commit (so a branch read once costs what it did). Null otherwise.
+let treeIndexes = null;
+function treeIndexAt(sha, cwd = HOME_CWD) {
+  if (!gitReadCache) return null;
+  if (treeIndexes?.cache !== gitReadCache) treeIndexes = { cache: gitReadCache, m: new Map() };
+  const k = `${gitCommonDirOf(cwd)}\0${sha}`;
+  const had = treeIndexes.m.get(k);
+  if (had !== undefined && had !== 'seen') return had;
+  if (had === undefined) { treeIndexes.m.set(k, 'seen'); return null; }
+  const o = git(['ls-tree', '-r', '-t', '-z', '--name-only', sha], cwd);
+  let index = null;
+  if (o !== null) {
+    const paths = new Set(o.split('\0').filter(Boolean));
+    const children = new Map();
+    for (const p of paths) {
+      const at = p.lastIndexOf('/');
+      if (at === -1) continue;
+      const d = p.slice(0, at);
+      if (!children.has(d)) children.set(d, []);
+      children.get(d).push(p.slice(at + 1));
+    }
+    index = { paths, children, fetched: new Set() };
+  }
+  treeIndexes.m.set(k, index);
+  return index;
+}
+// Whether a path is in a commit, as `git cat-file -e <ref>:<path>` says: from the tree index once a
+// read-only command has one.
+function hasPathAt(ref, p, cwd = HOME_CWD) {
+  const sha = refAt(ref);
+  const index = sha ? treeIndexAt(sha, cwd) : null;
+  return index ? index.paths.has(p) : git(['cat-file', '-e', `${ref}:${p}`], cwd) !== null;
 }
 function srcList(src, relDir) {
   if (src.repo && src.repo.name !== 'home') return src.repo.srcList(src.ref ?? null, relDir);
@@ -3039,7 +3133,7 @@ function linkRepo(id) {
   const rel = settings.project;
   const g = (args, cwd = root) => git(args, cwd);
   const c = { mainRef: undefined, log: null, parents: null, mergeSha: new Map(), mergedAt: new Map() };
-  const resolve = (ref) => g(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  const resolve = (ref) => resolveCommit(ref, root);
   const mainRefR = () => { if (c.mainRef === undefined) c.mainRef = [`origin/${settings.main_branch}`, settings.main_branch].find((r) => resolve(r)) ?? null; return c.mainRef; };
   const log = () => (c.log ??= parseMainLog(mainRefR() ? g(['log', mainRefR(), '--first-parent', '--format=%H%x09%s']) : null));
   const parents = () => (c.parents ??= parseParents(mainRefR() ? g(['log', mainRefR(), '--merges', '--first-parent', '-n', '500', '--format=%H %P']) : null));
@@ -3050,7 +3144,7 @@ function linkRepo(id) {
     ...gitFacts(g, (args) => gitRun(args, root)),
     git: g, gitOrDie: (args, cwd = root) => gitOrDie(args, cwd),
     gh: (args, opts = {}) => { const spec = ghSpec(l.remote); return sh('gh', [...args, ...(spec ? ['-R', spec] : [])], { cwd: root, ...opts }); },
-    mergeShaFor: (tid) => { if (!c.mergeSha.has(tid)) c.mergeSha.set(tid, findMergeSha(tid, { log, parents, resolve, ancestor: (a, b) => ancestorOf(a, b, root), ref: mainRefR() })); return c.mergeSha.get(tid); },
+    mergeShaFor: (tid) => { if (!c.mergeSha.has(tid)) c.mergeSha.set(tid, findMergeSha(tid, { log, parents, resolve, ancestor: (a, b) => ancestorOf(a, b, root), ref: mainRefR(), landings: (x) => mainLandings(x, root) })); return c.mergeSha.get(tid); },
     mergedAt: (tid) => { if (!c.mergedAt.has(tid)) { const sha = R.mergeShaFor(tid); const t = sha ? commitDateOf(sha, root) : NaN; c.mergedAt.set(tid, Number.isNaN(t) ? null : t); } return c.mergedAt.get(tid); },
     ticketBranchRef: (tid) => [`refs/heads/ticket/${tid}`, `refs/remotes/origin/ticket/${tid}`].find((r) => resolve(r)) ?? null,
     releasedIn: (sha, pattern) => releasedInAt(sha, pattern, root),
@@ -4166,7 +4260,7 @@ function plannersNow() {
     const feature = b.slice('plan/'.length);
     const by = `plan-${feature}`;
     // landed once its plan file is on main (a fresh planner's branch sits at main's tip, uncommitted)
-    if (main && git(['cat-file', '-e', `${main}:${projectRel}/log/${by}.jsonl`]) !== null) return null;
+    if (main && hasPathAt(main, `${projectRel}/log/${by}.jsonl`)) return null;
     // or once its branch came into main by a merge (its tip in main, off main's own first-parent
     // line): a design-change planner that wrote into another plan's file and merged through it.
     // A fresh planner's branch sits on a first-parent commit of main, so it still shows.
@@ -4213,7 +4307,7 @@ const approvalOf = (id, cls) => logObjects('act').filter((a) => a.class === cls 
 function recordsLandedOnly(t) {
   if (!isActive(t) || !recordsInHome(t) || mergeShaFor(t.id)) return false;
   const main = mainRef();
-  return !!main && git(['cat-file', '-e', `${main}:${projectRel}/tickets/${t.id}/spec.md`]) !== null;
+  return !!main && hasPathAt(main, `${projectRel}/tickets/${t.id}/spec.md`);
 }
 const RECORDS_ONLY_FIX = (id) => `records in home, code not merged: run merge ${id} again`;
 function deriveStatus() {
@@ -30955,11 +31049,19 @@ ${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, 
 const OPERATOR_READS = new Set(['search', 'status', 'moves', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek', 'recurring list', 'recurring show']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings', 'unread', 'recurring']);
 /* commandGroups start */
+// The commands that read the whole project and change nothing: one answer per git question, and each
+// ticket's reviews read once, as a dashboard refresh has it (a status on a big project was thousands
+// of git processes). A command that writes never runs this way.
+const gitReadOnly = (fn) => (...args) => {
+  gitReadCache = new Map();
+  reviewMemo = new Map();
+  try { return fn(...args); } finally { reviewMemo = null; }
+};
 const COMMANDS_SETUP = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
 };
 const COMMANDS_GRAPH = {
-  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: gitReadOnly(cmdReady), status: gitReadOnly(cmdStatus), moves: cmdMoves, roadmap: cmdRoadmap,
 };
 const COMMANDS_CHECKS = {
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
@@ -30971,7 +31073,7 @@ const COMMANDS_DECIDE = {
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
 };
 const COMMANDS_OBSERVE = {
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: gitReadOnly(cmdMetrics), ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
 };
 const COMMANDS_GOALS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
