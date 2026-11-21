@@ -1780,9 +1780,13 @@ test('A16: a jobs file in this checkout over the kit\'s size bound is a validate
     const SMALL = { ...SUP, DEVTEAM_RECURRING_MAX_BYTES: '4096' };
     write(path.join(T.old, JOBS), `{"aa":"${'x'.repeat(8000)}"}\n`);
     refused(T.run(['validate'], SMALL), /recurring\.json in this checkout: 8010 bytes, over the kit's bound of 4096; no jobs file needs that/);
-    // at the bound it reads (and is refused only for its shape)
-    write(path.join(T.old, JOBS), jobsText({ aa: check() }));
+    // at the bound it reads (and is refused only for its shape): exactly 4096 bytes; one byte more is over (final-13b F6)
+    const body = (n) => { const head = '{"aa":"'; const tail = '"}\n'; return `${head}${'x'.repeat(n - head.length - tail.length)}${tail}`; };
+    write(path.join(T.old, JOBS), body(4096));
+    assert.equal(fs.statSync(path.join(T.old, JOBS)).size, 4096);
     assert.doesNotMatch(T.run(['validate'], SMALL).text, /over the kit's bound/);
+    write(path.join(T.old, JOBS), body(4097));
+    refused(T.run(['validate'], SMALL), /recurring\.json in this checkout: 4097 bytes, over the kit's bound of 4096/);
   } finally { T.done(); }
 });
 
