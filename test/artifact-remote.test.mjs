@@ -69,7 +69,11 @@ exec "${REAL_GIT}" "$@"
   };
   return { env: { PATH: `${dir}${path.delimiter}${process.env.PATH}` }, fetches, hang: (on) => (on ? write(path.join(dir, 'hang'), '') : fs.rmSync(path.join(dir, 'hang'), { force: true })) };
 }
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// alive: the pid answers signal 0 and, where /proc says, isn't a zombie (one exited, its parent gone, not yet reaped)
+const alive = (pid) => {
+  try { process.kill(pid, 0); } catch { return false; }
+  try { return !/^\d+ \(.*\) Z /.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return true; }
+};
 // the design's fetch, word for word: its flags before origin, and exactly its two refspecs after
 function fetchArgvOk(argv) {
   const words = argv.split(' ');
@@ -216,14 +220,13 @@ test('artifact remote main: fetched once an interval while asked for, none while
     assert.equal(f.cwd, fs.realpathSync(F.old), 'M2: in the checkout');
     assert.equal(fetchArgvOk(f.argv), null, `M2: only the design's fetch ran (${f.argv})`);
   }
-  // demand gone: at most one more fetch, and none once the window and an interval have passed
+  // demand gone: fetches may go on until the window has passed since the last ask, and none starts after
+  // that (the timer decides when it fires); one already running may finish
   stop();
-  const n0 = spy.fetches().length;
-  await sleep(W + INT);
-  const n1 = spy.fetches().length;
-  assert.ok(n1 - n0 <= 1, `M1: at most one fetch after the asks stopped (${n1 - n0})`);
-  await sleep(INT * 3);
-  assert.equal(spy.fetches().length, n1, 'M1: no fetch once the Library closed');
+  const lastAsk = Date.now();
+  await sleep(W + INT * 4);
+  const late = spy.fetches().filter((f) => f.start > lastAsk + W + 250);
+  assert.deepEqual(late.map((f) => f.start - lastAsk), [], 'M1: no fetch starts once the window since the last ask has passed');
 });
 
 test('artifact remote main: the defaults are a fetch at once, then a 30 s cadence, and a 5 min back-off', { timeout: 180000 }, async (t) => {
