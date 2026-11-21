@@ -4169,12 +4169,23 @@ function fleetLeftPlace() {
   pop.hidden = false;
   const at = el.getBoundingClientRect(), box = pop.getBoundingClientRect(), W = document.documentElement.clientWidth, H = window.innerHeight;
   pop.style.left = `${Math.max(8, Math.min(at.left, W - box.width - 8))}px`;
-  pop.style.top = `${at.bottom + 6 + box.height <= H - 8 ? at.bottom + 6 : Math.max(8, at.top - 6 - box.height)}px`;
+  // under the switch too, when the word sits beside it (the phone's strip)
+  const sw = el.closest('#side-state') ? document.getElementById('side-fleet')?.getBoundingClientRect() : null;
+  const below = Math.max(at.bottom, sw?.bottom ?? 0) + 6;
+  pop.style.top = `${below + box.height <= H - 8 ? below : Math.max(8, at.top - 6 - box.height)}px`;
 }
 document.addEventListener('focusin', fleetLeftPlace);
 document.addEventListener('focusout', () => setTimeout(fleetLeftPlace));
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.activeElement?.closest?.('.fleet-left')) document.activeElement.blur(); });
 window.addEventListener('resize', fleetLeftPlace);
+// the word scrolled with its strip or page: the box follows it, and closes once it is out of the window
+window.addEventListener('scroll', (e) => {
+  const pop = document.getElementById('fleet-left-pop'), el = document.activeElement?.closest?.('.fleet-left');
+  if (!el || !pop || pop.hidden || e.target === pop) return;
+  const r = el.getBoundingClientRect();
+  if (r.right < 0 || r.left > document.documentElement.clientWidth || r.bottom < 0 || r.top > innerHeight) el.blur();
+  else fleetLeftPlace();
+}, true);
 const FLEET_DRAWN = new WeakMap();
 function drawFleet() {
   const f = DATA?.fleet || {};
@@ -4187,8 +4198,10 @@ function drawFleet() {
     if (want === undefined || FLEET_DRAWN.get(el) === want) continue;
     const ae = document.activeElement;
     const had = ae && el.contains(ae) ? ae.dataset.fleet : null;
+    const hadLeft = !!(ae && el.contains(ae) && ae.classList.contains('fleet-left'));
     el.innerHTML = want;
     FLEET_DRAWN.set(el, want);
+    if (hadLeft) el.querySelector('.fleet-left')?.focus({ preventScroll: true });
     if (had) el.querySelector(`[data-fleet="${CSS.escape(had)}"]`)?.focus({ preventScroll: true });
   }
   fleetLeftPlace();
