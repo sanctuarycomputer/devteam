@@ -46,18 +46,28 @@ const machine = (args, env = {}) => spawnSync(process.execPath, [KIT, ...args], 
 const dtIn = (r, args, env = {}) => spawnSync(process.execPath, [path.join(r, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: r, encoding: 'utf8', env: { ...baseEnv, ...env } });
 
 // A release's kit, from its tag: what a repo that hasn't synced yet runs. A shallow CI checkout has
-// no tags, so the one needed is fetched; a checkout that can't get it skips, never in CI.
+// no tags, so the one needed is fetched from origin into a private repo of its own under tmp, never
+// into the checkout's .git: two fetches into one shallow clone at once fail on its shallow file
+// (kit-220, kit-760). A checkout that can't get it skips, never in CI. from: the checkout (a test's own).
 const kits = new Map();
-function kitAt(tag) {
-  if (kits.has(tag)) return kits.get(tag);
-  const has = () => spawnSync('git', ['rev-parse', '--verify', '-q', `${tag}^{commit}`], { cwd: REPO }).status === 0;
-  if (!has()) spawnSync('git', ['fetch', '-q', '--depth=1', 'origin', 'tag', tag], { cwd: REPO, stdio: 'ignore', timeout: 60000 });
-  if (!has()) { kits.set(tag, null); return null; }
-  const dir = path.join(tmp, 'kits', tag);
-  fs.mkdirSync(dir, { recursive: true });
-  execFileSync('tar', ['-x', '-C', dir], { input: execFileSync('git', ['archive', '--format=tar', tag, 'docs/devteam'], { cwd: REPO, maxBuffer: 64 * 1024 * 1024 }) });
-  kits.set(tag, path.join(dir, 'docs', 'devteam'));
-  return kits.get(tag);
+function kitAt(tag, { from = REPO } = {}) {
+  const key = `${from}\0${tag}`;
+  if (kits.has(key)) return kits.get(key);
+  const has = (cwd) => spawnSync('git', ['rev-parse', '--verify', '-q', `${tag}^{commit}`], { cwd }).status === 0;
+  let src = has(from) ? from : null;
+  if (!src) {
+    const url = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: from, encoding: 'utf8' }).stdout?.trim();
+    const own = fs.mkdtempSync(path.join(tmp, 'tag-'));
+    if (url && spawnSync('git', ['init', '-q', own], { stdio: 'ignore' }).status === 0) {
+      spawnSync('git', ['fetch', '-q', '--depth=1', '--no-tags', url, `refs/tags/${tag}:refs/tags/${tag}`], { cwd: own, stdio: 'ignore', timeout: 60000 });
+      if (has(own)) src = own;
+    }
+  }
+  if (!src) { kits.set(key, null); return null; }
+  const dir = fs.mkdtempSync(path.join(tmp, `kit-${tag}-`));
+  execFileSync('tar', ['-x', '-C', dir], { input: execFileSync('git', ['archive', '--format=tar', tag, 'docs/devteam'], { cwd: src, maxBuffer: 64 * 1024 * 1024 }) });
+  kits.set(key, path.join(dir, 'docs', 'devteam'));
+  return kits.get(key);
 }
 
 function repo(name, { tag = null, links, settings, adopt = true, dir = code } = {}) {
