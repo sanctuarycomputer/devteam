@@ -4843,6 +4843,10 @@ function holdView(g) {
   return { mode, state, running, reason: g.hold?.reason ?? null, by: g.hold_by ?? null, fleet: g.hold?.fleet ?? null, since: (g.updates ?? []).filter((u) => u.hold !== undefined).pop()?.at ?? null };
 }
 
+// A session told to park that hasn't within this long is a park-unsettled finding: about two ticks
+// (DEVTEAM_PARK_SETTLE_MINUTES for tests).
+const PARK_SETTLE_ENV = process.env.DEVTEAM_PARK_SETTLE_MINUTES ? Number(process.env.DEVTEAM_PARK_SETTLE_MINUTES) : NaN;
+const PARK_SETTLE_MS = (Number.isFinite(PARK_SETTLE_ENV) ? PARK_SETTLE_ENV : 30) * 60000;
 // What holds need from the supervisor, as findings with a next step (supervisor.md §3): rulings a
 // park hasn't sent yet, sessions parked under a goal that runs again, tickets waiting on a held
 // goal's work, a drain that has finished, and a goal parked long enough to ask about.
@@ -4854,7 +4858,26 @@ function holdFindings(add, settings) {
     const mode = sessionMode(s.name);
     if (!parkedNow && ['park', 'let-go'].includes(mode)) {
       const c = currentCause(s.name);
-      if (c && !parkRulingSent(s.name, c.marker)) add('high', 'park-unsent', s.name, `its goal is ${holdWords(mode)} (${causeWords(c)}), and it hasn't been told`, `goal park-sessions ${isUpkeep(logGet(c.goal) ?? UPKEEP_VIRTUAL) ? 'upkeep' : c.goal}`);
+      const target = c ? (isUpkeep(logGet(c.goal) ?? UPKEEP_VIRTUAL) ? 'upkeep' : c.goal) : null;
+      if (c && !parkRulingSent(s.name, c.marker)) add('high', 'park-unsent', s.name, `its goal is ${holdWords(mode)} (${causeWords(c)}), and it hasn't been told`, `goal park-sessions ${target}`);
+      // told, and still not parked a while later: a park never waits on a reply or an owner answer
+      // (worker.md §9: commit WIP, a handoff naming what it waits on, phase parked), so one session
+      // left running doesn't hold the fleet in "parking" for days. Counted from the first ruling for
+      // this cause (a re-send that couldn't be delivered doesn't restart it), or from a later launch
+      // (a session started on purpose since gets its own time).
+      else if (c) {
+        const t = (x) => Date.parse(x?.created_at) || 0;
+        const first = logObjects('message').filter((m) => m.to === s.name && m.kind === 'ruling' && (m.text ?? '').includes(`[${c.marker}]`)).map(t).sort((a, b) => a - b)[0];
+        const launched = logObjects('phase').filter((x) => x.created_by === s.name && x.to === 'starting').map(t).sort((a, b) => b - a)[0] ?? 0;
+        const since = first ? Math.max(first, launched) : 0;
+        if (since && now - since >= PARK_SETTLE_MS) {
+          const gone = /^no tmux (session|window)/.test(resolvePane(tmuxTarget(s.name)).problem ?? '');
+          const next = gone
+            ? `its window is gone (a restart), so a ruling can't reach it: start it to park, ${s.role} ${s.id} --resume --force, then goal park-sessions ${target} --again (it commits its WIP, writes a handoff naming the questions it waits on, and parks)`
+            : `look at its window, then send the ruling again: goal park-sessions ${target} --again (it commits its WIP, writes a handoff naming the questions it waits on, and parks; it resumes from the handoff once they're answered)`;
+          add('medium', 'park-unsettled', s.name, `told to park ${Math.floor((now - since) / 60000)} min ago (${causeWords(c)}) and still ${lastPhaseOf(s.name)?.to ?? 'running'}: a park doesn't wait on a reply or an owner answer`, next);
+        }
+      }
     }
     if (parkedNow && ['run', 'drain'].includes(mode) && !draining()) add('medium', 'parked-under-run', s.name, `parked, and its goal is ${holdWords(mode)} again`, `${s.role} ${s.id} --resume${mode === 'drain' ? ' (a draining goal finishes what it started)' : ''}`);
   }
@@ -22436,7 +22459,7 @@ async function cmdDashboard() {
       accountsSaid = said;
     }));
   };
-  // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes (a page
+  // One dashboard-data run at a time, shared by every page waiting on it, with no time limit by default (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS) (a page
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
@@ -22448,6 +22471,10 @@ async function cmdDashboard() {
   // once the running one has ended and 3 s have passed since the last start; every read waiting then
   // shares it. A failed build is never kept.
   const DATA_EVERY_MS = 3000;
+  // No time limit on a build by default: a big project's build can take minutes, and stopping it at a
+  // fixed limit left its dashboard with no data at all. Builds run one at a time, so a slow one never
+  // piles up; DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS sets a limit in ms when wanted (0 or unset: none).
+  const DASHBOARD_DATA_TIMEOUT_MS = Math.max(0, Number(process.env.DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS) || 0);
   let dataEpoch = 0;
   let build = null;
   let nextBuild = null;
@@ -22456,9 +22483,9 @@ async function cmdDashboard() {
   const startBuild = () => {
     lastStart = Date.now();
     const b = { epoch: dataEpoch, finished: null, r: null };
-    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: DASHBOARD_DATA_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err && stdout) lastData = stdout;
-      b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
+      b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${DASHBOARD_DATA_TIMEOUT_MS < 120000 ? `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 1000)} s` : `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes`} and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
     }));
