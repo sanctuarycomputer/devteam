@@ -1708,3 +1708,91 @@ test('A16: a jobs file in this checkout over the kit\'s size bound is a validate
     assert.doesNotMatch(T.run(['validate'], SMALL).text, /over the kit's bound/);
   } finally { T.done(); }
 });
+
+// ---- landRecords, the records path's own landing (final-12 F1, F3) ----
+// a git that acts only in the records landing merge (its message names "Merged home's ticket/")
+const recShim = (F, name, body) => {
+  const dir = path.join(F.base, `git-${name}`);
+  write(path.join(dir, 'git'), `#!/bin/sh\nG="${REAL_GIT}"\ncase " $* " in\n  *" merge --no-ff --quiet -m "*"Merged home's ticket/"*)\n${body}\n  ;;\nesac\nexec "$G" "$@"\n`);
+  fs.chmodSync(path.join(dir, 'git'), 0o755);
+  return { PATH: `${dir}${path.delimiter}${process.env.PATH}` };
+};
+// console's code on its ticket branch, and home's ticket/<id> with the records off home's main
+const recordsReady = (F, id) => {
+  const codeSha = F.code(id);
+  F.g(['fetch', '-q', 'origin'], F.old);
+  const rw = path.join(F.old, '.worktrees', `records-${id}`);
+  F.g(['worktree', 'add', '-q', '-b', `ticket/${id}`, rw, 'origin/main'], F.old);
+  return { codeSha, rw, head: F.records(id, rw, codeSha) };
+};
+// one commit on home's main, pushed straight to origin
+let homeN = 0;
+const onHomeMain = (F, rel, body, msg) => {
+  const m = path.join(F.old, '.worktrees', `hm-${++homeN}`);
+  F.g(['fetch', '-q', 'origin'], F.old);
+  F.g(['worktree', 'add', '-q', '--detach', m, 'origin/main'], F.old);
+  write(path.join(m, rel), body);
+  F.g(['add', '-A'], m); F.g(['commit', '-qm', msg], m); F.g(['push', '-q', 'origin', 'HEAD:main'], m);
+  return F.g(['rev-parse', 'HEAD'], m);
+};
+const RID = 'console-01-a';
+
+test('A15 landing: records in home, home\'s main rewound between the checks and the records landing: the lease refuses, and main is left as the rewinder left it (final-12 F1)', () => {
+  const F = recordsHome('recur-rec-rewind');
+  try {
+    onHomeMain(F, `${PROJ}/notes-a.md`, 'a\n', 'one');
+    onHomeMain(F, `${PROJ}/notes-b.md`, 'b\n', 'two');
+    recordsReady(F, RID);
+    F.mainNow();
+    const back = F.g(['rev-parse', 'origin/main~1'], F.old);
+    const r = F.text(F.runIn(F.old, ['merge', RID], SUP, recShim(F, 'rewind', `    "$G" push -q -f origin ${back}:refs/heads/main >/dev/null 2>&1`)));
+    refused(r, /push to home's main refused/);
+    assert.equal(F.mainNow(), back, 'main as the rewinder left it');
+  } finally { F.done(); }
+});
+
+test('A15 landing: records in home, HEAD moved after the records merge (a new job on the same parents, or a commit on top) is refused before the push (final-12 F1)', () => {
+  for (const how of ['jobs', 'extra']) {
+    const F = recordsHome(`recur-rec-head-${how}`);
+    try {
+      recordsReady(F, RID);
+      const before = F.mainNow();
+      const after = how === 'jobs'
+        ? `    "$G" "$@" || exit $?\n${evilCommit('-p HEAD^1 -p HEAD^2')}    exit 0`
+        : '    "$G" "$@" || exit $?\n    echo x > hook-extra.txt\n    "$G" update-index --add hook-extra.txt\n    t=$("$G" write-tree)\n    c=$("$G" commit-tree -p HEAD -m moved "$t")\n    "$G" update-ref HEAD "$c"\n    exit 0';
+      const r = F.text(F.runIn(F.old, ['merge', RID], SUP, recShim(F, `head-${how}`, after)));
+      refused(r, how === 'jobs' ? /lands other jobs \(recurring\.json\) than home's main has/ : /the records merge at [0-9a-f]{12} is not home's ticket/);
+      assert.equal(F.mainNow(), before, `${how}: nothing pushed`);
+      assert.deepEqual(F.jobsAt('origin/main'), {}, `${how}: no job landed`);
+    } finally { F.done(); }
+  }
+});
+
+test('A15 landing: records in home, a records merge that hangs is killed at its timeout and refused, with nothing pushed (final-12 F1)', { timeout: 300000 }, () => {
+  const F = recordsHome('recur-rec-hang');
+  try {
+    recordsReady(F, RID);
+    const before = F.mainNow();
+    const t0 = Date.now();
+    const r = F.text(F.runIn(F.old, ['merge', RID], SUP, { ...recShim(F, 'hang', '    exec sleep 200'), DEVTEAM_GIT_TIMEOUT_MS: '15000' }));
+    refused(r, /timed out; nothing pushed/);
+    assert.ok(Date.now() - t0 < 100000, `killed at its timeout, not waited on (${Date.now() - t0} ms)`);
+    assert.equal(F.mainNow(), before);
+  } finally { F.done(); }
+});
+
+test('A15 landing: records in home, a post-merge hook from home\'s core.hooksPath never runs in the records merge (final-12 F1)', () => {
+  const F = recordsHome('recur-rec-hook');
+  try {
+    recordsReady(F, RID);
+    const hooks = path.join(F.base, 'abs-hooks');
+    const ran = path.join(F.base, 'hook-ran');
+    write(path.join(hooks, 'post-merge'), `#!/bin/sh\ntouch "${ran}"\n`);
+    fs.chmodSync(path.join(hooks, 'post-merge'), 0o755);
+    F.g(['config', 'core.hooksPath', hooks], F.old);
+    const r = F.text(F.runIn(F.old, ['merge', RID], SUP));
+    assert.equal(r.status, 0, r.text);
+    assert.match(r.text, /landed the records of console-01-a/);
+    assert.equal(fs.existsSync(ran), false, 'the hook never ran');
+  } finally { F.done(); }
+});
