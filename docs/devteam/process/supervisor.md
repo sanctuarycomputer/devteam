@@ -131,6 +131,18 @@ The file is the owner's. A job lands only with an answer that showed exactly its
 - **Never from a ticket or a plan.** A ticket or plan branch that changes the file is refused. Jobs change only through a chore.
 - **A branch behind main.** Merge main into a branch before a job change lands (under `merge_method: rebase`, rebase it onto main). A branch that changes the jobs, or that is behind a main whose jobs changed, is refused until it holds main's tip, so what lands is what was judged. A behind branch that never touches the jobs lands as it always did.
 
+### Checks
+
+A check may run any command, but it is only looking (OD1, the owner's answer): it reports what it finds and never changes production; anything that changes something goes through a reviewed change. The owner's yes on each check is the control.
+
+- **When.** Each check has slots. One with no `on` or `at` is first due when it lands, then `every` after its last run started; one with `on` or `at` keeps a fixed sequence of slots in UTC. Slots missed while nothing ran run once, for the latest. An edit to `every`, `on` or `at` starts the schedule again. It is all worked out from the log: only lines you wrote with `detector: "recurring"` count, and only the first result for a slot. `recurring due [--json]` prints when each check is next due.
+- **Who runs it.** `wait` starts `recurring run --due` in the background when a check is due and no runner holds the lock, at most once a minute, and carries on waiting. The runner takes `run/recurring/.lock` and runs each due check in name order.
+- **Where.** Each in an unseeded detached checkout of main at its commit (`.worktrees/tmp-recurring-…`: no `worktree_setup`, no files copied, nothing installed), in its own process group, with your environment. At `timeout_s` its whole group is killed and the run is an error; when the check's shell exits, the rest of its group is killed too (a process that left the group, with `setsid` or as a daemon, keeps running, but never holds the runner). The checkout is removed after each check.
+- **What it records.** One `recurring-run` line per run, as you, with its status (pass, fail or error, by the check's `fail` rule), slot, commit, seconds, exit and the last 200 characters of what it printed, scrubbed. The scrubbed tail of the last 16 KB goes to `run/recurring/<name>/` (the newest 20 are kept); the runner's own output goes to `run/recurring/runner.log` (its last 64 KB are kept). Deleting `run/recurring/` changes no due time.
+- **The lock.** A live lock (its runner alive and inside its time budget) means a second runner exits at once. A stale one (its pid gone, past its budget, or unreadable) is replaced in one step by exactly one runner, which kills the old runner only if it is this kit's `recurring run --due`, kills only the groups where a process carries the old runner's marker, removes only the checkouts named with the old runner's pid, and logs an error run for the check it was on. A runner that stalls more than the one-second re-read in the middle of a takeover can still replace the winner's lock, so a check can run twice for one slot: only the first result counts, and both runners clean up. While a runner holds a live lock, `fleet status` blocks a move.
+- **Holds.** Checks run whatever Upkeep's hold: draining or parking Upkeep doesn't stop them. To stop a check, stop the job.
+- **Trying one.** `recurring run <name> --draft` runs your checkout's entry once the same way and prints its status and excerpt, logging and keeping nothing: try a check before you ask for it.
+
 ## 4. Fixing drift
 
 | Observed | Means | Do |
