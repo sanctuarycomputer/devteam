@@ -366,9 +366,19 @@ test('main reload keeps place: a viewer on main reloads by itself on the page an
     await p.send('Page.navigate', { url });
     await soon(`typeof TS === 'object' && TS.kind === 'artifact' && TS.at === 'main' && TS.fp && (window.__titles ?? []).some((x) => x.title === ${J(title)})`, `${url}: main up at ${title}`);
   };
-  // a click on one of the page's two links, and the lens naming where it went
+  // a click on one of the page's two links, and the lens naming where it went. The click waits for the
+  // stage to settle: the frame where it was 300 ms ago and on top at the point (the dashboard draws its
+  // bar and lifts its loading cover after the frame's ready, which moves or covers the frame)
   const follow = async (dx, lens) => {
-    const r = await p.ev(`(() => { const b = document.getElementById('av-frame').getBoundingClientRect(); return { x: b.left + ${dx}, y: b.top + 15 }; })()`);
+    const at = `(() => { const f = document.getElementById('av-frame'), b = f.getBoundingClientRect(), x = b.left + ${dx}, y = b.top + 15; return JSON.stringify({ x, y, on: document.elementFromPoint(x, y) === f }); })()`;
+    let r = null;
+    for (const end = Date.now() + 30000; ;) {
+      const a = JSON.parse(await p.ev(at));
+      await sleep(300);
+      const b = JSON.parse(await p.ev(at));
+      if (a.on && b.on && a.x === b.x && a.y === b.y) { r = b; break; }
+      if (Date.now() > end) assert.fail(`the stage never settled for a click: ${J([a, b])}`);
+    }
     await p.clickAt(r.x, r.y);
     await soon(lens, `the lens names ${lens}`);
   };
