@@ -7930,6 +7930,27 @@ function askLine({ thread, about } = {}) {
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  // --options takes each choice as its own value (or one JSON array of strings). One value holding
+  // several choices joined by | ("yes|no", "Merge it | Let it go") would show the owner a single choice
+  // that reads that way, so it is refused with the command it meant; on a decision, so is a value of
+  // whole words joined by , or / ("yes,no"), and a decision whose drawn choices (--choices, else
+  // --options) are one offers nothing to choose. Skipped where the kit writes the choices itself.
+  if (!(cls === 'goal-met' || cls === 'recurring-edit' || flags['link-change'] !== undefined)) {
+    const decision = ['owner-decision', 'one-way-door'].includes(kind);
+    const opts = flags.options === undefined ? [] : listFlag('options').map(String);
+    const labels = flags.choices !== undefined ? (jsonFlag('choices') ?? []).map((c) => String(c?.label ?? '')) : opts;
+    const joined = (v) => {
+      const pipe = v.split(/\s*\|\s*/).filter(Boolean);
+      if (pipe.length > 1) return pipe;
+      const words = v.split(/\s*[,/]\s*/).filter(Boolean);
+      return decision && words.length > 1 && words.every((x) => /^[A-Za-z][A-Za-z-]+$/.test(x)) ? words : null;
+    };
+    if (labels.length === 1) {
+      const parts = joined(labels[0]);
+      if (parts) die(flags.choices !== undefined ? `--choices has one choice labelled "${labels[0]}": give each choice its own entry (--choices '${JSON.stringify(parts.map((label) => ({ label })))}')` : `--options takes each choice as its own value: --options ${parts.map((x) => JSON.stringify(x)).join(' ')} (one value "${labels[0]}" shows the owner a single choice that reads "${labels[0]}")`);
+      if (decision) die(`${flags.choices !== undefined ? '--choices' : '--options'} "${labels[0]}" is one choice, so there is nothing to choose: give each choice its own value (--options "a" "b"), or leave the choices out and the owner answers in words`);
+    }
+  }
   if (asksGoalApproval({ goal: flagStr('goal'), kind, question: q, choices: jsonFlag('choices'), options: asList(flags.options), recommendation: flagStr('recommendation'), def: flagStr('default') })) die(`this asks the owner to approve ${flagStr('goal')} (a draft goal), but goal decide uses only a goal-approval answer, so a yes to a ${kind} question is wasted: ask it with ask --kind goal-approval --goal ${flagStr('goal')} --links '<the design>' (planning.md §1). If it decides one part of the design instead, ask that part in its own words, with choices that say what each does`);
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
@@ -8316,7 +8337,7 @@ function askLine({ thread, about } = {}) {
   if (cls !== 'recurring-edit') try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : orderAsked ? [context, goalOrderText(orderAsked)].filter(Boolean).join('\n\n') : context,
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : recurringChange ?? goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : cls === 'recurring-edit' ? [{ label: 'Yes' }, { label: 'No' }] : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined, no_default: noDefault,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : recurringChange ?? goalChangeFlag(cls), options: flags.options === undefined ? [] : listFlag('options'), choices: goalMet ? GOAL_MET_CHOICES : cls === 'recurring-edit' ? [{ label: 'Yes' }, { label: 'No' }] : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined, no_default: noDefault,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
@@ -30450,7 +30471,7 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
   ${BROWSER_USAGE}   supervisor: the supervisor's own Chrome (Node 22+), in a tmux window beside yours, with one private profile per project under ~/.devteam/browser/; profiles lists them as JSON, and forget removes one (every site in it signed out); a password or one-time code goes in on stdin, never as an argument (other local users can read a command line): browser type <ref> --stdin
   preview start <name>            run a kit-started preview again, on its name and port
-  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
+  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]' | --options "a" "b"… (each choice its own value, or one JSON array)] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
                                   supervisor: an agent-drawn page for rows the owner decides; pins page, data and result schema to a commit and their sha256s
