@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { multiFixture, write, json, review, kit } from './lib/kit.mjs';
+import { multiFixture, write, json, review, kit, REAL_GIT } from './lib/kit.mjs';
 import { readyInHome, recordsFixture } from './lib/multirepo-home-fixture.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -165,3 +165,98 @@ test('records in home: they land, then the code is refused because main moved; t
   } finally { F.done(); }
 });
 
+
+// The records merges logged for a ticket: merge's own act for the records of <id> in home.
+const recordsActs = (F, id) => json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'merge-word' && String(a.what).startsWith(`merged home's ticket/${id} at `));
+
+test('records in home, home forge git: home\'s main moves after the checks, before the records land: refused with the moved words, and neither the records nor the code lands; merge again lands both', () => {
+  const F = recordsFixture('kit332-records-home');
+  const id = 'console-01-a';
+  try {
+    const homeOrigin = F.g(['config', '--get', 'remote.origin.url'], F.old);
+    // console's gate moves home's main (where the records land), not console's
+    consoleLink(F, { test: mover(homeOrigin, 'main', F.old) }, { records: 'home' });
+    const r0 = readyInHome(F, id);
+    const checked = tipOf(F, F.old, 'main');
+    const trunk = tipOf(F, F.console, 'trunk');
+    const adv = park(F, homeOrigin, 'main', 'api/moved.txt');
+    const r = F.runIn(F.old, ['merge', id], SUP);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, new RegExp(`the records of ${id} did not land in home \\(push to home's main refused: home's main moved since the checks \\(${checked.slice(0, 12)} to ${adv.slice(0, 12)}\\); run merge again\\); nothing landed: verify from the start`));
+    assert.equal(tipOf(F, F.old, 'main'), adv, 'home\'s main is as the mover left it');
+    assert.equal(landedOn(F, F.old, r0.head, 'main'), false, 'the records did not land');
+    assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'console\'s main is unchanged: the code did not land');
+    assert.deepEqual(recordsActs(F, id), [], 'no records act');
+    assert.deepEqual(mergeActs(F, id), [], 'no merge act');
+    // again, home's main unmoved: the records land onto it, then the code
+    assert.match(F.okIn(F.old, ['merge', id], SUP), new RegExp(`merged ticket/${id} at ${r0.code.slice(0, 12)} in console`));
+    assert.deepEqual(parentsOf(F, F.old, tipOf(F, F.old, 'main')), [adv, r0.head], 'the records merged onto the main they were checked on');
+    assert.equal(recordsActs(F, id).length, 1);
+    assert.equal(mergeActs(F, id).length, 1);
+  } finally { F.done(); }
+});
+
+// Records in home with home on forge github and console on forge git: a gh first on PATH answers
+// home's records PR (pr list: none merged; pr view: one open, clean PR #9 at the records head) and
+// only logs pr merge, so the records PR's merge never moves home's main.
+function recordsOnGithub(F, id, gate) {
+  const links = json(F.okIn(F.old, ['settings'])).links;
+  F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { forge: 'github', links: { ...links, console: { ...links.console, records: 'home', forge: 'git', gates: { test: gate } } } });
+  const r0 = readyInHome(F, id);
+  const bin = path.join(F.base, 'bin-gh');
+  const log = path.join(F.base, 'gh.log');
+  const prFile = path.join(F.base, 'pr.json');
+  write(prFile, JSON.stringify({ number: 9, headRefOid: r0.head, isDraft: false, mergeStateStatus: 'CLEAN', state: 'OPEN', statusCheckRollup: [] }));
+  write(path.join(bin, 'gh'), `#!/bin/sh\necho "$@" >> "${log}"\n[ "$1 $2" = "pr list" ] && { echo '[]'; exit 0; }\n[ "$1 $2" = "pr view" ] && exec cat "${prFile}"\n[ "$1 $2" = "pr merge" ] && exit 0\nexit 1\n`);
+  fs.chmodSync(path.join(bin, 'gh'), 0o755);
+  const prMerges = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter((c) => c.startsWith('pr merge ')) : []);
+  return { r0, bin, prMerges };
+}
+
+test('records in home, home forge github: home\'s main moves after the checks, so the records PR is not merged; unmoved, it merges once and the code lands', () => {
+  const F = recordsFixture('kit332-records-gh');
+  const id = 'console-01-a';
+  try {
+    const homeOrigin = F.g(['config', '--get', 'remote.origin.url'], F.old);
+    const { r0, bin, prMerges } = recordsOnGithub(F, id, mover(homeOrigin, 'main', F.old));
+    const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+    const checked = tipOf(F, F.old, 'main');
+    const trunk = tipOf(F, F.console, 'trunk');
+    const adv = park(F, homeOrigin, 'main', 'api/moved.txt');
+    const r = F.runIn(F.old, ['merge', id], SUP, env);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, new RegExp(`the records of ${id} did not land in home \\(home's main moved since the checks \\(${checked.slice(0, 12)} to ${adv.slice(0, 12)}\\); run merge again\\); nothing landed: verify from the start`));
+    assert.deepEqual(prMerges(), [], 'the records PR was never merged');
+    assert.equal(tipOf(F, F.old, 'main'), adv, 'home\'s main is as the mover left it');
+    assert.deepEqual(recordsActs(F, id), [], 'no records act');
+    assert.deepEqual(mergeActs(F, id), [], 'no merge act');
+    assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'the code did not land');
+    // again, home's main unmoved (the stand-in's pr merge moves nothing, so the gate is a no-op)
+    assert.match(F.okIn(F.old, ['merge', id], SUP, env), new RegExp(`merged ticket/${id} at ${r0.code.slice(0, 12)} in console`));
+    assert.equal(prMerges().length, 1);
+    assert.match(prMerges()[0], new RegExp(`^pr merge 9 --merge --match-head-commit ${r0.head}( |$)`));
+    assert.equal(landedOn(F, F.console, r0.code, 'trunk'), true, 'the code landed');
+    assert.equal(mergeActs(F, id).length, 1);
+  } finally { F.done(); }
+});
+
+test('records in home, home forge github: the re-check can\'t fetch home\'s main, so the records PR is not merged', () => {
+  const F = recordsFixture('kit332-records-gh-nofetch');
+  const id = 'console-01-a';
+  try {
+    // the gate drops a marker; from then on a git first on PATH fails every fetch
+    const marker = path.join(F.base, 'fetches-fail');
+    const shim = path.join(F.base, 'git-fetch-fails');
+    write(path.join(shim, 'git'), `#!/bin/sh\nif [ -f "${marker}" ]; then case " $* " in *" fetch "*) echo "fatal: the test's fetch fails" >&2; exit 128 ;; esac; fi\nexec "${REAL_GIT}" "$@"\n`);
+    fs.chmodSync(path.join(shim, 'git'), 0o755);
+    const { bin, prMerges } = recordsOnGithub(F, id, `touch '${marker}'`);
+    const trunk = tipOf(F, F.console, 'trunk');
+    const r = F.runIn(F.old, ['merge', id], SUP, { PATH: `${shim}${path.delimiter}${bin}${path.delimiter}${process.env.PATH}` });
+    assert.notEqual(r.status, 0, r.out);
+    assert.ok(fs.existsSync(marker), 'the gate ran');
+    assert.match(r.err, new RegExp(`the records of ${id} did not land in home \\(couldn't fetch home's main to check it hasn't moved since the checks; run merge again\\); nothing landed: verify from the start`));
+    assert.deepEqual(prMerges(), [], 'the records PR was never merged');
+    assert.deepEqual(recordsActs(F, id), [], 'no records act');
+    assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'the code did not land');
+  } finally { F.done(); }
+});
