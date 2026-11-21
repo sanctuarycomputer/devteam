@@ -3023,10 +3023,6 @@ function homeRepo() {
     mergeShaFor: homeMergeShaFor, mergedAt: homeMergedAt, ticketBranchRef: homeTicketBranchRef, releasedIn: homeReleasedIn,
     srcRead: (ref, rel) => srcRead({ ref }, rel), srcList: (ref, relDir) => srcList({ ref }, relDir),
     resetCaches: () => { mainRefCache = undefined; mainLogCache = undefined; mergeParentsCache = undefined; mergeShaCache.clear(); mergedAtCache.clear(); },
-    // main as one commit (merge's rerun judges a landing onto the main it landed on: final-15 F1),
-    // until unpinMain reads origin's again; the log is folded again either way (its durable copy is main's)
-    pinMain: (sha) => { mainRefCache = undefined; mainLogCache = undefined; mergeParentsCache = undefined; mergeShaCache.clear(); mergedAtCache.clear(); mainRefCache = sha; mainShaCache = sha; logCache = null; },
-    unpinMain: () => { mainRefCache = undefined; mainLogCache = undefined; mergeParentsCache = undefined; mergeShaCache.clear(); mergedAtCache.clear(); logCache = null; },
   });
 }
 function linkRepo(id) {
@@ -3061,8 +3057,6 @@ function linkRepo(id) {
     srcRead: (ref, relPath) => { const at = ref ?? mainRefR(); if (!at) return null; const sha = refAt(at, resolve); return sha ? showAt(sha, `${rel}/${relPath}`, root) : g(['show', `${at}:${rel}/${relPath}`]); },
     srcList: (ref, relDir) => (ref ?? mainRefR() ? listAndPrefetch(ref ?? mainRefR(), `${rel}/${relDir}`, g, root, resolve) : []),
     resetCaches: () => { c.mainRef = undefined; c.log = null; c.parents = null; c.mergeSha.clear(); c.mergedAt.clear(); },
-    pinMain: (sha) => { R.resetCaches(); c.mainRef = sha; },
-    unpinMain: () => R.resetCaches(),
     // in another repo the kit's line is only its project folder, where tickets keep their records
     devteamLine: () => [`${rel}/**`],
   };
@@ -7049,6 +7043,7 @@ function cmdMerge() {
   // normal landing; checks that refuse it log nothing. Anything else already on main is a second run:
   // nothing lands, nothing is logged.
   let relanded = null;
+  let unpinCode = null;
   if (checkedMain && R.git(['merge-base', '--is-ancestor', sha, checkedMain]) !== null) {
     const cls0 = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
     const logged = logObjects('act').some((a) => a.class === cls0 && String(a.what ?? '').startsWith(`merged ${branch} at ${sha}`) && (a.repo ?? null) === (onR.repo ?? null));
@@ -7058,7 +7053,7 @@ function cmdMerge() {
     relanded = { tip: checkedMain, onto: own.onto };
     out(`${branch}${inR} at ${sha.slice(0, 12)} is on ${mainBranch0} in the kit's own landing merge ${checkedMain.slice(0, 12)}, with no act logged (a push that timed out, which origin took): checking it onto ${own.onto.slice(0, 12)}, the main it landed on, to log its landing`);
     checkedMain = own.onto;
-    R.pinMain(own.onto);
+    unpinCode = recurringRegistry.pinMain(R, own.onto);
   }
   // records in home: one pinned home commit, checked here and landed below. Decided once, at the
   // head, after fetching home's ticket/<id>, so records pushed from another clone count (home wins)
@@ -7077,9 +7072,9 @@ function cmdMerge() {
     if (own?.lookalike) die(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} has the kit's records message and parents, but it isn't the records merge the kit recorded before its push: not the kit's own records merge; nothing logged (${own.lookalike}). Someone else made that merge: verify from the start`);
     if (own) { recOwn = { tip, onto: own.onto }; out(`the records of ${id} at ${rec.sha.slice(0, 12)} are on home's ${repo('home').settings.main_branch} in the kit's own records merge ${tip.slice(0, 12)}, with no act logged (a push that timed out, which origin took): checking them onto ${own.onto.slice(0, 12)}, the main they landed on, to log their landing`); }
   }
-  if (recOwn) repo('home').pinMain(recOwn.onto);
+  const unpinRecords = recOwn ? recurringRegistry.pinMain(repo('home'), recOwn.onto) : null;
   const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R, ...(id && tickets().has(id) ? { inHome } : {}), ...(inHome ? { records: rec.sha ?? null } : {}) });
-  if (recOwn) repo('home').unpinMain();
+  if (unpinRecords) unpinRecords();
   if (rec?.problems) fails.push(...rec.problems);
   // A refused footprint is a sign about the line (line-pressure): one observation per head.
   if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
@@ -7379,7 +7374,7 @@ function cmdMerge() {
     }
   }
   if (fails.length) report(fails, '');
-  if (relanded) R.unpinMain();
+  if (unpinCode) unpinCode();
   const recWords = rec ? `, records at ${rec.sha.slice(0, 12)} in home${rec.landed ? ' (landed already: only the code lands)' : ''}` : '';
   if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge${inR}${recWords}`);
   const mainBranch = S.main_branch;
@@ -24471,6 +24466,20 @@ const recurringRegistry = Object.freeze({
   landingFile: (repoName, what, head) => path.join(runDir, 'landings', encodeURIComponent(repoName), `${encodeURIComponent(what)}@${head}.json`),
   landingsOf(file) {
     try { const a = JSON.parse(fs.readFileSync(file, 'utf8')); return Array.isArray(a) ? a.filter((x) => isObj(x) && typeof x.merge === 'string' && typeof x.onto === 'string') : []; } catch { return []; }
+  },
+  // R's main as one commit (merge's rerun judges a landing onto the main it landed on: final-15 F1),
+  // for every check that reads R.mainRef() (home's: mainRef(), mainSha() and what they feed); returns
+  // the unpin, which reads origin's again. Home's log is folded again either way (its durable copy is
+  // main's).
+  pinMain(R, sha) {
+    R.resetCaches();
+    if (R.name === 'home') {
+      mainRefCache = sha; mainShaCache = sha; logCache = null;
+      return () => { R.resetCaches(); logCache = null; };
+    }
+    const was = R.mainRef;
+    R.mainRef = () => sha;
+    return () => { R.mainRef = was; R.resetCaches(); };
   },
   // null once merge (onto onto) is written and reads back, else why not: then nothing is pushed
   recordLanding(file, merge, onto) {
