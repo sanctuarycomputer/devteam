@@ -155,3 +155,43 @@ test('a spike whose touches are only its own ticket folder validates; D9 says th
     assert.doesNotMatch(d9, /project\/designs\//);
   } finally { F.done(); }
 });
+
+// planning.md D12 and D13: validate warns when a story's makes_true is not one of its feature's
+// preconditions, and on each budget a plan goes over; a feature within them gets no warning, and a
+// story without the new fields still validates (they are optional, for logs planned before them).
+test('validate warns on D12 makes_true and the D13 budgets, and not within them', () => {
+  const F = threadsFixture('goal-chain');
+  try {
+    const { goal } = F.approval();
+    const feature = (id, extra = {}) => F.sup(['feature', 'add', id, '--json', JSON.stringify({ title: id, goals: [goal], preconditions: [`${goal}#1`], design: 'project/designs/self-serve-billing.md', stories: [{ id: `${id.toUpperCase()}-S1`, text: 'an admin pays', release: 'v1.0.0' }], ...extra })]);
+    const ticket = (id, f, extra = {}) => F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: f, component: 'api', kind: 'build', size: 'S', risk: 'normal', serves: [`${f.toUpperCase()}-S1`], depends_on: [], touches: [`api/${id}/**`], done_when: ['its suite passes in CI'], ...extra })]);
+    const validate = () => { const r = F.run(F.old, ['validate'], F.SUP); return `${r.out}\n${r.err}`; };
+    // within budget, with the new fields: no D12 or D13 warning
+    feature('small', { stories: [{ id: 'SMALL-S1', text: 'an admin pays', release: 'v1.0.0', acceptance: ['an admin pays by card end to end (e2e pay_spec)'], makes_true: `${goal}#1` }] });
+    ticket('api-01-small', 'small', { contracts: { consumes: ['docs/contracts/a.md@1.0', 'docs/contracts/b.md@1.0'] } });
+    const v1 = validate();
+    assert.doesNotMatch(v1, /\(D1[23]\)/, v1);
+    // D12: a makes_true outside the feature's preconditions
+    feature('wrong', { stories: [{ id: 'WRONG-S1', text: 'an admin pays', makes_true: `${goal}#2` }] });
+    ticket('api-02-wrong', 'wrong', { contracts: { consumes: ['docs/contracts/a.md@1.0', 'docs/contracts/b.md@1.0', 'docs/contracts/c.md@1.0'] } });
+    // D13: 13 open tickets in one feature, in a chain 13 waves deep
+    feature('big');
+    for (let i = 0; i < 13; i++) ticket(`api-${10 + i}-big`, 'big', i ? { depends_on: [`api-${9 + i}-big`] } : {});
+    // a superseded ticket is not open: it counts toward neither budget
+    ticket('api-30-big', 'big', { depends_on: ['api-22-big'] });
+    F.sup(['ticket', 'set', 'api-30-big', '--json', JSON.stringify({ superseded_by: 'api-22-big' })]);
+    // D13: milestone 1 served by five features (small, wrong, big and two more)
+    feature('more');
+    feature('most');
+    const v2 = validate();
+    assert.match(v2, new RegExp(`feature wrong: story WRONG-S1 makes_true ${goal}#2, which is not one of the feature's preconditions \\(D12\\)`), v2);
+    assert.match(v2, new RegExp(`feature wrong: precondition ${goal}#1 has no story that makes it true \\(D12\\)`), v2);
+    assert.doesNotMatch(v2, /feature big: precondition/, v2);
+    assert.match(v2, /api-02-wrong: consumes 3 contracts, over the budget of 2; split the ticket \(D13\)/, v2);
+    assert.doesNotMatch(v2, /api-01-small: consumes/, v2);
+    assert.match(v2, /feature big: 13 open tickets, over the budget of 12; split the feature \(D13\)/, v2);
+    assert.match(v2, /feature big: its open tickets are 13 waves deep, over the budget of 5/, v2);
+    assert.match(v2, new RegExp(`milestone ${goal}@1 is served by 5 features \\(big, more, most, small, wrong\\), over the budget of 4; split the milestone \\(D13\\)`), v2);
+    assert.doesNotMatch(v2, /feature small: .*\(D1[23]\)/, v2);
+  } finally { F.done(); }
+});
