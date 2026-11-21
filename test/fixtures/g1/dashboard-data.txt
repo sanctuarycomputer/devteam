@@ -2534,17 +2534,6 @@ exit 0
       "owner_only": null
     },
     {
-      "key": "recurring",
-      "group": "Rhythm",
-      "name": "Jobs",
-      "description": "the jobs that run on a schedule under Upkeep: checks and chores",
-      "shown": "names",
-      "value": [],
-      "set": false,
-      "default": [],
-      "owner_only": null
-    },
-    {
       "key": "project",
       "group": "Project and links",
       "name": "Project name",

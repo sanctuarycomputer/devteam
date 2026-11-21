@@ -5834,7 +5834,7 @@ function openJob(name) {
     sort: [undefined, r.at ?? null, r.seconds ?? null], open: null,
   }))) : empty('None');
   showDrawer(`<h2 id="drawer-title">${esc(j.title || name)}</h2>
-    ${attrs({ id: `recurring.${name}`, idTip: 'Its name among the jobs in the settings, as the kit writes it.', peek: p, noRecord: true, kind: 'recurring', front: front.map((r) => [r[0], r, true]), computed })}
+    ${attrs({ id: `recurring.${name}`, idTip: 'Its name among the jobs in project/recurring.json, as the kit writes it.', peek: p, noRecord: true, kind: 'recurring', front: front.map((r) => [r[0], r, true]), computed })}
     ${fixing}${noticed}${psect('Recent runs', recent)}`);
 }
 function openBuiltin(name) {
