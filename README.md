@@ -2,13 +2,18 @@
 
 A kit a project copies into `docs/devteam/` and owns. It runs a supervised fleet of coding-agent sessions that takes broad goals, turns them into a graph of tickets, and plows through it with [superpowers](https://github.com/obra/superpowers), under one owner, with adversarial review before every merge and a loop that keeps improving the fleet itself.
 
-Thirteen files: three governance docs, three process docs, one schema, one script, one dashboard and its two helpers for review pages, the hub page that lists every instance on the machine, and a gitleaks config for the kit's own log. Once adopted, agents are routed by a section `init` adds to the project's `AGENTS.md`; there is no second README.
+Eighteen files: eight governance docs, three process docs, one schema, one script, one dashboard and its two helpers for review pages, the hub page that lists every instance on the machine, and a gitleaks config for the kit's own log. Once adopted, agents are routed by a section `init` adds to the project's `AGENTS.md`; there is no second README.
 
 ```
 docs/devteam/
   governance/constitution.md   who decides what, the trust ladder, principles, one-way doors, which rule wins
   governance/quality.md        definition of done, gates, the review standard, merging, releases
   governance/code-style.md     the code doctrine
+  governance/testing.md        the test pyramid, its tools, load tests before a launch
+  governance/operations.md     environments, releases and deploys, backups and recovery, uptime and alerting, CI
+  governance/ai.md             the rules every AI feature follows
+  governance/web-quality.md    accessibility, performance budgets, search and answer engines
+  governance/project-docs.md   the README runbook, ADRs, OpenAPI reference and architecture diagram every project keeps
   process/planning.md          goal → design → milestones → roadmap → graph
   process/supervisor.md        the tick as observe / orient / decide / act, questions, messages, the log, retros
   process/worker.md            one ticket with superpowers
