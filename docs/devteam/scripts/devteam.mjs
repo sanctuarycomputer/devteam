@@ -10114,9 +10114,14 @@ async function cmdPreview() {
 // it). Landed is what main has, read from git; a draft is a session worktree's copy under
 // .worktrees/, read off disk as it is, so the owner sees it while it's drawn.
 const ARTIFACTS_REL = `${projectRel}/artifacts`;
+// A branch on origin a draft from another machine may come from (kit-750): a name git takes as a ref
+// and a URL path segment carries once encoded, at most 200 characters; never .., //, a segment that
+// starts with a dot or ends .lock, @{, or a trailing / or dot. Checked before any git call names it.
+const BRANCH_AT = /^(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*@\{)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // Where a viewer may show an artifact: main, a draft's worktree (by name; draftWorktree says whether
-// it is one), or a published version by its tree id. The same forms a thread's artifact subject records.
-const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99})$/;
+// it is one), a draft on an origin branch fetched from another machine (origin:<branch>), or a
+// published version by its tree id. The same forms a thread's artifact subject records.
+const ARTIFACT_AT = new RegExp(`^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99}|origin:${BRANCH_AT.source.slice(1, -1)})$`);
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
 const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for', 'kind'];
@@ -10238,14 +10243,29 @@ function draftWorktree(name) {
 // A draft's folder is where it says it is: no symlink on the way to it (the slug folder, artifacts/,
 // the project folder) carries the route or a fingerprint off somewhere else on the machine.
 const draftDirOk = (root, slug) => { const want = path.join(root, ARTIFACTS_REL, slug); try { return fs.realpathSync(want) === want; } catch { return false; } };
-// Where an artifact's files are: main's tree (at 'main') or a draft worktree's folder; null if none.
-// A worktree's project folder sits at the same path inside it as this checkout's.
+// Where an artifact's files are: main's tree (at 'main'), a draft worktree's folder, or a branch
+// fetched from origin (origin:<branch>, under refs/devteam-remote/, kit-750); null if none.
+// A worktree's project folder sits at the same path inside it as this checkout's. A branch's folder
+// is read from its tree by id, never a checkout, and carries the artifact checks' first error (a
+// submodule included), which nothing serves past. The dashboard server never calls this for a
+// branch: its reads are async (artifactRemoteRefs' resolve).
 function artifactSource(at, slug) {
   if (!LINK_ID.test(slug ?? '')) return null;
   if (at === 'main') {
     const ref = mainRef();
     const entries = ref ? treeEntries(ref, `${ARTIFACTS_REL}/${slug}`) : [];
     return entries.length ? { entries } : null;
+  }
+  if (String(at).startsWith('origin:')) {
+    const b = String(at).slice(7);
+    if (!BRANCH_AT.test(b)) return null;
+    const tree = treeNow(git(['ls-tree', `refs/devteam-remote/${b}`, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot));
+    if (!tree) return null;
+    const entries = treeIdEntries(tree);
+    if (!entries.length) return null;
+    const sub = entries.find((e) => e.type !== 'blob');
+    const error = sub ? `${slug}/${sub.path}: a submodule isn't served` : artifactProblems(slug, entries).errors[0] ?? null;
+    return { entries, tree, error };
   }
   const root = draftWorktree(at);
   if (!root) return null;

@@ -15,7 +15,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { write, dashboardOnFreePort, fleetFixture, REAL_GIT } from './lib/kit.mjs';
+import vm from 'node:vm';
+import { kit, write, dashboardOnFreePort, fleetFixture, REAL_GIT } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const J = JSON.stringify;
@@ -197,6 +198,26 @@ async function setup(t, name, env = {}) {
   };
   return { F, spy, other, start, later };
 }
+
+// S6 at its source: BRANCH_AT and ARTIFACT_AT read out of the script, as the server and the CLI hold them
+test('artifact remote safe: BRANCH_AT takes branch names git and a URL can carry safely, and ARTIFACT_AT takes origin:<branch>', () => {
+  const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+  const decl = (name) => { const m = new RegExp(`^const ${name} = .*;$`, 'm').exec(src); assert.ok(m, `${name} is declared on one line`); return m[0]; };
+  const ctx = vm.createContext({});
+  vm.runInContext(`${decl('BRANCH_AT')}\n${decl('ARTIFACT_AT')}\nglobalThis.R = { BRANCH_AT, ARTIFACT_AT };`, ctx);
+  const { BRANCH_AT, ARTIFACT_AT } = ctx.R;
+  for (const b of ['ticket/far-01', 'a.b/c-d_e', 'main', 'plan/x', 'v1.2.3', `a${'b'.repeat(199)}`]) {
+    assert.ok(BRANCH_AT.test(b), `S6: takes ${b}`);
+    assert.ok(ARTIFACT_AT.test(`origin:${b}`), `S6: at origin:${b}`);
+  }
+  for (const b of ['../x', 'a/../b', 'a//b', 'a.lock', 'a/b.lock', '@{u}', 'a@{1}', 'a/.b', '.a', 'a/', 'a.', '', '/x', `a${'b'.repeat(200)}`, 'a b', 'ça', 'a\nb', 'a~1', 'a^b', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b']) {
+    assert.equal(BRANCH_AT.test(b), false, `S6: refuses ${JSON.stringify(b)}`);
+    assert.equal(ARTIFACT_AT.test(`origin:${b}`), false, `S6: at origin:${JSON.stringify(b)}`);
+  }
+  // what it took before stays as it was
+  for (const at of ['main', `tree:${'a'.repeat(40)}`, 'kit-750-x', 'demo-01-draft']) assert.ok(ARTIFACT_AT.test(at), `ARTIFACT_AT still takes ${at}`);
+  for (const at of ['tree:abc', '-x', 'a/b', 'origin:']) assert.equal(ARTIFACT_AT.test(at), false, `ARTIFACT_AT still refuses ${at}`);
+});
 
 test('artifact remote main: fetched once an interval while asked for, none while nothing is open; a push to main shows', { timeout: 300000 }, async (t) => {
   const { F, spy, other, start } = await setup(t, 'remote-main');
