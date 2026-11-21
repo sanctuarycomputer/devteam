@@ -997,6 +997,21 @@ test('A5: a recurring-edit answer binds only the owner\'s first turn right after
   } finally { T.done(); }
 });
 
+test('A5: a recurring-edit line from a turn is read against that turn\'s own words: a planted Yes on a No turn lands nothing (final-13b F2)', () => {
+  const T = setup('turn-words');
+  try {
+    const ev = check({ title: 'ev job', every: '1h', run: 'echo evil' });
+    const tid = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const q = QID.exec(T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', 'Add ev?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { ev } })]).out)[0];
+    const no = T.ok(['thread', 'say', tid, 'No, never add it.'], {}).split('\n')[0];
+    // X3: the line says Yes, the turn it cites says No
+    fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: q, at: new Date().toISOString(), by: 'owner', answer: 'Yes', channel: 'thread', said: 'Yes', turn: no })}\n`);
+    T.jobsChore('x3', () => ({ ev }));
+    refused(T.merge('x3', ['--approved', q]), new RegExp(`${q} can't approve a job change: answered from ${no}, whose words don't start with Yes \\("No, never add it\\."\\)`));
+    assert.deepEqual(T.mainJobs(), {}, 'no job landed');
+  } finally { T.done(); }
+});
+
 test('A14: supervisor.md documents registering, changing and stopping a job in recurring.json, and that none writes to production', () => {
   const doc = fs.readFileSync(path.join(kit, 'process/supervisor.md'), 'utf8');
   const at = (re) => doc.search(re);

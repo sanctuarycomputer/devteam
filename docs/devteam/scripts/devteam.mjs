@@ -24386,9 +24386,11 @@ const recurringRegistry = Object.freeze({
   // any case, past opening quotes (final-12b F3). The letters are spelled out, not /i, so no other
   // letter that folds to one of them (the long s, U+017F) passes for it.
   saysYes: (said) => /^["'\u2018\u201c\u201e\u00ab\s]*[Yy][Ee][Ss](?![\p{L}\p{N}])/u.test(String(said ?? '')),
-  // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1): one
-  // recorded from chat; from a turn whose words don't start with Yes; from a clause of a turn
-  // (said_at); or from a turn that isn't the owner's, in the log, and newer than the question; else null
+  // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1,
+  // final-13b F1 and F2): one recorded from chat; from a turn whose words (the line's, or the turn's
+  // own) don't start with Yes; from a clause of a turn (said_at); from a turn that isn't the owner's,
+  // in the log, and newer than the question; with words other than the turn's; or from a turn that
+  // doesn't bind the question (turnBinds); else null
   notOwnYes(v) {
     if (v?.channel === 'chat') return `answered from chat ("${String(v.said ?? '').slice(0, 80)}"), which approves no job change`;
     if (v?.channel !== 'thread') return null;
@@ -24397,6 +24399,10 @@ const recurringRegistry = Object.freeze({
     if (v.said_at !== undefined && v.said_at !== null) return `answered from a clause of ${turn} (said_at), which approves no job change`;
     const u = typeof v.turn === 'string' ? logGet(v.turn) : null;
     if (u?.type !== 'turn' || u.created_by !== 'owner' || !(String(u.created_at ?? '') > String(v.asked_at ?? ''))) return `answered from ${turn}, which isn't newer than the question (or isn't the owner's turn in the log)`;
+    // the cited turn's own words, never only the line's said (final-13b F2)
+    if (!recurringRegistry.saysYes(u.text)) return `answered from ${turn}, whose words don't start with Yes ("${String(u.text ?? '').slice(0, 80)}")`;
+    if (v.said !== u.text) return `answered from ${turn}, with words that aren't that turn's ("${String(v.said ?? '').slice(0, 80)}")`;
+    if (v.thread && u.thread !== v.thread) return `answered from ${turn}, which is in ${u.thread}, not the question's ${v.thread}`;
     const why = recurringRegistry.turnBinds(u, v.id);
     if (why) return `answered from ${turn}, which isn't the owner's first turn right after the supervisor's turn that shows the question (${why})`;
     return null;
