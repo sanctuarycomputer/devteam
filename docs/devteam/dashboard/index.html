@@ -6522,13 +6522,13 @@ function worldBlocks(kind, block) {
       + sec('What it touches but does not control', ul(list(b.not).map((x) => `<li>${esc(x)}</li>`)));
   }
   const ents = list(b.entities).filter((e) => e && typeof e === 'object');
-  if (!ents.length) return '<p>No entities drawn yet.</p>';
+  if (!ents.length) return '<p>None</p>';
   const REL = [['serves', 'It serves'], ['depends_on', 'It depends on'], ['builds_on_it', 'Builds on it'], ['alternative', 'Its alternatives'], ['collaborates', 'It works with'], ['governs', 'Governs it'], ['affects', 'It affects']];
   const KIND = { organisation: 'an organisation', group: 'a group', work: 'a work' };
   const score = (s) => (Number.isFinite(s?.score) ? s.score : 0);
   const entity = (e) => {
     const sigs = list(e.signals).filter((s) => s && typeof s === 'object').sort((x, y) => score(y) - score(x));
-    return `<li><b>${esc(e.name)}</b>, ${esc(Object.hasOwn(KIND, e.kind) ? KIND[e.kind] : e.kind)}: ${esc(e.matters)}<ul>${sigs.length ? sigs.map((s) => `<li>${esc(s.what)}</li>`).join('') : '<li>No signals yet</li>'}</ul></li>`;
+    return `<li><b>${esc(e.name)}</b>, ${esc(Object.hasOwn(KIND, e.kind) ? KIND[e.kind] : e.kind)}: ${esc(e.matters)}<ul>${sigs.length ? sigs.map((s) => `<li>${esc(s.what)}</li>`).join('') : '<li>None</li>'}</ul></li>`;
   };
   const known = new Set(REL.map(([r]) => r));
   const groups = REL.map(([r, h]) => [h, ents.filter((e) => e.relation === r)]);

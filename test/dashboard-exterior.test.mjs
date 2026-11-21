@@ -199,7 +199,8 @@ test('self.md and exterior.md beside the strategy', { skip: canDrive ? false : '
         assert.ok(items[j].includes(e.matters), `${e.name}: what matters`);
       });
     });
-    assert.deepEqual(await signalsOf('Local libraries'), ['No signals yet']);
+    // an empty state reads None (the copy rule, test/dashboard-copy.test.mjs)
+    assert.deepEqual(await signalsOf('Local libraries'), ['None']);
     await closePeek();
   });
 
@@ -254,7 +255,7 @@ test('self.md and exterior.md beside the strategy', { skip: canDrive ? false : '
     await closePeek();
     await load({ self: DATA.self, exterior: { entities: [] } }, '#overview');
     await openPeek(EXT, 'Exterior');
-    assert.ok((await md(`m.textContent.${fold}`)).includes('No entities drawn yet'), 'no entities');
+    assert.equal(await md("!m.querySelector('code.language-exterior') && !m.querySelector('h3') && [...m.querySelectorAll('p')].some((x) => x.textContent.trim() === 'None')"), true, 'no entities: None in the block\'s place');
     await closePeek();
     await load({}, '#overview', { drop: ['self', 'exterior'] });
     await openPeek(SELF, 'Self');
