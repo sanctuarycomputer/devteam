@@ -59,6 +59,12 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     assert.match(run(old, ['planner', 'gamma'], SUP).err, /--goal <g-id>/);
     const findings = json(ok(old, ['metrics', '--json'])).findings;
     assert.ok(!findings.some((f) => ['idle-capacity', 'idle-planning', 'park-unsent'].includes(f.kind)), 'nothing new is suggested while parked, and the ruling was sent');
+    assert.ok(!findings.some((f) => f.kind === 'park-unsettled'), 'just told: not yet unsettled');
+    // told and still not parked past the settle time (0 here): a park doesn't wait on a reply, so it says to send the ruling again
+    const unsettled = json(ok(old, ['metrics', '--json'], { DEVTEAM_PARK_SETTLE_MINUTES: '0' })).findings.find((f) => f.kind === 'park-unsettled');
+    assert.equal(unsettled?.subject, ID, JSON.stringify(unsettled));
+    assert.match(unsettled.detail, /told to park \d+ min ago .* and still build: a park doesn't wait on a reply or an owner answer/);
+    assert.match(unsettled.suggestion, /goal park-sessions upkeep --again/);
     assert.match(ok(old, ['prompt', 'supervisor']), /^The fleet is parked .*This is the machine it was parked on/);
     assert.match(run(old, ['chore', 'start', 'retro-x'], SUP).err, /Upkeep is parked: no new upkeep chore starts/);
 
@@ -83,6 +89,7 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     assert.match(run(ww, ['handoff'], WRK, '').err, /the note is empty/, 'the main checkout\'s kit ran');
     g(['checkout', '--', 'docs/devteam/scripts/devteam.mjs'], ww);
     ok(ww, ['phase', 'parked', '--note', 'parked'], WRK);
+    assert.ok(!json(ok(old, ['metrics', '--json'], { DEVTEAM_PARK_SETTLE_MINUTES: '0' })).findings.some((f) => f.kind === 'park-unsettled'), 'parked: park-unsettled clears');
     st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, false, true, false]]);
     const upkeepState = () => json(ok(old, ['goal', 'show', 'upkeep', '--json'])).hold_view.state;
@@ -173,6 +180,7 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
       assert.match(fs.readFileSync(path.join(neu, `docs/devteam/run/prompts/${ID}.txt`), 'utf8'), /## Handoff from a parked session/);
     } else g(['worktree', 'add', '-q', '--track', '-b', `ticket/${ID}`, nw, `origin/ticket/${ID}`], neu);
     ok(nw, ['phase', 'build', '--task', 'T2'], WRK);
+    assert.ok(!json(ok(neu, ['metrics', '--json'], { DEVTEAM_PARK_SETTLE_MINUTES: '0' })).findings.some((f) => f.kind === 'park-unsettled'), 'unparked and building on the new machine: silent');
     assert.doesNotMatch(ok(neu, ['prompt', 'worker', ID]), /Handoff from a parked session/, 'after its first phase line the note is history');
   } finally {
     F.done();
