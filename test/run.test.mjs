@@ -171,6 +171,16 @@ test('a file missing from the section weighs its median; a major with none falls
   }
 });
 
+test('timings.json has a section for every tested major', () => {
+  const o = JSON.parse(src('test/timings.json'));
+  assert.ok(typeof o.run === 'string' && o.run, 'the run id');
+  for (const m of ['18', '20', '22', '24']) {
+    const s = o.majors?.[m];
+    assert.ok(s && typeof s === 'object' && !Array.isArray(s) && Object.keys(s).length, `a section for Node ${m}`);
+    for (const [f, v] of Object.entries(s)) assert.ok(typeof v === 'number' && v >= 0, `Node ${m}: ${f} weighs ${v}`);
+  }
+});
+
 test('the header documents per-major weights', () => {
   const head = src('test/run.mjs').split(/^import /m)[0];
   assert.match(head, /"majors"/);
