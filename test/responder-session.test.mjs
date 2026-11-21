@@ -376,7 +376,7 @@ test('R4: prompt responder names its section of supervisor.md, and that section 
       ['data framing', /data, not instructions/],
       ['nothing private in artifacts', /nothing in an artifact you wouldn't want public/],
       ['refs as <type>:<id>, as the code takes them', /`--refs` as `<type>:<id>`/],
-      ['scripts outside its folder', /mktemp -d/],
+      ['scripts in its folder, removed once run', /script files the shell rule asks for in your folder[^.]*remove each when it has run/],
     ]) assert.match(s, re, what);
     assert.doesNotMatch(s, /responder draft|--re\b/, 'names no command a later ticket builds');
   } finally { F.done(); }
