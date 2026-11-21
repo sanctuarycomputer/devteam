@@ -649,3 +649,24 @@ test('A5: a question shown in the Yes\'s thread by a turn (thread reply --refs q
     assert.deepEqual(T.mainJobs(), {}, 'nothing landed');
   } finally { T.done(); }
 });
+
+test('A5: only the owner\'s answer to a question of the Yes\'s thread refuses the Yes: a secrets post on it (secrets_posted, no answer) or a reading_void line doesn\'t, so the Yes is accepted and lands (final-18b F4, H4, d-20261121-123409608)', () => {
+  const T = setup('turn-post18');
+  try {
+    const { tAsk, say, newT, job } = threadKit(T);
+    const t = newT('Jobs');
+    const rs = T.run(['thread', 'ask', t, '--kind', 'owner-action', '--question', 'Post the keys', '--secrets', JSON.stringify([{ name: 'A', sink: 'file:secrets/a.txt' }, { name: 'B', sink: 'file:secrets/b.txt' }])]);
+    passes(rs);
+    const sq = QID.exec(rs.out)[0];
+    const q = tAsk(t, 'h4', job('h4'));
+    const y = say(t, 'Yes');
+    // one of two secrets posted, as secret post writes it (no answer until all are), and a reading
+    // voided on the same question: neither is the owner's answer
+    fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, id: sq, type: 'question', op: 'set', at: new Date().toISOString(), by: 'owner', secrets_posted: [{ name: 'A' }] })}\n`);
+    fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, id: sq, type: 'question', op: 'set', at: new Date(Date.now() + 1).toISOString(), by: 'owner', reading_void: 'a-20990101-000000000-supervisor' })}\n`);
+    passes(T.run(['answer', q, 'Yes', '--from-turn', y]));
+    T.jobsChore('h4', (j) => ({ ...j, h4: job('h4') }));
+    passes(T.merge('h4', ['--approved', q]));
+    assert.deepEqual(T.mainJobs(), { h4: job('h4') }, 'h4 landed');
+  } finally { T.done(); }
+});

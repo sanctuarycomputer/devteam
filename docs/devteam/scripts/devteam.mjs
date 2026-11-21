@@ -24839,9 +24839,12 @@ const recurringRegistry = Object.freeze({
   // millisecond counts as after it), and no later than upto when given, other than u and any line
   // skip(L) names, as words for a refusal; else null (d-20261121-072341505-supervisor, final-16b F1
   // to F4; d-20261121-103254180-supervisor, final-17b F1): a turn in the thread; a resolve of it with
-  // an outcome (its words); a reopen of it; or an answer line (any set line of the owner's) on a
-  // question of the thread (threadQuestions), whatever channel it came from: a card answer to another
-  // question there can take the Yes back as well as a turn. A line in another thread never counts.
+  // an outcome (its words); a reopen of it; or the owner's answer (a set line that carries answer,
+  // as every owner answer the kit writes does: a pick, words, a decline, a review's result, the last
+  // secret posted) on a question of the thread (threadQuestions), whatever channel it came from: a
+  // card answer to another question there can take the Yes back as well as a turn. A set line with
+  // no answer (a partial secrets post, a reading_void) is no answer, so it doesn't count
+  // (final-18b F4). A line in another thread never counts.
   laterOwner(u, upto = null, skip = () => false) {
     const at = String(u?.created_at ?? '');
     const asked = recurringRegistry.threadQuestions(u.thread, (L) => upto === null || String(L.at ?? '') <= upto);
@@ -24849,7 +24852,7 @@ const recurringRegistry = Object.freeze({
     const later = readLog().lines.filter((L) => L.by === 'owner' && inWindow(L) && !skip(L) && (
       (L.type === 'turn' && L.thread === u.thread && L.id !== u.id)
       || (L.type === 'thread' && L.op === 'set' && L.id === u.thread && ((L.status === 'resolved' && typeof L.outcome === 'string' && L.outcome.trim() !== '') || L.status === 'open'))
-      || (L.type === 'question' && L.op === 'set' && asked.has(L.id))
+      || (L.type === 'question' && L.op === 'set' && asked.has(L.id) && Object.hasOwn(L, 'answer'))
     )).sort((x, y) => String(x.at).localeCompare(String(y.at)))[0];
     if (!later) return null;
     if (later.type === 'turn') return later.id;
