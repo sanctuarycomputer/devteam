@@ -965,7 +965,7 @@ test('A14: supervisor.md documents registering, changing and stopping a job in r
   const four = q.slice(q.search(/^## 4\. /m), q.search(/^## 5\. /m));
   assert.match(four, /recurring-edit/);
   // the landing onto the checked main, and the one window GitHub leaves (final-10 F3)
-  assert.match(four, /lands onto the main its checks judged \(forge git: a lease push; GitHub: a re-fetch just before `gh pr merge`, which leaves the call itself as the one window\)/);
+  assert.match(four, /lands onto the main its checks judged \(forge git: a lease push; GitHub: a re-fetch just before `gh pr merge`, which leaves the call itself as the one window; records in home land on GitHub's current main, with no re-fetch, and their branch never touches the jobs file\)/);
   assert.match(four, /onto the main its checks judged, with no git hooks, and pushes with a lease on that main/);
   assert.doesNotMatch(four, /onto origin's main with/);
 });
