@@ -8519,15 +8519,12 @@ function cmdAnswer() {
   // and never once the owner has written anything after it in its thread: their later words may take
   // it back ("Wait, no"), so the Yes is shown again and their next turn taken (final-14b F3). Any
   // later owner line counts, whatever it answers or binds (d-20261121-072341505-supervisor, final-16b
-  // F1 to F4): a turn, a resolve with an outcome (its words), or a reopen. A line in the same
-  // millisecond counts as after it. So each recurring-edit answer is recorded before the next
-  // question is shown.
+  // F1 to F4, final-17b F1): recurringRegistry.laterOwner. So each recurring-edit answer is recorded
+  // before the next question is shown.
   if (turn && v.class === 'recurring-edit') {
     const u = logGet(turn.turn);
-    const at = String(u?.created_at ?? '');
-    const later = u ? readLog().lines.filter((L) => L.by === 'owner' && String(L.at ?? '') >= at && ((L.type === 'turn' && L.thread === u.thread && L.id !== u.id) || (L.type === 'thread' && L.op === 'set' && L.id === u.thread && ((L.status === 'resolved' && typeof L.outcome === 'string' && L.outcome.trim() !== '') || L.status === 'open')))).sort((x, y) => String(x.at).localeCompare(String(y.at))).pop() : null;
-    const what = !later ? null : later.type === 'turn' ? later.id : `their ${later.status === 'open' ? 'reopen' : 'resolve'} of ${u.thread}${later.status === 'open' ? '' : ' with an outcome'}, at ${later.at}`;
-    if (later) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner wrote again after that turn (${what}): their later words may take the Yes back; show it again (thread reply <t-id> "…" --refs question:${id}) and take their next turn; record each recurring-edit answer before you show the next question`);
+    const what = u ? recurringRegistry.laterOwner(u) : null;
+    if (what) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner wrote again after that turn (${what}): their later words may take the Yes back; show it again (thread reply <t-id> "…" --refs question:${id}) and take their next turn; record each recurring-edit answer before you show the next question`);
   }
   // and only the owner's very next turn after the supervisor's turn that shows it, so a Yes said to
   // another question, in a turn or in plain words, or after a No, binds nothing (final-13b F1, final-14b F1)
@@ -24825,6 +24822,28 @@ const recurringRegistry = Object.freeze({
     // the Yes's own word, up to the first space: a quote mark there is before, in or right after it
     if (recurringRegistry.QUOTE_MARK.test(t.split(/\s/u)[0])) return false;
     return /^[Yy][Ee][Ss](?:$|[\s.,!])/u.test(t);
+  },
+  // The owner's first line in turn u's thread from u's own millisecond on (a line in the same
+  // millisecond counts as after it), and no later than upto when given, other than u and any line
+  // skip(L) names, as words for a refusal; else null (d-20261121-072341505-supervisor, final-16b F1
+  // to F4; d-20261121-103254180-supervisor, final-17b F1): a turn in the thread; a resolve of it with
+  // an outcome (its words); a reopen of it; or an answer line (any set line of the owner's) on a
+  // question shown in or asked from the thread, as thread show lists its questions (the question's
+  // thread), whatever channel it came from: a card answer to another question there can take the Yes
+  // back as well as a turn. A line in another thread never counts.
+  laterOwner(u, upto = null, skip = () => false) {
+    const at = String(u?.created_at ?? '');
+    const asked = new Set(logObjects('question').filter((q) => q.thread === u.thread).map((q) => q.id));
+    const inWindow = (L) => String(L.at ?? '') >= at && (upto === null || String(L.at ?? '') <= upto);
+    const later = readLog().lines.filter((L) => L.by === 'owner' && inWindow(L) && !skip(L) && (
+      (L.type === 'turn' && L.thread === u.thread && L.id !== u.id)
+      || (L.type === 'thread' && L.op === 'set' && L.id === u.thread && ((L.status === 'resolved' && typeof L.outcome === 'string' && L.outcome.trim() !== '') || L.status === 'open'))
+      || (L.type === 'question' && L.op === 'set' && asked.has(L.id))
+    )).sort((x, y) => String(x.at).localeCompare(String(y.at)))[0];
+    if (!later) return null;
+    if (later.type === 'turn') return later.id;
+    if (later.type === 'question') return `their answer to ${later.id}, at ${later.at}`;
+    return `their ${later.status === 'open' ? 'reopen' : 'resolve'} of ${u.thread}${later.status === 'open' ? '' : ' with an outcome'}, at ${later.at}`;
   },
   // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1,
   // final-13b F1 and F2): one recorded from chat; from a turn whose words (the line's, or the turn's

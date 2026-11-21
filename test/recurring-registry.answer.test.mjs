@@ -447,6 +447,30 @@ test('A5: once the owner has written anything after a recurring-edit Yes in its 
   } finally { T.done(); }
 });
 
+test('A5: the owner\'s card answer to another question of the Yes\'s thread counts as a later owner line (final-17b F1, d-20261121-103254180)', () => {
+  const T = setup('turn-later17');
+  try {
+    const tAsk = (tid, name, job) => { const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]); passes(r); return QID.exec(r.out)[0]; };
+    const pAsk = (tid, words) => { const r = T.run(['thread', 'ask', tid, '--question', words, '--recommendation', 'Yes']); passes(r); return QID.exec(r.out)[0]; };
+    const say = (tid, w) => T.ok(['thread', 'say', tid, w], {}).split('\n')[0];
+    const newT = (title) => T.ok(['thread', 'new', title, '--title', title], {}).split('\n')[0];
+    const job = (n) => check({ title: `${n} job`, run: `echo ${n}` });
+    // N1: a plain q2, then the recurring-edit q1, in thread t1; the owner says Yes to q1, then
+    // answers q2's card with words that take it back: the Yes is refused, and nothing lands
+    const t1 = newT('Jobs');
+    const q2 = pAsk(t1, 'Also restart the dashboard?');
+    T.ok(['thread', 'reply', t1, 'And one job.']);
+    const q1 = tAsk(t1, 'n1', job('n1'));
+    const y1 = say(t1, 'Yes');
+    T.ok(['answer', q2, 'No. And cancel that job too, do not add it.'], {});
+    refused(T.run(['answer', q1, 'Yes', '--from-turn', y1]), new RegExp(`--from-turn ${y1}: ${q1} is a recurring-edit question, and the owner wrote again after that turn \\(their answer to ${q2}, at [^)]*\\)`));
+    assert.equal(json(T.ok(['questions', '--id', q1, '--json']))[0].status, 'open', `${q1} stays open`);
+    T.jobsChore('n1', (j) => ({ ...j, n1: job('n1') }));
+    refused(T.merge('n1', ['--approved', q1]));
+    assert.equal(Object.hasOwn(T.mainJobs(), 'n1'), false, 'n1 did not land');
+  } finally { T.done(); }
+});
+
 test('A5: thread reply --refs question:<id> names a question in the log, or it is refused (final-16b F1, B4)', () => {
   const T = setup('refs-exist');
   try {
