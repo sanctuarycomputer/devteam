@@ -169,9 +169,12 @@ test('library menu publish: each landed card\'s ⋯ lists its publish actions, e
   const groupBefore = await p.ev(group(`artifact:${ids.public}`));
   await p.click(`${pc} .card-head details.menu > summary`);
   await soon(`document.querySelector('${pc} .card-head details.menu').open`, 'the public card\'s ⋯ open');
-  await p.ev(`(() => { DATA.library.artifacts.find((a) => a.slug === ${JSON.stringify(ids.public)} && a.at === 'main').title += ' (renamed)'; renderLibrary(DATA.library); })()`);
-  assert.deepEqual(await p.ev(`[document.querySelector('${pc} .lib-title').textContent.endsWith(' (renamed)'), document.querySelector('${pc} .card-head details.menu').open]`), [true, true], 'redrawn with its ⋯ still open');
-  assert.deepEqual(await p.ev(group(`artifact:${ids.public}`)), groupBefore, 'the same group');
+  // the change, the redraw and the reads in one task, so the page's own poll (which redraws from the server's data)
+  // can't come between them
+  const redrawn = await p.ev(`(() => { DATA.library.artifacts.find((a) => a.slug === ${JSON.stringify(ids.public)} && a.at === 'main').title += ' (renamed)'; renderLibrary(DATA.library);
+    return [document.querySelector('${pc} .lib-title').textContent.endsWith(' (renamed)'), document.querySelector('${pc} .card-head details.menu').open, ${group(`artifact:${ids.public}`)}]; })()`);
+  assert.deepEqual(redrawn.slice(0, 2), [true, true], 'redrawn with its ⋯ still open');
+  assert.deepEqual(redrawn[2], groupBefore, 'the same group');
   await p.ev(`document.querySelector('${pc} .card-head details.menu').open = false`);
   // nothing publishes by itself: a click on each kind of link opens the gateway's page in a new tab, the page makes
   // no request but GETs (any transport, any origin), and stays where it is
