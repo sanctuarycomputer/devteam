@@ -24561,7 +24561,7 @@ const recurringRegistry = Object.freeze({
   // Nothing may come between them, whoever wrote it: a plain reply asks something else in words just
   // as well. Nor may any other line of the thread, of any type (final-15b F1): a resolve proposal
   // (thread ready) asks something else too, and a resolve or a reopen is the thread moving on; a
-  // question asked into it is one more ask. Lines in the same millisecond as either end count as
+  // question asked into it comes with its own turn. Lines in the same millisecond as either end count as
   // between, so a tie never binds.
   turnBinds(u, qid) {
     if (u?.type !== 'turn') return 'no such turn';
@@ -24575,12 +24575,11 @@ const recurringRegistry = Object.freeze({
     const from = String(show.created_at ?? '');
     const between = turns.find((x) => x.id !== show.id && String(x.created_at ?? '') >= from && String(x.created_at ?? '') <= at);
     if (between) return `${between.id}, the ${typeof between.created_by === 'string' ? between.created_by : 'unknown'}'s turn, comes between ${show.id} and it`;
-    // every other line of the thread, as written: its own set lines, and a question asked into it
-    // (not the one the showing turn asks, which thread ask writes just before it)
+    // every other line of the thread, as written: its own set lines (a question asked into it is
+    // always a turn too, thread ask's, so the turns above catch it: final-16b F6)
     const who = (L) => (typeof L.by === 'string' ? L.by : 'unknown');
-    const line = readLog().lines.find((L) => String(L.at ?? '') >= from && String(L.at ?? '') <= at && ((L.type === 'thread' && L.id === u.thread) || (L.type === 'question' && L.op === 'new' && L.thread === u.thread && L.id !== show.question)));
-    if (line?.type === 'thread') return `the ${who(line)}'s ${isObj(line.ready) ? 'resolve proposal, a thread ready line,' : line.status !== undefined ? `status ${JSON.stringify(line.status)} line` : `${line.op} line`} on ${u.thread} at ${line.at} comes between ${show.id} and it`;
-    if (line) return `${line.id}, a question the ${who(line)} asked in ${u.thread}, comes between ${show.id} and it`;
+    const line = readLog().lines.find((L) => String(L.at ?? '') >= from && String(L.at ?? '') <= at && L.type === 'thread' && L.id === u.thread);
+    if (line) return `the ${who(line)}'s ${isObj(line.ready) ? 'resolve proposal, a thread ready line,' : line.status !== undefined ? `status ${JSON.stringify(line.status)} line` : `${line.op} line`} on ${u.thread} at ${line.at} comes between ${show.id} and it`;
     return null;
   },
   // The questions that block another question for their names: open ones, and live ones

@@ -1157,6 +1157,30 @@ test('A5: thread reply --refs question:<id> names a question in the log, or it i
   } finally { T.done(); }
 });
 
+test('A5: a thread line in the very millisecond of the showing turn or of the Yes counts as between them: a tie never binds (final-16b F6)', () => {
+  const T = setup('turn-tie');
+  try {
+    const tAsk = (tid, name, job) => { const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]); passes(r); return QID.exec(r.out)[0]; };
+    const job = (n) => check({ title: `${n} job`, run: `echo ${n}` });
+    const atOf = (id) => json(T.ok(['log', '--type', 'turn', '--json'])).find((x) => x.id === id).created_at;
+    const ready = (tid, at) => fs.appendFileSync(T.logFile('supervisor'), `${JSON.stringify({ v: 1, type: 'thread', op: 'set', id: tid, at, by: 'supervisor', ready: { outcome: 'Shall I resolve this?', at } })}\n`);
+    const TIE = (u, q) => new RegExp(`--from-turn ${u}: ${q} is a recurring-edit question, and that turn isn't the owner's first right after your turn that shows it \\(the supervisor's resolve proposal, a thread ready line,[^)]* comes between`);
+    // a resolve proposal planted at the Yes's own millisecond
+    const t1 = T.ok(['thread', 'new', 'Jobs', '--title', 'Jobs'], {}).split('\n')[0];
+    const q1 = tAsk(t1, 'c1', job('c1'));
+    const y1 = T.ok(['thread', 'say', t1, 'Yes'], {}).split('\n')[0];
+    ready(t1, atOf(y1));
+    refused(T.run(['answer', q1, 'Yes', '--from-turn', y1]), TIE(y1, q1));
+    // and one at the showing turn's own millisecond
+    const t2 = T.ok(['thread', 'new', 'Jobs 2', '--title', 'Jobs 2'], {}).split('\n')[0];
+    const q2 = tAsk(t2, 'c2', job('c2'));
+    const show = json(T.ok(['log', '--type', 'turn', '--json'])).find((x) => x.thread === t2 && x.question === q2);
+    ready(t2, show.created_at);
+    const y2 = T.ok(['thread', 'say', t2, 'Yes'], {}).split('\n')[0];
+    refused(T.run(['answer', q2, 'Yes', '--from-turn', y2]), TIE(y2, q2));
+  } finally { T.done(); }
+});
+
 test('A5: a supervisor reply after the owner\'s Yes doesn\'t block it, and an owner turn in the same millisecond as the Yes counts as after it (final-15b F6)', () => {
   const T = setup('turn-after');
   try {
