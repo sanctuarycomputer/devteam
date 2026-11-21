@@ -21082,8 +21082,6 @@ async function dashRoutesViewer(D, req, res, q) {
   if (req.method === 'GET' && u.pathname === '/api/artifact-fp') {
     const site = req.headers['sec-fetch-site'];
     if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
-    // an open draft viewer keeps origin fetched (kit-750)
-    remote.want();
     const slug = u.searchParams.get('slug') ?? '';
     const at = u.searchParams.get('at') ?? '';
     if (!LINK_ID.test(slug) || !ARTIFACT_AT.test(at) || at === 'main' || at.startsWith('tree:')) return send(res, 400, 'application/json', JSON.stringify({ error: 'a slug, and at a draft\'s worktree (drafts only)' }));
@@ -21123,8 +21121,6 @@ async function dashRoutesViewer(D, req, res, q) {
       return send(res, 200, 'application/json', JSON.stringify({ name: rec.name, label: rec.label, session: rec.session, project: rec.project, up: previewUp.get(rec.name) ?? null, origin, opened, lens: origin ? `${origin}/.devteam/lens` : null, served: previewServed() }));
     }
     if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
-    // an open artifact viewer keeps origin fetched (kit-750); a preview's viewer never fetches
-    remote.want();
     const key = `${slug}|${at}`;
     let job = describing.get(key);
     if (!job) { job = run(['artifact', 'describe', slug, `--at=${at}`, '--json'], { timeout: 12000 }).finally(() => describing.delete(key)); describing.set(key, job); }
@@ -21133,11 +21129,22 @@ async function dashRoutesViewer(D, req, res, q) {
     return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
   }
   // The Library's fetch of origin (kit-750): when it last fetched, whether that failed (the Library
-  // then says remote drafts may be stale), and rev, which moves when a fetch moved a ref. An ask is
-  // demand: a Library or viewer open keeps it fetching each interval. Same-origin only, as /api/view.
-  if (req.method === 'GET' && u.pathname === '/api/artifact-remote') {
+  // then says remote drafts may be stale), and rev, which moves when a fetch moved a ref. A GET only
+  // reads (org-access A13: no GET starts a command that writes). The page's POST is the demand: a
+  // Library or an artifact viewer open keeps origin fetched each interval. It is held to the owner
+  // actions' same-origin rule (a browser's own page, a JSON body), as fleet-check, the other POST
+  // that fetches; a refused one changes nothing.
+  if (u.pathname === '/api/artifact-remote' && (req.method === 'GET' || req.method === 'POST')) {
     const site = req.headers['sec-fetch-site'];
-    if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+    const origin = req.headers.origin;
+    const own = `http://${req.headers.host}`;
+    if (req.method === 'GET') {
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      return send(res, 200, 'application/json', JSON.stringify(remote.status()));
+    }
+    const sameOrigin = (site === 'same-origin' || origin === own) && (site === undefined || site === 'same-origin') && (origin === undefined || origin === own);
+    req.resume();
+    if (!q.okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: "only from this dashboard's own page, in a browser" }));
     remote.want();
     return send(res, 200, 'application/json', JSON.stringify(remote.status()));
   }

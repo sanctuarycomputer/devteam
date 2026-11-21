@@ -61,6 +61,7 @@ function listRoutes() {
 const NOT_ROUTES = {
   'dash /api/term/*': "the terminal's dispatch: its routes are listed from route() (term …)",
   'dash re:^\\/artifact\\/(?:main|wt\\/([^/]+)|tree\\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\\/([^/]+)(\\/.*)?$': "/artifact/*'s own parse of the path it matched: asked by dash /artifact/*",
+  'dash re:^\\/artifact\\/origin\\/([^/]+)\\/([^/]+)(\\/.*)?$': "/artifact/*'s parse of a draft from another machine (kit-750): asked by dash /artifact/*",
   'hub /*': "the redirect of a request on another Host to 127.0.0.1, the same request again: asked by every hub key's request on that Host",
 };
 

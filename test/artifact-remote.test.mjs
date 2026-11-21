@@ -135,7 +135,9 @@ function otherMachine(F) {
 }
 
 const getJson = async (B, route) => { const r = await fetch(`${B}${route}`); return { status: r.status, body: r.headers.get('content-type')?.includes('json') ? await r.json() : await r.text() }; };
-const remoteStatus = async (B) => (await getJson(B, '/api/artifact-remote')).body;
+// the page's ask: a same-origin POST, which is the demand (a GET only reads, org-access A13)
+const askRemote = (B, headers = {}) => fetch(`${B}/api/artifact-remote`, { method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: B, ...headers }, body: '{}' });
+const remoteStatus = async (B) => (await askRemote(B)).json();
 const library = async (B) => { const r = await fetch(`${B}/api/data`); assert.equal(r.status, 200, '/api/data'); return (await r.json()).library.artifacts; };
 const row = (arts, slug, at) => arts.find((a) => a.slug === slug && a.at === at) ?? null;
 const bytes = async (B, route) => { const r = await fetch(`${B}${route}`); return { status: r.status, text: await r.text() }; };
@@ -153,14 +155,15 @@ async function within(ms, f, what) {
 // The Library's ask, as the page makes it while the Library is shown: every 250 ms until stopped.
 function demand(B) {
   let on = true;
-  (async () => { while (on) { try { await (await fetch(`${B}/api/artifact-remote`, { headers: { 'sec-fetch-site': 'same-origin' } })).text(); } catch {} await sleep(250); } })();
+  (async () => { while (on) { try { await (await askRemote(B)).text(); } catch {} await sleep(250); } })();
   return () => { on = false; };
 }
 // what must never change: local branches and tags, worktrees, HEAD, the index, the working tree, and
 // every remote-tracking ref but origin/main
 const snapshot = (F) => ({
   heads: F.g(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags'], F.old),
-  remotes: F.g(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/remotes'], F.old).split('\n').filter((l) => l && !l.startsWith('refs/remotes/origin/main ')).join('\n'),
+  // a symbolic ref (origin/HEAD, which a newer git's clone makes) by what it names, not the sha it follows
+  remotes: F.g(['for-each-ref', '--format=%(refname) %(if)%(symref)%(then)-> %(symref)%(else)%(objectname)%(end)', 'refs/remotes'], F.old).split('\n').filter((l) => l && !l.startsWith('refs/remotes/origin/main ')).join('\n'),
   worktrees: F.g(['worktree', 'list', '--porcelain'], F.old),
   status: F.g(['status', '--porcelain', '--untracked-files=all'], F.old),
   head: F.g(['rev-parse', 'HEAD'], F.old),
@@ -227,9 +230,14 @@ test('artifact remote safe: BRANCH_AT takes branch names git and a URL can carry
 test('artifact remote main: fetched once an interval while asked for, none while nothing is open; a push to main shows', { timeout: 300000 }, async (t) => {
   const { F, spy, other, start } = await setup(t, 'remote-main');
   const { B, L, W } = await start();
-  // M1: nothing open, nothing fetched
-  await sleep(INT * 3 + W);
-  assert.deepEqual(spy.fetches(), [], 'M1: no fetch while no Library or viewer is open');
+  // M1: nothing open, nothing fetched; the GETs only read (org-access A13): the status, a viewer's
+  // check of main and a draft's fp start no fetch
+  const t1 = Date.now();
+  while (Date.now() - t1 < INT * 3 + W) {
+    for (const r of ['/api/artifact-remote', '/api/view?kind=artifact&slug=none&at=main', '/api/artifact-fp?slug=none&at=origin:ticket/none']) await (await fetch(`${B}${r}`, { headers: { 'sec-fetch-site': 'same-origin' } })).text();
+    await sleep(500);
+  }
+  assert.deepEqual(spy.fetches(), [], 'M1: no fetch while no Library or viewer is open, GETs asked or not');
   // M2 + M3: the Library open; a push to origin's main from the other machine shows
   const stop = demand(B);
   t.after(stop);
@@ -426,7 +434,8 @@ test('artifact remote safe: bounded, one at a time, backs off and says so, refs 
   for (let i = 1; i < all.length; i++) assert.ok(all[i].start >= (all[i - 1].end ?? Date.parse(st.fetched_at)), `S2: fetch ${i} began before ${i - 1} ended (${JSON.stringify([all[i - 1], all[i]].map((f) => ({ start: f.start, end: f.end, hang: f.hang?.at ?? null })))}, failed at ${st.fetched_at})`);
   await within(5000, async () => { const s = await remoteStatus(B); return s.stale === false && s.ok === true; }, 'S3: stale cleared');
   // S7: a cross-site ask refused
-  assert.equal((await fetch(`${B}/api/artifact-remote`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, 'S7: a cross-site ask');
+  assert.equal((await fetch(`${B}/api/artifact-remote`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, 'S7: a cross-site read');
+  for (const h of [{ 'sec-fetch-site': 'cross-site' }, { origin: 'http://evil.example' }, { 'content-type': 'text/plain' }]) assert.equal((await askRemote(B, h)).status, 403, `S7: a POST refused (${JSON.stringify(h)})`);
   // S2 at exit: a fetch under way when the dashboard ends is sent SIGTERM, so git removes its own
   // locks, never a bare SIGKILL (task-2 F1)
   const n1 = spy.fetches().length;

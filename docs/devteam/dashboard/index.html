@@ -7873,23 +7873,23 @@ function renderLibrary(lib) {
   thumbsWatch(grid);
   avBarPoll();
 }
-// The Library's ask of the dashboard's fetch of origin (kit-750): while the dashboard (never a viewer tab)
-// is seen and shows the Library or an artifact on its stage, /api/artifact-remote every 10 s, one ask at a time, given
-// up after 5 s. The ask is the demand that keeps origin fetched; a closed or hidden page asks nothing,
-// so nothing is fetched. A moved rev (a fetch moved a ref) loads the data at once (forced, past a
+// The Library's ask of the dashboard's fetch of origin (kit-750): while the page (a viewer tab too) is
+// seen and shows the Library or an artifact on its stage, a POST of /api/artifact-remote every 10 s,
+// one ask at a time, given up after 5 s. The POST is the demand that keeps origin fetched (a GET only
+// reads, org-access A13); a closed or hidden page asks nothing, so nothing is fetched. A moved rev (a fetch moved a ref) loads the data at once (forced, past a
 // read already out) rather than at the next poll; a change in stale draws the Library again. now() asks at once under the same guards,
 // when the last ask is over 10 s old (renderLibrary, so opening the Library doesn't wait).
 const artRemotePing = (() => {
   let last = null, askedAt = 0, inFlight = false;
   const tick = async () => {
-    if (VIEWER || document.visibilityState !== 'visible' || !(PAGE_NOW === 'library' || TS.kind === 'artifact') || inFlight) return;
+    if (document.visibilityState !== 'visible' || !(PAGE_NOW === 'library' || TS.kind === 'artifact') || inFlight) return;
     inFlight = true;
     askedAt = Date.now();
     const c = new AbortController(), t = setTimeout(() => c.abort(), 5000);
     let j = null;
     // a failed or given-up ask is no answer: the next tick asks again
     try {
-      const r = await fetch('/api/artifact-remote', { signal: c.signal, cache: 'no-store' });
+      const r = await fetch('/api/artifact-remote', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: c.signal, cache: 'no-store' });
       j = r.ok ? await r.json() : null;
     } catch {} finally { clearTimeout(t); inFlight = false; }
     if (!j || typeof j !== 'object') return;
@@ -7898,7 +7898,8 @@ const artRemotePing = (() => {
     if (was && was.rev !== j.rev) load({ force: true });
     else if (!!was?.stale !== !!j.stale && PAGE_NOW === 'library' && DATA) renderLibrary(DATA.library);
   };
-  if (!VIEWER) { setInterval(tick, 10000); document.addEventListener('visibilitychange', () => void tick()); }
+  setInterval(tick, 10000);
+  document.addEventListener('visibilitychange', () => void tick());
   return { now() { if (Date.now() - askedAt > 10000) void tick(); }, status: () => last };
 })();
 /* library-thumbs start */
