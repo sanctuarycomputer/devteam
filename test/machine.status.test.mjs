@@ -122,10 +122,10 @@ test('status lists the operator\'s own open kit PRs, and which need it now', () 
   fs.writeFileSync(prs, JSON.stringify([
     pr(405, 'link-pr-stall-findings', { comments: [verdict('CHANGES', old, 20), { body: 'fixed', createdAt: ago(10) }, verdict('CHANGES', head, 2)] }),
     pr(356, 'operator-idle-fleets', { comments: [verdict('APPROVE', head, 3)], statusCheckRollup: [{ __typename: 'CheckRun', name: 'kit', status: 'COMPLETED', conclusion: 'FAILURE' }, { __typename: 'StatusContext', context: 'x', state: 'SUCCESS' }] }),
-    pr(400, 'fixed-since', { comments: [verdict('CHANGES', old, 5)] }),
+    pr(400, 'fixed-since', { comments: [verdict('CHANGES', old, 0.1)] }),
     pr(401, 'reviewed-on-github', { latestReviews: [{ state: 'CHANGES_REQUESTED', body: '', submittedAt: ago(1), commit: { oid: head } }] }),
     pr(402, 'approved-after', { comments: [verdict('CHANGES', head, 4)], latestReviews: [{ state: 'APPROVED', body: '', submittedAt: ago(1), commit: { oid: head } }] }),
-    pr(403, 'brand-new', { createdAt: ago(3) }),
+    pr(403, 'brand-new', { createdAt: ago(0.1) }),
     pr(404, 'waiting-long'),
     pr(406, 'pending-only', { latestReviews: [{ state: 'PENDING', body: '', submittedAt: null }], statusCheckRollup: [{ __typename: 'StatusContext', context: 'ci', state: 'ERROR' }] }),
     pr(407, 'ticket/kit-1-x'), pr(408, 'plan/g-1'), pr(409, 'chore-devteam-sync-v1.0.0'), pr(415, 'release-prep-v1.0.0'),
@@ -136,26 +136,31 @@ test('status lists the operator\'s own open kit PRs, and which need it now', () 
     // a verdict in a GitHub review's body, which GitHub only calls a comment
     pr(412, 'review-body-verdict', { latestReviews: [{ state: 'COMMENTED', body: `Verdict: CHANGES ${head}`, submittedAt: ago(1), commit: { oid: head } }] }),
     // checks still running, or cancelled by a newer run: not red
-    pr(413, 'checks-running', { createdAt: ago(3), statusCheckRollup: [{ __typename: 'CheckRun', name: 'kit', status: 'IN_PROGRESS', conclusion: '' }, { __typename: 'CheckRun', name: 'old', status: 'COMPLETED', conclusion: 'CANCELLED' }] }),
+    pr(413, 'checks-running', { createdAt: ago(0.1), statusCheckRollup: [{ __typename: 'CheckRun', name: 'kit', status: 'IN_PROGRESS', conclusion: '' }, { __typename: 'CheckRun', name: 'old', status: 'COMPLETED', conclusion: 'CANCELLED' }] }),
     // a review that only comments is no verdict
     pr(414, 'commented-only', { createdAt: ago(40), latestReviews: [{ state: 'COMMENTED', body: 'looks fine so far', submittedAt: ago(30), commit: { oid: head } }] }),
     // a verdict quoted in a reply is not one
-    pr(416, 'quoted', { createdAt: ago(2), comments: [{ body: `> Verdict: CHANGES ${head}\n\nwill fix`, createdAt: ago(1) }] }),
+    pr(416, 'quoted', { createdAt: ago(0.2), comments: [{ body: `> Verdict: CHANGES ${head}\n\nwill fix`, createdAt: ago(0.1) }] }),
     // the same gh login opened it, but not the operator (no line of its own saying so): not the operator's
     pr(417, 'owners-own', { body: 'by hand', statusCheckRollup: [{ __typename: 'CheckRun', name: 'kit', status: 'COMPLETED', conclusion: 'FAILURE' }] }),
     pr(418, 'mentions-it', { body: 'see `Opened by the box operator.` in operator.md' }),
     pr(419, 'no-body', { body: null }),
+    // pushed 40 minutes ago and nobody has looked: past the 15 minutes, in minutes
+    pr(421, 'forty-minutes', { createdAt: ago(40 / 60) }),
+    // either side of the 15 minutes, with room for the test's own run time
+    pr(422, 'thirteen-minutes', { createdAt: ago(13 / 60) }),
+    pr(423, 'seventeen-minutes', { createdAt: ago(17 / 60) }),
     // a draft isn't up for review yet
     pr(420, 'a-draft', { isDraft: true }),
   ]));
   const st = status();
   assert.equal(st.status, 0, st.stderr);
-  assert.match(st.stdout, /^machine: operator PRs: 14 open, 9 need you \(#405 changes requested, #356 CI red, #401 changes requested, #404 no review 30h, #406 CI red and no review 30h, #410 changes requested, #411 no review of its head 26h, #412 changes requested, #414 no review 30h\)$/m);
+  assert.match(st.stdout, /^machine: operator PRs: 17 open, 11 need you \(#405 changes requested, #356 CI red, #401 changes requested, #404 no review 30h, #406 CI red and no review 30h, #410 changes requested, #411 no review of its head 26h, #412 changes requested, #414 no review 30h, #421 no review 40min, #423 no review 17min\)$/m);
   // one gh call for it, on the kit's repo, by the gh login
   const calls = fs.readFileSync(asked, 'utf8').split('\n').filter((l) => l.startsWith('pr list'));
   assert.equal(calls.length, 1);
   assert.match(calls[0], /-R sanctuarycomputer\/devteam --author @me --state open --search "Opened by the box operator\." in:body .*--json \S*body\S*isDraft\S*statusCheckRollup/);
-  fs.writeFileSync(prs, JSON.stringify([pr(400, 'fixed-since', { comments: [verdict('CHANGES', old, 5)] }), pr(407, 'ticket/kit-1-x')]));
+  fs.writeFileSync(prs, JSON.stringify([pr(400, 'fixed-since', { comments: [verdict('CHANGES', old, 0.1)] }), pr(407, 'ticket/kit-1-x')]));
   assert.match(status().stdout, /^machine: operator PRs: 1 open, none need you$/m);
   fs.writeFileSync(prs, '[]');
   assert.match(status().stdout, /^machine: operator PRs: none open$/m);
