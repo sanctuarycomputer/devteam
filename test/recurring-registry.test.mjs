@@ -721,12 +721,12 @@ test('A5: a recurring-edit answer is a whole owner turn newer than the question:
   } finally { T.done(); }
 });
 
-test('A5: the owner\'s Yes in a turn is read as --choice reads a label: any case, inside quotes only when they wrap the whole turn with no quote of any kind inside (final-14b F4, final-15b F5), then the end, a space or . , !, and no invisible characters (final-12b F3, final-13b F3)', () => {
+test('A5: the owner\'s Yes in a turn is read as --choice reads a label: any case, never inside or next to a quotation mark of any kind (final-14b F4, final-15b F5, final-16b F3), then the end, a space or . , !, and no invisible characters (final-12b F3, final-13b F3)', () => {
   const T = setup('turn-case');
   try {
     const tid = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
     const jobs = {};
-    ['Yes', 'yes, add it', 'YES!', '"Yes"', '\u201cYes.\u201d'].forEach((words, i) => {
+    ['Yes', 'yes, add it', 'YES!', 'Yes. Don\u2019t wait'].forEach((words, i) => {
       const name = `y${i}`;
       const job = check({ title: `${name} job`, run: `echo ${name}` });
       const q = QID.exec(T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]).out)[0];
@@ -740,7 +740,10 @@ test('A5: the owner\'s Yes in a turn is read as --choice reads a label: any case
     // the long s (U+017F) folds to s under a case-insensitive regex; it is not the label
     const tid2 = T.ok(['thread', 'new', 'More?', '--title', 'More'], {}).split('\n')[0];
     const q = QID.exec(T.run(['thread', 'ask', tid2, '--class', 'recurring-edit', '--question', 'Add zz?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { zz: ZZ } })]).out)[0];
-    for (const words of ['Ye\u017f', 'No, yes later', '"No" yes', "'yes' please", '"Yes" is what you want me to say. No.', '\u201cYes\u201d? No.', '\u00abYes\u00bb no', 'Yes\u200bterday', 'Yes\u00adterday', 'Yes\u2060no', 'Yes\u0301', 'Yesterday', 'Yes\u2019m no', 'Yes \u2060no', 'Yes, add it\u0301', '"Yes, sure', '"Yes," you want me to say. "No."', '"Yes." He wants that. I say "no"', '\u201cYes,\u201d you say. \u201cNo.\u201d', '"Yes,\u201d you said. \u201cNo."', '\u201cYes," you say. "No.\u201d', "'Yes, don't wait'", '\u00abYes, \u2018no\u2019\u00bb', '"Yes, you say \u2018no\u2019"']) {
+    for (const words of ['Ye\u017f', 'No, yes later', '"No" yes', "'yes' please", '"Yes" is what you want me to say. No.', '\u201cYes\u201d? No.', '\u00abYes\u00bb no', 'Yes\u200bterday', 'Yes\u00adterday', 'Yes\u2060no', 'Yes\u0301', 'Yesterday', 'Yes\u2019m no', 'Yes \u2060no', 'Yes, add it\u0301', '"Yes, sure', '"Yes," you want me to say. "No."', '"Yes." He wants that. I say "no"', '\u201cYes,\u201d you say. \u201cNo.\u201d', '"Yes,\u201d you said. \u201cNo."', '\u201cYes," you say. "No.\u201d', "'Yes, don't wait'", '\u00abYes, \u2018no\u2019\u00bb', '"Yes, you say \u2018no\u2019"',
+      // any quotation mark, inside a pair or next to the Yes (final-16b F3), and a pair alone
+      '"Yes,\u201e you said. \u201eNo."', '"Yes, \u2039no\u203a"', '"Yes,\uff02 you said. \uff02No."', '"Yes,\u300c you said \u300dNo."', '"Yes,\u2033 you said. \u2033No."',
+      'Yes,\u201e you said', 'Yes\u2033 no', '\u300cYes\u300d', 'Yes.\u201d', '"Yes"', '\u201cYes.\u201d']) {
       const u = T.ok(['thread', 'say', tid2, words], {}).split('\n')[0];
       refused(T.run(['answer', q, 'Yes', '--from-turn', u]), /don't start with Yes/);
     }
@@ -1236,7 +1239,7 @@ test('A14: supervisor.md documents registering, changing and stopping a job in r
   assert.ok(threads.includes('--from-turn <u-id> --said "<their clause>"` (not a recurring-edit question: ask it fresh and take their Yes after it; see Recurring jobs)'), 'the Threads bullet excepts a recurring-edit question');
   // and Recurring jobs says which turn binds and which words are a Yes (final-13b F1, F3)
   assert.match(section, /the owner's next turn after the one that shows the question \(the `thread ask`, or a reply with `--refs question:<qid>`, naming no other question\), with no line of the thread between them, of any type: a reply that asks something else, even in plain words, the owner's own No, a resolve proposal \(`thread ready`\), a resolve or a reopen comes between/);
-  assert.match(section, /quotes count only when they wrap the whole turn/);
+  assert.match(section, /a Yes inside quotes, or with a quotation mark of any kind right before or after it, is no Yes/);
   // and that a turn answer is refused once the owner wrote anything after it, so each answer is
   // recorded before the next question is shown (final-16b F5, d-20261121-072341505)
   assert.match(section, /refused once the owner has written anything after it in the thread \(a turn, whatever it answers, a resolve with an outcome, or a reopen\)/);

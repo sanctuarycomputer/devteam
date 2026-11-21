@@ -24514,21 +24514,21 @@ const recurringRegistry = Object.freeze({
     return { onto: parents[0] };
   },
   // words that start with the label Yes, read as --choice and --read read a label: any case
-  // (final-12b F3), then the end, whitespace, or one of . , ! (final-13b F3). Quotes are taken off
-  // only when one matching pair wraps the whole trimmed turn with no quote of any kind inside
-  // (" “ ” « » ' ‘ ’: final-15b F5, so a phone's smart quotes mixed with straight ones count too),
-  // so reported speech ("Yes" is what you want me to say. No.) is no Yes; a turn holding any format or combining character (a zero-width
-  // space, a soft hyphen, an accent) is none either. The letters are spelled out, not /i, so no
-  // other letter that folds to one of them (the long s, U+017F) passes for it.
+  // (final-12b F3), then the end, whitespace, or one of . , ! (final-13b F3). A Yes inside or next to
+  // a quotation mark of any kind is none (d-20261121-072341505-supervisor, final-16b F3): any
+  // \p{Quotation_Mark} (" ' “ ” „ ‟ ‘ ’ ‚ ‛ « » ‹ › ＂ ＇ 「 」 『 』 …), and ″ and 「 」 named too,
+  // before it (so no quote wraps the turn, not even "Yes" alone) or in its word (Yes", Yes.”, Yes,„),
+  // so reported speech ("Yes" is what you want me to say. No.) is no Yes, and the owner answers on
+  // the card instead; a turn holding any format or combining character (a zero-width space, a soft
+  // hyphen, an accent) is none either. The letters are spelled out, not /i, so no other letter that
+  // folds to one of them (the long s, U+017F) passes for it.
+  QUOTE_MARK: /[\p{Quotation_Mark}\u2033\u300c\u300d]/u,
   saysYes: (said) => {
     const s = String(said ?? '');
     if (/[\p{Cf}\p{M}]/u.test(s)) return false;
-    let t = s.trim();
-    const pair = [['"', '"'], ["'", "'"], ['\u201c', '\u201d'], ['\u2018', '\u2019'], ['\u00ab', '\u00bb']].find(([o, c]) => t.length >= 2 && t.startsWith(o) && t.endsWith(c));
-    // only when no quote of any kind is inside it: "Yes," you want me to say. "No." is two quotes,
-    // not one wrapping the turn (final-14b F4), and so is "Yes,” you said. “No." (final-15b F5); an
-    // apostrophe counts too ('Yes, don't wait' stays refused, the ruling's letter)
-    if (pair && !/["'\u201c\u201d\u2018\u2019\u00ab\u00bb]/u.test(t.slice(1, -1))) t = t.slice(1, -1);
+    const t = s.trim();
+    // the Yes's own word, up to the first space: a quote mark there is before, in or right after it
+    if (recurringRegistry.QUOTE_MARK.test(t.split(/\s/u)[0])) return false;
     return /^[Yy][Ee][Ss](?:$|[\s.,!])/u.test(t);
   },
   // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1,
