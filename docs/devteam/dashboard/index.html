@@ -11210,9 +11210,11 @@ const pullRefresh = VIEWER ? null : (() => {
     ring.style.animation = '';
     place(0, { ease: true });
     el.style.opacity = '0';
-    // its transition's end, or at once when there is none (reduced motion), or a bound if it never comes
+    // reduced motion: no slide to wait for, so hidden in this same task (a timer can land frames late)
+    if (still()) { el.hidden = true; state = 'idle'; return; }
+    // its transition's end, or a bound if it never comes
     const done = () => { clearTimeout(bound); el.removeEventListener('transitionend', done); el.hidden = true; state = 'idle'; };
-    const bound = setTimeout(done, still() ? 0 : 600);
+    const bound = setTimeout(done, 600);
     el.addEventListener('transitionend', done);
   };
   // what refuses a pull from where the finger is: a control that takes the touch, or a box between it
