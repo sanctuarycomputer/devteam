@@ -1868,9 +1868,10 @@ export function createGateway(opts = {}) {
   // A sandboxed artifact can't be told from another site's page by its headers, and its bytes use
   // relative URLs. So the frame's first load (same-origin, with the session) is redirected under
   // /c/<expiry>.<session>.<mac>/, good for that one artifact folder, and its files need no cookie.
-  // The folder is main's, a worktree's, or a published tree's (the owner's wrapper shows exactly the
-  // version the public sees: spec §8).
-  const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+|tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?)\/[^/]+\//;
+  // The folder is main's, a worktree's, a draft's fetched from another machine (origin/<branch>, the
+  // branch encoded into one segment: kit-750), or a published tree's (the owner's wrapper shows
+  // exactly the version the public sees: spec §8).
+  const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+|origin\/[^/]+|tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?)\/[^/]+\//;
   // An instance's viewer, and an artifact at a published tree, may also be framed by the owner's
   // wrapper on the public name (spec §8). frame-ancestors is checked against every ancestor, and the
   // wrapper is one. Nothing else of an instance's is opened to it. The raw path, as the kit reads it.
