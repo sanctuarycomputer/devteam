@@ -7908,6 +7908,17 @@ function askLine({ thread, about } = {}) {
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  // --options takes each choice as its own value. One value holding several words joined by | , or /
+  // ("yes|no") would show the owner a single choice reading "yes|no", so it is refused with the
+  // command it meant; and a decision with one choice offers nothing to choose.
+  {
+    const opts = asList(flags.options).map(String);
+    if (opts.length === 1) {
+      const parts = opts[0].split(/\s*[|,/]\s*/).filter(Boolean);
+      if (parts.length > 1 && parts.every((x) => !/\s/.test(x))) die(`--options takes each choice as its own value: --options ${parts.map((x) => JSON.stringify(x)).join(' ')} (one value "${opts[0]}" shows the owner a single choice that reads "${opts[0]}")`);
+      if (['owner-decision', 'one-way-door'].includes(kind)) die(`--options "${opts[0]}" is one choice, so there is nothing to choose: give each choice as its own value (--options "a" "b"), or leave --options out and the owner answers in words`);
+    }
+  }
   if (asksGoalApproval({ goal: flagStr('goal'), kind, question: q, choices: jsonFlag('choices'), options: asList(flags.options), recommendation: flagStr('recommendation'), def: flagStr('default') })) die(`this asks the owner to approve ${flagStr('goal')} (a draft goal), but goal decide uses only a goal-approval answer, so a yes to a ${kind} question is wasted: ask it with ask --kind goal-approval --goal ${flagStr('goal')} --links '<the design>' (planning.md §1). If it decides one part of the design instead, ask that part in its own words, with choices that say what each does`);
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
