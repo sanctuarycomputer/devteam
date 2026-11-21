@@ -8678,7 +8678,7 @@ const TURN_ID = /^u-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 // When a proposal was made, as the log stamps it: what the owner's accept names to bind to it.
 const READY_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 // What the dashboard can point at (data-subject="<type>:<id>"); index.html's T_TYPES is the same list.
-const SUBJECT_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
+const SUBJECT_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact', 'suggestion'];
 const SUBJECT_REF = new RegExp(`^(${SUBJECT_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`);
 const TURN_REF = /^[a-z]+:[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 // Each kind's keys, what it must have, and each string's cap in bytes. artifact and preview subjects
@@ -13395,7 +13395,92 @@ function autonomySenses() {
 function autonomyData(now = Date.now()) {
   const x = autonomyContext(now);
   const weeks = efficiencyWeeks(now).map((w) => autonomyWeek(w.start, now, x));
-  return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: autonomyTrust(now), senses: autonomySenses() };
+  const senses = autonomySenses();
+  return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: autonomyTrust(now), senses, suggestions: autonomySuggestions(now, senses) };
+}
+// The Trust Score's suggestions (kit-99): at most five things the owner could do this week, each with
+// its evidence and estimated effect (weight: questions a week, or a fixed 0.5 where the log measures
+// none), highest first. Derived on read from what the kit already reads, stored nowhere; one drops out
+// as soon as its condition stops holding. Rates are over the 28 days to now. Kinds of decision appear
+// by their plain names. An id is built from kind and subject only (so it is the same every week while
+// the condition holds) and cut at 109, so suggestion:<id> fits a subject ref's 120 bytes; clashes take
+// -2, -3, assigned in kind-then-subject order, never rank order. The strategy is read only for the
+// bullet lines under its one "## Not known yet" heading (the heading the template writes), nothing else.
+function autonomySuggestions(now, senses) {
+  const from = new Date(now - 28 * 86400000).toISOString();
+  const to = new Date(now).toISOString();
+  const inWindow = (t) => isStr(t) && t >= from && t <= to;
+  const qs = questions();
+  const byId = new Map(qs.map((q) => [q.id, q]));
+  const asked = new Map();
+  for (const q of qs) if (isStr(q.class) && inWindow(q.asked_at)) asked.set(q.class, (asked.get(q.class) ?? 0) + 1);
+  const fewer = (q, waits) => {
+    const n = Math.round(q);
+    if (waits) return n < 1 ? 'fewer than one question a week stops waiting on you' : `about ${n} question${n === 1 ? ' a week stops' : 's a week stop'} waiting on you`;
+    return n < 1 ? 'fewer than one question a week' : `about ${n} fewer question${n === 1 ? '' : 's'} a week`;
+  };
+  const out = [];
+  // raise: below its effective cap (incident-fix capped as autonomyTrust caps it), agreement met, no
+  // correction in the 28 days, no trust question already open for it, and asked in the 28 days
+  const L = ladder();
+  const fix = releasesOnMerge() ? Math.max(2, rungFor('release-production')) : null;
+  const capOf = (cls) => (cls === 'incident-fix' && fix != null ? Math.min(L.classes[cls].ceiling, fix) : L.classes[cls].ceiling);
+  const corrected = new Set(calls().filter((a) => inWindow(correctionOf(a)?.at)).map((a) => a.class));
+  const trustOpen = new Set(qs.filter((q) => q.kind === 'trust' && q.status === 'open').map((q) => q.class));
+  const raised = new Set();
+  for (const row of trustTable()) {
+    const cls = row.class;
+    const n = asked.get(cls) ?? 0;
+    if (row.rung >= capOf(cls) || !row.meets_agreement || corrected.has(cls) || trustOpen.has(cls) || n < 1) continue;
+    raised.add(cls);
+    const q = n / 4;
+    const toAct = row.rung + 1 === 3;
+    const agree = row.agreement_questions.filter((id) => byId.get(id)?.agreed_by_owner).length;
+    out.push({
+      kind: 'raise', subject: cls, what: toAct ? `Let "${className(cls)}" decide and tell you` : `Let "${className(cls)}" go ahead at a deadline`,
+      evidence: `${agree} of the last ${row.agreement_questions.length} answers went with its recommendation; no corrections in 4 weeks`, effect: fewer(q, !toAct), weight: toAct ? q : q / 2,
+    });
+  }
+  // question: the oldest open question holding a ticket or a planning session
+  const holds = new Map();
+  for (const [key, qid] of heldByMap()) holds.set(qid, [...(holds.get(qid) ?? []), key]);
+  const oldest = [...holds.keys()].map((id) => byId.get(id)).filter(Boolean).sort((a, b) => a.asked_at.localeCompare(b.asked_at) || a.id.localeCompare(b.id))[0];
+  if (oldest) {
+    const plans = new Set(planners().map((p) => `plan-${p.feature}`));
+    const keys = holds.get(oldest.id);
+    const names = [...keys.filter((k) => !plans.has(k)), ...keys.filter((k) => plans.has(k)).map(() => 'a planning session')];
+    const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names.join('');
+    const h = Math.floor((now - Date.parse(oldest.asked_at)) / 3600000);
+    const age = h < 1 ? 'under an hour' : h < 48 ? `${h} hour${h === 1 ? '' : 's'}` : `${Math.floor(h / 24)} days`;
+    out.push({ kind: 'question', subject: oldest.id, what: String(oldest.question ?? '').slice(0, 120), evidence: `open ${age}; holds ${list}`, effect: `${keys.length} can start`, weight: keys.length });
+  }
+  // sense: each one needed and not connected
+  for (const name of senses.missing) out.push({ kind: 'sense', subject: name, what: `Connect ${name}`, evidence: 'needed, not connected', effect: `Senses: has ${senses.has} of ${senses.needed} → ${senses.has + 1} of ${senses.needed}`, weight: 0.5 });
+  // strategy: each bullet under "## Not known yet", read from where strategyState reads it
+  if (strategyState() === 'written') {
+    const text = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md'));
+    let under = false;
+    for (const l of String(text ?? '').split('\n').map((s) => s.trimEnd())) {
+      if (/^## /.test(l)) { under = /^## +Not known yet$/.test(l); continue; }
+      const m = under && /^- +(.+)$/.exec(l);
+      if (m) out.push({ kind: 'strategy', subject: m[1].trim(), what: `"${m[1].trim().slice(0, 120)}" is not known yet`, evidence: 'listed under Not known yet in the strategy', effect: 'goals stop being rated against a guess', weight: 0.5 });
+    }
+  }
+  // rule: asked 3 or more times in the 28 days, no owner rule, not already a raise
+  for (const [cls, n] of asked) if (n >= 3 && !ownerRuleFor(cls) && !raised.has(cls)) out.push({ kind: 'rule', subject: cls, what: `A rule for "${className(cls)}"`, evidence: `asked ${n} times in 4 weeks`, effect: fewer(n / 4, false), weight: n / 4 });
+  const ORDER = ['question', 'raise', 'rule', 'sense', 'strategy'];
+  const taken = new Set();
+  for (const s of [...out].sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind) || (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : 0))) {
+    const id = suggestionId('tr', s.kind, s.subject).slice(0, 109);
+    let u = id;
+    for (let k = 2; taken.has(u); k++) u = id.slice(0, 109 - `-${k}`.length) + `-${k}`;
+    taken.add(u);
+    s.id = u;
+  }
+  return out
+    .sort((a, b) => b.weight - a.weight || ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .slice(0, 5)
+    .map(({ id, kind, what, evidence, effect, weight }) => ({ id, kind, what, evidence, effect, weight }));
 }
 // ===== the Awareness Score (kit-242) =====
 // One week of it (start: its Monday 00:00 UTC, ms), read at E, the week's last millisecond or now:
@@ -22601,7 +22686,7 @@ async function cmdDashboard() {
 /* cmdDashboard end */
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
-  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code; every claim about code sourced with a file:line or a command; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3). Build each plan task marked `Model: fast` in a subagent on the fast model (`settings --get model_tiers`) unless the plan says `- Built here: <why>` under it (worker.md §3).',
+  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code, its line in the acceptance table\'s red seen cell; every claim about code sourced with a file:line or a command in the spec\'s Today (sources) table; a Refusals and edges section in every spec; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3). Build each plan task marked `Model: fast` in a subagent on the fast model (`settings --get model_tiers`) unless the plan says `- Built here: <why>` under it (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
