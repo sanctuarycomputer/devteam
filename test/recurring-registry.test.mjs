@@ -737,7 +737,7 @@ test('A14: supervisor.md documents registering, changing and stopping a job in r
   assert.match(section, /a Yes inside quotes, or with a quotation mark of any kind right before or after it, is no Yes/);
   // and that a turn answer is refused once the owner wrote anything after it, so each answer is
   // recorded before the next question is shown (final-16b F5, d-20261121-072341505)
-  assert.match(section, /refused once the owner has written anything after it in the thread \(a turn, whatever it answers, a resolve with an outcome, or a reopen\)/);
+  assert.match(section, /refused once the owner has written anything after it in the thread \(a turn, whatever it answers, a resolve with an outcome, a reopen, or an answer to another question shown in the thread\)/);
   assert.match(section, /record each recurring-edit answer before you show the next question/);
   const q = fs.readFileSync(path.join(kit, 'governance/quality.md'), 'utf8');
   const four = q.slice(q.search(/^## 4\. /m), q.search(/^## 5\. /m));
