@@ -109,7 +109,7 @@ const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),
 export function appendLine(P, line) {
   if (!line?.type) throw new Error('appendLine: the line needs a type');
   const by = line.by ?? 'supervisor';
-  const file = by === 'owner' || by === 'supervisor' || by.startsWith('plan-') ? `${by}-${new Date().toISOString().slice(0, 7)}.jsonl` : `${by}.jsonl`;
+  const file = by === 'owner' || by === 'supervisor' ? `${by}-${new Date().toISOString().slice(0, 7)}.jsonl` : `${by}.jsonl`;
   const dir = path.join(P.run, 'log');
   fs.mkdirSync(dir, { recursive: true });
   const target = path.join(dir, file);
@@ -163,20 +163,21 @@ export const answerLines = (P) => logLines(P).filter((l) => l.type === 'question
 export const readLedger = (P) => (fs.existsSync(P.ledger) ? JSON.parse(fs.readFileSync(P.ledger, 'utf8')) : null);
 
 // The files under P's profile that hold any of secrets, as UTF-8 or as UTF-16LE: their paths relative
-// to the profile, sorted. Every regular file is read whole as bytes, binary included; a file gone or
-// unreadable mid-scan is passed over (Chrome writes while it is read).
+// to the profile, sorted. Every regular file is read whole as bytes, binary included. Only a file or
+// folder gone between its listing and its read (ENOENT: Chrome writes while it is read) is passed over;
+// any other read error throws, and so does a missing profile, so a scan never reads clean by failing.
 export function scanProfile(P, secrets) {
   const needles = secrets.filter(Boolean).flatMap((s) => [Buffer.from(s, 'utf8'), Buffer.from(s, 'utf16le')]);
   const found = [];
   const walk = (dir) => {
     let ents;
-    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { if (e.code === 'ENOENT' && dir !== P.profile) return; throw e; }
     for (const e of ents) {
       const p = path.join(dir, e.name);
       if (e.isDirectory()) walk(p);
       else if (e.isFile()) {
         let buf;
-        try { buf = fs.readFileSync(p); } catch { continue; }
+        try { buf = fs.readFileSync(p); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
         if (needles.some((n) => buf.includes(n))) found.push(path.relative(P.profile, p));
       }
     }
@@ -202,6 +203,8 @@ function testBrowserPids() {
 // daemon and Chrome, removes each project and the temp folder, and closes the site.
 export function handoverFile() {
   before(() => {
+    // a kit tmux server reached from here could be the fleet's: the tests run with TMUX unset
+    if (process.env.TMUX) throw new Error('handoverFile: TMUX is set; run the browser-handover tests under env -u TMUX, so no daemon window can reach the fleet\'s tmux server');
     setup = (async () => {
       tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-bhand-'));
       site = await startSites();
