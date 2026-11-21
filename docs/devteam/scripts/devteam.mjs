@@ -24261,7 +24261,8 @@ const recurringRegistry = Object.freeze({
   inSettings: () => `settings.md has "recurring": the jobs live in ${recurringRegistry.path()}; move them there (it lands with a recurring-edit answer, as any job change does)`,
   // git, bounded: every call the registry makes has a timeout and is killed at it; { status, out,
   // err, timedOut, ok }. A timeout or a failure is never read as an answer. encoding null gives
-  // out as a Buffer (the bytes git printed). DEVTEAM_GIT_TIMEOUT_MS only for tests.
+  // out as a Buffer (the bytes git printed). Tests shorten it with DEVTEAM_GIT_TIMEOUT_MS;
+  // production uses 120 s, for recurringRegistry.git only (other git calls have no such bound).
   // overflow: git printed more than maxBuffer and node killed it, told apart from a timeout (final-11b F2)
   git(args, { cwd = HOME_CWD, env, encoding = 'utf8' } = {}) {
     const r = spawnSync('git', args, { cwd, env: env ? { ...process.env, ...env } : process.env, encoding: encoding ?? 'buffer', timeout: Number(process.env.DEVTEAM_GIT_TIMEOUT_MS) || 120000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
