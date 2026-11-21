@@ -10121,7 +10121,9 @@ const BRANCH_AT = /^(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*@\{)(?!.*\.lock(?:\/|$))(
 // Where a viewer may show an artifact: main, a draft's worktree (by name; draftWorktree says whether
 // it is one), a draft on an origin branch fetched from another machine (origin:<branch>), or a
 // published version by its tree id. The same forms a thread's artifact subject records.
-const ARTIFACT_AT = new RegExp(`^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99}|origin:${BRANCH_AT.source.slice(1, -1)})$`);
+// The origin: form is BRANCH_AT's body written out, so the line stands alone (tests read it alone);
+// artifact-remote's BRANCH_AT case holds the two to the same names.
+const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99}|origin:(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*@\{)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199})$/;
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
 const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for', 'kind'];
