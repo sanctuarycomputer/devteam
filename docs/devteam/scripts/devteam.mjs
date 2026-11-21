@@ -25499,8 +25499,10 @@ const recurringLock = Object.freeze({
     try { fs.linkSync(tmp, f); return true; } catch (e) { if (e.code === 'EEXIST') return false; throw e; } finally { try { fs.unlinkSync(tmp); } catch {} }
   },
   // { me, old } once ours (old: the stale lock it replaced, or null), else { held: <the lock> }.
-  // Every create is followed by a re-read a second later: two runners can both get past a stale
-  // lock's removal, and only the one whose lock is still there goes on.
+  // A stale lock is replaced in one step (a rename over it), so there is never a moment with no lock
+  // for a plain create to win in (it would win with nothing to clean up). Every create or replace is
+  // followed by a re-read a second later: two runners can both get past a stale lock, and only the
+  // one whose lock is still there goes on.
   take(checks, budget_s) {
     fs.mkdirSync(path.dirname(recurringLock.file()), { recursive: true });
     const me = { pid: process.pid, start: nowIso(), budget_s, checks, current: null };
@@ -25519,16 +25521,18 @@ const recurringLock = Object.freeze({
       // stale: taken over only when it reads the same again, so a lock another runner just wrote is
       // never removed; a change starts the round over
       if (recurringLock.text() !== text) continue;
-      // tests only: hold here, past the unchanged re-read and before the unlink, until the test opens
+      // tests only: hold here, past the unchanged re-read and before the replace, until the test opens
       // the gate (at most 30 s), so the race two runners can run past a stale lock is forced exactly
       const gate = process.env.DEVTEAM_TEST_RECURRING_UNLINK_GATE;
       if (gate) {
         fs.writeFileSync(`${gate}.waiting`, `${process.pid}\n`);
         for (const end = Date.now() + 30000; !fs.existsSync(gate) && Date.now() < end;) recurringLock.sleep(25);
       }
-      try { fs.unlinkSync(recurringLock.file()); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-      if (recurringLock.create(me)) return settle(l);
-      return { held: recurringLock.read() };
+      const f = recurringLock.file();
+      const tmp = `${f}.${process.pid}.take`;
+      fs.writeFileSync(tmp, `${JSON.stringify(me)}\n`);
+      fs.renameSync(tmp, f);
+      return settle(l);
     }
     return { held: recurringLock.read() };
   },
@@ -25552,31 +25556,35 @@ const recurringLock = Object.freeze({
     const self = realPath(fileURLToPath(import.meta.url));
     return a.some((x, i) => a[i + 1] === 'recurring' && a[i + 2] === 'run' && a[i + 3] === '--due' && realPath(x) === self);
   },
-  // whether some live process in the group carries the runner's marker in its environment
-  marked(pgid, marker) {
-    const want = `DEVTEAM_RECURRING=${marker}`;
-    const pids = [];
+  // the groups holding a live process whose marker starts with prefix (`<pid>:<start>:`, one
+  // runner's): the check it was on, and any it started after its lock was last read
+  markedGroups(prefix) {
+    const want = `DEVTEAM_RECURRING=${prefix}`;
+    const procs = [];
     if (process.platform === 'linux') {
       let names = [];
       try { names = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n)); } catch {}
       for (const n of names) {
         // the fields after the last ")" (the command can hold one) are state, ppid, pgrp
-        try { const st = fs.readFileSync(`/proc/${n}/stat`, 'utf8'); if (Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) === pgid) pids.push(Number(n)); } catch {}
+        try { const st = fs.readFileSync(`/proc/${n}/stat`, 'utf8'); procs.push([Number(n), Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2])]); } catch {}
       }
     } else {
       const r = spawnSync('ps', ['-A', '-o', 'pid=,pgid='], { encoding: 'utf8', timeout: 10000 });
-      for (const line of String(r.stdout ?? '').split('\n')) { const [p, g] = line.trim().split(/\s+/).map(Number); if (g === pgid && p > 0) pids.push(p); }
+      for (const line of String(r.stdout ?? '').split('\n')) { const [p, g] = line.trim().split(/\s+/).map(Number); if (p > 0 && g > 0) procs.push([p, g]); }
     }
-    return pids.some((p) => (processInfo(p)?.env ?? []).includes(want));
+    const groups = new Set();
+    for (const [p, g] of procs) if (g > 1 && p !== process.pid && !groups.has(g) && (processInfo(p)?.env ?? []).some((e) => e.startsWith(want))) groups.add(g);
+    return [...groups];
   },
-  // After taking over a stale lock: kill the old runner if it is one, its check group if a process
-  // there carries its marker, remove the checkouts named with its pid, and log an error run for the
-  // check it was on. checks: main's checks by name. A lock that didn't parse names nothing to trust.
+  // After taking over a stale lock: kill the old runner if it is one, every group where a process
+  // carries its marker (its pid and start), remove the checkouts named with its pid, and log an error
+  // run for the check it was on. checks: main's checks by name. A lock that didn't parse names
+  // nothing to trust.
   cleanup(old, checks) {
     if (!old || old.bad) return;
     if (old.pid !== process.pid && recurringLock.isRunner(old.pid)) try { process.kill(old.pid, 'SIGKILL'); } catch {}
     const cur = isObj(old.current) ? old.current : null;
-    if (cur && Number.isInteger(cur.pgid) && cur.pgid > 1 && typeof cur.name === 'string' && recurringLock.marked(cur.pgid, `${old.pid}:${old.start}:${cur.name}`)) try { process.kill(-cur.pgid, 'SIGKILL'); } catch {}
+    for (const pg of recurringLock.markedGroups(`${old.pid}:${old.start}:`)) try { process.kill(-pg, 'SIGKILL'); } catch {}
     const dir = path.join(mainRoot, '.worktrees');
     const mine = new RegExp(`^tmp-recurring-${old.pid}-.+-${old.pid}$`);
     let names = [];
@@ -25805,6 +25813,17 @@ const recurringRunDue = Object.freeze({
     const logFile = path.join(dir, 'runner.log');
     fs.mkdirSync(dir, { recursive: true });
     fs.closeSync(fs.openSync(logFile, 'a'));
+    // its last 64 KB kept, so what runners say there never grows without end (final-1b F3)
+    try {
+      const size = fs.statSync(logFile).size;
+      if (size > 65536) {
+        const buf = Buffer.alloc(65536);
+        const fd = fs.openSync(logFile, 'r');
+        try { fs.readSync(fd, buf, 0, 65536, size - 65536); } finally { fs.closeSync(fd); }
+        const nl = buf.indexOf(10);
+        fs.writeFileSync(logFile, nl >= 0 ? buf.subarray(nl + 1) : buf);
+      }
+    } catch {}
     const script = 'if command -v setsid >/dev/null 2>&1; then setsid "$0" "$1" recurring run --due </dev/null >>"$2" 2>&1 & else "$0" "$1" recurring run --due </dev/null >>"$2" 2>&1 & fi';
     const r = spawnSync('sh', ['-c', script, process.execPath, self, logFile], { cwd: mainRoot, env: process.env, timeout: 10000, stdio: 'ignore' });
     return r.status === 0;

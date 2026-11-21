@@ -327,16 +327,38 @@ function startWait(T) {
   child.stderr.on('data', (b) => { out += b; });
   const lines = () => { try { return fs.readFileSync(trace, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   const starts = () => lines().filter((l) => l.children.some((c) => c.join(' ') === 'recurring run --due'));
-  return { child, lines, starts, out: () => out, kill: () => { try { child.kill('SIGKILL'); } catch {} } };
+  const closed = new Promise((r) => child.on('close', r));
+  // wait gone, then every process still working in the fixture (the runner it started, and the kit
+  // children it detached), so its removal never races a write (final-1 F2)
+  const stop = async () => {
+    try { child.kill('SIGKILL'); } catch {}
+    await closed;
+    await until(() => inside(T.base).length === 0, `nothing left running in the fixture (${inside(T.base).join(', ')})`);
+  };
+  return { child, lines, starts, out: () => out, stop };
+}
+// pids whose working directory is under dir (Linux; elsewhere none are seen)
+function inside(dir) {
+  if (process.platform !== 'linux') return [];
+  const out = [];
+  for (const n of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+    try { const cwd = fs.readlinkSync(`/proc/${n}/cwd`); if (cwd === dir || cwd.startsWith(`${dir}/`)) out.push(Number(n)); } catch {}
+  }
+  return out;
 }
 
 test('A2: with a 1h check last run 61 minutes ago, wait starts one detached recurring run --due and keeps cycling', async () => {
   const T = setup('wait', { ci: check({ every: '1h', run: 'sleep 15; echo done' }) });
-  const W = { kill() {} };
+  const W = { async stop() {} };
   try {
     T.addRun('ci', { slot: iso(Date.now() - 2 * 3600000), at: iso(Date.now() - 61 * 60000) });
+    // what earlier runners said, past 64 KB: kept to its last 64 KB when a runner is started (final-1b F3)
+    const said = path.join(T.old, RUN, 'recurring', 'runner.log');
+    write(said, `${'an earlier line\n'.repeat(8000)}the last earlier line\n`);
     Object.assign(W, startWait(T));
     await until(() => T.runs('ci').length === 2 || W.child.exitCode !== null, 'the run line');
+    const kept = fs.readFileSync(said, 'utf8');
+    assert.ok(kept.length <= 65536 && kept.includes('the last earlier line\n') && kept.startsWith('an earlier line\n'), `runner.log kept to its last 64 KB (${kept.length})`);
     assert.equal(W.child.exitCode, null, `wait kept running: ${W.out()}`);
     const starts = W.starts();
     assert.equal(starts.length, 1, JSON.stringify(W.lines().map((l) => l.children)));
@@ -345,12 +367,12 @@ test('A2: with a 1h check last run 61 minutes ago, wait starts one detached recu
     assert.ok(during.length >= 3, `wait cycled while the check ran (${during.length} snapshots)`);
     // the runner logs, then writes its tail and releases the lock: let it finish before the fixture goes
     await until(() => T.readLock() === null, 'the runner finished');
-  } finally { W.kill(); T.done(); }
+  } finally { await W.stop(); T.done(); }
 });
 
 test('A3: wait starts no runner when the check ran 30 minutes ago, or while a live runner holds the lock', async () => {
   const T = setup('wait-none', { ci: check({ every: '1h' }), dd: check({ every: '1d' }) });
-  let W = { kill() {} };
+  let W = { async stop() {} };
   try {
     // dd is due (never run since it landed), but a live runner holds the lock
     T.addRun('ci', { slot: iso(Date.now() - 31 * 60000), at: iso(Date.now() - 30 * 60000) });
@@ -359,7 +381,7 @@ test('A3: wait starts no runner when the check ran 30 minutes ago, or while a li
     W = startWait(T);
     await until(() => W.lines().length >= 6 || W.child.exitCode !== null, 'six snapshots');
     assert.equal(W.starts().length, 0, 'no runner while the lock is live');
-    W.kill();
+    await W.stop();
     // without the lock, and dd stopped from main by running it: only ci 30 min ago, so nothing is due
     fs.rmSync(T.lockFile);
     T.addRun('dd', { slot: T.dueOf('dd').slot, at: iso(Date.now() - 1000) });
@@ -367,7 +389,7 @@ test('A3: wait starts no runner when the check ran 30 minutes ago, or while a li
     W = startWait(T);
     await until(() => W.lines().length >= 6 || W.child.exitCode !== null, 'six snapshots');
     assert.equal(W.starts().length, 0, 'no runner when nothing is due');
-  } finally { W.kill(); T.done(); }
+  } finally { await W.stop(); T.done(); }
 });
 
 // ===== A4, A5, A11: the lock =====
@@ -402,6 +424,44 @@ test('A5: a stale lock (its pid gone, or past its budget) is taken over by exact
       if (kind === 'budget') assert.ok(alive(pid), 'a live pid that is no runner is never killed');
       assert.equal(T.readLock(), null);
     } finally { T.done(); }
+  }
+});
+
+test('A5c: a takeover is one step, so a runner starting meanwhile never wins with nothing to clean up (final-1 F1), and it kills every group the old runner marked (final-1b F1)', async () => {
+  const T = setup('handover', { ci: check({ run: 'echo ok' }), other: check({ every: '1h' }) });
+  let g = null;
+  try {
+    const slot = iso(Date.now() - 31 * 60000);
+    T.addRun('other', { slot: iso(Date.now() - 91 * 60000), at: iso(Date.now() - 90 * 60000) });
+    const pid = T.deadPid();
+    const start = iso(Date.now() - 60000);
+    // a check group the old runner started after its lock was read: marked, but named nowhere
+    g = spawn('sleep', ['120'], { detached: true, stdio: 'ignore', env: { ...process.env, DEVTEAM_RECURRING: `${pid}:${start}:other` } });
+    let gone = false;
+    g.on('exit', () => { gone = true; });
+    T.g(['worktree', 'add', '-q', '--detach', path.join(T.wtDir, `tmp-recurring-${pid}-other-${pid}`), 'origin/main']);
+    T.putLock({ pid, start, budget_s: 600, checks: ['other'], current: { name: 'other', slot } });
+    // a holds where it takes the stale lock over; b starts and takes the lock; then a goes on
+    const gate = path.join(fs.mkdtempSync(path.join(T.base, 'gate-')), 'open');
+    const a = T.runner(['recurring', 'run', '--due'], { DEVTEAM_TEST_RECURRING_UNLINK_GATE: gate });
+    await until(() => fs.existsSync(`${gate}.waiting`) || a.child.exitCode !== null, 'a held at its takeover');
+    const b = T.runner();
+    await until(() => T.readLock()?.pid === b.child.pid || b.child.exitCode !== null, "b's lock in place");
+    fs.writeFileSync(gate, '');
+    const rs = await Promise.all([a.done, b.done]);
+    for (const r of rs) assert.equal(r.code, 0, `${r.out}${r.err}`);
+    assert.deepEqual(T.runs('ci').map(status), ['pass'], JSON.stringify(rs));
+    const errs = T.runs('other').filter((l) => status(l) === 'error');
+    assert.equal(errs.length, 1, `one error run for the stale lock's check: ${JSON.stringify(errs)} ${JSON.stringify(rs)}`);
+    assert.equal(Date.parse(errs[0].run.slot), Date.parse(slot));
+    assert.deepEqual(T.checkouts(), [], "the old runner's checkout is removed");
+    // killed, not ended on its own: it sleeps 120 s
+    for (const end = Date.now() + 10000; !gone && Date.now() < end;) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(gone, 'the marked group the lock did not name is killed');
+    assert.equal(T.readLock(), null);
+  } finally {
+    if (g?.pid) try { process.kill(-g.pid, 'SIGKILL'); } catch {}
+    T.done();
   }
 });
 
@@ -661,7 +721,7 @@ test('A5b: the takeover race forced (one runner held before its unlink while the
 
 test('A2b: a check committed to main while wait runs is started', async () => {
   const T = setup('wait-new', {});
-  const W = { kill() {} };
+  const W = { async stop() {} };
   try {
     Object.assign(W, startWait(T));
     await until(() => W.lines().length >= 3 || W.child.exitCode !== null, 'three snapshots');
@@ -672,7 +732,7 @@ test('A2b: a check committed to main while wait runs is started', async () => {
     await until(() => T.runs('late').length === 1 || W.child.exitCode !== null, 'the new job run');
     assert.equal(W.starts().length, 1, JSON.stringify(W.lines().map((l) => l.children)));
     await until(() => T.readLock() === null, 'the runner finished');
-  } finally { W.kill(); T.done(); }
+  } finally { await W.stop(); T.done(); }
 });
 
 test('A16b: a job landed and then edited to another every through answered questions starts its schedule at the edit', () => {
