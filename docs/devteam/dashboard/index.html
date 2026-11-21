@@ -759,9 +759,10 @@ try {
 /* css-misc start */
   /* a key's tooltip on keyboard focus (the mouse has its title); Escape blurs it */
   .props dt[title] { position: relative; }
-  /* the fleet line's what-is-left, on focus or a tap (the mouse has its title); it opens upward, over the switch, so nothing moves */
-  .fleet-state .fleet-left { position: relative; cursor: help; text-decoration: underline dotted; }
-  .fleet-state .fleet-left:focus::after { content: attr(title); position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 5; width: 260px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); white-space: normal; }
+  /* the fleet line's what-is-left, on focus or a tap (the mouse has its title): one box on the page's top layer, placed by fleetLeftPlace, so no strip clips it and nothing moves */
+  .fleet-state .fleet-left { cursor: help; text-decoration: underline dotted; }
+  #fleet-left-pop { position: fixed; z-index: 1000; box-sizing: border-box; width: min(280px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow-y: auto; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); }
+  #fleet-left-pop[hidden] { display: none; }
   .props dt[title]:focus-visible::after { content: attr(title); position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); white-space: normal; }
   .drawer-body .psect { margin: 0 0 12px; }
   .drawer-body .psect-body > :first-child { margin-top: 0; }
@@ -4157,6 +4158,23 @@ function fleetStateLine(f, st) {
 // string written to it: innerHTML comes back re-serialised, as disabled="" or ' for &#39;), so focus,
 // a pending confirm and a click in progress stay; a rewrite keeps focus on the same button (the confirm is Park's), since
 // the binder's Escape needs focus inside the switch.
+// The fleet line's what-is-left for a keyboard or a tap: a box on the body, kept inside the window,
+// below the word or above it when there's no room.
+function fleetLeftPlace() {
+  const el = document.activeElement?.closest?.('.fleet-left');
+  let pop = document.getElementById('fleet-left-pop');
+  if (!el) { if (pop) pop.hidden = true; return; }
+  if (!pop) { pop = document.createElement('div'); pop.id = 'fleet-left-pop'; pop.setAttribute('role', 'tooltip'); document.body.appendChild(pop); }
+  pop.textContent = el.title;
+  pop.hidden = false;
+  const at = el.getBoundingClientRect(), box = pop.getBoundingClientRect(), W = document.documentElement.clientWidth, H = window.innerHeight;
+  pop.style.left = `${Math.max(8, Math.min(at.left, W - box.width - 8))}px`;
+  pop.style.top = `${at.bottom + 6 + box.height <= H - 8 ? at.bottom + 6 : Math.max(8, at.top - 6 - box.height)}px`;
+}
+document.addEventListener('focusin', fleetLeftPlace);
+document.addEventListener('focusout', () => setTimeout(fleetLeftPlace));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.activeElement?.closest?.('.fleet-left')) document.activeElement.blur(); });
+window.addEventListener('resize', fleetLeftPlace);
 const FLEET_DRAWN = new WeakMap();
 function drawFleet() {
   const f = DATA?.fleet || {};
@@ -4173,6 +4191,7 @@ function drawFleet() {
     FLEET_DRAWN.set(el, want);
     if (had) el.querySelector(`[data-fleet="${CSS.escape(had)}"]`)?.focus({ preventScroll: true });
   }
+  fleetLeftPlace();
 }
 // One fleet op through press(): the overlay shows the mode at once, the busy line holds the switch
 // while the request is out, and a refusal shows in the switch with the mode the data's again.
