@@ -804,7 +804,7 @@ test('A5: the owner\'s Yes in a turn is read as --choice reads a label: any case
     // the long s (U+017F) folds to s under a case-insensitive regex; it is not the label
     const tid2 = T.ok(['thread', 'new', 'More?', '--title', 'More'], {}).split('\n')[0];
     const q = QID.exec(T.run(['thread', 'ask', tid2, '--class', 'recurring-edit', '--question', 'Add zz?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { zz: ZZ } })]).out)[0];
-    for (const words of ['Ye\u017f', 'No, yes later', '"No" yes', "'yes' please", '"Yes" is what you want me to say. No.', '\u201cYes\u201d? No.', '\u00abYes\u00bb no', 'Yes\u200bterday', 'Yes\u00adterday', 'Yes\u2060no', 'Yes\u0301', 'Yesterday', 'Yes\u2019m no']) {
+    for (const words of ['Ye\u017f', 'No, yes later', '"No" yes', "'yes' please", '"Yes" is what you want me to say. No.', '\u201cYes\u201d? No.', '\u00abYes\u00bb no', 'Yes\u200bterday', 'Yes\u00adterday', 'Yes\u2060no', 'Yes\u0301', 'Yesterday', 'Yes\u2019m no', 'Yes \u2060no', 'Yes, add it\u0301']) {
       const u = T.ok(['thread', 'say', tid2, words], {}).split('\n')[0];
       refused(T.run(['answer', q, 'Yes', '--from-turn', u]), /don't start with Yes/);
     }
