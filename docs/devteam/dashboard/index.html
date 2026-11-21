@@ -7753,11 +7753,22 @@ function previewLinkHtml(l, me, esc) {
 // Publishing, as a landed card shows it. The log's newest artifact-publish line (a.published) says
 // what the owner asked for, or what something wrote for them; the gateway's header says what the
 // box serves, and that is the truth. A forged line can only make a card ask, and drift says when
-// the line's tree isn't main's. Through the gateway this page is on <port>.<box>.
-function publicHere(loc, lib) {
-  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(loc?.host || '');
-  return m ? { proto: loc.protocol, port: Number(m[1]), box: m[2], project: lib?.public?.project ?? null, root: lib?.public?.root ?? null } : null;
+// the line's tree isn't main's. Through the gateway this page is on <port>.<box> or <project>.<box>.
+// This block loads alone in tests, so it reads the host itself; test/dashboard-host-links.test.mjs holds
+// it to previewHere's answer on every project-hosts@1 label.
+const PUBLIC_LABEL = /^(?!\d+$)(?!(?:term|public|www)$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+function publicHere(loc, lib, hello = typeof pageHello === 'function' ? pageHello(loc) : null) {
+  const host = loc?.host || '';
+  const project = lib?.public?.project ?? null, root = lib?.public?.root ?? null;
+  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  if (m) return { proto: loc.protocol, port: Number(m[1]), box: m[2], project, root };
+  const name = hello?.name ?? project;
+  const n = /^([^.]+)\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  if (!n || n[1] !== name || !PUBLIC_LABEL.test(name)) return null;
+  return { proto: loc.protocol, port: hello?.port ?? null, box: n[2], project, root, named: true };
 }
+// A link can be built: a project host's links name the project, so one with none in settings has none.
+const canPublish = (me) => !!me && (!me.named || !!me.project);
 function publicState(a, pub, me) {
   const rec = a.published || null;
   // main has changed since the recorded publish: what would go up is not what the record names
@@ -7767,15 +7778,16 @@ function publicState(a, pub, me) {
   // the box's copy is this project's only when it came from this checkout (a port can change)
   const ours = !!e && e.root === me.root;
   const served = ours && e.artifacts && Object.hasOwn(e.artifacts, a.slug) ? e.artifacts[a.slug] : null;
-  if (served) return { state: 'public', rec, drift, from: e.port !== me.port ? e.port : null, actions: [...(rec && served !== a.tree ? ['update'] : []), ...(rec ? ['copy'] : []), 'unpublish'] };
-  if (rec) return { state: 'not-live', rec, drift, from: null, actions: [drift ? 'review' : 'restore', 'forget'] };
+  if (served) return { state: 'public', rec, drift, from: me.port != null && e.port !== me.port ? e.port : null, actions: [...(rec && served !== a.tree ? ['update'] : []), ...(rec ? ['copy'] : []), 'unpublish'] };
+  if (rec) return { state: 'not-live', rec, drift, from: null, actions: canPublish(me) ? [drift ? 'review' : 'restore', 'forget'] : ['forget'] };
   return { state: 'none', rec, drift, from: null, actions: me.project ? ['publish'] : [] };
 }
-// The gateway's own pages, on the box's name; the public link, on public.<box>.
+// The gateway's own pages, on the box's name, by project on a project host and by port on <port>.<box>;
+// the public link, on the project's host, or on public.<box> from <port>.<box>.
 const publicLinks = (me) => ({
-  publish: (slugs) => `${me.proto}//${me.box}/public/publish?port=${me.port}${slugs.map((s) => `&slug=${encodeURIComponent(s)}`).join('')}`,
-  unpublish: (slug) => `${me.proto}//${me.box}/public/unpublish?port=${me.port}&project=${encodeURIComponent(me.project)}&slug=${encodeURIComponent(slug)}`,
-  page: (slug) => `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`,
+  publish: (slugs) => `${me.proto}//${me.box}/public/publish?${me.named ? `project=${encodeURIComponent(me.project)}` : `port=${me.port}`}${slugs.map((s) => `&slug=${encodeURIComponent(s)}`).join('')}`,
+  unpublish: (slug) => `${me.proto}//${me.box}/public/unpublish?${me.named ? '' : `port=${me.port}&`}project=${encodeURIComponent(me.project)}&slug=${encodeURIComponent(slug)}`,
+  page: (slug) => (me.named ? `${me.proto}//${me.project}.${me.box}/${encodeURIComponent(slug)}/` : `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`),
 });
 /* public-states end */
 /* library-items start */
@@ -7958,7 +7970,7 @@ function renderLibrary(lib) {
   // the gateway's pages open in a new tab this page can't later redirect
   const tab = (href, label) => `<a class="ghost" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
   const landed = (lib?.artifacts ?? []).filter((a) => a.at === 'main' && !a.error);
-  const notLive = me ? landed.filter((a) => publicState(a, PUBLIC, me).state === 'not-live') : [];
+  const notLive = canPublish(me) ? landed.filter((a) => publicState(a, PUBLIC, me).state === 'not-live') : [];
   const drifted = notLive.filter((a) => publicState(a, PUBLIC, me).drift).length;
   // Restore all in both cases (R4): what goes up is main's version, and the sentence says so
   const pubHead = !landed.length ? ''
