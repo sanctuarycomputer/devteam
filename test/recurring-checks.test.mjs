@@ -407,7 +407,8 @@ test('A11: a runner facing a live lock within its budget, or a live reused pid w
   const T = setup('live', { slow: check({ run: 'sleep 15' }), ci: check({ run: 'echo ok' }) });
   try {
     const R1 = T.runner();
-    await until(() => T.readLock()?.current?.pgid, 'the first runner mid-check');
+    // on slow (ci, first in name order, ends at once on its own)
+    await until(() => T.readLock()?.current?.name === 'slow' && T.readLock()?.current?.pgid, 'the first runner mid-check on slow');
     const held = T.readLock();
     const before = T.allLines().length;
     const co = T.checkouts();

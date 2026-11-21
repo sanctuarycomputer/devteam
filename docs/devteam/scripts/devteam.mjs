@@ -25425,8 +25425,14 @@ const recurringLock = Object.freeze({
       if (text === null) continue;
       const l = recurringLock.parse(text);
       if (recurringLock.live(l)) return { held: l };
-      // stale: taken over in kit-163 T3
-      return { held: l };
+      // stale: taken over only when it reads the same again, so a lock another runner just wrote is
+      // never removed; a change starts the round over
+      if (recurringLock.text() !== text) continue;
+      const pause = Number(process.env.DEVTEAM_TEST_RECURRING_UNLINK_PAUSE_MS);
+      if (pause > 0) recurringLock.sleep(pause);
+      try { fs.unlinkSync(recurringLock.file()); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      if (recurringLock.create(me)) return settle(l);
+      return { held: recurringLock.read() };
     }
     return { held: recurringLock.read() };
   },
@@ -25442,6 +25448,49 @@ const recurringLock = Object.freeze({
   },
   release(me) {
     if (recurringLock.mine(recurringLock.read(), me)) try { fs.unlinkSync(recurringLock.file()); } catch {}
+  },
+  // this kit's runner (an argument that is this script, then recurring run --due): never a reused
+  // pid, a --draft, or another instance's runner
+  isRunner(pid) {
+    const a = processInfo(pid)?.args ?? [];
+    const self = realPath(fileURLToPath(import.meta.url));
+    return a.some((x, i) => a[i + 1] === 'recurring' && a[i + 2] === 'run' && a[i + 3] === '--due' && realPath(x) === self);
+  },
+  // whether some live process in the group carries the runner's marker in its environment
+  marked(pgid, marker) {
+    const want = `DEVTEAM_RECURRING=${marker}`;
+    const pids = [];
+    if (process.platform === 'linux') {
+      let names = [];
+      try { names = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n)); } catch {}
+      for (const n of names) {
+        // the fields after the last ")" (the command can hold one) are state, ppid, pgrp
+        try { const st = fs.readFileSync(`/proc/${n}/stat`, 'utf8'); if (Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) === pgid) pids.push(Number(n)); } catch {}
+      }
+    } else {
+      const r = spawnSync('ps', ['-A', '-o', 'pid=,pgid='], { encoding: 'utf8', timeout: 10000 });
+      for (const line of String(r.stdout ?? '').split('\n')) { const [p, g] = line.trim().split(/\s+/).map(Number); if (g === pgid && p > 0) pids.push(p); }
+    }
+    return pids.some((p) => (processInfo(p)?.env ?? []).includes(want));
+  },
+  // After taking over a stale lock: kill the old runner if it is one, its check group if a process
+  // there carries its marker, remove the checkouts named with its pid, and log an error run for the
+  // check it was on. checks: main's checks by name. A lock that didn't parse names nothing to trust.
+  cleanup(old, checks) {
+    if (!old || old.bad) return;
+    if (recurringLock.isRunner(old.pid)) try { process.kill(old.pid, 'SIGKILL'); } catch {}
+    const cur = isObj(old.current) ? old.current : null;
+    if (cur && Number.isInteger(cur.pgid) && cur.pgid > 1 && typeof cur.name === 'string' && recurringLock.marked(cur.pgid, `${old.pid}:${old.start}:${cur.name}`)) try { process.kill(-cur.pgid, 'SIGKILL'); } catch {}
+    const dir = path.join(mainRoot, '.worktrees');
+    const mine = new RegExp(`^tmp-recurring-${old.pid}-.+-${old.pid}$`);
+    let names = [];
+    try { names = fs.readdirSync(dir).filter((n) => mine.test(n)); } catch {}
+    for (const n of names) recurringRegistry.git(['worktree', 'remove', '--force', path.join(dir, n)], { cwd: mainRoot });
+    if (names.length) recurringRegistry.git(['worktree', 'prune'], { cwd: mainRoot });
+    const sha = mainSha();
+    if (cur && typeof cur.name === 'string' && Object.hasOwn(checks, cur.name) && typeof cur.slot === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?Z$/.test(cur.slot) && sha) {
+      recurringRunDue.log(cur.name, cur.slot, sha, { status: 'error', seconds: 0, excerpt: 'the runner checking it stopped (taken over)', takenFrom: old.pid });
+    }
   },
   heldWords: (l) => (l && !l.bad ? `a runner holds the lock: pid ${l.pid} since ${l.start} (${Array.isArray(l.checks) ? l.checks.join(', ') : ''})` : `a runner holds the lock (${recurringLock.file()} reads as no lock the kit wrote)`),
 });
@@ -25618,10 +25667,10 @@ const recurringRunDue = Object.freeze({
   excerpt: (tail) => String(tail).replace(/\s+/g, ' ').trim().slice(-200),
   // one recurring-run line, as the supervisor, and the tail kept beside the newest 20
   log(name, slot, sha, r) {
-    const how = r.noCheckout ? 'no checkout' : r.killed ? `killed at ${r.timeout}s` : r.exit === undefined ? 'did not start' : `exit ${r.exit}`;
+    const how = r.takenFrom ? `taken over from runner ${r.takenFrom}` : r.noCheckout ? 'no checkout' : r.killed ? `killed at ${r.timeout}s` : r.exit === undefined ? 'did not start' : `exit ${r.exit}`;
     const run = { status: r.status, slot, sha, seconds: r.seconds, ...(r.exit !== undefined ? { exit: r.exit } : {}), ...(r.value !== undefined ? { value: r.value } : {}), excerpt: r.excerpt };
-    appendLog({ type: 'observation', source: 'recurring', kind: 'recurring-run', subject: `recurring:${name}`, detector: 'recurring', severity: 0, valence: 0, detail: `${name}: ${r.status} in ${r.seconds}s (${how})`, source_key: `recurring:${name}:${slot}:${process.pid}`, run }, 'supervisor');
-    if (r.noCheckout) return;
+    appendLog({ type: 'observation', source: 'recurring', kind: 'recurring-run', subject: `recurring:${name}`, detector: 'recurring', severity: 0, valence: 0, detail: r.takenFrom ? `${name}: error (${how})` : `${name}: ${r.status} in ${r.seconds}s (${how})`, source_key: `recurring:${name}:${slot}:${process.pid}`, run }, 'supervisor');
+    if (r.noCheckout || r.takenFrom) return;
     const dir = path.join(runPath('recurring'), name);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${slot.slice(0, 10).replace(/-/g, '')}-${slot.slice(11, 23).replace(/[:.]/g, '')}-${process.pid}.txt`), r.tail);
@@ -25668,6 +25717,7 @@ const recurringRunDue = Object.freeze({
     const { me } = t;
     process.on('exit', () => recurringLock.release(me));
     R.onSignals(me);
+    recurringLock.cleanup(t.old, Object.fromEntries(first.checks.map((c) => [c.name, c.entry])));
     if (first.problem) return;
     const sha = mainSha();
     for (const { name } of due) {
