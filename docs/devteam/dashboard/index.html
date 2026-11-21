@@ -6645,14 +6645,15 @@ function avHint() {
 // The fingerprints just seen for an artifact there (null: not known), taken only while the stage
 // shows it; a published tree never changes, so it is never checked. A draft's own comes from its
 // poll alone (avLiveReload): a slower read begun before an edit would set it back. On main, a newer
-// one loads the frame again by itself, as a draft's does (kit-750, ruling A1, superseding kit-206's
-// outline for main): a fresh frame at its src, its anchor kept. A frame loaded before any fp was
-// known only takes it. A stale /api/data answer seen after a newer one loads it once more, harmless.
+// one loads the frame again by itself with a draft's own reload (kit-750, ruling A1, superseding
+// kit-206's outline for main; kit-753): a fresh frame, on the page and #hash the owner moved to, or
+// the anchor the address carried. A frame loaded before any fp was known only takes it. A stale
+// answer seen after a newer one loads main's current page twice more (TS.fp set back to the older fp,
+// then forward at the next answer), harmless: the dashboard reads /api/data one at a time, and a viewer tab asks /api/view one at a time.
 function avFpSeen(fp, mainFp, slug, at) {
   if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at || String(at).startsWith('tree:')) return;
   if (fp && at === 'main' && fp !== TS.fp) {
-    const src = $('av-frame').getAttribute('src');
-    if (TS.fp && src) avFreshFrame('av-frame').src = src;
+    if (TS.fp) avLiveReload.reload();
     TS.fp = fp;
   }
   if (fp && !avLiveReload.draft(at)) TS.fpNow = fp;
@@ -6729,7 +6730,8 @@ const avLiveReload = (() => {
   }
   setInterval(ask, 2000);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') ask(); });
-  return { serial: () => ++serial, draft };
+  // reload is main's too: avFpSeen keeps the owner's place with it (kit-753)
+  return { serial: () => ++serial, draft, reload };
 })();
 // A preview's viewer, in a tab of its own.
 const pvViewer = (name) => `/view/preview/${encodeURIComponent(name)}`;
