@@ -6,18 +6,46 @@
 // a blocking call: the fixture site lives in this process and must keep answering.
 //
 // The fixture site's /instructions page holds deliberate prompt-injection text: it is data.
-import { before, after } from 'node:test';
+// Only Node's own modules are imported statically: this file is also the timed scan's worker (scanLoop
+// starts it with workerData.scan), and a worker must start no site, project, hook or tmux shim. So the
+// worker's branch runs first, and the modules with effects at import (node:test's hooks, kit.mjs's tmux
+// shim and environment, the site and the view fixture) are loaded only in the main thread, below it.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { Worker } from 'node:worker_threads';
+import { Worker, isMainThread, workerData, parentPort } from 'node:worker_threads';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { monoFixture } from './kit.mjs';
-import { startSites } from './sites.mjs';
-import { ws } from './browser-view-fixture.mjs';
-import { validate } from '../fixtures/browser/check.mjs';
+
+// The timed scan's worker (scanLoop): scanProfile's rules, read synchronously here so the main thread's
+// event loop, which serves the fixture site and every chain's CLI, never blocks. workerData: { scan:
+// true, profile, secrets, stop } (stop an Int32Array on a SharedArrayBuffer, 1 = stop). It posts
+// { at, found, ms } per scan: a scan every 100 ms (the next starts 100 ms after the last started, or
+// when it ends if it took longer), and once more after stop. A scan that throws posts its error as a
+// find, never as clean.
+if (!isMainThread && workerData?.scan) {
+  const { profile, secrets, stop } = workerData;
+  const once = () => {
+    const at = Date.now();
+    let found;
+    try { found = scanProfile({ profile }, secrets); } catch (e) { found = [`(the scan failed: ${e.code ?? e.message})`]; }
+    parentPort.postMessage({ at, found, ms: Date.now() - at });
+    return at;
+  };
+  while (Atomics.load(stop, 0) === 0) {
+    const at = once();
+    const wait = 100 - (Date.now() - at);
+    if (wait > 0) Atomics.wait(stop, 0, 0, wait);
+  }
+  once();
+}
+const MAIN = isMainThread || !workerData?.scan;
+const { before, after } = MAIN ? await import('node:test') : {};
+const { monoFixture } = MAIN ? await import('./kit.mjs') : {};
+const { startSites } = MAIN ? await import('./sites.mjs') : {};
+const { ws } = MAIN ? await import('./browser-view-fixture.mjs') : {};
+const { validate } = MAIN ? await import('../fixtures/browser/check.mjs') : {};
 
 export let tmp;
 // startSites(): { port, origin, username, password, code, posts(), events(), sessions(), close() }
@@ -189,15 +217,14 @@ export async function ownerLogIn(P, { S = site, to } = {}) {
   return v;
 }
 
-// C12's timed scan of P's profile for secrets, started before the answer, in a worker thread
-// (profile-scan-worker.mjs: scanProfile's rules, read synchronously there, so this thread's event loop,
-// which serves the fixture site and every chain's CLI, never blocks): a scan every 100 ms, each dated
+// C12's timed scan of P's profile for secrets, started before the answer, in a worker thread (this
+// file, its worker branch at the top): a scan every 100 ms, each dated
 // by the time it started and timed (ms), until stop(), and once more after. firstCleanAfter(t): the
 // start of the first scan from t on that found nothing, or null. stop() resolves to every scan.
 export function scanLoop(P, secrets) {
   const scans = [];
   const stop = new Int32Array(new SharedArrayBuffer(4));
-  const w = new Worker(new URL('./profile-scan-worker.mjs', import.meta.url), { workerData: { profile: P.profile, secrets, stop } });
+  const w = new Worker(new URL(import.meta.url), { workerData: { scan: true, profile: P.profile, secrets, stop } });
   w.on('message', (m) => scans.push(m));
   const ended = new Promise((resolve) => { w.once('exit', resolve); w.once('error', (e) => { scans.push({ at: Date.now(), found: [`(the scan worker failed: ${e.message})`], ms: 0 }); resolve(); }); });
   return {
@@ -237,7 +264,7 @@ export async function viewSocket(P) {
 // envelope v, id, type, op, at, by (and channel for the owner) filled in where line leaves them out.
 // by defaults to supervisor; at to now, after the file's last line; id to <prefix>-<date>-<time>-<by>
 // from at. Taken under the file's lock as the kit takes it. Returns the line written.
-const ID_PREFIX = JSON.parse(fs.readFileSync(new URL('../../docs/devteam/schema/log.schema.json', import.meta.url), 'utf8'))['x-id'].prefix;
+const ID_PREFIX = MAIN ? JSON.parse(fs.readFileSync(new URL('../../docs/devteam/schema/log.schema.json', import.meta.url), 'utf8'))['x-id'].prefix : null;
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 export function appendLine(P, line) {
   if (!line?.type) throw new Error('appendLine: the line needs a type');
