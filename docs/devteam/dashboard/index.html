@@ -6566,7 +6566,7 @@ function avHeader() {
   avPubDraw();
 }
 // Where an artifact's page is served: main, a draft's worktree, or a published version by its tree.
-const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).startsWith('tree:') ? `tree/${String(at).slice(5)}` : `wt/${encodeURIComponent(at)}`}/${slug}/`;
+const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).startsWith('tree:') ? `tree/${String(at).slice(5)}` : String(at).startsWith('origin:') ? `origin/${encodeURIComponent(String(at).slice(7))}` : `wt/${encodeURIComponent(at)}`}/${slug}/`;
 // Its viewer, in a tab of its own.
 const artViewer = (slug, at) => `/view/artifact/${encodeURIComponent(slug)}${at && at !== 'main' ? `?${new URLSearchParams({ at })}` : ''}`;
 // The stage's lens state (spec §4, §6): what is on the stage, where its lens's messages may go (an
@@ -6644,9 +6644,17 @@ function avHint() {
 }
 // The fingerprints just seen for an artifact there (null: not known), taken only while the stage
 // shows it; a published tree never changes, so it is never checked. A draft's own comes from its
-// poll alone (avLiveReload): a slower read begun before an edit would set it back.
+// poll alone (avLiveReload): a slower read begun before an edit would set it back. On main, a newer
+// one loads the frame again by itself, as a draft's does (kit-750, ruling A1, superseding kit-206's
+// outline for main): a fresh frame at its src, its anchor kept. A frame loaded before any fp was
+// known only takes it. A stale /api/data answer seen after a newer one loads it once more, harmless.
 function avFpSeen(fp, mainFp, slug, at) {
   if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at || String(at).startsWith('tree:')) return;
+  if (fp && at === 'main' && fp !== TS.fp) {
+    const src = $('av-frame').getAttribute('src');
+    if (TS.fp && src) avFreshFrame('av-frame').src = src;
+    TS.fp = fp;
+  }
   if (fp && !avLiveReload.draft(at)) TS.fpNow = fp;
   if (mainFp) TS.mainFpNow = mainFp;
   avHint();
@@ -7755,7 +7763,8 @@ const PEEK_ART_CTX = () => ({ previewState, artHref, artViewer, pvViewer, fileHr
 /* peek-artifacts end */
 // The Library (kit-92): one .cards grid of libraryItems kept by the page's Kind and Goal filters, in kind order;
 // above it, only when there is something to say, #lib-top: where publishing happens, or one confirm for every
-// published artifact not live on this box, and the notice for a box whose gateway doesn't serve previews.
+// published artifact not live on this box, the notice for a box whose gateway doesn't serve previews, and,
+// when the last fetch of origin failed, that drafts from other machines may be out of date (kit-750).
 function renderLibrary(lib) {
   const items = libraryItems({ ...(DATA ?? {}), library: lib }, Date.now(), { previewState, artHref, artViewer, pvViewer, fileHref });
   // one per artifact and preview card
@@ -7775,8 +7784,13 @@ function renderLibrary(lib) {
     : !me?.project ? '<p class="small muted lib-pub">To publish from here, set <code>project</code> in settings.md: it is part of every public link.</p>'
     : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50).map((a) => a.slug)), 'Restore all')}</p>` : '';
   const pvNote = onBoxWithout && (lib?.previews ?? []).length ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : '';
+  // drafts from other machines (kit-750): the last fetch of origin failed; git's own words only in the title
+  if (PAGE_NOW === 'library') artRemotePing.now();
+  const rs = artRemotePing.status();
+  const staleNote = rs?.stale ? `<p class="small lib-pub" title="${esc(rs.error ?? '')}">Drafts from other machines may be out of date: this machine couldn't reach ${rs.host ? esc(rs.host) : "the project's remote"}${rs.fetched_at ? ` (last tried ${esc(when(rs.fetched_at))})` : ''}${rs.next_at ? `; it tries again ${esc(when(rs.next_at))}` : ''}.</p>` : '';
   const top = $('lib-top');
-  if (top.dataset.drawn !== pubHead + pvNote) { top.innerHTML = pubHead + pvNote; top.dataset.drawn = pubHead + pvNote; top.hidden = !(pubHead + pvNote); }
+  const topHtml = staleNote + pubHead + pvNote;
+  if (top.dataset.drawn !== topHtml) { top.innerHTML = topHtml; top.dataset.drawn = topHtml; top.hidden = !topHtml; }
   const KIND = Object.fromEntries(LIB_KINDS.map(([k, label, icon]) => [k, { label, icon }]));
   // the worktree truncated in the head
   const wtOf = (at) => `<span class="lib-wt small muted">in ${libWtLink(at)}</span>`;
@@ -7789,7 +7803,7 @@ function renderLibrary(lib) {
     // the landed row gives the publish state, the shown row (the newest draft, else the landed) the rest
     const ps = x.landed && !x.landed.error ? publicState(x.landed, PUBLIC, me) : null;
     const badges = [
-      x.art && x.art.at !== 'main' ? `<span class="badge amber">draft</span>${wtOf(x.art.at)}` : '',
+      x.art && x.art.at !== 'main' ? `<span class="badge amber">draft</span>${x.art.remote ? `<span class="lib-wt small muted">from another machine · <code>${esc(x.art.branch)}</code></span>` : wtOf(x.art.at)}` : '',
       libPubBadge(ps),
       x.pstate ? LIB_PV_BADGE[x.pstate.state] : '',
       x.error ? '<span class="badge high">broken</span>' : '',
@@ -7815,10 +7829,12 @@ function renderLibrary(lib) {
     // an artifact's meta: the session that drew it (a link that opens it), what it is for, when
     const a = x.art && !x.error ? x.art : null;
     const meta = !a ? '' : [a.by ? `<span class="lib-by">drawn by ${linkify(a.by)}</span>` : '', forOf(a.for), a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
+    // a worktree draft here that hides the same slug pushed from another machine (kit-750: local wins)
+    const alsoRemote = x.art?.remote_branches?.length ? `<div class="lib-meta small muted">Also pushed from another machine on ${x.art.remote_branches.map((b) => `<code>${esc(b)}</code>`).join(', ')}; this machine's worktree is shown.</div>` : '';
     return `<div class="card lib-card" data-lib-id="${esc(x.id)}" data-kind="${esc(x.kind)}"${p ? ` data-preview="${esc(p.name)}"` : ''}${said}>`
       + `<div class="card-head"><i class="icon-${k.icon}" aria-hidden="true"></i>${title}${badges}${copy}${open}${menuOf(x.id, [], `lib/${x.id}`, menuExtra)}</div>`
       + libThumb(x, pvHere)
-      + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}${pub}${details}${meta ? `<div class="lib-meta small muted">${meta}</div>` : ''}</div></div>`;
+      + `<div class="lib-body">${x.summary ? `<div class="lib-sum">${esc(x.summary)}</div>` : ''}${pub}${details}${meta ? `<div class="lib-meta small muted">${meta}</div>` : ''}${alsoRemote}</div></div>`;
   };
   const f = filtersNow('library');
   const cards = items.filter((x) => libraryKeep(x, f)).map((x) => [x.id, libraryCard(x)]);
@@ -7857,6 +7873,35 @@ function renderLibrary(lib) {
   thumbsWatch(grid);
   avBarPoll();
 }
+// The Library's ask of the dashboard's fetch of origin (kit-750): while the page (a viewer tab too) is
+// seen and shows the Library or an artifact on its stage, a POST of /api/artifact-remote every 10 s,
+// one ask at a time, given up after 5 s. The POST is the demand that keeps origin fetched (a GET only
+// reads, org-access A13); a closed or hidden page asks nothing, so nothing is fetched. A moved rev (a fetch moved a ref) loads the data at once (forced, past a
+// read already out) rather than at the next poll; a change in stale draws the Library again. now() asks at once under the same guards,
+// when the last ask is over 10 s old (renderLibrary, so opening the Library doesn't wait).
+const artRemotePing = (() => {
+  let last = null, askedAt = 0, inFlight = false;
+  const tick = async () => {
+    if (document.visibilityState !== 'visible' || !(PAGE_NOW === 'library' || TS.kind === 'artifact') || inFlight) return;
+    inFlight = true;
+    askedAt = Date.now();
+    const c = new AbortController(), t = setTimeout(() => c.abort(), 5000);
+    let j = null;
+    // a failed or given-up ask is no answer: the next tick asks again
+    try {
+      const r = await fetch('/api/artifact-remote', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: c.signal, cache: 'no-store' });
+      j = r.ok ? await r.json() : null;
+    } catch {} finally { clearTimeout(t); inFlight = false; }
+    if (!j || typeof j !== 'object') return;
+    const was = last;
+    last = j;
+    if (was && was.rev !== j.rev) load({ force: true });
+    else if (!!was?.stale !== !!j.stale && PAGE_NOW === 'library' && DATA) renderLibrary(DATA.library);
+  };
+  setInterval(tick, 10000);
+  document.addEventListener('visibilitychange', () => void tick());
+  return { now() { if (Date.now() - askedAt > 10000) void tick(); }, status: () => last };
+})();
 /* library-thumbs start */
 // The Library's thumbnails (kit-92): a box with a frame source (data-thumb-src) gets a sandboxed, inert frame
 // while it is in view, at most THUMB_MAX at once in all (an open peek's box first, then the grid's, top first);
