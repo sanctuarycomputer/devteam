@@ -188,6 +188,42 @@ test('pull to refresh: past the threshold reads at once, spins until the read la
     await soon(`window.__dataReads === ${n0 + 1}`, 'the next pull reads');
   });
 
+  // a redraw can replace the element the finger started on; its touch events then stop reaching document
+  const UNDER = `(() => { const d = document.createElement('div'); d.dataset.probe = '1'; d.id = 'pull-gone'; d.style.cssText = 'position:absolute;top:150px;left:0;width:390px;height:150px;z-index:50'; document.body.append(d); return true; })()`;
+  await t.test('the touched element removed mid-pull: the pull still follows and refreshes', async () => {
+    const n0 = await reads(p);
+    await p.ev(UNDER);
+    await pull(p, { dy: 120, lift: false });
+    await p.ev(FRAMES);
+    const a = await p.ev(SPIN);
+    assert.ok(a, 'a spinner mid-pull');
+    await p.ev(`document.getElementById('pull-gone').remove(), true`);
+    await touch(p, 'touchMove', 195, 420);
+    await p.ev(FRAMES);
+    const b = await p.ev(SPIN);
+    assert.ok(b && b.bottom > a.bottom, 'it still follows the finger');
+    await touch(p, 'touchEnd', 195, 420);
+    await soon(`window.__dataReads === ${n0 + 1}`, 'the release refreshes');
+    await soon(`${SPIN} === null && pullRefresh.state() === 'idle'`, 'the spinner gone');
+    await pull(p, { dy: 220 });
+    await soon(`window.__dataReads === ${n0 + 2}`, 'the next pull reads');
+  });
+
+  await t.test('the touched element removed mid-pull and the touch cancelled: no read, the spinner goes', async () => {
+    const n0 = await reads(p);
+    await p.ev(UNDER);
+    await pull(p, { dy: 220, lift: false });
+    await p.ev(FRAMES);
+    assert.ok(await p.ev(SPIN), 'a spinner mid-pull');
+    await p.ev(`document.getElementById('pull-gone').remove(), true`);
+    await p.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] });
+    await soon(`${SPIN} === null && pullRefresh.state() === 'idle'`, 'the spinner gone');
+    await settle();
+    assert.equal(await reads(p), n0, 'no read');
+    await pull(p, { dy: 220 });
+    await soon(`window.__dataReads === ${n0 + 1}`, 'the next pull reads');
+  });
+
   await t.test('scrolled down: a pull scrolls, reads nothing', async () => {
     await p.ev('scrollTo(0, 400)');
     const n0 = await reads(p);
