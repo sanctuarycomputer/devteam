@@ -206,6 +206,7 @@ test('artifact remote safe: BRANCH_AT takes branch names git and a URL can carry
   const ctx = vm.createContext({});
   vm.runInContext(`${decl('BRANCH_AT')}\n${decl('ARTIFACT_AT')}\nglobalThis.R = { BRANCH_AT, ARTIFACT_AT };`, ctx);
   const { BRANCH_AT, ARTIFACT_AT } = ctx.R;
+  assert.ok(ARTIFACT_AT.source.includes(`|origin:${BRANCH_AT.source.slice(1, -1)})`), 'S6: ARTIFACT_AT\'s origin: form is BRANCH_AT written out');
   for (const b of ['ticket/far-01', 'a.b/c-d_e', 'main', 'plan/x', 'v1.2.3', `a${'b'.repeat(199)}`]) {
     assert.ok(BRANCH_AT.test(b), `S6: takes ${b}`);
     assert.ok(ARTIFACT_AT.test(`origin:${b}`), `S6: at origin:${b}`);
