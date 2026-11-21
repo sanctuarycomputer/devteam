@@ -10339,7 +10339,7 @@ function artifactVersions(slug) {
       const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
       let commit = null;
       try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
-      if (a.remote) return { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: git(['rev-parse', '--verify', '-q', `refs/devteam-remote/${a.branch}^{commit}`], mainRoot), time: a.updated_at, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
+      if (a.remote) return { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: a.commit, time: a.updated_at, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
       return { kind: 'draft', at: a.at, worktree: a.at, commit, time: a.updated_at, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
     });
   const ref = mainRef();
@@ -10451,7 +10451,7 @@ function draftArtifacts(landed = landedArtifacts()) {
   const nextCache = {}, nextTrees = {};
   const onMain = new Map();
   const mainHas = (slug, tree) => {
-    if (!onMain.has(slug)) { const a = treeFolderArgs(ref, slug); onMain.set(slug, { now: treeNow(git(a.now, mainRoot)), log: git(a.log, mainRoot) }); }
+    if (!onMain.has(slug)) { const a = treeFolderArgs(msha, slug); onMain.set(slug, { now: treeNow(git(a.now, mainRoot)), log: git(a.log, mainRoot) }); }
     const m = onMain.get(slug);
     return tree === m.now || treeInHistory(m.log, slug, tree);
   };
@@ -10466,12 +10466,15 @@ function draftArtifacts(landed = landedArtifacts()) {
       if (merged !== 0 && merged !== 1) continue;
       kept = [];
       if (merged === 1) {
-        const base = git(['merge-base', msha, sha], mainRoot);
+        const mb = spawnSync('git', ['merge-base', msha, sha], { cwd: mainRoot, encoding: 'utf8' });
+        if (mb.status !== 0 && mb.status !== 1) continue;
+        const base = mb.status === 0 ? mb.stdout.trim() : null;
         let slugs;
         if (base) {
-          const names = git(['diff', '--name-only', '--no-renames', base, sha, '--', ARTIFACTS_REL], mainRoot);
+          // -z: a path with a non-ASCII byte comes as it is, never quoted
+          const names = git(['diff', '-z', '--name-only', '--no-renames', base, sha, '--', ARTIFACTS_REL], mainRoot);
           if (names === null) continue;
-          slugs = names.split('\n').map((n) => n.slice(ARTIFACTS_REL.length + 1).split('/')[0]);
+          slugs = names.split('\0').filter(Boolean).map((n) => n.slice(ARTIFACTS_REL.length + 1).split('/')[0]);
         } else {
           const ls = git(['ls-tree', sha, `${ARTIFACTS_REL}/`], mainRoot);
           if (ls === null) continue;
@@ -10493,7 +10496,7 @@ function draftArtifacts(landed = landedArtifacts()) {
         d = { ...describeArtifact(slug, at, src), error: src.error };
       }
       nextTrees[tree] = d;
-      const row = { ...d, at, branch: b, remote: true, tree, updated_at: new Date(date).toISOString() };
+      const row = { ...d, at, branch: b, remote: true, tree, commit: sha, updated_at: new Date(date).toISOString() };
       const l = local.get(slug);
       if (l) (l.remote_branches ??= []).push(b);
       else remote.push(row);
@@ -20824,9 +20827,9 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
   // the remote's host, for the page's words: scp form, a URL's; a local path or file:// has none
   const host = (() => {
     const s = String(url ?? '').trim();
-    const u = /^([a-z][a-z0-9+.-]*):\/\/(?:[^@/\s]*@)?([^/:?#\s]+)/i.exec(s);
+    const u = /^([a-z][a-z0-9+.-]*):\/\/(?:[^/\s]*@)?(\[[^\]\s]+\]|[^/:?#\s@]+)/i.exec(s);
     if (u) return u[1].toLowerCase() === 'file' ? null : u[2].toLowerCase();
-    const scp = /^[^@/\s]+@([^:/\s]+):/.exec(s);
+    const scp = /^(?:[^@/\s]+@)?([^:/\s@]+):(?!\/\/)/.exec(s);
     return scp ? scp[1].toLowerCase() : null;
   })();
   // running: a fetch is under way, from the refs read before it to the one after (child is set only
@@ -20842,7 +20845,8 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
     const ssh = env.GIT_SSH_COMMAND || git(['config', '--get', 'core.sshCommand'], root) ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
     const r = await new Promise((resolve) => {
       let errText = '', done = false, timedOut = false, term = null, kill = null;
-      const finish = (v) => { if (done) return; done = true; clearTimeout(term); clearTimeout(kill); child = null; resolve(v); };
+      // after a timeout the SIGKILL stays armed: what else in the group ignored SIGTERM goes too
+      const finish = (v) => { if (done) return; done = true; clearTimeout(term); if (!timedOut) clearTimeout(kill); child = null; resolve(v); };
       try {
         child = spawn('git', ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--prune', '--refmap=', 'origin', `+refs/heads/${main}:refs/remotes/origin/${main}`, '+refs/heads/*:refs/devteam-remote/*'], { cwd: root, env: { ...GIT_ENV, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, stdio: ['ignore', 'ignore', 'pipe'], detached: true });
       } catch (e) { return finish({ ok: false, error: String(e?.message ?? e) }); }
@@ -20854,7 +20858,7 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
       term = setTimeout(() => {
         timedOut = true;
         try { process.kill(-pid, 'SIGTERM'); } catch {}
-        kill = setTimeout(() => { try { process.kill(-pid, 0); process.kill(-pid, 'SIGKILL'); } catch {} finish({ ok: false, error: `no answer from origin in ${Math.round(TIMEOUT_MS / 1000)} s` }); }, GRACE_MS);
+        kill = setTimeout(() => { try { process.kill(-pid, 0); process.kill(-pid, 'SIGKILL'); } catch {} kill = null; finish({ ok: false, error: `no answer from origin in ${Math.round(TIMEOUT_MS / 1000)} s` }); }, GRACE_MS);
       }, TIMEOUT_MS);
     });
     endedAt = Date.now();
@@ -20884,7 +20888,7 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
       return { path: l.slice(tab + 1), mode, type, oid, size: Number(size) || 0, buf: null, read() { return this.buf; } };
     });
     for (const e of entries) {
-      if (e.type !== 'blob' || !['artifact.json', 'index.html'].includes(e.path)) continue;
+      if (e.type !== 'blob' || !['artifact.json', 'index.html'].includes(e.path) || e.size > ARTIFACT_FILE_MAX) continue;
       const b = await run(['cat-file', 'blob', e.oid], 'buffer');
       if (b.code !== 0) return null;
       e.buf = b.out;
@@ -20910,7 +20914,9 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
       return { remote, host, started_at: iso(startedAt), fetched_at: iso(endedAt), ok: lastOk, stale: lastOk === false, error: lastError, next_at: remote ? iso(Math.max(due(), Date.now())) : null, rev };
     },
     resolve,
-    stop() { clearTimeout(timer); timer = null; if (child) try { process.kill(-child.pid, 'SIGKILL'); } catch {} },
+    // at exit: a fetch under way gets SIGTERM, so git removes its own locks; it is its own group and
+    // ends by itself without us
+    stop() { clearTimeout(timer); timer = null; if (child) try { process.kill(-child.pid, 'SIGTERM'); } catch {} },
   };
 }
 /* cmdDashboard start */

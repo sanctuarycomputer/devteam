@@ -34,7 +34,8 @@ const art = (title, extra = {}) => ({
 });
 
 // A git on the dashboard's PATH. Every fetch is logged as `<ms> start <cwd>|<prompt>|<askpass>|<ssh askpass>|<ssh command>|<argv>`
-// and `<ms> end <status>`; with <dir>/hang present it starts `sleep 60` as a child, logs `<ms> hang <child pid>`, and waits on it.
+// and `<ms> end <status>`; with <dir>/hang present it starts `sleep 60` as a child, logs `<ms> hang <child pid>`, and waits on it;
+// a SIGTERM there logs `<ms> term` (a SIGKILL logs nothing).
 // Times come from node (portable); argv is logged one arg per | -separated field after the env.
 function spyGit(F) {
   const dir = path.join(F.base, 'git-spy');
@@ -44,7 +45,7 @@ function spyGit(F) {
 if [ "$1" = fetch ] || { [ "$1" = -c ] && printf '%s\\n' "$@" | grep -qx fetch; }; then
   a=""; for x in "$@"; do a="$a $x"; done
   printf '%s start %s|%s|%s|%s|%s|%s\\n' "$(${now})" "$PWD" "\${GIT_TERMINAL_PROMPT-unset}" "\${GIT_ASKPASS-unset}" "\${SSH_ASKPASS-unset}" "\${GIT_SSH_COMMAND-unset}" "\${a# }" >> "${log}"
-  if [ -f "${dir}/hang" ]; then sleep 60 </dev/null & c=$!; printf '%s hang %s\\n' "$(${now})" "$c" >> "${log}"; wait $c; exit 1; fi
+  if [ -f "${dir}/hang" ]; then sleep 60 </dev/null & c=$!; onterm() { printf '%s term\\n' "$(${now})" >> "${log}"; kill $c 2>/dev/null; exit 1; }; trap onterm TERM; printf '%s hang %s\\n' "$(${now})" "$c" >> "${log}"; wait $c; exit 1; fi
   "${REAL_GIT}" "$@"; s=$?
   printf '%s end %s\\n' "$(${now})" "$s" >> "${log}"
   exit $s
@@ -56,14 +57,14 @@ exec "${REAL_GIT}" "$@"
   const fetches = () => {
     const res = [];
     for (const l of lines()) {
-      const m = /^(\d+) (start|end|hang) ?(.*)$/.exec(l);
+      const m = /^(\d+) (start|end|hang|term) ?(.*)$/.exec(l);
       if (!m) continue;
       if (m[2] === 'start') {
         const [cwd, prompt, askpass, sshAsk, sshCmd, ...argv] = m[3].split('|');
-        res.push({ start: Number(m[1]), end: null, status: null, hang: null, cwd, prompt, askpass, sshAsk, sshCmd, argv: argv.join('|') });
+        res.push({ start: Number(m[1]), end: null, status: null, hang: null, term: null, cwd, prompt, askpass, sshAsk, sshCmd, argv: argv.join('|') });
       } else if (res.length) {
         const f = res[res.length - 1];
-        if (m[2] === 'hang') f.hang = { at: Number(m[1]), pid: Number(m[3]) }; else { f.end = Number(m[1]); f.status = Number(m[3]); }
+        if (m[2] === 'hang') f.hang = { at: Number(m[1]), pid: Number(m[3]) }; else if (m[2] === 'term') f.term = Number(m[1]); else { f.end = Number(m[1]); f.status = Number(m[3]); }
       }
     }
     return res;
@@ -308,6 +309,14 @@ test('artifact remote drafts: an origin branch that changes an artifact shows as
   assert.equal(page.status, 200, 'D1: served');
   assert.equal(page.text, F.g(['cat-file', 'blob', `${tree}:index.html`], other.dir), 'D1: the branch blob, byte for byte');
   assert.equal((await bytes(B, '/artifact/origin/ticket%2Ffar-01/far-mock/style.css')).text, 'p { color: red }', 'D1: its other files');
+  // the viewer's reads of it (task-3 F5): its version, and its fingerprint by the async lookup
+  const tip = F.g(['rev-parse', 'origin/ticket/far-01'], other.dir);
+  const vers = await getJson(B, '/api/artifact-versions?slug=far-mock');
+  assert.equal(vers.status, 200, 'D1: its versions');
+  assert.deepEqual(vers.body.versions.find((v) => v.at === 'origin:ticket/far-01'), { kind: 'draft', at: 'origin:ticket/far-01', worktree: 'origin:ticket/far-01', branch: 'ticket/far-01', commit: tip, time: r1.updated_at, fp: r1.fp, url: '/artifact/origin/ticket%2Ffar-01/far-mock/' }, 'D1: the remote version');
+  const fpAt = (at) => getJson(B, `/api/artifact-fp?${new URLSearchParams({ slug: 'far-mock', at })}`);
+  assert.deepEqual(await fpAt('origin:ticket/far-01'), { status: 200, body: { fp: r1.fp, at: 'origin:ticket/far-01' } }, "D1: its fp, the listing's");
+  assert.equal((await fpAt('origin:ticket/none')).status, 404, 'D1: no such branch is gone, not a failure');
   // D2: never a checkout, and no configured remote-tracking ref moved
   assert.deepEqual(snapshot(F), before, 'D2: no worktree, branch, index, file or remote-tracking ref of the checkout changed');
   assert.deepEqual(dirsNamed(F.old, 'far-mock'), [], 'D2: no far-mock folder on disk');
@@ -345,6 +354,7 @@ test('artifact remote drafts: an origin branch that changes an artifact shows as
   other.del('ticket/old-base');
   await within(L, async () => !row(await library(B), 'far-mock', 'origin:ticket/far-01'), 'D5: dropped');
   assert.equal((await bytes(B, '/artifact/origin/ticket%2Ffar-01/far-mock/')).status, 404, 'D5: no longer served');
+  assert.equal((await getJson(B, `/api/artifact-fp?${new URLSearchParams({ slug: 'far-mock', at: 'origin:ticket/far-01' })}`)).status, 404, "D5: the viewer's poll says it is gone");
   assert.doesNotMatch(refsIn(F, 'refs/devteam-remote'), /far-01|old-base/, 'D5: its ref pruned');
   assert.equal(F.g(['for-each-ref', '--format=%(objectname)', 'refs/remotes/origin/ticket/old-base'], F.old), tracking, "D5: the checkout's own remote-tracking ref left alone");
   assert.ok(spy.fetches().length >= 1);
@@ -362,7 +372,7 @@ test('artifact remote safe: bounded, one at a time, backs off and says so, refs 
   other.push('bad/manifest', 'bad-manifest', { 'artifact.json': '{"v": 2}', 'index.html': '<p>x</p>' });
   other.push('ok/cdn', 'cdn-mock', art('cdn', { 'index.html': '<!doctype html><script src="https://cdn.jsdelivr.net/npm/react/umd/react.production.min.js"></script><p>cdn</p>' }));
   F.g(['fetch', '-q', 'origin'], F.old);
-  const { B } = await start();
+  const { B, dash } = await start();
   const before = snapshot(F);
   const stop = demand(B);
   t.after(stop);
@@ -417,6 +427,14 @@ test('artifact remote safe: bounded, one at a time, backs off and says so, refs 
   await within(5000, async () => { const s = await remoteStatus(B); return s.stale === false && s.ok === true; }, 'S3: stale cleared');
   // S7: a cross-site ask refused
   assert.equal((await fetch(`${B}/api/artifact-remote`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, 'S7: a cross-site ask');
+  // S2 at exit: a fetch under way when the dashboard ends is sent SIGTERM, so git removes its own
+  // locks, never a bare SIGKILL (task-2 F1)
+  const n1 = spy.fetches().length;
+  spy.hang(true);
+  const last = await within(5000, async () => spy.fetches().slice(n1).find((f) => f.hang), 'S2: a fetch under way at exit');
+  await dash.stop();
+  await within(3000, async () => spy.fetches().find((f) => f.start === last.start)?.term, 'S2: the fetch under way at exit got SIGTERM');
+  spy.hang(false);
 });
 
 test('artifact remote safe: with no origin remote nothing is fetched, and the route says so', { timeout: 120000 }, async (t) => {
