@@ -8481,9 +8481,12 @@ async function helloLoad() {
   h = h && typeof h === 'object' ? h : null;
   const json = JSON.stringify(h);
   if (json === HELLO_JSON) return;
+  // who this dashboard is decides the Library's links, so a change of name or port redraws it
+  const moved = HELLO?.name !== h?.name || HELLO?.port !== h?.port;
   HELLO = h;
   HELLO_JSON = json;
   if (DATA) renderOverview();
+  if (DATA && moved && typeof PAGE_NOW !== 'undefined' && PAGE_NOW === 'library') renderLibrary(DATA.library);
 }
 // "2 min ago", as the hub says it
 function ovAgo(iso) {
