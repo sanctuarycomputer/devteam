@@ -288,6 +288,13 @@ exit 0
         "final": {
           "first_passes": 1,
           "rejected": 0,
+          "undated": 1,
+          "last_7d": {
+            "first_passes": 0,
+            "rejected": 0,
+            "rejection_rate": null,
+            "top_blocking_rules": []
+          },
           "rejection_rate": 0,
           "top_blocking_rules": [],
           "top_blocking_categories": []

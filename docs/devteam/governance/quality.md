@@ -85,12 +85,13 @@ project/reviews/<feature>/graph-<pass>[<track>].md            graph (on the plan
 project/reviews/<design-slug>/design-<pass>[<track>].md       design (on the plan branch)
 ```
 
-`<track>` is empty for the first independent review, `b`, `c` for further ones (`final-1.md`, `final-1b.md`). The file has a `- Reviewer:` line, a findings table (each Finding opens with one category word and a colon, so findings can be counted by kind: `weak-check` (passes when broken, or never seen red), `code-fact` (wrong about code or tools), `undecided` (an open choice the spec or plan leaves), `defect` (wrong behaviour), `contradicts` (disagrees with the spec, a contract or another doc), `coverage` (no check), `harness` (flaky or unsafe test), `untraced` (no task owns it), `tldr` (the TL;DR doesn't match the plan), `touches` (outside the ticket's touches) or `other` (none of these); each finding's id a capital prefix and a number: `F1`, `R2`, `CR3`, or per pass, `F4-1`) with a `Disposition` column the reviewer leaves empty and the author fills in with `devteam.mjs dispose <ticket> <record.md> <F-id> "<disposition>"`, which keeps the row's shape (`fixed`, `wont-fix <reason>` with the reviewer's agreement, `disputed` goes to the supervisor, `wrong` means the reviewer agrees it was a false positive), and the verdict as its last line with the full 40-character SHA:
+`<track>` is empty for the first independent review, `b`, `c` for further ones (`final-1.md`, `final-1b.md`). The file has a `- Reviewer:` line, a `- Date:` line (when the review was made, UTC: `2026-11-20T19:40Z`, so `metrics` can tell this week's first passes from all time and show whether a change to how specs and plans are written worked), a findings table (each Finding opens with one category word and a colon, so findings can be counted by kind: `weak-check` (passes when broken, or never seen red), `code-fact` (wrong about code or tools), `undecided` (an open choice the spec or plan leaves), `defect` (wrong behaviour), `contradicts` (disagrees with the spec, a contract or another doc), `coverage` (no check), `harness` (flaky or unsafe test), `untraced` (no task owns it), `tldr` (the TL;DR doesn't match the plan), `touches` (outside the ticket's touches) or `other` (none of these); each finding's id a capital prefix and a number: `F1`, `R2`, `CR3`, or per pass, `F4-1`) with a `Disposition` column the reviewer leaves empty and the author fills in with `devteam.mjs dispose <ticket> <record.md> <F-id> "<disposition>"`, which keeps the row's shape (`fixed`, `wont-fix <reason>` with the reviewer's agreement, `disputed` goes to the supervisor, `wrong` means the reviewer agrees it was a false positive), and the verdict as its last line with the full 40-character SHA:
 
 ```markdown
 # Final review, pass 1
 
 - Reviewer: reviewer-b (fresh subagent, claude-opus)
+- Date: 2026-11-20T19:40Z
 - Reviewed: 3f2a…e91c (the whole branch)
 
 | Id | Severity | Rule | Where | Finding | Disposition |
