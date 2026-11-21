@@ -1515,9 +1515,10 @@ test('Reload: main loads a newer version by itself, and the pill is never outlin
   const button = () => p.ev("(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), style: s.outlineStyle, h: b.getBoundingClientRect().height }; })()");
   assert.equal((await button()).stale, false, 'nothing newer at open');
   const fp0 = await p.ev('TS.fp');
-  // the frame as loaded now, marked: a reload puts a fresh frame in its place (avFreshFrame); and
+  // the frame as loaded now, marked by a property (avFreshFrame's clone copies attributes, not that):
+  // a reload puts a fresh frame in its place; and
   // whether the pill was ever outlined from here on
-  await p.ev("(() => { document.getElementById('av-frame').dataset.before = '1'; window.__wasStale = false; const b = document.getElementById('av-reload'); new MutationObserver(() => { if (b.classList.contains('stale')) window.__wasStale = true; }).observe(b, { attributes: true }); return true; })()");
+  await p.ev("(() => { document.getElementById('av-frame').__before = true; window.__wasStale = false; const b = document.getElementById('av-reload'); new MutationObserver(() => { if (b.classList.contains('stale')) window.__wasStale = true; }).observe(b, { attributes: true }); return true; })()");
   // main changes as versProject made it: a fourth commit (pushed too where the project has an origin, which mainRef reads first)
   const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: made.root, encoding: 'utf8' }).trim();
   const dir = path.join(made.root, 'docs/devteam/project/artifacts', VERS);
@@ -1525,7 +1526,7 @@ test('Reload: main loads a newer version by itself, and the pill is never outlin
   git('add', '-A', dir);
   git('commit', '-qm', `${VERS} v4`);
   if (git('remote').split('\n').includes('origin')) git('push', '-q', 'origin', 'HEAD:main');
-  await soonIn(p, 60000)(`(() => { const f = document.getElementById('av-frame'); return !!f && f.dataset.before !== '1' && ${frameIs(`/artifact/main/${VERS}/`)} && TS.fp !== ${JSON.stringify(fp0)} && TS.fp === TS.fpNow; })()`, 'the frame loaded again by itself once a newer fingerprint is seen');
+  await soonIn(p, 60000)(`(() => { const f = document.getElementById('av-frame'); return !!f && !f.__before && ${frameIs(`/artifact/main/${VERS}/`)} && TS.fp !== ${JSON.stringify(fp0)} && TS.fp === TS.fpNow; })()`, 'the frame loaded again by itself once a newer fingerprint is seen');
   const b = await button();
   assert.deepEqual([b.stale, b.style, b.h], [false, 'none', 20], 'no outline, on the 20px pill');
   assert.equal(await p.ev('window.__wasStale'), false, 'the pill was never outlined');
