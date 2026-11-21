@@ -10,6 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { spawnSync } from 'node:child_process';
@@ -237,14 +238,23 @@ function subjectProblemOf(src) {
   vm.runInNewContext(`${head}\n${src.slice(from, to)}\n;globalThis.subjectProblem = subjectProblem;`, ctx);
   return ctx.subjectProblem;
 }
-// A release's kit source, from its tag: a shallow CI checkout has no tags, so the one needed is fetched
-// (as test/lib/machine-fixture.mjs's kitAt does); null when it can't be had.
+// A release's kit source, from its tag; null when it can't be had. A shallow CI checkout has no tags, so the
+// one needed is fetched from origin into a private repo of its own, never into the checkout's .git: two
+// files fetching into one shallow clone at once fail on its shallow file (kit-220).
 function sourceAt(tag) {
-  const has = () => spawnSync('git', ['rev-parse', '--verify', '-q', `${tag}^{commit}`], { cwd: REPO }).status === 0;
-  if (!has()) spawnSync('git', ['fetch', '-q', '--depth=1', 'origin', 'tag', tag], { cwd: REPO, stdio: 'ignore', timeout: 60000 });
-  if (!has()) return null;
-  const r = spawnSync('git', ['show', `${tag}:docs/devteam/scripts/devteam.mjs`], { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  return r.status === 0 ? r.stdout : null;
+  const show = (cwd) => {
+    const r = spawnSync('git', ['show', `${tag}:docs/devteam/scripts/devteam.mjs`], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    return r.status === 0 ? r.stdout : null;
+  };
+  if (spawnSync('git', ['rev-parse', '--verify', '-q', `${tag}^{commit}`], { cwd: REPO }).status === 0) return show(REPO);
+  const url = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: REPO, encoding: 'utf8' }).stdout?.trim();
+  if (!url) return null;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-release-'));
+  try {
+    if (spawnSync('git', ['init', '-q', dir], { stdio: 'ignore' }).status !== 0) return null;
+    const got = spawnSync('git', ['fetch', '-q', '--depth=1', '--no-tags', url, `refs/tags/${tag}:refs/tags/${tag}`], { cwd: dir, stdio: 'ignore', timeout: 60000 });
+    return got.status === 0 ? show(dir) : null;
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 // the newest vX.Y.Z tag on origin
 function newestRelease() {

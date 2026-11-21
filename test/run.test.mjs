@@ -89,14 +89,17 @@ test('shards cover each file once and balance', () => {
   const w = new Map(Object.entries({ a: 10, b: 9, c: 5, d: 4, e: 1 }));
   assert.deepEqual(R.shard(['a', 'b', 'c', 'd', 'e'], w, 2), [['a', 'd', 'e'], ['b', 'c']]);
   const files = allFiles();
-  const timings = JSON.parse(fs.existsSync(path.join(testDir, 'timings.json')) ? fs.readFileSync(path.join(testDir, 'timings.json'), 'utf8') : '{"files":{}}').files;
-  const weights = R.weightsFor(files, timings);
-  for (let n = 1; n <= 4; n++) {
-    const shards = R.shard(files, weights, n);
-    assert.equal(shards.length, n);
-    const all = shards.flat();
-    assert.equal(new Set(all).size, all.length, `no file twice at n=${n}`);
-    assert.deepEqual([...all].sort(), files);
+  const timings = JSON.parse(fs.existsSync(path.join(testDir, 'timings.json')) ? fs.readFileSync(path.join(testDir, 'timings.json'), 'utf8') : '{"files":{}}');
+  // files, and every major's section: each deals every file once, at every n --shard takes
+  for (const [name, map] of [['files', timings.files], ...Object.entries(timings.majors ?? {}).map(([m, v]) => [`majors.${m}`, v])]) {
+    const weights = R.weightsFor(files, map);
+    for (let n = 1; n <= 8; n++) {
+      const shards = R.shard(files, weights, n);
+      assert.equal(shards.length, n);
+      const all = shards.flat();
+      assert.equal(new Set(all).size, all.length, `no file twice at n=${n} (${name})`);
+      assert.deepEqual([...all].sort(), files, `every file at n=${n} (${name})`);
+    }
   }
   assert.equal(R.weightsFor(['x', 'y', 'z', 'new'], { x: 1, y: 2, z: 9 }).get('new'), 2, 'the median, not the mean');
   assert.equal(R.weightsFor(['w', 'x', 'y', 'z', 'new'], { w: 1, x: 2, y: 9, z: 10 }).get('new'), 5.5, 'an even count: the middle two averaged');
@@ -105,8 +108,96 @@ test('shards cover each file once and balance', () => {
   assert.equal(R.weightsFor(['new'], {}).get('new'), 1);
 });
 
+// ---- per-major weights (kit-220) ----
+// A scratch root with its own test/timings.json: one chrome file (it imports ./lib/chrome.mjs) and
+// rest files a, b, c, d and new.
+const T = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [`test/${k}.test.mjs`, v]));
+const L = (...names) => names.map((k) => `test/${k}.test.mjs`);
+function weightsRoot(t, timings) {
+  const dir = fresh('weights');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'test'));
+  fs.writeFileSync(path.join(dir, 'test', 'chromey.test.mjs'), "import { openChrome } from './lib/chrome.mjs';\n");
+  for (const f of ['a', 'b', 'c', 'd', 'new']) fs.writeFileSync(path.join(dir, 'test', `${f}.test.mjs`), "import { test } from 'node:test';\n");
+  fs.writeFileSync(path.join(dir, 'test', 'timings.json'), JSON.stringify(timings));
+  return dir;
+}
+// every shard planRun deals, on the given Node major
+const dealt = (dir, files, n, major) => Array.from({ length: n }, (_, k) => R.planRun({ files, groups: null, shard: { i: k + 1, n } }, dir, major).map((p) => p.file));
+
+test('planRun deals by the running major\'s section', (t) => {
+  const dir = weightsRoot(t, { files: T({ chromey: 176, a: 50, b: 40, c: 30, d: 20 }), majors: { 18: T({ chromey: 0.2, a: 50, b: 40, c: 30, d: 20 }) } });
+  const files = L('chromey', 'a', 'b', 'c', 'd');
+  assert.equal(R.planRun({ files, groups: null, shard: null }, dir, 18).find((p) => p.file === 'test/chromey.test.mjs').group, 'chrome');
+  assert.deepEqual(dealt(dir, files, 2, 18), [L('a', 'd', 'chromey'), L('b', 'c')], 'Node 18: chromey weighs 0.2, its section\'s, not 176');
+  assert.deepEqual(dealt(dir, files, 2, 22), [L('chromey'), L('a', 'b', 'c', 'd')], 'Node 22 has no section: files');
+});
+
+test('with no major given, planRun deals by the running Node major\'s section', (t) => {
+  assert.equal(R.nodeMajor('18.20.4'), 18);
+  assert.equal(R.nodeMajor('24.0.0'), 24);
+  const here = String(Number(process.versions.node.split('.')[0]));
+  assert.equal(R.nodeMajor(), Number(here));
+  // as main() calls it: no third argument
+  const dir = weightsRoot(t, { files: T({ chromey: 176, a: 50, b: 40, c: 30, d: 20 }), majors: { [here]: T({ chromey: 0.2, a: 50, b: 40, c: 30, d: 20 }) } });
+  const files = L('chromey', 'a', 'b', 'c', 'd');
+  const got = [1, 2].map((i) => R.planRun({ files, groups: null, shard: { i, n: 2 } }, dir).map((p) => p.file));
+  assert.deepEqual(got, [L('a', 'd', 'chromey'), L('b', 'c')], `Node ${here}'s section, not files`);
+});
+
+test('no majors section deals as main does', (t) => {
+  const timings = { files: T({ a: 10, b: 9, c: 5, d: 4, chromey: 1 }) };
+  const dir = weightsRoot(t, timings);
+  const files = L('a', 'b', 'c', 'd', 'chromey');
+  const main = R.shard(files, R.weightsFor(files, timings.files), 2);
+  assert.deepEqual(main, [L('a', 'd', 'chromey'), L('b', 'c')]);
+  for (const major of [18, 22]) assert.deepEqual(dealt(dir, files, 2, major), main, `Node ${major}`);
+});
+
+test('a file missing from the section weighs its median; a major with none falls back', (t) => {
+  const files = L('a', 'b', 'c', 'new');
+  // new weighs 2 (the median of 1, 2, 9): c alone, then b, new, a; weighed 100, new is alone
+  const byMedian = [L('c'), L('b', 'new', 'a')];
+  const by100 = [L('new'), L('c', 'b', 'a')];
+  const dir = weightsRoot(t, { files: T({ a: 1, b: 2, c: 9, new: 100 }), majors: { 18: T({ a: 1, b: 2, c: 9 }), 22: {} } });
+  assert.deepEqual(dealt(dir, files, 2, 18), byMedian, 'Node 18: new is missing from its section, so it weighs the section\'s median, not files\' 100');
+  assert.deepEqual(dealt(dir, files, 2, 20), by100, 'Node 20 has no section: files');
+  assert.deepEqual(dealt(dir, files, 2, 22), by100, 'an empty section is no section: files');
+  const dir2 = weightsRoot(t, { files: T({ a: 1, b: 2, c: 9 }), majors: { 18: T({ a: 1, b: 2, c: 9 }) } });
+  assert.deepEqual(dealt(dir2, files, 2, 20), byMedian, 'no section and not in files: files\' median');
+  for (const majors of [[], 'x', null, { 20: [1] }, { 20: 'x' }, { 20: T({ a: 'x', b: -1 }) }]) {
+    const d = weightsRoot(t, { files: T({ a: 1, b: 2, c: 9, new: 100 }), majors });
+    assert.deepEqual(dealt(d, files, 2, 20), by100, `majors ${JSON.stringify(majors)}: files`);
+  }
+});
+
+test('timings.json has a section for every tested major', () => {
+  const o = JSON.parse(src('test/timings.json'));
+  assert.ok(typeof o.run === 'string' && o.run, 'the run id');
+  for (const m of ['18', '20', '22', '24']) {
+    const s = o.majors?.[m];
+    assert.ok(s && typeof s === 'object' && !Array.isArray(s) && Object.keys(s).length, `a section for Node ${m}`);
+    for (const [f, v] of Object.entries(s)) assert.ok(typeof v === 'number' && v >= 0, `Node ${m}: ${f} weighs ${v}`);
+  }
+});
+
+test('the header documents per-major weights', () => {
+  const head = src('test/run.mjs').split(/^import /m)[0];
+  assert.match(head, /"majors"/);
+  assert.match(head, /no section[^.]*\bfiles\b/i);
+  assert.match(head, /missing from (?:its|that|the) section[^.]*median/i);
+  assert.match(head, /n from 1 to 8/);
+});
+
+test('--shard takes n up to 8', () => {
+  for (const ok of ['5/5', '1/5', '8/8', '1/8']) assert.deepEqual(R.parseArgs(['--shard', ok], {}, root).shard, { i: Number(ok.split('/')[0]), n: Number(ok.split('/')[1]) }, ok);
+  for (const bad of ['0/5', '6/5', '0/8', '9/8', '1/9']) assert.throws(() => R.parseArgs(['--shard', bad], {}, root), /n from 1 to 8/, bad);
+  for (const [a, code] of [['5/5', 0], ['8/8', 0], ['9/8', 2]]) assert.equal(runSync(['--list', '--shard', a]).status, code, a);
+  assert.match(src('README.md'), /^- `--shard i\/n`: the i-th of n shards \(n from 1 to 8\)/m, 'README says 8 too');
+});
+
 test('parseArgs', () => {
-  for (const bad of [['--file-timeout', '99999999'], ['--shard', '0/2'], ['--shard', '3/2'], ['--shard', '1/5'], ['--group', 'nope'], ['--concurrency', '0'], ['--bogus'], ['test/no-such.test.mjs']]) {
+  for (const bad of [['--file-timeout', '99999999'], ['--shard', '0/2'], ['--shard', '3/2'], ['--shard', '1/9'], ['--group', 'nope'], ['--concurrency', '0'], ['--bogus'], ['test/no-such.test.mjs']]) {
     assert.throws(() => R.parseArgs(bad, {}, root), R.UsageError, bad.join(' '));
   }
   assert.deepEqual(R.parseArgs(['--group', 'chain,alone'], {}, root).groups, ['chain', 'alone']);
@@ -446,6 +537,7 @@ test('--timings writes wall seconds', async (t) => {
   assert.ok('run' in o);
   assert.deepEqual(Object.keys(o.files), ['test/fixtures/run/pass.mjs']);
   assert.equal(typeof o.files['test/fixtures/run/pass.mjs'], 'number');
+  assert.equal(o.node, Number(process.versions.node.split('.')[0]), 'the Node major beside the seconds');
 });
 
 test('--timings keeps the longest of a file\'s runs', async (t) => {
