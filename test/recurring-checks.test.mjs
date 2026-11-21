@@ -589,6 +589,24 @@ test('A14b: a check that leaves a background process and exits 0 finishes, and i
   } finally { T.done(); }
 });
 
+test('A14c: a check whose leftover left its group and holds its output open still ends: the runner exits and releases its lock (task-2 T2-1)', async () => {
+  // setsid puts the leftover in a session of its own, out of reach of the group kill; it keeps the pipes
+  const T = setup('escaped', { esc: check({ run: "setsid sh -c 'echo $$ > ../../docs/devteam/run/esc.txt; exec sleep 60' & sleep 1; echo started", timeout_s: 60 }) });
+  const escFile = path.join(T.old, RUN, 'esc.txt');
+  try {
+    const t0 = Date.now();
+    const r = await T.runner().done;
+    assert.equal(r.code, 0, `${r.out}${r.err}`);
+    assert.ok(Date.now() - t0 < 30000, `the runner did not wait on the escaped leftover (${Date.now() - t0} ms)`);
+    assert.deepEqual(T.runs('esc').map(status), ['pass']);
+    assert.equal(T.readLock(), null, 'the lock is released');
+    assert.deepEqual(T.checkouts(), [], 'the checkout is removed');
+  } finally {
+    try { const pid = Number(fs.readFileSync(escFile, 'utf8')); if (pid > 0) process.kill(pid, 'SIGKILL'); } catch {}
+    T.done();
+  }
+});
+
 test('A13b: a broken jobs file on main runs nothing, and recurring due says why', async () => {
   const T = setup('broken', { ci: check(), bad: { kind: 'check', title: 'Bad', what: 'no command', every: '1d' } });
   try {

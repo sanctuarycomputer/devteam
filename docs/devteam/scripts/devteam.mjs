@@ -25483,7 +25483,7 @@ const recurringLock = Object.freeze({
   // check it was on. checks: main's checks by name. A lock that didn't parse names nothing to trust.
   cleanup(old, checks) {
     if (!old || old.bad) return;
-    if (recurringLock.isRunner(old.pid)) try { process.kill(old.pid, 'SIGKILL'); } catch {}
+    if (old.pid !== process.pid && recurringLock.isRunner(old.pid)) try { process.kill(old.pid, 'SIGKILL'); } catch {}
     const cur = isObj(old.current) ? old.current : null;
     if (cur && Number.isInteger(cur.pgid) && cur.pgid > 1 && typeof cur.name === 'string' && recurringLock.marked(cur.pgid, `${old.pid}:${old.start}:${cur.name}`)) try { process.kill(-cur.pgid, 'SIGKILL'); } catch {}
     const dir = path.join(mainRoot, '.worktrees');
@@ -25585,7 +25585,34 @@ const recurringRunDue = Object.freeze({
     R.state.current = { wt };
     const marker = `${me?.pid ?? process.pid}:${me?.start ?? 'draft'}:${name}`;
     const timeout = Number.isInteger(entry.timeout_s) && entry.timeout_s > 0 ? entry.timeout_s : 120;
-    const run = await new Promise((resolve) => {
+    let pgid = null;
+    let lost = false;
+    let run;
+    // whatever happens, the checkout goes; a throw also kills the check's group (nothing else would)
+    try {
+      run = await R.spawnCheck(entry, { wt, marker, timeout, onSpawn: (pid) => {
+        pgid = pid;
+        R.state.current = { wt, pgid: pid };
+        // a lock lost by now (taken over) can't hold this check's group for a takeover to kill:
+        // kill it here, and the runner stops (spec-1 F6)
+        if (!draft && !recurringLock.set(me, { name, slot, pgid: pid, checkout: wt })) { lost = true; try { process.kill(-pid, 'SIGKILL'); } catch {} }
+      } });
+    } catch (e) {
+      if (pgid) try { process.kill(-pgid, 'SIGKILL'); } catch {}
+      throw e;
+    } finally {
+      R.removeCheckout(wt);
+      R.state.current = null;
+    }
+    if (lost) return { lost: true, status: 'error', seconds: seconds(), excerpt: '', tail: '' };
+    const judged = R.judge(entry, run);
+    const tail = R.scrub(run.both, run.cut);
+    return { ...judged, seconds: seconds(), ...(run.exit !== null && !run.killed ? { exit: run.exit } : {}), killed: run.killed, signal: run.signal, timeout, excerpt: R.excerpt(tail), tail };
+  },
+  // sh -c <run> in a group of its own: { both, stdout (each its last 16 KB), cut, killed, spawnError, exit, signal }
+  spawnCheck(entry, { wt, marker, timeout, onSpawn }) {
+    const R = recurringRunDue;
+    return new Promise((resolve) => {
       let both = Buffer.alloc(0);
       let stdout = Buffer.alloc(0);
       let total = 0;
@@ -25595,24 +25622,24 @@ const recurringRunDue = Object.freeze({
       let timer = null;
       let cap = null;
       let ended = false;
+      let child;
       const keep = (buf, b) => { const c = Buffer.concat([buf, b]); return c.length > R.KEEP * 2 ? c.subarray(c.length - R.KEEP) : c; };
       const end = () => {
         if (ended) return;
         ended = true;
         clearTimeout(timer);
         clearTimeout(cap);
+        // a process that left the group (setsid) can hold the pipes open past the cap: our ends are
+        // closed, so the runner never waits on it (task-2 T2-1)
+        try { child?.stdout?.destroy(); child?.stderr?.destroy(); child?.unref(); } catch {}
         const last = (b) => b.subarray(Math.max(0, b.length - R.KEEP)).toString('utf8');
-        resolve({ both: last(both), stdout: last(stdout), cut: total > R.KEEP, killed, spawnError, exit: exited?.code ?? null });
+        resolve({ both: last(both), stdout: last(stdout), cut: total > R.KEEP, killed, spawnError, exit: exited?.code ?? null, signal: exited?.signal ?? null });
       };
-      let child;
       try {
         child = spawn('sh', ['-c', entry.run], { cwd: wt, detached: true, env: { ...process.env, DEVTEAM_RECURRING: marker }, stdio: ['ignore', 'pipe', 'pipe'] });
       } catch (e) { spawnError = e; end(); return; }
       const group = (sig) => { if (child.pid) try { process.kill(-child.pid, sig); } catch {} };
-      if (child.pid) {
-        R.state.current = { wt, pgid: child.pid };
-        if (!draft) recurringLock.set(me, { name, slot, pgid: child.pid, checkout: wt });
-      }
+      if (child.pid) onSpawn(child.pid);
       child.stdout.on('data', (b) => { total += b.length; both = keep(both, b); stdout = keep(stdout, b); });
       child.stderr.on('data', (b) => { total += b.length; both = keep(both, b); });
       child.on('error', (e) => { spawnError = e; end(); });
@@ -25627,11 +25654,6 @@ const recurringRunDue = Object.freeze({
       });
       child.on('close', end);
     });
-    R.removeCheckout(wt);
-    R.state.current = null;
-    const judged = R.judge(entry, run);
-    const tail = R.scrub(run.both, run.cut);
-    return { ...judged, seconds: seconds(), ...(run.exit !== null && !run.killed ? { exit: run.exit } : {}), killed: run.killed, timeout, excerpt: R.excerpt(tail), tail };
   },
   // pass, fail or error by the entry's fail rule (C1); value: a last_line read as a number
   judge(entry, { exit, killed, spawnError, stdout }) {
@@ -25672,7 +25694,7 @@ const recurringRunDue = Object.freeze({
   excerpt: (tail) => String(tail).replace(/\s+/g, ' ').trim().slice(-200),
   // one recurring-run line, as the supervisor, and the tail kept beside the newest 20
   log(name, slot, sha, r) {
-    const how = r.takenFrom ? `taken over from runner ${r.takenFrom}` : r.noCheckout ? 'no checkout' : r.killed ? `killed at ${r.timeout}s` : r.exit === undefined ? 'did not start' : `exit ${r.exit}`;
+    const how = r.takenFrom ? `taken over from runner ${r.takenFrom}` : r.noCheckout ? 'no checkout' : r.killed ? `killed at ${r.timeout}s` : r.exit === undefined ? (r.signal ? `ended by ${r.signal}` : 'did not start') : `exit ${r.exit}`;
     const run = { status: r.status, slot, sha, seconds: r.seconds, ...(r.exit !== undefined ? { exit: r.exit } : {}), ...(r.value !== undefined ? { value: r.value } : {}), excerpt: r.excerpt };
     appendLog({ type: 'observation', source: 'recurring', kind: 'recurring-run', subject: `recurring:${name}`, detector: 'recurring', severity: 0, valence: 0, detail: r.takenFrom ? `${name}: error (${how})` : `${name}: ${r.status} in ${r.seconds}s (${how})`, source_key: `recurring:${name}:${slot}:${process.pid}`, run }, 'supervisor');
     if (r.noCheckout || r.takenFrom) return;
@@ -25709,7 +25731,7 @@ const recurringRunDue = Object.freeze({
       if (!sha) die(`no ${loadSettings().main_branch} branch to check out`);
       R.onSignals(null);
       const r = await R.runOne(name, entry, { sha, slot: null, me: null, draft: true });
-      const how = r.noCheckout ? 'no checkout' : r.killed ? `killed at ${r.timeout}s` : `exit ${r.exit ?? '?'}`;
+      const how = r.noCheckout ? 'no checkout' : r.killed ? `killed at ${r.timeout}s` : r.exit === undefined ? (r.signal ? `ended by ${r.signal}` : 'did not start') : `exit ${r.exit}`;
       out(`${name}: ${r.status} in ${r.seconds}s (${how})\nexcerpt: ${r.excerpt}`);
       return;
     }
@@ -25732,6 +25754,7 @@ const recurringRunDue = Object.freeze({
       if (!now) continue;
       if (!recurringLock.set(me, { name, slot: now.slot })) break;
       const r = await R.runOne(name, now.entry, { sha, slot: now.slot, me, draft: false });
+      if (r.lost) break;
       R.log(name, now.slot, sha, r);
     }
   },
