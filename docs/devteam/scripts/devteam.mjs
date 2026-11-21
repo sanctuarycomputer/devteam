@@ -25428,8 +25428,13 @@ const recurringLock = Object.freeze({
       // stale: taken over only when it reads the same again, so a lock another runner just wrote is
       // never removed; a change starts the round over
       if (recurringLock.text() !== text) continue;
-      const pause = Number(process.env.DEVTEAM_TEST_RECURRING_UNLINK_PAUSE_MS);
-      if (pause > 0) recurringLock.sleep(pause);
+      // tests only: hold here, past the unchanged re-read and before the unlink, until the test opens
+      // the gate (at most 30 s), so the race two runners can run past a stale lock is forced exactly
+      const gate = process.env.DEVTEAM_TEST_RECURRING_UNLINK_GATE;
+      if (gate) {
+        fs.writeFileSync(`${gate}.waiting`, `${process.pid}\n`);
+        for (const end = Date.now() + 30000; !fs.existsSync(gate) && Date.now() < end;) recurringLock.sleep(25);
+      }
       try { fs.unlinkSync(recurringLock.file()); } catch (e) { if (e.code !== 'ENOENT') throw e; }
       if (recurringLock.create(me)) return settle(l);
       return { held: recurringLock.read() };

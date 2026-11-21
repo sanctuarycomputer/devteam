@@ -617,16 +617,24 @@ test('A6b: a runner sent SIGTERM mid-check kills its check group, removes its ch
   } finally { T.done(); }
 });
 
-test('A5b: the takeover race forced (one runner paused before its unlink): still exactly one runs the check', async () => {
+test('A5b: the takeover race forced (one runner held before its unlink while the other takes the lock): still exactly one runs the check', async () => {
   const T = setup('race', { ci: check({ run: 'echo ok' }) });
   try {
     T.putLock({ pid: T.deadPid(), start: iso(Date.now() - 60000), budget_s: 600, checks: [], current: null });
-    const a = T.runner(['recurring', 'run', '--due'], { DEVTEAM_TEST_RECURRING_UNLINK_PAUSE_MS: '400' });
-    sleepMs(150);
+    // a reads the stale lock twice and holds before removing it; b then takes it over; then a
+    // removes b's fresh lock and makes its own, inside b's one-second re-read
+    const gate = path.join(fs.mkdtempSync(path.join(T.base, 'gate-')), 'open');
+    const a = T.runner(['recurring', 'run', '--due'], { DEVTEAM_TEST_RECURRING_UNLINK_GATE: gate });
+    await until(() => fs.existsSync(`${gate}.waiting`) || a.child.exitCode !== null, 'a held at its unlink');
     const b = T.runner();
+    await until(() => T.readLock()?.pid === b.child.pid || b.child.exitCode !== null, "b's lock in place");
+    fs.writeFileSync(gate, '');
     const rs = await Promise.all([a.done, b.done]);
     for (const r of rs) assert.equal(r.code, 0, `${r.out}${r.err}`);
     assert.deepEqual(T.runs('ci').map(status), ['pass'], JSON.stringify(rs));
+    // the loser learns it lost at its re-read a second after its create, and says so (not only
+    // stopped later by its lock rewrite failing)
+    assert.equal(rs.filter((r) => /holds the lock/.test(`${r.out}${r.err}`)).length, 1, JSON.stringify(rs));
     assert.equal(T.readLock(), null);
   } finally { T.done(); }
 });
