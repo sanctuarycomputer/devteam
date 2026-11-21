@@ -1461,6 +1461,12 @@ history('refused under rebase: a behind branch whose commits make docs/devteam/p
   refused(T.merge('linkflip'), BEHIND(how));
 }, ['rebase']);
 
+// The land path's waits, kept short (final-14 F2): a git the shims hang, or a post-receive that sleeps,
+// is killed at LAND_TIMEOUT, which every other git call of the landing still clears by far on a fixture
+// repo; POST_SLEEP outlasts it more than twice.
+const LAND_TIMEOUT = '3000';
+const POST_SLEEP = 8;
+
 test('A15 landing: forge git, main moves between the checks and the landing: refused, and main is left as the mover left it (final-4 F3)', () => {
   const T = setup('a15-moved');
   try {
@@ -1624,7 +1630,7 @@ test('A15 landing: forge git, a landing push that hangs is killed at its timeout
   const T = setup('a15-hang');
   try {
     // a git whose push to main never returns (a hung remote): exec, so the kill reaches the sleep
-    // itself; the kit's git timeout cut to 20 s (DEVTEAM_GIT_TIMEOUT_MS), so the file stays short
+    // itself; the kit's git timeout cut to 3 s (DEVTEAM_GIT_TIMEOUT_MS), so the file stays short (final-14 F2)
     const dir = path.join(T.base, 'git-push-hangs');
     write(path.join(dir, 'git'), `#!/bin/sh\ncase " $* " in *" push --quiet --no-verify --force-with-lease="*) exec sleep 200 ;; esac\nexec "${REAL_GIT}" "$@"\n`);
     fs.chmodSync(path.join(dir, 'git'), 0o755);
@@ -1632,7 +1638,7 @@ test('A15 landing: forge git, a landing push that hangs is killed at its timeout
     const before = T.g(['rev-parse', 'origin/main']);
     const t0 = Date.now();
     // a push killed at the timeout may still land, so merge says so and asks for a rerun (final-13 F1)
-    const r = T.merge('hang', [], { PATH: `${dir}${path.delimiter}${process.env.PATH}`, DEVTEAM_GIT_TIMEOUT_MS: '20000' });
+    const r = T.merge('hang', [], { PATH: `${dir}${path.delimiter}${process.env.PATH}`, DEVTEAM_GIT_TIMEOUT_MS: LAND_TIMEOUT });
     refused(r, /the code may have landed \(the push to main timed out before origin answered[^\n]*run merge --chore hang again/);
     assert.doesNotMatch(r.text, /nothing landed|verify from the start/);
     assert.ok(Date.now() - t0 < 100000, `refused at the timeout, before the hung push returned (${Date.now() - t0} ms)`);
@@ -1646,13 +1652,13 @@ test('A15 landing: forge git, a push origin takes but answers after the timeout 
   try {
     const q = T.yes({ recurring: { aa: check() } });
     T.jobsChore('slow', () => ({ aa: check() }));
-    // origin's post-receive outlasts the kit's git timeout (cut to 15 s): the ref is updated, and
+    // origin's post-receive outlasts the kit's git timeout (cut to 3 s): the ref is updated, and
     // the push is killed before it answers
     const hook = path.join(T.org, 'hooks', 'post-receive');
-    write(hook, '#!/bin/sh\nexec sleep 40 >/dev/null 2>&1\n');
+    write(hook, `#!/bin/sh\nexec sleep ${POST_SLEEP} >/dev/null 2>&1\n`);
     fs.chmodSync(hook, 0o755);
     const before = T.acts().length;
-    const r = T.merge('slow', ['--approved', q], { DEVTEAM_GIT_TIMEOUT_MS: '15000' });
+    const r = T.merge('slow', ['--approved', q], { DEVTEAM_GIT_TIMEOUT_MS: LAND_TIMEOUT });
     fs.rmSync(hook, { force: true });
     passes(r);
     assert.match(r.text, /the push to main timed out, but origin's main is the landing merge the kit built and checked \([0-9a-f]{12}\): landed/);
@@ -1678,7 +1684,7 @@ test('A15 landing: forge git, a landing merge that hangs is killed at its timeou
     const acts = T.acts().length;
     const t0 = Date.now();
     // it says it timed out, never that the head doesn't merge (final-11 F6)
-    const r = T.merge('mhang', [], { PATH: `${dir}${path.delimiter}${process.env.PATH}`, DEVTEAM_GIT_TIMEOUT_MS: '15000' });
+    const r = T.merge('mhang', [], { PATH: `${dir}${path.delimiter}${process.env.PATH}`, DEVTEAM_GIT_TIMEOUT_MS: LAND_TIMEOUT });
     refused(r, /the landing merge of [0-9a-f]{12} onto main timed out; nothing pushed/);
     assert.doesNotMatch(r.text, /does not merge/);
     assert.ok(Date.now() - t0 < 100000, `refused at the timeout, before the hung merge returned (${Date.now() - t0} ms)`);
@@ -1988,7 +1994,7 @@ test('A15 landing: records in home, a records merge that hangs is killed at its 
     recordsReady(F, RID);
     const before = F.mainNow();
     const t0 = Date.now();
-    const r = F.text(F.runIn(F.old, ['merge', RID], SUP, { ...recShim(F, 'hang', '    exec sleep 200'), DEVTEAM_GIT_TIMEOUT_MS: '15000' }));
+    const r = F.text(F.runIn(F.old, ['merge', RID], SUP, { ...recShim(F, 'hang', '    exec sleep 200'), DEVTEAM_GIT_TIMEOUT_MS: LAND_TIMEOUT }));
     refused(r, /timed out; nothing pushed/);
     assert.ok(Date.now() - t0 < 100000, `killed at its timeout, not waited on (${Date.now() - t0} ms)`);
     assert.equal(F.mainNow(), before);
@@ -2016,11 +2022,11 @@ test('A15 landing: records in home, a records push origin takes but answers afte
   try {
     const { head } = recordsReady(F, RID);
     const hook = path.join(F.org, 'hooks', 'post-receive');
-    write(hook, '#!/bin/sh\nexec sleep 40 >/dev/null 2>&1\n');
+    write(hook, `#!/bin/sh\nexec sleep ${POST_SLEEP} >/dev/null 2>&1\n`);
     fs.chmodSync(hook, 0o755);
     const acts0 = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length;
     let r;
-    try { r = F.text(F.runIn(F.old, ['merge', RID], SUP, { DEVTEAM_GIT_TIMEOUT_MS: '15000' })); } finally { fs.rmSync(hook, { force: true }); }
+    try { r = F.text(F.runIn(F.old, ['merge', RID], SUP, { DEVTEAM_GIT_TIMEOUT_MS: LAND_TIMEOUT })); } finally { fs.rmSync(hook, { force: true }); }
     assert.equal(r.status, 0, r.text);
     assert.match(r.text, /but origin's main is the records merge the kit built and checked \([0-9a-f]{12}\): landed/);
     assert.match(r.text, /landed the records of console-01-a/);
@@ -2031,11 +2037,11 @@ test('A15 landing: records in home, a records push origin takes but answers afte
 });
 
 // ---- a push killed at the timeout that origin then takes (final-13 F1) ----
-// origin's pre-receive outlasts the kit's git timeout (cut to 10 s): the push is killed before
+// origin's pre-receive outlasts the kit's git timeout (cut to 2 s): the push is killed before
 // origin updates the ref, and origin then takes it. The first run says it may have landed; the rerun
 // recognises the kit's own landing merge and logs its act once.
-const PRE_SLEEP = 14;
-const PRE_TIMEOUT = '10000';
+const PRE_SLEEP = 4;
+const PRE_TIMEOUT = '2000';
 const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const slowPreReceive = (origin) => { const hook = path.join(origin, 'hooks', 'pre-receive'); write(hook, `#!/bin/sh\ncat >/dev/null\nexec sleep ${PRE_SLEEP} >/dev/null 2>&1\n`); fs.chmodSync(hook, 0o755); return hook; };
 // until the bare origin's branch is no longer at `from` (or 40 s pass); returns where it is
