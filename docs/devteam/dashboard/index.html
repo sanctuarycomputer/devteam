@@ -6723,8 +6723,12 @@ const avLiveReload = (() => {
   // Dropped once a later reload began (the latest wins: it chose from the newer state), or when the stage
   // (TS.fpSerial) or its frame changed while it asked: a frame loaded under an image over the stage would
   // have its load taken as the image's (avFrameLoad), and the stage given back would ignore its lens.
+  // The owner's move in the frame while it asked wins (kit-758): a page the frame loaded again (a link
+  // followed, the Reload button; AV_LOADS) drops it, that page being newer than the change; a place its
+  // lens named anew without a load (a #hash, pushState or replaceState, the page's own or the owner's, or
+  // its first ready) starts it again from there, so the change is still loaded, at that place.
   async function reload() {
-    const f = $('av-frame'), src = f.getAttribute('src'), mine = ++reloads, { fpSerial } = TS;
+    const f = $('av-frame'), src = f.getAttribute('src'), mine = ++reloads, { fpSerial, path, hash } = TS, loads = AV_LOADS.get(f) ?? 0;
     if (!src) return;
     const opened = f.dataset.opened ?? src;
     const anchored = opened.includes('#'), at = src.indexOf('#');
@@ -6741,6 +6745,8 @@ const avLiveReload = (() => {
       } catch {} finally { clearTimeout(late); }
     }
     if (mine !== reloads || $('av-frame') !== f || TS.fpSerial !== fpSerial) return;
+    if (loads && (AV_LOADS.get(f) ?? 0) !== loads) return;
+    if (TS.path !== path || TS.hash !== hash) return void reload();
     avFreshFrame('av-frame').src = to;
   }
   function seen(fp) {
