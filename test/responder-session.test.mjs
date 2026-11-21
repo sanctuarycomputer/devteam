@@ -44,10 +44,13 @@ function fixture(name) {
     write(file, "import fs from 'node:fs';\nfs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd(), argv: process.argv.slice(3), role: process.env.DEVTEAM_ROLE ?? null, ticket: process.env.DEVTEAM_TICKET ?? null, feature: process.env.DEVTEAM_FEATURE ?? null }));\nsetInterval(() => {}, 1000);\n");
     return { cmd: `${process.execPath} ${file} ${out}`, out };
   };
+  // the stand-in's record, once it is whole (a file seen mid-write is read again)
   const ran = (a) => {
-    for (let i = 0; i < 300 && !fs.existsSync(a.out); i++) sleep(100);
-    assert.ok(fs.existsSync(a.out), `the stand-in agent ${a.out} never ran`);
-    return JSON.parse(fs.readFileSync(a.out, 'utf8'));
+    for (let i = 0; i < 300; i++) {
+      try { return JSON.parse(fs.readFileSync(a.out, 'utf8')); } catch {}
+      sleep(100);
+    }
+    assert.fail(`the stand-in agent ${a.out} never ran`);
   };
   const wt = path.join(F.old, '.worktrees', 'responder');
   // the fleet's tmux session up before the kit looks, holding one idle window, so the responder's

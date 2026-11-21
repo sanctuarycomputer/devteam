@@ -14809,6 +14809,8 @@ function spenderFor(cwd, ts) {
   const wtRoot = path.join(main, '.worktrees') + path.sep;
   if (!at.startsWith(wtRoot)) return at.startsWith(main + path.sep) ? { who: 'supervisor', role: 'supervisor' } : null;
   const name = at.slice(wtRoot.length).split(path.sep)[0];
+  // the thread responder's own worktree (kit-103); no ticket id is ever `responder` (a keyed id has a -NN-)
+  if (name === 'responder') return { who: 'responder', role: 'responder' };
   if (ts.has(name)) return { who: name, role: 'worker' };
   if (name.startsWith('plan-')) return { who: name, role: 'planner' };
   const rv = /^review-(.+?-\d+)-[0-9a-f]{8}/.exec(name);
@@ -30366,7 +30368,7 @@ function cmdResponder() {
       const late = responderWindowRefusal(w);
       if (late) refuse(late);
       // a pane that has exited (remain-on-exit) takes no typing: its window is opened anew
-      if (w.there && /has exited/.test(resolvePane(w.target).problem ?? '')) { tmux(['kill-window', '-t', w.target]); w = responderWindow(session); }
+      if (w.there && /has exited/.test(resolvePane(w.target).problem ?? '')) { tmux(['kill-window', '-t', w.target]); w = responderWindow(session); if (w.there) refuse(`could not close ${w.shown}, whose pane has exited; close it, then responder`); }
       if (!w.has) { if (sh('tmux', ['new-session', '-d', '-s', session, '-n', RESPONDER_NAME, '-c', wt], { env: tmuxServerEnv() }) === null) refuse('could not start tmux'); }
       else if (!w.there && !tmux(['new-window', '-d', '-t', `=${session}`, '-n', RESPONDER_NAME, '-c', wt])) refuse(`could not open ${w.shown}`);
       const type = (line) => { if (!typeNow(w.target, line)) refuse(`could not type into ${w.shown}; responder --resume starts it`); };
