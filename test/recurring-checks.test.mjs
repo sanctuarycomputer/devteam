@@ -343,6 +343,8 @@ test('A2: with a 1h check last run 61 minutes ago, wait starts one detached recu
     const ran = Date.parse(T.runs('ci')[1].at);
     const during = W.lines().filter((l) => l.at > starts[0].at && l.at < ran - 1000);
     assert.ok(during.length >= 3, `wait cycled while the check ran (${during.length} snapshots)`);
+    // the runner logs, then writes its tail and releases the lock: let it finish before the fixture goes
+    await until(() => T.readLock() === null, 'the runner finished');
   } finally { W.kill(); T.done(); }
 });
 
@@ -669,6 +671,7 @@ test('A2b: a check committed to main while wait runs is started', async () => {
     T.g(['fetch', '-q', 'origin']);
     await until(() => T.runs('late').length === 1 || W.child.exitCode !== null, 'the new job run');
     assert.equal(W.starts().length, 1, JSON.stringify(W.lines().map((l) => l.children)));
+    await until(() => T.readLock() === null, 'the runner finished');
   } finally { W.kill(); T.done(); }
 });
 
