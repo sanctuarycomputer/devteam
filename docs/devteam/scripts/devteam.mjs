@@ -8420,6 +8420,9 @@ function cmdAnswer() {
   // a job change takes only the owner's own Yes: never words the supervisor records from chat, and
   // from a turn only when the owner's words there start with it (final-11b F1)
   if (fromChat && v.class === 'recurring-edit') die(`${id} is a recurring-edit question: only the owner's own Yes approves a job change, never words recorded from chat; the owner answers it in the card, or says Yes in its thread (answer --from-turn)`);
+  // and only a whole owner turn newer than the question: a clause (--said) may sit in a No, or in a
+  // turn written before the question about something else (final-12b F1)
+  if (fromTurn && v.class === 'recurring-edit' && flags.said !== undefined) die(`${id} is a recurring-edit question: only a whole owner turn newer than the question approves a job change, never a clause of one (--said); the owner says Yes in its thread, then answer ${id} "Yes" --from-turn <that turn>`);
   if (pickFlag) {
     const own = v.kind === 'review' ? 'a review' : v.kind === 'goal-approval' ? 'a goal approval' : (v.secrets ?? []).length ? 'a secrets question' : null;
     if (own) die(`answer --${pickFlag}: ${id} is ${own}, answered its own way, not by a pick or words alone`);
@@ -8992,6 +8995,7 @@ function cmdThread() {
     if (flags.turn !== undefined) {
       const uid = flagStr('turn');
       if (!TURN_ID.test(uid ?? '')) die("thread ask --turn <u-id>: the owner's turn the question is about");
+      if (flagStr('class') === 'recurring-edit') die('thread ask --turn: a recurring-edit question is never asked about an earlier turn: only the owner\'s Yes after the question, to the exact change it shows, approves it; ask it in the thread without --turn (final-12b F1)');
       const u = logGet(uid);
       if (u?.type !== 'turn') die(`--turn ${uid}: no such turn`);
       if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the ${u.created_by}'s; a question is about the owner's words`);
@@ -24279,9 +24283,19 @@ const recurringRegistry = Object.freeze({
   live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && v.agreed_by_owner === true && !v.reading && !recurringRegistry.notOwnYes(v) && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
   // words that start with the label Yes, as it is written, as a whole word
   saysYes: (said) => /^Yes(?![\p{L}\p{N}])/u.test(String(said ?? '').trimStart()),
-  // why an answer line is not the owner's own Yes, whatever it says (final-11b F1): one recorded
-  // from chat, or from a turn whose words don't start with Yes; else null
-  notOwnYes: (v) => (v?.channel === 'chat' ? `answered from chat ("${String(v.said ?? '').slice(0, 80)}"), which approves no job change` : v?.channel === 'thread' && !recurringRegistry.saysYes(v.said) ? `answered from ${v.turn ?? 'a turn'}, whose words don't start with Yes ("${String(v.said ?? '').slice(0, 80)}")` : null),
+  // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1): one
+  // recorded from chat; from a turn whose words don't start with Yes; from a clause of a turn
+  // (said_at); or from a turn that isn't the owner's, in the log, and newer than the question; else null
+  notOwnYes(v) {
+    if (v?.channel === 'chat') return `answered from chat ("${String(v.said ?? '').slice(0, 80)}"), which approves no job change`;
+    if (v?.channel !== 'thread') return null;
+    const turn = v.turn ?? 'a turn';
+    if (!recurringRegistry.saysYes(v.said)) return `answered from ${turn}, whose words don't start with Yes ("${String(v.said ?? '').slice(0, 80)}")`;
+    if (v.said_at !== undefined && v.said_at !== null) return `answered from a clause of ${turn} (said_at), which approves no job change`;
+    const u = typeof v.turn === 'string' ? logGet(v.turn) : null;
+    if (u?.type !== 'turn' || u.created_by !== 'owner' || !(String(u.created_at ?? '') > String(v.asked_at ?? ''))) return `answered from ${turn}, which isn't newer than the question (or isn't the owner's turn in the log)`;
+    return null;
+  },
   // The questions that block another question for their names: open ones, and live ones
   // (registering an addition or edit, stopping when every value is null), as { qid, status, change }.
   pending() {

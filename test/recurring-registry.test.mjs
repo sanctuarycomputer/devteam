@@ -747,6 +747,43 @@ test('A5: a recurring-edit answer is never recorded from chat, and from a turn o
   } finally { T.done(); }
 });
 
+test('A5: a recurring-edit answer is a whole owner turn newer than the question: a --said clause and thread ask --turn are refused, and such a line already in the log lands nothing (final-12b F1)', () => {
+  const T = setup('turn-clause');
+  try {
+    const plant = (q, fields) => fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: q, at: new Date().toISOString(), by: 'owner', answer: 'Yes', channel: 'thread', ...fields })}\n`);
+    const tid = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const say = (w) => T.ok(['thread', 'say', tid, w], {}).split('\n')[0];
+    const tAsk = (name, extra = []) => T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: check({ title: `${name} job`, every: '1h', run: 'echo evil' }) } }), ...extra]);
+    const qOf = (r) => { passes(r); return QID.exec(r.out)[0]; };
+    const SAID = (q) => new RegExp(`${q} is a recurring-edit question: only a whole owner turn newer than the question approves a job change, never a clause of one \\(--said\\)`);
+    // H1: the owner's "Yes, add a nightly disk check.", written before any question
+    const early = say('Yes, add a nightly disk check.');
+    refused(tAsk('disk', ['--turn', early]), /thread ask --turn: a recurring-edit question is never asked about an earlier turn/);
+    const q1 = qOf(tAsk('disk'));
+    refused(T.run(['answer', q1, 'Yes', '--from-turn', early, '--said', 'Yes, add a nightly disk check.']), SAID(q1));
+    refused(T.run(['answer', q1, 'Yes', '--from-turn', early]), /the turn is older than/);
+    // H1b: the same after the owner's later No, with that No read
+    const no = say('No, not hourly, and not that command.');
+    refused(T.run(['answer', q1, 'Yes', '--from-turn', early, '--said', 'Yes, add a nightly disk check.', '--seen-turn', no]), SAID(q1));
+    refused(T.run(['answer', q1, 'Yes', '--from-turn', no]), /don't start with Yes/);
+    // H2: a No turn whose later clause starts with Yes
+    const q2 = qOf(tAsk('mem'));
+    const h2 = say('No. Yes would be wrong here.');
+    refused(T.run(['answer', q2, 'Yes', '--from-turn', h2, '--said', 'Yes would be wrong here.']), SAID(q2));
+    for (const q of [q1, q2]) assert.equal(json(T.ok(['questions', '--id', q, '--json']))[0].status, 'open', `${q} stays open`);
+    // lines of those kinds already in the log approve nothing at merge: a clause (said_at) of a
+    // newer Yes turn, and a whole Yes turn older than the question
+    plant(q1, { said: 'Yes, add a nightly disk check.', turn: early });
+    T.jobsChore('older', () => ({ disk: check({ title: 'disk job', every: '1h', run: 'echo evil' }) }));
+    refused(T.merge('older', ['--approved', q1]), new RegExp(`${q1} can't approve a job change: answered from ${early}, which isn't newer than the question`));
+    const later = say('Yes. But only nightly.');
+    plant(q2, { said: 'Yes.', turn: later, said_at: [0, 4], answer_seen: later });
+    T.jobsChore('clause', () => ({ mem: check({ title: 'mem job', every: '1h', run: 'echo evil' }) }));
+    refused(T.merge('clause', ['--approved', q2]), new RegExp(`${q2} can't approve a job change: answered from a clause of ${later} \\(said_at\\), which approves no job change`));
+    assert.deepEqual(T.mainJobs(), {}, 'no job landed');
+  } finally { T.done(); }
+});
+
 test('A12: recurring apply writes exactly the answered change into the chore worktree\'s file, and nothing else', () => {
   const T = setup('apply');
   try {
