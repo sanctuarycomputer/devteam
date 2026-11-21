@@ -24810,8 +24810,12 @@ const recurringRegistry = Object.freeze({
     // and its first parent was origin's main in this clone: the main the kit's first run fetched, and
     // judged and merged onto, is in the reflog of refs/remotes/origin/<main> (final-17 F1). A record
     // and a tree can be planted onto a commit that was never main (one carrying an unanswered job),
-    // and the checks, pinned there, would judge only the head's own change; this clone's reflog of
-    // origin's main is written by its own fetches and pushes. The rerun's fetch adds only the tip.
+    // and the checks, pinned there, would judge only the head's own change. The rerun's fetch adds
+    // only the tip. The reflog is no proof against a planter (final-18 F1): every worktree of the clone
+    // shares it (logs/refs/remotes), so whoever can write the clone can add an entry with one git
+    // update-ref, just as they can plant the landing record, and any main the clone ever saw passes,
+    // an older one too. It closes only a first parent the clone never saw; the PR's Known limits
+    // (H18-1, H18-2) say what is left open, and each case needs a push to main past the wall.
     const seen = (g(['reflog', 'show', '--format=%H', `refs/remotes/origin/${mainBranch}`]) ?? '').split('\n').map((l) => l.trim());
     if (!seen.includes(parents[0])) return { lookalike: `${parents[0].slice(0, 12)} is not in the reflog of refs/remotes/origin/${mainBranch}`, recorded: true, unseen: parents[0] };
     return { onto: parents[0] };
