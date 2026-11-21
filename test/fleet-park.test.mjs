@@ -59,6 +59,12 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     assert.match(run(old, ['planner', 'gamma'], SUP).err, /--goal <g-id>/);
     const findings = json(ok(old, ['metrics', '--json'])).findings;
     assert.ok(!findings.some((f) => ['idle-capacity', 'idle-planning', 'park-unsent'].includes(f.kind)), 'nothing new is suggested while parked, and the ruling was sent');
+    assert.ok(!findings.some((f) => f.kind === 'park-unsettled'), 'just told: not yet unsettled');
+    // told and still not parked past the settle time (0 here): a park doesn't wait on a reply, so it says to send the ruling again
+    const unsettled = json(ok(old, ['metrics', '--json'], { DEVTEAM_PARK_SETTLE_MINUTES: '0' })).findings.find((f) => f.kind === 'park-unsettled');
+    assert.equal(unsettled?.subject, ID, JSON.stringify(unsettled));
+    assert.match(unsettled.detail, /told to park \d+ min ago .* and still build: a park doesn't wait on a reply or an owner answer/);
+    assert.match(unsettled.suggestion, /goal park-sessions upkeep --again/);
     assert.match(ok(old, ['prompt', 'supervisor']), /^The fleet is parked .*This is the machine it was parked on/);
     assert.match(run(old, ['chore', 'start', 'retro-x'], SUP).err, /Upkeep is parked: no new upkeep chore starts/);
 
