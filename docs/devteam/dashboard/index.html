@@ -6566,7 +6566,7 @@ function avHeader() {
   avPubDraw();
 }
 // Where an artifact's page is served: main, a draft's worktree, or a published version by its tree.
-const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).startsWith('tree:') ? `tree/${String(at).slice(5)}` : `wt/${encodeURIComponent(at)}`}/${slug}/`;
+const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).startsWith('tree:') ? `tree/${String(at).slice(5)}` : String(at).startsWith('origin:') ? `origin/${encodeURIComponent(String(at).slice(7))}` : `wt/${encodeURIComponent(at)}`}/${slug}/`;
 // Its viewer, in a tab of its own.
 const artViewer = (slug, at) => `/view/artifact/${encodeURIComponent(slug)}${at && at !== 'main' ? `?${new URLSearchParams({ at })}` : ''}`;
 // The stage's lens state (spec §4, §6): what is on the stage, where its lens's messages may go (an
@@ -6644,9 +6644,17 @@ function avHint() {
 }
 // The fingerprints just seen for an artifact there (null: not known), taken only while the stage
 // shows it; a published tree never changes, so it is never checked. A draft's own comes from its
-// poll alone (avLiveReload): a slower read begun before an edit would set it back.
+// poll alone (avLiveReload): a slower read begun before an edit would set it back. On main, a newer
+// one loads the frame again by itself, as a draft's does (kit-750, ruling A1, superseding kit-206's
+// outline for main): a fresh frame at its src, its anchor kept. A frame loaded before any fp was
+// known only takes it. A stale /api/data answer seen after a newer one loads it once more, harmless.
 function avFpSeen(fp, mainFp, slug, at) {
   if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at || String(at).startsWith('tree:')) return;
+  if (fp && at === 'main' && fp !== TS.fp) {
+    const src = $('av-frame').getAttribute('src');
+    if (TS.fp && src) avFreshFrame('av-frame').src = src;
+    TS.fp = fp;
+  }
   if (fp && !avLiveReload.draft(at)) TS.fpNow = fp;
   if (mainFp) TS.mainFpNow = mainFp;
   avHint();

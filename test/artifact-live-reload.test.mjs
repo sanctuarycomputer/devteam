@@ -301,7 +301,7 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     assert.equal(await asks(), 0, 'the framed viewer tab: no ask');
   });
 
-  await t.test("C6: a draft never shows kit-206's outline; main keeps it, and its title", async () => {
+  await t.test("C6: a draft never shows kit-206's outline, and main now reloads by itself without it (kit-750, A1)", async () => {
     const watchStale = `(() => { window.__wasStale = false; const b = document.getElementById('av-reload'); const look = () => { if (b.classList.contains('stale')) window.__wasStale = true; }; look(); new MutationObserver(look).observe(b, { attributes: true }); return true; })()`;
     const row = `(DATA?.library?.artifacts ?? []).find((a) => a.slug === ${J(SLUG)} && a.at === ${J(WT)})?.fp ?? null`;
     await open(DASH_DRAFT, WT, 'v1');
@@ -313,12 +313,15 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     await soonIn(p, 90000)(`(${row}) !== ${J(listed)}`, "the dashboard's read lists the draft's new fingerprint");
     await sleep(1000);
     assert.equal(await p.ev('window.__wasStale'), false, 'the draft never had the outline');
-    // main: a second commit changes main's fingerprint; the outline and its title come, as kit-206 has them
+    // main: a second commit changes main's fingerprint; the frame loads it again by itself, and the
+    // outline kit-206 had never shows (ruling A1, d-20261121-041756284)
     await open(DASH_MAIN, 'main', 'main');
     await p.ev(watchStale);
     land(F, mock('main2'));
-    await soonIn(p, 90000)(`document.getElementById('av-reload').classList.contains('stale')`, "main's outline once a newer fingerprint is seen");
-    assert.equal(await p.ev(`document.getElementById('av-reload').title`), 'A newer version is ready: reload to see it');
+    await soonIn(p, 90000)(`__titles.some((x) => x.title === 'main2')`, 'main reloaded to main2 by itself');
+    await sleep(1000);
+    assert.equal(await p.ev('window.__wasStale'), false, "main never had kit-206's outline");
+    assert.equal(await p.ev(`document.getElementById('av-reload').classList.contains('stale')`), false, 'no outline after the reload');
     assert.equal(await asks(), 0, 'main: no /api/artifact-fp ask');
   });
 });
