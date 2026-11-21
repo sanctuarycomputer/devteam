@@ -574,3 +574,256 @@ test('R7c: an owner turn and a non-owner turn at the same millisecond: the owner
     assert.doesNotMatch(r.err, /answering/, 'nothing printed as answered');
   } finally { F.done(); }
 });
+
+// The final reviews' attacks (rulings on final-1 and final-1b): the responder is assumed talked into
+// writing anything its worktree and shell reach; nothing it plants may run, or be believed, with the
+// supervisor's authority at its next start.
+test('R12: what the responder plants does not run at its next start', { skip: NO_TMUX }, async (t) => {
+  const F = fixture('responder-planted');
+  t.after(() => { F.run(F.old, ['responder', '--stop'], SUP); F.done(); });
+  const A = F.agent('honest');
+  const E = F.agent('planted');
+  F.preSession();
+  F.onMain({ responder_command: A.cmd });
+  const g0 = (args, cwd = F.old) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const common = path.join(F.old, '.git');
+  const stop = () => assert.equal(F.run(F.old, ['responder', '--stop'], SUP).status, 0);
+  // a responder's worktree as a start leaves it, its agent stopped
+  const fresh = () => {
+    F.run(F.old, ['responder', '--stop'], SUP);
+    try { if (fs.lstatSync(F.wt).isSymbolicLink()) fs.rmSync(F.wt); } catch {}
+    g0(['worktree', 'remove', '--force', F.wt]);
+    fs.rmSync(F.wt, { recursive: true, force: true });
+    g0(['worktree', 'prune']);
+    fs.rmSync(A.out, { force: true });
+    const r = F.run(F.old, ['responder'], SUP);
+    assert.equal(r.status, 0, r.err);
+    F.ran(A);
+    stop();
+    fs.rmSync(A.out, { force: true });
+  };
+  // the owner's command ran, in its folder, and the planted one didn't
+  const honestStart = (args = ['responder']) => {
+    const r = F.run(F.old, args, SUP);
+    assert.equal(r.status, 0, r.err);
+    const a = F.ran(A);
+    assert.equal(fs.realpathSync(a.cwd), fs.realpathSync(F.wt), 'the agent runs in its worktree');
+    assert.ok(!fs.existsSync(E.out), 'the planted command never ran');
+    stop();
+    fs.rmSync(A.out, { force: true });
+  };
+  const script = (name, mark) => { const f = path.join(F.base, name); fs.writeFileSync(f, `#!/bin/sh\necho ran >> '${mark}'\n`, { mode: 0o755 }); return f; };
+
+  for (const target of ['the main checkout', "a worker's worktree"]) {
+    await t.test(`F1: a symlink at .worktrees/responder to ${target} is refused and detaches nothing`, () => {
+      fresh();
+      g0(['worktree', 'remove', '--force', F.wt]);
+      g0(['worktree', 'prune']);
+      const other = path.join(F.base, `wk-${target.length}`);
+      if (target !== 'the main checkout') assert.equal(g0(['worktree', 'add', '-q', '-b', `ticket/probe-${target.length}`, other]).status, 0);
+      const to = target === 'the main checkout' ? F.old : other;
+      const before = g0(['symbolic-ref', '--short', 'HEAD'], to).stdout.trim();
+      fs.symlinkSync(to, F.wt);
+      const r = F.run(F.old, ['responder'], SUP);
+      assert.notEqual(r.status, 0, 'refused');
+      assert.match(r.err, /is not a git worktree of its own/);
+      assert.equal(g0(['symbolic-ref', '--short', 'HEAD'], to).stdout.trim(), before, 'still on its branch');
+      assert.ok(!F.windows().includes('responder'), 'no window');
+      fs.rmSync(F.wt);
+    });
+  }
+  await t.test("F3: an ignored .claude/settings.local.json is gone before the agent starts", () => {
+    fresh();
+    fs.appendFileSync(path.join(common, 'info', 'exclude'), '.claude/settings.local.json\n');
+    const planted = path.join(F.wt, '.claude', 'settings.local.json');
+    fs.mkdirSync(path.dirname(planted), { recursive: true });
+    fs.writeFileSync(planted, '{"permissions":{"allow":["Bash(*)"]}}\n');
+    assert.equal(g0(['check-ignore', '-q', '.claude/settings.local.json'], F.wt).status, 0, 'git ignores it');
+    honestStart();
+    assert.ok(!fs.existsSync(planted), 'removed');
+  });
+  await t.test('F3: a tracked edit hidden with assume-unchanged or skip-worktree refuses the start', () => {
+    for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+      fresh();
+      const tracked = F.g(['ls-files'], F.wt).split('\n')[0];
+      fs.appendFileSync(path.join(F.wt, tracked), 'planted\n');
+      F.g(['update-index', flag, tracked], F.wt);
+      const r = F.run(F.old, ['responder'], SUP);
+      F.g(['update-index', flag.replace('--', '--no-'), tracked], F.wt);
+      F.g(['checkout', '--', tracked], F.wt);
+      assert.notEqual(r.status, 0, `${flag}: refused`);
+      assert.ok(r.err.includes(tracked), r.err);
+    }
+  });
+  await t.test('F4: a .git file repointed at a planted git dir is refused, and its fsmonitor never runs', () => {
+    fresh();
+    const mark = path.join(F.base, 'fsmonitor-ran.txt');
+    const evil = path.join(F.base, 'evil-gitdir');
+    assert.equal(g0(['init', '-q', '--bare', evil]).status, 0);
+    assert.equal(g0(['config', '--file', path.join(evil, 'config'), 'core.bare', 'false']).status, 0);
+    assert.equal(g0(['config', '--file', path.join(evil, 'config'), 'core.fsmonitor', script('fsm.sh', mark)]).status, 0);
+    const dotgit = path.join(F.wt, '.git');
+    const keep = fs.readFileSync(dotgit);
+    fs.writeFileSync(dotgit, `gitdir: ${evil}\n`);
+    const r = F.run(F.old, ['responder'], SUP);
+    fs.writeFileSync(dotgit, keep);
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /is not a git worktree of its own/);
+    assert.ok(!fs.existsSync(mark), 'the planted fsmonitor never ran');
+  });
+  await t.test('F4: a core.fsmonitor planted in the shared config never runs at a start', () => {
+    fresh();
+    const mark = path.join(F.base, 'fsmonitor2-ran.txt');
+    assert.equal(g0(['config', 'core.fsmonitor', script('fsm2.sh', mark)]).status, 0);
+    try { honestStart(); } finally { g0(['config', '--unset', 'core.fsmonitor']); }
+    assert.ok(!fs.existsSync(mark), 'the planted fsmonitor never ran');
+  });
+  // a commit of the responder's own, with another command, that was never pushed
+  const plantedCommit = () => {
+    F.edit({ responder_command: E.cmd });
+    F.g(['commit', '-qam', 'planted'], F.old);
+    const sha = F.g(['rev-parse', 'HEAD'], F.old);
+    F.g(['reset', '-q', '--hard', 'HEAD~1'], F.old);
+    return sha;
+  };
+  await t.test('F5: origin/main moved locally runs the owner\'s command', () => {
+    fresh();
+    const good = F.g(['rev-parse', 'origin/main'], F.old);
+    F.g(['update-ref', 'refs/remotes/origin/main', plantedCommit()], F.old);
+    try { honestStart(); } finally { F.g(['update-ref', 'refs/remotes/origin/main', good], F.old); }
+  });
+  await t.test('F5: origin/HEAD repointed locally runs the owner\'s command', () => {
+    fresh();
+    F.g(['update-ref', 'refs/heads/evil', plantedCommit()], F.old);
+    const had = g0(['symbolic-ref', 'refs/remotes/origin/HEAD']).stdout.trim();
+    F.g(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/heads/evil'], F.old);
+    try { honestStart(); } finally {
+      if (had) F.g(['symbolic-ref', 'refs/remotes/origin/HEAD', had], F.old); else g0(['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD']);
+      F.g(['update-ref', '-d', 'refs/heads/evil'], F.old);
+    }
+  });
+  await t.test('F5: a git replace of main\'s commit runs the owner\'s command', () => {
+    fresh();
+    const good = F.g(['rev-parse', 'origin/main'], F.old);
+    F.g(['replace', good, plantedCommit()], F.old);
+    try { honestStart(); } finally { F.g(['replace', '-d', good], F.old); }
+  });
+  await t.test('F5: an origin that cannot be read refuses the start', () => {
+    fresh();
+    const url = F.g(['remote', 'get-url', 'origin'], F.old);
+    F.g(['remote', 'set-url', 'origin', path.join(F.base, 'no-such-remote.git')], F.old);
+    let r;
+    try { r = F.run(F.old, ['responder'], SUP); } finally { F.g(['remote', 'set-url', 'origin', url], F.old); }
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /could not read main from origin/);
+    assert.ok(!F.windows().includes('responder'), 'no window');
+  });
+  await t.test('F6: a post-checkout hook in the shared hooks folder never runs at a start', () => {
+    fresh();
+    const mark = path.join(F.base, 'hook-ran.txt');
+    const hooks = path.join(common, 'hooks');
+    fs.mkdirSync(hooks, { recursive: true });
+    const hook = path.join(hooks, 'post-checkout');
+    fs.copyFileSync(script('hook.sh', mark), hook);
+    fs.chmodSync(hook, 0o755);
+    try { honestStart(); } finally { fs.rmSync(hook); }
+    assert.ok(!fs.existsSync(mark), 'the hook never ran');
+  });
+  await t.test('F8: the refusal names a tracked file in full', () => {
+    fresh();
+    const tracked = F.g(['ls-files'], F.wt).split('\n')[0];
+    fs.appendFileSync(path.join(F.wt, tracked), 'edited\n');
+    const r = F.run(F.old, ['responder'], SUP);
+    F.g(['checkout', '--', tracked], F.wt);
+    assert.notEqual(r.status, 0);
+    assert.ok(r.err.includes(`first ${tracked})`), r.err);
+  });
+  await t.test('1b F1: --resume from a shell at the main checkout runs the agent in its worktree', () => {
+    fresh();
+    assert.equal(F.tmux(['new-window', '-d', '-t', `=${F.session}`, '-n', 'responder', '-c', F.old, 'sh']).status, 0);
+    honestStart(['responder', '--resume']);
+  });
+  await t.test('1b F1: --resume from a shell in a removed worktree runs the agent in the new one', () => {
+    fresh();
+    assert.equal(F.tmux(['new-window', '-d', '-t', `=${F.session}`, '-n', 'responder', '-c', F.wt, 'sh']).status, 0);
+    fs.rmSync(F.wt, { recursive: true, force: true });
+    honestStart(['responder', '--resume']);
+  });
+  await t.test('1b F3: a seeded worktree_files entry git does not ignore does not refuse later starts', () => {
+    F.onMain({ worktree_files: ['seeded.env'] });
+    fs.writeFileSync(path.join(F.old, 'seeded.env'), 'A=1\n');
+    fs.appendFileSync(path.join(common, 'info', 'exclude'), '/seeded.env\n');
+    fresh();
+    const wtExclude = g0(['rev-parse', '--git-path', 'info/exclude'], F.wt).stdout.trim();
+    assert.ok(wtExclude);
+    g0(['config', 'core.excludesFile', '/dev/null']);
+    fs.writeFileSync(path.join(common, 'info', 'exclude'), '.claude/settings.local.json\n');
+    assert.notEqual(g0(['check-ignore', '-q', 'seeded.env'], F.wt).status, 0, 'git does not ignore it');
+    honestStart();
+    honestStart();
+    assert.equal(fs.readFileSync(path.join(F.wt, 'seeded.env'), 'utf8'), 'A=1\n');
+    // a link planted at that path is no seeded file: refused, and what it points at is not written
+    const target = path.join(F.base, 'link-target.txt');
+    fs.writeFileSync(target, 'kept\n');
+    fs.rmSync(path.join(F.wt, 'seeded.env'));
+    fs.symlinkSync(target, path.join(F.wt, 'seeded.env'));
+    const r = F.run(F.old, ['responder'], SUP);
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /has local changes/);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'kept\n');
+    fs.rmSync(path.join(F.wt, 'seeded.env'));
+    fs.rmSync(path.join(F.old, 'seeded.env'));
+    F.onMain({ worktree_files: [] });
+  });
+  await t.test('1b F4: a worktree removed by hand needs no manual prune', () => {
+    fresh();
+    fs.rmSync(F.wt, { recursive: true, force: true });
+    honestStart();
+  });
+});
+
+test('R13: with DEVTEAM_ROLE unset, its worktree writes as the responder, never the supervisor or the owner', { skip: NO_TMUX }, (t) => {
+  const F = fixture('responder-unset');
+  t.after(() => { F.run(F.old, ['responder', '--stop'], SUP); F.done(); });
+  const A = F.agent('a');
+  F.preSession();
+  F.onMain({ responder_command: A.cmd });
+  assert.equal(F.run(F.old, ['responder'], SUP).status, 0);
+  F.ran(A);
+  F.run(F.old, ['responder', '--stop'], SUP);
+  const T = F.owner(['thread', 'new', 'Is it up?']).split('\n')[0];
+  const sub = path.join(F.wt, 'docs');
+  // the worktree's own kit, run from the folder given, with no role in the env
+  const at = (cwd, args) => { const r = spawnSync(process.execPath, [path.join(F.wt, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd, env: F.env({}), encoding: 'utf8' }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+  for (const cwd of [F.wt, sub]) {
+    const r = at(cwd, ['thread', 'reply', T, 'Looking now.', '--anyway']);
+    assert.equal(r.status, 0, r.err);
+    const u = r.out.split('\n')[0];
+    assert.match(u, /-responder$/, `a turn from ${cwd} is the responder's: ${u}`);
+    assert.match(at(cwd, ['act', '--class', 'worker-slots', '--what', 'x', '--why', 'y']).err, /hand it over|the supervisor does this/, 'and a supervisor command is refused');
+  }
+  // a linked cwd is still the worktree; a look-alike folder, and a link AT the worktree's path, are not
+  const link = path.join(F.base, 'link-to-responder');
+  fs.symlinkSync(F.wt, link);
+  const viaLink = F.run(link, ['thread', 'reply', T, 'By the link.'], {});
+  assert.equal(viaLink.status, 0, viaLink.err);
+  assert.match(viaLink.out.split('\n')[0], /-responder$/, 'a symlinked cwd writes as the responder');
+  const alike = `${F.wt}-x`;
+  F.g(['worktree', 'add', '-q', '--detach', alike], F.old);
+  const near = F.run(alike, ['thread', 'reply', T, 'From next door.'], {});
+  assert.equal(near.status, 0, near.err);
+  assert.doesNotMatch(near.out.split('\n')[0], /-responder$/, 'responder-x is not the responder');
+  F.g(['worktree', 'remove', '--force', alike], F.old);
+  const aside = `${F.wt}-aside`;
+  F.g(['worktree', 'move', F.wt, aside], F.old);
+  fs.symlinkSync(F.old, F.wt);
+  const main = F.run(F.old, ['thread', 'reply', T, 'From the main checkout.'], SUP);
+  fs.rmSync(F.wt);
+  F.g(['worktree', 'move', aside, F.wt], F.old);
+  assert.equal(main.status, 0, main.err);
+  assert.match(main.out.split('\n')[0], /-supervisor$/, 'a link at its path does not make the main checkout the responder');
+  const a = F.run(F.wt, ['artifact', 'new', 'unset-role', '--title', 'T', '--summary', 'S'], {});
+  assert.equal(a.status, 0, a.err);
+  const manifest = JSON.parse(fs.readFileSync(path.join(F.wt, 'docs/devteam/project/artifacts/unset-role/artifact.json'), 'utf8'));
+  assert.equal(manifest.by, 'responder');
+});

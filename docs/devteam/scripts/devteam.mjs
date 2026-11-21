@@ -1954,7 +1954,7 @@ function currentTicketId() {
 // Who this process writes the log as: the responder (its role wins over a ticket, a feature or a
 // branch), a ticket id, plan-<feature>, or supervisor. Never the owner.
 function logWriter() {
-  if (process.env.DEVTEAM_ROLE === 'responder') return 'responder';
+  if (process.env.DEVTEAM_ROLE === 'responder' || inResponderWorktree()) return 'responder';
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
@@ -11024,7 +11024,7 @@ function cmdArtifact() {
     if (fs.existsSync(path.join(here, slugName))) die(`${ARTIFACTS_REL}/${slugName} already exists here`);
     const other = draftArtifacts().filter((a) => a.slug === slugName).map((a) => a.at);
     if (other.length) warn(`${slugName} is also being drawn in ${other.join(', ')}`);
-    const by = process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
+    const by = logWriter() === 'responder' ? 'responder' : process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
     // flags keep a repeated flag's last value; a kind given twice is refused rather than guessed
     const own = argv.indexOf('--') < 0 ? argv : argv.slice(0, argv.indexOf('--'));
     if (own.filter((a) => a === '--kind' || a.startsWith('--kind=')).length > 1) die('artifact new: give --kind once; kind is mock, diagram or docs');
@@ -30843,6 +30843,69 @@ async function cmdBrowser() {
 // is refused every supervisor command (supervisorOnly), runs the owner's responder_command (else
 // agent_command) with the workers' deny rules and no Stop hook, and makes no branch and no slot act.
 const RESPONDER_NAME = 'responder';
+// Whether this process runs in the responder's worktree, whatever its env says (final-1 F2). Both
+// sides are real paths, so a linked cwd counts, a look-alike (responder-x) doesn't; only the parent
+// of the folder is resolved, so a link AT .worktrees/responder never makes its target the responder's.
+function inResponderWorktree() {
+  let cwd;
+  try { cwd = realPath(process.cwd()); } catch { return false; }
+  const wt = path.join(realPath(path.join(mainRoot, '.worktrees')), 'responder');
+  return cwd === wt || cwd.startsWith(`${wt}${path.sep}`);
+}
+// git for the responder's start. What it could have planted never runs or counts: no shared hook
+// (final-1 F6), no fsmonitor (F4), no replaced object (F5).
+const responderGit = (args, cwd = mainRoot) => spawnSync('git', ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 120000 });
+// The commit origin itself calls main, and the owner's settings as that commit has them: no local
+// ref, which the responder can move without a push, is trusted (final-1 F5). Refuses if unreadable.
+function responderMain(s) {
+  const ls = responderGit(['ls-remote', '--symref', 'origin', 'HEAD']);
+  const branch = ls.status === 0 ? /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(ls.stdout)?.[1] : null;
+  const sha = ls.status === 0 ? /^([0-9a-f]{40,64})\s+HEAD$/m.exec(ls.stdout)?.[1] : null;
+  if (!branch || !sha) die('responder: could not read main from origin, so the owner\'s command can\'t be confirmed; try again when origin answers');
+  if (responderGit(['fetch', '--quiet', 'origin', `refs/heads/${branch}`]).status !== 0 || responderGit(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) die(`responder: could not read main from origin (${sha.slice(0, 8)} did not arrive)`);
+  const settings = { ...s };
+  if (projectInRepo) {
+    const shown = responderGit(['show', `${sha}:${projectRel}/settings.md`]);
+    const block = shown.status === 0 ? shown.stdout.match(/```json devteam\s*\n([\s\S]*?)\n```/) : null;
+    let onMain = { ...SETTINGS_DEFAULTS };
+    if (block) { try { onMain = { ...onMain, ...JSON.parse(block[1]) }; } catch { die(`responder: settings.md on main (${sha.slice(0, 8)}) is not valid JSON`); } }
+    for (const k of Object.keys(OWNER_SETTINGS)) settings[k] = onMain[k];
+  }
+  return { sha, settings };
+}
+// Why .worktrees/responder isn't the responder's own worktree, or null, from the files alone: no git
+// runs in a folder whose .git it may have rewritten (final-1 F1, F4).
+function responderWorktreeProblem(wt) {
+  const no = `${wt} is not a git worktree of its own: move it aside or remove it, then responder again`;
+  try {
+    if (!fs.lstatSync(wt).isDirectory() || !fs.lstatSync(path.join(wt, '.git')).isFile()) return no;
+    const to = /^gitdir: (.+?)\n?$/.exec(fs.readFileSync(path.join(wt, '.git'), 'utf8'))?.[1];
+    const common = responderGit(['rev-parse', '--absolute-git-dir']).stdout.trim();
+    const own = path.join(common, 'worktrees', RESPONDER_NAME);
+    if (!to || !common || !fs.lstatSync(own).isDirectory() || realPath(path.resolve(wt, to)) !== realPath(own)) return no;
+    // git's own record of it points back here
+    return realPath(path.dirname(fs.readFileSync(path.join(own, 'gitdir'), 'utf8').trim())) === realPath(wt) ? null : no;
+  } catch { return no; }
+}
+// What in the worktree would outlive a refresh, as full paths: tracked changes, files git was told
+// not to look at, and untracked files, but for a regular file the owner's worktree_files seeds.
+function responderDirty(wt, seeded) {
+  const st = responderGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], wt);
+  const flags = responderGit(['ls-files', '-v', '-z'], wt);
+  if (st.status !== 0 || flags.status !== 0) return null;
+  const seeds = new Set((seeded ?? []).map((f) => path.normalize(String(f))));
+  const isSeed = (f) => { try { return seeds.has(path.normalize(f)) && fs.lstatSync(path.join(wt, f)).isFile(); } catch { return false; } };
+  const hits = [];
+  const parts = st.stdout.split('\0').filter(Boolean);
+  for (let i = 0; i < parts.length; i++) {
+    const code = parts[i].slice(0, 2);
+    const f = parts[i].slice(3);
+    if (/[RC]/.test(code)) i++;
+    if (!(code === '??' && isSeed(f))) hits.push(f);
+  }
+  for (const e of flags.stdout.split('\0').filter(Boolean)) if (e[0] !== 'H') hits.push(e.slice(2));
+  return hits;
+}
 // A Claude Code policy file for one session, passed with --settings: the owner's worker deny rules,
 // naming the main branch of the repo it works in. A worker or planner also gets the Stop hook
 // (stop-ok); the responder doesn't. Its path.
@@ -30945,31 +31008,37 @@ function cmdResponder() {
   if (early) die(early);
   const mem = memoryFull(s);
   if (mem && !flags.resume) die(`${mem.words}: start the responder when some sessions finish, or responder --resume`);
-  // the owner's command, as main has it (OWNER_SETTINGS): unset or blank means agent_command
-  const rc = s.responder_command;
+  // the owner's settings as origin's main has them: unset or blank responder_command means agent_command
+  const { sha, settings: owned } = responderMain(s);
+  const rc = owned.responder_command;
   if (rc !== undefined && rc !== null && typeof rc !== 'string') die('responder_command is a shell command (a string): the owner fixes it on main through a PR');
-  let cmd = typeof rc === 'string' && rc.trim() ? rc : s.agent_command;
-  // its worktree, detached at main, moved there at each start. A folder there that is no worktree of
-  // its own (git would walk up to the main checkout and detach it) is refused, and so is one with any
-  // local change, tracked or untracked (a refresh would keep what git doesn't have to overwrite, so a
-  // file left there would outlive the restart); nothing in it is touched.
+  let cmd = typeof rc === 'string' && rc.trim() ? rc : owned.agent_command;
+  // its worktree, detached at that commit, moved there at each start. One that isn't its own is
+  // refused before any git runs in it, and so is any local change (a refresh would keep what git
+  // doesn't have to overwrite); ignored files, which git would keep too, are removed (final-1 F3).
   const R = repo('home');
-  const mb = s.main_branch;
+  const mb = owned.main_branch;
   const wt = path.join(mainRoot, '.worktrees', RESPONDER_NAME);
-  R.git(['fetch', '--quiet', 'origin', mb]);
-  const base = R.resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb;
-  if (!fs.existsSync(wt)) R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, base], R.root);
-  else {
-    const top = sh('git', ['-C', wt, 'rev-parse', '--show-toplevel']);
-    if (!top || realPath(top) !== realPath(wt)) die(`${wt} is not a git worktree of its own: move it aside or remove it, then responder again`);
-    const dirty = sh('git', ['-C', wt, 'status', '--porcelain']);
+  let found = null;
+  try { found = fs.lstatSync(wt); } catch {}
+  if (!found) {
+    // removed by hand: git's record of it goes first (final-1b F4)
+    responderGit(['worktree', 'prune']);
+    const add = responderGit(['worktree', 'add', '--quiet', '--detach', wt, sha]);
+    if (add.status !== 0) die(`${wt}: could not add it at ${sha.slice(0, 8)}: ${String(add.stderr ?? '').trim() || `exit ${add.status}`}`);
+  } else {
+    const bad = responderWorktreeProblem(wt);
+    if (bad) die(bad);
+    const dirty = responderDirty(wt, owned.worktree_files);
     if (dirty === null) die(`${wt}: git status failed there, so the responder's worktree is left as it is`);
-    if (dirty) die(`${wt} has local changes (${plural(dirty.split('\n').length, 'path')}, first ${dirty.split('\n')[0].slice(3)}): the responder starts from main, so clear them or remove the worktree, then responder again`);
-    const r = spawnSync('git', ['-C', wt, 'checkout', '--quiet', '--detach', base], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    if (r.status !== 0) die(`${wt}: could not move it to ${base}: ${String(r.stderr ?? '').trim() || `exit ${r.status}`}`);
+    if (dirty.length) die(`${wt} has local changes (${plural(dirty.length, 'path')}, first ${dirty[0]}): the responder starts from main, so clear them or remove the worktree, then responder again`);
+    const clean = responderGit(['clean', '-ffdXq'], wt);
+    if (clean.status !== 0) die(`${wt}: could not clear its ignored files: ${String(clean.stderr ?? '').trim() || `exit ${clean.status}`}`);
+    const r = responderGit(['checkout', '--quiet', '--detach', sha], wt);
+    if (r.status !== 0) die(`${wt}: could not move it to ${sha.slice(0, 8)}: ${String(r.stderr ?? '').trim() || `exit ${r.status}`}`);
   }
-  seedWorktree(wt, { setup: false });
-  trustWorktree(wt, s, R);
+  seedWorktree(wt, { setup: false, repo: { ...R, settings: { ...R.settings, worktree_files: owned.worktree_files } } });
+  trustWorktree(wt, owned, R);
   fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
   const promptFile = path.join(runDir, 'prompts', `${RESPONDER_NAME}.txt`);
   fs.writeFileSync(promptFile, `${promptFor(RESPONDER_NAME)}\n`);
@@ -30981,16 +31050,18 @@ function cmdResponder() {
       let w = responderWindow(session);
       const late = responderWindowRefusal(w);
       if (late) refuse(late);
-      // a pane that has exited (remain-on-exit) takes no typing: its window is opened anew
-      if (w.there && /has exited/.test(resolvePane(w.target).problem ?? '')) { tmux(['kill-window', '-t', w.target]); w = responderWindow(session); if (w.there) refuse(`could not close ${w.shown}, whose pane has exited; close it, then responder`); }
+      // a window left there (a shell, or a pane that has exited) is opened anew, so the agent always
+      // starts in the worktree, never in whatever folder that shell was in (final-1b F1)
+      const again = w.there;
+      if (w.there) { tmux(['kill-window', '-t', w.target]); w = responderWindow(session); if (w.there) refuse(`could not close ${w.shown}; close it, then responder`); }
       if (!w.has) { if (sh('tmux', ['new-session', '-d', '-s', session, '-n', RESPONDER_NAME, '-c', wt], { env: tmuxServerEnv() }) === null) refuse('could not start tmux'); }
       else if (!w.there && !tmux(['new-window', '-d', '-t', `=${session}`, '-n', RESPONDER_NAME, '-c', wt])) refuse(`could not open ${w.shown}`);
       const type = (line) => { if (!typeNow(w.target, line)) refuse(`could not type into ${w.shown}; responder --resume starts it`); };
       type(`export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN=${shq(runDir)} DEVTEAM_ROLE='responder'`);
-      if (/^claude(\s|$)/.test(cmd)) cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(RESPONDER_NAME, s, mb)}'`);
+      if (/^claude(\s|$)/.test(cmd)) cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(RESPONDER_NAME, owned, mb)}'`);
       // a ticket or feature from the tmux server's environment is never the responder's: env -u, which works in any shell
       type(`env -u DEVTEAM_TICKET -u DEVTEAM_FEATURE ${sessionMarkerPrefix(session)}${cmd} ${shq(promptPointer(promptFile))}`);
-      out(`${w.there ? 'restarted' : 'started'} the responder in ${w.shown} at ${wt}`);
+      out(`${again ? 'restarted' : 'started'} the responder in ${w.shown} at ${wt}`);
     });
   } catch (e) {
     if (e instanceof Refused) die(e.message);
