@@ -1032,6 +1032,12 @@ test('A14: supervisor.md documents registering, changing and stopping a job in r
   const six = doc.slice(at(/^## 6\. /m), at(/^## 7\. /m));
   const chat = six.slice(six.indexOf('**When the owner tells you in your own session.**'));
   assert.match(chat.split('\n')[0], /except a recurring-edit question, which can't be answered from chat \(see Recurring jobs\)/);
+  // and §6's Threads bullet on answering from a turn names it too (final-13b F4)
+  const threads = six.split('\n').find((l) => l.startsWith('- **An instruction in a thread is acted on as from chat**')) ?? '';
+  assert.ok(threads.includes('--from-turn <u-id> --said "<their clause>"` (not a recurring-edit question: ask it fresh and take their Yes after it; see Recurring jobs)'), 'the Threads bullet excepts a recurring-edit question');
+  // and Recurring jobs says which turn binds and which words are a Yes (final-13b F1, F3)
+  assert.match(section, /the owner's first turn right after your turn that shows the question/);
+  assert.match(section, /quotes count only when they wrap the whole turn/);
   const q = fs.readFileSync(path.join(kit, 'governance/quality.md'), 'utf8');
   const four = q.slice(q.search(/^## 4\. /m), q.search(/^## 5\. /m));
   assert.match(four, /recurring-edit/);
