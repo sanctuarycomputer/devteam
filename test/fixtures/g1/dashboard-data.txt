@@ -323,6 +323,19 @@ exit 0
       },
       "mis_rated": []
     },
+    "model_tiers": {
+      "window_days": 14,
+      "tickets": 0,
+      "fast_tasks": 0,
+      "strong_tasks": 0,
+      "fast_built_here": 0,
+      "misses": 0,
+      "miss_rate": null,
+      "build_usd": 0,
+      "build_usd_cheaper": 0,
+      "cheaper_share": null,
+      "unrouted": []
+    },
     "findings": [
       {
         "severity": "high",
@@ -2220,6 +2233,23 @@ exit 0
       "set": false,
       "default": [],
       "owner_only": "governance-edit"
+    },
+    {
+      "key": "model_tiers",
+      "group": "Agents and sessions",
+      "name": "Models for fast and strong tasks",
+      "description": "the model a plan task marked fast, or strong, runs on",
+      "shown": "value",
+      "value": {
+        "fast": "sonnet",
+        "strong": "opus"
+      },
+      "set": false,
+      "default": {
+        "fast": "sonnet",
+        "strong": "opus"
+      },
+      "owner_only": null
     },
     {
       "key": "gates",
