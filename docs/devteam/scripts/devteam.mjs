@@ -8490,8 +8490,8 @@ function cmdAnswer() {
   if (fromTurn && v.kind === 'review') die(`${id} is a review: its answer is the owner's result, which a turn can't carry`);
   const turn = fromTurn ? turnAnswer('answer', v) : null;
   if (turn && v.class === 'recurring-edit' && !recurringRegistry.saysYes(turn.said)) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner's words there don't start with Yes ("${String(turn.said).slice(0, 80)}"): only the owner's own Yes approves a job change; ask back in its thread`);
-  // and only the owner's first turn right after the supervisor's turn that shows it, so a Yes said to
-  // another question, or after a No, binds nothing (final-13b F1)
+  // and only the owner's very next turn after the supervisor's turn that shows it, so a Yes said to
+  // another question, in a turn or in plain words, or after a No, binds nothing (final-13b F1, final-14b F1)
   { const why = turn && v.class === 'recurring-edit' ? recurringRegistry.turnBinds(logGet(turn.turn), id) : null; if (why) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and that turn isn't the owner's first right after your turn that shows it (${why}): only the owner's Yes right after the question approves a job change; show it again (thread reply <t-id> "…" --refs question:${id}) and take their next turn`); }
   // a credential question has two answers: the token posted, or don't use this sensor
   if (v.sensor && !/^don['’]?t use this sensor\s*$/i.test(restWords.join(' ').trim())) die(`${id} asks for a sensor's token: post it (dashboard, or devteam.mjs secret post ${id}), or answer "Don't use this sensor". Any other answer would close it with neither`);
@@ -24461,15 +24461,14 @@ const recurringRegistry = Object.freeze({
     if (why) return `answered from ${turn}, which isn't the owner's first turn right after the supervisor's turn that shows the question (${why})`;
     return null;
   },
-  // why the owner's turn u doesn't bind question qid, or null (final-13b F1): it binds only as the
-  // owner's first turn after the supervisor's newest turn in u's thread that shows qid (thread ask's
-  // question, or a reply's --refs question:<qid>), and naming no other question. Nothing may come
-  // between them: no other owner turn, and no turn that shows or names a question. Turns in the same
-  // millisecond as either end count as between, so a tie never binds.
+  // why the owner's turn u doesn't bind question qid, or null (final-13b F1, final-14b F1): it binds
+  // only as the very next turn in u's thread after the supervisor's newest turn there that shows qid
+  // (thread ask's question, or a reply's --refs question:<qid>), and naming no other question.
+  // Nothing may come between them, whoever wrote it: a plain reply asks something else in words just
+  // as well. Turns in the same millisecond as either end count as between, so a tie never binds.
   turnBinds(u, qid) {
     if (u?.type !== 'turn') return 'no such turn';
     const refsQ = (x) => (Array.isArray(x.refs) ? x.refs : []).filter((r) => typeof r === 'string' && r.startsWith('question:'));
-    const names = (x) => !!x.question || refsQ(x).length > 0;
     const shows = (x) => x.created_by === 'supervisor' && (x.question === qid || refsQ(x).includes(`question:${qid}`));
     const turns = logObjects('turn').filter((x) => x.thread === u.thread && x.id !== u.id);
     const at = String(u.created_at ?? '');
@@ -24477,8 +24476,8 @@ const recurringRegistry = Object.freeze({
     if (!show) return `no turn of the supervisor's in ${u.thread} showed ${qid} before it`;
     if ((show.question && show.question !== qid) || refsQ(show).some((r) => r !== `question:${qid}`)) return `${show.id}, which shows it, names another question too`;
     const from = String(show.created_at ?? '');
-    const between = turns.find((x) => x.id !== show.id && String(x.created_at ?? '') >= from && String(x.created_at ?? '') <= at && (x.created_by === 'owner' || names(x)));
-    if (between) return `${between.id} ${between.created_by === 'owner' ? "is the owner's" : 'names a question'} between ${show.id} and it`;
+    const between = turns.find((x) => x.id !== show.id && String(x.created_at ?? '') >= from && String(x.created_at ?? '') <= at);
+    if (between) return `${between.id}, the ${typeof between.created_by === 'string' ? between.created_by : 'unknown'}'s turn, comes between ${show.id} and it`;
     return null;
   },
   // The questions that block another question for their names: open ones, and live ones

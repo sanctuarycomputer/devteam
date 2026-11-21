@@ -997,6 +997,49 @@ test('A5: a recurring-edit answer binds only the owner\'s first turn right after
   } finally { T.done(); }
 });
 
+test('A5: a recurring-edit answer binds only the owner\'s very next turn in the thread after the turn that shows the question: a plain supervisor reply between asks something else, so the Yes after it lands nothing (final-14b F1)', () => {
+  const T = setup('turn-next');
+  try {
+    const plant = (q, fields) => fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: q, at: new Date().toISOString(), by: 'owner', answer: 'Yes', channel: 'thread', ...fields })}\n`);
+    const FIRST = (u, q) => new RegExp(`--from-turn ${u}: ${q} is a recurring-edit question, and that turn isn't the owner's first right after your turn that shows it \\([^)]*, the supervisor's turn, comes between`);
+    const PLANTED = (q, u) => new RegExp(`${q} can't approve a job change: answered from ${u}, which isn't the owner's first turn right after the supervisor's turn that shows the question \\([^)]*the supervisor's turn, comes between`);
+    // Y1: thread ask q1, then a plain reply asking something else in words, then the owner's Yes
+    const ev = check({ title: 'ev job', every: '1h', run: 'echo evil' });
+    const t1 = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const r1 = T.run(['thread', 'ask', t1, '--class', 'recurring-edit', '--question', 'Add ev?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { ev } })]);
+    passes(r1);
+    const q1 = QID.exec(r1.out)[0];
+    T.ok(['thread', 'reply', t1, 'Separately: shall I delete the stale branches now? Just say yes.']);
+    const yes1 = T.ok(['thread', 'say', t1, 'Yes'], {}).split('\n')[0];
+    refused(T.run(['answer', q1, 'Yes', '--from-turn', yes1]), FIRST(yes1, q1));
+    assert.equal(json(T.ok(['questions', '--id', q1, '--json']))[0].status, 'open', 'q1 stays open');
+    plant(q1, { said: 'Yes', turn: yes1 });
+    T.jobsChore('y1', () => ({ ev }));
+    refused(T.merge('y1', ['--approved', q1]), PLANTED(q1, yes1));
+    // Y2: q2 asked in the Inbox and named by a reply, then a plain reply asking something else, then Yes
+    const ev2 = check({ title: 'ev2 job', every: '1h', run: 'echo evil2' });
+    const q2 = T.asked({ recurring: { ev2 } });
+    const t2 = T.ok(['thread', 'new', 'More jobs?', '--title', 'More jobs'], {}).split('\n')[0];
+    T.ok(['thread', 'reply', t2, 'From the Inbox: add ev2?', '--refs', `question:${q2}`]);
+    T.ok(['thread', 'reply', t2, 'Never mind that one. Shall I restart the dashboard?']);
+    const yes2 = T.ok(['thread', 'say', t2, 'Yes'], {}).split('\n')[0];
+    refused(T.run(['answer', q2, 'Yes', '--from-turn', yes2]), FIRST(yes2, q2));
+    plant(q2, { said: 'Yes', turn: yes2 });
+    T.jobsChore('y2', () => ({ ev2 }));
+    refused(T.merge('y2', ['--approved', q2]), PLANTED(q2, yes2));
+    assert.deepEqual(T.mainJobs(), {}, 'no job landed');
+    // the plain case: the reply shows the question, and the owner's very next turn says Yes; it lands
+    const ok = check({ title: 'ok job', run: 'echo ok' });
+    const q3 = T.asked({ recurring: { ok } });
+    T.ok(['thread', 'reply', t2, 'Add ok?', '--refs', `question:${q3}`]);
+    const yes3 = T.ok(['thread', 'say', t2, 'Yes'], {}).split('\n')[0];
+    passes(T.run(['answer', q3, 'Yes', '--from-turn', yes3]));
+    T.jobsChore('plain', () => ({ ok }));
+    passes(T.merge('plain', ['--approved', q3]));
+    assert.deepEqual(T.mainJobs(), { ok }, 'only the plain Yes landed its job');
+  } finally { T.done(); }
+});
+
 test('A5: a recurring-edit line from a turn is read against that turn\'s own words: a planted Yes on a No turn lands nothing (final-13b F2)', () => {
   const T = setup('turn-words');
   try {
@@ -1036,7 +1079,7 @@ test('A14: supervisor.md documents registering, changing and stopping a job in r
   const threads = six.split('\n').find((l) => l.startsWith('- **An instruction in a thread is acted on as from chat**')) ?? '';
   assert.ok(threads.includes('--from-turn <u-id> --said "<their clause>"` (not a recurring-edit question: ask it fresh and take their Yes after it; see Recurring jobs)'), 'the Threads bullet excepts a recurring-edit question');
   // and Recurring jobs says which turn binds and which words are a Yes (final-13b F1, F3)
-  assert.match(section, /the owner's first turn right after your turn that shows the question/);
+  assert.match(section, /the owner's next turn after the one that shows the question \(the `thread ask`, or a reply with `--refs question:<qid>`, naming no other question\), with no turn of anyone's between them/);
   assert.match(section, /quotes count only when they wrap the whole turn/);
   const q = fs.readFileSync(path.join(kit, 'governance/quality.md'), 'utf8');
   const four = q.slice(q.search(/^## 4\. /m), q.search(/^## 5\. /m));
