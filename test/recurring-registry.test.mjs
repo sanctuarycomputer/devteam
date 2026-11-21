@@ -1206,7 +1206,7 @@ history('cleared: an up-to-date answered chore lands exactly its answered change
   passes(T.merge('up', ['--approved', q], spy.env));
   assert.deepEqual(T.mainJobs(), { aa: check({ title: 'A job' }), zz: ZZ });
   // forge git lands with directory-rename moves off, whatever the user's git config says (plan-7 P2)
-  assert.match(spy.calls(), /(^| )-c merge\.directoryRenames=conflict merge --no-ff/m);
+  assert.match(spy.calls(), /(^| )-c merge\.directoryRenames=conflict -c commit\.cleanup=verbatim merge --no-ff/m);
 });
 
 history('cleared: a behind PR touching only docs/other.md and project/notes.md lands, main having moved by another file', (T, how) => {
@@ -1571,7 +1571,7 @@ test('A15 landing: forge git, a hook the branch tracks (home has core.hooksPath 
     assert.equal(T.has('origin/main', JOBS), false, 'no job landed on main');
     assert.equal(T.g(['rev-list', '--parents', '-n', '1', 'origin/main']).split(' ').slice(1).join(' '), `${checked} ${sha}`);
     assert.equal(T.g(['rev-parse', 'origin/main^{tree}']), T.g(['rev-parse', `${sha}^{tree}`]), 'the head\'s tree lands');
-    assert.match(spy.calls(), /(^| )-c core\.hooksPath=\/dev\/null -c merge\.directoryRenames=conflict merge --no-ff/m);
+    assert.match(spy.calls(), /(^| )-c core\.hooksPath=\/dev\/null -c merge\.directoryRenames=conflict -c commit\.cleanup=verbatim merge --no-ff/m);
     assert.match(spy.calls(), /(^| )push --quiet --no-verify --force-with-lease=main:/m);
   } finally { T.done(); }
 });
