@@ -7765,7 +7765,8 @@ function publicHere(loc, lib, hello = typeof pageHello === 'function' ? pageHell
   const name = hello?.name ?? project;
   const n = /^([^.]+)\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
   if (!n || n[1] !== name || !PUBLIC_LABEL.test(name)) return null;
-  return { proto: loc.protocol, port: hello?.port ?? null, box: n[2], project, root, named: true };
+  // hello and the Library are read separately and can differ for a while: links name only this host's project
+  return { proto: loc.protocol, port: hello?.port ?? null, box: n[2], project: project === n[1] ? project : null, root, named: true };
 }
 // A link can be built: a project host's links name the project, so one with none in settings has none.
 const canPublish = (me) => !!me && (!me.named || !!me.project);

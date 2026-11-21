@@ -118,6 +118,20 @@ test('A11 a project host with no project in settings offers no link that names n
   assert.deepEqual([...publicState({ ...art, published: null }, {}, me).actions], []);
 });
 
+test('F1 on a project host, a Library naming another project builds no link', () => {
+  const { publicHere, publicState, canPublish } = load();
+  for (const project of ['beta', 'my.app', 'other_app']) {
+    const me = publicHere(onHost, { public: { project, root: '/srv/alpha' } }, hello);
+    assert.equal(me?.project, null, `${project}: not this host's project`);
+    assert.equal(canPublish(me), false, project);
+    const pub = { [project]: { port: 4321, root: '/srv/alpha', artifacts: { hello: T } } };
+    assert.equal(publicState(art, pub, me).state, 'not-live', `${project}: its copy is not shown as this project's`);
+    assert.deepEqual([...publicState(art, pub, me).actions], ['forget'], project);
+    assert.deepEqual([...publicState({ ...art, published: null }, pub, me).actions], [], project);
+  }
+  assert.equal(publicHere(onHost, lib, hello).project, 'alpha', 'the same name is kept');
+});
+
 test('A11b Restore all is offered wherever a link can name the project', () => {
   const { publicHere, canPublish } = load();
   assert.equal(canPublish(publicHere(onHost, { public: { project: null, root: '/r' } }, hello)), false, 'a project host with no project in settings');
