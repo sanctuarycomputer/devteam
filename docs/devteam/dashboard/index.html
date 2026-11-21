@@ -2027,10 +2027,26 @@ function effWaste(ws) {
 }
 // Suggestions (ported from the mock; kit-99 reuses it for Trust): numbered, no buttons; each item is
 // data-sugg="<id>" and its data-title is the title a thread on it starts with. A click or Enter starts
-// a thread on its page subject, or opens the open one (effSuggGo, below).
+// a thread on its page subject, or opens the open one (effSuggGo, below). An item given a ref (Trust's)
+// also carries it as data-subject, its item subject.
 function suggestionsList(xs) {
   if (!xs.length) return effNone('None this week');
-  return `<ol class="sugg">${xs.map((x, i) => `<li class="sugg-i" data-sugg="${esc(x.id)}" data-title="${esc(tLine(`${x.title} · ${x.what}`, T_TITLE_MAX))}" tabindex="0" role="link" title="Start a thread about this suggestion"><span class="sugg-n">${i + 1}</span><div class="sugg-b"><span class="sugg-go">${esc(x.title)}</span><div class="sugg-w">${esc(x.what)}</div><div class="sugg-m">${esc(x.evidence)}</div><div class="sugg-e">Estimated effect: ${esc(x.effect)}</div></div></li>`).join('')}</ol>`;
+  return `<ol class="sugg">${xs.map((x, i) => `<li class="sugg-i" data-sugg="${esc(x.id)}"${typeof x.ref === 'string' ? ` data-subject="${esc(x.ref)}"` : ''} data-title="${esc(tLine(`${x.title} · ${x.what}`, T_TITLE_MAX))}" tabindex="0" role="link" title="Start a thread about this suggestion"><span class="sugg-n">${i + 1}</span><div class="sugg-b"><span class="sugg-go">${esc(x.title)}</span><div class="sugg-w">${esc(x.what)}</div><div class="sugg-m">${esc(x.evidence)}</div><div class="sugg-e">Estimated effect: ${esc(x.effect)}</div></div></li>`).join('')}</ol>`;
+}
+// The Trust Score's suggestions (kit-99): titled by kind (an unknown kind reads Suggestion), each on its
+// item subject suggestion:<id>, so a thread on one is pinned to it. Anything but an array is none.
+function trustSuggestions(xs) {
+  const TITLES = { raise: 'Raise a trust level', question: 'Answer the oldest question holding work', sense: 'Connect a missing sense', strategy: 'Settle a strategy unknown', rule: 'Set a standing rule' };
+  return suggestionsList((Array.isArray(xs) ? xs : []).map((x) => ({ id: String(x?.id ?? ''), title: Object.hasOwn(TITLES, String(x?.kind)) ? TITLES[x.kind] : 'Suggestion', what: x?.what ?? '', evidence: x?.evidence ?? '', effect: x?.effect ?? '', ref: `suggestion:${x?.id ?? ''}` })));
+}
+// A click or Enter on a Trust suggestion: the hit a Shift+click on it builds (tSubjectAt's item branch),
+// started, or its open thread opened, by tlStart. A ref the log can't take (a bad character, over 120
+// bytes) starts nothing.
+function trustSuggGo(it, x, y) {
+  const ref = it?.dataset?.subject ?? '';
+  if (!ref.startsWith('suggestion:') || !T_REF.test(ref) || tBytes(ref) > T_REF_MAX) return;
+  const hit = tSubjectAt(it, x, y, tlSection);
+  if (hit) tlStart({ ...hit, x, y });
 }
 const EFF_SUGG_WORDS = { 'review-depth': 'Fit review depth to the ticket', 'smaller-model': 'Use a smaller model where it fits', cache: 'Keep the prompt cache', 'costly-ticket': 'Find where a costly ticket\'s spend went', 'tighter-specs': 'Write tighter specs' };
 function effSuggestions(xs) {
@@ -2200,7 +2216,7 @@ function trustScoreCard(a) {
   const senses = `<div class="eff-parts">${[['needed', se.needed], ['has', se.has], ['working', se.working]].map(([k, v]) => `<div class="stat"><span class="k">${k}</span><b>${esc(trustCount(v))}</b></div>`).join('')}</div>
     <p class="score-w trust-missing">${missing.length ? `Missing: ${esc(missing.join(', '))}` : 'None missing'}</p>`;
   return `<div class="card eff-card trust-card">${cardHead('shield-check', 'Trust Score', { extra: '<span class="muted">this week</span>' })}${
-    effSection('Score', a ? trustScore(a) : effNone())}${effSection('Trust', a ? trust : effNone())}${effSection('Senses', a ? senses : effNone())}</div>`;
+    effSection('Score', a ? trustScore(a) : effNone())}${effSection('Trust', a ? trust : effNone())}${effSection('Senses', a ? senses : effNone())}${effSection('Suggestions', a ? trustSuggestions(a.suggestions) : effNone())}</div>`;
 }
 // The page, written into #trust only when its HTML changed, so a redraw keeps focus and a pin's element
 function renderTrust(d) {
@@ -2209,6 +2225,24 @@ function renderTrust(d) {
     pageTable('trust:kinds', ['Kind of decision', 'Now', 'At most', 'Agreed with you', 'Corrected'], trustRows(trust))}</div><div class="card flush">${cardHead('history', 'How the levels moved')}${
     pageTable('trust:moves', ['Kind of decision', 'To', 'Why', 'When'], levelMoves(trust))}</div>`;
   const el = $('trust');
+  // a suggestion's click or Enter (kit-99), bound once on #trust, as effSuggGo's are on the document
+  if (el && !el.__sugg) {
+    el.__sugg = true;
+    el.addEventListener('click', (e) => {
+      const it = e.target.closest?.('[data-sugg]');
+      if (!it || e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
+      if (String(window.getSelection?.() ?? '')) return;
+      e.preventDefault();
+      trustSuggGo(it, e.clientX, e.clientY);
+    });
+    el.addEventListener('keydown', (e) => {
+      const t = e.target;
+      if (e.key !== 'Enter' || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin || !t?.matches?.('[data-sugg]')) return;
+      e.preventDefault();
+      const r = t.getBoundingClientRect();
+      trustSuggGo(t, r.right, r.top + 10);
+    });
+  }
   if (!el || el.__html === html) return;
   el.__html = html;
   for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
@@ -8533,16 +8567,16 @@ function showFailure(message) {
 // how big it is, where a card opens and what its state line says, the pins and the dock's words.
 // The kit's test loads this block by itself.
 // What the page can point at: the kit's SUBJECT_TYPES (a test holds the two lists equal).
-const T_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
+const T_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact', 'suggestion'];
 // The kit's SUBJECT_REF, the same way (a test holds the two equal): the page never sends a ref the log refuses.
 // T_REF_MAX: the kit's SUBJECT_CAPS.ref, in bytes; the pattern alone lets a long kind's ref past it.
 const T_REF = new RegExp(`^(${T_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`), T_REF_MAX = 120;
 // What each kind is called where an item has no name of its own (the owner never reads a ref).
-const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a question', ticket: 'a ticket', planner: 'a planning session', decision: 'a decision', lesson: 'a lesson', problem: 'a problem', act: 'an action', preview: 'a preview', artifact: 'an artifact' };
+const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a question', ticket: 'a ticket', planner: 'a planning session', decision: 'a decision', lesson: 'a lesson', problem: 'a problem', act: 'an action', preview: 'a preview', artifact: 'an artifact', suggestion: 'a suggestion' };
 // Where each kind of item lives: an item drawn in two places (an observation also in the Sensors
 // feed, a question in a Decide row) is pinned in its home section. A question's, 'inbox', is the
 // Threads panel's Inbox tab (#th-inbox #questions, kit-100 spec §2.6), not a page's section.
-const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
+const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library', suggestion: 'trust' };
 // The sections' names, as the sidebar shows them.
 const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust', awareness: 'Awareness', governance: 'Governance', efficiency: 'Efficiency', retros: 'Retros', health: 'Sensors', monitoring: 'Sensors' };
 // T_ENCODED_MAX: a turn as the log line holds it, JSON-escaped (a quotation mark is two bytes there,
@@ -8730,7 +8764,7 @@ function tPlace(r, w, h, vw, vh) {
   const top = Math.min(Math.max(8, r.top), Math.max(8, vh - h - 8));
   return { sheet: false, left: Math.round(left), top: Math.round(top) };
 }
-const T_WHERE = { goal: 'Goals', question: 'Inbox', ticket: 'Board', planner: 'Board', observation: 'Loop, Observe', problem: 'Loop, Orient', lesson: 'Loop, Orient', decision: 'Loop, Decide', act: 'Loop, Act', preview: 'Library', artifact: 'Library' };
+const T_WHERE = { goal: 'Goals', question: 'Inbox', ticket: 'Board', planner: 'Board', observation: 'Loop, Observe', problem: 'Loop, Orient', lesson: 'Loop, Orient', decision: 'Loop, Decide', act: 'Loop, Act', preview: 'Library', artifact: 'Library', suggestion: 'Trust' };
 // Where a thread's subject is, in the dock's words.
 function tWhere(s) {
   if (!s) return 'no subject';
