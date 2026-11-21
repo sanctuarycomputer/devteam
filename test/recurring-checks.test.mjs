@@ -140,6 +140,14 @@ test('A16: due times follow C1 for each example the design names, and a slot rec
     assert.equal(Date.parse(r.next), Date.parse(nx), `${what}: next ${r.next}, expected ${nx}`);
     if (d) assert.equal(Date.parse(r.slot), Date.parse(nx), `${what}: the slot a run now records`);
   }
+  // entries the shape refuses (a hand edit on main) never hang or throw here: no schedule (task-1 T1-1)
+  for (const e of [check({ every: '1w', on: 'Monday' }), check({ every: '2w', on: 7 }), check({ every: '1mo', on: 'mon' }), check({ every: '1d', at: '9am' }), check({ every: '1w', at: '9am' })]) {
+    assert.equal(next([{ at: '2026-11-10T08:00:00Z', entry: e }], [], '2026-11-20T00:00:00Z'), null, JSON.stringify(e));
+  }
+  // a null on and at are absent: unanchored, first due at its landing (task-1 T1-2)
+  const bare = next([{ at: '2026-11-10T08:00:00Z', entry: check({ every: '1d', on: null, at: null }) }], [], '2026-11-10T08:00:00Z');
+  assert.equal(bare.due, true);
+  assert.equal(Date.parse(bare.next), Date.parse('2026-11-10T08:00:00Z'));
 });
 
 // ===== A17, A16 end to end: one run, its checkout and its line =====

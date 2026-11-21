@@ -25325,7 +25325,7 @@ function recurringNextSlot(landings, runs, now) {
     return addMonths(x, k * n);
   };
   const out = (due, slot) => ({ due, slot: iso(slot), next: iso(slot), start: iso(start) });
-  if (unit === 'h' || (entry.on === undefined && entry.at === undefined)) {
+  if (unit === 'h' || (entry.on == null && entry.at == null)) {
     const latest = first.size ? Math.max(...first.keys()) : null;
     const slot = latest === null ? start : step(first.get(latest), 1);
     return out(t >= slot, slot);
@@ -25342,13 +25342,18 @@ function recurringNextSlot(landings, runs, now) {
     if (slot0 < start) slot0 = Date.UTC(y, mon + 1, day, hh, mm);
   } else {
     slot0 = Date.UTC(y, mon, s.getUTCDate(), hh, mm);
+    if (!Number.isFinite(slot0)) return null;
     if (unit === 'w') {
-      const want = entry.on === undefined ? s.getUTCDay() : ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].indexOf(entry.on);
+      const want = entry.on == null ? s.getUTCDay() : ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].indexOf(entry.on);
+      // an on that is no weekday (a hand edit the shape refuses) has no schedule, never a loop without end
+      if (want < 0) return null;
       while (new Date(slot0).getUTCDay() !== want || slot0 < start) slot0 += DAY;
     } else if (slot0 < start) {
       slot0 += DAY;
     }
   }
+  // an on or at the shape refuses gives no instant: no schedule, never a throw or a loop
+  if (!Number.isFinite(slot0)) return null;
   if (t < slot0) return out(false, slot0);
   // the latest slot at or before now: estimate by a short period, then walk to it
   const period = unit === 'd' ? n * DAY : unit === 'w' ? n * 7 * DAY : n * 28 * DAY;
