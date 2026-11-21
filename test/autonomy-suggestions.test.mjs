@@ -261,3 +261,50 @@ test('plain words: kinds by name, never by id', () => {
     assert.ok(S.find((s) => s.kind === 'rule').what.includes(D.class_words['new-feature']));
   } finally { F.done(); }
 });
+
+// task-2 review F1-F4: the edges the known-answers log doesn't reach
+test('edges: no question in the window, asked exactly 3, the effect words, the ages', () => {
+  let F = fleetFixture('sugg-edges');
+  try {
+    const hand = handFor(F);
+    const T = Date.now();
+    let k = 0;
+    const ask = (cls, ms) => hand('supervisor', { type: 'question', kind: 'owner-decision', class: cls, question: `Should we take edge step ${++k}?`, recommendation: 'Yes', options: ['Yes', 'No'] }, ms);
+    const answered = (cls, n, inside) => {
+      for (let i = 0; i < n; i++) {
+        const ms = i < inside ? T - (2 + i) * DAY : T - (40 + i) * DAY;
+        hand('owner', { type: 'question', op: 'set', id: ask(cls, ms), answer: 'Yes' }, ms + HOUR);
+      }
+    };
+    answered('priority-change', 10, 1); // a raise to 3 asked once: under half a question a week
+    answered('production-remediation', 10, 8); // a raise to 2 asked 8 times: 2 a week stop waiting
+    answered('release-scope', 10, 0); // ready, but nothing asked in the 28 days: no raise (F1)
+    for (let i = 0; i < 3; i++) ask('new-feature', T - (3 + i) * DAY); // exactly 3: a rule (F2)
+    const D = data(F);
+    const W = D.class_words;
+    assert.deepEqual(D.autonomy.suggestions, [
+      { id: 'tr-raise-production-remediation', kind: 'raise', what: `Let "${W['production-remediation']}" go ahead at a deadline`, evidence: '10 of the last 10 answers went with its recommendation; no corrections in 4 weeks', effect: 'about 2 questions a week stop waiting on you', weight: 1 },
+      { id: 'tr-rule-new-feature', kind: 'rule', what: `A rule for "${W['new-feature']}"`, evidence: 'asked 3 times in 4 weeks', effect: 'about 1 fewer question a week', weight: 0.75 },
+      { id: 'tr-raise-priority-change', kind: 'raise', what: `Let "${W['priority-change']}" decide and tell you`, evidence: '10 of the last 10 answers went with its recommendation; no corrections in 4 weeks', effect: 'fewer than one question a week', weight: 0.25 },
+    ]);
+  } finally { F.done(); }
+  // the oldest holding question's age and what it holds, each older one taking its place (F3)
+  F = fleetFixture('sugg-ages');
+  try {
+    const hand = handFor(F);
+    const T = Date.now();
+    const hold = (ago, blocks) => hand('supervisor', { type: 'question', kind: 'owner-decision', question: `Hold ${blocks.join(' ')}?`, options: ['Yes', 'No'], blocks }, T - ago);
+    const q = () => suggestions(F).find((s) => s.kind === 'question');
+    for (const [ago, blocks, evidence, effect] of [
+      [30 * 60000, ['kit-1'], 'open under an hour; holds kit-1', '1 can start'],
+      [1.5 * HOUR, ['kit-2', 'kit-3', 'kit-4'], 'open 1 hour; holds kit-2, kit-3 and kit-4', '3 can start'],
+      [47.5 * HOUR, ['kit-5'], 'open 47 hours; holds kit-5', '1 can start'],
+      [48.5 * HOUR, ['kit-6', 'kit-7'], 'open 2 days; holds kit-6 and kit-7', '2 can start'],
+      [10.5 * DAY, ['kit-8'], 'open 10 days; holds kit-8', '1 can start'],
+    ]) {
+      hold(ago, blocks);
+      const s = q();
+      assert.deepEqual([s.evidence, s.effect, s.weight], [evidence, effect, blocks.length], evidence);
+    }
+  } finally { F.done(); }
+});
