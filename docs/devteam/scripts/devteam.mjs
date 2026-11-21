@@ -10339,6 +10339,7 @@ function artifactVersions(slug) {
       const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
       let commit = null;
       try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
+      if (a.remote) return { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: git(['rev-parse', '--verify', '-q', `refs/devteam-remote/${a.branch}^{commit}`], mainRoot), time: a.updated_at, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
       return { kind: 'draft', at: a.at, worktree: a.at, commit, time: a.updated_at, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
     });
   const ref = mainRef();
@@ -10418,7 +10419,8 @@ function draftArtifacts(landed = landedArtifacts()) {
   const fpOf = new Map(landed.map((a) => [a.slug, a.fp]));
   const res = [];
   let names = [];
-  try { names = fs.readdirSync(path.join(mainRoot, '.worktrees')); } catch { return res; }
+  // no .worktrees/ is no worktree drafts; drafts from other machines are still listed below
+  try { names = fs.readdirSync(path.join(mainRoot, '.worktrees')); } catch {}
   for (const w of names.sort()) {
     if (!draftWorktree(w)) continue;
     let slugs = [];
@@ -10430,7 +10432,78 @@ function draftArtifacts(landed = landedArtifacts()) {
       if (fpOf.get(s) !== d.fp) res.push(d);
     }
   }
-  return res;
+  // Drafts from other machines (kit-750): each branch the dashboard fetched into refs/devteam-remote/
+  // that isn't main and isn't merged into it, newest tip first, at most 200. Its slugs are the ones
+  // its own commits since it left main changed (every one, for a branch with no base), and only a
+  // folder whose tree main never had (now or in its history), so a squash- or rebase-merged branch
+  // kept on origin shows nothing. A branch's slugs are kept by its tip and main's (artifacts-remote),
+  // a description by tree id (artifacts-remote-trees). A worktree draft of the same slug wins, and
+  // names the branches it hides (remote_branches).
+  const ref = mainRef(), msha = mainSha(), mainB = loadSettings().main_branch;
+  const refs = ref ? git(['for-each-ref', '--sort=-committerdate', '--format=%(refname) %(objectname) %(committerdate:iso-strict)', 'refs/devteam-remote/'], mainRoot) : null;
+  if (!refs) return res;
+  const branches = refs.split('\n').map((l) => /^refs\/devteam-remote\/(\S+) ([0-9a-f]+) (\S+)$/.exec(l)).filter((m) => m && m[1] !== mainB && BRANCH_AT.test(m[1])).slice(0, 200);
+  const cacheFile = path.join(runDir, 'cache', 'artifacts-remote.json');
+  const treeFile = path.join(runDir, 'cache', 'artifacts-remote-trees.json');
+  let cache = {}, trees = {};
+  try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
+  try { trees = JSON.parse(fs.readFileSync(treeFile, 'utf8')); } catch {}
+  const nextCache = {}, nextTrees = {};
+  const onMain = new Map();
+  const mainHas = (slug, tree) => {
+    if (!onMain.has(slug)) { const a = treeFolderArgs(ref, slug); onMain.set(slug, { now: treeNow(git(a.now, mainRoot)), log: git(a.log, mainRoot) }); }
+    const m = onMain.get(slug);
+    return tree === m.now || treeInHistory(m.log, slug, tree);
+  };
+  const local = new Map();
+  for (const d of res) if (!local.has(d.slug)) local.set(d.slug, d);
+  const remote = [];
+  for (const [, b, sha, date] of branches) {
+    const key = `${sha} ${msha}`;
+    let kept = Array.isArray(cache[key]) ? cache[key] : null;
+    if (!kept) {
+      const merged = spawnSync('git', ['merge-base', '--is-ancestor', sha, msha], { cwd: mainRoot, stdio: 'ignore' }).status;
+      if (merged !== 0 && merged !== 1) continue;
+      kept = [];
+      if (merged === 1) {
+        const base = git(['merge-base', msha, sha], mainRoot);
+        let slugs;
+        if (base) {
+          const names = git(['diff', '--name-only', '--no-renames', base, sha, '--', ARTIFACTS_REL], mainRoot);
+          if (names === null) continue;
+          slugs = names.split('\n').map((n) => n.slice(ARTIFACTS_REL.length + 1).split('/')[0]);
+        } else {
+          const ls = git(['ls-tree', sha, `${ARTIFACTS_REL}/`], mainRoot);
+          if (ls === null) continue;
+          slugs = ls.split('\n').map((l) => /^040000 tree [0-9a-f]+\t.*\/([^/]+)$/.exec(l)?.[1]);
+        }
+        for (const slug of [...new Set(slugs)].filter((x) => LINK_ID.test(x ?? '')).sort()) {
+          const tree = treeNow(git(['ls-tree', sha, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot));
+          if (tree && !mainHas(slug, tree)) kept.push([slug, tree]);
+        }
+      }
+    }
+    nextCache[key] = kept;
+    const at = `origin:${b}`;
+    for (const [slug, tree] of kept) {
+      let d = trees[tree]?.slug === slug && 'kind' in trees[tree] ? trees[tree] : null;
+      if (!d) {
+        const src = artifactSource(at, slug);
+        if (!src || src.tree !== tree) continue;
+        d = { ...describeArtifact(slug, at, src), error: src.error };
+      }
+      nextTrees[tree] = d;
+      const row = { ...d, at, branch: b, remote: true, tree, updated_at: new Date(date).toISOString() };
+      const l = local.get(slug);
+      if (l) (l.remote_branches ??= []).push(b);
+      else remote.push(row);
+    }
+  }
+  for (const l of local.values()) l.remote_branches?.sort();
+  const save = (file, next, was) => { if (canonical(next) !== canonical(was)) try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(next)); } catch {} };
+  save(cacheFile, nextCache, cache);
+  save(treeFile, nextTrees, trees);
+  return [...res, ...remote];
 }
 const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
 // ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
@@ -20756,7 +20829,9 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
     const scp = /^[^@/\s]+@([^:/\s]+):/.exec(s);
     return scp ? scp[1].toLowerCase() : null;
   })();
-  let lastWant = -Infinity, timer = null, child = null, rev = 0;
+  // running: a fetch is under way, from the refs read before it to the one after (child is set only
+  // while git runs), so a want() between them never arms a second
+  let lastWant = -Infinity, timer = null, child = null, running = false, rev = 0;
   let startedAt = null, endedAt = null, lastOk = null, lastError = null;
   const iso = (t) => (t === null ? null : new Date(t).toISOString());
   const due = () => (endedAt === null ? Date.now() : endedAt + (lastOk ? FETCH_MS : BACKOFF_MS));
@@ -20788,14 +20863,15 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
     if (r.ok) { const after = await refsNow(); if (after !== before) { rev += 1; try { onMoved(); } catch {} } }
   };
   const arm = () => {
-    if (!remote || timer || child) return;
+    if (!remote || timer || running) return;
     timer = setTimeout(fire, Math.max(0, due() - Date.now()));
     timer.unref?.();
   };
   function fire() {
     timer = null;
     if (Date.now() - lastWant > WINDOW_MS) return;
-    void fetchOnce().finally(arm);
+    running = true;
+    void fetchOnce().catch(() => {}).finally(() => { running = false; arm(); });
   }
   // a fetched branch's artifact folder, for the server: { missing } | { failed } | { tree, fp, error }
   const trees = new Map();
@@ -21005,6 +21081,14 @@ async function dashRoutesViewer(D, req, res, q) {
     const slug = u.searchParams.get('slug') ?? '';
     const at = u.searchParams.get('at') ?? '';
     if (!LINK_ID.test(slug) || !ARTIFACT_AT.test(at) || at === 'main' || at.startsWith('tree:')) return send(res, 400, 'application/json', JSON.stringify({ error: 'a slug, and at a draft\'s worktree (drafts only)' }));
+    // a draft from another machine (kit-750): its fetched tree, read async, its fp kept by tree id;
+    // a branch or folder that isn't there is gone (404), a git that fails a 500
+    if (at.startsWith('origin:')) {
+      const r = await remote.resolve(at.slice(7), slug);
+      if (r.failed) return send(res, 500, 'application/json', JSON.stringify({ error: "the draft's files: git failed" }));
+      if (!r.tree) return send(res, 404, 'application/json', JSON.stringify({ error: `no draft of ${slug} at ${at}` }));
+      return send(res, 200, 'application/json', JSON.stringify({ fp: r.fp, at }));
+    }
     // a draft that vanishes mid-walk is nothing there (404); any other failure (EACCES, EMFILE) is a 500, as /api/view keeps them apart
     let src;
     try { src = artifactSource(at, slug); } catch (e) {
@@ -21189,7 +21273,7 @@ async function dashRoutesFiles(D, req, res, q) {
 // /public-manifest/…, /artifact/…
 async function dashRoutesArtifacts(D, req, res, q) {
   const { u } = q;
-  const { run, send } = D;
+  const { run, send, remote } = D;
   // An artifact's files: landed from main's tree, a published version from its tree by id (what the
   // gateway's owner wrapper frames, spec §8), a draft off its worktree's disk. Matched on the raw
   // path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
@@ -21206,30 +21290,48 @@ async function dashRoutesArtifacts(D, req, res, q) {
     return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
   }
   if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
-    const am = /^\/artifact\/(?:main|wt\/([^/]+)|tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\/([^/]+)(\/.*)?$/.exec(rawPath);
-    const at = am ? (am[2] ? `tree:${am[2]}` : am[1] ?? 'main') : null;
-    if (!am || (at !== 'main' && !am[2] && !draftWorktree(at)) || !LINK_ID.test(am[3])) return send(res, 404, 'text/plain', 'not found');
-    if (am[4] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
-    const rel = am[4] === '/' ? 'index.html' : am[4].slice(1);
-    if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
-    const blobAt = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
-    let bytes = null;
-    if (at === 'main') {
-      const ref = mainRef();
-      if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
-    } else if (am[2]) {
-      // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
-      // against a commit or the root tree as well, which would serve any committed file. A tree
-      // never changes: what was published is what is shown.
-      if (await artifactTreeOk(am[2], am[3])) bytes = await blobAt(`${am[2]}:${rel}`);
+    // A draft from another machine (kit-750): a fetched branch's folder, by the tree id that passed
+    // the artifact checks (artifactRemoteRefs' resolve), its files as blobs of that tree, so a fetch
+    // that moves the branch meanwhile never mixes two trees. Never a checkout; every refusal a 404.
+    const om = /^\/artifact\/origin\/([^/]+)\/([^/]+)(\/.*)?$/.exec(rawPath);
+    let bytes = null, rel, tail;
+    if (om) {
+      let b = null;
+      try { b = decodeURIComponent(om[1]); } catch {}
+      if (b === null || !BRANCH_AT.test(b) || !LINK_ID.test(om[2])) return send(res, 404, 'text/plain', 'not found');
+      if (om[3] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
+      tail = om[3];
+      rel = om[3] === '/' ? 'index.html' : om[3].slice(1);
+      if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
+      const r = await remote.resolve(b, om[2]);
+      if (!r.tree || r.error) return send(res, 404, 'text/plain', 'not found');
+      bytes = await new Promise((resolve) => execFile('git', ['cat-file', 'blob', `${r.tree}:${rel}`], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
     } else {
-      // the real path stays inside the artifact's folder: a symlink out of it is not found
-      try {
-        const root = draftWorktree(at);
-        const dir = path.join(root, ARTIFACTS_REL, am[3]);
-        const real = draftDirOk(root, am[3]) ? fs.realpathSync(path.join(dir, rel)) : null;
-        if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
-      } catch {}
+      const am = /^\/artifact\/(?:main|wt\/([^/]+)|tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\/([^/]+)(\/.*)?$/.exec(rawPath);
+      const at = am ? (am[2] ? `tree:${am[2]}` : am[1] ?? 'main') : null;
+      if (!am || (at !== 'main' && !am[2] && !draftWorktree(at)) || !LINK_ID.test(am[3])) return send(res, 404, 'text/plain', 'not found');
+      if (am[4] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
+      tail = am[4];
+      rel = am[4] === '/' ? 'index.html' : am[4].slice(1);
+      if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
+      const blobAt = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
+      if (at === 'main') {
+        const ref = mainRef();
+        if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
+      } else if (am[2]) {
+        // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
+        // against a commit or the root tree as well, which would serve any committed file. A tree
+        // never changes: what was published is what is shown.
+        if (await artifactTreeOk(am[2], am[3])) bytes = await blobAt(`${am[2]}:${rel}`);
+      } else {
+        // the real path stays inside the artifact's folder: a symlink out of it is not found
+        try {
+          const root = draftWorktree(at);
+          const dir = path.join(root, ARTIFACTS_REL, am[3]);
+          const real = draftDirOk(root, am[3]) ? fs.realpathSync(path.join(dir, rel)) : null;
+          if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
+        } catch {}
+      }
     }
     if (!bytes) return send(res, 404, 'text/plain', 'not found');
     const base = `http://${req.headers.host}`;
@@ -21239,7 +21341,7 @@ async function dashRoutesArtifacts(D, req, res, q) {
     // loopback fetch for a publish get the bytes as committed. Vary says so to anything that keeps
     // an answer, though no-store already keeps none.
     const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
-    res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
+    res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - tail.length)}/`) });
     return res.end(framed ? withArtifactLens(bytes) : bytes);
   }
   return DASH_NEXT;

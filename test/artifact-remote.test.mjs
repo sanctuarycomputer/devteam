@@ -194,7 +194,10 @@ async function setup(t, name, env = {}) {
     const BUILD = Math.max(1000, Date.now() - t0);
     const int = Number(e.DEVTEAM_ARTIFACT_FETCH_MS) || 30000;
     const L = int + DATA_EVERY_MS + 2 * BUILD + 5000;
-    return { dash, B, BUILD, L, P: L + 10000, V: int + 10000 + 12000 + 5000, W: WINDOW(int) };
+    // LW: a change on this machine's disk (a worktree draft) moves no ref, so it waits out a kept
+    // /api/data build (reused up to 20 s) rather than a fetch
+    const LW = 20000 + DATA_EVERY_MS + 2 * BUILD + 5000;
+    return { dash, B, BUILD, L, LW, P: L + 10000, V: int + 10000 + 12000 + 5000, W: WINDOW(int) };
   };
   return { F, spy, other, start, later };
 }
@@ -289,7 +292,7 @@ test('artifact remote drafts: an origin branch that changes an artifact shows as
   F.g(['pull', '-q', 'origin', 'main'], F.old);
   // the checkout's own remote-tracking refs for every branch, as a supervisor's fetch leaves them
   F.g(['fetch', '-q', 'origin'], F.old);
-  const { B, L } = await start();
+  const { B, L, LW } = await start();
   const stop = demand(B);
   t.after(stop);
   const before = snapshot(F);
@@ -331,12 +334,12 @@ test('artifact remote drafts: an origin branch that changes an artifact shows as
   // D6: a local worktree's draft of the same slug wins, and says so
   const wt = path.join(F.old, '.worktrees/far-01', ARTS, 'far-mock');
   for (const [rel, text] of Object.entries(art('local'))) write(path.join(wt, rel), text);
-  const r6 = await within(L, async () => row(await library(B), 'far-mock', 'far-01'), 'D6: the local draft');
+  const r6 = await within(LW, async () => row(await library(B), 'far-mock', 'far-01'), 'D6: the local draft');
   assert.deepEqual(r6.remote_branches, ['ticket/far-01'], 'D6: the local row names the remote draft it hides');
   assert.equal(row(await library(B), 'far-mock', 'origin:ticket/far-01'), null, 'D6: no remote row beside it');
   fs.rmSync(path.join(F.old, '.worktrees'), { recursive: true, force: true });
   // D5: deleted on origin, gone after the next fetch; only the kit's own namespace pruned
-  await within(L, async () => row(await library(B), 'far-mock', 'origin:ticket/far-01'), 'D5: back once the local draft went');
+  await within(LW, async () => row(await library(B), 'far-mock', 'origin:ticket/far-01'), 'D5: back once the local draft went');
   const tracking = F.g(['for-each-ref', '--format=%(objectname)', 'refs/remotes/origin/ticket/old-base'], F.old);
   other.del('ticket/far-01');
   other.del('ticket/old-base');
@@ -410,7 +413,7 @@ test('artifact remote safe: bounded, one at a time, backs off and says so, refs 
   const next = await within(15000, async () => spy.fetches().slice(n0)[1], 'S3: the fetch after the back-off');
   assert.ok(next.start - Date.parse(st.fetched_at) >= 6000 - 200, `S3: backed off (${next.start - Date.parse(st.fetched_at)} ms after the failure)`);
   const all = spy.fetches();
-  for (let i = 1; i < all.length; i++) assert.ok(all[i].start >= (all[i - 1].end ?? Date.parse(st.fetched_at)), `S2: fetch ${i} began before ${i - 1} ended`);
+  for (let i = 1; i < all.length; i++) assert.ok(all[i].start >= (all[i - 1].end ?? Date.parse(st.fetched_at)), `S2: fetch ${i} began before ${i - 1} ended (${JSON.stringify([all[i - 1], all[i]].map((f) => ({ start: f.start, end: f.end, hang: f.hang?.at ?? null })))}, failed at ${st.fetched_at})`);
   await within(5000, async () => { const s = await remoteStatus(B); return s.stale === false && s.ok === true; }, 'S3: stale cleared');
   // S7: a cross-site ask refused
   assert.equal((await fetch(`${B}/api/artifact-remote`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, 'S7: a cross-site ask');
