@@ -1128,7 +1128,7 @@ history('cleared: an up-to-date answered chore lands exactly its answered change
   passes(T.merge('up', ['--approved', q], spy.env));
   assert.deepEqual(T.mainJobs(), { aa: check({ title: 'A job' }), zz: ZZ });
   // forge git lands with directory-rename moves off, whatever the user's git config says (plan-7 P2)
-  assert.match(spy.calls(), /(^| )-c merge\.directoryRenames=conflict -c commit\.cleanup=verbatim merge --no-ff/m);
+  assert.match(spy.calls(), /(^| )-c merge\.directoryRenames=conflict -c commit\.cleanup=verbatim -c merge\.log=false merge --no-ff/m);
 });
 
 history('cleared: a behind PR touching only docs/other.md and project/notes.md lands, main having moved by another file', (T, how) => {

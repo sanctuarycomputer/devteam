@@ -130,7 +130,7 @@ test('A15 landing: forge git, a hook the branch tracks (home has core.hooksPath 
     assert.equal(T.has('origin/main', JOBS), false, 'no job landed on main');
     assert.equal(T.g(['rev-list', '--parents', '-n', '1', 'origin/main']).split(' ').slice(1).join(' '), `${checked} ${sha}`);
     assert.equal(T.g(['rev-parse', 'origin/main^{tree}']), T.g(['rev-parse', `${sha}^{tree}`]), 'the head\'s tree lands');
-    assert.match(spy.calls(), /(^| )-c core\.hooksPath=\/dev\/null -c merge\.directoryRenames=conflict -c commit\.cleanup=verbatim merge --no-ff/m);
+    assert.match(spy.calls(), /(^| )-c core\.hooksPath=\/dev\/null -c merge\.directoryRenames=conflict -c commit\.cleanup=verbatim -c merge\.log=false merge --no-ff/m);
     assert.match(spy.calls(), /(^| )push --quiet --no-verify --force-with-lease=main:/m);
   } finally { T.done(); }
 });
@@ -758,4 +758,28 @@ test('A15 landing: records in home, a hand-pushed real records merge with a file
     assert.equal(json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length, acts0, 'nothing logged');
     assert.equal(F.g(['rev-parse', 'refs/heads/trunk'], F.consoleOrigin), trunk0, 'the code did not land');
   } finally { F.done(); }
+});
+
+test('A15 landing: forge git, with merge.log=true in the repo\'s config, a code push killed at the timeout is still recognised as the kit\'s own landing on the rerun (final-15 F2, H15-3)', { timeout: 300000 }, () => {
+  const T = setup('a15-mergelog');
+  try {
+    T.g(['config', 'merge.log', 'true']);
+    const q = T.yes({ recurring: { aa: check() } });
+    T.jobsChore('pre', () => ({ aa: check() }));
+    const main0 = T.g(['rev-parse', 'refs/heads/main'], T.org);
+    const hook = slowPreReceive(T.org);
+    const before = T.acts().length;
+    let r;
+    try {
+      r = T.merge('pre', ['--approved', q], { DEVTEAM_GIT_TIMEOUT_MS: PRE_TIMEOUT });
+      assert.notEqual(refMoves(T.org, 'main', main0), main0, 'origin took the push after the kill');
+    } finally { fs.rmSync(hook, { force: true }); }
+    refused(r, MAYBE);
+    assert.doesNotMatch(T.g(['log', '-1', '--format=%B', 'refs/heads/main'], T.org), /^\* /m, 'no shortlog in the message');
+    const r2 = T.merge('pre', ['--approved', q]);
+    passes(r2);
+    assert.match(r2.text, /in the kit's own landing merge [0-9a-f]{12}, with no act logged/);
+    assert.equal(T.acts().length, before + 1);
+    assert.equal(json(T.ok(['recurring', 'show', 'aa', '--json'])).registered?.qid, q, 'registered through the answer');
+  } finally { T.done(); }
 });

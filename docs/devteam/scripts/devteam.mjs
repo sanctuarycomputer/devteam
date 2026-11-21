@@ -24453,9 +24453,10 @@ const recurringRegistry = Object.freeze({
   // broken file left as it is (landRecords, before it records and pushes its merge)
   keepsJobs: (M, H) => !H.failed && !M.failed && (H.problem || M.problem ? !!H.problem && !!M.problem && !!H.entry && H.entry === M.entry : !Object.keys(recurringRegistry.changed(M.jobs, H.jobs)).length),
   // the flags of the kit's landing merges (landCode, landRecords): directory renames are a conflict,
-  // and the message is kept verbatim, whatever the user's commit.cleanup says, so the rerun
-  // (kitMergeOf) reads back exactly what merge wrote (final-14 F3)
-  MERGE_FLAGS: ['-c', 'merge.directoryRenames=conflict', '-c', 'commit.cleanup=verbatim'],
+  // and the message is kept verbatim, whatever the user's commit.cleanup or merge.log says (merge.log
+  // would add a shortlog to it), so the rerun (kitMergeOf) reads back exactly what merge wrote
+  // (final-14 F3, final-15 F2)
+  MERGE_FLAGS: ['-c', 'merge.directoryRenames=conflict', '-c', 'commit.cleanup=verbatim', '-c', 'merge.log=false'],
   // The kit's own landing merges (final-15 F1, d-20261121-055611227-supervisor): landCode and
   // landRecords write each merge's sha here before its push, and a rerun adopts main's tip only when
   // it is one of them. Parents, a message and a tree are anything anyone can push; a sha the kit wrote
