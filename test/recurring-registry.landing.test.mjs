@@ -890,3 +890,70 @@ test('A15 landing: records in home, a planted record of a records merge whose pa
     assert.equal(json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length, acts0, 'nothing logged');
   } finally { F.done(); }
 });
+
+const ONTO_UNSEEN = (tip, onto) => new RegExp(`main's tip ${tip.slice(0, 12)} is a landing merge recorded for this head onto ${onto.slice(0, 12)}, which this clone never saw as origin's main: not the kit's own landing; nothing logged`);
+const REC_ONTO_UNSEEN = (tip, onto) => new RegExp(`home's main tip ${tip.slice(0, 12)} is a records merge recorded for them onto ${onto.slice(0, 12)}, which this clone never saw as origin's main: not the kit's own records merge; nothing logged`);
+
+test('A15 landing: forge git, a planted record of the real merge of the head onto a first parent that was never main (it carries an unanswered job) is never adopted, and nothing is logged (final-17 F1, H17-1)', () => {
+  const T = setup('a15-h17-1');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    T.g(['fetch', '-q', 'origin']);
+    const main0 = T.g(['rev-parse', 'origin/main']);
+    // O': main0 and an unanswered job bb, never pushed to main; the chore head on it adds aa
+    const o = path.join(T.old, '.worktrees', 'h17o');
+    T.g(['worktree', 'add', '-q', '--detach', o, main0]);
+    putJobs(o, () => ({ bb: check({ title: 'B', run: 'echo bb' }) }));
+    T.g(['add', '-A'], o); T.g(['commit', '-qm', 'O prime'], o);
+    const Op = T.g(['rev-parse', 'HEAD'], o);
+    T.g(['checkout', '-q', '-b', 'chore-hand'], o);
+    putJobs(o, (j) => ({ ...j, aa: check() }));
+    T.g(['add', '-A'], o); T.g(['commit', '-qm', 'chore-hand: jobs'], o);
+    const sha = T.g(['rev-parse', 'HEAD'], o);
+    T.g(['push', '-q', '-f', 'origin', 'chore-hand'], o);
+    write(path.join(T.old, 'docs/devteam/run/pr/chore-hand.md'), '# chore-hand: jobs\n\n## One-way doors\n\nNone.\n');
+    // the control: an honest merge refuses it, since bb is a change too
+    refused(T.dry('hand', q), /recurring\.bb is added here/);
+    // the real merge of O' and the head (its tree is merge's own), pushed to main, and a record onto O'
+    const m = path.join(T.old, '.worktrees', 'h17m');
+    T.g(['worktree', 'add', '-q', '--detach', m, Op]);
+    T.g(['-c', 'merge.directoryRenames=conflict', '-c', 'commit.cleanup=verbatim', '-c', 'merge.log=false', 'merge', '-q', '--no-ff', '-m', 'a hand merge', sha], m);
+    const hand = T.g(['rev-parse', 'HEAD'], m);
+    T.g(['push', '-q', '-f', 'origin', `${hand}:refs/heads/main`], m); T.g(['fetch', '-q', 'origin']);
+    plantLanding(T.old, 'home', 'chore-hand', sha, hand, Op);
+    const before = T.acts().length;
+    const r = T.merge('hand', ['--approved', q]);
+    refused(r, ONTO_UNSEEN(hand, Op));
+    assert.doesNotMatch(r.text, /in the kit's own landing merge/);
+    assert.equal(T.acts().length, before, 'nothing logged');
+    assert.equal(json(T.ok(['recurring', 'show', 'aa', '--json'])).registered?.qid ?? null, null, 'aa is not registered through q');
+  } finally { T.done(); }
+});
+
+test('A15 landing: records in home, a planted record of the real records merge onto a first parent that was never home\'s main is never adopted, and nothing is logged (final-17 F1, H17-1)', () => {
+  const F = recordsHome('recur-h17-1r');
+  try {
+    const { head } = recordsReady(F, RID);
+    const main0 = F.mainNow();
+    const acts0 = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length;
+    const trunk0 = F.g(['rev-parse', 'refs/heads/trunk'], F.consoleOrigin);
+    // E: main0 and a file outside the records folder, never pushed to main; the real merge of E and
+    // the records, pushed to home's main, and a record onto E
+    const e = path.join(F.old, '.worktrees', 'h17e');
+    F.g(['worktree', 'add', '-q', '--detach', e, main0], F.old);
+    write(path.join(e, `${PROJ}/notes-evil.md`), 'evil\n');
+    F.g(['add', '-A'], e); F.g(['commit', '-qm', 'E'], e);
+    const E = F.g(['rev-parse', 'HEAD'], e);
+    const msg = `${RID}: records\n\nMerged home's ticket/${RID} at ${head}: the records of ${RID}, whose code lands in console`;
+    F.g(['-c', 'merge.directoryRenames=conflict', '-c', 'commit.cleanup=verbatim', '-c', 'merge.log=false', 'merge', '-q', '--no-ff', '-m', msg, head], e);
+    const c = F.g(['rev-parse', 'HEAD'], e);
+    F.g(['push', '-q', '-f', 'origin', `${c}:refs/heads/main`], e);
+    plantLanding(F.old, 'home', `records-${RID}`, head, c, E);
+    const r = F.text(F.runIn(F.old, ['merge', RID], SUP));
+    assert.notEqual(r.status, 0, r.text);
+    assert.match(r.text, REC_ONTO_UNSEEN(c, E));
+    assert.doesNotMatch(r.text, /in the kit's own records merge/);
+    assert.equal(json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length, acts0, 'nothing logged');
+    assert.equal(F.g(['rev-parse', 'refs/heads/trunk'], F.consoleOrigin), trunk0, 'the code did not land');
+  } finally { F.done(); }
+});

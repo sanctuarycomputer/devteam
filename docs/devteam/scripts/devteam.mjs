@@ -7048,7 +7048,8 @@ function cmdMerge() {
   if (checkedMain && R.git(['merge-base', '--is-ancestor', sha, checkedMain]) !== null) {
     const cls0 = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
     const logged = logObjects('act').some((a) => a.class === cls0 && String(a.what ?? '').startsWith(`merged ${branch} at ${sha}`) && (a.repo ?? null) === (onR.repo ?? null));
-    const own = viaGit && !logged ? recurringRegistry.kitMergeOf((args) => R.git(args), checkedMain, sha, `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, recurringRegistry.landingFile(R.name, branch, sha), R.root) : null;
+    const own = viaGit && !logged ? recurringRegistry.kitMergeOf((args) => R.git(args), checkedMain, sha, `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, recurringRegistry.landingFile(R.name, branch, sha), R.root, mainBranch0) : null;
+    if (own?.unseen) die(`${branch}${inR} at ${sha.slice(0, 12)}: main's tip ${checkedMain.slice(0, 12)} is a landing merge recorded for this head onto ${own.unseen.slice(0, 12)}, which this clone never saw as origin's ${mainBranch0}: not the kit's own landing; nothing logged (${own.lookalike}). Someone else made that merge and planted its record: verify from the start`);
     if (own?.lookalike && own.recorded) die(`${branch}${inR} at ${sha.slice(0, 12)}: main's tip ${checkedMain.slice(0, 12)} is a landing merge recorded for this head, but not the tree the kit's merge of its parents builds: not the kit's own landing; nothing logged (${own.lookalike}). Someone else made that merge, or planted its record: verify from the start`);
     if (own?.lookalike) die(`${branch}${inR} at ${sha.slice(0, 12)}: main's tip ${checkedMain.slice(0, 12)} has the kit's landing message and parents, but it isn't the landing merge the kit recorded for this head before its push: not the kit's own landing; nothing logged (${own.lookalike}). Someone else made that merge: verify from the start`);
     if (!own) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
@@ -7070,7 +7071,8 @@ function cmdMerge() {
   let recOwn = null;
   if (rec?.landed && repo('home').settings.forge === 'git' && !recordsLanded()) {
     const tip = resolveCommit(`origin/${repo('home').settings.main_branch}`);
-    const own = tip ? recurringRegistry.kitMergeOf((args) => git(args), tip, rec.sha, recurringRegistry.recordsMessage(id, rec.sha, R.name), recurringRegistry.landingFile('home', `records-${id}`, rec.sha), mainRoot) : null;
+    const own = tip ? recurringRegistry.kitMergeOf((args) => git(args), tip, rec.sha, recurringRegistry.recordsMessage(id, rec.sha, R.name), recurringRegistry.landingFile('home', `records-${id}`, rec.sha), mainRoot, repo('home').settings.main_branch) : null;
+    if (own?.unseen) die(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} is a records merge recorded for them onto ${own.unseen.slice(0, 12)}, which this clone never saw as origin's ${repo('home').settings.main_branch}: not the kit's own records merge; nothing logged (${own.lookalike}). Someone else made that merge and planted its record: verify from the start`);
     if (own?.lookalike && own.recorded) die(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} is a records merge recorded for them, but not the tree the kit's merge of its parents builds: not the kit's own records merge; nothing logged (${own.lookalike}). Someone else made that merge, or planted its record: verify from the start`);
     if (own?.lookalike) die(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} has the kit's records message and parents, but it isn't the records merge the kit recorded before its push: not the kit's own records merge; nothing logged (${own.lookalike}). Someone else made that merge: verify from the start`);
     if (own) { recOwn = { tip, onto: own.onto }; out(`the records of ${id} at ${rec.sha.slice(0, 12)} are on home's ${repo('home').settings.main_branch} in the kit's own records merge ${tip.slice(0, 12)}, with no act logged (a push that timed out, which origin took): checking them onto ${own.onto.slice(0, 12)}, the main they landed on, to log their landing`); }
@@ -24783,13 +24785,15 @@ const recurringRegistry = Object.freeze({
   //   landingFile; final-15 F1), is adopted whatever its message says (the PR text may have changed
   //   since: d-20261121-072341505-supervisor, final-16 F1), but only when its tree is also the one
   //   merge builds from those parents with MERGE_FLAGS (git merge-tree --write-tree, git 2.38 or
-  //   later; bounded, in cwd), which a planted record can't forge (final-16 F2). A tree that differs,
-  //   or a merge-tree that conflicts, fails or times out, is a look-alike: { lookalike: why, recorded: true }.
+  //   later; bounded, in cwd), which a planted record can't forge (final-16 F2), and only when that
+  //   first parent is a commit this clone saw as origin's mainBranch (final-17 F1). A tree that
+  //   differs, or a merge-tree that conflicts, fails or times out, is a look-alike: { lookalike: why,
+  //   recorded: true }; a first parent never seen as main is { lookalike: why, recorded: true, unseen: that first parent }.
   // - one it never recorded is a look-alike when it carries merge's own message (as git keeps it:
   //   trailing spaces and repeated blank lines dropped), { lookalike: why, recorded: false }, and with
   //   another message is someone else's merge: null.
   // Else { onto: the first parent }. g is the repo's git (output, or null).
-  kitMergeOf(g, tip, head, message, file, cwd) {
+  kitMergeOf(g, tip, head, message, file, cwd, mainBranch) {
     const norm = (m) => String(m ?? '').split('\n').map((l) => l.trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
     const parents = (g(['rev-list', '--parents', '-n', '1', tip]) ?? '').trim().split(' ').slice(1);
     if (parents.length !== 2 || parents[1] !== head) return null;
@@ -24803,6 +24807,13 @@ const recurringRegistry = Object.freeze({
     if (!m.ok) return { lookalike: `git merge-tree of its parents ${m.timedOut ? 'timed out' : 'failed or conflicts (it needs git 2.38 or later)'}`, recorded: true };
     const want = m.out.trim().split('\n')[0];
     if (!have || have !== want) return { lookalike: `its tree ${have.slice(0, 12) || '(unread)'}, the merge's ${want.slice(0, 12)}`, recorded: true };
+    // and its first parent was origin's main in this clone: the main the kit's first run fetched, and
+    // judged and merged onto, is in the reflog of refs/remotes/origin/<main> (final-17 F1). A record
+    // and a tree can be planted onto a commit that was never main (one carrying an unanswered job),
+    // and the checks, pinned there, would judge only the head's own change; this clone's reflog of
+    // origin's main is written by its own fetches and pushes. The rerun's fetch adds only the tip.
+    const seen = (g(['reflog', 'show', '--format=%H', `refs/remotes/origin/${mainBranch}`]) ?? '').split('\n').map((l) => l.trim());
+    if (!seen.includes(parents[0])) return { lookalike: `${parents[0].slice(0, 12)} is not in the reflog of refs/remotes/origin/${mainBranch}`, recorded: true, unseen: parents[0] };
     return { onto: parents[0] };
   },
   // words that start with the label Yes, read as --choice and --read read a label: any case
