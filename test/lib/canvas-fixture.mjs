@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { openCanvas, startCanvasFake, docErrors } from './canvas-fake.mjs';
+import { openCanvas, startCanvasFake, docErrors, resolve } from './canvas-fake.mjs';
 import { cleanup, openChrome } from './chrome.mjs';
 import { until } from './kit.mjs';
 
@@ -450,6 +450,7 @@ export async function dragPath(p, pts, mid = null) {
 export const ARROW_CODE = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
 
 // An arrow key as a keyboard sends it, Shift held when asked.
+// An arrow key as a keyboard sends it (the helper's key() knows only Left and Right), Shift held when asked.
 export async function arrow(p, k, shift = false) {
   const e = { key: k, code: k, windowsVirtualKeyCode: ARROW_CODE[k], nativeVirtualKeyCode: ARROW_CODE[k], modifiers: shift ? 8 : 0 };
   await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...e });
@@ -595,6 +596,7 @@ export async function key(p, k, { ctrl: c = false, shift = false, commands } = {
 
 export const MINIMAL = fixture('doc-minimal.json');
 
+// The shown page (the Pages list's current link), and showing another by its link.
 export const shownPage = (p) => p.ev("document.querySelector('#pages a[aria-current=\"page\"]')?.dataset.page ?? null");
 
 export const pageLink = (id) => `#pages a[data-page="${id}"]`;
@@ -653,3 +655,39 @@ export const blurAll = (p) => p.ev('(() => { const a = document.activeElement; i
 export async function marquee(p, a, b) {
   await dragPath(p, [await pagePt(p, a.x, a.y), await pagePt(p, b.x, b.y)]);
 }
+
+export const setOp = (id, prop, value) => ({ op: 'set', id, prop, value });
+
+export async function showPg(p, pg) {
+  if ((await shownPage(p)) === pg) return;
+  await p.click(`#pages a[data-page="${pg}"]`);
+  await within(async () => (await shownPage(p)) === pg, `page ${pg} shown`, async () => shownPage(p));
+}
+
+// The panel's notes, as text.
+export const notes = (p) => p.ev("[...document.querySelectorAll('#props .note')].filter((e) => !e.hidden).map((e) => e.textContent)");
+
+export const IMG_PATH = path.join(FIX, 'images', IMG_FILE);
+
+export const pressedTool = (p) => p.ev("[...document.querySelectorAll('#tools button[aria-pressed=\"true\"]')].map((b) => b.dataset.tool).join(' ') || null");
+
+// The one add the page sent after the first n0 edits, acked.
+export async function added(rec, n0, what) {
+  const e = await nextEdit(rec, n0);
+  assert.equal(e.ops.length, 1, `${what}: one op`);
+  assert.equal(e.ops[0].op, 'add', `${what}: an add`);
+  assert.equal(Object.hasOwn(e.ops[0].node, 'children'), false, `${what}: no children key`);
+  assert.match(e.ops[0].node.id, /^[0-9a-z]{6}-\d+$/, `${what}: a new id <prefix>-<n>`);
+  await ackOf(rec, e);
+  return e.ops[0];
+}
+
+// After a creation: the tool is Move again and the new node is selected.
+export async function madeAndSelected(p, id, what) {
+  await within(async () => (await pressedTool(p)) === 'move', `${what}: the tool back to Move`, async () => pressedTool(p), 5000);
+  await within(async () => (await p.ev(`document.querySelector('#layers .layer[data-node="${id}"]')?.getAttribute('aria-selected') ?? null`)) === 'true', `${what}: the new node selected`, async () => p.ev("[...document.querySelectorAll('#layers .layer[aria-selected=\"true\"]')].map((r) => r.dataset.node).join(' ')"), 5000);
+}
+
+export const shownMsg = (p) => shownText(p, '#msg');
+
+export const selectedIds = (p) => p.ev("[...document.querySelectorAll('#layers .layer[aria-selected=\"true\"]')].map((r) => r.dataset.node)");
