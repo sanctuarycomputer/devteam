@@ -805,7 +805,8 @@ test('R13: with DEVTEAM_ROLE unset, its worktree writes as the responder, never 
   // a linked cwd is still the worktree; a look-alike folder, and a link AT the worktree's path, are not
   const link = path.join(F.base, 'link-to-responder');
   fs.symlinkSync(F.wt, link);
-  const viaLink = F.run(link, ['thread', 'reply', T, 'By the link.'], {});
+  // as a shell that did `cd` through the link leaves it: PWD names the link
+  const viaLink = F.run(link, ['thread', 'reply', T, 'By the link.', '--anyway'], { PWD: link });
   assert.equal(viaLink.status, 0, viaLink.err);
   assert.match(viaLink.out.split('\n')[0], /-responder$/, 'a symlinked cwd writes as the responder');
   const alike = `${F.wt}-x`;
