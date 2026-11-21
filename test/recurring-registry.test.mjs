@@ -1119,6 +1119,29 @@ test('A5: a later owner turn bound to another question shown in the thread, or c
   } finally { T.done(); }
 });
 
+test('A5: a supervisor reply after the owner\'s Yes doesn\'t block it, and an owner turn in the same millisecond as the Yes counts as after it (final-15b F6)', () => {
+  const T = setup('turn-after');
+  try {
+    const tAsk = (tid, name, job) => { const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]); passes(r); return QID.exec(r.out)[0]; };
+    const job = (n) => check({ title: `${n} job`, run: `echo ${n}` });
+    // laterany: the owner's Yes, then the supervisor's reply; the answer from the Yes is accepted
+    const t1 = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const q1 = tAsk(t1, 'b1', job('b1'));
+    const y1 = T.ok(['thread', 'say', t1, 'Yes'], {}).split('\n')[0];
+    T.ok(['thread', 'reply', t1, 'Thanks: I will add it.']);
+    passes(T.run(['answer', q1, 'Yes', '--from-turn', y1]));
+    // samems: an owner turn written in the very millisecond of the Yes (a planted line, its id one
+    // millisecond on) counts as after it, so the Yes is refused
+    const t2 = T.ok(['thread', 'new', 'Jobs 2?', '--title', 'Jobs 2'], {}).split('\n')[0];
+    const q2 = tAsk(t2, 'b2', job('b2'));
+    const y2 = T.ok(['thread', 'say', t2, 'Yes'], {}).split('\n')[0];
+    const at = json(T.ok(['log', '--type', 'turn', '--json'])).find((x) => x.id === y2).created_at;
+    const same = y2.replace(/-(\d{9})-owner$/, (m, d) => `-${String(Number(d) + 1).padStart(9, '0')}-owner`);
+    fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, type: 'turn', op: 'new', id: same, at, by: 'owner', channel: 'cli', thread: t2, text: 'Wait, no.' })}\n`);
+    refused(T.run(['answer', q2, 'Yes', '--from-turn', y2]), new RegExp(`--from-turn ${y2}: ${q2} is a recurring-edit question, and the owner wrote again after that turn \\(${same}\\)`));
+  } finally { T.done(); }
+});
+
 test('A5: a planted line on a channel the kit never writes for an owner\'s answer lands nothing (final-14b F7)', () => {
   const T = setup('turn-channel');
   try {
