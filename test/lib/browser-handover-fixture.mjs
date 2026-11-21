@@ -9,6 +9,7 @@
 import { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { Worker } from 'node:worker_threads';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -188,27 +189,26 @@ export async function ownerLogIn(P, { S = site, to } = {}) {
   return v;
 }
 
-// C12's timed scan of P's profile for secrets (scanProfile), started before the answer: every 100 ms,
-// each scan dated by the time it started, until stop(), and once more after. firstCleanAfter(t): the
+// C12's timed scan of P's profile for secrets, started before the answer, in a worker thread
+// (profile-scan-worker.mjs: scanProfile's rules, read synchronously there, so this thread's event loop,
+// which serves the fixture site and every chain's CLI, never blocks): a scan every 100 ms, each dated
+// by the time it started and timed (ms), until stop(), and once more after. firstCleanAfter(t): the
 // start of the first scan from t on that found nothing, or null. stop() resolves to every scan.
 export function scanLoop(P, secrets) {
   const scans = [];
-  let stopped = false;
-  // a scan that throws counts as a find (named by its error): never clean by failing to read
-  const scan = () => { const at = Date.now(); let found; try { found = scanProfile(P, secrets); } catch (e) { found = [`(the scan failed: ${e.code ?? e.message})`]; } scans.push({ at, found }); return at; };
-  const loop = (async () => {
-    while (!stopped) { const at = scan(); await sleep(Math.max(0, 100 - (Date.now() - at))); }
-    scan();
-  })();
+  const stop = new Int32Array(new SharedArrayBuffer(4));
+  const w = new Worker(new URL('./profile-scan-worker.mjs', import.meta.url), { workerData: { profile: P.profile, secrets, stop } });
+  w.on('message', (m) => scans.push(m));
+  const ended = new Promise((resolve) => { w.once('exit', resolve); w.once('error', (e) => { scans.push({ at: Date.now(), found: [`(the scan worker failed: ${e.message})`], ms: 0 }); resolve(); }); });
   return {
     scans,
     firstCleanAfter: (t) => scans.find((s) => s.at >= t && !s.found.length)?.at ?? null,
-    stop: async () => { stopped = true; await loop; return scans; },
+    stop: async () => { Atomics.store(stop, 0, 1); Atomics.notify(stop, 0); await ended; return scans; },
   };
 }
 // The code typed into the profile's files at all: polled up to 15 s (Chrome's session save), so a clean
 // scan later means the code left, not that the scan can't find it. The files that held it.
-export const codeOnDisk = (P, code) => until(() => { const f = scanProfile(P, [code]); return f.length ? f : null; }, 15000, 'the code in some profile file (the scan shown able to find it)');
+export const codeOnDisk = (P, code) => until(async () => { const f = await scanProfileAsync(P, [code]); return f.length ? f : null; }, 15000, 'the code in some profile file (the scan shown able to find it)');
 
 // The owner at the view: a socket to P's view port (state.json's view_port) with the view's own Origin.
 // { status, msgs, send(obj), tab(n), paste(text), enter(), waitFor(pred, ms), close(), c }: tab sends n
@@ -316,6 +316,28 @@ export function scanProfile(P, secrets) {
     }
   };
   walk(P.profile);
+  return found.sort();
+}
+
+// scanProfile's rules, read asynchronously: the timed scans run while this process also serves the
+// fixture site and every chain's CLI, so a scan never blocks its event loop. Resolves to the sorted paths.
+export async function scanProfileAsync(P, secrets) {
+  const needles = secrets.filter(Boolean).flatMap((s) => [Buffer.from(s, 'utf8'), Buffer.from(s, 'utf16le')]);
+  const found = [];
+  const walk = async (dir) => {
+    let ents;
+    try { ents = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (e) { if (e.code === 'ENOENT' && dir !== P.profile) return; throw e; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(p);
+      else if (e.isFile()) {
+        let buf;
+        try { buf = await fs.promises.readFile(p); } catch (err) { if (err.code === 'ENOENT') continue; throw err; }
+        if (needles.some((n) => buf.includes(n))) found.push(path.relative(P.profile, p));
+      }
+    }
+  };
+  await walk(P.profile);
   return found.sort();
 }
 

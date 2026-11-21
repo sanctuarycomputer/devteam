@@ -15,12 +15,13 @@ handoverFile();
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
-// The checks run as two chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C12, C13, C14, C16, RF3) and cB's (C18, RF4, T4-1, T4-3, T4-2).
-// onA and onB add a check.
-const cAChecks = [], cBChecks = [];
+// The checks run as three chains at once, one per project (each its own daemon), checks in order within
+// a chain: cA's (C23, C15, C20, W1, RF3), cB's (C18, RF4, T4-1, T4-3, T4-2) and cD's (C12, C13, C14,
+// C16). onA, onB and onD add a check.
+const cAChecks = [], cBChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
 const onB = (name, fn) => cBChecks.push([name, fn]);
+const onD = (name, fn) => cDChecks.push([name, fn]);
 if (mustRun && !canDrive) test('Chrome is needed on CI\'s Node 22+', () => assert.fail('Chrome is needed on CI\'s Node 22+: this file must run there, not skip'));
 
 // C23's own sites: hosts no other check hands over, so only C23's handovers name them. S2 carries
@@ -145,8 +146,13 @@ onA('W1 wait after a restart: a close made while the daemon was dead, and one ha
   assert.equal(entriesFor(P, q2).length, 1, 'the new daemon handled q2 again');
 });
 
-// --- the reopen and the secrets (T5) on cA, before RF3 (whose close dated ahead dates every later line)
+// --- the reopen and the secrets (T5) on cD: a project of their own (no hooks), a chain beside cA's and
+// cB's, so the file's longest chain stays short
+let CD;
+const cD = () => (CD ??= project('cD'));
 const SIGNED = 'Signed in as owner';
+// the site's sign-in POSTs by path (other chains POST /events to the same site meanwhile)
+const signInPosts = () => { const p = site.posts().paths; return { login: p['/login'] ?? 0, twofa: p['/2fa'] ?? 0 }; };
 // The close after a login, with C12's scan: the code shown on disk first; the scan running from before
 // the answer (close: the owner's Done or Can't right now, or the supervisor's withdraw); no secret in
 // any scan from 2 s after the answer on, and none after the first clean one, through wait and once
@@ -168,10 +174,14 @@ async function closeAndScan(P, q, close, label) {
     clean = loop.firstCleanAfter(answerAt);
     w = await waitJson(P);
   } finally { await loop.stop(); }
+  const ms = clean - answerAt;
+  let load = '?';
+  try { load = fs.readFileSync('/proc/loadavg', 'utf8').split(' ').slice(0, 3).join(' '); } catch {}
+  const took = loop.scans.map((s) => s.ms);
+  const first = loop.scans.find((s) => s.at === clean);
+  console.log(`# kit-67 ${label}: answer to first clean scan ${ms} ms (by its end ${clean + first.ms - answerAt} ms; ${loop.scans.length} scans, each ${Math.min(...took)}-${Math.max(...took)} ms; load ${load})`);
   const late = loop.scans.filter((s) => s.found.length && (s.at >= answerAt + 2000 || s.at >= clean));
   assert.deepEqual(late.map((s) => ({ after: s.at - answerAt, found: s.found })), [], `${label}: a secret on disk 2 s after the answer, or after a clean scan`);
-  const ms = clean - answerAt;
-  console.log(`# kit-67 ${label}: answer to first clean scan ${ms} ms (${loop.scans.length} scans)`);
   return { w, ms };
 }
 // The at of the line that closed question q: its answer (an owner line) or its status set line.
@@ -182,8 +192,8 @@ const closeLines = (P) => {
     .filter((l) => l.type === 'question' && l.op === 'set' && ['withdrawn', 'defaulted'].includes(l.status));
 };
 
-onA('C12 a login over the view, then Done: the password and code leave the disk within 2 s, and the last GET (/account) comes back signed in', async () => {
-  const P = cA();
+onD('C12 a login over the view, then Done: the password and code leave the disk within 2 s, and the last GET (/account) comes back signed in', async () => {
+  const P = cD();
   await ok(P, ['open', `${site.origin}/login`]);
   const q = await askHandover(P);
   const v = await ownerLogIn(P, { to: `${site.origin}/account` });
@@ -197,28 +207,28 @@ onA('C12 a login over the view, then Done: the password and code leave the disk 
   assert.deepEqual(e.reopened, w.reopened);
 });
 
-onA('C13 the 200-page variant: the form page (/2fa?variant=•••) is the last GET, reopened signed in, and no POST replayed', async () => {
-  const P = cA();
+onD('C13 the 200-page variant: the form page (/2fa?variant=•••) is the last GET, reopened signed in, and no POST replayed', async () => {
+  const P = cD();
   await ok(P, ['open', `${site.origin}/login?variant=page`]);
   const q = await askHandover(P);
   const v = await ownerLogIn(P, { to: `${site.origin}/2fa` });
   let posts;
   const { w } = await closeAndScan(P, q, async () => {
-    posts = site.posts().posts;
+    posts = signInPosts();
     const a = await owner(P, ['answer', q, '--choice', 'Done']);
     assert.equal(a.status, 0, a.err || a.out);
   }, 'C13');
   v.close();
   assert.deepEqual([w.qid, w.outcome, w.reopened], [q, 'done', [`${site.origin}/2fa?variant=•••`]]);
-  assert.equal(site.posts().posts, posts, 'a POST was replayed');
+  assert.deepEqual(signInPosts(), posts, 'a POST was replayed');
   const s = await ok(P, ['snapshot']);
   assert.ok(s.out.includes(SIGNED), `the form page reopened isn't signed in: ${s.out.slice(0, 300)}`);
   assert.deepEqual(await tabUrls(P), [`${site.origin}/2fa?variant=•••`]);
   assert.deepEqual(entryIs(P, q, 'done').reopened, w.reopened);
 });
 
-onA('C14 declined and withdrawn after a login: the secrets leave the disk, no tab is kept, and the session-only cookie outlives the restart', async () => {
-  const P = cA();
+onD('C14 declined and withdrawn after a login: the secrets leave the disk, no tab is kept, and the session-only cookie outlives the restart', async () => {
+  const P = cD();
   for (const [label, close, outcome] of [
     ['C14 declined', (q) => async () => { const a = await owner(P, ['answer', q, '--choice', "Can't right now"]); assert.equal(a.status, 0, a.err || a.out); }, 'declined'],
     ['C14 withdrawn', (q) => () => withdraw(P, q), 'withdrawn'],
@@ -237,8 +247,8 @@ onA('C14 declined and withdrawn after a login: the secrets leave the disk, no ta
   }
 });
 
-onA('C16 a daemon killed mid-handover: wait brings it and the view back under the same name, and Done reopens the page by GET', async () => {
-  const P = cA();
+onD('C16 a daemon killed mid-handover: wait brings it and the view back under the same name, and Done reopens the page by GET', async () => {
+  const P = cD();
   await ok(P, ['open', `${site.origin}/login`]);
   const q = await askHandover(P);
   const v = await ownerLogIn(P, { to: `${site.origin}/account` });
@@ -407,13 +417,14 @@ onB('T4-2 problem lines never wedge the browser: a handover gone from the log un
   entryIs(P, a.id, 'withdrawn');
   await ok(P, ['snapshot']);
   assert.equal(entriesFor(P, a.id).length, 1, 'handled again by the same daemon');
-  // a new daemon still starts and serves
+  // a new daemon still starts and serves, and finds that close handled by its entry: once overall
   await ok(P, ['stop']);
   await ok(P, ['start']);
   assert.match((await ok(P, ['snapshot'])).out, BLANK);
+  assert.equal(entriesFor(P, a.id).length, 1, 'a new daemon handled the close with no time again');
 });
 
-test('the close on cA and cB, two chains at once (C17: every ledger validates after each check)', { skip, timeout: 280000, concurrency: 2 }, async (t) => {
+test('the close on cA, cB and cD, three chains at once (C17: every ledger validates after each check)', { skip, timeout: 280000, concurrency: 3 }, async (t) => {
   const chain = (P, checks) => t.test(`on ${P().name}`, { concurrency: 1 }, async (c) => {
     for (const [name, fn] of checks) await c.test(name, { timeout: 120000 }, async () => { await fn(); ledgerValid(P()); });
     await c.test('C17 resets.json validates against shapes.resets, mode 0600', () => {
@@ -421,5 +432,5 @@ test('the close on cA and cB, two chains at once (C17: every ledger validates af
       ledgerValid(P());
     });
   });
-  await Promise.all([chain(cA, cAChecks), chain(cB, cBChecks)]);
+  await Promise.all([chain(cA, cAChecks), chain(cB, cBChecks), chain(cD, cDChecks)]);
 });

@@ -27684,7 +27684,7 @@ function browserAlive(pid) {
   return r.status === 0 && !!r.stdout.trim() && !r.stdout.includes('Z');
 }
 const browserSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function browserGone(pid, ms) { const end = Date.now() + ms; while (browserAlive(pid)) { if (Date.now() > end) return false; await browserSleep(100); } return true; }
+async function browserGone(pid, ms) { const end = Date.now() + ms; while (browserAlive(pid)) { if (Date.now() > end) return false; await browserSleep(25); } return true; }
 // run/browser (0700): state.json, the start lock, shots/.
 const BROWSER_DIR = () => runPath('browser');
 const browserStateFile = () => path.join(BROWSER_DIR(), 'state.json');
@@ -27742,11 +27742,14 @@ function browserHandled(ctx, h, ledger, now) {
   if (mem && mem.closeAt === h.closeAt && mem.outcome === h.outcome) return mem;
   const e = ledger.filter((x) => x.qid === h.qid).at(-1);
   if (!e || e.outcome !== h.outcome) return null;
-  const at = Date.parse(e.at), closed = browserClosedMs(ctx, h, now);
+  // a close time that doesn't parse has no window: its latest entry with the fold's outcome, whatever
+  // its at, handles it, so it is handled once overall, not once per daemon
+  if (!Number.isFinite(Date.parse(h.closeAt))) { browserClosedMs(ctx, h, now); return e; }
+  const at = Date.parse(e.at), closed = Date.parse(h.closeAt);
   return at >= closed && at <= Math.max(closed, now) + 60000 ? e : null;
 }
-// A close's time in ms. One whose time doesn't parse (a line written by hand) reads as closed now:
-// handled, never a NaN that throws or wedges every start; said once on the daemon's stderr.
+// A close's time in ms. One whose time doesn't parse (a line written by hand) reads as closed now (its
+// entry's at), never a NaN that throws or wedges every start; said once on the daemon's stderr.
 function browserClosedMs(ctx, h, now) {
   const t = Date.parse(h.closeAt);
   if (Number.isFinite(t)) return t;
@@ -28084,10 +28087,12 @@ function browserWritePrefs(profile) {
 }
 // Every start step before Chrome launches, in order: a leftover Chrome stopped (only a proven one), a
 // foreign host's stale lock cleared (refused while a process here holds the profile), any Singleton*
-// left with nobody on the profile removed, the session files deleted, the prefs written.
-async function browserPrepareProfile(profile, notes) {
+// left with nobody on the profile removed, the session files deleted, the prefs written. procs: the
+// profile's process list when the caller has just read it (browserRelaunch, after Chrome's stop proved
+// it empty), so /proc isn't scanned twice in a row; else it is read here.
+async function browserPrepareProfile(profile, notes, { procs: known } = {}) {
   const { killed } = await browserKillChrome(profile, browserCandidates(profile));
-  const lock = browserSingleton(profile), procs = browserProcsOn(profile);
+  const lock = browserSingleton(profile), procs = known ?? browserProcsOn(profile);
   if (lock && lock.host !== browserHostname()) {
     if (procs === null) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)}, and this machine's processes couldn't be listed to see whether one here has it open`);
     if (procs.length) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)} and a process here (pid ${procs[0]}) has it open`);
@@ -28583,14 +28588,17 @@ async function browserRelaunch(ctx, { wipe }) {
     await browserEndChrome(ctx.cdp, old.pid);
     if (ctx.stopping) return false;
     let procs = browserProcsOn(ctx.profile);
-    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(100);
+    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(25);
     if (ctx.stopping) return false;
     if (procs === null || procs.length) { browserShutdown(ctx, 'error', procs === null ? "couldn't list this machine's processes after stopping Chrome" : `a process (pid ${procs[0]}) still carried the profile 5 s after Chrome's stop`); return false; } // nothing removed on a guess
+    // the session files go the moment no process holds the profile (a close's secrets leave the disk
+    // here; a failed delete throws to the catch); a forget's wipe removes them with the rest
+    if (!wipe) browserDeleteSession(ctx.profile);
     if (wipe) {
       fs.rmSync(ctx.profile, { recursive: true, force: true });
       ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
     }
-    await browserPrepareProfile(ctx.profile, []);
+    await browserPrepareProfile(ctx.profile, [], { procs }); // procs: [] just read, nothing on the profile since
     if (ctx.stopping) return false;
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return false; } // launched while it stopped
@@ -28680,13 +28688,19 @@ async function browserReopen(ctx, urls) {
     let tab = null;
     if (i === 0) tab = ctx.active?.sessionId ? ctx.active : ctx.tabs.find((t) => t.sessionId) ?? null;
     else {
-      try {
-        const { targetId } = await Promise.race([ctx.cdp.send('Target.createTarget', { url: 'about:blank' }), browserSleep(left()).then(() => ({}))]);
-        while (targetId && !ctx.stopping && left() && !(tab = ctx.tabs.find((t) => t.targetId === targetId))) await browserSleep(50);
-      } catch { tab = null; }
+      // no new tab in the last 2 s; a tab made too late to navigate is closed when it comes, never
+      // left open on about:blank
+      if (left() < 2000) break;
+      const shut = (targetId) => { if (targetId) ctx.cdp.send('Target.closeTarget', { targetId }).catch(() => {}); };
+      const made = ctx.cdp.send('Target.createTarget', { url: 'about:blank' });
+      const r = await Promise.race([made, browserSleep(left()).then(() => null)]).catch(() => null);
+      if (!r) { made.then((x) => shut(x?.targetId), () => {}); break; }
+      while (!ctx.stopping && left() && !(tab = ctx.tabs.find((t) => t.targetId === r.targetId))) await browserSleep(50);
+      if (!tab) { shut(r.targetId); break; }
     }
     if (tab) await Promise.race([tab.ready, browserSleep(left())]); // its Page and Network on: the load seen, its GET tracked
     if (tab?.sessionId && !ctx.stopping && left()) go(tab, url);
+    else if (i > 0 && tab) { ctx.cdp.send('Target.closeTarget', { targetId: tab.targetId }).catch(() => {}); break; } // made, never navigated
   }
   await Promise.race([Promise.all(waits), browserSleep(left())]);
   for (const w of waits) w.finish(); // any load still running: its wait let go, its tab.loaded freed
@@ -29367,7 +29381,8 @@ async function browserHandover() {
   }
   const context = ["Open the browser from the link, do the step there, then press Done. Until you press Done, the supervisor can't use the browser.", site ? `The browser is on ${site}.` : null].filter(Boolean).join('\n\n');
   for (const k of Object.keys(flags)) delete flags[k];
-  Object.assign(flags, { kind: 'owner-action', class: 'browser-handover', scope, question: reason, context, links: JSON.stringify([{ title: 'Open the browser', preview: s.preview }]), choices: JSON.stringify([{ label: 'Done' }, { label: "Can't right now" }]), stake: '2', urgency: '2' });
+  Object.assign(flags, { kind: 'owner-action', scope, question: reason, context, links: JSON.stringify([{ title: 'Open the browser', preview: s.preview }]), choices: JSON.stringify([{ label: 'Done' }, { label: "Can't right now" }]), stake: '2', urgency: '2' });
+  Object.assign(flags, { class: 'browser-handover' }); // its own line: every quoted kebab word beside a class key is read as a class name
   out(askLine().id);
 }
 // browser wait [--timeout <n>s|<n>m|<n>h]: how this scope's handover ended, as browser@1's wait. The
