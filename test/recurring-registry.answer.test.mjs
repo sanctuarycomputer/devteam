@@ -447,7 +447,7 @@ test('A5: once the owner has written anything after a recurring-edit Yes in its 
   } finally { T.done(); }
 });
 
-test('A5: the owner\'s card answer to another question of the Yes\'s thread counts as a later owner line (final-17b F1, d-20261121-103254180)', () => {
+test('A5: the owner\'s card answer to another question of the Yes\'s thread counts as a later owner line; at merge a planted answer line after a later owner line lands nothing (final-17b F1, F3, d-20261121-103254180)', () => {
   const T = setup('turn-later17');
   try {
     const tAsk = (tid, name, job) => { const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]); passes(r); return QID.exec(r.out)[0]; };
@@ -468,6 +468,21 @@ test('A5: the owner\'s card answer to another question of the Yes\'s thread coun
     T.jobsChore('n1', (j) => ({ ...j, n1: job('n1') }));
     refused(T.merge('n1', ['--approved', q1]));
     assert.equal(Object.hasOwn(T.mainJobs(), 'n1'), false, 'n1 did not land');
+    // N2: Yes, then "Wait, no.", then an answer line from the Yes planted in the owner's log: merge
+    // re-checks the later owner line and lands nothing
+    const t2 = newT('Jobs 2');
+    const qn2 = tAsk(t2, 'n2', job('n2'));
+    const yn2 = say(t2, 'Yes');
+    const back = say(t2, 'Wait, no. Cancel that job.');
+    refused(T.run(['answer', qn2, 'Yes', '--from-turn', yn2]), /the owner wrote again after that turn/);
+    const yText = json(T.ok(['log', '--type', 'turn', '--json'])).find((x) => x.id === yn2).text;
+    fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: qn2, at: new Date().toISOString(), by: 'owner', answer: 'Yes', channel: 'thread', said: yText, turn: yn2 })}\n`);
+    assert.equal(json(T.ok(['questions', '--id', qn2, '--json']))[0].matched, true, 'the view takes the planted line');
+    T.jobsChore('n2', (j) => ({ ...j, n2: job('n2') }));
+    const AFTER = new RegExp(`${qn2} can't approve a job change: answered from ${yn2}, after which the owner wrote again in ${t2} before the answer was recorded \\(${back}\\)`);
+    refused(T.dry('n2', qn2), AFTER);
+    refused(T.merge('n2', ['--approved', qn2]), AFTER);
+    assert.equal(Object.hasOwn(T.mainJobs(), 'n2'), false, 'n2 did not land');
   } finally { T.done(); }
 });
 

@@ -24848,8 +24848,9 @@ const recurringRegistry = Object.freeze({
   // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1,
   // final-13b F1 and F2): one recorded from chat; from a turn whose words (the line's, or the turn's
   // own) don't start with Yes; from a clause of a turn (said_at); from a turn that isn't the owner's,
-  // in the log, and newer than the question; with words other than the turn's; or from a turn that
-  // doesn't bind the question (turnBinds); else null
+  // in the log, and newer than the question; with words other than the turn's; from a turn that
+  // doesn't bind the question (turnBinds); or one after which the owner wrote again in its thread
+  // before the answer line (laterOwner); else null
   notOwnYes(v) {
     if (v?.channel === 'chat') return `answered from chat ("${String(v.said ?? '').slice(0, 80)}"), which approves no job change`;
     // the channels the kit writes on an owner's answer (appendLog, cmdAnswer): the card (cli or
@@ -24867,6 +24868,12 @@ const recurringRegistry = Object.freeze({
     if (v.thread && u.thread !== v.thread) return `answered from ${turn}, which is in ${u.thread}, not the question's ${v.thread}`;
     const why = recurringRegistry.turnBinds(u, v.id);
     if (why) return `answered from ${turn}, which isn't the owner's first turn right after the supervisor's turn that shows the question (${why})`;
+    // and no owner line in its thread between the Yes and the answer line itself, as cmdAnswer refuses
+    // (final-17b F3): a line planted past that refusal, or one written in the race between its check
+    // and its append, lands nothing. A line after the answer was recorded doesn't void it.
+    const upto = String(v.answered_at ?? '');
+    const what = recurringRegistry.laterOwner(u, upto, (L) => L.type === 'question' && L.id === v.id && String(L.at ?? '') === upto);
+    if (what) return `answered from ${turn}, after which the owner wrote again in ${u.thread} before the answer was recorded (${what})`;
     return null;
   },
   // why the owner's turn u doesn't bind question qid, or null (final-13b F1, final-14b F1): it binds
