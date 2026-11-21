@@ -1796,3 +1796,22 @@ test('A15 landing: records in home, a post-merge hook from home\'s core.hooksPat
     assert.equal(fs.existsSync(ran), false, 'the hook never ran');
   } finally { F.done(); }
 });
+
+test('A15 landing: records in home, a records push origin takes but answers after the timeout is landed: merge finds the records merge on home\'s main, logs their act, and lands the code (final-12 F3)', { timeout: 300000 }, () => {
+  const F = recordsHome('recur-rec-slow');
+  try {
+    const { head } = recordsReady(F, RID);
+    const hook = path.join(F.org, 'hooks', 'post-receive');
+    write(hook, '#!/bin/sh\nexec sleep 40 >/dev/null 2>&1\n');
+    fs.chmodSync(hook, 0o755);
+    const acts0 = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length;
+    let r;
+    try { r = F.text(F.runIn(F.old, ['merge', RID], SUP, { DEVTEAM_GIT_TIMEOUT_MS: '15000' })); } finally { fs.rmSync(hook, { force: true }); }
+    assert.equal(r.status, 0, r.text);
+    assert.match(r.text, /but origin's main is the records merge the kit built and checked \([0-9a-f]{12}\): landed/);
+    assert.match(r.text, /landed the records of console-01-a/);
+    F.g(['merge-base', '--is-ancestor', head, F.mainNow()], F.old);
+    const acts = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).slice(acts0);
+    assert.equal(acts.filter((a) => a.class === 'merge-word' && /the records of console-01-a/.test(a.what)).length, 1, 'the records\' act, once');
+  } finally { F.done(); }
+});

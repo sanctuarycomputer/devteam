@@ -6958,7 +6958,16 @@ function landRecords(id, rec, linkName) {
       const H = recurringRegistry.read(head);
       const keeps = !H.failed && !M.failed && (H.problem || M.problem ? !!H.problem && !!M.problem && !!H.entry && H.entry === M.entry : !Object.keys(recurringRegistry.changed(M.jobs, H.jobs)).length);
       if (!keeps) return `the records merge at ${head.slice(0, 12)} lands other jobs (recurring.json) than home's ${HS.main_branch} has; records never change them; nothing pushed`;
-      if (!lg([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${HS.main_branch}:${checked}`, 'origin', `${head}:refs/heads/${HS.main_branch}`], wt).ok) return `push to home's ${HS.main_branch} refused (did main move?)`;
+      const pushed = lg([...noHooks, 'push', '--quiet', '--no-verify', `--force-with-lease=${HS.main_branch}:${checked}`, 'origin', `${head}:refs/heads/${HS.main_branch}`], wt);
+      if (!pushed.ok) {
+        // origin may have taken it and only its answer failed or timed out (a slow post-receive): when
+        // origin's main, fetched again with a bound, is exactly the merge built and checked here, the
+        // records landed, and their act is logged as for any landing (final-12 F3, as landCode's final-11 F3)
+        const f = lg(['fetch', '--quiet', 'origin', HS.main_branch], wt);
+        const o = f.ok ? lg(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${HS.main_branch}^{commit}`], wt) : null;
+        if (!(o?.ok && o.out.trim() === head)) return `push to home's ${HS.main_branch} refused (did main move?)`;
+        out(`the push of the records to home's ${HS.main_branch} ${recurringRegistry.why(pushed)}, but origin's ${HS.main_branch} is the records merge the kit built and checked (${head.slice(0, 12)}): landed`);
+      }
     } finally {
       git(['worktree', 'remove', '--force', wt], mainRoot);
     }
