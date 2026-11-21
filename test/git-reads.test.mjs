@@ -56,6 +56,18 @@ test('status: merges of every shape, each review read, in a few git calls whatev
     assert.equal(st.reviews.by_stage.plan.first_passes, 5, 'every ticket with a review on its branch or on main');
     assert.deepEqual(made.filter((c) => /^merge-base --is-ancestor|^rev-parse --verify --quiet refs\/|^show \S*:docs\/devteam\/project\/tickets\//.test(c)), [], 'nothing asked per ticket');
     assert.ok(made.length <= 25, `${made.length} git calls:\n${made.join('\n')}`);
+
+    const shape = (x) => ({ merged: x.tickets.map((t) => [t.id, t.merge_sha, t.records_landed]), plan: x.reviews.by_stage.plan.first_passes });
+    // from a subfolder of home, the same answer as from its root
+    const sub = path.join(old, 'docs/devteam/run');
+    fs.mkdirSync(sub, { recursive: true });
+    const fromSub = json(execFileSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), 'status', '--json'], { cwd: sub, env: F.env({}), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
+    assert.deepEqual(shape(fromSub), shape(st), 'status from a subfolder');
+    // a ref listing that fails is no answer: each ref is asked for, and nothing reads as unmerged
+    const failing = path.join(base, 'bin-no-refs');
+    write(path.join(failing, 'git'), `#!/bin/sh\ncase "$*" in "for-each-ref --format=%(refname)%00%(objecttype)"*) exit 1;; esac\nexec '${real}' "$@"\n`);
+    fs.chmodSync(path.join(failing, 'git'), 0o755);
+    assert.deepEqual(shape(json(ok(old, ['status', '--json'], { PATH: `${failing}${path.delimiter}${process.env.PATH}` }))), shape(st), 'status with for-each-ref failing');
   } finally {
     F.done();
   }

@@ -2110,21 +2110,29 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main') {
 // command that writes, asks git directly.
 let refCommits = null;
 function resolveCommit(ref, cwd = HOME_CWD) {
-  if (gitReadCache && ref.startsWith('refs/')) {
+  // only an exact ref name is in the listing: main~1 or x^{} is rev-parse's to answer
+  if (gitReadCache && ref.startsWith('refs/') && !/[~^@:]/.test(ref)) {
     if (!refCommits || refCommits.cache !== gitReadCache) refCommits = { cache: gitReadCache, byRepo: new Map() };
     const k = cwd ?? '';
     if (!refCommits.byRepo.has(k)) {
-      const map = new Map();
-      for (const line of (git(['for-each-ref', '--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)'], cwd) ?? '').split('\n')) {
-        const [name, type, sha, ptype, psha] = line.split('\0');
-        if (name) map.set(name, type === 'commit' ? sha : ptype === 'commit' ? psha : undefined);
+      const listing = git(['for-each-ref', '--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)'], cwd);
+      // a listing that failed says nothing about any ref: ask for each one instead of calling them all gone
+      let map = null;
+      if (listing !== null) {
+        map = new Map();
+        for (const line of listing.split('\n')) {
+          const [name, type, sha, ptype, psha] = line.split('\0');
+          if (name) map.set(name, type === 'commit' ? sha : ptype === 'commit' ? psha : undefined);
+        }
       }
       refCommits.byRepo.set(k, map);
     }
     const map = refCommits.byRepo.get(k);
-    if (!map.has(ref)) return null;
-    const sha = map.get(ref);
-    if (sha !== undefined) return sha;
+    if (map) {
+      if (!map.has(ref)) return null;
+      const sha = map.get(ref);
+      if (sha !== undefined) return sha;
+    }
   }
   return git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], cwd);
 }
@@ -3037,7 +3045,7 @@ function listAndPrefetch(ref, dirPath, gitFn, cwd, resolve) {
     if (names.length) prefetchAt(sha, names.map((n) => `${dirPath}/${n}`), cwd);
     return names;
   }
-  const names = (gitFn(['ls-tree', '--name-only', `${ref}:${dirPath}`]) ?? '').split('\n').filter(Boolean);
+  const names = (gitFn(['ls-tree', '--full-tree', '-z', '--name-only', `${ref}:${dirPath}`]) ?? '').split('\0').filter(Boolean);
   if (sha && names.length) prefetchAt(sha, names.map((n) => `${dirPath}/${n}`), cwd);
   return names;
 }
@@ -3051,7 +3059,7 @@ function treeIndexAt(sha, cwd = HOME_CWD) {
   const had = treeIndexes.m.get(k);
   if (had !== undefined && had !== 'seen') return had;
   if (had === undefined) { treeIndexes.m.set(k, 'seen'); return null; }
-  const o = git(['ls-tree', '-r', '-t', '-z', '--name-only', sha], cwd);
+  const o = git(['ls-tree', '--full-tree', '-r', '-t', '-z', '--name-only', sha], cwd);
   let index = null;
   if (o !== null) {
     const paths = new Set(o.split('\0').filter(Boolean));
@@ -3177,7 +3185,7 @@ function recordsHomeSetting(t) {
 }
 // The ticket folders in a project's tickets/ at a ref: one ls-tree per log read, not one cat-file
 // per ticket (a dashboard asks for every ticket).
-const ticketFoldersAt = (ref, rel, g) => new Set(ref ? (g(['ls-tree', '--name-only', `${ref}:${rel}/tickets`]) ?? '').split('\n').filter(Boolean) : []);
+const ticketFoldersAt = (ref, rel, g) => new Set(ref ? (g(['ls-tree', '--full-tree', '-z', '--name-only', `${ref}:${rel}/tickets`]) ?? '').split('\0').filter(Boolean) : []);
 const homeTicketFolders = (ref) => memo(`homeTicketFolders:${ref}`, () => ticketFoldersAt(ref, projectRel, git));
 const linkTicketFolders = (R) => memo(`linkTicketFolders:${R.name}`, () => ticketFoldersAt(R.mainRef(), R.projectRel, R.git));
 // A ticket of a records-"home" link whose records were left in the link, written before the link
@@ -31053,11 +31061,6 @@ const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 
 // ticket's reviews read once, as a dashboard refresh has it (a status on a big project was thousands
 // of git processes). A command that writes never runs this way.
 const GIT_READ_ONLY = new Set(['status', 'ready', 'metrics']);
-const gitReadOnly = (fn) => (...args) => {
-  gitReadCache = new Map();
-  reviewMemo = new Map();
-  try { return fn(...args); } finally { reviewMemo = null; }
-};
 const COMMANDS_SETUP = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
 };
@@ -31113,7 +31116,9 @@ else {
       if (!(d.refs ?? []).some((r) => targets.includes(r))) die(`${d.id} is about ${(d.refs ?? []).join(', ') || 'nothing in particular (it named no --refs)'}; this ${command} is about ${targets.slice(0, 4).join(', ')}${targets.length > 4 ? ', …' : ''}. Decide with --refs naming it, or act without --decision`);
     }
   }
-  const r = (GIT_READ_ONLY.has(command) ? gitReadOnly(COMMANDS[command]) : COMMANDS[command])();
+  if (GIT_READ_ONLY.has(command)) { gitReadCache = new Map(); reviewMemo = new Map(); }
+  const r = COMMANDS[command]();
+  if (GIT_READ_ONLY.has(command)) reviewMemo = null;
   // done: the dashboard has its answer, then the supervisor is told
   // a command that set a failing exit code (preview start when the app died) answers from its exit
   Promise.resolve(r).then(() => { if (!process.exitCode) replyNow(); deliverNudges(); }, (e) => die(e?.message ?? String(e)));
