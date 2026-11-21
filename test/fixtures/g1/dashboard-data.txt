@@ -131,7 +131,8 @@ exit 0
     "goal-order": "Putting the goals in order",
     "goal-approval": "Approving a goal",
     "owner-setting": "Asking for a setting",
-    "settings-edit": "Changing one of its own settings"
+    "settings-edit": "Changing one of its own settings",
+    "browser-handover": "Handing the browser to you for a login"
   },
   "critical_path": [
     "g1-01-a",
