@@ -1,0 +1,17 @@
+# Dependabot for the kit itself (code-style.md L-SEC-9). The kit has no package manifest: its
+# dependencies are the GitHub Actions in .github/workflows and the cloud box's base image. Security
+# updates ignore the cooldown; version updates wait it out (L-SEC-6).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: docker
+    directory: /cloud
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
