@@ -366,21 +366,19 @@ test('main reload keeps place: a viewer on main reloads by itself on the page an
     await p.send('Page.navigate', { url });
     await soon(`typeof TS === 'object' && TS.kind === 'artifact' && TS.at === 'main' && TS.fp && (window.__titles ?? []).some((x) => x.title === ${J(title)})`, `${url}: main up at ${title}`);
   };
-  // a click on one of the page's two links, and the lens naming where it went. The click waits for the
-  // stage to settle: the frame where it was 300 ms ago and on top at the point (the dashboard draws its
-  // bar and lifts its loading cover after the frame's ready, which moves or covers the frame)
+  // a click on one of the page's two links, and the lens naming where it went. The click goes where the
+  // frame is on top, and is sent again (up to 3 times, 5 s apart) while the lens names nothing new:
+  // a click sent just after the frame's ready sometimes moves nothing (about 1 run in 3 on the dashboard's
+  // stage, its rect and the element at the point unchanged; said as a diagnostic). A click sent again lands on the same link
+  // or, once it went, on nothing on page2.html or the same #tab2, so it moves nothing further.
   const follow = async (dx, lens) => {
     const at = `(() => { const f = document.getElementById('av-frame'), b = f.getBoundingClientRect(), x = b.left + ${dx}, y = b.top + 15; return JSON.stringify({ x, y, on: document.elementFromPoint(x, y) === f }); })()`;
-    let r = null;
-    for (const end = Date.now() + 30000; ;) {
-      const a = JSON.parse(await p.ev(at));
-      await sleep(300);
-      const b = JSON.parse(await p.ev(at));
-      if (a.on && b.on && a.x === b.x && a.y === b.y) { r = b; break; }
-      if (Date.now() > end) assert.fail(`the stage never settled for a click: ${J([a, b])}`);
+    for (let i = 1; ; i++) {
+      const r = JSON.parse(await p.ev(at));
+      assert.ok(r.on, `the frame is on top at the click point: ${J(r)}`);
+      await p.clickAt(r.x, r.y);
+      try { await soonIn(p, 5000)(lens, `the lens names ${lens}`); return; } catch (e) { if (i === 3) throw e; t.diagnostic(`click ${i} moved nothing on ${await p.ev('location.pathname + location.hash')}; sent again`); }
     }
-    await p.clickAt(r.x, r.y);
-    await soon(lens, `the lens names ${lens}`);
   };
   // main changes (a merged commit): the frame, marked, is replaced by a fresh one that says ready at `want`
   const landAndSee = async (want) => {

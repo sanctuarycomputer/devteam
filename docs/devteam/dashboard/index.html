@@ -6648,8 +6648,8 @@ function avHint() {
 // one loads the frame again by itself with a draft's own reload (kit-750, ruling A1, superseding
 // kit-206's outline for main; kit-753): a fresh frame, on the page and #hash the owner moved to, or
 // the anchor the address carried. A frame loaded before any fp was known only takes it. A stale
-// answer seen after a newer one loads it twice more (back to the older fp, then on to the newer at the
-// next answer), harmless: the dashboard reads /api/data one at a time, and a viewer tab asks /api/view one at a time.
+// answer seen after a newer one loads main's current page twice more (TS.fp set back to the older fp,
+// then forward at the next answer), harmless: the dashboard reads /api/data one at a time, and a viewer tab asks /api/view one at a time.
 function avFpSeen(fp, mainFp, slug, at) {
   if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at || String(at).startsWith('tree:')) return;
   if (fp && at === 'main' && fp !== TS.fp) {
