@@ -24504,7 +24504,8 @@ const recurringRegistry = Object.freeze({
   },
   // words that start with the label Yes, read as --choice and --read read a label: any case
   // (final-12b F3), then the end, whitespace, or one of . , ! (final-13b F3). Quotes are taken off
-  // only when one matching pair wraps the whole trimmed turn with no other quote of its kind inside,
+  // only when one matching pair wraps the whole trimmed turn with no quote of any kind inside
+  // (" “ ” « » ' ‘ ’: final-15b F5, so a phone's smart quotes mixed with straight ones count too),
   // so reported speech ("Yes" is what you want me to say. No.) is no Yes; a turn holding any format or combining character (a zero-width
   // space, a soft hyphen, an accent) is none either. The letters are spelled out, not /i, so no
   // other letter that folds to one of them (the long s, U+017F) passes for it.
@@ -24513,9 +24514,10 @@ const recurringRegistry = Object.freeze({
     if (/[\p{Cf}\p{M}]/u.test(s)) return false;
     let t = s.trim();
     const pair = [['"', '"'], ["'", "'"], ['\u201c', '\u201d'], ['\u2018', '\u2019'], ['\u00ab', '\u00bb']].find(([o, c]) => t.length >= 2 && t.startsWith(o) && t.endsWith(c));
-    // only when no other quote of the pair's kind is inside it: "Yes," you want me to say. "No."
-    // is two quotes, not one wrapping the turn (final-14b F4)
-    if (pair && !pair.some((q) => t.slice(1, -1).includes(q))) t = t.slice(1, -1);
+    // only when no quote of any kind is inside it: "Yes," you want me to say. "No." is two quotes,
+    // not one wrapping the turn (final-14b F4), and so is "Yes,” you said. “No." (final-15b F5); an
+    // apostrophe counts too ('Yes, don't wait' stays refused, the ruling's letter)
+    if (pair && !/["'\u201c\u201d\u2018\u2019\u00ab\u00bb]/u.test(t.slice(1, -1))) t = t.slice(1, -1);
     return /^[Yy][Ee][Ss](?:$|[\s.,!])/u.test(t);
   },
   // why an answer line is not the owner's own Yes, whatever it says (final-11b F1, final-12b F1,
