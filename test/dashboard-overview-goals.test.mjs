@@ -824,6 +824,11 @@ test('goal peek and Upkeep peek', { ...CHROME, timeout: 300000 }, async (t) => {
   assert.deepEqual(await p.ev(PEEK_KEYS), ['ID', 'Status', 'Hold', 'Held because', 'What it covers', 'Chores in flight', 'How it changes']);
   assert.match(await p.ev(`${ddOf('Held because')}.textContent`), /the box is moving/);
   assert.match(await p.ev(`${ddOf('Status')}.textContent`), /Parked/);
+  // held by a fleet park that isn't ready to move yet (another goal's session still settling): its own
+  // sessions have settled, so it reads Parked, not Parking…; what is left is the fleet line's to say
+  await p.ev(`FLEET.data = { ready: false, blockers: ['app-9-x: not parked (phase awaiting-word)'] }; window.__patchData.upkeep = { ...window.__patchData.upkeep, fleet: true }; void 0`);
+  await soon(`/Parked/.test(${ddOf('Status')}.textContent)`, 'fleet-held and settled: Parked');
+  assert.doesNotMatch(await p.ev(`${ddOf('Status')}.textContent`), /Parking/);
   assert.deepEqual(await p.ev(`[...${ddOf('Hold')}.querySelectorAll('button')].map((b) => [b.textContent, b.getAttribute('aria-pressed')])`), [['Run', 'false'], ['Drain', 'false'], ['Park', 'true']], 'Run, Drain, Park; no Let go');
   assert.ok(await p.ev(`!!${ddOf('Chores in flight')}.querySelector('a[href="#ticket/chore-01-tidy"]')`));
   assert.ok(await p.ev(`!!${ddOf('How it changes')}.querySelector('[data-thread-on]')`), 'Upkeep\'s How it changes: Start a thread');

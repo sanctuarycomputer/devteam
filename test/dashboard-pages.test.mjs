@@ -646,6 +646,31 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await line({ mode: 'drain', op: 'f-1', reason: 'quiet week' }, null), 'draining… · quiet week');
   assert.equal(await line({ mode: 'drain', op: 'f-1', reason: 'quiet week' }, { ready: true, blockers: [] }), 'drained · quiet week');
   assert.equal(await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: false, blockers: ['x'] }), 'parking… · new laptop');
+  // what is left rides on the line's hover, each up to its first parenthesis, so the line (and the switch above it) stays put
+  await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: false, blockers: ['app-9-x: not parked (phase awaiting-word)', 'the live log is not on main yet (a.jsonl: 3 line(s))'] });
+  assert.equal(await p.ev(`document.querySelector('#side-state b').title`), 'Left before the move: app-9-x: not parked; the live log is not on main yet');
+  await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: true, blockers: [] });
+  assert.equal(await p.ev(`document.querySelector('#side-state b').title`), '', 'ready: no hover');
+  // reachable without a mouse: it takes focus and its label carries the list
+  await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: false, blockers: ['app-9-x: not parked (phase awaiting-word)'] });
+  assert.equal(await p.ev(`document.querySelector('#side-state b').tabIndex`), 0, 'focusable');
+  assert.match(await p.ev(`document.querySelector('#side-state b').getAttribute('aria-label')`), /^parking…\. Left before the move: app-9-x: not parked$/);
+  // focused, the list shows whole inside the window, and nothing on the page moves
+  const popAt = () => p.ev(`(() => { const b = document.querySelector('#side-state b'), sw = document.querySelector('#side-fleet'), before = [sw.getBoundingClientRect().top, document.documentElement.scrollWidth, document.querySelector('#side-state').parentElement.scrollWidth]; b.focus(); const e = document.getElementById('fleet-left-pop'), r = e.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); const out = { text: e.textContent, inside: r.left >= 0 && r.top >= 0 && r.right <= document.documentElement.clientWidth && r.bottom <= innerHeight, onTop: e.contains(hit), same: JSON.stringify(before) === JSON.stringify([sw.getBoundingClientRect().top, document.documentElement.scrollWidth, document.querySelector('#side-state').parentElement.scrollWidth]) }; b.blur(); return out; })()`);
+  const whole = { text: 'Left before the move: app-9-x: not parked', inside: true, onTop: true, same: true };
+  assert.deepEqual(await popAt(), whole, 'at desktop width');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: false });
+  assert.deepEqual(await popAt(), whole, 'at phone width');
+  await p.send('Emulation.clearDeviceMetricsOverride', {});
+  await until(async () => p.ev(`document.getElementById('fleet-left-pop').hidden`), 'it closes when focus leaves');
+  // a settled goal's card says the fleet as a whole isn't ready yet
+  assert.match(await p.ev(`(() => { FLEET.data = { ready: false, blockers: ['x'] }; return goalState({ id: 'g-1', status: 'met', hold_view: { mode: 'park', state: 'parked', fleet: 'f-1', running: [], reason: null } }, {}, []).label; })()`), /^Parked \(the fleet isn\u2019t ready to move yet\)/);
+  // after a failed check the list would be old: none
+  assert.equal(await p.ev(`(() => { FLEET.error = 'offline'; render({ ...DATA, fleet: { mode: 'park', op: 'f-1', reason: 'new laptop' } }); const t = document.querySelector('#side-state b').title; FLEET.error = null; return t; })()`), '', 'no list from an old answer');
+  // a fleet-held goal whose own sessions settled reads Parked while the fleet isn't ready to move
+  // (it read Parking… until the whole fleet was ready, for days on one box)
+  assert.equal(await p.ev(`(() => { FLEET.data = { ready: false, blockers: ['x'] }; return holdState({ mode: 'park', state: 'parked', fleet: 'f-1', running: [] }); })()`), 'parked');
+  assert.equal(await p.ev(`holdState({ mode: 'park', state: 'parking', fleet: 'f-1', running: ['a-1'] })`), 'parking', 'its own session still settling: parking');
   assert.equal(await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: true, blockers: [] }), 'parked · new laptop');
   assert.equal(await line({ mode: null, op: 'f-1', reason: 'set apart' }, null), 'partly held (a goal was set apart after the fleet op) · set apart');
   await p.ev('FLEET.busy = false; redrawNow()');
