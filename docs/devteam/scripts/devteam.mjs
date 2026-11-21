@@ -27742,21 +27742,34 @@ function browserHandled(ctx, h, ledger, now) {
   if (mem && mem.closeAt === h.closeAt && mem.outcome === h.outcome) return mem;
   const e = ledger.filter((x) => x.qid === h.qid).at(-1);
   if (!e || e.outcome !== h.outcome) return null;
-  const at = Date.parse(e.at), closed = Date.parse(h.closeAt);
+  const at = Date.parse(e.at), closed = browserClosedMs(ctx, h, now);
   return at >= closed && at <= Math.max(closed, now) + 60000 ? e : null;
+}
+// A close's time in ms. One whose time doesn't parse (a line written by hand) reads as closed now:
+// handled, never a NaN that throws or wedges every start; said once on the daemon's stderr.
+function browserClosedMs(ctx, h, now) {
+  const t = Date.parse(h.closeAt);
+  if (Number.isFinite(t)) return t;
+  if (!ctx.badTimes?.has(h.qid)) {
+    (ctx.badTimes ??= new Set()).add(h.qid);
+    try { process.stderr.write(`devteam: browser: ${h.qid}'s close time ${JSON.stringify(String(h.closeAt).slice(0, 40))} doesn't parse; read as closed now\n`); } catch {}
+  }
+  return now;
 }
 // The closes of this scope not yet handled, from the handovers hs.
 function browserUnhandled(ctx, hs) {
   const ledger = browserLedger(), now = Date.now();
-  return hs.filter((h) => h.status !== 'open' && h.outcome && h.closeAt && !browserHandled(ctx, h, ledger, now));
+  return hs.filter((h) => h.status !== 'open' && h.outcome && !browserHandled(ctx, h, ledger, now));
 }
 // The entries for closes handled, written to the ledger and recorded in memory. at is the later of
 // now and the close time, so a close line dated ahead of this clock is handled once, never in a loop.
-// reopened (masked) on done only.
+// reopened (masked) on done only. A qid off the contract's pattern is recorded in memory only: an
+// entry the reader refuses would turn the whole ledger off. (The log's own id rule keeps such a line
+// out of the fold today; this holds if the two patterns ever part.)
 function browserRecordCloses(ctx, closes, reopened) {
   const now = Date.now();
-  const entries = closes.map((h) => ({ qid: h.qid, outcome: h.outcome, reset: h.outcome !== 'done', at: new Date(Math.max(now, Date.parse(h.closeAt))).toISOString(), ...(h.outcome === 'done' ? { reopened } : {}) }));
-  browserLedgerAdd(entries);
+  const entries = closes.filter((h) => BROWSER_QID.test(h.qid)).map((h) => ({ qid: h.qid, outcome: h.outcome, reset: h.outcome !== 'done', at: new Date(Math.max(now, browserClosedMs(ctx, h, now))).toISOString(), ...(h.outcome === 'done' ? { reopened } : {}) }));
+  if (entries.length) browserLedgerAdd(entries);
   for (const h of closes) ctx.handled.set(h.qid, { qid: h.qid, closeAt: h.closeAt, outcome: h.outcome, ...(h.outcome === 'done' ? { reopened } : {}) });
 }
 // The daemon's answer to one verb: { code, out }. Rejects when nothing answers in ms.
@@ -28545,7 +28558,7 @@ async function browserRelaunch(ctx, { wipe }) {
     let procs = browserProcsOn(ctx.profile);
     for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(100);
     if (ctx.stopping) return false;
-    if (procs === null || procs.length) { browserShutdown(ctx, 'error'); return false; } // nothing removed on a guess
+    if (procs === null || procs.length) { browserShutdown(ctx, 'error', procs === null ? "couldn't list this machine's processes after stopping Chrome" : `a process (pid ${procs[0]}) still carried the profile 5 s after Chrome's stop`); return false; } // nothing removed on a guess
     if (wipe) {
       fs.rmSync(ctx.profile, { recursive: true, force: true });
       ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
@@ -28564,7 +28577,7 @@ async function browserRelaunch(ctx, { wipe }) {
     ctx.state = { ...ctx.state, chrome_pid: ctx.chrome.pid };
     browserWriteState(ctx.state);
     return true;
-  } catch { browserShutdown(ctx, 'error'); return false; }
+  } catch (e) { browserShutdown(ctx, 'error', e?.message); return false; }
 }
 // Sign out of everything (the view's forget), on the verbs' queue: the screencast stopped, then the
 // clean restart with the profile wiped (browserRelaunch), and the screencast started again on the same
@@ -28607,7 +28620,7 @@ async function browserCloseRestart(ctx, closes, { pages = [] } = {}) {
     if (ctx.stopping) return;
     browserRecordCloses(ctx, closes, reopened);
     ctx.ready = true;
-  } catch { browserShutdown(ctx, 'error'); }
+  } catch (e) { browserShutdown(ctx, 'error', e?.message); }
 }
 // The gate, run only from a job already on the verbs' queue (a verb's run, or the watch's job): it
 // folds afresh, keeps ctx.held, and runs one restart for every close not yet handled. It never queues
@@ -28647,11 +28660,26 @@ function browserWatch(ctx) {
   t.unref();
   return t;
 }
+// run/browser/last-error (0600): why the last daemon shut itself down on a failed close or forget
+// restart, one line, for the offline status's plain text (browser@1's status JSON is unchanged). A
+// daemon that comes up removes it. Control characters dropped, 300 characters at most.
+const browserErrorFile = () => path.join(BROWSER_DIR(), 'last-error');
+function browserLastError(detail) {
+  try {
+    browserDirMade();
+    const tmp = path.join(BROWSER_DIR(), `last-error.${process.pid}.tmp`);
+    fs.rmSync(tmp, { force: true });
+    fs.writeFileSync(tmp, `${new Date().toISOString()} ${String(detail).replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 300)}\n`, { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, browserErrorFile());
+  } catch {}
+}
+const browserReadLastError = () => { try { return fs.readFileSync(browserErrorFile(), 'utf8').split('\n')[0].replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 330) || null; } catch { return null; } };
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
 // hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
 // guard and servers closed; exit. Once a signal came, a dead pty can't end it early.
-function browserShutdown(ctx, why) {
+function browserShutdown(ctx, why, detail) {
   if (ctx.stopping) return ctx.stopping;
+  if (why === 'error' && detail) browserLastError(detail);
   if (why === 'signal') for (const s of [process.stdout, process.stderr]) { s.on('error', () => {}); }
   ctx.stopping = (async () => {
     clearTimeout(ctx.idle);
@@ -28693,7 +28721,7 @@ function browserVerbs(ctx) {
       const ledger = browserLedger(), now = Date.now();
       const handled = [];
       for (const h of browserHandovers()) {
-        if (h.status === 'open' || !h.outcome || !h.closeAt) continue;
+        if (h.status === 'open' || !h.outcome) continue;
         const r = browserHandled(ctx, h, ledger, now);
         if (r) handled.push({ qid: h.qid, outcome: h.outcome, ...(Array.isArray(r.reopened) ? { reopened: r.reopened } : {}) });
       }
@@ -29160,6 +29188,7 @@ async function browserServe({ chrome: bin }) {
     ctx.state = { browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview };
     browserWriteState(ctx.state); // a forget rewrites it with its new chrome_pid
     ctx.ready = true; // the view's guard 5: Chrome is up
+    fs.rmSync(browserErrorFile(), { force: true }); // an earlier daemon's failure is history now
     arm();
     ctx.renew = setInterval(() => browserRenew(ctx, viewPort), Number(browserTestEnv('DEVTEAM_TEST_BROWSER_RENEW_MS')) || 3600000);
     ctx.renew.unref();
@@ -29203,7 +29232,8 @@ async function browserStatus() {
   if (s) { try { r = await browserCall('status', { json: !!flags.json }, { state: s }); } catch {} }
   if (r) { process.exitCode = r.code; return out(r.out); }
   const off = { browser: 1, instance: browserKey(), running: false, held: browserHeld(browserHandovers()) };
-  return out(flags.json ? JSON.stringify(off) : `browser isn't running (profile ${off.instance})\n${browserHeldLine(off.held)}`);
+  const err = browserReadLastError();
+  return out(flags.json ? JSON.stringify(off) : [`browser isn't running (profile ${off.instance})`, browserHeldLine(off.held), ...(err ? [`last error: ${err}`] : [])].join('\n'));
 }
 // browser type --stdin's text: stdin read to its end, bounded in bytes (stops once past max + 2, room
 // for a \r\n) and in time, decoded once at the end so a character split across reads stays whole,
@@ -29291,7 +29321,9 @@ async function browserWait() {
   const qid = browserHeld(hs) ?? hs.at(-1)?.qid;
   if (!qid) die('browser wait: no handover has been asked on this browser');
   const start = Date.now();
-  const find = () => browserHandovers(scope).find((h) => h.qid === qid);
+  // a qid gone from this scope's fold (its live log file removed: run/ is the machine's own) is no
+  // handover of this browser now: said, never a crash
+  const find = () => browserHandovers(scope).find((h) => h.qid === qid) ?? die(`browser wait: ${qid} is no longer in the log as a handover of this browser; nothing to wait for`);
   let h = find();
   while (h.status === 'open') {
     await browserEnsure();

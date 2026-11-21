@@ -16,7 +16,8 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as two chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, RF3) and cB's (C18, RF4). onA and onB add a check.
+// a chain: cA's (C23, C15, C20, W1, RF3) and cB's (C18, RF4, T4-1, T4-3, T4-2).
+// onA and onB add a check.
 const cAChecks = [], cBChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
 const onB = (name, fn) => cBChecks.push([name, fn]);
@@ -212,6 +213,81 @@ onB('RF4 the daemon told to stop during a close: the close ends, and no Chrome i
   // the next start handles it
   await ok(P, ['start']);
   entryIs(P, q, 'withdrawn');
+});
+
+onB('T4-1 a defaulted handover the owner answers later closes twice: a second reset and a second entry', async () => {
+  const P = cB();
+  const l = appendLine(P, handoverLine(P, { default: 'Done', deadline: new Date(Date.now() - 60000).toISOString() }));
+  const d = await kit(P, ['answer', l.id, '--defaulted']);
+  assert.equal(d.status, 0, d.err || d.out);
+  const w1 = await waitJson(P);
+  assert.deepEqual([w1.qid, w1.outcome], [l.id, 'declined']);
+  assert.equal(entriesFor(P, l.id).length, 1);
+  const pid1 = readState(P).chrome_pid;
+  // the owner's own answer moves the close time: a close the first entry predates
+  const a = await owner(P, ['answer', l.id, '--choice', "Can't right now"]);
+  assert.equal(a.status, 0, a.err || a.out);
+  const w2 = await waitJson(P);
+  assert.deepEqual([w2.qid, w2.outcome], [l.id, 'declined']);
+  const es = entriesFor(P, l.id);
+  assert.equal(es.length, 2, `the later close was not handled again: ${JSON.stringify(es)}`);
+  assert.ok(Date.parse(es[1].at) > Date.parse(es[0].at), JSON.stringify(es));
+  assert.notEqual(readState(P).chrome_pid, pid1, 'no second restart');
+});
+
+onB('T4-3 a close that fails shuts the daemon down, and the offline status says why', async () => {
+  const P = cB();
+  await ok(P, ['stop']);
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_DELETE_FAILS: '1' });
+  await ok(P, ['open', `${site.origin}/record`]);
+  const st = readState(P);
+  await until(() => fs.existsSync(path.join(P.profile, 'Default', 'Sessions')), 15000, "Chrome's session folder");
+  const q = await askHandover(P);
+  await withdraw(P, q);
+  const s = await browser(P, ['snapshot']);
+  assert.notEqual(s.status, 0, `the snapshot was served: ${s.out}`);
+  await until(() => !alive(st.daemon_pid), 20000, 'the daemon gone');
+  const off = await ok(P, ['status']);
+  assert.match(off.out, /^last error: \d{4}-\d\d-\d\dT\S+ browser: couldn't delete \S.* \(EACCES\): Chrome would bring its tabs back$/m, off.out);
+  assert.equal(entriesFor(P, q).length, 0, 'a failed close wrote its entry');
+  // the next start handles the close, and the old failure is no longer said
+  await ok(P, ['start']);
+  entryIs(P, q, 'withdrawn');
+  assert.doesNotMatch((await ok(P, ['status'])).out, /last error/);
+  await ok(P, ['stop']);
+  assert.doesNotMatch((await ok(P, ['status'])).out, /last error/);
+});
+
+// last on cB: its close line's at doesn't parse, and stays the log's last line
+onB('T4-2 problem lines never wedge the browser: a handover gone from the log under wait, a close time that does not parse', async () => {
+  const P = cB();
+  await ok(P, ['start']);
+  // (c) wait's handover gone from the fold while it waits (its live log file moved away): a clear exit 1
+  const c = await askHandover(P);
+  const dir = path.join(P.run, 'log');
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl') && fs.readFileSync(path.join(dir, f), 'utf8').includes(`"id":"${c}"`));
+  assert.ok(files.length, `no live log file holds ${c}`);
+  const waiting = browser(P, ['wait']);
+  await sleep(1500);
+  for (const f of files) fs.renameSync(path.join(dir, f), path.join(P.home, f));
+  let w;
+  try { w = await waiting; } finally { for (const f of files) fs.renameSync(path.join(P.home, f), path.join(dir, f)); }
+  assert.equal(w.status, 1, w.out);
+  assert.match(w.err, new RegExp(`browser wait: ${c} is no longer in the log as a handover of this browser; nothing to wait for`), w.err);
+  await withdraw(P, c);
+  assert.match((await ok(P, ['snapshot'])).out, BLANK);
+  entryIs(P, c, 'withdrawn');
+  // (a) a close time that doesn't parse: read as closed now, handled once
+  const a = appendLine(P, handoverLine(P));
+  appendLine(P, { type: 'question', op: 'set', id: a.id, status: 'withdrawn', reason: 'a close time that does not parse', at: 'not a time' });
+  assert.match((await ok(P, ['snapshot'])).out, BLANK);
+  entryIs(P, a.id, 'withdrawn');
+  await ok(P, ['snapshot']);
+  assert.equal(entriesFor(P, a.id).length, 1, 'handled again by the same daemon');
+  // a new daemon still starts and serves
+  await ok(P, ['stop']);
+  await ok(P, ['start']);
+  assert.match((await ok(P, ['snapshot'])).out, BLANK);
 });
 
 test('the close on cA and cB, two chains at once (C17: every ledger validates after each check)', { skip, timeout: 280000, concurrency: 2 }, async (t) => {
