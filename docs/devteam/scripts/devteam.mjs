@@ -4838,7 +4838,8 @@ function holdView(g) {
 
 // A session told to park that hasn't within this long is a park-unsettled finding: about two ticks
 // (DEVTEAM_PARK_SETTLE_MINUTES for tests).
-const PARK_SETTLE_MS = Number(process.env.DEVTEAM_PARK_SETTLE_MINUTES ?? 30) * 60000;
+const PARK_SETTLE_ENV = process.env.DEVTEAM_PARK_SETTLE_MINUTES ? Number(process.env.DEVTEAM_PARK_SETTLE_MINUTES) : NaN;
+const PARK_SETTLE_MS = (Number.isFinite(PARK_SETTLE_ENV) ? PARK_SETTLE_ENV : 30) * 60000;
 // What holds need from the supervisor, as findings with a next step (supervisor.md §3): rulings a
 // park hasn't sent yet, sessions parked under a goal that runs again, tickets waiting on a held
 // goal's work, a drain that has finished, and a goal parked long enough to ask about.
@@ -4854,10 +4855,21 @@ function holdFindings(add, settings) {
       if (c && !parkRulingSent(s.name, c.marker)) add('high', 'park-unsent', s.name, `its goal is ${holdWords(mode)} (${causeWords(c)}), and it hasn't been told`, `goal park-sessions ${target}`);
       // told, and still not parked a while later: a park never waits on a reply or an owner answer
       // (worker.md §9: commit WIP, a handoff naming what it waits on, phase parked), so one session
-      // left running doesn't hold the fleet in "parking" for days
+      // left running doesn't hold the fleet in "parking" for days. Counted from the first ruling for
+      // this cause (a re-send that couldn't be delivered doesn't restart it), or from a later launch
+      // (a session started on purpose since gets its own time).
       else if (c) {
-        const told = logObjects('message').filter((m) => m.to === s.name && m.kind === 'ruling' && (m.text ?? '').includes(`[${c.marker}]`)).map((m) => Date.parse(m.created_at) || 0).sort((a, b) => b - a)[0];
-        if (told && now - told >= PARK_SETTLE_MS) add('medium', 'park-unsettled', s.name, `told to park ${Math.floor((now - told) / 60000)} min ago (${causeWords(c)}) and still ${lastPhaseOf(s.name)?.to ?? 'running'}: a park doesn't wait on a reply or an owner answer`, `look at its window, then send the ruling again: goal park-sessions ${target} --again (it commits its WIP, writes a handoff naming the questions it waits on, and parks; it resumes from the handoff once they're answered)`);
+        const t = (x) => Date.parse(x?.created_at) || 0;
+        const first = logObjects('message').filter((m) => m.to === s.name && m.kind === 'ruling' && (m.text ?? '').includes(`[${c.marker}]`)).map(t).sort((a, b) => a - b)[0];
+        const launched = logObjects('phase').filter((x) => x.created_by === s.name && x.to === 'starting').map(t).sort((a, b) => b - a)[0] ?? 0;
+        const since = first ? Math.max(first, launched) : 0;
+        if (since && now - since >= PARK_SETTLE_MS) {
+          const gone = /^no tmux (session|window)/.test(resolvePane(tmuxTarget(s.name)).problem ?? '');
+          const next = gone
+            ? `its window is gone (a restart), so a ruling can't reach it: start it to park, ${s.role} ${s.id} --resume --force, then goal park-sessions ${target} --again (it commits its WIP, writes a handoff naming the questions it waits on, and parks)`
+            : `look at its window, then send the ruling again: goal park-sessions ${target} --again (it commits its WIP, writes a handoff naming the questions it waits on, and parks; it resumes from the handoff once they're answered)`;
+          add('medium', 'park-unsettled', s.name, `told to park ${Math.floor((now - since) / 60000)} min ago (${causeWords(c)}) and still ${lastPhaseOf(s.name)?.to ?? 'running'}: a park doesn't wait on a reply or an owner answer`, next);
+        }
       }
     }
     if (parkedNow && ['run', 'drain'].includes(mode) && !draining()) add('medium', 'parked-under-run', s.name, `parked, and its goal is ${holdWords(mode)} again`, `${s.role} ${s.id} --resume${mode === 'drain' ? ' (a draining goal finishes what it started)' : ''}`);
