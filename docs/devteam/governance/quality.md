@@ -36,6 +36,7 @@ Every project, day one:
 | duplication | copy-paste over the threshold in the settings | |
 | secrets | any secret detected | `L-SEC-8` |
 | lockfile | install not frozen, or a dependency younger than the cooldown | `L-SEC-6`, `-8` |
+| audit | a known high or critical advisory in a lockfile (ratchet mode, so an advisory already on main blocks no unrelated PR; while main carries one, a PR adding another passes with a warning, and the dependabot sensor, where it runs, catches it) | `L-SEC-9` |
 | escape-hatch | a bare suppression comment | `L-ESC-1` |
 | devteam | `devteam.mjs validate` fails | |
 
@@ -43,7 +44,7 @@ Every project, day one:
 
 Add accessibility and lab performance once there is a UI, evals with thresholds once there is an AI feature.
 
-Default tools: TypeScript Biome (or ESLint + Prettier), `tsc --noEmit`, vitest (`sequence.shuffle`), knip, jscpd; Ruby RuboCop, RSpec `--order random`, SimpleCov, debride, flay; Python ruff, pyright, pytest + pytest-randomly, coverage.py, vulture; Go gofmt + golangci-lint, `go test -shuffle on -cover`, staticcheck, dupl; Rust rustfmt + clippy, nextest, cargo-llvm-cov, cargo-machete. Secrets: gitleaks everywhere. Record the choice in the settings.
+Default tools: TypeScript Biome (or ESLint + Prettier), `tsc --noEmit`, vitest (`sequence.shuffle`), knip, jscpd; Ruby RuboCop, RSpec `--order random`, SimpleCov, debride, flay; Python ruff, pyright, pytest + pytest-randomly, coverage.py, vulture; Go gofmt + golangci-lint, `go test -shuffle on -cover`, staticcheck, dupl; Rust rustfmt + clippy, nextest, cargo-llvm-cov, cargo-machete. Secrets: gitleaks everywhere. Audit: the stack's own scanner (`bundle-audit`, `npm audit --audit-level=high`, `pip-audit`, `govulncheck`, `cargo audit`), or `osv-scanner` where one tool covers several lockfiles; a development-only tool, so adding it is `gate-add`. Record the choice in the settings.
 
 **Secrets.** gitleaks scans the history, run from the repository root, and the history holds the kit's log. gitleaks' `generic-api-key` rule reads the log's `source_key` (the key that groups repeats of one signal, a slug such as `spend-spike-nov9-10`) as a key when its value has a digit in it, so the kit ships `docs/devteam/gitleaks.toml`: gitleaks' default rules, plus one allowlist on that rule for a `source_key` whose value is a slug, matched on the JSON key. A real secret anywhere else on a log line (its `detail`, a sensor's `sample`), or a `source_key` value that isn't a slug, still fails, and every other rule still sees `source_key`. `init` writes a `.gitleaks.toml` that extends it where a project has none; a kit sync adds that file where main has none (`supervisor.md` §9). A project that already has a `.gitleaks.toml` extends the kit's from it, beside its own rules and allowlists:
 
