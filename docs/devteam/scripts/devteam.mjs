@@ -6963,7 +6963,7 @@ function landRecords(id, rec, linkName) {
     const noHooks = ['-c', 'core.hooksPath=/dev/null'];
     const wt = detachedWorktree(checked, `land-records-${slug(id)}`, HR, { seed: false });
     try {
-      const m = lg([...noHooks, '-c', 'merge.directoryRenames=conflict', 'merge', '--no-ff', '--quiet', '-m', `${subject}\n\n${body}`, rec.sha], wt);
+      const m = lg([...noHooks, ...recurringRegistry.MERGE_FLAGS, 'merge', '--no-ff', '--quiet', '-m', `${subject}\n\n${body}`, rec.sha], wt);
       if (!m.ok) return m.timedOut ? `the merge of home's ticket/${id} at ${rec.sha.slice(0, 12)} onto home's ${HS.main_branch} timed out; nothing pushed` : `home's ticket/${id} at ${rec.sha.slice(0, 12)} does not merge onto home's ${HS.main_branch}`;
       const h = lg(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], wt);
       const head = h.ok ? h.out.trim() : '';
@@ -7401,7 +7401,7 @@ function cmdMerge() {
       const wt = detachedWorktree(checkedMain, `land-${slug(branch)}`, R);
       try {
         // one killed at the timeout says so, never that the head doesn't merge (final-11 F6)
-        const lm = recurringRegistry.git([...noHooks, '-c', 'merge.directoryRenames=conflict', 'merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], { cwd: wt });
+        const lm = recurringRegistry.git([...noHooks, ...recurringRegistry.MERGE_FLAGS, 'merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], { cwd: wt });
         if (!lm.ok) return lm.timedOut ? `the landing merge of ${sha.slice(0, 12)} onto ${mainBranch}${inR} timed out; nothing pushed` : `${sha.slice(0, 12)} does not merge onto ${mainBranch}${inR}`;
         // What is pushed is what was judged: one merge commit of exactly the checked main and the
         // head, in that order, whose jobs are the ones the checks said land. Anything that moved HEAD
@@ -24424,6 +24424,10 @@ const recurringRegistry = Object.freeze({
   // label (agreed_by_owner; never a reading of words, whatever line wrote it:
   // d-20261120-195829274-supervisor), not landed, not superseded
   live: (v) => v?.class === 'recurring-edit' && v.status === 'answered' && v.matched === true && v.agreed_by_owner === true && !v.reading && !recurringRegistry.notOwnYes(v) && !recurringRegistry.landed(v.id) && !recurringRegistry.superseded(v),
+  // the flags of the kit's landing merges (landCode, landRecords) and of the merge kitMergeOf builds
+  // again: directory renames are a conflict, and the message is kept verbatim, whatever the user's
+  // commit.cleanup says, so the rerun reads back exactly what merge wrote (final-14 F3)
+  MERGE_FLAGS: ['-c', 'merge.directoryRenames=conflict', '-c', 'commit.cleanup=verbatim'],
   // the message landRecords gives the records merge on home's main (final-13 F1 reads it back)
   recordsMessage: (id, recSha, linkName) => `${id}: records\n\nMerged home's ticket/${id} at ${recSha}: the records of ${id}, whose code lands in ${linkName}`,
   // Whether tip is the kit's own landing merge of head (final-13 F1): exactly two parents, the second

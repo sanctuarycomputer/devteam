@@ -2113,6 +2113,30 @@ test('A15 landing: forge git, a merge on main that someone else made (another me
   } finally { T.done(); }
 });
 
+test('A15 landing: forge git, with commit.cleanup=strip in the repo\'s config, a code push killed at the timeout is still recognised as the kit\'s own landing on the rerun (final-14 F3)', { timeout: 300000 }, () => {
+  const T = setup('a15-cleanup');
+  try {
+    T.g(['config', 'commit.cleanup', 'strip']);
+    const q = T.yes({ recurring: { aa: check() } });
+    T.jobsChore('pre', () => ({ aa: check() }));
+    const main0 = T.g(['rev-parse', 'refs/heads/main'], T.org);
+    const hook = slowPreReceive(T.org);
+    const before = T.acts().length;
+    let r;
+    try {
+      r = T.merge('pre', ['--approved', q], { DEVTEAM_GIT_TIMEOUT_MS: PRE_TIMEOUT });
+      assert.notEqual(refMoves(T.org, 'main', main0), main0, 'origin took the push after the kill');
+    } finally { fs.rmSync(hook, { force: true }); }
+    refused(r, MAYBE);
+    assert.match(T.g(['log', '-1', '--format=%B', 'refs/heads/main'], T.org), /^# chore-pre: jobs$/m, 'the message is kept verbatim');
+    const r2 = T.merge('pre', ['--approved', q]);
+    passes(r2);
+    assert.match(r2.text, /in the kit's own landing merge [0-9a-f]{12}, with no act logged/);
+    assert.equal(T.acts().length, before + 1);
+    assert.equal(json(T.ok(['recurring', 'show', 'aa', '--json'])).registered?.qid, q, 'registered through the answer');
+  } finally { T.done(); }
+});
+
 test('A15 landing: records in home, a records push killed at the timeout that home\'s origin then takes: merge says they may have landed, and the rerun logs their act once and lands the code (final-13 F1)', { timeout: 300000 }, () => {
   const F = recordsHome('recur-rec-pre');
   try {
