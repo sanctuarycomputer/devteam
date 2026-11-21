@@ -25274,6 +25274,91 @@ function cmdRecurring() {
   ].join('\n'));
 }
 
+// When a recurring job is next due (design C1), from its landings on main and its recorded results.
+// landings: [{ at, entry }] in any order, entry null when the job stopped; runs: [{ slot, at }], at the
+// run's start. An unanchored job's next slot is the last result's start plus every; an anchored one
+// (on/at) keeps a fixed sequence. An edit to every/on/at restarts the schedule at that landing, and a
+// slot counts its earliest result only. Missed slots run once, for the latest. Self-contained: the
+// test loads this function alone, so it names nothing outside its body, and no line of it is a bare
+// closing brace but its last.
+function recurringNextSlot(landings, runs, now) {
+  const ms = (x) => (typeof x === 'number' ? x : Date.parse(x));
+  const iso = (t) => new Date(t).toISOString().replace(/\.000Z$/, 'Z');
+  const schedule = (e) => JSON.stringify([e.every ?? null, e.on ?? null, e.at ?? null]);
+  let start = null;
+  let entry = null;
+  for (const l of [...landings].sort((a, b) => ms(a.at) - ms(b.at))) {
+    if (l.entry === null || typeof l.entry !== 'object') {
+      start = null;
+      entry = null;
+      continue;
+    }
+    if (!entry || schedule(l.entry) !== schedule(entry)) start = ms(l.at);
+    entry = l.entry;
+  }
+  const m = entry && typeof entry.every === 'string' ? /^([1-9][0-9]{0,3})(h|d|w|mo)$/.exec(entry.every) : null;
+  if (!m || !(start >= 0)) return null;
+  const n = Number(m[1]);
+  const unit = m[2];
+  const t = ms(now);
+  // one result per slot: the earliest start, of runs since the schedule began
+  const first = new Map();
+  for (const r of runs) {
+    const s = ms(r.slot);
+    const a = ms(r.at);
+    if (!(s >= 0) || !(a >= start)) continue;
+    if (!first.has(s) || a < first.get(s)) first.set(s, a);
+  }
+  const DAY = 86400000;
+  // k calendar months on, the day held to the target month's last (Jan 31 + 1mo is Feb 28 or 29)
+  const addMonths = (x, k) => {
+    const d = new Date(x);
+    const y = d.getUTCFullYear();
+    const mo = d.getUTCMonth() + k;
+    const last = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+    return Date.UTC(y, mo, Math.min(d.getUTCDate(), last), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds());
+  };
+  const step = (x, k) => {
+    if (unit === 'h') return x + k * n * 3600000;
+    if (unit === 'd') return x + k * n * DAY;
+    if (unit === 'w') return x + k * n * 7 * DAY;
+    return addMonths(x, k * n);
+  };
+  const out = (due, slot) => ({ due, slot: iso(slot), next: iso(slot), start: iso(start) });
+  if (unit === 'h' || (entry.on === undefined && entry.at === undefined)) {
+    const latest = first.size ? Math.max(...first.keys()) : null;
+    const slot = latest === null ? start : step(first.get(latest), 1);
+    return out(t >= slot, slot);
+  }
+  // anchored: slot 0 is the first on/at instant at or after the start
+  const [hh, mm] = String(entry.at ?? '00:00').split(':').map(Number);
+  const s = new Date(start);
+  const y = s.getUTCFullYear();
+  const mon = s.getUTCMonth();
+  let slot0;
+  if (unit === 'mo') {
+    const day = entry.on ?? Math.min(s.getUTCDate(), 28);
+    slot0 = Date.UTC(y, mon, day, hh, mm);
+    if (slot0 < start) slot0 = Date.UTC(y, mon + 1, day, hh, mm);
+  } else {
+    slot0 = Date.UTC(y, mon, s.getUTCDate(), hh, mm);
+    if (unit === 'w') {
+      const want = entry.on === undefined ? s.getUTCDay() : ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].indexOf(entry.on);
+      while (new Date(slot0).getUTCDay() !== want || slot0 < start) slot0 += DAY;
+    } else if (slot0 < start) {
+      slot0 += DAY;
+    }
+  }
+  if (t < slot0) return out(false, slot0);
+  // the latest slot at or before now: estimate by a short period, then walk to it
+  const period = unit === 'd' ? n * DAY : unit === 'w' ? n * 7 * DAY : n * 28 * DAY;
+  let k = Math.floor((t - slot0) / period);
+  while (k > 0 && step(slot0, k) > t) k--;
+  while (step(slot0, k + 1) <= t) k++;
+  const cur = step(slot0, k);
+  return first.has(cur) ? out(false, step(slot0, k + 1)) : out(true, cur);
+}
+
 // ===== sensors: production signals into the loop =====
 // A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
 // A meaningful change becomes an observation in the log on subject sensor:<name>, and the
