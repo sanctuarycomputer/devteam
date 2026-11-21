@@ -30325,8 +30325,8 @@ ${[HELP_SETUP, HELP_HOLDS, HELP_GRAPH, HELP_CHECKS, HELP_SESSIONS, HELP_DECIDE, 
 // recover, machine and operator-thread write, and are allowed by name below: bringing a supervisor
 // back, the machine's digest, word to a supervisor and alert, and its own replies to the owner are
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
-const OPERATOR_READS = new Set(['search', 'status', 'moves', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
-const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings', 'unread']);
+const OPERATOR_READS = new Set(['search', 'status', 'moves', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek', 'recurring list', 'recurring show']);
+const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings', 'unread', 'recurring']);
 /* commandGroups start */
 const COMMANDS_SETUP = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
