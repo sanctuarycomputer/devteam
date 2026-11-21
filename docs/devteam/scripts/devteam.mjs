@@ -7890,6 +7890,9 @@ function askLine({ thread, about } = {}) {
     const R = recurringRegistry;
     const c = jsonFlag('change');
     if (c === undefined) die('a recurring-edit question shows the exact change: --change \'{"recurring":{"<name>":{…} | null}}\'');
+    // a key twice in one object: JSON.parse keeps the last, so the words and the change could differ (final-14b F7)
+    const dup = (jsonDuplicateKeys(flagStr('change')) ?? [])[0];
+    if (dup) die(`--change for recurring-edit: ${JSON.stringify(String(dup.at(-1)))} appears twice in one object (${dup.join('.')}): JSON keeps only the last, so the question would show one thing and the kit read another`);
     const extra = isObj(c) ? Object.keys(c).filter((k) => k !== 'recurring') : [];
     if (extra.length) die(`--change for recurring-edit has only "recurring"; not ${extra.join(', ')}`);
     if (!isObj(c) || !isObj(c.recurring) || !Object.keys(c.recurring).length) die('--change for recurring-edit is {"recurring":{"<name>":{…} | null}}, with at least one job');
@@ -24447,7 +24450,10 @@ const recurringRegistry = Object.freeze({
   // doesn't bind the question (turnBinds); else null
   notOwnYes(v) {
     if (v?.channel === 'chat') return `answered from chat ("${String(v.said ?? '').slice(0, 80)}"), which approves no job change`;
-    if (v?.channel !== 'thread') return null;
+    // the channels the kit writes on an owner's answer (appendLog, cmdAnswer): the card (cli or
+    // dashboard), chat and thread; any other value is a line the kit never wrote (final-14b F7)
+    if (v?.channel === 'cli' || v?.channel === 'dashboard') return null;
+    if (v?.channel !== 'thread') return `answered on channel ${JSON.stringify(v?.channel ?? null)}, which the kit never writes for an owner's answer, so it approves no job change`;
     const turn = v.turn ?? 'a turn';
     if (!recurringRegistry.saysYes(v.said)) return `answered from ${turn}, whose words don't start with Yes ("${String(v.said ?? '').slice(0, 80)}")`;
     if (v.said_at !== undefined && v.said_at !== null) return `answered from a clause of ${turn} (said_at), which approves no job change`;
