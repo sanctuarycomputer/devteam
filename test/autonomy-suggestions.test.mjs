@@ -390,7 +390,8 @@ test('the Trust page: Suggestions, and a thread on one', { skip: canDrive ? fals
     await p.click(at(s2.id));
     await soon(`TL.draft?.subject?.ref === ${JSON.stringify(`suggestion:${s2.id}`)}`, 'a draft on item 2');
     assert.equal(await p.ev('TL.draft.subject.kind'), 'item');
-    assert.ok((await p.ev('TL.draft.subject.quote')).startsWith(`${TITLES[1]} · `));
+    const quote = await p.ev('TL.draft.subject.quote');
+    assert.ok(quote.startsWith(`${TITLES[1]} · ${s2.what.slice(0, 20)}`), quote);
     assert.deepEqual(await p.ev('window.__writes'), []);
     await p.click('#tl-c-text');
     await p.type('try it');
@@ -401,12 +402,13 @@ test('the Trust page: Suggestions, and a thread on one', { skip: canDrive ? fals
     assert.equal(w.length, 1, JSON.stringify(w));
     assert.deepEqual([w[0].method, w[0].url], ['POST', '/api/thread-new']);
     const body = JSON.parse(w[0].body);
-    assert.deepEqual([body.subject.kind, body.subject.ref], ['item', `suggestion:${s2.id}`]);
+    assert.deepEqual([body.subject.kind, body.subject.ref, body.subject.quote], ['item', `suggestion:${s2.id}`, quote]);
     await p.ev('tlClose(); void 0');
     // Enter on item 3
     await p.ev(`(${ITEM(s3.id)}).focus(); void 0`);
     await p.key('Enter');
     await soon(`TL.draft?.subject?.ref === ${JSON.stringify(`suggestion:${s3.id}`)}`, 'a draft by Enter');
+    assert.ok((await p.ev('TL.draft.subject.quote')).startsWith(`${TITLES[2]} · ${s3.what.slice(0, 20)}`));
     await p.ev('tlClose(); void 0');
     // a Shift+click on item 4 gives the subject a click on it gives
     await p.click(at(s4.id));
