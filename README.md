@@ -198,7 +198,7 @@ Changes land on `main` through PRs, and the kit's tests in `test/` must pass. Ru
 - `--concurrency n`: files at once (default `DEVTEAM_TEST_CONCURRENCY`, else 2).
 - `--file-timeout s`: each file's watchdog, in seconds (default 300; 600 for `test/kit.test.mjs` and the files the runner lists as long).
 - `--group g[,g…]`: only files in these groups: `chain` (`test/kit.test.mjs`), `alone` (`test/bounds.test.mjs`), `chrome` (files that drive Chrome), `rest`.
-- `--shard i/n`: the i-th of n shards (n from 1 to 4), balanced by `test/timings.json`.
+- `--shard i/n`: the i-th of n shards (n from 1 to 8), balanced by the running Node major's weights in `test/timings.json`.
 - `--repeat n`: run every chosen file n times; a failure on any run fails the run.
 
 A release is a `vX.Y.Z` tag on `main` with a GitHub Release whose notes have three sections, because projects' supervisors read them to decide what to fold in:
