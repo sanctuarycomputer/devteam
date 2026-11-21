@@ -139,7 +139,7 @@ const LOOP_PAGES = ((now = Date.now(), ago = (h) => new Date(now - h * 3600000).
 // Goals; page-top at 1440x900 only, as the Goals entries above (o-20261116-110914358)
 const THREAD_PAGES = [lib.reopenFixture()].map(({ hash, init, ready }) => ({ hash, init, ready, narrow: { view: '#no-such-view' } }));
 // kit-99: the Trust Score's suggestions
-const TRUST_SUGG_PAGES = [];
+const TRUST_SUGG_PAGES = [{ hash: '#trust', init: lib.suggestionsFixture().init, ready: "(() => { const s = [...document.querySelectorAll('#trust .trust-card .sec')].pop(); return s?.querySelector('.lbl')?.textContent.trim() === 'Suggestions' && s.querySelectorAll('.sugg-i').length === 5 && [...document.querySelectorAll('#trust .fit[data-fit]')].every((f) => +f.dataset.w > 0); })()", narrow: { view: '#no-such-view' } }];
 // kit-171: attachments
 const ATTACH_PAGES = (() => {
   const at = new Date(Date.now() - 3600000).toISOString();

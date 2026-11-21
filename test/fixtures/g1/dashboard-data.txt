@@ -1891,7 +1891,17 @@ exit 0
         "has": [],
         "working": []
       }
-    }
+    },
+    "suggestions": [
+      {
+        "id": "tr-question-q-<sha>-<sha>-supervisor",
+        "kind": "question",
+        "what": "Ship g1 behind a flag?",
+        "evidence": "open under an hour; holds g1-01-a",
+        "effect": "1 can start",
+        "weight": 1
+      }
+    ]
   },
   "autonomy_score": {
     "this_week": null,
@@ -2531,17 +2541,6 @@ exit 0
       "value": 7,
       "set": false,
       "default": 7,
-      "owner_only": null
-    },
-    {
-      "key": "recurring",
-      "group": "Rhythm",
-      "name": "Jobs",
-      "description": "the jobs that run on a schedule under Upkeep: checks and chores",
-      "shown": "names",
-      "value": [],
-      "set": false,
-      "default": [],
       "owner_only": null
     },
     {

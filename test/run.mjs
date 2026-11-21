@@ -27,12 +27,20 @@
 //                          alone   the files in ALONE below
 //                          chrome  a file that imports ./lib/chrome.mjs
 //                          rest    every other file
-//   --shard i/n          the i-th of n shards (n from 1 to 4), dealt greedily by the weights in
-//                        test/timings.json (an unlisted file weighs the median). Stale weights cost
-//                        balance, never a file.
+//   --shard i/n          the i-th of n shards (n from 1 to 8), dealt greedily by the weights in
+//                        test/timings.json for the Node major running this (below). Stale weights
+//                        cost balance, never a file.
 //   --list               print the chosen files with their groups and timeouts; run nothing
 //   --repeat n           run every chosen file n times; a failure on any run fails, and says which
-//   --timings out.json   write each file's wall seconds, in test/timings.json's shape
+//   --timings out.json   write each file's wall seconds, and the Node major they were measured on:
+//                        { "run", "node": 22, "files": { "<file>": <seconds> } }
+//
+// test/timings.json: { "run", "source", "files": { "<file>": <seconds> }, "majors": { "18": { … },
+// "20": { … }, … } }. A major's section in "majors" is that major's seconds for each file (its
+// files from one CI run's --timings or summary rows); "files" is the largest across majors. A run
+// on Node N deals by "majors"["N"]; a file missing from that section weighs that section's median
+// (of the chosen files it lists). A major with no section (or one with no weight in it) uses "files"
+// the same way, and with neither every file weighs 1.
 //
 // Each file runs with TMPDIR set to a scratch folder of its own (under /tmp/dtr- where /tmp is
 // writable), removed when the file ends, and DEVTEAM_TEST_SHARED_TMP naming the shared temp dir
@@ -49,8 +57,9 @@ import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(import.meta.url);
 export const ROOT = fs.realpathSync(path.resolve(path.dirname(here), '..'));
 export const ALONE = ['test/bounds.test.mjs'];
-// Files known to run longer than 300 s get a longer watchdog here; none do (kit-210 split dashboard.test.mjs).
-export const LONG = {};
+// Files known to run longer than 300 s get a longer watchdog here (kit-210 split dashboard.test.mjs).
+// recurring-registry nears 300 s on CI's slowest runner (281 s on Node 18; kit-162 final-11 F2).
+export const LONG = { 'test/recurring-registry.test.mjs': 600 };
 export const GROUPS = ['chain', 'alone', 'chrome', 'rest'];
 export class UsageError extends Error {}
 
@@ -85,7 +94,7 @@ export function parseArgs(argv, env, root = ROOT) {
     } else if (a === '--shard') {
       const m = /^(\d+)\/(\d+)$/.exec(val());
       const i = m && Number(m[1]), n = m && Number(m[2]);
-      if (!m || n < 1 || n > 4 || i < 1 || i > n) throw new UsageError(`--shard wants i/n with n from 1 to 4 and i from 1 to n, not ${JSON.stringify(argv[k])}`);
+      if (!m || n < 1 || n > 8 || i < 1 || i > n) throw new UsageError(`--shard wants i/n with n from 1 to 8 and i from 1 to n, not ${JSON.stringify(argv[k])}`);
       o.shard = { i, n };
     } else if (a.startsWith('-')) throw new UsageError(`unknown option ${a}`);
     else {
@@ -137,15 +146,24 @@ export function shard(files, weights, n) {
   return shards.map((s) => s.files);
 }
 
-const readTimings = (root) => { try { return JSON.parse(fs.readFileSync(path.join(root, 'test', 'timings.json'), 'utf8')).files ?? {}; } catch { return {}; } };
-export function planRun(opts, root = ROOT) {
+const isMap = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const isWeight = (w) => typeof w === 'number' && w >= 0;
+// The weights a run on this Node major deals by: its section of majors when that holds a weight, else files.
+export function timingsFor(timings, major) {
+  const section = isMap(timings?.majors) ? timings.majors[String(major)] : undefined;
+  if (isMap(section) && Object.values(section).some(isWeight)) return section;
+  return isMap(timings?.files) ? timings.files : {};
+}
+export const nodeMajor = (version = process.versions.node) => Number(version.split('.')[0]);
+const readTimings = (root) => { try { return JSON.parse(fs.readFileSync(path.join(root, 'test', 'timings.json'), 'utf8')); } catch { return {}; } };
+export function planRun(opts, root = ROOT, major = nodeMajor()) {
   const files = opts.files?.length ? opts.files : fs.readdirSync(path.join(root, 'test')).filter((f) => f.endsWith('.test.mjs')).sort().map((f) => `test/${f}`);
   let chosen = files.map((file) => {
     const group = groupOf(file, fs.readFileSync(path.isAbsolute(file) ? file : path.join(root, file), 'utf8'));
     return { file, group, timeout: timeoutOf(file, group, opts.fileTimeout ?? null) };
   }).filter((p) => !opts.groups || opts.groups.includes(p.group));
   if (opts.shard) {
-    const mine = shard(chosen.map((p) => p.file), weightsFor(chosen.map((p) => p.file), readTimings(root)), opts.shard.n)[opts.shard.i - 1];
+    const mine = shard(chosen.map((p) => p.file), weightsFor(chosen.map((p) => p.file), timingsFor(readTimings(root), major)), opts.shard.n)[opts.shard.i - 1];
     const by = new Map(chosen.map((p) => [p.file, p]));
     chosen = mine.map((f) => by.get(f));
   }
@@ -562,7 +580,7 @@ async function runFiles(opts, plan, ctx) {
   if (opts.timings) {
     const files = {};
     for (const r of results) files[r.file] = Math.max(files[r.file] ?? 0, Math.round(r.seconds * 10) / 10);
-    fs.writeFileSync(opts.timings, `${JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? null, files }, null, 2)}\n`);
+    fs.writeFileSync(opts.timings, `${JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? null, node: nodeMajor(), files }, null, 2)}\n`);
   }
   return bad.length ? 1 : 0;
 }

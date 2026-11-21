@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { threadsFixture, fleetFixture, multiFixture, line, write, json, dashboardOnFreePort, PORTS, kit, freePort, serverUp } from './lib/kit.mjs';
+import { threadsFixture, fleetFixture, multiFixture, line, write, json, dashboardOnFreePort, PORTS, kit, freePort, serverUp, until } from './lib/kit.mjs';
 
 // `/api/data` serves exactly this
 const data = (F) => json(F.ok(F.old, ['dashboard-data']));
@@ -448,7 +448,11 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   assert.deepEqual(await get('/api/governance'), cli);
   const d = await get('/api/data');
   for (const k of ['class_words', 'threads', 'upkeep_days', 'settings_all']) assert.ok(k in d, `/api/data has ${k}`);
-  const h = await get('/api/hello');
+  // /api/hello answers at once from the dashboard's last `hello` child; until the first one lands, its
+  // threads, fleet and inbox are null (devteam.mjs refreshHello, helloBody). That child starts beside the
+  // warm dashboard-data build, and /api/data can answer first, so wait for the first hello: its fleet is
+  // never null (cmdHello). The assert below is unchanged.
+  const h = await until(async () => { const x = await get('/api/hello'); return x.fleet !== null && x; }, "the dashboard's first hello");
   for (const k of ['you', 'waiting', 'ready']) assert.equal(typeof h.threads?.[k], 'number', `/api/hello's threads.${k}`);
   assert.deepEqual(logAt(A.root), before, 'the dashboard\'s reads wrote nothing to the log');
 });
@@ -475,7 +479,8 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
     ...[...sourceBlock(src, 'const OWNER_SETTINGS = {').matchAll(/\b([a-z_]+): '/g)].map((m) => m[1]),
     'sensor_scrub',
   ]);
-  assert.equal(union.size, 50, 'every setting the kit reads, 50 today');
+  // kit-162 moved `recurring` out of SETTINGS_DEFAULTS into project/recurring.json: one fewer than main's count
+  assert.equal(union.size, 49, 'every setting the kit reads, 49 today');
   // every direct read names a key in the union (spec §6, F3-3: its reach)
   const reads = [...src.matchAll(/loadSettings\(\)\.([a-z_]+)/g), ...src.matchAll(/settingsAt\([^)]*\)\??\.([a-z_]+)/g)].map((m) => m[1]);
   assert.ok(reads.length > 50, `the read sites found (${reads.length})`);
@@ -532,7 +537,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   const all = data(F).settings_all;
   assert.ok(Array.isArray(all), 'settings_all');
   // keys
-  assert.equal(all.length, 50);
+  assert.equal(all.length, 49);
   assert.deepEqual(new Set(all.map((e) => e.key)), union);
   // order: each group once, in the page's order
   const groups = all.map((e) => e.group).filter((g, i, a) => g !== a[i - 1]);
@@ -540,7 +545,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   // the show kinds (F3-4)
   const kinds = {};
   for (const e of all) kinds[e.shown] = (kinds[e.shown] ?? 0) + 1;
-  assert.deepEqual(kinds, { value: 33, hidden: 6, names: 8, count: 3 });
+  assert.deepEqual(kinds, { value: 33, hidden: 6, names: 7, count: 3 }); // kit-162: recurring left SETTINGS_DEFAULTS (it was a names kind)
   for (const e of all) {
     for (const f of ['key', 'group', 'name', 'description', 'shown', 'value', 'set', 'default', 'owner_only']) assert.ok(f in e, `${e.key} has ${f}`);
     assert.equal(e.set, mainKeys.has(e.key), `${e.key}: set is whether main's file has it`);
