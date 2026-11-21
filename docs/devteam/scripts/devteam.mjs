@@ -24226,6 +24226,9 @@ const recurringRegistry = Object.freeze({
     if (s.failed) return cant(s.failed);
     const not = s.isSymbolicLink() ? 'symlink' : s.isDirectory() ? 'directory' : !s.isFile() ? 'special file' : s.mode & 0o111 ? 'executable' : null;
     if (not) return { jobs: null, problem: `recurring.json ${where} is not a regular file (${not}); the kit reads only a plain file` };
+    // its size first, from the lstat, as read does with cat-file -s (final-12b F5)
+    const max = Number(process.env.DEVTEAM_RECURRING_MAX_BYTES) || recurringRegistry.MAX_BYTES;
+    if (s.size > max) return { jobs: null, problem: `recurring.json ${where}: ${s.size} bytes, over the kit's bound of ${max}; no jobs file needs that` };
     let text;
     try { text = fs.readFileSync(path.join(projectRoot, ...recurringRegistry.path().split('/')), 'utf8'); } catch (e) { return cant(e); }
     return recurringRegistry.parse(text, where);
