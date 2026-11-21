@@ -759,6 +759,9 @@ try {
 /* css-misc start */
   /* a key's tooltip on keyboard focus (the mouse has its title); Escape blurs it */
   .props dt[title] { position: relative; }
+  /* the fleet line's what-is-left, on focus or a tap (the mouse has its title); it opens upward, over the switch, so nothing moves */
+  .fleet-state .fleet-left { position: relative; cursor: help; text-decoration: underline dotted; }
+  .fleet-state .fleet-left:focus::after { content: attr(title); position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 5; width: 260px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); white-space: normal; }
   .props dt[title]:focus-visible::after { content: attr(title); position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); white-space: normal; }
   .drawer-body .psect { margin: 0 0 12px; }
   .drawer-body .psect-body > :first-child { margin-top: 0; }
@@ -4142,8 +4145,11 @@ function fleetStateLine(f, st) {
   // not ready yet: what is left (fleet status's blockers, each up to its first parenthesis) rides on
   // the line's hover, so a park that stalls says on what without growing the line (it sits under the
   // switch, which must not move)
-  const left = (f.mode === 'park' || f.mode === 'drain') && !settled && st && Array.isArray(st.blockers) && st.blockers.length ? st.blockers : null;
-  const tip = left ? ` title="${esc(`Left before the move: ${left.map((b) => String(b).split(' (')[0].slice(0, 120)).join('; ')}`)}"` : '';
+  // (from the last good answer only: after a failed check it would be old). It takes focus (Tab, or a
+  // tap on a phone) and shows on focus too, and screen readers hear it in its label.
+  const left = (f.mode === 'park' || f.mode === 'drain') && !settled && !FLEET.error && st && Array.isArray(st.blockers) && st.blockers.length ? st.blockers : null;
+  const leftWords = left ? `Left before the move: ${left.map((b) => String(b).split(/ \(|: run /)[0].slice(0, 120)).join('; ')}` : '';
+  const tip = left ? ` class="fleet-left" tabindex="0" title="${esc(leftWords)}" aria-label="${esc(`${words}. ${leftWords}`)}"` : '';
   return `<b${tip}>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
 }
 // Every fleet slot on the page: the sidebar's ([data-fleet-slot="switch"] and "state"), and any other

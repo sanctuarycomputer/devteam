@@ -651,6 +651,16 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await p.ev(`document.querySelector('#side-state b').title`), 'Left before the move: app-9-x: not parked; the live log is not on main yet');
   await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: true, blockers: [] });
   assert.equal(await p.ev(`document.querySelector('#side-state b').title`), '', 'ready: no hover');
+  // reachable without a mouse: it takes focus and its label carries the list
+  await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: false, blockers: ['app-9-x: not parked (phase awaiting-word)'] });
+  assert.equal(await p.ev(`document.querySelector('#side-state b').tabIndex`), 0, 'focusable');
+  assert.match(await p.ev(`document.querySelector('#side-state b').getAttribute('aria-label')`), /^parking…\. Left before the move: app-9-x: not parked$/);
+  // after a failed check the list would be old: none
+  assert.equal(await p.ev(`(() => { FLEET.error = 'offline'; render({ ...DATA, fleet: { mode: 'park', op: 'f-1', reason: 'new laptop' } }); const t = document.querySelector('#side-state b').title; FLEET.error = null; return t; })()`), '', 'no list from an old answer');
+  // a fleet-held goal whose own sessions settled reads Parked while the fleet isn't ready to move
+  // (it read Parking… until the whole fleet was ready, for days on one box)
+  assert.equal(await p.ev(`(() => { FLEET.data = { ready: false, blockers: ['x'] }; return holdState({ mode: 'park', state: 'parked', fleet: 'f-1', running: [] }); })()`), 'parked');
+  assert.equal(await p.ev(`holdState({ mode: 'park', state: 'parking', fleet: 'f-1', running: ['a-1'] })`), 'parking', 'its own session still settling: parking');
   assert.equal(await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: true, blockers: [] }), 'parked · new laptop');
   assert.equal(await line({ mode: null, op: 'f-1', reason: 'set apart' }, null), 'partly held (a goal was set apart after the fleet op) · set apart');
   await p.ev('FLEET.busy = false; redrawNow()');
