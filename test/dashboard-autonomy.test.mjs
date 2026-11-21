@@ -200,7 +200,7 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     // the head's label, then its "this week"
     assert.equal(await p.ev("[...document.querySelector('#trust .card .card-head').childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim()"), 'Trust Score');
     assert.equal(await text('#trust .card .card-head .grow'), 'this week');
-    assert.deepEqual(await texts('#trust .card:first-child .sec .lbl'), ['Score', 'Trust', 'Senses']);
+    assert.deepEqual(await texts('#trust .card:first-child .sec .lbl'), ['Score', 'Trust', 'Senses', 'Suggestions']);
     const score = await secText('Score');
     assert.match(score, /\b64%/);
     assert.match(score, /last week 58%/);

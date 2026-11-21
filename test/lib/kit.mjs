@@ -1303,6 +1303,26 @@ export function autonomyFixture({ now = Date.now() } = {}) {
     },
   };
 }
+// kit-99: autonomyFixture with autonomy.suggestions set, in the server's shape (autonomySuggestions): five,
+// one per kind, ranked, with long words for the narrow screens (release-scope's long kind name, a long
+// question and a long strategy item). suggestions: in place of the five (null leaves the key out);
+// threads: added to /api/threads. { patch, init, items }: init is autonomyFixture's (every non-GET
+// request kept in window.__writes, every error in window.__errors, the 10 s poll every 300 ms).
+export function suggestionsFixture({ suggestions, threads = [] } = {}) {
+  const f = autonomyFixture();
+  const items = suggestions === undefined ? [
+    { id: 'tr-question-q-20261101-000000301-supervisor', kind: 'question', what: 'Which route should the hub use to read the cloud box when the tunnel is down and the fallback relay is unreachable too?', evidence: 'open 5 hours; holds kit-23 and a planning session', effect: '2 can start', weight: 2 },
+    { id: 'tr-raise-release-scope', kind: 'raise', what: `Let "${f.ids.longKind}" decide and tell you`, evidence: '10 of the last 10 answers went with its recommendation; no corrections in 4 weeks', effect: 'about 2 fewer questions a week', weight: 1.5 },
+    { id: 'tr-rule-new-feature', kind: 'rule', what: 'A rule for "Starting a feature you haven\'t asked for"', evidence: 'asked 4 times in 4 weeks', effect: 'about 1 fewer question a week', weight: 1 },
+    { id: 'tr-sense-sentry', kind: 'sense', what: 'Connect sentry', evidence: 'needed, not connected', effect: 'Senses: has 3 of 4 → 4 of 4', weight: 0.5 },
+    { id: 'tr-strategy-whether-self-hosted-customers-get-the-hosted-release-cadence', kind: 'strategy', what: '"Whether self-hosted customers get the same release cadence as the hosted service, or one a quarter" is not known yet', evidence: 'listed under Not known yet in the strategy', effect: 'goals stop being rated against a guess', weight: 0.5 },
+  ] : suggestions;
+  const autonomy = { ...f.patch.autonomy };
+  if (items === null) delete autonomy.suggestions; else autonomy.suggestions = items;
+  f.patch = { ...f.patch, autonomy };
+  f.threads = threads;
+  return { patch: f.patch, items, get init() { return f.init; } };
+}
 
 
 // kit-88: a project with a record for every side peek, every "How it changes" case and every item of
