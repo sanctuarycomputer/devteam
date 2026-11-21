@@ -25150,7 +25150,7 @@ function recurringBindingFails(main, landed, approved) {
 function cmdRecurring() {
   const R = recurringRegistry;
   const [sub, arg] = positional;
-  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid>';
+  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid> | recurring run --due | recurring run <name> --draft | recurring due [--json]';
   const P = R.path();
   // main's jobs, as read(ref) reads them: a problem (a broken file, or git failing) stops here
   const mainJobs = () => {
@@ -25199,6 +25199,24 @@ function cmdRecurring() {
       ...(entries.length ? entries.map((e) => `${e.name}  ${str(e.entry?.kind)}  every ${str(e.entry?.every)}  ${str(e.entry?.title)}  ${regWords(e.registered)}${(e.problems ?? []).map((p) => `\n  problem: ${p}`).join('')}`) : ['no jobs on main']),
       `${R.runsWords(total)} runs a day, cap ${R.CAP}`,
       ...(pending.length ? pending.map((p) => `pending: ${pendWords(p)}`) : ['pending: none']),
+    ].join('\n'));
+  }
+  if (sub === 'run') {
+    supervisorOnly('recurring run');
+    if (flags.due === true && !arg) return recurringRunDue.run({ due: true });
+    if (arg && flags.draft === true) return recurringRunDue.run({ draft: arg });
+    die('usage: recurring run --due | recurring run <name> --draft');
+  }
+  if (sub === 'due') {
+    const c = recurringRunDue.checks();
+    if (c.problem) die(c.problem);
+    const l = recurringLock.read();
+    const runner = recurringLock.live(l) ? { pid: l.pid, start: l.start, budget_s: l.budget_s, current: l.current ?? null } : null;
+    const checks = c.checks.map(({ name, due, slot, next, start }) => ({ name, due, slot, next, start }));
+    if (flags.json) return json({ checks, runner });
+    return out([
+      ...(checks.length ? checks.map((x) => `${x.name}  ${x.due ? 'due' : 'next'} ${x.next}  slot ${x.slot}`) : ['no checks on main']),
+      runner ? `runner: pid ${runner.pid} since ${runner.start}${runner.current ? ` (${runner.current.name})` : ''}` : 'runner: none',
     ].join('\n'));
   }
   if (sub !== 'apply') die(usage);
@@ -25363,6 +25381,306 @@ function recurringNextSlot(landings, runs, now) {
   const cur = step(slot0, k);
   return first.has(cur) ? out(false, step(slot0, k + 1)) : out(true, cur);
 }
+
+// The lock one recurring runner holds while it runs due checks: run/recurring/.lock, JSON { pid,
+// start, budget_s, checks, current: { name, slot, pgid?, checkout? } | null }. It is made whole in
+// one step (written to a temp file, then linked into place, which fails when a lock exists), so no
+// reader ever sees it half-written. Live means a good shape, a live pid other than ours (a lock
+// naming our own pid is a reused pid) and now inside its budget; anything else that exists is stale.
+const recurringLock = Object.freeze({
+  file: () => path.join(runPath('recurring'), '.lock'),
+  sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+  // the lock's text, null when there is none, '' when it can't be read (stale)
+  text() { try { return fs.readFileSync(recurringLock.file(), 'utf8'); } catch (e) { return e.code === 'ENOENT' ? null : ''; } },
+  good: (l) => isObj(l) && Number.isInteger(l.pid) && l.pid > 0 && typeof l.start === 'string' && Number.isFinite(Date.parse(l.start)) && typeof l.budget_s === 'number' && l.budget_s > 0,
+  parse(text) {
+    if (text === null) return null;
+    try { const l = JSON.parse(text); return recurringLock.good(l) ? l : { bad: true }; } catch { return { bad: true }; }
+  },
+  read: () => recurringLock.parse(recurringLock.text()),
+  live: (l, nowMs = Date.now()) => !!l && !l.bad && l.pid !== process.pid && pidAlive(l.pid) && nowMs < Date.parse(l.start) + l.budget_s * 1000,
+  mine: (l, me) => !!me && !!l && !l.bad && l.pid === me.pid && l.start === me.start,
+  // our lock into place: true when made, false when one exists
+  create(me) {
+    const f = recurringLock.file();
+    const tmp = `${f}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(me)}\n`);
+    try { fs.linkSync(tmp, f); return true; } catch (e) { if (e.code === 'EEXIST') return false; throw e; } finally { try { fs.unlinkSync(tmp); } catch {} }
+  },
+  // { me, old } once ours (old: the stale lock it replaced, or null), else { held: <the lock> }.
+  // Every create is followed by a re-read a second later: two runners can both get past a stale
+  // lock's removal, and only the one whose lock is still there goes on.
+  take(checks, budget_s) {
+    fs.mkdirSync(path.dirname(recurringLock.file()), { recursive: true });
+    const me = { pid: process.pid, start: nowIso(), budget_s, checks, current: null };
+    const settle = (old) => {
+      recurringLock.sleep(1000);
+      const now = recurringLock.read();
+      return recurringLock.mine(now, me) ? { me, old } : { held: now };
+    };
+    for (let round = 0; round < 3; round++) {
+      if (recurringLock.create(me)) return settle(null);
+      const text = recurringLock.text();
+      // gone between the create and the read: create again
+      if (text === null) continue;
+      const l = recurringLock.parse(text);
+      if (recurringLock.live(l)) return { held: l };
+      // stale: taken over in kit-163 T3
+      return { held: l };
+    }
+    return { held: recurringLock.read() };
+  },
+  // current into our lock, only while it is ours; false when it isn't (the runner stops)
+  set(me, current) {
+    if (!recurringLock.mine(recurringLock.read(), me)) return false;
+    me.current = current;
+    const f = recurringLock.file();
+    const tmp = `${f}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(me)}\n`);
+    fs.renameSync(tmp, f);
+    return true;
+  },
+  release(me) {
+    if (recurringLock.mine(recurringLock.read(), me)) try { fs.unlinkSync(recurringLock.file()); } catch {}
+  },
+  heldWords: (l) => (l && !l.bad ? `a runner holds the lock: pid ${l.pid} since ${l.start} (${Array.isArray(l.checks) ? l.checks.join(', ') : ''})` : `a runner holds the lock (${recurringLock.file()} reads as no lock the kit wrote)`),
+});
+
+// Main's recurring checks, when each is due (recurringNextSlot over its landings and its results in
+// the log), and the runner that runs the due ones: each in an unseeded detached checkout of main, in
+// its own process group under timeout_s, judged by its fail rule, its output scrubbed, one
+// recurring-run line logged as the supervisor with detector recurring. Nothing is kept but the log
+// and the tails in run/recurring/<name>/, so deleting run/recurring/ changes no due time.
+const recurringRunDue = Object.freeze({
+  KEEP: 16384,
+  TAILS: 20,
+  // the check and checkout running now, for the signal handlers
+  state: { current: null },
+  // only the supervisor's detector recurring lines count, one result (pass, fail, error) per slot;
+  // a run's start is its line's time less its seconds (the runner logs at the end)
+  results(name) {
+    return logObjects('observation')
+      .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${name}` && o.detector === 'recurring' && o.created_by === 'supervisor' && ['pass', 'fail', 'error'].includes(o.run?.status) && typeof o.run.slot === 'string')
+      .map((o) => ({ slot: o.run.slot, at: new Date(Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0)).toISOString() }));
+  },
+  // the entry's landings: each merge-chore act citing an answered recurring-edit question that shows
+  // this name, oldest first; main's entry when the last of them isn't it, at main's last commit to the file
+  landings(name, entry, ref) {
+    const R = recurringRegistry;
+    const views = new Map(R.questions().map((v) => [v.id, v]));
+    const out = [];
+    for (const a of logObjects('act').filter((x) => x.class === 'merge-chore' && typeof x.approved_by === 'string').sort(byTime)) {
+      const v = views.get(a.approved_by);
+      const shown = R.shown(v);
+      if (v?.status === 'answered' && shown && Object.hasOwn(shown, name)) out.push({ at: a.created_at, entry: shown[name] });
+    }
+    const last = out.at(-1);
+    if (!last || canonical(last.entry) !== canonical(entry)) {
+      const r = R.git(['log', '-1', '--format=%cI', ref, '--', R.path()]);
+      const ms = r.ok ? Date.parse(r.out.trim()) : NaN;
+      if (Number.isFinite(ms)) out.push({ at: new Date(Math.max(ms, last ? Date.parse(last.at) : 0)).toISOString(), entry });
+    }
+    return out;
+  },
+  // main's checks in name order, each { name, entry, due, slot, next, start }; nothing when main's
+  // file has a problem, an entry breaks the shape or the registry is over the cap
+  checks(nowMs = Date.now()) {
+    const R = recurringRegistry;
+    const ref = mainRef();
+    if (!ref) return { checks: [], problem: `no ${loadSettings().main_branch} branch to read the jobs from` };
+    const r = R.read(ref);
+    if (r.problem) return { checks: [], problem: r.problem };
+    for (const [n, e] of Object.entries(r.jobs)) {
+      const p = recurringEntryProblems(n, e);
+      if (p.length) return { checks: [], problem: p[0] };
+    }
+    const cap = R.capProblem(r.jobs, 'on main');
+    if (cap) return { checks: [], problem: cap };
+    const checks = [];
+    for (const name of Object.keys(r.jobs).sort()) {
+      const entry = r.jobs[name];
+      if (entry.kind !== 'check') continue;
+      const s = recurringNextSlot(recurringRunDue.landings(name, entry, ref), recurringRunDue.results(name), nowMs);
+      if (s) checks.push({ name, entry, ...s });
+    }
+    return { checks, problem: null };
+  },
+  checkout: (name) => path.join(mainRoot, '.worktrees', `tmp-recurring-${process.pid}-${name}-${process.pid}`),
+  removeCheckout(wt) {
+    recurringRegistry.git(['worktree', 'remove', '--force', wt], { cwd: mainRoot });
+    recurringRegistry.git(['worktree', 'prune'], { cwd: mainRoot });
+  },
+  // one run: { status, seconds, exit?, value?, killed?, noCheckout?, excerpt, tail }
+  async runOne(name, entry, { sha, slot, me, draft }) {
+    const R = recurringRunDue;
+    const t0 = Date.now();
+    const seconds = () => Math.round((Date.now() - t0) / 100) / 10;
+    const wt = R.checkout(name);
+    fs.mkdirSync(path.dirname(wt), { recursive: true });
+    // the test hook: a file where the checkout goes, so git's own refusal is what is logged
+    const hook = process.env.DEVTEAM_TEST_RECURRING_NO_CHECKOUT === name;
+    if (hook) fs.writeFileSync(wt, 'kit-163 test hook\n');
+    const add = recurringRegistry.git(['worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot });
+    if (hook) try { fs.unlinkSync(wt); } catch {}
+    if (!add.ok) {
+      // git's first error line, with the checkout's path made short so the excerpt keeps all of it
+      const first = (add.err.split('\n').find((l) => l.trim()) ?? recurringRegistry.why(add)).trim().split(wt).join(path.relative(mainRoot, wt));
+      const tail = R.scrub(`the checkout could not be made: ${first}`, false);
+      return { status: 'error', seconds: seconds(), noCheckout: true, excerpt: R.excerpt(tail), tail };
+    }
+    R.state.current = { wt };
+    const marker = `${me?.pid ?? process.pid}:${me?.start ?? 'draft'}:${name}`;
+    const timeout = Number.isInteger(entry.timeout_s) && entry.timeout_s > 0 ? entry.timeout_s : 120;
+    const run = await new Promise((resolve) => {
+      let both = Buffer.alloc(0);
+      let stdout = Buffer.alloc(0);
+      let total = 0;
+      let killed = false;
+      let exited = null;
+      let spawnError = null;
+      let timer = null;
+      let cap = null;
+      let ended = false;
+      const keep = (buf, b) => { const c = Buffer.concat([buf, b]); return c.length > R.KEEP * 2 ? c.subarray(c.length - R.KEEP) : c; };
+      const end = () => {
+        if (ended) return;
+        ended = true;
+        clearTimeout(timer);
+        clearTimeout(cap);
+        const last = (b) => b.subarray(Math.max(0, b.length - R.KEEP)).toString('utf8');
+        resolve({ both: last(both), stdout: last(stdout), cut: total > R.KEEP, killed, spawnError, exit: exited?.code ?? null });
+      };
+      let child;
+      try {
+        child = spawn('sh', ['-c', entry.run], { cwd: wt, detached: true, env: { ...process.env, DEVTEAM_RECURRING: marker }, stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (e) { spawnError = e; end(); return; }
+      const group = (sig) => { if (child.pid) try { process.kill(-child.pid, sig); } catch {} };
+      if (child.pid) {
+        R.state.current = { wt, pgid: child.pid };
+        if (!draft) recurringLock.set(me, { name, slot, pgid: child.pid, checkout: wt });
+      }
+      child.stdout.on('data', (b) => { total += b.length; both = keep(both, b); stdout = keep(stdout, b); });
+      child.stderr.on('data', (b) => { total += b.length; both = keep(both, b); });
+      child.on('error', (e) => { spawnError = e; end(); });
+      timer = setTimeout(() => { killed = true; group('SIGKILL'); }, timeout * 1000);
+      // the check ends when its shell does: the rest of its group (anything it left running) is
+      // killed so nothing outlives the run or holds its pipes open, then the pipes get 5 s to close
+      child.on('exit', (code, signal) => {
+        exited = { code, signal };
+        clearTimeout(timer);
+        group('SIGKILL');
+        cap = setTimeout(end, 5000);
+      });
+      child.on('close', end);
+    });
+    R.removeCheckout(wt);
+    R.state.current = null;
+    const judged = R.judge(entry, run);
+    const tail = R.scrub(run.both, run.cut);
+    return { ...judged, seconds: seconds(), ...(run.exit !== null && !run.killed ? { exit: run.exit } : {}), killed: run.killed, timeout, excerpt: R.excerpt(tail), tail };
+  },
+  // pass, fail or error by the entry's fail rule (C1); value: a last_line read as a number
+  judge(entry, { exit, killed, spawnError, stdout }) {
+    if (killed || spawnError || exit === null || exit === 126 || exit === 127) return { status: 'error' };
+    const fail = isObj(entry.fail) ? entry.fail : { exit: 'nonzero' };
+    if (!isObj(fail.last_line)) return { status: exit === 0 ? 'pass' : 'fail' };
+    const rule = fail.last_line;
+    const line = String(stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean).at(-1) ?? '';
+    const num = /^-?\d+(\.\d+)?$/.test(line) ? Number(line) : NaN;
+    const value = Number.isFinite(num) ? { value: num } : {};
+    if (Object.hasOwn(rule, 'is_not')) return { status: line === String(rule.is_not) ? 'pass' : 'fail', ...value };
+    if (!Number.isFinite(num)) return { status: 'error' };
+    const over = Object.hasOwn(rule, 'above') && num > rule.above;
+    const under = Object.hasOwn(rule, 'below') && num < rule.below;
+    return { status: over || under ? 'fail' : 'pass', ...value };
+  },
+  // From the front to just after the first line break that isn't the last character, so a cut
+  // never leaves part of a line (or of a secret) at the front; a text with none is kept as it is.
+  fromLine(t) {
+    const i = t.indexOf('\n');
+    return i >= 0 && i < t.length - 1 ? t.slice(i + 1) : t;
+  },
+  // What a check printed, safe to keep: line-aligned when it was cut, the runner's own rules for what
+  // scrubText misses (an assignment to a secret-sounding name, --password, mysql -p), cut again if
+  // they made it longer than scrubText keeps (so scrubText never cuts its end off), then scrubText.
+  RULES: [
+    [/\b([A-Za-z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)[A-Za-z0-9_]*)(\s*[=:]\s*)("[^"\n]*"|'[^'\n]*'|[^\s"']+)/gi, '$1$2[scrubbed]'],
+    [/(--password)(=|\s+)(\S+)/gi, '$1$2[scrubbed]'],
+    [/\b((?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n]*?\s-p)(\S+)/gi, '$1[scrubbed]'],
+  ],
+  scrub(text, cut) {
+    const R = recurringRunDue;
+    let t = cut ? R.fromLine(text) : text;
+    for (const [re, to] of R.RULES) t = t.replace(re, to);
+    if (Buffer.byteLength(t) > SCRUB_MAX) t = R.fromLine(Buffer.from(t).subarray(-SCRUB_MAX).toString('utf8'));
+    return scrubText(t);
+  },
+  excerpt: (tail) => String(tail).replace(/\s+/g, ' ').trim().slice(-200),
+  // one recurring-run line, as the supervisor, and the tail kept beside the newest 20
+  log(name, slot, sha, r) {
+    const how = r.noCheckout ? 'no checkout' : r.killed ? `killed at ${r.timeout}s` : r.exit === undefined ? 'did not start' : `exit ${r.exit}`;
+    const run = { status: r.status, slot, sha, seconds: r.seconds, ...(r.exit !== undefined ? { exit: r.exit } : {}), ...(r.value !== undefined ? { value: r.value } : {}), excerpt: r.excerpt };
+    appendLog({ type: 'observation', source: 'recurring', kind: 'recurring-run', subject: `recurring:${name}`, detector: 'recurring', severity: 0, valence: 0, detail: `${name}: ${r.status} in ${r.seconds}s (${how})`, source_key: `recurring:${name}:${slot}:${process.pid}`, run }, 'supervisor');
+    if (r.noCheckout) return;
+    const dir = path.join(runPath('recurring'), name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${slot.slice(0, 10).replace(/-/g, '')}-${slot.slice(11, 23).replace(/[:.]/g, '')}-${process.pid}.txt`), r.tail);
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.txt')).map((f) => { try { return [f, fs.statSync(path.join(dir, f)).mtimeMs]; } catch { return [f, 0]; } }).sort((a, b) => b[1] - a[1]);
+    for (const [f] of files.slice(recurringRunDue.TAILS)) try { fs.unlinkSync(path.join(dir, f)); } catch {}
+  },
+  // a SIGTERM or SIGINT mid-check kills its group, removes its checkout and releases the lock
+  onSignals(me) {
+    const stop = (code) => () => {
+      const cur = recurringRunDue.state.current;
+      if (cur?.pgid) try { process.kill(-cur.pgid, 'SIGKILL'); } catch {}
+      if (cur?.wt) recurringRunDue.removeCheckout(cur.wt);
+      if (me) recurringLock.release(me);
+      process.exit(code);
+    };
+    process.on('SIGTERM', stop(143));
+    process.on('SIGINT', stop(130));
+  },
+  async run(opts) {
+    const R = recurringRunDue;
+    if (opts.draft) {
+      const name = opts.draft;
+      const w = recurringRegistry.readWorking();
+      if (w.problem) die(w.problem);
+      const entry = w.jobs[name];
+      if (!entry) die(`no job ${name} in this checkout's ${recurringRegistry.path()}`);
+      if (entry.kind !== 'check') die(`${name} is a ${entry.kind ?? 'kindless'} job; only a check runs here`);
+      const p = recurringEntryProblems(name, entry);
+      if (p.length) die(p[0]);
+      const sha = mainSha();
+      if (!sha) die(`no ${loadSettings().main_branch} branch to check out`);
+      R.onSignals(null);
+      const r = await R.runOne(name, entry, { sha, slot: null, me: null, draft: true });
+      const how = r.noCheckout ? 'no checkout' : r.killed ? `killed at ${r.timeout}s` : `exit ${r.exit ?? '?'}`;
+      out(`${name}: ${r.status} in ${r.seconds}s (${how})\nexcerpt: ${r.excerpt}`);
+      return;
+    }
+    const first = R.checks();
+    if (first.problem) process.stderr.write(`recurring run: nothing runs, ${first.problem}\n`);
+    const due = first.checks.filter((c) => c.due);
+    const budget = Math.max(60, due.reduce((t, c) => t + (Number.isInteger(c.entry.timeout_s) ? c.entry.timeout_s : 120) + 60, 0));
+    const t = recurringLock.take(due.map((c) => c.name), budget);
+    if (t.held) return out(recurringLock.heldWords(t.held));
+    const { me } = t;
+    process.on('exit', () => recurringLock.release(me));
+    R.onSignals(me);
+    if (first.problem) return;
+    const sha = mainSha();
+    for (const { name } of due) {
+      // again before each check: a takeover's error line or another runner's result may have its slot
+      logCache = null;
+      const now = R.checks().checks.find((c) => c.name === name && c.due);
+      if (!now) continue;
+      if (!recurringLock.set(me, { name, slot: now.slot })) break;
+      const r = await R.runOne(name, now.entry, { sha, slot: now.slot, me, draft: false });
+      R.log(name, now.slot, sha, r);
+    }
+  },
+});
 
 // ===== sensors: production signals into the loop =====
 // A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
@@ -30305,7 +30623,10 @@ const HELP_GOALS = `Goals and retros
 const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring list [--json]   main's jobs (project/recurring.json at main) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions; a file on main that doesn't read prints its problem and exits 1. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null, problems?: ["…"] }], runs_a_day, cap, pending: [{ qid, name, change, status }] }; problems is there only when an entry breaks the shape (validate says the same)
   recurring show <name> [--json]   one job on main in full, who registered it, its problems if it breaks the shape, and its pending questions
-  recurring apply <qid>   supervisor: write an answered recurring-edit question's exact change into .worktrees/chore-recurring's recurring.json (chore start recurring first; its file must be main's), main's jobs with each null removed, each edit in its place and each addition last; then chore pr recurring and merge --chore recurring --approved <qid>`;
+  recurring apply <qid>   supervisor: write an answered recurring-edit question's exact change into .worktrees/chore-recurring's recurring.json (chore start recurring first; its file must be main's), main's jobs with each null removed, each edit in its place and each addition last; then chore pr recurring and merge --chore recurring --approved <qid>
+  recurring run --due   supervisor (wait starts it when a check is due): take run/recurring/.lock and run each due check of main's in an unseeded detached checkout of main, in its own process group under timeout_s; one recurring-run line each (detector recurring), the scrubbed tail in run/recurring/<name>/; a live lock: says who holds it and exits 0
+  recurring run <name> --draft   supervisor: run this checkout's entry once the same way, to try it before asking; prints the status and excerpt, logs and keeps nothing
+  recurring due [--json]   when each of main's checks is due, from the log alone: { checks: [{ name, due, slot, next, start }], runner: { pid, start, budget_s, current } | null }; a problem with main's file exits 1 naming it`;
 const HELP_LOG = `The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
