@@ -25560,20 +25560,27 @@ const recurringLock = Object.freeze({
   // runner's): the check it was on, and any it started after its lock was last read
   markedGroups(prefix) {
     const want = `DEVTEAM_RECURRING=${prefix}`;
-    const procs = [];
+    const groups = new Set();
+    const add = (p, g, carries) => { if (g > 1 && p !== process.pid && carries()) groups.add(g); };
     if (process.platform === 'linux') {
       let names = [];
       try { names = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n)); } catch {}
       for (const n of names) {
         // the fields after the last ")" (the command can hold one) are state, ppid, pgrp
-        try { const st = fs.readFileSync(`/proc/${n}/stat`, 'utf8'); procs.push([Number(n), Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2])]); } catch {}
+        try {
+          const st = fs.readFileSync(`/proc/${n}/stat`, 'utf8');
+          const g = Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]);
+          if (!groups.has(g)) add(Number(n), g, () => (processInfo(Number(n))?.env ?? []).some((e) => e.startsWith(want)));
+        } catch {}
       }
     } else {
-      const r = spawnSync('ps', ['-A', '-o', 'pid=,pgid='], { encoding: 'utf8', timeout: 10000 });
-      for (const line of String(r.stdout ?? '').split('\n')) { const [p, g] = line.trim().split(/\s+/).map(Number); if (p > 0 && g > 0) procs.push([p, g]); }
+      // one ps for every process: pid, pgid, then its command line and environment (final-2b R3)
+      const r = spawnSync('ps', ['eww', '-A', '-o', 'pid=,pgid=,command='], { encoding: 'utf8', timeout: 10000, maxBuffer: 64 * 1024 * 1024 });
+      for (const line of String(r.stdout ?? '').split('\n')) {
+        const m = /^\s*(\d+)\s+(\d+)\s(.*)$/.exec(line);
+        if (m) add(Number(m[1]), Number(m[2]), () => m[3].split(/\s+/).some((e) => e.startsWith(want)));
+      }
     }
-    const groups = new Set();
-    for (const [p, g] of procs) if (g > 1 && p !== process.pid && !groups.has(g) && (processInfo(p)?.env ?? []).some((e) => e.startsWith(want))) groups.add(g);
     return [...groups];
   },
   // After taking over a stale lock: kill the old runner if it is one, every group where a process
@@ -25673,7 +25680,8 @@ const recurringRunDue = Object.freeze({
     // the test hook: a file where the checkout goes, so git's own refusal is what is logged
     const hook = process.env.DEVTEAM_TEST_RECURRING_NO_CHECKOUT === name;
     if (hook) fs.writeFileSync(wt, 'kit-163 test hook\n');
-    const add = recurringRegistry.git(['worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot });
+    // no hook runs there: a tracked core.hooksPath (husky) would run a command no entry names (final-2 F3)
+    const add = recurringRegistry.git(['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot });
     if (hook) try { fs.unlinkSync(wt); } catch {}
     if (!add.ok) {
       // git's first error line, with the checkout's path made short so the excerpt keeps all of it

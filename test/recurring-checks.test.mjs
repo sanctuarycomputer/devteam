@@ -154,8 +154,16 @@ test('A16: due times follow C1 for each example the design names, and a slot rec
 
 test('A17: a due check runs in an unseeded detached checkout of main at its sha and logs one line', async () => {
   const awk = "awk 'BEGIN{for(i=0;i<400;i++)print \"line \" i \" ..................................................\"}'";
-  const T = setup('one', { ci: check({ every: '1h', run: `${awk}; touch made-here; test ! -e SETUP_RAN && echo unseeded; git rev-parse HEAD` }) }, { settings: (j) => { j.worktree_setup = 'touch SETUP_RAN'; } });
+  const T = setup('one', { ci: check({ every: '1h', run: `${awk}; touch made-here; test ! -e SETUP_RAN && test ! -e HOOK_RAN && echo unseeded; git rev-parse HEAD` }) }, { settings: (j) => { j.worktree_setup = 'touch SETUP_RAN'; } });
   try {
+    // a tracked hooks folder main's config points at (as husky sets it): no hook runs in the checkout (final-2 F3)
+    write(path.join(T.old, 'hooks', 'post-checkout'), '#!/bin/sh\ntouch HOOK_RAN\n');
+    fs.chmodSync(path.join(T.old, 'hooks', 'post-checkout'), 0o755);
+    T.g(['add', '-A', 'hooks']);
+    T.g(['commit', '-qm', 'main: a tracked hook']);
+    T.g(['push', '-q', 'origin', 'main']);
+    T.g(['fetch', '-q', 'origin']);
+    T.g(['config', 'core.hooksPath', 'hooks']);
     T.addRun('ci', { slot: iso(Date.now() - 2 * 3600000), at: iso(Date.now() - 61 * 60000) });
     const d = T.dueOf('ci');
     assert.equal(d.due, true, JSON.stringify(d));
@@ -175,7 +183,7 @@ test('A17: a due check runs in an unseeded detached checkout of main at its sha 
     assert.equal(Date.parse(l.run.slot), Date.parse(d.slot), 'the line records the slot it was due for');
     assert.ok(l.run.excerpt.length <= 200, l.run.excerpt);
     assert.ok(l.run.excerpt.includes(T.mainSha()), `the excerpt is the output's end: ${l.run.excerpt}`);
-    assert.ok(l.run.excerpt.includes('unseeded'), `worktree_setup did not run there: ${l.run.excerpt}`);
+    assert.ok(l.run.excerpt.includes('unseeded'), `neither worktree_setup nor a hook ran there: ${l.run.excerpt}`);
     assert.ok(!l.run.excerpt.includes('line 0 '), l.run.excerpt);
     const tdir = path.join(T.old, RUN, 'recurring', 'ci');
     const tails = fs.readdirSync(tdir).map((f) => fs.readFileSync(path.join(tdir, f), 'utf8'));
@@ -447,9 +455,19 @@ test('A5c: a takeover is one step, so a runner starting meanwhile never wins wit
     await until(() => fs.existsSync(`${gate}.waiting`) || a.child.exitCode !== null, 'a held at its takeover');
     const b = T.runner();
     await until(() => T.readLock()?.pid === b.child.pid || b.child.exitCode !== null, "b's lock in place");
+    // every change to .lock while a takes over, as the kernel reports it (Linux: one per removal,
+    // creation or rename onto it); a sleeps a second after its takeover, and b is in its own re-read
+    const seen = [];
+    const watcher = process.platform === 'linux' ? fs.watch(path.dirname(T.lockFile), (ev, f) => { if (f === path.basename(T.lockFile)) seen.push(Date.now()); }) : null;
     fs.writeFileSync(gate, '');
     const rs = await Promise.all([a.done, b.done]);
+    watcher?.close();
     for (const r of rs) assert.equal(r.code, 0, `${r.out}${r.err}`);
+    if (watcher) {
+      const first = seen[0];
+      const burst = seen.filter((t) => t - first < 300);
+      assert.equal(burst.length, 1, `a takeover is one change to the lock (a rename over it), never a removal and then a create: ${burst.length} changes`);
+    }
     assert.deepEqual(T.runs('ci').map(status), ['pass'], JSON.stringify(rs));
     const errs = T.runs('other').filter((l) => status(l) === 'error');
     assert.equal(errs.length, 1, `one error run for the stale lock's check: ${JSON.stringify(errs)} ${JSON.stringify(rs)}`);
