@@ -10596,9 +10596,10 @@ function artifactProblems(slug, entries) {
 }
 const WT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // A worktree a draft may come from: a session's own checkout directly under .worktrees/, never a
-// reviewer's (review-*) or a scratch one (tmp-*). Its real path, or null.
+// reviewer's (review-*), a scratch one (tmp-*), or the responder's (a copy of main that ages
+// between its starts, kit-103). Its real path, or null.
 function draftWorktree(name) {
-  if (!WT_NAME.test(name ?? '') || /^(review|tmp)-/.test(name)) return null;
+  if (!WT_NAME.test(name ?? '') || /^(review|tmp)-/.test(name) || name === 'responder') return null;
   try {
     const root = fs.realpathSync(path.join(mainRoot, '.worktrees'));
     const real = fs.realpathSync(path.join(root, name));
@@ -22709,6 +22710,7 @@ async function cmdDashboard() {
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code, its line in the acceptance table\'s red seen cell; every claim about code sourced with a file:line or a command in the spec\'s Today (sources) table; a Refusals and edges section in every spec; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3). Build each plan task marked `Model: fast` in a subagent on the fast model (`settings --get model_tiers`) unless the plan says `- Built here: <why>` under it (worker.md §3).',
+  responder: 'You are the responder for this repository: you answer the owner\'s thread messages at once, while the supervisor works. Read docs/devteam/process/supervisor.md §13 (The responder), the only part of that doc that is yours, and follow it. Your first action on any turn, typed or taken from the queue, is a reply: node docs/devteam/scripts/devteam.mjs thread reply <t-id> "…" (add --pending only when you will do the work yourself, then reply again when it is done). When you are done, run node docs/devteam/scripts/devteam.mjs thread list --waiting --responder and take the next turn. Hand anything else to the supervisor with node docs/devteam/scripts/devteam.mjs send supervisor "…" --kind handoff --thread <t-id>. Write to the owner in plain words. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline.',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
@@ -23629,14 +23631,7 @@ function makeSession(role) {
   // records worktree was removed gets it back)
   if (role === 'worker' && recordsInHomeId(id)) ensureRecordsWorktree(id);
   // the agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding
-  if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
-  else if (s.agent_trust_command?.trim()) {
-    try {
-      execFileSync('sh', ['-c', s.agent_trust_command], { cwd: wt, stdio: ['ignore', 2, 'inherit'], env: { ...gateEnv(null, R), DEVTEAM_WORKTREE: realPath(wt) }, timeout: 60000 });
-    } catch (e) {
-      warn(`agent_trust_command failed in ${wt}: ${e.code === 'ETIMEDOUT' ? 'it ran past 60 s' : e.signal ? `killed by ${e.signal}` : `exit ${e.status ?? '?'}`}; if the agent asks whether to trust its folder, the blocked-prompt finding shows it`);
-    }
-  }
+  trustWorktree(wt, s, R);
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
   // What the prompt's knowledge block carries, for the start's act (a lesson's effect is measured
@@ -23690,11 +23685,8 @@ function makeSession(role) {
     // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.
     let cmd = resume ? s.resume_command : s.agent_command;
     if (/^claude(\s|$)/.test(cmd)) {
-      // per session: the deny rules name the main branch of the repo this session works in
-      const policy = path.join(runDir, 'agent', `${name}-claude.json`);
-      fs.mkdirSync(path.dirname(policy), { recursive: true });
-      fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
-      cmd = cmd.replace(/^claude/, `claude --settings '${policy}'`);
+      // per session: the deny rules name the main branch of the repo this session works in (claudePolicy)
+      cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(name, s, mb, { stopHook: true })}'`);
     }
     // A tmux server started from inside an agent session (the supervisor's, on a new machine) hands
     // every window that session's markers; a worker that inherits them runs as its child (Claude Code
@@ -23941,6 +23933,9 @@ function cmdFleet() {
 // exactly what it changed.
 function fleetOp(mode) {
   const by = fleetWriter();
+  // a fleet park stops the thread responder (kit-103): only once the writer is allowed, and before
+  // any return below, so a park with every goal already parked, or a move's marking, stops it too
+  if (mode === 'park') { const at = stopResponder(); if (at) out(`stopped the responder (${at})`); }
   // A park or drain is a pause unless it says it is a move (--move): throttling spend, waiting on
   // the owner or on information, a quiet week. Only a move releases the host claim (hostClaimBody).
   const move = !!flags.move;
@@ -30208,6 +30203,112 @@ async function cmdBrowser() {
 }
 /* browser end */
 
+/* responder-session start */
+// The thread responder (kit-103; fast-threads.md §The session): a second, narrow session that
+// answers the owner's thread turns at once while the supervisor works, and hands the rest over.
+// One window, `responder`, in the fleet's tmux session; its worktree .worktrees/responder is
+// detached at main and moved to main again at each start. It writes as `responder` (logWriter),
+// is refused every supervisor command (supervisorOnly), runs the owner's responder_command (else
+// agent_command) with the workers' deny rules and no Stop hook, and makes no branch and no slot act.
+const RESPONDER_NAME = 'responder';
+// A Claude Code policy file for one session, passed with --settings: the owner's worker deny rules,
+// naming the main branch of the repo it works in. A worker or planner also gets the Stop hook
+// (stop-ok); the responder doesn't. Its path.
+function claudePolicy(name, s, mb, { stopHook = false } = {}) {
+  const policy = path.join(runDir, 'agent', `${name}-claude.json`);
+  fs.mkdirSync(path.dirname(policy), { recursive: true });
+  const hooks = stopHook ? { hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } } : {};
+  fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, ...hooks }, null, 2)}\n`);
+  return policy;
+}
+// The agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding.
+function trustWorktree(wt, s, R) {
+  if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
+  else if (s.agent_trust_command?.trim()) {
+    try {
+      execFileSync('sh', ['-c', s.agent_trust_command], { cwd: wt, stdio: ['ignore', 2, 'inherit'], env: { ...gateEnv(null, R), DEVTEAM_WORKTREE: realPath(wt) }, timeout: 60000 });
+    } catch (e) {
+      warn(`agent_trust_command failed in ${wt}: ${e.code === 'ETIMEDOUT' ? 'it ran past 60 s' : e.signal ? `killed by ${e.signal}` : `exit ${e.status ?? '?'}`}; if the agent asks whether to trust its folder, the blocked-prompt finding shows it`);
+    }
+  }
+}
+// The responder's window in the fleet's session: whether the session and the window are there.
+function responderWindow(session = tmuxSession()) {
+  const has = tmux(['has-session', '-t', `=${session}`]);
+  const there = has && (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n').includes(RESPONDER_NAME);
+  return { session, has, there, target: `=${session}:${RESPONDER_NAME}`, shown: `${session}:${RESPONDER_NAME}` };
+}
+// Kill the responder's window if it is there; what was stopped (session:window), or null.
+function stopResponder() {
+  const w = responderWindow();
+  return w.there && tmux(['kill-window', '-t', w.target]) ? w.shown : null;
+}
+// Why the responder can't be started into its window now, or null: one there needs --resume, and
+// --resume never types into a live agent (a shell or dead pane is relaunched in).
+function responderWindowRefusal(w) {
+  if (!w.there) return null;
+  if (!flags.resume) return `the responder is already running in ${w.shown} (responder --stop first, or --resume to restart it there)`;
+  if (!resolvePane(w.target).problem) return `${w.shown} has a live agent; responder --stop first`;
+  return null;
+}
+// responder [--resume | --stop]: the supervisor starts, restarts or stops the responder.
+function cmdResponder() {
+  if (flags.owner || process.env.DEVTEAM_CHANNEL === 'dashboard') die('responder: the supervisor starts the responder (settings.responder turns it off)');
+  supervisorOnly('responder');
+  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  if (!sh('tmux', ['-V'])) die('tmux not found');
+  // a stop always works: nothing else is checked
+  if (flags.stop) { const at = stopResponder(); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
+  const s = loadSettings();
+  if (s.responder === false) die("settings.responder is off: the owner's thread turns go to the supervisor; set it true to start the responder");
+  // a fleet park stops it (fleetOp) and keeps it stopped; a drain, or a goal's own hold, doesn't
+  if (draining() || fleetMode() === 'park') die('the fleet is parked: the responder starts again after fleet unpark');
+  const session = tmuxSession({ save: true });
+  const early = responderWindowRefusal(responderWindow(session));
+  if (early) die(early);
+  const mem = memoryFull(s);
+  if (mem && !flags.resume) die(`${mem.words}: start the responder when some sessions finish, or responder --resume`);
+  // the owner's command, as main has it (OWNER_SETTINGS): unset or blank means agent_command
+  const rc = s.responder_command;
+  if (rc !== undefined && rc !== null && typeof rc !== 'string') die('responder_command is a shell command (a string): the owner fixes it on main through a PR');
+  let cmd = typeof rc === 'string' && rc.trim() ? rc : s.agent_command;
+  // its worktree, detached at main, moved there at each start; a checkout git refuses (local edits) dies with git's words
+  const R = repo('home');
+  const mb = s.main_branch;
+  const wt = path.join(mainRoot, '.worktrees', RESPONDER_NAME);
+  R.git(['fetch', '--quiet', 'origin', mb]);
+  const base = R.resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb;
+  if (!fs.existsSync(wt)) R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, base], R.root);
+  else R.gitOrDie(['checkout', '--quiet', '--detach', base], wt);
+  seedWorktree(wt, { setup: false });
+  trustWorktree(wt, s, R);
+  fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
+  const promptFile = path.join(runDir, 'prompts', `${RESPONDER_NAME}.txt`);
+  fs.writeFileSync(promptFile, `${promptFor(RESPONDER_NAME)}\n`);
+  class Refused extends Error {}
+  const refuse = (m) => { throw new Refused(m); };
+  try {
+    // the look at the window and the typing under one lock, so two starts at once can't both type
+    withLock(path.join(runDir, `launch-${RESPONDER_NAME}`), () => {
+      const w = responderWindow(session);
+      const late = responderWindowRefusal(w);
+      if (late) refuse(late);
+      if (!w.has) { if (sh('tmux', ['new-session', '-d', '-s', session, '-n', RESPONDER_NAME, '-c', wt], { env: tmuxServerEnv() }) === null) refuse('could not start tmux'); }
+      else if (!w.there && !tmux(['new-window', '-d', '-t', `=${session}`, '-n', RESPONDER_NAME, '-c', wt])) refuse(`could not open ${w.shown}`);
+      const type = (line) => { if (!typeNow(w.target, line)) refuse(`could not type into ${w.shown}; responder --resume starts it`); };
+      // a ticket or feature from the tmux server's environment is never the responder's
+      type(`unset DEVTEAM_TICKET DEVTEAM_FEATURE; export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN=${shq(runDir)} DEVTEAM_ROLE='responder'`);
+      if (/^claude(\s|$)/.test(cmd)) cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(RESPONDER_NAME, s, mb)}'`);
+      type(`${sessionMarkerPrefix(session)}${cmd} ${shq(promptPointer(promptFile))}`);
+      out(`${w.there ? 'restarted' : 'started'} the responder in ${w.shown} at ${wt}`);
+    });
+  } catch (e) {
+    if (e instanceof Refused) die(e.message);
+    throw e;
+  }
+}
+/* responder-session end */
+
 /* HELP start */
 /* helpSections start */
 const HELP_SETUP = `Setup and roles
@@ -30351,7 +30452,7 @@ const OPERATOR_READS = new Set(['search', 'status', 'moves', 'ready', 'metrics',
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings', 'unread', 'recurring']);
 /* commandGroups start */
 const COMMANDS_SETUP = {
-  init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
+  init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), responder: cmdResponder, whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
 };
 const COMMANDS_GRAPH = {
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
