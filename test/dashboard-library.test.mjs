@@ -765,10 +765,18 @@ test('no publish buttons on any card (box)', { ...CHROME, timeout: 300000 }, asy
   assert.ok((await badges(ids.pubUpdate)).includes('Public'));
   assert.ok((await badges(ids.drift)).includes('not live on this box'));
   assert.ok((await badges(ids.notLive)).includes('not live on this box'));
-  const WORDS = ['Unpublish', 'Update', 'Publish', 'Start', 'Stop', "Review main's version"];
-  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#lib-grid *')].map((e) => e.textContent.trim()).filter((s) => ${JSON.stringify(WORDS)}.includes(s))`), [], 'none of the publish or preview buttons, menus included');
-  // the gateway's pages: Restore alone, on a not-live card
-  assert.deepEqual(await p.ev(`[...new Set([...document.querySelectorAll('#lib-grid a[href]')].filter((a) => a.getAttribute('href').startsWith(${JSON.stringify(`http://box.localhost:${port}/`)})).map((a) => a.textContent))]`), ['Restore']);
+  const WORDS = ['Start', 'Stop', "Review main's version"];
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#lib-grid *')].map((e) => e.textContent.trim()).filter((s) => ${JSON.stringify(WORDS)}.includes(s))`), [], 'none of the preview buttons, menus included');
+  // no control publishes by itself (kit-751): Publish, Update, Unpublish and Restore are only links, each the
+  // gateway's own confirm page in a new tab, where the owner confirms. Every element whose text is one of those
+  // words, with children or not (a button holding an icon and the word), is such a link, sits in one or holds one.
+  const PUB = ['Publish', 'Update', 'Unpublish', 'Restore'];
+  const gw = JSON.stringify(`http://box.localhost:${port}/`);
+  const gwSel = JSON.stringify(`a[href^="http://box.localhost:${port}/"]`);
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#lib-grid *')].filter((e) => ${JSON.stringify(PUB)}.includes(e.textContent.trim())).filter((e) => !(e.closest(${gwSel}) || e.querySelector(${gwSel}))).map((e) => e.outerHTML)`), [], 'every publish word a link to the gateway');
+  const links = await p.ev(`[...document.querySelectorAll('#lib-grid a[href]')].filter((a) => a.getAttribute('href').startsWith(${gw})).map((a) => [a.textContent, a.target, new URL(a.href).pathname])`);
+  assert.ok(links.length > 0, 'the gateway\'s pages are linked');
+  for (const [label, target, at] of links) assert.ok(target === '_blank' && ['/public/publish', '/public/unpublish'].includes(at), `${label}: the gateway's confirm page in a new tab (${target} ${at})`);
   assert.deepEqual(await p.ev(ERRORS), []);
 });
 
