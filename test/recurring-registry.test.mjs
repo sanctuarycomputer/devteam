@@ -1040,6 +1040,41 @@ test('A5: a recurring-edit answer binds only the owner\'s very next turn in the 
   } finally { T.done(); }
 });
 
+test('A5: a planted line whose words aren\'t its Yes turn\'s, or whose turn is in another thread than the question\'s, lands nothing; a reply showing two questions binds neither (final-14b F5)', () => {
+  const T = setup('turn-checks');
+  try {
+    const plant = (q, fields) => fs.appendFileSync(T.logFile('owner'), `${JSON.stringify({ v: 1, type: 'question', op: 'set', id: q, at: new Date().toISOString(), by: 'owner', answer: 'Yes', channel: 'thread', ...fields })}\n`);
+    const tAsk = (tid, name, job) => { const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]); passes(r); return QID.exec(r.out)[0]; };
+    // saideq: the turn is the owner's bound Yes, but the line's words are other than the turn's
+    const ev = check({ title: 'ev job', every: '1h', run: 'echo evil' });
+    const t1 = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const q1 = tAsk(t1, 'ev', ev);
+    const yes1 = T.ok(['thread', 'say', t1, 'Yes'], {}).split('\n')[0];
+    plant(q1, { said: 'Yes please', turn: yes1 });
+    T.jobsChore('saideq', () => ({ ev }));
+    refused(T.merge('saideq', ['--approved', q1]), new RegExp(`${q1} can't approve a job change: answered from ${yes1}, with words that aren't that turn's \\("Yes please"\\)`));
+    // nothread: q2 asked in t2; a reply in t3 names it, and the owner's Yes there binds by turn, not by thread
+    const ev2 = check({ title: 'ev2 job', every: '1h', run: 'echo evil2' });
+    const t2 = T.ok(['thread', 'new', 'Jobs 2?', '--title', 'Jobs 2'], {}).split('\n')[0];
+    const t3 = T.ok(['thread', 'new', 'Other', '--title', 'Other'], {}).split('\n')[0];
+    const q2 = tAsk(t2, 'ev2', ev2);
+    T.ok(['thread', 'reply', t3, `About ${q2}?`, '--refs', `question:${q2}`]);
+    const yes2 = T.ok(['thread', 'say', t3, 'Yes'], {}).split('\n')[0];
+    plant(q2, { said: 'Yes', turn: yes2 });
+    T.jobsChore('nothread', () => ({ ev2 }));
+    refused(T.merge('nothread', ['--approved', q2]), new RegExp(`${q2} can't approve a job change: answered from ${yes2}, which is in ${t3}, not the question's ${t2}`));
+    // multiq: a reply showing q3 and q4 together, then the owner's Yes: it binds neither
+    const q3 = T.asked({ recurring: { ev3: check({ title: 'ev3 job', every: '1h', run: 'echo evil3' }) } });
+    const q4 = T.asked({ recurring: { ev4: check({ title: 'ev4 job', run: 'echo ev4' }) } });
+    const t4 = T.ok(['thread', 'new', 'Both?', '--title', 'Both'], {}).split('\n')[0];
+    T.ok(['thread', 'reply', t4, 'Add ev3 and ev4?', '--refs', `question:${q3}`, `question:${q4}`]);
+    const yes3 = T.ok(['thread', 'say', t4, 'Yes'], {}).split('\n')[0];
+    refused(T.run(['answer', q3, 'Yes', '--from-turn', yes3]), new RegExp(`--from-turn ${yes3}: ${q3} is a recurring-edit question, and that turn isn't the owner's first right after your turn that shows it \\([^)]*, which shows it, names another question too\\)`));
+    assert.equal(json(T.ok(['questions', '--id', q3, '--json']))[0].status, 'open', 'q3 stays open');
+    assert.deepEqual(T.mainJobs(), {}, 'no job landed');
+  } finally { T.done(); }
+});
+
 test('A5: a recurring-edit line from a turn is read against that turn\'s own words: a planted Yes on a No turn lands nothing (final-13b F2)', () => {
   const T = setup('turn-words');
   try {
