@@ -7006,13 +7006,28 @@ function landRecords(id, rec, linkName) {
         const o = f.ok ? lg(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${HS.main_branch}^{commit}`], wt) : null;
         // killed at the timeout, origin may still take it (a slow pre-receive): it may have landed, and
         // the rerun recognises the kit's own merge and logs the act then (final-13 F1)
-        if (!(o?.ok && o.out.trim() === head)) return pushed.timedOut ? { maybe: `the push to home's ${HS.main_branch} timed out before origin answered, and its ${HS.main_branch} isn't the records merge yet` } : `push to home's ${HS.main_branch} refused (did main move?)`;
+        if (!(o?.ok && o.out.trim() === head)) {
+          if (pushed.timedOut) return { maybe: `the push to home's ${HS.main_branch} timed out before origin answered, and its ${HS.main_branch} isn't the records merge yet` };
+          // a main that moved since the checks says so, with both shas, as landCode's moved() does (kit-332)
+          if (o?.ok && o.out.trim() !== checked) return `push to home's ${HS.main_branch} refused: home's ${HS.main_branch} moved since the checks (${checked.slice(0, 12)} to ${o.out.trim().slice(0, 12)}); run merge again`;
+          return `push to home's ${HS.main_branch} refused (did main move?)`;
+        }
         out(`the push of the records to home's ${HS.main_branch} ${recurringRegistry.why(pushed)}, but origin's ${HS.main_branch} is the records merge the kit built and checked (${head.slice(0, 12)}): landed`);
       }
     } finally {
       git(['worktree', 'remove', '--force', wt], mainRoot);
     }
-  } else if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+  } else {
+    // GitHub has no lease on the base: home's main is read again just before gh pr merge, and must
+    // still be the main the checks judged (mainSha(), read before this fetch), as landCode's moved()
+    // does for the code (kit-332). The fetch is bounded (recurringRegistry.git); one that fails refuses.
+    const checked = mainSha();
+    if (!checked) return `no home ${HS.main_branch} to land on`;
+    if (!recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot }).ok) return `couldn't fetch home's ${HS.main_branch} to check it hasn't moved since the checks; run merge again`;
+    const tip = resolveCommit(`refs/remotes/origin/${HS.main_branch}`);
+    if (tip !== checked) return `home's ${HS.main_branch} moved since the checks (${String(checked).slice(0, 12)} to ${String(tip).slice(0, 12)}); run merge again`;
+    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+  }
   git(['fetch', '--quiet', 'origin', HS.main_branch]);
   mainRefCache = undefined; mainLogCache = undefined; mergeShaCache.clear();
   return null;
