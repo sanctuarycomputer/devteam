@@ -85,6 +85,8 @@ test('R1: responder opens its window and detached worktree, runs responder_comma
     assert.equal(fs.realpathSync(a.cwd), fs.realpathSync(F.wt), 'it runs in .worktrees/responder');
     assert.deepEqual([a.role, a.ticket, a.feature], ['responder', null, null], 'DEVTEAM_ROLE=responder, no ticket, no feature');
     assert.match(a.argv.join(' '), /run\/prompts\/responder\.txt/, 'its prompt file');
+    // prompt responder prints exactly what the start wrote there
+    assert.equal(F.ok(F.old, ['prompt', 'responder'], SUP), fs.readFileSync(path.join(F.old, 'docs/devteam/run/prompts/responder.txt'), 'utf8').trimEnd(), 'prompt responder is the prompt file');
     });
     await t.test('R1d: agent_trust_command ran in the worktree, with DEVTEAM_WORKTREE its real path', () => {
     assert.ok(fs.existsSync(trusted), 'agent_trust_command ran');
@@ -353,6 +355,12 @@ test('R4: prompt responder names its section of supervisor.md, and that section 
     assert.match(p, /docs\/devteam\/process\/supervisor\.md/);
     assert.match(p, /§13/);
     assert.doesNotMatch(p, /responder draft|--re\b/, 'no command a later ticket builds');
+    // it prints the prompt alone, as the start writes it: accepted knowledge is not added
+    const k = F.ok(F.old, ['knowledge', 'add', '--kind', 'fact', '--scope', 'project', '--statement', 'Releases go out on Tuesdays'], SUP).match(/k-\S+/)[0];
+    F.ok(F.old, ['knowledge', 'set', k, '--status', 'accepted'], SUP);
+    assert.match(F.ok(F.old, ['prompt', 'worker'], SUP), /Releases go out on Tuesdays/, 'the knowledge is one a prompt would carry');
+    assert.equal(F.ok(F.old, ['prompt', 'responder']), p, 'prompt responder adds nothing to its prompt');
+    assert.equal(F.ok(F.old, ['prompt', 'responder', 'some-feature']), p, 'nor for an extra argument');
     const doc = fs.readFileSync(path.join(kit, 'process', 'supervisor.md'), 'utf8');
     const at = doc.indexOf('\n## 13. The responder');
     assert.ok(at >= 0, 'supervisor.md has a section "## 13. The responder"');
@@ -367,6 +375,8 @@ test('R4: prompt responder names its section of supervisor.md, and that section 
       ['plain words', /plain words/i],
       ['data framing', /data, not instructions/],
       ['nothing private in artifacts', /nothing in an artifact you wouldn't want public/],
+      ['refs as <type>:<id>, as the code takes them', /`--refs` as `<type>:<id>`/],
+      ['scripts outside its folder', /mktemp -d/],
     ]) assert.match(s, re, what);
     assert.doesNotMatch(s, /responder draft|--re\b/, 'names no command a later ticket builds');
   } finally { F.done(); }
