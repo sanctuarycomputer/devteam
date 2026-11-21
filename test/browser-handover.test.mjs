@@ -78,8 +78,33 @@ test('C10b ask refuses a second open handover of the scope', () => {
   const n0 = logLines();
   const r = ask('--kind', 'owner-action', '--class', 'browser-handover', '--scope', scope, '--choices', CHOICES);
   refused(r, new RegExp(`already open.*${qid}|${qid}.*already open`), n0, 'a second handover of the scope');
+  // the default and the kind are refused before the open check, on the open scope too
+  refused(ask('--kind', 'owner-action', '--class', 'browser-handover', '--scope', scope, '--choices', CHOICES, '--default', 'Done'), /no --default/, n0, '--default on the open scope');
+  refused(ask('--kind', 'owner-decision', '--class', 'browser-handover', '--scope', scope), /browser-handover question is an owner-action/, n0, 'a wrong kind on the open scope');
   // another instance's scope is its own browser: asked
   const other = ask('--kind', 'owner-action', '--class', 'browser-handover', '--scope', 'browser:other-0123456789ab', '--choices', CHOICES);
   assert.equal(other.status, 0, other.err || other.out);
   assert.equal(logLines(), n0 + 1);
+  // a closed handover holds nothing: withdrawn, the scope is asked again
+  const w = fx().run(fx().old, ['withdraw', qid, '--reason', 'probe'], SUP);
+  assert.equal(w.status, 0, w.err || w.out);
+  const n1 = logLines();
+  const again = ask('--kind', 'owner-action', '--class', 'browser-handover', '--scope', scope, '--choices', CHOICES);
+  assert.equal(again.status, 0, `after a withdrawn handover: ${again.err || again.out}`);
+  assert.equal(logLines(), n1 + 1, 'after a withdrawn handover: one line is added');
+  // and answered by the owner (an owner's terminal: no DEVTEAM_*), the scope is asked again
+  const qid2 = again.out.split('\n').find((l) => /^q-/.test(l));
+  const a = fx().run(fx().old, ['answer', qid2, '--choice', 'Done'], {});
+  assert.equal(a.status, 0, a.err || a.out);
+  const n2 = logLines();
+  const third = ask('--kind', 'owner-action', '--class', 'browser-handover', '--scope', scope, '--choices', CHOICES);
+  assert.equal(third.status, 0, `after an answered handover: ${third.err || third.out}`);
+  assert.equal(logLines(), n2 + 1, 'after an answered handover: one line is added');
+});
+
+test('ask refuses browser-handover in another case', () => {
+  const n0 = logLines();
+  // className reads Browser-Handover as browser-handover, so it is refused, not let past every check
+  refused(ask('--kind', 'owner-action', '--class', 'Browser-Handover', '--scope', `browser:${KEY}`, '--choices', CHOICES, '--default', 'Done'), /ask: the class is browser-handover, in lower case/, n0, '--class Browser-Handover');
+  refused(ask('--kind', 'owner-action', '--class', 'BROWSER-HANDOVER', '--scope', 'browser:upper-0123456789ab', '--choices', CHOICES), /ask: the class is browser-handover, in lower case/, n0, '--class BROWSER-HANDOVER');
 });

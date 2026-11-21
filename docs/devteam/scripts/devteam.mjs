@@ -7667,6 +7667,9 @@ function askLine({ thread, about } = {}) {
   // owner's Done hands it back, so it has no default; it is one owner-action about one instance's
   // browser (browser:<instance key>, BROWSER_KEY: initialised at load, long before this runs), and
   // that browser has one handover open at a time. Checked in this order, before anything else.
+  // Another case (Browser-Handover) is refused first: className would name it a handover while
+  // these checks, and the hold, skipped it.
+  if (cls !== 'browser-handover' && cls?.toLowerCase() === 'browser-handover') die('ask: the class is browser-handover, in lower case');
   if (cls === 'browser-handover') {
     if (flags.default !== undefined) die('a browser-handover question has no --default: only the owner hands the browser back');
     if (kind !== 'owner-action') die(`a browser-handover question is an owner-action (the owner logs in, then answers Done): ask it --kind owner-action, not --kind ${kind}`);
