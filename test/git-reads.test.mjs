@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fleetFixture, json, write } from './lib/kit.mjs';
+import { fleetFixture, json, multiFixture, write } from './lib/kit.mjs';
 
 test('status: merges of every shape, each review read, in a few git calls whatever the ticket count', () => {
   const F = fleetFixture('git-reads');
@@ -70,5 +70,28 @@ test('status: merges of every shape, each review read, in a few git calls whatev
     assert.deepEqual(shape(json(ok(old, ['status', '--json'], { PATH: `${failing}${path.delimiter}${process.env.PATH}` }))), shape(st), 'status with for-each-ref failing');
   } finally {
     F.done();
+  }
+});
+
+test('status: a link whose project folder is spelled ./docs/proj reads every ticket\'s reviews', () => {
+  for (const project of ['docs/proj', './docs/proj']) {
+    const F = multiFixture(`git-reads-spelling-${project.length}`);
+    const { old, okIn, ticket, g } = F;
+    try {
+      F.edit((j) => { j.links.console.project = project; });
+      g(['commit', '-qam', 'project folder'], old); g(['push', '-q', 'origin', 'main'], old);
+      const ids = ['console-01-a', 'console-02-b', 'console-03-c'];
+      for (const id of ids) ticket(id);
+      for (const id of ids) {
+        g(['checkout', '-q', '-b', `ticket/${id}`, 'trunk'], F.console);
+        write(path.join(F.console, `docs/proj/tickets/${id}/reviews/plan-1.md`), `# Review\n\n- Stage: plan\n- Pass: 1\n\nVerdict: APPROVE ${'a'.repeat(40)}\n`);
+        g(['add', '-A'], F.console); g(['commit', '-qm', `${id} work`], F.console);
+        g(['checkout', '-q', 'trunk'], F.console);
+        g(['merge', '-q', '--no-ff', '-m', `Merge from ticket/${id}`, `ticket/${id}`], F.console);
+      }
+      g(['push', '-q', 'origin', 'trunk'], F.console);
+      g(['fetch', '-q', 'origin'], F.console);
+      assert.equal(json(okIn(old, ['status', '--json'])).reviews.by_stage.plan.first_passes, 3, project);
+    } finally { F.done(); }
   }
 });

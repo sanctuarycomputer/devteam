@@ -3032,7 +3032,8 @@ const refAt = (ref, resolve = resolveCommit) => (FULL_SHA.test(ref) ? ref : gitR
 // named (a dashboard refresh read each ticket branch's review files one call each).
 function listAndPrefetch(ref, dirPath, gitFn, cwd, resolve) {
   const sha = refAt(ref, resolve);
-  const index = sha ? treeIndexAt(sha, cwd) : null;
+  // the index holds paths as git lists them; a link's project may be spelled ./docs/proj or .
+  const index = sha && path.posix.normalize(dirPath) === dirPath ? treeIndexAt(sha, cwd) : null;
   if (index) {
     // every ticket's reviews at this commit in one read, the first time one ticket's are asked for
     const m = /^(.*\/tickets\/)[^/]+\/reviews$/.exec(dirPath);
@@ -3080,7 +3081,7 @@ function treeIndexAt(sha, cwd = HOME_CWD) {
 // read-only command has one.
 function hasPathAt(ref, p, cwd = HOME_CWD) {
   const sha = refAt(ref);
-  const index = sha ? treeIndexAt(sha, cwd) : null;
+  const index = sha && path.posix.normalize(p) === p ? treeIndexAt(sha, cwd) : null;
   return index ? index.paths.has(p) : git(['cat-file', '-e', `${ref}:${p}`], cwd) !== null;
 }
 function srcList(src, relDir) {
