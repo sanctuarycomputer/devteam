@@ -12,10 +12,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { write, dashboardOnFreePort, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
-
-const J = JSON.stringify;
-const SLUG = 'live-mock', WT = 'demo-01-draft';
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+import { J, SLUG, WT, sleep, PAGE, soonIn, placed, follower } from './lib/artifact-live.mjs';
 
 // The page's own title says what it is and the anchor it loaded at (the lens's ready carries
 // document.title); a link at its top left goes to its second page.
@@ -24,62 +21,6 @@ const mock = (title) => ({
   'index.html': `<!doctype html><html><head><title>${title}</title></head><body style="margin:0"><a id="p2" href="page2.html" style="display:block;position:fixed;left:0;top:0;width:80px;height:40px;background:#ccc">page 2</a><p id="section" style="margin-top:60px">${title}</p><script>document.title = ${J(title)} + location.hash;</script></body></html>`,
   'page2.html': '<!doctype html><html><head><title>page2</title></head><body><p>the second page</p></body></html>',
 });
-
-// The fake /api/artifact-fp, matched by the request's path however it is called (a string, a URL, a
-// Request): it answers from window.__fake ({ status, fp, body, delay }: fp null answers what the stage
-// loaded, TS.fp, or a fixed one when the stage knows none, i.e. "unchanged"; body, a raw body in place
-// of the JSON; delay, ms held, given up when the page's signal aborts), and logs each ask (its time,
-// whether the page read as hidden then). Every other request goes on. Also: every /api/data and
-// /api/view read, with whether it landed; document.visibilityState as window.__hidden says; the lens's
-// ready titles, with their time.
-const PAGE = `(() => {
-  // C10: a viewer tab whose address carries kit106-framed stands for one under the owner's wrapper, a
-  // parent of another origin: its window.parent is another window (a stand-in that takes messages and
-  // does nothing), and frameElement stays null, as under any parent of another origin
-  if (window.parent === window && location.pathname.startsWith('/view/') && new URLSearchParams(location.search).has('kit106-framed')) { const stand = { postMessage() {} }; Object.defineProperty(window, 'parent', { configurable: true, get: () => stand }); }
-  window.__fake = { status: 200, fp: null, body: null, delay: 0 };
-  window.__fpAsks = [];
-  window.__reads = [];
-  window.__hidden = false;
-  Object.defineProperty(Document.prototype, 'visibilityState', { configurable: true, get() { return window.__hidden ? 'hidden' : 'visible'; } });
-  const f = window.fetch;
-  window.fetch = async (u, o) => {
-    const s = u instanceof Request ? u.url : String(u);
-    let pathname = '';
-    try { pathname = new URL(s, location.href).pathname; } catch {}
-    if (pathname === '/api/artifact-fp') {
-      const ask = { u: s, t: Date.now(), hidden: document.visibilityState !== 'visible', done: false };
-      window.__fpAsks.push(ask);
-      const k = { ...window.__fake };
-      if (k.delay) await new Promise((res, rej) => { const tm = setTimeout(res, k.delay); o?.signal?.addEventListener('abort', () => { clearTimeout(tm); ask.done = true; rej(new DOMException('aborted', 'AbortError')); }); });
-      ask.done = true;
-      const fp = k.fp ?? (typeof TS === 'object' && TS.fp ? TS.fp : 'a'.repeat(64));
-      const body = k.body ?? (k.status === 200 ? JSON.stringify({ fp, at: new URL(s, location.href).searchParams.get('at') }) : JSON.stringify({ error: 'no draft' }));
-      return new Response(body, { status: k.status, headers: { 'content-type': 'application/json' } });
-    }
-    const x = { u: s, landed: false };
-    if (pathname === '/api/data' || pathname === '/api/view') window.__reads.push(x);
-    const r = await f(u, o);
-    for (const m of ['json', 'text']) { const g = r[m].bind(r); r[m] = () => g().finally(() => { x.landed = true; }); }
-    return r;
-  };
-  window.__titles = [];
-  addEventListener('message', (e) => { const fr = document.getElementById('av-frame'); if (fr && e.source === fr.contentWindow && e.data?.lens === 1 && e.data.type === 'ready') window.__titles.push({ title: e.data.title, t: Date.now() }); });
-})();`;
-
-const soonIn = (p, ms = 30000) => async (expr, what) => {
-  const end = Date.now() + ms;
-  for (;;) {
-    let v, err = null;
-    try { v = await p.ev(expr); } catch (e) { err = e; }
-    if (v) return v;
-    if (Date.now() > end) {
-      const at = await p.ev('[location.href, JSON.stringify(window.__titles ?? null), (window.__fpAsks ?? []).length]').catch((e) => e.message);
-      assert.fail(`timed out: ${what}; the tab: ${JSON.stringify(at)}${err ? `; last: ${err.message}` : ''}`);
-    }
-    await sleep(50);
-  }
-};
 
 // An artifact landed on main, as a merged PR puts it there: its tree id.
 function land(F, files) {
@@ -285,11 +226,14 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     await p.ev(`(window.__fake.delay = 1500, window.__fake.fp = ${J(NEW_FP)}, true)`);
     const n = await asks();
     await soon(`__fpAsks.length > ${n} && !__fpAsks[__fpAsks.length - 1].done`, 'a held ask with the new fp');
-    await p.ev(`(showArtifact(${J(SLUG)}, 'main', { fp: ${J('b'.repeat(64))} }), true)`);
+    // main's own fp, as /api/view gives it: since kit-750 (A1) a viewer on main reloads by itself on
+    // any other, so a made-up one would reload it at the next check
+    const mainFp = await p.ev(`fetch('/api/view?' + new URLSearchParams({ kind: 'artifact', slug: ${J(SLUG)}, at: 'main' })).then((r) => r.json()).then((j) => j.fp)`);
+    await p.ev(`(showArtifact(${J(SLUG)}, 'main', { fp: ${J(mainFp)} }), true)`);
     await soon(`__titles.some((x) => x.title === 'main')`, "main's frame ready");
     await sleep(3000);
     assert.deepEqual(await titles(), ['v1', 'main'], "the answer for the draft didn't reload main's frame");
-    assert.equal(await p.ev('TS.fp'), 'b'.repeat(64), "main's fp unchanged");
+    assert.equal(await p.ev('TS.fp'), mainFp, "main's fp unchanged");
   });
 
   await t.test('C10: a framed viewer tab (the owner wrapper) on a draft makes no /api/artifact-fp ask', async () => {
@@ -301,7 +245,7 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     assert.equal(await asks(), 0, 'the framed viewer tab: no ask');
   });
 
-  await t.test("C6: a draft never shows kit-206's outline; main keeps it, and its title", async () => {
+  await t.test("C6: a draft never shows kit-206's outline, and main now reloads by itself without it (kit-750, A1)", async () => {
     const watchStale = `(() => { window.__wasStale = false; const b = document.getElementById('av-reload'); const look = () => { if (b.classList.contains('stale')) window.__wasStale = true; }; look(); new MutationObserver(look).observe(b, { attributes: true }); return true; })()`;
     const row = `(DATA?.library?.artifacts ?? []).find((a) => a.slug === ${J(SLUG)} && a.at === ${J(WT)})?.fp ?? null`;
     await open(DASH_DRAFT, WT, 'v1');
@@ -313,12 +257,86 @@ test('a viewer on a draft reloads by itself when its fingerprint changes', { ski
     await soonIn(p, 90000)(`(${row}) !== ${J(listed)}`, "the dashboard's read lists the draft's new fingerprint");
     await sleep(1000);
     assert.equal(await p.ev('window.__wasStale'), false, 'the draft never had the outline');
-    // main: a second commit changes main's fingerprint; the outline and its title come, as kit-206 has them
+    // main: a second commit changes main's fingerprint; the frame loads it again by itself, and the
+    // outline kit-206 had never shows (ruling A1, d-20261121-041756284)
     await open(DASH_MAIN, 'main', 'main');
     await p.ev(watchStale);
     land(F, mock('main2'));
-    await soonIn(p, 90000)(`document.getElementById('av-reload').classList.contains('stale')`, "main's outline once a newer fingerprint is seen");
-    assert.equal(await p.ev(`document.getElementById('av-reload').title`), 'A newer version is ready: reload to see it');
+    await soonIn(p, 90000)(`__titles.some((x) => x.title === 'main2')`, 'main reloaded to main2 by itself');
+    await sleep(1000);
+    assert.equal(await p.ev('window.__wasStale'), false, "main never had kit-206's outline");
+    assert.equal(await p.ev(`document.getElementById('av-reload').classList.contains('stale')`), false, 'no outline after the reload');
     assert.equal(await asks(), 0, 'main: no /api/artifact-fp ask');
+  });
+});
+
+// main's viewer reloads by itself on a new fingerprint (kit-750, ruling A1); it keeps the owner's
+// place exactly as a draft's does (kit-142, kit-753): the page of the artifact they moved to, and the
+// #hash they moved to unless the address carried an anchor of its own, which stays. Each version's
+// pages carry its title, so a reload is told from the page it lands on: a link at the top left goes
+// to page2.html, one beside it to #tab2.
+test('main reload keeps place: a viewer on main reloads by itself on the page and #hash the owner moved to, its own anchor kept', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 900000 }, async (t) => {
+  const later = cleanup(t);
+  const F = threadsFixture('main-place');
+  later(() => F.done());
+  land(F, placed('m0'));
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  const B = `http://127.0.0.1:${port}`;
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: PAGE });
+  const soon = soonIn(p);
+  const VIEW = `${B}/view/artifact/${SLUG}`;
+  let n = 0;
+  // the page on the stage, from about:blank (a document of its own, its logs fresh), once its frame says ready
+  const open = async (url, title) => {
+    await p.send('Page.navigate', { url: 'about:blank' });
+    await soon(`location.href === 'about:blank'`, 'about:blank');
+    await p.send('Page.navigate', { url });
+    await soon(`typeof TS === 'object' && TS.kind === 'artifact' && TS.at === 'main' && TS.fp && (window.__titles ?? []).some((x) => x.title === ${J(title)})`, `${url}: main up at ${title}`);
+  };
+  const follow = follower(p, t);
+  // main changes (a merged commit): the frame, marked, is replaced by a fresh one that says ready at `want`
+  const landAndSee = async (want) => {
+    const v = `m${++n}`;
+    await p.ev(`(document.getElementById('av-frame').__before = 1, true)`);
+    const t0 = await p.ev('Date.now()');
+    land(F, placed(v));
+    const got = await soonIn(p, 90000)(`__titles.find((x) => x.t > ${t0} && x.title.startsWith(${J(v)}))`, `main reloaded by itself to ${v}`);
+    assert.equal(got.title, want(v), 'reloaded at the owner\'s place');
+    assert.equal(await p.ev(`document.getElementById('av-frame').__before`), undefined, 'in a fresh frame');
+    return v;
+  };
+
+  await t.test("M1: a viewer tab on main: the owner went to page2.html; main's reload stays on it", async () => {
+    await open(VIEW, `m${n}`);
+    await follow(20, `TS.path === 'page2.html'`);
+    await landAndSee((v) => `${v}-page2`);
+  });
+
+  await t.test("M2: a viewer tab on main: the owner went to #tab2; main's reload stays at it", async () => {
+    await open(VIEW, `m${n}`);
+    await follow(140, `TS.path === 'index.html' && TS.hash === '#tab2'`);
+    await landAndSee((v) => `${v}#tab2`);
+  });
+
+  await t.test("M3: a viewer tab opened at #section (showArtifact's anchor): the reload keeps it; moved to page2.html, it stays there", async () => {
+    await open(`${VIEW}#section`, `m${n}#section`);
+    assert.match(await p.ev(`document.getElementById('av-frame').getAttribute('src')`), /#section$/, "the frame's src carries the anchor");
+    await landAndSee((v) => `${v}#section`);
+    await follow(20, `TS.path === 'page2.html'`);
+    await landAndSee((v) => `${v}-page2`);
+  });
+
+  await t.test("M4: the dashboard's stage on main: the owner went to page2.html; main's reload (seen in /api/data) stays on it", async () => {
+    await open(`${B}/#artifact/main/${SLUG}`, `m${n}`);
+    await follow(20, `TS.path === 'page2.html'`);
+    await landAndSee((v) => `${v}-page2`);
   });
 });

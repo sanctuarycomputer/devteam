@@ -765,10 +765,18 @@ test('no publish buttons on any card (box)', { ...CHROME, timeout: 300000 }, asy
   assert.ok((await badges(ids.pubUpdate)).includes('Public'));
   assert.ok((await badges(ids.drift)).includes('not live on this box'));
   assert.ok((await badges(ids.notLive)).includes('not live on this box'));
-  const WORDS = ['Unpublish', 'Update', 'Publish', 'Start', 'Stop', "Review main's version"];
-  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#lib-grid *')].map((e) => e.textContent.trim()).filter((s) => ${JSON.stringify(WORDS)}.includes(s))`), [], 'none of the publish or preview buttons, menus included');
-  // the gateway's pages: Restore alone, on a not-live card
-  assert.deepEqual(await p.ev(`[...new Set([...document.querySelectorAll('#lib-grid a[href]')].filter((a) => a.getAttribute('href').startsWith(${JSON.stringify(`http://box.localhost:${port}/`)})).map((a) => a.textContent))]`), ['Restore']);
+  const WORDS = ['Start', 'Stop', "Review main's version"];
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#lib-grid *')].map((e) => e.textContent.trim()).filter((s) => ${JSON.stringify(WORDS)}.includes(s))`), [], 'none of the preview buttons, menus included');
+  // no control publishes by itself (kit-751): Publish, Update, Unpublish and Restore are only links, each the
+  // gateway's own confirm page in a new tab, where the owner confirms. Every element whose text is one of those
+  // words, with children or not (a button holding an icon and the word), is such a link, sits in one or holds one.
+  const PUB = ['Publish', 'Update', 'Unpublish', 'Restore'];
+  const gw = JSON.stringify(`http://box.localhost:${port}/`);
+  const gwSel = JSON.stringify(`a[href^="http://box.localhost:${port}/"]`);
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#lib-grid *')].filter((e) => ${JSON.stringify(PUB)}.includes(e.textContent.trim())).filter((e) => !(e.closest(${gwSel}) || e.querySelector(${gwSel}))).map((e) => e.outerHTML)`), [], 'every publish word a link to the gateway');
+  const links = await p.ev(`[...document.querySelectorAll('#lib-grid a[href]')].filter((a) => a.getAttribute('href').startsWith(${gw})).map((a) => [a.textContent, a.target, new URL(a.href).pathname])`);
+  assert.ok(links.length > 0, 'the gateway\'s pages are linked');
+  for (const [label, target, at] of links) assert.ok(target === '_blank' && ['/public/publish', '/public/unpublish'].includes(at), `${label}: the gateway's confirm page in a new tab (${target} ${at})`);
   assert.deepEqual(await p.ev(ERRORS), []);
 });
 
@@ -1506,13 +1514,19 @@ test('a tree opened by a link is the published version', { ...CHROME, timeout: 3
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
-// On main: a draft reloads by itself (kit-106) and never shows the outline; main keeps it.
-test('Reload: its stale outline on the pill', { ...CHROME, timeout: 300000 }, async (t) => {
+// On main: a newer version loads by itself, as a draft's does (kit-106), and the pill is never
+// outlined (kit-750, ruling A1, which supersedes kit-206's outline for main).
+test('Reload: main loads a newer version by itself, and the pill is never outlined', { ...CHROME, timeout: 300000 }, async (t) => {
   const { p, soon, go, made } = await versOn(t);
   await go(`#artifact/main/${VERS}`);
   await soon(`${frameIs(`/artifact/main/${VERS}/`)} && /^[0-9a-f]{64}$/.test(TS.fp ?? '')`, "main's version in the viewer, with its fingerprint");
-  const button = () => p.ev("(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle, h: b.getBoundingClientRect().height }; })()");
+  const button = () => p.ev("(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), style: s.outlineStyle, h: b.getBoundingClientRect().height }; })()");
   assert.equal((await button()).stale, false, 'nothing newer at open');
+  const fp0 = await p.ev('TS.fp');
+  // the frame as loaded now, marked by a property (avFreshFrame's clone copies attributes, not that):
+  // a reload puts a fresh frame in its place; and
+  // whether the pill was ever outlined from here on
+  await p.ev("(() => { document.getElementById('av-frame').__before = true; window.__wasStale = false; const b = document.getElementById('av-reload'); new MutationObserver(() => { if (b.classList.contains('stale')) window.__wasStale = true; }).observe(b, { attributes: true }); return true; })()");
   // main changes as versProject made it: a fourth commit (pushed too where the project has an origin, which mainRef reads first)
   const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: made.root, encoding: 'utf8' }).trim();
   const dir = path.join(made.root, 'docs/devteam/project/artifacts', VERS);
@@ -1520,9 +1534,10 @@ test('Reload: its stale outline on the pill', { ...CHROME, timeout: 300000 }, as
   git('add', '-A', dir);
   git('commit', '-qm', `${VERS} v4`);
   if (git('remote').split('\n').includes('origin')) git('push', '-q', 'origin', 'HEAD:main');
-  await soonIn(p, 60000)("document.getElementById('av-reload').classList.contains('stale')", 'the outline once a newer fingerprint is seen');
+  await soonIn(p, 60000)(`(() => { const f = document.getElementById('av-frame'); return !!f && !f.__before && ${frameIs(`/artifact/main/${VERS}/`)} && TS.fp !== ${JSON.stringify(fp0)} && TS.fp === TS.fpNow; })()`, 'the frame loaded again by itself once a newer fingerprint is seen');
   const b = await button();
-  assert.deepEqual([b.color, b.width, b.style, b.h], [await tokenColor(p, '--amber'), '1px', 'solid', 20], 'the --amber outline at the pill\'s border width (1px), on the 20px pill');
+  assert.deepEqual([b.stale, b.style, b.h], [false, 'none', 20], 'no outline, on the 20px pill');
+  assert.equal(await p.ev('window.__wasStale'), false, 'the pill was never outlined');
   assert.equal(await p.ev("getComputedStyle(document.getElementById('av-reload')).borderTopWidth"), '1px', 'the pill\'s border width');
   assert.deepEqual(await p.ev('window.__errors'), []);
 });

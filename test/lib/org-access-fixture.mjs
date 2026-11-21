@@ -28,6 +28,8 @@ const REQUESTS = (F) => ({
   'dash /api/artifact-fp': [[200, `/api/artifact-fp?slug=${F.slug}&at=${F.wt}`]],
   'dash /api/view': [[200, `/api/view?kind=artifact&slug=${F.slug}&at=main`], [200, `/api/view?kind=artifact&slug=${F.slug}&at=${F.wt}`], [200, `/api/view?kind=preview&name=${F.preview}`]],
   'dash /api/artifact-versions': [[200, `/api/artifact-versions?slug=${F.slug}`]],
+  // the fetch of origin's status: a GET only reads; the page's POST is what fetches (kit-750)
+  'dash /api/artifact-remote': [[200, '/api/artifact-remote']],
   'dash /api/threads': [[200, '/api/threads']],
   'dash /api/fleet': [[200, '/api/fleet?fetch=1'], [200, '/api/fleet']],
   'dash /api/record': [[200, `/api/record?id=${F.ticket}`]],
@@ -41,7 +43,7 @@ const REQUESTS = (F) => ({
   // the result as TSV only once the owner answered: this question has none yet, so `review result` says so
   'dash /api/review': [[200, `/api/review?id=${F.review}`], [404, `/api/review?id=${F.review}&format=tsv`]],
   'dash /public-manifest/*': [[200, `/public-manifest/${F.slug}`]],
-  'dash /artifact/*': [[200, `/artifact/main/${F.slug}/`], [301, `/artifact/main/${F.slug}`], [200, `/artifact/wt/${F.wt}/${F.slug}/`]],
+  'dash /artifact/*': [[200, `/artifact/main/${F.slug}/`], [301, `/artifact/main/${F.slug}`], [200, `/artifact/wt/${F.wt}/${F.slug}/`], [404, `/artifact/origin/ticket%2Fnone/${F.slug}/`]],
   'dash re:^\\/review\\/([^/]+)\\/([^/]*)$': [[200, `/review/${F.review}/`, FRAME], [200, `/review/preview/?path=docs/devteam/project/artifacts/${F.slug}/index.html&ref=main`, FRAME], [200, '/review/preview/devteam-ui.css']],
   // a socket: a plain request gets its guard's status
   'dash /presence': [[400, '/presence']],
@@ -62,7 +64,7 @@ const REQUESTS = (F) => ({
 // requests a slice; the box asks each key's first GET, all in one slice. The route-listing test checks
 // the slices cover every key once.
 const LAPTOP_PARTS = [
-  ['dash /upload/*', 'dash /api/hello', 'dash /', 'dash /index.html', 'dash /api/data*', 'dash re:^\\/view\\/artifact\\/([^/]+)$', 'dash re:^\\/view\\/preview\\/([^/]+)$', 'dash /api/artifact-fp', 'dash /api/view', 'dash /api/artifact-versions', 'dash /api/threads'],
+  ['dash /upload/*', 'dash /api/hello', 'dash /', 'dash /index.html', 'dash /api/data*', 'dash re:^\\/view\\/artifact\\/([^/]+)$', 'dash re:^\\/view\\/preview\\/([^/]+)$', 'dash /api/artifact-fp', 'dash /api/view', 'dash /api/artifact-versions', 'dash /api/artifact-remote', 'dash /api/threads'],
   ['dash /api/fleet', 'dash /api/record', 'dash /api/peek', 'dash /api/sensor', 'dash /api/schema', 'dash /api/timeline', 'dash /api/governance', 'dash /api/file', 'dash /api/review', 'dash /public-manifest/*'],
   ['dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /memory.json', 'hub /memory.json?*', 'hub /operator/threads'],
 ];
