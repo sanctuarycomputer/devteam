@@ -22407,7 +22407,7 @@ async function cmdDashboard() {
       accountsSaid = said;
     }));
   };
-  // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes (a page
+  // One dashboard-data run at a time, shared by every page waiting on it, with no time limit by default (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS) (a page
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
@@ -22433,7 +22433,7 @@ async function cmdDashboard() {
     const b = { epoch: dataEpoch, finished: null, r: null };
     b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: DASHBOARD_DATA_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err && stdout) lastData = stdout;
-      b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
+      b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${DASHBOARD_DATA_TIMEOUT_MS < 120000 ? `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 1000)} s` : `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes`} and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
     }));
