@@ -286,11 +286,16 @@ test('self.md and exterior.md beside the strategy', { skip: canDrive ? false : '
         probe.remove();
         // the whole viewer, not only .md: lists drawn outside it are judged too
         const els = [...m.querySelectorAll('p, li, h3')].filter((e) => !e.closest('[hidden]'));
-        return { ms, n: m.querySelectorAll('h3 + ul > li').length, wide: els.filter((e) => e.getBoundingClientRect().width > ms + 1).map((e) => Math.round(e.getBoundingClientRect().width) + 'px ' + e.textContent.slice(0, 30)) };
+        // outside .md: a heading not under the element whose max-width is the measure (index.html .md)
+        const loose = [...m.querySelectorAll('h3')].filter((h) => !h.closest('.md')).length;
+        return { ms, loose, n: m.querySelectorAll('h3 + ul > li').length, wide: els.filter((e) => e.getBoundingClientRect().width > ms + 1).map((e) => Math.round(e.getBoundingClientRect().width) + 'px ' + e.textContent.slice(0, 30)) };
       })()`);
       assert.ok(r.ms > 0, `the measure resolves: ${r.ms}`);
       assert.ok(r.n > 0, `${title}: lists drawn`);
       assert.deepEqual(r.wide, [], `${title}: wider than the measure (${r.ms}px)`);
+      // the drawer's text box is about 78ch wide today, as wide as the measure's 78ch override, so width alone can't
+      // fail here: the lists must sit in .md, which keeps them to --measure whatever it becomes (560px once the override goes)
+      assert.equal(r.loose, 0, `${title}: lists outside .md, which holds the measure`);
       await closePeek();
     }
   });
