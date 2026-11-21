@@ -7037,7 +7037,8 @@ function cmdMerge() {
   // home's is mainSha(), the main checkPr's recurringRegistry.landing judges, so the landing and the land agree
   let checkedMain = R.name === 'home' ? mainSha() : R.resolveCommit(`origin/${mainBranch0}`);
   // A landing whose push timed out may still have landed (final-13 F1): when main is exactly the kit's
-  // own landing merge of this head, as it recorded it before the push (kitMergeOf, final-15 F1), and no
+  // own landing merge of this head, as it recorded it before the push, whatever its message, with the
+  // tree merge builds from its parents (kitMergeOf: final-15 F1, final-16 F1 and F2), and no
   // act for it was logged, this run checks the head onto the main it landed on (main is pinned there
   // for every check, so their base is that main, not the head), lands nothing, and logs its act as a
   // normal landing; checks that refuse it log nothing. Anything else already on main is a second run:
@@ -7047,7 +7048,8 @@ function cmdMerge() {
   if (checkedMain && R.git(['merge-base', '--is-ancestor', sha, checkedMain]) !== null) {
     const cls0 = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
     const logged = logObjects('act').some((a) => a.class === cls0 && String(a.what ?? '').startsWith(`merged ${branch} at ${sha}`) && (a.repo ?? null) === (onR.repo ?? null));
-    const own = viaGit && !logged ? recurringRegistry.kitMergeOf((args) => R.git(args), checkedMain, sha, `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, recurringRegistry.landingFile(R.name, branch, sha)) : null;
+    const own = viaGit && !logged ? recurringRegistry.kitMergeOf((args) => R.git(args), checkedMain, sha, `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, recurringRegistry.landingFile(R.name, branch, sha), R.root) : null;
+    if (own?.lookalike && own.recorded) die(`${branch}${inR} at ${sha.slice(0, 12)}: main's tip ${checkedMain.slice(0, 12)} is a landing merge recorded for this head, but not the tree the kit's merge of its parents builds: not the kit's own landing; nothing logged (${own.lookalike}). Someone else made that merge, or planted its record: verify from the start`);
     if (own?.lookalike) die(`${branch}${inR} at ${sha.slice(0, 12)}: main's tip ${checkedMain.slice(0, 12)} has the kit's landing message and parents, but it isn't the landing merge the kit recorded for this head before its push: not the kit's own landing; nothing logged (${own.lookalike}). Someone else made that merge: verify from the start`);
     if (!own) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
     relanded = { tip: checkedMain, onto: own.onto };
@@ -7068,7 +7070,8 @@ function cmdMerge() {
   let recOwn = null;
   if (rec?.landed && repo('home').settings.forge === 'git' && !recordsLanded()) {
     const tip = resolveCommit(`origin/${repo('home').settings.main_branch}`);
-    const own = tip ? recurringRegistry.kitMergeOf((args) => git(args), tip, rec.sha, recurringRegistry.recordsMessage(id, rec.sha, R.name), recurringRegistry.landingFile('home', `records-${id}`, rec.sha)) : null;
+    const own = tip ? recurringRegistry.kitMergeOf((args) => git(args), tip, rec.sha, recurringRegistry.recordsMessage(id, rec.sha, R.name), recurringRegistry.landingFile('home', `records-${id}`, rec.sha), mainRoot) : null;
+    if (own?.lookalike && own.recorded) die(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} is a records merge recorded for them, but not the tree the kit's merge of its parents builds: not the kit's own records merge; nothing logged (${own.lookalike}). Someone else made that merge, or planted its record: verify from the start`);
     if (own?.lookalike) die(`the records of ${id} at ${rec.sha.slice(0, 12)}: home's main tip ${tip.slice(0, 12)} has the kit's records message and parents, but it isn't the records merge the kit recorded before its push: not the kit's own records merge; nothing logged (${own.lookalike}). Someone else made that merge: verify from the start`);
     if (own) { recOwn = { tip, onto: own.onto }; out(`the records of ${id} at ${rec.sha.slice(0, 12)} are on home's ${repo('home').settings.main_branch} in the kit's own records merge ${tip.slice(0, 12)}, with no act logged (a push that timed out, which origin took): checking them onto ${own.onto.slice(0, 12)}, the main they landed on, to log their landing`); }
   }
@@ -24496,21 +24499,26 @@ const recurringRegistry = Object.freeze({
   // the message landRecords gives the records merge on home's main (final-13 F1 reads it back)
   recordsMessage: (id, recSha, linkName) => `${id}: records\n\nMerged home's ticket/${id} at ${recSha}: the records of ${id}, whose code lands in ${linkName}`,
   // Whether tip is the kit's own landing merge of head (final-13 F1): exactly two parents, the second
-  // head and the first one that doesn't already hold it (the main it landed on), and merge's own
-  // message, as git keeps it (trailing spaces and repeated blank lines dropped). A merge anyone else
-  // made, with other parents or another message, is not: null. g is the repo's git (output, or null).
-  // And tip must be a merge the kit recorded for this head before its push, onto that first parent
-  // (file: landingFile; final-15 F1): one with the right parents and message that it never recorded is
-  // a look-alike, { lookalike: why }, never adopted, whatever its tree. Else { onto: the first parent }.
-  // (final-14 F1's tree check and the records' keepsJobs are gone: a recorded sha is that very merge,
-  // whose tree and jobs landCode or landRecords checked before writing it.)
-  kitMergeOf(g, tip, head, message, file) {
+  // head and the first one that doesn't already hold it (the main it landed on); else null. Then:
+  // - a merge the kit recorded for this head before its push, onto that first parent (file:
+  //   landingFile; final-15 F1), is adopted whatever its message says (the PR text may have changed
+  //   since: d-20261121-072341505-supervisor, final-16 F1), but only when its tree is also the one
+  //   merge builds from those parents with MERGE_FLAGS (git merge-tree --write-tree, git 2.38 or
+  //   later; bounded, in cwd), which a planted record can't forge (final-16 F2). A tree that differs,
+  //   or a merge-tree that conflicts, fails or times out, is a look-alike: { lookalike: why, recorded: true }.
+  // - one it never recorded is a look-alike when it carries merge's own message (as git keeps it:
+  //   trailing spaces and repeated blank lines dropped), { lookalike: why, recorded: false }, and with
+  //   another message is someone else's merge: null.
+  // Else { onto: the first parent }. g is the repo's git (output, or null).
+  kitMergeOf(g, tip, head, message, file, cwd) {
     const norm = (m) => String(m ?? '').split('\n').map((l) => l.trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
     const parents = (g(['rev-list', '--parents', '-n', '1', tip]) ?? '').trim().split(' ').slice(1);
     if (parents.length !== 2 || parents[1] !== head) return null;
     if (g(['merge-base', '--is-ancestor', head, parents[0]]) !== null) return null;
-    if (norm(g(['log', '-1', '--format=%B', tip])) !== norm(message)) return null;
-    if (!recurringRegistry.landingsOf(file).some((x) => x.merge === tip && x.onto === parents[0])) return { lookalike: `no merge ${tip.slice(0, 12)} onto ${parents[0].slice(0, 12)} in ${path.relative(mainRoot, file)}` };
+    if (!recurringRegistry.landingsOf(file).some((x) => x.merge === tip && x.onto === parents[0])) {
+      if (norm(g(['log', '-1', '--format=%B', tip])) !== norm(message)) return null;
+      return { lookalike: `no merge ${tip.slice(0, 12)} onto ${parents[0].slice(0, 12)} in ${path.relative(mainRoot, file)}`, recorded: false };
+    }
     return { onto: parents[0] };
   },
   // words that start with the label Yes, read as --choice and --read read a label: any case

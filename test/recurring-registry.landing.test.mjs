@@ -783,3 +783,33 @@ test('A15 landing: forge git, with merge.log=true in the repo\'s config, a code 
     assert.equal(json(T.ok(['recurring', 'show', 'aa', '--json'])).registered?.qid, q, 'registered through the answer');
   } finally { T.done(); }
 });
+
+// ---- a recorded merge is adopted whatever its message, and only with the tree merge builds (final-16 F1, F2) ----
+const RECORDED_TREE = (tip) => new RegExp(`main's tip ${tip.slice(0, 12)} is a landing merge recorded for this head, but not the tree the kit's merge of its parents builds: not the kit's own landing; nothing logged`);
+const REC_RECORDED_TREE = (tip) => new RegExp(`home's main tip ${tip.slice(0, 12)} is a records merge recorded for them, but not the tree the kit's merge of its parents builds: not the kit's own records merge; nothing logged`);
+
+test('A15 landing: forge git, a code push killed at the timeout that origin then takes, and the PR text edited before the rerun: the recorded merge is adopted whatever its message, and its act logged once (final-16 F1, H16-1)', { timeout: 300000 }, () => {
+  const T = setup('a15-h16-1');
+  try {
+    const q = T.yes({ recurring: { aa: check() } });
+    T.jobsChore('pre', () => ({ aa: check() }));
+    const main0 = T.g(['rev-parse', 'refs/heads/main'], T.org);
+    const hook = slowPreReceive(T.org);
+    const before = T.acts().length;
+    let r;
+    try {
+      r = T.merge('pre', ['--approved', q], { DEVTEAM_GIT_TIMEOUT_MS: PRE_TIMEOUT });
+      assert.notEqual(refMoves(T.org, 'main', main0), main0, 'origin took the push after the kill');
+    } finally { fs.rmSync(hook, { force: true }); }
+    refused(r, MAYBE);
+    // the supervisor adds a Known limits line to the PR text before the rerun: the message no longer matches
+    write(path.join(T.old, 'docs/devteam/run/pr/chore-pre.md'), '# chore-pre: jobs\n\n## One-way doors\n\nNone.\n\n## Known limits\n\nnone\n');
+    const r2 = T.merge('pre', ['--approved', q]);
+    passes(r2);
+    assert.match(r2.text, new RegExp(`in the kit's own landing merge [0-9a-f]{12}, with no act logged[^\\n]*checking it onto ${main0.slice(0, 12)}`));
+    const added = T.acts().slice(before);
+    assert.equal(added.length, 1, JSON.stringify(added));
+    assert.equal(added[0].approved_by, q);
+    assert.equal(json(T.ok(['recurring', 'show', 'aa', '--json'])).registered?.qid, q, 'registered through the answer');
+  } finally { T.done(); }
+});
