@@ -8520,10 +8520,16 @@ function cmdAnswer() {
   if (turn && v.class === 'recurring-edit' && !recurringRegistry.saysYes(turn.said)) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner's words there don't start with Yes ("${String(turn.said).slice(0, 80)}"): only the owner's own Yes approves a job change; ask back in its thread`);
   // and never once the owner has written again after it in its thread: their next turn may take it
   // back ("Wait, no"), so the Yes is shown again and their next turn taken (final-14b F3). A turn in
-  // the same millisecond counts as after it.
+  // the same millisecond counts as after it. Only a later owner turn not bound elsewhere counts
+  // (d-20261121-055611227-supervisor, final-15b F2): one that turnBinds binds to another question
+  // the supervisor showed in the thread (of any class), or that another question's answer cites, is
+  // the owner answering that question, not taking this Yes back.
   if (turn && v.class === 'recurring-edit') {
     const u = logGet(turn.turn);
-    const later = u ? logObjects('turn').filter((x) => x.thread === u.thread && x.id !== u.id && x.created_by === 'owner' && String(x.created_at ?? '') >= String(u.created_at ?? '')).sort(byTime).pop() : null;
+    const shownHere = u ? [...new Set(logObjects('turn').filter((x) => x.thread === u.thread && x.created_by === 'supervisor').flatMap((x) => [x.question, ...(Array.isArray(x.refs) ? x.refs : []).filter((r) => typeof r === 'string' && r.startsWith('question:')).map((r) => r.slice('question:'.length))]).filter((q) => typeof q === 'string' && q && q !== id))] : [];
+    const cited = new Set(logObjects('question').filter((q) => q.id !== id && typeof q.turn === 'string').map((q) => q.turn));
+    const boundElsewhere = (x) => cited.has(x.id) || shownHere.some((q) => !recurringRegistry.turnBinds(x, q));
+    const later = u ? logObjects('turn').filter((x) => x.thread === u.thread && x.id !== u.id && x.created_by === 'owner' && String(x.created_at ?? '') >= String(u.created_at ?? '') && !boundElsewhere(x)).sort(byTime).pop() : null;
     if (later) die(`--from-turn ${turn.turn}: ${id} is a recurring-edit question, and the owner wrote again after that turn (${later.id}): their later words may take the Yes back; show it again (thread reply <t-id> "…" --refs question:${id}) and take their next turn`);
   }
   // and only the owner's very next turn after the supervisor's turn that shows it, so a Yes said to

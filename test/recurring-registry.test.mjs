@@ -1074,6 +1074,51 @@ test('A5: a recurring-edit Yes is refused once the owner has written again after
   } finally { T.done(); }
 });
 
+test('A5: a later owner turn bound to another question shown in the thread, or cited by its answer, doesn\'t block a recurring-edit Yes; a retraction still does (final-15b F2, H3)', () => {
+  const T = setup('turn-bound');
+  try {
+    const tAsk = (tid, name, job) => { const r = T.run(['thread', 'ask', tid, '--class', 'recurring-edit', '--question', `Add ${name}?`, '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { [name]: job } })]); passes(r); return QID.exec(r.out)[0]; };
+    const pAsk = (tid, words) => { const r = T.run(['thread', 'ask', tid, '--question', words, '--recommendation', 'Yes']); passes(r); return QID.exec(r.out)[0]; };
+    const say = (tid, w) => T.ok(['thread', 'say', tid, w], {}).split('\n')[0];
+    const job = (n) => check({ title: `${n} job`, run: `echo ${n}` });
+    // H3: q1, y1, then q2 (a recurring-edit question), y2; q2 recorded from y2, then q1 from y1
+    const t1 = T.ok(['thread', 'new', 'Jobs?', '--title', 'Jobs'], {}).split('\n')[0];
+    const q1 = tAsk(t1, 'a1', job('a1'));
+    const y1 = say(t1, 'Yes');
+    const q2 = tAsk(t1, 'a2', job('a2'));
+    const y2 = say(t1, 'Yes');
+    passes(T.run(['answer', q2, 'Yes', '--from-turn', y2]));
+    passes(T.run(['answer', q1, 'Yes', '--from-turn', y1]));
+    // the same with q2 a plain question, and q1 recorded first: y2 is bound to q2 by the turn that showed it
+    const t2 = T.ok(['thread', 'new', 'Jobs 2?', '--title', 'Jobs 2'], {}).split('\n')[0];
+    const q3 = tAsk(t2, 'a3', job('a3'));
+    const y3 = say(t2, 'Yes');
+    const q4 = pAsk(t2, 'Shall I merge kit-200 now?');
+    const y4 = say(t2, 'Yes');
+    passes(T.run(['answer', q3, 'Yes', '--from-turn', y3]));
+    passes(T.run(['answer', q4, 'Yes', '--from-turn', y4]));
+    // a plain q6 whose Yes came after a reply (so the showing turn doesn't bind it), recorded from it:
+    // its answer line cites that turn, so it doesn't block q5's Yes
+    const t3 = T.ok(['thread', 'new', 'Jobs 3?', '--title', 'Jobs 3'], {}).split('\n')[0];
+    const q5 = tAsk(t3, 'a5', job('a5'));
+    const y5 = say(t3, 'Yes');
+    const q6 = pAsk(t3, 'Shall I restart the dashboard?');
+    T.ok(['thread', 'reply', t3, 'It is safe: nothing is running.']);
+    const y6 = say(t3, 'Yes, go on');
+    passes(T.run(['answer', q6, 'Yes', '--from-turn', y6]));
+    passes(T.run(['answer', q5, 'Yes', '--from-turn', y5]));
+    // a retraction bound to nothing still blocks
+    const t4 = T.ok(['thread', 'new', 'Jobs 4?', '--title', 'Jobs 4'], {}).split('\n')[0];
+    const q7 = tAsk(t4, 'a7', job('a7'));
+    const y7 = say(t4, 'Yes');
+    const q8 = tAsk(t4, 'a8', job('a8'));
+    const y8 = say(t4, 'Yes');
+    const back = say(t4, 'Wait, no. Not the first one.');
+    refused(T.run(['answer', q7, 'Yes', '--from-turn', y7]), new RegExp(`--from-turn ${y7}: ${q7} is a recurring-edit question, and the owner wrote again after that turn \\(${back}\\)`));
+    refused(T.run(['answer', q8, 'Yes', '--from-turn', y8]), new RegExp(`the owner wrote again after that turn \\(${back}\\)`));
+  } finally { T.done(); }
+});
+
 test('A5: a planted line on a channel the kit never writes for an owner\'s answer lands nothing (final-14b F7)', () => {
   const T = setup('turn-channel');
   try {
