@@ -229,6 +229,18 @@ function itemsOf(data, now = Date.now()) {
   return { items, keep: (f) => items.filter((x) => vctx.libraryKeep(x, f)).map((x) => x.id) };
 }
 
+// The tab's history as the browser has it (its own record, not the page's): each entry's head (its URL's
+// hash, or the URL when it has none) and which is current.
+async function tabHistory(p) {
+  const h = await p.send('Page.getNavigationHistory');
+  return { at: h.currentIndex, heads: h.entries.map((e) => { try { return new URL(e.url).hash || e.url; } catch { return e.url; } }) };
+}
+// what a timeout reports of the page: its head and the tab's history (kit-775: a Back that never arrived
+// said only that it timed out); each read given 3 s, so a hung page can't hold the report back
+async function whereNow(p) {
+  const in3s = (x) => Promise.race([x, new Promise((_, no) => setTimeout(() => no(new Error('no answer in 3 s')), 3000).unref())]);
+  try { const h = await in3s(tabHistory(p)); return `; the page at ${JSON.stringify(await in3s(p.ev('location.hash')))}, the tab's history ${JSON.stringify(h.heads)} at ${h.at}`; } catch (e) { return `; the page unread: ${e.message}`; }
+}
 // a wait on a condition in the page
 const soonIn = (p, ms = 20000, server = null) => async (expr, what) => {
   const end = Date.now() + ms;
@@ -236,10 +248,22 @@ const soonIn = (p, ms = 20000, server = null) => async (expr, what) => {
     let v, err = null;
     try { v = await p.ev(expr); } catch (e) { err = e; }
     if (v) return v;
-    if (Date.now() > end) assert.fail(`timed out: ${what}${err ? `; last: ${err.message}` : ''}${server ? `; the server said, last: ${JSON.stringify(String(server()).slice(-600))}` : ''}`);
+    if (Date.now() > end) assert.fail(`timed out: ${what}${err ? `; last: ${err.message}` : ''}${await whereNow(p)}${server ? `; the server said, last: ${JSON.stringify(String(server()).slice(-600))}` : ''}`);
     await new Promise((r) => setTimeout(r, 50));
   }
 };
+// Back, as the owner's Back button goes: first the tab's history must hold `from` as its current entry with
+// `to` right below it (each entry the test made committed, nothing pushed after it), then one step back, then
+// the page at `to` (or, given `landed`, that expression true in the page). ms: how long the history may take.
+async function backTo(p, soon, from, to, what, landed = `location.hash === ${JSON.stringify(to)}`, ms = 20000) {
+  const end = Date.now() + ms;
+  for (let h = await tabHistory(p); !(h.heads[h.at] === from && h.heads[h.at - 1] === to); h = await tabHistory(p)) {
+    if (Date.now() > end) assert.fail(`${what}: the tab's history doesn't end ${JSON.stringify([to, from])}: ${JSON.stringify(h.heads)} at ${h.at}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  await p.ev('history.back()');
+  await soon(landed, what);
+}
 
 // The box (kit-92 T3): a page whose requests to http://<n>.box.localhost:<port>/ (Chrome sends *.localhost to
 // loopback; the dashboard answers only its own Host) are paused over a second DevTools connection (the helper's
@@ -413,6 +437,22 @@ test('the Library is one grid in kind order with no headers', { ...CHROME, timeo
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
+test('a wait that runs out says where the page is; Back first wants the history it expects (kit-775)', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { patch } = libraryFixture();
+  const { p, go } = await libraryOn(t, { init: dataPatchInit(patch) });
+  await go('#library');
+  const short = soonIn(p, 300);
+  await assert.rejects(short('false', 'never'), (e) => {
+    assert.match(e.message, /^timed out: never; the page at "#library", the tab's history \[.*"#library"\] at \d+$/);
+    return true;
+  });
+  await assert.rejects(backTo(p, short, '#library', '#nowhere', 'a Back', undefined, 300), (e) => {
+    assert.match(e.message, /^a Back: the tab's history doesn't end \["#nowhere","#library"\]: \[.*"#library"\] at \d+$/);
+    return true;
+  });
+  assert.equal(await p.ev('location.hash'), '#library', 'a Back refused for its history goes nowhere');
+});
+
 test('Kind and Goal ride in the hash', { ...CHROME, timeout: 300000 }, async (t) => {
   const { patch, ids } = libraryFixture();
   const { items, keep } = itemsOf(patch);
@@ -440,8 +480,7 @@ test('Kind and Goal ride in the hash', { ...CHROME, timeout: 300000 }, async (t)
   await soon(idsAre(keep({ kind: 'diagram', goal: g })), "only the goal's diagrams");
   assert.deepEqual(await p.ev(`[${ctl('goal')}.value, ${ctl('kind')}.value]`), [g, 'diagram'], 'the selects show the filters');
   // Back restores the Diagram-only set
-  await p.ev('history.back()');
-  await soon("location.hash === '#library?kind=diagram'", 'back: the kind alone');
+  await backTo(p, soon, await p.ev('location.hash'), '#library?kind=diagram', 'back: the kind alone');
   await soon(idsAre(diagrams), 'back: the Diagram cards');
   assert.equal(await p.ev(`${ctl('goal')}.value`), '', 'back: All goals');
   // the goal alone
@@ -1486,8 +1525,7 @@ test('a list open when the viewer closes holds no Escape', { ...CHROME, timeout:
   await soon(frameIs(`/artifact/wt/${VERS_WT}/${VERS}/`), 'the draft in the viewer');
   await p.click('#av-ver');
   await soon(`${LIST_OPEN} && ${OPTS}.length === 4`, 'the list open');
-  await p.ev('history.back()');
-  await soon(`!${VIEWING} && location.hash.startsWith('#library')`, 'the viewer closed by Back');
+  await backTo(p, soon, await p.ev('location.hash'), '#library', 'the viewer closed by Back', `!${VIEWING} && location.hash.startsWith('#library')`);
   assert.equal(await p.ev(LIST_OPEN), false, 'the list closed with it');
   // the page's own Escape listeners hear the next Escape
   await p.ev("window.__esc = 0; document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.__esc++; }); document.activeElement?.blur?.(); true");
