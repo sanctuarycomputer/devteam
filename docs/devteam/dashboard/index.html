@@ -759,6 +759,10 @@ try {
 /* css-misc start */
   /* a key's tooltip on keyboard focus (the mouse has its title); Escape blurs it */
   .props dt[title] { position: relative; }
+  /* the fleet line's what-is-left, on focus or a tap (the mouse has its title): one box on the page's top layer, placed by fleetLeftPlace, so no strip clips it and nothing moves */
+  .fleet-state .fleet-left { cursor: help; text-decoration: underline dotted; }
+  #fleet-left-pop { position: fixed; z-index: 1000; box-sizing: border-box; width: min(280px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow-y: auto; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); }
+  #fleet-left-pop[hidden] { display: none; }
   .props dt[title]:focus-visible::after { content: attr(title); position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); white-space: normal; }
   .drawer-body .psect { margin: 0 0 12px; }
   .drawer-body .psect-body > :first-child { margin-top: 0; }
@@ -3980,12 +3984,15 @@ async function reviewDecline(id, note, errId, btn) {
   clearTimeout(me.saveTimer); me.pending = null; RV = null; openReview(location.hash.slice(1));
 }
 
-// A hold's state in words. Parking and draining are transitions, shown as such everywhere until they
-// finish; a goal the fleet op holds finishes only when the fleet is ready to move (fleet status).
+// A hold's state in words. Parking and draining are transitions, shown until that goal's own sessions
+// have settled. A goal whose sessions all have is Parked (or Drained) even while the fleet as a whole
+// isn't ready to move yet: what is still left for the move (the log landing, a session of another goal)
+// is the fleet line's to say, with what it is, not every goal card's (one unsettled session used to
+// turn every card into Parking… for days).
 const HOLD_STATE_WORDS = { running: 'Running', draining: 'Draining…', drained: 'Drained', parking: 'Parking…', parked: 'Parked', 'let go': 'Let go' };
+const fleetMoveReady = () => !!(FLEET.data && FLEET.data.ready);
 function holdState(h) {
   if (!h) return 'running';
-  if (h.fleet && ['parked', 'drained'].includes(h.state) && !(FLEET.data && FLEET.data.ready)) return h.state === 'parked' ? 'parking' : 'draining';
   return h.state;
 }
 /* goal-block start */
@@ -4025,7 +4032,7 @@ function goalState(g, R, openQs) {
   if (!h || h.mode === 'run' || h.mode === 'let-go') return s;
   const st = holdState(h);
   const words = HOLD_STATE_WORDS[st] || st;
-  const running = h.running.length ? ` (${h.running.length} ${h.mode === 'park' ? 'still settling' : 'still running'})` : st !== h.state ? ' (the fleet is still getting ready to move)' : '';
+  const running = h.running.length ? ` (${h.running.length} ${h.mode === 'park' ? 'still settling' : 'still running'})` : h.fleet && ['parked', 'drained'].includes(st) && FLEET.data && !fleetMoveReady() ? ' (the fleet isn\u2019t ready to move yet)' : '';
   const why = `${h.fleet ? 'the whole fleet' : h.by === 'supervisor' ? 'the supervisor' : 'you'}${h.reason ? `: ${esc(h.reason)}` : ''}`;
   return { ...s, label: `${words}${running} · ${s.label}`, tone: h.mode === 'park' ? 'high' : 'medium', next: `${h.mode === 'drain' ? 'Draining: what is running finishes and merges; nothing new starts' : 'Parked: its sessions stopped with their work pushed and a handoff; nothing starts and nothing merges'} (set by ${why}). ${s.next || ''}` };
 }
@@ -4136,13 +4143,49 @@ function fleetStateLine(f, st) {
   f = f || {};
   const settled = !!(st && st.ready);
   const words = f.mode === 'park' ? (settled ? 'parked' : 'parking…') : f.mode === 'drain' ? (settled ? 'drained' : 'draining…') : f.op ? 'partly held (a goal was set apart after the fleet op)' : 'running';
-  return `<b>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
+  // not ready yet: what is left (fleet status's blockers, each up to its first parenthesis) rides on
+  // the line's hover, so a park that stalls says on what without growing the line (it sits under the
+  // switch, which must not move)
+  // (from the last good answer only: after a failed check it would be old). It takes focus (Tab, or a
+  // tap on a phone) and shows on focus too, and screen readers hear it in its label.
+  const left = (f.mode === 'park' || f.mode === 'drain') && !settled && !FLEET.error && st && Array.isArray(st.blockers) && st.blockers.length ? st.blockers : null;
+  const leftWords = left ? `Left before the move: ${left.map((b) => String(b).split(/ \(|: run /)[0].slice(0, 120)).join('; ')}` : '';
+  const tip = left ? ` class="fleet-left" tabindex="0" title="${esc(leftWords)}" aria-label="${esc(`${words}. ${leftWords}`)}"` : '';
+  return `<b${tip}>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
 }
 // Every fleet slot on the page: the sidebar's ([data-fleet-slot="switch"] and "state"), and any other
 // page's copies with the same attribute. A slot is written only when its HTML changed (against the last
 // string written to it: innerHTML comes back re-serialised, as disabled="" or ' for &#39;), so focus,
 // a pending confirm and a click in progress stay; a rewrite keeps focus on the same button (the confirm is Park's), since
 // the binder's Escape needs focus inside the switch.
+// The fleet line's what-is-left for a keyboard or a tap: a box on the body, kept inside the window,
+// below the word or above it when there's no room.
+function fleetLeftPlace() {
+  const el = document.activeElement?.closest?.('.fleet-left');
+  let pop = document.getElementById('fleet-left-pop');
+  if (!el) { if (pop) pop.hidden = true; return; }
+  if (!pop) { pop = document.createElement('div'); pop.id = 'fleet-left-pop'; pop.setAttribute('role', 'tooltip'); document.body.appendChild(pop); }
+  pop.textContent = el.title;
+  pop.hidden = false;
+  const at = el.getBoundingClientRect(), box = pop.getBoundingClientRect(), W = document.documentElement.clientWidth, H = window.innerHeight;
+  pop.style.left = `${Math.max(8, Math.min(at.left, W - box.width - 8))}px`;
+  // under the switch too, when the word sits beside it (the phone's strip)
+  const sw = el.closest('#side-state') ? document.getElementById('side-fleet')?.getBoundingClientRect() : null;
+  const below = Math.max(at.bottom, sw?.bottom ?? 0) + 6;
+  pop.style.top = `${below + box.height <= H - 8 ? below : Math.max(8, at.top - 6 - box.height)}px`;
+}
+document.addEventListener('focusin', fleetLeftPlace);
+document.addEventListener('focusout', () => setTimeout(fleetLeftPlace));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.activeElement?.closest?.('.fleet-left')) document.activeElement.blur(); });
+window.addEventListener('resize', fleetLeftPlace);
+// the word scrolled with its strip or page: the box follows it, and closes once it is out of the window
+window.addEventListener('scroll', (e) => {
+  const pop = document.getElementById('fleet-left-pop'), el = document.activeElement?.closest?.('.fleet-left');
+  if (!el || !pop || pop.hidden || e.target === pop) return;
+  const r = el.getBoundingClientRect();
+  if (r.right < 0 || r.left > document.documentElement.clientWidth || r.bottom < 0 || r.top > innerHeight) el.blur();
+  else fleetLeftPlace();
+}, true);
 const FLEET_DRAWN = new WeakMap();
 function drawFleet() {
   const f = DATA?.fleet || {};
@@ -4155,10 +4198,13 @@ function drawFleet() {
     if (want === undefined || FLEET_DRAWN.get(el) === want) continue;
     const ae = document.activeElement;
     const had = ae && el.contains(ae) ? ae.dataset.fleet : null;
+    const hadLeft = !!(ae && el.contains(ae) && ae.classList.contains('fleet-left'));
     el.innerHTML = want;
     FLEET_DRAWN.set(el, want);
+    if (hadLeft) el.querySelector('.fleet-left')?.focus({ preventScroll: true });
     if (had) el.querySelector(`[data-fleet="${CSS.escape(had)}"]`)?.focus({ preventScroll: true });
   }
+  fleetLeftPlace();
 }
 // One fleet op through press(): the overlay shows the mode at once, the busy line holds the switch
 // while the request is out, and a refusal shows in the switch with the mode the data's again.
@@ -5072,7 +5118,7 @@ const homeLink = (kind, id) => {
   const pg = shellPages().find((x) => x.id === page);
   return pg ? ` <a class="linkish" href="#${esc(pg.id)}">${esc(pg.title)}</a>` : '';
 };
-const GOVERNED = /^docs\/devteam\/(governance|process)\/|(^|\/)strategy\.md$/;
+const GOVERNED = /^docs\/devteam\/(governance|process)\/|(^|\/)strategy\.md$|^docs\/devteam\/project\/(self|exterior)\.md$/;
 function howItChanges(kind, rec = {}) {
   const id = rec.id;
   const tip = KEY_TIPS['How it changes'];
@@ -6505,6 +6551,39 @@ function refetchFile(url) {
   FILE_FLIGHT.set(url, pr);
   return pr;
 }
+// The Self's or the Exterior's block as lists (kit-137), from its dashboard shape (log.schema.json $defs.self.dashboard,
+// $defs.exterior.dashboard): HTML in which every value from the block is escaped. null is not drafted yet. The
+// Exterior's entities by relation, in the schema's order (other by its word), each in the data's order with its
+// signals by score, highest first.
+function worldBlocks(kind, block) {
+  if (block === null) return `<p>The ${kind === 'self' ? 'Self is not drafted yet: main has no self.md' : 'Exterior is not drafted yet: main has no exterior.md'} that passes its check.</p>`;
+  const list = (xs) => (Array.isArray(xs) ? xs : []);
+  const ul = (items) => `<ul>${items.length ? items.join('') : '<li>None</li>'}</ul>`;
+  const sec = (h, body) => `<h3>${esc(h)}</h3>${body}`;
+  const b = block && typeof block === 'object' ? block : {};
+  if (kind === 'self') {
+    return sec('What it is', `<p>${esc(b.what)}</p>`) + sec('What it makes', `<p>${esc(b.makes)}</p>`)
+      + sec('Its parts', ul(list(b.parts).map((x) => `<li>${esc(x?.name)}: ${esc(x?.what)}${list(x?.code).map((c) => ` <code>${esc(c)}</code>`).join('')}</li>`)))
+      + sec('What it controls', ul(list(b.controls).map((x) => `<li>${esc(x)}</li>`)))
+      + sec('What it touches but does not control', ul(list(b.not).map((x) => `<li>${esc(x)}</li>`)));
+  }
+  const ents = list(b.entities).filter((e) => e && typeof e === 'object');
+  if (!ents.length) return '<p>None</p>';
+  const REL = [['serves', 'It serves'], ['depends_on', 'It depends on'], ['builds_on_it', 'Builds on it'], ['alternative', 'Its alternatives'], ['collaborates', 'It works with'], ['governs', 'Governs it'], ['affects', 'It affects']];
+  const KIND = { organisation: 'an organisation', group: 'a group', work: 'a work' };
+  const score = (s) => (Number.isFinite(s?.score) ? s.score : 0);
+  const entity = (e) => {
+    const sigs = list(e.signals).filter((s) => s && typeof s === 'object').sort((x, y) => score(y) - score(x));
+    return `<li><b>${esc(e.name)}</b>, ${esc(Object.hasOwn(KIND, e.kind) ? KIND[e.kind] : e.kind)}: ${esc(e.matters)}<ul>${sigs.length ? sigs.map((s) => `<li>${esc(s.what)}</li>`).join('') : '<li>None</li>'}</ul></li>`;
+  };
+  const known = new Set(REL.map(([r]) => r));
+  const groups = REL.map(([r, h]) => [h, ents.filter((e) => e.relation === r)]);
+  // other, and a relation this page doesn't know, by its word in first-seen order
+  const words = [];
+  for (const e of ents) if (!known.has(e.relation)) { const w = typeof e.relation_word === 'string' && e.relation_word ? e.relation_word : ''; if (!words.includes(w)) words.push(w); }
+  for (const w of words) groups.push([w ? `Other: ${w}` : 'Other', ents.filter((e) => !known.has(e.relation) && ((typeof e.relation_word === 'string' && e.relation_word) || '') === w)]);
+  return groups.filter(([, es]) => es.length).map(([h, es]) => sec(h, `<ul>${es.map(entity).join('')}</ul>`)).join('');
+}
 function openFile(params) {
   const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref'), repo = params.get('repo');
   drawerFor('file', path, params);
@@ -6516,14 +6595,31 @@ function openFile(params) {
   const tail = historySection(p, path);
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
   if (['html', 'pdf'].includes(ext)) return showDrawer(`${head}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open in a new tab</a></p>${tail}`);
+  // The project's self.md or exterior.md read at main (kit-137): its fenced block is drawn as lists from DATA's
+  // dashboard block (self@1, exterior@1), main's like DATA; null there is not drafted yet, and a key DATA lacks
+  // (a server that doesn't carry it) leaves the file as any Markdown file. The project's: the path the page
+  // assumes for the strategy until a governance listing is read, then one that listing shows in its Project section.
+  const wk = ref || repo || ext !== 'md' ? undefined : ['self', 'exterior'].find((k) => (GOV.files
+    ? GOV.files.some((f) => f?.group === 'project' && f.path === path) && (path === `${k}.md` || path.endsWith(`/${k}.md`))
+    : path === `docs/devteam/project/${k}.md`));
+  const wb = wk && DATA && Object.hasOwn(DATA, wk) ? worldBlocks(wk, DATA[wk]) : null;
   const txt = FILES.get(url);
   if (txt === undefined) { refetchFile(url); return showDrawer(`${head}<p class="loading">Loading…</p>${tail}`); }
-  if (typeof txt !== 'string') return showDrawer(`${head}<p class="err">${esc(txt.error)}</p>${tail}`);
+  if (typeof txt !== 'string') return showDrawer(`${head}${wb !== null && DATA[wk] === null ? `<div class="viewer"><div class="md">${wb}</div></div>` : `<p class="err">${esc(txt.error)}</p>`}${tail}`);
   const where = `<code>${esc(path)}</code>${ref ? ` at <code>${esc(ref)}</code>` : ''}`;
   // Markdown renders (sanitized: agents write these files) with a toggle back to the raw text.
   const isMd = ['md', 'markdown'].includes(ext) && window.marked && window.DOMPurify;
   const mode = (() => { try { return localStorage.getItem('devteam.mdview') || 'rendered'; } catch { return 'rendered'; } })();
-  const rendered = isMd ? DOMPurify.sanitize(marked.parse(txt, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : '';
+  let rendered = isMd ? DOMPurify.sanitize(marked.parse(txt, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : '';
+  if (isMd && wb !== null) {
+    // the lists in the block's place (after the sanitizer: they are built from escaped strings only), else after the prose
+    const doc = document.createElement('template'), lists = document.createElement('template');
+    doc.innerHTML = rendered;
+    lists.innerHTML = wb;
+    const pre = doc.content.querySelector(`pre > code.language-${wk}`)?.parentElement;
+    if (pre) pre.replaceWith(lists.content); else doc.content.append(lists.content);
+    rendered = doc.innerHTML;
+  }
   if (isMd) AFTER.push(() => renderMermaid($('drawer-body').querySelector('.md')));
   showDrawer(`${head}
     <div class="viewbar"><span class="grow">${where}</span>${isMd ? `<span class="seg2" role="group" aria-label="View"><button type="button" data-mdview="rendered" aria-pressed="${mode === 'rendered'}">Rendered</button><button type="button" data-mdview="raw" aria-pressed="${mode === 'raw'}">Raw</button></span>` : ''}</div>
@@ -7609,11 +7705,33 @@ function markAnswered(id, text) {
 }
 
 /* preview-cards start */
-// A preview's link for where this page is. Through the gateway the dashboard is on <port>.<box>
-// and the preview on <name>.<box>; elsewhere it is 127.0.0.1:<port>, the owner's own machine.
-function previewHere(loc, served) {
-  const m = served ? /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(loc?.host || '') : null;
-  return m ? { proto: loc.protocol, box: m[2] } : null;
+// project-hosts@1's label rule, with its reserved labels.
+const PROJECT_LABEL = /^(?!\d+$)(?!(?:term|public|www)$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+// Who this dashboard is: /api/hello's answer; until it comes (or when it fails) the project the Library
+// names; else, on a page the gateway marked as served (only it can set x-devteam-previews), the host's
+// first label. The last two have no port.
+const pageHello = (loc) => {
+  const h = typeof HELLO === 'undefined' ? null : HELLO;
+  if (h?.name) return h;
+  const n = typeof DATA === 'undefined' ? null : DATA?.library?.public?.project;
+  if (n) return { name: n, port: null };
+  const served = typeof PREVIEWS !== 'undefined' && PREVIEWS;
+  return served ? { name: String(loc?.host ?? '').split('.')[0], port: null } : null;
+};
+// Where this page is on a box: <port>.<box>, or <project>.<box> when the first label is this
+// project's own name (so the box's own name, or another project's, is never read as this one).
+function hostHere(loc, name) {
+  const host = loc?.host || '';
+  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  if (m) return { box: m[2] };
+  const n = /^([^.]+)\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  return n && n[1] === name && PROJECT_LABEL.test(name) ? { box: n[2], named: true } : null;
+}
+// A preview's link for where this page is. Through the gateway the dashboard is on <port>.<box> or
+// <project>.<box> and the preview on <name>.<box>; elsewhere it is 127.0.0.1:<port>, the owner's own machine.
+function previewHere(loc, served, hello = pageHello(loc)) {
+  const h = served ? hostHere(loc, hello?.name) : null;
+  return h ? { proto: loc.protocol, box: h.box } : null;
 }
 const previewUrl = (me, p) => (me ? `${me.proto}//${p.name}.${me.box}/` : `http://127.0.0.1:${p.port}/`);
 // The Library card: what the state is and what the owner can do about it.
@@ -7635,11 +7753,23 @@ function previewLinkHtml(l, me, esc) {
 // Publishing, as a landed card shows it. The log's newest artifact-publish line (a.published) says
 // what the owner asked for, or what something wrote for them; the gateway's header says what the
 // box serves, and that is the truth. A forged line can only make a card ask, and drift says when
-// the line's tree isn't main's. Through the gateway this page is on <port>.<box>.
-function publicHere(loc, lib) {
-  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(loc?.host || '');
-  return m ? { proto: loc.protocol, port: Number(m[1]), box: m[2], project: lib?.public?.project ?? null, root: lib?.public?.root ?? null } : null;
+// the line's tree isn't main's. Through the gateway this page is on <port>.<box> or <project>.<box>.
+// This block loads alone in tests, so it reads the host itself; test/dashboard-host-links.test.mjs holds
+// it to previewHere's answer on every project-hosts@1 label.
+const PUBLIC_LABEL = /^(?!\d+$)(?!(?:term|public|www)$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+function publicHere(loc, lib, hello = typeof pageHello === 'function' ? pageHello(loc) : null) {
+  const host = loc?.host || '';
+  const project = lib?.public?.project ?? null, root = lib?.public?.root ?? null;
+  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  if (m) return { proto: loc.protocol, port: Number(m[1]), box: m[2], project, root };
+  const name = hello?.name ?? project;
+  const n = /^([^.]+)\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  if (!n || n[1] !== name || !PUBLIC_LABEL.test(name)) return null;
+  // hello and the Library are read separately and can differ for a while: links name only this host's project
+  return { proto: loc.protocol, port: hello?.port ?? null, box: n[2], project: project === n[1] ? project : null, root, named: true };
 }
+// A link can be built: a project host's links name the project, so one with none in settings has none.
+const canPublish = (me) => !!me && (!me.named || !!me.project);
 function publicState(a, pub, me) {
   const rec = a.published || null;
   // main has changed since the recorded publish: what would go up is not what the record names
@@ -7649,15 +7779,16 @@ function publicState(a, pub, me) {
   // the box's copy is this project's only when it came from this checkout (a port can change)
   const ours = !!e && e.root === me.root;
   const served = ours && e.artifacts && Object.hasOwn(e.artifacts, a.slug) ? e.artifacts[a.slug] : null;
-  if (served) return { state: 'public', rec, drift, from: e.port !== me.port ? e.port : null, actions: [...(rec && served !== a.tree ? ['update'] : []), ...(rec ? ['copy'] : []), 'unpublish'] };
-  if (rec) return { state: 'not-live', rec, drift, from: null, actions: [drift ? 'review' : 'restore', 'forget'] };
+  if (served) return { state: 'public', rec, drift, from: me.port != null && e.port !== me.port ? e.port : null, actions: [...(rec && served !== a.tree ? ['update'] : []), ...(rec ? ['copy'] : []), 'unpublish'] };
+  if (rec) return { state: 'not-live', rec, drift, from: null, actions: canPublish(me) ? [drift ? 'review' : 'restore', 'forget'] : ['forget'] };
   return { state: 'none', rec, drift, from: null, actions: me.project ? ['publish'] : [] };
 }
-// The gateway's own pages, on the box's name; the public link, on public.<box>.
+// The gateway's own pages, on the box's name, by project on a project host and by port on <port>.<box>;
+// the public link, on the project's host, or on public.<box> from <port>.<box>.
 const publicLinks = (me) => ({
-  publish: (slugs) => `${me.proto}//${me.box}/public/publish?port=${me.port}${slugs.map((s) => `&slug=${encodeURIComponent(s)}`).join('')}`,
-  unpublish: (slug) => `${me.proto}//${me.box}/public/unpublish?port=${me.port}&project=${encodeURIComponent(me.project)}&slug=${encodeURIComponent(slug)}`,
-  page: (slug) => `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`,
+  publish: (slugs) => `${me.proto}//${me.box}/public/publish?${me.named ? `project=${encodeURIComponent(me.project)}` : `port=${me.port}`}${slugs.map((s) => `&slug=${encodeURIComponent(s)}`).join('')}`,
+  unpublish: (slug) => `${me.proto}//${me.box}/public/unpublish?${me.named ? '' : `port=${me.port}&`}project=${encodeURIComponent(me.project)}&slug=${encodeURIComponent(slug)}`,
+  page: (slug) => (me.named ? `${me.proto}//${me.project}.${me.box}/${encodeURIComponent(slug)}/` : `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`),
 });
 /* public-states end */
 /* library-items start */
@@ -7840,7 +7971,7 @@ function renderLibrary(lib) {
   // the gateway's pages open in a new tab this page can't later redirect
   const tab = (href, label) => `<a class="ghost" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
   const landed = (lib?.artifacts ?? []).filter((a) => a.at === 'main' && !a.error);
-  const notLive = me ? landed.filter((a) => publicState(a, PUBLIC, me).state === 'not-live') : [];
+  const notLive = canPublish(me) ? landed.filter((a) => publicState(a, PUBLIC, me).state === 'not-live') : [];
   const drifted = notLive.filter((a) => publicState(a, PUBLIC, me).drift).length;
   // Restore all in both cases (R4): what goes up is main's version, and the sentence says so
   const pubHead = !landed.length ? ''
@@ -8351,9 +8482,12 @@ async function helloLoad() {
   h = h && typeof h === 'object' ? h : null;
   const json = JSON.stringify(h);
   if (json === HELLO_JSON) return;
+  // who this dashboard is decides the Library's links, so a change of name or port redraws it
+  const moved = HELLO?.name !== h?.name || HELLO?.port !== h?.port;
   HELLO = h;
   HELLO_JSON = json;
   if (DATA) renderOverview();
+  if (DATA && moved && typeof PAGE_NOW !== 'undefined' && PAGE_NOW === 'library') renderLibrary(DATA.library);
 }
 // "2 min ago", as the hub says it
 function ovAgo(iso) {
@@ -11161,6 +11295,121 @@ if (!VIEWER && window.parent === window.top) {
     } catch (e) { reply({ ok: false, error: String(e?.message ?? e).slice(0, 300) }); }
   });
 }
+// Pull to refresh on a touch screen (kit-759), as iOS does it: at the very top of the page a finger
+// dragged down brings a spinner down after it, slower than the finger and slower still the further it
+// goes; let go once the finger has come PULL_AT px, the page reads its data again at once
+// (load({ force: true }), no reload) and the spinner spins until the read lands, then slides back up.
+// Let go short of that, it goes back and nothing is read. Touch events only, so never a mouse; and it
+// never starts with the page scrolled, on a text field or a canvas, inside a box that scrolls or a
+// layer fixed over the page (a panel, a drawer, the viewer), or while a pull's refresh is still going.
+// A frame (an artifact, a preview, a terminal) has its own document and never reaches this one. It
+// sits over the page and moves nothing on it. With reduced motion it keeps still where it stops, and
+// spins at the kit's slow pace. Not in a viewer tab, which has no dashboard to read.
+const pullRefresh = VIEWER ? null : (() => {
+  const PULL_AT = 70;   // the finger's travel that refreshes on release
+  const MAX = 120;      // what the spinner's travel tends to and never passes
+  const REST = 56;      // where it spins
+  const SIZE = 32;
+  const travel = (dy) => MAX * (1 - Math.exp(-Math.max(0, dy) / 160));
+  const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const el = document.createElement('div');
+  el.id = 'pull-refresh';
+  el.hidden = true;
+  el.setAttribute('aria-hidden', 'true');
+  el.style.cssText = `position: fixed; top: 0; left: 50%; z-index: 60; width: ${SIZE}px; height: ${SIZE}px; margin-left: ${-SIZE / 2}px; box-sizing: border-box; border-radius: 50%; background: var(--surface); border: 1px solid var(--line-2); box-shadow: 0 2px 8px rgba(0, 0, 0, .12); pointer-events: none; will-change: transform;`;
+  const ring = document.createElement('div');
+  ring.style.cssText = 'position: absolute; inset: 7px; border-radius: 50%; border: 2px solid var(--fg-2); border-right-color: transparent;';
+  el.append(ring);
+  document.body.append(el);
+  // idle, pulling (a finger down and moving it), refreshing (a read in flight), going (on its way back);
+  // at: how far the finger has come down
+  let state = 'idle', y0 = 0, x0 = 0, armed = false, at = 0;
+  // eased over the page's --dur, which reduced motion makes 0 ms (the page's own rule): no slide, no fade
+  const place = (y, { ease = false } = {}) => {
+    el.style.transition = ease ? 'transform var(--dur) var(--ease), opacity var(--dur) var(--ease)' : 'none';
+    el.style.transform = `translateY(${Math.round((still() ? REST : y) - SIZE)}px)`;
+  };
+  // the finger dy px down: the spinner travel(dy), its fade and its ring's turn how far to the threshold
+  const show = (dy) => {
+    at = dy;
+    el.hidden = false;
+    place(travel(dy));
+    const k = Math.min(1, Math.max(0, dy) / PULL_AT);
+    el.style.opacity = String(k);
+    ring.style.transform = `rotate(${Math.round(k * 270)}deg)`;
+  };
+  const away = () => {
+    state = 'going';
+    el.classList.remove('spinning');
+    ring.style.animation = '';
+    place(0, { ease: true });
+    el.style.opacity = '0';
+    // reduced motion: no slide to wait for, so hidden in this same task (a timer can land frames late)
+    if (still()) { el.hidden = true; state = 'idle'; return; }
+    // its transition's end, or a bound if it never comes
+    const done = () => { clearTimeout(bound); el.removeEventListener('transitionend', done); el.hidden = true; state = 'idle'; };
+    const bound = setTimeout(done, 600);
+    el.addEventListener('transitionend', done);
+  };
+  // what refuses a pull from where the finger is: a control that takes the touch, or a box between it
+  // and the page that scrolls or is fixed over it
+  const refused = (t) => {
+    if (!(t instanceof Element)) return true;
+    if (t.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), canvas')) return true;
+    for (let e = t; e && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+      const s = getComputedStyle(e);
+      if (s.position === 'fixed') return true;
+      if (/(auto|scroll)/.test(s.overflowY) && e.scrollHeight > e.clientHeight) return true;
+    }
+    return false;
+  };
+  const top = () => (document.scrollingElement?.scrollTop ?? scrollY) <= 0;
+  let hold = null; // the listeners on the touched element, for this touch
+  document.addEventListener('touchstart', (e) => {
+    hold?.abort();
+    armed = false;
+    // a second finger landing mid-pull cancels it
+    if (state === 'pulling') return away();
+    if (state !== 'idle' || e.touches.length !== 1 || !top() || refused(e.target)) return;
+    armed = true;
+    y0 = e.touches[0].clientY;
+    x0 = e.touches[0].clientX;
+    // a redraw can take the touched element out of the page, and its touch events then stop reaching
+    // document: hear them on the element too (move and release are safe to run twice for one event)
+    hold = new AbortController();
+    e.target.addEventListener('touchmove', move, { passive: false, signal: hold.signal });
+    e.target.addEventListener('touchend', release, { passive: true, signal: hold.signal });
+    e.target.addEventListener('touchcancel', release, { passive: true, signal: hold.signal });
+  }, { passive: true });
+  const move = (e) => {
+    if (!armed) return;
+    const dy = e.touches[0].clientY - y0, dx = e.touches[0].clientX - x0;
+    if (state === 'idle') {
+      // a pull is down, more than across, from the top: anything else is the page's own gesture
+      if (dy <= 0 || Math.abs(dx) > dy) { armed = false; return; }
+      state = 'pulling';
+    }
+    if (e.cancelable) e.preventDefault();
+    show(dy);
+  };
+  document.addEventListener('touchmove', move, { passive: false });
+  const release = async (e) => {
+    hold?.abort();
+    if (!armed) return;
+    armed = false;
+    if (state === 'idle') return;
+    if (e.type === 'touchcancel' || at < PULL_AT) return away();
+    state = 'refreshing';
+    place(REST, { ease: true });
+    el.style.opacity = '1';
+    el.classList.add('spinning');
+    ring.style.animation = `spin ${still() ? '2.5s' : '.7s'} linear infinite`;
+    try { await load({ force: true }); } catch (err) { console.error(err); } finally { away(); }
+  };
+  document.addEventListener('touchend', release, { passive: true });
+  document.addEventListener('touchcancel', release, { passive: true });
+  return { state: () => state };
+})();
 </script>
 </body>
 </html>

@@ -161,7 +161,9 @@ test('threads: records and the thread commands', async (t) => {
     const snap = F.snapLog();
     try {
       const have = JSON.parse(F.owner(['thread', 'list', '--json'])).length;
-      for (let i = 0; i < 200 - have; i++) F.hand('owner', { type: 'thread', title: `filler ${i}` }, 3600000 + i * 10); // 10 ms apart: ids carry the millisecond, and the loop itself takes time
+      for (let i = 0; i < 199 - have; i++) F.hand('owner', { type: 'thread', id: `t-20261109-120000${String(i).padStart(3, '0')}-owner`, title: `filler ${i}` }, 3600000 + i * 10); // the id from i, not the clock: a loop of about 10 ms would cancel a 10 ms step and repeat one
+      assert.equal(JSON.parse(F.owner(['thread', 'list', '--json'])).length, 199);
+      F.owner(['thread', 'new', 'the 200th']); // the last one allowed: a limit of 199 refuses it
       assert.equal(JSON.parse(F.owner(['thread', 'list', '--json'])).length, 200);
       assert.match(F.fails(['thread', 'new', 'one more']), /200 threads are open, the most a project keeps: resolve some first/);
     } finally { F.restoreLog(snap); }
