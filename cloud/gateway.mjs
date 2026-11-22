@@ -1791,6 +1791,7 @@ export function createGateway(opts = {}) {
   let portHost = new Map();
   let hubFrames = [];
   let listRead = false;
+  let listed = new Map();
   const takePreviews = (body) => {
     let list = null;
     try { list = JSON.parse(body).instances; } catch {}
@@ -1798,6 +1799,9 @@ export function createGateway(opts = {}) {
     const byPort = listedByPort(ok, BLOCK);
     const names = new Map();
     for (const [port, x] of byPort) if (typeof x.name === 'string' && HOST_LABEL.test(x.name) && !RESERVED_LABELS.includes(x.name)) names.set(x.name, [...(names.get(x.name) ?? []), { port, root: x.root, viewer: x.viewer === 1 }]);
+    // every name the list gives, host or not: an older page may be stored under one that can't be
+    listed = new Map();
+    for (const x of byPort.values()) if (typeof x.name === 'string') listed.set(x.name, (listed.get(x.name) ?? 0) + 1);
     projects = names;
     portHost = new Map([...names].filter(([, c]) => c.length === 1).map(([n, c]) => [c[0].port, projectOrigin(n)]));
     previews = previewLinks(ok, BLOCK, ownPort, ttydPort);
@@ -1850,6 +1854,9 @@ export function createGateway(opts = {}) {
     Promise.resolve(previewRefresh).catch(() => {}).then(() => refreshPreviews()).then(() => (listRead ? projects : null), () => null).then((v) => { clearTimeout(t); done(v); });
   });
   const sharedWhy = (name, from = projects) => (from.get(name)?.length > 1 ? `two listed projects share the name ${name}, so the box can't tell which one you mean: rename one (settings.md's project)` : null);
+  // Whether two listed instances give this name, whether or not it can be a host: what Unpublish asks
+  // (a-20261122-032256363), as of the newest list applied, which is at least as new as any proof.
+  const listedShared = (name) => (listed.get(name) ?? 0) > 1;
   // Why a page of this project can't be published now: no fresh list to prove the name is one
   // project's, or a name two share, by that list or the live one.
   const publishBlocked = (name, proved) => (!proved ? `the hub's list can't be read, so the box can't check that only one project is named ${name}: start the hub and try again` : sharedWhy(name, proved) || sharedWhy(name));
@@ -2892,7 +2899,7 @@ export function createGateway(opts = {}) {
         // Never refused: a page nobody could take down is worse. Without a fresh list proving the name
         // one project's, the box can't know which instance holds the record, so it tells none.
         const proved = await freshList(1000);
-        const shared = Boolean(sharedWhy(project, proved ?? projects));
+        const shared = listedShared(project);
         return page(res, PAGES.unpublish({ project, slug, port: shared || !proved ? null : port, title: a.title, url: hostable(project) ? publicAddress(project, slug) : null, shared }));
       }
       if (req.method === 'POST' && p === '/public/unpublish') {
@@ -2904,7 +2911,7 @@ export function createGateway(opts = {}) {
         // A shared name, or no fresh list to say it isn't: only the gateway's copy comes down, and no
         // instance is told, even one sent, since the box can't know which one holds the record.
         const proved = await freshList(1000);
-        const shared = Boolean(sharedWhy(project, proved ?? projects));
+        const shared = listedShared(project);
         const port = shared || !proved ? null : asked;
         const root = await pstore.serial(() => {
           const now = store.load();

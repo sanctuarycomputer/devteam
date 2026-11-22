@@ -4157,6 +4157,21 @@ on('C35c a hub that accepts and never answers: Unpublish still takes the page do
   assert.deepEqual(Object.keys(stored(b).alpha.artifacts), ['kept']);
   b.hub.release();
 });
+on('C35d Unpublish of a shared name that can\'t be a host: an older page under my.app, listed by two instances', { list: [row('my.app', P), row('my.app', P + 1, { root: '/srv/my.app2' })], published: { 'my.app': { root: '/srv/my.app', port: P, artifacts: { notes: art(), other: art() } } } }, async (b) => {
+  for (const ask of ['project=my.app&slug=notes', `port=${P}&project=my.app&slug=notes`]) {
+    const page = await b.get(null, `/public/unpublish?${ask}`, { cookie: COOKIE, headers: DOC });
+    assert.equal(page.status, 200, ask);
+    assert.match(page.body, /share the name my\.app, so this page may be the other project/, `${ask}: it says the name is shared`);
+    assert.doesNotMatch(page.body, /const ITEM = [^\n]*"port"/, `${ask}: the page sends no port`);
+  }
+  const seenBefore = [b.seen.get(P).length, b.seen.get(P + 1).length];
+  const r = await unpublishPost(b, { project: 'my.app', slug: 'notes', port: P });
+  const said = JSON.parse(r.body);
+  assert.deepEqual([r.status, said.ok, said.recorded, said.shared], [200, true, false, true]);
+  assert.match(said.note, /my\.app\/notes is down.*share that name/);
+  assert.deepEqual([b.seen.get(P).length, b.seen.get(P + 1).length], seenBefore, 'neither instance is asked anything, even with a port sent');
+  assert.deepEqual(Object.keys(stored(b)['my.app'].artifacts), ['other'], 'only that page');
+});
 on('C36 a publish from the page by ?project= writes the record and tells the instance', { published: {} }, async (b) => {
   const page = await b.get(null, '/public/publish?project=alpha&slug=fresh', { cookie: COOKIE, headers: DOC });
   const port = Number(/const PORT = (\d+);/.exec(page.body)?.[1]);
