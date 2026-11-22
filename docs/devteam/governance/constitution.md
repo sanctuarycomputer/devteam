@@ -8,6 +8,8 @@ Who decides what, how the supervisor earns the right to decide more, and the pri
 |---|---|---|
 | The goals, and changing them | owner | The supervisor drafts from what the owner says and interviews until each is unambiguous; only the owner approves one, on its reviewed design (`goal decide`: approve, refine with notes, or let go; `planning.md` §1). |
 | The strategy: why the project exists, who it serves, how it wins, its values and refusals (`project/strategy.md`) | owner | The supervisor drafts and proposes; `merge` lands a change to the file only with the owner's `strategy-change` answer. |
+| What the project is, what it makes or does, its parts and its boundary (`project/self.md`) | owner | The supervisor drafts each version; `merge` lands one only with the owner's `self-change` answer, in the chore its question names. |
+| What the project relates to, by relation to the Self (`project/exterior.md`) | owner | The supervisor drafts each version; `merge` lands one only with the owner's `exterior-change` answer, in the chore its question names. |
 | How much each goal matters to the project (its impact, 1 to 4) | supervisor | Judged against the strategy and logged as a `goal-impact` decision (`goal impact`). The owner corrects it with the value they give it (`correct <d-id> --impact n`), and that value stands. It orders the owner's Inbox, never the work: the goal's priority does that, and is the owner's. |
 | Product direction, what a feature is for | owner | The supervisor proposes; it never decides alone unless the owner delegated that class on the ladder (§2). |
 | One-way doors (§4) | owner | Asked with a recommendation; never a default. |
@@ -49,7 +51,7 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
     "production-remediation": { "ceiling": 2, "start": 1, "about": "restart, scale or roll back production with a reviewed remediation script" }
   },
   "constitutional": ["merge-word", "approve-feature-plan", "merge-chore", "worker-slots", "replan-within-feature", "add-ticket", "approve-spec", "approve-plan", "approve-design-change", "contract-ruling", "improvement-trial", "release-staging", "goal-readiness", "apply-default", "withdraw-question", "recovery", "carry-answer", "drain", "undrain", "goal-hold", "fleet-drain", "fleet-park", "fleet-undrain", "fleet-unpark", "registry-edit", "goal-impact", "orient-noise", "gate-add"],
-  "owner_only": ["one-way-door", "check-override", "governance-edit", "process-edit", "gate-change", "goal-change", "strategy-change", "goal-met", "registry-attest", "new-dependency", "artifact-publish", "recurring-edit"],
+  "owner_only": ["one-way-door", "check-override", "governance-edit", "process-edit", "gate-change", "goal-change", "strategy-change", "self-change", "exterior-change", "goal-met", "registry-attest", "new-dependency", "artifact-publish", "recurring-edit"],
   "owner_rules": ["gate-change"],
   "reasons": [
     { "id": "below-rung", "means": "the class is on the ladder and the supervisor isn't trusted to act alone yet" },

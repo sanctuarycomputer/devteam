@@ -1489,6 +1489,8 @@ const CLASS_WORDS = Object.freeze({
   'gate-change': 'Changing a check',
   'goal-change': 'Changing a goal',
   'strategy-change': 'Changing the strategy',
+  'self-change': 'Changing what the project is',
+  'exterior-change': 'Changing what the project relates to',
   'goal-met': 'Saying a goal is met',
   'registry-attest': 'Confirming the registry is complete',
   'new-dependency': 'Adding a new dependency',
