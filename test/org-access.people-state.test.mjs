@@ -335,9 +335,16 @@ const upgrade = (gw, host, headers, route = '/ws') => new Promise((resolve) => {
 const PV = 'brave-otter';
 const termWs = (gw, cookie) => upgrade(gw, `term.box.localhost:${gw.port}`, { origin: gw.term, cookie });
 const previewWs = (gw, cookie) => upgrade(gw, `${PV}.box.localhost:${gw.port}`, { origin: `http://${PV}.box.localhost:${gw.port}`, cookie }, '/');
+// The instance P as the project alpha, at alpha.<box> (project-hosts@1): a stand-in hub on HUB lists
+// it, so a signed-in request there finds its port. Resolves with a function that closes the hub.
+const listAlpha = async () => {
+  const s = http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'application/json' }); r.end(JSON.stringify({ hub: 1, instances: [{ devteam: 1, name: 'alpha', root: '/srv/alpha', port: P, viewer: 1 }] })); });
+  await new Promise((r, j) => { s.once('error', j); s.listen(HUB, '127.0.0.1', r); });
+  return () => { s.closeAllConnections?.(); return new Promise((r) => s.close(r)); };
+};
 // an artifact opened as a document on an instance's name: its 302 to a capability link
 const artifactLink = async (gw, cookie) => {
-  const r = await gw.req('GET', '/artifact/main/x/index.html', { on: P, cookie, headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
+  const r = await gw.req('GET', '/artifact/main/x/index.html', { on: 'alpha', cookie, headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
   assert.equal(r.status, 302, r.body);
   assert.match(r.headers.location, /^\/c\/\d+\.[\w-]+\.[\w-]+\/artifact\/main\/x\/index\.html$/);
   return r.headers.location;
@@ -380,10 +387,10 @@ test('org-access A9: a person signs in with their passkey into a session of thei
     assert.ok(row.methods[0].last_used, 'the method\'s last use');
     assert.equal(row.methods[0].data.signCount, 1, 'its counter, where it lives');
     assert.equal((await gw.req('GET', '/box.json', { cookie })).status, 200);
-    const inst = await gw.req('GET', '/', { on: P, cookie });
+    const inst = await gw.req('GET', '/', { on: 'alpha', cookie });
     assert.notEqual(inst.status, 401, 'an instance\'s name lets her past the session check');
     assert.notEqual(inst.status, 302);
-    assert.equal((await gw.req('GET', '/', { on: P, cookie: '' })).status, 401);
+    assert.equal((await gw.req('GET', '/', { on: 'alpha', cookie: '' })).status, 401);
     // her counter is checked where it lives: a replay of an old count is refused
     assert.equal((await gw.login(ana, { counter: 1 })).status, 400);
     // the owner's sign-in stays top-level, and names its passkey
@@ -429,10 +436,11 @@ test('org-access A9: sign-out ends only the signed-in person\'s session', async 
 
 test('org-access A9: a person\'s session opens artifact links, the terminal\'s socket and a preview\'s', async () => {
   const { gw, ana } = await people('a9-paths');
+  const unlist = await listAlpha();
   try {
     const cookie = await signIn(gw, ana);
     const link = await artifactLink(gw, cookie);
-    assert.notEqual((await gw.req('GET', link, { on: P, cookie: '' })).status, 403, 'capOk accepts a person\'s session');
+    assert.notEqual((await gw.req('GET', link, { on: 'alpha', cookie: '' })).status, 403, 'capOk accepts a person\'s session');
     assert.notEqual(await termWs(gw, cookie), 401, 'the terminal\'s upgrade passes the session check');
     assert.equal(await termWs(gw, undefined), 401, 'and without a session it is refused');
     assert.equal(await previewWs(gw, cookie), 503, 'a preview\'s upgrade gets past the session check to "no such preview"');
@@ -441,12 +449,13 @@ test('org-access A9: a person\'s session opens artifact links, the terminal\'s s
     // gateway's reclaim leaves it, until the next start's stamp check)
     gw.write({ ...gw.state(), passkeys: [], sessions: [] });
     assert.ok(gw.state().peopleSessions.length, 'Ana\'s entry is live');
-    assert.equal((await gw.req('GET', link, { on: P, cookie: '' })).status, 403, 'capOk needs the box claimed');
-  } finally { await gw.close(); }
+    assert.equal((await gw.req('GET', link, { on: 'alpha', cookie: '' })).status, 403, 'capOk needs the box claimed');
+  } finally { await gw.close(); await unlist(); }
 });
 
 test('org-access A9: a person whose row is deleted has every session and link refused at once', async () => {
   const { gw, ana, anaRow, ownerCookie } = await people('a9-removed');
+  const unlist = await listAlpha();
   try {
     const cookie = await signIn(gw, ana);
     const link = await artifactLink(gw, cookie);
@@ -454,8 +463,8 @@ test('org-access A9: a person whose row is deleted has every session and link re
     const s = gw.state();
     gw.write({ ...s, people: s.people.filter((p) => p.id !== anaRow.id) });
     assert.equal((await gw.req('GET', '/box.json', { cookie })).status, 401);
-    assert.equal((await gw.req('GET', '/', { on: P, cookie })).status, 401, 'an instance\'s name');
-    assert.equal((await gw.req('GET', link, { on: P, cookie: '' })).status, 403, 'the /c/ link issued before');
+    assert.equal((await gw.req('GET', '/', { on: 'alpha', cookie })).status, 401, 'an instance\'s name');
+    assert.equal((await gw.req('GET', link, { on: 'alpha', cookie: '' })).status, 403, 'the /c/ link issued before');
     assert.equal(await termWs(gw, cookie), 401);
     assert.equal(await previewWs(gw, cookie), 401);
     assert.equal((await gw.req('GET', '/box.json', { cookie: ownerCookie })).status, 200, 'the owner is still in');
@@ -464,7 +473,7 @@ test('org-access A9: a person whose row is deleted has every session and link re
     gw.write({ ...gw.state(), peopleSessions: [ghost.row] });
     assert.equal((await gw.req('GET', '/box.json', { cookie: ghost.cookie })).status, 401);
     assert.equal(await termWs(gw, ghost.cookie), 401);
-  } finally { await gw.close(); }
+  } finally { await gw.close(); await unlist(); }
 });
 
 test('org-access A9: a sign-in on a box unclaimed since its challenge is refused', async () => {

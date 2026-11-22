@@ -93,6 +93,8 @@ function authenticator() {
 // A gateway on a localhost URL (the gateway test's fixture), claimed with a passkey, so its jar holds
 // the owner's session. Its instance P (DEVTEAM_PORT_BASE, the first of its block) has nothing
 // listening: a request the gateway proxies there gets 502. Its uploads root is <base>/uploads, 0750.
+// A stand-in hub (on the fixture's DEVTEAM_HUB_PORT, P - 1) lists that instance as the project alpha
+// and P + 1 as beta, so each is served at <project>.<box> (project-hosts@1).
 const freePort = () => new Promise((resolve, reject) => { const v = http.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); });
 // A port the OS gives now and that stays bound: the gateway listens on this very socket later
 // (listen(handle)), so no other process can take the port in between.
@@ -100,8 +102,11 @@ const boundPort = () => new Promise((resolve, reject) => { const v = http.create
 async function boxGateway(t, extra = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-attach-gw-'));
   const { port, held } = await boundPort();
+  const hub = http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'application/json' }); r.end(JSON.stringify({ hub: 1, instances: [{ devteam: 1, name: 'alpha', root: '/srv/alpha', port: P, viewer: 1 }, { devteam: 1, name: 'beta', root: '/srv/beta', port: P + 1, viewer: 1 }] })); });
+  await new Promise((r, j) => { hub.once('error', j); hub.listen(P - 1, '127.0.0.1', r); });
+  t.after(async () => { hub.closeAllConnections?.(); await new Promise((r) => hub.close(r)); });
   const publicUrl = `http://box.localhost:${port}`;
-  const inst = (p) => `http://${p}.box.localhost:${port}`;
+  const inst = (name) => `http://${name}.box.localhost:${port}`;
   const term = `http://term.box.localhost:${port}`;
   const site = `http://public.box.localhost:${port}`;
   const ttydPage = path.join(base, 'ttyd.html');
@@ -115,8 +120,8 @@ async function boxGateway(t, extra = {}) {
   const token = /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   let jar = '';
   let flowJar = ''; // the flow cookie of a passkey ceremony, sent to the box's own name beside the session
-  // on: 'term', 'public', 'box', or an instance's port (the default, P). Headers set to undefined are left out.
-  const req = (method, route, { body, headers = {}, cookie = jar, flow, on = P } = {}) => new Promise((resolve, reject) => {
+  // on: 'term', 'public', 'box', or a project's name (the default, alpha). Headers set to undefined are left out.
+  const req = (method, route, { body, headers = {}, cookie = jar, flow, on = 'alpha' } = {}) => new Promise((resolve, reject) => {
     const self = on === 'box' ? publicUrl : on === 'term' ? term : on === 'public' ? site : inst(on);
     const sent = [cookie, self === publicUrl ? (flow ?? flowJar) : ''].filter(Boolean).join('; ');
     const h = { host: new URL(self).host, ...(method !== 'GET' && method !== 'HEAD' ? { origin: self, 'content-type': 'application/json' } : {}), ...(sent ? { cookie: sent } : {}), ...headers };
@@ -143,9 +148,9 @@ async function boxGateway(t, extra = {}) {
   assert.equal(claimed.status, 200, claimed.body);
   return { g, port, base, publicUrl, inst, term, site, logs, req, uploadsDir, jar: () => jar };
 }
-// A dropped file sent as a page sends one, to an instance's name (P) unless `host` says otherwise.
+// A dropped file sent as a page sends one, to a project's name (alpha, at P) unless `host` says otherwise.
 // `origin` and `cookie` default to that name's own and the session; null leaves one out.
-function boxUpload(gw, name, body, { host = gw.inst(P), origin = host, cookie = gw.jar(), chunks = null, gapMs = 50, within = 20000 } = {}) {
+function boxUpload(gw, name, body, { host = gw.inst('alpha'), origin = host, cookie = gw.jar(), chunks = null, gapMs = 50, within = 20000 } = {}) {
   return request(gw.port, `/upload?name=${encodeURIComponent(name)}`, { headers: { host: new URL(host).host, origin, cookie: cookie || null, 'content-type': 'application/octet-stream' }, body: chunks ? null : body, chunks, gapMs, within });
 }
 // The last two segments of a stored path: what GET /upload/<folder>/<name> takes.
@@ -469,7 +474,7 @@ test('box upload: an instance\'s name takes a dropped file, with the session and
 test('box upload: no session is 401, any Origin but the instance\'s own is 403, each with its reason (A2)', async (t) => {
   const gw = await boxGateway(t);
   const bytes = Buffer.from('nope');
-  const cases = [['no cookie', { cookie: null }, 401], ['no Origin', { origin: null }, 403], ['the terminal\'s Origin', { origin: gw.term }, 403], ['another instance\'s Origin', { origin: gw.inst(P + 1) }, 403], ['another site', { origin: 'https://evil.example' }, 403]];
+  const cases = [['no cookie', { cookie: null }, 401], ['no Origin', { origin: null }, 403], ['the terminal\'s Origin', { origin: gw.term }, 403], ['another instance\'s Origin', { origin: gw.inst('beta') }, 403], ['another site', { origin: 'https://evil.example' }, 403]];
   for (const [what, how, code] of cases) {
     const r = await boxUpload(gw, 'a.txt', bytes, how);
     assert.equal(r.status, code, `${what}: ${r.text}`);
@@ -533,9 +538,10 @@ test('box serve: no session is 401 (a navigation goes to sign-in), and another s
   assert.equal(none.status, 401, none.body);
   assert.ok(none.body.trim().length > 0, 'a reason');
   assert.equal((await gw.req('HEAD', at, { cookie: '' })).status, 401, 'HEAD too');
+  // on a project's name, the signed-out page: its script sends the whole address to the box's sign-in
   const nav = await gw.req('GET', at, { cookie: '', headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } });
-  assert.equal(nav.status, 302);
-  assert.match(nav.headers.location, /\/auth\/login/);
+  assert.equal(nav.status, 401);
+  assert.ok(nav.body.includes(JSON.stringify(`${gw.publicUrl}/auth/login?next=`)), nav.body);
   const img = await gw.req('GET', at, { headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': 'image', 'sec-fetch-mode': 'no-cors' } });
   assert.equal(img.status, 403, img.body);
   // and the same request from the instance's own page is served
