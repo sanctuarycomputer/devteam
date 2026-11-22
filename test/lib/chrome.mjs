@@ -32,9 +32,13 @@ export async function openChrome() {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-chrome-'));
   // Its own process group, so its helpers go with it: one left holding the stderr pipe open keeps this
   // test process (and the job) alive after every test has finished.
-  const proc = spawn(chromePath, chromeArgs(profile), { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+  // Chrome's own temp folders (org.chromium.Chromium.*) go in a short folder of this browser's, removed
+  // with it: a killed Chrome leaves them, and loose in the machine's temp folder they piled up by the
+  // thousand. Short: a socket's path is capped, so not inside the profile.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dc'));
+  const proc = spawn(chromePath, chromeArgs(profile), { stdio: ['ignore', 'ignore', 'pipe'], detached: true, env: { ...process.env, TMPDIR: tmp } });
   const signal = (sig) => { try { process.kill(-proc.pid, sig); } catch { try { proc.kill(sig); } catch {} } };
-  const atExit = () => signal('SIGKILL');
+  const atExit = () => { signal('SIGKILL'); for (const d of [profile, tmp]) try { fs.rmSync(d, { recursive: true, force: true }); } catch {} };
   process.once('exit', atExit);
   const base = await new Promise((resolve, reject) => {
     let err = '';
@@ -60,7 +64,7 @@ export async function openChrome() {
       process.off('exit', atExit);
       proc.off('exit', done);
       proc.stderr.destroy();
-      try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
+      for (const d of [profile, tmp]) try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
       r();
     }
     // 'exit', not 'close': Chrome's helpers can hold its stderr open after it is gone
