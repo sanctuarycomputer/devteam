@@ -344,7 +344,8 @@ const ISO = '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$';
 const str = { type: 'string' };
 const time = { type: 'string', pattern: ISO };
 const closed = (properties) => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
-const REGISTERED = closed({ qid: { type: 'string', pattern: '^q-' }, at: time });
+// null for a job on main with no answered landing, a hand edit (kit-168, ruling a-20261122-182138520-supervisor)
+const REGISTERED = { ...closed({ qid: { type: 'string', pattern: '^q-' }, at: time }), type: ['object', 'null'] };
 const PEEK_SHAPE = closed({
   name: str,
   entry: { type: 'object', properties: { kind: { enum: ['check', 'chore'] }, title: str, what: str, every: str, registered: REGISTERED }, required: ['kind', 'title', 'what', 'every', 'registered'] },
@@ -508,7 +509,7 @@ test('dashboard.json is C5\'s upkeep.recurring', () => {
     if (h) assert.equal(e.next_at, isoOf(Date.parse(e.last.at) + Number(h[1]) * 3600e3), `${e.name}: next from the last start`);
   }
   // a job's runs and signals come after it was registered
-  for (const e of E) for (const t of [e.last?.at, ...e.signals.flatMap((g) => g.evidence.map(idTime))].filter(Boolean)) assert.ok(t > e.registered.at, `${e.name}: ${t} after registered`);
+  for (const e of E.filter((x) => x.registered)) for (const t of [e.last?.at, ...e.signals.flatMap((g) => g.evidence.map(idTime))].filter(Boolean)) assert.ok(t > e.registered.at, `${e.name}: ${t} after registered`);
   assert.deepEqual(d.builtin.map((b) => [b.name, b.setting]), [['retro', 'retro_every_days'], ['research', 'research_every_days'], ['kit-sync', 'upstream_check_hours'], ['sensors', null]]);
   assert.deepEqual(d.proposals.map((p) => p.status).sort(), ['open', 'registering', 'stopping']);
   for (const v of Object.values(peek)) {
@@ -565,6 +566,7 @@ test('each dashboard state and signal is one the design\'s rules would give', ()
       if (g.kind === 'quiet') {
         const h = /^(\d+)h$/.exec(e.every);
         assert.ok(h && Number(h[1]) <= 6, `${where}: every 6 hours or less`);
+        assert.ok(e.registered, `${where}: a quiet job has an answered landing`);
         assert.ok(snapshot - Date.parse(e.registered.at) >= 90 * DAY && ev.length >= 100 && ev.every((id) => snapshot - at(id) <= 90 * DAY), `${where}: 100 passes in 90 days, landed 90 days ago`);
       }
       if (g.kind === 'idle') assert.ok(ev.length >= 3 && e.last.status === 'nothing', `${where}: its last 3 finished runs nothing`);
