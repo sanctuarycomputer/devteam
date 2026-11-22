@@ -521,6 +521,15 @@ test("A7a: upkeep.recurring.entries lists main's checks, and the whole of upkeep
   assert.deepEqual(F.rec.entries.map((e) => e.registered?.qid ?? null), [F.qid, null, null], 'registered from the answered landing, else null');
 });
 
+// task-7 review F1: a counted line with a longer excerpt (written by hand) still meets the shape
+test("A7e: an entry's last.excerpt is at most its last 200 characters, as the peek's are", () => {
+  const F = setup('a7e', { ce: check({ every: '1d' }) });
+  const long = 'x'.repeat(100) + 'y'.repeat(200);
+  F.addRun('ce', { slot: F.dueOf('ce').slot, at: Date.now() - 5 * 60000, status: 'fail', excerpt: long });
+  const e = F.data().upkeep.recurring.entries.find((x) => x.name === 'ce');
+  assert.equal(e.last.excerpt, 'y'.repeat(200));
+});
+
 test('A7s: each entry has its state, last result and fails_in_a_row, counting only the supervisor\'s lines', () => {
   const by = Object.fromEntries((A7().rec?.entries ?? []).map((e) => [e.name, e]));
   assert.deepEqual([by.cf?.state, by.cf?.fails_in_a_row, by.cf?.last?.status, by.cf?.last?.excerpt], ['failing', 3, 'fail', 'run 3']);

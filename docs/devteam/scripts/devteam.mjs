@@ -25903,8 +25903,8 @@ function cmdRecurring() {
     if (!new RegExp(idRe).test(id)) die(`--id ${id} must match ${idRe}`);
     const old = logGet(id);
     if (old) {
-      // a live chores ticket can be made this check's fix: the line is one act runs as given (its refs are words)
-      const linkable = old.type === 'ticket' && old.feature === CHORES && !old.superseded_by;
+      // a live (unmerged, not superseded) chores ticket can be made this check's fix: the line is one act runs as given (its refs are words)
+      const linkable = old.type === 'ticket' && old.feature === CHORES && !old.superseded_by && !mergedAt(id);
       die(`${id} exists${linkable ? `; to make it ${arg}'s fix ticket, link it: act --class add-ticket --refs ${id} recurring:${arg} -- "linked ${id} as ${arg}'s fix ticket"` : ''}`);
     }
     const touches = listFlag('touches');
@@ -26667,7 +26667,7 @@ function recurringDashboard() {
       name, title: entry.title, what: entry.what, kind: entry.kind, by: null, every: entry.every, on: entry.on ?? null, at: entry.at ?? null,
       state: !last ? 'never' : last.status === 'pass' ? 'passing' : 'failing',
       fails_in_a_row: st.stretch.length,
-      last: last ? { status: last.status, at: last.at, seconds: last.seconds, excerpt: last.excerpt } : null,
+      last: last ? { status: last.status, at: last.at, seconds: last.seconds, excerpt: typeof last.excerpt === 'string' ? last.excerpt.slice(-200) : null } : null,
       next_at: sec(next), ticket: st.fixTicket, registered: reg ? { qid: reg.qid, at: sec(reg.at) } : null, signals: [],
     };
   });
@@ -32707,7 +32707,7 @@ const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring run <name> --draft   supervisor: run this checkout's entry once the same way, to try it before asking; prints the status and excerpt, logs and keeps nothing
   recurring due [--json]   when each of main's checks is due, from the log alone: { checks: [{ name, due, slot, next, start }], runner: { pid, start, budget_s, current } | null }; a problem with main's file exits 1 naming it
   recurring ticket <name> --id <id> --touches <glob>… [--component <c>]   supervisor: a chores ticket to fix a failing check, cited by its add-ticket act (which clears recurring-failing); refused unless the check has failed fail_after runs in a row with no fix ticket
-  metrics raises recurring-failing (a check failing fail_after runs in a row, no fix ticket), recurring-stale (not run in 3 intervals while wait runs) and recurring-invalid (main's recurring.json doesn't read); recurring run --due logs recurring-failed and recurring-recovered after each pass`;
+  metrics raises recurring-failing (a check failing fail_after runs in a row, no fix ticket), recurring-stale (not run in 3 intervals while wait runs) and recurring-invalid (main's recurring.json doesn't read, breaks the shape, or is over the 100-runs-a-day cap); recurring run --due logs recurring-failed and recurring-recovered after each pass`;
 const HELP_LOG = `The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
