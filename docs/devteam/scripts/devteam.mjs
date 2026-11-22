@@ -8474,8 +8474,15 @@ function askLine({ thread, about } = {}) {
     if (l.at !== undefined && l.artifact === undefined) die('--links: at belongs to an artifact link');
     if (l.artifact !== undefined) {
       arts ??= allArtifacts();
-      const cands = arts.filter((a) => a.slug === l.artifact);
-      if (!cands.length) die(`--links: no artifact "${l.artifact}" (devteam.mjs artifacts)`);
+      const all = arts.filter((a) => a.slug === l.artifact);
+      if (!all.length) die(`--links: no artifact "${l.artifact}" (devteam.mjs artifacts)`);
+      // A draft fetched from another machine (origin:<branch>, kit-750) is the Library's to show; a
+      // question links main's copy or one in a worktree here, as before kit-750 (kit-752, ruling
+      // a-20261122-082323258): with no at it is never picked, and naming it, or any at
+      // when it is the only copy, is refused.
+      const far = typeof l.at === 'string' && l.at.startsWith('origin:') ? [l.at] : all.every((a) => a.remote) ? all.map((a) => a.at) : null;
+      if (far) die(`--links: artifact "${l.artifact}" in ${far.join(' and ')} is a draft from another machine, which a question can't link: check its branch out in a worktree here, or merge it to main, first`);
+      const cands = all.filter((a) => !a.remote);
       const pick = l.at !== undefined ? cands.find((a) => a.at === l.at) : cands.length === 1 ? cands[0] : null;
       if (pick?.error) die(`--links: artifact "${l.artifact}" in ${pick.at} is broken (${pick.error}); fix it first (artifact check)`);
       if (!pick) die(`--links: artifact "${l.artifact}" is ${l.at !== undefined ? `not at ${l.at}; it is in ${cands.map((a) => a.at).join(' and ')}` : `in ${cands.map((a) => a.at).join(' and ')}`}; say which with "at"`);
