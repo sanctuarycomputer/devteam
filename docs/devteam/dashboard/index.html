@@ -3181,7 +3181,7 @@ function oaPaint() {
   for (const card of document.querySelectorAll('[data-qcard]')) {
     const q = DATA.questions.find((x) => x.id === card.dataset.qcard);
     if (!isOa(q)) continue;
-    const pre = card.id.startsWith('t-') ? 't-' : '';
+    const { pre } = qcardOf(card);
     const recs = card.querySelector('[data-oa-recs]');
     if (recs) recs.outerHTML = oaRows(q, pre);
     const any = card.querySelector('[data-oa-anyway]');
@@ -3258,9 +3258,9 @@ const rankRow = (q) => [
 const nextChip = (q) => (q.id === NEXT_ID() ? '<span class="chip-next">Next</span>' : '');
 function questionCard(q, o, reasonText, copy = false) {
   if (q.kind === 'review') return reviewCard(q, o, reasonText);
-  // copy: the same card in a thread (t-q-<id>): its own radio groups and error line, so the Inbox's
-  // and the thread's never answer for each other; the controls find their card from themselves.
-  const pre = copy ? 't-' : '';
+  // copy: the same card in a thread (true, t-q-<id>) or a side peek ('peek', p-q-<id>): its own radio groups
+  // and error line, so no copy answers for another; the controls find their card from themselves.
+  const pre = copy === 'peek' ? 'p-' : copy ? 't-' : '';
   const cls = q.class && o.classes[q.class];
   const kindCls = q.kind === 'one-way-door' ? 'door' : q.kind === 'trust' ? 'trust' : '';
   const list = choicesOf(q);
@@ -3287,7 +3287,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${cardHead(KIND_ICON[q.kind] || 'circle-help', `${copy ? '' : nextChip(q)}<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
       ${movedText(q) ? `<p class="moved" data-links-moved><i class="icon-triangle-alert" aria-hidden="true"></i> ${esc(movedText(q))}</p>` : ''}
       ${rankWhy(q)}
-      ${q.thread && !copy ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
+      ${q.thread && copy !== true ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       ${q.new_because ? `<p class="again"><b>Asked again because:</b> ${esc(q.new_because)}</p>` : ''}
       <h4>${qinline(q.question, q.links)}</h4>
@@ -6504,16 +6504,6 @@ function openPlanner(feature) {
 }
 function openQuestion(id) {
   const q = allQuestions().find((x) => x.id === id);
-  // an open question (kit-100 spec §2.4): its entry is replaced by the page head in force with th=inbox (on a cold
-  // load #overview?th=inbox, its kind's home), stamped, so Back returns to the page the link was clicked on; then
-  // the panel's Inbox tab shows its card (a floating thread's t is kept, as thGo keeps it)
-  if (q?.status === 'open') {
-    hideDrawer();
-    const p = parseHead(thHead(), SHELL_ROUTES), state = { ...p.state, th: 'inbox' };
-    if (!state.t || thInPanelId(state.t)) delete state.t;
-    goHead(headFor({ page: p.page, state }), { replace: true });
-    return void inboxGo({ scrollTo: `#q-${CSS.escape(id)}` });
-  }
   drawerFor('q', id);
   const p = peekOf('q', id);
   if (!q) return notFound('question', id, p, p?.error ? 'No such question.' : '');
@@ -6521,18 +6511,35 @@ function openQuestion(id) {
   const used = (DATA.ooda.decisions || []).find((x) => x.kind === 'answer' && x.id === id)?.acts || [];
   const blocked = (q.blocks || []).map((b) => ticketMap().get(b) ? `${tlink(b)} <span class="muted">· ${esc(STAGE_WORDS[ticketMap().get(b).stage] || ticketMap().get(b).stage)}</span>` : linkify(b));
   const took = q.answered_at && q.asked_at ? Date.parse(q.answered_at) - Date.parse(q.asked_at) : null;
+  // open: the Inbox's own card (kit-766), or, for a review or a secret, whose page or form stays in the Inbox, where to
+  // answer it. Pressed, it says so until the data does.
+  const open = q.status === 'open';
+  const here = open && q.kind !== 'review' && !(q.secrets || []).length && !ANSWERED.has(id);
+  const said = open && ANSWERED.has(id) ? `<div class="card small done"><div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(ANSWERED.get(id))}</b></div></div>` : '';
+  const answer = !open ? answeredCard(q, { inPeek: true }) : said || (here ? questionCard(q, DATA.ooda, Object.fromEntries((DATA.ooda.reasons || []).map((r) => [r.id, r.means])), 'peek') : `<p class="meta"><a class="linkish" href="#inbox" data-q-inbox="${esc(id)}">Answer it in the Inbox</a>${q.kind === 'review' ? ', where its page is' : ', where its form is'}.</p>`);
+  // the card's rule and trust boxes aren't in its HTML: a redraw puts them back
+  const was = $('drawer-body').querySelector(`#p-q-${CSS.escape(id)}`);
+  if (was && here) {
+    const rule = !!was.querySelector('input[data-rulebox]')?.checked, auto = was.querySelector('input[data-auto]:checked')?.value;
+    AFTER.push(() => {
+      const c = $('drawer-body').querySelector(`#p-q-${CSS.escape(id)}`);
+      const rb = c?.querySelector('input[data-rulebox]');
+      if (rb) rb.checked = rule;
+      if (auto !== undefined) { const r = [...(c?.querySelectorAll('input[data-auto]') ?? [])].find((x) => x.value === auto); if (r) r.checked = true; }
+    });
+  }
   showDrawer(`<h2 id="drawer-title">${qinline(q.question, q.links)}</h2>
-    ${attrs({ id, peek: p, type: 'question', computed: [
+    ${attrs({ id, peek: p, type: 'question', front: open ? [['How it changes', attrRow('How it changes', ANSWERED.has(id) ? 'Answered' : `${here ? 'Answer it below' : 'Answer it in the Inbox'}, or ${threadOn('q', id)}`, KEY_TIPS['How it changes']), true]] : [], computed: [
       ['Status', esc(q.status), 'open, answered, defaulted or withdrawn.'],
       ['Settled', q.answered_at ? `${esc(when(q.answered_at))}${q.answered_by ? ` by ${esc(q.answered_by === 'owner' ? 'you' : q.answered_by)}` : ''}` : '', 'When it was answered, defaulted or withdrawn, and by whom.'],
       ['Took', took != null && ['answered', 'defaulted'].includes(q.status) ? esc(took < 3600e3 ? `${Math.max(1, Math.round(took / 60e3))} minutes` : took < 2 * DAY ? `${(took / 3600e3).toFixed(1)} hours` : `${(took / DAY).toFixed(1)} days`) : '', 'From asking to the answer.'],
       ['Matched', matchedWords(q), 'Whether your answer was its recommendation; only your own pick is evidence for more trust, never the supervisor’s reading of your words.'],
     ] })}
-    ${q.context ? `<div class="ctx measure">${qblock(q.context, q.links)}</div>` : ''}
-    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? (/\n/.test(c.detail) ? `<div class="ctx">${qblock(c.detail, q.links)}</div>` : ` · ${qinline(c.detail, q.links)}`) : ''}${c.effect ? (/\n/.test(c.effect) ? `<div class="ctx">For users:${qblock(c.effect, q.links)}</div>` : ` · For users: ${qinline(c.effect, q.links)}`) : ''}</li>`).join('')}</ul>` : ''}
-    ${(q.links || []).length ? `<div class="links">${q.links.map(linkOf).join('')}</div>` : ''}
-    ${answeredCard(q, { inPeek: true })}
-    ${blocked.length ? psect('What it held up', `<ul>${blocked.map((b) => `<li>${b}</li>`).join('')}</ul>`) : ''}
+    ${!here && q.context ? `<div class="ctx measure">${qblock(q.context, q.links)}</div>` : ''}
+    ${!here && list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? (/\n/.test(c.detail) ? `<div class="ctx">${qblock(c.detail, q.links)}</div>` : ` · ${qinline(c.detail, q.links)}`) : ''}${c.effect ? (/\n/.test(c.effect) ? `<div class="ctx">For users:${qblock(c.effect, q.links)}</div>` : ` · For users: ${qinline(c.effect, q.links)}`) : ''}</li>`).join('')}</ul>` : ''}
+    ${!here && (q.links || []).length ? `<div class="links">${q.links.map(linkOf).join('')}</div>` : ''}
+    ${answer}
+    ${blocked.length ? psect(open ? 'What it holds up' : 'What it held up', `<ul>${blocked.map((b) => `<li>${b}</li>`).join('')}</ul>`) : ''}
     ${used.length ? psect('What used it', `<ul>${used.map((x) => `<li>${x.startsWith('d-') ? dlink(x, decisionTitle(x)) : linkify(x)}</li>`).join('')}</ul>`) : ''}
     ${historySection(p, id)}`);
 }
@@ -7292,7 +7299,7 @@ function press(key, { build, apply, overlay, undo, restore, errId, onOk, onError
 // What the owner had in a question card (the note, the pick, the trust and rule boxes), to put back
 // if the server refuses the answer.
 function cardFields(id, card) {
-  return { note: card?.querySelector('textarea[data-q]')?.value ?? drafts[id], pick: picks[id], auto: card?.querySelector('input[data-auto]:checked')?.value ?? null, rule: !!card?.querySelector('input[data-rulebox]')?.checked };
+  return { note: card?.querySelector('textarea[data-q]')?.value ?? drafts[id], pick: picks[id], boxes: [...document.querySelectorAll(`[data-qcard="${CSS.escape(id)}"]`)].map((c) => ({ at: c.id, auto: c.querySelector('input[data-auto]:checked')?.value ?? null, rule: !!c.querySelector('input[data-rulebox]')?.checked })) };
 }
 function putBackCard(id, f) {
   ANSWERED.delete(id);
@@ -7300,10 +7307,13 @@ function putBackCard(id, f) {
   if (f.pick !== undefined) picks[id] = f.pick;
 }
 function putBackBoxes(id, f) {
-  for (const card of document.querySelectorAll(`[data-qcard="${CSS.escape(id)}"]`)) {
-    if (f.auto) { const r = card.querySelector(`input[data-auto][value="${CSS.escape(f.auto)}"]`); if (r) r.checked = true; }
+  // each copy gets back its own: the Inbox's, a thread's and a peek's boxes are separate answers
+  for (const b of f.boxes) {
+    const card = document.getElementById(b.at);
+    if (!card) continue;
+    if (b.auto !== null) { const r = [...card.querySelectorAll('input[data-auto]')].find((x) => x.value === b.auto); if (r) r.checked = true; }
     const rb = card.querySelector('input[data-rulebox]');
-    if (rb) rb.checked = f.rule;
+    if (rb) rb.checked = b.rule;
   }
 }
 // A goal's hold as the server will show it right after the press: a drain or park is a transition
@@ -7697,7 +7707,7 @@ const REFUSED = new Map();
 let REFUSALS = 0;
 // The card a control is on, and its error line: the Inbox's copy of a question (q-<id>) or a thread
 // card's (t-q-<id>), found from the control itself, so the two copies never answer for each other.
-const qcardOf = (el) => { const card = el.closest('[data-qcard]'); return { card, errId: `${card?.id.startsWith('t-') ? 't-' : ''}${card?.dataset.qcard ?? ''}` }; };
+const qcardOf = (el) => { const card = el.closest('[data-qcard]'); const pre = /^[tp]-/.exec(card?.id ?? '')?.[0] ?? ''; return { card, pre, errId: `${pre}${card?.dataset.qcard ?? ''}` }; };
 function markAnswered(id, text) {
   ANSWERED.set(id, text);
   // both copies: the Inbox's and a thread card's
@@ -8626,7 +8636,7 @@ function render(d) {
   document.querySelectorAll('textarea[data-know-note]').forEach((t) => { drafts[`know:${t.dataset.knowNote}`] = t.value; });
   keepSecretDrafts();
   const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].filter((el) => !layerField(el)).map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
-  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !layerField(el)).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
+  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !layerField(el) && !el.closest('#drawer')).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
   // only the lessons the supervisor sent you: the rest are about how the agents work, and its own to keep
@@ -8678,7 +8688,7 @@ function render(d) {
   for (const id of [...OA_PEEKS]) { const pk = PEEKS.get(peekKey('lesson', id)); if (pk && !pk.missing && pk.record?.fields?.status !== 'retired') fetchPeek('lesson', id); }
   // last, so every section that holds an input is drawn before its half-typed value comes back
   // into the page's copy (the Inbox tab's), never the layer's (a thread's card, kit-89)
-  const pageField = (sel) => [...document.querySelectorAll(sel)].find((el) => !layerField(el));
+  const pageField = (sel) => [...document.querySelectorAll(sel)].find((el) => !layerField(el) && !el.closest('#drawer'));
   for (const [sel, v] of kept) { const el = pageField(sel); if (el) el.value = v; }
   for (const sel of keptChecks) { const el = pageField(sel); if (el) el.checked = true; }
   restoreSecretDrafts();
@@ -10846,6 +10856,14 @@ document.querySelector('.pagebar .extra').addEventListener('click', (e) => {
   if (d && PAGE_NOW === 'loop' && Object.hasOwn(LOOP_DEC, d.dataset.dec)) { LOOP_DEC[d.dataset.dec] = !LOOP_DEC[d.dataset.dec]; drawFilterPage('loop'); }
 });
 
+// A question's words, typed in the Inbox's card or its peek: one draft, shown in both (a thread's card keeps its own).
+document.addEventListener('input', (e) => {
+  const t = e.target;
+  if (!t.matches?.('textarea[data-q]') || layerField(t)) return;
+  drafts[t.dataset.q] = t.value;
+  for (const o of document.querySelectorAll(`textarea[data-q="${CSS.escape(t.dataset.q)}"]`)) if (o !== t && !layerField(o)) o.value = t.value;
+});
+
 document.addEventListener('click', async (ev) => {
   const hb = ev.target.closest('[data-hold-id]');
   if (hb) {
@@ -10941,6 +10959,9 @@ document.addEventListener('click', async (ev) => {
     });
     return;
   }
+  // a question the peek can't answer: the Inbox tab at its card (the #inbox listener has run; this target replaces its none)
+  const qin = ev.target.closest('[data-q-inbox]');
+  if (qin && !ev.button && !ev.metaKey && !ev.ctrlKey && !ev.shiftKey && !ev.altKey) { ev.preventDefault(); return void inboxGo({ scrollTo: `#q-${CSS.escape(qin.dataset.qInbox)}` }); }
   const pick = ev.target.closest('input[data-pick]');
   if (pick) {
     picks[pick.dataset.pick] = pick.value;
@@ -11041,7 +11062,7 @@ document.addEventListener('click', async (ev) => {
   const oak = ev.target.closest('[data-oa-know]');
   if (oak) {
     const id = oak.dataset.oaKnow, status = oak.dataset.status, qid = oak.dataset.oaQ;
-    const pre = oak.closest('[data-qcard]')?.id.startsWith('t-') ? 't-' : '';
+    const { pre } = qcardOf(oak);
     press(`k:${id}`, {
       build: () => ({ action: 'knowledge', body: { id, status } }),
       apply: () => { const qv = DATA.questions.find((x) => x.id === qid); OA_SET.set(id, { status, at: new Date().toISOString(), words: qv ? oaState(qv, id).words : undefined }); oaPaint(); },
@@ -11055,7 +11076,7 @@ document.addEventListener('click', async (ev) => {
   const oag = ev.target.closest('[data-oa-goal]');
   if (oag) {
     const id = oag.dataset.oaGoal, qid = oag.dataset.oaQ;
-    const pre = oag.closest('[data-qcard]')?.id.startsWith('t-') ? 't-' : '';
+    const { pre } = qcardOf(oag);
     if (!oaConfirming(id)) { OA_CONFIRM.set(id, Date.now() + 6000); setTimeout(oaPaint, 6050); oaPaint(); return; }
     OA_CONFIRM.delete(id);
     press(`g:${id}`, {
