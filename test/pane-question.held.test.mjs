@@ -286,6 +286,10 @@ test("a session at a permission prompt is a red question: hello counts the super
     win('plan-x', BUSY);
     h = hello(S);
     assert.deepEqual([h.prompts, h.inbox, h.prompt_sessions], [1, base + 1, []], 'prose and a busy pane are no prompt, and the foreign wk-01-run is never read');
+    assert.ok(!fs.existsSync(path.join(F.old, 'docs/devteam/run/cache/usage.json')), 'the look only reads: no spend parse, no cache written');
+    // a split in the worker's window, at a prompt: only the window's first pane is the agent's
+    const split = (t, lines) => { const id = tm(['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', t, '-c', path.join(F.old, '.worktrees', 'wk-01-run'), screen(lines)]); shows(id, /\S/); return id; };
+    { const x = split(wkr, MENU('')); assert.deepEqual(hello(S).prompt_sessions, [], 'a split is not the agent'); tm(['kill-pane', '-t', x]); }
     // a planner at a permission prompt: counted, named, its line as the pane has it
     win('plan-y', MENU(''));
     h = hello(S);
@@ -302,8 +306,11 @@ test("a session at a permission prompt is a red question: hello counts the super
     assert.deepEqual([h.prompts, h.prompt_sessions.map((x) => x.window)], [2, ['wk-01-run']]);
     assert.doesNotMatch(JSON.stringify(h), /FOREIGN/);
     assert.doesNotMatch(h.prompt_sessions[0].line, /[\u202a-\u202e]/, 'no bidi controls');
+    // a window counts once, whatever its splits show
+    split(wkr, MENU(''));
+    assert.deepEqual(hello(S).prompt_sessions.map((x) => x.window), ['wk-01-run']);
     // answered (gone): it counts no more
-    tm(['kill-pane', '-t', wkr]);
+    tm(['kill-window', '-t', wkr]);
     assert.equal(hello(S).prompts, 1);
   } finally { F.done(); }
 });

@@ -4110,19 +4110,24 @@ const paneShown = (t, n) => String(t ?? '').replace(/[\p{Cc}\u200e\u200f\u202a-\
 // The fleet's sessions stopped at a permission prompt or another dialog, for hello's Inbox count:
 // [{ window, line }]. Only this checkout's windows, read by the pane ids that the one list-panes
 // matched by start path (never by name: a session can be shared, a name repeated), and only those the
-// blocked-prompt finding watches: an active worker's, a planner's that isn't parked. Read by the
-// dialog's shape (paneAskingIn), as the supervisor's terminal is: never words in the agent's prose or
-// a tool's output, never a busy pane, never a usage-limit stop. Its own budget (budgetMs in all, at
-// most 2 s a pane): a slow tmux leaves the rest unread rather than losing the whole hello. Only reads.
+// blocked-prompt finding watches: an active worker's, a planner's that isn't parked. Start path alone
+// doesn't prove a pane is the agent's, so only a window's first pane is read, where the kit starts
+// it: a split counts for nothing, and a window at most once. Read by the dialog's shape (paneAskingIn)
+// while the agent's input box and working line aren't showing, as the supervisor's terminal is: an
+// agent's reply or a tool's output on its normal screen is no prompt, nor a busy pane or a usage-limit
+// stop; a full-screen view someone opened (a transcript, a pager) can still read as one. Its own
+// budget (budgetMs in all, at most 2 s a pane): a stalled capture leaves the rest unread rather than
+// losing the whole hello. Only reads: active is decided from the log, never workerState, whose spend
+// parses transcripts and writes run/cache/usage.json.
 function fleetPrompts(budgetMs = 4000) {
   const end = Date.now() + budgetMs;
   const session = tmuxSession();
   const left = () => end - Date.now();
   if (sh('tmux', ['has-session', '-t', `=${session}`], { timeout: Math.max(1, Math.min(2000, left())) }) === null) return [];
   const root = `${path.join(fs.realpathSync(mainRoot), '.worktrees')}${path.sep}`;
-  const listed = left() > 0 ? sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{pane_dead}\t#{pane_current_command}\t#W\t#{pane_start_path}'], { timeout: Math.max(1, Math.min(2000, left())) }) : null;
-  const rows = (listed ?? '').split('\n').filter(Boolean).map((l) => { const [id, dead, cmd, name, ...p] = l.split('\t'); let start = p.join('\t'); try { start = fs.realpathSync(start); } catch {} return { id, dead, cmd, name, start: `${start}${path.sep}` }; });
-  const watched = (name) => (name.startsWith('plan-') ? lastPhaseOf(name)?.to !== 'parked' && git(['rev-parse', '--verify', '--quiet', `refs/heads/plan/${name.slice(5)}`]) !== null : tickets().has(name) && activeWorker(name));
+  const listed = left() > 0 ? sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{pane_dead}\t#{pane_current_command}\t#{window_id}\t#W\t#{pane_start_path}'], { timeout: Math.max(1, Math.min(2000, left())) }) : null;
+  const rows = (listed ?? '').split('\n').filter(Boolean).map((l) => { const [id, dead, cmd, win, name, ...p] = l.split('\t'); let start = p.join('\t'); try { start = fs.realpathSync(start); } catch {} return { id, dead, cmd, win, name, start: `${start}${path.sep}` }; }).filter((r, i, all) => all.findIndex((x) => x.win === r.win) === i);
+  const watched = (name) => (name.startsWith('plan-') ? lastPhaseOf(name)?.to !== 'parked' && git(['rev-parse', '--verify', '--quiet', `refs/heads/plan/${name.slice(5)}`]) !== null : tickets().has(name) && !!lastPhaseOf(name)?.to && !['done', 'parked'].includes(lastPhaseOf(name).to) && !mergeShaFor(name));
   const found = [];
   for (const r of rows) {
     if (left() <= 0) break;
@@ -28093,8 +28098,7 @@ function cmdHello() {
   const s = loadSettings();
   // the Inbox as the dashboard counts it: open questions and the lessons sent to the owner to keep
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter(forOwner).length;
-  const windows = ourWindows(tmuxSession());
-  const workers = windows.length;
+  const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
   const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };

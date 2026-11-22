@@ -9700,7 +9700,7 @@ function promptsHtml() {
   const ps = typeof TL !== 'undefined' ? TL.prompts ?? [] : [];
   if (!ps.length) return '';
   return `<div class="card ask" data-ask-sessions><div><i class="icon-triangle-alert" aria-hidden="true"></i> <b>${ps.length === 1 ? 'A session is' : `${ps.length} sessions are`} stopped at a permission prompt</b></div>
-    <ul>${ps.map((x) => `<li><b>${esc(x.window)}</b>: <code>${esc(x.line)}</code></li>`).join('')}</ul>
+    <ul>${ps.map((x) => `<li><b>${esc(x.window)}</b>: <code style="overflow-wrap:anywhere">${esc(x.line)}</code></li>`).join('')}</ul>
     <div class="small muted">Answer ${ps.length === 1 ? 'it' : 'them'} in the terminal; the supervisor may clear one it can (supervisor.md §11).</div></div>`;
 }
 function askHtml() {
