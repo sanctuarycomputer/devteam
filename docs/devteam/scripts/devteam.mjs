@@ -15063,14 +15063,14 @@ function upkeepDays(now = Date.now()) {
   const day0 = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
   const days = Array.from({ length: 14 }, (_, i) => ({ starts_at: new Date(day0 - (13 - i) * DAY).toISOString(), items: [], failed: false }));
   const seen = new Set();
-  const add = (at, kind, ref, words) => {
+  const add = (at, kind, ref, words, failed = kind === 'ci-fix') => {
     const i = Math.floor((Date.parse(at) - (day0 - 13 * DAY)) / DAY);
     if (!(i >= 0 && i <= 13)) return;
     const key = `${i}|${kind}|${ref}`;
     if (seen.has(key)) return;
     seen.add(key);
     days[i].items.push({ kind, ref, words, at });
-    if (kind === 'ci-fix') days[i].failed = true;
+    if (failed) days[i].failed = true;
   };
   for (const a of logObjects('act')) {
     if (a.created_by !== 'supervisor' || !Array.isArray(a.refs)) continue;
@@ -15088,6 +15088,11 @@ function upkeepDays(now = Date.now()) {
     }
   }
   for (const o of logObjects('observation')) if (o.kind === 'retro' && o.created_by === 'supervisor') add(o.created_at, 'retro', o.id, 'Retro');
+  // each check result (kit-168): one per job and slot, the supervisor's detector recurring lines only, for
+  // any job that ran, on main now or not; a fail or an error turns its day red
+  const ran = new Set(logObjects('observation').filter((o) => o.kind === 'recurring-run' && recurringFailures.counts(o) && String(o.subject ?? '').startsWith('recurring:')).map((o) => o.subject.slice('recurring:'.length)));
+  const WORDS = { pass: 'passed', fail: 'failed', error: 'errored' };
+  for (const name of ran) for (const r of recurringFailures.results(name)) add(r.at, 'check', r.id, `Check ${name} ${WORDS[r.status]}`, r.status !== 'pass');
   for (const d of days) d.items.sort((a, b) => a.at.localeCompare(b.at));
   return days;
 }
