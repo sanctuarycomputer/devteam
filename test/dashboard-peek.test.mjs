@@ -1213,14 +1213,13 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.ev("document.getElementById('answered-wrap').open = false; document.getElementById('th-close').click(); void 0");
     await soon("!document.body.classList.contains('threads-open')", 'the panel closed');
 
-    // an open question's link: the panel's Inbox tab at its card, no peek
+    // an open question's link: the question's side peek, with its card; the panel stays closed
     await p.ev("location.hash = '#board'");
     await soon("location.hash === '#board' && !document.body.classList.contains('peek-open')", 'back on Board');
     await p.ev(`location.hash = ${JSON.stringify(`#q/${encodeURIComponent(ids.qOpen)}`)}`);
-    await soon(`location.hash === '#board?th=inbox' && (() => { const c = document.getElementById(${JSON.stringify(`q-${ids.qOpen}`)}); if (!c) return false; const r = c.getBoundingClientRect(); return r.height > 0 && r.bottom > 0 && r.top < innerHeight; })()`, 'the panel\'s Inbox at the open question\'s card');
-    assert.equal(await p.ev("document.body.classList.contains('peek-open')"), false, 'no peek');
-    await p.ev("document.getElementById('th-close').click(); void 0");
-    await soon("!document.body.classList.contains('threads-open')", 'the panel closed');
+    await soon(`location.hash === ${JSON.stringify(`#q/${encodeURIComponent(ids.qOpen)}`)} && DRAWER.kind === 'q' && !document.getElementById('drawer').hidden && !!document.querySelector(${JSON.stringify(`#drawer-body [id="p-q-${ids.qOpen}"]`)})`, 'the peek with its card');
+    await p.ev("document.getElementById('drawer-close').click(); void 0");
+    await soon("document.getElementById('drawer').hidden", 'the peek closed');
   });
 
   // Every detail stays (spec §2.4): one assertion per item of the design's peek inventory (the table

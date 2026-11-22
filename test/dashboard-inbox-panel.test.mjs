@@ -200,11 +200,10 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.ev(`(() => { const a = document.createElement('a'); a.id = 'probe-q'; a.href = '#q/${q2}'; a.textContent = 'the probe'; document.querySelector('main.page > section[data-page="board"]').prepend(a); })()`);
     let n = await len();
     await p.click('#probe-q');
-    await soon(`location.hash === '#board?th=inbox' && ${ON_PAGE('board')} && ${ON_INBOX} && ${IN_BODY(`#q-${q2}`)}`, 'Board, the panel on Inbox, the card in view in #th-body');
-    assert.equal(await len(), n + 1, 'the q/ entry replaced: one entry');
-    assert.equal(await p.ev("document.body.classList.contains('peek-open')"), false, 'no peek');
+    await soon(`location.hash === '#q/${q2}' && ${ON_PAGE('board')} && !${IS_OPEN} && DRAWER.kind === 'q' && DRAWER.id === '${q2}' && !document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body [id="p-q-' + '${q2}' + '"]')`, 'the peek with its card, the panel closed');
+    assert.equal(await len(), n + 1, 'one new entry');
     await back();
-    await soon(`location.hash === '#board' && ${ON_PAGE('board')} && !${IS_OPEN}`, 'Back: #board, the panel closed');
+    await soon(`location.hash === '#board' && ${ON_PAGE('board')} && !${IS_OPEN} && document.getElementById('drawer').hidden`, 'Back: #board, the peek closed');
 
     // a settled question's #q/: its read-only peek
     for (const id of [fx.answered, fx.defaulted, fx.withdrawn]) {
@@ -306,7 +305,7 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     })()` });
     await q1.send('Page.navigate', { url: `http://127.0.0.1:${port}/#q/${fx.q.q3}` });
     const soon1 = soonIn(q1, 30000);
-    await soon1(`location.hash === '#overview?th=inbox' && ${ON_INBOX} && ${IN_BODY(`#q-${fx.q.q3}`)}`, 'cold: #overview?th=inbox, the card in view in #th-body');
+    await soon1(`DRAWER.kind === 'q' && DRAWER.id === '${fx.q.q3}' && !document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body [id="p-q-' + '${fx.q.q3}' + '"]')`, 'cold: the peek with its card');
     assert.deepEqual(await q1.ev('window.__thrown'), [], 'nothing thrown');
   });
 

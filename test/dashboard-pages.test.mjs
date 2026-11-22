@@ -314,17 +314,15 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
   await onPage('loop');
   assert.equal(await tab(), 'observe', 'a fresh #loop opens on Observe: the tab is not remembered');
 
-  // 2e: an open question's link on Goals: Goals with the panel on its Inbox tab (kit-100), the card in view;
+  // 2e: an open question's link on Goals: the question's side peek with its card (kit-766), one new entry;
   // Back returns to Goals
   const onInbox = (page) => until(async () => JSON.stringify(await shown()) === JSON.stringify([page]) && await p.ev(`location.hash === ${JSON.stringify(`#${page}?th=inbox`)} && document.body.classList.contains('threads-open') && document.querySelector('#th-tabs [role="tab"][data-tab="inbox"]')?.getAttribute('aria-selected') === 'true' && !document.getElementById('th-inbox').hidden && getComputedStyle(document.getElementById('threads')).transform === 'none'`), `${page} with the panel on Inbox, at rest`);
   await go('#goals');
   await onPage('goals');
   n = await len();
   await p.click(`#goals a[href="#q/${ids.goalQ}"]`);
-  await onInbox('goals');
-  await until(() => p.ev(`(() => { const r = document.getElementById(${JSON.stringify(`q-${ids.goalQ}`)})?.getBoundingClientRect(); return !!r && r.height > 0 && r.top < innerHeight && r.bottom > 0; })()`), 'its card in view');
-  assert.equal(await len(), n + 1, 'the q/ entry is replaced by #goals?th=inbox');
-  assert.equal(await peekOpen(), false);
+  await until(() => p.ev(`location.hash === ${JSON.stringify(`#q/${ids.goalQ}`)} && DRAWER.kind === 'q' && !document.getElementById('drawer').hidden && !!document.querySelector(${JSON.stringify(`#drawer-body [id="p-q-${ids.goalQ}"]`)})`), 'the peek with its card');
+  assert.equal(await len(), n + 1, 'one new entry');
   await back();
   await onPage('goals');
 

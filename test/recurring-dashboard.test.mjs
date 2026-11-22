@@ -248,9 +248,9 @@ test('a Built in row opens its peek; a job\'s peek has ID recurring.<name>; a pr
   await go('#goal/upkeep');
   await soon(upkeepReady(`!!${PEEK.sect('Proposed jobs')}`), 'Upkeep\'s peek');
   assert.deepEqual((await p.ev(rows(PEEK.sect('Proposed jobs')))).map((r) => r[0]), ['The bundle stays under 300 kB', 'Stale issues are closed', 'The weekly report is sent'], 'the declined one is not listed');
-  // an open question's row: its card in the Inbox, as every open question's link does
+  // an open question's row: the question's side peek, with its card, as every open question's link does
   await click(`#drawer-body [data-gp="proposals"] tbody tr[data-row="0"] td:nth-child(1)`);
-  await soon(`/[?&]th=inbox/.test(location.hash) && document.getElementById('drawer').hidden && !!document.getElementById(${J(`q-${fx.ids.open}`)})`, 'the open question\'s Inbox card');
+  await soon(`DRAWER.kind === 'q' && DRAWER.id === ${J(fx.ids.open)} && !document.getElementById('drawer').hidden && !!document.querySelector(${J(`#drawer-body [id="p-q-${fx.ids.open}"]`)})`, 'the open question\'s peek');
   // a Yes still landing: the question's read-only peek
   await go('#goal/upkeep');
   await soon(upkeepReady(`!!${PEEK.sect('Proposed jobs')}`), 'Upkeep\'s peek');
