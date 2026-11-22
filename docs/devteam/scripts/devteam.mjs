@@ -1037,13 +1037,13 @@ function loadSettings({ origin = false } = {}) {
   // origin's commit for main, read as a launch reads it: what it can't do goes to fail(message)
   const readOrigin = (fail) => {
     const no = (why) => fail(`could not read main from origin (${why}), so the owner's settings can't be confirmed and nothing was started; a local ref is any session's to move, so none is trusted to start one. Try again when origin answers`);
-    // origin gets 30 s in all, and a relaunch's child (DEVTEAM_SETUP_DEADLINE, accounts-tick) less,
-    // so a hung origin refuses with its reason before the tick's kill comes
+    // origin gets 30 s in all, and a relaunch's child no longer than its DEVTEAM_SETUP_DEADLINE (5 s
+    // before the tick's kill, relaunchChild), so a hung origin refuses with its reason before the kill
     const deadline = Number(process.env.DEVTEAM_SETUP_DEADLINE);
-    const end = Math.min(Date.now() + (Number(process.env.DEVTEAM_LAUNCH_ORIGIN_MS) || 30000), Number.isFinite(deadline) && deadline > Date.now() ? deadline - 5000 : Infinity);
+    const end = Math.min(Date.now() + (Number(process.env.DEVTEAM_LAUNCH_ORIGIN_MS) || 30000), Number.isFinite(deadline) && deadline > Date.now() ? deadline : Infinity);
     const toOrigin = (args) => {
       const ms = Math.floor(end - Date.now());
-      if (ms < 1000) return { status: 124, stdout: '', stderr: '' };
+      if (ms < 100) return { status: 124, stdout: '', stderr: '' };
       return spawnSync(process.execPath, ['-e', RESPONDER_GROUP_RUN, '--', String(ms), 'git', ...RESPONDER_GIT, ...args], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: ms + 10000 });
     };
     // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
@@ -1088,10 +1088,12 @@ function loadSettings({ origin = false } = {}) {
     let read;
     try { read = readOrigin((why) => { throw { refused: why }; }); } catch (e) { if (e?.refused) return { refused: e.refused }; throw e; }
     const s = { ...mine };
-    if (read.onMain) {
-      for (const k of [...Object.keys(OWNER_SETTINGS), ...OWNER_ASKABLE]) s[k] = read.onMain[k];
-      s.links = pinOwnedLinks(mine.links, read.onMain.links).links;
-    }
+    // before adoption (no settings.md at origin's commit) the working tree is all there is, as for a
+    // launch: never what the local refs gave this process
+    let own = read.onMain;
+    if (!own) { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); let w = {}; try { w = JSON.parse(m?.[1]) ?? {}; } catch {} own = { ...SETTINGS_DEFAULTS, ...(isObj(w) ? w : {}) }; }
+    for (const k of [...Object.keys(OWNER_SETTINGS), ...OWNER_ASKABLE]) s[k] = own[k];
+    s.links = pinOwnedLinks(mine.links, own.links).links;
     loadSettings.fromOrigin = s;
     return s;
   }
@@ -18456,13 +18458,15 @@ function supervisorToRestart() {
   if (problem || !target || !paneStoppedAtLimit(target) || !paneStartedIn(target, fs.realpathSync(mainRoot))) return null;
   const id = supervisorLimit()?.session;
   if (!id) return null;
+  // a pane whose process is plainly not the supervisor needs no command, so origin isn't asked
+  const agent = paneAgentProcess(target);
+  if (agent?.env.length && !isSupervisorProcess(agent)) return null;
   // the owner's resume_command as origin has it, never a local ref's (kit-764): a refusal skips this
   // restart and says why
   const s = loadSettings({ origin: true });
   if (s.refused) return { refused: s.refused };
   const cmd = supervisorResumeCommand(id, s);
   if (!cmd) return null;
-  const agent = paneAgentProcess(target);
   if (!agent?.env.length) return { refused: `could not read the environment of the process in ${target}` };
   if (!isSupervisorProcess(agent)) return null;
   return { target, id, cmd: startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd) };
