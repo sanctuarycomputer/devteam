@@ -412,20 +412,24 @@ export function handoverFile() {
     const problems = projects.flatMap((P) => { try { return answerAudit(P); } catch (e) { return [`${P.name}: the audit failed: ${e.message}`]; } });
     const counts = projects.map((P) => { try { return `${P.name} ${answerLines(P).length}/${P.ownerAnswers}`; } catch { return `${P.name} ?/${P.ownerAnswers}`; } });
     console.log(`# kit-67 C25: ${counts.join(', ') || 'no projects'} (answer lines / owner answers run)`);
-    for (const c of sockets) c.close();
-    for (const P of projects) await browser(P, ['stop']).catch(() => {});
-    for (const P of projects) {
-      let pid;
-      try { pid = JSON.parse(fs.readFileSync(P.state, 'utf8')).daemon_pid; } catch {}
-      // only while that pid is still this project's daemon (its command line names the checkout)
-      let cmd = '';
-      try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch {}
-      if (Number.isInteger(pid) && pid > 0 && cmd.includes(P.old)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    // the audit's failure stands even when the cleanup throws (it wins over the cleanup's error)
+    try {
+      for (const c of sockets) c.close();
+      for (const P of projects) await browser(P, ['stop']).catch(() => {});
+      for (const P of projects) {
+        let pid;
+        try { pid = JSON.parse(fs.readFileSync(P.state, 'utf8')).daemon_pid; } catch {}
+        // only while that pid is still this project's daemon (its command line names the checkout)
+        let cmd = '';
+        try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch {}
+        if (Number.isInteger(pid) && pid > 0 && cmd.includes(P.old)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+      }
+      for (const pid of testBrowserPids()) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+      for (const P of projects) P.done();
+      await site?.close();
+      if (tmp) fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } finally {
+      assert.deepEqual(problems, [], 'C25: an answer line the owner did not write, or a count off');
     }
-    for (const pid of testBrowserPids()) { try { process.kill(pid, 'SIGKILL'); } catch {} }
-    for (const P of projects) P.done();
-    await site?.close();
-    if (tmp) fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-    assert.deepEqual(problems, [], 'C25: an answer line the owner did not write, or a count off');
   });
 }
