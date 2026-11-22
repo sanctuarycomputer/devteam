@@ -241,7 +241,7 @@ test("what the card cannot answer is said as it is: a dialog with no numbers, on
   } finally { F.done(); }
 });
 
-test("a session at a permission prompt is a red question: hello counts the supervisor's and each worker's into the Inbox, a usage-limit stop not", { skip: hasTmux ? false : 'no tmux' }, () => {
+test("a session at a permission prompt is a red question: hello counts the supervisor's and each watched session's by the dialog's shape, never prose, a busy pane, a usage-limit stop or another window of the same name", { skip: hasTmux ? false : 'no tmux' }, () => {
   const F = threadsFixture('pane-prompts');
   try {
     const hello = (S) => JSON.parse(F.owner(['hello', '--json', '--no-kit', '--pane'], S));
@@ -259,20 +259,51 @@ test("a session at a permission prompt is a red question: hello counts the super
     assert.deepEqual([hello({ DEVTEAM_SUPERVISOR: menuPane(F, 'trust,input').target }).prompts], [1]);
     const limit = hello({ DEVTEAM_SUPERVISOR: menuPane(F, 'limit,input').target });
     assert.deepEqual([limit.supervisor_question.kind, limit.prompts, limit.inbox], ['limit', 0, base]);
-    // a worker's window (started in a worktree, in the fleet's tmux session) at a permission prompt
-    const wt = path.join(F.old, '.worktrees', 'some-ticket');
-    fs.mkdirSync(wt, { recursive: true });
-    const worker = menuPane(F, 'menu2,input', wt);
-    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/tmux-session'), `${worker.target.split(':')[0]}\n`);
+
+    // The fleet's session: windows that show a fixed screen. An active worker wk-01-run and planners plan-x, plan-y.
+    const env = F.env();
+    const tm = (args) => { const r = spawnSync('tmux', args, { env, encoding: 'utf8' }); assert.equal(r.status, 0, `tmux ${args.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+    const RULE = '─'.repeat(80);
+    const MENU = (head) => [RULE, ' Bash command', '', '   npm test', '', ` ${head}Do you want to proceed?`, ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel'];
+    const IDLE_YN = ['⏺ I can run the migration next. Should I proceed (y/n)?', '', RULE, '❯ ', RULE, '  ? for shortcuts'];
+    const BUSY = ['⏺ Bash(npm test)', '  ⎿  Press Enter to continue...', '', '✻ Working… (12s · esc to interrupt)', RULE, '❯ ', RULE];
+    let n = 0;
+    const screen = (lines) => { const f = path.join(F.base, `screen-${++n}.mjs`); fs.writeFileSync(f, `process.stdout.write(${JSON.stringify(`${lines.join('\n')}\n`)}); setInterval(() => {}, 1e6);\n`); return `${process.execPath} ${f}`; };
+    const shows = (target, re) => { for (let i = 0; i < 100 && !re.test(spawnSync('tmux', ['capture-pane', '-p', '-t', target], { env, encoding: 'utf8' }).stdout ?? ''); i++) nap(50); };
+    const wt = (name) => { const d = path.join(F.old, '.worktrees', name); fs.mkdirSync(d, { recursive: true }); return d; };
+    const session = 'fleet-prompts';
+    const stamp = (ago) => { const d = new Date(Date.now() - ago).toISOString(); return `${d.slice(0, 10).replace(/-/g, '')}-${d.slice(11, 23).replace(/[:.]/g, '')}`; };
+    // another instance's (or the operator's) window first, named like our worker, at a prompt
+    tm(['new-session', '-d', '-x', '120', '-y', '40', '-s', session, '-n', 'wk-01-run', '-c', F.base, screen(MENU('FOREIGN SECRET '))]);
+    const win = (name, lines) => { const id = tm(['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', `=${session}:`, '-n', name, '-c', wt(name), screen(lines)]); shows(id, /\S/); return id; };
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/tmux-session'), `${session}\n`);
+    F.sup(['feature', 'add', 'fwk', '--json', JSON.stringify({ title: 'FW', goals: [F.goal], stories: [{ id: 'W-S1', text: 'it works', release: 'v1.0.0' }] })]);
+    F.sup(['ticket', 'add', 'wk-01-run', '--json', JSON.stringify({ title: 'wk-01-run', feature: 'fwk', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['W-S1'], depends_on: [], touches: ['src/wkr/**'], done_when: ['its test passes in CI'] })]);
+    for (const [from, to, ago] of [[null, 'starting', 60000], ['starting', 'build', 30000]]) F.hand('wk-01-run', { id: `h-${stamp(ago)}-wk-01-run`, type: 'phase', from, to }, ago, 'wk-01-run.jsonl');
+    for (const b of ['plan/x', 'plan/y']) spawnSync('git', ['branch', b], { cwd: F.old });
+    // an idle worker whose own reply says (y/n), a busy planner whose tool output says Press Enter to continue: neither
+    let wkr = win('wk-01-run', IDLE_YN);
+    win('plan-x', BUSY);
     h = hello(S);
-    assert.deepEqual([h.prompts, h.inbox, h.prompt_sessions.map((x) => x.window)], [2, base + 2, ['main']]);
-    assert.match(h.prompt_sessions[0].line, /Do you want to proceed|1\. Yes/);
-    assert.match(h.pulse.attention[1], /^main is stopped at a permission prompt: answer it in the terminal/);
-    // answered at the worker's terminal: it counts no more
-    worker.press('1');
-    for (let i = 0; i < 50 && /proceed/.test(worker.shows()); i++) nap(100);
+    assert.deepEqual([h.prompts, h.inbox, h.prompt_sessions], [1, base + 1, []], 'prose and a busy pane are no prompt, and the foreign wk-01-run is never read');
+    // a planner at a permission prompt: counted, named, its line as the pane has it
+    win('plan-y', MENU(''));
     h = hello(S);
-    assert.deepEqual([h.prompts, h.inbox, h.prompt_sessions], [1, base + 1, []]);
-    assert.equal(worker.typed(), '1', 'hello types nothing into any pane');
+    assert.deepEqual([h.prompts, h.inbox, h.prompt_sessions.map((x) => x.window)], [2, base + 2, ['plan-y']]);
+    assert.match(h.prompt_sessions[0].line, /Bash command|proceed/);
+    assert.match(h.pulse.attention[1], /^plan-y is stopped at a permission prompt: answer it in the terminal/);
+    // parked, it is not watched (as the blocked-prompt finding skips it)
+    { const r = F.run(F.old, ['phase', 'parked'], { DEVTEAM_FEATURE: 'y' }); assert.equal(r.status, 0, r.err); }
+    assert.deepEqual(hello(S).prompts, 1);
+    // our wk-01-run at a prompt: read by its own pane id, never the same-named foreign window before it
+    tm(['kill-pane', '-t', wkr]);
+    wkr = win('wk-01-run', MENU('\u202eevil\u202c '));
+    h = hello(S);
+    assert.deepEqual([h.prompts, h.prompt_sessions.map((x) => x.window)], [2, ['wk-01-run']]);
+    assert.doesNotMatch(JSON.stringify(h), /FOREIGN/);
+    assert.doesNotMatch(h.prompt_sessions[0].line, /[\u202a-\u202e]/, 'no bidi controls');
+    // answered (gone): it counts no more
+    tm(['kill-pane', '-t', wkr]);
+    assert.equal(hello(S).prompts, 1);
   } finally { F.done(); }
 });

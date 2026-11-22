@@ -4104,6 +4104,41 @@ function supervisorAsk() {
   return { target, ask: ask && not && ask.kind === 'menu' ? { kind: 'dialog', text: paneScreen(target).slice(-25).join('\n').trim(), digest: ask.digest } : ask, problem: not };
 }
 
+// Pane text shown to the owner as it is: no control or bidi-control characters (a line that reads
+// backwards, or redraws itself), cut to n.
+const paneShown = (t, n) => String(t ?? '').replace(/[\p{Cc}\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
+// The fleet's sessions stopped at a permission prompt or another dialog, for hello's Inbox count:
+// [{ window, line }]. Only this checkout's windows, read by the pane ids that the one list-panes
+// matched by start path (never by name: a session can be shared, a name repeated), and only those the
+// blocked-prompt finding watches: an active worker's, a planner's that isn't parked. Read by the
+// dialog's shape (paneAskingIn), as the supervisor's terminal is: never words in the agent's prose or
+// a tool's output, never a busy pane, never a usage-limit stop. Its own budget (budgetMs in all, at
+// most 2 s a pane): a slow tmux leaves the rest unread rather than losing the whole hello. Only reads.
+function fleetPrompts(budgetMs = 4000) {
+  const end = Date.now() + budgetMs;
+  const session = tmuxSession();
+  const left = () => end - Date.now();
+  if (sh('tmux', ['has-session', '-t', `=${session}`], { timeout: Math.max(1, Math.min(2000, left())) }) === null) return [];
+  const root = `${path.join(fs.realpathSync(mainRoot), '.worktrees')}${path.sep}`;
+  const listed = left() > 0 ? sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{pane_dead}\t#{pane_current_command}\t#W\t#{pane_start_path}'], { timeout: Math.max(1, Math.min(2000, left())) }) : null;
+  const rows = (listed ?? '').split('\n').filter(Boolean).map((l) => { const [id, dead, cmd, name, ...p] = l.split('\t'); let start = p.join('\t'); try { start = fs.realpathSync(start); } catch {} return { id, dead, cmd, name, start: `${start}${path.sep}` }; });
+  const watched = (name) => (name.startsWith('plan-') ? lastPhaseOf(name)?.to !== 'parked' && git(['rev-parse', '--verify', '--quiet', `refs/heads/plan/${name.slice(5)}`]) !== null : tickets().has(name) && activeWorker(name));
+  const found = [];
+  for (const r of rows) {
+    if (left() <= 0) break;
+    if (!/^%\d+$/.test(r.id) || r.dead === '1' || SHELLS.has(r.cmd.replace(/^-/, '')) || r.name.startsWith('dev~') || !r.start.startsWith(root) || !watched(r.name)) continue;
+    let text = '';
+    try { text = execFileSync('tmux', ['-u', 'capture-pane', '-p', '-t', r.id], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.max(1, Math.min(2000, left())) }); } catch { continue; }
+    const lines = screenLines(text);
+    if (lines.filter((l) => l.trim()).slice(-15).some((l) => PANE_WORKING.test(l))) continue;
+    const ask = paneAskingIn(lines);
+    if (!ask || ask.kind === 'limit') continue;
+    const said = ask.kind === 'menu' ? ask.first || String(ask.question ?? '').split('\n').find((l) => l.trim()) : [...String(ask.text ?? '').split('\n')].reverse().find((l) => /\?\s*$/.test(l)) ?? String(ask.text ?? '').split('\n').filter((l) => l.trim()).pop();
+    found.push({ window: paneShown(r.name, 60), line: paneShown(said, 200) });
+  }
+  return found;
+}
+
 // Deliveries held while a pane asks: a message typed into a menu, with its Enter, answers the menu
 // (an owner's "Approved here" in a thread once answered No to a tool's consent prompt). So typeInto
 // types nothing while the pane asks; the line (already in the log, which is the record) waits in
@@ -28071,11 +28106,9 @@ function cmdHello() {
     if (a.ask && Array.isArray(r.pulse?.attention)) r.pulse.attention.unshift(a.ask.kind === 'menu' ? "The supervisor's terminal is asking you a question: answer it on the dashboard, at the top of the Inbox" : a.ask.kind === 'limit' ? 'The supervisor is stopped at a usage-limit menu' : "The supervisor's terminal needs you: a dialog is up that is answered in the terminal");
     // A session at a permission prompt or another dialog is a red question in the Inbox: the hub's tab
     // count and its notification (the box's push too) rise with inbox. A usage-limit stop is not one
-    // (accounts-tick clears it). The supervisor's, from what its terminal asks; each worker's and
-    // planner's, as paneWaitingIn reads it for the blocked-prompt finding: one capture-pane a window
-    // (the pane table is one list-panes, kept 5 s). This process has no DEVTEAM_ROLE from the
-    // dashboard (ownerActionEnv), so the look types nothing into any pane.
-    const sessions = windows.map((w) => ({ window: w.name, wait: paneWaitingIn(w.name) })).filter((x) => x.wait?.kind === 'prompt').map((x) => ({ window: x.window, line: x.wait.line }));
+    // (accounts-tick clears it). The supervisor's, from what its terminal asks; each active worker's
+    // and unparked planner's by the same shape (fleetPrompts). Nothing is typed into any pane.
+    const sessions = fleetPrompts();
     r.prompts = (a.ask && a.ask.kind !== 'limit' ? 1 : 0) + sessions.length;
     r.prompt_sessions = sessions;
     r.inbox += r.prompts;

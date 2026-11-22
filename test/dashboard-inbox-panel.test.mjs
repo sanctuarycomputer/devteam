@@ -54,9 +54,9 @@ const paneInit = (q) => `(() => {
       return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
     }
     const r = await real(u, o);
-    if (method !== 'GET' || !r.ok || !url.startsWith('/api/threads') || !window.__pane) return r;
+    if (method !== 'GET' || !r.ok || !url.startsWith('/api/threads') || (!window.__pane && !window.__prompts)) return r;
     const j = await r.json();
-    return new Response(JSON.stringify({ ...j, supervisor: { ...(j.supervisor || {}), pane: true, question: window.__pane } }), { status: r.status, statusText: r.statusText, headers: r.headers });
+    return new Response(JSON.stringify({ ...j, supervisor: { ...(j.supervisor || {}), pane: true, question: window.__pane, ...(window.__prompts ? { prompts: window.__prompts } : {}) } }), { status: r.status, statusText: r.statusText, headers: r.headers });
   };
 })()`;
 
@@ -980,6 +980,20 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.ev('window.__pane = null; void 0');
     // the terminal's card goes before the next press, or the cards below it move up under the pointer
     await soon("!document.querySelector('#ask-inbox [data-ask]')", "the terminal's card gone");
+
+    // a worker's or planner's session at a permission prompt (/api/threads' supervisor.prompts): a card with no
+    // buttons, its pane text as text, and one more red question in the count and the tab title
+    const n0 = await p.ev('inboxCount()');
+    await p.ev(`window.__prompts = ${JSON.stringify([{ window: 'plan-<b>x</b>', line: '<img src=x onerror="window.__pwned2=1"><a href="javascript:1">Do you want to proceed?</a>' }])}; void 0`);
+    await soon("!!document.querySelector('#ask-inbox [data-ask-sessions]')", "the sessions' card");
+    const sc = await p.ev(`(() => { const c = document.querySelector('#ask-inbox [data-ask-sessions]'); return { text: c.innerText, tags: c.querySelectorAll('img, a, button').length, pwned: window.__pwned2 === 1, n: inboxCount(), title: document.title }; })()`);
+    assert.match(sc.text, /A session is stopped at a permission prompt/);
+    assert.match(sc.text, /plan-<b>x<\/b>: <img src=x/);
+    assert.deepEqual([sc.tags, sc.pwned], [0, false], 'no markup, link or button from the pane');
+    assert.equal(sc.n, n0 + 1);
+    assert.match(sc.title, new RegExp(`^\\(${n0 + 1}\\) `));
+    await p.ev('window.__prompts = null; void 0');
+    await soon(`!document.querySelector('#ask-inbox [data-ask-sessions]') && inboxCount() === ${n0}`, "the sessions' card gone, the count back");
 
     // the review: opened full size over the panel; closed, back to the page with the panel on Inbox
     await press(IN(`[data-open-review="${fx.r}"]`), 'Open the review');
