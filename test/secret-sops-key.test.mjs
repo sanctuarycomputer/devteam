@@ -127,6 +127,29 @@ test('two secrets posted in two runs both land', { skip: !real }, () => {
   } finally { F.done(); }
 });
 
+test('a chore store that no longer holds the earlier post is refused, not overwritten', { skip: !real }, () => {
+  const F = fleetFixture('sops-lost');
+  try {
+    const good = keygen();
+    repo(F, good.pub);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE', 'TWO']);
+    assert.equal(F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9' })).status, 0);
+    // a lost side file can't matter: nothing outside the question's record decides this
+    fs.rmSync(path.join(F.home, '.devteam', 'sops-misses.json'), { force: true });
+    const w = path.join(F.old, '.worktrees', fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-')));
+    write(path.join(w, 'secrets/app.enc.env'), 'SEED=1\n');
+    encrypt(good.pub, path.join(w, 'secrets/app.enc.env'));
+    F.g(['add', '-A', 'secrets'], w);
+    F.g(['commit', '-qm', 'changed'], w);
+    const before = fs.readFileSync(path.join(w, 'secrets/app.enc.env'), 'utf8');
+    const r = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ TWO: 'value-two-9' }));
+    assert.notEqual(r.status, 0);
+    assert.match(r.out + r.err, /not what its earlier post recorded/);
+    assert.equal(fs.readFileSync(path.join(w, 'secrets/app.enc.env'), 'utf8'), before);
+  } finally { F.done(); }
+});
+
 test('a stdin sink that stops reading: exit 0 is not posted, and a refusal shows its own error', () => {
   const F = fleetFixture('sink-epipe');
   try {
