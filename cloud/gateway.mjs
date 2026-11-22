@@ -1785,10 +1785,9 @@ export function createGateway(opts = {}) {
   // hub once more, with every waiter sharing one read, so no anonymous request can make it poll.
   const ownPort = opts.port ?? null;
   let previews = new Map();
-  // Each instance's root and whether its kit has viewers, as the hub's list last said (every poll,
-  // PUSH_POLL_MS): the owner wrapper's choice is a lookup in it, so no visit asks anything (spec §8).
-  let listed = new Map();
-  // Each name the list gives to the ports that hold it; a port's origin only for a name one port holds;
+  // Each name the list gives to the ports that hold it (with each one's root and whether its kit has
+  // viewers, as the hub's list last said, every poll, PUSH_POLL_MS: the owner wrapper's choice is a
+  // lookup in it, so no visit asks anything, spec §8); a port's origin only for a name one port holds;
   // whether the last read gave a list; and the hub page's copy of the hosts, which a failed read leaves.
   let projects = new Map();
   let portHost = new Map();
@@ -1806,7 +1805,6 @@ export function createGateway(opts = {}) {
     previews = previewLinks(ok, BLOCK, ownPort, ttydPort);
     // a preview whose generated name is a project's is not served under it
     for (const n of names.keys()) previews.delete(n);
-    listed = new Map([...byPort].map(([port, x]) => [port, { root: x.root, viewer: x.viewer === 1 }]));
     listRead = Array.isArray(list);
     if (listRead) hubFrames = [...portHost.values()];
   };
@@ -1818,6 +1816,23 @@ export function createGateway(opts = {}) {
     if (c?.length === 1) return { port: c[0].port };
     if (c) return { shared: true };
     return previews.has(l) ? { preview: l } : null;
+  };
+  // A page is a published one when the gateway's store holds it under this name, by its first path
+  // segment as sent (raw, before any decoding). Never a reserved segment: those are the dashboard's
+  // (and the gateway's own /upload), whatever an older store holds under them. The store alone, so
+  // it answers alike signed in or out, with the hub down. Throws only if the store can't be read.
+  const publishedBy = (label, seg) => {
+    if (!seg || RESERVED_SEGMENTS.includes(seg) || !LINK_ID.test(seg)) return false;
+    const pub = store.load().public ?? {};
+    return Object.hasOwn(pub, label) && Object.hasOwn(pub[label].artifacts ?? {}, seg);
+  };
+  // Whether a raw path is /<slug>/… for a slug some other project published: on this host that is
+  // a page's address under the wrong name, so the gateway answers 404 rather than the dashboard.
+  // /<slug> with no slash and every reserved segment stay the dashboard's (or the gateway's).
+  const anotherProjects = (label, raw) => {
+    const m = /^\/([^/]+)\//.exec(raw);
+    if (!m || RESERVED_SEGMENTS.includes(m[1]) || !LINK_ID.test(m[1])) return false;
+    return Object.entries(store.load().public ?? {}).some(([n, x]) => n !== label && Object.hasOwn(x?.artifacts ?? {}, m[1]));
   };
   let previewRefresh = null;
   const refreshPreviews = () => (previewRefresh ??= hubList().then(takePreviews).finally(() => { previewRefresh = null; }));
@@ -2220,22 +2235,24 @@ export function createGateway(opts = {}) {
   // on both, a site that opens the page in a popup could tell from the window (its frame count, or
   // whether it can still see it) whether the visitor is the signed-in owner. The page's sandbox
   // has no allow-popups, so it opens no window that the policy could cut off.
-  const servePublic = (req, res) => {
+  // On <label>.<box>, the page is /<slug>/… of the project of that name.
+  const servePublic = (req, res, label) => {
     if (!['GET', 'HEAD'].includes(req.method)) return send(res, 405, 'text/plain; charset=utf-8', 'GET or HEAD only', { allow: 'GET, HEAD' });
     if (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker') return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
     const notFound = () => send(res, 404, 'text/plain; charset=utf-8', 'not found');
-    const m = /^\/([^/]+)\/([^/]+)(\/.*)?$/.exec(req.url.split('?')[0]);
-    if (!m || !PROJECT.test(m[1]) || !LINK_ID.test(m[2])) return notFound();
+    const raw = /^\/([^/]+)(\/.*)?$/.exec(req.url.split('?')[0]);
+    const m = raw ? [raw[0], label, raw[1], raw[2]] : null;
+    if (!m || !LINK_ID.test(m[2])) return notFound();
     const pub = store.load().public ?? {};
     const proj = Object.hasOwn(pub, m[1]) ? pub[m[1]] : null;
     const art = proj && Object.hasOwn(proj.artifacts ?? {}, m[2]) ? proj.artifacts[m[2]] : null;
     if (!art) return notFound();
-    if (m[3] === undefined) { res.writeHead(302, { location: `/${m[1]}/${m[2]}/`, 'cache-control': 'no-store', ...hsts }); return res.end(); }
+    if (m[3] === undefined) { res.writeHead(302, { location: `/${m[2]}/`, 'cache-control': 'no-store', ...hsts }); return res.end(); }
     const rel = m[3] === '/' ? 'index.html' : m[3].slice(1);
     const f = publicPathOk(rel) && Object.hasOwn(art.files ?? {}, rel) ? art.files[rel] : null;
     if (!f || !/^[0-9a-f]{64}$/.test(f.sha256 ?? '')) return notFound();
     const tag = `"${f.sha256}"`;
-    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(`${PUBLIC}/${m[1]}/${m[2]}/`), ...(rel === 'index.html' ? { vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' } : {}), ...hsts };
+    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(publicAddress(m[1], m[2])), ...(rel === 'index.html' ? { vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' } : {}), ...hsts };
     const asked = String(req.headers['if-none-match'] ?? '').split(',').map((t) => t.trim());
     if (asked.includes('*') || asked.includes(tag)) { res.writeHead(304, head); return res.end(); }
     // no range requests, as in the kit: the whole file or its headers
@@ -2380,7 +2397,7 @@ export function createGateway(opts = {}) {
     return text.length <= 32 * 1024 ? text : asciiJson(Object.fromEntries(Object.entries(all).filter(([, x]) => x.port === port)));
   };
 
-  // The owner's page on the public name (spec §8): the project's viewer at the published version,
+  // The owner's page at a published page's address (spec §8): the project's viewer at the published version,
   // with threads. Only for a top-level visit (sec-fetch-dest: document; navigate also matches frames)
   // to a published page's index, by the signed-in owner, whose bound instance the hub's list (as last
   // polled) shows as that checkout with a kit that has viewers. Anything in doubt is null: a session
@@ -2390,22 +2407,26 @@ export function createGateway(opts = {}) {
   // on a miss, so its timing says nothing of who is visiting. The list can be up to a poll stale.
   // The root check is for consistency, against another real checkout on that port, not for
   // authenticity: that rests on the port binding, as it does for the dashboard on that name.
-  // The wrapper's own policy: styles and one frame, the bound instance's; no script, nothing to fetch.
-  const WRAP_CSP = (inst) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${inst}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
-  const ownerWrapper = (req, url) => {
+  // On <label>.<box> the binding is found by name and root, not by the port stored at publish: the
+  // listed project of that name, one port only, at the stored root, with viewers. A project whose
+  // port moved keeps its wrapper; a name two projects share gets the plain bytes. The viewer it
+  // frames is on this same host, so the frame is 'self'.
+  // The wrapper's own policy: styles and one frame, its own host's; no script, nothing to fetch.
+  const WRAP_CSP = () => "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+  const ownerWrapper = (req, url, label) => {
     try {
       if (req.method !== 'GET' || req.headers['sec-fetch-dest'] !== 'document' || url.searchParams.has('plain')) return null;
-      const m = /^\/([^/]+)\/([^/]+)\/(?:index\.html)?$/.exec(req.url.split('?')[0]);
-      if (!m || !PROJECT.test(m[1]) || !LINK_ID.test(m[2])) return null;
+      const m = /^\/([^/]+)\/(?:index\.html)?$/.exec(req.url.split('?')[0]);
+      if (!m || !LINK_ID.test(m[1])) return null;
       const s = store.load();
       if (!s.passkeys.length || !sessionOf(req)) return null;
-      const bound = Object.hasOwn(s.public ?? {}, m[1]) ? s.public[m[1]] : null;
-      const art = bound && Object.hasOwn(bound.artifacts ?? {}, m[2]) ? bound.artifacts[m[2]] : null;
-      if (!art || !BLOCK.includes(bound.port) || typeof bound.root !== 'string' || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
-      const x = listed.get(bound.port);
-      if (!x?.viewer || x.root !== bound.root) return null;
+      const bound = Object.hasOwn(s.public ?? {}, label) ? s.public[label] : null;
+      const art = bound && Object.hasOwn(bound.artifacts ?? {}, m[1]) ? bound.artifacts[m[1]] : null;
+      if (!art || typeof bound.root !== 'string' || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
+      const c = projects.get(label) ?? [];
+      if (c.length !== 1 || !c[0].viewer || c[0].root !== bound.root) return null;
       const at = `tree:${art.tree}`;
-      return { port: bound.port, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title: typeof art.title === 'string' && art.title ? art.title : m[2], frame: `${instanceOrigin(bound.port)}/view/artifact/${m[2]}?at=${at}&w=${wrapGrant(bound.port, m[2], at)}` }) };
+      return { port: c[0].port, html: PAGES.ownerWrapper({ project: label, slug: m[1], title: typeof art.title === 'string' && art.title ? art.title : m[1], frame: `/view/artifact/${m[1]}?at=${at}&w=${wrapGrant(c[0].port, m[1], at)}` }) };
     } catch { return null; }
   };
 
@@ -2575,8 +2596,19 @@ export function createGateway(opts = {}) {
     const rawPath = req.url.split('?')[0];
     if (label && !capLinkExact(rawPath) && PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, 'text/plain; charset=utf-8', 'not in another site\'s frame');
     const p = url.pathname;
-    // Step 6 of the order, a page this name published (task 2 of kit-277), goes here: anyone's, from
-    // the gateway's store, before every check about the owner.
+    // A page this name published: anyone's, from the gateway's own store, before every check about
+    // the owner. The one exception reads the cookie to choose a page, never to refuse one: the
+    // owner's own visit gets the wrapper, and whatever that can't settle gets the public's bytes.
+    // Nothing after this runs for a published page.
+    if (label) {
+      let published = false;
+      try { published = publishedBy(label, rawPath.split('/')[1]); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
+      if (published) {
+        const wrap = ownerWrapper(req, url, label);
+        if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' });
+        try { return servePublic(req, res, label); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
+      }
+    }
     const isAuth = isBox && (p === '/auth' || p.startsWith('/auth/'));
     try {
       const cm = label ? CAP_LINK.exec(rawPath) : null;
@@ -2669,6 +2701,9 @@ export function createGateway(opts = {}) {
       if (pv) return servePreview(req, res, pv, own);
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
       if (port) {
+        // another project's page under this name is no page: 404, never the dashboard (reserved
+        // segments, /upload among them, are never another project's)
+        if (anotherProjects(label, rawPath)) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
         // dropped files, as on term. (receiveUpload, after the session and the Origin rule above), and served back
         if (rawPath === '/upload' && req.method === 'POST') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
         if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) return await serveUpload(req, res, rawPath);

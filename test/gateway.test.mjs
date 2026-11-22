@@ -1136,20 +1136,20 @@ function seedPublic(dir, project, slug, files, { root = '/srv/x', port = P } = {
   fs.writeFileSync(f, JSON.stringify({ ...s, public: pub }));
 }
 
-test('public.<box>: anyone reads a published artifact, from the gateway\'s own copy, under its own headers', async () => {
+test('<project>.<box>: anyone reads a published artifact, from the gateway\'s own copy, under its own headers', async () => {
   const gw = await gateway('public-serve');
   try {
     assert.equal((await gw.claim(authenticator())).status, 200);
     const page = '<!doctype html><p>hi';
     seedPublic(gw.dir, 'alpha', 'hello', { 'index.html': page, 'app.js': 'x()', 'img/a.png': 'png', 'data.weird': 'w' });
-    const get = (route, headers = {}, method = 'GET') => gw.req(method, route, { on: 'public', cookie: '', headers });
-    let r = await get('/alpha/hello/');
+    const get = (route, headers = {}, method = 'GET') => gw.req(method, route, { on: 'alpha', cookie: '', headers });
+    let r = await get('/hello/');
     assert.equal(r.status, 200);
     assert.equal(r.body, page);
     const etag = `"${crypto.createHash('sha256').update(page).digest('hex')}"`;
     assert.deepEqual([r.headers['content-type'], r.headers['content-length'], r.headers.etag, r.headers['cache-control'], r.headers['x-content-type-options'], r.headers['referrer-policy']], ['text/html; charset=utf-8', String(Buffer.byteLength(page)), etag, 'public, max-age=60', 'nosniff', 'no-referrer']);
     assert.equal(r.headers['set-cookie'], undefined);
-    const self = `${gw.site}/alpha/hello/`;
+    const self = `${gw.inst('alpha')}/hello/`;
     const csp = r.headers['content-security-policy'].split('; ');
     for (const d of ["default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `connect-src ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `img-src ${self} data: blob:`, "form-action 'none'", "frame-ancestors 'none'", 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock']) assert.ok(csp.includes(d), `the policy has ${d}: ${csp.join('; ')}`);
     // Pinned: a published page frames nothing and has no origin of its own. An instance's viewer
@@ -1158,36 +1158,41 @@ test('public.<box>: anyone reads a published artifact, from the gateway\'s own c
     assert.ok(csp.includes("frame-src 'none'"), csp.join('; '));
     assert.equal(csp.filter((d) => /^(frame-src|child-src|sandbox)\b/.test(d)).join('; '), "frame-src 'none'; sandbox allow-scripts allow-forms allow-modals allow-pointer-lock", 'no child-src, one frame-src, one sandbox');
     assert.doesNotMatch(r.headers['content-security-policy'], /allow-same-origin|127\.0\.0\.1/);
-    assert.equal((await get('/alpha/hello/app.js')).headers['content-type'], 'text/javascript; charset=utf-8');
-    assert.equal((await get('/alpha/hello/img/a.png')).headers['content-type'], 'image/png');
-    assert.equal((await get('/alpha/hello/data.weird')).headers['content-type'], 'application/octet-stream');
+    assert.equal((await get('/hello/app.js')).headers['content-type'], 'text/javascript; charset=utf-8');
+    assert.equal((await get('/hello/img/a.png')).headers['content-type'], 'image/png');
+    assert.equal((await get('/hello/data.weird')).headers['content-type'], 'application/octet-stream');
     // HEAD: the headers and no body; a strong tag that matches, or *, is a 304
-    r = await get('/alpha/hello/', {}, 'HEAD');
+    r = await get('/hello/', {}, 'HEAD');
     assert.deepEqual([r.status, r.body, r.headers['content-length'], r.headers.etag], [200, '', String(Buffer.byteLength(page)), etag]);
-    assert.equal((await get('/alpha/hello/', { 'if-none-match': `"x", ${etag}` })).status, 304);
-    assert.equal((await get('/alpha/hello/', { 'if-none-match': '*' })).status, 304);
-    assert.equal((await get('/alpha/hello/', { 'if-none-match': `W/${etag}` })).status, 200, 'a weak tag is no match');
+    assert.equal((await get('/hello/', { 'if-none-match': `"x", ${etag}` })).status, 304);
+    assert.equal((await get('/hello/', { 'if-none-match': '*' })).status, 304);
+    assert.equal((await get('/hello/', { 'if-none-match': `W/${etag}` })).status, 200, 'a weak tag is no match');
     // a lost blob: HEAD and GET agree
     const lost = path.join(gw.dir, 'public', 'blobs', crypto.createHash('sha256').update('w').digest('hex'));
     fs.renameSync(lost, `${lost}.away`);
-    assert.deepEqual([(await get('/alpha/hello/data.weird', {}, 'HEAD')).status, (await get('/alpha/hello/data.weird')).status], [500, 500]);
+    assert.deepEqual([(await get('/hello/data.weird', {}, 'HEAD')).status, (await get('/hello/data.weird')).status], [500, 500]);
     fs.renameSync(`${lost}.away`, lost);
     // reads only, and no service workers
-    r = await gw.req('POST', '/alpha/hello/', { on: 'public', cookie: '', body: {} });
+    r = await gw.req('POST', '/hello/', { on: 'alpha', cookie: '', body: {} });
     assert.deepEqual([r.status, r.headers.allow], [405, 'GET, HEAD']);
-    assert.equal((await get('/alpha/hello/app.js', { 'service-worker': 'script' })).status, 403);
-    assert.equal((await get('/alpha/hello/app.js', { 'sec-fetch-dest': 'serviceworker' })).status, 403);
+    assert.equal((await get('/hello/app.js', { 'service-worker': 'script' })).status, 403);
+    assert.equal((await get('/hello/app.js', { 'sec-fetch-dest': 'serviceworker' })).status, 403);
     // signed in or not, without fetch metadata the same answer: the cookie only ever chooses the
     // owner's wrapper (a top-level visit), and none is set
-    r = await gw.req('GET', '/alpha/hello/', { on: 'public' });
+    r = await gw.req('GET', '/hello/', { on: 'alpha' });
     assert.deepEqual([r.status, r.body, r.headers['set-cookie']], [200, page, undefined]);
-    // nothing is listed, nothing unpublished is there, and the raw path is matched before decoding
-    for (const bad of ['/', '/alpha/', '/alpha/nope/', '/beta/hello/', '/alpha/hello/nope.js', '/alpha/hello/.env', '/alpha/hello/%2e%2e/x', '/alpha/hello/../hello/app.js', '/Alpha/hello/', '/alpha/hello//app.js', '/box.json', '/auth/login'])
+    // inside a published page, nothing unpublished is there, and the raw path is matched before decoding
+    for (const bad of ['/hello/nope.js', '/hello/.env', '/hello/%2e%2e/x', '/hello/../hello/app.js', '/hello//app.js'])
       assert.equal((await get(bad)).status, 404, bad);
-    r = await get('/alpha/hello');
-    assert.deepEqual([r.status, r.headers.location, r.headers['cache-control']], [302, '/alpha/hello/', 'no-store'], 'to the trailing slash, when published');
-    assert.equal((await get('/alpha/nope')).status, 404, 'and only then');
-    assert.equal((await gw.req('GET', '/', { headers: { host: `pub.box.localhost:${gw.port}` } })).status, 421, 'the box still answers only on its own names');
+    // any other path is the dashboard's, behind the session: signed out, never a stored page
+    for (const other of ['/', '/nope/', '/Hello/', '/box.json', '/auth/login', '/alpha/hello/'])
+      assert.deepEqual([(r = await get(other)).status, r.body === page], [401, false], other);
+    assert.equal((await gw.req('GET', '/hello/', { cookie: '', headers: { host: `beta.box.localhost:${gw.port}` } })).status, 401, 'another name has no such page');
+    r = await get('/hello');
+    assert.deepEqual([r.status, r.headers.location, r.headers['cache-control']], [302, '/hello/', 'no-store'], 'to the trailing slash, when published');
+    assert.equal((await get('/nope')).status, 401, 'and only then');
+    assert.equal((await gw.req('GET', '/alpha/hello/', { headers: { host: `public.box.localhost:${gw.port}` } })).status, 421, 'the old public name answers nothing');
+    assert.equal((await gw.req('GET', '/', { headers: { host: `pub.box.evil.test:${gw.port}` } })).status, 421, 'the box still answers only on its own names');
   } finally { await gw.close(); }
 });
 
@@ -3582,6 +3587,76 @@ on('C6c a signed-out /healthz reads the cookie through sessionOf alike on a live
   assert.ok(counts.nobody > 0, 'the session work is done');
   assert.deepEqual(counts, { 'cool-tiger': counts.nobody, alpha: counts.nobody, nobody: counts.nobody }, 'the same work on every name');
   assert.deepEqual(b.seen.get(b.DEV), [], 'and the dev server is not asked');
+});
+on('C7 a published page answers signed out under the public policy, never from the port', undefined, async (b) => {
+  const r = await b.get('alpha', '/launch-notes/', { headers: NAV });
+  assert.deepEqual([r.status, r.body], [200, PAGE], 'the published bytes');
+  const csp = r.headers['content-security-policy'];
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.match(csp, /sandbox allow-scripts/);
+  assert.doesNotMatch(csp, /allow-same-origin/);
+  assert.ok(csp.includes(`img-src ${b.origin('alpha')}/launch-notes/ `), 'self is this page\'s folder, not the host (the dashboard\'s paths stay out)');
+  assert.equal(r.headers['cross-origin-opener-policy'], 'same-origin');
+  assert.match(r.headers.vary, /cookie/);
+  assert.deepEqual(b.seen.get(P), []);
+});
+on('C8 signed in, a document visit gets the wrapper framing the viewer on the same host', undefined, async (b) => {
+  const r = await b.get('alpha', '/launch-notes/', { cookie: COOKIE, headers: NAV });
+  assert.match(r.body, new RegExp(`<iframe src="/view/artifact/launch-notes\\?at=tree:${TREE}&#38;w=\\d+\\.`), 'frames the viewer here');
+  assert.match(r.headers['content-security-policy'], /frame-src 'self'/);
+  assert.equal(r.headers['x-frame-options'], 'DENY');
+  assert.deepEqual(b.seen.get(P), [], 'the wrapper asks the port nothing');
+});
+on('C9 ?plain gets the public bytes, signed in', undefined, async (b) => {
+  const r = await b.get('alpha', '/launch-notes/?plain', { cookie: COOKIE, headers: NAV });
+  assert.deepEqual([r.status, r.body], [200, PAGE]);
+});
+on('C10 a page stored under a reserved segment is not served; the dashboard answers behind the session', undefined, async (b) => {
+  const out = await b.get('alpha', '/view/', { headers: { accept: 'text/html' } });
+  assert.notEqual(out.body, PAGE, 'not the stored page, signed out');
+  assert.notEqual(out.status, 421, 'the host answers');
+  const r = await b.get('alpha', '/view/', { cookie: COOKIE });
+  assert.deepEqual([r.status, b.seen.get(P)], [200, ['/view/']], 'reaches the dashboard');
+});
+on('C10b a page stored under review is not served either', undefined, async (b) => {
+  const out = await b.get('alpha', '/review/', { headers: { accept: 'text/html' } });
+  assert.notEqual(out.body, PAGE, 'not the stored page, signed out');
+  const r = await b.get('alpha', '/review/', { cookie: COOKIE });
+  assert.deepEqual([r.status, b.seen.get(P)], [200, ['/review/']], 'reaches the dashboard');
+});
+on('C11 another project\'s slug answers 404 signed in', undefined, async (b) => {
+  const r = await b.get('alpha', '/beta-notes/', { cookie: COOKIE });
+  assert.equal(r.status, 404);
+  assert.deepEqual(b.seen.get(P), [], 'and the port is not asked');
+  const bare = await b.get('alpha', '/beta-notes', { cookie: COOKIE });
+  assert.deepEqual([bare.status, b.seen.get(P)], [200, ['/beta-notes']], 'with no trailing slash it is the dashboard\'s path');
+});
+// kit-276 F1: a page another project stored under upload before it was reserved does not take /upload/.
+on('C11b /upload stays the gateway\'s on a project host, whatever another project stored as upload', { published: { alpha: { root: '/srv/alpha', port: P, artifacts: { 'launch-notes': art() } }, 'beta-app': { root: '/srv/beta-app', port: P + 1, artifacts: { upload: art() } } } }, async (b) => {
+  const put = await b.get('alpha', '/upload?name=a.txt', { method: 'POST', cookie: COOKIE, headers: { origin: b.origin('alpha'), 'content-type': 'application/octet-stream', 'content-length': 2 }, body: 'hi' });
+  assert.equal(put.status, 200, put.body);
+  const stored = JSON.parse(put.body).path;
+  const back = await b.get('alpha', `/upload/${path.basename(path.dirname(stored))}/a.txt`, { cookie: COOKIE });
+  assert.deepEqual([back.status, back.body], [200, 'hi'], 'served back by the gateway');
+  assert.deepEqual(b.seen.get(P), [], 'never the port');
+});
+on('C13 after the project\'s port moves, the owner still gets the wrapper', { list: [row('alpha', P + 1)] }, async (b) => {
+  const r = await b.get('alpha', '/launch-notes/', { cookie: COOKIE, headers: NAV });
+  assert.match(r.body, /\/view\/artifact\/launch-notes\?at=tree:/, 'the wrapper, by name and root');
+});
+on('C15 a shared name gets no dashboard, and its stored page still answers signed out', { list: [row('twin', P), row('twin', P + 1, { root: '/srv/twin2' })], published: { twin: { root: '/srv/twin', port: P, artifacts: { 'twin-notes': art() } } } }, async (b) => {
+  assert.deepEqual((await b.get('twin', '/twin-notes/', { headers: NAV })).body, PAGE);
+  await b.get('twin', '/api/data', { cookie: COOKIE });
+  assert.deepEqual([b.seen.get(P), b.seen.get(P + 1)], [[], []], 'neither port');
+});
+on('C20 hub down: a stored page answers; signed in, a private path says the hub or the project is not running', { hubUp: false }, async (b) => {
+  assert.equal((await b.get('alpha', '/launch-notes/', { headers: NAV })).body, PAGE);
+  const r = await b.get('alpha', '/', { cookie: COOKIE, headers: NAV });
+  assert.match(r.body, /isn.t running/);
+});
+on('C20b the hub answers an empty list: a stored page answers, a private path says not running', { list: [] }, async (b) => {
+  assert.equal((await b.get('alpha', '/launch-notes/', { headers: NAV })).body, PAGE);
+  assert.match((await b.get('alpha', '/', { cookie: COOKIE, headers: NAV })).body, /alpha isn.t running/);
 });
 for (const l of ['4321', 'public', 'www', 'a_b', '-app', 'DevTeam']) on(`C14 ${l}.<box> answers 421`, undefined, async (b) => {
   assert.equal((await b.get(l, '/', { cookie: COOKIE })).status, 421);
