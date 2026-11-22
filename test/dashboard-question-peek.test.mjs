@@ -205,6 +205,16 @@ test('an open question is answered from its side peek, with the Inbox card', { s
     assert.equal(answers(Q.trustBack).length, 0, 'nothing recorded');
   });
 
+  await t.test("AC18: words typed in a goal peek's Wrong? form survive a redraw", async () => {
+    F.sup(['goal', 'impact', F.goal, '3', '--rationale', 'moves the number the strategy watches']);
+    await p.ev(`location.hash = ${J(`#goal/${encodeURIComponent(F.goal)}`)}`);
+    await soon("!!document.querySelector('#drawer-body button[data-correct]')", "the goal peek's Wrong?");
+    await p.ev("document.querySelector('#drawer-body button[data-correct]').click()");
+    await p.ev("(() => { const r = document.querySelector('#drawer-body input[data-reason]'); r.focus(); r.value = 'only one admin pays'; r.blur(); })()");
+    const at = await p.ev("(() => { const was = document.querySelector('#drawer-body input[data-reason]'); LAST_HTML = ''; render(DATA); const r = document.querySelector('#drawer-body input[data-reason]'); return { redrawn: r !== was, value: r.value }; })()");
+    assert.deepEqual(at, { redrawn: true, value: 'only one admin pays' }, "the Wrong? form's words, right after a redraw");
+  });
+
   await t.test('AC6: a link to an open question opens the peek, and Back returns to the page', async () => {
     await p.ev(`TL.open = null; thGo({}); void 0`);
     await p.ev(`location.hash = '#board'`);

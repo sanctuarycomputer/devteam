@@ -8688,9 +8688,11 @@ function render(d) {
   for (const id of [...OA_PEEKS]) { const pk = PEEKS.get(peekKey('lesson', id)); if (pk && !pk.missing && pk.record?.fields?.status !== 'retired') fetchPeek('lesson', id); }
   // last, so every section that holds an input is drawn before its half-typed value comes back
   // into the page's copy (the Inbox tab's), never the layer's (a thread's card, kit-89)
-  const pageField = (sel) => [...document.querySelectorAll(sel)].find((el) => !layerField(el) && !el.closest('#drawer'));
+  // A tick goes back to the Inbox's card only: a peek's card keeps its own (kit-766). A typed value
+  // goes back wherever it was, the goal peek's Wrong? form included.
+  const pageField = (sel) => [...document.querySelectorAll(sel)].find((el) => !layerField(el));
   for (const [sel, v] of kept) { const el = pageField(sel); if (el) el.value = v; }
-  for (const sel of keptChecks) { const el = pageField(sel); if (el) el.checked = true; }
+  for (const sel of keptChecks) { const el = [...document.querySelectorAll(sel)].find((c) => !layerField(c) && !c.closest('#drawer')); if (el) el.checked = true; }
   restoreSecretDrafts();
   focusBack(focus);
 }
