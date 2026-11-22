@@ -4105,6 +4105,49 @@ function supervisorAsk() {
   return { target, ask: ask && not && ask.kind === 'menu' ? { kind: 'dialog', text: paneScreen(target).slice(-25).join('\n').trim(), digest: ask.digest } : ask, problem: not };
 }
 
+// Pane text shown to the owner as it is: no control or bidi-control characters (a line that reads
+// backwards, or redraws itself), cut to n.
+const paneShown = (t, n) => String(t ?? '').replace(/[\p{Cc}\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
+// The fleet's sessions stopped at a permission prompt or another dialog, for hello's Inbox count:
+// [{ window, line }]. Only this checkout's windows, read by the pane ids that the one list-panes
+// matched by start path (never by name: a session can be shared, a name repeated), and only those the
+// blocked-prompt finding watches: an active worker's, a planner's that isn't parked. A window may be
+// split or its panes swapped, so each of its panes that isn't a shell is read, and the window counts
+// once if any shows a dialog (start path alone doesn't prove which pane is the agent's). Read by the dialog's shape (paneAskingIn)
+// while the agent's input box and working line aren't showing, as the supervisor's terminal is: an
+// agent's reply or a tool's output on its normal screen is no prompt, nor a busy pane or a usage-limit
+// stop; a full-screen view someone opened (a transcript, a pager) can still read as one. Its own
+// budget (budgetMs in all, at most 2 s a pane): a stalled capture leaves the rest unread rather than
+// losing the whole hello. Only reads: active is decided from the log, never workerState, whose spend
+// parses transcripts and writes run/cache/usage.json.
+function fleetPrompts(budgetMs = 4000) {
+  const end = Date.now() + budgetMs;
+  const session = tmuxSession();
+  const left = () => end - Date.now();
+  if (sh('tmux', ['has-session', '-t', `=${session}`], { timeout: Math.max(1, Math.min(2000, left())) }) === null) return [];
+  const root = `${path.join(fs.realpathSync(mainRoot), '.worktrees')}${path.sep}`;
+  const listed = left() > 0 ? sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{pane_dead}\t#{pane_current_command}\t#{window_id}\t#W\t#{pane_start_path}'], { timeout: Math.max(1, Math.min(2000, left())) }) : null;
+  const rows = (listed ?? '').split('\n').filter(Boolean).map((l) => { const [id, dead, cmd, win, name, ...p] = l.split('\t'); let start = p.join('\t'); try { start = fs.realpathSync(start); } catch {} return { id, dead, cmd, win, name, start: `${start}${path.sep}` }; });
+  const watched = (name) => (name.startsWith('plan-') ? lastPhaseOf(name)?.to !== 'parked' && git(['rev-parse', '--verify', '--quiet', `refs/heads/plan/${name.slice(5)}`]) !== null : tickets().has(name) && !!lastPhaseOf(name)?.to && !['done', 'parked'].includes(lastPhaseOf(name).to) && !mergeShaFor(name));
+  const found = [];
+  const counted = new Set();
+  for (const r of rows) {
+    if (left() <= 0) break;
+    if (counted.has(r.win)) continue;
+    if (!/^%\d+$/.test(r.id) || r.dead === '1' || SHELLS.has(r.cmd.replace(/^-/, '')) || r.name.startsWith('dev~') || !r.start.startsWith(root) || !watched(r.name)) continue;
+    let text = '';
+    try { text = execFileSync('tmux', ['-u', 'capture-pane', '-p', '-t', r.id], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.max(1, Math.min(2000, left())) }); } catch { continue; }
+    const lines = screenLines(text);
+    if (lines.filter((l) => l.trim()).slice(-15).some((l) => PANE_WORKING.test(l))) continue;
+    const ask = paneAskingIn(lines);
+    if (!ask || ask.kind === 'limit') continue;
+    const said = ask.kind === 'menu' ? ask.first || String(ask.question ?? '').split('\n').find((l) => l.trim()) : [...String(ask.text ?? '').split('\n')].reverse().find((l) => /\?\s*$/.test(l)) ?? String(ask.text ?? '').split('\n').filter((l) => l.trim()).pop();
+    counted.add(r.win);
+    found.push({ window: paneShown(r.name, 60), line: paneShown(said, 200) });
+  }
+  return found;
+}
+
 // Deliveries held while a pane asks: a message typed into a menu, with its Enter, answers the menu
 // (an owner's "Approved here" in a thread once answered No to a tool's consent prompt). So typeInto
 // types nothing while the pane asks; the line (already in the log, which is the record) waits in
@@ -8431,8 +8474,15 @@ function askLine({ thread, about } = {}) {
     if (l.at !== undefined && l.artifact === undefined) die('--links: at belongs to an artifact link');
     if (l.artifact !== undefined) {
       arts ??= allArtifacts();
-      const cands = arts.filter((a) => a.slug === l.artifact);
-      if (!cands.length) die(`--links: no artifact "${l.artifact}" (devteam.mjs artifacts)`);
+      const all = arts.filter((a) => a.slug === l.artifact);
+      if (!all.length) die(`--links: no artifact "${l.artifact}" (devteam.mjs artifacts)`);
+      // A draft fetched from another machine (origin:<branch>, kit-750) is the Library's to show; a
+      // question links main's copy or one in a worktree here, as before kit-750 (kit-752, ruling
+      // a-20261122-082323258): with no at it is never picked, and naming it, or any at
+      // when it is the only copy, is refused.
+      const far = typeof l.at === 'string' && l.at.startsWith('origin:') ? [l.at] : all.every((a) => a.remote) ? all.map((a) => a.at) : null;
+      if (far) die(`--links: artifact "${l.artifact}" in ${far.join(' and ')} is a draft from another machine, which a question can't link: check its branch out in a worktree here, or merge it to main, first`);
+      const cands = all.filter((a) => !a.remote);
       const pick = l.at !== undefined ? cands.find((a) => a.at === l.at) : cands.length === 1 ? cands[0] : null;
       if (pick?.error) die(`--links: artifact "${l.artifact}" in ${pick.at} is broken (${pick.error}); fix it first (artifact check)`);
       if (!pick) die(`--links: artifact "${l.artifact}" is ${l.at !== undefined ? `not at ${l.at}; it is in ${cands.map((a) => a.at).join(' and ')}` : `in ${cands.map((a) => a.at).join(' and ')}`}; say which with "at"`);
@@ -22020,7 +22070,7 @@ async function dashRoutesViewer(D, req, res, q) {
 // /api/threads
 async function dashRoutesThreads(D, req, res, q) {
   const { u } = q;
-  const { send, threadsRead, supervisorPane, supervisorAsks, paneToken } = D;
+  const { send, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken } = D;
   // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
   // browser says another site's page asks.
   if (req.method === 'GET' && u.pathname === '/api/threads') {
@@ -22030,6 +22080,7 @@ async function dashRoutesThreads(D, req, res, q) {
     try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
     const pane = supervisorPane();
     const asks = supervisorAsks();
+    const prompts = sessionPrompts();
     // the card's "not delivered": the turns no terminal took, and when the supervisor last checked
     // (two small run files, read here: no child, no tmux)
     const undelivered = Object.keys(undeliveredTurns(Date.now(), { entries: true }));
@@ -22042,11 +22093,11 @@ async function dashRoutesThreads(D, req, res, q) {
     // this process's work is saved.
     // the token for an answer goes only to this page's own read, said so by the browser
     if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
-    const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}`).slice(0, 20)}"`;
+    const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}|${JSON.stringify(prompts)}`).slice(0, 20)}"`;
     const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
     if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
     res.writeHead(200, { 'content-type': 'application/json', ...head });
-    return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
+    return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, ...(prompts.length ? { prompts } : {}), checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
   }
   return DASH_NEXT;
 }
@@ -22497,7 +22548,7 @@ async function cmdDashboard() {
   // in a second (kit-223). Anything that isn't a number of at least 0 is the default.
   const HELLO_MS = ((n) => (process.env.DEVTEAM_HELLO_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 30000))(Number(process.env.DEVTEAM_HELLO_MS));
   every(refreshHello, HELLO_MS);
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, prompts: hello?.prompts ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -22862,6 +22913,9 @@ async function cmdDashboard() {
     if (q.kind === 'menu' && Array.isArray(q.options)) return { kind: 'menu', question: String(q.question ?? ''), options: q.options.slice(0, 40).map((o) => ({ n: Number(o?.n), label: String(o?.label ?? '') })), selected: Number(q.selected) || null, hint: String(q.hint ?? ''), digest: q.digest };
     return { kind: q.kind === 'limit' ? 'limit' : 'dialog', text: String(q.text ?? ''), digest: q.digest };
   };
+  // The workers' and planners' sessions stopped at a permission prompt, as that same run found them:
+  // red questions in the Inbox, answered in their terminals (pane text: the page escapes it).
+  const sessionPrompts = () => (Array.isArray(hello?.prompt_sessions) ? hello.prompt_sessions.slice(0, 40).map((x) => ({ window: String(x?.window ?? '').slice(0, 120), line: String(x?.line ?? '').slice(0, 200) })) : []);
   // The owner's answer to it. Who may send one: this page, by the browser's own headers (Origin and
   // Sec-Fetch-Site, both), carrying the token this process made for that question and gave only to a
   // same-origin read of /api/threads (kept in memory: not in run/, not in the log, not in any
@@ -22912,7 +22966,8 @@ async function cmdDashboard() {
     // still up is reported as a key that may not have landed, as a digit's is, with no second key.
     const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
     const finish = async (rec, keys, why, after) => {
-      if (hello) hello.supervisor_question = null;
+      // the prompt it was is answered: out of the Inbox's count now, not at the next look
+      if (hello) { if (hello.supervisor_question && hello.supervisor_question.kind !== 'limit' && hello.prompts > 0 && hello.inbox > 0) { hello.prompts--; hello.inbox--; } hello.supervisor_question = null; }
       refreshHello();
       const said = rec.ok ? rec.stdout.trim() : rec.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '');
       if (!rec.ok) return no(`the key was sent (${keys}), but the answer could not be recorded: ${said || 'the command failed'}`, 500);
@@ -22956,7 +23011,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
-  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   const server = http.createServer(async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
@@ -28319,8 +28374,17 @@ function cmdHello() {
     r.supervisor_question = a.ask;
     r.supervisor_target = a.ask ? a.target : null;
     if (a.ask && Array.isArray(r.pulse?.attention)) r.pulse.attention.unshift(a.ask.kind === 'menu' ? "The supervisor's terminal is asking you a question: answer it on the dashboard, at the top of the Inbox" : a.ask.kind === 'limit' ? 'The supervisor is stopped at a usage-limit menu' : "The supervisor's terminal needs you: a dialog is up that is answered in the terminal");
+    // A session at a permission prompt or another dialog is a red question in the Inbox: the hub's tab
+    // count and its notification (the box's push too) rise with inbox. A usage-limit stop is not one
+    // (accounts-tick clears it). The supervisor's, from what its terminal asks; each active worker's
+    // and unparked planner's by the same shape (fleetPrompts). Nothing is typed into any pane.
+    const sessions = fleetPrompts();
+    r.prompts = (a.ask && a.ask.kind !== 'limit' ? 1 : 0) + sessions.length;
+    r.prompt_sessions = sessions;
+    r.inbox += r.prompts;
+    if (sessions.length && Array.isArray(r.pulse?.attention)) r.pulse.attention.splice(a.ask ? 1 : 0, 0,`${sessions.length === 1 ? `${sessions[0].window} is` : `${sessions.length} sessions are`} stopped at a permission prompt: answer ${sessions.length === 1 ? 'it' : 'them'} in the terminal`);
   }
-  return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
+  return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${r.inbox} open question(s)${r.prompts ? ` (${r.prompts} at a prompt)` : ''}, fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the
 // kit committed on main: its files outside project/ and run/, by blob. Offline, never upstream.
