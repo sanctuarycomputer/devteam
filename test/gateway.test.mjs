@@ -125,6 +125,15 @@ async function gateway(name, extra = {}) {
   return { g, port, publicUrl, inst, auth, term, site, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, uploadsDir, close: () => new Promise((r) => g.server.close(r)) };
 }
 
+// Where the signed-out page of a project's host sends a browser that is at href: it runs the page's own script.
+const signedOutTo = (r, href) => {
+  const code = [...r.body.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)?.[1] ?? '';
+  const { origin, pathname } = new URL(href);
+  let to = null;
+  vm.runInNewContext(code, { location: { href, pathname, origin, replace: (x) => { to = x; } }, encodeURIComponent });
+  return to;
+};
+
 test('cbor and cose: what WebAuthn needs, nothing more', () => {
   const m = new Map([[1, 2], ['a', Buffer.from([1, 2])], [-3, [true, false, null, 'x']]]);
   assert.deepEqual(G.cborDecode(cbor(m)).value, m);
@@ -148,7 +157,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     assert.equal((await gw.req('GET', '/', { headers: { 'sec-fetch-mode': 'navigate' } })).headers.location, `${gw.auth}/auth/login`, 'unclaimed: every page sends you to sign in, on the box\'s own name');
     assert.ok(gw.logs.join('\n').includes(`${gw.auth}/auth/claim#`), 'the claim link is on the box\'s own name');
     assert.equal((await gw.req('GET', '/auth')).headers.location, '/auth/login', '/auth is the sign-in');
-    assert.equal((await gw.req('GET', '/', { headers: { host: `auth.box.localhost:${gw.port}` } })).status, 421, 'and there is no auth name any more');
+    assert.equal((await gw.req('GET', '/auth/login', { headers: { host: `auth.box.localhost:${gw.port}` } })).status, 403, 'and there is no auth name any more: sign-in is the box\'s alone');
     assert.match((await gw.req('GET', '/auth/login')).body, /unclaimed/);
     assert.equal((await gw.req('GET', '/box.json')).status, 403, 'nothing behind the gateway answers an unclaimed box');
     const a = authenticator();
@@ -160,7 +169,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     assert.equal(bad.status, 400);
     assert.match(bad.json.error, /origin/);
     o = await gw.req('POST', '/auth/claim/options', { body: { token: gw.token } });
-    bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.inst(P)) } });
+    bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.inst('alpha')) } });
     assert.match(bad.json.error, /origin/, 'a passkey made on the box\'s own name (the hub, the terminal: bytes an agent can change) is refused');
     o = await gw.req('POST', '/auth/claim/options', { body: { token: gw.token } });
     bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.auth, { flags: 0x41 }) } });
@@ -184,13 +193,15 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     // signing in: the passkey, verified; nothing else
     gw.setJar('');
     assert.equal((await gw.req('GET', '/box.json')).status, 401);
-    assert.equal((await gw.req('GET', '/x?y=1', { on: P, headers: { 'sec-fetch-mode': 'navigate' } })).headers.location, `${gw.auth}/auth/login?next=${encodeURIComponent(`${gw.inst(P)}/x?y=1`)}`, 'an instance sends you to sign in, and back');
-    assert.equal((await gw.req('GET', '/x', { on: P })).status, 401, 'a fetch gets a 401');
+    const signedOut = await gw.req('GET', '/x?y=1', { on: 'alpha', headers: { 'sec-fetch-mode': 'navigate' } });
+    assert.equal(signedOut.status, 401);
+    assert.equal(signedOutTo(signedOut, `${gw.inst('alpha')}/x?y=1`), `${gw.auth}/auth/login?next=${encodeURIComponent(`${gw.inst('alpha')}/x?y=1`)}`, 'a project sends you to sign in, and back');
+    assert.equal((await gw.req('GET', '/x', { on: 'alpha' })).status, 401, 'a fetch gets a 401');
     // where signing in returns to: the box or an instance, never another site
     const nextOf = async (n) => /const next = ("[^"]*")/.exec((await gw.req('GET', `/auth/login?next=${encodeURIComponent(n)}`)).body)?.[1];
-    assert.equal(await nextOf(`${gw.inst(P)}/a`), JSON.stringify(`${gw.inst(P)}/a`));
+    assert.equal(await nextOf(`${gw.inst('alpha')}/a`), JSON.stringify(`${gw.inst('alpha')}/a`));
     assert.equal(await nextOf(`${gw.term}/`), JSON.stringify(`${gw.term}/`));
-    for (const n of ['/\\evil.example', '//evil.example/', 'https://evil.example/', `http://${P + 25}.box.localhost:${gw.port}/`, 'javascript:alert(1)']) assert.equal(await nextOf(n), JSON.stringify(`${gw.publicUrl}/`), n);
+    for (const n of ['/\\evil.example', '//evil.example/', 'https://evil.example/', `http://${P}.box.localhost:${gw.port}/`, `http://${P + 25}.box.localhost:${gw.port}/`, `http://public.box.localhost:${gw.port}/`, 'javascript:alert(1)']) assert.equal(await nextOf(n), JSON.stringify(`${gw.publicUrl}/`), n);
     assert.equal((await gw.login(a)).status, 200);
     assert.equal((await gw.req('GET', '/box.json')).status, 200);
     const other = authenticator();
@@ -206,7 +217,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     const flood = await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' });
     assert.equal(flood.json.rpId, 'box.localhost');
     for (let i = 0; i < 300; i++) await gw.req('POST', '/auth/login/options', { body: {}, cookie: '', flow: '' });
-    assert.match((await gw.req('POST', '/auth/login/verify', { body: a.get(flood.json, gw.inst(P), { counter: 19 }), cookie: '' })).json.error, /origin/, 'a dashboard\'s page may ask for the passkey, but its answer is no sign-in');
+    assert.match((await gw.req('POST', '/auth/login/verify', { body: a.get(flood.json, gw.inst('alpha'), { counter: 19 }), cookie: '' })).json.error, /origin/, 'a dashboard\'s page may ask for the passkey, but its answer is no sign-in');
     const once = a.get(flood.json, gw.auth, { counter: 20 });
     assert.equal((await gw.req('POST', '/auth/login/verify', { body: once, cookie: '' })).status, 200, 'a pending sign-in survives anyone asking for challenges');
     assert.match((await gw.req('POST', '/auth/login/verify', { body: once, cookie: '' })).json.error, /challenge/, 'and is good once');
@@ -251,12 +262,12 @@ test('reclaim, and the gateway\'s own names and origins', async () => {
   const gw = await gateway('names');
   try {
     assert.equal((await gw.req('GET', '/', { headers: { host: 'evil.example' } })).status, 421, 'another Host gets nothing');
-    for (const h of [`${P + 25}.box.localhost:${gw.port}`, `0${P}.box.localhost:${gw.port}`, `${P}.box.localhost`, `${P}.x.box.localhost:${gw.port}`]) assert.equal((await gw.req('GET', '/', { headers: { host: h } })).status, 421, h);
+    for (const h of [`${P}.box.localhost:${gw.port}`, `public.box.localhost:${gw.port}`, `${P + 25}.box.localhost:${gw.port}`, `0${P}.box.localhost:${gw.port}`, `${P}.box.localhost`, `${P}.x.box.localhost:${gw.port}`]) assert.equal((await gw.req('GET', '/', { headers: { host: h } })).status, 421, h);
     assert.equal((await gw.req('GET', '/healthz', { headers: { host: 'internal' } })).status, 200, 'but the health check answers anyone');
     assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: 'https://evil.example' } })).status, 403, 'a POST from another site is refused before anything else');
     assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: undefined } })).status, 403, 'and so is one with no Origin');
-    assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: gw.inst(P) } })).status, 403, 'and one from an instance\'s page: a dashboard can\'t act on the box');
-    assert.equal((await gw.req('POST', '/api/fleet', { on: P, body: {}, headers: { origin: gw.publicUrl } })).status, 403, 'nor the box on an instance');
+    assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: gw.inst('alpha') } })).status, 403, 'and one from an instance\'s page: a dashboard can\'t act on the box');
+    assert.equal((await gw.req('POST', '/api/fleet', { on: 'alpha', body: {}, headers: { origin: gw.publicUrl } })).status, 403, 'nor the box on an instance');
     assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: gw.term } })).status, 403, 'nor the terminal\'s');
     assert.equal((await gw.req('GET', 'http://evil.example/', { headers: { host: `box.localhost:${gw.port}` } })).status, 400, 'a request line with a full URL is refused');
   } finally { await gw.close(); }
@@ -538,15 +549,17 @@ test('what an agent serves on an instance\'s name doesn\'t outlive its server: n
   const seen = [];
   const evil = http.createServer((req, res) => { seen.push(req.url); res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'max-age=31536000, immutable' }); res.end('//'); });
   await new Promise((r) => evil.listen(P, '127.0.0.1', r));
+  const hub = http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify({ hub: 1, instances: [{ devteam: 1, name: 'alpha', root: '/srv/alpha', port: P }] })); });
+  await new Promise((r) => hub.listen(HUB, '127.0.0.1', r));
   try {
     assert.equal((await gw.claim(authenticator())).status, 200);
-    const page = await gw.req('GET', '/page.js', { on: P });
+    const page = await gw.req('GET', '/page.js', { on: 'alpha' });
     assert.equal(page.status, 200);
     assert.equal(page.headers['cache-control'], 'no-store', 'its own cache-control is replaced');
-    assert.equal((await gw.req('GET', '/sw.js', { on: P, headers: { 'service-worker': 'script' } })).status, 403);
-    assert.equal((await gw.req('GET', '/sw.js', { on: P, headers: { 'sec-fetch-dest': 'serviceworker' } })).status, 403);
+    assert.equal((await gw.req('GET', '/sw.js', { on: 'alpha', headers: { 'service-worker': 'script' } })).status, 403);
+    assert.equal((await gw.req('GET', '/sw.js', { on: 'alpha', headers: { 'sec-fetch-dest': 'serviceworker' } })).status, 403);
     assert.deepEqual(seen, ['/page.js'], 'and the registration never reaches it');
-  } finally { evil.close(); await gw.close(); }
+  } finally { evil.close(); hub.closeAllConnections(); hub.close(); await gw.close(); }
 });
 
 test('the hub on a laptop is unchanged: no box.json, instances on their own loopback ports', () => {
@@ -760,8 +773,8 @@ test('installing the hub needs no sign-in, and the page may use what it installs
     const hub = await gw.req('GET', '/');
     for (const d of ["worker-src 'self'", "manifest-src 'self'"]) assert.ok(hub.headers['content-security-policy'].split('; ').includes(d));
     assert.match(hub.body, /<link rel="manifest" href="manifest\.webmanifest">/);
-    assert.doesNotMatch((await gw.req('GET', '/sw.js', { on: P })).body, /showNotification/, 'only the box\'s name serves it');
-    assert.equal((await gw.req('GET', '/sw.js', { on: P, headers: { 'sec-fetch-dest': 'serviceworker' } })).status, 403, 'and an instance still has no worker');
+    assert.doesNotMatch((await gw.req('GET', '/sw.js', { on: 'alpha' })).body, /showNotification/, 'only the box\'s name serves it');
+    assert.equal((await gw.req('GET', '/sw.js', { on: 'alpha', headers: { 'sec-fetch-dest': 'serviceworker' } })).status, 403, 'and an instance still has no worker');
   } finally { await gw.close(); }
 });
 
@@ -2361,9 +2374,9 @@ test('a preview: the owner reaches the dev server on its own name, with localhos
     // no cookie: sign-in, back to the link; and the hub was not asked for an unknown name
     const before = hub.hits;
     let r = await req('cool-tiger', 'GET', '/x?y=1', { cookie: '', headers: NAV });
-    assert.equal(r.status, 302);
-    assert.equal(r.headers.location, `/auth/login?next=${encodeURIComponent(`${site}/x?y=1`)}`.replace('/auth', `${gw.auth}/auth`), 'sign-in comes back to the preview');
-    assert.equal((await req('never-heard', 'GET', '/', { cookie: '', headers: NAV })).status, 302);
+    assert.equal(r.status, 401);
+    assert.equal(signedOutTo(r, `${site}/x?y=1`), `/auth/login?next=${encodeURIComponent(`${site}/x?y=1`)}`.replace('/auth', `${gw.auth}/auth`), 'sign-in comes back to the preview');
+    assert.equal((await req('never-heard', 'GET', '/', { cookie: '', headers: NAV })).status, 401);
     assert.equal((await req('never-heard', 'GET', '/x.js', { cookie: '', headers: { 'sec-fetch-mode': 'cors' } })).status, 401);
     assert.equal(hub.hits, before, 'no anonymous request makes the gateway poll the hub');
     // with the session, once the poll has the name
@@ -2412,9 +2425,10 @@ test('a preview: the owner reaches the dev server on its own name, with localhos
       await gw.g.pollPush();
     }
     // the box's own names are unchanged
-    r = await gw.req('GET', '/api/data', { on: P + 2 });
+    hub.list = [...hub.list, instance('/srv/gamma', P + 2, [])];
+    r = await gw.req('GET', '/api/data', { on: 'gamma' });
     assert.equal(r.headers['x-devteam-previews'], '1', 'a dashboard learns the box serves previews');
-    assert.equal((await gw.req('GET', '/x', { headers: { host: `x-y.${S.box}` } })).status, 421, 'a shape that matches nothing is still another name');
+    assert.equal((await gw.req('GET', '/x', { headers: { host: `x_y.${S.box}` } })).status, 421, 'a name that is no label is still another name');
     assert.equal((await gw.req('GET', '/box.json')).headers['x-devteam-previews'], undefined);
     assert.equal((await gw.req('GET', '/healthz', { headers: { host: S.box } })).body, 'ok', 'the platform\'s check comes in on the service\'s name');
   } finally { await S.close(); dev.close(); inst.close(); }
@@ -2441,7 +2455,7 @@ test('a preview that is down, ambiguous or unknown answers 503, a page only to a
     assert.doesNotMatch(r.body, /<html/i, 'never a page to a fetch');
     r = await req('never-heard', 'GET', '/', { headers: NAV });
     assert.equal(r.status, 503);
-    assert.match(r.body, /No preview named/);
+    assert.match(r.body, /Nothing is named never-heard/);
     assert.match(r.body, /cool-tiger/, 'the current names');
     assert.match(r.body, /location\.reload/, 'it retries');
     assert.doesNotMatch(r.body, /<noscript>/, 'for a few minutes, never forever');
@@ -2477,7 +2491,7 @@ test('a preview that is down, ambiguous or unknown answers 503, a page only to a
     await gw.g.pollPush();
     r = await req('cool-tiger', 'GET', '/', { headers: NAV });
     assert.equal(r.status, 503);
-    assert.match(r.body, /No preview named/);
+    assert.match(r.body, /Nothing is named cool-tiger/);
     // a hub that doesn't answer lists nothing: a stale name can't keep a port
     hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
     await gw.g.pollPush();
@@ -3198,7 +3212,8 @@ test("a goal's approval pressed through the gateway is recorded once", { timeout
     assert.equal((await gw.claim(authenticator())).status, 200);
     // the port the dashboard took, as it says it, never assumed
     const on = Number(await until(() => /dashboard on http:\/\/127\.0\.0\.1:(\d+)/.exec(out)?.[1], `the dashboard (${out})`));
-    const goalDecide = (body) => gw.req('POST', '/api/goal-decide', { on, body, headers: { 'sec-fetch-site': 'same-origin' } });
+    await until(async () => (await gw.req('GET', '/api/data', { on: 'alpha' })).status === 200, `the hub to list the dashboard on ${on}`);
+    const goalDecide = (body) => gw.req('POST', '/api/goal-decide', { on: 'alpha', body, headers: { 'sec-fetch-site': 'same-origin' } });
     // a verdict the server doesn't take: its refusal, as it said it, and nothing recorded
     const bad = await goalDecide({ id: G1, verdict: 'yes' });
     assert.equal(bad.status, 400, bad.body);
@@ -3219,3 +3234,241 @@ test("a goal's approval pressed through the gateway is recorded once", { timeout
     assert.equal(lines.filter((l) => l.type === 'question' && l.op === 'set' && l.id === Q && l.answer !== undefined).length, 1, 'one answer');
   } finally { if (d) { d.kill(); await new Promise((r) => { if (d.exitCode !== null || d.signalCode !== null) return r(); d.once('exit', r); }); } await gw.close(); }
 });
+
+// --- project hosts (project-hosts@1): each project at <project>.<box> ----------------------------
+// A box: a signed-in owner, stand-in instances, a hub that lists what the test says. The hub's port
+// and the instance block are the gateway's, read when it is imported (HUB and P above); every other
+// port, the dev servers' included, is the one the OS gave at listen.
+const TOK = crypto.randomBytes(32);
+const COOKIE = `devteam_session=${u(TOK)}`;
+const PAGE = '<!doctype html><p>published';
+const TREE = 'a'.repeat(40);
+const art = (title = 't') => ({ tree: TREE, title, at: '2026-11-01T00:00:00.000Z', files: { 'index.html': { sha256: sha(PAGE).toString('hex'), size: Buffer.byteLength(PAGE) } } });
+const row = (name, port, over = {}) => ({ devteam: 1, name, root: `/srv/${name}`, port, viewer: 1, ...over });
+let manifestProject = 'alpha';
+const realTree = () => G.gitTreeId({ 'index.html': { oid: G.gitBlobId(Buffer.from(PAGE)), mode: '100644' } });
+const manifest = (slug) => ({ public: 1, project: manifestProject, slug, title: 't', summary: '', root: `/srv/${manifestProject}`, tree: realTree(), files: { 'index.html': { sha256: sha(PAGE).toString('hex'), size: Buffer.byteLength(PAGE), mode: '100644' } } });
+const hubAnswer = (r, l) => { r.writeHead(200, { 'content-type': 'application/json' }); r.end(JSON.stringify({ hub: 1, instances: l })); };
+let boxes = 0;
+// given: the box's options, or a function of its dev ports ({ DEV, DEV2 }) that returns them
+async function box(given) {
+  const dir = path.join(tmp, `project-hosts-${++boxes}`);
+  fs.mkdirSync(path.join(dir, 'public', 'blobs'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'public', 'blobs', sha(PAGE).toString('hex')), PAGE);
+  const seen = new Map();
+  const stubs = [];
+  const hub = { list: [], hits: 0, stall: false, held: [], release() { hub.stall = false; for (const x of hub.held.splice(0)) hubAnswer(x.r, x.list); } };
+  // fixed: a port of the instance block; none: the OS's, never the hub's or one in the block
+  const stub = async (fixed) => {
+    for (let i = 0; i < 5; i++) {
+      let port = fixed ?? 0;
+      const s = http.createServer((q, r) => {
+        seen.get(port).push(q.url);
+        const slug = /^\/public-manifest\/([^/?]+)$/.exec(q.url)?.[1];
+        if (slug) { r.writeHead(200, { 'content-type': 'application/json' }); return r.end(JSON.stringify(manifest(slug))); }
+        if (q.url === '/api/artifact-publish') { q.resume(); r.writeHead(200, { 'content-type': 'application/json' }); return r.end('{"ok":true}'); }
+        if (q.url.startsWith('/artifact/main/') && q.url.endsWith('/index.html') && !q.headers.cookie && !q.headers['sec-fetch-dest']) { hub.onFile?.(q.url); r.writeHead(200); return r.end(PAGE); }
+        r.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': `default-src 'self'; frame-src http://127.0.0.1:${P}; frame-ancestors 'self' http://127.0.0.1:${HUB}` });
+        return r.end(`port ${port}`);
+      });
+      await new Promise((ok, no) => { s.once('error', no); s.listen(port, '127.0.0.1', () => { s.off('error', no); ok(); }); });
+      port = s.address().port;
+      if (fixed === undefined && (port === HUB || (port >= P && port < P + 25))) { await new Promise((ok) => s.close(ok)); continue; }
+      seen.set(port, []);
+      stubs.push(s);
+      return port;
+    }
+    return assert.fail('no dev port apart from the hub and the instance block');
+  };
+  await stub(P);
+  await stub(P + 1);
+  const DEV = await stub();
+  const DEV2 = await stub();
+  const { list = [row('alpha', P), row('beta-app', P + 1)], published, hubUp = true, poll = true, stall = false } = (typeof given === 'function' ? given({ DEV, DEV2 }) : given) ?? {};
+  hub.list = list;
+  const now = Date.now();
+  const pub = published ?? { alpha: { root: '/srv/alpha', port: P, artifacts: { 'launch-notes': art(), view: art(), review: art() } }, 'beta-app': { root: '/srv/beta-app', port: P + 1, artifacts: { 'beta-notes': art() } } };
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ passkeys: [{ id: 'k1', name: 'k', rp: 'box.localhost', createdAt: new Date(now).toISOString() }], sessions: [{ hash: u(sha(TOK)), method: 'k1', at: now, expires: now + 3600e3 }], pushSubs: [], public: pub }), { mode: 0o600 });
+  let hubSrv = null;
+  if (hubUp) {
+    hubSrv = http.createServer((q, r) => { hub.hits++; if (stall) return; if (hub.stall) { hub.held.push({ r, list: hub.list }); return; } hubAnswer(r, hub.list); });
+    await new Promise((ok) => hubSrv.listen(HUB, '127.0.0.1', ok));
+  }
+  const port = await freePort();
+  const ttyd = path.join(dir, 'ttyd.html');
+  fs.writeFileSync(ttyd, 'ttyd');
+  const uploadsDir = path.join(dir, 'uploads');
+  fs.mkdirSync(uploadsDir, { mode: 0o750 });
+  const g = G.createGateway({ publicUrl: `http://box.localhost:${port}`, dir, ttydPort: await freePort(), ttydPage: ttyd, uploadsDir, log: () => {} });
+  await new Promise((ok) => g.server.listen(port, '127.0.0.1', ok));
+  if (hubUp && poll && !stall) await g.pollPush().catch(() => {});
+  hub.hits = 0;
+  const host = (l) => (l ? `${l}.box.localhost:${port}` : `box.localhost:${port}`);
+  const get = (label, route, { cookie = '', headers = {}, method = 'GET', body } = {}) => new Promise((ok, no) => {
+    const h = { host: host(label), ...(cookie ? { cookie } : {}), ...headers };
+    const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h, agent: false }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => ok({ status: res.statusCode, headers: res.headers, body: b })); });
+    r.on('error', no);
+    r.end(body);
+  });
+  const close = async () => {
+    g.server.closeAllConnections?.();
+    await new Promise((ok) => g.server.close(ok));
+    for (const s of stubs) { s.closeAllConnections?.(); await new Promise((ok) => s.close(ok)); }
+    if (hubSrv) { hubSrv.closeAllConnections?.(); await new Promise((ok) => hubSrv.close(ok)); }
+  };
+  return { g, port, dir, seen, hub, host, get, close, DEV, DEV2, origin: (l) => `http://${host(l)}` };
+}
+const on = (name, opts, fn) => test(name, { timeout: 20000 }, async () => { const b = await box(opts); try { await fn(b); } finally { await b.close(); } });
+const shape = (r) => { const headers = { ...r.headers }; delete headers.date; return JSON.stringify({ status: r.status, headers, body: r.body }); };
+const handshake = (b, label) => new Promise((ok, no) => {
+  const c = net.connect(b.port, '127.0.0.1');
+  let got = '';
+  c.on('data', (d) => { got += d; });
+  c.on('error', no);
+  c.on('close', () => ok(got));
+  c.write(['GET /hmr HTTP/1.1', `Host: ${b.host(label)}`, `Origin: ${b.origin(label)}`, 'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', '', ''].join('\r\n'));
+});
+const FX = JSON.parse(fs.readFileSync(path.join(here, 'fixtures', 'project-hosts.json'), 'utf8'));
+const previewOn = (name, port) => ({ name, port, project: 'other', session: 's', label: 'l' });
+
+on('C1 signed in, a project host reaches that port and no other', undefined, async (b) => {
+  const r = await b.get('alpha', '/api/data', { cookie: COOKIE });
+  assert.equal(r.status, 200, 'alpha host answers signed in');
+  assert.deepEqual([b.seen.get(P), b.seen.get(P + 1)], [['/api/data'], []], 'only alpha\'s port was asked');
+});
+on('C1b signed in, / reaches that project\'s port and no other', undefined, async (b) => {
+  const r = await b.get('beta-app', '/', { cookie: COOKIE });
+  assert.deepEqual([r.status, b.seen.get(P), b.seen.get(P + 1)], [200, [], ['/']]);
+});
+on('C2 signed out, a page gets the page that carries location.href to sign-in', undefined, async (b) => {
+  const r = await b.get('alpha', '/x?y=1', { headers: NAV });
+  const code = [...r.body.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)?.[1] ?? '';
+  const href = `${b.origin('alpha')}/x?y=1#board?goal=g-1`;
+  let to = null;
+  vm.runInNewContext(code, { location: { href, pathname: '/x', origin: b.origin('alpha'), replace: (x) => { to = x; } }, encodeURIComponent });
+  assert.equal(to, `${b.origin()}/auth/login?next=${encodeURIComponent(href)}`, 'the signed-out page sends the whole address, hash included, to the box\'s sign-in');
+});
+on('C3 safeNext accepts a project host', undefined, async (b) => {
+  const to = `${b.origin('alpha')}/#board`;
+  assert.equal(b.g.safeNext(to), to);
+});
+on('C3b safeNext refuses a look-alike of a project host', undefined, async (b) => {
+  const evil = `http://alpha.box.localhost.evil.test:${b.port}/`;
+  assert.equal(b.g.safeNext(evil), `${b.origin()}/`);
+});
+for (const [id, what, route, headers] of [
+  ['C4a', 'a page', '/', NAV],
+  ['C4b', 'a bad /c/ link', '/c/1.aaaa.bbbb/artifact/main/x/', {}],
+  ['C4c', 'a Service-Worker request', '/sw.js', { 'service-worker': 'script', 'sec-fetch-dest': 'serviceworker' }],
+  ['C4d', 'a request framed from another site', '/', { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'cross-site' }],
+  ['C4e', 'the lens path', '/.devteam/lens', {}],
+]) on(`${id} signed out, a listed name and a made-up one answer ${what} alike, and nothing asks the hub`, { list: [row('alpha', P), row('devteam-dev', P + 1)] }, async (b) => {
+  const [real, made, realShaped, madeShaped] = [await b.get('alpha', route, { headers }), await b.get('nobody', route, { headers }), await b.get('devteam-dev', route, { headers }), await b.get('madeup-name', route, { headers })];
+  assert.notEqual(real.status, 421, 'a well-formed label is not refused as a name');
+  assert.equal(shape(real), shape(made));
+  assert.equal(shape(realShaped), shape(madeShaped), 'a name of a preview\'s shape too');
+  assert.equal(shape(real), shape(realShaped));
+  assert.equal(b.hub.hits, 0, 'no read of the hub\'s list');
+});
+on('C4f a Service-Worker request is refused on a preview\'s host, signed in', ({ DEV }) => ({ list: [row('other', P + 1, { previews: [previewOn('cool-tiger', DEV)] })] }), async (b) => {
+  const r = await b.get('cool-tiger', '/sw.js', { cookie: COOKIE, headers: { 'service-worker': 'script', 'sec-fetch-dest': 'serviceworker' } });
+  assert.equal(r.status, 403);
+  assert.deepEqual(b.seen.get(b.DEV), [], 'and the dev server is not asked');
+});
+on('C4g a signed-out WebSocket answers a listed and a made-up name alike', { list: [row('alpha', P), row('devteam-dev', P + 1)] }, async (b) => {
+  assert.equal(await handshake(b, 'devteam-dev'), await handshake(b, 'madeup-name'), 'on a preview\'s shape');
+  assert.equal(await handshake(b, 'alpha'), await handshake(b, 'nobody'), 'on any other label');
+  assert.equal(b.hub.hits, 0);
+});
+test('C4h a bad /c/ link does the same MAC work on an unlisted name', () => {
+  const src = fs.readFileSync(path.join(here, '..', 'cloud', 'gateway.mjs'), 'utf8');
+  assert.match(src, /const capGood = capOk\(capPort \?\? 0, cm\[4\]/, 'capOk runs before the name is judged');
+  assert.doesNotMatch(src, /capPort === null \|\| !capOk/, 'an unlisted name must not skip it');
+});
+on('C5 a valid /c/ link works on the project host with no cookie', undefined, async (b) => {
+  const first = await b.get('alpha', '/artifact/main/mock/index.html', { cookie: COOKIE, headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
+  assert.equal(first.status, 302, 'the frame\'s first load is sent under a capability');
+  const r = await b.get('alpha', first.headers.location);
+  assert.equal(r.status, 200);
+  assert.deepEqual(b.seen.get(P), ['/artifact/main/mock/index.html']);
+});
+on('C6 /healthz is the gateway\'s ok on a project label of a preview\'s shape', { list: [row('devteam-dev', P)] }, async (b) => {
+  const r = await b.get('devteam-dev', '/healthz');
+  assert.deepEqual([r.status, r.body], [200, 'ok']);
+  assert.deepEqual(b.seen.get(P), [], 'never the port');
+});
+on('C6b /healthz is the gateway\'s ok on a made-up label and on 127.0.0.1:<port>', undefined, async (b) => {
+  const made = await b.get('nobody', '/healthz');
+  assert.deepEqual([made.status, made.body], [200, 'ok'], 'a made-up label');
+  const boot = await b.get(null, '/healthz', { headers: { host: `127.0.0.1:${b.port}` } });
+  assert.deepEqual([boot.status, boot.body], [200, 'ok'], 'the boot check');
+});
+for (const l of ['4321', 'public', 'www', 'a_b', '-app', 'DevTeam']) on(`C14 ${l}.<box> answers 421`, undefined, async (b) => {
+  assert.equal((await b.get(l, '/', { cookie: COOKIE })).status, 421);
+});
+on('C14b the block\'s own port as a label answers 421', undefined, async (b) => {
+  assert.equal((await b.get(String(P), '/', { cookie: COOKIE })).status, 421);
+});
+test('C14c every label case in the fixture resolves as it says, a 421 with no hub read', { timeout: 60000 }, async () => {
+  const cases = [...FX.labelCases, { name: 'cool-tiger', projects: ['cool-tiger', 'cool-tiger'], previews: ['cool-tiger'], expect: 'shared' }];
+  for (const c of cases) {
+    if (c.name === 'term') continue; // the terminal's own name
+    const names = c.projects ?? (c.expect === 'refused' ? [] : [c.name]);
+    const b = await box(({ DEV, DEV2 }) => {
+      const previews = (c.previews ?? []).map((name, i) => ({ name, port: [DEV, DEV2][i], project: 'host', session: 's', label: 'l' }));
+      const list = names.map((n, i) => row(n, P + i, { root: `/srv/${n}-${i}` }));
+      if (previews.length) list.push(row('host', P + 2, { previews }));
+      return { list };
+    });
+    try {
+      const say = `case ${JSON.stringify(c)}`;
+      const r = await b.get(null, '/', { cookie: COOKIE, headers: { host: `${c.name}.box.localhost:${b.port}`, ...NAV } });
+      const hit = (port) => b.seen.get(port).length;
+      if (c.expect === 'refused') { assert.equal(r.status, 421, say); assert.equal(b.hub.hits, 0, `${say}: at once`); }
+      if (c.expect === 'project') assert.deepEqual([r.status, hit(P)], [200, 1], say);
+      if (c.expect === 'shared') assert.deepEqual([r.status, hit(P), hit(P + 1), hit(b.DEV)], [503, 0, 0, 0], say);
+      if (c.expect === 'preview') assert.deepEqual([r.status, hit(b.DEV)], [200, 1], say);
+      if (c.expect === 'unknown') assert.deepEqual([r.status, hit(P), b.hub.hits], [503, 0, 1], say);
+    } finally { await b.close(); }
+  }
+});
+on('C16 a listed preview answers; a project of the same shape is the project', ({ DEV }) => ({ list: [row('devteam-dev', P), row('other', P + 1, { previews: [previewOn('cool-tiger', DEV)] })] }), async (b) => {
+  const r = await b.get('devteam-dev', '/api/data', { cookie: COOKIE });
+  assert.deepEqual([r.status, b.seen.get(P)], [200, ['/api/data']], 'the project wins over the shape');
+});
+on('C16b a listed preview reaches its own server', ({ DEV }) => ({ list: [row('other', P + 1, { previews: [previewOn('cool-tiger', DEV)] })] }), async (b) => {
+  const r = await b.get('cool-tiger', '/x', { cookie: COOKIE });
+  assert.deepEqual([r.status, b.seen.get(b.DEV)], [200, ['/x']]);
+});
+on('C17 a project listed since the poll is found after exactly one shared re-read', { list: [] }, async (b) => {
+  b.hub.list = [row('alpha', P)];
+  const rs = await Promise.all([b.get('alpha', '/a', { cookie: COOKIE }), b.get('alpha', '/b', { cookie: COOKIE }), b.get('alpha', '/c', { cookie: COOKIE })]);
+  assert.deepEqual(rs.map((r) => r.status), [200, 200, 200]);
+  assert.equal(b.hub.hits, 1, 'one read, shared');
+});
+on('C17b a preview listed since the poll is found after one re-read', { list: [] }, async (b) => {
+  b.hub.list = [row('other', P + 1, { previews: [previewOn('cool-tiger', b.DEV)] })];
+  const r = await b.get('cool-tiger', '/x', { cookie: COOKIE });
+  assert.deepEqual([r.status, b.hub.hits], [200, 1]);
+});
+on('C18 an unknown name, signed in, re-reads once and lists what is live', undefined, async (b) => {
+  const r = await b.get('nobody', '/', { cookie: COOKIE, headers: NAV });
+  assert.equal(b.hub.hits, 1);
+  assert.ok(r.body.includes(`${b.origin('alpha')}/`), 'the page links the live projects');
+});
+on('C18b the unknown-name page links a live preview too', ({ DEV }) => ({ list: [row('alpha', P, { previews: [{ ...previewOn('cool-tiger', DEV), project: 'alpha' }] })] }), async (b) => {
+  const r = await b.get('nobody', '/', { cookie: COOKIE, headers: NAV });
+  assert.ok(r.body.includes(`${b.origin('cool-tiger')}/`));
+});
+on('C18c a stalled hub with an empty list holds a dashboard request about a second', { stall: true }, async (b) => {
+  const t0 = Date.now();
+  const r = await b.get('alpha', '/', { cookie: COOKIE, headers: NAV });
+  assert.ok(Date.now() - t0 < 2500, 'bounded');
+  assert.equal(r.status, 503);
+});
+on('C19 /dev/ leaves out a preview named as a project', ({ DEV, DEV2 }) => ({ list: [row('cool-tiger', P), row('other', P + 1, { previews: [previewOn('cool-tiger', DEV), previewOn('warm-otter', DEV2)] })] }), async (b) => {
+  const r = await b.get(null, '/dev/', { cookie: COOKIE, headers: { 'sec-fetch-dest': 'document' } });
+  assert.match(r.body, /warm-otter/);
+  assert.doesNotMatch(r.body, /cool-tiger/);
+});
+test('C33 the fixture still lists what this probe assumes', () => assert.deepEqual(FX.reservedLabels, ['term', 'public', 'www']));

@@ -385,6 +385,9 @@ function listedByRoot(instances, ports) {
 }
 // A preview's host name: two letter-only words and an optional number, which no reserved name of
 // the box can be. A word list would say nothing more; the map says whether it is live.
+export const HOST_LABEL = /^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+export const RESERVED_LABELS = ['term', 'public', 'www'];
+export const RESERVED_SEGMENTS = ['api', 'artifact', 'c', 'healthz', 'index.html', 'presence', 'public-manifest', 'review', 'upload', 'view'];
 export const PREVIEW_NAME = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
 const PREVIEW_MAX = 20;
 const PREVIEW_CAPS = { project: 63, session: 80, label: 40 };
@@ -1022,10 +1025,14 @@ export function createGateway(opts = {}) {
   const SECURE = pubUrl.protocol === 'https:';
   const SUFFIX = pubUrl.port ? `:${pubUrl.port}` : '';
   const instanceOrigin = (port) => `${pubUrl.protocol}//${port}.${NAME}${SUFFIX}`;
-  const instanceOf = (host) => {
-    const m = /^(\d{1,5})\.(.+)$/.exec(String(host ?? ''));
-    const port = m && m[2] === `${NAME}${SUFFIX}` && String(Number(m[1])) === m[1] ? Number(m[1]) : null;
-    return BLOCK.includes(port) ? port : null;
+  const projectOrigin = (name) => `${pubUrl.protocol}//${name}.${NAME}${SUFFIX}`;
+  // Exactly <label>.<box>: a look-alike suffix or a second label is no name of this box.
+  const labelOf = (host) => {
+    const h = String(host ?? '');
+    const tail = `.${NAME}${SUFFIX}`;
+    if (!h.endsWith(tail)) return null;
+    const l = h.slice(0, -tail.length);
+    return HOST_LABEL.test(l) && !RESERVED_LABELS.includes(l) ? l : null;
   };
   // A preview's name, one label directly under the box's, on the wildcard DNS and certificate it has.
   const previewOf = (host) => {
@@ -1047,7 +1054,7 @@ export function createGateway(opts = {}) {
   // What the owner published, to anyone. Under the box's wildcard name like term., and never an
   // instance's: those are all digits.
   const PUBLIC = `${pubUrl.protocol}//public.${pubUrl.host}`;
-  const publicHost = new URL(PUBLIC).host;
+  const publicAddress = (project, slug) => `${projectOrigin(project)}/${slug}/`;
   // Parsed once, before anything else starts: a cap that isn't a number would compare false
   // against every total and publish without limit, so a bad one stops the gateway instead.
   const maxSet = opts.publicMax ?? env.DEVTEAM_PUBLIC_MAX;
@@ -1181,7 +1188,7 @@ export function createGateway(opts = {}) {
   const safeNext = (n) => {
     try {
       const u = new URL(String(n ?? '/'), PUB);
-      if (u.origin === PUB || u.origin === TERM || (u.protocol === pubUrl.protocol && instanceOf(u.host) && u.origin === instanceOrigin(instanceOf(u.host))) || (u.protocol === pubUrl.protocol && previewOf(u.host) && u.origin === previewOrigin(previewOf(u.host)))) return u.href;
+      if (u.origin === PUB || u.origin === TERM || (u.protocol === pubUrl.protocol && labelOf(u.host) && u.origin === projectOrigin(labelOf(u.host)))) return u.href;
     } catch {}
     return `${PUB}/`;
   };
@@ -1778,12 +1785,36 @@ export function createGateway(opts = {}) {
   // Each instance's root and whether its kit has viewers, as the hub's list last said (every poll,
   // PUSH_POLL_MS): the owner wrapper's choice is a lookup in it, so no visit asks anything (spec §8).
   let listed = new Map();
+  // Each name the list gives to the ports that hold it; a port's origin only for a name one port holds;
+  // whether the last read gave a list; and the hub page's copy of the hosts, which a failed read leaves.
+  let projects = new Map();
+  let portHost = new Map();
+  let hubFrames = [];
+  let listRead = false;
   const takePreviews = (body) => {
     let list = null;
     try { list = JSON.parse(body).instances; } catch {}
     const ok = Array.isArray(list) ? list : [];
+    const byPort = listedByPort(ok, BLOCK);
+    const names = new Map();
+    for (const [port, x] of byPort) if (typeof x.name === 'string' && HOST_LABEL.test(x.name) && !RESERVED_LABELS.includes(x.name)) names.set(x.name, [...(names.get(x.name) ?? []), { port, root: x.root, viewer: x.viewer === 1 }]);
+    projects = names;
+    portHost = new Map([...names].filter(([, c]) => c.length === 1).map(([n, c]) => [c[0].port, projectOrigin(n)]));
     previews = previewLinks(ok, BLOCK, ownPort, ttydPort);
-    listed = new Map([...listedByPort(ok, BLOCK)].map(([port, x]) => [port, { root: x.root, viewer: x.viewer === 1 }]));
+    // a preview whose generated name is a project's is not served under it
+    for (const n of names.keys()) previews.delete(n);
+    listed = new Map([...byPort].map(([port, x]) => [port, { root: x.root, viewer: x.viewer === 1 }]));
+    listRead = Array.isArray(list);
+    if (listRead) hubFrames = [...portHost.values()];
+  };
+  // At most ms of waiting on the shared read; the read itself goes on and still updates the maps.
+  const refreshWithin = (ms) => new Promise((done) => { const t = setTimeout(done, ms); refreshPreviews().catch(() => {}).finally(() => { clearTimeout(t); done(); }); });
+  // One listed project, else a name two share (no dashboard), else a listed preview.
+  const resolveLabel = (l) => {
+    const c = projects.get(l);
+    if (c?.length === 1) return { port: c[0].port };
+    if (c) return { shared: true };
+    return previews.has(l) ? { preview: l } : null;
   };
   let previewRefresh = null;
   const refreshPreviews = () => (previewRefresh ??= hubList().then(takePreviews).finally(() => { previewRefresh = null; }));
@@ -2493,39 +2524,43 @@ export function createGateway(opts = {}) {
     let url;
     try { url = new URL(req.url, PUB); } catch { return send(res, 400, 'text/plain', 'bad request'); }
     // an app's own /healthz is reachable through its link; the platform's probe is on the service's name
-    if (url.pathname === '/healthz' && !previewOf(req.headers.host)) return send(res, 200, 'text/plain', 'ok');
+    // The gateway's own ok on every name, but for a live preview's own /healthz to its signed-in owner:
+    // signed out, a real name and a made-up one answer alike.
+    if (url.pathname === '/healthz') {
+      const l = labelOf(req.headers.host);
+      let app = false;
+      try { app = !!l && previews.has(l) && store.load().passkeys.length > 0 && !!sessionOf(req); } catch {}
+      if (!app) return send(res, 200, 'text/plain', 'ok');
+    }
     // Our own names only; and anything but a read must come from a page on the same name.
     const isBox = req.headers.host === pubUrl.host;
     const isTerm = req.headers.host === termHost;
-    const isPublic = req.headers.host === publicHost;
-    const pv = previewOf(req.headers.host);
-    const port = isBox || isTerm || isPublic || pv ? null : instanceOf(req.headers.host);
-    if (!isBox && !isTerm && !isPublic && !port && !pv) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
-    // Anyone's, so before every check that is about the owner (Origin, cookie, session). The one
-    // exception reads the cookie to choose a page, never to refuse one: the owner's own visit gets
-    // the wrapper, and whatever that can't settle gets the public's bytes, exactly as before.
-    if (isPublic) {
-      const wrap = ownerWrapper(req, url);
-      if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(instanceOrigin(wrap.port)), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' });
-      try { return servePublic(req, res); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
-    }
-    const own = isBox ? PUB : isTerm ? TERM : pv ? previewOrigin(pv) : instanceOrigin(port);
+    const label = isBox || isTerm ? null : labelOf(req.headers.host);
+    if (!isBox && !isTerm && !label) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
+    const own = isBox ? PUB : isTerm ? TERM : projectOrigin(label);
     if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin !== own) return send(res, 403, 'text/plain; charset=utf-8', 'only from this box\'s own pages');
-    // The kit has no service workers. One an agent's page registers on an instance's name would
+    // The kit has no service workers. One an agent's page registers on a project's name would
     // outlive its server, and run as that name's real dashboard once one takes the port.
-    if ((port || pv) && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
+    if (label && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
+    // Before any lookup, for every label: no other site lays one of these under its own page with
+    // the owner's session in it.
+    if (label && PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, 'text/plain; charset=utf-8', 'not in another site\'s frame');
     const p = url.pathname;
+    // Step 6 of the order, a page this name published (task 2 of kit-277), goes here: anyone's, from
+    // the gateway's store, before every check about the owner.
     const isAuth = isBox && (p === '/auth' || p.startsWith('/auth/'));
     const rawPath = req.url.split('?')[0];
     try {
-      const cm = port ? /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/.exec(rawPath) : null;
+      const cm = label ? /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/.exec(rawPath) : null;
       if (cm) {
-        if (!['GET', 'HEAD'].includes(req.method) || !capOk(port, cm[4], cm[1], cm[2], cm[3])) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
-        return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}`, publicFrame: treeGranted(port, cm[4]) });
+        // The same MAC and state read for every name: an unlisted one is checked against port 0,
+        // which no link is minted for, so a failure costs the same and says nothing of the list.
+        const only = projects.get(label);
+        const capPort = only?.length === 1 ? only[0].port : null;
+        const capGood = capOk(capPort ?? 0, cm[4], cm[1], cm[2], cm[3]);
+        if (!['GET', 'HEAD'].includes(req.method) || capPort === null || !capGood) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
+        return proxy(req, res, { port: capPort, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}`, publicFrame: treeGranted(capPort, cm[4]) });
       }
-      // A preview may be framed only by a page of this box (the dashboard's viewer, in time), so no
-      // other site can lay it under its own page with the owner's session in it.
-      if (pv && PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, 'text/plain; charset=utf-8', 'not in another site\'s frame');
       if (!crossSiteOk(req, p, url)) return send(res, 403, 'text/plain; charset=utf-8', 'not for another site\'s page');
       const s = store.load();
       const claimed = s.passkeys.length > 0;
@@ -2577,12 +2612,27 @@ export function createGateway(opts = {}) {
       if (installed) return send(res, 200, installed.type, installed.body());
       const who = claimed ? sessionOf(req) : null;
       if (!who) {
-        // a lens open in a tab of its own is no use after sign-in: the preview itself is
-        const back = pv && p === '/.devteam/lens' ? `${own}/` : `${own}${req.url}`;
-        if (navigating(req)) return redirect(res, claimed ? loginAt(back) : loginAt());
+        // On a project's name, the same bytes for every name; only its script can read the hash.
+        if (label && claimed && navigating(req)) return send(res, 401, 'text/html; charset=utf-8', PAGES.signedOut(PUB), { 'content-security-policy': PAGE_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+        if (navigating(req)) return redirect(res, claimed ? loginAt(`${own}${req.url}`) : loginAt());
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
       const { session, person } = who;
+      // Only now, with the session, does the name mean anything: a miss asks the hub once, shared.
+      let port = null;
+      let pv = null;
+      if (label) {
+        let found = resolveLabel(label);
+        if (!found) { await refreshWithin(1000); found = resolveLabel(label); }
+        if (found?.shared) return previewUnavailable(req, res, () => PAGES.sharedName(label));
+        if (!found) {
+          let stored = false;
+          try { stored = Object.hasOwn(store.load().public ?? {}, label); } catch {}
+          return previewUnavailable(req, res, () => PAGES.unknownHost(label, listRead, stored, [...projects].filter(([, c]) => c.length === 1).map(([n]) => n).sort(), [...previews.keys()].sort(), projectOrigin));
+        }
+        port = found.port ?? null;
+        pv = found.preview ?? null;
+      }
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
       if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': LENS_CSP, 'referrer-policy': 'no-referrer' });
@@ -2970,13 +3020,19 @@ const publishNote = (r) => {
 };
 const doc = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>${title}</title>${STYLE}</head><body><main>${body}</main>${CLIENT}`;
 const PREVIEW_REFRESH = '<meta http-equiv="refresh" content="5">';
+// A name not listed yet may be a moment away (a `preview` command takes one to show up): retry for a few minutes, never forever.
+const RETRY_UNLISTED = "<script>try{const k='dt-preview-since',t=Date.now();let s=Number(sessionStorage.getItem(k)||0);if(!s||t-s>600000){s=t;sessionStorage.setItem(k,String(s))}if(t-s<180000)setTimeout(()=>location.reload(),5000)}catch{}</script>";
 const PAGES = {
+  // Signed out on a project's host: the same bytes for every name. Only script can read the hash.
+  signedOut: (box) => `${doc('Sign in', '<h1>devteam</h1><p>Sign in to open this page.</p>')}<script>const here = location.pathname === '/.devteam/lens' ? location.origin + '/' : location.href; location.replace(${jsonIn(`${box}/auth/login?next=`)} + encodeURIComponent(here));</script></body></html>`,
+  sharedName: (name) => `${doc('No dashboard', `<h1>Two projects are named ${esc(name)}</h1><p>This box can't tell which one this address means, so it opens neither. Rename one (settings.md's project). Their published pages still answer.</p>`)}</body></html>`,
+  unknownHost: (name, read, stored, names, previewNames, originOf) => `${doc('Not found', `${RETRY_UNLISTED}<h1>${!read || stored ? `${esc(name)} isn't running` : `Nothing is named ${esc(name)} on this box`}</h1><p>${!read ? 'The hub isn\'t running, so the box can\'t list its projects.' : `Live now: ${[...names, ...previewNames].map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ') || 'none'}.`}</p>`)}</body></html>`,
   // Every preview on the box, by instance. Each value came through the hub's list and is shown as text.
   previewList: (rows) => doc('Previews', `<h1>Previews on this box</h1><p>Only you can open these, signed in. Each is a running server a session offered.</p>${rows.length ? Object.entries(rows.reduce((g, r) => { (g[r.root] ??= []).push(r); return g; }, Object.create(null))).map(([root, rs]) => `<h2 style="font-size:15px;margin:16px 0 4px">${esc(rs[0].project)} <small>${esc(root)}</small></h2><ul>${rs.map((r) => `<li class="pub"><span><b>${esc(r.name)}</b> <small>${[r.session && esc(r.session), r.label && esc(r.label), `port ${esc(r.port)}`, esc(r.state)].filter(Boolean).join(' · ')}</small></span>${r.link ? `<a href="${esc(r.link)}">Open</a>` : ''}</li>`).join('')}</ul>`).join('') : '<p>Nothing is offered right now.</p>'}`),
   previewDown: (name, l) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Preview ${esc(l.label || name)} isn't answering</h1><p>Offered by ${esc(l.session)} of ${esc(l.project)}, instance ${esc(l.root)}: nothing answers on port ${esc(l.port)}. Its server may be starting, or stopped. This page retries every 5 s.</p>`)}`,
   previewAmbiguous: (name, cs) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Two instances offer a preview named ${esc(name)}</h1><p>${cs.map((c) => `${esc(c.project)} at ${esc(c.root)} (port ${esc(c.port)})`).join(' and ')}. The box serves neither until one stops; run <code>devteam.mjs preview stop ${esc(name)}</code> in the one that shouldn't. This page retries every 5 s.</p>`)}`,
   // A preview command can be a second behind the link: the page retries for a few minutes, not forever.
-  previewUnknown: (name, names, originOf) => `${doc('Preview', `<script>try{const k='dt-preview-since',t=Date.now();let s=Number(sessionStorage.getItem(k)||0);if(!s||t-s>600000){s=t;sessionStorage.setItem(k,String(s))}if(t-s<180000)setTimeout(()=>location.reload(),5000)}catch{}</script><h1>No preview named ${esc(name)} on this box</h1><p>${names.length ? `Offered now: ${names.map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ')}.` : 'Nothing is offered right now.'} This page retries for a few minutes; a <code>preview</code> command takes a moment to show up.</p>`)}`,
+  previewUnknown: (name, names, originOf) => `${doc('Preview', `${RETRY_UNLISTED}<h1>No preview named ${esc(name)} on this box</h1><p>${names.length ? `Offered now: ${names.map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ')}.` : 'Nothing is offered right now.'} This page retries for a few minutes; a <code>preview</code> command takes a moment to show up.</p>`)}`,
   claim: (box) => `${doc('Claim this box', `<h1>Claim this devteam box</h1><p>Make a passkey for this box. Your password manager (1Password, iCloud Keychain…) saves it; from then on only a passkey made here opens the box.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and claim</button></p><p id="err"></p>`)}
 <script>
 const token = decodeURIComponent(location.hash.slice(1));
