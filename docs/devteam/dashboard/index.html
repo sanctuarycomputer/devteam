@@ -5878,7 +5878,18 @@ function openJob(name) {
   const p = peekOf('recurring', name);
   const row = recRow(name);
   const e = p && !p.error && p.entry && typeof p.entry === 'object' ? p.entry : null;
-  if (!row && !e) return p === undefined ? showDrawer(`<h2 id="drawer-title">${esc(name)}</h2><p class="loading">Loading…</p>`) : notFound('recurring', `recurring.${name}`, p, 'No such job.', { noRecord: true });
+  // kit-166 final-1 F2: a 404 stored before the job's data existed is asked again while its row is in the
+  // data, at most once every 10 s; the time is kept here, as fetchPeek replaces the stored peek on each answer
+  if (p?.missing && row) {
+    openJob.retried ??= new Map();
+    if (Date.now() - (openJob.retried.get(name) ?? 0) > 10000) {
+      openJob.retried.set(name, Date.now());
+      PEEKS.delete(peekKey('recurring', name, {}));
+      fetchPeek('recurring', name);
+    }
+  }
+  // kit-166 final-1 F1: a job that isn't found has no History to show
+  if (!row && !e) return showDrawer(p === undefined ? `<h2 id="drawer-title">${esc(name)}</h2><p class="loading">Loading…</p>` : `<h2 id="drawer-title">${esc(name)}</h2>${attrs({ id: `recurring.${name}`, peek: p, type: 'recurring', noRecord: true })}${p?.transient ? `<p class="err">Could not load it just now (${esc(p.error)}); trying again.</p>` : '<p class="muted">No such job.</p>'}`);
   const j = { ...(row || {}), ...(e || {}), name };
   const check = j.kind === 'check';
   const runs = p && !p.error && Array.isArray(p.runs) ? p.runs.filter((r) => r && typeof r === 'object') : null;
