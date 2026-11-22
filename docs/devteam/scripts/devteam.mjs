@@ -13648,7 +13648,7 @@ function signalGroups() {
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
   for (const o of logObjects('observation')) {
-    if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) continue;
+    if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link', 'learning', 'recurring-run', 'recurring-recovered'].includes(o.kind)) continue;
     const key = signalKeyOf(o);
     if (covered(keys, key, o.created_at)) continue;
     add(key, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
@@ -13742,7 +13742,7 @@ const authorityOfCall = (c) => (c.type === 'decision' ? c.authority : actAuthori
 function recurringGroups() {
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [], formed_at: null }).get(key)).items.push(item);
-  for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
+  for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning', 'recurring-run', 'recurring-recovered'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
   for (const a of calls()) { const c = correctionOf(a); if (c) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by }); }
   for (const g of groups.values()) {
     g.items.sort((a, b) => a.at.localeCompare(b.at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -13811,7 +13811,7 @@ function lessonEfficacy(cut) {
     const first = new Map();
     for (const a of logObjects('act').filter((x) => x.class === 'worker-slots' && Array.isArray(x.knowledge)).sort(byTime)) for (const k of a.knowledge) if (!first.has(k)) first.set(k, a.created_at);
     const byKey = new Map();
-    for (const o of logObjects('observation').sort(byTime)) { if (['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) continue; const k = signalKeyOf(o); (byKey.get(k) ?? byKey.set(k, []).get(k)).push(o); }
+    for (const o of logObjects('observation').sort(byTime)) { if (['reading', 'retro', 'outcome', 'link', 'learning', 'recurring-run', 'recurring-recovered'].includes(o.kind)) continue; const k = signalKeyOf(o); (byKey.get(k) ?? byKey.set(k, []).get(k)).push(o); }
     return [...first].map(([id, at]) => {
       const k = logGet(id);
       const keys = [...new Set((k?.evidence ?? []).map(logGet).filter((o) => o?.type === 'observation').map(signalKeyOf))];
@@ -29063,7 +29063,7 @@ function peekView(kind, id) {
     // and skipped as lessonEfficacy does them; null when its evidence holds no observation to follow
     if (o.type === 'knowledge') {
       const keys = new Set((o.evidence ?? []).map(logGet).filter((x) => x?.type === 'observation').map(signalKeyOf));
-      const seen = keys.size ? logObjects('observation').filter((x) => !['reading', 'retro', 'outcome', 'link', 'learning'].includes(x.kind) && keys.has(signalKeyOf(x))).map((x) => x.created_at) : null;
+      const seen = keys.size ? logObjects('observation').filter((x) => !['reading', 'retro', 'outcome', 'link', 'learning', 'recurring-run', 'recurring-recovered'].includes(x.kind) && keys.has(signalKeyOf(x))).map((x) => x.created_at) : null;
       v.given_to = logObjects('act').filter((a) => a.class === 'worker-slots' && Array.isArray(a.knowledge) && a.knowledge.includes(id)).sort(byTime).reverse().slice(0, 40).map((a) => {
         const m = /^(?:made|resumed) (\S+) (\S+)/.exec(a.what ?? '');
         return { act: a.id, session: m ? m[2] : a.id, role: m ? m[1] : null, at: a.created_at, since: seen ? seen.filter((at) => at >= a.created_at).length : null };
