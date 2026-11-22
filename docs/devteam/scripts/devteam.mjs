@@ -26276,7 +26276,7 @@ const recurringRunDue = Object.freeze({
   results(name) {
     return logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${name}` && o.detector === 'recurring' && o.created_by === 'supervisor' && ['pass', 'fail', 'error'].includes(o.run?.status) && typeof o.run.slot === 'string')
-      .map((o) => ({ slot: o.run.slot, at: new Date(Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0)).toISOString() }));
+      .map((o) => ({ slot: o.run.slot, at: new Date(recurringFailures.runStart(o.created_at, o.run.seconds)).toISOString() }));
   },
   // the entry's landings: each merge-chore act citing an answered recurring-edit question that shows
   // this name, oldest first; main's entry when the last of them isn't it, at main's last commit to the file
@@ -26555,6 +26555,15 @@ const recurringRunDue = Object.freeze({
 // gives is ISO to the second, as the dashboard contract has them.
 const recurringFailures = Object.freeze({
   isoSec: (t) => `${new Date(typeof t === 'number' ? t : Date.parse(t)).toISOString().slice(0, 19)}Z`,
+  // a run's start, in ms: its line's time less its seconds (the runner logs at the end); a seconds
+  // that isn't a positive number, or would put the start before 1970 (no date, or one the
+  // contract's times can't show), is ignored as a duration, and the start is the line's time (kit-781)
+  runStart(createdAt, seconds) {
+    const t = Date.parse(createdAt);
+    if (!(Number.isFinite(seconds) && seconds > 0)) return t;
+    const start = t - seconds * 1000;
+    return start >= 0 ? start : t;
+  },
   counts: (o) => o?.created_by === 'supervisor' && o?.detector === 'recurring',
   failAfter: (entry) => (Number.isInteger(entry?.fail_after) ? entry.fail_after : 1),
   // the answered landings that show this name, oldest first (a stop shows it as null)
@@ -26599,7 +26608,7 @@ const recurringFailures = Object.freeze({
       if (o.kind !== 'recurring-run' || o.subject !== `recurring:${name}` || !RF.counts(o)) continue;
       const r = o.run;
       if (!r || !['pass', 'fail', 'error'].includes(r.status) || typeof r.slot !== 'string' || !Number.isFinite(Date.parse(r.slot))) continue;
-      const ms = Date.parse(o.created_at) - (Number.isFinite(r.seconds) && r.seconds > 0 ? r.seconds * 1000 : 0);
+      const ms = RF.runStart(o.created_at, r.seconds);
       if (!(ms >= floor)) continue;
       const cur = first.get(r.slot);
       if (!cur || ms < cur.ms) first.set(r.slot, { ms, id: o.id, status: r.status, slot: r.slot, seconds: Number.isFinite(r.seconds) ? r.seconds : null, excerpt: typeof r.excerpt === 'string' ? r.excerpt : null });
@@ -29123,7 +29132,7 @@ function peekView(kind, id) {
     const STATUSES = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
     const runs = logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && Number.isFinite(Date.parse(o.created_at)))
-      .map((o) => ({ o, ms: Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0) }))
+      .map((o) => ({ o, ms: RF.runStart(o.created_at, o.run.seconds) }))
       .sort((a, b) => b.ms - a.ms)
       .slice(0, 20)
       .map(({ o, ms }) => ({ status: o.run.status, at: RF.isoSec(ms), slot: RF.isoSec(o.run.slot), seconds: Number.isFinite(o.run.seconds) ? o.run.seconds : null, excerpt: typeof o.run.excerpt === 'string' ? o.run.excerpt.slice(-200) : null, ref: typeof o.run.ref === 'string' && o.run.ref ? o.run.ref : null }));
