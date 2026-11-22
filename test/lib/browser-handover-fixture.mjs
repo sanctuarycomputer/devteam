@@ -181,9 +181,9 @@ export async function killDaemon(P) {
 }
 // The owner types text into the open /record page's note over the view: a socket, a frame, a click on
 // the page's button, Tab to the note, then a paste; resolved once the site recorded the whole value.
-// The socket is returned, still open.
-export async function typeNote(P, text) {
-  const v = await viewSocket(P);
+// The socket is returned, still open. v: a socket already open, used instead of a new one.
+export async function typeNote(P, text, { v: open } = {}) {
+  const v = open ?? await viewSocket(P);
   await v.waitFor((m) => m.t === 'frame', 5000);
   v.send({ t: 'mouse', type: 'click', x: 108, y: 120, button: 'left', clicks: 1 });
   await sleep(200);

@@ -290,12 +290,21 @@ onA('RF5 two open handovers: held by the oldest', async () => {
   // RF5's second half (T4): closing the newer of two open handovers is still a close. It gets its
   // reset, a restart and its entry, and the hold stays on the older one (H1).
   const pid0 = readState(P).chrome_pid;
+  // the view's half (T6): the open viewer, on the older one, gets bye when the newer closes
+  const v = await viewSocket(P);
+  await v.waitFor((m) => m.t === 'held' && m.qid === H1, 5000);
   await withdraw(P, newer.id);
+  await v.waitFor((m) => m.t === 'bye', 15000);
+  v.close();
   const e = await until(() => entriesFor(P, newer.id)[0], 10000, `the ledger entry for ${newer.id}`);
   assert.equal(e.outcome, 'withdrawn');
   assert.equal(e.reset, true);
   assert.equal((await statusJson(P)).held, H1, 'still held by the older one');
   assert.notEqual(readState(P).chrome_pid, pid0, 'Chrome restarted for the newer one\'s close');
+  // a viewer that reconnects (the view answers 503 until the restart is over) is sent the older qid
+  const again = await until(() => viewSocket(P).catch(() => null), 15000, 'the view open again');
+  await again.waitFor((m) => m.t === 'held' && m.qid === H1, 5000);
+  again.close();
 });
 
 onA('C22 another instance\'s handover never holds this browser', async () => {

@@ -29868,13 +29868,41 @@ async function browserReopen(ctx, urls) {
   for (const w of waits) w.finish(); // any load still running: its wait let go, its tab.loaded freed
   return opened.map((u) => browserMask(u));
 }
+// A fold just read, kept: ctx.held, the fold and its time (the view's input check reads them), and the
+// open viewer told when the hold changed.
+function browserKeepHeld(ctx, hs) {
+  ctx.held = browserHeld(hs);
+  ctx.folded = hs;
+  ctx.foldAt = Date.now();
+  if (ctx.viewer) browserViewHeld(ctx, ctx.viewer);
+}
+// The viewer's side of the hold: {t:"held",qid} sent when it differs from what this socket was last
+// sent (the first time on connect). v.handover is the handover this socket was sent, or null. It
+// follows the hold only while its own handover is open: once that one has closed it stays, so the
+// socket's input stays dropped until the close's bye, even if another handover holds the browser now.
+function browserViewHeld(ctx, v) {
+  if (v.ws.closed) return;
+  const held = ctx.held ?? null;
+  if (held !== v.heldSent) { v.heldSent = held; try { v.ws.send({ t: 'held', qid: held }); } catch {} } // never throws into the watch's timer
+  if (held && (!v.handover || ctx.folded.some((h) => h.qid === v.handover && h.status === 'open'))) v.handover = held;
+}
+// Whether this socket's handover has closed, by a fold no more than 500 ms old (read here when the
+// watch's is older, so the drop doesn't rest on the watch). A fold that fails reads as closed. A socket
+// that was never sent a handover is never closed: outside a handover the view is kit-66's.
+function browserViewClosed(ctx, v) {
+  if (!v.handover) return false;
+  if (Date.now() - ctx.foldAt > 500) {
+    try { browserKeepHeld(ctx, browserHandovers()); } catch { return true; }
+  }
+  return !ctx.folded.some((h) => h.qid === v.handover && h.status === 'open');
+}
 // The gate, run only from a job already on the verbs' queue (a verb's run, or the watch's job): it
 // folds afresh, keeps ctx.held, and runs one restart for every close not yet handled. It never queues
 // itself and never skips, so a later queued job finds nothing left.
 async function browserGate(ctx) {
   if (ctx.stopping) return;
   const hs = browserHandovers();
-  ctx.held = browserHeld(hs);
+  browserKeepHeld(ctx, hs);
   const closes = browserUnhandled(ctx, hs);
   if (closes.length) await browserCloseRestart(ctx, closes);
 }
@@ -29883,7 +29911,7 @@ async function browserGate(ctx) {
 // and no tab comes back. Chrome needs no restart: every start already deleted the session files.
 function browserStartGate(ctx) {
   const hs = browserHandovers();
-  ctx.held = browserHeld(hs);
+  browserKeepHeld(ctx, hs);
   const closes = browserUnhandled(ctx, hs);
   if (closes.length) browserRecordCloses(ctx, closes, []);
 }
@@ -29897,7 +29925,7 @@ function browserWatch(ctx) {
     if (ctx.stopping) return;
     let hs;
     try { hs = browserHandovers(); } catch { return; }
-    ctx.held = browserHeld(hs);
+    browserKeepHeld(ctx, hs);
     if (browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_HANDLE') === '0' || ctx.gateQueued) return;
     if (!browserUnhandled(ctx, hs).length) return;
     ctx.gateQueued = true;
@@ -30047,8 +30075,19 @@ function browserVerbs(ctx) {
 function browserControl(ctx, secret) {
   const want = Buffer.from(secret);
   let queue = Promise.resolve();
-  // with a viewer's socket open, the idle timer arms again rather than stop the daemon
-  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (ctx.viewer && !ctx.stopping ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
+  // with a viewer's socket open, while the owner has the browser, or with a close not yet handled (the
+  // watch queues it within 500 ms: the daemon never idles out from under it), the idle timer arms again
+  // rather than stop the daemon. The fold is read as it fires; one that fails keeps the last hold.
+  const busy = () => {
+    if (ctx.viewer) return true;
+    try {
+      const hs = browserHandovers();
+      browserKeepHeld(ctx, hs);
+      if (browserUnhandled(ctx, hs).length) return true;
+    } catch {}
+    return !!ctx.held;
+  };
+  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (!ctx.stopping && busy() ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
   // ctx.serial(fn): fn on the verbs' queue (the view's forget), the idle timer paused as for a verb
   ctx.serial = (fn) => {
     const run = queue.then(async () => {
@@ -30295,9 +30334,11 @@ const BROWSER_BUTTONS = { none: 0, left: 1, right: 2, middle: 4 };
 // One message from the page: parsed, checked, and handed to the active tab's session. Nothing about
 // it is logged, printed, stored or echoed; a failed CDP call is dropped (browserViewCdp catches it).
 // While Chrome isn't up (the start steps, a forget restarting it) or the daemon is stopping, every
-// message is dropped, a second forget among them, so nothing reads a null ctx.active.
+// message is dropped, a second forget among them, so nothing reads a null ctx.active. So is every
+// message on a socket whose handover has closed (browserViewClosed), before the close's bye.
 function browserViewInput(ctx, v, text) {
   if (!ctx.ready || ctx.stopping || ctx.viewer !== v) return;
+  if (browserViewClosed(ctx, v)) return;
   let m;
   try { m = browserViewMessage(JSON.parse(text)); } catch { return; }
   if (!m) return;
@@ -30381,13 +30422,13 @@ function browserViewServer(ctx) {
       if (!ctx.ready || ctx.stopping) return refuse(503);
       const accept = crypto.createHash('sha1').update(key + BROWSER_WS_GUID).digest('base64');
       sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
-      const v = { ws: null, seq: 0, tab: null, url: null, timer: null, scale: 1 };
+      const v = { ws: null, seq: 0, tab: null, url: null, timer: null, scale: 1, handover: null, heldSent: undefined };
       v.ws = browserSocket(sock, { pingMs: browserPingMs(), onText: (text) => browserViewInput(ctx, v, text), onClose: () => browserViewClose(ctx, v) });
       if (head?.length) v.ws.feed(head);
       if (v.ws.closed) return;
       if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
       ctx.viewer = v;
-      v.ws.send({ t: 'held', qid: null });
+      try { browserKeepHeld(ctx, browserHandovers()); } catch { browserViewHeld(ctx, v); } // the current hold, from a fresh fold
       browserViewTick(ctx, v);
       v.timer = setInterval(() => browserViewTick(ctx, v), 250);
       v.timer.unref?.();
@@ -30401,7 +30442,7 @@ function browserViewServer(ctx) {
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, gateQueued: false, watch: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], foldAt: 0, gateQueued: false, watch: null };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   browserIsDaemon = true;
   const viewPort = Number(process.env.PORT);

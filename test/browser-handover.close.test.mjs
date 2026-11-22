@@ -15,12 +15,13 @@ handoverFile();
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
-// The checks run as three chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, RF3), cB's (C18, RF4, T4-1, T4-3, T4-2) and cD's (C12, C13, C14,
-// C16). onA, onB and onD add a check.
-const cAChecks = [], cBChecks = [], cDChecks = [];
+// The checks run as four chains at once, one per project (each its own daemon), checks in order within
+// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, RF4, T4-1, T4-3, T4-2), cC's (C24, RF2)
+// and cD's (C12, C13, C14, C16). onA, onB, onC and onD add a check.
+const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
 const onB = (name, fn) => cBChecks.push([name, fn]);
+const onC = (name, fn) => cCChecks.push([name, fn]);
 const onD = (name, fn) => cDChecks.push([name, fn]);
 if (mustRun && !canDrive) test('Chrome is needed on CI\'s Node 22+', () => assert.fail('Chrome is needed on CI\'s Node 22+: this file must run there, not skip'));
 
@@ -278,6 +279,36 @@ onD('C16 a daemon killed mid-handover: wait brings it and the view back under th
   assert.ok(s.out.includes(SIGNED), `the page reopened isn't signed in: ${s.out.slice(0, 300)}`);
 });
 
+// --- the view (T6)
+onA('C21 a decline after a half-typed note: bye comes while the old Chrome is alive, and the value is gone', async () => {
+  const P = cA();
+  await ok(P, ['stop']);
+  // the close held 1.5 s after its bye, so what the bye came before can be read
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS: '1500' });
+  await ok(P, ['open', `${site.origin}/record`]);
+  const q = await askHandover(P);
+  const mark = marker('c21');
+  const v = await typeNote(P, mark);
+  const old = readState(P).chrome_pid;
+  assert.ok(alive(old), 'the Chrome to be stopped');
+  const a = await owner(P, ['answer', q, '--choice', "Can't right now"]);
+  assert.equal(a.status, 0, a.err || a.out);
+  await v.waitFor((m) => m.t === 'bye', 15000);
+  assert.equal(readState(P).chrome_pid, old, 'state.json has a new Chrome at bye');
+  assert.ok(alive(old), 'the old Chrome was already gone at bye');
+  v.close();
+  const w = await waitJson(P);
+  assert.deepEqual([w.qid, w.outcome], [q, 'declined']);
+  const s = await ok(P, ['snapshot']);
+  assert.match(s.out, BLANK);
+  assert.ok(!s.out.includes(mark), 'the half-typed note survived the decline');
+  await ok(P, ['screenshot']);
+  assert.equal(JSON.parse((await ok(P, ['status', '--json'])).out).url, 'about:blank');
+  assert.deepEqual(await tabUrls(P), ['about:blank']);
+  entryIs(P, q, 'declined');
+  await ok(P, ['stop']); // the close-delay hook ends with this daemon
+});
+
 onA('RF3 a ledger entry dated ahead, and a close dated ahead of the clock: each handled once, never in a loop', async () => {
   const P = cA();
   await ok(P, ['start']);
@@ -325,6 +356,39 @@ onB('C18 a snapshot at once after a withdraw is served only after the reset', as
   const s = await ok(P, ['snapshot']);
   assert.match(s.out, BLANK);
   entryIs(P, q, 'withdrawn');
+});
+
+onB('C19 input after the close never reaches the page, on a socket opened during the handover and on one sent held', async () => {
+  const P = cB();
+  for (const how of ['opened during the handover', 'open before it, sent held']) {
+    await ok(P, ['open', `${site.origin}/record`]);
+    let q, v;
+    if (how.startsWith('opened')) {
+      q = await askHandover(P);
+      v = await viewSocket(P);
+    } else {
+      v = await viewSocket(P);
+      await v.waitFor((m) => m.t === 'held' && m.qid === null, 5000);
+      q = await askHandover(P);
+    }
+    await v.waitFor((m) => m.t === 'held' && m.qid === q, 5000);
+    await typeNote(P, marker('c19'), { v });
+    const from = v.msgs.length;
+    const a = await owner(P, ['answer', q, '--choice', 'Done']);
+    assert.equal(a.status, 0, a.err || a.out);
+    const answered = Date.now();
+    await v.c.wait((m) => m.t === 'held' && m.qid === null, 5000, from); // the watch still tracks the hold
+    await sleep(Math.max(0, 1500 - (Date.now() - answered)));
+    assert.equal(v.c.closed, null, `${how}: the socket closed before the late paste`);
+    assert.ok(!v.msgs.some((m) => m.t === 'bye'), `${how}: bye before the late paste: no close should have run`);
+    const late = `zq-late-${Math.random().toString(36).slice(2, 10)}`;
+    v.paste(late);
+    await sleep(1500);
+    assert.ok(!site.events().some((e) => String(e.value).includes(late)), `${how}: the value typed after the close reached the page`);
+    const w = await waitJson(P);
+    assert.deepEqual([w.qid, w.outcome], [q, 'done'], how);
+    v.close();
+  }
 });
 
 onB('RF4 the daemon told to stop during a close: the close ends, and no Chrome is left', async () => {
@@ -424,7 +488,55 @@ onB('T4-2 problem lines never wedge the browser: a handover gone from the log un
   assert.equal(entriesFor(P, a.id).length, 1, 'a new daemon handled the close with no time again');
 });
 
-test('the close on cA, cB and cD, three chains at once (C17: every ledger validates after each check)', { skip, timeout: 280000, concurrency: 3 }, async (t) => {
+// --- cC: DEVTEAM_TEST_BROWSER_IDLE_MS=1500
+let CC;
+const cC = () => (CC ??= project('cC', { DEVTEAM_TEST_BROWSER_IDLE_MS: '1500' }));
+
+onC('C24 the idle timer never stops the browser while held, and stops it after the close', async () => {
+  const P = cC();
+  // the handover is in the log before the daemon starts, so no idle gap comes before the hold
+  const l = appendLine(P, handoverLine(P));
+  await ok(P, ['start']);
+  const st = readState(P);
+  await sleep(4000);
+  assert.ok(alive(st.daemon_pid), 'the daemon stopped for idleness while held');
+  assert.ok(alive(readState(P)?.chrome_pid ?? st.chrome_pid), 'Chrome stopped while held');
+  await withdraw(P, l.id);
+  // "after the close": the daemon's close, which ends with its ledger entry and arms the timer again
+  await until(() => entriesFor(P, l.id).length, 20000, 'the close handled');
+  await until(() => !alive(st.daemon_pid), 4000, 'the daemon stopped for idleness after the close');
+  await until(() => !profilePids(P).length, 5000, 'Chrome gone with the daemon');
+});
+
+onC('RF2 Sign out of everything during a handover, then its close: the forget runs first, and the ledger records the close', async () => {
+  const P = cC();
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_IDLE_MS: '120000', DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS: '4000' });
+  const q = await askHandover(P);
+  const pid0 = readState(P).chrome_pid;
+  const mark = path.join(P.profile, 'zq-before-the-forget');
+  fs.writeFileSync(mark, 'x');
+  const v = await viewSocket(P);
+  await v.waitFor((m) => m.t === 'held' && m.qid === q, 5000);
+  v.send({ t: 'forget' });
+  // the forget is running once the view refuses a new socket (503) while it restarts
+  await until(async () => { try { (await viewSocket(P)).close(); return false; } catch (e) { return /503/.test(e.message); } }, 3000, 'the forget under way');
+  await withdraw(P, q);
+  assert.equal(readState(P).chrome_pid, pid0, 'the withdraw should land inside the forget');
+  await v.waitFor((m) => m.t === 'bye', 30000);
+  const pid1 = readState(P).chrome_pid;
+  assert.notEqual(pid1, pid0, "the close began before the forget's restart ended");
+  assert.ok(!fs.existsSync(mark), "the close began before the forget's wipe");
+  v.close();
+  const w = await waitJson(P);
+  assert.deepEqual([w.qid, w.outcome], [q, 'withdrawn']);
+  entryIs(P, q, 'withdrawn');
+  assert.equal(entriesFor(P, q).length, 1);
+  assert.notEqual(readState(P).chrome_pid, pid1, 'the close restarted Chrome after the forget');
+  assert.match((await ok(P, ['snapshot'])).out, BLANK);
+  await ok(P, ['stop']);
+});
+
+test('the close on cA, cB, cC and cD, four chains at once (C17: every ledger validates after each check)', { skip, timeout: 280000, concurrency: 4 }, async (t) => {
   const chain = (P, checks) => t.test(`on ${P().name}`, { concurrency: 1 }, async (c) => {
     for (const [name, fn] of checks) await c.test(name, { timeout: 120000 }, async () => { await fn(); ledgerValid(P()); });
     await c.test('C17 resets.json validates against shapes.resets, mode 0600', () => {
@@ -432,5 +544,5 @@ test('the close on cA, cB and cD, three chains at once (C17: every ledger valida
       ledgerValid(P());
     });
   });
-  await Promise.all([chain(cA, cAChecks), chain(cB, cBChecks), chain(cD, cDChecks)]);
+  await Promise.all([chain(cA, cAChecks), chain(cB, cBChecks), chain(cC, cCChecks), chain(cD, cDChecks)]);
 });
