@@ -11795,11 +11795,224 @@ File.write(ENV.fetch("DEVTEAM_SECRET_DONE"), "ok")
 const isUtf8 = (buf) => { try { new TextDecoder('utf-8', { fatal: true }).decode(buf); return true; } catch { return false; } };
 // DEVTEAM_HUB_RECORD too: a session's mark, so the tmux server or owner action it starts records as usual
 const ownerProcessEnv = () => { const e = { ...process.env }; for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HUB_RECORD']) delete e[k]; return e; };
+// SOPS stores and their age keys. sops itself only looks in the environment and
+// ~/.config/sops/age/keys.txt, and a repo's key is often a gitignored file in its main checkout, so
+// the kit finds it. Anything that can write ignored paths could plant a key, or a store made for one,
+// so a post never runs sops on a file in the repo: it works on a private copy of the store as the
+// remote's main holds it (or as an earlier post of this kit wrote it), and a found key is used only
+// if it is one of that store's age recipients. Only that one native identity reaches sops.
+const sopsHash = (b) => crypto.createHash('sha256').update(b).digest('hex');
+const SOPS_NAME = /(^|[-_./])(age|sops)([-_.]|$)/i;
+const SOPS_FOLDER = /(^|[-_./])(age|sops|secrets?|keys?)([-_./]|$)/i;
+// A failed key search, remembered so a poll doesn't repeat it. Only ever a hint to skip a search:
+// a post always reads its store, and the key it needs, from the remote's main.
+const sopsMissFile = () => path.join(process.env.HOME ?? os.homedir(), '.devteam', 'sops-misses.json');
+function sopsMisses() {
+  try { const j = JSON.parse(fs.readFileSync(sopsMissFile(), 'utf8')); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch { return {}; }
+}
+function saveSopsMisses(v) {
+  try {
+    const f = sopsMissFile();
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const tmp = `${f}.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(v), { mode: 0o600 });
+    fs.renameSync(tmp, f);
+  } catch {}
+}
+// A private folder, with a config of its own so no .sops.yaml in a parent folder applies. One left by
+// a killed run holds only ciphertext, and goes once it is an hour old.
+function sopsPrivateDir() {
+  const base = os.tmpdir();
+  try {
+    for (const n of fs.readdirSync(base)) if (n.startsWith('devteam-sops-')) {
+      const d = path.join(base, n);
+      try { if (Date.now() - fs.statSync(d).mtimeMs > 3600000) fs.rmSync(d, { recursive: true, force: true }); } catch {}
+    }
+  } catch {}
+  const dir = fs.mkdtempSync(path.join(base, 'devteam-sops-'));
+  const config = path.join(dir, '.sops-config.yaml');
+  fs.writeFileSync(config, 'creation_rules: []\n', { mode: 0o600 });
+  return { dir, config };
+}
+let sopsKeyNote = '';
+const sopsRecipients = (b) => [...new Set(b.toString('utf8').split('\n').filter((l) => /recipient/i.test(l)).flatMap((l) => l.match(/age1[02-9ac-hj-np-z]{58}/g) ?? []))].sort();
+// The store on the remote's main, read past local refs and replace objects.
+function sopsMainBlob(file) {
+  const main = loadSettings().main_branch;
+  // ls-remote matches a pattern against the tail of a ref name, so a branch a/refs/heads/main matches too
+  const ref = `refs/heads/${main}`;
+  const lines = (spawnSync('git', ['ls-remote', 'origin', ref], { cwd: mainRoot, encoding: 'utf8', timeout: 20000, killSignal: 'SIGKILL' }).stdout ?? '').split('\n').filter(Boolean).map((l) => l.split('\t')).filter(([, name]) => name === ref);
+  if (lines.length !== 1) return null;
+  const head = lines[0][0];
+  if (!/^[0-9a-f]{40,64}$/.test(head)) return null;
+  // the remote can be ahead of what is here: fetch exactly that commit
+  if (spawnSync('git', ['cat-file', '-e', `${head}^{commit}`], { cwd: mainRoot, stdio: 'ignore' }).status !== 0) {
+    spawnSync('git', ['fetch', '--quiet', '--no-tags', 'origin', head], { cwd: mainRoot, stdio: 'ignore', timeout: 30000, killSignal: 'SIGKILL' });
+    if (spawnSync('git', ['--no-replace-objects', 'rev-parse', '--verify', '--quiet', `${head}^{commit}`], { cwd: mainRoot, encoding: 'utf8' }).stdout?.trim() !== head) return null;
+  }
+  const r = spawnSync('git', ['--no-replace-objects', 'show', `${head}:${file}`], { cwd: mainRoot, maxBuffer: 16 * 1024 * 1024, timeout: 10000, killSignal: 'SIGKILL' });
+  return r.status === 0 ? r.stdout : null;
+}
+function sopsIdentities(f, follow) {
+  try {
+    const st = follow ? fs.statSync(f) : fs.lstatSync(f);
+    if (!st.isFile() || st.size > 65536) return [];
+    const lines = fs.readFileSync(f, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+    return lines.length && lines.every((l) => /^AGE-SECRET-KEY-1[0-9A-Z]+$/.test(l)) ? lines : [];
+  } catch { return []; }
+}
+function sopsKeyCandidates() {
+  const inRepo = [];
+  for (const e of (git(['ls-files', '-o', '-i', '--exclude-standard', '--directory'], mainRoot) ?? '').split('\n').filter(Boolean)) {
+    if (e.endsWith('/')) {
+      if (/(^|\/)(node_modules|\.worktrees|\.git)\/$/.test(e) || !SOPS_FOLDER.test(e)) continue;
+      try { for (const n of fs.readdirSync(path.join(mainRoot, e))) inRepo.push(path.join(mainRoot, e, n)); } catch {}
+    } else if (SOPS_NAME.test(e)) inRepo.push(path.join(mainRoot, e));
+  }
+  // the owner's own folder may link to a key elsewhere; a link inside the repo is never followed
+  const dir = path.join(process.env.HOME ?? os.homedir(), '.config', 'sops', 'age');
+  let own = [];
+  try { own = fs.readdirSync(dir).map((n) => path.join(dir, n)); } catch {}
+  return [...own.map((f) => [f, true]), ...inRepo.map((f) => [f, false])].slice(0, 500);
+}
+// The environment that gives sops this store's key, or {} to leave sops to its own lookup. A miss is
+// remembered only when every candidate was really checked; a search cut short waits a minute and
+// says so, and a tool that could not run is never held against the key.
+function sopsKeyFor(file, blob, base) {
+  sopsKeyNote = '';
+  if (base.SOPS_AGE_KEY || base.SOPS_AGE_KEY_FILE || base.SOPS_AGE_KEY_CMD) return {};
+  const recipients = new Set(sopsRecipients(blob));
+  if (!recipients.size) return {};
+  const candidates = sopsKeyCandidates();
+  // a key added or changed since the last search ends the wait at once
+  const seen = candidates.map(([f]) => { try { const st = fs.statSync(f); return `${f}:${st.size}:${st.mtimeMs}`; } catch { return f; } }).join('\n');
+  const missKey = sopsHash(`${file}\0${sopsHash(blob)}\0${seen}`);
+  const misses = sopsMisses();
+  const held = misses[missKey];
+  if (held && Date.now() - held.at < held.ttl) { if (held.ttl < 600000) sopsKeyNote = 'the search for its age key did not finish'; return {}; }
+  const deadline = Date.now() + 5000;
+  let tried = 0, unchecked = false, cut = false;
+  search: for (const [f, follow] of candidates) for (const id of sopsIdentities(f, follow)) {
+    const left = deadline - Date.now();
+    if (tried++ >= 32 || left <= 0) { cut = true; break search; }
+    const r = spawnSync('age-keygen', ['-y'], { input: `${id}\n`, encoding: 'utf8', timeout: Math.min(2000, left), killSignal: 'SIGKILL' });
+    if (r.status === 0) { if (recipients.has(r.stdout.trim())) return { SOPS_AGE_KEY: id }; continue; }
+    unchecked = true;
+    if (r.error) sopsKeyNote = `age-keygen could not run (${r.error.code ?? r.error.message}), and the kit needs it on PATH to match an age key`;
+  }
+  if (cut) sopsKeyNote ||= 'the search for its age key did not finish';
+  if (!unchecked) {
+    const now = Date.now();
+    for (const [k, m] of Object.entries(misses)) if (now - (m?.at ?? 0) >= (m?.ttl ?? 0)) delete misses[k];
+    misses[missKey] = { at: now, ttl: cut ? 60000 : 600000 };
+    saveSopsMisses(misses);
+  }
+  return {};
+}
+// A per-question lock that only its live holder can lose: a holder that died is taken over by an
+// atomic rename, and only the holder removes it.
+function sopsQuestionLock(id, fn) {
+  const dir = path.join(runDir, 'secret-locks');
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = path.join(dir, encodeURIComponent(id));
+  const breaker = `${lock}.clearing`;
+  const me = `${process.pid}:${crypto.randomUUID()}`;
+  const alive = (pid) => { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  const read = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { return e.code === 'ENOENT' ? null : ''; } };
+  // A lock file is born whole: written under a private name, then linked into place, which fails if one is there.
+  const claim = (p) => {
+    const tmp = `${p}.${process.pid}.${crypto.randomUUID()}`;
+    fs.writeFileSync(tmp, me, { flag: 'wx', mode: 0o600 });
+    try { fs.linkSync(tmp, p); return true; } catch (e) { if (e.code === 'EEXIST') return false; throw e; } finally { fs.rmSync(tmp, { force: true }); }
+  };
+  const start = Date.now();
+  const wait = () => {
+    if (Date.now() - start > 300000) die(`another post for ${id} is still running (${lock}); try again when it finishes`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  };
+  for (;;) {
+    if (claim(lock)) break;
+    const owner = read(lock);
+    if (owner === null) continue;
+    if (alive(Number(owner.split(':')[0]))) { wait(); continue; }
+    const pause = Number(process.env.DEVTEAM_TEST_LOCK_PAUSE_MS) || 0; // tests: let another post clear it first
+    if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
+    // Its holder is dead. One process at a time clears a dead lock, and only while the lock is still that
+    // dead holder's: nothing else removes a lock, so a live one taken meanwhile is never cleared.
+    if (!claim(breaker)) {
+      const b = read(breaker);
+      if (b !== null && !alive(Number(b.split(':')[0]))) die(`a post for ${id} died while clearing a stale lock; remove ${breaker} and post again`);
+      wait();
+      continue;
+    }
+    try { if (read(lock) === owner) fs.rmSync(lock, { force: true }); } finally { if (read(breaker) === me) fs.rmSync(breaker, { force: true }); }
+  }
+  const release = () => { if (read(lock) === me) fs.rmSync(lock, { force: true }); };
+  process.once('exit', release);
+  try { return fn(); } finally { process.off('exit', release); release(); }
+}
+// A question's secrets for one store go in together, or not at all: from a private copy of the store
+// on the remote's main, so nothing in a worktree or an ignored file can choose its data key, and with
+// no partial state for a later post to continue from.
+function sopsPostAll(id, sinks, declared, posted, values, cwd, redact) {
+  const results = new Map();
+  const groups = new Map();
+  for (const x of sinks) if (x.k.type === 'sops') groups.set(x.k.file, [...(groups.get(x.k.file) ?? []), x]);
+  for (const [file, group] of groups) {
+    const names = declared.filter((x) => { try { const k = parseSink(x.sink, { soft: true }); return k.type === 'sops' && k.file === file; } catch { return false; } }).map((x) => x.name);
+    const earlier = names.filter((n) => posted.some((p) => p.name === n));
+    if (earlier.length) nudgeSupervisor(`[devteam secrets for ${id} from owner] ${file} already holds ${earlier.join(', ')} from an earlier post and takes the rest only in one post: ask for all of ${names.join(', ')} again in a new question.`);
+    const missing = names.filter((n) => !group.some((x) => x.name === n));
+    const r = earlier.length ? { ok: false, out: `${earlier.join(', ')} already went to ${file}, and a store takes all of a question's secrets in one post. Nothing was changed. The supervisor has been told to ask for all of them again in a new question` }
+      : missing.length ? { ok: false, out: `${file} takes all of this question's secrets in one post, and ${missing.join(', ')} ${missing.length > 1 ? 'are' : 'is'} missing. Nothing was saved` }
+        : sopsSetAll(file, group, values, cwd, redact);
+    for (const x of group) results.set(x.name, r);
+  }
+  return results;
+}
+function sopsSetAll(file, group, values, cwd, redact) {
+  const target = path.join(cwd, file);
+  if (!fs.existsSync(target)) return { ok: false, out: `${file} does not exist on main; create it with sops first` };
+  for (const x of group) {
+    if (x.k.keys.some((part) => /^\d+$/.test(part))) return { ok: false, out: `${x.sink}: a sops sink names map keys, not list positions` };
+    if (x.kind === 'file' && !isUtf8(values.get(x.name))) return { ok: false, out: 'sops stores text; this file is binary (base64 it first, or use a file: sink)' };
+  }
+  const blob = sopsMainBlob(file);
+  if (!blob) return { ok: false, out: `could not read ${file} from the remote's main` };
+  const want = sopsRecipients(blob).join();
+  const { dir, config } = sopsPrivateDir();
+  try {
+    const copy = path.join(dir, path.basename(file));
+    fs.writeFileSync(copy, blob, { mode: 0o600 });
+    const env = { ...ownerProcessEnv(), ...sopsKeyFor(file, blob, ownerProcessEnv()) };
+    for (const x of group) {
+      const text = values.get(x.name).toString('utf8');
+      const input = JSON.stringify(x.kind === 'file' ? text : text.replace(/\r?\n$/, ''));
+      const p = spawnSync('sops', ['--config', config, 'set', '--value-stdin', copy, x.k.keys.map((part) => `[${JSON.stringify(part)}]`).join('')], { cwd: dir, encoding: 'utf8', input, env, maxBuffer: 16 * 1024 * 1024, timeout: 120000, killSignal: 'SIGKILL' });
+      if (p.error && !(p.error.code === 'EPIPE' && p.status !== null && p.status !== 0)) return { ok: false, out: redact(p.error.message) };
+      let out = redact(`${p.stdout ?? ''}${p.stderr ?? ''}`.trim()).split(copy).join(file);
+      if (p.status !== 0) {
+        if (want && /no master key|failed to load age|failed to get the data key/i.test(out)) out = `no usable age key for ${file}${sopsKeyNote ? ` (${sopsKeyNote})` : ''}. The kit looks in the environment, ~/.config/sops/age/ and this repo's gitignored files with age or sops in their name, needs age-keygen on PATH to match one, and uses a key only if it is one of the file's recipients on the remote's main. ${out}`;
+        if (/value-stdin/.test(out)) out += ' (this sops is too old for set --value-stdin; update it)';
+        return { ok: false, out };
+      }
+    }
+    const done = fs.readFileSync(copy);
+    if (done.equals(blob)) return { ok: false, out: `sops exited 0 but ${file} did not change` };
+    if (sopsRecipients(done).join() !== want) return { ok: false, out: `${file}: its recipients changed; not saved` };
+    const parent = path.dirname(target);
+    if (!insideDir(fs.realpathSync(parent), fs.realpathSync(cwd))) return { ok: false, out: `${file} resolves outside the repo` };
+    const tmp = path.join(parent, `.${path.basename(target)}.devteam-${process.pid}`);
+    try { fs.writeFileSync(tmp, done, { flag: 'wx', mode: 0o644 }); fs.renameSync(tmp, target); } catch (e) { fs.rmSync(tmp, { force: true }); return { ok: false, out: e.message }; }
+    return { ok: true, out: '', files: [file] };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
 // Returns { ok, out, files }: files are the tracked paths a commit sink changed.
 function runSink(k, value, kind, cwd, redact) {
   const run = (cmd, args, opts) => {
     const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts });
-    if (r.error) return { ok: false, out: redact(r.error.message) };
+    // a tool that refuses before reading its stdin (sops with no key) gives EPIPE: its own error is the one to show
+    if (r.error && !(r.error.code === 'EPIPE' && r.status !== null && r.status !== 0)) return { ok: false, out: redact(r.error.message) };
     return { ok: r.status === 0, out: redact(`${r.stdout ?? ''}${r.stderr ?? ''}`.trim()) };
   };
   const changed = (rel) => (git(['status', '--porcelain', '--', rel], cwd) ?? '').trim() !== '';
@@ -11820,14 +12033,6 @@ function runSink(k, value, kind, cwd, redact) {
     return { ok: true, out: `wrote ${k.file}` };
   }
   if (kind === 'file' && !isUtf8(value)) return { ok: false, out: `${k.type} stores text; this file is binary (base64 it first, or use a file: sink)` };
-  if (k.type === 'sops') {
-    if (!fs.existsSync(path.join(cwd, k.file))) return { ok: false, out: `${k.file} does not exist on main; create it with sops first` };
-    const text = value.toString('utf8');
-    const r = run('sops', ['set', '--value-stdin', k.file, k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')], { input: JSON.stringify(kind === 'string' ? text.replace(/\r?\n$/, '') : text), env: ownerProcessEnv() });
-    if (r.ok && !changed(k.file)) return { ok: false, out: `sops exited 0 but ${k.file} did not change${r.out ? `: ${r.out}` : ''}` };
-    if (!r.ok && /value-stdin/.test(r.out)) r.out += ' (this sops is too old for set --value-stdin; update it)';
-    return { ...r, files: [k.file] };
-  }
   // rails-credentials: credentials:edit with an editor that sets one key. Without the environment's
   // key Rails would generate a new key and new credentials, so refuse instead.
   const enc = k.env === 'default' ? 'config/credentials.yml.enc' : `config/credentials/${k.env}.yml.enc`;
@@ -11923,6 +12128,22 @@ function cmdSecret() {
     }
   }
   if (!values.size) die('nothing to post');
+  // a SOPS store takes all of a question's secrets in one post: say what's missing before anything runs
+  const storeOf = (x) => { try { const k = parseSink(x.sink, { soft: true }); return k.type === 'sops' ? k.file : null; } catch { return null; } };
+  for (const file of new Set(todo.map(storeOf).filter(Boolean))) {
+    const names = todo.filter((x) => storeOf(x) === file).map((x) => x.name);
+    const missing = names.filter((n) => !values.has(n));
+    if (missing.length && missing.length < names.length) die(`${file} takes all of this question's secrets in one post: add ${missing.join(', ')} too. Nothing was posted`);
+  }
+  // one post per question at a time, from reading what is posted through the log line
+  return sopsQuestionLock(id, () => {
+    logCache = null;
+    const now = openQuestion(id).secrets_posted ?? [];
+    if (now.length !== posted.length) die(`${id} changed while you were posting; nothing was posted from this run. Look again and post what is still open`);
+    return postSecretsNow(id, v, declared, posted, todo, values, by);
+  });
+}
+function postSecretsNow(id, v, declared, posted, todo, values, by) {
   const redact = redactor(values);
   const sinks = todo.filter((x) => values.has(x.name)).map((x) => ({ ...x, k: parseSink(x.sink) }));
   // Encrypted stores change in one chore worktree per question, committed together; it starts clean.
@@ -11937,8 +12158,9 @@ function cmdSecret() {
   const done = [];
   const files = new Set();
   try {
+    const sopsDone = sopsPostAll(id, sinks, declared, posted, values, wt, redact);
     for (const x of sinks) {
-      const r = runSink(x.k, values.get(x.name), x.kind, x.k.commits ? wt : mainRoot, redact);
+      const r = x.k.type === 'sops' ? sopsDone.get(x.name) : runSink(x.k, values.get(x.name), x.kind, x.k.commits ? wt : mainRoot, redact);
       if (r.ok) { done.push({ name: x.name, at: nowIso() }); for (const f of r.files ?? []) files.add(f); }
       else failures.push(`${x.name} → ${sinkWords(x.sink)}: ${r.out || 'failed'}`);
     }
@@ -26559,7 +26781,25 @@ function readCredential(source) {
   if (k.type === 'file') {
     if (git(['check-ignore', '-q', '--', k.file], mainRoot) === null) throw new Error(`${k.file} is not gitignored`);
     v = fs.readFileSync(path.join(mainRoot, k.file), 'utf8').replace(/\r?\n$/, '');
-  } else if (k.type === 'sops') v = run('sops', ['-d', '--extract', k.keys.map((x) => `[${JSON.stringify(x)}]`).join(''), k.file]).replace(/\r?\n$/, '');
+  } else if (k.type === 'sops') {
+    const extract = ['-d', '--extract', k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')];
+    let out;
+    try { out = run('sops', [...extract, k.file]); } catch (e) {
+      // sops's own lookup found no key: a found key opens only a private copy of the remote's store
+      const blob = sopsMainBlob(k.file);
+      const key = blob ? sopsKeyFor(k.file, blob, ownerProcessEnv()) : {};
+      if (!key.SOPS_AGE_KEY) throw sopsKeyNote ? new Error(`${e.message}: ${sopsKeyNote}`) : e;
+      const { dir, config } = sopsPrivateDir();
+      try {
+        const copy = path.join(dir, path.basename(k.file));
+        fs.writeFileSync(copy, blob, { mode: 0o600 });
+        const r = spawnSync('sops', ['--config', config, ...extract, copy], { cwd: dir, encoding: 'utf8', env: { ...ownerProcessEnv(), ...key }, timeout: 60000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 });
+        if (r.status !== 0) throw new Error(`sops -d failed (${r.error?.code ?? `exit ${r.status}`})`);
+        out = r.stdout;
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }
+    v = out.replace(/\r?\n$/, '');
+  }
   else if (k.type === 'rails-credentials') {
     const yml = run(path.join(mainRoot, 'bin', 'rails'), ['credentials:show', ...(k.env === 'default' ? [] : ['--environment', k.env])]);
     v = run('ruby', ['-ryaml', '-rdate', '-e', 'd = YAML.safe_load($stdin.read, permitted_classes: [Date, Time, Symbol], aliases: true) || {}; v = d.dig(*ARGV); abort "no such key" if v.nil?; print v.to_s', ...k.keys], yml);
