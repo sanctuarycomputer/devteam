@@ -318,11 +318,19 @@ async function refusedInGap(P, what) {
 // A new viewer after a failed or unfinished close: its frames are of a fresh about:blank, never the old page.
 async function freshViewer(P) {
   const x = await nextViewer(P);
-  await x.waitFor((o) => o.t === 'frame', 10000);
   await x.waitFor((o) => o.t === 'url', 5000);
+  assert.deepEqual([...new Set(x.msgs.filter((o) => o.t === 'url').map((o) => o.url))], ['about:blank'], 'a new viewer saw the old page');
+  await x.waitFor((o) => o.t === 'frame', 10000);
   assert.deepEqual([...new Set(x.msgs.filter((o) => o.t === 'url').map((o) => o.url))], ['about:blank'], 'a new viewer saw the old page');
   x.close();
 }
+// The page is in Chrome's session files, so a start that failed to clear them would bring it back.
+const sessionHolds = (P, text) => until(() => {
+  const dir = path.join(P.profile, 'Default', 'Sessions');
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch {}
+  return names.some((n) => { try { return fs.readFileSync(path.join(dir, n)).includes(text); } catch { return false; } });
+}, 15000, `${text} in Chrome's session files`);
 onA('C21 a decline after a half-typed note: bye comes while the old Chrome is alive, and the value is gone', async () => {
   const P = cA();
   await ok(P, ['stop']);
@@ -561,6 +569,7 @@ onB('PC3 a close that never finishes (the daemon killed inside it): no socket is
   await ok(P, ['stop']);
   await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS: '60000' });
   await ok(P, ['open', `${site.origin}/record`]);
+  await sessionHolds(P, '/record');
   const q = await askHandover(P);
   const v = await viewSocket(P);
   await v.waitFor((m) => m.t === 'held' && m.qid === q, 5000);
