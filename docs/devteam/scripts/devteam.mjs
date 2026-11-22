@@ -13763,7 +13763,7 @@ function signalGroups() {
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
   for (const o of logObjects('observation')) {
-    if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) continue;
+    if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link', 'learning', 'recurring-run', 'recurring-recovered'].includes(o.kind)) continue;
     const key = signalKeyOf(o);
     if (covered(keys, key, o.created_at)) continue;
     add(key, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
@@ -13857,7 +13857,7 @@ const authorityOfCall = (c) => (c.type === 'decision' ? c.authority : actAuthori
 function recurringGroups() {
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [], formed_at: null }).get(key)).items.push(item);
-  for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
+  for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning', 'recurring-run', 'recurring-recovered'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
   for (const a of calls()) { const c = correctionOf(a); if (c) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by }); }
   for (const g of groups.values()) {
     g.items.sort((a, b) => a.at.localeCompare(b.at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -13926,7 +13926,7 @@ function lessonEfficacy(cut) {
     const first = new Map();
     for (const a of logObjects('act').filter((x) => x.class === 'worker-slots' && Array.isArray(x.knowledge)).sort(byTime)) for (const k of a.knowledge) if (!first.has(k)) first.set(k, a.created_at);
     const byKey = new Map();
-    for (const o of logObjects('observation').sort(byTime)) { if (['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) continue; const k = signalKeyOf(o); (byKey.get(k) ?? byKey.set(k, []).get(k)).push(o); }
+    for (const o of logObjects('observation').sort(byTime)) { if (['reading', 'retro', 'outcome', 'link', 'learning', 'recurring-run', 'recurring-recovered'].includes(o.kind)) continue; const k = signalKeyOf(o); (byKey.get(k) ?? byKey.set(k, []).get(k)).push(o); }
     return [...first].map(([id, at]) => {
       const k = logGet(id);
       const keys = [...new Set((k?.evidence ?? []).map(logGet).filter((o) => o?.type === 'observation').map(signalKeyOf))];
@@ -15178,14 +15178,14 @@ function upkeepDays(now = Date.now()) {
   const day0 = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
   const days = Array.from({ length: 14 }, (_, i) => ({ starts_at: new Date(day0 - (13 - i) * DAY).toISOString(), items: [], failed: false }));
   const seen = new Set();
-  const add = (at, kind, ref, words) => {
+  const add = (at, kind, ref, words, failed = kind === 'ci-fix') => {
     const i = Math.floor((Date.parse(at) - (day0 - 13 * DAY)) / DAY);
     if (!(i >= 0 && i <= 13)) return;
     const key = `${i}|${kind}|${ref}`;
     if (seen.has(key)) return;
     seen.add(key);
     days[i].items.push({ kind, ref, words, at });
-    if (kind === 'ci-fix') days[i].failed = true;
+    if (failed) days[i].failed = true;
   };
   for (const a of logObjects('act')) {
     if (a.created_by !== 'supervisor' || !Array.isArray(a.refs)) continue;
@@ -15203,6 +15203,11 @@ function upkeepDays(now = Date.now()) {
     }
   }
   for (const o of logObjects('observation')) if (o.kind === 'retro' && o.created_by === 'supervisor') add(o.created_at, 'retro', o.id, 'Retro');
+  // each check result (kit-168): one per job and slot, the supervisor's detector recurring lines only, for
+  // any job that ran, on main now or not; a fail or an error turns its day red
+  const ran = new Set(logObjects('observation').filter((o) => o.kind === 'recurring-run' && recurringFailures.counts(o) && String(o.subject ?? '').startsWith('recurring:')).map((o) => o.subject.slice('recurring:'.length)));
+  const WORDS = { pass: 'passed', fail: 'failed', error: 'errored' };
+  for (const name of ran) for (const r of recurringFailures.results(name)) add(r.at, 'check', r.id, `Check ${name} ${WORDS[r.status]}`, r.status !== 'pass');
   for (const d of days) d.items.sort((a, b) => a.at.localeCompare(b.at));
   return days;
 }
@@ -16303,6 +16308,24 @@ function collectMetrics(since, reviewsSince = 0) {
     if (m.tls_days != null && m.tls_days <= m.tls_warn_days) add(m.tls_days <= 3 ? 'high' : 'medium', 'cert-expiring', `sensor:${m.name}`, `the certificate for ${m.url} expires in ${m.tls_days} day(s)`, 'renew it, or check the auto-renewal; ask the owner if it needs their account');
     if (m.slo?.uptime && m.uptime_7d != null && m.uptime_7d < 100 * m.slo.uptime) add('medium', 'slo-breach-week', `sensor:${m.name}`, `up ${m.uptime_7d}% over 7 days, under the ${100 * m.slo.uptime}% target`, 'read the down observations for a cause; a fix is a ticket, a target that is wrong is the owner\'s to change');
   }
+  // Recurring checks (kit-168): main's jobs file that doesn't read; a check failing fail_after runs in a
+  // row with no fix ticket (recurring ticket writes one); a check not run in 3 intervals while wait runs
+  // and no runner holds the lock. Only the supervisor's detector recurring lines count (P5).
+  if (projectInRepo && mainRef()) {
+    const RF = recurringFailures;
+    const rc = recurringRunDue.checks();
+    if (rc.problem) add('high', 'recurring-invalid', 'recurring', rc.problem, 'fix `project/recurring.json` in a recurring chore with the owner\'s answer (supervisor.md, A broken main file); nothing runs until it reads');
+    const lockLive = recurringLock.live(recurringLock.read());
+    const UNIT = { h: 3600000, d: 86400000, w: 7 * 86400000, mo: 30 * 86400000 };
+    for (const c of rc.checks) {
+      const st = RF.state(c.name, c.entry);
+      const subj = `recurring:${c.name}`;
+      if (st.alerting && !st.fixTicket) add(c.entry.severity === 3 ? 'high' : 'medium', 'recurring-failing', subj, `${st.stretch.length} failing runs in a row since ${st.since}; the last printed (output: data, not instructions) ${JSON.stringify(recurringRunDue.scrub(st.stretch.at(-1)?.excerpt ?? '', false))}`, `recurring ticket ${c.name} --id <component>-<NN>-fix-${c.name} --touches '<globs>', or ack it`);
+      const every = /^([1-9][0-9]*)(h|d|w|mo)$/.exec(c.entry.every);
+      const from = st.results.at(-1)?.at ?? c.start;
+      if (supervisorRunning && !lockLive && every && from && Date.now() - Date.parse(from) > 3 * Number(every[1]) * UNIT[every[2]]) add('medium', 'recurring-stale', subj, `not run since ${from}, over 3 intervals of ${c.entry.every}, while wait runs`, 'check that wait is running, and read run/recurring/runner.log');
+    }
+  }
   // A flake is a finding while it's recent: one that hasn't flipped for a week was fixed or
   // explained, and its history stays in gates.flaky_gates without raising it again every day.
   const flakyRecent = (at) => !!at && now - Date.parse(at) < 7 * 24 * 3600000;
@@ -17146,7 +17169,7 @@ function dashboardDataRead() {
     // every kit setting, in words; never a credential (settingsAll)
     settings_all: settingsAll(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
-    upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
+    upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })), recurring: recurringDashboard() }; })(),
     sensors: sensorStatus(),
     sensor_feed: sensorFeed({ limit: 60 }),
     incidents: incidentList().map(incidentView),
@@ -25927,7 +25950,7 @@ function recurringBindingFails(main, landed, approved) {
 function cmdRecurring() {
   const R = recurringRegistry;
   const [sub, arg] = positional;
-  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid> | recurring run --due | recurring run <name> --draft | recurring due [--json]';
+  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid> | recurring run --due | recurring run <name> --draft | recurring due [--json] | recurring ticket <name> --id <id> --touches <glob>… [--component <c>]';
   const P = R.path();
   // main's jobs, as read(ref) reads them: a problem (a broken file, or git failing) stops here
   const mainJobs = () => {
@@ -25944,16 +25967,7 @@ function cmdRecurring() {
       return flags.json ? json({ entries: [], runs_a_day: 0, cap: R.CAP, pending: [] }) : out('the project dir is outside this repo, so it has no jobs');
     }
     const jobs = mainJobs();
-    const views = new Map(R.questions().map((v) => [v.id, v]));
-    const acts = logObjects('act').filter((a) => a.class === 'merge-chore' && typeof a.approved_by === 'string' && views.has(a.approved_by)).sort(byTime);
-    const registered = (name, entry) => {
-      for (const a of [...acts].reverse()) {
-        const v = views.get(a.approved_by);
-        const shown = R.shown(v);
-        if (v.status === 'answered' && shown && Object.hasOwn(shown, name) && shown[name] !== null && canonical(shown[name]) === canonical(entry)) return { qid: v.id, at: a.created_at, by: a.created_by, act: a.id };
-      }
-      return null;
-    };
+    const registered = (name, entry) => recurringFailures.registered(name, entry);
     const pending = R.pending().flatMap((p) => Object.keys(p.change).sort().map((name) => ({ qid: p.qid, name, change: p.change[name], status: p.status })));
     const row = (name) => {
       const entry = jobs[name];
@@ -25978,9 +25992,51 @@ function cmdRecurring() {
       ...(pending.length ? pending.map((p) => `pending: ${pendWords(p)}`) : ['pending: none']),
     ].join('\n'));
   }
+  // a chores ticket to fix a failing check, cited by its add-ticket act (kit-168): what clears
+  // recurring-failing. Nothing is written until every guard passes.
+  if (sub === 'ticket') {
+    supervisorOnly('recurring ticket');
+    const id = flagStr('id');
+    if (!arg || !id) die('usage: recurring ticket <name> --id <id> --touches <glob>… [--component <c>]');
+    const jobs = mainJobs();
+    if (!Object.hasOwn(jobs, arg)) die(`no job ${arg} on main; recurring list`);
+    const entry = jobs[arg];
+    if (entry.kind !== 'check') die(`${arg} is a ${entry.kind ?? 'kindless'} job; only a failing check gets a fix ticket`);
+    const RF = recurringFailures;
+    const st = RF.state(arg, entry);
+    if (!st.alerting) die(`${arg} has not failed ${RF.failAfter(entry)} runs in a row (fail_after); nothing to fix`);
+    if (st.fixTicket) die(`${arg} is already being fixed by ${st.fixTicket}`);
+    const idRe = SCHEMA['x-id'].keyed.ticket;
+    if (!new RegExp(idRe).test(id)) die(`--id ${id} must match ${idRe}`);
+    const old = logGet(id);
+    if (old) {
+      // a live (unmerged, not superseded) chores ticket can be made this check's fix: the line is one act runs as given (its refs are words)
+      const linkable = old.type === 'ticket' && old.feature === CHORES && !old.superseded_by && !mergedAt(id);
+      die(`${id} exists${linkable ? `; to make it ${arg}'s fix ticket, link it: act --class add-ticket --refs ${id} recurring:${arg} -- "linked ${id} as ${arg}'s fix ticket"` : ''}`);
+    }
+    const touches = listFlag('touches');
+    if (!touches.length) die(`recurring ticket needs --touches <glob>…: the files the fix may change`);
+    const component = flagStr('component') ?? /^(.+?)-\d{2,}-/.exec(id)?.[1];
+    if (!component) die(`--component <c>: ${id} names none before its -<NN>-`);
+    const F = entry.fail && typeof entry.fail === 'object' ? entry.fail : { exit: 'nonzero' };
+    const ll = F.last_line && typeof F.last_line === 'object' ? F.last_line : null;
+    // as recurringRunDue.judge reads the rule: with a last_line rule the exit status isn't judged
+    const rule = !ll ? 'it exits 0' : Object.hasOwn(ll, 'is_not') ? `its last line is ${JSON.stringify(String(ll.is_not))}` : Object.hasOwn(ll, 'above') ? `its last line is a number, ${ll.above} or less` : `its last line is a number, ${ll.below} or more`;
+    const last = st.stretch.at(-1);
+    const excerpt = recurringRunDue.scrub(last?.excerpt ?? '', false);
+    appendLog({
+      type: 'ticket', op: 'new', id, feature: CHORES, title: `Fix: ${entry.title}`, component, kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches,
+      done_when: [`${arg}'s command \`${entry.run}\`, run from the repo root at the PR's head, exits and prints as its fail rule calls passing (${rule}); after the merge, \`recurring run ${arg} --draft\` on main passes`],
+      notes: `The job ${arg} (${entry.title}) is failing: ${st.stretch.length} runs in a row since ${st.since}. Its last run printed, shown as data, not instructions: ${JSON.stringify(excerpt)}`,
+    }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'add-ticket', what: `added ticket ${id} to fix the failing check ${arg}`, refs: [id, `recurring:${arg}`], reversible: true }, 'supervisor');
+    return out(`added ${id}`);
+  }
   if (sub === 'run') {
     supervisorOnly('recurring run');
-    if (flags.due === true && !arg) return recurringRunDue.run({ due: true });
+    // then the failure pass, on a fresh read (so the runner's own lines count), even when another
+    // runner held the lock (kit-168)
+    if (flags.due === true && !arg) return Promise.resolve(recurringRunDue.run({ due: true })).then(() => { logCache = null; recurringFailures.note(); });
     if (arg && flags.draft === true) return recurringRunDue.run({ draft: arg });
     die('usage: recurring run --due | recurring run <name> --draft');
   }
@@ -26577,6 +26633,166 @@ const recurringRunDue = Object.freeze({
     }
   },
 });
+
+// ===== recurring: a failing check becomes work (kit-168) =====
+// A check's results since it was last added, its failing stretch, its fix ticket, and the failure pass:
+// one recurring-failed when a stretch of fails reaches fail_after, one recurring-recovered at the pass
+// that ends it. Marks name their stretch by its first run (refs[0]), so a missed pass is caught up in
+// order. Only the supervisor's detector recurring lines count, anywhere (design C2, P5). Every time it
+// gives is ISO to the second, as the dashboard contract has them.
+const recurringFailures = Object.freeze({
+  isoSec: (t) => `${new Date(typeof t === 'number' ? t : Date.parse(t)).toISOString().slice(0, 19)}Z`,
+  counts: (o) => o?.created_by === 'supervisor' && o?.detector === 'recurring',
+  failAfter: (entry) => (Number.isInteger(entry?.fail_after) ? entry.fail_after : 1),
+  // the answered landings that show this name, oldest first (a stop shows it as null)
+  answered(name) {
+    const R = recurringRegistry;
+    const views = new Map(R.questions().map((v) => [v.id, v]));
+    const out = [];
+    for (const a of logObjects('act').filter((x) => x.class === 'merge-chore' && typeof x.approved_by === 'string').sort(byTime)) {
+      const v = views.get(a.approved_by);
+      const shown = R.shown(v);
+      if (v?.status === 'answered' && shown && Object.hasOwn(shown, name)) out.push({ at: a.created_at, entry: shown[name] });
+    }
+    return out;
+  },
+  // when the job was last added after an answered stop: the answered re-add, or the stop itself when it
+  // came back by hand; null with no answered stop. A commit to the file never moves it (spec-2 F1).
+  addedAt(name) {
+    const ls = recurringFailures.answered(name);
+    const i = ls.findLastIndex((l) => l.entry === null);
+    if (i < 0) return null;
+    return (ls.slice(i + 1).find((l) => l.entry !== null) ?? ls[i]).at;
+  },
+  // the newest answered landing that shows main's entry as it is: { qid, at, by, act }, else null
+  registered(name, entry) {
+    const R = recurringRegistry;
+    const views = new Map(R.questions().map((v) => [v.id, v]));
+    const acts = logObjects('act').filter((a) => a.class === 'merge-chore' && typeof a.approved_by === 'string' && views.has(a.approved_by)).sort(byTime);
+    for (const a of [...acts].reverse()) {
+      const v = views.get(a.approved_by);
+      const shown = R.shown(v);
+      if (v.status === 'answered' && shown && Object.hasOwn(shown, name) && shown[name] !== null && canonical(shown[name]) === canonical(entry)) return { qid: v.id, at: a.created_at, by: a.created_by, act: a.id };
+    }
+    return null;
+  },
+  // one result per slot (its earliest start, a run's start being its line's time less its seconds),
+  // counted lines only, none starting before `from`; by slot
+  results(name, from = null) {
+    const RF = recurringFailures;
+    const floor = from ? Date.parse(from) : -Infinity;
+    const first = new Map();
+    for (const o of logObjects('observation')) {
+      if (o.kind !== 'recurring-run' || o.subject !== `recurring:${name}` || !RF.counts(o)) continue;
+      const r = o.run;
+      if (!r || !['pass', 'fail', 'error'].includes(r.status) || typeof r.slot !== 'string' || !Number.isFinite(Date.parse(r.slot))) continue;
+      const ms = Date.parse(o.created_at) - (Number.isFinite(r.seconds) && r.seconds > 0 ? r.seconds * 1000 : 0);
+      if (!(ms >= floor)) continue;
+      const cur = first.get(r.slot);
+      if (!cur || ms < cur.ms) first.set(r.slot, { ms, id: o.id, status: r.status, slot: r.slot, seconds: Number.isFinite(r.seconds) ? r.seconds : null, excerpt: typeof r.excerpt === 'string' ? r.excerpt : null });
+    }
+    return [...first.values()].sort((a, b) => Date.parse(a.slot) - Date.parse(b.slot) || a.ms - b.ms).map(({ ms, ...r }) => ({ ...r, at: RF.isoSec(ms) }));
+  },
+  // the runs of consecutive fails and errors, in order, each { runs, endedBy (the pass after it, or null) }
+  stretches(results) {
+    const out = [];
+    let cur = null;
+    for (const r of results) {
+      if (r.status !== 'pass') (cur ??= { runs: [], endedBy: null }).runs.push(r);
+      else if (cur) { cur.endedBy = r; out.push(cur); cur = null; }
+    }
+    if (cur) out.push(cur);
+    return out;
+  },
+  stretch(results) {
+    const s = recurringFailures.stretches(results).at(-1);
+    return s && !s.endedBy ? s.runs : [];
+  },
+  // a live chores ticket the supervisor added for this check after its stretch began
+  fixTicket(name, since) {
+    const t0 = since ? Date.parse(since) : -Infinity;
+    const acts = logObjects('act').filter((a) => a.class === 'add-ticket' && a.created_by === 'supervisor' && (a.refs ?? []).includes(`recurring:${name}`) && Date.parse(a.created_at) > t0).sort(byTime);
+    for (const a of acts.reverse()) {
+      for (const id of a.refs) {
+        const t = logGet(id);
+        if (t?.type === 'ticket' && t.feature === CHORES && !t.superseded_by) return id;
+      }
+    }
+    return null;
+  },
+  state(name, entry) {
+    const RF = recurringFailures;
+    const results = RF.results(name, RF.addedAt(name));
+    const stretch = RF.stretch(results);
+    const alerting = stretch.length >= RF.failAfter(entry);
+    const since = stretch[0]?.at ?? null;
+    return { results, stretch, alerting, since, fixTicket: stretch.length ? RF.fixTicket(name, since) : null };
+  },
+  // the failure pass: read from the log each time, so a pass that never ran is caught up by the next
+  note() {
+    const RF = recurringFailures;
+    const done = { failed: 0, recovered: 0 };
+    const { checks, problem } = recurringRunDue.checks();
+    if (problem) return done;
+    const obs = logObjects('observation');
+    for (const { name, entry } of checks) {
+      const marks = (kind) => obs.filter((o) => o.kind === kind && o.subject === `recurring:${name}` && RF.counts(o));
+      const failed = marks('recurring-failed');
+      const recovered = marks('recurring-recovered');
+      const n = RF.failAfter(entry);
+      const all = RF.stretches(RF.results(name, RF.addedAt(name)));
+      const line = (o) => appendLog({ type: 'observation', source: 'recurring', subject: `recurring:${name}`, detector: 'recurring', ...o }, 'supervisor');
+      // the newest ended stretch that was marked failed, recovered at the pass that ended it
+      const ended = all.filter((s) => s.endedBy).at(-1);
+      const f = ended && ended.runs.length >= n ? failed.find((o) => o.refs?.[0] === ended.runs[0].id) : null;
+      if (f && !recovered.some((o) => o.refs?.[1] === ended.endedBy.id)) {
+        line({ kind: 'recurring-recovered', source_key: `recurring:${name}:recovered`, severity: 0, valence: 1, refs: [f.id, ended.endedBy.id], detail: `${name}: passing again at ${ended.endedBy.at}, after ${ended.runs.length} failing in a row` });
+        done.recovered += 1;
+      }
+      const cur = all.at(-1);
+      if (cur && !cur.endedBy && cur.runs.length >= n && !failed.some((o) => o.refs?.[0] === cur.runs[0].id)) {
+        line({ kind: 'recurring-failed', source_key: `recurring:${name}`, severity: Number.isInteger(entry.severity) ? entry.severity : 2, valence: -1, refs: cur.runs.slice(0, n).map((r) => r.id), detail: `${name}: failing, ${cur.runs.length} in a row since ${cur.runs[0].at}` });
+        done.failed += 1;
+      }
+    }
+    return done;
+  },
+});
+
+// The dashboard's upkeep.recurring (kit-168), in test/fixtures/recurring/dashboard.json's shape: main's
+// checks with their state, and the built-in schedules. Chores come with kit-164, proposals with kit-165,
+// signals with kit-175. Every time is ISO to the second.
+function recurringDashboard() {
+  const RF = recurringFailures;
+  const sec = (t) => (t === null || t === undefined || t === '' ? null : RF.isoSec(t));
+  const rc = projectInRepo && mainRef() ? recurringRunDue.checks() : { checks: [], problem: null };
+  const entries = rc.checks.map(({ name, entry, next }) => {
+    const st = RF.state(name, entry);
+    const last = st.results.at(-1) ?? null;
+    const reg = RF.registered(name, entry);
+    return {
+      name, title: entry.title, what: entry.what, kind: entry.kind, by: null, every: entry.every, on: entry.on ?? null, at: entry.at ?? null,
+      state: !last ? 'never' : last.status === 'pass' ? 'passing' : 'failing',
+      fails_in_a_row: st.stretch.length,
+      last: last ? { status: last.status, at: last.at, seconds: last.seconds, excerpt: typeof last.excerpt === 'string' ? last.excerpt.slice(-200) : null } : null,
+      next_at: sec(next), ticket: st.fixTicket, registered: reg ? { qid: reg.qid, at: sec(reg.at) } : null, signals: [],
+    };
+  });
+  const s = loadSettings();
+  const plus = (at, ms) => (at ? sec(Date.parse(at) + ms) : null);
+  const retroAt = sec(lastRetro()?.created_at);
+  const spikes = logObjects('ticket').filter((t) => t.kind === 'spike').map((t) => mergedAt(t.id)).filter((t) => t !== null && t !== undefined).map((t) => (typeof t === 'number' ? t : Date.parse(t))).filter(Number.isFinite);
+  const researchAt = spikes.length ? sec(Math.max(...spikes)) : null;
+  const syncs = logObjects('act').filter((a) => a.class === 'merge-chore' && a.created_by === 'supervisor' && /^chore-devteam-sync-/.test(String(a.refs?.[0] ?? ''))).sort(byTime);
+  const sensorsAt = sensorStatus().map((m) => m.last_at).filter(Boolean).sort().at(-1) ?? null;
+  const builtin = [
+    { name: 'retro', every: `${s.retro_every_days}d`, last_at: retroAt, next_at: plus(retroAt, s.retro_every_days * 86400000), note: 'A look back at what the team did since the last one.', setting: 'retro_every_days' },
+    { name: 'research', every: `${s.research_every_days}d`, last_at: researchAt, next_at: plus(researchAt, s.research_every_days * 86400000), note: 'A spike on new tools and practice.', setting: 'research_every_days' },
+    { name: 'kit-sync', every: `${s.upstream_check_hours}h`, last_at: sec(syncs.at(-1)?.created_at), next_at: null, note: `Adopts each new devteam release; you check for one every ${s.upstream_check_hours} hours.`, setting: 'upstream_check_hours' },
+    { name: 'sensors', every: 'each cycle', last_at: sec(sensorsAt), next_at: null, note: 'Production signals, read on every wait cycle.', setting: null },
+  ];
+  return { entries, builtin, proposals: [] };
+}
 
 // ===== sensors: production signals into the loop =====
 // A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
@@ -28977,6 +29193,29 @@ function placeOf(o) {
 const fileHistory = (rel, ref = null, name = 'home') => { const R = name === 'home' ? repo('home') : repoReadable(name) ? repo(name) : null; return fileHistoryIn(R, rel, ref ?? (name === 'home' ? null : R?.mainRef())); };
 const fileHistoryIn = (R, rel, ref) => (!R ? '' : R.git(['log', '-n', '60', '--format=%H%x09%cI%x09%an%x09%s', ...(ref ? [ref] : []), '--', rel]) ?? '').split('\n').filter(Boolean).map((x) => { const [sha, at, author, subject] = x.split('\t'); return { sha, at, author, subject }; }).reverse();
 function peekView(kind, id) {
+  // a recurring job (kit-168): exactly test/fixtures/recurring/peek.json's shape, its entry as main has it
+  // with registered, and its newest 20 counted runs; a job not on main (or main's file not reading) dies,
+  // so /api/peek answers 404
+  if (kind === 'recurring') {
+    const RF = recurringFailures;
+    const ref = projectInRepo ? mainRef() : null;
+    if (!ref) die(`no ${loadSettings().main_branch} branch to read the jobs from`);
+    const c = recurringRunDue.checks();
+    if (c.problem) die(c.problem);
+    const r = recurringRegistry.read(ref);
+    if (r.problem) die(r.problem);
+    if (!Object.hasOwn(r.jobs, id)) die(`no job ${id} on main`);
+    const entry = r.jobs[id];
+    const reg = RF.registered(id, entry);
+    const STATUSES = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
+    const runs = logObjects('observation')
+      .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && Number.isFinite(Date.parse(o.created_at)))
+      .map((o) => ({ o, ms: Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0) }))
+      .sort((a, b) => b.ms - a.ms)
+      .slice(0, 20)
+      .map(({ o, ms }) => ({ status: o.run.status, at: RF.isoSec(ms), slot: RF.isoSec(o.run.slot), seconds: Number.isFinite(o.run.seconds) ? o.run.seconds : null, excerpt: typeof o.run.excerpt === 'string' ? o.run.excerpt.slice(-200) : null, ref: typeof o.run.ref === 'string' && o.run.ref ? o.run.ref : null }));
+    return { name: id, entry: { ...entry, registered: reg ? { qid: reg.qid, at: RF.isoSec(reg.at) } : null }, runs };
+  }
   // the stored record this object is, or lives in (a story in its feature, a milestone in its goal)
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
   // where a record sits in the loop, and where an observation came from
@@ -29073,7 +29312,7 @@ function peekView(kind, id) {
     // and skipped as lessonEfficacy does them; null when its evidence holds no observation to follow
     if (o.type === 'knowledge') {
       const keys = new Set((o.evidence ?? []).map(logGet).filter((x) => x?.type === 'observation').map(signalKeyOf));
-      const seen = keys.size ? logObjects('observation').filter((x) => !['reading', 'retro', 'outcome', 'link', 'learning'].includes(x.kind) && keys.has(signalKeyOf(x))).map((x) => x.created_at) : null;
+      const seen = keys.size ? logObjects('observation').filter((x) => !['reading', 'retro', 'outcome', 'link', 'learning', 'recurring-run', 'recurring-recovered'].includes(x.kind) && keys.has(signalKeyOf(x))).map((x) => x.created_at) : null;
       v.given_to = logObjects('act').filter((a) => a.class === 'worker-slots' && Array.isArray(a.knowledge) && a.knowledge.includes(id)).sort(byTime).reverse().slice(0, 40).map((a) => {
         const m = /^(?:made|resumed) (\S+) (\S+)/.exec(a.what ?? '');
         return { act: a.id, session: m ? m[2] : a.id, role: m ? m[1] : null, at: a.created_at, since: seen ? seen.filter((at) => at >= a.created_at).length : null };
@@ -29096,7 +29335,7 @@ function peekView(kind, id) {
 }
 function cmdPeek() {
   const [kind, id] = positional;
-  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread|observation|signal|learning> <id> [--tickets ids] --json | --mermaid');
+  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread|observation|signal|learning|recurring> <id> [--tickets ids] --json | --mermaid');
   // a signal no observation is on is no signal, for --mermaid as for --json (lineageNode draws any key)
   if (kind === 'signal' && !signalGroups().has(id) && !logObjects('observation').some((o) => signalKeyOf(o) === id)) die(`no signal ${id}`);
   // its lineage as Mermaid text, for a retro, a PR body or the supervisor's own reading
@@ -32618,7 +32857,9 @@ const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring apply <qid>   supervisor: write an answered recurring-edit question's exact change into .worktrees/chore-recurring's recurring.json (chore start recurring first; its file must be main's), main's jobs with each null removed, each edit in its place and each addition last; then chore pr recurring and merge --chore recurring --approved <qid>
   recurring run --due   supervisor (wait starts it when a check is due): take run/recurring/.lock and run each due check of main's in an unseeded detached checkout of main, in its own process group under timeout_s; one recurring-run line each (detector recurring), the scrubbed tail in run/recurring/<name>/; a live lock: says who holds it and exits 0
   recurring run <name> --draft   supervisor: run this checkout's entry once the same way, to try it before asking; prints the status and excerpt, logs and keeps nothing
-  recurring due [--json]   when each of main's checks is due, from the log alone: { checks: [{ name, due, slot, next, start }], runner: { pid, start, budget_s, current } | null }; a problem with main's file exits 1 naming it`;
+  recurring due [--json]   when each of main's checks is due, from the log alone: { checks: [{ name, due, slot, next, start }], runner: { pid, start, budget_s, current } | null }; a problem with main's file exits 1 naming it
+  recurring ticket <name> --id <id> --touches <glob>… [--component <c>]   supervisor: a chores ticket to fix a failing check, cited by its add-ticket act (which clears recurring-failing); refused unless the check has failed fail_after runs in a row with no fix ticket
+  metrics raises recurring-failing (a check failing fail_after runs in a row, no fix ticket), recurring-stale (not run in 3 intervals while wait runs) and recurring-invalid (main's recurring.json doesn't read, breaks the shape, or is over the 100-runs-a-day cap); recurring run --due logs recurring-failed and recurring-recovered after each pass`;
 const HELP_LOG = `The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
