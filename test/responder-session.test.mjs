@@ -22,7 +22,20 @@ const NO_TMUX = !hasTmux && 'no tmux';
 // there), the fleet's tmux session and its windows, and a stand-in agent that records where and as
 // whom it runs.
 function fixture(name) {
-  const F = threadsFixture(name);
+  const T = threadsFixture(name);
+  // final-7b F3: a pane runs a login shell, and /etc/profile resets PATH, so a stand-in first on the
+  // test's PATH is not enough. Each fixture's panes get a private HOME whose .bash_profile and
+  // .profile put a stand-in `claude` first, so a start that types the kit's default command (a
+  // regressed check) reaches the stand-in, never the real claude. paneClaude() shows it in a pane.
+  const home = path.join(T.base, 'pane-home');
+  const standin = path.join(T.base, 'standin-bin');
+  const claudeRan = path.join(T.base, 'standin-claude.ran');
+  write(path.join(standin, 'claude'), `#!/bin/sh\necho "claude $*" >> '${claudeRan}'\n`);
+  fs.chmodSync(path.join(standin, 'claude'), 0o755);
+  const profile = `PATH='${standin}':"$PATH"; export PATH\n`;
+  for (const f of ['.bash_profile', '.profile', '.bashrc']) write(path.join(home, f), profile);
+  const withHome = (role = {}) => ({ ...role, HOME: home });
+  const F = { ...T, paneHome: home, claudeRan, env: (role) => T.env(withHome(role)), run: (cwd, args, role, input) => T.run(cwd, args, withHome(role), input), ok: (cwd, args, role, input) => T.ok(cwd, args, withHome(role), input) };
   const sf = path.join(F.old, 'docs/devteam/project/settings.md');
   const edit = (patch) => {
     const text = fs.readFileSync(sf, 'utf8');
@@ -61,7 +74,17 @@ function fixture(name) {
     assert.equal(tmux(['new-session', '-d', '-s', session, '-n', 'hold', `${process.execPath} ${idle}`]).status, 0);
     for (const [k, v] of Object.entries(env)) assert.equal(tmux(['set-environment', '-g', k, v]).status, 0);
   };
-  return { ...F, edit, onMain, session, tmux, windows, agent, ran, wt, preSession };
+  // what `claude` is in a login-shell pane of the fleet's session (the shell a start types into)
+  const paneClaude = () => {
+    const out = path.join(F.base, `pane-claude-${Date.now()}.txt`);
+    assert.equal(tmux(['new-window', '-d', '-t', `=${session}:`, '-n', 'claude-check']).status, 0);
+    assert.equal(tmux(['send-keys', '-t', `=${session}:claude-check`, `command -v claude > '${out}'; exit`, 'Enter']).status, 0);
+    for (let i = 0; i < 100 && !(fs.existsSync(out) && fs.readFileSync(out, 'utf8').endsWith('\n')); i++) sleep(100);
+    tmux(['kill-window', '-t', `=${session}:claude-check`]);
+    return fs.existsSync(out) ? fs.readFileSync(out, 'utf8').trim() : null;
+  };
+  const standinFirst = () => assert.equal(paneClaude(), path.join(standin, 'claude'), "a pane's claude is the stand-in, so no start can reach the real one");
+  return { ...F, edit, onMain, session, tmux, windows, agent, ran, wt, preSession, standinFirst };
 }
 
 test('R1: responder opens its window and detached worktree, runs responder_command (else agent_command), and makes no slot act or branch', { skip: NO_TMUX }, async (t) => {
@@ -584,6 +607,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
   const A = F.agent('honest');
   const E = F.agent('planted');
   F.preSession();
+  F.standinFirst();
   F.onMain({ responder_command: A.cmd });
   const g0 = (args, cwd = F.old) => spawnSync('git', args, { cwd, encoding: 'utf8' });
   const common = path.join(F.old, '.git');
@@ -1078,7 +1102,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     }
   });
   // final-4: the owner's settings as anything but a plain object never start the kit's defaults
-  for (const shape of ['null', '[]', '"x"', '7', '42', 'true', '{}', '{"main_branch": 7}', '{"main_branch": ""}', '{"main_branch": null}', '{"main_branch": ["main"]}', '{"foo": 1}', '{"__proto__": {}}', '{"__proto__": null}', '{"constructor": 1}', '[{"main_branch": "main"}]', '{"project": 7}', '{"gates": "x"}', '{"responder": "yes"}', '{"upstream_base": {"x": 1}}', '{"links": 0}', `{"junk": "${'x'.repeat(6 * 1024 * 1024)}", "project": 7}`, '{"worker_denied_commands": "x"}', '{"worker_denied_commands": [5]}', '{"worker_denied_commands": null}', '{"worker_denied_commands": 42}', '{"worker_denied_commands": [""]}', '{"agent_command": ["claude"]}', '{"agent_command": ""}', '{"responder_command": ["x"]}']) {
+  for (const shape of ['null', '[]', '"x"', '7', '42', 'true', '{}', '{"main_branch": 7}', '{"main_branch": ""}', '{"main_branch": null}', '{"main_branch": ["main"]}', '{"foo": 1}', '{"__proto__": {}}', '{"__proto__": null}', '{"constructor": 1}', '[{"main_branch": "main"}]', '{"project": 7}', '{"gates": "x"}', '{"remediations": "x"}', '{"usage_command": 5}', `{"junk": "${'x'.repeat(6 * 1024 * 1024)}", "project": 7}`, '{"worker_denied_commands": "x"}', '{"worker_denied_commands": [5]}', '{"worker_denied_commands": null}', '{"worker_denied_commands": 42}', '{"worker_denied_commands": [""]}', '{"agent_command": ["claude"]}', '{"agent_command": ""}', '{"responder_command": ["x"]}']) {
     const label = shape.length > 80 ? `${shape.slice(0, 40)}… (${shape.length} bytes)` : shape;
     await t.test(`final-4 F1: a settings block of ${label} refuses and types nothing`, () => {
       fresh();
@@ -1097,6 +1121,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
       assert.match(r.err, /could not read the owner's settings/);
       assert.ok(!F.windows().includes('responder'), 'no window, so nothing typed');
       assert.ok(!fs.existsSync(A.out) && !fs.existsSync(E.out), 'no command ran');
+      assert.ok(!fs.existsSync(F.claudeRan), 'the stand-in claude never ran');
     });
   }
   await t.test("final-4 F1: a block as init writes it for a project on main (no main_branch) starts", () => {
@@ -1130,6 +1155,11 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     ['sensor_scrub null', { sensor_scrub: null }],
     ['an empty deny list (the owner\'s choice)', { worker_denied_commands: [] }],
     ['a main_branch with a +', { main_branch: 'rel+1' }, 'rel+1'],
+    ['agent_trust_command null (run nothing)', { agent_trust_command: null }],
+    ['release as a branch', { release: { branch: 'prod' } }],
+    ['a non-owner key with junk on main (responder "yes"; read from the working file)', { responder: 'yes' }],
+    ['a non-owner key with junk on main (links 0)', { links: 0 }],
+    ['a non-owner key with junk on main (upstream_base {"x": 1})', { upstream_base: { x: 1 } }],
   ]) {
     await t.test(`final-7 F1: ${label} starts`, () => {
       fresh();

@@ -31900,27 +31900,24 @@ function responderMainBranch() {
 }
 // The owner's settings key that can't be what a start reads, or null. The keys the start reads
 // are checked strictly, so a junk value never starts the kit's defaults and a deny list that isn't
-// one never drops the workers' rules (final-6 F1, final-6b F1-F3). Every other known key is checked
+// one never drops the workers' rules (final-6 F1, final-6b F1-F3). Every other owner key is checked
 // only for the kind the kit reads it as, with null allowed (unset): never SETTING_SHAPES, which
 // decides what the Settings page shows and refuses values the kit takes, such as init's
 // `project: "My App"` (final-7 F1, rulings-kit-103-r4.md Round 8). An empty deny list is the
 // owner's choice, as it is for workers (final-7 F2). A blank responder_command stays unset, as
-// done-when 1 has it (R1c); main_branch is checked by responderMain.
+// done-when 1 has it (R1c); main_branch is checked by responderMain. Only owner keys are judged:
+// the start reads those from main, and every other key from the working file (Round 8 addendum).
 const RESPONDER_NEEDS = {
   worker_denied_commands: (v) => Array.isArray(v) && v.every((c) => typeof c === 'string' && c.trim() !== ''),
   agent_command: (v) => typeof v === 'string' && v.trim() !== '',
   responder_command: (v) => v === null || typeof v === 'string',
 };
 // the kinds the kit reads where the default gives none (null or no default), or more than one
-const RESPONDER_KINDS = {
-  tmux_session: ['string'], usage_command: ['string'], upstream_base: ['string'], remediations: ['object'], sensor_scrub: ['array'],
-  max_active_tickets: ['number'], max_active_per_component: ['number'], max_active_planners: ['number'], dashboard_port: ['number'],
-  release: ['string', 'object'],
-};
+const RESPONDER_KINDS = { usage_command: ['string'], remediations: ['object'], release: ['string', 'object'] };
 const settingKind = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : isObj(v) ? 'object' : typeof v);
 function responderBadSetting(own) {
   for (const [k, v] of Object.entries(own)) {
-    if (!SETTINGS_KEYS.includes(k)) continue;
+    if (!Object.hasOwn(OWNER_SETTINGS, k)) continue;
     if (RESPONDER_NEEDS[k]) { if (!RESPONDER_NEEDS[k](v)) return k; continue; }
     if (k === 'main_branch' || v === null) continue;
     const def = SETTINGS_DEFAULTS[k] ?? REPO_OWN_DEFAULTS[k];
