@@ -323,6 +323,7 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
   await p.click(`#goals a[href="#q/${ids.goalQ}"]`);
   await until(() => p.ev(`location.hash === ${JSON.stringify(`#q/${ids.goalQ}`)} && DRAWER.kind === 'q' && !document.getElementById('drawer').hidden && !!document.querySelector(${JSON.stringify(`#drawer-body [id="p-q-${ids.goalQ}"]`)})`), 'the peek with its card');
   assert.equal(await len(), n + 1, 'one new entry');
+  assert.deepEqual(await shown(), ['goals'], 'Goals alone, under the peek');
   await back();
   await onPage('goals');
 

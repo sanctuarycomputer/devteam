@@ -193,7 +193,8 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.deepEqual(await p.ev("[...document.querySelectorAll('.side nav.nav[data-group=\"project\"] a .nl')].map((a) => a.textContent.trim())"), ['Overview', 'Goals', 'Progress', 'Board', 'Library']);
     assert.equal(await p.ev("SHELL_ROUTES.pages.includes('inbox')"), false, 'SHELL_ROUTES.pages has no inbox');
 
-    // an open question's #q/ link on Board (the test draws the anchor: the routing is the page's)
+    // an open question's #q/ link on Board opens its side peek, over Board (kit-766; the test draws the
+    // anchor: the routing is the page's)
     await p.ev("location.hash = '#board'");
     await soon(`location.hash === '#board' && ${ON_PAGE('board')} && !${IS_OPEN}`, 'Board, the panel closed');
     const q2 = fx.q.q2;
@@ -289,8 +290,8 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.match(block, /redirects: \{[^}]*\binbox: 'overview\?th=inbox'/, 'inbox in the block\'s redirects');
     assert.match(block, /redirects: \{[^}]*\bquestions: 'overview\?th=inbox'/, 'questions in the block\'s redirects');
 
-    // a cold load of an open question's #q/ in a new tab, /api/data held back: nothing thrown, then Overview
-    // with the panel on Inbox and the card in #th-body's box
+    // a cold load of an open question's #q/ in a new tab, /api/data held back: nothing thrown, then the
+    // question's side peek with its card (kit-766)
     const q1 = await chrome.newPage();
     later(() => q1.close());
     await q1.send('Page.enable');
