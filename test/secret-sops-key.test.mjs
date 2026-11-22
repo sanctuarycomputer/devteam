@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fleetFixture, write } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -76,6 +76,7 @@ test('a planted chore folder and key never receive the value', { skip: !real }, 
     const r = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9' }));
     assert.notEqual(r.status, 0);
     assert.equal(fs.readFileSync(path.join(fake, 'secrets/app.enc.env'), 'utf8'), before, 'the planted file got nothing');
+    for (const f of fs.readdirSync(path.join(F.old, '.worktrees'))) { const p2 = path.join(F.old, '.worktrees', f, 'secrets/app.enc.env'); if (fs.existsSync(p2)) assert.doesNotMatch(decrypt(evil.id, p2).stdout ?? '', /value-one-9/, "the planter's key never opens the value"); }
   } finally { F.done(); }
 });
 
@@ -119,11 +120,11 @@ test('a store takes all of a question\'s secrets in one post, and a failed one s
     const q = asks(F, ['ONE', 'TWO']);
     const part = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9' }));
     assert.notEqual(part.status, 0);
-    assert.match(part.out + part.err, /takes all of this question's secrets in one post, and TWO is missing/);
-    const w = path.join(F.old, '.worktrees', fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-')));
-    assert.doesNotMatch(decrypt(good.id, path.join(w, 'secrets/app.enc.env')).stdout, /ONE=/, 'nothing was saved');
+    assert.match(part.out + part.err, /takes all of this question's secrets in one post: add TWO too/);
+    assert.ok(!fs.existsSync(path.join(F.old, '.worktrees')) || !fs.readdirSync(path.join(F.old, '.worktrees')).some((x) => x.startsWith('chore-secret-')), 'refused before anything ran');
     const all = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9', TWO: 'value-two-9' }));
     assert.equal(all.status, 0, all.out + all.err);
+    const w = path.join(F.old, '.worktrees', fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-')));
     const plain = decrypt(good.id, path.join(w, 'secrets/app.enc.env')).stdout;
     assert.match(plain, /ONE=value-one-9/);
     assert.match(plain, /TWO=value-two-9/);
@@ -157,6 +158,53 @@ test('a branch whose name ends in refs/heads/main never supplies the store', { s
     const after = path.join(F.old, '.worktrees', c, 'secrets/app.enc.env');
     assert.equal(stanza(fs.readFileSync(after, 'utf8')), stanza(real0), "main's own store");
     assert.equal(decrypt(evil.id, after).status === 0, false, "the pusher's key can't open it");
+  } finally { F.done(); }
+});
+
+test('the remote moved since the last fetch: the post reads its new main', { skip: !real }, () => {
+  const F = fleetFixture('sops-moved');
+  try {
+    const good = keygen();
+    repo(F, good.pub);
+    const other = path.join(F.base, 'other');
+    F.g(['clone', '-q', F.org, other]);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) F.g(['config', k, v], other);
+    write(path.join(other, 'unrelated.txt'), 'x\n');
+    F.g(['add', '-A'], other); F.g(['commit', '-qm', 'unrelated'], other); F.g(['push', '-q', 'origin', 'main'], other);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE']);
+    const r = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9' }));
+    assert.equal(r.status, 0, r.out + r.err);
+  } finally { F.done(); }
+});
+
+test('two posts at once for one question: one lands whole, the other says it posted nothing', { skip: !real }, async () => {
+  const F = fleetFixture('sops-race');
+  try {
+    const good = keygen();
+    repo(F, good.pub);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE', 'TWO']);
+    const bin = path.join(F.base, 'slow-bin');
+    const realSops = spawnSync('sh', ['-c', 'command -v sops'], { encoding: 'utf8' }).stdout.trim();
+    write(path.join(bin, 'sops'), `#!/bin/sh\nsleep 1\nexec "${realSops}" "$@"\n`);
+    fs.chmodSync(path.join(bin, 'sops'), 0o755);
+    const env = F.env({ PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+    const post = (tag) => new Promise((done) => {
+      let err = '';
+      const c = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'secret', 'post', q, '--json'], { cwd: F.old, env, stdio: ['pipe', 'ignore', 'pipe'] });
+      c.stderr.on('data', (d) => { err += d; });
+      c.stdin.end(JSON.stringify({ ONE: `one-${tag}-9`, TWO: `two-${tag}-9` }));
+      c.on('close', (code) => done({ code, err, tag }));
+    });
+    const rs = await Promise.all([post('a'), post('b')]);
+    const won = rs.filter((r) => r.code === 0);
+    assert.equal(won.length, 1, rs.map((r) => r.err).join('\n'));
+    assert.match(rs.find((r) => r.code !== 0).err, /is already answered|nothing was posted from this run/, 'the loser posted nothing and says so');
+    const w = fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-'));
+    const plain = decrypt(good.id, path.join(F.old, '.worktrees', w, 'secrets/app.enc.env')).stdout;
+    assert.match(plain, new RegExp(`ONE=one-${won[0].tag}-9`));
+    assert.match(plain, new RegExp(`TWO=two-${won[0].tag}-9`));
   } finally { F.done(); }
 });
 

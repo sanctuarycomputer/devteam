@@ -11822,6 +11822,11 @@ function sopsMainBlob(file) {
   if (lines.length !== 1) return null;
   const head = lines[0][0];
   if (!/^[0-9a-f]{40,64}$/.test(head)) return null;
+  // the remote can be ahead of what is here: fetch exactly that commit
+  if (spawnSync('git', ['cat-file', '-e', `${head}^{commit}`], { cwd: mainRoot, stdio: 'ignore' }).status !== 0) {
+    spawnSync('git', ['fetch', '--quiet', '--no-tags', 'origin', head], { cwd: mainRoot, stdio: 'ignore', timeout: 30000, killSignal: 'SIGKILL' });
+    if (spawnSync('git', ['--no-replace-objects', 'rev-parse', '--verify', '--quiet', `${head}^{commit}`], { cwd: mainRoot, encoding: 'utf8' }).stdout?.trim() !== head) return null;
+  }
   const r = spawnSync('git', ['--no-replace-objects', 'show', `${head}:${file}`], { cwd: mainRoot, maxBuffer: 16 * 1024 * 1024, timeout: 10000, killSignal: 'SIGKILL' });
   return r.status === 0 ? r.stdout : null;
 }
@@ -11881,6 +11886,35 @@ function sopsKeyFor(file, blob, base) {
   }
   return {};
 }
+// A per-question lock that only its live holder can lose: a holder that died is taken over by an
+// atomic rename, and only the holder removes it.
+function sopsQuestionLock(id, fn) {
+  const dir = path.join(runDir, 'secret-locks');
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = path.join(dir, encodeURIComponent(id));
+  const me = `${process.pid}:${crypto.randomUUID()}`;
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  const start = Date.now();
+  for (;;) {
+    try { fs.mkdirSync(lock); fs.writeFileSync(path.join(lock, 'owner'), me); break; } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      let owner = '';
+      try { owner = fs.readFileSync(path.join(lock, 'owner'), 'utf8'); } catch {}
+      const pid = Number(owner.split(':')[0]);
+      const age = Date.now() - (fs.lstatSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
+      if ((pid && !alive(pid)) || (!pid && age > 5000)) {
+        const gone = `${lock}.gone-${process.pid}-${Date.now()}`;
+        try { fs.renameSync(lock, gone); fs.rmSync(gone, { recursive: true, force: true }); } catch {}
+        continue;
+      }
+      if (Date.now() - start > 300000) die(`another post for ${id} is still running (${lock}); try again when it finishes`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  const release = () => { try { if (fs.readFileSync(path.join(lock, 'owner'), 'utf8') === me) fs.rmSync(lock, { recursive: true, force: true }); } catch {} };
+  process.once('exit', release);
+  try { return fn(); } finally { process.off('exit', release); release(); }
+}
 // A question's secrets for one store go in together, or not at all: from a private copy of the store
 // on the remote's main, so nothing in a worktree or an ignored file can choose its data key, and with
 // no partial state for a later post to continue from.
@@ -11891,8 +11925,9 @@ function sopsPostAll(sinks, declared, posted, values, cwd, redact) {
   for (const [file, group] of groups) {
     const names = declared.filter((x) => { try { const k = parseSink(x.sink, { soft: true }); return k.type === 'sops' && k.file === file; } catch { return false; } }).map((x) => x.name);
     const earlier = names.filter((n) => posted.some((p) => p.name === n));
+    if (earlier.length) nudgeSupervisor(`[devteam secrets for ${id} from owner] ${file} already holds ${earlier.join(', ')} from an earlier post and takes the rest only in one post: ask for all of ${names.join(', ')} again in a new question.`);
     const missing = names.filter((n) => !group.some((x) => x.name === n));
-    const r = earlier.length ? { ok: false, out: `${earlier.join(', ')} already went to ${file}, and a store takes all of a question's secrets in one post. Nothing was changed. Ask for all of them again in a new question` }
+    const r = earlier.length ? { ok: false, out: `${earlier.join(', ')} already went to ${file}, and a store takes all of a question's secrets in one post. Nothing was changed. The supervisor has been told to ask for all of them again in a new question` }
       : missing.length ? { ok: false, out: `${file} takes all of this question's secrets in one post, and ${missing.join(', ')} ${missing.length > 1 ? 'are' : 'is'} missing. Nothing was saved` }
         : sopsSetAll(file, group, values, cwd, redact);
     for (const x of group) results.set(x.name, r);
@@ -11917,7 +11952,7 @@ function sopsSetAll(file, group, values, cwd, redact) {
     for (const x of group) {
       const text = values.get(x.name).toString('utf8');
       const input = JSON.stringify(x.kind === 'file' ? text : text.replace(/\r?\n$/, ''));
-      const p = spawnSync('sops', ['--config', config, 'set', '--value-stdin', copy, x.k.keys.map((part) => `[${JSON.stringify(part)}]`).join('')], { cwd: dir, encoding: 'utf8', input, env, maxBuffer: 16 * 1024 * 1024 });
+      const p = spawnSync('sops', ['--config', config, 'set', '--value-stdin', copy, x.k.keys.map((part) => `[${JSON.stringify(part)}]`).join('')], { cwd: dir, encoding: 'utf8', input, env, maxBuffer: 16 * 1024 * 1024, timeout: 120000, killSignal: 'SIGKILL' });
       if (p.error && !(p.error.code === 'EPIPE' && p.status !== null && p.status !== 0)) return { ok: false, out: redact(p.error.message) };
       let out = redact(`${p.stdout ?? ''}${p.stderr ?? ''}`.trim()).split(copy).join(file);
       if (p.status !== 0) {
@@ -12057,6 +12092,22 @@ function cmdSecret() {
     }
   }
   if (!values.size) die('nothing to post');
+  // a SOPS store takes all of a question's secrets in one post: say what's missing before anything runs
+  const storeOf = (x) => { try { const k = parseSink(x.sink, { soft: true }); return k.type === 'sops' ? k.file : null; } catch { return null; } };
+  for (const file of new Set(todo.map(storeOf).filter(Boolean))) {
+    const names = todo.filter((x) => storeOf(x) === file).map((x) => x.name);
+    const missing = names.filter((n) => !values.has(n));
+    if (missing.length && missing.length < names.length) die(`${file} takes all of this question's secrets in one post: add ${missing.join(', ')} too. Nothing was posted`);
+  }
+  // one post per question at a time, from reading what is posted through the log line
+  return sopsQuestionLock(id, () => {
+    logCache = null;
+    const now = openQuestion(id).secrets_posted ?? [];
+    if (now.length !== posted.length) die(`${id} changed while you were posting; nothing was posted from this run. Look again and post what is still open`);
+    return postSecretsNow(id, v, declared, posted, todo, values, by);
+  });
+}
+function postSecretsNow(id, v, declared, posted, todo, values, by) {
   const redact = redactor(values);
   const sinks = todo.filter((x) => values.has(x.name)).map((x) => ({ ...x, k: parseSink(x.sink) }));
   // Encrypted stores change in one chore worktree per question, committed together; it starts clean.
