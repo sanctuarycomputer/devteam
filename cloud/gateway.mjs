@@ -1052,10 +1052,10 @@ export function createGateway(opts = {}) {
   const RP_ID = NAME;
   const TERM = `${pubUrl.protocol}//term.${pubUrl.host}`;
   const termHost = new URL(TERM).host;
-  // What the owner published, to anyone. Under the box's wildcard name like term., and never an
-  // instance's: those are all digits.
-  const PUBLIC = `${pubUrl.protocol}//public.${pubUrl.host}`;
+  // What the owner published, to anyone: under its project's own host. A project whose name isn't a
+  // host label has no such host, so a page of it has no address.
   const publicAddress = (project, slug) => `${projectOrigin(project)}/${slug}/`;
+  const hostable = (name) => HOST_LABEL.test(name) && !RESERVED_LABELS.includes(name);
   // Parsed once, before anything else starts: a cap that isn't a number would compare false
   // against every total and publish without limit, so a bad one stops the gateway instead.
   const maxSet = opts.publicMax ?? env.DEVTEAM_PUBLIC_MAX;
@@ -1832,8 +1832,33 @@ export function createGateway(opts = {}) {
     if (!m || RESERVED_SEGMENTS.includes(m[1]) || !LINK_ID.test(m[1])) return false;
     return Object.entries(store.load().public ?? {}).some(([n, x]) => n !== label && Object.hasOwn(x?.artifacts ?? {}, m[1]));
   };
+  // Every read that feeds the maps is numbered when it begins, so a slow older answer never undoes
+  // a newer one: an answer is applied only if no read begun after it has been applied already.
+  let readSeq = 0;
+  let appliedSeq = 0;
+  const readList = () => {
+    const seq = ++readSeq;
+    return hubList().then((body) => { if (seq > appliedSeq) { appliedSeq = seq; takePreviews(body); } return body; });
+  };
   let previewRefresh = null;
-  const refreshPreviews = () => (previewRefresh ??= hubList().then(takePreviews).finally(() => { previewRefresh = null; }));
+  const refreshPreviews = () => (previewRefresh ??= readList().finally(() => { previewRefresh = null; }));
+  // The projects of a list read that began after this call and returned within ms, or null (no list
+  // in time, or none the hub could give). A read already under way may hold an older answer, so it
+  // is waited out, not counted. What Publish takes as proof that a name is one project's.
+  const freshList = (ms) => new Promise((done) => {
+    const t = setTimeout(() => done(null), ms);
+    Promise.resolve(previewRefresh).catch(() => {}).then(() => refreshPreviews()).then(() => (listRead ? projects : null), () => null).then((v) => { clearTimeout(t); done(v); });
+  });
+  const sharedWhy = (name, from = projects) => (from.get(name)?.length > 1 ? `two listed projects share the name ${name}, so the box can't tell which one you mean: rename one (settings.md's project)` : null);
+  // Why a page of this project can't be published now: no fresh list to prove the name is one
+  // project's, or a name two share, by that list or the live one.
+  const publishBlocked = (name, proved) => (!proved ? `the hub's list can't be read, so the box can't check that only one project is named ${name}: start the hub and try again` : sharedWhy(name, proved) || sharedWhy(name));
+  // The port a project's name stands for, as the list says after at most a second's re-read.
+  const projectPort = async (name) => {
+    await refreshWithin(1000);
+    const c = projects.get(name) ?? [];
+    return c.length > 1 ? { refused: sharedWhy(name) } : { port: c[0]?.port ?? null };
+  };
 
   // --- notifications: the gateway reads the hub's list itself, so they need no page open ----------
   // The signing key sits with the passkeys, where no agent can read it. Made the first time it's asked for.
@@ -1863,8 +1888,7 @@ export function createGateway(opts = {}) {
     if (polling) return;
     polling = true;
     try {
-      const body = await hubList();
-      takePreviews(body);
+      const body = await readList();
       let list = null;
       try { list = JSON.parse(body).instances; } catch {}
       if (!Array.isArray(list)) return;
@@ -2290,10 +2314,18 @@ export function createGateway(opts = {}) {
     return m;
   };
   const manifestHash = (m) => hex256(canonicalJson(m));
+  // A page needs an address: <project>.<box>/<slug>/, where the slug is none of the dashboard's paths.
+  const addressProblem = (m) => {
+    if (RESERVED_SEGMENTS.includes(m.slug)) return `${m.slug} is a path of the dashboard, so a page can't be published under it: rename the artifact`;
+    if (!hostable(m.project)) return `${m.project} can't be a host name, so a page of it would have no address: rename the project (settings.md's project)`;
+    return null;
+  };
   // Whether this item may go on the box as it stands: bound to the root the owner saw, and under
   // the cap with this item's files in place of its old version. Checked before the slow work, and
   // again in the queue against the state it will change.
   const publishProblem = (pubNow, m, item) => {
+    const where = addressProblem(m);
+    if (where) return where;
     const bound = Object.hasOwn(pubNow, m.project) ? pubNow[m.project] : null;
     if (bound && bound.root !== m.root) {
       if (item.move !== true) return `${m.project} is published from ${bound.root}; this instance is ${m.root}: tick "move it" to publish it from here`;
@@ -2334,12 +2366,18 @@ export function createGateway(opts = {}) {
       ids[rel] = { oid: gitBlobId(r.body, algo), mode: f.mode };
     }
     if (gitTreeId(ids, algo) !== m.tree) throw new Error(`the files don't make the tree ${m.tree.slice(0, 12)} the manifest names; nothing was published`);
+    // this item's own proof that its name is one project's, from a list read begun now, taken
+    // outside the store's queue so a stalled hub never holds anyone else's change
+    const proof = await freshList(1000);
+    const blocked = publishBlocked(m.project, proof);
+    if (blocked) throw Object.assign(new Error(blocked), { noProof: !proof });
     return pstore.serial(async () => {
       try {
         // the budget may have run out while this item queued: refuse before any blob is written
         left();
-        // the state may have changed while this item waited: a move, another publish, the cap
-        why = publishProblem(store.load().public ?? {}, m, item);
+        // the state may have changed while this item waited: a move, another publish, the cap, a
+        // second project of this name listed since
+        why = publishProblem(store.load().public ?? {}, m, item) || publishBlocked(m.project, proof);
         if (why) throw new Error(why);
         for (const [sha, buf] of bytes) pstore.write(sha, buf);
         // the record gets the full deadline, whatever is left of the budget: cutting it short would leave a recorded-but-unsaved publish
@@ -2354,7 +2392,7 @@ export function createGateway(opts = {}) {
         const update = Object.hasOwn(kept, m.slug);
         pub[m.project] = { root: m.root, port, artifacts: { ...kept, [m.slug]: { tree: m.tree, title: m.title, at: new Date().toISOString(), files: Object.fromEntries(Object.entries(m.files).map(([rel, f]) => [rel, { sha256: f.sha256, size: f.size }])) } } };
         store.save({ ...now, public: pub });
-        return { url: `${PUBLIC}/${m.project}/${m.slug}/`, update };
+        return { url: publicAddress(m.project, m.slug), update };
       } finally { try { pstore.sweep(store.load().public); } catch {} }
     });
   };
@@ -2741,11 +2779,12 @@ export function createGateway(opts = {}) {
         await refreshWithin(1000);
         return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': hubCsp(), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
       }
-      // /box.json, box: 1: { box, terminal, instance, passkeys, previews, push, image }. image is what the
+      // /box.json, box: 2: { box, terminal, project, passkeys, previews, push, image }. project is where a
+      // project is (project-hosts@1), {project} its name. image is what the
       // box's image says it is (boxImage, from the image's ENV: its release and its tools' pins):
       // { release: 'vX.Y.Z' | null, tools: { name: version } } in the ENV's order, or null with neither
-      // set (a laptop, an older image). Versions only. An additive change keeps box: 1.
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE });
+      // set (a laptop, an older image). Versions only. An additive change keeps box: 2.
+      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
@@ -2790,21 +2829,31 @@ export function createGateway(opts = {}) {
       }
       if (req.method === 'GET' && (p === '/public' || p.startsWith('/public/')) && req.headers['sec-fetch-dest'] !== undefined && req.headers['sec-fetch-dest'] !== 'document') return send(res, 403, 'text/plain; charset=utf-8', 'open this page on its own, not in a frame');
       if (req.method === 'GET' && p === '/public/publish') {
-        const port = Number(url.searchParams.get('port'));
+        // One proof for what the page shows; each item of the POST takes its own.
+        const proved = await freshList(1000);
+        const byName = url.searchParams.has('project') && !url.searchParams.has('port');
+        if (byName && !proved) return send(res, 503, 'text/plain; charset=utf-8', publishBlocked(url.searchParams.get('project'), null));
+        // by the project's name, or by an instance's port as an older dashboard sends it
+        const named = url.searchParams.has('port') ? { port: Number(url.searchParams.get('port')) } : byName ? await projectPort(url.searchParams.get('project')) : { port: NaN };
+        if (named.refused) return send(res, 409, 'text/plain; charset=utf-8', named.refused);
+        const port = named.port;
         const slugs = [...new Set(url.searchParams.getAll('slug'))];
-        if (!BLOCK.includes(port) || !slugs.length || slugs.length > 50 || !slugs.every((x) => LINK_ID.test(x))) return send(res, 400, 'text/plain; charset=utf-8', 'publish?port=<an instance of this box>&slug=<slug>[&slug=…], at most 50');
+        if (!BLOCK.includes(port) || !slugs.length || slugs.length > 50 || !slugs.every((x) => LINK_ID.test(x))) return send(res, 400, 'text/plain; charset=utf-8', 'publish?project=<project>&slug=<slug>[&slug=…] (or ?port=<an instance of this box>), at most 50');
         const pub = store.load().public ?? {};
         // at most four manifests at a time: each is a node child on the instance, and Restore all asks for up to 50
         const rows = await mapPool(slugs, 4, async (slug) => {
           try {
             const m = await fetchManifest(port, slug);
+            // however the instance was named, the manifest's project is judged against the proof
+            const why = addressProblem(m) || publishBlocked(m.project, proved);
+            if (why) throw new Error(why);
             const bound = Object.hasOwn(pub, m.project) ? pub[m.project] : null;
             const now = bound && Object.hasOwn(bound.artifacts ?? {}, slug) ? bound.artifacts[slug] : null;
             const moving = bound && bound.root !== m.root;
             // what the owner approved earlier, if this box still holds it: the only copy to compare with
             const held = now && !moving ? now : null;
             // a move takes down every other page of the old checkout: the page names them
-            return { slug, m, hash: manifestHash(m), url: `${PUBLIC}/${m.project}/${slug}/`, held: !!held, changes: held && held.tree !== m.tree ? fileChanges(held.files, m.files) : null, state: !held ? 'not on this box' : held.tree === m.tree ? 'already public at this version' : 'an update', movedFrom: moving ? bound.root : null, others: moving ? Object.keys(bound.artifacts ?? {}).filter((x) => x !== slug).sort() : [] };
+            return { slug, m, hash: manifestHash(m), url: publicAddress(m.project, slug), held: !!held, changes: held && held.tree !== m.tree ? fileChanges(held.files, m.files) : null, state: !held ? 'not on this box' : held.tree === m.tree ? 'already public at this version' : 'an update', movedFrom: moving ? bound.root : null, others: moving ? Object.keys(bound.artifacts ?? {}).filter((x) => x !== slug).sort() : [] };
           } catch (e) { return { slug, error: e.message }; }
         });
         return page(res, PAGES.publish(port, rows));
@@ -2815,9 +2864,12 @@ export function createGateway(opts = {}) {
         const items = Array.isArray(body?.items) ? body.items : [];
         if (!BLOCK.includes(port) || !items.length || items.length > 50 || !items.every((x) => x && typeof x.slug === 'string' && LINK_ID.test(x.slug) && typeof x.manifest === 'string' && /^[0-9a-f]{64}$/.test(x.manifest))) return json(res, 400, { error: 'publish takes { port, items: [{ slug, manifest, move, movedFrom }] }, 1 to 50 items' });
         const results = [];
+        // a proof that failed stops the request: the rest get the same refusal and are not asked for
+        let stopped = null;
         for (const it of items) {
+          if (stopped) { results.push({ slug: it.slug, ok: false, error: stopped }); continue; }
           try { results.push({ slug: it.slug, ok: true, ...(await publishItem(port, it)) }); }
-          catch (e) { results.push({ slug: it.slug, ok: false, error: e.message }); }
+          catch (e) { results.push({ slug: it.slug, ok: false, error: e.message }); if (e.noProof) stopped = e.message; }
         }
         log(`public: ${results.map((x) => `${x.slug} ${x.ok ? 'published' : 'refused'}`).join(', ')} from instance ${port}`);
         return json(res, 200, { results });
@@ -2826,7 +2878,7 @@ export function createGateway(opts = {}) {
       if (req.method === 'GET' && p === '/public/unpublish') {
         const pub = store.load().public ?? {};
         const slug = url.searchParams.get('slug') ?? '';
-        const port = url.searchParams.has('port') ? Number(url.searchParams.get('port')) : null;
+        let port = url.searchParams.has('port') ? Number(url.searchParams.get('port')) : null;
         let project = url.searchParams.get('project');
         if (project === null && port !== null) {
           const named = Object.keys(pub).filter((n) => pub[n].port === port && Object.hasOwn(pub[n].artifacts ?? {}, slug));
@@ -2835,14 +2887,25 @@ export function createGateway(opts = {}) {
         if (!LINK_ID.test(slug) || (port !== null && !BLOCK.includes(port)) || !PROJECT.test(project ?? '')) return send(res, 400, 'text/plain; charset=utf-8', 'unpublish?project=<project>&slug=<slug>[&port=<instance>]');
         const a = Object.hasOwn(pub, project) && Object.hasOwn(pub[project].artifacts ?? {}, slug) ? pub[project].artifacts[slug] : null;
         if (!a) return send(res, 404, 'text/plain; charset=utf-8', `${project}/${slug} is not public on this box`);
-        return page(res, PAGES.unpublish({ project, slug, port, title: a.title, url: `${PUBLIC}/${project}/${slug}/` }));
+        // by the project's name, the instance to tell is the one the list names (a shared name, none)
+        if (url.searchParams.has('project') && port === null) port = (await projectPort(project)).port ?? null;
+        // Never refused: a page nobody could take down is worse. Without a fresh list proving the name
+        // one project's, the box can't know which instance holds the record, so it tells none.
+        const proved = await freshList(1000);
+        const shared = Boolean(sharedWhy(project, proved ?? projects));
+        return page(res, PAGES.unpublish({ project, slug, port: shared || !proved ? null : port, title: a.title, url: hostable(project) ? publicAddress(project, slug) : null, shared }));
       }
       if (req.method === 'POST' && p === '/public/unpublish') {
         const body = await readJson(req);
         const project = String(body?.project ?? '');
         const slug = String(body?.slug ?? '');
-        const port = body?.port === undefined || body?.port === null ? null : Number(body.port);
-        if (!PROJECT.test(project) || !LINK_ID.test(slug) || (port !== null && !BLOCK.includes(port))) return json(res, 400, { error: 'unpublish takes { project, slug, port? }' });
+        const asked = body?.port === undefined || body?.port === null ? null : Number(body.port);
+        if (!PROJECT.test(project) || !LINK_ID.test(slug) || (asked !== null && !BLOCK.includes(asked))) return json(res, 400, { error: 'unpublish takes { project, slug, port? }' });
+        // A shared name, or no fresh list to say it isn't: only the gateway's copy comes down, and no
+        // instance is told, even one sent, since the box can't know which one holds the record.
+        const proved = await freshList(1000);
+        const shared = Boolean(sharedWhy(project, proved ?? projects));
+        const port = shared || !proved ? null : asked;
         const root = await pstore.serial(() => {
           const now = store.load();
           const pub = { ...(now.public ?? {}) };
@@ -2859,11 +2922,12 @@ export function createGateway(opts = {}) {
         });
         if (root === null) return json(res, 404, { error: `${project}/${slug} is not public on this box` });
         log(`public: ${project}/${slug} unpublished`);
-        if (port === null) return json(res, 200, { ok: true, recorded: false, note: 'no instance was named, so the record wasn\'t written; the Library\'s Forget clears it' });
+        if (shared) return json(res, 200, { ok: true, recorded: false, shared: true, note: `${project}/${slug} is down. Two listed projects share that name, so it may have been the other project's page. No instance's record was written; the Library's Forget clears it.` });
+        if (port === null) return json(res, 200, { ok: true, recorded: false, note: asked !== null ? 'the hub\'s list can\'t be read, so no instance\'s record was written; the Library\'s Forget clears it' : 'no instance was named, so the record wasn\'t written; the Library\'s Forget clears it' });
         try { await recordUnpublish(port, project, root, slug); return json(res, 200, { ok: true, recorded: true, note: null }); }
         catch (e) { return json(res, 200, { ok: true, recorded: false, note: `${e.message}; the Library's Forget clears it` }); }
       }
-      if (req.method === 'GET' && (p === '/public' || p === '/public/')) return page(res, PAGES.publicList(store.load().public ?? {}, PUBLIC));
+      if (req.method === 'GET' && (p === '/public' || p === '/public/')) return page(res, PAGES.publicList(store.load().public ?? {}, (n, s) => (hostable(n) ? publicAddress(n, s) : null)));
       return send(res, 404, 'text/plain', 'not found');
     } catch (e) {
       if (res.headersSent) return res.destroy();
@@ -3126,7 +3190,7 @@ if (go) go.onclick = run(async () => {
   } finally { go.disabled = false; }
 });
 </script></body></html>`,
-  unpublish: (x) => `${doc('Unpublish', `<h1>Take this page down</h1><p><b>${esc(x.title)}</b> (${esc(x.project)} · ${esc(x.slug)}) comes down within a minute, for everyone:</p><p><code>${esc(x.url)}</code></p><p><button id="go">Unpublish</button></p><p id="err"></p><p id="out"></p>`)}
+  unpublish: (x) => `${doc('Unpublish', `<h1>Take this page down</h1><p><b>${esc(x.title)}</b> (${esc(x.project)} · ${esc(x.slug)}) comes down within a minute, for everyone:</p>${x.url ? `<p><code>${esc(x.url)}</code></p>` : ''}${x.shared ? `<p id="shared">Two listed projects share the name ${esc(x.project)}, so this page may be the other project's. Only this page comes down, and no instance's record is written; the Library's Forget clears it.</p>` : ''}<p><button id="go">Unpublish</button></p><p id="err"></p><p id="out"></p>`)}
 <script>
 const ITEM = ${jsonIn({ project: x.project, slug: x.slug, ...(x.port ? { port: x.port } : {}) })};
 const go = document.getElementById('go');
@@ -3136,9 +3200,10 @@ go.onclick = run(async () => {
   document.getElementById('out').textContent = 'Taken down.' + (r.recorded ? ' The Library shows it.' : ' ' + (r.note || ''));
 });
 </script></body></html>`,
-  publicList: (pub, site) => {
-    const rows = Object.entries(pub).flatMap(([n, x]) => Object.entries(x.artifacts ?? {}).map(([s, a]) => ({ n, s, a, root: x.root, link: `${site}/${n}/${s}/` })));
-    return `${doc('Public', `<h1>Public on this box</h1><p>Anyone can read these, with no sign-in. Each is the box's own copy of what you published.</p>${rows.length ? `<ul>${rows.map((r) => `<li class="pub"><b>${esc(r.a.title)}</b><small>${esc(r.n)} · ${esc(r.s)} · published ${esc(String(r.a.at).slice(0, 10))} from ${esc(r.root)}</small><code><a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">${esc(r.link)}</a></code><a href="${esc(`/public/unpublish?project=${r.n}&slug=${r.s}`)}">Unpublish</a></li>`).join('')}</ul>` : '<p>Nothing is public.</p>'}`)}</body></html>`;
+  // address(project, slug): a page's address, or null for a project whose name can't be a host
+  publicList: (pub, address) => {
+    const rows = Object.entries(pub).flatMap(([n, x]) => Object.entries(x.artifacts ?? {}).map(([s, a]) => ({ n, s, a, root: x.root, link: address(n, s) })));
+    return `${doc('Public', `<h1>Public on this box</h1><p>Anyone can read these, with no sign-in. Each is the box's own copy of what you published.</p>${rows.length ? `<ul>${rows.map((r) => `<li class="pub"><b>${esc(r.a.title)}</b><small>${esc(r.n)} · ${esc(r.s)} · published ${esc(String(r.a.at).slice(0, 10))} from ${esc(r.root)}</small>${r.link ? `<code><a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">${esc(r.link)}</a></code>` : '<small>this name can\'t be a host, so the page has no address</small>'}<a href="${esc(`/public/unpublish?project=${r.n}&slug=${r.s}`)}">Unpublish</a></li>`).join('')}</ul>` : '<p>Nothing is public.</p>'}`)}</body></html>`;
   },
   // The owner's view of a public page: the instance's viewer, framed full size under one line, and
   // no script of its own. The frame may not navigate this tab, nor open a window outside its
