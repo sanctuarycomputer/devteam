@@ -275,9 +275,9 @@ test('four section cards in order, each the shell\'s sortable record table whose
   assert.equal(await p.ev('location.hash'), '#builtin/retro');
   await p.ev('history.back(); void 0');
   await soon(`${peekClosed} && ${PAGE.on} && ${withRows('proposals')}`, 'Back to the Jobs page');
-  // an open question's row: its card in the Inbox, as every open question's link does
+  // an open question's row: the question's side peek, with its card, as every open question's link does
   await openRow('proposals', 'The bundle stays under 300 kB');
-  await soon(`/[?&]th=inbox/.test(location.hash) && document.getElementById('drawer').hidden && !!document.getElementById(${J(`q-${fx.ids.open}`)})`, 'the open question\'s Inbox card');
+  await soon(`DRAWER.kind === 'q' && DRAWER.id === ${J(fx.ids.open)} && !document.getElementById('drawer').hidden && !!document.querySelector(${J(`#drawer-body [id="p-q-${fx.ids.open}"]`)})`, 'the open question\'s peek');
   // a Yes still landing: the question's read-only peek
   await go('#jobs');
   await soon(jobsReady(withRows('proposals')), 'the Jobs page');
