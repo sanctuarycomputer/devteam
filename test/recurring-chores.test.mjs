@@ -605,3 +605,10 @@ test('C21: peek recurring <name> --json for a supervisor chore and a worker chor
 });
 
 // ===== DW14: supervisor.md =====
+
+test('C22: supervisor.md documents chores: when they come due, recurring start, done with --nothing and --abandoned, and holds', () => {
+  const sec = /\n## Recurring jobs\n[\s\S]*?\n## /.exec(SUPERVISOR_MD)?.[0] ?? '';
+  const chores = /\n### Chores\n[\s\S]*?(?=\n### |\n## )/.exec(sec)?.[0] ?? '';
+  assert.ok(chores, 'a Chores part under Recurring jobs');
+  for (const w of ['recurring-due', 'recurring-overdue', 'recurring-stuck', 'grace_days', 'recurring start', 'chore-recurring-<name>-<yyyymmdd>', '<component>-<NN>-recurring-<name>', 'recurring done <name> --nothing', '--abandoned', 'superseded', 'drained or parked']) assert.ok(chores.includes(w), `names ${w}`);
+});
