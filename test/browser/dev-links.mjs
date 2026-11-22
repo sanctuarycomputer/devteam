@@ -412,7 +412,8 @@ async function previewThreads({ DASH, name, previewPort, app }) {
 async function viaGateway({ DASH, HUB, app, G, SP, goal }) {
   const pub = `http://box.localhost:${G}`;
   const hubUrl = `${pub}/`;
-  const dashUrl = `http://${DASH}.box.localhost:${G}/`;
+  // the dashboard at its project's name (project-hosts@1): makeRepo's project is demo
+  const dashUrl = `http://demo.box.localhost:${G}/`;
   const gwEnv = { ...env, DEVTEAM_PUBLIC_URL: pub, PORT: String(G), DEVTEAM_GATEWAY_DIR: path.join(base, 'gateway'), DEVTEAM_TTYD_PORT: String(G + 2) };
   const gwProc = spawn(process.execPath, [path.resolve(here, '..', '..', 'cloud', 'gateway.mjs'), 'serve'], { cwd: base, env: gwEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   procs.push(gwProc);
@@ -442,7 +443,7 @@ async function viaGateway({ DASH, HUB, app, G, SP, goal }) {
   await browser.evalIn(hubUrl, `[...document.querySelectorAll('[role=tab]')].find((t) => t.textContent.includes('demo')).click()`);
   await until(() => browser.frameWhere(dashUrl), 'the dashboard frame inside the hub');
   stepOk('the hub shows the Terminal tab and the framed dashboard, on the gateway');
-  await browser.cdp.send('Browser.grantPermissions', { origin: `http://${DASH}.box.localhost:${G}`, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+  await browser.cdp.send('Browser.grantPermissions', { origin: new URL(dashUrl).origin, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
   const appTab = await throughCard({ hubUrl, dashUrl, name, previewUrl, socketPrefix: `ws://${name}.box.localhost:${G}/?token=`, app });
   void appTab;
 
@@ -464,6 +465,19 @@ async function viaGateway({ DASH, HUB, app, G, SP, goal }) {
   await until(() => (tab.url ?? '').startsWith(previewUrl), 'sign-in to land back on the preview');
   await until(() => browser.evalIn(previewUrl, `document.getElementById('app')?.textContent === 'hello two'`), 'the preview after sign-in');
   stepOk('signed in with the passkey again: landed back on the preview');
+
+  // C38: signed out at a project's address with a hash, a real sign-in lands on that address, hash
+  // and all (the signed-out page sends location.href, which only a script can read)
+  const inTop = async (expression) => browser.evalFrame({ session: tab, frameId: (await browser.cdp.send('Page.getFrameTree', {}, tab.sessionId)).frameTree.frame.id }, expression);
+  const deep = `${dashUrl}#goals`;
+  await browser.navigate(tab, hubUrl);
+  assert.equal(await until(() => browser.evalIn(hubUrl, `fetch('/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then((r) => r.status)`), 'sign-out again'), 200, 'sign-out again');
+  await browser.navigate(tab, deep);
+  await until(() => (tab.url ?? '').startsWith(`${pub}/auth/login`), 'the dashboard\'s name to send a signed-out owner to sign-in');
+  await browser.click(`${pub}/auth/login`, `${pub}/auth/login`, '#go');
+  const landed = await until(async () => ((tab.url ?? '').startsWith(dashUrl) ? inTop('location.href') : null), 'sign-in to land on the dashboard\'s name');
+  assert.equal(landed, deep, 'sign-in lands on the address it was asked for, hash included');
+  stepOk(`C38: signed out at ${deep}, a passkey sign-in landed on that address, hash and all`);
 
   // what no-store costs: a second load through the gateway, against one straight to the server
   // in this tab's own frame: another tab can sit at the same address
@@ -567,7 +581,7 @@ async function threads({ DASH, pane }) {
   return G;
 }
 
-// ===== the gateway's half of viewers: the lens on a preview's name, the owner's view on the public
+// ===== the gateway's half of viewers: the lens on a preview's name, the owner's view on the project's
 // name, against a stand-in instance: its hello says viewer: 1, and its pages carry the kit's kinds of
 // policy in its loopback origin, as the kit's do. kitViewers runs the owner's view against the real one. =====
 // A server of the test's own on 127.0.0.1, closed (its open connections too) with everything else.
@@ -579,7 +593,8 @@ async function serve(port, handler) {
 }
 async function gatewayViewers({ G, HUB, SP, tab, app }) {
   const pub = `http://box.localhost:${G}`;
-  const inst = `http://${SP}.box.localhost:${G}`;
+  // the stand-in instance at its project's name (its hello says standin)
+  const inst = `http://standin.box.localhost:${G}`;
   const self = `http://127.0.0.1:${SP}`;
   const T = 'e'.repeat(40);
   // an app that refuses every frame, as many do: only its lens's own load may hold it. Its console
@@ -708,19 +723,14 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   await browser.navigate(tab, `${inst}/view/preview/${plainName}`);
   await until(() => browser.evalIn(`${plainLens}?route=%2F`, `(() => { const d = document.getElementById('app').contentDocument; return d && d.getElementById('buy') && d.getElementById('buy').textContent; })()`), 'the header-less app in its owner\'s viewer');
   stepOk('an app that sends no framing headers shows in the lens in the owning instance\'s viewer');
-  // Another instance's viewer may hold the lens (its policy is the same on every preview's name), but
-  // the app's policy names only the instance that lists it: the lens shows an empty frame. Its own
-  // script runs, which is what says the refusal is the app's. A refused frame is Chrome's error
-  // page, an opaque origin, so the lens loses its document: that, not a pause, is the refusal seen.
-  const refused = async (lens, what) => {
-    await until(() => browser.evalIn(lens, `(() => { const f = document.getElementById('app'); return !!f && f.contentDocument === null; })()`), `the app's frame to be refused (${what})`, 15000);
-    assert.equal(await browser.evalIn(lens, `(() => { try { return !!frames[0].document; } catch (e) { return 'cross-origin'; } })()`), 'cross-origin', `${what}: not the app's origin`);
-  };
-  await browser.navigate(tab, `http://${SP + 1}.box.localhost:${G}/view/preview/${name}`);
-  await refused(otherLens, 'X-Frame-Options and frame-ancestors \'none\'');
-  await browser.navigate(tab, `http://${SP + 1}.box.localhost:${G}/view/preview/${plainName}`);
-  await refused(`${plainLens}?route=%2F&from=other`, 'no framing headers');
-  stepOk('another instance\'s viewer holds the lens, but the app inside it is refused, with framing headers or none: its policy names only the instance that lists the preview');
+  // On project hosts the lens's own policy names, beside the hub, only the host of the project that
+  // lists the preview (C24), so another project's viewer can't hold the lens at all, whether the app
+  // sends framing headers or none: Chrome refuses the lens's frame by its frame-ancestors.
+  await browser.navigate(tab, `http://other.box.localhost:${G}/view/preview/${name}`);
+  await until(() => browser.refusedFrame((u) => u === otherLens), 'the lens to be refused in another project\'s viewer (X-Frame-Options and frame-ancestors \'none\')', 15000);
+  await browser.navigate(tab, `http://other.box.localhost:${G}/view/preview/${plainName}`);
+  await until(() => browser.refusedFrame((u) => u === `${plainLens}?route=%2F&from=other`), 'the lens to be refused in another project\'s viewer (no framing headers)', 15000);
+  stepOk('another project\'s viewer is refused the lens, with framing headers or none: its policy names only the project that lists the preview');
 
   // --- the owner's view of a public page: what the box serves for standin/mock, bound to the stand-in ---
   const gwDir = path.join(base, 'gateway');
@@ -732,7 +742,8 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   const st = JSON.parse(fs.readFileSync(sf, 'utf8'));
   st.public = { ...(st.public ?? {}), standin: { root: '/srv/standin', port: SP, artifacts: { mock: { tree: T, title: 'Mock', at: new Date().toISOString(), files: { 'index.html': { sha256: sha, size: Buffer.byteLength(copy) } } } } } };
   fs.writeFileSync(sf, JSON.stringify(st, null, 2));
-  const page = `http://public.box.localhost:${G}/standin/mock/`;
+  // published pages are on their project's own name now, at /<slug>/
+  const page = `${inst}/mock/`;
   await browser.navigate(tab, page);
   // the gateway reads the hub's list every 10 s: the stand-in has been listed far longer than that
   const viewerFrame = await until(() => browser.frameWhere(`${inst}/view/artifact/mock?at=tree:${T}&w=`), 'the viewer in the owner\'s view, under the wrapper\'s grant');
@@ -742,18 +753,18 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   assert.match(await browser.evalIn(page, 'document.querySelector(\'header\').textContent'), /Public · standin\/mock/);
   stepOk('signed in, the public link is the owner\'s view: the viewer at the published tree, the artifact under its capability, each frame allowed by every ancestor');
   await browser.click(page, page, 'header a');
-  await until(() => (tab.url ?? '').endsWith('/standin/mock/?plain'), 'the plain link');
+  await until(() => (tab.url ?? '') === `${page}?plain`, 'the plain link');
   assert.equal(await browser.evalIn(`${page}?plain`, 'document.getElementById(\'art\').textContent + \'|\' + document.querySelectorAll(\'iframe\').length'), 'the box\'s own copy|0');
   stepOk('"Open it as the public sees it" is the box\'s own copy, plain');
 }
 
 // ===== the same chain against the real kit (PR 3): the owner's view of a public page frames the
 // project's own dashboard's viewer, which frames the artifact at the published tree, with its lens.
-// Every frame must be allowed by every ancestor: the wrapper (public name), the viewer (instance,
+// Every frame must be allowed by every ancestor: the wrapper (the project's name), the viewer (same name,
 // under the wrapper's w= grant), the artifact (instance, under its capability, at the bound tree). =====
 async function kitViewers({ G, DASH, tab, goal }) {
-  const pub = `http://public.box.localhost:${G}`;
-  const inst = `http://${DASH}.box.localhost:${G}`;
+  // the dashboard's project's name, demo, which serves its published pages too
+  const inst = `http://demo.box.localhost:${G}`;
   const rel = 'docs/devteam/project/artifacts/mock';
   // the page writes its own address (under /c/<capability>/ when framed on a box) into its title and
   // an attribute, so the lens's every answer about it has the capability to leave out
@@ -773,7 +784,7 @@ async function kitViewers({ G, DASH, tab, goal }) {
   const st = JSON.parse(fs.readFileSync(sf, 'utf8'));
   st.public = { ...(st.public ?? {}), demo: { root: fs.realpathSync(repo), port: DASH, artifacts: { mock: { tree: T, title: 'Mock', at: new Date().toISOString(), files: { 'index.html': { sha256: sha, size: Buffer.byteLength(page) } } } } } };
   fs.writeFileSync(sf, JSON.stringify(st, null, 2));
-  const wrapper = `${pub}/demo/mock/`;
+  const wrapper = `${inst}/mock/`;
   const viewer = `${inst}/view/artifact/mock?at=tree:${T}`;
   await browser.navigate(tab, wrapper);
   await browser.cdp.send('Page.bringToFront', {}, tab.sessionId).catch(() => {});
