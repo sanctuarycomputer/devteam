@@ -4111,9 +4111,9 @@ const paneShown = (t, n) => String(t ?? '').replace(/[\p{Cc}\u200e\u200f\u202a-\
 // The fleet's sessions stopped at a permission prompt or another dialog, for hello's Inbox count:
 // [{ window, line }]. Only this checkout's windows, read by the pane ids that the one list-panes
 // matched by start path (never by name: a session can be shared, a name repeated), and only those the
-// blocked-prompt finding watches: an active worker's, a planner's that isn't parked. Start path alone
-// doesn't prove a pane is the agent's, so only a window's first pane is read, where the kit starts
-// it: a split counts for nothing, and a window at most once. Read by the dialog's shape (paneAskingIn)
+// blocked-prompt finding watches: an active worker's, a planner's that isn't parked. A window may be
+// split or its panes swapped, so each of its panes that isn't a shell is read, and the window counts
+// once if any shows a dialog (start path alone doesn't prove which pane is the agent's). Read by the dialog's shape (paneAskingIn)
 // while the agent's input box and working line aren't showing, as the supervisor's terminal is: an
 // agent's reply or a tool's output on its normal screen is no prompt, nor a busy pane or a usage-limit
 // stop; a full-screen view someone opened (a transcript, a pager) can still read as one. Its own
@@ -4127,11 +4127,13 @@ function fleetPrompts(budgetMs = 4000) {
   if (sh('tmux', ['has-session', '-t', `=${session}`], { timeout: Math.max(1, Math.min(2000, left())) }) === null) return [];
   const root = `${path.join(fs.realpathSync(mainRoot), '.worktrees')}${path.sep}`;
   const listed = left() > 0 ? sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{pane_dead}\t#{pane_current_command}\t#{window_id}\t#W\t#{pane_start_path}'], { timeout: Math.max(1, Math.min(2000, left())) }) : null;
-  const rows = (listed ?? '').split('\n').filter(Boolean).map((l) => { const [id, dead, cmd, win, name, ...p] = l.split('\t'); let start = p.join('\t'); try { start = fs.realpathSync(start); } catch {} return { id, dead, cmd, win, name, start: `${start}${path.sep}` }; }).filter((r, i, all) => all.findIndex((x) => x.win === r.win) === i);
+  const rows = (listed ?? '').split('\n').filter(Boolean).map((l) => { const [id, dead, cmd, win, name, ...p] = l.split('\t'); let start = p.join('\t'); try { start = fs.realpathSync(start); } catch {} return { id, dead, cmd, win, name, start: `${start}${path.sep}` }; });
   const watched = (name) => (name.startsWith('plan-') ? lastPhaseOf(name)?.to !== 'parked' && git(['rev-parse', '--verify', '--quiet', `refs/heads/plan/${name.slice(5)}`]) !== null : tickets().has(name) && !!lastPhaseOf(name)?.to && !['done', 'parked'].includes(lastPhaseOf(name).to) && !mergeShaFor(name));
   const found = [];
+  const counted = new Set();
   for (const r of rows) {
     if (left() <= 0) break;
+    if (counted.has(r.win)) continue;
     if (!/^%\d+$/.test(r.id) || r.dead === '1' || SHELLS.has(r.cmd.replace(/^-/, '')) || r.name.startsWith('dev~') || !r.start.startsWith(root) || !watched(r.name)) continue;
     let text = '';
     try { text = execFileSync('tmux', ['-u', 'capture-pane', '-p', '-t', r.id], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.max(1, Math.min(2000, left())) }); } catch { continue; }
@@ -4140,6 +4142,7 @@ function fleetPrompts(budgetMs = 4000) {
     const ask = paneAskingIn(lines);
     if (!ask || ask.kind === 'limit') continue;
     const said = ask.kind === 'menu' ? ask.first || String(ask.question ?? '').split('\n').find((l) => l.trim()) : [...String(ask.text ?? '').split('\n')].reverse().find((l) => /\?\s*$/.test(l)) ?? String(ask.text ?? '').split('\n').filter((l) => l.trim()).pop();
+    counted.add(r.win);
     found.push({ window: paneShown(r.name, 60), line: paneShown(said, 200) });
   }
   return found;
