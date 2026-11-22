@@ -248,10 +248,10 @@ test('the rules say it: owner_only, the authority rows, the pinned link\'s descr
 // found by a folded path (case folding, normalisation, trailing dots and spaces); and the gate's
 // own refusals when it can't list the PR's added files or finds no merge base. Each check is
 // tried and its miss kept, so one run names every check that fails, not only the first.
-const checks = () => {
+const checks = (label = 'kit-773') => {
   const misses = [];
   const check = (fn) => { try { fn(); } catch (e) { misses.push(String(e.message).split('\n')[0]); } };
-  return { check, none: () => assert.deepEqual(misses, [], `kit-773 misses:\n${misses.join('\n')}`) };
+  return { check, none: () => assert.deepEqual(misses, [], `${label} misses:\n${misses.join('\n')}`) };
 };
 
 for (const k of ['strategy', 'self', 'exterior']) {
@@ -341,7 +341,7 @@ test('kit-773: the gate refuses on its own when it can\'t list the files a PR ad
     const sha = chore('gone', (w) => write(path.join(w, `${P}/designs/deep/er/x.md`), 'x\n'));
     const tree = g(['rev-parse', `${sha}:${P}/designs/deep/er`], old);
     for (const objects of [path.join(old, '.git/objects'), path.join(W.org, 'objects')]) fs.rmSync(path.join(objects, tree.slice(0, 2), tree.slice(2)), { force: true });
-    const cannot = new RegExp(`could not list the files ${sha.slice(0, 12)} adds since [0-9a-f]{12}, so a change to the owner's files can't be ruled out`);
+    const cannot = new RegExp(`could not list the files ${sha.slice(0, 12)} adds or changes since [0-9a-f]{12}, so a change to the owner's files can't be ruled out`);
     check(() => refused(merge('gone'), cannot, 'kit-773 DW3 the diff fails, merge'));
     check(() => refused(checkPr('chore-gone', sha, yes), cannot, 'kit-773 DW3 the diff fails, check-pr --approved'));
     // no merge base: an orphan chore carrying self.md
@@ -378,5 +378,127 @@ test('kit-773: ask pins the draft on the chore\'s branch when a tag has the same
     assert.equal(r.status, 0, r.err);
     const q = json(ok(old, ['questions', '--id', r.out.trim(), '--json']))[0];
     assert.equal(q.links[0].blob, g(['rev-parse', `refs/heads/chore-s:${rel}`], old), 'kit-773 DW3 a same-named tag: the pin is the branch\'s draft');
+  } finally { W.done(); }
+});
+
+// kit-776: a branch off main whose tree is set through the index, never the disk, so a twin a
+// folding disk can't hold is still committed. entries: [path, text, mode] (mode 100644 if left
+// out; 120000 makes text a symlink's target); a null text removes the path. onto: 'main' pushes the
+// commit to origin's main (the gate reads origin/main), else it is pushed as its own branch with a
+// PR file. Returns the commit.
+function indexed(W, branch, entries, { onto } = {}) {
+  const { old, g, base } = W;
+  const w = path.join(old, '.worktrees', `ix-${branch.replace(/\//g, '-')}`);
+  g(['worktree', 'add', '-q', '--no-checkout', '-b', branch, w, 'origin/main'], old);
+  g(['read-tree', 'HEAD'], w);
+  let n = 0;
+  for (const [p, text, mode = '100644'] of entries) {
+    if (text === null) { g(['update-index', '--force-remove', p], w); continue; }
+    const f = path.join(base, `ix-${branch.replace(/\//g, '-')}-${++n}`);
+    fs.writeFileSync(f, text);
+    g(['update-index', '--add', '--cacheinfo', `${mode},${g(['hash-object', '-w', f], w)},${p}`], w);
+  }
+  g(['commit', '-qm', branch], w);
+  if (onto === 'main') g(['push', '-q', 'origin', `HEAD:main`], w);
+  else {
+    g(['push', '-q', 'origin', branch], w);
+    write(path.join(old, 'docs/devteam/run/pr', `${branch}.md`), `# ${branch.replace('/', '-')}: x\n\n## One-way doors\n\nNone.\n`);
+  }
+  return g(['rev-parse', 'HEAD'], w);
+}
+
+test('kit-776: an added path one of whose folders folds to an owner file or a folder on its path is refused', () => {
+  const W = world('wa-twin-folders');
+  const { merge, checkPr, run, old } = W;
+  const { check, none } = checks('kit-776');
+  try {
+    const yes = W.other(null);
+    const mergeOf = (branch) => said(run(old, ['merge', ...(branch.startsWith('plan/') ? ['--plan', branch.slice(5)] : branch.startsWith('ticket/') ? [branch.slice(7)] : ['--chore', branch.slice(6)]), '--dry-run'], SUP));
+    const G = W.goal('Billing', 1);
+    W.feature('billing', G);
+    W.ticket('billing-01-a', 'billing');
+    for (const id of ['billing-02-b', 'billing-03-c', 'billing-04-d']) W.ticket(id, 'billing');
+    // a folder named as an owner file, in a chore: in a folder a folding disk can't tell from the file
+    for (const k of ['strategy', 'self', 'exterior']) {
+      const { rel } = FILES[k];
+      const f = rel.replace(`${k}.md`, `${k.toUpperCase()}.md/x.md`);
+      const slug = `fold-in-${k}`;
+      const sha = indexed(W, `chore-${slug}`, [[f, 'x\n']]);
+      const says = new RegExp(`adds ${re(f)}, in a folder a disk that ignores case can't tell from ${re(rel)}`);
+      check(() => refused(merge(slug), says, `kit-776 DW1 ${k.toUpperCase()}.md/x.md, merge`));
+      check(() => refused(checkPr(`chore-${slug}`, sha, yes), says, `kit-776 DW1 ${k.toUpperCase()}.md/x.md, check-pr --approved`));
+    }
+    // twins of the project folder (a symlink, a case twin, a trailing dot) and of each folder above
+    // it, in ticket and plan PRs; each line names the folder it can't be told from, and ends there
+    const folderTwins = [
+      ['ticket/billing-01-a', 'docs/devteam/PROJECT', 'elsewhere', '120000', 'which', P, 'a symlink twin of the project folder, ticket PR'],
+      ['plan/billing', 'docs/devteam/PROJECT/x.md', 'x\n', '100644', 'in a folder', P, 'a case-twin project folder, plan PR'],
+      ['ticket/billing-04-d', `${P}./notes.md`, 'x\n', '100644', 'in a folder', P, 'a trailing-dot twin of the project folder, ticket PR'],
+      ['ticket/billing-02-b', 'docs/DevTeam/x.md', 'x\n', '100644', 'in a folder', 'docs/devteam', 'a case twin of the folder above the project folder, ticket PR'],
+      ['ticket/billing-03-c', 'Docs/x.md', 'x\n', '100644', 'in a folder', 'docs', 'a case twin of the top folder, ticket PR'],
+    ];
+    for (const [branch, f, text, mode, how, at, m] of folderTwins) {
+      const sha = indexed(W, branch, [[f, text, mode]]);
+      const says = new RegExp(`adds ${re(f)}, ${how} a disk that ignores case can't tell from ${re(at)}[;:]`);
+      check(() => refused(mergeOf(branch), says, `kit-776 DW1 ${m}, merge`));
+      check(() => refused(checkPr(branch, sha, yes), says, `kit-776 DW1 ${m}, check-pr --approved`));
+    }
+    // over-refusal: a path near the files but no fold of them, and the project folder's own notes
+    for (const [slug, f] of [['near-self', `${P}/selfie/x.md`], ['near-md', `${P}/self.md.d/x.md`], ['note', `${P}/designs/n.md`]]) {
+      const sha = indexed(W, `chore-${slug}`, [[f, 'x\n']]);
+      check(() => { const r = merge(slug); assert.equal(r.status, 0, `kit-776 DW1 ${f} is no twin, merge\n${r.text}`); });
+      check(() => { const r = checkPr(`chore-${slug}`, sha); assert.doesNotMatch(r.text, /disk that ignores case/, `kit-776 DW1 ${f} is no twin, check-pr`); });
+    }
+    none();
+  } finally { W.done(); }
+});
+
+test('kit-776: a change to a case twin of an owner file already on main is refused like a change to the file', () => {
+  const W = world('wa-twin-on-main');
+  const { merge, checkPr } = W;
+  const { check, none } = checks('kit-776');
+  try {
+    const yes = W.other(null);
+    const twinOf = (k) => FILES[k].rel.replace(`${k}.md`, `${k.toUpperCase()}.md`);
+    // the twins landed before the gate looked for them
+    indexed(W, 'main-twins', [...['strategy', 'self', 'exterior'].map((k) => [twinOf(k), `# ${k}\n\nA twin on main.\n`]), [`${P.replace('project', 'PROJECT')}/old.md`, 'old\n']], { onto: 'main' });
+    // a file already on main in a folder twin is no owner file: changing it is named by no twin line
+    // (only an added path is a folder twin), so an adopter can still edit what it has
+    const osha = indexed(W, 'chore-edit-old', [[`${P.replace('project', 'PROJECT')}/old.md`, 'new\n']]);
+    check(() => { const r = checkPr('chore-edit-old', osha); assert.doesNotMatch(r.text, /disk that ignores case/, `kit-776 DW2 a file on main in a folder twin, changed, check-pr\n${r.text}`); });
+    for (const k of ['strategy', 'self', 'exterior']) {
+      const { rel } = FILES[k];
+      const t = twinOf(k);
+      // the chore also carries a draft of the file itself, which the owner answers yes to
+      const sha = indexed(W, `chore-edit-${k}`, [[t, `# ${k}\n\nWords the owner never saw.\n`], [rel, `# ${k}\n\nThe draft the owner saw.\n`]]);
+      const says = new RegExp(`changes ${re(t)}, which a disk that ignores case can't tell from ${re(rel)}`);
+      check(() => refused(merge(`edit-${k}`), says, `kit-776 DW2 ${k.toUpperCase()}.md changed, merge`));
+      // ruling a-20261122-192515661: refused under the file's own answer too
+      const own = W.answered(k, `edit-${k}`);
+      check(() => refused(merge(`edit-${k}`, own), says, `kit-776 DW2 ${k.toUpperCase()}.md changed, merge under ${k}.md's own answer`));
+      check(() => refused(checkPr(`chore-edit-${k}`, sha, own), says, `kit-776 DW2 ${k.toUpperCase()}.md changed, check-pr under ${k}.md's own answer`));
+      check(() => refused(checkPr(`chore-edit-${k}`, sha, yes), says, `kit-776 DW2 ${k.toUpperCase()}.md changed, check-pr --approved`));
+      check(() => { const r = checkPr(`chore-edit-${k}`, sha); assert.match(r.text, new RegExp(`warn: ${says.source}`), `kit-776 DW2 ${k.toUpperCase()}.md changed, check-pr warns`); });
+      // removing the twin is the fix, so it lands
+      indexed(W, `chore-drop-${k}`, [[t, null]]);
+      check(() => { const r = merge(`drop-${k}`); assert.equal(r.status, 0, `kit-776 DW2 ${k.toUpperCase()}.md removed, merge\n${r.text}`); });
+    }
+    none();
+  } finally { W.done(); }
+});
+
+test('kit-776: trailing dots and spaces are dropped from every folder of a path, not only the last part', () => {
+  const W = world('wa-fold-folders');
+  const { merge } = W;
+  const { check, none } = checks('kit-776');
+  try {
+    for (const k of ['strategy', 'self', 'exterior']) {
+      const { rel } = FILES[k];
+      for (const [slug, twin] of [[`pdot-${k}`, rel.replace(`${P}/`, `${P}./`)], [`pspace-${k}`, rel.replace(`${P}/`, `${P} /`)], [`ddot-${k}`, rel.replace('docs/', 'docs../')]]) {
+        indexed(W, `chore-${slug}`, [[twin, `# ${k}\n\nA twin.\n`]]);
+        check(() => refused(merge(slug), new RegExp(`adds ${re(twin)}, which a disk that ignores case can't tell from ${re(rel)}`), `kit-776 DW3 ${JSON.stringify(twin)}, merge`));
+      }
+    }
+    none();
   } finally { W.done(); }
 });
