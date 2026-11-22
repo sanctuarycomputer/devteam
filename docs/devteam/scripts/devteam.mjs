@@ -6971,7 +6971,10 @@ function cmdGovernance() {
 // (worldFileFails.actOf): a self-change or exterior-change answer names exactly its one chore, so
 // a plan or ticket PR carrying either file lands under no answer.
 function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
-  if (!base || !projectInRepo) return [];
+  if (!projectInRepo) return [];
+  // No merge base (an unrelated history, or main unread): what the PR changes can't be known, so
+  // the gate refuses on its own rather than lean on another check.
+  if (!base) return [`${String(sha).slice(0, 12)} has no merge base with main, so a change to the owner's files can't be ruled out: merge main into it and run it again`];
   const fails = [];
   // The paths the PR adds, for the case twins below: only an added path can be a twin, and a diff
   // reads no tree (check-pr with no lines does no tree work). One that fails is refused, never read
@@ -6979,13 +6982,29 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   const added = git(['diff', '--no-renames', '--diff-filter=A', '-z', '--name-only', base, sha]);
   if (added === null) return [`could not list the files ${String(sha).slice(0, 12)} adds since ${String(base).slice(0, 12)}, so a change to the owner's files can't be ruled out: fetch both and run it again`];
   const tree = added.split('\0').filter(Boolean);
+  // A path as a disk that folds names reads it, part by part: Unicode compatibility normalisation
+  // (an NFD spelling is the NFC one, and ſ is s), lower case, and trailing dots and spaces dropped
+  // (as Windows drops them). It folds more than any one disk does; a stray path it catches is only
+  // refused.
+  const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toLowerCase().normalize('NFKC').replace(/[. ]+$/, '')).join('/');
+  // A plain file, whatever the owner answered: a symlink's blob is the path it points at, so the
+  // text read through it changes with no change here; a submodule or a folder pins no text at all.
+  // The modes come from one read of the project folder's own listing (the three files sit in it),
+  // never a walk of the tree, so check-pr with no lines still does no tree work (landing-git). A
+  // listing that doesn't read, or isn't a folder's, is refused, never read as plain files.
+  const listing = git(['cat-file', '-p', `${sha}:${projectRel}`]);
+  const entries = listing === null ? null : listing.split('\n').filter(Boolean).map((l) => /^(\d{6}) \w+ [0-9a-f]+\t(.*)$/.exec(l));
+  if (!entries || entries.some((m) => !m)) return [...fails, `could not read ${projectRel} at ${String(sha).slice(0, 12)} as a folder, so the owner's files can't be judged plain files: merge main into it, or fetch it, and run it again`];
+  const modes = new Map(entries.map((m) => [`${projectRel}/${m[2]}`, m[1]]));
   for (const { rel, cls, what: words, template } of worldFileFails.files()) {
+    const mode = modes.get(rel);
+    if (mode && mode !== '100644' && mode !== '100755') { fails.push(`${rel} is ${{ 120000: 'a symlink', 160000: 'a submodule', '040000': 'a folder' }[mode] ?? `of mode ${mode}`} at the head, not a plain file: ${words} is read as written there, so make it one`); continue; }
     // by the file's blob at each end, never a diff (a failed diff reads as no files)
     const before = git(['rev-parse', '--verify', '--quiet', `${base}:${rel}`]);
     const after = git(['rev-parse', '--verify', '--quiet', `${sha}:${rel}`]);
-    // A second file whose path differs from this one's only by case: on a disk that ignores case
-    // (macOS, Windows) the two are one file, and a checkout may leave this one where it is read.
-    const twins = tree.filter((f) => f !== rel && f.toLowerCase() === rel.toLowerCase());
+    // A second file whose path folds to this one's (fold, above): on a disk that ignores case or
+    // spelling (macOS, Windows) the two are one file, and a checkout may leave this one where it is read.
+    const twins = tree.filter((f) => f !== rel && fold(f) === fold(rel));
     if (twins.length) { fails.push(`adds ${twins.join(', ')}, which a disk that ignores case can't tell from ${rel}: ${words} is one file, and the owner's; remove it`); continue; }
     if (before === after) continue;
     if (template && before === null && (git(['show', `${sha}:${rel}`]) ?? '').trim() === template.trim()) continue;
