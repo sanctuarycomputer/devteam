@@ -4,6 +4,7 @@
 // needs Chrome and skips without canDrive; the mustRun guard fails the file instead on CI's Node 22+.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -17,7 +18,7 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as four chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, PC1, RF4, T4-1, T4-3, PC3, T4-2), cC's (C24, T6-3, RF2)
+// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, PC3, T4-2), cC's (C24, T6-3, RF2, RL0, RL1, RL2, RL3)
 // and cD's (C12, C13, C14, C16). onA, onB, onC and onD add a check.
 const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
@@ -29,12 +30,20 @@ if (mustRun && !canDrive) test('Chrome is needed on CI\'s Node 22+', () => asser
 // C23's own sites: hosts no other check hands over, so only C23's handovers name them. S2 carries
 // the 8-day case and the near miss, S3 the 6-day, second-handover and after-forget cases: the live
 // handover of the 8-day case names S2, so it is never an earlier handover of S3's cases.
-let S2, S3, ticker;
+let S2, S3, ticker, tickerGo = false, tickerLanded = 0;
 before(async () => {
   S2 = await startSites();
   S3 = await startSites();
   // a page that repaints all the time, so the screencast has frames to send whenever it is allowed to
-  ticker = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<!doctype html><title>ticker</title><p id="n">0</p><script>let i = 0; setInterval(() => { document.getElementById("n").textContent = ++i; document.body.style.background = i % 2 ? "#fff" : "#eee"; }, 40);</script>'); });
+  // and that moves itself to /landed once the test says so (tickerGo)
+  const tick = 'let i = 0; setInterval(() => { document.getElementById("n").textContent = ++i; document.body.style.background = i % 2 ? "#fff" : "#eee"; }, 40);';
+  const hop = 'setInterval(async () => { try { if ((await (await fetch("/go", { cache: "no-store" })).text()) === "1") location.href = "/landed"; } catch {} }, 100);';
+  ticker = http.createServer((req, res) => {
+    if (req.url === '/go') { res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store' }); return res.end(tickerGo ? '1' : '0'); }
+    if (req.url === '/landed') tickerLanded++;
+    res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' });
+    res.end(`<!doctype html><title>ticker</title><p id="n">0</p><script>${tick}${req.url === '/landed' ? '' : hop}</script>`);
+  });
   await new Promise((r) => ticker.listen(0, '127.0.0.1', r));
 });
 after(async () => { await S2?.close(); await S3?.close(); await new Promise((r) => (ticker ? ticker.close(r) : r())); });
@@ -473,6 +482,7 @@ onB('C19 input after the close never reaches the page, on a socket opened during
 
 onB('PC1 while a close is pending no socket is sent a frame, and frames come back once it is handled', async () => {
   const P = cB();
+  tickerGo = false;
   const allow = { DEVTEAM_TEST_BROWSER_ALLOW: `${site.port},${ticker.address().port}` };
   await ok(P, ['stop']);
   await ok(P, ['start'], allow);
@@ -485,9 +495,13 @@ onB('PC1 while a close is pending no socket is sent a frame, and frames come bac
   assert.equal(a.status, 0, a.err || a.out);
   await v.c.wait((m) => m.t === 'held' && m.qid === null, 5000, from); // sent the moment the daemon sees the close
   const seen = v.msgs.findIndex((m, i) => i >= from && m.t === 'held' && m.qid === null);
+  const landedBefore = tickerLanded;
+  tickerGo = true; // the page moves itself, with the close pending
+  await until(() => tickerLanded > landedBefore, 10000, 'the page moved itself');
   await sleep(1000);
   assert.equal(v.c.closed, null, 'the socket closed: no close should have run');
   assert.equal(framesIn(v.msgs.slice(seen + 1)), 0, 'frames were sent while the close was pending');
+  assert.deepEqual(v.msgs.slice(seen + 1).filter((m) => m.t === 'url').map((m) => m.url), [], 'a url was sent while the close was pending');
   await refusedInGap(P, 'pc1-gap');
   assert.equal((await waitJson(P)).outcome, 'done');
   v.close();
@@ -496,6 +510,86 @@ onB('PC1 while a close is pending no socket is sent a frame, and frames come bac
   await until(() => framesIn(again.msgs) >= 3, 15000, 'frames after the close was handled');
   again.close();
   await ok(P, ['stop']);
+});
+
+onB('PC4 each input during a handover reads the log first: a close line just written, or a failed read, stops it', async () => {
+  const P = cB();
+  const fails = path.join(P.home, 'view-read-fails');
+  await ok(P, ['stop']);
+  // the watch slowed so far that only the input's own read can see the close
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_WATCH_MS: '600000', DEVTEAM_TEST_BROWSER_VIEW_READ_FAILS: fails });
+  // outside a handover no read is made (R5): a read that would fail doesn't stop the input
+  await ok(P, ['open', `${site.origin}/record`]);
+  const out = await nextViewer(P);
+  fs.writeFileSync(fails, '');
+  await typeNote(P, marker('pc4-outside'), { v: out });
+  out.close();
+  fs.rmSync(fails, { force: true });
+  await ok(P, ['open', `${site.origin}/record`]);
+  const q = await askHandover(P);
+  const v = await nextViewer(P);
+  await v.waitFor((m) => m.t === 'held' && m.qid === q, 5000);
+  await typeNote(P, marker('pc4-note'), { v });
+  // the read fails: dropped; it reads again: forwarded
+  fs.writeFileSync(fails, '');
+  const dropped = marker('pc4-failed-read');
+  v.paste(dropped);
+  await sleep(600);
+  assert.ok(!landed(dropped), 'an input whose read failed reached the page');
+  fs.rmSync(fails, { force: true });
+  const back = marker('pc4-read-again');
+  v.paste(back);
+  await until(() => landed(back), 5000, 'the input once the read works');
+  // a close line written right after an input's read, and the next input at once
+  v.send({ t: 'mouse', type: 'move', x: 10, y: 10 });
+  await sleep(100);
+  appendLine(P, { type: 'question', op: 'set', id: q, status: 'withdrawn', reason: 'a close the daemon has not read' });
+  const late = marker('pc4-late');
+  v.paste(late);
+  await sleep(800);
+  assert.ok(!landed(late), 'an input sent after the close line, before any other read, reached the page');
+  assert.equal(v.c.closed, null, 'the socket closed: nothing should have handled the close yet');
+  const w = await waitJson(P);
+  assert.deepEqual([w.qid, w.outcome], [q, 'withdrawn']);
+  v.close();
+  await ok(P, ['stop']);
+});
+
+// A close that reaches this checkout only through main: the log file with its close line committed from
+// another worktree, pushed, and fetched here. No file in this checkout changes.
+const gitIn = (P, dir, args) => new Promise((resolve, reject) => execFile('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { env: { ...P.env, HOME: P.home } }, (e, out) => (e ? reject(e) : resolve(out))));
+async function closeThroughMain(P, q) {
+  const live = path.join(P.run, 'log');
+  const file = fs.readdirSync(live).find((n) => n.endsWith('.jsonl') && fs.readFileSync(path.join(live, n), 'utf8').includes(`"id":"${q}"`));
+  assert.ok(file, `no live log file holds ${q}`);
+  const dir = path.join(P.home, `main-${q}`);
+  await gitIn(P, P.old, ['fetch', '-q', 'origin']);
+  await gitIn(P, P.old, ['worktree', 'add', '-q', '--detach', dir, 'origin/main']);
+  const at = new Date().toISOString();
+  const target = path.join(dir, 'docs', 'devteam', 'project', 'log', file);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, `${fs.readFileSync(path.join(live, file), 'utf8')}${JSON.stringify({ v: 1, id: q, type: 'question', op: 'set', at, by: 'supervisor', status: 'withdrawn', reason: 'closed on main' })}\n`);
+  await gitIn(P, dir, ['add', '-f', '--', target]);
+  await gitIn(P, dir, ['commit', '-q', '--no-verify', '-m', 'the close, on main']);
+  await gitIn(P, dir, ['push', '-q', '--no-verify', 'origin', 'HEAD:main']);
+  await gitIn(P, P.old, ['fetch', '-q', 'origin']);
+  await gitIn(P, P.old, ['worktree', 'remove', '--force', dir]);
+}
+
+onB('PC5 a close that arrives only through main: a socket opened then is refused', async () => {
+  const P = cB();
+  await ok(P, ['start']);
+  await ok(P, ['open', `${site.origin}/record`]);
+  const q = await askHandover(P);
+  await closeThroughMain(P, q);
+  const x = await viewSocket(P);
+  const m = await x.waitFor((o) => o.t === 'held' || o.t === 'bye', 10000);
+  assert.equal(m.t, 'bye', `a socket opened after a close on main became the viewer: ${JSON.stringify(m)}`);
+  assert.equal(framesIn(x.msgs), 0, 'it was sent a frame');
+  x.close();
+  const w = await waitJson(P);
+  assert.deepEqual([w.qid, w.outcome], [q, 'withdrawn']);
+  entryIs(P, q, 'withdrawn');
 });
 
 onB('RF4 the daemon told to stop during a close: the close ends, and no Chrome is left', async () => {
@@ -578,6 +672,13 @@ onB('PC3 a close that never finishes (the daemon killed inside it): no socket is
   await v.waitFor((m) => m.t === 'bye', 15000);
   v.close();
   await refusedInGap(P, 'pc3-inside-the-close');
+  // a verb that times out on the close says it may still be finishing, never how it ended
+  for (const args of [['tabs'], ['status'], ['stop']]) {
+    const t = await browser(P, args, { DEVTEAM_TEST_BROWSER_CALL_MS: '800' });
+    assert.equal(t.status, 1, `${args[0]}: ${t.out} ${t.err}`);
+    assert.match(t.err, /the daemon didn't answer in 1 s; a close may still be finishing/, `${args[0]}: ${t.err}`);
+    assert.doesNotMatch(`${t.out} ${t.err}`, /stopped|failed|succeeded|not running/, `${args[0]} said how it ended`);
+  }
   await killDaemon(P);
   const r = await snap;
   assert.notEqual(r.status, 0, `the snapshot was served: ${r.out}`);
@@ -686,6 +787,101 @@ onC('RF2 Sign out of everything during a handover, then its close: the forget ru
   assert.equal(entriesFor(P, q).length, 1);
   assert.notEqual(readState(P).chrome_pid, pid1, 'the close restarted Chrome after the forget');
   assert.match((await ok(P, ['snapshot'])).out, BLANK);
+  await ok(P, ['stop']);
+});
+
+// --- a log that can't be read (ruling a-20261122-035321348), on cC. The hook's file makes the view's and
+// the watch's reads fail; the hook's limit stands in for the real one, checked here from the code.
+const READ = (P, limit, extra = {}) => ({ DEVTEAM_TEST_BROWSER_IDLE_MS: '120000', DEVTEAM_TEST_BROWSER_VIEW_READ_FAILS: path.join(P.home, 'view-read-fails'), DEVTEAM_TEST_BROWSER_READ_FAIL_MS: String(limit), ...extra });
+const UNREADABLE = /can't read its log/;
+
+onC('RL0 the limit on failed reads is 10 s', () => {
+  const src = fs.readFileSync(new URL('../docs/devteam/scripts/devteam.mjs', import.meta.url), 'utf8');
+  assert.match(src, /const BROWSER_READ_FAIL_MS = 10000;/);
+});
+
+onC('RL1 failed reads inside the limit: input is dropped, nothing shuts down, and one good read resets the limit', async () => {
+  const P = cC();
+  const fails = path.join(P.home, 'view-read-fails');
+  await ok(P, ['start'], READ(P, 6000));
+  const st = readState(P);
+  await ok(P, ['open', `${site.origin}/record`]);
+  const q = await askHandover(P);
+  const v = await nextViewer(P);
+  await v.waitFor((m) => m.t === 'held' && m.qid === q, 5000);
+  await typeNote(P, marker('rl1-note'), { v });
+  // two spells that add up to more than the limit, a good read between them
+  for (const spell of ['first', 'second']) {
+    fs.writeFileSync(fails, '');
+    const dropped = marker(`rl1-${spell}`);
+    v.paste(dropped);
+    await sleep(3500);
+    assert.ok(!landed(dropped), `${spell} spell: input reached the page during failed reads`);
+    assert.ok(alive(st.daemon_pid), `${spell} spell: the daemon shut down inside the limit`);
+    fs.rmSync(fails, { force: true });
+    const back = marker(`rl1-${spell}-back`);
+    v.paste(back);
+    await until(() => landed(back), 5000, `${spell} spell: input after a good read`);
+  }
+  assert.ok(!v.msgs.some((m) => m.t === 'bye'), 'a bye inside the limit');
+  await withdraw(P, q);
+  assert.equal((await waitJson(P)).outcome, 'withdrawn');
+  v.close();
+  await ok(P, ['stop']);
+});
+
+onC('RL2 failed reads held to the limit: the daemon shuts down with its reason, the viewer is told why, and the session is gone', async () => {
+  const P = cC();
+  const fails = path.join(P.home, 'view-read-fails');
+  await ok(P, ['start'], READ(P, 1500));
+  const st = readState(P);
+  await ok(P, ['open', `${site.origin}/record`]);
+  await sessionHolds(P, '/record');
+  const q = await askHandover(P);
+  const v = await nextViewer(P);
+  await v.waitFor((m) => m.t === 'held' && m.qid === q, 5000);
+  fs.writeFileSync(fails, '');
+  const m = await v.waitFor((o) => o.t === 'bye', 15000);
+  assert.match(m.why, UNREADABLE, m.why);
+  assert.notEqual(m.why, BACK);
+  await until(() => !alive(st.daemon_pid), 20000, 'the daemon gone');
+  v.close();
+  fs.rmSync(fails, { force: true });
+  assert.deepEqual(profilePids(P), [], 'a Chrome left on the profile');
+  assert.ok(!fs.readdirSync(path.join(P.profile, 'Default')).includes('Sessions') || !fs.readdirSync(path.join(P.profile, 'Default', 'Sessions')).length, 'the session files are still there');
+  const off = await ok(P, ['status']);
+  assert.match(off.out, /^last error: \S+ browser: couldn't read the log/m, off.out);
+  await ok(P, ['start']);
+  await freshViewer(P);
+  await withdraw(P, q);
+  assert.equal((await waitJson(P)).outcome, 'withdrawn');
+  await ok(P, ['stop']);
+});
+
+onC('RL3 no handover known: an unreadable log changes nothing, frames keep coming and input lands', async () => {
+  const P = cC();
+  const fails = path.join(P.home, 'view-read-fails');
+  const port = ticker.address().port;
+  tickerGo = false;
+  await ok(P, ['start'], READ(P, 1500, { DEVTEAM_TEST_BROWSER_ALLOW: `${site.port},${port}` }));
+  const st = readState(P);
+  await ok(P, ['open', `http://127.0.0.1:${port}/`]);
+  const v = await nextViewer(P);
+  await until(() => framesIn(v.msgs) >= 3, 15000, 'frames before the reads fail');
+  fs.writeFileSync(fails, '');
+  await sleep(2500); // past the hook's limit
+  const n = framesIn(v.msgs);
+  await until(() => framesIn(v.msgs) >= n + 3, 15000, 'frames while the log is unreadable');
+  assert.ok(alive(st.daemon_pid), 'the daemon shut down with no handover known');
+  assert.ok(!v.msgs.some((m) => m.t === 'bye'), 'a bye with no handover known');
+  v.close();
+  // a new socket isn't refused either, and its input lands
+  await ok(P, ['open', `${site.origin}/record`]);
+  const w = await nextViewer(P);
+  assert.ok(w.msgs.some((m) => m.t === 'held' && m.qid === null));
+  await typeNote(P, marker('rl3-note'), { v: w });
+  w.close();
+  fs.rmSync(fails, { force: true });
   await ok(P, ['stop']);
 });
 

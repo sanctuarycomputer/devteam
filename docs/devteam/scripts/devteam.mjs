@@ -28939,7 +28939,8 @@ function browserRecordCloses(ctx, closes, reopened) {
   ctx.foldAt = 0; // the kept fold still counts these as pending: the view's next input folds again
 }
 // The daemon's answer to one verb: { code, out }. Rejects when nothing answers in ms.
-function browserCall(verb, args = {}, { state = browserState(), ms = 120000 } = {}) {
+const browserCallMs = () => Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CALL_MS')) || 150000; // the hook: tests, a short limit
+function browserCall(verb, args = {}, { state = browserState(), ms = browserCallMs() } = {}) {
   return new Promise((resolve, reject) => {
     if (!state) return reject(new Error('the browser is not running'));
     const body = JSON.stringify({ verb, args });
@@ -28949,7 +28950,7 @@ function browserCall(verb, args = {}, { state = browserState(), ms = 120000 } = 
       res.on('data', (c) => { b += c; });
       res.on('end', () => { try { const r = JSON.parse(b); if (res.statusCode === 200 && Number.isInteger(r?.code) && typeof r.out === 'string') return resolve(r); } catch {} reject(new Error(`the daemon answered ${res.statusCode}`)); });
     });
-    req.on('timeout', () => req.destroy(new Error(`the daemon didn't answer in ${Math.round(ms / 1000)} s`)));
+    req.on('timeout', () => req.destroy(Object.assign(new Error(`the daemon didn't answer in ${Math.round(ms / 1000)} s; a close may still be finishing`), { timedOut: true })));
     req.on('error', reject);
     req.end(body);
   });
@@ -29875,6 +29876,7 @@ async function browserReopen(ctx, urls) {
 // can't be worked out counts as pending) and the fold's time (the view's input check reads them), and
 // the open viewer told when the hold changed.
 function browserKeepHeld(ctx, hs) {
+  ctx.readFailedAt = 0;
   ctx.held = browserHeld(hs);
   ctx.folded = hs;
   try { ctx.pending = browserUnhandled(ctx, hs).length > 0; } catch { ctx.pending = true; }
@@ -29891,20 +29893,51 @@ function browserViewHeld(ctx, v) {
   if (held !== v.heldSent) { v.heldSent = held; try { v.ws.send({ t: 'held', qid: held }); } catch {} } // never throws into the watch's timer
   if (held && (!v.handover || ctx.folded.some((h) => h.qid === v.handover && h.status === 'open'))) v.handover = held;
 }
+// A fold read for the view. The hook (tests): while its file exists, the read fails.
+function browserViewRead(ctx) {
+  try {
+    const fails = browserTestEnv('DEVTEAM_TEST_BROWSER_VIEW_READ_FAILS');
+    if (fails && fs.existsSync(fails)) throw new Error('the log could not be read');
+    browserKeepHeld(ctx, browserHandovers());
+  } catch (e) { browserReadFailed(ctx); throw e; }
+}
+// A failed read while a handover is held or a close is pending. Held for BROWSER_READ_FAIL_MS, the
+// daemon can no longer tell whether the owner's session should end, so it ends it: the viewer told
+// why, then browserShutdown (Chrome stopped, session files gone, the reason in last-error). With no
+// handover known a failed read changes nothing.
+const BROWSER_READ_FAIL_MS = 10000;
+const BROWSER_UNREADABLE = "The browser can't read its log, so it shut down and ended this session.";
+function browserReadFailed(ctx) {
+  if (ctx.stopping || (!ctx.held && !ctx.pending)) { ctx.readFailedAt = 0; return; }
+  const now = Date.now();
+  ctx.readFailedAt ||= now;
+  if (now - ctx.readFailedAt < (Number(browserTestEnv('DEVTEAM_TEST_BROWSER_READ_FAIL_MS')) || BROWSER_READ_FAIL_MS)) return;
+  const v = ctx.viewer;
+  if (v && !v.ws.closed) { try { v.ws.send({ t: 'bye', why: BROWSER_UNREADABLE }); v.ws.close(1000); } catch {} }
+  browserShutdown(ctx, 'error', "browser: couldn't read the log during a handover, so the session was ended");
+}
 // Whether a close is pending for the view, by a fold no more than 500 ms old (read here when the
 // watch's is older, so this doesn't rest on the watch; fresh: read now). While it is, the page still
 // holds the owner's session: no socket is sent a frame, none has its input forwarded, and a new one is
-// refused. A fold that can't be read counts as pending.
+// refused. A fold that can't be read counts as pending only while a handover is known; with none the
+// view carries on as in kit-66. A connect's read (fresh) also looks at main again, so a close that came
+// only through main is seen.
 function browserViewPending(ctx, fresh = false) {
   if (fresh || Date.now() - ctx.foldAt > 500) {
-    try { browserKeepHeld(ctx, browserHandovers()); } catch { return true; }
+    if (fresh) browserMainSeen = { ...browserMainSeen, at: 0 };
+    try { browserViewRead(ctx); } catch { return !!ctx.held || ctx.pending; }
   }
   return ctx.pending;
 }
 // Whether this socket's input is cut off: while a close is pending, and on a socket whose own handover
 // has closed. With no close pending, a socket never sent a handover is kit-66's.
 function browserViewClosed(ctx, v) {
-  if (browserViewPending(ctx)) return true;
+  if (!v.handover && !ctx.held && !ctx.pending) { // no handover known: kit-66's, whatever the log does
+    try { if (Date.now() - ctx.foldAt > 500) browserViewRead(ctx); } catch { return false; }
+    return ctx.pending;
+  }
+  try { browserViewRead(ctx); } catch { return true; }
+  if (ctx.pending) return true;
   return !!v.handover && !ctx.folded.some((h) => h.qid === v.handover && h.status === 'open');
 }
 // The gate, run only from a job already on the verbs' queue (a verb's run, or the watch's job): it
@@ -29934,14 +29967,12 @@ function browserStartGate(ctx) {
 function browserWatch(ctx) {
   const t = setInterval(() => {
     if (ctx.stopping) return;
-    let hs;
-    try { hs = browserHandovers(); } catch { return; }
-    browserKeepHeld(ctx, hs);
+    try { browserViewRead(ctx); } catch { return; }
     if (browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_HANDLE') === '0' || ctx.gateQueued) return;
     if (!ctx.pending) return;
     ctx.gateQueued = true;
     ctx.serial(() => browserGate(ctx)).finally(() => { ctx.gateQueued = false; });
-  }, 500);
+  }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 500); // the hook: tests, a slowed watch
   t.unref();
   return t;
 }
@@ -30091,7 +30122,7 @@ function browserControl(ctx, secret) {
   // rather than stop the daemon. The fold is read as it fires; one that fails keeps the last hold.
   const busy = () => {
     if (ctx.viewer) return true;
-    try { browserKeepHeld(ctx, browserHandovers()); } catch {}
+    try { browserViewRead(ctx); } catch {}
     return ctx.pending || !!ctx.held;
   };
   const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (!ctx.stopping && busy() ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
@@ -30275,7 +30306,7 @@ function browserViewTick(ctx, v) {
     const tab = ctx.active?.sessionId ? ctx.active : null;
     if (tab !== v.tab) { browserCast(ctx, v.tab, false); v.tab = tab; browserCast(ctx, tab, true); }
     const url = browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening);
-    if (url !== v.url) { v.url = url; v.ws.send({ t: 'url', url }); }
+    if (url !== v.url && !browserViewPending(ctx)) { v.url = url; v.ws.send({ t: 'url', url }); }
   } catch {}
 }
 function browserViewClose(ctx, v) {
@@ -30508,7 +30539,13 @@ async function browserStop({ say = true, rec } = {}) {
   let ok = true;
   const s = browserState();
   if (s) {
-    try { await browserCall('stop', {}, { state: s, ms: 120000 }); } catch {}
+    let late = null;
+    try { await browserCall('stop', {}, { state: s }); } catch (e) { if (e.timedOut) late = e; }
+    if (late && browserAlive(s.daemon_pid)) { // still working: its Chrome and session are left to it
+      process.stderr.write(`devteam: browser stop: ${late.message}\n`);
+      process.exitCode = 1;
+      return false;
+    }
     await browserGone(s.daemon_pid, 10000);
   }
   const profile = path.join(browserHome(), browserKey());
@@ -30527,7 +30564,7 @@ async function browserStop({ say = true, rec } = {}) {
 async function browserStatus() {
   const s = browserState();
   let r = null;
-  if (s) { try { r = await browserCall('status', { json: !!flags.json }, { state: s }); } catch {} }
+  if (s) { try { r = await browserCall('status', { json: !!flags.json }, { state: s }); } catch (e) { if (e.timedOut) die(`browser status: ${e.message}`); } }
   if (r) { process.exitCode = r.code; return out(r.out); }
   const off = { browser: 1, instance: browserKey(), running: false, held: browserHeld(browserHandovers()) };
   const err = browserReadLastError();
@@ -30581,7 +30618,7 @@ async function browserHandover() {
   const s = await browserEnsure();
   // the site: the active tab's host (with its port), from the status verb; none on about:blank
   let st = null;
-  try { const r = await browserCall('status', { json: true }, { state: s }); if (r.code === 0) st = JSON.parse(r.out); } catch {}
+  try { const r = await browserCall('status', { json: true }, { state: s }); if (r.code === 0) st = JSON.parse(r.out); } catch (e) { if (e.timedOut) die(`browser handover: ${e.message}`); }
   let site = null;
   try { const u = new URL(st?.url ?? ''); if (u.protocol === 'http:' || u.protocol === 'https:') site = u.host; } catch {}
   if (site) {
