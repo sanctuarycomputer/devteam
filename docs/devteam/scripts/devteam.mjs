@@ -6973,14 +6973,19 @@ function cmdGovernance() {
 function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   if (!base || !projectInRepo) return [];
   const fails = [];
-  const tree = (git(['ls-tree', '-r', '-z', '--name-only', sha]) ?? '').split('\0');
+  // The paths the PR adds, for the case twins below: only an added path can be a twin, and a diff
+  // reads no tree (check-pr with no lines does no tree work). One that fails is refused, never read
+  // as no files.
+  const added = git(['diff', '--no-renames', '--diff-filter=A', '-z', '--name-only', base, sha]);
+  if (added === null) return [`could not list the files ${String(sha).slice(0, 12)} adds since ${String(base).slice(0, 12)}, so a change to the owner's files can't be ruled out: fetch both and run it again`];
+  const tree = added.split('\0').filter(Boolean);
   for (const { rel, cls, what: words, template } of worldFileFails.files()) {
     // by the file's blob at each end, never a diff (a failed diff reads as no files)
     const before = git(['rev-parse', '--verify', '--quiet', `${base}:${rel}`]);
     const after = git(['rev-parse', '--verify', '--quiet', `${sha}:${rel}`]);
     // A second file whose path differs from this one's only by case: on a disk that ignores case
     // (macOS, Windows) the two are one file, and a checkout may leave this one where it is read.
-    const twins = tree.filter((f) => f !== rel && f.toLowerCase() === rel.toLowerCase() && git(['rev-parse', '--verify', '--quiet', `${base}:${f}`]) === null);
+    const twins = tree.filter((f) => f !== rel && f.toLowerCase() === rel.toLowerCase());
     if (twins.length) { fails.push(`adds ${twins.join(', ')}, which a disk that ignores case can't tell from ${rel}: ${words} is one file, and the owner's; remove it`); continue; }
     if (before === after) continue;
     if (template && before === null && (git(['show', `${sha}:${rel}`]) ?? '').trim() === template.trim()) continue;
