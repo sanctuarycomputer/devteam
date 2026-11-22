@@ -266,3 +266,74 @@ test('a worker session denies pushes to its own repo\'s main; a merge with no me
     assert.equal(fs1.length, 2, 'nothing for home, where nothing was merged');
   } finally { F.done(); }
 });
+
+test('merged-without-merge: a merge whose head a merge act names raises nothing, a forge merge does, and an ack of a merge commit does not lapse', () => {
+  const F = multiFixture('merge-act-heads');
+  const { old, g, okIn, ticket } = F;
+  const logDir = path.join(old, 'docs/devteam/run/log');
+  const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
+  // a line as the kit would have written it agoMs ago: the supervisor's, or a worker's (its own file)
+  const hand = (o, agoMs, by = 'supervisor') => {
+    const d = new Date(Date.now() - agoMs);
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, by === 'supervisor' ? `supervisor-${d.toISOString().slice(0, 7)}.jsonl` : `${by}.jsonl`), line({ op: 'new', ...o, id: `${o.type[0]}-${stamp(d)}-${by}`, at: d.toISOString(), by }));
+  };
+  // a --no-ff merge of a one-commit branch onto main, pushed: what merge, the forge's button or a
+  // hand merge leaves on main. Returns [the merge commit, the branch head it merged].
+  const mergeOn = (cwd, main, branch, file) => {
+    g(['checkout', '-q', '-b', branch], cwd);
+    write(path.join(cwd, file), `${branch}\n`);
+    g(['add', '-A'], cwd); g(['commit', '-qm', branch], cwd);
+    const head = g(['rev-parse', 'HEAD'], cwd);
+    g(['checkout', '-q', main], cwd);
+    g(['merge', '-q', '--no-ff', '-m', `Merge ${branch}`, branch], cwd);
+    g(['push', '-q', 'origin', main], cwd);
+    return [g(['rev-parse', 'HEAD'], cwd), head];
+  };
+  const H = 3600000;
+  try {
+    // home: a records-in-home merge (its own act), a records merge named only in its code's act
+    // ("records at <sha> in home"), and a plan merged by merge --plan
+    const [, rec1] = mergeOn(old, 'main', 'ticket/console-05-r', 'docs/devteam/project/tickets/console-05-r/spec.md');
+    hand({ type: 'act', class: 'merge-word', what: `merged home's ticket/console-05-r at ${rec1}: the records of console-05-r, ahead of its code in console`, refs: [], reversible: false }, 1000);
+    const [, rec2] = mergeOn(old, 'main', 'ticket/console-06-s', 'docs/devteam/project/tickets/console-06-s/spec.md');
+    hand({ type: 'act', class: 'merge-word', what: `merged ticket/console-06-s at ${'c'.repeat(40)}; records at ${rec2} in home`, refs: [], reversible: false, repo: 'console' }, 900);
+    const [, planHead] = mergeOn(old, 'main', 'plan/feat-x', 'docs/devteam/project/designs/feat-x.md');
+    hand({ type: 'act', class: 'approve-feature-plan', what: `merged plan/feat-x at ${planHead}`, refs: ['feat-x'], reversible: false }, 800);
+    // companion: two merges from the forge's button, no act
+    const [button] = mergeOn(F.companion, 'main', 'side', 'app/x.js');
+    const [button2] = mergeOn(F.companion, 'main', 'side2', 'app/y.js');
+    // console: a ticket pushed straight to trunk, no act (a ticket subject, not a merge commit)
+    ticket('console-01-a');
+    const w = path.join(F.base, 'console-push');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    write(path.join(w, 'src/main.js'), 'pushed\n');
+    g(['commit', '-qam', 'console-01-a: work'], w);
+    g(['push', '-q', 'origin', 'HEAD:trunk'], w);
+    const mwm = () => { const m = json(okIn(old, ['metrics', '--json'])); return { raised: m.findings.filter((x) => x.kind === 'merged-without-merge'), acked: m.acknowledged.filter((x) => x.kind === 'merged-without-merge') }; };
+    let { raised } = mwm();
+    const subj = (x) => x.subject;
+    assert.ok(!raised.some((x) => x.detail.includes(rec1.slice(0, 12))), `A: a records-in-home merge its act names raises nothing: ${JSON.stringify(raised.map(subj))}`);
+    assert.ok(!raised.some((x) => x.detail.includes(rec2.slice(0, 12))), `B: a records merge named as "records at" in its code's act raises nothing: ${JSON.stringify(raised.map(subj))}`);
+    assert.ok(!raised.some((x) => x.detail.includes(planHead.slice(0, 12))), `C: a plan merged by merge --plan raises nothing: ${JSON.stringify(raised.map(subj))}`);
+    const btn = `companion:${button.slice(0, 12)}`;
+    const btn2 = `companion:${button2.slice(0, 12)}`;
+    assert.deepEqual(raised.map(subj).sort(), [btn, btn2, 'console-01-a'].sort(), 'D: the forge-button merges and the pushed ticket still raise, and nothing else');
+    // both set aside two days ago, beyond finding_ack_hours (24); a second apart, so their ids differ
+    for (const [i, s] of [btn, 'console-01-a'].entries()) hand({ type: 'observation', source: 'ack', kind: 'finding-ack', subject: `merged-without-merge ${s}`, detail: 'looked at', source_ref: `metrics:merged-without-merge:${s}` }, 48 * H + i * 1000);
+    // a worker's own finding-ack of the second (as observe writes it), as old: it keeps the window
+    hand({ type: 'observation', source: 'ack', kind: 'finding-ack', subject: `merged-without-merge ${btn2}`, detail: 'nothing to see', source_ref: `metrics:merged-without-merge:${btn2}` }, 48 * H + 2000, 'console-01-a');
+    let acked;
+    ({ raised, acked } = mwm());
+    assert.ok(!raised.some((x) => x.subject === btn), `E: an acked merge commit does not come back when finding_ack_hours pass: ${JSON.stringify(raised.map(subj))}`);
+    const a = acked.find((x) => x.subject === btn);
+    assert.ok(a, 'E: it stays among the acknowledged');
+    assert.equal(a.ack.until, null, 'E: with no end');
+    assert.ok(raised.some((x) => x.subject === 'console-01-a'), `F: a ticket subject's ack still lapses: ${JSON.stringify(raised.map(subj))}`);
+    assert.ok(raised.some((x) => x.subject === btn2), `J: a worker's finding-ack of a merge commit lapses, so the merge raises again: ${JSON.stringify(raised.map(subj))}`);
+    // ack says how long: for good for a merge commit, the window for anything else
+    const SUP = { DEVTEAM_ROLE: 'supervisor' };
+    assert.match(okIn(old, ['ack', 'merged-without-merge', btn2, '--reason', 'checked'], SUP), /set aside for good: a merge commit can't change/, 'K: ack says a merge commit is set aside for good');
+    assert.match(okIn(old, ['ack', 'merged-without-merge', 'console-01-a', '--reason', 'checked'], SUP), /set aside for 24h/, 'K: and the window for a ticket');
+  } finally { F.done(); }
+});
