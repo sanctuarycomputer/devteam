@@ -1530,9 +1530,9 @@
             "x-tip": "The answer that closes them."
           },
           "approves": {
-            "description": "The acts this question approves, named when asked (ask --approves): ticket ids, chore-<slug> or plan-<feature>. The answer approves each once and nothing else.",
+            "description": "The acts this question approves, named when asked (ask --approves): ticket ids, chore-<slug> or plan-<feature>. The answer approves each once and nothing else. Two or more, except on a self-change or exterior-change question, which names exactly one: the chore whose branch holds the draft its link pins (ask checks both).",
             "type": "array",
-            "minItems": 2,
+            "minItems": 1,
             "maxItems": 10,
             "items": {
               "type": "string"
