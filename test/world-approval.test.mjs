@@ -479,6 +479,9 @@ test('kit-776: a change to a case twin of an owner file already on main is refus
       check(() => refused(checkPr(`chore-edit-${k}`, sha, own), says, `kit-776 DW2 ${k.toUpperCase()}.md changed, check-pr under ${k}.md's own answer`));
       check(() => refused(checkPr(`chore-edit-${k}`, sha, yes), says, `kit-776 DW2 ${k.toUpperCase()}.md changed, check-pr --approved`));
       check(() => { const r = checkPr(`chore-edit-${k}`, sha); assert.match(r.text, new RegExp(`warn: ${says.source}`), `kit-776 DW2 ${k.toUpperCase()}.md changed, check-pr warns`); });
+      // a twin made a symlink is a change of kind, and named like any change (task-1 F1)
+      indexed(W, `chore-link-${k}`, [[t, 'elsewhere', '120000']]);
+      check(() => refused(merge(`link-${k}`), says, `kit-776 DW2 ${k.toUpperCase()}.md made a symlink, merge`));
       // removing the twin is the fix, so it lands
       indexed(W, `chore-drop-${k}`, [[t, null]]);
       check(() => { const r = merge(`drop-${k}`); assert.equal(r.status, 0, `kit-776 DW2 ${k.toUpperCase()}.md removed, merge\n${r.text}`); });
