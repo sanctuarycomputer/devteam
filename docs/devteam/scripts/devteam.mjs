@@ -31011,7 +31011,10 @@ function responderDiffers(wt, sha) {
   try {
     if (responderGit(['read-tree', sha], wt, env).status !== 0) return null;
     // with --ignore-submodules, neither the refresh nor the compare looks inside a nested repo at a
-    // gitlink, so its own config (a clean filter) never runs here (final-3b F2, final-4 F7)
+    // gitlink, so its own config (a clean filter) never runs here (final-3b F2, final-4 F7). The
+    // refresh's flag alone has no case that goes red: a refresh reads a nested repo's HEAD and runs
+    // no filter there, with the flag or without it (git 2.39, probed). It stays so the refresh never
+    // looks inside one; R12's planted-gitlink cases go red with all three flags removed.
     responderGit(['update-index', '--ignore-submodules', '-q', '--really-refresh'], wt, env);
     const d = responderGit(['diff-files', '--ignore-submodules=all', '--name-only', '-z'], wt, env);
     return d.status === 0 ? d.stdout.split('\0').filter(Boolean) : null;

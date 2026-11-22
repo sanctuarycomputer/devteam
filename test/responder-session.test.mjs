@@ -1205,14 +1205,12 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
   // first `git <at>` in the worktree, it plants a nested repo at main's gitlink. So each later check
   // is reached with the walk already behind it (final-4 F3, F7).
   const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
-  const plantLater = (at, mark, { moved = false } = {}) => {
+  const plantLater = (at, mark) => {
     const bin = path.join(F.base, `r4-shim-${at}`);
     fs.rmSync(bin, { recursive: true, force: true });
     fs.mkdirSync(bin, { recursive: true });
     const prep = path.join(bin, 'prep');
     const away = nestedAt(prep, mark);
-    // a HEAD moved off the gitlink's commit: a refresh looks inside only then
-    if (moved) F.g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'moved'], prep);
     const done = path.join(bin, 'done');
     const into = path.join(F.wt, 'vendor', 'lib');
     write(path.join(bin, 'git'), `#!/bin/sh
@@ -1231,13 +1229,13 @@ exec '${realGit}' "$@"
     fs.chmodSync(path.join(bin, 'git'), 0o755);
     return { env: { ...SUP, PATH: `${bin}:${process.env.PATH}` }, fired: () => fs.existsSync(done), away };
   };
-  for (const [at, moved] of [['status', false], ['checkout', false], ['read-tree', false], ['update-index', true]]) {
-    await t.test(`final-4 F3, F7: a nested repo${moved ? ' with a moved HEAD' : ''} planted at main's gitlink just before \`git ${at}\` refuses, and its filter never runs`, () => {
+  for (const at of ['status', 'checkout', 'read-tree']) {
+    await t.test(`final-4 F3, F7: a nested repo planted at main's gitlink just before \`git ${at}\` refuses, and its filter never runs`, () => {
       gitlinkOnMain(true);
       try {
         fresh();
         const mark = path.join(F.base, `r4-${at}-filter-ran.txt`);
-        const shim = plantLater(at, mark, { moved });
+        const shim = plantLater(at, mark);
         const r = F.run(F.old, ['responder'], shim.env);
         fs.rmSync(path.join(F.wt, 'vendor', 'lib', '.git'), { recursive: true, force: true });
         fs.rmSync(shim.away, { recursive: true, force: true });
