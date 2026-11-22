@@ -1496,6 +1496,8 @@ const CLASS_WORDS = Object.freeze({
   'gate-change': 'Changing a check',
   'goal-change': 'Changing a goal',
   'strategy-change': 'Changing the strategy',
+  'self-change': 'Changing what the project is',
+  'exterior-change': 'Changing what the project relates to',
   'goal-met': 'Saying a goal is met',
   'registry-attest': 'Confirming the registry is complete',
   'new-dependency': 'Adding a new dependency',
@@ -6724,7 +6726,7 @@ function cmdReviewWorktree() {
   }
 }
 function cmdCheckPr() {
-  const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
+  const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file; --approved <qid> for a PR changing the strategy, self.md or exterior.md)');
   // --repo: a PR in another repo, checked in its checkout (--path names another one, such as a CI run's)
   const R = repo(flagStr('repo') ?? 'home');
   const sha = R.resolveCommit(flagStr('sha') ?? 'HEAD') ?? die(`cannot resolve the head${R.name === 'home' ? '' : ` in ${R.name}`}`);
@@ -6742,6 +6744,15 @@ function cmdCheckPr() {
   const fails = checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R, inHome, ...(records !== undefined ? { records } : {}) });
   // none on origin: say so (checkTicket leaves the why to its caller when told none is pinned)
   if (records === null) fails.push(`no records for ${tid} in home: home's ticket/${tid} is not on origin; push it`);
+  // The owner's files (worldFileFails): handed the owner's answer, check-pr refuses what merge
+  // refuses; without one, each line is a warning and the exit is unchanged, so a forge's check that
+  // runs check-pr bare stays as it was, and merge stays the wall.
+  if (R.name === 'home' && mainRef()) {
+    const approved = flagStr('approved') ?? null;
+    const lines = worldFileFails(git(['merge-base', mainRef(), sha]), sha, approved, worldFileFails.actOf(headRef), 'check-pr --approved');
+    if (approved) fails.push(...lines);
+    else for (const l of lines) out(`warn: ${l}`);
+  }
   report(fails, `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
 }
 // An owner-answered question, for commands that need the owner's yes.
@@ -6950,30 +6961,64 @@ function cmdGovernance() {
   if (flags.json) return json(view);
   for (const r of view.files) out(`${r.group.padEnd(10)} ${r.path}  ${r.state ?? ''}`);
 }
-// A PR that changes the strategy (any PR: a chore, a plan, a ticket) lands only under the owner's
-// answered strategy-change question. The one change that needs none is init's untouched template
-// arriving where main has no strategy file: once a file is there, emptying it, resetting it to the
-// template or deleting it is a change like any other.
-function strategyFails(base, sha, approved) {
+// The owner's three files: a PR that changes one (any PR: a chore, a plan, a ticket) lands only
+// under the owner's answered question of that file's class (strategy-change, self-change,
+// exterior-change), pinned to the exact text. The one change that needs none is init's untouched
+// strategy template arriving where main has no strategy file: once a file is there, emptying it,
+// resetting it or deleting it is a change like any other, and a deletion has no draft to pin, so
+// it is never approved. Each file is judged alone, so a PR changing two of them under one answer
+// is refused for the file that answer isn't of. act is what a question names for this PR
+// (worldFileFails.actOf): a self-change or exterior-change answer names exactly its one chore, so
+// a plan or ticket PR carrying either file lands under no answer.
+function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   if (!base || !projectInRepo) return [];
-  // by the file's blob at each end, never a diff (a failed diff reads as no files)
-  const before = git(['rev-parse', '--verify', '--quiet', `${base}:${strategyRel}`]);
-  const after = git(['rev-parse', '--verify', '--quiet', `${sha}:${strategyRel}`]);
-  // A second file whose path differs from the strategy's only by case: on a disk that ignores case
-  // (macOS, Windows) the two are one file, and a checkout may leave this one where the strategy is read.
-  const twins = (git(['ls-tree', '-r', '-z', '--name-only', sha]) ?? '').split('\0').filter((f) => f !== strategyRel && f.toLowerCase() === strategyRel.toLowerCase() && git(['rev-parse', '--verify', '--quiet', `${base}:${f}`]) === null);
-  if (twins.length) return [`adds ${twins.join(', ')}, which a disk that ignores case can't tell from ${strategyRel}: the strategy is one file, and the owner's; remove it`];
-  if (before === after) return [];
-  if (before === null && (git(['show', `${sha}:${strategyRel}`]) ?? '').trim() === STRATEGY_MD.trim()) return [];
-  if (!approved) return [`changes ${strategyRel}: the strategy is the owner's, so the owner's answer is needed: ask --class strategy-change --reasons owner-only --recommendation "…" with a link to the draft, then --approved <qid>`];
-  const q = ownerAnswer(approved, 'merge --approved');
-  if (q.class !== 'strategy-change') return [`${approved} is a ${q.class ?? 'classless'} question; changing ${strategyRel} needs an answered strategy-change question`];
-  // The answer approves the text the question pinned when asked, and no other: a branch amended
-  // since lands words the owner never saw. The pin must also be what its link shows.
-  const pin = (q.links ?? []).find((l) => isObj(l) && l.path === strategyRel && l.blob);
-  if (!pin || git(['rev-parse', '--verify', '--quiet', `${pin.ref}:${strategyRel}`]) !== pin.blob) return [`${approved} pins no draft of ${strategyRel} that this repo can show: ask again with a link to the draft on its branch`];
-  return after === pin.blob ? [] : [`${strategyRel} at the head is not the text ${approved} asked the owner about (${after ? after.slice(0, 12) : 'no file'}, not ${pin.blob.slice(0, 12)}); ask again about the text as it is now`];
+  const fails = [];
+  // The paths the PR adds, for the case twins below: only an added path can be a twin, and a diff
+  // reads no tree (check-pr with no lines does no tree work). One that fails is refused, never read
+  // as no files.
+  const added = git(['diff', '--no-renames', '--diff-filter=A', '-z', '--name-only', base, sha]);
+  if (added === null) return [`could not list the files ${String(sha).slice(0, 12)} adds since ${String(base).slice(0, 12)}, so a change to the owner's files can't be ruled out: fetch both and run it again`];
+  const tree = added.split('\0').filter(Boolean);
+  for (const { rel, cls, what: words, template } of worldFileFails.files()) {
+    // by the file's blob at each end, never a diff (a failed diff reads as no files)
+    const before = git(['rev-parse', '--verify', '--quiet', `${base}:${rel}`]);
+    const after = git(['rev-parse', '--verify', '--quiet', `${sha}:${rel}`]);
+    // A second file whose path differs from this one's only by case: on a disk that ignores case
+    // (macOS, Windows) the two are one file, and a checkout may leave this one where it is read.
+    const twins = tree.filter((f) => f !== rel && f.toLowerCase() === rel.toLowerCase());
+    if (twins.length) { fails.push(`adds ${twins.join(', ')}, which a disk that ignores case can't tell from ${rel}: ${words} is one file, and the owner's; remove it`); continue; }
+    if (before === after) continue;
+    if (template && before === null && (git(['show', `${sha}:${rel}`]) ?? '').trim() === template.trim()) continue;
+    if (!approved) { fails.push(`changes ${rel}: ${words} is the owner's, so the owner's answer is needed: ask --class ${cls} --reasons owner-only --recommendation "…" with a link to the draft, then --approved <qid>`); continue; }
+    const q = ownerAnswer(approved, what);
+    if (q.class !== cls) { fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${rel} needs an answered ${cls} question`); continue; }
+    // the two newer classes name their one chore (ask requires it): no other PR lands their file
+    if (cls !== 'strategy-change') {
+      const acts = Array.isArray(q.approves) ? q.approves : [];
+      if (acts.length !== 1 || acts[0] !== act || !act.startsWith('chore-')) { fails.push(`${approved} approves ${acts.length ? acts.join(', ') : 'nothing'}, not ${act}: a change to ${rel} lands only in the chore its question names`); continue; }
+    }
+    // The answer approves the text the question pinned when asked, and no other: a branch amended
+    // since lands words the owner never saw. The pin must also be what its link shows.
+    const pin = (q.links ?? []).find((l) => isObj(l) && l.path === rel && l.blob);
+    if (!pin || git(['rev-parse', '--verify', '--quiet', `${pin.ref}:${rel}`]) !== pin.blob) { fails.push(`${approved} pins no draft of ${rel} that this repo can show: ask again with a link to the draft on its branch`); continue; }
+    if (after !== pin.blob) fails.push(`${rel} at the head is not the text ${approved} asked the owner about (${after ? after.slice(0, 12) : 'no file'}, not ${pin.blob.slice(0, 12)}); ask again about the text as it is now`);
+  }
+  return fails;
 }
+// the three files, in the order a PR's lines name them; title: the link's, as ask shows it; template: init's untouched text, which
+// needs no answer where main has no file (the strategy's only). Words keep the strategy's own.
+worldFileFails.files = () => [
+  { rel: strategyRel, cls: 'strategy-change', what: 'the strategy', title: 'The strategy', template: STRATEGY_MD },
+  { rel: `${projectRel}/self.md`, cls: 'self-change', what: 'the Self', title: 'The Self', template: null },
+  { rel: `${projectRel}/exterior.md`, cls: 'exterior-change', what: 'the exterior', title: 'The exterior', template: null },
+];
+// what a question names for the PR on this branch: chore-<slug> for a chore, plan-<feature> for
+// a plan, the id for a ticket, and any other branch as it is (so it matches a chore act only on
+// that chore's own branch). A ticket whose id reads chore-… keeps its ticket/ prefix: it is no chore.
+worldFileFails.actOf = (ref) => {
+  const b = String(ref).replace(/^refs\/heads\//, '');
+  return b.startsWith('plan/') ? `plan-${b.slice(5)}` : b.startsWith('ticket/') && !b.startsWith('ticket/chore-') ? b.slice(7) : b;
+};
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -7365,7 +7410,7 @@ function cmdMerge() {
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls) && !(c.key === 'gates' && gateAdds)) ?? null;
     ownerChanged = changed;
     fails.push(...registryActFails(base, sha));
-    fails.push(...strategyFails(base, sha, approved));
+    fails.push(...worldFileFails(base, sha, approved, worldFileFails.actOf(branch)));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
       const classes = [...new Set(changed.map((c) => c.cls))];
@@ -8318,9 +8363,14 @@ function askLine({ thread, about } = {}) {
   // A question that asks about several acts names them up front; the owner's card lists them, and
   // the answer approves each once and nothing else (constitution.md §3, one answer, one act).
   const approves = [...new Set(asList(flags.approves).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
+  // A Self or exterior change names its one chore, the branch its draft is on (checked with the
+  // link below), so the chore waits on the owner and merge lands the file in that chore only.
+  const oneAct = ['self-change', 'exterior-change'].includes(cls);
+  if (oneAct && !approves.length) die(`a ${cls} question names its chore: --approves chore-<slug>, the chore whose branch the link pins`);
+  if (oneAct && (approves.length !== 1 || !/^chore-[a-z0-9][a-z0-9-]*$/.test(approves[0]))) die(`a ${cls} question approves exactly one act, the chore chore-<slug> whose branch holds the draft`);
   if (approves.length) {
     if (!['owner-decision', 'one-way-door'].includes(kind)) die(`--approves belongs on an owner-decision or one-way-door question, not ${kind}`);
-    if (approves.length < 2) die('--approves names two or more acts; a question about one act needs no --approves');
+    if (approves.length < 2 && !oneAct) die('--approves names two or more acts; a question about one act needs no --approves');
     if (approves.length > 10) die('--approves names at most 10 acts; split the question');
     for (const a of approves) if (!(tickets().has(a) || /^chore-[a-z0-9][a-z0-9-]*$/.test(a) || /^plan-[a-z0-9][a-z0-9-]*$/.test(a))) die(`--approves ${a}: name a ticket id, chore-<slug> or plan-<feature>`);
   }
@@ -8499,15 +8549,20 @@ function askLine({ thread, about } = {}) {
     }
   }
   for (const [, n] of `${q}\n${flagStr('context') ?? ''}`.matchAll(/\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/g)) if (!names.has(n)) die(`--links: the text names [[${n}]] but no link has "name": "${n}"`);
-  // A strategy change is asked about one text: the draft's blob and commit are pinned here, in this
-  // one line the question's hash covers. merge lands that blob and no other, and the link shows the
-  // owner that commit's text however the branch moves after.
-  if (cls === 'strategy-change' && projectInRepo) {
-    const l = (links ?? []).find((x) => isObj(x) && x.path === strategyRel);
-    if (!l?.ref) die(`--links: a strategy-change question links the draft it asks about, on its branch: {"title":"The strategy","path":"${strategyRel}","ref":"<the chore's branch>"}`);
-    const commit = /^-/.test(l.ref) ? null : git(['rev-parse', '--verify', '--quiet', `${l.ref}^{commit}`]);
-    const blob = commit && git(['rev-parse', '--verify', '--quiet', `${commit}:${strategyRel}`]);
-    if (!blob) die(`--links: no ${strategyRel} at ${l.ref}; commit the draft to its branch first`);
+  // A change to the strategy, the Self or the exterior is asked about one text: the draft's blob and
+  // commit are pinned here, in this one line the question's hash covers. merge lands that blob and
+  // no other, and the link shows the owner that commit's text however the branch moves after. The
+  // Self's and the exterior's link is on the branch of the one chore the question names, read as a
+  // branch (never a tag or another ref of that name).
+  const world = worldFileFails.files().find((w) => w.cls === cls);
+  if (world && projectInRepo) {
+    const rel = world.rel;
+    const l = (links ?? []).find((x) => isObj(x) && x.path === rel);
+    if (!l?.ref) die(`--links: a ${cls} question links the draft it asks about, on its branch: {"title":"${world.title}","path":"${rel}","ref":"<the chore's branch>"}`);
+    if (oneAct && l.ref !== approves[0]) die(`--approves ${approves[0]}: the link pins the draft on ${l.ref}; link it on ${approves[0]}, the chore's branch`);
+    const commit = /^-/.test(l.ref) ? null : git(['rev-parse', '--verify', '--quiet', oneAct ? `refs/heads/${l.ref}^{commit}` : `${l.ref}^{commit}`]);
+    const blob = commit && git(['rev-parse', '--verify', '--quiet', `${commit}:${rel}`]);
+    if (!blob) die(`--links: no ${rel} at ${l.ref}; commit the draft to its branch first`);
     l.ref = commit;
     l.blob = blob;
   }
@@ -32306,7 +32361,7 @@ const HELP_GRAPH = `The graph (planning.md)
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines`;
 const HELP_CHECKS = `Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
-  check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
+  check-pr --head-ref r --sha s [--title t] [--body-file f] [--approved <qid>] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts; --approved holds a change to strategy.md, self.md or exterior.md to that owner answer, and without it such a change only warns); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
   merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid [qid …]] [--decision d-id] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
   review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's`;
 const HELP_SESSIONS = `Sessions (worker.md)

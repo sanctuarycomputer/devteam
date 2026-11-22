@@ -1443,7 +1443,7 @@
                 "blob": {
                   "type": "string",
                   "pattern": "^[0-9a-f]{40,64}$",
-                  "description": "On a strategy-change question's link to project/strategy.md: the git blob of the draft when asked, written by ask (which also resolves ref to that commit). merge lands exactly this text under the owner's answer."
+                  "description": "On a strategy-change, self-change or exterior-change question's link to its file (project/strategy.md, project/self.md, project/exterior.md): the git blob of the draft when asked, written by ask (which also resolves ref to that commit). check-pr and merge land exactly this text under the owner's answer."
                 },
                 "name": {
                   "type": "string",
@@ -1530,9 +1530,9 @@
             "x-tip": "The answer that closes them."
           },
           "approves": {
-            "description": "The acts this question approves, named when asked (ask --approves): ticket ids, chore-<slug> or plan-<feature>. The answer approves each once and nothing else.",
+            "description": "The acts this question approves, named when asked (ask --approves): ticket ids, chore-<slug> or plan-<feature>. The answer approves each once and nothing else. Two or more, except on a self-change or exterior-change question, which names exactly one: the chore whose branch holds the draft its link pins (ask checks both).",
             "type": "array",
-            "minItems": 2,
+            "minItems": 1,
             "maxItems": 10,
             "items": {
               "type": "string"
