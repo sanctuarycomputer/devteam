@@ -110,6 +110,13 @@ async function signedIn(page) {
   return page;
 }
 
+// a listen that loses its port fails the rig, instead of leaving it pending with nothing to stop it
+const listening = (server, port) => new Promise((ok, no) => {
+  const failed = (e) => no(e);
+  server.once('error', failed);
+  server.listen(port, '127.0.0.1', () => { server.removeListener('error', failed); ok(); });
+});
+
 let built = null;
 after(async () => { const r = await built?.catch(() => null); await r?.close(); });
 const rig = () => (built ??= (async () => {
@@ -159,7 +166,7 @@ const rig = () => (built ??= (async () => {
       if (q.url === '/api/hello') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ devteam: 1, name: 'www', root: '/srv/www', port: P + 2 })); }
       return s.end('www');
     });
-    await new Promise((ok) => www.listen(P + 2, '127.0.0.1', ok));
+    await listening(www, P + 2);
     stops.push(() => new Promise((ok) => { www.closeAllConnections?.(); www.close(ok); }));
     // two projects that share a name: what reaches either, but the hub's hello
     r.twinHits = [];
@@ -169,7 +176,7 @@ const rig = () => (built ??= (async () => {
         r.twinHits.push(`${port} ${q.method} ${q.url}`);
         return s.end('twin');
       });
-      await new Promise((ok) => twin.listen(port, '127.0.0.1', ok));
+      await listening(twin, port);
       stops.push(() => new Promise((ok) => { twin.closeAllConnections?.(); twin.close(ok); }));
     }
     await poll(() => /dashboard on http/.test(dashA.out()) && /dashboard on http/.test(dashB.out()), `the dashboards: ${dashA.out().slice(-300)} ${dashB.out().slice(-300)}`, 120000);
@@ -178,18 +185,22 @@ const rig = () => (built ??= (async () => {
       return l.instances?.length === 5 && l.instances.every((x) => x.name) ? l.instances : null;
     }, `the hub's list (${hubOut.slice(-300)})`, 90000);
     // the gateway
-    const port = await freePort();
-    r.port = port;
-    r.box = `http://box.localhost:${port}`;
-    r.at = (label) => `http://${label}.box.localhost:${port}`;
     const logs = [];
     const ttydPage = path.join(tmp, 'ttyd.html');
     fs.writeFileSync(ttydPage, 'ttyd');
     const uploadsDir = path.join(tmp, 'uploads');
     fs.mkdirSync(uploadsDir, { mode: 0o750 });
-    r.dir = path.join(tmp, 'gw');
-    r.g = G.createGateway({ publicUrl: r.box, dir: r.dir, ttydPort: await freePort(), ttydPage, uploadsDir, log: (m) => logs.push(m) });
-    await new Promise((ok) => r.g.server.listen(port, '127.0.0.1', ok));
+    // freePort's port can be taken before the gateway binds it (as lib/kit.mjs's dashboardOnFreePort
+    // retries): the address is in the gateway's config, so a lost port means a new gateway
+    for (let i = 0; ; i++) {
+      r.port = await freePort();
+      r.box = `http://box.localhost:${r.port}`;
+      r.dir = path.join(tmp, `gw-${i}`);
+      logs.length = 0;
+      r.g = G.createGateway({ publicUrl: r.box, dir: r.dir, ttydPort: await freePort(), ttydPage, uploadsDir, log: (m) => logs.push(m) });
+      try { await listening(r.g.server, r.port); break; } catch (e) { if (e.code !== 'EADDRINUSE' || i >= 4) throw e; }
+    }
+    r.at = (label) => `http://${label}.box.localhost:${r.port}`;
     stops.push(() => new Promise((ok) => { r.g.server.closeAllConnections?.(); r.g.server.close(ok); }));
     r.reqs = [];
     r.g.server.prependListener('request', (q, s) => {
@@ -348,6 +359,11 @@ test('C4 PL-S7: no address in the bar, a link, a Copy link or Open in a new tab 
   }
   const opened = await r.page.ev('window.__opened');
   assert.deepEqual(opened, [`${r.at('alpha')}/`, `${r.at('beta')}/`], 'Open in a new tab opens each project host');
+  // the three cards with no host: their menus open, and offer no new tab
+  const noHost = await r.page.ev(`[...document.querySelectorAll('.ov-card')]
+    .filter((c) => ['www', 'twin'].includes(c.querySelector('.ov-name')?.textContent))
+    .map((c) => { c.querySelector('.menu-btn').click(); const m = [...document.querySelectorAll('.menu-pop button')].map((b) => b.textContent); closeMenu(); return m; })`);
+  assert.deepEqual(noHost, [['Open its dashboard'], ['Open its dashboard'], ['Open its dashboard']], 'a card with no host offers no new tab');
   seen.push(...opened, ...await r.page.ev(ADDRESSES));
   // a project in the hub's frame
   await r.page.ev(`select(${JSON.stringify(r.list.find((x) => x.name === 'alpha').root)})`);
@@ -503,6 +519,10 @@ test('C14b PL-S10: two projects sharing a name get no host: the tab says why, an
   await waitFor(r.page, `document.body.innerText.includes('This project has no address on this box: its name is shared')`, "the twin tab's reason");
   assert.equal(await r.page.ev(shownFrame), null, 'no frame for it');
   r.twinHits.length = 0;
-  for (const route of ['/', '/api/data']) await raw(r, `twin.box.localhost:${r.port}`, route, { headers: { cookie: `devteam_session=${r.session}`, 'sec-fetch-site': 'none', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } });
+  for (const route of ['/', '/api/data']) {
+    const a = await raw(r, `twin.box.localhost:${r.port}`, route, { headers: { cookie: `devteam_session=${r.session}`, 'sec-fetch-site': 'none', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } });
+    assert.equal(a.status, 503, `${route} on a shared name`);
+    assert.match(a.body, /Two projects are named twin/, `${route}: the gateway's own page for a shared name`);
+  }
   assert.deepEqual(r.twinHits, [], 'neither twin was asked');
 });
