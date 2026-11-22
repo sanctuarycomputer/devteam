@@ -3209,13 +3209,15 @@ const movedOff = (q) => { const m = movedText(q); return m ? ` disabled title="$
 // Secrets typed or chosen but not yet posted live only in memory, never in storage, and survive a
 // refresh. Each goes straight from the browser to the owner's process and on to its sink.
 const SECRET_DRAFTS = new Map();
+// A SOPS store takes all of a question's secrets in one post: its inputs carry the store.
+const sopsStore = (x) => x.sink_type === 'sops' ? ` data-sops-store="${esc(String(x.sink).slice(5, String(x.sink).lastIndexOf(':')))}"` : '';
 function secretsForm(q) {
   const posted = new Map((q.secrets_posted || []).map((p) => [p.name, p]));
   return `<div class="secrets">${q.secrets.map((x) => {
     const p = posted.get(x.name);
     const key = `${q.id}:${x.name}`;
     const where = x.sink_type === 'stdin' ? `<div class="sink-cmd">Runs as you, with the value on its input:<pre>${esc(x.sink.slice('stdin:'.length))}</pre></div>` : `<span class="muted small">goes to ${esc(x.to || x.sink)}</span>`;
-    return `<div class="secret"><span class="sname"><code>${esc(x.name)}</code> ${x.sink_type === 'stdin' ? '' : where}</span>${x.sink_type === 'stdin' ? where : ''}${x.warning && !p ? `<span class="err small" role="note">${esc(x.warning)}</span>` : ''}${p ? '<span class="badge good">posted</span>' : x.kind === 'file' ? `<input type="file" data-secret="${esc(key)}" aria-label="${esc(x.name)}">` : `<textarea class="masked" rows="2" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-form-type="other" data-secret="${esc(key)}" aria-label="${esc(x.name)}" placeholder="Paste the value (several lines are fine)"></textarea>`}</div>`;
+    return `<div class="secret"><span class="sname"><code>${esc(x.name)}</code> ${x.sink_type === 'stdin' ? '' : where}</span>${x.sink_type === 'stdin' ? where : ''}${x.warning && !p ? `<span class="err small" role="note">${esc(x.warning)}</span>` : ''}${p ? '<span class="badge good">posted</span>' : x.kind === 'file' ? `<input type="file" data-secret="${esc(key)}"${sopsStore(x)} aria-label="${esc(x.name)}">` : `<textarea class="masked" rows="2" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-form-type="other" data-secret="${esc(key)}"${sopsStore(x)} aria-label="${esc(x.name)}" placeholder="Paste the value (several lines are fine)"></textarea>`}</div>`;
   }).join('')}<p class="meta">devteam doesn’t save what you post or show it to an agent: it goes from this page through your own process to the place named, and the log records only the name. Check where each one goes before you post.</p></div>`;
 }
 function keepSecretDrafts() {
@@ -10986,6 +10988,13 @@ document.addEventListener('click', async (ev) => {
       else if (el.value) values[name] = el.value;
     }
     if (!Object.keys(values).length) { if (err) err.textContent = 'Paste a value or choose a file first.'; return; }
+    // a store started is a store finished: name what's missing before anything is cleared or sent
+    const stores = new Map();
+    for (const el of inputs) if (el.dataset.sopsStore) stores.set(el.dataset.sopsStore, [...(stores.get(el.dataset.sopsStore) || []), el.dataset.secret.slice(id.length + 1)]);
+    for (const [file, names] of stores) {
+      const missing = names.filter((n) => !(n in values));
+      if (missing.length && missing.length < names.length) { if (err) err.textContent = `${file} takes these together: add ${missing.join(', ')} too, or post none of them yet.`; return; }
+    }
     if (err) err.textContent = '';
     // at once: the card says it is posting and takes no second press. It stays in the Inbox until the
     // server says the question is answered (every secret posted). The values never stay in the page:
