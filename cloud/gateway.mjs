@@ -1892,7 +1892,9 @@ export function createGateway(opts = {}) {
   // A sandboxed artifact's own frames arrive cross-site, with their capability as the only credential,
   // so an exact capability path answers to its own check instead of the frame refusal. Judged on the
   // raw path: anything a server could decode or normalise into another path keeps the refusal.
-  const capLinkExact = (raw) => CAP_LINK.test(raw) && !/%(?:2f|5c|2e)|\\|\/\//i.test(raw) && !raw.split('/').some((x) => x === '.' || x === '..');
+  // An encoded slash, backslash or dot, at any depth of encoding (%2f, %252f, ...), a backslash, or a doubled slash.
+  const CAP_NOT_EXACT = /%(?:25)*(?:2f|5c|2e)|\\|\/\//i;
+  const capLinkExact = (raw) => CAP_LINK.test(raw) && !CAP_NOT_EXACT.test(raw) && !raw.split('/').some((x) => x === '.' || x === '..');
   const crossSiteOk = (req, p, url) => {
     const site = req.headers['sec-fetch-site'];
     if (!site || site === 'same-origin' || site === 'none') return true;

@@ -3397,6 +3397,11 @@ on('C5 a valid /c/ link works on the project host with no cookie', undefined, as
 });
 // A sandboxed artifact's nested frame: the browser calls it cross-site, and its capability is its only credential.
 const CROSS_FRAME = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'cross-site' };
+// Every request to this box then carries this cookie, and onSession runs each time sessionOf reads it.
+const trapCookie = (b, cookie, onSession) => b.g.server.prependListener('request', (req) => Object.defineProperty(req.headers, 'cookie', { enumerable: true, configurable: true, get() {
+  if (new Error().stack.includes('sessionOf')) onSession();
+  return cookie;
+} }));
 const capLink = async (b) => (await b.get('alpha', '/artifact/main/mock/index.html', { cookie: COOKIE, headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } })).headers.location;
 on('C5b a valid capability loads as a cross-site frame, signed out or with a cookie, and the port gets no cookie', undefined, async (b) => {
   const link = await capLink(b);
@@ -3423,6 +3428,8 @@ on('C5d any other /c/ form, as a cross-site frame, keeps the frame refusal and r
     `${cap}/artifact/main/mock%5cindex.html`, `${cap}/artifact/main/mock%5Cindex.html`, `${cap}/artifact/main/mock\\index.html`,
     `${cap}/artifact/main/./mock/index.html`, `${cap}/artifact/main/../mock/index.html`, `${cap}/artifact/main/mock/..`,
     `${cap}/artifact/main/%2e/mock/index.html`, `${cap}/artifact/main/%2E/mock/index.html`, `${cap}/artifact/main/%2e%2e/mock/index.html`, `${cap}/artifact/main/.%2E/mock/index.html`,
+    `${cap}/artifact/main/mock%252findex.html`, `${cap}/artifact/main/mock%252Findex.html`, `${cap}/artifact/main/mock%255cindex.html`, `${cap}/artifact/main/mock%255Cindex.html`,
+    `${cap}/artifact/main/%252e%252e/mock/index.html`, `${cap}/artifact/main/%252E%252E/mock/index.html`, `${cap}/artifact/main/mock%25252findex.html`,
     `${cap}//artifact/main/mock/index.html`, `${cap}/artifact//main/mock/index.html`, `${cap}/artifact/main/mock//index.html`,
     '/c/', '/c/x/artifact/main/mock/index.html', '/c/1.a/artifact/main/mock/index.html', `${cap}/other/x`, cap,
   ]) {
@@ -3434,11 +3441,7 @@ on('C5d any other /c/ form, as a cross-site frame, keeps the frame refusal and r
 on('C5e the capability route never consults the session, even with a cookie that makes sessionOf throw', undefined, async (b) => {
   const link = await capLink(b);
   let sessionReads = 0;
-  const trap = (req) => Object.defineProperty(req.headers, 'cookie', { enumerable: true, configurable: true, get() {
-    if (new Error().stack.includes('sessionOf')) { sessionReads++; throw new Error('sessionOf read the cookie'); }
-    return COOKIE;
-  } });
-  b.g.server.prependListener('request', trap);
+  trapCookie(b, COOKIE, () => { sessionReads++; throw new Error('sessionOf read the cookie'); });
   const r = await b.get('alpha', link, { headers: CROSS_FRAME });
   assert.equal(r.status, 200);
   assert.equal(sessionReads, 0, 'no sessionOf on the capability route');
@@ -3464,10 +3467,19 @@ on('C6b /healthz is the gateway\'s ok on a made-up label and on 127.0.0.1:<port>
   const boot = await b.get(null, '/healthz', { headers: { host: `127.0.0.1:${b.port}` } });
   assert.deepEqual([boot.status, boot.body], [200, 'ok'], 'the boot check');
 });
-test('C6c a signed-out /healthz does the session work on every label before it consults the list', () => {
-  const src = fs.readFileSync(path.join(here, '..', 'cloud', 'gateway.mjs'), 'utf8');
-  assert.match(src, /const signedIn = !!l && store\.load\(\)\.passkeys\.length > 0 && !!sessionOf\(req\);\s*app = signedIn && previews\.has\(l\);/, 'the session first, the list after');
-  assert.doesNotMatch(src, /previews\.has\(l\) && store\.load\(\)/, 'a live preview must not be the only name that does the session work');
+on('C6c a signed-out /healthz reads the cookie through sessionOf alike on a live preview, a project and a made-up name', ({ DEV }) => ({ list: [row('alpha', P), row('other', P + 1, { previews: [previewOn('cool-tiger', DEV)] })] }), async (b) => {
+  let reads = 0;
+  trapCookie(b, `devteam_session=${u(crypto.randomBytes(32))}`, () => { reads++; });
+  const counts = {};
+  for (const name of ['cool-tiger', 'alpha', 'nobody']) {
+    reads = 0;
+    const r = await b.get(name, '/healthz');
+    assert.deepEqual([r.status, r.body], [200, 'ok'], name);
+    counts[name] = reads;
+  }
+  assert.ok(counts.nobody > 0, 'the session work is done');
+  assert.deepEqual(counts, { 'cool-tiger': counts.nobody, alpha: counts.nobody, nobody: counts.nobody }, 'the same work on every name');
+  assert.deepEqual(b.seen.get(b.DEV), [], 'and the dev server is not asked');
 });
 for (const l of ['4321', 'public', 'www', 'a_b', '-app', 'DevTeam']) on(`C14 ${l}.<box> answers 421`, undefined, async (b) => {
   assert.equal((await b.get(l, '/', { cookie: COOKIE })).status, 421);
