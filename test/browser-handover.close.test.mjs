@@ -16,7 +16,7 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as four chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, RF4, T4-1, T4-3, T4-2), cC's (C24, RF2)
+// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, RF4, T4-1, T4-3, T4-2), cC's (C24, T6-3, RF2)
 // and cD's (C12, C13, C14, C16). onA, onB, onC and onD add a check.
 const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
@@ -280,6 +280,18 @@ onD('C16 a daemon killed mid-handover: wait brings it and the view back under th
 });
 
 // --- the view (T6)
+// A socket that became the viewer (its first held came; a socket the old one's close hasn't freed yet
+// is told bye, and tried again).
+async function nextViewer(P) {
+  return until(async () => {
+    const x = await viewSocket(P);
+    const m = await x.waitFor((o) => o.t === 'held' || o.t === 'bye', 10000);
+    if (m.t === 'held') return x;
+    x.close();
+    return null;
+  }, 15000, 'the view free for a new socket');
+}
+const landed = (text) => site.events().some((e) => String(e.value).includes(text));
 onA('C21 a decline after a half-typed note: bye comes while the old Chrome is alive, and the value is gone', async () => {
   const P = cA();
   await ok(P, ['stop']);
@@ -389,6 +401,44 @@ onB('C19 input after the close never reaches the page, on a socket opened during
     assert.deepEqual([w.qid, w.outcome], [q, 'done'], how);
     v.close();
   }
+  // In the gap: closed, and no close handled yet. (1) a socket opened after the close
+  await ok(P, ['open', `${site.origin}/record`]);
+  const q1 = await askHandover(P);
+  (await typeNote(P, marker('c19-gap'))).close();
+  const a1 = await owner(P, ['answer', q1, '--choice', 'Done']);
+  assert.equal(a1.status, 0, a1.err || a1.out);
+  const g1 = await nextViewer(P);
+  assert.ok(g1.msgs.some((m) => m.t === 'held' && m.qid === null), 'the socket in the gap is told no one holds the browser');
+  const late1 = marker('late-gap');
+  g1.paste(late1);
+  await sleep(1000);
+  assert.ok(!landed(late1), 'a socket opened after the close: its input reached the page');
+  console.log(`# kit-67 C19 gap: a socket opened after the close was sent ${g1.msgs.filter((m) => m.t === 'frame').length} frames before the close was handled`);
+  assert.equal((await waitJson(P)).outcome, 'done');
+  g1.close();
+  // (2) a socket that takes a newer open handover while the older one's close is pending
+  await ok(P, ['open', `${site.origin}/record`]);
+  const q2 = await askHandover(P);
+  (await typeNote(P, marker('c19-gap2'))).close();
+  const newer = appendLine(P, handoverLine(P));
+  await withdraw(P, q2);
+  const g2 = await nextViewer(P);
+  assert.ok(g2.msgs.some((m) => m.t === 'held' && m.qid === newer.id), 'the socket takes the newer handover');
+  const late2 = marker('late-gap2');
+  g2.paste(late2);
+  await sleep(1000);
+  assert.ok(!landed(late2), 'a socket on a newer handover, an older close pending: its input reached the page');
+  await withdraw(P, newer.id);
+  const w2 = await waitJson(P);
+  assert.deepEqual([w2.qid, w2.outcome], [newer.id, 'withdrawn']);
+  g2.close();
+  entryIs(P, q2, 'withdrawn');
+  entryIs(P, newer.id, 'withdrawn');
+  // with no close pending, a new socket's input reaches the page again (R5)
+  await ok(P, ['open', `${site.origin}/record`]);
+  const after = await nextViewer(P);
+  await typeNote(P, marker('c19-after'), { v: after });
+  after.close();
 });
 
 onB('RF4 the daemon told to stop during a close: the close ends, and no Chrome is left', async () => {
@@ -464,8 +514,9 @@ onB('T4-2 problem lines never wedge the browser: a handover gone from the log un
   const dir = path.join(P.run, 'log');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl') && fs.readFileSync(path.join(dir, f), 'utf8').includes(`"id":"${c}"`));
   assert.ok(files.length, `no live log file holds ${c}`);
-  const waiting = browser(P, ['wait']);
-  await sleep(1500);
+  const read = path.join(P.home, 'wait-first-read');
+  const waiting = browser(P, ['wait'], { DEVTEAM_TEST_BROWSER_WAIT_FIRST_READ: read });
+  await until(() => fs.existsSync(read), 60000, "wait's first read of the log");
   for (const f of files) fs.renameSync(path.join(dir, f), path.join(P.home, f));
   let w;
   try { w = await waiting; } finally { for (const f of files) fs.renameSync(path.join(P.home, f), path.join(dir, f)); }
@@ -506,6 +557,22 @@ onC('C24 the idle timer never stops the browser while held, and stops it after t
   await until(() => entriesFor(P, l.id).length, 20000, 'the close handled');
   await until(() => !alive(st.daemon_pid), 4000, 'the daemon stopped for idleness after the close');
   await until(() => !profilePids(P).length, 5000, 'Chrome gone with the daemon');
+});
+
+onC('T6-3 the idle timer never stops the daemon with a close unhandled', async () => {
+  const P = cC();
+  // the watch queues nothing, so the close stays unhandled for two idle periods
+  const l = appendLine(P, handoverLine(P));
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_WATCH_HANDLE: '0' });
+  const st = readState(P);
+  await withdraw(P, l.id);
+  await sleep(3500);
+  assert.ok(alive(st.daemon_pid), 'the daemon stopped for idleness with a close unhandled');
+  assert.equal(entriesFor(P, l.id).length, 0, 'the close was handled early');
+  assert.deepEqual((await waitJson(P)).outcome, 'withdrawn');
+  assert.equal(readState(P).daemon_pid, st.daemon_pid, 'wait had to start a new daemon');
+  entryIs(P, l.id, 'withdrawn');
+  await until(() => !alive(st.daemon_pid), 4000, 'the daemon stopped for idleness once the close was handled');
 });
 
 onC('RF2 Sign out of everything during a handover, then its close: the forget runs first, and the ledger records the close', async () => {
