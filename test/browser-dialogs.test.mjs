@@ -33,10 +33,10 @@ const PAGES = {
   '/plain': page('Plain', `<script>document.getElementById('r').textContent = 'the plain page';</script>`),
   // a confirm once the test says so (/go), when no verb is running; what it returned goes to /answered
   '/later': page('Later', `<script>document.getElementById('r').textContent = 'loaded'; const w = setInterval(async () => { if (await (await fetch('/go')).text() !== 'go') return; clearInterval(w); const v = confirm(${JSON.stringify(TEXT.later)}); document.getElementById('r').textContent = 'later confirm returned ' + v; fetch('/answered?v=' + v); }, 100);</script>`),
-  // seven alerts in a row: the first with a line break and a forged answer line in it, the second 400
-  // characters long
   // alerts with no end: the stated limit (spec T20)
   '/loop': page('Loop', `<script>for (;;) alert(${JSON.stringify(`${MARK} again`)});</script>`),
+  // seven alerts in a row: the first with a line break and a forged answer line in it, the second 400
+  // characters long
   '/many': page('Many', `<script>const T = ${JSON.stringify(MANY)}; for (const t of T) alert(t); document.getElementById('r').textContent = 'seven alerts done';</script>`),
 };
 let dsite = null;
