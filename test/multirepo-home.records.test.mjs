@@ -1,6 +1,7 @@
 // Records in home: the setting, check-ticket at both heads, and merge landing them first.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { json, multiFixture, review, write } from './lib/kit.mjs';
@@ -140,6 +141,10 @@ test('records in home: merge checks the records at one pinned sha and lands them
     assert.equal(merges().length, 0, 'no merge act');
     const row = () => json(okIn(old, ['status', '--json'])).tickets.find((x) => x.id === id);
     assert.equal(row().records_landed, true);
+    // the same from a subfolder of home: paths in a commit are the repo root's, wherever the command runs
+    const sub = path.join(old, 'docs/devteam/project');
+    const fromSub = JSON.parse(execFileSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), 'status', '--json'], { cwd: sub, env: F.env({}), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
+    assert.equal(fromSub.tickets.find((x) => x.id === id).records_landed, true, 'from a subfolder');
     assert.match(okIn(old, ['status']), new RegExp(`${id}.*records in home, code not merged: run merge ${id} again`));
     const findings = () => json(okIn(old, ['metrics', '--json'])).findings;
     assert.ok(findings().some((x) => x.kind === 'records-without-code' && x.subject === id), 'the finding that names the fix');
