@@ -56,7 +56,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = fileURLToPath(import.meta.url);
 export const ROOT = fs.realpathSync(path.resolve(path.dirname(here), '..'));
-export const ALONE = ['test/bounds.test.mjs'];
+export const ALONE = ['test/bounds.test.mjs', 'test/browser-handover.close.test.mjs'];
 // Files known to run longer than 300 s get a longer watchdog here (kit-210 split dashboard.test.mjs).
 // recurring-registry nears 300 s on CI's slowest runner (281 s on Node 18; kit-162 final-11 F2).
 export const LONG = { 'test/recurring-registry.test.mjs': 600 };

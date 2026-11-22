@@ -82,7 +82,7 @@ test('groups by rule', () => {
   assert.equal(R.groupOf('test/x.test.mjs', "if (x === '1') await import('./lib/chrome.mjs');\n"), 'rest');
   assert.equal(R.groupOf('test/x.test.mjs', "if (x) {\n  await import('./lib/chrome.mjs');\n}\n"), 'chrome');
   const plan = R.planRun({ files: [], groups: ['chain', 'alone'], shard: null }, root);
-  assert.deepEqual(plan.map((p) => p.file), ['test/bounds.test.mjs', 'test/kit.test.mjs']);
+  assert.deepEqual(plan.map((p) => p.file), ['test/bounds.test.mjs', 'test/browser-handover.close.test.mjs', 'test/kit.test.mjs']);
 });
 
 test('shards cover each file once and balance', () => {
