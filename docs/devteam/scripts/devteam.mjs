@@ -11772,32 +11772,58 @@ File.write(ENV.fetch("DEVTEAM_SECRET_DONE"), "ok")
 const isUtf8 = (buf) => { try { new TextDecoder('utf-8', { fatal: true }).decode(buf); return true; } catch { return false; } };
 // DEVTEAM_HUB_RECORD too: a session's mark, so the tmux server or owner action it starts records as usual
 const ownerProcessEnv = () => { const e = { ...process.env }; for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HUB_RECORD']) delete e[k]; return e; };
-// The age key that opens a SOPS file, so a repo's key is found wherever it keeps it. sops itself only
-// looks in the environment and ~/.config/sops/age/keys.txt, and a repo's key is often a gitignored
-// file in its main checkout (a chore worktree has no copy). Each candidate is proved by decrypting
-// the file with the output thrown away: only the key that opens this file is ever used, so one
-// repo's key can't be picked up for another's. Paths only: a key's contents never leave this check.
-function sopsKeyFiles(cwd) {
-  const common = gitCommonDirOf(cwd);
-  const root = path.basename(common) === '.git' ? path.dirname(common) : cwd;
-  const out = [];
-  for (const e of (git(['ls-files', '-o', '-i', '--exclude-standard', '--directory'], root) ?? '').split('\n').filter(Boolean)) {
+// The age key for a SOPS file, so a repo's key is found wherever it keeps it: sops itself only looks in
+// the environment and ~/.config/sops/age/keys.txt, and a repo's key is often a gitignored file in its
+// main checkout. Anything that can write ignored paths could plant a key and a file made for it, so a
+// found key is used only on a file byte-for-byte as committed on main (or as this process just wrote
+// it), in a real worktree of this repo, when its public half is one of that committed file's age
+// recipients. Only that one native identity reaches sops, so a planted plugin line never runs.
+const SOPS_WRITTEN = new Set();
+const sopsHash = (b) => crypto.createHash('sha256').update(b).digest('hex');
+const SOPS_NAME = /(^|[-_./])(age|sops)([-_.]|$)/i;
+const SOPS_FOLDER = /(^|[-_./])(age|sops|secrets?|keys?)([-_./]|$)/i;
+function sopsIdentities(f, follow) {
+  try {
+    const st = follow ? fs.statSync(f) : fs.lstatSync(f);
+    if (!st.isFile() || st.size > 65536) return [];
+    const lines = fs.readFileSync(f, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+    return lines.length && lines.every((l) => /^AGE-SECRET-KEY-1[0-9A-Z]+$/.test(l)) ? lines : [];
+  } catch { return []; }
+}
+function sopsKeyCandidates() {
+  const inRepo = [];
+  for (const e of (git(['ls-files', '-o', '-i', '--exclude-standard', '--directory'], mainRoot) ?? '').split('\n').filter(Boolean)) {
     if (e.endsWith('/')) {
-      if (/(^|\/)(node_modules|\.worktrees|\.git)\/$/.test(e) || !/secret|sops|age|key/i.test(e)) continue;
-      try { for (const n of fs.readdirSync(path.join(root, e))) out.push(path.join(root, e, n)); } catch {}
-    } else if (/(^|[-_./])(age|sops)([-_.]|$)/i.test(e)) out.push(path.join(root, e));
+      if (/(^|\/)(node_modules|\.worktrees|\.git)\/$/.test(e) || !SOPS_FOLDER.test(e)) continue;
+      try { for (const n of fs.readdirSync(path.join(mainRoot, e))) inRepo.push(path.join(mainRoot, e, n)); } catch {}
+    } else if (SOPS_NAME.test(e)) inRepo.push(path.join(mainRoot, e));
   }
-  const home = path.join(process.env.HOME ?? os.homedir(), '.config', 'sops', 'age');
-  try { for (const n of fs.readdirSync(home)) out.push(path.join(home, n)); } catch {}
-  return [...new Set(out)].filter((f) => {
-    try { const st = fs.statSync(f); return st.isFile() && st.size <= 65536 && fs.readFileSync(f, 'utf8').includes('AGE-SECRET-KEY-'); } catch { return false; }
-  }).slice(0, 32);
+  // the owner's own folder may link to a key elsewhere; a link inside the repo is never followed
+  const dir = path.join(process.env.HOME ?? os.homedir(), '.config', 'sops', 'age');
+  let own = [];
+  try { own = fs.readdirSync(dir).map((n) => path.join(dir, n)); } catch {}
+  return [...own.map((f) => [f, true]), ...inRepo.map((f) => [f, false])].slice(0, 32);
 }
 function sopsKeyEnv(file, cwd, base = process.env) {
   if (base.SOPS_AGE_KEY || base.SOPS_AGE_KEY_FILE || base.SOPS_AGE_KEY_CMD) return {};
-  const opens = (env) => spawnSync('sops', ['-d', file], { cwd, env: { ...base, ...env }, stdio: 'ignore', timeout: 30000 }).status === 0;
-  if (opens({})) return {};
-  for (const f of sopsKeyFiles(cwd)) if (opens({ SOPS_AGE_KEY_FILE: f })) return { SOPS_AGE_KEY_FILE: f };
+  try {
+    const target = path.join(cwd, file);
+    if (fs.lstatSync(target).isSymbolicLink()) return {};
+    if (fs.realpathSync(git(['rev-parse', '--show-toplevel'], cwd)?.trim() ?? '') !== fs.realpathSync(cwd) || gitCommonDirOf(cwd) !== gitCommonDirOf(mainRoot)) return {};
+    const main = loadSettings().main_branch;
+    const committed = [`origin/${main}`, main].map((r) => spawnSync('git', ['show', `${r}:${file}`], { cwd: mainRoot, maxBuffer: 16 * 1024 * 1024, timeout: 5000 })).filter((r) => r.status === 0).map((r) => r.stdout);
+    if (!committed.length) return {};
+    const now = fs.readFileSync(target);
+    if (!committed.some((c) => c.equals(now)) && !SOPS_WRITTEN.has(sopsHash(now))) return {};
+    const recipients = new Set(committed[0].toString('utf8').split('\n').filter((l) => /recipient/i.test(l)).flatMap((l) => l.match(/age1[02-9ac-hj-np-z]{58}/g) ?? []));
+    if (!recipients.size) return {};
+    const deadline = Date.now() + 5000;
+    for (const [f, follow] of sopsKeyCandidates()) for (const id of sopsIdentities(f, follow)) {
+      if (Date.now() > deadline) return {};
+      const r = spawnSync('age-keygen', ['-y'], { input: `${id}\n`, encoding: 'utf8', timeout: 2000 });
+      if (r.status === 0 && recipients.has(r.stdout.trim())) return { SOPS_AGE_KEY: id };
+    }
+  } catch {}
   return {};
 }
 // Returns { ok, out, files }: files are the tracked paths a commit sink changed.
@@ -11805,7 +11831,7 @@ function runSink(k, value, kind, cwd, redact) {
   const run = (cmd, args, opts) => {
     const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts });
     // a tool that refuses before reading its stdin (sops with no key) gives EPIPE: its own error is the one to show
-    if (r.error && !(r.error.code === 'EPIPE' && r.status !== null)) return { ok: false, out: redact(r.error.message) };
+    if (r.error && !(r.error.code === 'EPIPE' && r.status !== null && r.status !== 0)) return { ok: false, out: redact(r.error.message) };
     return { ok: r.status === 0, out: redact(`${r.stdout ?? ''}${r.stderr ?? ''}`.trim()) };
   };
   const changed = (rel) => (git(['status', '--porcelain', '--', rel], cwd) ?? '').trim() !== '';
@@ -11829,8 +11855,10 @@ function runSink(k, value, kind, cwd, redact) {
   if (k.type === 'sops') {
     if (!fs.existsSync(path.join(cwd, k.file))) return { ok: false, out: `${k.file} does not exist on main; create it with sops first` };
     const text = value.toString('utf8');
-    const r = run('sops', ['set', '--value-stdin', k.file, k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')], { input: JSON.stringify(kind === 'string' ? text.replace(/\r?\n$/, '') : text), env: { ...ownerProcessEnv(), ...sopsKeyEnv(k.file, cwd, ownerProcessEnv()) } });
-    if (!r.ok && /no master key|failed to load age/i.test(r.out)) r.out = `no age key on this machine opens ${k.file}. The kit looks in the environment, ~/.config/sops/age/ and this repo's gitignored files with age or sops in their name. ${r.out}`;
+    const keyEnv = sopsKeyEnv(k.file, cwd, ownerProcessEnv());
+    const r = run('sops', ['set', '--value-stdin', k.file, k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')], { input: JSON.stringify(kind === 'string' ? text.replace(/\r?\n$/, '') : text), env: { ...ownerProcessEnv(), ...keyEnv } });
+    if (r.ok && keyEnv.SOPS_AGE_KEY) try { SOPS_WRITTEN.add(sopsHash(fs.readFileSync(path.join(cwd, k.file)))); } catch {}
+    if (!r.ok && /no master key|failed to load age/i.test(r.out)) r.out = `no usable age key for ${k.file}. The kit looks in the environment, ~/.config/sops/age/ and this repo's gitignored files with age or sops in their name, and uses a key only if it is one of the file's recipients on main and the file is unchanged from main. ${r.out}`;
     if (r.ok && !changed(k.file)) return { ok: false, out: `sops exited 0 but ${k.file} did not change${r.out ? `: ${r.out}` : ''}` };
     if (!r.ok && /value-stdin/.test(r.out)) r.out += ' (this sops is too old for set --value-stdin; update it)';
     return { ...r, files: [k.file] };
