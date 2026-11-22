@@ -17049,7 +17049,7 @@ function dashboardDataRead() {
     // every kit setting, in words; never a credential (settingsAll)
     settings_all: settingsAll(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
-    upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
+    upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })), recurring: recurringDashboard() }; })(),
     sensors: sensorStatus(),
     sensor_feed: sensorFeed({ limit: 60 }),
     incidents: incidentList().map(incidentView),
@@ -26623,6 +26623,41 @@ const recurringFailures = Object.freeze({
     return done;
   },
 });
+
+// The dashboard's upkeep.recurring (kit-168), in test/fixtures/recurring/dashboard.json's shape: main's
+// checks with their state, and the built-in schedules. Chores come with kit-164, proposals with kit-165,
+// signals with kit-175. Every time is ISO to the second.
+function recurringDashboard() {
+  const RF = recurringFailures;
+  const sec = (t) => (t === null || t === undefined || t === '' ? null : RF.isoSec(t));
+  const rc = projectInRepo && mainRef() ? recurringRunDue.checks() : { checks: [], problem: null };
+  const entries = rc.checks.map(({ name, entry, next }) => {
+    const st = RF.state(name, entry);
+    const last = st.results.at(-1) ?? null;
+    const reg = RF.registered(name, entry);
+    return {
+      name, title: entry.title, what: entry.what, kind: entry.kind, by: null, every: entry.every, on: entry.on ?? null, at: entry.at ?? null,
+      state: !last ? 'never' : last.status === 'pass' ? 'passing' : 'failing',
+      fails_in_a_row: st.stretch.length,
+      last: last ? { status: last.status, at: last.at, seconds: last.seconds, excerpt: last.excerpt } : null,
+      next_at: sec(next), ticket: st.fixTicket, registered: reg ? { qid: reg.qid, at: sec(reg.at) } : null, signals: [],
+    };
+  });
+  const s = loadSettings();
+  const plus = (at, ms) => (at ? sec(Date.parse(at) + ms) : null);
+  const retroAt = sec(lastRetro()?.created_at);
+  const spikes = logObjects('ticket').filter((t) => t.kind === 'spike').map((t) => mergedAt(t.id)).filter((t) => t !== null && t !== undefined).map((t) => (typeof t === 'number' ? t : Date.parse(t))).filter(Number.isFinite);
+  const researchAt = spikes.length ? sec(Math.max(...spikes)) : null;
+  const syncs = logObjects('act').filter((a) => a.class === 'merge-chore' && a.created_by === 'supervisor' && /^chore-devteam-sync-/.test(String(a.refs?.[0] ?? ''))).sort(byTime);
+  const sensorsAt = sensorStatus().map((m) => m.last_at).filter(Boolean).sort().at(-1) ?? null;
+  const builtin = [
+    { name: 'retro', every: `${s.retro_every_days}d`, last_at: retroAt, next_at: plus(retroAt, s.retro_every_days * 86400000), note: 'A look back at what the team did since the last one.', setting: 'retro_every_days' },
+    { name: 'research', every: `${s.research_every_days}d`, last_at: researchAt, next_at: plus(researchAt, s.research_every_days * 86400000), note: 'A spike on new tools and practice.', setting: 'research_every_days' },
+    { name: 'kit-sync', every: `${s.upstream_check_hours}h`, last_at: sec(syncs.at(-1)?.created_at), next_at: null, note: `Adopts each new devteam release; you check for one every ${s.upstream_check_hours} hours.`, setting: 'upstream_check_hours' },
+    { name: 'sensors', every: 'each cycle', last_at: sec(sensorsAt), next_at: null, note: 'Production signals, read on every wait cycle.', setting: null },
+  ];
+  return { entries, builtin, proposals: [] };
+}
 
 // ===== sensors: production signals into the loop =====
 // A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
