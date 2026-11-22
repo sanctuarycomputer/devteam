@@ -10,6 +10,7 @@ import { fleetFixture, write } from './lib/kit.mjs';
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const has = (c) => spawnSync(c, ['--version'], { stdio: 'ignore' }).status === 0;
 const real = has('sops') && has('age-keygen');
+if (process.env.DEVTEAM_TEST_SOPS === '1') assert.ok(real, 'DEVTEAM_TEST_SOPS=1 but sops or age-keygen is not on PATH');
 const keygen = () => {
   const out = spawnSync('age-keygen', { encoding: 'utf8' }).stdout;
   return { id: out.match(/AGE-SECRET-KEY-1[0-9A-Z]+/)[0], pub: out.match(/age1[a-z0-9]+/)[0] };
@@ -78,25 +79,51 @@ test('a planted chore folder and key never receive the value', { skip: !real }, 
   } finally { F.done(); }
 });
 
-test('a real chore worktree whose store was replaced, even with the real recipient, never receives the value', { skip: !real }, () => {
+const stanza = (text) => text.match(/^sops_age__list_0__map_enc=.*$/m)?.[0];
+
+test('a tampered worktree, a moved local main and a replace ref never choose the store', { skip: !real }, () => {
   const F = fleetFixture('sops-tamper');
   try {
     const good = keygen();
     repo(F, good.pub);
+    const real0 = fs.readFileSync(path.join(F.old, 'secrets/app.enc.env'), 'utf8');
     const q = asks(F, ['ONE']);
     const slug = `secret-${q.split('-').slice(1, 3).join('-')}`;
     const wt = path.join(F.old, '.worktrees', `chore-${slug}`);
     F.g(['worktree', 'add', '-q', '-b', `chore-${slug}`, wt, 'origin/main'], F.old);
-    write(path.join(wt, 'secrets/app.enc.env'), 'SEED=1\n');
     // anyone can encrypt to the public key, with a data key they know
+    write(path.join(wt, 'secrets/app.enc.env'), 'SEED=1\n');
     encrypt(good.pub, path.join(wt, 'secrets/app.enc.env'));
+    const planted = fs.readFileSync(path.join(wt, 'secrets/app.enc.env'), 'utf8');
+    assert.notEqual(stanza(planted), stanza(real0));
     F.g(['add', '-A', 'secrets'], wt);
     F.g(['commit', '-qm', 'planted'], wt);
-    const before = fs.readFileSync(path.join(wt, 'secrets/app.enc.env'), 'utf8');
+    const evilBlob = F.g(['rev-parse', 'HEAD:secrets/app.enc.env'], wt).trim();
+    const realBlob = F.g(['rev-parse', 'origin/main:secrets/app.enc.env'], F.old).trim();
+    F.g(['replace', realBlob, evilBlob], F.old);
     write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
     const r = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9' }));
-    assert.notEqual(r.status, 0);
-    assert.equal(fs.readFileSync(path.join(wt, 'secrets/app.enc.env'), 'utf8'), before, 'the planted file got nothing');
+    assert.equal(r.status, 0, r.out + r.err);
+    const after = fs.readFileSync(path.join(wt, 'secrets/app.enc.env'), 'utf8');
+    assert.equal(stanza(after), stanza(real0), "the value is under the remote store's data key");
+    assert.match(decrypt(good.id, path.join(wt, 'secrets/app.enc.env')).stdout, /ONE=value-one-9/);
+  } finally { F.done(); }
+});
+
+test('two secrets posted in two runs both land', { skip: !real }, () => {
+  const F = fleetFixture('sops-two');
+  try {
+    const good = keygen();
+    repo(F, good.pub);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE', 'TWO']);
+    assert.equal(F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9' })).status, 0);
+    const second = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ TWO: 'value-two-9' }));
+    assert.equal(second.status, 0, second.out + second.err);
+    const w = fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-'));
+    const plain = decrypt(good.id, path.join(F.old, '.worktrees', w, 'secrets/app.enc.env')).stdout;
+    assert.match(plain, /ONE=value-one-9/);
+    assert.match(plain, /TWO=value-two-9/);
   } finally { F.done(); }
 });
 
