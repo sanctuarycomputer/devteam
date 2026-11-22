@@ -31898,24 +31898,34 @@ function responderMainBranch() {
   try { const b = block ? JSON.parse(block[1]).main_branch : null; if (typeof b === 'string' && b) return b; } catch {}
   return SETTINGS_DEFAULTS.main_branch;
 }
-// The owner's settings key that can't be what a start reads, or null. Each key the start uses has
-// the shape it needs, and every other known key fits its SETTING_SHAPES entry or else the kind of its
-// default: a junk value never starts the kit's defaults, and a deny list that isn't one never drops
-// the workers' rules (final-6 F1, final-6b F1-F3, rulings-kit-103-r4.md Round 7). A blank
-// responder_command stays unset, as done-when 1 has it (R1c).
+// The owner's settings key that can't be what a start reads, or null. The keys the start reads
+// are checked strictly, so a junk value never starts the kit's defaults and a deny list that isn't
+// one never drops the workers' rules (final-6 F1, final-6b F1-F3). Every other known key is checked
+// only for the kind the kit reads it as, with null allowed (unset): never SETTING_SHAPES, which
+// decides what the Settings page shows and refuses values the kit takes, such as init's
+// `project: "My App"` (final-7 F1, rulings-kit-103-r4.md Round 8). An empty deny list is the
+// owner's choice, as it is for workers (final-7 F2). A blank responder_command stays unset, as
+// done-when 1 has it (R1c); main_branch is checked by responderMain.
 const RESPONDER_NEEDS = {
   worker_denied_commands: (v) => Array.isArray(v) && v.every((c) => typeof c === 'string' && c.trim() !== ''),
   agent_command: (v) => typeof v === 'string' && v.trim() !== '',
   responder_command: (v) => v === null || typeof v === 'string',
-  sensor_scrub: (v) => Array.isArray(v) && v.every((p) => typeof p === 'string' || isObj(p)),
 };
-const settingKind = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+// the kinds the kit reads where the default gives none (null or no default), or more than one
+const RESPONDER_KINDS = {
+  tmux_session: ['string'], usage_command: ['string'], upstream_base: ['string'], remediations: ['object'], sensor_scrub: ['array'],
+  max_active_tickets: ['number'], max_active_per_component: ['number'], max_active_planners: ['number'], dashboard_port: ['number'],
+  release: ['string', 'object'],
+};
+const settingKind = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : isObj(v) ? 'object' : typeof v);
 function responderBadSetting(own) {
   for (const [k, v] of Object.entries(own)) {
     if (!SETTINGS_KEYS.includes(k)) continue;
+    if (RESPONDER_NEEDS[k]) { if (!RESPONDER_NEEDS[k](v)) return k; continue; }
+    if (k === 'main_branch' || v === null) continue;
     const def = SETTINGS_DEFAULTS[k] ?? REPO_OWN_DEFAULTS[k];
-    const fits = [RESPONDER_NEEDS[k], SETTING_SHAPES[k], !RESPONDER_NEEDS[k] && !SETTING_SHAPES[k] && def != null ? (x) => settingKind(x) === settingKind(def) : null].filter(Boolean);
-    if (fits.some((f) => !f(v))) return k;
+    const kinds = RESPONDER_KINDS[k] ?? (def == null ? null : [settingKind(def)]);
+    if (kinds && !kinds.includes(settingKind(v))) return k;
   }
   return null;
 }
@@ -31942,6 +31952,7 @@ function responderMain(s) {
     // F1). A block without main_branch is a project on main, as init writes one; one present must be a
     // branch name (m-20261122-054734545-supervisor).
     if (!isObj(own) || !Object.keys(own).some((k) => SETTINGS_KEYS.includes(k)) || (Object.hasOwn(own, 'main_branch') && (typeof own.main_branch !== 'string' || !own.main_branch))) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): the settings block is not an object of settings, so nothing was started`);
+    if (Object.hasOwn(own, 'main_branch') && responderGit(['check-ref-format', '--branch', own.main_branch]).status !== 0) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): main_branch is not a branch name, so nothing was started`);
     const bad = responderBadSetting(own);
     if (bad) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): ${bad} is not a value it can take, so nothing was started`);
     const onMain = { ...SETTINGS_DEFAULTS, ...own };

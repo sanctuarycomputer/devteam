@@ -1078,7 +1078,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     }
   });
   // final-4: the owner's settings as anything but a plain object never start the kit's defaults
-  for (const shape of ['null', '[]', '"x"', '7', '42', 'true', '{}', '{"main_branch": 7}', '{"main_branch": ""}', '{"main_branch": null}', '{"main_branch": ["main"]}', '{"foo": 1}', '{"__proto__": {}}', '{"__proto__": null}', '{"constructor": 1}', '[{"main_branch": "main"}]', '{"project": 7}', '{"gates": "x"}', '{"responder": "yes"}', '{"sensor_scrub": null}', '{"upstream_base": {"x": 1}}', '{"links": 0}', `{"junk": "${'x'.repeat(6 * 1024 * 1024)}", "project": 7}`, '{"worker_denied_commands": "x"}', '{"worker_denied_commands": [5]}', '{"worker_denied_commands": null}', '{"worker_denied_commands": 42}', '{"worker_denied_commands": [""]}', '{"agent_command": ["claude"]}', '{"agent_command": ""}', '{"responder_command": ["x"]}']) {
+  for (const shape of ['null', '[]', '"x"', '7', '42', 'true', '{}', '{"main_branch": 7}', '{"main_branch": ""}', '{"main_branch": null}', '{"main_branch": ["main"]}', '{"foo": 1}', '{"__proto__": {}}', '{"__proto__": null}', '{"constructor": 1}', '[{"main_branch": "main"}]', '{"project": 7}', '{"gates": "x"}', '{"responder": "yes"}', '{"upstream_base": {"x": 1}}', '{"links": 0}', `{"junk": "${'x'.repeat(6 * 1024 * 1024)}", "project": 7}`, '{"worker_denied_commands": "x"}', '{"worker_denied_commands": [5]}', '{"worker_denied_commands": null}', '{"worker_denied_commands": 42}', '{"worker_denied_commands": [""]}', '{"agent_command": ["claude"]}', '{"agent_command": ""}', '{"responder_command": ["x"]}']) {
     const label = shape.length > 80 ? `${shape.slice(0, 40)}… (${shape.length} bytes)` : shape;
     await t.test(`final-4 F1: a settings block of ${label} refuses and types nothing`, () => {
       fresh();
@@ -1117,6 +1117,39 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
       F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
     }
   });
+  // Round 8 (final-7 F1, F2): values the kit takes everywhere else start. The block is cmdInit's,
+  // whose project is --name or the folder's name as typed (devteam.mjs cmdInit).
+  for (const [label, patch, branch] of [
+    ['init --name "My App"', { project: 'My App' }],
+    ['init in a folder named café', { project: 'café' }],
+    ['init in a folder named My Website', { project: 'My Website' }],
+    ['tmux_session "my fleet"', { tmux_session: 'my fleet' }],
+    ['worktree_setup null', { worktree_setup: null }],
+    ['a worktree_files path over 100 characters', { worktree_files: [`vendor/${'x'.repeat(120)}`] }],
+    ['a deny pattern over 100 characters', { worker_denied_commands: [`git push*${'x'.repeat(120)}*`] }],
+    ['sensor_scrub null', { sensor_scrub: null }],
+    ['an empty deny list (the owner\'s choice)', { worker_denied_commands: [] }],
+    ['a main_branch with a +', { main_branch: 'rel+1' }, 'rel+1'],
+  ]) {
+    await t.test(`final-7 F1: ${label} starts`, () => {
+      fresh();
+      const sf = path.join(F.old, settingsRel);
+      const keep = fs.readFileSync(sf);
+      const text = keep.toString();
+      const block = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text);
+      const init = { project: 'p', upstream_base: null, upstream_sync: 'adopt', components: {}, gates: {}, responder_command: A.cmd, ...patch };
+      fs.writeFileSync(sf, text.replace(block[1], JSON.stringify(init, null, 2)));
+      F.g(['commit', '-qam', `settings: ${label}`], F.old);
+      for (const b of ['main', ...(branch ? [branch] : [])]) F.g(['push', '-q', 'origin', `HEAD:${b}`], F.old);
+      try { honestStart(); } finally {
+        F.run(F.old, ['responder', '--stop'], SUP);
+        fs.writeFileSync(sf, keep);
+        F.g(['commit', '-qam', 'settings: back'], F.old);
+        F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+        if (branch) F.g(['push', '-q', 'origin', `:${branch}`], F.old);
+      }
+    });
+  }
   // final-4 F2: git never lists a path named .git, so the walk refuses one anywhere below the root
   for (const [name, rel] of [['p9 a file under a tracked folder', 'docs/.git/planted'], ['p10 a file under a new folder', 'r4-new/.git/planted'], ['p11 a file under .claude', '.claude/.git/planted'], ['n5 a .git file in a tracked folder', 'docs/.git']]) {
     await t.test(`final-4 F2: ${name} refuses`, () => {
