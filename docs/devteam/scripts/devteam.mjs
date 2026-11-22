@@ -11980,8 +11980,9 @@ function sopsKeyFor(file, blob, base) {
   }
   return {};
 }
-// A per-question lock that only its live holder can lose: a holder that died is taken over by an
-// atomic rename, and only the holder removes it.
+// A per-question lock that only its live holder can lose. A lock file is born whole and removed only by
+// its holder; a dead holder's is cleared under <lock>.clearing, and only while it is still that holder's.
+// Anything at the lock path that isn't a regular file is named in a refusal, and nothing is posted.
 function sopsQuestionLock(id, fn) {
   const dir = path.join(runDir, 'secret-locks');
   fs.mkdirSync(dir, { recursive: true });
@@ -11989,25 +11990,36 @@ function sopsQuestionLock(id, fn) {
   const breaker = `${lock}.clearing`;
   const me = `${process.pid}:${crypto.randomUUID()}`;
   const alive = (pid) => { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
-  const read = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { return e.code === 'ENOENT' ? null : ''; } };
+  // never follows a link or blocks on a pipe: anything but a regular file reads as ''
+  const read = (p) => {
+    let fd;
+    try { fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); return fs.fstatSync(fd).isFile() ? fs.readFileSync(fd, 'utf8') : ''; } catch (e) { return e.code === 'ENOENT' ? null : ''; } finally { if (fd !== undefined) fs.closeSync(fd); }
+  };
+  const kind = (st) => (st.isDirectory() ? 'a folder' : st.isSymbolicLink() ? 'a link' : st.isFIFO() ? 'a named pipe' : st.isSocket() ? 'a socket' : 'a special file');
+  const odd = (what) => die(`${lock} is ${what}, not a lock file. Nothing was posted; remove it${what === 'a folder' ? ' (rm -r)' : ''} and post again`);
   // A lock file is born whole: written under a private name, then linked into place, which fails if one is there.
   const claim = (p) => {
     const tmp = `${p}.${process.pid}.${crypto.randomUUID()}`;
     fs.writeFileSync(tmp, me, { flag: 'wx', mode: 0o600 });
-    try { fs.linkSync(tmp, p); return true; } catch (e) { if (e.code === 'EEXIST') return false; throw e; } finally { fs.rmSync(tmp, { force: true }); }
+    let refused;
+    try { fs.linkSync(tmp, p); return true; } catch (e) { if (e.code === 'EEXIST') return false; refused = e; } finally { fs.rmSync(tmp, { force: true }); }
+    // no fallback to a plain create: a lock seen before its holder is written reads as a dead holder's, and would be cleared
+    die(`could not take the lock for ${id}: the filesystem at ${dir} refused a hard link (${refused.code ?? refused.message}). Nothing was posted`);
   };
   const start = Date.now();
-  const wait = () => {
-    if (Date.now() - start > 300000) die(`another post for ${id} is still running (${lock}); try again when it finishes`);
+  const wait = (why) => {
+    if (Date.now() - start > 300000) die(why ?? `another post for ${id} is still running (${lock}); try again when it finishes`);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   };
   for (;;) {
     if (claim(lock)) break;
+    const st = fs.lstatSync(lock, { throwIfNoEntry: false });
+    if (!st) { wait(); continue; } // released between the claim and this look
+    if (st.isSymbolicLink() && !fs.existsSync(lock)) { wait(`${lock} is a link to nothing, not a lock file. Nothing was posted; remove it and post again`); continue; }
+    if (!st.isFile()) odd(kind(st));
     const owner = read(lock);
-    if (owner === null) continue;
+    if (owner === null) { wait(); continue; }
     if (alive(Number(owner.split(':')[0]))) { wait(); continue; }
-    const pause = Number(process.env.DEVTEAM_TEST_LOCK_PAUSE_MS) || 0; // tests: let another post clear it first
-    if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
     // Its holder is dead. One process at a time clears a dead lock, and only while the lock is still that
     // dead holder's: nothing else removes a lock, so a live one taken meanwhile is never cleared.
     if (!claim(breaker)) {
@@ -12016,7 +12028,13 @@ function sopsQuestionLock(id, fn) {
       wait();
       continue;
     }
-    try { if (read(lock) === owner) fs.rmSync(lock, { force: true }); } finally { if (read(breaker) === me) fs.rmSync(breaker, { force: true }); }
+    let bad = null; // refused only after .clearing is let go, so the next post isn't stopped by it
+    try {
+      const now = fs.lstatSync(lock, { throwIfNoEntry: false });
+      if (now && !now.isFile()) bad = kind(now);
+      else if (now && read(lock) === owner) { try { fs.unlinkSync(lock); } catch (e) { if (e.code !== 'ENOENT') bad = `something that could not be removed (${e.code})`; } }
+    } finally { if (read(breaker) === me) fs.rmSync(breaker, { force: true }); }
+    if (bad) odd(bad);
   }
   const release = () => { if (read(lock) === me) fs.rmSync(lock, { force: true }); };
   process.once('exit', release);
