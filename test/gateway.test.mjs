@@ -2303,7 +2303,8 @@ test('preview names: only the box\'s, one label, and safeNext sends sign-in back
     for (const h of [`term.${box}`, `public.${box}`, `${P}.${box}`, `cooltiger.${box}`, `a-b.${box}`, `cool-tiger.other.example`, `sub.cool-tiger.${box}`, box]) assert.equal(gw.g.previewOf(h), null, h);
     assert.equal(gw.g.safeNext(`http://cool-tiger.${box}/x`), `http://cool-tiger.${box}/x`);
     assert.equal(gw.g.safeNext('https://cool-tiger.evil.example/x'), `${gw.publicUrl}/`);
-    assert.equal(gw.g.safeNext(`https://${'a'.repeat(8)}-tiger.${box}/x`), `${gw.publicUrl}/`, 'not this shape');
+    assert.equal(gw.g.safeNext(`https://${'a'.repeat(8)}-tiger.${box}/x`), `${gw.publicUrl}/`, 'not on another scheme than the box\'s');
+    assert.equal(gw.g.safeNext(`http://a_b.${box}/x`), `${gw.publicUrl}/`, 'not this shape');
   } finally { await gw.close(); }
 });
 
@@ -3256,6 +3257,7 @@ async function box(given) {
   fs.mkdirSync(path.join(dir, 'public', 'blobs'), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(dir, 'public', 'blobs', sha(PAGE).toString('hex')), PAGE);
   const seen = new Map();
+  const cookies = []; // the Cookie header of each request a stand-in received
   const stubs = [];
   const hub = { list: [], hits: 0, stall: false, held: [], release() { hub.stall = false; for (const x of hub.held.splice(0)) hubAnswer(x.r, x.list); } };
   // fixed: a port of the instance block; none: the OS's, never the hub's or one in the block
@@ -3264,6 +3266,7 @@ async function box(given) {
       let port = fixed ?? 0;
       const s = http.createServer((q, r) => {
         seen.get(port).push(q.url);
+        cookies.push(q.headers.cookie);
         const slug = /^\/public-manifest\/([^/?]+)$/.exec(q.url)?.[1];
         if (slug) { r.writeHead(200, { 'content-type': 'application/json' }); return r.end(JSON.stringify(manifest(slug))); }
         if (q.url === '/api/artifact-publish') { q.resume(); r.writeHead(200, { 'content-type': 'application/json' }); return r.end('{"ok":true}'); }
@@ -3316,7 +3319,7 @@ async function box(given) {
     for (const s of stubs) { s.closeAllConnections?.(); await new Promise((ok) => s.close(ok)); }
     if (hubSrv) { hubSrv.closeAllConnections?.(); await new Promise((ok) => hubSrv.close(ok)); }
   };
-  return { g, port, dir, seen, hub, host, get, close, DEV, DEV2, origin: (l) => `http://${host(l)}` };
+  return { g, port, dir, seen, cookies, hub, host, get, close, DEV, DEV2, origin: (l) => `http://${host(l)}` };
 }
 const on = (name, opts, fn) => test(name, { timeout: 20000 }, async () => { const b = await box(opts); try { await fn(b); } finally { await b.close(); } });
 const shape = (r) => { const headers = { ...r.headers }; delete headers.date; return JSON.stringify({ status: r.status, headers, body: r.body }); };
@@ -3392,6 +3395,57 @@ on('C5 a valid /c/ link works on the project host with no cookie', undefined, as
   assert.equal(r.status, 200);
   assert.deepEqual(b.seen.get(P), ['/artifact/main/mock/index.html']);
 });
+// A sandboxed artifact's nested frame: the browser calls it cross-site, and its capability is its only credential.
+const CROSS_FRAME = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'cross-site' };
+const capLink = async (b) => (await b.get('alpha', '/artifact/main/mock/index.html', { cookie: COOKIE, headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } })).headers.location;
+on('C5b a valid capability loads as a cross-site frame, signed out or with a cookie, and the port gets no cookie', undefined, async (b) => {
+  const link = await capLink(b);
+  const out = await b.get('alpha', link, { headers: CROSS_FRAME });
+  const signedIn = await b.get('alpha', link, { cookie: COOKIE, headers: CROSS_FRAME });
+  assert.deepEqual([out.status, signedIn.status], [200, 200]);
+  assert.deepEqual(b.seen.get(P), ['/artifact/main/mock/index.html', '/artifact/main/mock/index.html']);
+  assert.deepEqual(b.cookies, [undefined, undefined], 'the port receives no cookie');
+});
+on('C5c an expired capability and a bad MAC, as a cross-site frame, answer a listed and a made-up name alike', undefined, async (b) => {
+  const [, exp, sid, mac, inner] = /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/.*)$/.exec(await capLink(b));
+  for (const bad of [`/c/1.${sid}.${mac}${inner}`, `/c/${exp}.${sid}.${mac[0] === 'A' ? 'B' : 'A'}${mac.slice(1)}${inner}`]) {
+    const [real, made] = [await b.get('alpha', bad, { headers: CROSS_FRAME }), await b.get('nobody', bad, { headers: CROSS_FRAME })];
+    assert.equal(real.status, 403, bad);
+    assert.match(real.body, /artifact link has expired/, 'the capability\'s own refusal');
+    assert.equal(shape(real), shape(made), bad);
+  }
+  assert.deepEqual([b.seen.get(P), b.seen.get(P + 1)], [[], []], 'no port is asked');
+});
+on('C5d any other /c/ form, as a cross-site frame, keeps the frame refusal and reaches no port', undefined, async (b) => {
+  const cap = /^\/c\/[^/]+/.exec(await capLink(b))[0];
+  for (const form of [
+    `${cap}/artifact/main/mock%2findex.html`, `${cap}/artifact/main/mock%2Findex.html`,
+    `${cap}/artifact/main/mock%5cindex.html`, `${cap}/artifact/main/mock%5Cindex.html`, `${cap}/artifact/main/mock\\index.html`,
+    `${cap}/artifact/main/./mock/index.html`, `${cap}/artifact/main/../mock/index.html`, `${cap}/artifact/main/mock/..`,
+    `${cap}/artifact/main/%2e/mock/index.html`, `${cap}/artifact/main/%2E/mock/index.html`, `${cap}/artifact/main/%2e%2e/mock/index.html`, `${cap}/artifact/main/.%2E/mock/index.html`,
+    `${cap}//artifact/main/mock/index.html`, `${cap}/artifact//main/mock/index.html`, `${cap}/artifact/main/mock//index.html`,
+    '/c/', '/c/x/artifact/main/mock/index.html', '/c/1.a/artifact/main/mock/index.html', `${cap}/other/x`, cap,
+  ]) {
+    const r = await b.get('alpha', form, { headers: CROSS_FRAME });
+    assert.deepEqual([r.status, r.body], [403, 'not in another site\'s frame'], form);
+  }
+  assert.deepEqual([b.seen.get(P), b.seen.get(P + 1)], [[], []], 'no port is asked');
+});
+on('C5e the capability route never consults the session, even with a cookie that makes sessionOf throw', undefined, async (b) => {
+  const link = await capLink(b);
+  let sessionReads = 0;
+  const trap = (req) => Object.defineProperty(req.headers, 'cookie', { enumerable: true, configurable: true, get() {
+    if (new Error().stack.includes('sessionOf')) { sessionReads++; throw new Error('sessionOf read the cookie'); }
+    return COOKIE;
+  } });
+  b.g.server.prependListener('request', trap);
+  const r = await b.get('alpha', link, { headers: CROSS_FRAME });
+  assert.equal(r.status, 200);
+  assert.equal(sessionReads, 0, 'no sessionOf on the capability route');
+  assert.deepEqual(b.cookies, [undefined], 'and the cookie does not reach the port');
+  await b.get('alpha', '/api/data');
+  assert.ok(sessionReads > 0, 'the trap does fire on a route that reads the session');
+});
 on('C6 /healthz is the gateway\'s ok on a project label of a preview\'s shape', { list: [row('devteam-dev', P)] }, async (b) => {
   const r = await b.get('devteam-dev', '/healthz');
   assert.deepEqual([r.status, r.body], [200, 'ok']);
@@ -3402,6 +3456,11 @@ on('C6b /healthz is the gateway\'s ok on a made-up label and on 127.0.0.1:<port>
   assert.deepEqual([made.status, made.body], [200, 'ok'], 'a made-up label');
   const boot = await b.get(null, '/healthz', { headers: { host: `127.0.0.1:${b.port}` } });
   assert.deepEqual([boot.status, boot.body], [200, 'ok'], 'the boot check');
+});
+test('C6c a signed-out /healthz does the session work on every label before it consults the list', () => {
+  const src = fs.readFileSync(path.join(here, '..', 'cloud', 'gateway.mjs'), 'utf8');
+  assert.match(src, /const signedIn = !!l && store\.load\(\)\.passkeys\.length > 0 && !!sessionOf\(req\);\s*app = signedIn && previews\.has\(l\);/, 'the session first, the list after');
+  assert.doesNotMatch(src, /previews\.has\(l\) && store\.load\(\)/, 'a live preview must not be the only name that does the session work');
 });
 for (const l of ['4321', 'public', 'www', 'a_b', '-app', 'DevTeam']) on(`C14 ${l}.<box> answers 421`, undefined, async (b) => {
   assert.equal((await b.get(l, '/', { cookie: COOKIE })).status, 421);

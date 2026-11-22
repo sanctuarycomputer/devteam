@@ -383,11 +383,11 @@ function listedByRoot(instances, ports) {
   for (const x of perPort.values()) if (!perRoot.has(x.root) || Number(x.port) < Number(perRoot.get(x.root).port)) perRoot.set(x.root, x);
   return [...perRoot.values()];
 }
-// A preview's host name: two letter-only words and an optional number, which no reserved name of
-// the box can be. A word list would say nothing more; the map says whether it is live.
 export const HOST_LABEL = /^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 export const RESERVED_LABELS = ['term', 'public', 'www'];
 export const RESERVED_SEGMENTS = ['api', 'artifact', 'c', 'healthz', 'index.html', 'presence', 'public-manifest', 'review', 'upload', 'view'];
+// A preview's host name: two letter-only words and an optional number, which no reserved name of
+// the box can be. A word list would say nothing more; the map says whether it is live.
 export const PREVIEW_NAME = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
 const PREVIEW_MAX = 20;
 const PREVIEW_CAPS = { project: 63, session: 80, label: 40 };
@@ -1888,6 +1888,11 @@ export function createGateway(opts = {}) {
   // artifact's files don't need this: they load under a capability in the path (below).
   const IMAGE = /\.(png|jpe?g|gif|webp|avif|svg|ico)$/i;
   const PREVIEW_FRAMED = ['iframe', 'frame', 'object', 'embed', 'fencedframe'];
+  const CAP_LINK = /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/;
+  // A sandboxed artifact's own frames arrive cross-site, with their capability as the only credential,
+  // so an exact capability path answers to its own check instead of the frame refusal. Judged on the
+  // raw path: anything a server could decode or normalise into another path keeps the refusal.
+  const capLinkExact = (raw) => CAP_LINK.test(raw) && !/%(?:2f|5c|2e)|\\|\/\//i.test(raw) && !raw.split('/').some((x) => x === '.' || x === '..');
   const crossSiteOk = (req, p, url) => {
     const site = req.headers['sec-fetch-site'];
     if (!site || site === 'same-origin' || site === 'none') return true;
@@ -2529,7 +2534,11 @@ export function createGateway(opts = {}) {
     if (url.pathname === '/healthz') {
       const l = labelOf(req.headers.host);
       let app = false;
-      try { app = !!l && previews.has(l) && store.load().passkeys.length > 0 && !!sessionOf(req); } catch {}
+      // the session work first, for every label, so its cost says nothing of which names are live
+      try {
+        const signedIn = !!l && store.load().passkeys.length > 0 && !!sessionOf(req);
+        app = signedIn && previews.has(l);
+      } catch {}
       if (!app) return send(res, 200, 'text/plain', 'ok');
     }
     // Our own names only; and anything but a read must come from a page on the same name.
@@ -2543,15 +2552,15 @@ export function createGateway(opts = {}) {
     // outlive its server, and run as that name's real dashboard once one takes the port.
     if (label && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
     // Before any lookup, for every label: no other site lays one of these under its own page with
-    // the owner's session in it.
-    if (label && PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, 'text/plain; charset=utf-8', 'not in another site\'s frame');
+    // the owner's session in it. An exact capability path has its own check, and reads no session.
+    const rawPath = req.url.split('?')[0];
+    if (label && !capLinkExact(rawPath) && PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, 'text/plain; charset=utf-8', 'not in another site\'s frame');
     const p = url.pathname;
     // Step 6 of the order, a page this name published (task 2 of kit-277), goes here: anyone's, from
     // the gateway's store, before every check about the owner.
     const isAuth = isBox && (p === '/auth' || p.startsWith('/auth/'));
-    const rawPath = req.url.split('?')[0];
     try {
-      const cm = label ? /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/.exec(rawPath) : null;
+      const cm = label ? CAP_LINK.exec(rawPath) : null;
       if (cm) {
         // The same MAC and state read for every name: an unlisted one is checked against port 0,
         // which no link is minted for, so a failure costs the same and says nothing of the list.
