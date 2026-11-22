@@ -16657,11 +16657,14 @@ function collectMetrics(since, reviewsSince = 0) {
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
   const ackWindow = settings.finding_ack_hours * 3600000;
-  const acks = logObjects('observation').filter((o) => o.kind === 'finding-ack' && now - Date.parse(o.created_at) < ackWindow);
+  // A merge commit on a main never changes, so an ack of one (merged-without-merge on <repo>:<sha>)
+  // never lapses: it would only bring the same merge back a day later (kit-348).
+  const lasting = (a) => /^merged-without-merge [^\s:]+:[0-9a-f]{12}$/.test(a.subject);
+  const acks = logObjects('observation').filter((o) => o.kind === 'finding-ack' && (lasting(o) || now - Date.parse(o.created_at) < ackWindow));
   const ackOf = (x) => acks.filter((a) => a.subject === `${x.kind} ${x.subject}`).sort(byTime).pop();
   const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
   m.findings = sorted.filter((x) => !ackOf(x));
-  m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
+  m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: lasting(a) ? null : new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
   return m;
 }
 // ack <finding-kind> <subject> --reason r [--owner]: set a metrics finding aside for
