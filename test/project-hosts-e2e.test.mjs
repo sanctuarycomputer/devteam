@@ -296,9 +296,10 @@ async function otherBrowser(t, r, { session = false, passkey = false } = {}) {
 const ADDRESSES = `[location.href, ...[...document.querySelectorAll('[href],[src],[action],[data-copy]')].flatMap((e) => ['href', 'src', 'action', 'data-copy'].map((a) => e.getAttribute(a)).filter(Boolean).map((v) => { try { return new URL(v, location.href).href; } catch { return v; } }))]`;
 // An address "names a port" when it reaches a project or the hub by its port. The gateway's own port
 // is in every address here only because a test can't listen on 80, so it is allowed.
-// the names the contract keeps off every project (cloud/gateway.mjs RESERVED_LABELS), written out so
-// a change to the gateway's list can't change what this scan looks for
-const RESERVED = ['term', 'public', 'www'];
+// reserved names no address here should be on (cloud/gateway.mjs RESERVED_LABELS), written out so a
+// change to the gateway's list can't change what this scan looks for. Not term: term.<box> is the box's
+// own terminal, which the hub frames (hub.html, box.terminal).
+const RESERVED = ['public', 'www'];
 function namingPorts(r, addresses) {
   const block = new Set([HUB, ...Array.from({ length: 25 }, (_, i) => P + i)].map(String));
   return addresses.filter((a) => {
@@ -400,12 +401,19 @@ test('C5 PL-S8: signed out, a project address signs in on the box and lands back
 test('C5b PL-S8: signed out, a project host answers 401 to its API, and a made-up name answers as a real one', CHROME, async () => {
   const r = await rig();
   const own = r.at('alpha');
-  const before = r.reqs.length;
-  const read = await raw(r, `alpha.box.localhost:${r.port}`, '/api/data', { headers: { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' } });
+  // each request tagged, so the owner's open dashboard polling the gateway meanwhile isn't counted
+  const tag = `c5b=${Date.now()}`;
+  const fetchHeaders = { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' };
+  const read = await raw(r, `alpha.box.localhost:${r.port}`, `/api/data?${tag}`, { headers: fetchHeaders });
   assert.deepEqual([read.status, read.body], [401, 'sign in with your passkey'], 'GET /api/data, signed out');
-  const act = await raw(r, `alpha.box.localhost:${r.port}`, '/api/pane-answer', { method: 'POST', headers: { origin: own, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', 'content-type': 'application/json' }, body: JSON.stringify({ pane: 'x', answer: 'y' }) });
+  const act = await raw(r, `alpha.box.localhost:${r.port}`, `/api/pane-answer?${tag}`, { method: 'POST', headers: { origin: own, ...fetchHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ pane: 'x', answer: 'y' }) });
   assert.deepEqual([act.status, act.body], [401, 'sign in with your passkey'], 'POST /api/pane-answer, signed out');
-  assert.equal(r.reqs.length - before, 2, 'both reached the gateway');
+  // not only /api/: the dashboard's own pages of a committed artifact, and its viewer, need the session too
+  for (const route of ['/artifact/main/hello/index.html', '/view/artifact/hello']) {
+    const a = await raw(r, `alpha.box.localhost:${r.port}`, `${route}?${tag}`, { headers: fetchHeaders });
+    assert.deepEqual([a.status, a.body], [401, 'sign in with your passkey'], `GET ${route}, signed out`);
+  }
+  assert.equal(r.reqs.filter((x) => x.url.includes(tag)).length, 4, 'all four reached the gateway');
   // a navigation: the same answer for a real name and a made-up one
   const nav = { 'sec-fetch-site': 'none', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' };
   const [real, made] = await Promise.all(['alpha', 'nosuchname'].map((n) => raw(r, `${n}.box.localhost:${r.port}`, '/', { headers: nav })));
@@ -471,6 +479,18 @@ test("C10 PL-S9: signed in, the page's script reaches neither /api nor the dashb
   assert.deepEqual([out.data, out.answer], ['threw', 'threw'], 'neither request gave it an answer');
   assert.deepEqual(sent.filter((u) => new URL(u).pathname.startsWith('/api/')), [], 'its policy kept the requests in the browser');
   assert.deepEqual(r.reqs.filter((x) => x.url.startsWith('/api/') && x.site !== 'same-origin'), [], 'and none reached the gateway');
+});
+
+test("C10b PL-S9: signed in, the gateway's public copy (?plain) is sandboxed: it can't read the dashboard's storage", CHROME, async () => {
+  const r = await rig();
+  await go(r.page, `${r.at('alpha')}/`);
+  await waitFor(r.page, `document.title === 'devteam · alpha'`, "alpha's dashboard");
+  await r.page.ev(`localStorage.setItem('e2e-secret', 'the owner')`);
+  await go(r.page, `${r.at('alpha')}/hello/?plain`);
+  const first = await waitFor(r.page, `location.search === '?plain' && window.__probe?.[0]`, "the page's script, as the public sees it");
+  assert.equal(await r.page.ev('location.href'), `${r.at('alpha')}/hello/?plain`, 'not sent to the wrapper');
+  assert.deepEqual([first.storage, first.parentStorage], ['SecurityError', 'SecurityError'], "it can't read the dashboard's localStorage");
+  assert.equal(await r.page.ev('self.origin'), 'null', 'its origin is opaque');
 });
 
 test("C11 PL-S9: what such a page would send (Origin: null, the owner's cookie) the gateway refuses", CHROME, async () => {
