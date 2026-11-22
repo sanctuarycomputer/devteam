@@ -1499,6 +1499,7 @@ const CLASS_WORDS = Object.freeze({
   'goal-approval': 'Approving a goal',
   'owner-setting': 'Asking for a setting',
   'settings-edit': 'Changing one of its own settings',
+  'browser-handover': 'Handing the browser to you for a login',
 });
 // A class in plain words; one the supervisor made up (decide --class, ask --class) shows as unnamed,
 // in its own words, so the gap is visible and the bare id never is. No class, no name.
@@ -8048,6 +8049,21 @@ function askLine({ thread, about } = {}) {
   // rules (no default, below; the Inbox's floor) hold. Refused, not rewritten: another kind given on purpose
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
+  // browser-handover (kit-67): the browser held for the owner's login until they answer. Only the
+  // owner's Done hands it back, so it has no default; it is one owner-action about one instance's
+  // browser (browser:<instance key>, BROWSER_KEY: initialised at load, long before this runs), and
+  // that browser has one handover open at a time. Checked in this order, before anything else.
+  // Another case (Browser-Handover) is refused first: className would name it a handover while
+  // these checks, and the hold, skipped it.
+  if (cls !== 'browser-handover' && cls?.toLowerCase() === 'browser-handover') die('ask: the class is browser-handover, in lower case');
+  if (cls === 'browser-handover') {
+    if (flags.default !== undefined) die('a browser-handover question has no --default: only the owner hands the browser back');
+    if (kind !== 'owner-action') die(`a browser-handover question is an owner-action (the owner logs in, then answers Done): ask it --kind owner-action, not --kind ${kind}`);
+    const hs = flagStr('scope') ?? null;
+    if (typeof hs !== 'string' || !hs.startsWith('browser:') || !BROWSER_KEY.test(hs.slice('browser:'.length))) die(`a browser-handover question's scope is browser:<instance key> (the browser it hands over, as browser status names it)${hs == null ? ', and this one has no --scope' : `, not ${hs}`}`);
+    const held = questions().filter((x) => x.class === 'browser-handover' && x.scope === hs && x.status === 'open');
+    if (held.length) die(`a browser-handover question for ${hs} is already open (${held.map((x) => x.id).join(', ')}): the browser is handed over once at a time; wait for the owner's answer, or withdraw it first`);
+  }
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
   // --options takes each choice as its own value (or one JSON array of strings). One value holding
   // several choices joined by | ("yes|no", "Merge it | Let it go") would show the owner a single choice
@@ -8247,7 +8263,7 @@ function askLine({ thread, about } = {}) {
     if (hold && !flagStr('owner-said')) die(remediationHoldWords(r.name, rel[0] ?? null, hold, r.valid_minutes));
     ownerSaid = about?.owner_said ?? (flagStr('owner-said')?.trim() || null);
   }
-  if (!orderAsked && !flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
+  if (!orderAsked && cls !== 'browser-handover' && !flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
   // the answer approves each once and nothing else (constitution.md §3, one answer, one act).
   const approves = [...new Set(asList(flags.approves).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
@@ -29581,7 +29597,7 @@ async function cmdBrowserGuard() {
 // devteam.mjs browser (browser@1; design supervisors-can-use-a-browser-with-the-o, §2 and §3): the
 // supervisor's own Chrome, driven from its shell. One private profile per project (the owner's
 // answer to q-20261114-203933946-supervisor), at ~/.devteam/browser/<key>/, used by nobody else.
-const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | type <ref> --stdin | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>]';
+const BROWSER_USAGE = 'browser start [--headed] | stop | status [--json] | open <url> | snapshot [--json] | click <ref> | type <ref> <text> | type <ref> --stdin | press <key> | scroll <up|down> | back | tabs | tab <n> | screenshot [--out f] | profiles | forget [--profile <key>] | handover --reason "<words>" | wait [--timeout <n>s|<n>m|<n>h]';
 // The instance key, the contract's instance pattern: <project slug>-<12 hex>. A path is built from a
 // key only once it matches, so no key can climb out of browserHome().
 const BROWSER_KEY = /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$/;
@@ -29621,6 +29637,58 @@ function browserKey() {
   const slug = String(loadSettings().project ?? path.basename(mainRoot)).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
   return `${slug}-${crypto.createHash('sha1').update(realPath(mainRoot)).digest('hex').slice(0, 12)}`;
 }
+// --- the handover (kit-67): the browser held for the owner while a browser-handover question of this
+// instance's scope is open. The hold comes from the log alone, read fresh: no file holds it.
+const browserScope = () => `browser:${browserKey()}`;
+// The verbs refused while held, in the CLI before anything starts (the daemon refuses every verb but
+// ping, status, stop and settle on its own).
+const BROWSER_HELD_VERBS = ['open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget'];
+// Set by browser serve: the daemon reads the log on every verb, so it keys the fold on the log files'
+// stat alone and on main's sha (a git call) only every 5 s.
+let browserIsDaemon = false;
+let browserLogSeen = null;
+let browserMainSeen = { at: 0, part: null };
+// Each log file's name, size and mtime under run/log and project/log, as logKey reads them.
+function browserLogStat() {
+  const parts = [];
+  for (const [tag, d] of [['run', liveLogDir()], ['project', durableLogDir()]]) {
+    let names = [];
+    try { names = fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).sort(); } catch {}
+    for (const f of names) { try { const st = fs.statSync(path.join(d, f)); parts.push(`${tag}/${f} ${st.size} ${st.mtimeMs}`); } catch {} }
+  }
+  return parts.join('\n');
+}
+// The fold dropped when the log changed since this process last read it: in a CLI by logKey(), as wait
+// does, so a long browser wait sees the owner's answer; in the daemon by the cheap key above.
+function browserFresh() {
+  let key;
+  if (browserIsDaemon) {
+    if (Date.now() - browserMainSeen.at >= (Number(browserTestEnv('DEVTEAM_TEST_BROWSER_MAIN_MS')) || 5000)) { mainRefCache = undefined; browserMainSeen = { at: Date.now(), part: `main ${mainSha() ?? '-'}` }; }
+    key = `${browserMainSeen.part}\n${browserLogStat()}`;
+  } else key = logKey();
+  if (key !== browserLogSeen) { logCache = null; browserLogSeen = key; }
+}
+// A closed handover's outcome, from questionView: done only for the owner's own Done (the pick when the
+// answer line has a choice key, else its leading label; never the supervisor's reading), declined for
+// any other answer and a default, withdrawn for a withdraw; null while open.
+function browserOutcome(v) {
+  if (v.status === 'withdrawn') return 'withdrawn';
+  if (v.status === 'defaulted') return 'declined';
+  if (v.status !== 'answered') return null;
+  const label = v.in_words === null ? String(v.answer ?? '').split(' — ')[0] : v.in_words ? null : v.choice;
+  return String(label ?? '').trim().toLowerCase() === 'done' ? 'done' : 'declined';
+}
+// This scope's handovers in a fresh fold, oldest asked first. Only the class and scope's questions are
+// folded into views, so a refold costs only the handovers.
+function browserHandovers(scope = browserScope()) {
+  browserFresh();
+  return logObjects('question').filter((q) => q.class === 'browser-handover' && q.scope === scope).map(questionView)
+    .sort((a, b) => a.asked_at.localeCompare(b.asked_at) || a.id.localeCompare(b.id))
+    .map((v) => ({ qid: v.id, status: v.status, outcome: browserOutcome(v), closeAt: v.status === 'open' ? null : v.answered_at, asked_at: v.asked_at, context: v.context }));
+}
+// The qid holding the browser (the oldest open handover), or null.
+const browserHeld = (hs) => hs.find((h) => h.status === 'open')?.qid ?? null;
+const browserHeldLine = (held) => `held: ${held ? `${held} (the owner has the browser)` : 'no'}`;
 // The root a profile's root.json names, or null without a readable one.
 function browserRootOf(dir) {
   try { const r = JSON.parse(fs.readFileSync(path.join(dir, 'root.json'), 'utf8'))?.root; return typeof r === 'string' && path.isAbsolute(r) && r.length <= 4096 ? r : null; } catch { return null; }
@@ -29709,7 +29777,7 @@ function browserAlive(pid) {
   return r.status === 0 && !!r.stdout.trim() && !r.stdout.includes('Z');
 }
 const browserSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function browserGone(pid, ms) { const end = Date.now() + ms; while (browserAlive(pid)) { if (Date.now() > end) return false; await browserSleep(100); } return true; }
+async function browserGone(pid, ms) { const end = Date.now() + ms; while (browserAlive(pid)) { if (Date.now() > end) return false; await browserSleep(25); } return true; }
 // run/browser (0700): state.json, the start lock, shots/.
 const BROWSER_DIR = () => runPath('browser');
 const browserStateFile = () => path.join(BROWSER_DIR(), 'state.json');
@@ -29732,8 +29800,78 @@ function browserWriteState(s) {
   fs.writeFileSync(tmp, `${JSON.stringify(s)}\n`, { mode: 0o600, flag: 'wx' });
   fs.renameSync(tmp, browserStateFile());
 }
+// --- the reset ledger (kit-67): run/browser/resets.json, browser@1's resets. The daemon's record of
+// the closes it handled, oldest first; it never says how a handover ended (wait reads the fold).
+const browserLedgerFile = () => path.join(BROWSER_DIR(), 'resets.json');
+const BROWSER_QID = /^q-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const BROWSER_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const browserLedgerEntry = (e) => isObj(e) && Object.keys(e).every((k) => ['qid', 'outcome', 'reset', 'at', 'reopened'].includes(k)) && typeof e.qid === 'string' && BROWSER_QID.test(e.qid)
+  && ['done', 'declined', 'withdrawn'].includes(e.outcome) && typeof e.reset === 'boolean' && typeof e.at === 'string' && BROWSER_AT.test(e.at)
+  && (e.reopened === undefined || (Array.isArray(e.reopened) && e.reopened.every((u) => typeof u === 'string' && BROWSER_MASKED.test(u))));
+// Its entries. A file that can't be read, isn't JSON or is off the contract anywhere reads as [] (one
+// restart then handles every close it listed, and the file is written whole again).
+function browserLedger() {
+  try {
+    const j = JSON.parse(fs.readFileSync(browserLedgerFile(), 'utf8'));
+    if (isObj(j) && j.browser === 1 && Object.keys(j).length === 2 && Array.isArray(j.resets) && j.resets.every(browserLedgerEntry)) return j.resets;
+  } catch {}
+  return [];
+}
+// entries appended, written whole: a tmp file (0600), then renamed over it.
+function browserLedgerAdd(entries) {
+  browserDirMade();
+  const tmp = path.join(BROWSER_DIR(), `resets.json.${process.pid}.tmp`);
+  fs.rmSync(tmp, { force: true });
+  fs.writeFileSync(tmp, `${JSON.stringify({ browser: 1, resets: [...browserLedger(), ...entries] })}\n`, { mode: 0o600, flag: 'wx' });
+  fs.renameSync(tmp, browserLedgerFile());
+}
+// Whether the close of handover h (closed, from browserHandovers) is handled: the record of a close
+// this daemon handled (ctx.handled) with the same qid, close time and outcome; or the ledger's latest
+// entry for the qid (the last in file order) with the outcome the fold reads now and an at from the
+// close time up to the later of the close time and now, plus 60 s. The record or the entry, else null.
+// An entry written before the close, far ahead, or with another outcome doesn't count: handled again.
+function browserHandled(ctx, h, ledger, now) {
+  const mem = ctx.handled.get(h.qid);
+  if (mem && mem.closeAt === h.closeAt && mem.outcome === h.outcome) return mem;
+  const e = ledger.filter((x) => x.qid === h.qid).at(-1);
+  if (!e || e.outcome !== h.outcome) return null;
+  // a close time that doesn't parse has no window: its latest entry with the fold's outcome, whatever
+  // its at, handles it, so it is handled once overall, not once per daemon
+  if (!Number.isFinite(Date.parse(h.closeAt))) { browserClosedMs(ctx, h, now); return e; }
+  const at = Date.parse(e.at), closed = Date.parse(h.closeAt);
+  return at >= closed && at <= Math.max(closed, now) + 60000 ? e : null;
+}
+// A close's time in ms. One whose time doesn't parse (a line written by hand) reads as closed now (its
+// entry's at), never a NaN that throws or wedges every start; said once on the daemon's stderr.
+function browserClosedMs(ctx, h, now) {
+  const t = Date.parse(h.closeAt);
+  if (Number.isFinite(t)) return t;
+  if (!ctx.badTimes?.has(h.qid)) {
+    (ctx.badTimes ??= new Set()).add(h.qid);
+    try { process.stderr.write(`devteam: browser: ${h.qid}'s close time ${JSON.stringify(String(h.closeAt).slice(0, 40))} doesn't parse; read as closed now\n`); } catch {}
+  }
+  return now;
+}
+// The closes of this scope not yet handled, from the handovers hs.
+function browserUnhandled(ctx, hs) {
+  const ledger = browserLedger(), now = Date.now();
+  return hs.filter((h) => h.status !== 'open' && h.outcome && !browserHandled(ctx, h, ledger, now));
+}
+// The entries for closes handled, written to the ledger and recorded in memory. at is the later of
+// now and the close time, so a close line dated ahead of this clock is handled once, never in a loop.
+// reopened (masked) on done only. A qid off the contract's pattern is recorded in memory only: an
+// entry the reader refuses would turn the whole ledger off. (The log's own id rule keeps such a line
+// out of the fold today; this holds if the two patterns ever part.)
+function browserRecordCloses(ctx, closes, reopened) {
+  const now = Date.now();
+  const entries = closes.filter((h) => BROWSER_QID.test(h.qid)).map((h) => ({ qid: h.qid, outcome: h.outcome, reset: h.outcome !== 'done', at: new Date(Math.max(now, browserClosedMs(ctx, h, now))).toISOString(), ...(h.outcome === 'done' ? { reopened } : {}) }));
+  if (entries.length) browserLedgerAdd(entries);
+  for (const h of closes) ctx.handled.set(h.qid, { qid: h.qid, closeAt: h.closeAt, outcome: h.outcome, ...(h.outcome === 'done' ? { reopened } : {}) });
+  ctx.foldAt = 0; // the kept fold still counts these as pending: the view's next input folds again
+}
 // The daemon's answer to one verb: { code, out }. Rejects when nothing answers in ms.
-function browserCall(verb, args = {}, { state = browserState(), ms = 60000 } = {}) {
+const browserCallMs = () => Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CALL_MS')) || 150000; // the hook: tests, a short limit
+function browserCall(verb, args = {}, { state = browserState(), ms = browserCallMs() } = {}) {
   return new Promise((resolve, reject) => {
     if (!state) return reject(new Error('the browser is not running'));
     const body = JSON.stringify({ verb, args });
@@ -29743,7 +29881,7 @@ function browserCall(verb, args = {}, { state = browserState(), ms = 60000 } = {
       res.on('data', (c) => { b += c; });
       res.on('end', () => { try { const r = JSON.parse(b); if (res.statusCode === 200 && Number.isInteger(r?.code) && typeof r.out === 'string') return resolve(r); } catch {} reject(new Error(`the daemon answered ${res.statusCode}`)); });
     });
-    req.on('timeout', () => req.destroy(new Error(`the daemon didn't answer in ${Math.round(ms / 1000)} s`)));
+    req.on('timeout', () => req.destroy(Object.assign(new Error(`the daemon didn't answer in ${Math.round(ms / 1000)} s; a close may still be finishing`), { timedOut: true })));
     req.on('error', reject);
     req.end(body);
   });
@@ -30044,10 +30182,12 @@ function browserWritePrefs(profile) {
 }
 // Every start step before Chrome launches, in order: a leftover Chrome stopped (only a proven one), a
 // foreign host's stale lock cleared (refused while a process here holds the profile), any Singleton*
-// left with nobody on the profile removed, the session files deleted, the prefs written.
-async function browserPrepareProfile(profile, notes) {
+// left with nobody on the profile removed, the session files deleted, the prefs written. procs: the
+// profile's process list when the caller has just read it (browserRelaunch, after Chrome's stop proved
+// it empty), so /proc isn't scanned twice in a row; else it is read here.
+async function browserPrepareProfile(profile, notes, { procs: known } = {}) {
   const { killed } = await browserKillChrome(profile, browserCandidates(profile));
-  const lock = browserSingleton(profile), procs = browserProcsOn(profile);
+  const lock = browserSingleton(profile), procs = known ?? browserProcsOn(profile);
   if (lock && lock.host !== browserHostname()) {
     if (procs === null) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)}, and this machine's processes couldn't be listed to see whether one here has it open`);
     if (procs.length) throw new Error(`browser: the profile is locked by host ${browserHostWords(lock.host)} and a process here (pid ${procs[0]}) has it open`);
@@ -30124,9 +30264,24 @@ async function cdpBrowser(chrome) {
   await cdp.send('Browser.getVersion');
   return cdp;
 }
-// The tabs: page targets in the order they appeared, each attached flat with Page enabled. A page
-// opened by another (a popup) becomes active; a sixth is closed at once, with a note.
+// The tabs: page targets in the order they appeared, each attached flat with Page and Network enabled
+// (tab.ready settles once they are). A page opened by another (a popup) becomes active; a sixth is
+// closed at once, with a note.
+// Each tab's last GET (kit-67), the page a done reopens: tab.lastGet is the URL of the latest
+// main-frame document request whose method was GET (a redirect comes as a new request under the same
+// requestId, so the 302 after a POST makes its target the last GET; a POST answered with a page leaves
+// it where it was), and tab.gets the URLs seen so (the latest 200). A page restored from the
+// back-forward cache sends no request: its URL counts only when it was seen as a GET on that tab.
+// Network is enabled with maxPostDataSize 0 and postData is never read: no request body reaches the
+// daemon. The URLs are kept in memory only.
 const BROWSER_TAB_CAP = 5;
+const BROWSER_GETS_KEPT = 200;
+function browserSawGet(tab, url) {
+  tab.lastGet = url;
+  tab.gets.delete(url);
+  tab.gets.add(url);
+  if (tab.gets.size > BROWSER_GETS_KEPT) tab.gets.delete(tab.gets.values().next().value);
+}
 async function browserWatchTabs(ctx) {
   const { cdp } = ctx;
   cdp.on('Target.targetCreated', async ({ targetInfo: t }) => {
@@ -30135,13 +30290,17 @@ async function browserWatchTabs(ctx) {
       if (!ctx.notes.includes(`Closed a tab past the cap of ${BROWSER_TAB_CAP}.`)) ctx.notes.push(`Closed a tab past the cap of ${BROWSER_TAB_CAP}.`);
       return void cdp.send('Target.closeTarget', { targetId: t.targetId }).catch(() => {});
     }
-    const tab = { targetId: t.targetId, sessionId: null, url: t.url, opening: null, refs: new Map() };
+    const tab = { targetId: t.targetId, sessionId: null, url: t.url, opening: null, refs: new Map(), lastGet: null, gets: new Set() };
     ctx.tabs.push(tab);
     if (t.openerId || !ctx.active) ctx.active = tab;
-    try {
-      tab.sessionId = (await cdp.send('Target.attachToTarget', { targetId: t.targetId, flatten: true })).sessionId;
-      await cdp.send('Page.enable', {}, tab.sessionId);
-    } catch {}
+    tab.ready = (async () => {
+      try {
+        tab.sessionId = (await cdp.send('Target.attachToTarget', { targetId: t.targetId, flatten: true })).sessionId;
+        await cdp.send('Page.enable', {}, tab.sessionId);
+        await cdp.send('Network.enable', { maxPostDataSize: 0 }, tab.sessionId);
+      } catch {}
+    })();
+    await tab.ready;
   });
   // Chrome's target title is never kept: on a page without one it is the raw URL (browserTitle).
   cdp.on('Target.targetInfoChanged', ({ targetInfo: t }) => { const tab = ctx.tabs.find((x) => x.targetId === t?.targetId); if (tab) tab.url = t.url; });
@@ -30153,7 +30312,15 @@ async function browserWatchTabs(ctx) {
     if (!tab || !frame || frame.parentId) return;
     tab.url = tab.frameUrl = frame.url;
     tab.unreachable = frame.unreachableUrl ?? null;
-    if (type === 'BackForwardCacheRestore') tab.loaded?.();
+    if (type === 'BackForwardCacheRestore') {
+      if (tab.gets.has(frame.url)) browserSawGet(tab, frame.url);
+      tab.loaded?.();
+    }
+  });
+  // the main frame's document requests: only the method and URL are read (never postData)
+  cdp.on('Network.requestWillBeSent', ({ type, frameId, request }, sid) => {
+    const tab = bySession(sid);
+    if (tab && type === 'Document' && frameId === tab.targetId && request?.method === 'GET' && typeof request.url === 'string') browserSawGet(tab, request.url);
   });
   cdp.on('Page.frameStartedLoading', ({ frameId }, sid) => { const tab = bySession(sid); if (tab && frameId === tab.targetId) tab.started?.(); });
   // a same-document navigation (a fragment, pushState) loads nothing: back's wait takes it as its load
@@ -30434,7 +30601,9 @@ function browserUserAgent(bin) {
 // more with --no-sandbox, and a note. Its stderr is kept (the last 64 KiB) only until then, for the
 // sandbox check; after, it is drained and dropped: Chrome's log lines can carry page URLs.
 async function browserLaunchChrome(ctx, { headed }) {
-  const ua = browserUserAgent(ctx.bin);
+  // read once per daemon (a spawn of Chrome, most of a second): a close or a forget relaunches the same binary
+  if (ctx.ua === undefined) ctx.ua = browserUserAgent(ctx.bin);
+  const ua = ctx.ua;
   const args = [
     ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-pipe',
     `--proxy-server=127.0.0.1:${ctx.guard.port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
@@ -30498,13 +30667,51 @@ function browserWatchChrome(ctx, chrome, cdp) {
   cdp.on('close', gone);
   cdp.on('Page.screencastFrame', (p, sid) => browserViewFrame(ctx, p, sid));
 }
-// Sign out of everything (the view's forget), on the verbs' queue: the screencast stopped, the
-// current Chrome retired and ended, the profile folder (ctx.profile, the one the daemon runs on)
-// removed only once no process carries it, made again empty with this checkout's root.json, its start
-// steps, a fresh Chrome on about:blank, the tabs watched again, state.json rewritten with the new
-// chrome_pid, and the screencast started again on the same viewer (its seq goes on). The daemon,
-// guard, control port and preview stay. A stop meanwhile wins: after each await, ctx.stopping ends
-// it (browserShutdown kills ctx.chrome, whichever it is). Any failure stops the daemon.
+// The clean restart a forget and a close share, on the verbs' queue, with ctx.ready already false:
+// the current Chrome retired and ended, then up to 5 s until no process carries the profile; with
+// wipe, the profile folder (ctx.profile, the one the daemon runs on) removed and made again empty
+// with this checkout's root.json; its start steps (the session files deleted, a failed delete
+// throwing; the prefs), a fresh Chrome on about:blank, the tabs watched again and state.json
+// rewritten with the new chrome_pid. The daemon, guard, control port and preview stay. A stop
+// meanwhile wins: after each await, ctx.stopping ends it (browserShutdown kills ctx.chrome, whichever
+// it is). Processes that can't be listed, or one left, and any failure stop the daemon (the next start
+// cleans up). True once the fresh Chrome is up; false when it ended.
+async function browserRelaunch(ctx, { wipe }) {
+  try {
+    const old = ctx.chrome;
+    old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
+    await browserEndChrome(ctx.cdp, old.pid);
+    if (ctx.stopping) return false;
+    let procs = browserProcsOn(ctx.profile);
+    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(25);
+    if (ctx.stopping) return false;
+    if (procs === null || procs.length) { browserShutdown(ctx, 'error', procs === null ? "couldn't list this machine's processes after stopping Chrome" : `a process (pid ${procs[0]}) still carried the profile 5 s after Chrome's stop`); return false; } // nothing removed on a guess
+    // the session files go the moment no process holds the profile (a close's secrets leave the disk
+    // here; a failed delete throws to the catch); a forget's wipe removes them with the rest
+    if (!wipe) browserDeleteSession(ctx.profile);
+    if (wipe) {
+      fs.rmSync(ctx.profile, { recursive: true, force: true });
+      ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
+    }
+    await browserPrepareProfile(ctx.profile, [], { procs }); // procs: [] just read, nothing on the profile since
+    if (ctx.stopping) return false;
+    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
+    if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return false; } // launched while it stopped
+    ctx.cdp = cdp;
+    browserWatchChrome(ctx, ctx.chrome, cdp);
+    ctx.tabs = [];
+    ctx.active = null;
+    await browserWatchTabs(ctx);
+    for (let i = 0; i < 100 && !ctx.stopping && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
+    if (ctx.stopping) return false;
+    ctx.state = { ...ctx.state, chrome_pid: ctx.chrome.pid };
+    browserWriteState(ctx.state);
+    return true;
+  } catch (e) { browserShutdown(ctx, 'error', e?.message); return false; }
+}
+// Sign out of everything (the view's forget), on the verbs' queue: the screencast stopped, then the
+// clean restart with the profile wiped (browserRelaunch), and the screencast started again on the same
+// viewer (its seq goes on).
 async function browserForgetRestart(ctx) {
   if (ctx.stopping || !ctx.ready) return;
   try {
@@ -30513,42 +30720,257 @@ async function browserForgetRestart(ctx) {
     if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
     if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
-    const old = ctx.chrome;
-    old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
-    await browserEndChrome(ctx.cdp, old.pid);
-    if (ctx.stopping) return;
-    let procs = browserProcsOn(ctx.profile);
-    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(100);
-    if (ctx.stopping) return;
-    if (procs === null || procs.length) return void browserShutdown(ctx, 'error'); // nothing removed on a guess
-    fs.rmSync(ctx.profile, { recursive: true, force: true });
-    ctx.profile = browserProfile({ fail: (m) => { throw new Error(m); } }); // to the catch: browserShutdown, not die
-    await browserPrepareProfile(ctx.profile, []);
-    if (ctx.stopping) return;
-    const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
-    if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // launched while it stopped
-    ctx.cdp = cdp;
-    browserWatchChrome(ctx, ctx.chrome, cdp);
-    ctx.tabs = [];
-    ctx.active = null;
-    await browserWatchTabs(ctx);
-    for (let i = 0; i < 100 && !ctx.stopping && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
-    if (ctx.stopping) return;
-    ctx.state = { ...ctx.state, chrome_pid: ctx.chrome.pid };
-    browserWriteState(ctx.state);
+    if (!(await browserRelaunch(ctx, { wipe: true }))) return;
     ctx.ready = true;
     if (ctx.viewer) browserViewTick(ctx, ctx.viewer); // the screencast again, on the same socket
   } catch { browserShutdown(ctx, 'error'); }
 }
+// --- the gate on a close (kit-67): the handovers this daemon hasn't handled since they closed, all in
+// one clean restart, on the verbs' queue. In order: (1) the owner cut off, before Chrome is touched:
+// ctx.ready false (the view drops all input) and the viewer sent bye, its socket closed; (2) the pages
+// to reopen, only when the batch is one done (browserNotePages); (3, 4) Chrome stopped and started
+// fresh on a clean session (browserRelaunch, no wipe); (5) on done, those pages reopened by plain GET
+// (browserReopen); (6) one ledger entry per close, each recorded in memory too; then ctx.ready.
+// A stop meanwhile ends it at its next check, with no entry: the next start handles the close.
+const BROWSER_BACK = 'The supervisor has the browser again.';
+async function browserCloseRestart(ctx, closes) {
+  if (ctx.stopping || !closes.length) return;
+  try {
+    ctx.closing = true; // until it ends: a socket opened meanwhile is refused with bye
+    ctx.ready = false;
+    const v = ctx.viewer;
+    if (v) {
+      try { v.ws.send({ t: 'bye', why: BROWSER_BACK }); v.ws.close(1000); } catch {}
+      browserViewClose(ctx, v);
+    }
+    const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
+    if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
+    const reopen = closes.length === 1 && closes[0].outcome === 'done' ? browserNotePages(ctx) : []; // only one done reopens
+    if (!(await browserRelaunch(ctx, { wipe: false }))) return;
+    const reopened = reopen.length ? await browserReopen(ctx, reopen) : [];
+    if (ctx.stopping) return;
+    browserRecordCloses(ctx, closes, reopened);
+    ctx.ready = true;
+  } catch (e) { browserShutdown(ctx, 'error', e?.message); } finally { ctx.closing = false; }
+}
+// The pages a done reopens: each tab's last GET (browserWatchTabs), in tab order; a tab with none, or
+// one that isn't http(s) (about:blank), adds nothing. Raw URLs, in memory only.
+function browserNotePages(ctx) {
+  return ctx.tabs.map((t) => t.lastGet).filter((u) => typeof u === 'string' && browserHttp(u));
+}
+// The noted pages opened again on the fresh Chrome, within the 5-tab cap: the first in the first tab,
+// each other in a tab Target.createTarget opens on about:blank (navigated once its Page and Network
+// are on, so its own last GET is tracked too). Each is a plain Page.navigate GET; the loads are waited
+// on together, 15 s in all, and a load still running then is left to finish on its own. Back: the
+// URLs navigated, masked.
+const BROWSER_REOPEN_MS = 15000;
+async function browserReopen(ctx, urls) {
+  const end = Date.now() + BROWSER_REOPEN_MS, left = () => Math.max(0, end - Date.now());
+  const waits = [], opened = [];
+  // as browserLoad: done on the load event once Page.navigate answered, or on its error
+  const go = (tab, url) => {
+    let finish, nav = false, loaded = false;
+    const onLoad = () => { loaded = true; if (nav) finish(); };
+    const p = new Promise((resolve) => {
+      finish = () => { if (tab.loaded === onLoad) tab.loaded = null; resolve(); };
+      Object.assign(tab, { opening: url, frameUrl: null, unreachable: null, refs: new Map(), loaded: onLoad });
+      ctx.cdp.send('Page.navigate', { url }, tab.sessionId).then((r) => { nav = true; if (r?.errorText || !r?.loaderId || loaded) finish(); }, () => finish());
+    });
+    p.finish = () => finish();
+    waits.push(p);
+    opened.push(url);
+  };
+  for (const [i, url] of urls.slice(0, BROWSER_TAB_CAP).entries()) {
+    if (ctx.stopping || !left()) break;
+    let tab = null;
+    if (i === 0) tab = ctx.active?.sessionId ? ctx.active : ctx.tabs.find((t) => t.sessionId) ?? null;
+    else {
+      // no new tab in the last 2 s; a tab made too late to navigate is closed when it comes, never
+      // left open on about:blank
+      if (left() < 2000) break;
+      const shut = (targetId) => { if (targetId) ctx.cdp.send('Target.closeTarget', { targetId }).catch(() => {}); };
+      const made = ctx.cdp.send('Target.createTarget', { url: 'about:blank' });
+      const r = await Promise.race([made, browserSleep(left()).then(() => null)]).catch(() => null);
+      if (!r) { made.then((x) => shut(x?.targetId), () => {}); break; }
+      while (!ctx.stopping && left() && !(tab = ctx.tabs.find((t) => t.targetId === r.targetId))) await browserSleep(50);
+      if (!tab) { shut(r.targetId); break; }
+    }
+    if (tab) await Promise.race([tab.ready, browserSleep(left())]); // its Page and Network on: the load seen, its GET tracked
+    if (tab?.sessionId && !ctx.stopping && left()) go(tab, url);
+    else if (i > 0 && tab) { ctx.cdp.send('Target.closeTarget', { targetId: tab.targetId }).catch(() => {}); break; } // made, never navigated
+  }
+  await Promise.race([Promise.all(waits), browserSleep(left())]);
+  for (const w of waits) w.finish(); // any load still running: its wait let go, its tab.loaded freed
+  return opened.map((u) => browserMask(u));
+}
+// A fold just read, kept: ctx.held, the fold, whether a close is still unhandled (ctx.pending; one that
+// can't be worked out counts as pending) and the fold's time (the view's input check reads them), and
+// the open viewer told when the hold changed.
+function browserKeepHeld(ctx, hs) {
+  ctx.readFailedAt = 0;
+  ctx.held = browserHeld(hs);
+  ctx.folded = hs;
+  try { ctx.pending = browserUnhandled(ctx, hs).length > 0; } catch { ctx.pending = true; }
+  ctx.foldAt = Date.now();
+  if (ctx.viewer) browserViewHeld(ctx, ctx.viewer);
+}
+// The viewer's side of the hold: {t:"held",qid} sent when it differs from what this socket was last
+// sent (the first time on connect). v.handover is the handover this socket was sent, or null. It
+// follows the hold only while its own handover is open: once that one has closed it stays, so the
+// socket's input stays dropped until the close's bye, even if another handover holds the browser now.
+function browserViewHeld(ctx, v) {
+  if (v.ws.closed) return;
+  const held = ctx.held ?? null;
+  if (held !== v.heldSent) { v.heldSent = held; try { v.ws.send({ t: 'held', qid: held }); } catch {} } // never throws into the watch's timer
+  if (held && (!v.handover || ctx.folded.some((h) => h.qid === v.handover && h.status === 'open'))) v.handover = held;
+}
+// A fold read for the view. The hook (tests): while its file exists, the read fails.
+function browserViewRead(ctx) {
+  try {
+    const fails = browserTestEnv('DEVTEAM_TEST_BROWSER_VIEW_READ_FAILS');
+    if (fails && fs.existsSync(fails)) throw new Error('the log could not be read');
+    browserKeepHeld(ctx, browserHandovers());
+  } catch (e) { browserReadFailed(ctx); throw e; }
+}
+// A failed read while a handover is held or a close is pending. Held for BROWSER_READ_FAIL_MS, the
+// daemon can no longer tell whether the owner's session should end, so it ends it: the viewer told
+// why, then browserShutdown (Chrome stopped, session files gone, the reason in last-error). With no
+// handover known a failed read changes nothing.
+const BROWSER_READ_FAIL_MS = 10000;
+const BROWSER_UNREADABLE = "The browser can't read its log, so it shut down and ended this session.";
+// a new socket refused while reads fail inside the limit: the handover may still be open
+const BROWSER_UNREADABLE_NOW = "The browser can't read its log right now; if that lasts, it ends this session.";
+function browserReadFailed(ctx) {
+  if (ctx.stopping || (!ctx.held && !ctx.pending)) { ctx.readFailedAt = 0; return; }
+  const now = Date.now();
+  ctx.readFailedAt ||= now;
+  if (now - ctx.readFailedAt < (Number(browserTestEnv('DEVTEAM_TEST_BROWSER_READ_FAIL_MS')) || BROWSER_READ_FAIL_MS)) return;
+  const v = ctx.viewer;
+  if (v && !v.ws.closed) { try { v.ws.send({ t: 'bye', why: BROWSER_UNREADABLE }); v.ws.close(1000); } catch {} }
+  browserShutdown(ctx, 'error', "browser: couldn't read the log during a handover, so the session was ended");
+}
+// Whether a close is pending for the view, by a fold no more than 500 ms old (read here when the
+// watch's is older, so this doesn't rest on the watch; fresh: read now). While it is, the page still
+// holds the owner's session: no socket is sent a frame, none has its input forwarded, and a new one is
+// refused. A fold that can't be read counts as pending only while a handover is known; with none the
+// view carries on as in kit-66. A connect's read (fresh) also looks at main again, so a close that came
+// only through main is seen.
+function browserViewPending(ctx, fresh = false) {
+  if (fresh || Date.now() - ctx.foldAt > 500) {
+    if (fresh) browserMainSeen = { ...browserMainSeen, at: 0 };
+    try { browserViewRead(ctx); } catch { return !!ctx.held || ctx.pending; }
+  }
+  return ctx.pending;
+}
+// Main as the files say, with no git call: inode, size and mtime in ns of main's loose ref and of
+// packed-refs in the common git dir. A ref named by origin/<main> counts even while <main> is in use,
+// since it would take over. A file that's absent is a state (a packed ref has no loose file); any other
+// error throws.
+const browserMainHook = () => { const p = browserTestEnv('DEVTEAM_TEST_BROWSER_MAIN_CHECK_FAILS'); try { return p ? fs.readFileSync(p, 'utf8') : ''; } catch { return ''; } };
+function browserMainRefKey(ref) {
+  if (browserMainHook() === 'stat') throw new Error("main's refs could not be read");
+  const b = loadSettings().main_branch;
+  const names = [`refs/remotes/origin/${b}`, ...(ref === b ? [`refs/heads/${b}`] : []), 'packed-refs'];
+  return names.map((n) => {
+    try {
+      const st = fs.statSync(path.join(commonDir, n), { bigint: true });
+      return `${n} ${st.ino} ${st.size} ${st.mtimeNs}`;
+    } catch (e) {
+      if (e.code === 'ENOENT') return `${n} absent`;
+      throw e;
+    }
+  }).join('\n');
+}
+// Before an input during a handover: main's sha read again if its files moved, so the fold that follows
+// sees a close that came only through main. Throws when the stat or that read fails, and the input is
+// dropped. With no main ref at all there is nothing to watch: the fold is the live log's, as it always
+// was, and browserFresh keeps looking for main every 5 s.
+let browserMainRefs = null;
+function browserMainCheck() {
+  if (!commonDir) return;
+  const ref = browserMainRefs?.ref ?? mainRef();
+  if (!ref) return;
+  const key = browserMainRefKey(ref); // before the read: a move during it is seen next time
+  if (key === browserMainRefs?.key && mainRefCache) return;
+  browserMainRefs = { ref, key: null }; // until the read below succeeds
+  mainRefCache = undefined;
+  const sha = browserMainHook() === 'read' ? null : mainSha();
+  if (!sha) { mainRefCache = undefined; throw new Error("main's sha could not be read"); }
+  browserMainSeen = { at: Date.now(), part: `main ${sha}` };
+  browserMainRefs = { ref: mainRefCache, key: mainRefCache === ref ? key : null };
+}
+// Whether this socket's input is cut off: while a close is pending, and on a socket whose own handover
+// has closed. With no close pending, a socket never sent a handover is kit-66's.
+function browserViewClosed(ctx, v) {
+  if (!v.handover && !ctx.held && !ctx.pending) { // no handover known: kit-66's, whatever the log does
+    try { if (Date.now() - ctx.foldAt > 500) browserViewRead(ctx); } catch { return false; }
+    return ctx.pending;
+  }
+  try { browserMainCheck(); browserViewRead(ctx); } catch { return true; }
+  if (ctx.pending) return true;
+  return !!v.handover && !ctx.folded.some((h) => h.qid === v.handover && h.status === 'open');
+}
+// The gate, run only from a job already on the verbs' queue (a verb's run, or the watch's job): it
+// folds afresh, keeps ctx.held, and runs one restart for every close not yet handled. It never queues
+// itself and never skips, so a later queued job finds nothing left.
+async function browserGate(ctx) {
+  if (ctx.stopping) return;
+  const hs = browserHandovers();
+  browserKeepHeld(ctx, hs);
+  const closes = browserUnhandled(ctx, hs);
+  if (closes.length) await browserCloseRestart(ctx, closes);
+}
+// At start, once the fresh Chrome is up and before the control server takes verbs: an entry for each
+// close not yet handled, with no reopen (a dead daemon's notes are gone: R1), so done gets reopened []
+// and no tab comes back. Chrome needs no restart: every start already deleted the session files.
+function browserStartGate(ctx) {
+  const hs = browserHandovers();
+  browserKeepHeld(ctx, hs);
+  const closes = browserUnhandled(ctx, hs);
+  if (closes.length) browserRecordCloses(ctx, closes, []);
+}
+// The watch, from start to stop: every 500 ms a fresh fold (browserFresh keys it cheaply), ctx.held
+// kept, and a close not yet handled queued once on the verbs' queue (ctx.gateQueued, set when queued
+// and cleared when the job ends, so a close queued or running isn't queued again). With
+// DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0 (tests) it keeps ctx.held only: a close is then handled by a
+// verb's pre-verb read or wait's settle alone.
+function browserWatch(ctx) {
+  const t = setInterval(() => {
+    if (ctx.stopping) return;
+    try { browserViewRead(ctx); } catch { return; }
+    if (browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_HANDLE') === '0' || ctx.gateQueued) return;
+    if (!ctx.pending) return;
+    ctx.gateQueued = true;
+    ctx.serial(() => browserGate(ctx)).finally(() => { ctx.gateQueued = false; });
+  }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 500); // the hook: tests, a slowed watch
+  t.unref();
+  return t;
+}
+// run/browser/last-error (0600): why the last daemon shut itself down on a failed close or forget
+// restart, one line, for the offline status's plain text (browser@1's status JSON is unchanged). A
+// daemon that comes up removes it. Control characters dropped, 300 characters at most.
+const browserErrorFile = () => path.join(BROWSER_DIR(), 'last-error');
+function browserLastError(detail) {
+  try {
+    browserDirMade();
+    const tmp = path.join(BROWSER_DIR(), `last-error.${process.pid}.tmp`);
+    fs.rmSync(tmp, { force: true });
+    fs.writeFileSync(tmp, `${new Date().toISOString()} ${String(detail).replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 300)}\n`, { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, browserErrorFile());
+  } catch {}
+}
+const browserReadLastError = () => { try { return fs.readFileSync(browserErrorFile(), 'utf8').split('\n')[0].replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 330) || null; } catch { return null; } };
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
 // hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
 // guard and servers closed; exit. Once a signal came, a dead pty can't end it early.
-function browserShutdown(ctx, why) {
+function browserShutdown(ctx, why, detail) {
   if (ctx.stopping) return ctx.stopping;
+  if (why === 'error' && detail) browserLastError(detail);
   if (why === 'signal') for (const s of [process.stdout, process.stderr]) { s.on('error', () => {}); }
   ctx.stopping = (async () => {
     clearTimeout(ctx.idle);
     clearInterval(ctx.renew);
+    clearInterval(ctx.watch);
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
@@ -30572,17 +30994,33 @@ function browserVerbs(ctx) {
   return {
     ping: async () => ({ code: 0, out: 'pong' }),
     status: async (args) => {
-      const s = { browser: 1, instance: browserKey(), running: true, held: null, preview: ctx.preview, url: browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening), tabs: ctx.tabs.length, restarted: ctx.restarted, notes: ctx.notes };
+      const s = { browser: 1, instance: browserKey(), running: true, held: browserHeld(browserHandovers()), preview: ctx.preview, url: browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening), tabs: ctx.tabs.length, restarted: ctx.restarted, notes: ctx.notes };
       if (args?.json) return { code: 0, out: JSON.stringify(s) };
-      return { code: 0, out: [`browser running (preview ${s.preview}, profile ${s.instance})`, `url: ${s.url}`, `tabs: ${s.tabs}`, `restarted: ${s.restarted ? 'yes' : 'no'}`, ...s.notes.map((n) => `note: ${n}`)].join('\n') };
+      return { code: 0, out: [`browser running (preview ${s.preview}, profile ${s.instance})`, `url: ${s.url}`, `tabs: ${s.tabs}`, `restarted: ${s.restarted ? 'yes' : 'no'}`, browserHeldLine(s.held), ...s.notes.map((n) => `note: ${n}`)].join('\n') };
     },
     stop: async () => { ctx.after = () => browserShutdown(ctx, 'stop'); return { code: 0, out: 'browser stopped' }; },
+    // internal (browser wait's): the gate, then every close of this scope that is handled, by this
+    // daemon's record or by the ledger, with reopened from that record
+    settle: async () => {
+      await browserGate(ctx);
+      if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
+      const ledger = browserLedger(), now = Date.now();
+      const handled = [];
+      for (const h of browserHandovers()) {
+        if (h.status === 'open' || !h.outcome) continue;
+        const r = browserHandled(ctx, h, ledger, now);
+        if (r) handled.push({ qid: h.qid, outcome: h.outcome, ...(Array.isArray(r.reopened) ? { reopened: r.reopened } : {}) });
+      }
+      return { code: 0, out: JSON.stringify({ handled }) };
+    },
     open: async ({ url }) => {
       if (!browserHttp(url)) return { code: 1, out: 'browser open takes an http: or https: URL' };
       const tab = ctx.active;
       if (!tab?.sessionId) return { code: 1, out: 'browser open: no tab to open it in' };
       Object.assign(tab, { opening: url, frameUrl: null, unreachable: null, refs: new Map() });
       const r = await browserLoad(tab, () => ctx.cdp.send('Page.navigate', { url }, tab.sessionId));
+      const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_OPEN_DELAY_MS')); // tests: a long open, landed
+      if (hold > 0) await browserSleep(hold);
       return browserLanded(ctx, tab, r, url, (u, title) => `opened ${u} (${title})`);
     },
     snapshot: async ({ json }) => ({ code: 0, out: await browserSnapshot(ctx, ctx.active, !!json) }),
@@ -30649,8 +31087,15 @@ function browserVerbs(ctx) {
 function browserControl(ctx, secret) {
   const want = Buffer.from(secret);
   let queue = Promise.resolve();
-  // with a viewer's socket open, the idle timer arms again rather than stop the daemon
-  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (ctx.viewer && !ctx.stopping ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
+  // with a viewer's socket open, while the owner has the browser, or with a close not yet handled (the
+  // watch queues it within 500 ms: the daemon never idles out from under it), the idle timer arms again
+  // rather than stop the daemon. The fold is read as it fires; one that fails keeps the last hold.
+  const busy = () => {
+    if (ctx.viewer) return true;
+    try { browserViewRead(ctx); } catch {}
+    return ctx.pending || !!ctx.held;
+  };
+  const arm = () => { clearTimeout(ctx.idle); ctx.idle = setTimeout(() => (!ctx.stopping && busy() ? arm() : browserShutdown(ctx, 'idle')), browserIdleMs()); };
   // ctx.serial(fn): fn on the verbs' queue (the view's forget), the idle timer paused as for a verb
   ctx.serial = (fn) => {
     const run = queue.then(async () => {
@@ -30678,7 +31123,18 @@ function browserControl(ctx, secret) {
         if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
         if (!verb) return { code: 1, out: `usage: ${BROWSER_USAGE}` };
         if (verb !== 'ping') clearTimeout(ctx.idle); // paused while the verb runs
-        try { return await ctx.verbs[verb](isObj(m.args) ? m.args : {}); } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
+        try {
+          // a close first, so no verb runs ahead of one (settle runs the gate itself), then the hold,
+          // read again here: a verb the CLI's check let by (or a call that skipped the CLI) is refused
+          // while the owner has the browser. settle serves nothing to the agent.
+          if (!['ping', 'status', 'stop', 'settle'].includes(verb)) {
+            await browserGate(ctx);
+            if (ctx.stopping) return { code: 1, out: 'browser: stopping' };
+            const held = browserHeld(browserHandovers());
+            if (held) return { code: 3, out: `the owner has the browser (${held})` };
+          }
+          return await ctx.verbs[verb](isObj(m.args) ? m.args : {});
+        } catch (e) { return { code: 1, out: `browser ${verb}: ${e?.message ?? 'failed'}` }; } finally { if (verb !== 'ping' && !ctx.stopping) arm(); }
       };
       // ping reads nothing from Chrome and is answered at once, off the queue: a long verb or a forget
       // never makes the daemon look dead to browserLive (and so a second daemon started over it)
@@ -30820,7 +31276,7 @@ function browserViewTick(ctx, v) {
     const tab = ctx.active?.sessionId ? ctx.active : null;
     if (tab !== v.tab) { browserCast(ctx, v.tab, false); v.tab = tab; browserCast(ctx, tab, true); }
     const url = browserMask(ctx.active?.url ?? 'about:blank', ctx.active?.opening);
-    if (url !== v.url) { v.url = url; v.ws.send({ t: 'url', url }); }
+    if (url !== v.url && !browserViewPending(ctx)) { v.url = url; v.ws.send({ t: 'url', url }); }
   } catch {}
 }
 function browserViewClose(ctx, v) {
@@ -30840,6 +31296,7 @@ function browserViewFrame(ctx, params, sessionId) {
   if (typeof params.data !== 'string' || !BROWSER_FRAME_DATA.test(params.data) || !(w >= 1 && w <= 8192) || !(h >= 1 && h <= 8192)) return;
   const scale = params.metadata.pageScaleFactor;
   v.scale = typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1; // the input's x, y are divided by it
+  if (browserViewPending(ctx)) return; // acknowledged above, never sent
   if (v.ws.send({ t: 'frame', data: params.data, w, h, seq: v.seq }, true)) v.seq++;
 }
 // The page's messages ($defs.view.from_page), checked by hand: closed field sets, types, bounds and
@@ -30886,9 +31343,11 @@ const BROWSER_BUTTONS = { none: 0, left: 1, right: 2, middle: 4 };
 // One message from the page: parsed, checked, and handed to the active tab's session. Nothing about
 // it is logged, printed, stored or echoed; a failed CDP call is dropped (browserViewCdp catches it).
 // While Chrome isn't up (the start steps, a forget restarting it) or the daemon is stopping, every
-// message is dropped, a second forget among them, so nothing reads a null ctx.active.
+// message is dropped, a second forget among them, so nothing reads a null ctx.active. So is every
+// message on a socket whose handover has closed (browserViewClosed), before the close's bye.
 function browserViewInput(ctx, v, text) {
   if (!ctx.ready || ctx.stopping || ctx.viewer !== v) return;
+  if (browserViewClosed(ctx, v)) return;
   let m;
   try { m = browserViewMessage(JSON.parse(text)); } catch { return; }
   if (!m) return;
@@ -30969,16 +31428,20 @@ function browserViewServer(ctx) {
       if (![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(browserOneHeader(req, 'origin'))) return refuse(403);
       const key = browserOneHeader(req, 'sec-websocket-key');
       if (req.method !== 'GET' || String(browserOneHeader(req, 'upgrade')).toLowerCase() !== 'websocket' || browserOneHeader(req, 'sec-websocket-version') !== '13' || !/^[A-Za-z0-9+/]{22}==$/.test(key ?? '')) return refuse(400);
-      if (!ctx.ready || ctx.stopping) return refuse(503);
+      if (ctx.stopping || (!ctx.ready && !ctx.closing)) return refuse(503);
       const accept = crypto.createHash('sha1').update(key + BROWSER_WS_GUID).digest('base64');
       sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
-      const v = { ws: null, seq: 0, tab: null, url: null, timer: null, scale: 1 };
+      const v = { ws: null, seq: 0, tab: null, url: null, timer: null, scale: 1, handover: null, heldSent: undefined };
       v.ws = browserSocket(sock, { pingMs: browserPingMs(), onText: (text) => browserViewInput(ctx, v, text), onClose: () => browserViewClose(ctx, v) });
       if (head?.length) v.ws.feed(head);
       if (v.ws.closed) return;
+      // a close pending: refused with bye, before it can be the viewer, so it is never sent a frame.
+      // A bye, not a 503: browser.html stops on it and offers Show it again, where a 503 has it retry
+      // A refusal because the log can't be read says so: the handover may still be open (R3-1)
+      if (ctx.closing || browserViewPending(ctx, true)) { v.ws.send({ t: 'bye', why: !ctx.closing && ctx.readFailedAt ? BROWSER_UNREADABLE_NOW : BROWSER_BACK }); return v.ws.close(1000); }
       if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
       ctx.viewer = v;
-      v.ws.send({ t: 'held', qid: null });
+      browserViewHeld(ctx, v); // the current hold, from the fold just read
       browserViewTick(ctx, v);
       v.timer = setInterval(() => browserViewTick(ctx, v), 250);
       v.timer.unref?.();
@@ -30992,8 +31455,9 @@ function browserViewServer(ctx) {
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
+  browserIsDaemon = true;
   const viewPort = Number(process.env.PORT);
   const rec = readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser' && r.port === viewPort);
   if (!rec) die(`browser serve: no browser preview record on port ${process.env.PORT}`);
@@ -31015,12 +31479,16 @@ async function browserServe({ chrome: bin }) {
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
     ctx.verbs = browserVerbs(ctx);
     const secret = crypto.randomBytes(32).toString('hex');
-    const { server, arm } = browserControl(ctx, secret);
+    const { server, arm } = browserControl(ctx, secret); // the verbs' queue (ctx.serial); ctx.handled is made above
     ctx.control = server;
+    // closes made while no daemon ran are handled before any verb is taken (kit-67), then the watch
+    browserStartGate(ctx);
+    ctx.watch = browserWatch(ctx);
     const controlPort = await browserListen(server, 0);
     ctx.state = { browser: 1, daemon_pid: process.pid, chrome_pid: ctx.chrome.pid, control_port: controlPort, control_secret: secret, guard_port: ctx.guard.port, view_port: viewPort, preview: ctx.preview };
     browserWriteState(ctx.state); // a forget rewrites it with its new chrome_pid
     ctx.ready = true; // the view's guard 5: Chrome is up
+    fs.rmSync(browserErrorFile(), { force: true }); // an earlier daemon's failure is history now
     arm();
     ctx.renew = setInterval(() => browserRenew(ctx, viewPort), Number(browserTestEnv('DEVTEAM_TEST_BROWSER_RENEW_MS')) || 3600000);
     ctx.renew.unref();
@@ -31042,7 +31510,13 @@ async function browserStop({ say = true, rec } = {}) {
   let ok = true;
   const s = browserState();
   if (s) {
-    try { await browserCall('stop', {}, { state: s, ms: 15000 }); } catch {}
+    let late = null;
+    try { await browserCall('stop', {}, { state: s }); } catch (e) { if (e.timedOut) late = e; }
+    if (late && browserAlive(s.daemon_pid)) { // still working: its Chrome and session are left to it
+      process.stderr.write(`devteam: browser stop: ${late.message}\n`);
+      process.exitCode = 1;
+      return false;
+    }
     await browserGone(s.daemon_pid, 10000);
   }
   const profile = path.join(browserHome(), browserKey());
@@ -31059,12 +31533,13 @@ async function browserStop({ say = true, rec } = {}) {
   return ok;
 }
 async function browserStatus() {
-  const off = { browser: 1, instance: browserKey(), running: false, held: null };
   const s = browserState();
   let r = null;
-  if (s) { try { r = await browserCall('status', { json: !!flags.json }, { state: s }); } catch {} }
+  if (s) { try { r = await browserCall('status', { json: !!flags.json }, { state: s }); } catch (e) { if (e.timedOut) die(`browser status: ${e.message}`); } }
   if (r) { process.exitCode = r.code; return out(r.out); }
-  return out(flags.json ? JSON.stringify(off) : `browser isn't running (profile ${off.instance})`);
+  const off = { browser: 1, instance: browserKey(), running: false, held: browserHeld(browserHandovers()) };
+  const err = browserReadLastError();
+  return out(flags.json ? JSON.stringify(off) : [`browser isn't running (profile ${off.instance})`, browserHeldLine(off.held), ...(err ? [`last error: ${err}`] : [])].join('\n'));
 }
 // browser type --stdin's text: stdin read to its end, bounded in bytes (stops once past max + 2, room
 // for a \r\n) and in time, decoded once at the end so a character split across reads stays whole,
@@ -31092,9 +31567,99 @@ function browserReadStdin({ max, ms }) {
     });
   });
 }
+// browser handover --reason "<words>": one owner-action question handing the browser to the owner for a
+// login (class browser-handover, scope browser:<key>), linking the live view by its preview name only.
+// In order: exactly --reason (non-blank, at most 2000 characters; so no --default reaches ask from
+// here), not while one is open, the daemon ensured (the preview exists), the repeated-site warning,
+// then askLine's own checks. It prints the qid.
+const BROWSER_HANDOVER_USAGE = 'usage: browser handover --reason "<words>" (non-blank, at most 2000 characters)';
+const BROWSER_HANDOVER_DAYS = 7;
+async function browserHandover() {
+  const reason = flagStr('reason');
+  if (positional.length !== 1 || rest !== null || Object.keys(flags).some((k) => k !== 'reason') || reason === undefined || !reason.trim() || [...reason].length > 2000) die(BROWSER_HANDOVER_USAGE);
+  const scope = browserScope();
+  const open = browserHeld(browserHandovers(scope));
+  if (open) die(`browser handover: ${open} is already open; wait for it (browser wait) or withdraw it`);
+  // root.json's mtime (a forget makes it again): only a missing file reads as none; any other error
+  // stops here, before anything starts. Read again once the daemon is up, which makes a missing one.
+  const rootMade = () => {
+    try { return fs.statSync(path.join(browserHome(), browserKey(), 'root.json')).mtimeMs; } catch (e) { if (e.code === 'ENOENT') return 0; return die(`browser handover: couldn't read the profile's root.json (${e.code ?? e.message})`); }
+  };
+  rootMade();
+  const s = await browserEnsure();
+  // the site: the active tab's host (with its port), from the status verb; none on about:blank
+  let st = null;
+  try { const r = await browserCall('status', { json: true }, { state: s }); if (r.code === 0) st = JSON.parse(r.out); } catch (e) { if (e.timedOut) die(`browser handover: ${e.message}`); }
+  let site = null;
+  try { const u = new URL(st?.url ?? ''); if (u.protocol === 'http:' || u.protocol === 'https:') site = u.host; } catch {}
+  if (site) {
+    // an earlier handover of this site, asked within 7 days and after the profile's root.json was made
+    // (a forget, or Sign out of everything, makes it again): its session may not have lasted
+    const line = `The browser is on ${site}.`;
+    const made = rootMade();
+    const now = Date.now();
+    const seen = browserHandovers(scope).filter((h) => { const at = Date.parse(h.asked_at); return String(h.context).split(/\r\n|\r|\n/).includes(line) && now - at <= BROWSER_HANDOVER_DAYS * 86400000 && at > made; }).pop();
+    if (seen) warn(`browser handover: ${site} was handed over on ${seen.asked_at.slice(0, 10)} (${seen.qid}) and not forgotten since; the session may not have lasted`);
+  }
+  const context = ["Open the browser from the link, do the step there, then press Done. Until you press Done, the supervisor can't use the browser.", site ? `The browser is on ${site}.` : null].filter(Boolean).join('\n\n');
+  for (const k of Object.keys(flags)) delete flags[k];
+  Object.assign(flags, { kind: 'owner-action', scope, question: reason, context, links: JSON.stringify([{ title: 'Open the browser', preview: s.preview }]), choices: JSON.stringify([{ label: 'Done' }, { label: "Can't right now" }]), stake: '2', urgency: '2' });
+  Object.assign(flags, { class: 'browser-handover' }); // its own line: every quoted kebab word beside a class key is read as a class name
+  out(askLine().id);
+}
+// browser wait [--timeout <n>s|<n>m|<n>h]: how this scope's handover ended, as browser@1's wait. The
+// handover is the held one (the oldest open), else the most recently asked; only that qid is read.
+// While it is open: the fold every 500 ms, the daemon kept running (a dead one and its view started
+// again under the same preview name), and after --timeout {outcome: timeout} with the hold left.
+// Once it is closed: the daemon's settle (the daemon started if none runs; its start handles the close
+// too) until it lists the qid with the fold's outcome, up to 120 s; then the fold's outcome and, on
+// done, the entry's reopened. The outcome is always the fold's, never a run/ file's.
+const BROWSER_WAIT_USAGE = 'usage: browser wait [--timeout <n>s|<n>m|<n>h] (1 s to 24 h)';
+async function browserWait() {
+  if (positional.length !== 1 || rest !== null || Object.keys(flags).some((k) => k !== 'timeout')) die(BROWSER_WAIT_USAGE);
+  let limit = null;
+  if (flags.timeout !== undefined) {
+    const m = /^([1-9]\d{0,5})([smh])$/.exec(typeof flags.timeout === 'string' ? flags.timeout : '');
+    limit = m ? Number(m[1]) * { s: 1000, m: 60000, h: 3600000 }[m[2]] : 0;
+    if (!(limit >= 1000 && limit <= 86400000)) die(BROWSER_WAIT_USAGE);
+  }
+  const scope = browserScope();
+  const hs = browserHandovers(scope);
+  const qid = browserHeld(hs) ?? hs.at(-1)?.qid;
+  if (!qid) die('browser wait: no handover has been asked on this browser');
+  const start = Date.now();
+  // a qid gone from this scope's fold (its live log file removed: run/ is the machine's own) is no
+  // handover of this browser now: said, never a crash
+  const find = () => browserHandovers(scope).find((h) => h.qid === qid) ?? die(`browser wait: ${qid} is no longer in the log as a handover of this browser; nothing to wait for`);
+  let h = find();
+  const firstRead = browserTestEnv('DEVTEAM_TEST_BROWSER_WAIT_FIRST_READ'); // tests: a file made once wait has read the log
+  if (firstRead) fs.writeFileSync(firstRead, '');
+  while (h.status === 'open') {
+    await browserEnsure();
+    if (limit !== null && Date.now() - start >= limit) return out(JSON.stringify({ browser: 1, qid, outcome: 'timeout' }));
+    await browserSleep(500);
+    h = find();
+  }
+  const bound = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WAIT_MS')) || 120000;
+  const closed = Date.now();
+  for (;;) {
+    let listed = null;
+    try {
+      const s = await browserEnsure();
+      const r = await browserCall('settle', {}, { state: s });
+      if (r.code === 0) listed = JSON.parse(r.out)?.handled?.find((x) => x?.qid === qid) ?? null;
+    } catch (e) { if (e?.timedOut) die(`browser wait: ${e.message}`); } // the ruled words, as every verb's (R3-2)
+    h = find();
+    if (h.status !== 'open' && listed && listed.outcome === h.outcome) {
+      return out(JSON.stringify({ browser: 1, qid, outcome: h.outcome, ...(h.outcome === 'done' && Array.isArray(listed.reopened) ? { reopened: listed.reopened } : {}) }));
+    }
+    if (Date.now() - closed >= bound) die(`browser wait: the browser hasn't confirmed the reset after ${qid} closed; browser status says more`);
+    await browserSleep(500);
+  }
+}
 // Which gates each verb runs: status, profiles and stop skip Chrome; the memory check is browserEnsure's.
 const BROWSER_VERBS = {
-  ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve'].map((v) => [v, { chrome: true }])),
+  ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve', 'handover', 'wait'].map((v) => [v, { chrome: true }])),
   status: { chrome: false }, stop: { chrome: false }, profiles: { chrome: false },
 };
 async function cmdBrowser() {
@@ -31102,6 +31667,11 @@ async function cmdBrowser() {
   if (!Object.hasOwn(BROWSER_VERBS, verb ?? '')) die(`usage: ${BROWSER_USAGE}`);
   if (verb === 'serve' && process.env.DEVTEAM_BROWSER_SERVE !== '1') die('browser serve is internal: browser start runs it in its own window');
   const { chrome } = browserGates(BROWSER_VERBS[verb]);
+  // the hold, before anything starts: no daemon touched, no stdin read, no profile removed
+  if (BROWSER_HELD_VERBS.includes(verb)) {
+    const held = browserHeld(browserHandovers());
+    if (held) die(`browser ${verb}: the owner has the browser (${held}); browser wait says when it is back`, 3);
+  }
   if (verb === 'profiles') return out(JSON.stringify({ browser: 1, profiles: browserProfiles() }));
   if (verb === 'forget') {
     if (flags.profile === true) die(`usage: ${BROWSER_USAGE}`);
@@ -31115,6 +31685,8 @@ async function cmdBrowser() {
   if (verb === 'status') return browserStatus();
   if (verb === 'stop') return browserStop();
   if (verb === 'start') { const s = await browserEnsure({ headed: !!flags.headed }); return out(`browser running (preview ${s.preview}, profile ${browserKey()})`); }
+  if (verb === 'handover') return browserHandover();
+  if (verb === 'wait') return browserWait();
   // open is refused before any daemon is touched unless its URL is http(s)
   if (verb === 'open' && (positional.length !== 2 || !browserHttp(positional[1]))) die('browser open takes an http: or https: URL');
   // Each verb's arguments, checked here so a wrong one starts nothing; a refusal never echoes a typed
