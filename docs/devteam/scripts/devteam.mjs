@@ -18681,7 +18681,6 @@ function recoverOne() {
   // never two: first, under any flag
   if (supervisorRunningNow(rec)) return { say: 'already running' };
   if (recoverStarting(rec)) return { say: 'already running (brought back moments ago)' };
-  const s = loadSettings();
   // A supervisor is never down by accident: a parked or drained fleet's comes back like any other.
   // Under a pause it answers threads and questions and keeps the Inbox and log current; under a move
   // its prompt has it carry the move on and start nothing. It is down only when someone exited it
@@ -18690,6 +18689,9 @@ function recoverOne() {
     const no = recoverRefusal(rec);
     if (no) return { say: no };
   }
+  // after every early return, as cmdRecover's line before the lock: a supervisor left stopped needs
+  // no owner's command, so origin is read only for a start (kit-764)
+  const s = loadSettings();
   const id = supervisorSessionId();
   const exact = /^claude(\s|$)/.test(s.resume_command);
   const missing = (s.worktree_files ?? []).filter((f) => !fs.existsSync(path.join(mainRoot, f)));
@@ -18751,6 +18753,10 @@ function cmdRecover() {
   if (writer !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`recover: not from here: ${writer !== 'supervisor' ? `this session or checkout is ${writer}'s (a ticket or plan branch)` : `this session is a ${process.env.DEVTEAM_ROLE}`}. The owner, the operator or the supervisor runs it, from the main checkout (${mainRoot})`);
   if (flags.machine) return recoverMachine();
   if (!flags['dry-run']) fs.mkdirSync(runDir, { recursive: true });
+  // the owner's settings before the lock, unless nothing will start (one is up, or recoverOne's own
+  // refusal leaves it stopped; offline too): a start refused for them (an unreadable origin, kit-764)
+  // exits, and an exit under the lock would leave it held for the next recover to wait out
+  { const rec = supervisorUpRecord(); if (!supervisorRunningNow(rec) && !recoverStarting(rec) && (flags.force || flags['was-up'] || !recoverRefusal(rec))) loadSettings(); }
   // One recover at a time, for longer than the usual lock: on a loaded box tmux alone can take most
   // of 10 s. Still stale in the end, so a crash halfway can't wedge the next one.
   const { say, run } = flags['dry-run'] ? recoverOne() : withLock(path.join(runDir, 'recover'), recoverOne, { staleMs: 90000, waitMs: 100000 });
