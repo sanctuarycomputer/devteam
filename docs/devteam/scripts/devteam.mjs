@@ -1970,6 +1970,7 @@ function logWriter() {
 // for the command at hand.
 function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
+  if (inResponderWorktree()) die("owner commands don't run in the responder's worktree");
   const pane = process.env.TMUX_PANE;
   if (!pane || !process.env.TMUX) return { by: 'owner' };
   const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set'
@@ -30854,24 +30855,56 @@ function inResponderWorktree() {
 }
 // git for the responder's start. What it could have planted never runs or counts: no shared hook
 // (final-1 F6), no fsmonitor (F4), no replaced object (F5).
-const responderGit = (args, cwd = mainRoot) => spawnSync('git', ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 120000 });
-// The commit origin itself calls main, and the owner's settings as that commit has them: no local
-// ref, which the responder can move without a push, is trusted (final-1 F5). Refuses if unreadable.
+const RESPONDER_GIT = ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+const responderGit = (args, cwd = mainRoot, env = null) => spawnSync('git', [...RESPONDER_GIT, ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 120000, ...(env ? { env: { ...process.env, ...env } } : {}) });
+// A git call to origin, in its own process group: at the deadline the whole group goes, so a hung
+// transport (ssh) isn't left behind by a refused start (final-2b F4).
+const RESPONDER_GROUP_RUN = "const {spawn}=require('child_process');const [ms,...a]=process.argv.slice(1);const c=spawn(a[0],a.slice(1),{detached:true,stdio:'inherit'});const t=setTimeout(()=>{try{process.kill(-c.pid,'SIGKILL')}catch{}process.exit(124)},Number(ms));c.on('error',()=>process.exit(127));c.on('exit',(code)=>{clearTimeout(t);process.exit(code??1)});";
+function responderOrigin(args) {
+  const ms = Number(process.env.DEVTEAM_RESPONDER_GIT_MS) || 120000;
+  return spawnSync(process.execPath, ['-e', RESPONDER_GROUP_RUN, '--', String(ms), 'git', ...RESPONDER_GIT, ...args], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: ms + 10000 });
+}
+// The branch the kit treats as main, from the main checkout's own settings file: not through a local
+// ref, which the responder can move without a push, and not origin's HEAD (final-2b F3).
+function responderMainBranch() {
+  const block = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  try { const b = block ? JSON.parse(block[1]).main_branch : null; if (typeof b === 'string' && b) return b; } catch {}
+  return SETTINGS_DEFAULTS.main_branch;
+}
+// The commit origin has at that exact branch, and the owner's settings as that commit has them; a
+// commit that names another branch as main is refused. Refuses if origin can't be read (final-1 F5).
 function responderMain(s) {
-  const ls = responderGit(['ls-remote', '--symref', 'origin', 'HEAD']);
-  const branch = ls.status === 0 ? /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(ls.stdout)?.[1] : null;
-  const sha = ls.status === 0 ? /^([0-9a-f]{40,64})\s+HEAD$/m.exec(ls.stdout)?.[1] : null;
-  if (!branch || !sha) die('responder: could not read main from origin, so the owner\'s command can\'t be confirmed; try again when origin answers');
-  if (responderGit(['fetch', '--quiet', 'origin', `refs/heads/${branch}`]).status !== 0 || responderGit(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) die(`responder: could not read main from origin (${sha.slice(0, 8)} did not arrive)`);
+  const branch = responderMainBranch();
+  const ref = `refs/heads/${branch}`;
+  const ls = responderOrigin(['ls-remote', 'origin', ref]);
+  const sha = ls.status === 0 ? ls.stdout.split('\n').map((l) => l.split('\t')).find(([, r]) => r === ref)?.[0] : null;
+  if (!/^[0-9a-f]{40,64}$/.test(sha ?? '')) die(`responder: could not read main from origin (${ref}), so the owner's command can't be confirmed; try again when origin answers`);
+  if (responderOrigin(['fetch', '--quiet', 'origin', ref]).status !== 0 || responderGit(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) die(`responder: could not read main from origin (${sha.slice(0, 8)} did not arrive)`);
   const settings = { ...s };
   if (projectInRepo) {
     const shown = responderGit(['show', `${sha}:${projectRel}/settings.md`]);
     const block = shown.status === 0 ? shown.stdout.match(/```json devteam\s*\n([\s\S]*?)\n```/) : null;
     let onMain = { ...SETTINGS_DEFAULTS };
-    if (block) { try { onMain = { ...onMain, ...JSON.parse(block[1]) }; } catch { die(`responder: settings.md on main (${sha.slice(0, 8)}) is not valid JSON`); } }
+    if (block) {
+      try { onMain = { ...onMain, ...JSON.parse(block[1]) }; } catch { die(`responder: settings.md on main (${sha.slice(0, 8)}) is not valid JSON`); }
+      if (onMain.main_branch !== branch) die(`responder: could not read main from origin: ${ref} names ${onMain.main_branch} as main`);
+    }
     for (const k of Object.keys(OWNER_SETTINGS)) settings[k] = onMain[k];
   }
   return { sha, settings };
+}
+// The tracked files that differ from a commit, read from the files themselves through a fresh index:
+// the worktree's own index can carry the stat of an edited file beside the original blob (final-2 F2).
+function responderDiffers(wt, sha) {
+  fs.mkdirSync(path.join(runDir, 'agent'), { recursive: true });
+  const dir = fs.mkdtempSync(path.join(runDir, 'agent', 'responder-index-'));
+  const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
+  try {
+    if (responderGit(['read-tree', sha], wt, env).status !== 0) return null;
+    responderGit(['update-index', '-q', '--really-refresh'], wt, env);
+    const d = responderGit(['diff-files', '--name-only', '-z'], wt, env);
+    return d.status === 0 ? d.stdout.split('\0').filter(Boolean) : null;
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 // Why .worktrees/responder isn't the responder's own worktree, or null, from the files alone: no git
 // runs in a folder whose .git it may have rewritten (final-1 F1, F4).
@@ -30888,13 +30921,14 @@ function responderWorktreeProblem(wt) {
   } catch { return no; }
 }
 // What in the worktree would outlive a refresh, as full paths: tracked changes, files git was told
-// not to look at, and untracked files, but for a regular file the owner's worktree_files seeds.
+// not to look at, and untracked files, but for a regular file the owner's worktree_files seeds from
+// a source that exists, so the copy replaces it (final-2 F3).
 function responderDirty(wt, seeded) {
   const st = responderGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], wt);
   const flags = responderGit(['ls-files', '-v', '-z'], wt);
   if (st.status !== 0 || flags.status !== 0) return null;
   const seeds = new Set((seeded ?? []).map((f) => path.normalize(String(f))));
-  const isSeed = (f) => { try { return seeds.has(path.normalize(f)) && fs.lstatSync(path.join(wt, f)).isFile(); } catch { return false; } };
+  const isSeed = (f) => { try { return seeds.has(path.normalize(f)) && fs.existsSync(path.join(mainRoot, f)) && fs.lstatSync(path.join(wt, f)).isFile(); } catch { return false; } };
   const hits = [];
   const parts = st.stdout.split('\0').filter(Boolean);
   for (let i = 0; i < parts.length; i++) {
@@ -31031,13 +31065,17 @@ function cmdResponder() {
     if (bad) die(bad);
     const dirty = responderDirty(wt, owned.worktree_files);
     if (dirty === null) die(`${wt}: git status failed there, so the responder's worktree is left as it is`);
-    if (dirty.length) die(`${wt} has local changes (${plural(dirty.length, 'path')}, first ${dirty[0]}): the responder starts from main, so clear them or remove the worktree, then responder again`);
+    const changed = (hits) => die(`${wt} has local changes (${plural(hits.length, 'path')}, first ${hits[0]}): the responder starts from main, so clear them or remove the worktree, then responder again`);
+    if (dirty.length) changed(dirty);
     const clean = responderGit(['clean', '-ffdXq'], wt);
     if (clean.status !== 0) die(`${wt}: could not clear its ignored files: ${String(clean.stderr ?? '').trim() || `exit ${clean.status}`}`);
     const r = responderGit(['checkout', '--quiet', '--detach', sha], wt);
     if (r.status !== 0) die(`${wt}: could not move it to ${sha.slice(0, 8)}: ${String(r.stderr ?? '').trim() || `exit ${r.status}`}`);
+    const differs = responderDiffers(wt, sha);
+    if (differs === null) die(`${wt}: could not compare it with ${sha.slice(0, 8)}, so the responder's worktree is left as it is`);
+    if (differs.length) changed(differs);
   }
-  seedWorktree(wt, { setup: false, repo: { ...R, settings: { ...R.settings, worktree_files: owned.worktree_files } } });
+  seedWorktree(wt, { setup: false, repo: Object.create(R, { settings: { value: { ...R.settings, worktree_files: owned.worktree_files } } }) });
   trustWorktree(wt, owned, R);
   fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
   const promptFile = path.join(runDir, 'prompts', `${RESPONDER_NAME}.txt`);

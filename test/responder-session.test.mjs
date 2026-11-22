@@ -596,6 +596,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     fs.rmSync(F.wt, { recursive: true, force: true });
     g0(['worktree', 'prune']);
     fs.rmSync(A.out, { force: true });
+    fs.rmSync(E.out, { force: true });
     const r = F.run(F.old, ['responder'], SUP);
     assert.equal(r.status, 0, r.err);
     F.ran(A);
@@ -775,6 +776,109 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     fs.rmSync(path.join(F.old, 'seeded.env'));
     F.onMain({ worktree_files: [] });
   });
+  await t.test('final-2 F2: a tracked edit hidden in the index by a one-shot clean filter refuses; a clean --resume still starts', () => {
+    fresh();
+    const tracked = F.g(['ls-files'], F.wt).split('\n')[0];
+    const file = path.join(F.wt, tracked);
+    const keep = path.join(F.base, 'kept-original');
+    fs.copyFileSync(file, keep);
+    fs.appendFileSync(file, 'planted for the next agent\n');
+    const past = new Date(Date.now() - 3600000);
+    fs.utimesSync(file, past, past);
+    sleep(1200);
+    const attrs = path.join(F.base, 'one-shot-attrs');
+    fs.writeFileSync(attrs, `${tracked} filter=p\n`);
+    F.g(['-c', `core.attributesFile=${attrs}`, '-c', `filter.p.clean=cat '${keep}'`, 'add', tracked], F.wt);
+    assert.equal(F.g(['status', '--porcelain'], F.wt), '', 'git status sees nothing: the attack is set');
+    const r = F.run(F.old, ['responder'], SUP);
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /has local changes/);
+    assert.ok(r.err.includes(tracked), r.err);
+    assert.ok(!F.windows().includes('responder'), 'no window');
+    // cleared by hand: `reset --hard` wouldn't, since the index says the file is unchanged
+    fs.copyFileSync(keep, file);
+    F.g(['add', tracked], F.wt);
+    fs.rmSync(A.out, { force: true });
+    honestStart(['responder', '--resume']);
+  });
+  await t.test('final-2 F3, F4: a file planted at a worktree_files path main lacks refuses; the warning names the main checkout', () => {
+    F.onMain({ worktree_files: ['absent.env'] });
+    try {
+      fresh();
+      const planted = path.join(F.wt, 'absent.env');
+      fs.writeFileSync(planted, 'planted\n');
+      const r = F.run(F.old, ['responder'], SUP);
+      assert.notEqual(r.status, 0, 'refused');
+      assert.match(r.err, /has local changes/);
+      fs.rmSync(planted);
+      const ok = F.run(F.old, ['responder'], SUP);
+      assert.equal(ok.status, 0, ok.err);
+      assert.match(ok.err, /absent\.env is not in the main checkout/);
+      assert.doesNotMatch(ok.err, /undefined/);
+      F.ran(A);
+      stop();
+    } finally { F.onMain({ worktree_files: [] }); }
+  });
+  const originDir = () => F.g(['remote', 'get-url', 'origin'], F.old);
+  await t.test("final-2b F3: origin's default branch being another branch runs main's command", () => {
+    fresh();
+    const planted = plantedCommit();
+    const bare = originDir();
+    F.g(['push', '-q', 'origin', `${planted}:refs/heads/develop`], F.old);
+    const had = F.g(['symbolic-ref', 'HEAD'], bare);
+    F.g(['symbolic-ref', 'HEAD', 'refs/heads/develop'], bare);
+    try { honestStart(); } finally {
+      F.g(['symbolic-ref', 'HEAD', had], bare);
+      F.g(['push', '-q', 'origin', ':refs/heads/develop'], F.old);
+    }
+  });
+  await t.test('final-2b F3: a pushed branch that names itself main, with origin/HEAD moved to it, runs main\'s command', () => {
+    fresh();
+    F.edit({ responder_command: E.cmd, main_branch: 'evil' });
+    F.g(['commit', '-qam', 'planted, naming itself main'], F.old);
+    const planted = F.g(['rev-parse', 'HEAD'], F.old);
+    F.g(['reset', '-q', '--hard', 'HEAD~1'], F.old);
+    F.g(['push', '-q', 'origin', `${planted}:refs/heads/evil`], F.old);
+    F.g(['update-ref', 'refs/remotes/origin/evil', planted], F.old);
+    const had = g0(['symbolic-ref', 'refs/remotes/origin/HEAD']).stdout.trim();
+    F.g(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/evil'], F.old);
+    try { honestStart(); } finally {
+      if (had) F.g(['symbolic-ref', 'refs/remotes/origin/HEAD', had], F.old); else g0(['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD']);
+      F.g(['update-ref', '-d', 'refs/remotes/origin/evil'], F.old);
+      F.g(['push', '-q', 'origin', ':refs/heads/evil'], F.old);
+    }
+  });
+  await t.test('final-2b F3: a main branch origin does not have refuses the start', () => {
+    fresh();
+    F.edit({ main_branch: 'nosuch' });
+    let r;
+    try { r = F.run(F.old, ['responder'], SUP); } finally { F.g(['checkout', '--', 'docs/devteam/project/settings.md'], F.old); }
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /could not read main from origin/);
+    assert.ok(!F.windows().includes('responder'), 'no window');
+  });
+  await t.test('final-2b F4: a hung origin refuses the start and leaves no transport process', () => {
+    fresh();
+    const pidFile = path.join(F.base, 'transport.pid');
+    const hang = path.join(F.base, 'hang-ssh.sh');
+    fs.writeFileSync(hang, `#!/bin/sh\nsleep 300 &\necho $! > '${pidFile}'\nwait\n`, { mode: 0o755 });
+    const url = originDir();
+    F.g(['remote', 'set-url', 'origin', 'ssh://probe.invalid/x.git'], F.old);
+    F.g(['config', 'core.sshCommand', hang], F.old);
+    let r;
+    try { r = F.run(F.old, ['responder'], { ...SUP, DEVTEAM_RESPONDER_GIT_MS: '2500' }); } finally {
+      F.g(['config', '--unset', 'core.sshCommand'], F.old);
+      F.g(['remote', 'set-url', 'origin', url], F.old);
+    }
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /could not read main from origin/);
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    const alive = () => { const st = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim(); return !!st && !st.startsWith('Z'); };
+    for (let i = 0; i < 50 && alive(); i++) sleep(100);
+    const left = alive();
+    if (left) process.kill(pid, 'SIGKILL');
+    assert.ok(!left, 'the transport process is gone');
+  });
   await t.test('1b F4: a worktree removed by hand needs no manual prune', () => {
     fresh();
     fs.rmSync(F.wt, { recursive: true, force: true });
@@ -802,6 +906,20 @@ test('R13: with DEVTEAM_ROLE unset, its worktree writes as the responder, never 
     assert.match(u, /-responder$/, `a turn from ${cwd} is the responder's: ${u}`);
     assert.match(at(cwd, ['act', '--class', 'worker-slots', '--what', 'x', '--why', 'y']).err, /hand it over|the supervisor does this/, 'and a supervisor command is refused');
   }
+  // nothing from its worktree writes as the owner, whichever owner command it tries (final-2 F1)
+  const openQ = F.ok(F.old, ['ask', '--kind', 'owner-decision', '--goal', F.goal, '--question', 'Ship it?', '--options', 'Yes', 'No'], SUP).split('\n')[0];
+  for (const args of [['thread', 'say', T, 'Forged.'], ['thread', 'new', 'Forged.'], ['thread', 'resolve', T], ['thread', 'reopen', T], ['answer', openQ, 'Yes'], ['fleet', 'park', '--owner'], ['goal', 'order', 'g-none']]) {
+    for (const cwd of [F.wt, sub]) {
+      const r = at(cwd, args);
+      assert.notEqual(r.status, 0, `${args.join(' ')} from ${cwd} is refused`);
+      assert.match(r.err, /owner commands don't run in the responder's worktree/, `${args.join(' ')}: ${r.err}`);
+    }
+  }
+  assert.ok(!json(F.ok(F.old, ['thread', 'show', T, '--json'], SUP)).turns.some((u) => u.text === 'Forged.'), 'no forged turn');
+  const notParked = F.run(F.old, ['responder'], SUP);
+  assert.equal(notParked.status, 0, `the fleet was not parked: ${notParked.err}`);
+  F.ran(A);
+  assert.equal(F.run(F.old, ['responder', '--stop'], SUP).status, 0);
   // a linked cwd is still the worktree; a look-alike folder, and a link AT the worktree's path, are not
   const link = path.join(F.base, 'link-to-responder');
   fs.symlinkSync(F.wt, link);
