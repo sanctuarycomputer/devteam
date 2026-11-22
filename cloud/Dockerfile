@@ -277,7 +277,10 @@ COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
 # command first, after a ;, and anywhere after a command that is handed one as a word (if-shell,
 # confirm-before, set-hook, display-menu, choose-tree, command-prompt, bind-key, source-file). Not
 # caught: kill-session, kill-server typed at tmux's : prompt or inside a file source-file reads, or a
-# tmux earlier on PATH than this one (a mise or project install).
+# tmux earlier on PATH than this one (a mise or project install). (c) A TMUX_TMPDIR that is set but
+# is no directory, with no -S, is refused whatever the command: tmux then falls back to /tmp, the box's
+# server. On 2026-11-22, twice, a test's cleanup listed and killed "its" sessions through a private
+# TMUX_TMPDIR whose folder was already gone, and ended every session on the box.
 # Everything else goes straight to tmux, arguments untouched: every tmux call the kit makes runs this.
 RUN dpkg-divert --local --rename --divert /usr/bin/tmux.distrib --add /usr/bin/tmux
 COPY --chmod=755 <<'EOF' /usr/bin/tmux
@@ -309,6 +312,10 @@ for a do
   fi
   case $a in *\;) at=1 any= ;; *) at= ;; esac
 done
+if [ -n "$TMUX_TMPDIR" ] && [ -z "$s" ] && [ ! -d "$TMUX_TMPDIR" ]; then
+  echo "tmux: refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not a directory, so tmux would use the box's server; use tmux -S <socket> …" >&2
+  exit 1
+fi
 if [ -n "$TMUX_TMPDIR" ] && [ -n "$TMUX" ] && [ -z "$s$l" ]; then
   case ${TMUX%%,*} in "${TMUX_TMPDIR%/}"/*) ;; *) unset TMUX TMUX_PANE ;; esac
 fi
