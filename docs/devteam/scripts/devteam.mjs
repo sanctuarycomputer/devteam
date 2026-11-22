@@ -30990,8 +30990,13 @@ function responderMain(s) {
     const block = shown.status === 0 ? shown.stdout.match(/```json devteam\s*\n([\s\S]*?)\n```/) : null;
     // never the kit's defaults in place of the owner's command and deny rules (final-3 F3)
     if (!block) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}), so nothing was started`);
-    let onMain = { ...SETTINGS_DEFAULTS };
-    try { onMain = { ...onMain, ...JSON.parse(block[1]) }; } catch { die(`responder: settings.md on main (${sha.slice(0, 8)}) is not valid JSON`); }
+    let own;
+    try { own = JSON.parse(block[1]); } catch { die(`responder: settings.md on main (${sha.slice(0, 8)}) is not valid JSON`); }
+    // null, an array, a scalar or {} would leave every owner setting at the kit's default (final-4
+    // F1). A block without main_branch is a project on main, as init writes one; one present must be a
+    // branch name (m-20261122-054734545-supervisor).
+    if (!isObj(own) || !Object.keys(own).length || ('main_branch' in own && (typeof own.main_branch !== 'string' || !own.main_branch))) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): the settings block is not an object of settings, so nothing was started`);
+    const onMain = { ...SETTINGS_DEFAULTS, ...own };
     if (onMain.main_branch !== branch) die(`responder: could not read main from origin: ${ref} names ${onMain.main_branch} as main`);
     for (const k of Object.keys(OWNER_SETTINGS)) settings[k] = onMain[k];
   }
@@ -31005,6 +31010,8 @@ function responderDiffers(wt, sha) {
   const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
   try {
     if (responderGit(['read-tree', sha], wt, env).status !== 0) return null;
+    // with --ignore-submodules, neither the refresh nor the compare looks inside a nested repo at a
+    // gitlink, so its own config (a clean filter) never runs here (final-3b F2, final-4 F7)
     responderGit(['update-index', '--ignore-submodules', '-q', '--really-refresh'], wt, env);
     const d = responderGit(['diff-files', '--ignore-submodules=all', '--name-only', '-z'], wt, env);
     return d.status === 0 ? d.stdout.split('\0').filter(Boolean) : null;
@@ -31047,9 +31054,10 @@ function responderPlanted(wt, sha) {
     if (!gitlinks.has(f)) return `${wt} has a nested repository the commit doesn't have (${f}): remove the worktree, then responder again`;
     let inside = [];
     try { inside = fs.readdirSync(path.join(wt, f)); } catch (err) { if (err.code !== 'ENOENT') inside = [f]; }
-    if (inside.length) return `${wt} holds files at a nested repository's path (${f}): remove the worktree, then responder again`;
+    if (inside.length) return `${wt} holds files at a nested repository's path (${f}), as an initialised submodule does, and a start can't check inside one: remove the worktree (git worktree remove --force ${wt}), then responder again`;
   }
   const cant = (f, why) => `${wt}: can't check ${f} (${why}): clear it or remove the worktree, then responder again`;
+  const loose = [];
   const folders = [''];
   while (folders.length) {
     const dir = folders.pop();
@@ -31058,12 +31066,23 @@ function responderPlanted(wt, sha) {
     for (const n of names) {
       if (!dir && n === '.git') continue;
       const f = dir ? path.join(dir, n) : n;
+      // git never lists a path named .git, file or folder: a nested repo, or what hides in one (final-4 F2)
+      if (n === '.git') return cant(f, "a nested repository's .git");
       let st;
       try { st = fs.lstatSync(path.join(wt, f)); } catch { return cant(f, "it can't be read"); }
       if (st.isDirectory()) folders.push(f);
-      else if (st.isSymbolicLink()) { if (!links.has(f)) return cant(f, 'a link the commit does not have'); }
+      else if (st.isSymbolicLink()) { if (!links.has(f)) loose.push(f); }
       else if (!st.isFile()) return cant(f, 'not a file or a folder');
     }
+  }
+  // A link the commit lacks is left only where git ignores it, so git clean -ffdX removes it, never
+  // following it (node_modules/.bin, a .venv); check-ignore runs no filter (final-4 F5).
+  if (loose.length) {
+    const ci = spawnSync('git', [...RESPONDER_GIT, 'check-ignore', '--no-index', '-z', '--stdin'], { cwd: wt, input: `${loose.join('\0')}\0`, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 120000 });
+    if (ci.status !== 0 && ci.status !== 1) return `${wt}: could not ask git which links it ignores, so the responder's worktree is left as it is`;
+    const ignored = new Set((ci.stdout ?? '').split('\0').filter(Boolean));
+    const kept = loose.find((f) => !ignored.has(f));
+    if (kept) return cant(kept, 'a link the commit does not have');
   }
   return null;
 }
@@ -31086,6 +31105,7 @@ function responderSeed(wt, files, R) {
 // not to look at, and untracked files, but for a regular file the owner's worktree_files seeds from
 // a source that exists, so the copy replaces it (final-2 F3).
 function responderDirty(wt, seeded) {
+  // --ignore-submodules=all: status never enters a nested repo at a gitlink to run its filter
   const st = responderGit(['status', '--ignore-submodules=all', '--porcelain=v1', '-z', '--untracked-files=all'], wt);
   const flags = responderGit(['ls-files', '-v', '-z'], wt);
   if (st.status !== 0 || flags.status !== 0) return null;
@@ -31238,6 +31258,10 @@ function cmdResponder() {
     const differs = responderDiffers(wt, sha);
     if (differs === null) die(`${wt}: could not compare it with ${sha.slice(0, 8)}, so the responder's worktree is left as it is`);
     if (differs.length) changed(differs);
+    // again, with every git call behind it: a nested repo put at a gitlink after the first look,
+    // which the flagged status and compare never enter (final-4 F3)
+    const after = responderPlanted(wt, sha);
+    if (after) die(after);
   }
   responderSeed(wt, owned.worktree_files, R);
   trustWorktree(wt, owned, R);

@@ -964,17 +964,33 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     assert.match(r.err, /can't check/);
     assert.ok(r.err.includes('.claude/settings.local.json'), r.err);
   });
-  await t.test('final-3 F2: an ignored symlink refuses; a symlink the commit tracks does not', () => {
+  await t.test("final-4 F5: an ignored symlink is gone before the agent starts, its target untouched, at a start and a --resume; one git doesn't ignore refuses; a tracked one stays", () => {
     fresh();
     const exclude = path.join(common, 'info', 'exclude');
     const had = fs.readFileSync(exclude);
-    fs.appendFileSync(exclude, 'r3-link\n');
+    fs.appendFileSync(exclude, 'r4-deps/\n');
+    const target = path.join(F.base, 'r4-link-target');
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, 'bin'), 'kept\n');
+    try {
+      for (const args of [['responder'], ['responder', '--resume']]) {
+        stop();
+        const link = path.join(F.wt, 'r4-deps', '.bin', 'tool');
+        fs.mkdirSync(path.dirname(link), { recursive: true });
+        fs.symlinkSync(target, link);
+        assert.equal(g0(['check-ignore', '-q', 'r4-deps/.bin/tool'], F.wt).status, 0, 'git ignores it: the case is set');
+        honestStart(args);
+        assert.throws(() => fs.lstatSync(link), /ENOENT/, `${args.join(' ')}: the link is gone`);
+        assert.equal(fs.readFileSync(path.join(target, 'bin'), 'utf8'), 'kept\n', 'its target is untouched');
+      }
+    } finally { fs.writeFileSync(exclude, had); }
+    fresh();
     const link = path.join(F.wt, 'r3-link');
     fs.symlinkSync(path.join(F.old, 'docs'), link);
     let r;
-    try { r = F.run(F.old, ['responder'], SUP); } finally { fs.rmSync(link, { force: true }); fs.writeFileSync(exclude, had); }
+    try { r = F.run(F.old, ['responder'], SUP); } finally { fs.rmSync(link, { force: true }); }
     assert.notEqual(r.status, 0, 'refused');
-    assert.match(r.err, /can't check/);
+    assert.match(r.err, /can't check r3-link/);
     const tracked = path.join(F.old, 'r3-tracked-link');
     fs.symlinkSync('docs', tracked);
     F.g(['add', 'r3-tracked-link'], F.old);
@@ -1030,6 +1046,8 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
       fs.mkdirSync(dir);
       assert.notEqual(r.status, 0, 'refused');
       assert.match(r.err, /holds files at a nested repository's path/);
+      assert.match(r.err, /an initialised submodule/);
+      assert.match(r.err, /git worktree remove --force/);
       assert.ok(!fs.existsSync(mark), 'the planted filter never ran');
       honestStart();
     } finally {
@@ -1059,6 +1077,176 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
       F.onMain({ worktree_files: [] });
     }
   });
+  // final-4: the owner's settings as anything but a plain object never start the kit's defaults
+  for (const shape of ['null', '[]', '"x"', '7', '42', 'true', '{}', '{"main_branch": 7}', '{"main_branch": ""}', '{"main_branch": null}', '{"main_branch": ["main"]}']) {
+    await t.test(`final-4 F1: a settings block of ${shape} refuses and types nothing`, () => {
+      fresh();
+      const sf = path.join(F.old, settingsRel);
+      const keep = fs.readFileSync(sf);
+      fs.writeFileSync(sf, `# Project settings\n\n\`\`\`json devteam\n${shape}\n\`\`\`\n`);
+      F.g(['commit', '-qam', `settings: ${shape}`], F.old);
+      F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+      let r;
+      try { r = F.run(F.old, ['responder'], SUP); } finally {
+        fs.writeFileSync(sf, keep);
+        F.g(['commit', '-qam', 'settings: back'], F.old);
+        F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+      }
+      assert.notEqual(r.status, 0, 'refused');
+      assert.match(r.err, /could not read the owner's settings/);
+      assert.ok(!F.windows().includes('responder'), 'no window, so nothing typed');
+      assert.ok(!fs.existsSync(A.out) && !fs.existsSync(E.out), 'no command ran');
+    });
+  }
+  await t.test("final-4 F1: a block as init writes it for a project on main (no main_branch) starts", () => {
+    fresh();
+    const sf = path.join(F.old, settingsRel);
+    const keep = fs.readFileSync(sf);
+    const text = keep.toString();
+    const block = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text);
+    // devteam.mjs cmdInit's block, with the owner's responder_command
+    const init = { project: 'p', upstream_base: null, upstream_sync: 'adopt', components: {}, gates: {}, responder_command: A.cmd };
+    fs.writeFileSync(sf, text.replace(block[1], JSON.stringify(init, null, 2)));
+    F.g(['commit', '-qam', 'settings: no main_branch'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    try { honestStart(); } finally {
+      stop();
+      fs.writeFileSync(sf, keep);
+      F.g(['commit', '-qam', 'settings: back'], F.old);
+      F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    }
+  });
+  // final-4 F2: git never lists a path named .git, so the walk refuses one anywhere below the root
+  for (const [name, rel] of [['p9 a file under a tracked folder', 'docs/.git/planted'], ['p10 a file under a new folder', 'r4-new/.git/planted'], ['p11 a file under .claude', '.claude/.git/planted'], ['n5 a .git file in a tracked folder', 'docs/.git']]) {
+    await t.test(`final-4 F2: ${name} refuses`, () => {
+      fresh();
+      const file = path.join(F.wt, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, rel.endsWith('.git') ? `gitdir: ${path.join(F.base, 'elsewhere')}\n` : 'planted\n');
+      assert.equal(g0(['status', '--porcelain', '--untracked-files=all'], F.wt).stdout.includes('planted'), false, 'git status does not show it: the attack is set');
+      const r = F.run(F.old, ['responder'], SUP);
+      const top = rel.split('/')[0];
+      fs.rmSync(path.join(F.wt, top === 'docs' ? 'docs/.git' : top), { recursive: true, force: true });
+      assert.notEqual(r.status, 0, 'refused');
+      assert.match(r.err, /can't check \S*\.git \(a nested repository's \.git\)/);
+      assert.ok(!F.windows().includes('responder'), 'no window');
+    });
+  }
+  await t.test('final-4 F2: p12 a repo at docs/.git with a planted fsmonitor refuses, and the fsmonitor never runs', () => {
+    fresh();
+    const mark = path.join(F.base, 'r4-fsmonitor-ran.txt');
+    const src = path.join(F.base, 'r4-fsm');
+    fs.mkdirSync(src, { recursive: true });
+    F.g(['init', '-q'], src);
+    F.g(['config', 'core.fsmonitor', `sh -c 'echo ran >> "${mark}"'`], src);
+    fs.renameSync(path.join(src, '.git'), path.join(F.wt, 'docs', '.git'));
+    const r = F.run(F.old, ['responder'], SUP);
+    fs.rmSync(path.join(F.wt, 'docs', '.git'), { recursive: true, force: true });
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /can't check docs\/\.git/);
+    assert.ok(!fs.existsSync(mark), 'the planted fsmonitor never ran');
+  });
+  // main gains a real gitlink at vendor/lib, after the responder's worktree was made
+  const lib = path.join(F.base, 'r4-lib');
+  fs.mkdirSync(lib, { recursive: true });
+  F.g(['init', '-q'], lib);
+  F.g(['config', 'user.email', 'probe@example.invalid'], lib);
+  F.g(['config', 'user.name', 'probe'], lib);
+  fs.writeFileSync(path.join(lib, 'r'), 'r');
+  F.g(['add', '-A'], lib);
+  F.g(['commit', '-qm', 'lib'], lib);
+  const libHead = F.g(['rev-parse', 'HEAD'], lib);
+  const gitlinkOnMain = (on) => {
+    if (on) {
+      F.g(['update-index', '--add', '--cacheinfo', `160000,${libHead},vendor/lib`], F.old);
+      fs.writeFileSync(path.join(F.old, '.gitmodules'), `[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = ${lib}\n`);
+      F.g(['add', '.gitmodules'], F.old);
+    } else {
+      F.g(['update-index', '--force-remove', 'vendor/lib'], F.old);
+      F.g(['rm', '-qf', '.gitmodules'], F.old);
+    }
+    F.g(['commit', '-qm', on ? 'main gains a submodule' : 'no submodule'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+  };
+  // a nested repo at the commit main's gitlink names, its own work tree outside with a same-size
+  // edit and a clean filter that leaves a mark: only a git that looks inside it runs the filter
+  const nestedAt = (dir, mark) => {
+    F.g(['clone', '-q', lib, dir], F.base);
+    fs.rmSync(path.join(dir, 'r'));
+    const away = fs.mkdtempSync(path.join(F.base, 'r4-away-'));
+    F.g(['config', 'filter.p.clean', `sh -c 'echo ran >> "${mark}"; cat'`], dir);
+    F.g(['config', 'core.worktree', away], dir);
+    fs.writeFileSync(path.join(away, '.gitattributes'), '* filter=p\n');
+    fs.writeFileSync(path.join(away, 'r'), 'x');
+    return away;
+  };
+  await t.test("final-4 F3: p5r4c a nested .git beside a file the worktree's HEAD tracks, where main has a gitlink, refuses", () => {
+    fresh();
+    gitlinkOnMain(true);
+    const mark = path.join(F.base, 'r4c-filter-ran.txt');
+    const nest = path.join(F.wt, 'vendor', 'lib');
+    try {
+      fs.mkdirSync(path.dirname(nest), { recursive: true });
+      const away = nestedAt(nest, mark);
+      fs.writeFileSync(path.join(nest, 'keep'), 'k');
+      const blob = F.g(['hash-object', '-w', '--no-filters', path.join(nest, 'keep')], F.wt);
+      F.g(['update-index', '--add', '--cacheinfo', `100644,${blob},vendor/lib/keep`], F.wt);
+      F.g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'tracks the folder'], F.wt);
+      assert.equal(g0(['status', '--porcelain', '--untracked-files=all'], F.wt).stdout, '', 'git status sees nothing: the attack is set');
+      const r = F.run(F.old, ['responder'], SUP);
+      fs.rmSync(away, { recursive: true, force: true });
+      assert.notEqual(r.status, 0, 'refused');
+      assert.match(r.err, /vendor\/lib\/\.git/);
+      assert.ok(!fs.existsSync(mark), 'the nested filter never ran');
+      assert.ok(!F.windows().includes('responder'), 'no window');
+    } finally { gitlinkOnMain(false); }
+  });
+  // A process left running past --stop, stood in for by a git first on PATH: just before the start's
+  // first `git <at>` in the worktree, it plants a nested repo at main's gitlink. So each later check
+  // is reached with the walk already behind it (final-4 F3, F7).
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const plantLater = (at, mark) => {
+    const bin = path.join(F.base, `r4-shim-${at}`);
+    fs.rmSync(bin, { recursive: true, force: true });
+    fs.mkdirSync(bin, { recursive: true });
+    const prep = path.join(bin, 'prep');
+    const away = nestedAt(prep, mark);
+    const done = path.join(bin, 'done');
+    const into = path.join(F.wt, 'vendor', 'lib');
+    write(path.join(bin, 'git'), `#!/bin/sh
+sub=
+skip=
+for a in "$@"; do
+  if [ -n "$skip" ]; then skip=; continue; fi
+  case "$a" in -c) skip=1 ;; -*) ;; *) sub=$a; break ;; esac
+done
+if [ "$sub" = '${at}' ] && [ ! -e '${done}' ] && [ "$(pwd -P)" = '${fs.realpathSync(F.wt)}' ]; then
+  : > '${done}'
+  mkdir -p '${into}' && mv '${prep}/.git' '${into}/.git'
+fi
+exec '${realGit}' "$@"
+`);
+    fs.chmodSync(path.join(bin, 'git'), 0o755);
+    return { env: { ...SUP, PATH: `${bin}:${process.env.PATH}` }, fired: () => fs.existsSync(done), away };
+  };
+  for (const at of ['status', 'checkout', 'read-tree']) {
+    await t.test(`final-4 F3, F7: a nested repo planted at main's gitlink just before \`git ${at}\` refuses, and its filter never runs`, () => {
+      gitlinkOnMain(true);
+      try {
+        fresh();
+        const mark = path.join(F.base, `r4-${at}-filter-ran.txt`);
+        const shim = plantLater(at, mark);
+        const r = F.run(F.old, ['responder'], shim.env);
+        fs.rmSync(path.join(F.wt, 'vendor', 'lib', '.git'), { recursive: true, force: true });
+        fs.rmSync(shim.away, { recursive: true, force: true });
+        assert.ok(shim.fired(), `the plant went in before git ${at}: the attack is set`);
+        assert.ok(!fs.existsSync(mark), `the nested filter never ran: ${fs.existsSync(mark) ? fs.readFileSync(mark, 'utf8').trim() : ''}`);
+        assert.notEqual(r.status, 0, 'refused');
+        assert.match(r.err, /nested repository/);
+        assert.ok(!F.windows().includes('responder'), 'no window');
+      } finally { gitlinkOnMain(false); }
+    });
+  }
   await t.test('1b F4: a worktree removed by hand needs no manual prune', () => {
     fresh();
     fs.rmSync(F.wt, { recursive: true, force: true });
