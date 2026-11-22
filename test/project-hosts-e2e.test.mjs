@@ -181,7 +181,7 @@ const rig = () => (built ??= (async () => {
     }
     await poll(() => /dashboard on http/.test(dashA.out()) && /dashboard on http/.test(dashB.out()), `the dashboards: ${dashA.out().slice(-300)} ${dashB.out().slice(-300)}`, 120000);
     r.list = await poll(async () => {
-      const l = await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json();
+      const l = await (await fetch(`http://127.0.0.1:${HUB}/instances.json`, { signal: AbortSignal.timeout(5000) })).json();
       return l.instances?.length === 5 && l.instances.every((x) => x.name) ? l.instances : null;
     }, `the hub's list (${hubOut.slice(-300)})`, 90000);
     // the gateway
