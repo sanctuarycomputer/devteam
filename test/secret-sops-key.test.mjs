@@ -134,6 +134,32 @@ test('a store takes all of a question\'s secrets in one post, and a failed one s
   } finally { F.done(); }
 });
 
+test('a branch whose name ends in refs/heads/main never supplies the store', { skip: !real }, () => {
+  const F = fleetFixture('sops-ref');
+  try {
+    const good = keygen(); const evil = keygen();
+    repo(F, good.pub);
+    const real0 = fs.readFileSync(path.join(F.old, 'secrets/app.enc.env'), 'utf8');
+    // a store for the owner's recipient and the pusher's own, on a branch that sorts before main
+    const w = path.join(F.base, 'pusher');
+    F.g(['worktree', 'add', '-q', '-b', 'pusher', w, 'origin/main'], F.old);
+    write(path.join(w, 'secrets/app.enc.env'), 'SEED=1\n');
+    encrypt(`${good.pub},${evil.pub}`, path.join(w, 'secrets/app.enc.env'));
+    F.g(['add', '-A', 'secrets'], w);
+    F.g(['commit', '-qm', 'planted'], w);
+    F.g(['push', '-q', 'origin', 'pusher:refs/heads/a/refs/heads/main'], w);
+    F.g(['fetch', '-q', 'origin', '+refs/heads/*:refs/remotes/origin/*'], F.old);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE']);
+    const r = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9' }));
+    assert.equal(r.status, 0, r.out + r.err);
+    const c = fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-'));
+    const after = path.join(F.old, '.worktrees', c, 'secrets/app.enc.env');
+    assert.equal(stanza(fs.readFileSync(after, 'utf8')), stanza(real0), "main's own store");
+    assert.equal(decrypt(evil.id, after).status === 0, false, "the pusher's key can't open it");
+  } finally { F.done(); }
+});
+
 test('a stdin sink that stops reading: exit 0 is not posted, and a refusal shows its own error', () => {
   const F = fleetFixture('sink-epipe');
   try {

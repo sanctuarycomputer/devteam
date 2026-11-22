@@ -11816,8 +11816,12 @@ const sopsRecipients = (b) => [...new Set(b.toString('utf8').split('\n').filter(
 // The store on the remote's main, read past local refs and replace objects.
 function sopsMainBlob(file) {
   const main = loadSettings().main_branch;
-  const head = spawnSync('git', ['ls-remote', 'origin', `refs/heads/${main}`], { cwd: mainRoot, encoding: 'utf8', timeout: 20000, killSignal: 'SIGKILL' }).stdout?.split(/\s/)[0];
-  if (!/^[0-9a-f]{40,64}$/.test(head ?? '')) return null;
+  // ls-remote matches a pattern against the tail of a ref name, so a branch a/refs/heads/main matches too
+  const ref = `refs/heads/${main}`;
+  const lines = (spawnSync('git', ['ls-remote', 'origin', ref], { cwd: mainRoot, encoding: 'utf8', timeout: 20000, killSignal: 'SIGKILL' }).stdout ?? '').split('\n').filter(Boolean).map((l) => l.split('\t')).filter(([, name]) => name === ref);
+  if (lines.length !== 1) return null;
+  const head = lines[0][0];
+  if (!/^[0-9a-f]{40,64}$/.test(head)) return null;
   const r = spawnSync('git', ['--no-replace-objects', 'show', `${head}:${file}`], { cwd: mainRoot, maxBuffer: 16 * 1024 * 1024, timeout: 10000, killSignal: 'SIGKILL' });
   return r.status === 0 ? r.stdout : null;
 }
