@@ -2418,7 +2418,7 @@ exit 0
       "key": "finding_ack_hours",
       "group": "Questions and findings",
       "name": "A finding set aside for",
-      "description": "hours a set-aside finding stays quiet, unless its subject changes",
+      "description": "hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good",
       "shown": "value",
       "value": 24,
       "set": false,

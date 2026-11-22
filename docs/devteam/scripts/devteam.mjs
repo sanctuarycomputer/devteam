@@ -693,7 +693,7 @@ const SETTINGS_WORDS = Object.freeze({
   autonomy_ceilings: ['Merging and checks', 'Autonomy ceilings', "the highest level the supervisor may reach for a kind of decision, below the kit's", 'value'],
   hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
   question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
-  finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes', 'value'],
+  finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good', 'value'],
   upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
@@ -32506,7 +32506,7 @@ const HELP_OBSERVE = `Observe and orient
   observe-link --url u | --path p --title t [--for scope…] [--notes n] [--owner]   a resource the work uses; orient proposes it for the registry
   wait [--minutes n]   supervisor, between ticks: blocks until a new message to you, a new owner line, a new high finding, or the tick is due (tick_minutes, default 15); an open high finding returns at once until acted on or acked
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
-  ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
+  ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours (a merge commit: for good)
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
   governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
