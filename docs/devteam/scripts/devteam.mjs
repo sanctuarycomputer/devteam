@@ -25973,14 +25973,18 @@ function cmdRecurring() {
       const open = st?.open;
       if (!open) die(`${arg} has no started run to finish${st?.runs.length ? ` (its last, ${st.runs.at(-1).ref}, is ${st.runs.at(-1).status})` : ''}`);
       if (RC.isTicketRef(open.ref)) die(`${arg}'s run ${open.ref} is a ticket: it ends only through that ticket`);
+      if (!RC.REF.test(open.ref)) die(`${arg}'s run ${open.ref} is not a chore branch (chore-recurring-<name>-<yyyymmdd>); finish it by hand`);
       const wt = path.join(mainRoot, '.worktrees', open.ref);
       let removed = '';
+      // a symlink there is never followed: it could lead to another chore's worktree
+      if (status === 'nothing' && fs.lstatSync(wt, { throwIfNoEntry: false })?.isSymbolicLink()) die(`.worktrees/${open.ref} is a symlink, not this chore's worktree; move it aside, then recurring done again`);
       if (status === 'nothing' && fs.existsSync(wt)) {
         // empty: nothing uncommitted and no commit main lacks; anything else is work, never removed here
         const g = (args) => recurringRegistry.git(args, { cwd: wt });
         const top = g(['rev-parse', '--show-toplevel']);
         if (!top.ok || realPath(top.out.trim()) !== realPath(wt)) die(`.worktrees/${open.ref} is not a worktree; move it aside, then recurring done again`);
-        const dirty = g(['status', '--porcelain']);
+        // every untracked file and submodule change counts, whatever the user's git config hides
+        const dirty = g(['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none']);
         const main = mainSha();
         const ahead = main ? g(['rev-list', '--count', 'HEAD', '--not', main]) : { ok: false };
         if (!dirty.ok || !ahead.ok) die(`couldn't read .worktrees/${open.ref} (git ${recurringRegistry.why(dirty.ok ? ahead : dirty)}); nothing was logged`);

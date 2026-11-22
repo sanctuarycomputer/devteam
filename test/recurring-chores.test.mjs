@@ -441,7 +441,7 @@ test('C24: a start cut short after writing its ticket (no started line) is taken
 
 // ===== refusals the done-whens imply =====
 const refuse = group(() => {
-  const jobs = { kept: chore({ every: '1d' }), chk: { kind: 'check', title: 'A check', what: 'runs', every: '1d', run: 'true' } };
+  const jobs = { kept: chore({ every: '1d' }), hide: chore({ every: '1d' }), lnk: chore({ every: '1d' }), other: chore({ every: '1d' }), chk: { kind: 'check', title: 'A check', what: 'runs', every: '1d', run: 'true' } };
   const T = setup('refuse', jobs);
   // a job put on main by a plain commit, with no answer
   const file = path.join(T.old, JOBS);
@@ -480,6 +480,37 @@ test('C25c: recurring done --nothing refuses a chore worktree that holds work, l
   assert.match(r.err, /holds work \(uncommitted changes\)/);
   assert.equal(T.runLines('kept').length, n, 'no line');
   assert.ok(fs.existsSync(path.join(T.old, '.worktrees', ref, PROJ, 'notes', 'work.md')), 'the work is kept');
+});
+
+test('C25d: recurring done --nothing sees an untracked file even when git config hides untracked files, and keeps it', () => {
+  const T = refuse();
+  T.ok(['recurring', 'start', 'hide']);
+  const ref = `chore-recurring-hide-${ymd(Date.now())}`;
+  const file = path.join(T.old, '.worktrees', ref, PROJ, 'notes', 'hidden.md');
+  write(file, 'work\n');
+  const n = T.runLines('hide').length;
+  const r = T.dt(['recurring', 'done', 'hide', '--nothing', 'nothing'], { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'status.showUntrackedFiles', GIT_CONFIG_VALUE_0: 'no' });
+  assert.equal(r.status, 1, r.text);
+  assert.match(r.err, /holds work \(uncommitted changes\)/);
+  assert.equal(T.runLines('hide').length, n, 'no line');
+  assert.ok(fs.existsSync(file), 'the untracked file is kept');
+});
+
+test('C25e: recurring done --nothing refuses a chore worktree path that is a symlink, and removes nothing', () => {
+  const T = refuse();
+  T.ok(['recurring', 'start', 'lnk']);
+  T.ok(['recurring', 'start', 'other']);
+  const day = ymd(Date.now());
+  const mine = path.join(T.old, '.worktrees', `chore-recurring-lnk-${day}`);
+  const theirs = path.join(T.old, '.worktrees', `chore-recurring-other-${day}`);
+  T.g(['worktree', 'remove', mine]);
+  fs.symlinkSync(theirs, mine);
+  const n = T.runLines('lnk').length;
+  const r = T.dt(['recurring', 'done', 'lnk', '--nothing', 'nothing']);
+  assert.equal(r.status, 1, r.text);
+  assert.match(r.err, /is a symlink/);
+  assert.equal(T.runLines('lnk').length, n, 'no line');
+  assert.ok(fs.existsSync(path.join(theirs, '.git')), "the other chore's worktree is kept");
 });
 
 // ===== DW9, DW11: holds, and the dashboard's states =====
