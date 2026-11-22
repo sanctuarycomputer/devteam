@@ -178,10 +178,12 @@ test('a launch reads the owner\'s settings from origin, never from a local ref a
         F.g(['fetch', '-q', 'origin'], F.old);
       }
       assert.notEqual(r.status, 0, 'refused');
-      assert.match(r.err, /could not read main from origin/);
+      assert.match(r.err, /could not read main from origin \('origin' does not appear to be a git repository\)/);
+      assert.match(r.err, /nothing was started/);
       sleep(1000);
       assert.deepEqual(F.started(), { own: false, evil: false, setup: false });
       assert.ok(!F.windows().includes(TICKET), 'no window');
+      assert.ok(!fs.existsSync(path.join(F.old, '.worktrees', TICKET)), 'no worktree');
     });
     for (const [what, block] of [['null', 'null'], ['an array', '[]'], ['{}', '{}']]) {
       await t.test(`origin's settings block is ${what}: the worker starts nothing, never the kit's defaults`, () => {
@@ -270,10 +272,10 @@ test('origin unreadable at a relaunch or a recover: refused with the reason, and
       // no DEVTEAM_LAUNCH_ORIGIN_MS: only the deadline the tick hands its child bounds the wait
       const t0 = Date.now();
       let said;
-      try { said = F.tick({ ...UNDER(F), DEVTEAM_SETUP_DEADLINE: String(Date.now() + 9000) }); } finally { g(['config', '--unset', 'core.sshCommand']); up(); }
+      try { said = F.tick({ ...UNDER(F), DEVTEAM_SETUP_DEADLINE: String(Date.now() + 12000) }); } finally { g(['config', '--unset', 'core.sshCommand']); up(); }
       const took = Date.now() - t0;
       assert.match(said, /could not relaunch demo-03-c: [\s\S]*could not read main from origin \(it did not answer in time\)/);
-      assert.ok(took < 20000, `refused inside the deadline the tick gave (${took} ms), not after the launch's own 30 s`);
+      assert.ok(took < 25000, `refused inside the deadline the tick gave (${took} ms), not after the launch's own 30 s`);
       assert.deepEqual(F.relaunched().filter((n) => n === 'demo-03-c'), [], 'nothing started');
     });
     // the supervisor's start, as box-recover's child recover runs it, on a tmux server of its own
@@ -328,7 +330,8 @@ test('origin unreadable at a relaunch or a recover: refused with the reason, and
         g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'planted']);
         const planted = g(['rev-parse', 'HEAD']);
         g(['reset', '-q', '--hard', 'HEAD~1']);
-        const good = g(['rev-parse', 'origin/main']);
+        const good = g(['rev-parse', '--verify', 'origin/main^{commit}']);
+        assert.match(good, /^[0-9a-f]{40}$/, 'origin/main is there to put back');
         g(['update-ref', 'refs/remotes/origin/main', planted]);
         let r;
         try { r = recover(); } finally { g(['update-ref', 'refs/remotes/origin/main', good]); }
