@@ -462,10 +462,10 @@ test('kit-776: a change to a case twin of an owner file already on main is refus
     const twinOf = (k) => FILES[k].rel.replace(`${k}.md`, `${k.toUpperCase()}.md`);
     // the twins landed before the gate looked for them
     indexed(W, 'main-twins', [...['strategy', 'self', 'exterior'].map((k) => [twinOf(k), `# ${k}\n\nA twin on main.\n`]), [`${P.replace('project', 'PROJECT')}/old.md`, 'old\n']], { onto: 'main' });
-    // a file already on main in a folder twin is no owner file: changing it is named by no twin line
-    // (only an added path is a folder twin), so an adopter can still edit what it has
+    // a file already on main in a folder twin, changed: kit-776 let it through; kit-779 names it
+    // like an added one (its own test, below, covers the cases)
     const osha = indexed(W, 'chore-edit-old', [[`${P.replace('project', 'PROJECT')}/old.md`, 'new\n']]);
-    check(() => { const r = checkPr('chore-edit-old', osha); assert.doesNotMatch(r.text, /disk that ignores case/, `kit-776 DW2 a file on main in a folder twin, changed, check-pr\n${r.text}`); });
+    check(() => { const r = checkPr('chore-edit-old', osha); assert.match(r.text, /warn: changes docs\/devteam\/PROJECT\/old\.md, in a folder a disk that ignores case can't tell from docs\/devteam\/project[;:]/, `kit-779 DW1 a file on main in a folder twin, changed, check-pr warns\n${r.text}`); });
     for (const k of ['strategy', 'self', 'exterior']) {
       const { rel } = FILES[k];
       const t = twinOf(k);
@@ -501,6 +501,89 @@ test('kit-776: trailing dots and spaces are dropped from every folder of a path,
         indexed(W, `chore-${slug}`, [[twin, `# ${k}\n\nA twin.\n`]]);
         check(() => refused(merge(slug), new RegExp(`adds ${re(twin)}, which a disk that ignores case can't tell from ${re(rel)}`), `kit-776 DW3 ${JSON.stringify(twin)}, merge`));
       }
+    }
+    none();
+  } finally { W.done(); }
+});
+
+// kit-779: a folder twin an older kit let onto main is held like an added one. A path the PR changes
+// under it (or makes a symlink), or the twin itself repointed, is named at merge and check-pr in
+// ticket and plan PRs; removing it is the fix, and lands.
+test('kit-779: a change under a folder twin of docs, docs/devteam or the project folder already on main is refused like an added one', () => {
+  const W = world('wa-folder-twins-on-main');
+  const { checkPr, run, old } = W;
+  const { check, none } = checks('kit-779');
+  try {
+    const yes = W.other(null);
+    const mergeOf = (branch) => said(run(old, ['merge', ...(branch.startsWith('plan/') ? ['--plan', branch.slice(5)] : [branch.slice(7)]), '--dry-run'], SUP));
+    const G = W.goal('Billing', 1);
+    const feats = ['billing', 'payments', 'ledger', 'audit', 'tax'];
+    for (const f of feats) W.feature(f, G);
+    for (const n of [1, 2, 3, 4, 5, 6, 7]) W.ticket(`billing-0${n}-t`, 'billing');
+    // the twins landed before the gate looked at changed paths
+    indexed(W, 'main-folder-twins', [
+      [`${P.replace('project', 'PROJECT')}/old.md`, 'old\n'],
+      ['docs/devteam/Project', 'elsewhere', '120000'],
+      ['docs/DevTeam/b.md', 'b\n'],
+      ['Docs/a.md', 'a\n'],
+      ['docs/notes.md', 'n\n'],
+    ], { onto: 'main' });
+    const cases = [
+      ['docs/devteam/PROJECT/old.md', 'new\n', '100644', 'in a folder', P, 'a file in a case-twin project folder, changed'],
+      ['docs/devteam/PROJECT/old.md', '../project/self.md', '120000', 'in a folder', P, 'a file in a case-twin project folder, made a symlink'],
+      ['docs/devteam/Project', 'other', '120000', 'which', P, 'a symlink twin of the project folder, repointed'],
+      ['docs/DevTeam/b.md', 'b2\n', '100644', 'in a folder', 'docs/devteam', 'a file in a case twin of docs/devteam, changed'],
+      ['Docs/a.md', 'a2\n', '100644', 'in a folder', 'docs', 'a file in a case twin of docs, changed'],
+    ];
+    cases.forEach(([f, text, mode, how, at, m], i) => {
+      const says = new RegExp(`changes ${re(f)}, ${how} a disk that ignores case can't tell from ${re(at)}[;:]`);
+      for (const branch of [`ticket/billing-0${i + 1}-t`, `plan/${feats[i]}`]) {
+        const kind = branch.startsWith('plan/') ? 'plan PR' : 'ticket PR';
+        const sha = indexed(W, branch, [[f, text, mode]]);
+        check(() => refused(mergeOf(branch), says, `kit-779 DW1 ${m}, ${kind}, merge`));
+        check(() => refused(checkPr(branch, sha, yes), says, `kit-779 DW1 ${m}, ${kind}, check-pr --approved`));
+        check(() => { const r = checkPr(branch, sha); assert.match(r.text, new RegExp(`warn: ${says.source}`), `kit-779 DW1 ${m}, ${kind}, check-pr warns`); });
+      }
+    });
+    // removing the twins is the fix; a changed file in no twin is named by no twin line
+    for (const [branch, entries, m] of [
+      ['ticket/billing-06-t', [[`${P.replace('project', 'PROJECT')}/old.md`, null], ['docs/devteam/Project', null], ['docs/DevTeam/b.md', null], ['Docs/a.md', null]], 'the folder twins removed'],
+      ['ticket/billing-07-t', [['docs/notes.md', 'n2\n']], 'docs/notes.md changed'],
+    ]) {
+      const sha = indexed(W, branch, entries);
+      check(() => { const r = checkPr(branch, sha, yes); assert.doesNotMatch(r.text, /disk that ignores case/, `kit-779 DW1 ${m}, check-pr --approved\n${r.text}`); });
+      check(() => { const r = mergeOf(branch); assert.doesNotMatch(r.text, /disk that ignores case/, `kit-779 DW1 ${m}, merge\n${r.text}`); });
+    }
+    none();
+  } finally { W.done(); }
+});
+
+// kit-779: a folding disk may merge more than NFKC and lower case do: NTFS upper-cases (ı is I), and
+// HFS+ ignores default-ignorable code points (U+200C, a soft hyphen).
+test('kit-779: the fold upper-cases before lower-casing and drops default-ignorable code points', () => {
+  const W = world('wa-fold-wider');
+  const { merge, checkPr } = W;
+  const { check, none } = checks('kit-779');
+  try {
+    const yes = W.other(null);
+    const twins = [
+      ['dotless', `${P}/exterıor.md`, 'which', FILES.exterior.rel, 'exterıor.md (dotless i)'],
+      ['zwnj', `${P}/self.md‌`, 'which', FILES.self.rel, 'self.md then U+200C'],
+      ['zwnj-dot', `${P}/self.md.‌`, 'which', FILES.self.rel, 'self.md, a dot, then U+200C'],
+      ['shy', `${P}/strat­egy.md`, 'which', FILES.strategy.rel, 'strategy.md with a soft hyphen'],
+      ['zwsp-folder', `docs/devteam/pro​ject/x.md`, 'in a folder', P, 'the project folder with U+200B, a file in it'],
+    ];
+    for (const [slug, f, how, at, m] of twins) {
+      const sha = indexed(W, `chore-${slug}`, [[f, 'x\n']]);
+      const says = new RegExp(`adds ${re(f)}, ${how} a disk that ignores case can't tell from ${re(at)}[;:]`);
+      check(() => refused(merge(slug), says, `kit-779 DW2 ${m}, merge`));
+      check(() => refused(checkPr(`chore-${slug}`, sha, yes), says, `kit-779 DW2 ${m}, check-pr --approved`));
+    }
+    // over-refusal: a note whose name has a dotless i or an ignorable, near no owner file
+    for (const [slug, f] of [['note-dotless', `${P}/designs/ıdea.md`], ['note-shy', `${P}/designs/so­ft.md`]]) {
+      const sha = indexed(W, `chore-${slug}`, [[f, 'x\n']]);
+      check(() => { const r = merge(slug); assert.equal(r.status, 0, `kit-779 DW2 ${f} is no twin, merge\n${r.text}`); });
+      check(() => { const r = checkPr(`chore-${slug}`, sha); assert.doesNotMatch(r.text, /disk that ignores case/, `kit-779 DW2 ${f} is no twin, check-pr`); });
     }
     none();
   } finally { W.done(); }
