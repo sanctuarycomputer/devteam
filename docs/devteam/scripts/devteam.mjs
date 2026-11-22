@@ -26578,7 +26578,7 @@ const recurringFailures = Object.freeze({
     for (const o of logObjects('observation')) {
       if (o.kind !== 'recurring-run' || o.subject !== `recurring:${name}` || !RF.counts(o)) continue;
       const r = o.run;
-      if (!r || !['pass', 'fail', 'error'].includes(r.status) || typeof r.slot !== 'string') continue;
+      if (!r || !['pass', 'fail', 'error'].includes(r.status) || typeof r.slot !== 'string' || !Number.isFinite(Date.parse(r.slot))) continue;
       const ms = Date.parse(o.created_at) - (Number.isFinite(r.seconds) && r.seconds > 0 ? r.seconds * 1000 : 0);
       if (!(ms >= floor)) continue;
       const cur = first.get(r.slot);
@@ -29102,7 +29102,7 @@ function peekView(kind, id) {
     const reg = RF.registered(id, entry);
     const STATUSES = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
     const runs = logObjects('observation')
-      .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string')
+      .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && Number.isFinite(Date.parse(o.created_at)))
       .map((o) => ({ o, ms: Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0) }))
       .sort((a, b) => b.ms - a.ms)
       .slice(0, 20)
