@@ -420,6 +420,25 @@ test('A5s: once its fix ticket is superseded, the check is failing again', () =>
   assert.equal(F.finding('recurring-failing', 'recurring:cx').length, 1, 'a superseded fix ticket clears nothing');
 });
 
+// task-6 F1: a chores ticket written without its act, linked by the line the refusal prints
+const A5L = group(() => {
+  const F = setup('a5l', { cl: check({ every: '1d' }) });
+  F.addRun('cl', { slot: F.dueOf('cl').slot, at: Date.now() - 5 * 60000, status: 'fail' });
+  F.hand('supervisor', { type: 'ticket', id: 'ops-05-fix-cl', feature: 'chores', title: 'Fix: cl', component: 'ops', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['ops/**'], done_when: ['x'], notes: 'by hand' }, Date.now() - 60000);
+  return F;
+});
+
+test('A5l: a fix ticket that exists without its act is linked by running the line the refusal prints, which clears the finding', () => {
+  const F = A5L();
+  assert.equal(F.finding('recurring-failing', 'recurring:cl').length, 1, 'raised before the link');
+  const r = F.dt(['recurring', 'ticket', 'cl', '--id', 'ops-05-fix-cl', '--touches', 'ops/**']);
+  assert.notEqual(r.status, 0);
+  const m = /link it: act (.+) -- "([^"]+)"/.exec(r.text);
+  assert.ok(m, `the refusal prints the line: ${r.text}`);
+  F.ok(['act', ...m[1].split(' '), '--', m[2]]);
+  assert.equal(F.finding('recurring-failing', 'recurring:cl').length, 0, 'the printed line clears it');
+});
+
 test('A5x: an ack of the finding as metrics names it clears it, on the next metrics too', () => {
   const F = A5();
   const [f] = F.metrics().findings.filter((x) => x.kind === 'recurring-failing' && String(x.subject).includes('cz'));

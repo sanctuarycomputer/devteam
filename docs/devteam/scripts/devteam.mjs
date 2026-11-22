@@ -25880,9 +25880,11 @@ function cmdRecurring() {
     if (st.fixTicket) die(`${arg} is already being fixed by ${st.fixTicket}`);
     const idRe = SCHEMA['x-id'].keyed.ticket;
     if (!new RegExp(idRe).test(id)) die(`--id ${id} must match ${idRe}`);
-    if (logGet(id)) {
-      const cited = logObjects('act').some((a) => a.class === 'add-ticket' && (a.refs ?? []).includes(id) && (a.refs ?? []).includes(`recurring:${arg}`));
-      die(`${id} exists${cited ? '' : `; to make it ${arg}'s fix ticket, link it with act --class add-ticket --refs ${id},recurring:${arg}`}`);
+    const old = logGet(id);
+    if (old) {
+      // a live chores ticket can be made this check's fix: the line is one act runs as given (its refs are words)
+      const linkable = old.type === 'ticket' && old.feature === CHORES && !old.superseded_by;
+      die(`${id} exists${linkable ? `; to make it ${arg}'s fix ticket, link it: act --class add-ticket --refs ${id} recurring:${arg} -- "linked ${id} as ${arg}'s fix ticket"` : ''}`);
     }
     const touches = listFlag('touches');
     if (!touches.length) die(`recurring ticket needs --touches <glob>…: the files the fix may change`);
