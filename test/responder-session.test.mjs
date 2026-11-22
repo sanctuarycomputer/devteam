@@ -848,6 +848,21 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
       F.g(['push', '-q', 'origin', ':refs/heads/evil'], F.old);
     }
   });
+  await t.test('final-2b F3: a branch whose own settings name another branch as main refuses the start', () => {
+    fresh();
+    const planted = plantedCommit();
+    F.g(['push', '-q', 'origin', `${planted}:refs/heads/develop`], F.old);
+    F.edit({ main_branch: 'develop' });
+    let r;
+    try { r = F.run(F.old, ['responder'], SUP); } finally {
+      F.g(['checkout', '--', 'docs/devteam/project/settings.md'], F.old);
+      F.g(['push', '-q', 'origin', ':refs/heads/develop'], F.old);
+    }
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /refs\/heads\/develop names main as main/);
+    assert.ok(!fs.existsSync(E.out), 'the planted command never ran');
+    assert.ok(!F.windows().includes('responder'), 'no window');
+  });
   await t.test('final-2b F3: a main branch origin does not have refuses the start', () => {
     fresh();
     F.edit({ main_branch: 'nosuch' });
