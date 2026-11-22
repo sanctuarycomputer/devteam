@@ -559,7 +559,7 @@ test('kit-779: a change under a folder twin of docs, docs/devteam or the project
 });
 
 // kit-779: a folding disk may merge more than NFKC and lower case do: NTFS upper-cases (ı is I), and
-// HFS+ ignores default-ignorable code points (U+200C, a soft hyphen).
+// HFS+ ignores some default-ignorable code points (U+200C); the fold drops them all (a soft hyphen too).
 test('kit-779: the fold upper-cases before lower-casing and drops default-ignorable code points', () => {
   const W = world('wa-fold-wider');
   const { merge, checkPr } = W;

@@ -6986,9 +6986,10 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   for (let i = 0; i + 1 < parts.length; i += 2) tree.push({ verb: parts[i] === 'A' ? 'adds' : 'changes', f: parts[i + 1] });
   // A path as a disk that folds names reads it, part by part: Unicode compatibility normalisation
   // (an NFD spelling is the NFC one, and ſ is s), upper case then lower case (NTFS upper-cases, so
-  // a dotless ı is i), the code points HFS+ ignores dropped (default-ignorable ones, such as U+200C
-  // or a soft hyphen), and then trailing dots and spaces dropped (as Windows drops them). It folds
-  // more than any one disk does; a stray path it catches is only refused.
+  // a dotless ı is i), default-ignorable code points dropped (all of those HFS+ ignores, such as
+  // U+200C, and more, such as a soft hyphen), NFKC again (a mark left beside its letter composes),
+  // and then trailing dots and spaces dropped (as Windows drops them). It folds more than any one
+  // disk does; a stray path it catches is only refused.
   const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toUpperCase().toLowerCase().replace(/\p{Default_Ignorable_Code_Point}/gu, '').normalize('NFKC').replace(/[. ]+$/, '')).join('/');
   // f is at, or inside the folder at; twin: such a disk puts f at at, or in it, where git doesn't.
   const under = (f, at) => f === at || f.startsWith(`${at}/`);
