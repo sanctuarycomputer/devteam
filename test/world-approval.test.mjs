@@ -243,3 +243,137 @@ test('the rules say it: owner_only, the authority rows, the pinned link\'s descr
   assert.ok(sup.indexOf('### Self and exterior changes') > sup.indexOf('## 6. Questions to the owner') && sup.indexOf('### Self and exterior changes') < sup.indexOf('## 7.'), 'DW4 at the end of §6');
   for (const w of ['--approves chore-<slug>', 'public', 'separate PRs', 'self-change', 'exterior-change', 'branch', '--approved']) assert.ok(sec.includes(w), `DW4 the section says ${w}`);
 });
+
+// kit-773: each owner file is a plain file at the head, whatever the owner answered; a twin is
+// found by a folded path (case folding, normalisation, trailing dots and spaces); and the gate's
+// own refusals when it can't list the PR's added files or finds no merge base. Each check is
+// tried and its miss kept, so one run names every check that fails, not only the first.
+const checks = () => {
+  const misses = [];
+  const check = (fn) => { try { fn(); } catch (e) { misses.push(String(e.message).split('\n')[0]); } };
+  return { check, none: () => assert.deepEqual(misses, [], `kit-773 misses:\n${misses.join('\n')}`) };
+};
+
+for (const k of ['strategy', 'self', 'exterior']) {
+  const { rel } = FILES[k];
+
+  test(`kit-773: ${rel} that is a symlink, a submodule or a folder is refused, whatever the owner answered`, () => {
+    const W = world(`wa-plain-${k}`);
+    const { chore, merge, checkPr, answered, old, g } = W;
+    const { check, none } = checks();
+    try {
+      const kinds = [
+        ['symlink', 'a symlink', (w) => { write(path.join(w, `${P}/designs/n.md`), `# ${k}\n\nRead through a link.\n`); fs.rmSync(path.join(w, rel), { force: true }); fs.symlinkSync('designs/n.md', path.join(w, rel)); }],
+        ['gitlink', 'a submodule', (w) => { const d = path.join(w, rel); fs.rmSync(d, { force: true }); fs.mkdirSync(d, { recursive: true }); g(['init', '-q'], d); g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'sub'], d); }],
+        ['folder', 'a folder', (w) => { fs.rmSync(path.join(w, rel), { force: true }); write(path.join(w, rel, 'x.md'), `# ${k}\n\nA folder.\n`); }],
+      ];
+      for (const [slug, words, change] of kinds) {
+        const sha = chore(slug, change);
+        const yes = answered(k, slug);
+        const says = new RegExp(`${re(rel)} is ${words} at the head, not a plain file`);
+        check(() => refused(merge(slug, yes), says, `kit-773 DW1 ${slug} under the owner's yes, merge`));
+        check(() => refused(checkPr(`chore-${slug}`, sha, yes), says, `kit-773 DW1 ${slug} under the owner's yes, check-pr`));
+        // check-pr with no --approved warns, its exit as for a notes-only chore (kit-138's ruling A)
+        if (slug === 'symlink') check(() => { const r = checkPr(`chore-${slug}`, sha); assert.match(r.text, new RegExp(`warn: ${says.source}`), `kit-773 DW1 ${slug}, check-pr with no answer warns`); });
+      }
+      // already a symlink on main: a PR that changes only what it points at is refused too
+      write(path.join(old, `${P}/designs/n.md`), 'On main.\n');
+      fs.rmSync(path.join(old, rel), { force: true });
+      fs.symlinkSync('designs/n.md', path.join(old, rel));
+      g(['add', '-A'], old); g(['commit', '-qm', 'main: a link'], old); g(['push', '-q', 'origin', 'main'], old);
+      const tsha = chore('target', (w) => write(path.join(w, `${P}/designs/n.md`), 'Words the owner never saw.\n'));
+      check(() => refused(merge('target'), new RegExp(`${re(rel)} is a symlink at the head, not a plain file`), 'kit-773 DW1 a symlink on main, its target changed, merge'));
+      check(() => refused(checkPr('chore-target', tsha, W.other(null)), new RegExp(`${re(rel)} is a symlink at the head, not a plain file`), 'kit-773 DW1 a symlink on main, its target changed, check-pr --approved'));
+      none();
+    } finally { W.done(); }
+  });
+
+  test(`kit-773: a folded twin of ${rel} (long s, trailing dot, trailing space) is refused`, () => {
+    const W = world(`wa-fold-${k}`);
+    const { chore, merge } = W;
+    const { check, none } = checks();
+    try {
+      const twins = [
+        ['longs', rel.replace(/^docs\//, 'docſ/')],
+        ['dot', `${rel}.`],
+        ['space', `${rel} `],
+        ...(k === 'exterior' ? [] : [['longs-name', rel.replace(`/${k}.md`, `/ſ${k.slice(1)}.md`)]]),
+      ];
+      for (const [slug, twin] of twins) {
+        chore(slug, (w) => write(path.join(w, twin), `# ${k}\n\nA twin.\n`));
+        // on a disk that folds names (caseBlind) the twin is written onto the file itself
+        check(() => refused(merge(slug), new RegExp(`adds ${re(twin)}, which a disk that ignores case can't tell from ${re(rel)}${caseBlind ? `|changes ${re(rel)}` : ''}`), `kit-773 DW2 ${slug} twin of ${k}.md, merge`));
+      }
+      none();
+    } finally { W.done(); }
+  });
+}
+
+test('kit-773: in a project folder spelled with an accent, an NFD spelling of each owner file is a twin', () => {
+  const W = world('wa-fold-nfd');
+  const { old, g, run } = W;
+  const { check, none } = checks();
+  try {
+    const NFC = 'docs/devteam/projé';
+    const NFD = 'docs/devteam/projé';
+    g(['mv', P, NFC], old); g(['commit', '-qm', 'main: the project folder, accented'], old); g(['push', '-q', 'origin', 'main'], old);
+    const env = { ...SUP, DEVTEAM_PROJECT: path.join(old, NFC) };
+    for (const f of ['strategy.md', 'self.md', 'exterior.md']) {
+      const slug = `nfd-${f.replace('.md', '')}`;
+      const w = path.join(old, '.worktrees', `chore-${slug}`);
+      g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, 'origin/main'], old);
+      write(path.join(w, NFD, f), '# A twin.\n');
+      g(['add', '-A'], w); g(['commit', '-qm', slug], w); g(['push', '-q', 'origin', `chore-${slug}`], w);
+      write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
+      check(() => refused(said(run(old, ['merge', '--chore', slug, '--dry-run'], env)), new RegExp(`adds ${re(`${NFD}/${f}`)}, which a disk that ignores case can't tell from ${re(`${NFC}/${f}`)}${caseBlind ? `|changes ${re(`${NFC}/${f}`)}` : ''}`), `kit-773 DW2 NFD twin of ${f}, merge`));
+    }
+    none();
+  } finally { W.done(); }
+});
+
+test('kit-773: the gate refuses on its own when it can\'t list the files a PR adds, or finds no merge base', () => {
+  const W = world('wa-fail-closed');
+  const { chore, merge, checkPr, old, g } = W;
+  const { check, none } = checks();
+  try {
+    const yes = W.other(null);
+    // the added-files diff fails: a tree only the diff reads is missing from the object store
+    const sha = chore('gone', (w) => write(path.join(w, `${P}/designs/deep/er/x.md`), 'x\n'));
+    const tree = g(['rev-parse', `${sha}:${P}/designs/deep/er`], old);
+    for (const objects of [path.join(old, '.git/objects'), path.join(W.org, 'objects')]) fs.rmSync(path.join(objects, tree.slice(0, 2), tree.slice(2)), { force: true });
+    const cannot = new RegExp(`could not list the files ${sha.slice(0, 12)} adds since [0-9a-f]{12}, so a change to the owner's files can't be ruled out`);
+    check(() => refused(merge('gone'), cannot, 'kit-773 DW3 the diff fails, merge'));
+    check(() => refused(checkPr('chore-gone', sha, yes), cannot, 'kit-773 DW3 the diff fails, check-pr --approved'));
+    // no merge base: an orphan chore carrying self.md
+    const w = path.join(old, '.worktrees', 'chore-orphan');
+    g(['worktree', 'add', '-q', '-b', 'chore-orphan-from', w, 'origin/main'], old);
+    g(['checkout', '-q', '--orphan', 'chore-orphan'], w);
+    write(path.join(w, FILES.self.rel), '# self\n\nFrom nowhere.\n');
+    g(['add', '-A'], w); g(['commit', '-qm', 'orphan'], w); g(['push', '-q', 'origin', 'chore-orphan'], w);
+    write(path.join(old, 'docs/devteam/run/pr/chore-orphan.md'), '# chore-orphan: x\n\n## One-way doors\n\nNone.\n');
+    const osha = g(['rev-parse', 'HEAD'], w);
+    const noBase = new RegExp(`${osha.slice(0, 12)} has no merge base with main, so a change to the owner's files can't be ruled out`);
+    check(() => refused(merge('orphan'), noBase, 'kit-773 DW3 no merge base, merge'));
+    check(() => refused(checkPr('chore-orphan', osha, yes), noBase, 'kit-773 DW3 no merge base, check-pr --approved'));
+    // the project folder's listing doesn't read as a folder (here a symlink in its place): refused, never read as plain files
+    const lsha = chore('folder-link', (w) => { fs.rmSync(path.join(w, P), { recursive: true, force: true }); fs.symlinkSync('elsewhere', path.join(w, P)); });
+    const unread = new RegExp(`could not read ${re(P)} at ${lsha.slice(0, 12)} as a folder, so the owner's files can't be judged plain files`);
+    check(() => refused(checkPr('chore-folder-link', lsha, yes), unread, 'kit-773 DW1 the project folder unread, check-pr --approved'));
+    none();
+  } finally { W.done(); }
+});
+
+test('kit-773: ask pins the draft on the chore\'s branch when a tag has the same name', () => {
+  const W = world('wa-ask-tag');
+  const { chore, askRun, ok, old, g } = W;
+  try {
+    const rel = FILES.self.rel;
+    chore('s', (w) => write(path.join(w, rel), '# self\n\nThe branch\'s draft.\n'));
+    const other = chore('t', (w) => write(path.join(w, rel), '# self\n\nThe tag\'s text.\n'));
+    g(['tag', 'chore-s', other], old);
+    const r = askRun('self', 's');
+    assert.equal(r.status, 0, r.err);
+    const q = json(ok(old, ['questions', '--id', r.out.trim(), '--json']))[0];
+    assert.equal(q.links[0].blob, g(['rev-parse', `refs/heads/chore-s:${rel}`], old), 'kit-773 DW3 a same-named tag: the pin is the branch\'s draft');
+  } finally { W.done(); }
+});
