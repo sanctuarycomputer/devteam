@@ -18,8 +18,21 @@ import { canDrive, openChrome } from './lib/chrome.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kit = path.resolve(here, '..', 'docs', 'devteam');
-// ports of its own, apart from the blocks lib/kit.mjs hands out (20000 and up); set after its import, so these win
-const PORTS = 10000 + (process.pid % 90) * 100;
+// ports of its own, apart from the blocks lib/kit.mjs hands out (20000 and up); set after its import, so these win.
+// The gateway reads the hub's port and the instance block once, at import, so the whole file shares
+// one range: the hub's port and the 25 after it, every one seen free here, never a range something on
+// the box already holds. It starts at a slot of its own process id, below the ephemeral ports.
+const bindable = (port) => new Promise((ok) => { const v = net.createServer(); v.once('error', () => ok(false)); v.listen(port, '127.0.0.1', () => v.close(() => ok(true))); });
+async function freeRange() {
+  for (let i = 0; i < 90; i++) {
+    const base = 10000 + ((process.pid + i) % 90) * 100;
+    let all = true;
+    for (let p = base; p <= base + 25 && all; p++) all = await bindable(p);
+    if (all) return base;
+  }
+  throw new Error('no free range of 26 ports between 10000 and 19000');
+}
+const PORTS = await freeRange();
 const HUB = PORTS;
 const P = PORTS + 1;
 process.env.DEVTEAM_HUB_PORT = String(HUB);
@@ -1190,7 +1203,8 @@ test('<project>.<box>: anyone reads a published artifact, from the gateway\'s ow
     assert.equal((await gw.req('GET', '/hello/', { cookie: '', headers: { host: `beta.box.localhost:${gw.port}` } })).status, 401, 'another name has no such page');
     r = await get('/hello');
     assert.deepEqual([r.status, r.headers.location, r.headers['cache-control']], [302, '/hello/', 'no-store'], 'to the trailing slash, when published');
-    assert.equal((await get('/nope')).status, 401, 'and only then');
+    r = await get('/nope');
+    assert.deepEqual([r.status, r.headers.location], [401, undefined], 'only a published slug is sent to its trailing slash: any other is the dashboard\'s, behind the session');
     assert.equal((await gw.req('GET', '/alpha/hello/', { headers: { host: `public.box.localhost:${gw.port}` } })).status, 421, 'the old public name answers nothing');
     assert.equal((await gw.req('GET', '/', { headers: { host: `pub.box.evil.test:${gw.port}` } })).status, 421, 'the box still answers only on its own names');
   } finally { await gw.close(); }
@@ -3625,6 +3639,8 @@ on('C10b a page stored under review is not served either', undefined, async (b) 
   assert.deepEqual([r.status, b.seen.get(P)], [200, ['/review/']], 'reaches the dashboard');
 });
 on('C11 another project\'s slug answers 404 signed in', undefined, async (b) => {
+  // signed out it says nothing of which slugs other projects published: the same bytes as any unpublished path
+  for (const headers of [{}, NAV]) assert.equal(shape(await b.get('alpha', '/beta-notes/', { headers })), shape(await b.get('alpha', '/nope/', { headers })), `signed out, ${headers === NAV ? 'a navigation' : 'a fetch'}: as an unpublished path`);
   const r = await b.get('alpha', '/beta-notes/', { cookie: COOKIE });
   assert.equal(r.status, 404);
   assert.deepEqual(b.seen.get(P), [], 'and the port is not asked');
