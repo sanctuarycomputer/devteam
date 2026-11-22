@@ -6939,7 +6939,7 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
     // the two newer classes name their one chore (ask requires it): no other PR lands their file
     if (cls !== 'strategy-change') {
       const acts = Array.isArray(q.approves) ? q.approves : [];
-      if (acts.length !== 1 || acts[0] !== act) { fails.push(`${approved} approves ${acts.length ? acts.join(', ') : 'nothing'}, not ${act}: a change to ${rel} lands only in the chore its question names`); continue; }
+      if (acts.length !== 1 || acts[0] !== act || !act.startsWith('chore-')) { fails.push(`${approved} approves ${acts.length ? acts.join(', ') : 'nothing'}, not ${act}: a change to ${rel} lands only in the chore its question names`); continue; }
     }
     // The answer approves the text the question pinned when asked, and no other: a branch amended
     // since lands words the owner never saw. The pin must also be what its link shows.

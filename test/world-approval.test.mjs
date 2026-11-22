@@ -131,6 +131,10 @@ for (const k of ['self', 'exterior']) {
       refused(checkPr('ticket/chore-a', sha, yes), new RegExp(`${yes} approves chore-a, not ticket/chore-a: a change to ${re(rel)}`), 'DW1 a ticket named chore-a, check-pr');
       refused(checkPr('ticket/billing-01-a', ticketSha, yes), new RegExp(`${yes} approves chore-a, not billing-01-a`), 'DW1 ticket PR, check-pr');
       refused(said(W.run(W.old, ['merge', '--plan', 'billing', '--dry-run', '--approved', yes], SUP)), new RegExp(`${yes} approves chore-a, not plan-billing: a change to ${re(rel)}`), 'DW1 plan PR, merge');
+      const planQ = 'q-20260105-000000002-supervisor';
+      supLine({ id: planQ, type: 'question', op: 'new', kind: 'owner-decision', class: cls, reasons: ['owner-only'], question: 'Approve the plan\'s draft (by hand)?', recommendation: 'yes', approves: ['plan-billing'], links: [{ title: FILES[k].title, path: rel, ref: 'plan/billing', blob: W.g(['rev-parse', `plan/billing:${rel}`], W.old) }] });
+      W.ok(W.old, ['answer', planQ, 'yes']);
+      refused(checkPr('plan/billing', planSha, planQ), new RegExp(`${planQ} approves plan-billing, not plan-billing: a change to ${re(rel)} lands only in the chore`), 'DW1 a hand-written line naming the plan, check-pr');
       refused(said(W.run(W.old, ['merge', 'billing-01-a', '--dry-run', '--approved', yes], SUP)), new RegExp(`${yes} approves chore-a, not billing-01-a: a change to ${re(rel)}`), 'DW1 ticket PR, merge');
       // amended after the answer: the owner never saw it
       const sha2 = chore('a', (w) => write(path.join(w, rel), `# ${k}\n\nDraft B, never seen.\n`), { amend: true });
