@@ -25816,16 +25816,7 @@ function cmdRecurring() {
       return flags.json ? json({ entries: [], runs_a_day: 0, cap: R.CAP, pending: [] }) : out('the project dir is outside this repo, so it has no jobs');
     }
     const jobs = mainJobs();
-    const views = new Map(R.questions().map((v) => [v.id, v]));
-    const acts = logObjects('act').filter((a) => a.class === 'merge-chore' && typeof a.approved_by === 'string' && views.has(a.approved_by)).sort(byTime);
-    const registered = (name, entry) => {
-      for (const a of [...acts].reverse()) {
-        const v = views.get(a.approved_by);
-        const shown = R.shown(v);
-        if (v.status === 'answered' && shown && Object.hasOwn(shown, name) && shown[name] !== null && canonical(shown[name]) === canonical(entry)) return { qid: v.id, at: a.created_at, by: a.created_by, act: a.id };
-      }
-      return null;
-    };
+    const registered = (name, entry) => recurringFailures.registered(name, entry);
     const pending = R.pending().flatMap((p) => Object.keys(p.change).sort().map((name) => ({ qid: p.qid, name, change: p.change[name], status: p.status })));
     const row = (name) => {
       const entry = jobs[name];
@@ -25852,7 +25843,9 @@ function cmdRecurring() {
   }
   if (sub === 'run') {
     supervisorOnly('recurring run');
-    if (flags.due === true && !arg) return recurringRunDue.run({ due: true });
+    // then the failure pass, on a fresh read (so the runner's own lines count), even when another
+    // runner held the lock (kit-168)
+    if (flags.due === true && !arg) return Promise.resolve(recurringRunDue.run({ due: true })).then(() => { logCache = null; recurringFailures.note(); });
     if (arg && flags.draft === true) return recurringRunDue.run({ draft: arg });
     die('usage: recurring run --due | recurring run <name> --draft');
   }
@@ -26447,6 +26440,131 @@ const recurringRunDue = Object.freeze({
       if (r.lost) break;
       R.log(name, now.slot, sha, r);
     }
+  },
+});
+
+// ===== recurring: a failing check becomes work (kit-168) =====
+// A check's results since it was last added, its failing stretch, its fix ticket, and the failure pass:
+// one recurring-failed when a stretch of fails reaches fail_after, one recurring-recovered at the pass
+// that ends it. Marks name their stretch by its first run (refs[0]), so a missed pass is caught up in
+// order. Only the supervisor's detector recurring lines count, anywhere (design C2, P5). Every time it
+// gives is ISO to the second, as the dashboard contract has them.
+const recurringFailures = Object.freeze({
+  isoSec: (t) => `${new Date(typeof t === 'number' ? t : Date.parse(t)).toISOString().slice(0, 19)}Z`,
+  counts: (o) => o?.created_by === 'supervisor' && o?.detector === 'recurring',
+  failAfter: (entry) => (Number.isInteger(entry?.fail_after) ? entry.fail_after : 1),
+  // the answered landings that show this name, oldest first (a stop shows it as null)
+  answered(name) {
+    const R = recurringRegistry;
+    const views = new Map(R.questions().map((v) => [v.id, v]));
+    const out = [];
+    for (const a of logObjects('act').filter((x) => x.class === 'merge-chore' && typeof x.approved_by === 'string').sort(byTime)) {
+      const v = views.get(a.approved_by);
+      const shown = R.shown(v);
+      if (v?.status === 'answered' && shown && Object.hasOwn(shown, name)) out.push({ at: a.created_at, entry: shown[name] });
+    }
+    return out;
+  },
+  // when the job was last added after an answered stop: the answered re-add, or the stop itself when it
+  // came back by hand; null with no answered stop. A commit to the file never moves it (spec-2 F1).
+  addedAt(name) {
+    const ls = recurringFailures.answered(name);
+    const i = ls.findLastIndex((l) => l.entry === null);
+    if (i < 0) return null;
+    return (ls.slice(i + 1).find((l) => l.entry !== null) ?? ls[i]).at;
+  },
+  // the newest answered landing that shows main's entry as it is: { qid, at, by, act }, else null
+  registered(name, entry) {
+    const R = recurringRegistry;
+    const views = new Map(R.questions().map((v) => [v.id, v]));
+    const acts = logObjects('act').filter((a) => a.class === 'merge-chore' && typeof a.approved_by === 'string' && views.has(a.approved_by)).sort(byTime);
+    for (const a of [...acts].reverse()) {
+      const v = views.get(a.approved_by);
+      const shown = R.shown(v);
+      if (v.status === 'answered' && shown && Object.hasOwn(shown, name) && shown[name] !== null && canonical(shown[name]) === canonical(entry)) return { qid: v.id, at: a.created_at, by: a.created_by, act: a.id };
+    }
+    return null;
+  },
+  // one result per slot (its earliest start, a run's start being its line's time less its seconds),
+  // counted lines only, none starting before `from`; by slot
+  results(name, from = null) {
+    const RF = recurringFailures;
+    const floor = from ? Date.parse(from) : -Infinity;
+    const first = new Map();
+    for (const o of logObjects('observation')) {
+      if (o.kind !== 'recurring-run' || o.subject !== `recurring:${name}` || !RF.counts(o)) continue;
+      const r = o.run;
+      if (!r || !['pass', 'fail', 'error'].includes(r.status) || typeof r.slot !== 'string') continue;
+      const ms = Date.parse(o.created_at) - (Number.isFinite(r.seconds) && r.seconds > 0 ? r.seconds * 1000 : 0);
+      if (!(ms >= floor)) continue;
+      const cur = first.get(r.slot);
+      if (!cur || ms < cur.ms) first.set(r.slot, { ms, id: o.id, status: r.status, slot: r.slot, seconds: Number.isFinite(r.seconds) ? r.seconds : null, excerpt: typeof r.excerpt === 'string' ? r.excerpt : null });
+    }
+    return [...first.values()].sort((a, b) => Date.parse(a.slot) - Date.parse(b.slot) || a.ms - b.ms).map(({ ms, ...r }) => ({ ...r, at: RF.isoSec(ms) }));
+  },
+  // the runs of consecutive fails and errors, in order, each { runs, endedBy (the pass after it, or null) }
+  stretches(results) {
+    const out = [];
+    let cur = null;
+    for (const r of results) {
+      if (r.status !== 'pass') (cur ??= { runs: [], endedBy: null }).runs.push(r);
+      else if (cur) { cur.endedBy = r; out.push(cur); cur = null; }
+    }
+    if (cur) out.push(cur);
+    return out;
+  },
+  stretch(results) {
+    const s = recurringFailures.stretches(results).at(-1);
+    return s && !s.endedBy ? s.runs : [];
+  },
+  // a live chores ticket the supervisor added for this check after its stretch began
+  fixTicket(name, since) {
+    const t0 = since ? Date.parse(since) : -Infinity;
+    const acts = logObjects('act').filter((a) => a.class === 'add-ticket' && a.created_by === 'supervisor' && (a.refs ?? []).includes(`recurring:${name}`) && Date.parse(a.created_at) > t0).sort(byTime);
+    for (const a of acts.reverse()) {
+      for (const id of a.refs) {
+        const t = logGet(id);
+        if (t?.type === 'ticket' && t.feature === CHORES && !t.superseded_by) return id;
+      }
+    }
+    return null;
+  },
+  state(name, entry) {
+    const RF = recurringFailures;
+    const results = RF.results(name, RF.addedAt(name));
+    const stretch = RF.stretch(results);
+    const alerting = stretch.length >= RF.failAfter(entry);
+    const since = stretch[0]?.at ?? null;
+    return { results, stretch, alerting, since, fixTicket: stretch.length ? RF.fixTicket(name, since) : null };
+  },
+  // the failure pass: read from the log each time, so a pass that never ran is caught up by the next
+  note() {
+    const RF = recurringFailures;
+    const done = { failed: 0, recovered: 0 };
+    const { checks, problem } = recurringRunDue.checks();
+    if (problem) return done;
+    const obs = logObjects('observation');
+    for (const { name, entry } of checks) {
+      const marks = (kind) => obs.filter((o) => o.kind === kind && o.subject === `recurring:${name}` && RF.counts(o));
+      const failed = marks('recurring-failed');
+      const recovered = marks('recurring-recovered');
+      const n = RF.failAfter(entry);
+      const all = RF.stretches(RF.results(name, RF.addedAt(name)));
+      const line = (o) => appendLog({ type: 'observation', source: 'recurring', subject: `recurring:${name}`, detector: 'recurring', ...o }, 'supervisor');
+      // the newest ended stretch that was marked failed, recovered at the pass that ended it
+      const ended = all.filter((s) => s.endedBy).at(-1);
+      const f = ended && ended.runs.length >= n ? failed.find((o) => o.refs?.[0] === ended.runs[0].id) : null;
+      if (f && !recovered.some((o) => o.refs?.[1] === ended.endedBy.id)) {
+        line({ kind: 'recurring-recovered', source_key: `recurring:${name}:recovered`, severity: 0, valence: 1, refs: [f.id, ended.endedBy.id], detail: `${name}: passing again at ${ended.endedBy.at}, after ${ended.runs.length} failing in a row` });
+        done.recovered += 1;
+      }
+      const cur = all.at(-1);
+      if (cur && !cur.endedBy && cur.runs.length >= n && !failed.some((o) => o.refs?.[0] === cur.runs[0].id)) {
+        line({ kind: 'recurring-failed', source_key: `recurring:${name}`, severity: Number.isInteger(entry.severity) ? entry.severity : 2, valence: -1, refs: cur.runs.slice(0, n).map((r) => r.id), detail: `${name}: failing, ${cur.runs.length} in a row since ${cur.runs[0].at}` });
+        done.failed += 1;
+      }
+    }
+    return done;
   },
 });
 
