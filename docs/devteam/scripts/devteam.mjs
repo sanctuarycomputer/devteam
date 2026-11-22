@@ -26819,8 +26819,8 @@ const recurringChores = Object.freeze({
 });
 
 // The dashboard's upkeep.recurring (kit-168), in test/fixtures/recurring/dashboard.json's shape: main's
-// checks with their state, and the built-in schedules. Chores come with kit-164, proposals with kit-165,
-// signals with kit-175. Every time is ISO to the second.
+// checks with their state, then main's chores (kit-164), and the built-in schedules. Proposals come with
+// kit-165, signals with kit-175. Every time is ISO to the second.
 function recurringDashboard() {
   const RF = recurringFailures;
   const sec = (t) => (t === null || t === undefined || t === '' ? null : RF.isoSec(t));
