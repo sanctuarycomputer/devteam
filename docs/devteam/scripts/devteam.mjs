@@ -11869,7 +11869,7 @@ function sopsKeyFor(file, blob, base) {
     if (r.error) sopsKeyNote = `age-keygen could not run (${r.error.code ?? r.error.message}), and the kit needs it on PATH to match an age key`;
   }
   if (cut) sopsKeyNote ||= 'the search for its age key did not finish';
-  if (!unchecked || cut) {
+  if (!unchecked) {
     const now = Date.now();
     for (const [k, m] of Object.entries(misses)) if (now - (m?.at ?? 0) >= (m?.ttl ?? 0)) delete misses[k];
     misses[missKey] = { at: now, ttl: cut ? 60000 : 600000 };
@@ -11881,6 +11881,7 @@ function sopsKeyFor(file, blob, base) {
 // It starts from the remote's store, or from what an earlier post for this question recorded. When
 // the question posted to this store before and the worktree no longer holds that, it refuses: going
 // back to the remote's store would lose the earlier value while the log still says it was posted.
+const sopsKeyPath = (keys) => keys.map((x) => `[${JSON.stringify(x)}]`).join('');
 function sopsSet(k, input, cwd, run, trust) {
   const blob = sopsMainBlob(k.file);
   if (!blob) return { ok: false, out: `could not read ${k.file} from the remote's main` };
@@ -11890,7 +11891,7 @@ function sopsSet(k, input, cwd, run, trust) {
   try { if (!fs.lstatSync(target).isSymbolicLink()) now = fs.readFileSync(target); } catch {}
   let start = blob;
   if (now && trust.stores.get(k.file) === sopsHash(now) && sopsRecipients(now).join() === want) start = now;
-  else if (trust.earlier.has(k.file) && !(now && now.equals(blob))) return { ok: false, out: `${k.file} in this question's chore is not what its earlier post recorded, so saving here could lose that value. Nothing was changed. The supervisor should look at the chore branch before this is posted again` };
+  else if (trust.earlier.has(k.file) && !(now && now.equals(blob))) return { ok: false, out: `${k.file} in this question's chore is not what its earlier post recorded, so saving here could lose that value. Nothing was changed. To recover, the supervisor puts the chore branch back on its commit from that post, or asks again for the secrets that are gone` };
   const { dir, config } = sopsPrivateDir();
   try {
     const copy = path.join(dir, path.basename(k.file));
@@ -11905,6 +11906,10 @@ function sopsSet(k, input, cwd, run, trust) {
     const done = fs.readFileSync(copy);
     if (done.equals(start)) return { ok: false, out: `sops exited 0 but ${k.file} did not change${r.out ? `: ${r.out}` : ''}` };
     if (sopsRecipients(done).join() !== want) return { ok: false, out: `${k.file}: its recipients changed; not saved` };
+    // everything this question posted to the store must still be in it (a reset chore branch loses it)
+    for (const ks of trust.keys.get(k.file) ?? []) {
+      if (spawnSync('sops', ['--config', config, '-d', '--extract', ks, copy], { cwd: dir, env, stdio: 'ignore', timeout: 30000, killSignal: 'SIGKILL' }).status !== 0) return { ok: false, out: `${k.file} no longer holds ${ks}, which this question already posted, so saving could lose it. Nothing was changed. To recover, the supervisor puts the chore branch back on its commit from that post, or asks again for the secrets that are gone` };
+    }
     const parent = path.dirname(target);
     fs.mkdirSync(parent, { recursive: true });
     if (!insideDir(fs.realpathSync(parent), fs.realpathSync(cwd))) return { ok: false, out: `${k.file} resolves outside the repo` };
@@ -11913,11 +11918,12 @@ function sopsSet(k, input, cwd, run, trust) {
     const sha256 = sopsHash(done);
     trust.stores.set(k.file, sha256);
     trust.earlier.add(k.file);
+    trust.keys.set(k.file, [...(trust.keys.get(k.file) ?? []), sopsKeyPath(k.keys)]);
     return { ...r, store: { file: k.file, sha256 } };
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 // Returns { ok, out, files }: files are the tracked paths a commit sink changed.
-function runSink(k, value, kind, cwd, redact, trust = { stores: new Map(), earlier: new Set() }) {
+function runSink(k, value, kind, cwd, redact, trust = { stores: new Map(), earlier: new Set(), keys: new Map() }) {
   const run = (cmd, args, opts) => {
     const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts });
     // a tool that refuses before reading its stdin (sops with no key) gives EPIPE: its own error is the one to show
@@ -12044,6 +12050,22 @@ function cmdSecret() {
     }
   }
   if (!values.size) die('nothing to post');
+  // One post at a time: from reading what is posted, through the stores, to the log line.
+  fs.mkdirSync(runDir, { recursive: true });
+  const lock = path.join(runDir, 'secret-post');
+  return withLock(lock, () => {
+    // a post that dies (a sink failed, git refused) exits inside the lock, past withLock's finally
+    const release = () => fs.rmSync(`${lock}.lock`, { recursive: true, force: true });
+    process.once('exit', release);
+    try { return postSecrets(id, declared, values, by); } finally { process.off('exit', release); }
+  }, { staleMs: 600000, waitMs: 120000 });
+}
+function postSecrets(id, declared, values, by) {
+  logCache = null;
+  const v = openQuestion(id);
+  const posted = [...(v.secrets_posted ?? [])];
+  const todo = declared.filter((x) => !posted.some((p) => p.name === x.name));
+  if (!todo.some((x) => values.has(x.name))) die(`${id}: what you posted is already posted`);
   const redact = redactor(values);
   const sinks = todo.filter((x) => values.has(x.name)).map((x) => ({ ...x, k: parseSink(x.sink) }));
   // Encrypted stores change in one chore worktree per question, committed together; it starts clean.
@@ -12055,12 +12077,15 @@ function cmdSecret() {
     git(['clean', '-fdq'], wt);
   }
   // What this question already put in each store: the record that says a chore's store may be continued.
-  const trust = { stores: new Map(), earlier: new Set() };
+  const trust = { stores: new Map(), earlier: new Set(), keys: new Map() };
   for (const p of posted) {
     const d = declared.find((x) => x.name === p.name);
-    let f = null;
-    try { f = d ? parseSink(d.sink, { soft: true }).file : null; } catch {}
-    if (f) trust.earlier.add(f);
+    let sink = null;
+    try { sink = d ? parseSink(d.sink, { soft: true }) : null; } catch {}
+    if (sink?.type === 'sops') {
+      trust.earlier.add(sink.file);
+      trust.keys.set(sink.file, [...(trust.keys.get(sink.file) ?? []), sopsKeyPath(sink.keys)]);
+    }
     if (p.store?.file && typeof p.store.sha256 === 'string') trust.stores.set(p.store.file, p.store.sha256);
   }
   const failures = [];

@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fleetFixture, write } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -135,8 +135,6 @@ test('a chore store that no longer holds the earlier post is refused, not overwr
     write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
     const q = asks(F, ['ONE', 'TWO']);
     assert.equal(F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9' })).status, 0);
-    // a lost side file can't matter: nothing outside the question's record decides this
-    fs.rmSync(path.join(F.home, '.devteam', 'sops-misses.json'), { force: true });
     const w = path.join(F.old, '.worktrees', fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-')));
     write(path.join(w, 'secrets/app.enc.env'), 'SEED=1\n');
     encrypt(good.pub, path.join(w, 'secrets/app.enc.env'));
@@ -147,6 +145,50 @@ test('a chore store that no longer holds the earlier post is refused, not overwr
     assert.notEqual(r.status, 0);
     assert.match(r.out + r.err, /not what its earlier post recorded/);
     assert.equal(fs.readFileSync(path.join(w, 'secrets/app.enc.env'), 'utf8'), before);
+  } finally { F.done(); }
+});
+
+test('a chore branch reset to main loses an earlier post: the next post refuses', { skip: !real }, () => {
+  const F = fleetFixture('sops-reset');
+  try {
+    const good = keygen();
+    repo(F, good.pub);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE', 'TWO']);
+    assert.equal(F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9' })).status, 0);
+    const w = path.join(F.old, '.worktrees', fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-')));
+    F.g(['reset', '-q', '--hard', 'origin/main'], w);
+    const r = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ TWO: 'value-two-9' }));
+    assert.notEqual(r.status, 0);
+    assert.match(r.out + r.err, /no longer holds \["ONE"\]/);
+    assert.doesNotMatch(decrypt(good.id, path.join(w, 'secrets/app.enc.env')).stdout, /TWO=/, 'nothing was saved');
+    assert.doesNotMatch(F.ok(F.old, ['questions', '--all', '--json']), /"name":\s*"TWO"[^}]*"at"/, 'TWO is not logged as posted');
+  } finally { F.done(); }
+});
+
+test('two posts at once for one question both land', { skip: !real }, async () => {
+  const F = fleetFixture('sops-race');
+  try {
+    const good = keygen();
+    repo(F, good.pub);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE', 'TWO']);
+    // a slow sops holds both posts inside the window between reading the store and writing it
+    const bin = path.join(F.base, 'slow-bin');
+    const realSops = spawnSync('sh', ['-c', 'command -v sops'], { encoding: 'utf8' }).stdout.trim();
+    write(path.join(bin, 'sops'), `#!/bin/sh\nsleep 1\nexec "${realSops}" "$@"\n`);
+    fs.chmodSync(path.join(bin, 'sops'), 0o755);
+    const env = F.env({ PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+    const post = (name) => new Promise((done) => {
+      const c = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'secret', 'post', q, '--json'], { cwd: F.old, env, stdio: ['pipe', 'ignore', 'ignore'] });
+      c.stdin.end(JSON.stringify({ [name]: `value-${name}-9` }));
+      c.on('close', done);
+    });
+    assert.deepEqual(await Promise.all([post('ONE'), post('TWO')]), [0, 0]);
+    const w = fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-'));
+    const plain = decrypt(good.id, path.join(F.old, '.worktrees', w, 'secrets/app.enc.env')).stdout;
+    assert.match(plain, /ONE=value-ONE-9/);
+    assert.match(plain, /TWO=value-TWO-9/);
   } finally { F.done(); }
 });
 
