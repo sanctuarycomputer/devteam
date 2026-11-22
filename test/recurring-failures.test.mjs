@@ -383,7 +383,7 @@ test('A5r: recurring ticket refuses a passing check, an existing id, no --touche
 
 test('A5b: recurring ticket writes the chores fix ticket and its add-ticket act with ref recurring:<name>', () => {
   const F = A5();
-  F.ok(['recurring', 'ticket', 'cx', '--id', 'ops-07-fix-cx', '--touches', 'ops/**', '--touches', 'README.md']);
+  F.ok(['recurring', 'ticket', 'cx', '--id', 'ops-07-fix-cx', '--touches', 'ops/**', 'README.md']);
   const t = F.allLines().filter((l) => l.type === 'ticket' && l.id === 'ops-07-fix-cx');
   assert.equal(t.length, 1, 'the ticket is written');
   assert.deepEqual([t[0].feature, t[0].kind, t[0].component, t[0].title, t[0].by], ['chores', 'chore', 'ops', 'Fix: The docs build', 'supervisor']);
