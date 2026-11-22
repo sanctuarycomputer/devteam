@@ -2,24 +2,31 @@
 // devteam's gateway: the one public listener on a cloud box. It lets in only the owner, by a
 // passkey registered when the box was claimed, and passes the owner through to the machine's hub
 // (box.example.com), a web terminal on the box's tmux server (term.box.example.com), and each
-// instance's dashboard on a subdomain of its own (4321.box.example.com). Signing in and passkeys
-// are under /auth on the box's name, so an installed hub signs in without leaving its own scope.
-// Every agent runs as the box's user and can change files and take ports, so the box and term names
-// serve only bytes the gateway holds: its own copy of the hub page and of ttyd's page, and its own
-// pages. Only the hub's JSON (its list, and the owner's threads with the operator) and the
-// terminal's socket come from behind it. An agent's page can exist only on an instance's name. The gateway also sends the hub's notifications, by Web Push.
+// project's dashboard at a host of its own, its name (alpha.box.example.com: project-hosts@1, below).
+// Signed out, a navigation on a project's host gets the gateway's signed-out page, the same for a
+// listed name and a made-up one, which sends the whole address, hash included, to sign-in. Signing
+// in and passkeys are under /auth on the box's name, so an installed hub signs in without leaving
+// its own scope. Every agent runs as the box's user and can change files and take ports, so the box
+// and term names serve only bytes the gateway holds: its own copy of the hub page and of ttyd's
+// page, and its own pages. Only the hub's JSON (its list, and the owner's threads with the operator)
+// and the terminal's socket come from behind it. An agent's page can exist only on a project's or a
+// preview's host. The gateway also sends the hub's notifications, by Web Push.
 // Behind it the kit runs unchanged: every proxied request looks to the kit like a local browser's,
 // and the kit's loopback origins in its response headers are mapped to the public ones.
 // A file the owner drops on the terminal is the one thing it stores for the agents' side: under a
 // folder only it writes, and handed over as a path pasted into the terminal.
 // A session's running dev server gets a name of its own too (cool-tiger.box.example.com), behind the
-// owner's session like an instance, from the hub's list; the gateway holds nothing about them, never
+// owner's session like a project, from the hub's list; the gateway holds nothing about them, never
 // picks between two claimants of one name, and box.example.com/dev/ lists them.
+// A project's public pages are at <project>.<box>/<slug>/, for anyone, from the gateway's own copy of
+// what the owner published.
 // The kit's viewers (for threads) lean on it twice. A preview's name answers /.devteam/lens, the
 // gateway's own page that frames the app, and the app's own framing headers give way for that one
-// frame. On public.box.example.com, the signed-in owner's own visit to a published page gets a page
-// of the gateway's framing that project's viewer at the published version; everyone else, and any
-// doubt, gets the published bytes. The public name reads the cookie for that choice alone.
+// frame. The signed-in owner's own visit to a published page is sent to the owner's wrapper on the
+// box's own name, <box>/w/<project>/<slug>/, a page of the gateway's framing that project's viewer at
+// the published version, under a grant bound to project, slug and tree; everyone else, and any
+// doubt, gets the published bytes. A project's host reads the cookie on a published page for that
+// choice alone.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
 // project-hosts@1: where a project is on a box
 // This section is the definition the gateway moves to: the address of a project on a box. Until the

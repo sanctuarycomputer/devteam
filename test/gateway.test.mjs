@@ -4325,3 +4325,13 @@ on('C36 a publish from the page by ?project= writes the record and tells the ins
   const saved = stored(b).alpha;
   assert.deepEqual([saved.root, saved.port, Object.keys(saved.artifacts)], ['/srv/alpha', P, ['fresh']], 'the same record as by port');
 });
+
+// --- project hosts: the image turns them on (task 6) ---------------------------------------------
+test('C31 cloud/Dockerfile sets ENV DEVTEAM_PROJECT_HOSTS=1', () => {
+  assert.match(fs.readFileSync(path.join(here, '..', 'cloud', 'Dockerfile'), 'utf8'), /^ENV .*\bDEVTEAM_PROJECT_HOSTS=1\b/m);
+});
+test('C32 the kit-301 caveat is gone from the README section and the Dockerfile', () => {
+  const root = path.join(here, '..');
+  assert.doesNotMatch(fs.readFileSync(path.join(root, 'README.md'), 'utf8'), /Until the gateway change \(kit-277\)/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, 'cloud', 'Dockerfile'), 'utf8'), /Until the gateway change \(kit-277\)/);
+});
