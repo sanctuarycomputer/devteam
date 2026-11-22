@@ -319,6 +319,17 @@ function logLines(P) {
 }
 // The question set lines of P's log that carry an answer.
 export const answerLines = (P) => logLines(P).filter((l) => l.type === 'question' && l.op === 'set' && Object.hasOwn(l, 'answer'));
+// C25 on one project: every answer line in P's log is by: 'owner', and there are as many as the owner
+// answers its tests ran (owner() and ownerVia() count them on P; expected for a project made another
+// way); and a project()'s agent commands run as the supervisor. The problems, in words; [] when it holds.
+export function answerAudit(P, expected = P.ownerAnswers, name = P.name) {
+  const problems = [];
+  if (typeof P.env === 'object' && P.env.DEVTEAM_ROLE !== 'supervisor') problems.push(`${name}: its agent commands run as ${P.env.DEVTEAM_ROLE ?? 'no role'}, not the supervisor`);
+  const lines = answerLines(P);
+  for (const l of lines) if (l.by !== 'owner') problems.push(`${name}: ${l.id}'s answer line is by ${l.by}, not the owner: ${JSON.stringify(l.answer).slice(0, 80)}`);
+  if (lines.length !== expected) problems.push(`${name}: ${lines.length} answer lines in its log, but the tests ran ${expected} owner answers`);
+  return problems;
+}
 // P's reset ledger (run/browser/resets.json): its entries, or null with no file.
 export const readLedger = (P) => (fs.existsSync(P.ledger) ? JSON.parse(fs.readFileSync(P.ledger, 'utf8')) : null);
 
@@ -381,8 +392,10 @@ function testBrowserPids() {
 
 // The file's hooks, called at the file's top (no work at import). before makes the temp folder and
 // starts the fixture site, on every Node (the site needs no Chrome, so the asking checks get projects
-// too); after closes every view socket, stops every project's browser, kills what is left of its
-// daemon and Chrome, removes each project and the temp folder, and closes the site.
+// too); after runs C25's audit on every project while its log is there (answerAudit: its answer lines
+// all the owner's, as many as the owner answers it ran), closes every view socket, stops every
+// project's browser, kills what is left of its daemon and Chrome, removes each project and the temp
+// folder, closes the site, and only then fails on what the audit found.
 export function handoverFile() {
   before(() => {
     // a kit tmux server reached from here could be the fleet's: the tests run with TMUX unset
@@ -395,6 +408,10 @@ export function handoverFile() {
   });
   after(async () => {
     await setup.catch(() => {});
+    // C25, before any project is removed; a project's audit that throws is a problem too
+    const problems = projects.flatMap((P) => { try { return answerAudit(P); } catch (e) { return [`${P.name}: the audit failed: ${e.message}`]; } });
+    const counts = projects.map((P) => { try { return `${P.name} ${answerLines(P).length}/${P.ownerAnswers}`; } catch { return `${P.name} ?/${P.ownerAnswers}`; } });
+    console.log(`# kit-67 C25: ${counts.join(', ') || 'no projects'} (answer lines / owner answers run)`);
     for (const c of sockets) c.close();
     for (const P of projects) await browser(P, ['stop']).catch(() => {});
     for (const P of projects) {
@@ -409,5 +426,6 @@ export function handoverFile() {
     for (const P of projects) P.done();
     await site?.close();
     if (tmp) fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    assert.deepEqual(problems, [], 'C25: an answer line the owner did not write, or a count off');
   });
 }

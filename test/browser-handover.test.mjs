@@ -11,7 +11,7 @@ import path from 'node:path';
 import { canDrive } from './lib/chrome.mjs';
 import { monoFixture } from './lib/kit.mjs';
 import { validate } from './fixtures/browser/check.mjs';
-import { handoverFile, project, kit, browser, owner, ownerVia, answerLines, appendLine, site, CHOICES, qidOf, ok, withdraw, sleep, until, readState, askHandover, waitJson, handoverLine, entriesFor, ledgerValid, typeNote, viewSocket } from './lib/browser-handover-fixture.mjs';
+import { handoverFile, project, kit, browser, owner, ownerVia, answerLines, answerAudit, appendLine, site, CHOICES, qidOf, ok, withdraw, sleep, until, readState, askHandover, waitJson, handoverLine, entriesFor, ledgerValid, typeNote, viewSocket } from './lib/browser-handover-fixture.mjs';
 
 handoverFile();
 
@@ -33,7 +33,11 @@ const CHOICE_JSON = JSON.stringify(CHOICES);
 // One project for the asking checks; every line the log holds, counted across its files.
 let F;
 const fx = () => (F ??= monoFixture('handover-ask'));
-test.after(() => F?.done());
+// the owner answers run on it, for C25's audit, which runs before it is removed
+let fxOwnerAnswers = 0;
+test.after(() => {
+  try { if (F) assert.deepEqual(answerAudit(F, fxOwnerAnswers, 'handover-ask'), [], 'C25: an answer line the owner did not write, or a count off'); } finally { F?.done(); }
+});
 const logLines = () => {
   const dir = path.join(fx().old, 'docs/devteam/run/log');
   if (!fs.existsSync(dir)) return 0;
@@ -104,6 +108,7 @@ test('C10b ask refuses a second open handover of the scope', () => {
   // and answered by the owner (an owner's terminal: no DEVTEAM_*), the scope is asked again
   const qid2 = again.out.split('\n').find((l) => /^q-/.test(l));
   const a = fx().run(fx().old, ['answer', qid2, '--choice', 'Done'], {});
+  if (a.status === 0) fxOwnerAnswers++;
   assert.equal(a.status, 0, a.err || a.out);
   const n2 = logLines();
   const third = ask('--kind', 'owner-action', '--class', 'browser-handover', '--scope', scope, '--choices', CHOICE_JSON);
@@ -131,6 +136,28 @@ test('fixture: owner answer is written by owner', async () => {
   assert.equal(lines[0].id, qid);
   assert.equal(lines[0].by, 'owner');
   assert.equal(P.ownerAnswers, 1);
+});
+
+// C25's static half: the browser's code (the region between its markers in the kit's devteam.mjs)
+// never answers. No cmdAnswer, no answer: field (quoted or not, or a shorthand { answer }), and no
+// 'answer' string, the spawn's argument among them. The markers are each there once, in order, around
+// the browser's own code, so the check never passes on an empty or a wrong region.
+test('C25 the browser region writes no answer: no cmdAnswer, no answer field, no answer spawn', () => {
+  const src = fs.readFileSync(new URL('../docs/devteam/scripts/devteam.mjs', import.meta.url), 'utf8');
+  const [START, END] = ['/* browser start */', '/* browser end */'];
+  assert.equal(src.split(START).length, 2, `${START} once in devteam.mjs`);
+  assert.equal(src.split(END).length, 2, `${END} once in devteam.mjs`);
+  const from = src.indexOf(START) + START.length, to = src.indexOf(END);
+  assert.ok(from < to, `${START} before ${END}`);
+  const region = src.slice(from, to);
+  const at = src.slice(0, from).split('\n').length;
+  const lines = region.split('\n');
+  assert.ok(lines.length > 1000, `the region is the browser's code: ${lines.length} lines`);
+  for (const own of ['function browserHandovers(', 'function browserGate(', 'function browserForgetRestart(', "m.t === 'forget'"]) assert.ok(region.includes(own), `the region holds ${own}`);
+  const banned = [[/\bcmdAnswer\b/, 'cmdAnswer'], [/(?<![\w$])['"`]?answer['"`]?\s*:(?!:)/, 'an answer: field'], [/[{,]\s*answer\s*[,}]/, 'a shorthand answer field'], [/['"`]answer['"`]/, "an 'answer' string (a spawn's argument)"]];
+  const hits = [];
+  lines.forEach((l, i) => { for (const [re, what] of banned) if (re.test(l)) hits.push(`devteam.mjs:${at + i}: ${what}: ${l.trim().slice(0, 120)}`); });
+  assert.deepEqual(hits, [], 'the browser region writes an answer');
 });
 
 // --- the hold (T3): project hA, one daemon; the checks run in order on one open handover, H1.
@@ -312,8 +339,10 @@ onA('C22 another instance\'s handover never holds this browser', async () => {
   assert.ok(H1, 'C1 asked the handover');
   await withdraw(P, H1);
   assert.equal((await statusJson(P)).held, null);
-  // this scope's close does enter the ledger: so the other scope's absence below means something
-  await until(() => entriesFor(P, H1).length, 10000, `the ledger entry for ${H1}`);
+  // this scope's close does enter the ledger, as a withdrawn close with its reset: so the other
+  // scope's absence below means something
+  const h1 = await until(() => entriesFor(P, H1)[0], 10000, `the ledger entry for ${H1}`);
+  assert.deepEqual([entriesFor(P, H1).length, h1.outcome, h1.reset], [1, 'withdrawn', true], JSON.stringify(h1));
   const other = appendLine(P, handoverLine(P, { scope: 'browser:other-0123456789ab' }));
   await ok(P, ['open', `${site.origin}/account`]);
   await ok(P, ['snapshot']);
@@ -321,8 +350,11 @@ onA('C22 another instance\'s handover never holds this browser', async () => {
   assert.equal((await statusJson(P)).held, null);
   assert.match((await ok(P, ['status'])).out, /^held: no$/m);
   await withdraw(P, other.id);
-  await sleep(1500);
+  // a verb runs the gate on every close not yet handled before it answers: once it has, any close of
+  // the other scope this daemon took would be in the ledger already, however long its restart took
+  await ok(P, ['snapshot']);
   assert.equal(entriesFor(P, other.id).length, 0, 'its close enters this ledger');
+  assert.equal(entriesFor(P, H1).length, 1, `${H1} is still handled once`);
 });
 
 // --- the close (T4): wait prints the fold's outcome once the daemon has handled the close.
