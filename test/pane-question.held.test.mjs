@@ -240,3 +240,39 @@ test("what the card cannot answer is said as it is: a dialog with no numbers, on
     assert.match(look(elsewhere).q.problem, /not in this checkout/);
   } finally { F.done(); }
 });
+
+test("a session at a permission prompt is a red question: hello counts the supervisor's and each worker's into the Inbox, a usage-limit stop not", { skip: hasTmux ? false : 'no tmux' }, () => {
+  const F = threadsFixture('pane-prompts');
+  try {
+    const hello = (S) => JSON.parse(F.owner(['hello', '--json', '--no-kit', '--pane'], S));
+    const none = hello({ DEVTEAM_SUPERVISOR: 'no-such-session:0' });
+    assert.equal(none.prompts, 0);
+    const base = none.inbox;
+    assert.equal(JSON.parse(F.owner(['hello', '--json', '--no-kit'])).prompts, undefined, 'only when asked: tmux is not read for a plain hello');
+    // the supervisor at a Bash permission prompt: one more in the Inbox
+    const sup = menuPane(F, 'menu2,input');
+    const S = { DEVTEAM_SUPERVISOR: sup.target };
+    let h = hello(S);
+    assert.equal(h.supervisor_question.kind, 'menu');
+    assert.deepEqual([h.prompts, h.inbox, h.prompt_sessions], [1, base + 1, []]);
+    // a dialog with no numbers counts too; the usage-limit menu does not
+    assert.deepEqual([hello({ DEVTEAM_SUPERVISOR: menuPane(F, 'trust,input').target }).prompts], [1]);
+    const limit = hello({ DEVTEAM_SUPERVISOR: menuPane(F, 'limit,input').target });
+    assert.deepEqual([limit.supervisor_question.kind, limit.prompts, limit.inbox], ['limit', 0, base]);
+    // a worker's window (started in a worktree, in the fleet's tmux session) at a permission prompt
+    const wt = path.join(F.old, '.worktrees', 'some-ticket');
+    fs.mkdirSync(wt, { recursive: true });
+    const worker = menuPane(F, 'menu2,input', wt);
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/tmux-session'), `${worker.target.split(':')[0]}\n`);
+    h = hello(S);
+    assert.deepEqual([h.prompts, h.inbox, h.prompt_sessions.map((x) => x.window)], [2, base + 2, ['main']]);
+    assert.match(h.prompt_sessions[0].line, /Do you want to proceed|1\. Yes/);
+    assert.match(h.pulse.attention[1], /^main is stopped at a permission prompt: answer it in the terminal/);
+    // answered at the worker's terminal: it counts no more
+    worker.press('1');
+    for (let i = 0; i < 50 && /proceed/.test(worker.shows()); i++) nap(100);
+    h = hello(S);
+    assert.deepEqual([h.prompts, h.inbox, h.prompt_sessions], [1, base + 1, []]);
+    assert.equal(worker.typed(), '1', 'hello types nothing into any pane');
+  } finally { F.done(); }
+});

@@ -21782,7 +21782,7 @@ async function dashRoutesViewer(D, req, res, q) {
 // /api/threads
 async function dashRoutesThreads(D, req, res, q) {
   const { u } = q;
-  const { send, threadsRead, supervisorPane, supervisorAsks, paneToken } = D;
+  const { send, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken } = D;
   // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
   // browser says another site's page asks.
   if (req.method === 'GET' && u.pathname === '/api/threads') {
@@ -21792,6 +21792,7 @@ async function dashRoutesThreads(D, req, res, q) {
     try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
     const pane = supervisorPane();
     const asks = supervisorAsks();
+    const prompts = sessionPrompts();
     // the card's "not delivered": the turns no terminal took, and when the supervisor last checked
     // (two small run files, read here: no child, no tmux)
     const undelivered = Object.keys(undeliveredTurns(Date.now(), { entries: true }));
@@ -21804,11 +21805,11 @@ async function dashRoutesThreads(D, req, res, q) {
     // this process's work is saved.
     // the token for an answer goes only to this page's own read, said so by the browser
     if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
-    const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}`).slice(0, 20)}"`;
+    const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}|${JSON.stringify(prompts)}`).slice(0, 20)}"`;
     const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
     if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
     res.writeHead(200, { 'content-type': 'application/json', ...head });
-    return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
+    return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, ...(prompts.length ? { prompts } : {}), checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
   }
   return DASH_NEXT;
 }
@@ -22259,7 +22260,7 @@ async function cmdDashboard() {
   // in a second (kit-223). Anything that isn't a number of at least 0 is the default.
   const HELLO_MS = ((n) => (process.env.DEVTEAM_HELLO_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 30000))(Number(process.env.DEVTEAM_HELLO_MS));
   every(refreshHello, HELLO_MS);
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, prompts: hello?.prompts ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), ...(hello?.box_alert ? { box_alert: hello.box_alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -22624,6 +22625,9 @@ async function cmdDashboard() {
     if (q.kind === 'menu' && Array.isArray(q.options)) return { kind: 'menu', question: String(q.question ?? ''), options: q.options.slice(0, 40).map((o) => ({ n: Number(o?.n), label: String(o?.label ?? '') })), selected: Number(q.selected) || null, hint: String(q.hint ?? ''), digest: q.digest };
     return { kind: q.kind === 'limit' ? 'limit' : 'dialog', text: String(q.text ?? ''), digest: q.digest };
   };
+  // The workers' and planners' sessions stopped at a permission prompt, as that same run found them:
+  // red questions in the Inbox, answered in their terminals (pane text: the page escapes it).
+  const sessionPrompts = () => (Array.isArray(hello?.prompt_sessions) ? hello.prompt_sessions.slice(0, 40).map((x) => ({ window: String(x?.window ?? '').slice(0, 120), line: String(x?.line ?? '').slice(0, 200) })) : []);
   // The owner's answer to it. Who may send one: this page, by the browser's own headers (Origin and
   // Sec-Fetch-Site, both), carrying the token this process made for that question and gave only to a
   // same-origin read of /api/threads (kept in memory: not in run/, not in the log, not in any
@@ -22674,7 +22678,8 @@ async function cmdDashboard() {
     // still up is reported as a key that may not have landed, as a digit's is, with no second key.
     const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
     const finish = async (rec, keys, why, after) => {
-      if (hello) hello.supervisor_question = null;
+      // the prompt it was is answered: out of the Inbox's count now, not at the next look
+      if (hello) { if (hello.supervisor_question && hello.supervisor_question.kind !== 'limit' && hello.prompts > 0 && hello.inbox > 0) { hello.prompts--; hello.inbox--; } hello.supervisor_question = null; }
       refreshHello();
       const said = rec.ok ? rec.stdout.trim() : rec.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '');
       if (!rec.ok) return no(`the key was sent (${keys}), but the answer could not be recorded: ${said || 'the command failed'}`, 500);
@@ -22718,7 +22723,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
-  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   const server = http.createServer(async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
@@ -28053,7 +28058,8 @@ function cmdHello() {
   const s = loadSettings();
   // the Inbox as the dashboard counts it: open questions and the lessons sent to the owner to keep
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter(forOwner).length;
-  const workers = ourWindows(tmuxSession()).length;
+  const windows = ourWindows(tmuxSession());
+  const workers = windows.length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
   const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
@@ -28063,8 +28069,19 @@ function cmdHello() {
     r.supervisor_question = a.ask;
     r.supervisor_target = a.ask ? a.target : null;
     if (a.ask && Array.isArray(r.pulse?.attention)) r.pulse.attention.unshift(a.ask.kind === 'menu' ? "The supervisor's terminal is asking you a question: answer it on the dashboard, at the top of the Inbox" : a.ask.kind === 'limit' ? 'The supervisor is stopped at a usage-limit menu' : "The supervisor's terminal needs you: a dialog is up that is answered in the terminal");
+    // A session at a permission prompt or another dialog is a red question in the Inbox: the hub's tab
+    // count and its notification (the box's push too) rise with inbox. A usage-limit stop is not one
+    // (accounts-tick clears it). The supervisor's, from what its terminal asks; each worker's and
+    // planner's, as paneWaitingIn reads it for the blocked-prompt finding: one capture-pane a window
+    // (the pane table is one list-panes, kept 5 s). This process has no DEVTEAM_ROLE from the
+    // dashboard (ownerActionEnv), so the look types nothing into any pane.
+    const sessions = windows.map((w) => ({ window: w.name, wait: paneWaitingIn(w.name) })).filter((x) => x.wait?.kind === 'prompt').map((x) => ({ window: x.window, line: x.wait.line }));
+    r.prompts = (a.ask && a.ask.kind !== 'limit' ? 1 : 0) + sessions.length;
+    r.prompt_sessions = sessions;
+    r.inbox += r.prompts;
+    if (sessions.length && Array.isArray(r.pulse?.attention)) r.pulse.attention.splice(a.ask ? 1 : 0, 0,`${sessions.length === 1 ? `${sessions[0].window} is` : `${sessions.length} sessions are`} stopped at a permission prompt: answer ${sessions.length === 1 ? 'it' : 'them'} in the terminal`);
   }
-  return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
+  return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${r.inbox} open question(s)${r.prompts ? ` (${r.prompts} at a prompt)` : ''}, fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the
 // kit committed on main: its files outside project/ and run/, by blob. Offline, never upstream.

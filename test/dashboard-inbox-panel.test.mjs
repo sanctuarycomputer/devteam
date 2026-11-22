@@ -127,14 +127,15 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
   // AC1 (done-when 1)
   await t.test('the tab and the button', async () => {
     assert.deepEqual(await p.ev('threadsTabs.list().map((t) => t.id)'), ['inbox', 'threads', 'supervisor', 'shell']);
-    // the first tab: Inbox, its count 9 (six open questions, the review and two lessons), in red
-    await soon("document.querySelector('#th-tabs [role=\"tab\"] .n')?.textContent === '9'", 'the Inbox count, 9');
+    // the first tab: Inbox, its count 10 (six open questions, the review, two lessons and the terminal's
+    // permission prompt, a red question too), in red
+    await soon("document.querySelector('#th-tabs [role=\"tab\"] .n')?.textContent === '10'", 'the Inbox count, 10');
     const tab = await p.ev(`(() => { const b = document.querySelector('#th-tabs [role="tab"]'), n = b.querySelector('.n');
       const probe = document.createElement('span'); probe.style.color = 'var(--red)'; b.append(probe); const red = getComputedStyle(probe).color; probe.remove();
       return { id: b.dataset.tab, text: b.textContent, n: n.textContent, color: getComputedStyle(n).color, red }; })()`);
     assert.equal(tab.id, 'inbox');
     assert.match(tab.text, /^Inbox/);
-    assert.equal(tab.n, '9');
+    assert.equal(tab.n, '10');
     assert.equal(tab.color, tab.red, `the count is --red: ${JSON.stringify(tab)}`);
 
     // the button opens the panel on the Inbox tab, over the page in force
@@ -156,7 +157,7 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.equal(inbox.open, false, 'Answered collapsed');
     assert.equal(inbox.sum, `Answered (${inbox.answered})`);
     // .tt's red count is the tab's
-    assert.equal(await p.ev("document.querySelector('.pagebar .tt .n.q').textContent"), '9');
+    assert.equal(await p.ev("document.querySelector('.pagebar .tt .n.q').textContent"), '10');
 
     // Threads, then Inbox again
     await p.click('#th-tabs [role="tab"][data-tab="threads"]');
@@ -853,7 +854,8 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon(`window.__staleN > 0 && RAW.questions.some((q) => q.id === '${q1}') && !document.querySelector(${JSON.stringify(IN(`[data-qcard="${q1}"]`))})`, "a read with q1 still open, drawn")
       .catch(async (e) => assert.fail(`${e.message}: ${JSON.stringify(await p.ev(`[window.__staleN, ${COUNTS}]`))}`));
     await p.ev(FRAMES);
-    assert.deepEqual(await p.ev(COUNTS), ['8', '8', '8'], 'the tab, .tt and the title say 8');
+    // 9: q1 gone, the terminal's prompt still up
+    assert.deepEqual(await p.ev(COUNTS), ['9', '9', '9'], 'the tab, .tt and the title say 9');
     await p.ev('window.__stale = false; void 0');
     await gone(q1);
     // one redraw after the data says q1 is answered: Q's subject is no longer in the Inbox, so no pin of Q's in the panel
