@@ -25867,7 +25867,7 @@ function recurringBindingFails(main, landed, approved) {
 function cmdRecurring() {
   const R = recurringRegistry;
   const [sub, arg] = positional;
-  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid> | recurring run --due | recurring run <name> --draft | recurring due [--json] | recurring ticket <name> --id <id> --touches <glob>… [--component <c>]';
+  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid> | recurring run --due | recurring run <name> --draft | recurring due [--json] | recurring ticket <name> --id <id> --touches <glob>… [--component <c>] | recurring start <name> | recurring done <name> --nothing "<why>" | --abandoned "<why>"';
   const P = R.path();
   // main's jobs, as read(ref) reads them: a problem (a broken file, or git failing) stops here
   const mainJobs = () => {
@@ -25948,6 +25948,87 @@ function cmdRecurring() {
     }, 'supervisor');
     appendLog({ type: 'act', decision: citing(), class: 'add-ticket', what: `added ticket ${id} to fix the failing check ${arg}`, refs: [id, `recurring:${arg}`], reversible: true }, 'supervisor');
     return out(`added ${id}`);
+  }
+  // a due chore begins (kit-164): the supervisor's in a chore worktree, a worker's as a chores ticket;
+  // its run for the slot is the started line, finished by its merge or by recurring done
+  if (sub === 'start' || sub === 'done') {
+    supervisorOnly(`recurring ${sub}`);
+    const RC = recurringChores;
+    if (!arg) die(sub === 'start' ? 'usage: recurring start <name>' : 'usage: recurring done <name> --nothing "<why>" | --abandoned "<why>"');
+    const l = RC.list();
+    if (l.problem) die(l.problem);
+    const jobs = mainJobs();
+    if (!Object.hasOwn(jobs, arg)) die(`no job ${arg} on main; recurring list`);
+    const entry = jobs[arg];
+    if (entry.kind !== 'chore') die(`${arg} is a ${entry.kind ?? 'kindless'} job; only a chore starts and finishes here (a check runs on its own)`);
+    if (sub === 'done') {
+      const how = ['nothing', 'abandoned'].filter((f) => flags[f] !== undefined);
+      if (how.length !== 1) die('usage: recurring done <name> --nothing "<why>" | --abandoned "<why>" (one of them)');
+      const status = how[0];
+      const why = flagStr(status)?.trim();
+      if (!why) die(`recurring done --${status} needs the reason: --${status} "<why>"`);
+      if (UNSAFE_TEXT.test(why) || why.length > 300) die(`--${status}: one line of at most 300 characters`);
+      if (entry.by === 'worker') die(`${arg} is a worker's chore: it ends only through its ticket (its merge, or a ticket set … superseded_by), so a live ticket is never written twice`);
+      const st = RC.state(arg, entry, { forge: true });
+      const open = st?.open;
+      if (!open) die(`${arg} has no started run to finish${st?.runs.length ? ` (its last, ${st.runs.at(-1).ref}, is ${st.runs.at(-1).status})` : ''}`);
+      if (RC.isTicketRef(open.ref)) die(`${arg}'s run ${open.ref} is a ticket: it ends only through that ticket`);
+      const wt = path.join(mainRoot, '.worktrees', open.ref);
+      let removed = '';
+      if (status === 'nothing' && fs.existsSync(wt)) {
+        // empty: nothing uncommitted and no commit main lacks; anything else is work, never removed here
+        const g = (args) => recurringRegistry.git(args, { cwd: wt });
+        const top = g(['rev-parse', '--show-toplevel']);
+        if (!top.ok || realPath(top.out.trim()) !== realPath(wt)) die(`.worktrees/${open.ref} is not a worktree; move it aside, then recurring done again`);
+        const dirty = g(['status', '--porcelain']);
+        const main = mainSha();
+        const ahead = main ? g(['rev-list', '--count', 'HEAD', '--not', main]) : { ok: false };
+        if (!dirty.ok || !ahead.ok) die(`couldn't read .worktrees/${open.ref} (git ${recurringRegistry.why(dirty.ok ? ahead : dirty)}); nothing was logged`);
+        if (dirty.out.trim() || Number(ahead.out.trim()) > 0) die(`.worktrees/${open.ref} holds work (${dirty.out.trim() ? 'uncommitted changes' : `${ahead.out.trim()} commit(s) main lacks`}): land it (chore pr ${open.ref.replace(/^chore-/, '')}, then merge --chore), or --abandoned "<why>"`);
+        const rm = recurringRegistry.git(['worktree', 'remove', wt], { cwd: mainRoot });
+        if (!rm.ok) die(`couldn't remove .worktrees/${open.ref} (git worktree remove ${recurringRegistry.why(rm)}); nothing was logged`);
+        removed = `; removed the empty .worktrees/${open.ref}`;
+      }
+      appendLog({ type: 'observation', source: 'recurring', kind: 'recurring-run', subject: `recurring:${arg}`, detector: 'recurring', severity: 0, valence: 0, detail: why, source_key: `recurring:${arg}:${open.slot}:${status}:${open.ref}`, run: { status, slot: open.slot, ref: open.ref } }, 'supervisor');
+      return out(`${arg}: ${status === 'nothing' ? 'nothing to do' : 'abandoned'} for ${open.slot} (${open.ref})${removed}; due again by its slots`);
+    }
+    // start: Upkeep running, an answered job, due, and no run of it live
+    const mode = goalMode(upkeepOrVirtual());
+    if (mode !== 'run') die(`Upkeep is ${holdWords(mode)}: recurring chores wait until it runs (goal hold upkeep run --owner)`);
+    const reg = recurringFailures.registered(arg, entry);
+    if (!reg) die(`${arg} on main was not registered through an answered recurring-edit question: only a job the owner approved starts`);
+    const st = RC.state(arg, entry, { mode, forge: true });
+    if (!st) die(`${arg} has no schedule the kit can read`);
+    if (st.open) die(`${arg} is already started (${st.open.ref}, for ${st.open.slot}): it finishes when that merges${RC.isTicketRef(st.open.ref) ? ' or is superseded' : ', or with recurring done --nothing | --abandoned'}`);
+    if (!st.due) die(`${arg} is not due: next ${st.next}`);
+    const now = Date.now();
+    const header = `${arg}: ${entry.title}. Approved by ${reg.qid}; due for ${st.slot}.`;
+    const body = ['Its instructions, as the owner approved them:', entry.prompt].join('\n');
+    if (entry.by === 'supervisor') {
+      const ref = RC.slug(arg, now);
+      const slug = ref.replace(/^chore-/, '');
+      if (st.runs.some((r) => r.ref === ref)) die(`${arg} already started as ${ref} today: start it again tomorrow`);
+      if (fs.existsSync(path.join(mainRoot, '.worktrees', ref))) die(`.worktrees/${ref} is there already: land or remove it first`);
+      const wt = choreWorktree(slug, { setup: true });
+      RC.logStart(arg, st.slot, ref, `chore ${slug}`);
+      return out([header, `Started in ${path.relative(mainRoot, wt)}.`, '', body, '', 'Then:', `  devteam.mjs chore pr ${slug} --title "…"   and merge --chore ${slug} (that merge finishes it)`, `  or devteam.mjs recurring done ${arg} --nothing "<why>"   (nothing to do; removes the empty worktree)`, `  or devteam.mjs recurring done ${arg} --abandoned "<why>"`].join('\n'));
+    }
+    // a ticket an earlier start wrote and logged no line for is taken up, never written twice
+    const stray = RC.stray(arg, entry, st.runs);
+    if (stray) {
+      RC.logStart(arg, st.slot, stray, `ticket ${stray}, taken up`);
+      return out([header, `Took up the chores ticket ${stray}, written by an earlier start that logged no run; start its worker as any chore ticket's (devteam.mjs worker ${stray}). It finishes when ${stray} merges, or is superseded.`, '', body].join('\n'));
+    }
+    const id = RC.nextId(entry.component, arg);
+    if (!new RegExp(SCHEMA['x-id'].keyed.ticket).test(id)) die(`the chore ticket's id ${id} must match ${SCHEMA['x-id'].keyed.ticket}`);
+    if (logGet(id)) die(`${id} exists`);
+    appendLog({
+      type: 'ticket', op: 'new', id, feature: CHORES, title: `Recurring: ${entry.title}`, component: entry.component, kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: entry.touches, done_when: entry.done_when,
+      notes: `${header}\n${body}`,
+    }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'add-ticket', what: `added chore ticket ${id} for the recurring chore ${arg}`, refs: [id, `recurring:${arg}`], reversible: true }, 'supervisor');
+    RC.logStart(arg, st.slot, id, `ticket ${id}`);
+    return out([header, `Wrote the chores ticket ${id}; start its worker as any chore ticket's (devteam.mjs worker ${id}). It finishes when ${id} merges, or is superseded.`, '', body].join('\n'));
   }
   if (sub === 'run') {
     supervisorOnly('recurring run');

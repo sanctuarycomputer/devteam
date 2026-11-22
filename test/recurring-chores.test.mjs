@@ -248,6 +248,28 @@ test('C6: a worker chore whose ticket is superseded reads as abandoned, and is d
   assert.ok(['due', 'overdue'].includes(T.entryOf('pins').state), 'due again');
 });
 
+test('C7: a worker chore ticket written but not started is live: no second start, no second ticket', () => {
+  const T = worker();
+  T.ok(['recurring', 'start', 'bump']);
+  const r = T.dt(['recurring', 'start', 'bump']);
+  assert.equal(r.status, 1, 'a second start is refused');
+  assert.match(r.err, /already started \(ops-\d+-recurring-bump/);
+  assert.equal(T.ticketsOf('bump').length, 1, 'one ticket');
+  assert.equal(T.entryOf('bump').state, 'started');
+});
+
+test('C8: a worker chore ticket whose PR was closed is still live, and gh is never asked about it', () => {
+  const T = worker();
+  T.ok(['recurring', 'start', 'lint']);
+  const id = T.ticketsOf('lint')[0].id;
+  T.prs({ [id]: [{ number: 4, closedAt: iso(NOW - HOUR), mergedAt: null }], [`ticket/${id}`]: [{ number: 4, closedAt: iso(NOW - HOUR), mergedAt: null }] });
+  assert.equal(T.dt(['recurring', 'start', 'lint']).status, 1, 'still started');
+  T.metrics();
+  assert.equal(T.peek('lint').runs[0].status, 'started');
+  assert.equal(T.ticketsOf('lint').length, 1);
+  assert.ok(!T.ghCalls().some((c) => c.includes(id)), 'no gh call names the ticket');
+});
+
 // ===== DW5: supervisor chores that end without a merge, and recurring-stuck =====
 const sup = group(() => {
   const jobs = { tidy: chore({ every: '1d' }), drop: chore({ every: '1d' }), slow: chore({ every: '1d' }) };
@@ -268,6 +290,30 @@ test('C9b: dashboard-data, metrics and peek never ask gh, even with a supervisor
   assert.deepEqual(T.ghCalls(), [], 'no gh call from peek');
 });
 
+test('C9: a supervisor chore whose chore-recurring-<name>-<date> PR is closed unmerged is read as abandoned by recurring start, and is due again by its slots: it starts again', () => {
+  const T = sup();
+  const old = `chore-recurring-tidy-${ymd(NOW - 2 * DAY)}`;
+  T.prs({ [old]: [{ number: 9, closedAt: iso(NOW - DAY), mergedAt: null }], [`chore-recurring-drop-${ymd(NOW - 2 * DAY)}`]: [{ number: 10, closedAt: iso(NOW - DAY), mergedAt: '2026-01-01T00:00:00Z' }] });
+  T.ok(['recurring', 'start', 'tidy']);
+  assert.ok(T.ghCalls().some((c) => c.includes(`--head ${old}`) && c.includes('--state closed')), 'gh asked about its branch');
+  const runs = T.peek('tidy').runs;
+  assert.deepEqual(runs.map((r) => [r.status, r.ref]), [['started', `chore-recurring-tidy-${ymd(Date.now())}`], ['abandoned', old]], 'the old run abandoned, a new one started');
+  const r = T.dt(['recurring', 'start', 'drop']);
+  assert.match(r.err, /already started/, 'a PR closed by its merge is not abandoned');
+});
+
+test('C10: recurring done <name> --abandoned "<why>" logs status abandoned with that reason (not nothing), and the chore is due again', () => {
+  const T = sup();
+  T.ok(['recurring', 'done', 'drop', '--abandoned', 'the branch was already tidy']);
+  const l = T.runLines('drop').at(-1);
+  assert.equal(l.run.status, 'abandoned');
+  assert.equal(l.detail, 'the branch was already tidy');
+  assert.equal(l.by, 'supervisor');
+  assert.equal(l.detector, 'recurring');
+  assert.equal(l.run.ref, `chore-recurring-drop-${ymd(NOW - 2 * DAY)}`);
+  assert.ok(['due', 'overdue'].includes(T.entryOf('drop').state), 'due again');
+});
+
 test('C11: recurring-stuck (medium) for a started run not finished grace_days after its start', () => {
   const T = sup();
   const f = T.finding('recurring-stuck', 'slow');
@@ -283,12 +329,114 @@ const start = group(() => {
   return T;
 });
 
+test('C12: recurring start on a by: supervisor chore opens .worktrees/chore-recurring-<name>-<yyyymmdd>, prints the prompt headed with the approving qid, and logs started with that ref', () => {
+  const T = start();
+  const o = T.ok(['recurring', 'start', 'sweep']);
+  const ref = `chore-recurring-sweep-${ymd(Date.now())}`;
+  assert.ok(fs.existsSync(path.join(T.old, '.worktrees', ref, '.git')), 'the chore worktree');
+  assert.match(o.split('\n')[0], new RegExp(T.q.sweep), 'headed with the approving qid');
+  assert.ok(o.indexOf('Tidy the branches.\nSay what you removed.') > o.indexOf(T.q.sweep), 'then the prompt');
+  const l = T.runLines('sweep').at(-1);
+  assert.deepEqual([l.by, l.detector, l.source, l.run.status, l.run.ref], ['supervisor', 'recurring', 'recurring', 'started', ref]);
+  assert.match(l.run.slot, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test('C14: the run reads as done once merge --chore of that slug lands', () => {
+  const T = start();
+  T.ok(['recurring', 'start', 'land']);
+  const ref = `chore-recurring-land-${ymd(Date.now())}`;
+  const wt = path.join(T.old, '.worktrees', ref);
+  write(path.join(wt, PROJ, 'notes', 'tidy.md'), 'tidied\n');
+  T.ok(['chore', 'pr', ref.replace(/^chore-/, ''), '--title', 'tidied']);
+  T.ok(['merge', '--chore', ref.replace(/^chore-/, '')]);
+  assert.equal(T.peek('land').runs[0].status, 'done');
+  assert.notEqual(T.entryOf('land').state, 'started');
+});
+
+test('C16: recurring done <name> --nothing "<why>" logs status nothing and removes an empty worktree', () => {
+  const T = start();
+  T.ok(['recurring', 'start', 'noop']);
+  const ref = `chore-recurring-noop-${ymd(Date.now())}`;
+  assert.ok(fs.existsSync(path.join(T.old, '.worktrees', ref)));
+  T.ok(['recurring', 'done', 'noop', '--nothing', 'no branch to tidy']);
+  const l = T.runLines('noop').at(-1);
+  assert.deepEqual([l.run.status, l.detail, l.run.ref], ['nothing', 'no branch to tidy', ref]);
+  assert.ok(!fs.existsSync(path.join(T.old, '.worktrees', ref)), 'the empty worktree is removed');
+  assert.equal(T.peek('noop').runs[0].status, 'nothing');
+});
+
+test('C23: a chore whose name has a digit word (deps-02-bump) still finishes by its merge: its branch is never read as a ticket', () => {
+  const T = start();
+  T.ok(['recurring', 'start', 'deps-02-bump']);
+  const ref = `chore-recurring-deps-02-bump-${ymd(Date.now())}`;
+  assert.equal(T.runLines('deps-02-bump').at(-1)?.run.ref, ref);
+  T.mergeChore(ref, Date.now() + 1000);
+  assert.equal(T.peek('deps-02-bump').runs[0].status, 'done');
+});
+
 // ===== DW7, DW8 (the ticket's merge), DW12: a worker chore =====
 const wstart = group(() => {
   const jobs = { deps: wchore({ every: '1d', touches: ['ops/**', 'web/package.json'], done_when: ['the pins are current', 'the suite passes'] }), wnone: wchore({ every: '1d' }), wdone: wchore({ every: '1d' }), wstray: wchore({ every: '1d' }) };
   const T = setup('wstart', jobs);
   T.hand('supervisor', { type: 'ticket', feature: 'chores', id: 'ops-04-older', title: 'older', component: 'ops', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['ops/x'], done_when: ['x'] }, NOW - 20 * DAY);
   return T;
+});
+
+test('C13: recurring start on a by: worker chore writes a chores ticket <component>-<NN>-recurring-<name> (the next free number) with the entry\'s touches and done_when and the prompt in notes, its add-ticket act, and started with the ticket id', () => {
+  const T = wstart();
+  const o = T.ok(['recurring', 'start', 'deps']);
+  const t = T.ticketsOf('deps');
+  assert.equal(t.length, 1);
+  assert.equal(t[0].id, 'ops-05-recurring-deps', 'the next free number after ops-04');
+  assert.deepEqual([t[0].feature, t[0].component, t[0].touches, t[0].done_when], ['chores', 'ops', ['ops/**', 'web/package.json'], ['the pins are current', 'the suite passes']]);
+  assert.match(t[0].notes, /Bump the pins in ops\//);
+  assert.match(t[0].notes, new RegExp(T.q.deps));
+  assert.match(o, new RegExp(T.q.deps));
+  const act = T.allLines().find((l) => l.type === 'act' && l.class === 'add-ticket' && l.refs?.includes('ops-05-recurring-deps'));
+  assert.deepEqual(act?.refs, ['ops-05-recurring-deps', 'recurring:deps']);
+  const l = T.runLines('deps').at(-1);
+  assert.deepEqual([l.by, l.detector, l.run.status, l.run.ref], ['supervisor', 'recurring', 'started', 'ops-05-recurring-deps']);
+});
+
+test('C20: recurring done --nothing and --abandoned are refused for a by: worker chore; nothing is logged and no second ticket is written', () => {
+  const T = wstart();
+  T.ok(['recurring', 'start', 'wnone']);
+  const before = T.runLines('wnone').length;
+  for (const f of ['--nothing', '--abandoned']) {
+    const r = T.dt(['recurring', 'done', 'wnone', f, 'no change']);
+    assert.equal(r.status, 1, `${f} refused`);
+    assert.match(r.err, /worker's chore: it ends only through its ticket/);
+  }
+  assert.equal(T.runLines('wnone').length, before, 'no line');
+  assert.equal(T.dt(['recurring', 'start', 'wnone']).status, 1, 'still started');
+  assert.equal(T.ticketsOf('wnone').length, 1, 'one ticket');
+});
+
+test("C15: the run reads as done once the ticket's merge lands", () => {
+  const T = wstart();
+  T.ok(['recurring', 'start', 'wdone']);
+  const id = T.ticketsOf('wdone')[0]?.id;
+  assert.ok(id, 'its ticket');
+  assert.equal(T.peek('wdone').runs[0].status, 'started', 'live before the merge');
+  T.g(['checkout', '-q', '-b', `ticket/${id}`]);
+  write(path.join(T.old, 'ops', 'pins.txt'), 'bumped\n');
+  T.g(['add', '-A', 'ops']);
+  T.g(['commit', '-qm', `${id}: bump`]);
+  T.g(['checkout', '-q', 'main']);
+  T.g(['merge', '--no-ff', '-q', '-m', `Merge pull request #5 from x/ticket/${id}`, `ticket/${id}`]);
+  T.g(['push', '-q', 'origin', 'main']);
+  T.g(['fetch', '-q', 'origin']);
+  assert.equal(T.peek('wdone').runs[0].status, 'done');
+});
+
+test('C24: a start cut short after writing its ticket (no started line) is taken up by the next start, never a second ticket', () => {
+  const T = wstart();
+  const id = 'ops-09-recurring-wstray';
+  T.hand('supervisor', { type: 'ticket', feature: 'chores', id, title: 'Recurring: A worker chore', component: 'ops', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['ops/**'], done_when: ['the chore is done'] }, NOW - HOUR);
+  T.hand('supervisor', { type: 'act', class: 'add-ticket', what: `added chore ticket ${id}`, refs: [id, 'recurring:wstray'], reversible: true }, NOW - HOUR);
+  T.ok(['recurring', 'start', 'wstray']);
+  assert.deepEqual(T.ticketsOf('wstray').map((t) => t.id), [id], 'no second ticket');
+  assert.equal(T.runLines('wstray').at(-1)?.run.ref, id, 'started with it');
 });
 
 // ===== refusals the done-whens imply =====
@@ -302,6 +450,36 @@ const refuse = group(() => {
   T.g(['push', '-q', 'origin', 'main']);
   T.g(['fetch', '-q', 'origin']);
   return T;
+});
+
+test('C25a: recurring start refuses a job the owner never approved through an answer', () => {
+  const T = refuse();
+  const r = T.dt(['recurring', 'start', 'loose']);
+  assert.equal(r.status, 1);
+  assert.match(r.err, /was not registered through an answered recurring-edit question/);
+  assert.equal(T.runLines('loose').length, 0);
+});
+
+test('C25b: recurring start and done refuse a check', () => {
+  const T = refuse();
+  for (const args of [['start', 'chk'], ['done', 'chk', '--nothing', 'x']]) {
+    const r = T.dt(['recurring', ...args]);
+    assert.equal(r.status, 1, args.join(' '));
+    assert.match(r.err, /chk is a check job; only a chore starts and finishes here/);
+  }
+});
+
+test('C25c: recurring done --nothing refuses a chore worktree that holds work, logs nothing and keeps it', () => {
+  const T = refuse();
+  T.ok(['recurring', 'start', 'kept']);
+  const ref = `chore-recurring-kept-${ymd(Date.now())}`;
+  write(path.join(T.old, '.worktrees', ref, PROJ, 'notes', 'work.md'), 'work\n');
+  const n = T.runLines('kept').length;
+  const r = T.dt(['recurring', 'done', 'kept', '--nothing', 'nothing']);
+  assert.equal(r.status, 1);
+  assert.match(r.err, /holds work \(uncommitted changes\)/);
+  assert.equal(T.runLines('kept').length, n, 'no line');
+  assert.ok(fs.existsSync(path.join(T.old, '.worktrees', ref, PROJ, 'notes', 'work.md')), 'the work is kept');
 });
 
 // ===== DW9, DW11: holds, and the dashboard's states =====
@@ -326,6 +504,23 @@ test('C19: dashboard-data upkeep.recurring lists chore entries with states due, 
   assert.deepEqual(['ca', 'cb', 'cc'].map((n) => by[n]?.state), ['due', 'started', 'overdue']);
   for (const n of ['ca', 'cb', 'cc', 'cd']) assert.deepEqual(schemaErrors(ENTRY_SHAPE, by[n], n), [], `${n} meets the entry shape`);
   assert.deepEqual([by.cb.kind, by.cb.by, by.cb.last.status, by.cb.ticket], ['chore', 'supervisor', 'started', null]);
+});
+
+test('C17: recurring start is refused while Upkeep is drained or parked, and the chore shows held in dashboard-data (and no due finding)', () => {
+  const T = held();
+  for (const mode of ['drain', 'park']) {
+    T.hold(mode);
+    const r = T.dt(['recurring', 'start', 'cd']);
+    assert.equal(r.status, 1, `refused while ${mode}`);
+    assert.match(r.err, /Upkeep is (draining|parked): recurring chores wait/);
+    const e = T.entryOf('cd');
+    assert.equal(e.state, 'held', `held while ${mode}`);
+    assert.deepEqual(schemaErrors(ENTRY_SHAPE, e, 'cd'), []);
+    assert.equal(T.finding('recurring-due', 'cd').length, 0, `no recurring-due while ${mode}`);
+  }
+  assert.equal(T.runLines('cd').filter((l) => l.run?.status === 'started').length, 1, 'no start was logged');
+  T.hold('run');
+  assert.equal(T.entryOf('cd').state, 'due', 'due again once Upkeep runs');
 });
 
 // ===== DW10: lines that don't count =====
@@ -365,6 +560,17 @@ const pk = group(() => {
   T.addLine('sv', { slot: iso(NOW - 2 * DAY), ref: `chore-recurring-sv-${ymd(NOW - 2 * DAY)}`, at: NOW - 2 * DAY + HOUR });
   T.ok(['recurring', 'start', 'wk']);
   return T;
+});
+
+test('C21: peek recurring <name> --json for a supervisor chore and a worker chore matches peek.json\'s shape: prompt, by, runs with started, nothing and ref', () => {
+  const T = pk();
+  const s = T.peek('sv');
+  assert.deepEqual(schemaErrors(PEEK_SHAPE, s, 'sv'), []);
+  assert.deepEqual([s.entry.by, s.entry.prompt], ['supervisor', 'Tidy the branches.\nSay what you removed.']);
+  assert.deepEqual(s.runs.map((r) => [r.status, r.ref]), [['started', `chore-recurring-sv-${ymd(NOW - 2 * DAY)}`], ['nothing', `chore-recurring-sv-${ymd(NOW - 3 * DAY)}`]], 'one row per run, newest first, each as it finished');
+  const w = T.peek('wk');
+  assert.deepEqual(schemaErrors(PEEK_SHAPE, w, 'wk'), []);
+  assert.deepEqual([w.entry.by, w.entry.prompt, w.runs[0].status, w.runs[0].ref], ['worker', 'Bump the pins in ops/.', 'started', 'ops-01-recurring-wk']);
 });
 
 // ===== DW14: supervisor.md =====
