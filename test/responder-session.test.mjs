@@ -1106,6 +1106,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     const label = shape.length > 80 ? `${shape.slice(0, 40)}… (${shape.length} bytes)` : shape;
     await t.test(`final-4 F1: a settings block of ${label} refuses and types nothing`, () => {
       fresh();
+      fs.rmSync(F.claudeRan, { force: true });
       const sf = path.join(F.old, settingsRel);
       const keep = fs.readFileSync(sf);
       fs.writeFileSync(sf, `# Project settings\n\n\`\`\`json devteam\n${shape}\n\`\`\`\n`);
@@ -1180,6 +1181,30 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
       }
     });
   }
+  // Round 8: main_branch as git checks a branch name. A branch named -x can be on origin
+  // (refs/heads/-x is a valid ref), but git check-ref-format --branch refuses it.
+  await t.test('final-7 F1: a main_branch git refuses as a branch name (-x) refuses and types nothing', () => {
+    fresh();
+    fs.rmSync(F.claudeRan, { force: true });
+    const sf = path.join(F.old, settingsRel);
+    const keep = fs.readFileSync(sf);
+    const text = keep.toString();
+    const block = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text);
+    fs.writeFileSync(sf, text.replace(block[1], JSON.stringify({ project: 'p', upstream_sync: 'adopt', components: {}, gates: {}, responder_command: A.cmd, main_branch: '-x' }, null, 2)));
+    F.g(['commit', '-qam', 'settings: main_branch -x'], F.old);
+    for (const b of ['main', 'refs/heads/-x']) F.g(['push', '-q', 'origin', `HEAD:${b}`], F.old);
+    let r;
+    try { r = F.run(F.old, ['responder'], SUP); } finally {
+      F.run(F.old, ['responder', '--stop'], SUP);
+      fs.writeFileSync(sf, keep);
+      F.g(['commit', '-qam', 'settings: back'], F.old);
+      F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+      F.g(['push', '-q', 'origin', ':refs/heads/-x'], F.old);
+    }
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /main_branch is not a branch name/);
+    assert.ok(!fs.existsSync(A.out) && !fs.existsSync(F.claudeRan), 'nothing ran');
+  });
   // final-4 F2: git never lists a path named .git, so the walk refuses one anywhere below the root
   for (const [name, rel] of [['p9 a file under a tracked folder', 'docs/.git/planted'], ['p10 a file under a new folder', 'r4-new/.git/planted'], ['p11 a file under .claude', '.claude/.git/planted'], ['n5 a .git file in a tracked folder', 'docs/.git']]) {
     await t.test(`final-4 F2: ${name} refuses`, () => {
