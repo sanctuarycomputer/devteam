@@ -1660,11 +1660,14 @@ export function createGateway(opts = {}) {
   };
   // The hub's list is the one thing the box's name takes from behind it, and only as data: whatever
   // holds the port, the page reads JSON and shows it as text. No hub yet is an empty list.
+  // Each read is a connection of its own (agent: false): since Node 19 the global agent keeps
+  // sockets alive, and one the hub closed (a restart, its idle timeout) failed the next read, which
+  // emptied the list until the poll after it.
   const hubList = () => new Promise((settle) => {
     let deadline = null;
     const resolve = (v) => { clearTimeout(deadline); settle(v); };
     const none = () => resolve(null);
-    const up = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 10000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (ur) => {
+    const up = http.get({ host: '127.0.0.1', port: HUB_PORT, agent: false, path: '/instances.json', timeout: 10000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (ur) => {
       if (ur.statusCode !== 200) { ur.resume(); return none(); }
       const chunks = [];
       let size = 0;

@@ -3719,6 +3719,27 @@ on('C13 after the project\'s port moves, the owner still gets the /w/ page', { l
   assert.match(r.body, /\/view\/artifact\/launch-notes\?at=tree:/, 'the wrapper, by name and root');
   assert.equal((await b.get('alpha', '/launch-notes/', { cookie: COOKIE, headers: NAV })).status, 302, 'and the visit is sent there');
 });
+// CI run 45001674968: Node 19+ keeps the global agent's sockets alive, so a list read reused the
+// socket of the read before it, which the hub (here a restarted one) had closed: the read failed, the
+// list was taken as empty, and the /w/ page, which asks nothing on the request path, answered 404
+// until the next poll. A hub that closes a connection after one answer stands in for that.
+on('C13b each read of the hub\'s list is a connection of its own: a socket the hub closed is never reused', { hubUp: false }, async (b) => {
+  const sockets = new Set();
+  const hubSrv = http.createServer((q, r) => {
+    if (sockets.has(q.socket)) return q.socket.destroy();
+    sockets.add(q.socket);
+    hubAnswer(r, [row('alpha', P)]);
+  });
+  await new Promise((ok) => hubSrv.listen(HUB, '127.0.0.1', ok));
+  try {
+    for (let i = 1; i <= 3; i++) {
+      await b.g.pollPush();
+      const r = await b.get(null, '/w/alpha/launch-notes/', { cookie: COOKIE, headers: NAV });
+      assert.equal(r.status, 200, `read ${i}: the list holds alpha`);
+    }
+    assert.equal(sockets.size, 3, 'three reads, three connections');
+  } finally { hubSrv.closeAllConnections(); await new Promise((ok) => hubSrv.close(ok)); }
+});
 // The owner's wrapper on the hub origin (ruling a-20261122-073738459): the dashboard stops itself
 // when framed by its own origin, so the wrapper lives on the box's name and frames the project's host.
 const WRAP_AT = `tree:${TREE}`;
@@ -3820,8 +3841,13 @@ test('C45 in Chrome, the owner\'s visit lands on the hub\'s /w/ page, the viewer
   assert.ok(KIT_GUARD && KIT_GUARD.includes('window.frameElement'), 'the kit\'s own frame guard');
   const b = await box();
   const chrome = await openChrome();
+  // What Chrome says it refused. Where a blocked frame's error page lives depends on the version (from
+  // 158 it is a target of its own, out of the page's frame tree), so the frame tree can't show it.
+  const reports = [];
+  const reportSrv = http.createServer((q, r) => { let x = ''; q.on('data', (c) => { x += c; }); q.on('end', () => { reports.push(JSON.parse(x)['csp-report']); r.end(); }); });
+  await new Promise((ok) => reportSrv.listen(0, '127.0.0.1', ok));
   try {
-    const kitCsp = { 'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'; frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB}` };
+    const kitCsp = { 'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'; frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB}; report-uri http://127.0.0.1:${reportSrv.address().port}/r` };
     b.pages.set('/view/artifact/launch-notes', { headers: kitCsp, body: `<!doctype html><html><head>${KIT_GUARD}</head><body><p id="v">the viewer</p><iframe id="av-frame" sandbox="${AV_SANDBOX}" src="/artifact/tree/${TREE}/launch-notes/"></iframe></body></html>` });
     b.pages.set(`/artifact/tree/${TREE}/launch-notes/`, { headers: { 'content-security-policy': `default-src 'none'; img-src http://127.0.0.1:${P}/artifact/tree/${TREE}/launch-notes/; frame-ancestors http://127.0.0.1:${P} http://127.0.0.1:${HUB}; sandbox allow-scripts` }, body: '<!doctype html><p id="art">the artifact</p><img src="dot.png">' });
     const page = await chrome.newPage();
@@ -3838,13 +3864,12 @@ test('C45 in Chrome, the owner\'s visit lands on the hub\'s /w/ page, the viewer
     // a bad grant: the same frame, its grant's mac changed, is blocked by the viewer's ancestors
     const good = await page.ev('document.querySelector(\'iframe\').src');
     const badUrl = good.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'));
-    const tree = async () => (await page.send('Page.getFrameTree')).frameTree.childFrames?.[0]?.frame ?? {};
+    assert.deepEqual(reports, [], 'the good grant\'s frame was refused nothing');
     await page.ev(`(document.querySelector('iframe').src = ${JSON.stringify(badUrl)}, true)`);
-    let f = {};
-    for (let i = 0; i < 100; i++) { f = await tree(); if (f.unreachableUrl || f.url === badUrl) break; await sleep(100); }
-    assert.equal(f.unreachableUrl, badUrl, `the bad grant's frame is blocked: ${JSON.stringify(f)}`);
+    for (let i = 0; i < 100 && !reports.length; i++) await sleep(100);
+    assert.deepEqual(reports.map((x) => [x['effective-directive'], x.disposition, x['blocked-uri']]), [['frame-ancestors', 'enforce', `${b.origin('alpha')}/`]], 'the bad grant\'s frame is blocked by the viewer\'s ancestors');
     assert.ok(b.seen.get(P).some((x) => badUrl.endsWith(x)), 'the viewer answered, and the browser refused to show it');
-  } finally { await chrome.close(); await b.close(); }
+  } finally { await chrome.close(); reportSrv.closeAllConnections(); await new Promise((ok) => reportSrv.close(ok)); await b.close(); }
 });
 on('C15 a shared name gets no dashboard, and its stored page still answers signed out', { list: [row('twin', P), row('twin', P + 1, { root: '/srv/twin2' })], published: { twin: { root: '/srv/twin', port: P, artifacts: { 'twin-notes': art() } } } }, async (b) => {
   assert.deepEqual((await b.get('twin', '/twin-notes/', { headers: NAV })).body, PAGE);
