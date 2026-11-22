@@ -439,6 +439,21 @@ test('A5j: an excerpt with a quote and a newline ends the notes as its JSON stri
   assert.equal(JSON.parse(t.notes.slice(t.notes.indexOf(tail) + tail.length)), X, 'it parses back to the excerpt');
 });
 
+// final-2 F1: only a chores ticket is a fix ticket; the act form the refusal prints, naming a build ticket, clears nothing
+const A5Q = group(() => {
+  const F = setup('a5q', { cq: check({ every: '1d' }) });
+  F.addRun('cq', { slot: F.dueOf('cq').slot, at: Date.now() - 5 * 60000, status: 'fail' });
+  F.hand('supervisor', { type: 'ticket', id: 'ops-05-build', feature: 'ops-work', title: 'A build ticket', component: 'ops', kind: 'build', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['ops/**'], done_when: ['x'] }, Date.now() - 2 * 60000);
+  F.hand('supervisor', { type: 'act', class: 'add-ticket', what: 'linked ops-05-build', refs: ['ops-05-build', 'recurring:cq'] }, Date.now() - 60000);
+  return F;
+});
+
+test("A5q: a supervisor's add-ticket act after the failure that names a live non-chores ticket leaves recurring-failing raised and the entry's ticket null", () => {
+  const F = A5Q();
+  assert.equal(F.finding('recurring-failing', 'recurring:cq').length, 1, 'still raised');
+  assert.equal(F.data().upkeep.recurring.entries.find((x) => x.name === 'cq').ticket, null, 'no fix ticket');
+});
+
 test("A5c: the ticket's notes hold no token the excerpt carried", () => {
   const t = A5().allLines().find((l) => l.type === 'ticket' && l.id === 'ops-07-fix-cx');
   assert.ok(t, 'the ticket exists');
@@ -564,7 +579,6 @@ test("A7a: upkeep.recurring.entries lists main's checks, and the whole of upkeep
   assert.deepEqual(F.rec.entries.map((e) => e.registered?.qid ?? null), [F.qid, null, null], 'registered from the answered landing, else null');
 });
 
-// task-7 review F1: a counted line with a longer excerpt (written by hand) still meets the shape
 // final-1b F3: a counted line whose slot doesn't parse is no run, so the peek and the dashboard still answer
 test('A7m: a counted line with a slot that does not parse is skipped by the peek and the dashboard', () => {
   const F = setup('a7m', { cm: check({ every: '1d' }) });
@@ -577,6 +591,7 @@ test('A7m: a counted line with a slot that does not parse is skipped by the peek
   assert.deepEqual([e.state, e.fails_in_a_row], ['failing', 1]);
 });
 
+// task-7 review F1: a counted line with a longer excerpt (written by hand) still meets the shape
 test("A7e: an entry's last.excerpt is at most its last 200 characters, as the peek's are", () => {
   const F = setup('a7e', { ce: check({ every: '1d' }) });
   const long = 'x'.repeat(100) + 'y'.repeat(200);
