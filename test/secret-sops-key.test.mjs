@@ -208,6 +208,80 @@ test('two posts at once for one question: one lands whole, the other says it pos
   } finally { F.done(); }
 });
 
+test('a dead holder\'s lock: posts racing to clear it never run together', { skip: !real }, async () => {
+  const F = fleetFixture('sops-dead-lock');
+  try {
+    const good = keygen();
+    repo(F, good.pub);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE', 'TWO']);
+    // a post killed while holding the lock leaves it behind, naming a process that is gone
+    write(path.join(F.old, 'docs/devteam/run/secret-locks', encodeURIComponent(q)), '2147483646:dead');
+    const bin = path.join(F.base, 'slow-bin');
+    const realSops = spawnSync('sh', ['-c', 'command -v sops'], { encoding: 'utf8' }).stdout.trim();
+    // sops notes any call that starts while another post's call is still running
+    const busy = path.join(F.base, 'sops-busy');
+    const overlap = path.join(F.base, 'sops-overlap');
+    write(path.join(bin, 'sops'), `#!/bin/sh\n[ -e "${busy}" ] && touch "${overlap}"\ntouch "${busy}"\nsleep 1\n"${realSops}" "$@"\ns=$?\nrm -f "${busy}"\nexit $s\n`);
+    fs.chmodSync(path.join(bin, 'sops'), 0o755);
+    const env = F.env({ PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+    // each post waits a little longer between finding the holder dead and clearing its lock, so the later
+    // ones find a live lock taken meanwhile: that one must never be cleared
+    const post = (tag, i) => new Promise((done) => {
+      let err = '';
+      const c = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'secret', 'post', q, '--json'], { cwd: F.old, env: { ...env, DEVTEAM_TEST_LOCK_PAUSE_MS: String(i * 400) }, stdio: ['pipe', 'ignore', 'pipe'] });
+      c.stderr.on('data', (d) => { err += d; });
+      c.stdin.end(JSON.stringify({ ONE: `one-${tag}-9`, TWO: `two-${tag}-9` }));
+      c.on('close', (code) => done({ code, err, tag }));
+    });
+    const rs = await Promise.all(['a', 'b', 'c', 'd'].map(post));
+    assert.ok(!fs.existsSync(overlap), 'two posts held the lock at once');
+    const won = rs.filter((r) => r.code === 0);
+    assert.equal(won.length, 1, rs.map((r) => r.err).join('\n'));
+    for (const r of rs.filter((x) => x.code !== 0)) assert.match(r.err, /is already answered|nothing was posted from this run/);
+    const w = fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-'));
+    const plain = decrypt(good.id, path.join(F.old, '.worktrees', w, 'secrets/app.enc.env')).stdout;
+    assert.match(plain, new RegExp(`ONE=one-${won[0].tag}-9`));
+    assert.match(plain, new RegExp(`TWO=two-${won[0].tag}-9`));
+    assert.deepEqual(fs.readdirSync(path.join(F.old, 'docs/devteam/run/secret-locks')), [], 'no lock or claim file is left behind');
+  } finally { F.done(); }
+});
+
+test('a post that died while clearing a dead lock: the next post refuses and names what to remove', { skip: !real }, () => {
+  const F = fleetFixture('sops-dead-clearing');
+  try {
+    const good = keygen();
+    repo(F, good.pub);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE', 'TWO']);
+    const lock = path.join(F.old, 'docs/devteam/run/secret-locks', encodeURIComponent(q));
+    write(lock, '2147483646:dead');
+    write(`${lock}.clearing`, '2147483645:dead');
+    const r = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'value-one-9', TWO: 'value-two-9' }));
+    assert.notEqual(r.status, 0);
+    assert.match(r.out + r.err, /died while clearing a stale lock; remove .*\.clearing and post again/);
+    assert.ok(!fs.existsSync(path.join(F.old, '.worktrees')) || !fs.readdirSync(path.join(F.old, '.worktrees')).some((x) => x.startsWith('chore-secret-')), 'nothing ran');
+  } finally { F.done(); }
+});
+
+test('a store an older kit part-posted is refused plainly, and nothing is posted', { skip: !real }, () => {
+  const F = fleetFixture('sops-older-part');
+  try {
+    const good = keygen();
+    repo(F, good.pub);
+    write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE', 'TWO']);
+    // an older kit posted a store's secrets one at a time, and recorded ONE alone
+    fs.appendFileSync(path.join(F.old, 'docs/devteam/run/log', `owner-${new Date().toISOString().slice(0, 7)}.jsonl`), `${JSON.stringify({ v: 1, id: q, type: 'question', op: 'set', at: new Date().toISOString(), by: 'owner', secrets_posted: [{ name: 'ONE', at: new Date().toISOString() }] })}\n`);
+    const r = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ TWO: 'value-two-9' }));
+    assert.notEqual(r.status, 0);
+    assert.doesNotMatch(r.out + r.err, /ReferenceError/);
+    assert.match(r.out + r.err, /ONE already went to secrets\/app\.enc\.env/);
+    const w = fs.existsSync(path.join(F.old, '.worktrees')) ? fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-')) : null;
+    if (w) assert.doesNotMatch(decrypt(good.id, path.join(F.old, '.worktrees', w, 'secrets/app.enc.env')).stdout, /value-two-9/);
+  } finally { F.done(); }
+});
+
 test('a stdin sink that stops reading: exit 0 is not posted, and a refusal shows its own error', () => {
   const F = fleetFixture('sink-epipe');
   try {

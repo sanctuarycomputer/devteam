@@ -11782,7 +11782,7 @@ const sopsHash = (b) => crypto.createHash('sha256').update(b).digest('hex');
 const SOPS_NAME = /(^|[-_./])(age|sops)([-_.]|$)/i;
 const SOPS_FOLDER = /(^|[-_./])(age|sops|secrets?|keys?)([-_./]|$)/i;
 // A failed key search, remembered so a poll doesn't repeat it. Only ever a hint to skip a search:
-// what a store may continue from is in the question's own record (secrets_posted[].store).
+// a post always reads its store, and the key it needs, from the remote's main.
 const sopsMissFile = () => path.join(process.env.HOME ?? os.homedir(), '.devteam', 'sops-misses.json');
 function sopsMisses() {
   try { const j = JSON.parse(fs.readFileSync(sopsMissFile(), 'utf8')); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch { return {}; }
@@ -11892,33 +11892,46 @@ function sopsQuestionLock(id, fn) {
   const dir = path.join(runDir, 'secret-locks');
   fs.mkdirSync(dir, { recursive: true });
   const lock = path.join(dir, encodeURIComponent(id));
+  const breaker = `${lock}.clearing`;
   const me = `${process.pid}:${crypto.randomUUID()}`;
-  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  const alive = (pid) => { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  const read = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { return e.code === 'ENOENT' ? null : ''; } };
+  // A lock file is born whole: written under a private name, then linked into place, which fails if one is there.
+  const claim = (p) => {
+    const tmp = `${p}.${process.pid}.${crypto.randomUUID()}`;
+    fs.writeFileSync(tmp, me, { flag: 'wx', mode: 0o600 });
+    try { fs.linkSync(tmp, p); return true; } catch (e) { if (e.code === 'EEXIST') return false; throw e; } finally { fs.rmSync(tmp, { force: true }); }
+  };
   const start = Date.now();
+  const wait = () => {
+    if (Date.now() - start > 300000) die(`another post for ${id} is still running (${lock}); try again when it finishes`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  };
   for (;;) {
-    try { fs.mkdirSync(lock); fs.writeFileSync(path.join(lock, 'owner'), me); break; } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      let owner = '';
-      try { owner = fs.readFileSync(path.join(lock, 'owner'), 'utf8'); } catch {}
-      const pid = Number(owner.split(':')[0]);
-      const age = Date.now() - (fs.lstatSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
-      if ((pid && !alive(pid)) || (!pid && age > 5000)) {
-        const gone = `${lock}.gone-${process.pid}-${Date.now()}`;
-        try { fs.renameSync(lock, gone); fs.rmSync(gone, { recursive: true, force: true }); } catch {}
-        continue;
-      }
-      if (Date.now() - start > 300000) die(`another post for ${id} is still running (${lock}); try again when it finishes`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    if (claim(lock)) break;
+    const owner = read(lock);
+    if (owner === null) continue;
+    if (alive(Number(owner.split(':')[0]))) { wait(); continue; }
+    const pause = Number(process.env.DEVTEAM_TEST_LOCK_PAUSE_MS) || 0; // tests: let another post clear it first
+    if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
+    // Its holder is dead. One process at a time clears a dead lock, and only while the lock is still that
+    // dead holder's: nothing else removes a lock, so a live one taken meanwhile is never cleared.
+    if (!claim(breaker)) {
+      const b = read(breaker);
+      if (b !== null && !alive(Number(b.split(':')[0]))) die(`a post for ${id} died while clearing a stale lock; remove ${breaker} and post again`);
+      wait();
+      continue;
     }
+    try { if (read(lock) === owner) fs.rmSync(lock, { force: true }); } finally { if (read(breaker) === me) fs.rmSync(breaker, { force: true }); }
   }
-  const release = () => { try { if (fs.readFileSync(path.join(lock, 'owner'), 'utf8') === me) fs.rmSync(lock, { recursive: true, force: true }); } catch {} };
+  const release = () => { if (read(lock) === me) fs.rmSync(lock, { force: true }); };
   process.once('exit', release);
   try { return fn(); } finally { process.off('exit', release); release(); }
 }
 // A question's secrets for one store go in together, or not at all: from a private copy of the store
 // on the remote's main, so nothing in a worktree or an ignored file can choose its data key, and with
 // no partial state for a later post to continue from.
-function sopsPostAll(sinks, declared, posted, values, cwd, redact) {
+function sopsPostAll(id, sinks, declared, posted, values, cwd, redact) {
   const results = new Map();
   const groups = new Map();
   for (const x of sinks) if (x.k.type === 'sops') groups.set(x.k.file, [...(groups.get(x.k.file) ?? []), x]);
@@ -12122,7 +12135,7 @@ function postSecretsNow(id, v, declared, posted, todo, values, by) {
   const done = [];
   const files = new Set();
   try {
-    const sopsDone = sopsPostAll(sinks, declared, posted, values, wt, redact);
+    const sopsDone = sopsPostAll(id, sinks, declared, posted, values, wt, redact);
     for (const x of sinks) {
       const r = x.k.type === 'sops' ? sopsDone.get(x.name) : runSink(x.k, values.get(x.name), x.kind, x.k.commits ? wt : mainRoot, redact);
       if (r.ok) { done.push({ name: x.name, at: nowIso() }); for (const f of r.files ?? []) files.add(f); }
