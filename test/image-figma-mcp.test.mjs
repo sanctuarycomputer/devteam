@@ -18,13 +18,15 @@ function box() {
   fs.writeFileSync(path.join(bin, 'claude'), `#!/bin/sh
 echo "$*" >> "$HOME/calls"
 case "$2" in
-  get) [ -e "$HOME/has-figma" ] ;;
-  add) [ -z "$NO_ADD" ] && : > "$HOME/has-figma" ;;
+  get) [ -e "$HOME/has-figma" ] && echo "  Scope: $(cat "$HOME/has-figma")" ;;
+  add) [ -z "$NO_ADD" ] && echo 'User config (available in all your projects)' > "$HOME/has-figma" && echo added-to-log ;;
 esac
 `, { mode: 0o755 });
   const boot = (env = {}) => {
-    const r = spawnSync('sh', ['-c', `note() { echo "$*" >> "$HOME/notes"; }\n${block}`], { cwd: home, encoding: 'utf8', env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, ...env } });
+    const r = spawnSync('sh', ['-c', `note() { echo "$*" >> "$HOME/notes"; }\n${block}\necho after >> "$HOME/ran"`], { cwd: home, encoding: 'utf8', env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, ...env } });
     assert.equal(r.status, 0, r.stderr);
+    assert.ok(fs.existsSync(path.join(home, 'ran')), 'the boot went on past the block');
+    fs.rmSync(path.join(home, 'ran'));
   };
   const calls = () => (fs.existsSync(path.join(home, 'calls')) ? fs.readFileSync(path.join(home, 'calls'), 'utf8').trim().split('\n') : []);
   return { home, boot, calls, done: () => fs.rmSync(home, { recursive: true, force: true }) };
@@ -34,6 +36,10 @@ test('the block comes before the first session, and carries no credential', () =
   assert.ok(block, 'the figma-mcp block');
   assert.ok(df.indexOf('# figma-mcp start') < df.indexOf('\nstart_operator boot'), 'added before the operator starts');
   assert.doesNotMatch(block, /--header|Authorization|Bearer|token=/i);
+  // a hung CLI can't hold the boot, before the operator and the terminal are up
+  assert.equal([...block.matchAll(/claude mcp/g)].length, 2);
+  assert.equal([...block.matchAll(/timeout 30 claude mcp/g)].length, 2, 'both calls have a time limit');
+  assert.match(df, /Figma: in Claude, \/mcp, pick figma and log in once; new sessions then have it/, 'the welcome text says how');
 });
 
 test('added once, with the login left to the owner; a server they removed stays removed', () => {
@@ -41,6 +47,7 @@ test('added once, with the login left to the owner; a server they removed stays 
   try {
     B.boot();
     assert.deepEqual(B.calls(), ['mcp get figma', 'mcp add --transport http --scope user figma https://mcp.figma.com/mcp']);
+    assert.match(fs.readFileSync(path.join(B.home, 'box.log'), 'utf8'), /added-to-log/, "the add's output goes to box.log");
     fs.rmSync(path.join(B.home, 'has-figma'));
     B.boot();
     assert.equal(B.calls().length, 2, 'the mark holds: no second add');
@@ -50,7 +57,7 @@ test('added once, with the login left to the owner; a server they removed stays 
 test('one already there is left alone, and a failed add is noted and tried at the next boot', () => {
   const A = box();
   try {
-    fs.writeFileSync(path.join(A.home, 'has-figma'), '');
+    fs.writeFileSync(path.join(A.home, 'has-figma'), 'User config (available in all your projects)\n');
     A.boot();
     assert.deepEqual(A.calls(), ['mcp get figma']);
   } finally { A.done(); }
@@ -62,4 +69,22 @@ test('one already there is left alone, and a failed add is noted and tried at th
     F.boot();
     assert.ok(fs.existsSync(path.join(F.home, '.box/figma-mcp')), 'the next boot adds it');
   } finally { F.done(); }
+});
+
+test('a figma from another scope is not counted, and an unwritable .box never stops the boot', () => {
+  const P = box();
+  try {
+    fs.writeFileSync(path.join(P.home, 'has-figma'), 'Project config (shared via .mcp.json)\n');
+    P.boot();
+    assert.ok(P.calls().some((c) => c.startsWith('mcp add')), 'a project-scope figma still gets the user one');
+  } finally { P.done(); }
+  const R = box();
+  try {
+    fs.writeFileSync(path.join(R.home, 'has-figma'), 'User config (available in all your projects)\n');
+    fs.mkdirSync(path.join(R.home, '.box'));
+    fs.chmodSync(path.join(R.home, '.box'), 0o555);
+    R.boot();
+    assert.match(fs.readFileSync(path.join(R.home, 'notes'), 'utf8'), /could not mark the Figma MCP/);
+    fs.chmodSync(path.join(R.home, '.box'), 0o755);
+  } finally { R.done(); }
 });

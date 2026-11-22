@@ -499,7 +499,7 @@ devteam box. Window 0 (operator) looks after the box: tell it what you want. Clo
   git config --global user.name '…' && git config --global user.email '…'
 Add a repo:  cd ~/code && gh repo clone <owner/repo> && cd <repo> && claude "Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo"
 Tools: languages per project with mise (mise install; asdf works too). box-pg 16 starts another Postgres. ~/.box/boot.sh is what starts at boot.
-Figma: in Claude, /mcp, pick figma and log in once; every session on the box then has it.
+Figma: in Claude, /mcp, pick figma and log in once; new sessions then have it, with your Figma access. Use an account limited to the files the fleet needs.
 Expo: npx expo start --tunnel for your phone; eas build for builds.
 Heroku: heroku login -i, with a token from heroku authorizations:create --expires-in <seconds> --scope <scopes> on your laptop as the password. It lands in ~/.netrc, readable by every agent here, so keep it narrow and short. (The browser login is refused from another IP.)
 tmux: C-b s lists every session (each repo's supervisor and its workers); C-b d leaves one. touch ~/.devteam-quiet hides this.
@@ -520,14 +520,15 @@ if [ -f "$up.boot.at" ]; then [ -f "$up.boot" ] && awk 'NR == FNR { r = $0; sub(
 if [ -s "$up" ]; then now=$(date +%s); sed "s/^/$now /" "$up" >> "$up.boot"; fi
 rm -f "$up"
 # figma-mcp start
-# Figma's MCP for every session on the box, with no token in it: the owner logs in once (/mcp, figma)
+# Figma's MCP for new sessions on the box, with no token in it: the owner logs in once (/mcp, figma)
 # and Claude Code keeps that login on the disk and renews it. Before any session starts, since a
-# session rewrites the same config file. Once per disk: a server the owner removed stays removed.
-mkdir -p .box
+# session rewrites the same config file. Once per disk, so a server the owner removed stays removed;
+# delete ~/.box/figma-mcp to add it again. Nothing here may stop the boot.
+mkdir -p .box 2>/dev/null || :
 if [ ! -e .box/figma-mcp ]; then
-  if timeout 30 claude mcp get figma >/dev/null 2>&1 \
+  if timeout 30 claude mcp get figma 2>/dev/null | grep -q 'Scope: User config' \
     || timeout 30 claude mcp add --transport http --scope user figma https://mcp.figma.com/mcp >> box.log 2>&1; then
-    : > .box/figma-mcp
+    touch .box/figma-mcp 2>/dev/null || note "could not mark the Figma MCP as added"
   else
     note "could not add the Figma MCP (see box.log); the next boot tries again"
   fi
