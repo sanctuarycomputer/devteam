@@ -30981,17 +30981,18 @@ function responderMain(s) {
   const ref = `refs/heads/${branch}`;
   const ls = responderOrigin(['ls-remote', 'origin', ref]);
   const sha = ls.status === 0 ? ls.stdout.split('\n').map((l) => l.split('\t')).find(([, r]) => r === ref)?.[0] : null;
+  if (ls.status === 0 && !sha) die(`responder: origin has no ${ref}, so the owner's command can't be confirmed; check main_branch in settings.md`);
   if (!/^[0-9a-f]{40,64}$/.test(sha ?? '')) die(`responder: could not read main from origin (${ref}), so the owner's command can't be confirmed; try again when origin answers`);
   if (responderOrigin(['fetch', '--quiet', 'origin', ref]).status !== 0 || responderGit(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) die(`responder: could not read main from origin (${sha.slice(0, 8)} did not arrive)`);
   const settings = { ...s };
   if (projectInRepo) {
     const shown = responderGit(['show', `${sha}:${projectRel}/settings.md`]);
     const block = shown.status === 0 ? shown.stdout.match(/```json devteam\s*\n([\s\S]*?)\n```/) : null;
+    // never the kit's defaults in place of the owner's command and deny rules (final-3 F3)
+    if (!block) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}), so nothing was started`);
     let onMain = { ...SETTINGS_DEFAULTS };
-    if (block) {
-      try { onMain = { ...onMain, ...JSON.parse(block[1]) }; } catch { die(`responder: settings.md on main (${sha.slice(0, 8)}) is not valid JSON`); }
-      if (onMain.main_branch !== branch) die(`responder: could not read main from origin: ${ref} names ${onMain.main_branch} as main`);
-    }
+    try { onMain = { ...onMain, ...JSON.parse(block[1]) }; } catch { die(`responder: settings.md on main (${sha.slice(0, 8)}) is not valid JSON`); }
+    if (onMain.main_branch !== branch) die(`responder: could not read main from origin: ${ref} names ${onMain.main_branch} as main`);
     for (const k of Object.keys(OWNER_SETTINGS)) settings[k] = onMain[k];
   }
   return { sha, settings };
@@ -31004,8 +31005,8 @@ function responderDiffers(wt, sha) {
   const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
   try {
     if (responderGit(['read-tree', sha], wt, env).status !== 0) return null;
-    responderGit(['update-index', '-q', '--really-refresh'], wt, env);
-    const d = responderGit(['diff-files', '--name-only', '-z'], wt, env);
+    responderGit(['update-index', '--ignore-submodules', '-q', '--really-refresh'], wt, env);
+    const d = responderGit(['diff-files', '--ignore-submodules=all', '--name-only', '-z'], wt, env);
     return d.status === 0 ? d.stdout.split('\0').filter(Boolean) : null;
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
@@ -31023,11 +31024,69 @@ function responderWorktreeProblem(wt) {
     return realPath(path.dirname(fs.readFileSync(path.join(own, 'gitdir'), 'utf8').trim())) === realPath(wt) ? null : no;
   } catch { return no; }
 }
+// A commit's entries as [mode, path]; null if it can't be read.
+function responderTree(wt, rev) {
+  const r = responderGit(['ls-tree', '-r', '-z', rev], wt);
+  return r.status === 0 ? r.stdout.split('\0').filter(Boolean).map((e) => { const tab = e.indexOf('\t'); return [e.slice(0, 6), e.slice(tab + 1)]; }) : null;
+}
+// Why the worktree holds something git can't be trusted to report, or null, read without running any
+// filter. A gitlink the commit lacks, or files at one it has, would be a nested repo whose own config
+// runs in the start's git (final-3b F2). A folder git can't list, or a FIFO, socket or device, hides
+// from status and clean (final-3 F2), so the files are walked by lstat, following no link.
+function responderPlanted(wt, sha) {
+  const head = responderTree(wt, 'HEAD');
+  const main = responderTree(wt, sha);
+  const index = responderGit(['ls-files', '--stage', '-z'], wt);
+  if (!head || !main || index.status !== 0) return `${wt}: could not read its index or commits, so the responder's worktree is left as it is`;
+  const known = (mode) => new Set([...head, ...main].filter(([m]) => m === mode).map(([, f]) => f));
+  const gitlinks = known('160000');
+  const links = known('120000');
+  for (const e of index.stdout.split('\0').filter(Boolean)) {
+    if (!e.startsWith('160000 ')) continue;
+    const f = e.slice(e.indexOf('\t') + 1);
+    if (!gitlinks.has(f)) return `${wt} has a nested repository the commit doesn't have (${f}): remove the worktree, then responder again`;
+    let inside = [];
+    try { inside = fs.readdirSync(path.join(wt, f)); } catch (err) { if (err.code !== 'ENOENT') inside = [f]; }
+    if (inside.length) return `${wt} holds files at a nested repository's path (${f}): remove the worktree, then responder again`;
+  }
+  const cant = (f, why) => `${wt}: can't check ${f} (${why}): clear it or remove the worktree, then responder again`;
+  const folders = [''];
+  while (folders.length) {
+    const dir = folders.pop();
+    let names;
+    try { names = fs.readdirSync(path.join(wt, dir)); } catch { return cant(dir, "a folder that can't be listed"); }
+    for (const n of names) {
+      if (!dir && n === '.git') continue;
+      const f = dir ? path.join(dir, n) : n;
+      let st;
+      try { st = fs.lstatSync(path.join(wt, f)); } catch { return cant(f, "it can't be read"); }
+      if (st.isDirectory()) folders.push(f);
+      else if (st.isSymbolicLink()) { if (!links.has(f)) return cant(f, 'a link the commit does not have'); }
+      else if (!st.isFile()) return cant(f, 'not a file or a folder');
+    }
+  }
+  return null;
+}
+// The owner's worktree_files, each written as a new file: whatever is at the path goes first, so a
+// hard link or a symlink there is never written through (final-3b F3).
+function responderSeed(wt, files, R) {
+  for (const rel of files ?? []) {
+    const from = path.join(R.root, rel);
+    if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in the main checkout`); continue; }
+    const to = path.join(wt, rel);
+    try {
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.rmSync(to, { force: true });
+      const fd = fs.openSync(to, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+      try { fs.writeFileSync(fd, fs.readFileSync(from)); fs.fchmodSync(fd, fs.statSync(from).mode & 0o777); } finally { fs.closeSync(fd); }
+    } catch (e) { die(`${wt}: could not seed ${rel}: ${e.message}`); }
+  }
+}
 // What in the worktree would outlive a refresh, as full paths: tracked changes, files git was told
 // not to look at, and untracked files, but for a regular file the owner's worktree_files seeds from
 // a source that exists, so the copy replaces it (final-2 F3).
 function responderDirty(wt, seeded) {
-  const st = responderGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], wt);
+  const st = responderGit(['status', '--ignore-submodules=all', '--porcelain=v1', '-z', '--untracked-files=all'], wt);
   const flags = responderGit(['ls-files', '-v', '-z'], wt);
   if (st.status !== 0 || flags.status !== 0) return null;
   const seeds = new Set((seeded ?? []).map((f) => path.normalize(String(f))));
@@ -31166,6 +31225,8 @@ function cmdResponder() {
   } else {
     const bad = responderWorktreeProblem(wt);
     if (bad) die(bad);
+    const planted = responderPlanted(wt, sha);
+    if (planted) die(planted);
     const dirty = responderDirty(wt, owned.worktree_files);
     if (dirty === null) die(`${wt}: git status failed there, so the responder's worktree is left as it is`);
     const changed = (hits) => die(`${wt} has local changes (${plural(hits.length, 'path')}, first ${hits[0]}): the responder starts from main, so clear them or remove the worktree, then responder again`);
@@ -31178,7 +31239,7 @@ function cmdResponder() {
     if (differs === null) die(`${wt}: could not compare it with ${sha.slice(0, 8)}, so the responder's worktree is left as it is`);
     if (differs.length) changed(differs);
   }
-  seedWorktree(wt, { setup: false, repo: Object.create(R, { settings: { value: { ...R.settings, worktree_files: owned.worktree_files } } }) });
+  responderSeed(wt, owned.worktree_files, R);
   trustWorktree(wt, owned, R);
   fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
   const promptFile = path.join(runDir, 'prompts', `${RESPONDER_NAME}.txt`);

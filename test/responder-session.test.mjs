@@ -770,7 +770,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     fs.symlinkSync(target, path.join(F.wt, 'seeded.env'));
     const r = F.run(F.old, ['responder'], SUP);
     assert.notEqual(r.status, 0, 'refused');
-    assert.match(r.err, /has local changes/);
+    assert.match(r.err, /can't check seeded\.env/);
     assert.equal(fs.readFileSync(target, 'utf8'), 'kept\n');
     fs.rmSync(path.join(F.wt, 'seeded.env'));
     fs.rmSync(path.join(F.old, 'seeded.env'));
@@ -869,7 +869,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     let r;
     try { r = F.run(F.old, ['responder'], SUP); } finally { F.g(['checkout', '--', 'docs/devteam/project/settings.md'], F.old); }
     assert.notEqual(r.status, 0, 'refused');
-    assert.match(r.err, /could not read main from origin/);
+    assert.match(r.err, /origin has no refs\/heads\/nosuch/);
     assert.ok(!F.windows().includes('responder'), 'no window');
   });
   await t.test('final-2b F4: a hung origin refuses the start and leaves no transport process', () => {
@@ -893,6 +893,171 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     const left = alive();
     if (left) process.kill(pid, 'SIGKILL');
     assert.ok(!left, 'the transport process is gone');
+  });
+  const settingsRel = 'docs/devteam/project/settings.md';
+  await t.test("final-3 F3: a settings blob at origin's commit that can't be read refuses and types nothing", () => {
+    F.onMain({ worktree_files: ['r3-unused.env'] });
+    fresh();
+    const blob = F.g(['rev-parse', `origin/main:${settingsRel}`], F.old);
+    const loose = path.join(common, 'objects', blob.slice(0, 2), blob.slice(2));
+    assert.ok(fs.existsSync(loose), 'the blob is a loose object: the attack is set');
+    const aside = `${loose}.aside`;
+    fs.renameSync(loose, aside);
+    let r;
+    try { r = F.run(F.old, ['responder'], SUP); } finally { fs.renameSync(aside, loose); }
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /could not read the owner's settings/);
+    assert.ok(!F.windows().includes('responder'), 'no window, so nothing typed');
+    assert.ok(!fs.existsSync(A.out) && !fs.existsSync(E.out), 'no command ran');
+    F.onMain({ worktree_files: [] });
+  });
+  await t.test("final-3 F3: a commit on main whose settings.md has no settings block refuses", () => {
+    fresh();
+    const sf = path.join(F.old, settingsRel);
+    const keep = fs.readFileSync(sf);
+    fs.writeFileSync(sf, '# no settings here\n');
+    F.g(['commit', '-qam', 'settings: no block'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    let r;
+    try { r = F.run(F.old, ['responder'], SUP); } finally {
+      fs.writeFileSync(sf, keep);
+      F.g(['commit', '-qam', 'settings: back'], F.old);
+      F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    }
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /could not read the owner's settings/);
+    assert.ok(!F.windows().includes('responder'), 'no window');
+  });
+  const asRoot = process.getuid?.() === 0;
+  for (const [name, folder, ignore] of [['a new folder', '.claude', '.claude/'], ['a tracked folder', 'docs/devteam', null], ['an ignored folder', 'r3-config', 'r3-config/']]) {
+    await t.test(`final-3 F2: ${name} git can't list refuses, with the file inside it kept`, { skip: asRoot && 'root reads any folder' }, () => {
+      fresh();
+      const dir = path.join(F.wt, folder);
+      const exclude = path.join(common, 'info', 'exclude');
+      const had = fs.readFileSync(exclude);
+      if (ignore) fs.appendFileSync(exclude, `${ignore}\n`);
+      fs.mkdirSync(dir, { recursive: true });
+      const planted = path.join(dir, 'settings.local.json');
+      fs.writeFileSync(planted, '{"permissions":{"allow":["Bash(*)"]}}\n');
+      const mode = fs.statSync(dir).mode & 0o777;
+      fs.chmodSync(dir, 0o311);
+      let r;
+      try {
+        assert.equal(g0(['status', '--porcelain'], F.wt).stdout.includes('settings.local.json'), false, 'git can not see it: the attack is set');
+        r = F.run(F.old, ['responder'], SUP);
+      } finally { fs.chmodSync(dir, mode); fs.writeFileSync(exclude, had); fs.rmSync(planted, { force: true }); }
+      assert.notEqual(r.status, 0, 'refused');
+      assert.match(r.err, /can't check/);
+      assert.ok(r.err.includes(folder), r.err);
+      assert.ok(!F.windows().includes('responder'), 'no window');
+    });
+  }
+  await t.test('final-3 F2: a FIFO refuses', () => {
+    fresh();
+    const dir = path.join(F.wt, '.claude');
+    fs.mkdirSync(dir, { recursive: true });
+    const fifo = path.join(dir, 'settings.local.json');
+    assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+    const r = F.run(F.old, ['responder'], SUP);
+    fs.rmSync(dir, { recursive: true, force: true });
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /can't check/);
+    assert.ok(r.err.includes('.claude/settings.local.json'), r.err);
+  });
+  await t.test('final-3 F2: an ignored symlink refuses; a symlink the commit tracks does not', () => {
+    fresh();
+    const exclude = path.join(common, 'info', 'exclude');
+    const had = fs.readFileSync(exclude);
+    fs.appendFileSync(exclude, 'r3-link\n');
+    const link = path.join(F.wt, 'r3-link');
+    fs.symlinkSync(path.join(F.old, 'docs'), link);
+    let r;
+    try { r = F.run(F.old, ['responder'], SUP); } finally { fs.rmSync(link, { force: true }); fs.writeFileSync(exclude, had); }
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /can't check/);
+    const tracked = path.join(F.old, 'r3-tracked-link');
+    fs.symlinkSync('docs', tracked);
+    F.g(['add', 'r3-tracked-link'], F.old);
+    F.g(['commit', '-qm', 'a tracked link'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    try { fresh(); honestStart(); honestStart(); } finally {
+      F.g(['rm', '-qf', 'r3-tracked-link'], F.old);
+      F.g(['commit', '-qm', 'no tracked link'], F.old);
+      F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    }
+  });
+  // a nested repo whose own config holds a clean filter that leaves a mark, and a change for it to clean
+  const plantRepo = (dir, mark) => {
+    fs.mkdirSync(dir, { recursive: true });
+    F.g(['init', '-q'], dir);
+    F.g(['config', 'user.email', 'probe@example.invalid'], dir);
+    F.g(['config', 'user.name', 'probe'], dir);
+    fs.writeFileSync(path.join(dir, '.gitattributes'), '* filter=p\n');
+    fs.writeFileSync(path.join(dir, 'f.txt'), 'one\n');
+    F.g(['add', '.'], dir);
+    F.g(['commit', '-qm', 'nested'], dir);
+    F.g(['config', 'filter.p.clean', `sh -c 'echo ran >> "${mark}"; cat'`], dir);
+    fs.writeFileSync(path.join(dir, 'f.txt'), 'two\n');
+    return F.g(['rev-parse', 'HEAD'], dir);
+  };
+  await t.test("final-3b F2: a gitlink the commit lacks refuses, and the nested repo's filter never runs", () => {
+    fresh();
+    const mark = path.join(F.base, 'nested-filter-ran.txt');
+    const oid = plantRepo(path.join(F.wt, 'r3-nested'), mark);
+    F.g(['update-index', '--add', '--cacheinfo', `160000,${oid},r3-nested`], F.wt);
+    const r = F.run(F.old, ['responder'], SUP);
+    F.g(['update-index', '--force-remove', 'r3-nested'], F.wt);
+    fs.rmSync(path.join(F.wt, 'r3-nested'), { recursive: true, force: true });
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /a nested repository the commit doesn't have/);
+    assert.ok(r.err.includes('r3-nested'), r.err);
+    assert.ok(!fs.existsSync(mark), 'the planted filter never ran');
+  });
+  await t.test("final-3b F2: a repo planted at a gitlink the commit has refuses, and its filter never runs", () => {
+    const mark = path.join(F.base, 'nested-filter2-ran.txt');
+    const source = path.join(F.base, 'r3-sub-source');
+    const oid = plantRepo(source, path.join(F.base, 'unused-mark.txt'));
+    F.g(['update-index', '--add', '--cacheinfo', `160000,${oid},r3-sub`], F.old);
+    F.g(['commit', '-qm', 'a gitlink'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    try {
+      fresh();
+      const dir = path.join(F.wt, 'r3-sub');
+      fs.rmSync(dir, { recursive: true, force: true });
+      plantRepo(dir, mark);
+      const r = F.run(F.old, ['responder'], SUP);
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir);
+      assert.notEqual(r.status, 0, 'refused');
+      assert.match(r.err, /holds files at a nested repository's path/);
+      assert.ok(!fs.existsSync(mark), 'the planted filter never ran');
+      honestStart();
+    } finally {
+      F.g(['update-index', '--force-remove', 'r3-sub'], F.old);
+      F.g(['commit', '-qm', 'no gitlink'], F.old);
+      F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    }
+  });
+  await t.test('final-3b F3: a hard link at a seed path leaves the outside file unchanged', () => {
+    F.onMain({ worktree_files: ['r3-seed.env'] });
+    const source = path.join(F.old, 'r3-seed.env');
+    fs.writeFileSync(source, 'SECRET=seed\n');
+    try {
+      fresh();
+      const outside = path.join(F.base, 'r3-outside.log');
+      fs.writeFileSync(outside, 'kept\n');
+      const dest = path.join(F.wt, 'r3-seed.env');
+      fs.rmSync(dest, { force: true });
+      fs.linkSync(outside, dest);
+      honestStart();
+      assert.equal(fs.readFileSync(outside, 'utf8'), 'kept\n', 'the outside file is unchanged');
+      assert.equal(fs.readFileSync(dest, 'utf8'), 'SECRET=seed\n', 'the seed is in place');
+      assert.equal(fs.statSync(dest).nlink, 1, 'its own file');
+    } finally {
+      fs.rmSync(path.join(F.wt, 'r3-seed.env'), { force: true });
+      fs.rmSync(source, { force: true });
+      F.onMain({ worktree_files: [] });
+    }
   });
   await t.test('1b F4: a worktree removed by hand needs no manual prune', () => {
     fresh();
