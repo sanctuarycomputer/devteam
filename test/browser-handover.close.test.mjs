@@ -18,7 +18,7 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as four chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, PC3, T4-2), cC's (C24, T6-3, RF2, RL0, RL1, RL2, RL3)
+// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, PC1, PC4, PC5, PC6, RF4, T4-1, T4-3, PC3, T4-2), cC's (C24, T6-3, RF2, RL0, RL1, RL2, RL3)
 // and cD's (C12, C13, C14, C16). onA, onB, onC and onD add a check.
 const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
@@ -568,7 +568,11 @@ async function closeThroughMain(P, q) {
   const at = new Date().toISOString();
   const target = path.join(dir, 'docs', 'devteam', 'project', 'log', file);
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, `${fs.readFileSync(path.join(live, file), 'utf8')}${JSON.stringify({ v: 1, id: q, type: 'question', op: 'set', at, by: 'supervisor', status: 'withdrawn', reason: 'closed on main' })}\n`);
+  // main's copy keeps the closes already on it; the live lines it lacks are added
+  const had = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : '';
+  const known = new Set(had.split('\n'));
+  const added = fs.readFileSync(path.join(live, file), 'utf8').split('\n').filter((l) => l && !known.has(l));
+  fs.writeFileSync(target, `${had}${added.length ? `${added.join('\n')}\n` : ''}${JSON.stringify({ v: 1, id: q, type: 'question', op: 'set', at, by: 'supervisor', status: 'withdrawn', reason: 'closed on main' })}\n`);
   await gitIn(P, dir, ['add', '-f', '--', target]);
   await gitIn(P, dir, ['commit', '-q', '--no-verify', '-m', 'the close, on main']);
   await gitIn(P, dir, ['push', '-q', '--no-verify', 'origin', 'HEAD:main']);
@@ -590,6 +594,80 @@ onB('PC5 a close that arrives only through main: a socket opened then is refused
   const w = await waitJson(P);
   assert.deepEqual([w.qid, w.outcome], [q, 'withdrawn']);
   entryIs(P, q, 'withdrawn');
+});
+
+// Main's own refresh and the watch are both slowed out of reach: only the input's own check can see main
+// move. Every case is collected, so one failing doesn't hide the others.
+onB('PC6 an input on an open socket checks main first: loose, packed, a same-size rewrite, and a failed check', async () => {
+  const P = cB();
+  const fails = path.join(P.home, 'main-check-fails');
+  await ok(P, ['stop']);
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_WATCH_MS: '600000', DEVTEAM_TEST_BROWSER_MAIN_MS: '600000', DEVTEAM_TEST_BROWSER_MAIN_CHECK_FAILS: fails });
+  const common = (await gitIn(P, P.old, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+  const loose = path.join(common, 'refs', 'remotes', 'origin', 'main');
+  const pack = () => gitIn(P, P.old, ['pack-refs', '--all']);
+  const touchRef = (from, to) => new Promise((resolve, reject) => execFile('touch', ['-r', from, to], (e) => (e ? reject(e) : resolve())));
+  const bad = [];
+  const dropped = async (v, what) => { const t = marker(`pc6-${what}`); v.paste(t); await sleep(400); if (landed(t)) bad.push(`${what}: the input reached the page`); };
+  const lands = async (v, what) => { const t = marker(`pc6-${what}`); v.paste(t); await until(() => landed(t), 5000, what).catch(() => bad.push(`${what}: the input never landed`)); };
+  const viewer = async () => {
+    await ok(P, ['open', `${site.origin}/record`]);
+    const q = await askHandover(P);
+    const v = await nextViewer(P);
+    await v.waitFor((m) => m.t === 'held' && m.qid === q, 5000);
+    await typeNote(P, marker('pc6-note'), { v }); // this input's check has seen main as it is now
+    return { q, v };
+  };
+  const round = async (what, { before, close }) => {
+    if (before) await before();
+    const { q, v } = await viewer();
+    await close(q);
+    await dropped(v, what);
+    const y = await viewSocket(P); // a connect's read: the daemon sees the close even where the input's check didn't
+    await y.waitFor((o) => o.t === 'bye' || o.t === 'held', 10000);
+    y.close();
+    const w = await waitJson(P);
+    if (w.qid !== q || w.outcome !== 'withdrawn') bad.push(`${what}: wait said ${JSON.stringify(w)}`);
+    v.close();
+  };
+  // no handover known: no stat is made (R5), so a stat that would fail stops nothing
+  await ok(P, ['open', `${site.origin}/record`]);
+  const out = await nextViewer(P);
+  fs.writeFileSync(fails, 'stat');
+  await typeNote(P, marker('pc6-outside'), { v: out }).catch(() => bad.push('no handover: a failing stat stopped the input'));
+  fs.rmSync(fails, { force: true });
+  out.close();
+  await round('loose', { close: async (q) => { await closeThroughMain(P, q); assert.ok(fs.existsSync(loose), 'the ref is loose'); } });
+  await round('packed', { before: pack, close: async (q) => { await closeThroughMain(P, q); await pack(); assert.ok(!fs.existsSync(loose), 'the ref is packed'); } });
+  const stamp = path.join(P.home, 'pc6-stamp');
+  await round('same-size', {
+    before: async () => { fs.mkdirSync(path.dirname(loose), { recursive: true }); fs.writeFileSync(loose, `${(await gitIn(P, P.old, ['rev-parse', 'refs/remotes/origin/main'])).trim()}\n`); fs.writeFileSync(stamp, ''); await touchRef(loose, stamp); await touchRef(stamp, loose); },
+    close: async (q) => {
+      const was = fs.statSync(loose, { bigint: true });
+      await closeThroughMain(P, q);
+      await touchRef(stamp, loose);
+      const now = fs.statSync(loose, { bigint: true });
+      assert.deepEqual([now.size, now.mtimeNs], [was.size, was.mtimeNs], 'the rewrite keeps the size and the mtime');
+      assert.notEqual(now.ino, was.ino, 'the rewrite is a new file');
+    },
+  });
+  // a failed stat, then a failed re-read: dropped, and the input works again after each
+  const { q, v } = await viewer();
+  fs.writeFileSync(fails, 'stat');
+  await dropped(v, 'failed-stat');
+  fs.rmSync(fails, { force: true });
+  await lands(v, 'after-stat');
+  fs.writeFileSync(fails, 'read');
+  const later = new Date(Date.now() + 2000);
+  fs.utimesSync(path.join(common, 'packed-refs'), later, later);
+  await dropped(v, 'failed-re-read');
+  fs.rmSync(fails, { force: true });
+  await lands(v, 'after-re-read');
+  await withdraw(P, q);
+  assert.equal((await waitJson(P)).outcome, 'withdrawn');
+  v.close();
+  await ok(P, ['stop']);
+  assert.deepEqual(bad, []);
 });
 
 onB('RF4 the daemon told to stop during a close: the close ends, and no Chrome is left', async () => {

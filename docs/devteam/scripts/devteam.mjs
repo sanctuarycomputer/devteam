@@ -28732,7 +28732,7 @@ function browserLogStat() {
 function browserFresh() {
   let key;
   if (browserIsDaemon) {
-    if (Date.now() - browserMainSeen.at >= 5000) { mainRefCache = undefined; browserMainSeen = { at: Date.now(), part: `main ${mainSha() ?? '-'}` }; }
+    if (Date.now() - browserMainSeen.at >= (Number(browserTestEnv('DEVTEAM_TEST_BROWSER_MAIN_MS')) || 5000)) { mainRefCache = undefined; browserMainSeen = { at: Date.now(), part: `main ${mainSha() ?? '-'}` }; }
     key = `${browserMainSeen.part}\n${browserLogStat()}`;
   } else key = logKey();
   if (key !== browserLogSeen) { logCache = null; browserLogSeen = key; }
@@ -29929,6 +29929,43 @@ function browserViewPending(ctx, fresh = false) {
   }
   return ctx.pending;
 }
+// Main as the files say, with no git call: inode, size and mtime in ns of main's loose ref and of
+// packed-refs in the common git dir. A ref named by origin/<main> counts even while <main> is in use,
+// since it would take over. A file that's absent is a state (a packed ref has no loose file); any other
+// error throws.
+const browserMainHook = () => { const p = browserTestEnv('DEVTEAM_TEST_BROWSER_MAIN_CHECK_FAILS'); try { return p ? fs.readFileSync(p, 'utf8') : ''; } catch { return ''; } };
+function browserMainRefKey(ref) {
+  if (browserMainHook() === 'stat') throw new Error("main's refs could not be read");
+  const b = loadSettings().main_branch;
+  const names = [`refs/remotes/origin/${b}`, ...(ref === b ? [`refs/heads/${b}`] : []), 'packed-refs'];
+  return names.map((n) => {
+    try {
+      const st = fs.statSync(path.join(commonDir, n), { bigint: true });
+      return `${n} ${st.ino} ${st.size} ${st.mtimeNs}`;
+    } catch (e) {
+      if (e.code === 'ENOENT') return `${n} absent`;
+      throw e;
+    }
+  }).join('\n');
+}
+// Before an input during a handover: main's sha read again if its files moved, so the fold that follows
+// sees a close that came only through main. Throws when the stat or that read fails, and the input is
+// dropped. With no main ref at all there is nothing to watch: the fold is the live log's, as it always
+// was, and browserFresh keeps looking for main every 5 s.
+let browserMainRefs = null;
+function browserMainCheck() {
+  if (!commonDir) return;
+  const ref = browserMainRefs?.ref ?? mainRef();
+  if (!ref) return;
+  const key = browserMainRefKey(ref); // before the read: a move during it is seen next time
+  if (key === browserMainRefs?.key && mainRefCache) return;
+  browserMainRefs = { ref, key: null }; // until the read below succeeds
+  mainRefCache = undefined;
+  const sha = browserMainHook() === 'read' ? null : mainSha();
+  if (!sha) { mainRefCache = undefined; throw new Error("main's sha could not be read"); }
+  browserMainSeen = { at: Date.now(), part: `main ${sha}` };
+  browserMainRefs = { ref: mainRefCache, key: mainRefCache === ref ? key : null };
+}
 // Whether this socket's input is cut off: while a close is pending, and on a socket whose own handover
 // has closed. With no close pending, a socket never sent a handover is kit-66's.
 function browserViewClosed(ctx, v) {
@@ -29936,7 +29973,7 @@ function browserViewClosed(ctx, v) {
     try { if (Date.now() - ctx.foldAt > 500) browserViewRead(ctx); } catch { return false; }
     return ctx.pending;
   }
-  try { browserViewRead(ctx); } catch { return true; }
+  try { browserMainCheck(); browserViewRead(ctx); } catch { return true; }
   if (ctx.pending) return true;
   return !!v.handover && !ctx.folded.some((h) => h.qid === v.handover && h.status === 'open');
 }
