@@ -14,6 +14,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 // the suite's shared env scrub, tmux shim and stand-ins (it also claims a port block, unused here)
 import './lib/kit.mjs';
+import { canDrive, openChrome } from './lib/chrome.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kit = path.resolve(here, '..', 'docs', 'devteam');
@@ -3258,6 +3259,7 @@ async function box(given) {
   fs.writeFileSync(path.join(dir, 'public', 'blobs', sha(PAGE).toString('hex')), PAGE);
   const seen = new Map();
   const cookies = []; // the Cookie header of each request a stand-in received
+  const pages = new Map(); // path to the HTML a stand-in answers there
   const stubs = [];
   const hub = { list: [], hits: 0, stall: false, held: [], release() { hub.stall = false; for (const x of hub.held.splice(0)) hubAnswer(x.r, x.list); } };
   // fixed: a port of the instance block; none: the OS's, never the hub's or one in the block
@@ -3267,6 +3269,7 @@ async function box(given) {
       const s = http.createServer((q, r) => {
         seen.get(port).push(q.url);
         cookies.push(q.headers.cookie);
+        if (pages.has(q.url)) { r.writeHead(200, { 'content-type': 'text/html' }); return r.end(pages.get(q.url)); }
         const slug = /^\/public-manifest\/([^/?]+)$/.exec(q.url)?.[1];
         if (slug) { r.writeHead(200, { 'content-type': 'application/json' }); return r.end(JSON.stringify(manifest(slug))); }
         if (q.url === '/api/artifact-publish') { q.resume(); r.writeHead(200, { 'content-type': 'application/json' }); return r.end('{"ok":true}'); }
@@ -3319,7 +3322,7 @@ async function box(given) {
     for (const s of stubs) { s.closeAllConnections?.(); await new Promise((ok) => s.close(ok)); }
     if (hubSrv) { hubSrv.closeAllConnections?.(); await new Promise((ok) => hubSrv.close(ok)); }
   };
-  return { g, port, dir, seen, cookies, hub, host, get, close, DEV, DEV2, origin: (l) => `http://${host(l)}` };
+  return { g, port, dir, seen, cookies, pages, hub, host, get, close, DEV, DEV2, origin: (l) => `http://${host(l)}` };
 }
 const on = (name, opts, fn) => test(name, { timeout: 20000 }, async () => { const b = await box(opts); try { await fn(b); } finally { await b.close(); } });
 const shape = (r) => { const headers = { ...r.headers }; delete headers.date; return JSON.stringify({ status: r.status, headers, body: r.body }); };
@@ -3459,6 +3462,68 @@ on('C5f a request served through a valid capability reaches the port with no coo
   const plain = await b.get('alpha', link, { cookie: `app=1; ${COOKIE}` });
   assert.deepEqual([framed.status, plain.status], [200, 200]);
   assert.deepEqual(b.cookies, [undefined, undefined], 'no cookie of any name reaches the port');
+});
+// A draft from another machine: the kit's link encodes the branch into one segment.
+const SAME_FRAME = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' };
+const draftAt = (branch, rest = 'mock/nested.html') => `/artifact/origin/${branch}/${rest}`;
+on('C5g a cross-site frame keeps the refusal for every encoded form but one branch segment, and reaches no port', undefined, async (b) => {
+  const cap = /^\/c\/[^/]+/.exec(await capLink(b))[0];
+  const notRefused = [];
+  for (const inner of [
+    draftAt('ticket%252Fkit-1'), draftAt('ticket%252fkit-1'),
+    draftAt('ticket%2Fkit%2e1'), draftAt('ticket%2Fkit%2E1'), draftAt('ticket%2e%2Fkit-1'),
+    draftAt('ticket%5ckit-1'), draftAt('ticket%2Fkit%5C1'),
+    draftAt('ticket%2F..%2Fkit-1'), draftAt('..%2Fkit-1'), draftAt('ticket%2F%2e%2e%2Fkit-1'), draftAt('ticket%2F..'),
+    draftAt('a%2F%2Fb'), draftAt('a%2f%2fb'), draftAt('%2Fa'), draftAt('a%2F'),
+    draftAt('ticket%2F.hidden'), draftAt('ticket%2Fkit.lock'), draftAt('ticket%2Fkit%2D1'), draftAt('ticket%2Fkit 1'.replace(' ', '%20')),
+    draftAt('ticket%2Fkit-1', 'mo%2Fck/nested.html'), draftAt('ticket%2Fkit-1', 'mo%2fck/nested.html'), draftAt('ticket%2Fkit-1', 'mock/a%2Fb.html'), draftAt('ticket%2Fkit-1', 'mock/a%41.html'),
+    draftAt('main', 'mo%2Fck/nested.html'),
+    draftAt('ticket%2Fkit-1', 'mock/../x.html'), draftAt('ticket%2Fkit-1', 'mock/./x.html'), draftAt('ticket%2Fkit-1', 'mock//x.html'), draftAt('ticket%2Fkit-1', 'mock/a\\b.html'),
+    '/artifact/main/mo%2Fck/nested.html', '/artifact/wt/a%2Fb/mock/nested.html', `/artifact/tree/${TREE}/mo%2Fck/nested.html`, '/artifact/other%2Fx/mock/nested.html', '/artifact/origin%2Fx/mock/nested.html',
+  ]) {
+    // under a link minted for this very path where the gateway mints one, so only the frame rule can refuse it
+    const minted = (await b.get('alpha', inner, { cookie: COOKIE, headers: SAME_FRAME })).headers.location;
+    const asked = b.cookies.length;
+    const r = await b.get('alpha', minted?.startsWith('/c/') ? minted : `${cap}${inner}`, { headers: CROSS_FRAME });
+    if (r.status !== 403 || r.body !== 'not in another site\'s frame' || b.cookies.length !== asked) notRefused.push(inner);
+  }
+  assert.deepEqual(notRefused, [], `not refused: ${JSON.stringify(notRefused)}`);
+});
+on('C5h a ticket/<id> draft\'s capability loads as a cross-site frame, and the port gets exactly the path approved', undefined, async (b) => {
+  for (const branch of ['ticket%2Fkit-1', 'ticket%2fkit-1']) {
+    const inner = draftAt(branch);
+    const link = (await b.get('alpha', inner, { cookie: COOKIE, headers: SAME_FRAME })).headers.location;
+    assert.ok(link?.endsWith(inner), 'the link carries the raw path');
+    const r = await b.get('alpha', link, { headers: CROSS_FRAME });
+    assert.equal(r.status, 200, branch);
+    assert.equal(b.seen.get(P).at(-1), inner, 'the same bytes, so the kit decodes the same segment to the same branch');
+    assert.equal(b.cookies.at(-1), undefined);
+  }
+});
+test('C5i the gateway\'s BRANCH_AT is the kit\'s, character for character', () => {
+  const of = (file) => /^const BRANCH_AT = (.+);$/m.exec(fs.readFileSync(path.join(here, '..', file), 'utf8'))?.[1];
+  const kit = of('docs/devteam/scripts/devteam.mjs');
+  assert.ok(kit, 'the kit defines it');
+  assert.equal(of('cloud/gateway.mjs'), kit);
+});
+test('C5j in Chrome, a ticket/<id> draft\'s nested frame loads through its capability', { skip: !canDrive, timeout: 90000 }, async () => {
+  const b = await box();
+  const chrome = await openChrome();
+  try {
+    const index = draftAt('ticket%2Fkit-1', 'mock/index.html');
+    const nested = draftAt('ticket%2Fkit-1', 'mock/nested.html');
+    b.pages.set('/draft-host', `<!doctype html><iframe sandbox="allow-scripts" src="${index}"></iframe>`);
+    b.pages.set(index, '<!doctype html><iframe src="nested.html"></iframe>');
+    b.pages.set(nested, '<!doctype html><p>nested</p>');
+    const page = await chrome.newPage();
+    await page.send('Network.enable');
+    await page.send('Network.setCookie', { name: 'devteam_session', value: u(TOK), url: `${b.origin('alpha')}/` });
+    await page.send('Page.navigate', { url: `${b.origin('alpha')}/draft-host` });
+    for (let i = 0; i < 100 && !b.seen.get(P).includes(nested); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(b.seen.get(P).includes(index), `the draft itself loads: ${JSON.stringify(b.seen.get(P))}`);
+    assert.ok(b.seen.get(P).includes(nested), `its nested frame is requested: ${JSON.stringify(b.seen.get(P))}`);
+    assert.equal(b.cookies[b.seen.get(P).indexOf(nested)], undefined, 'with no cookie');
+  } finally { await chrome.close(); await b.close(); }
 });
 on('C6 /healthz is the gateway\'s ok on a project label of a preview\'s shape', { list: [row('devteam-dev', P)] }, async (b) => {
   const r = await b.get('devteam-dev', '/healthz');

@@ -386,6 +386,9 @@ function listedByRoot(instances, ports) {
 export const HOST_LABEL = /^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 export const RESERVED_LABELS = ['term', 'public', 'www'];
 export const RESERVED_SEGMENTS = ['api', 'artifact', 'c', 'healthz', 'index.html', 'presence', 'public-manifest', 'review', 'upload', 'view'];
+// The kit's rule for a branch name (docs/devteam/scripts/devteam.mjs), copied because the gateway
+// imports nothing of the kit; a test holds the two to the same characters.
+const BRANCH_AT = /^(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // A preview's host name: two letter-only words and an optional number, which no reserved name of
 // the box can be. A word list would say nothing more; the map says whether it is live.
 export const PREVIEW_NAME = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
@@ -1894,7 +1897,20 @@ export function createGateway(opts = {}) {
   // raw path: anything a server could decode or normalise into another path keeps the refusal.
   // An encoded slash, backslash or dot, at any depth of encoding (%2f, %252f, ...), a backslash, or a doubled slash.
   const CAP_NOT_EXACT = /%(?:25)*(?:2f|5c|2e)|\\|\/\//i;
-  const capLinkExact = (raw) => CAP_LINK.test(raw) && !CAP_NOT_EXACT.test(raw) && !raw.split('/').some((x) => x === '.' || x === '..');
+  // The one exception: the kit's link to a draft on a fetched branch encodes the branch into one
+  // segment (/artifact/origin/ticket%2Fkit-1/<slug>/...). There, and only there, %2F is allowed: it
+  // must decode to a branch the kit accepts, whose characters hold no %, so any other escape fails
+  // it, and leave no % after the segment. The path is forwarded unchanged, so the kit decodes this
+  // segment to this branch.
+  const capLinkExact = (raw) => {
+    const m = CAP_LINK.exec(raw);
+    if (!m) return false;
+    const [, branch, rest] = /^\/artifact\/origin\/([^/]+)(\/.*)$/.exec(m[4]) ?? [];
+    const encoded = branch !== undefined && /%2f/i.test(branch);
+    if (encoded && (rest.includes('%') || !BRANCH_AT.test(branch.replace(/%2f/gi, '/')))) return false;
+    const judged = encoded ? rest : raw;
+    return !CAP_NOT_EXACT.test(judged) && !judged.split('/').some((x) => x === '.' || x === '..');
+  };
   const crossSiteOk = (req, p, url) => {
     const site = req.headers['sec-fetch-site'];
     if (!site || site === 'same-origin' || site === 'none') return true;
