@@ -16681,8 +16681,10 @@ function collectMetrics(since, reviewsSince = 0) {
   // expires or its subject changes; it is never hidden.
   const ackWindow = settings.finding_ack_hours * 3600000;
   // A merge commit on a main never changes, so an ack of one (merged-without-merge on <repo>:<sha>)
-  // never lapses: it would only bring the same merge back a day later (kit-348).
-  const lasting = (a) => /^merged-without-merge [^\s:]+:[0-9a-f]{12}$/.test(a.subject);
+  // never lapses: it would only bring the same merge back a day later (kit-348). Only ack's own
+  // lines, by the supervisor or the owner: a worker's finding-ack (observe) keeps the window, so it
+  // can't hide a merge it pushed for good (final-1 F1). cmdAck words the same subjects "for good".
+  const lasting = (a) => a.source === 'ack' && ['supervisor', 'owner'].includes(writerClass(a.created_by)) && /^merged-without-merge [^\s:]+:[0-9a-f]{12}$/.test(a.subject);
   const acks = logObjects('observation').filter((o) => o.kind === 'finding-ack' && (lasting(o) || now - Date.parse(o.created_at) < ackWindow));
   const ackOf = (x) => acks.filter((a) => a.subject === `${x.kind} ${x.subject}`).sort(byTime).pop();
   const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
@@ -16706,7 +16708,9 @@ function cmdAck() {
   const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
   const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
   const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
-  out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
+  // a merge commit's ack never lapses (collectMetrics' lasting(), kit-348)
+  const forGood = kind === 'merged-without-merge' && /^[^\s:]+:[0-9a-f]{12}$/.test(subject);
+  out(`${line.id}: ${kind} ${subject} set aside ${forGood ? 'for good: a merge commit can\'t change' : `for ${loadSettings().finding_ack_hours}h`}`);
 }
 
 // Merged tickets (the last 30 days) rated light (S, normal risk, not high uncertainty) whose results
