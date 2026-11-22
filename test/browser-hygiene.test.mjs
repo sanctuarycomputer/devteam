@@ -131,6 +131,21 @@ test("kit-777 F2: a Chrome that fails to launch leaves no folder of its own", { 
   } finally { await cli(h, ['stop']); }
 });
 
+// kit-777 final-1 F2: a stop signal during the start steps (the hook sends it just before the
+// launch) ends the daemon with no Chrome launched: one launched anyway is detached, can outlive the
+// daemon, and would run in a temp folder the daemon's exit removes. The Chrome is a stand-in that
+// notes each launch (its --version, for the user agent, isn't one) and exits.
+test('kit-777 final-1 F2: a stop during the start steps launches no Chrome and leaves no folder', { skip, timeout: 120000 }, async () => {
+  const launches = path.join(tmp, 'f2-launches'), fake = path.join(tmp, 'chrome-that-notes');
+  fs.writeFileSync(fake, `#!/bin/sh\ncase "$1" in --version) exit 0;; esac\necho launched >> '${launches}'\nexit 1\n`, { mode: 0o755 });
+  try {
+    const r = await cli(h, ['start'], { CHROME_PATH: fake, DEVTEAM_TEST_BROWSER_STOP_BEFORE_LAUNCH: '1' });
+    assert.equal(r.status, 1, `start stopped: ${r.out}`);
+    assert.equal(fs.existsSync(launches), false, 'no Chrome launched after the stop');
+    assert.equal(fs.existsSync(daemonDc(h)), false, 'no temp folder left');
+  } finally { await cli(h, ['stop']); }
+});
+
 // ----- kit-777: the daemon's Chrome temp folder. browserChromeTmp is cut out of devteam.mjs and run
 // under node:vm with only what it uses in scope, on a base folder and uid the test gives (the daemon's
 // own base is /tmp, as it runs under env -i, so a long one can't be reached through a start) -----

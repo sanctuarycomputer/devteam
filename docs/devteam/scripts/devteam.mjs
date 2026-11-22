@@ -31756,6 +31756,11 @@ async function browserServe({ chrome: bin }) {
     await browserListen(ctx.view, viewPort);
     ctx.restarted = (await browserPrepareProfile(ctx.profile, ctx.notes)).restarted;
     ctx.guard = await startBrowserGuard();
+    // test hook: a stop signal that lands during the start steps, as one can (kit-777 final-1 F2)
+    if (browserTestEnv('DEVTEAM_TEST_BROWSER_STOP_BEFORE_LAUNCH')) process.emit('SIGTERM');
+    // a stop came during the start steps: no Chrome now. Detached, it would outlive the daemon, whose
+    // exit would also remove the temp folder it runs in.
+    if (ctx.stopping) return;
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
     ctx.cdp = cdp;
