@@ -755,6 +755,8 @@ test('the box\'s tmux refuses a kill-server aimed at the box, and honours a priv
       [['-L', 'default', 'kill-session', '-t', '=tw-no-such-session'], { TMUX_TMPDIR: gone }, '-L'],
       [['kill-session', '-t', '=tw-no-such-session'], { TMUX_TMPDIR: gone, TMUX: pane, TMUX_PANE: '%0' }, 'in a pane of the box'],
       [['kill-session', '-t', '=tw-no-such-session'], { TMUX_TMPDIR: file }, 'a file, not a folder'],
+      [['kill-session', '-t', '=tw-no-such-session'], { TMUX_TMPDIR: '' }, 'set, but empty'],
+      [['-V', 'list-sessions'], { TMUX_TMPDIR: gone }, '-V with a command'],
     ]) {
       const r = wrap(args, extra);
       assert.equal(r.status, 1, what);
@@ -762,6 +764,7 @@ test('the box\'s tmux refuses a kill-server aimed at the box, and honours a priv
       assert.ok(boxUp(), `${what}: the box's server lives`);
     }
     assert.equal(wrap(['-S', boxSock, 'has-session', '-t', '=home'], { TMUX_TMPDIR: gone }).status, 0, '-S names the socket: TMUX_TMPDIR is not used');
+    assert.match(wrap(['-V'], { TMUX_TMPDIR: gone }).stdout, /^tmux\S* \S/, 'a lone -V asks no server, and is answered');
     // kill-server as a word that is no command (a target, a format) goes to tmux
     for (const args of [['has-session', '-t', 'kill-server'], ['display-message', '-p', 'kill-server'], ['list-windows', '-t', '=home', '-F', 'kill-server'], ['if-shell', 'true', 'display -p x', ';', 'display-message', '-p', 'kill-server']]) {
       const r = wrap(['-S', boxSock, ...args]);
