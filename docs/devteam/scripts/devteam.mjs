@@ -6976,17 +6976,30 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   // the gate refuses on its own rather than lean on another check.
   if (!base) return [`${String(sha).slice(0, 12)} has no merge base with main, so a change to the owner's files can't be ruled out: merge main into it and run it again`];
   const fails = [];
-  // The paths the PR adds, for the case twins below: only an added path can be a twin, and a diff
-  // reads no tree (check-pr with no lines does no tree work). One that fails is refused, never read
-  // as no files.
-  const added = git(['diff', '--no-renames', '--diff-filter=A', '-z', '--name-only', base, sha]);
-  if (added === null) return [`could not list the files ${String(sha).slice(0, 12)} adds since ${String(base).slice(0, 12)}, so a change to the owner's files can't be ruled out: fetch both and run it again`];
-  const tree = added.split('\0').filter(Boolean);
+  // The paths the PR adds or changes, for the case twins below: a twin is one it adds, or one
+  // already on main that it changes (one it removes is the fix, so it is left out). A diff reads no
+  // tree (check-pr with no lines does no tree work). One that fails is refused, never read as no files.
+  const listed = git(['diff', '--no-renames', '--diff-filter=AMT', '-z', '--name-status', base, sha]);
+  if (listed === null) return [`could not list the files ${String(sha).slice(0, 12)} adds or changes since ${String(base).slice(0, 12)}, so a change to the owner's files can't be ruled out: fetch both and run it again`];
+  const parts = listed.split('\0');
+  const tree = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) tree.push({ verb: parts[i] === 'A' ? 'adds' : 'changes', f: parts[i + 1] });
   // A path as a disk that folds names reads it, part by part: Unicode compatibility normalisation
   // (an NFD spelling is the NFC one, and ſ is s), lower case, and trailing dots and spaces dropped
   // (as Windows drops them). It folds more than any one disk does; a stray path it catches is only
   // refused.
   const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toLowerCase().normalize('NFKC').replace(/[. ]+$/, '')).join('/');
+  // f is at, or inside the folder at; twin: such a disk puts f at at, or in it, where git doesn't.
+  const under = (f, at) => f === at || f.startsWith(`${at}/`);
+  const twin = (f, at) => under(fold(f), fold(at)) && !under(f, at);
+  const says = ({ verb, f }, at) => `${verb} ${f}, ${fold(f) === fold(at) ? 'which' : 'in a folder'} a disk that ignores case can't tell from ${at}`;
+  // a twin of an owner file is named with that file (below); a twin of a folder on their path (the
+  // project folder, or one above it), at the deepest folder it folds into. Only an added path: one
+  // already on main in such a folder is no owner file, so a PR may still change it.
+  const owned = worldFileFails.files().map((w) => w.rel);
+  const folders = [...new Set(owned.flatMap((r) => r.split('/').slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join('/'))))].sort((a, b) => b.length - a.length);
+  const inFolder = tree.filter((t) => t.verb === 'adds' && !owned.some((r) => twin(t.f, r))).flatMap((t) => { const at = folders.find((d) => under(fold(t.f), fold(d))); return at && twin(t.f, at) ? [says(t, at)] : []; });
+  if (inFolder.length) fails.push(`${inFolder.join('; ')}: the owner's files are read in ${projectRel}, and a twin of a folder on their path can put other files there; remove it`);
   // A plain file, whatever the owner answered: a symlink's blob is the path it points at, so the
   // text read through it changes with no change here; a submodule or a folder pins no text at all.
   // The modes come from one read of the project folder's own listing (the three files sit in it),
@@ -7006,8 +7019,8 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
     const after = git(['rev-parse', '--verify', '--quiet', `${sha}:${rel}`]);
     // A second file whose path folds to this one's (fold, above): on a disk that ignores case or
     // spelling (macOS, Windows) the two are one file, and a checkout may leave this one where it is read.
-    const twins = tree.filter((f) => f !== rel && fold(f) === fold(rel));
-    if (twins.length) { fails.push(`adds ${twins.join(', ')}, which a disk that ignores case can't tell from ${rel}: ${words} is one file, and the owner's; remove it`); continue; }
+    const twins = tree.filter((t) => twin(t.f, rel));
+    if (twins.length) { fails.push(`${twins.map((t) => says(t, rel)).join('; ')}: ${words} is one file, and the owner's; remove it`); continue; }
     if (before === after) continue;
     if (template && before === null && (git(['show', `${sha}:${rel}`]) ?? '').trim() === template.trim()) continue;
     if (!approved) { fails.push(`changes ${rel}: ${words} is the owner's, so the owner's answer is needed: ask --class ${cls} --reasons owner-only --recommendation "…" with a link to the draft, then --approved <qid>`); continue; }
