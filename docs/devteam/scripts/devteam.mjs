@@ -29800,13 +29800,15 @@ async function browserForgetRestart(ctx) {
 // fresh on a clean session (browserRelaunch, no wipe); (5) on done, those pages reopened by plain GET
 // (browserReopen); (6) one ledger entry per close, each recorded in memory too; then ctx.ready.
 // A stop meanwhile ends it at its next check, with no entry: the next start handles the close.
+const BROWSER_BACK = 'The supervisor has the browser again.';
 async function browserCloseRestart(ctx, closes) {
   if (ctx.stopping || !closes.length) return;
   try {
+    ctx.closing = true; // until it ends: a socket opened meanwhile is refused with bye
     ctx.ready = false;
     const v = ctx.viewer;
     if (v) {
-      try { v.ws.send({ t: 'bye', why: 'The supervisor has the browser again.' }); v.ws.close(1000); } catch {}
+      try { v.ws.send({ t: 'bye', why: BROWSER_BACK }); v.ws.close(1000); } catch {}
       browserViewClose(ctx, v);
     }
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
@@ -29817,7 +29819,7 @@ async function browserCloseRestart(ctx, closes) {
     if (ctx.stopping) return;
     browserRecordCloses(ctx, closes, reopened);
     ctx.ready = true;
-  } catch (e) { browserShutdown(ctx, 'error', e?.message); }
+  } catch (e) { browserShutdown(ctx, 'error', e?.message); } finally { ctx.closing = false; }
 }
 // The pages a done reopens: each tab's last GET (browserWatchTabs), in tab order; a tab with none, or
 // one that isn't http(s) (about:blank), adds nothing. Raw URLs, in memory only.
@@ -29889,16 +29891,20 @@ function browserViewHeld(ctx, v) {
   if (held !== v.heldSent) { v.heldSent = held; try { v.ws.send({ t: 'held', qid: held }); } catch {} } // never throws into the watch's timer
   if (held && (!v.handover || ctx.folded.some((h) => h.qid === v.handover && h.status === 'open'))) v.handover = held;
 }
-// Whether this socket's input is cut off, by a fold no more than 500 ms old (read here when the
-// watch's is older, so the drop doesn't rest on the watch): on every socket while any close is not yet
-// handled (the page still holds the owner's session, whenever the socket was opened), and on a socket
-// whose own handover has closed. A fold that fails cuts it off. With no close pending, a socket never
-// sent a handover is kit-66's.
-function browserViewClosed(ctx, v) {
-  if (Date.now() - ctx.foldAt > 500) {
+// Whether a close is pending for the view, by a fold no more than 500 ms old (read here when the
+// watch's is older, so this doesn't rest on the watch; fresh: read now). While it is, the page still
+// holds the owner's session: no socket is sent a frame, none has its input forwarded, and a new one is
+// refused. A fold that can't be read counts as pending.
+function browserViewPending(ctx, fresh = false) {
+  if (fresh || Date.now() - ctx.foldAt > 500) {
     try { browserKeepHeld(ctx, browserHandovers()); } catch { return true; }
   }
-  if (ctx.pending) return true;
+  return ctx.pending;
+}
+// Whether this socket's input is cut off: while a close is pending, and on a socket whose own handover
+// has closed. With no close pending, a socket never sent a handover is kit-66's.
+function browserViewClosed(ctx, v) {
+  if (browserViewPending(ctx)) return true;
   return !!v.handover && !ctx.folded.some((h) => h.qid === v.handover && h.status === 'open');
 }
 // The gate, run only from a job already on the verbs' queue (a verb's run, or the watch's job): it
@@ -30289,6 +30295,7 @@ function browserViewFrame(ctx, params, sessionId) {
   if (typeof params.data !== 'string' || !BROWSER_FRAME_DATA.test(params.data) || !(w >= 1 && w <= 8192) || !(h >= 1 && h <= 8192)) return;
   const scale = params.metadata.pageScaleFactor;
   v.scale = typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1; // the input's x, y are divided by it
+  if (browserViewPending(ctx)) return; // acknowledged above, never sent
   if (v.ws.send({ t: 'frame', data: params.data, w, h, seq: v.seq }, true)) v.seq++;
 }
 // The page's messages ($defs.view.from_page), checked by hand: closed field sets, types, bounds and
@@ -30420,16 +30427,19 @@ function browserViewServer(ctx) {
       if (![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(browserOneHeader(req, 'origin'))) return refuse(403);
       const key = browserOneHeader(req, 'sec-websocket-key');
       if (req.method !== 'GET' || String(browserOneHeader(req, 'upgrade')).toLowerCase() !== 'websocket' || browserOneHeader(req, 'sec-websocket-version') !== '13' || !/^[A-Za-z0-9+/]{22}==$/.test(key ?? '')) return refuse(400);
-      if (!ctx.ready || ctx.stopping) return refuse(503);
+      if (ctx.stopping || (!ctx.ready && !ctx.closing)) return refuse(503);
       const accept = crypto.createHash('sha1').update(key + BROWSER_WS_GUID).digest('base64');
       sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
       const v = { ws: null, seq: 0, tab: null, url: null, timer: null, scale: 1, handover: null, heldSent: undefined };
       v.ws = browserSocket(sock, { pingMs: browserPingMs(), onText: (text) => browserViewInput(ctx, v, text), onClose: () => browserViewClose(ctx, v) });
       if (head?.length) v.ws.feed(head);
       if (v.ws.closed) return;
+      // a close pending: refused with bye, before it can be the viewer, so it is never sent a frame.
+      // A bye, not a 503: browser.html stops on it and offers Show it again, where a 503 has it retry
+      if (ctx.closing || browserViewPending(ctx, true)) { v.ws.send({ t: 'bye', why: BROWSER_BACK }); return v.ws.close(1000); }
       if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
       ctx.viewer = v;
-      try { browserKeepHeld(ctx, browserHandovers()); } catch { ctx.foldAt = 0; browserViewHeld(ctx, v); } // the current hold, from a fresh fold; a failed one is read again at its first input
+      browserViewHeld(ctx, v); // the current hold, from the fold just read
       browserViewTick(ctx, v);
       v.timer = setInterval(() => browserViewTick(ctx, v), 250);
       v.timer.unref?.();
@@ -30443,7 +30453,7 @@ function browserViewServer(ctx) {
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, gateQueued: false, watch: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   browserIsDaemon = true;
   const viewPort = Number(process.env.PORT);

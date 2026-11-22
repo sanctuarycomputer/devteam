@@ -5,6 +5,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { canDrive } from './lib/chrome.mjs';
 import { startSites } from './lib/sites.mjs';
@@ -16,7 +17,7 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as four chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, RF4, T4-1, T4-3, T4-2), cC's (C24, T6-3, RF2)
+// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, PC1, RF4, T4-1, T4-3, PC3, T4-2), cC's (C24, T6-3, RF2)
 // and cD's (C12, C13, C14, C16). onA, onB, onC and onD add a check.
 const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
@@ -28,9 +29,15 @@ if (mustRun && !canDrive) test('Chrome is needed on CI\'s Node 22+', () => asser
 // C23's own sites: hosts no other check hands over, so only C23's handovers name them. S2 carries
 // the 8-day case and the near miss, S3 the 6-day, second-handover and after-forget cases: the live
 // handover of the 8-day case names S2, so it is never an earlier handover of S3's cases.
-let S2, S3;
-before(async () => { S2 = await startSites(); S3 = await startSites(); });
-after(async () => { await S2?.close(); await S3?.close(); });
+let S2, S3, ticker;
+before(async () => {
+  S2 = await startSites();
+  S3 = await startSites();
+  // a page that repaints all the time, so the screencast has frames to send whenever it is allowed to
+  ticker = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<!doctype html><title>ticker</title><p id="n">0</p><script>let i = 0; setInterval(() => { document.getElementById("n").textContent = ++i; document.body.style.background = i % 2 ? "#fff" : "#eee"; }, 40);</script>'); });
+  await new Promise((r) => ticker.listen(0, '127.0.0.1', r));
+});
+after(async () => { await S2?.close(); await S3?.close(); await new Promise((r) => (ticker ? ticker.close(r) : r())); });
 
 let C;
 const cA = () => (C ??= project('cA', { DEVTEAM_TEST_BROWSER_ALLOW: `${site.port},${S2.port},${S3.port}` }));
@@ -292,6 +299,30 @@ async function nextViewer(P) {
   }, 15000, 'the view free for a new socket');
 }
 const landed = (text) => site.events().some((e) => String(e.value).includes(text));
+const framesIn = (msgs) => msgs.filter((m) => m.t === 'frame').length;
+const BACK = 'The supervisor has the browser again.';
+// A socket opened while a close is pending: it pastes at once, and is refused with bye. Never a frame,
+// never a hold. Returns the pasted text, for the check that it never landed.
+async function refusedInGap(P, what) {
+  const x = await viewSocket(P);
+  const late = marker(what);
+  x.paste(late);
+  const m = await x.waitFor((o) => o.t === 'bye', 10000);
+  assert.equal(m.why, BACK, `${what}: the refusal's words`);
+  await sleep(500);
+  assert.equal(framesIn(x.msgs), 0, `${what}: a socket in the gap was sent a frame`);
+  assert.ok(!x.msgs.some((o) => o.t === 'held' || o.t === 'url'), `${what}: a socket in the gap was served: ${JSON.stringify(x.msgs.map((o) => o.t))}`);
+  x.close();
+  return late;
+}
+// A new viewer after a failed or unfinished close: its frames are of a fresh about:blank, never the old page.
+async function freshViewer(P) {
+  const x = await nextViewer(P);
+  await x.waitFor((o) => o.t === 'frame', 10000);
+  await x.waitFor((o) => o.t === 'url', 5000);
+  assert.deepEqual([...new Set(x.msgs.filter((o) => o.t === 'url').map((o) => o.url))], ['about:blank'], 'a new viewer saw the old page');
+  x.close();
+}
 onA('C21 a decline after a half-typed note: bye comes while the old Chrome is alive, and the value is gone', async () => {
   const P = cA();
   await ok(P, ['stop']);
@@ -407,31 +438,22 @@ onB('C19 input after the close never reaches the page, on a socket opened during
   (await typeNote(P, marker('c19-gap'))).close();
   const a1 = await owner(P, ['answer', q1, '--choice', 'Done']);
   assert.equal(a1.status, 0, a1.err || a1.out);
-  const g1 = await nextViewer(P);
-  assert.ok(g1.msgs.some((m) => m.t === 'held' && m.qid === null), 'the socket in the gap is told no one holds the browser');
-  const late1 = marker('late-gap');
-  g1.paste(late1);
-  await sleep(1000);
+  const late1 = await refusedInGap(P, 'late-gap');
+  await sleep(500);
   assert.ok(!landed(late1), 'a socket opened after the close: its input reached the page');
-  console.log(`# kit-67 C19 gap: a socket opened after the close was sent ${g1.msgs.filter((m) => m.t === 'frame').length} frames before the close was handled`);
   assert.equal((await waitJson(P)).outcome, 'done');
-  g1.close();
   // (2) a socket that takes a newer open handover while the older one's close is pending
   await ok(P, ['open', `${site.origin}/record`]);
   const q2 = await askHandover(P);
   (await typeNote(P, marker('c19-gap2'))).close();
   const newer = appendLine(P, handoverLine(P));
   await withdraw(P, q2);
-  const g2 = await nextViewer(P);
-  assert.ok(g2.msgs.some((m) => m.t === 'held' && m.qid === newer.id), 'the socket takes the newer handover');
-  const late2 = marker('late-gap2');
-  g2.paste(late2);
-  await sleep(1000);
+  const late2 = await refusedInGap(P, 'late-gap2');
+  await sleep(500);
   assert.ok(!landed(late2), 'a socket on a newer handover, an older close pending: its input reached the page');
   await withdraw(P, newer.id);
   const w2 = await waitJson(P);
   assert.deepEqual([w2.qid, w2.outcome], [newer.id, 'withdrawn']);
-  g2.close();
   entryIs(P, q2, 'withdrawn');
   entryIs(P, newer.id, 'withdrawn');
   // with no close pending, a new socket's input reaches the page again (R5)
@@ -439,6 +461,33 @@ onB('C19 input after the close never reaches the page, on a socket opened during
   const after = await nextViewer(P);
   await typeNote(P, marker('c19-after'), { v: after });
   after.close();
+});
+
+onB('PC1 while a close is pending no socket is sent a frame, and frames come back once it is handled', async () => {
+  const P = cB();
+  const allow = { DEVTEAM_TEST_BROWSER_ALLOW: `${site.port},${ticker.address().port}` };
+  await ok(P, ['stop']);
+  await ok(P, ['start'], allow);
+  await ok(P, ['open', `http://127.0.0.1:${ticker.address().port}/`]);
+  const q = await askHandover(P);
+  const v = await viewSocket(P);
+  await until(() => framesIn(v.msgs) >= 3, 15000, 'frames of the repainting page');
+  const from = v.msgs.length;
+  const a = await owner(P, ['answer', q, '--choice', 'Done']);
+  assert.equal(a.status, 0, a.err || a.out);
+  await v.c.wait((m) => m.t === 'held' && m.qid === null, 5000, from); // sent the moment the daemon sees the close
+  const seen = v.msgs.findIndex((m, i) => i >= from && m.t === 'held' && m.qid === null);
+  await sleep(1000);
+  assert.equal(v.c.closed, null, 'the socket closed: no close should have run');
+  assert.equal(framesIn(v.msgs.slice(seen + 1)), 0, 'frames were sent while the close was pending');
+  await refusedInGap(P, 'pc1-gap');
+  assert.equal((await waitJson(P)).outcome, 'done');
+  v.close();
+  // handled: a new viewer gets frames again (R5)
+  const again = await nextViewer(P);
+  await until(() => framesIn(again.msgs) >= 3, 15000, 'frames after the close was handled');
+  again.close();
+  await ok(P, ['stop']);
 });
 
 onB('RF4 the daemon told to stop during a close: the close ends, and no Chrome is left', async () => {
@@ -500,9 +549,37 @@ onB('T4-3 a close that fails shuts the daemon down, and the offline status says 
   // the next start handles the close, and the old failure is no longer said
   await ok(P, ['start']);
   entryIs(P, q, 'withdrawn');
+  await freshViewer(P);
+  assert.equal((await waitJson(P)).outcome, 'withdrawn');
   assert.doesNotMatch((await ok(P, ['status'])).out, /last error/);
   await ok(P, ['stop']);
   assert.doesNotMatch((await ok(P, ['status'])).out, /last error/);
+});
+
+onB('PC3 a close that never finishes (the daemon killed inside it): no socket is served meanwhile, and the next start ends it', async () => {
+  const P = cB();
+  await ok(P, ['stop']);
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS: '60000' });
+  await ok(P, ['open', `${site.origin}/record`]);
+  const q = await askHandover(P);
+  const v = await viewSocket(P);
+  await v.waitFor((m) => m.t === 'held' && m.qid === q, 5000);
+  await withdraw(P, q);
+  const snap = browser(P, ['snapshot']); // its pre-verb read starts the close, held inside it
+  await v.waitFor((m) => m.t === 'bye', 15000);
+  v.close();
+  await refusedInGap(P, 'pc3-inside-the-close');
+  await killDaemon(P);
+  const r = await snap;
+  assert.notEqual(r.status, 0, `the snapshot was served: ${r.out}`);
+  assert.equal(entriesFor(P, q).length, 0, 'a close cut short wrote its entry');
+  await ok(P, ['start']);
+  entryIs(P, q, 'withdrawn');
+  await freshViewer(P);
+  const w = await waitJson(P);
+  assert.deepEqual([w.qid, w.outcome], [q, 'withdrawn']);
+  assert.equal(entriesFor(P, q).length, 1, 'the close was handled twice');
+  assert.match((await ok(P, ['snapshot'])).out, BLANK);
 });
 
 // last on cB: its close line's at doesn't parse, and stays the log's last line
