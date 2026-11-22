@@ -953,7 +953,8 @@ test('org-access A17: a provider claim alone links nobody', async () => {
 test('org-access A17: a redirect type finishes by GET, and next stays on the box', async () => {
   const { gw, ana } = await setup('c15', { methods: [stubMethod('k1')] });
   try {
-    const next = `${gw.inst(INSTANCE)}/some/page?x=1`;
+    // a project's address (project-hosts@1): safeNext keeps it by its shape, with no list read
+    const next = `${gw.inst('alpha')}/some/page?x=1`;
     const b = browser(gw);
     const st = await b.start('stub', { purpose: 'sign-in' });
     ok(st, 'sign-in start');

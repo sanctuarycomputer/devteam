@@ -4,9 +4,6 @@
 # owner to the machine's devteam hub, a terminal on the box's tmux server (where supervisors and
 # workers run), and each project at a host of its own. What lasts lives on /data.
 #
-# Until the gateway change (kit-277) ships, the project hosts below don't answer and the older addresses
-# do (<box> is the box's name): <port>.<box> for a project's dashboard, public.<box>/<project>/<slug>/ for
-# a public page, <box>/public/publish?port=... for Publish, and /box.json says box: 1.
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com. Each project is
 # at <project>.box.example.com: its dashboard and every private view after sign-in, and its public
 # pages (what the owner published) at /<artifact>/ for anyone, from the gateway's own copy
@@ -44,7 +41,7 @@
 #   devteam-reclaim, which prints a new claim link (as another user, setpriv fails: use root).
 FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 
-ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1 DEVTEAM_PREVIEWS=1
+ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1 DEVTEAM_PREVIEWS=1 DEVTEAM_PROJECT_HOSTS=1
 
 RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
  && apt-get update \

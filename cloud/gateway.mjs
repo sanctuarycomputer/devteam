@@ -2,24 +2,31 @@
 // devteam's gateway: the one public listener on a cloud box. It lets in only the owner, by a
 // passkey registered when the box was claimed, and passes the owner through to the machine's hub
 // (box.example.com), a web terminal on the box's tmux server (term.box.example.com), and each
-// instance's dashboard on a subdomain of its own (4321.box.example.com). Signing in and passkeys
-// are under /auth on the box's name, so an installed hub signs in without leaving its own scope.
-// Every agent runs as the box's user and can change files and take ports, so the box and term names
-// serve only bytes the gateway holds: its own copy of the hub page and of ttyd's page, and its own
-// pages. Only the hub's JSON (its list, and the owner's threads with the operator) and the
-// terminal's socket come from behind it. An agent's page can exist only on an instance's name. The gateway also sends the hub's notifications, by Web Push.
+// project's dashboard at a host of its own, its name (alpha.box.example.com: project-hosts@1, below).
+// Signed out, a navigation on a project's host gets the gateway's signed-out page, the same for a
+// listed name and a made-up one, which sends the whole address, hash included, to sign-in. Signing
+// in and passkeys are under /auth on the box's name, so an installed hub signs in without leaving
+// its own scope. Every agent runs as the box's user and can change files and take ports, so the box
+// and term names serve only bytes the gateway holds: its own copy of the hub page and of ttyd's
+// page, and its own pages. Only the hub's JSON (its list, and the owner's threads with the operator)
+// and the terminal's socket come from behind it. An agent's page can exist only on a project's or a
+// preview's host. The gateway also sends the hub's notifications, by Web Push.
 // Behind it the kit runs unchanged: every proxied request looks to the kit like a local browser's,
 // and the kit's loopback origins in its response headers are mapped to the public ones.
 // A file the owner drops on the terminal is the one thing it stores for the agents' side: under a
 // folder only it writes, and handed over as a path pasted into the terminal.
 // A session's running dev server gets a name of its own too (cool-tiger.box.example.com), behind the
-// owner's session like an instance, from the hub's list; the gateway holds nothing about them, never
+// owner's session like a project, from the hub's list; the gateway holds nothing about them, never
 // picks between two claimants of one name, and box.example.com/dev/ lists them.
+// A project's public pages are at <project>.<box>/<slug>/, for anyone, from the gateway's own copy of
+// what the owner published.
 // The kit's viewers (for threads) lean on it twice. A preview's name answers /.devteam/lens, the
 // gateway's own page that frames the app, and the app's own framing headers give way for that one
-// frame. On public.box.example.com, the signed-in owner's own visit to a published page gets a page
-// of the gateway's framing that project's viewer at the published version; everyone else, and any
-// doubt, gets the published bytes. The public name reads the cookie for that choice alone.
+// frame. The signed-in owner's own visit to a published page is sent to the owner's wrapper on the
+// box's own name, <box>/w/<project>/<slug>/, a page of the gateway's framing that project's viewer at
+// the published version, under a grant bound to project, slug and tree; everyone else, and any
+// doubt, gets the published bytes. A project's host reads the cookie on a published page for that
+// choice alone.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
 // project-hosts@1: where a project is on a box
 // This section is the definition the gateway moves to: the address of a project on a box. Until the
@@ -383,6 +390,12 @@ function listedByRoot(instances, ports) {
   for (const x of perPort.values()) if (!perRoot.has(x.root) || Number(x.port) < Number(perRoot.get(x.root).port)) perRoot.set(x.root, x);
   return [...perRoot.values()];
 }
+export const HOST_LABEL = /^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+export const RESERVED_LABELS = ['term', 'public', 'www'];
+export const RESERVED_SEGMENTS = ['api', 'artifact', 'c', 'healthz', 'index.html', 'presence', 'public-manifest', 'review', 'upload', 'view'];
+// The kit's rule for a branch name (docs/devteam/scripts/devteam.mjs), copied because the gateway
+// imports nothing of the kit; a test holds the two to the same characters.
+const BRANCH_AT = /^(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // A preview's host name: two letter-only words and an optional number, which no reserved name of
 // the box can be. A word list would say nothing more; the map says whether it is live.
 export const PREVIEW_NAME = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
@@ -840,9 +853,9 @@ export const PUBLIC_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdeliv
 export const publicPathOk = (p) => /^[A-Za-z0-9._/-]+$/.test(p) && p.split('/').every((s) => s && !s.startsWith('.'));
 // The kit's artifact policy, its own folder as self, framed by nothing. The sandbox (no
 // allow-same-origin) makes the page an opaque origin, so it can't read or write the box's cookies.
-// frame-src 'none' is load-bearing too: an instance's viewer and published trees accept the public
-// name as a frame ancestor (viewerGranted, treeGranted), and frame-ancestors matches by URL, not
-// origin, so a published page that could frame would satisfy it, sandbox or not. A test pins both.
+// frame-src 'none' is load-bearing too: a published page is served on its project's own host, whose
+// dashboard pages accept 'self' as a frame ancestor, and frame-ancestors matches by URL, not origin,
+// so a published page that could frame would satisfy it, sandbox or not. A test pins both.
 export const publicCsp = (self) => {
   const cdns = PUBLIC_CDNS.join(' ');
   return [
@@ -854,9 +867,6 @@ export const publicCsp = (self) => {
 // The frame-ancestors directive of each policy in a header (several arrive joined by ", "), with
 // what precedes it and the list it names.
 const FRAME_ANCESTORS = /(^|[;,])(\s*)frame-ancestors(?=[\s;,]|$)([^;,]*)/gi;
-// One more origin that may frame the page, in every policy that names who may. A page that says no
-// one, or says nothing, is left as it is: adding a directive where there was none would narrow it.
-export const addFrameAncestor = (csp, origin) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => (!list.trim() || /^\s*'none'\s*$/i.test(list) ? all : `${sep}${sp}frame-ancestors ${list.trim()} ${origin}${/\s$/.test(list) ? ' ' : ''}`));
 // Who may frame the page, replaced in every policy that says. A policy that doesn't say gets nothing.
 export const replaceFrameAncestors = (csp, sources) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => `${sep}${sp}frame-ancestors ${sources}${/\s$/.test(list) ? ' ' : ''}`);
 export const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
@@ -1021,11 +1031,14 @@ export function createGateway(opts = {}) {
   const NAME = pubUrl.hostname;
   const SECURE = pubUrl.protocol === 'https:';
   const SUFFIX = pubUrl.port ? `:${pubUrl.port}` : '';
-  const instanceOrigin = (port) => `${pubUrl.protocol}//${port}.${NAME}${SUFFIX}`;
-  const instanceOf = (host) => {
-    const m = /^(\d{1,5})\.(.+)$/.exec(String(host ?? ''));
-    const port = m && m[2] === `${NAME}${SUFFIX}` && String(Number(m[1])) === m[1] ? Number(m[1]) : null;
-    return BLOCK.includes(port) ? port : null;
+  const projectOrigin = (name) => `${pubUrl.protocol}//${name}.${NAME}${SUFFIX}`;
+  // Exactly <label>.<box>: a look-alike suffix or a second label is no name of this box.
+  const labelOf = (host) => {
+    const h = String(host ?? '');
+    const tail = `.${NAME}${SUFFIX}`;
+    if (!h.endsWith(tail)) return null;
+    const l = h.slice(0, -tail.length);
+    return HOST_LABEL.test(l) && !RESERVED_LABELS.includes(l) ? l : null;
   };
   // A preview's name, one label directly under the box's, on the wildcard DNS and certificate it has.
   const previewOf = (host) => {
@@ -1034,20 +1047,22 @@ export function createGateway(opts = {}) {
   };
   const previewOrigin = (name) => `${pubUrl.protocol}//${name}.${NAME}${SUFFIX}`;
   // Who may hold a preview's lens: frame-ancestors is checked against every ancestor, so the hub
-  // (which frames a dashboard) as well as each instance (whose viewer frames the lens). The lens is
-  // the same bytes and policy on every preview's name, as the kit's relay serves it, and neither can
-  // know which instance a name is for. The app inside it can: its own policy (downstreamHeaders)
-  // names only the instance that lists the preview, so a lens held by any other gets an empty frame.
-  const LENS_CSP = previewLensCsp([PUB, ...BLOCK.map(instanceOrigin)].join(' '));
+  // (which frames a dashboard) as well as the project host of the instance that lists the preview
+  // (whose viewer frames the lens), as the list last said. The bytes are the same on every preview's
+  // name, as the kit's relay serves them. A name two instances list, or none, gets the hub alone.
+  const lensCsp = (name) => {
+    const l = previews.get(name);
+    return previewLensCsp([PUB, l && !l.ambiguous ? portHost.get(l.instance) : null].filter(Boolean).join(' '));
+  };
   // Passkeys belong to the box's name. A page on an instance's subdomain may ask for one, but its
   // answer names that page's origin, and only an answer from the box's own origin is accepted.
   const RP_ID = NAME;
   const TERM = `${pubUrl.protocol}//term.${pubUrl.host}`;
   const termHost = new URL(TERM).host;
-  // What the owner published, to anyone. Under the box's wildcard name like term., and never an
-  // instance's: those are all digits.
-  const PUBLIC = `${pubUrl.protocol}//public.${pubUrl.host}`;
-  const publicHost = new URL(PUBLIC).host;
+  // What the owner published, to anyone: under its project's own host. A project whose name isn't a
+  // host label has no such host, so a page of it has no address.
+  const publicAddress = (project, slug) => `${projectOrigin(project)}/${slug}/`;
+  const hostable = (name) => HOST_LABEL.test(name) && !RESERVED_LABELS.includes(name);
   // Parsed once, before anything else starts: a cap that isn't a number would compare false
   // against every total and publish without limit, so a bad one stops the gateway instead.
   const maxSet = opts.publicMax ?? env.DEVTEAM_PUBLIC_MAX;
@@ -1181,7 +1196,7 @@ export function createGateway(opts = {}) {
   const safeNext = (n) => {
     try {
       const u = new URL(String(n ?? '/'), PUB);
-      if (u.origin === PUB || u.origin === TERM || (u.protocol === pubUrl.protocol && instanceOf(u.host) && u.origin === instanceOrigin(instanceOf(u.host))) || (u.protocol === pubUrl.protocol && previewOf(u.host) && u.origin === previewOrigin(previewOf(u.host)))) return u.href;
+      if (u.origin === PUB || u.origin === TERM || (u.protocol === pubUrl.protocol && labelOf(u.host) && u.origin === projectOrigin(labelOf(u.host)))) return u.href;
     } catch {}
     return `${PUB}/`;
   };
@@ -1522,7 +1537,8 @@ export function createGateway(opts = {}) {
     return h;
   };
   const LOOP = /http:\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
-  const mapLoop = (s) => s.replace(LOOP, (all, p) => (Number(p) === HUB_PORT ? PUB : BLOCK.includes(Number(p)) ? instanceOrigin(Number(p)) : all));
+  // A block port to its project's host, as the list last said; a port no one name holds stays as sent.
+  const mapLoop = (s) => s.replace(LOOP, (all, p) => (Number(p) === HUB_PORT ? PUB : BLOCK.includes(Number(p)) ? portHost.get(Number(p)) ?? all : all));
   // A preview's own headers: only this link's port, http and ws forms, to its own origin.
   const PREVIEW_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   const mapPreview = (s, port, own) => s.replace(PREVIEW_LOOP, (all, scheme, p) => (Number(p) !== port ? all : scheme === 'ws' ? own.replace(/^http/, 'ws') : own));
@@ -1542,7 +1558,7 @@ export function createGateway(opts = {}) {
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
     // a port off the block is no instance's: then nothing gives way
     if (previewPort && BLOCK.includes(lensOf)) {
-      const ancestors = `'self' ${PUB} ${instanceOrigin(lensOf)}`;
+      const ancestors = ["'self'", PUB, portHost.get(lensOf)].filter(Boolean).join(' ');
       delete out['x-frame-options'];
       const csp = out['content-security-policy'] ? String(out['content-security-policy']) : '';
       if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, ancestors);
@@ -1552,12 +1568,13 @@ export function createGateway(opts = {}) {
     }
     return { ...out, ...hsts };
   };
-  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, publicFrame = false }) => {
+  // viewer: null, or for the viewer's page whether the wrapper's grant holds (viewerAncestors)
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null }) => {
     const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
       const head = downstreamHeaders(ur.headers, cap, publicOrigin);
-      if (publicFrame && head['content-security-policy']) head['content-security-policy'] = addFrameAncestor(String(head['content-security-policy']), PUBLIC);
+      if (viewer !== null && head['content-security-policy']) head['content-security-policy'] = viewerAncestors(String(head['content-security-policy']), viewer.granted);
       res.writeHead(ur.statusCode, { ...head, 'cache-control': 'no-store', ...(extra ?? {}) });
       // an upstream cut off mid-body cuts the browser's response too, rather than leaving it open
       pipeline(ur, res, () => {});
@@ -1643,11 +1660,14 @@ export function createGateway(opts = {}) {
   };
   // The hub's list is the one thing the box's name takes from behind it, and only as data: whatever
   // holds the port, the page reads JSON and shows it as text. No hub yet is an empty list.
+  // Each read is a connection of its own (agent: false): since Node 19 the global agent keeps
+  // sockets alive, and one the hub closed (a restart, its idle timeout) failed the next read, which
+  // emptied the list until the poll after it.
   const hubList = () => new Promise((settle) => {
     let deadline = null;
     const resolve = (v) => { clearTimeout(deadline); settle(v); };
     const none = () => resolve(null);
-    const up = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 10000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (ur) => {
+    const up = http.get({ host: '127.0.0.1', port: HUB_PORT, agent: false, path: '/instances.json', timeout: 10000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (ur) => {
       if (ur.statusCode !== 200) { ur.resume(); return none(); }
       const chunks = [];
       let size = 0;
@@ -1775,18 +1795,89 @@ export function createGateway(opts = {}) {
   // hub once more, with every waiter sharing one read, so no anonymous request can make it poll.
   const ownPort = opts.port ?? null;
   let previews = new Map();
-  // Each instance's root and whether its kit has viewers, as the hub's list last said (every poll,
-  // PUSH_POLL_MS): the owner wrapper's choice is a lookup in it, so no visit asks anything (spec §8).
+  // Each name the list gives to the ports that hold it (with each one's root and whether its kit has
+  // viewers, as the hub's list last said, every poll, PUSH_POLL_MS: the owner wrapper's choice is a
+  // lookup in it, so no visit asks anything, spec §8); a port's origin only for a name one port holds;
+  // whether the last read gave a list; and the hub page's copy of the hosts, which a failed read leaves.
+  let projects = new Map();
+  let portHost = new Map();
+  let hubFrames = [];
+  let listRead = false;
   let listed = new Map();
   const takePreviews = (body) => {
     let list = null;
     try { list = JSON.parse(body).instances; } catch {}
     const ok = Array.isArray(list) ? list : [];
+    const byPort = listedByPort(ok, BLOCK);
+    const names = new Map();
+    for (const [port, x] of byPort) if (typeof x.name === 'string' && HOST_LABEL.test(x.name) && !RESERVED_LABELS.includes(x.name)) names.set(x.name, [...(names.get(x.name) ?? []), { port, root: x.root, viewer: x.viewer === 1 }]);
+    // every name the list gives, host or not: an older page may be stored under one that can't be
+    listed = new Map();
+    for (const x of byPort.values()) if (typeof x.name === 'string') listed.set(x.name, (listed.get(x.name) ?? 0) + 1);
+    projects = names;
+    portHost = new Map([...names].filter(([, c]) => c.length === 1).map(([n, c]) => [c[0].port, projectOrigin(n)]));
     previews = previewLinks(ok, BLOCK, ownPort, ttydPort);
-    listed = new Map([...listedByPort(ok, BLOCK)].map(([port, x]) => [port, { root: x.root, viewer: x.viewer === 1 }]));
+    // a preview whose generated name is a project's is not served under it
+    for (const n of names.keys()) previews.delete(n);
+    listRead = Array.isArray(list);
+    if (listRead) hubFrames = [...portHost.values()];
+  };
+  // At most ms of waiting on the shared read; the read itself goes on and still updates the maps.
+  const refreshWithin = (ms) => new Promise((done) => { const t = setTimeout(done, ms); refreshPreviews().catch(() => {}).finally(() => { clearTimeout(t); done(); }); });
+  // One listed project, else a name two share (no dashboard), else a listed preview.
+  const resolveLabel = (l) => {
+    const c = projects.get(l);
+    if (c?.length === 1) return { port: c[0].port };
+    if (c) return { shared: true };
+    return previews.has(l) ? { preview: l } : null;
+  };
+  // A page is a published one when the gateway's store holds it under this name, by its first path
+  // segment as sent (raw, before any decoding). Never a reserved segment: those are the dashboard's
+  // (and the gateway's own /upload), whatever an older store holds under them. The store alone, so
+  // it answers alike signed in or out, with the hub down. Throws only if the store can't be read.
+  const publishedBy = (label, seg) => {
+    if (!seg || RESERVED_SEGMENTS.includes(seg) || !LINK_ID.test(seg)) return false;
+    const pub = store.load().public ?? {};
+    return Object.hasOwn(pub, label) && Object.hasOwn(pub[label].artifacts ?? {}, seg);
+  };
+  // Whether a raw path is /<slug>/… for a slug some other project published: on this host that is
+  // a page's address under the wrong name, so the gateway answers 404 rather than the dashboard.
+  // /<slug> with no slash and every reserved segment stay the dashboard's (or the gateway's).
+  const anotherProjects = (label, raw) => {
+    const m = /^\/([^/]+)\//.exec(raw);
+    if (!m || RESERVED_SEGMENTS.includes(m[1]) || !LINK_ID.test(m[1])) return false;
+    return Object.entries(store.load().public ?? {}).some(([n, x]) => n !== label && Object.hasOwn(x?.artifacts ?? {}, m[1]));
+  };
+  // Every read that feeds the maps is numbered when it begins, so a slow older answer never undoes
+  // a newer one: an answer is applied only if no read begun after it has been applied already.
+  let readSeq = 0;
+  let appliedSeq = 0;
+  const readList = () => {
+    const seq = ++readSeq;
+    return hubList().then((body) => { if (seq > appliedSeq) { appliedSeq = seq; takePreviews(body); } return body; });
   };
   let previewRefresh = null;
-  const refreshPreviews = () => (previewRefresh ??= hubList().then(takePreviews).finally(() => { previewRefresh = null; }));
+  const refreshPreviews = () => (previewRefresh ??= readList().finally(() => { previewRefresh = null; }));
+  // The projects of a list read that began after this call and returned within ms, or null (no list
+  // in time, or none the hub could give). A read already under way may hold an older answer, so it
+  // is waited out, not counted. What Publish takes as proof that a name is one project's.
+  const freshList = (ms) => new Promise((done) => {
+    const t = setTimeout(() => done(null), ms);
+    Promise.resolve(previewRefresh).catch(() => {}).then(() => refreshPreviews()).then(() => (listRead ? projects : null), () => null).then((v) => { clearTimeout(t); done(v); });
+  });
+  const sharedWhy = (name, from = projects) => (from.get(name)?.length > 1 ? `two listed projects share the name ${name}, so the box can't tell which one you mean: rename one (settings.md's project)` : null);
+  // Whether two listed instances give this name, whether or not it can be a host: what Unpublish asks
+  // (a-20261122-032256363), as of the newest list applied, which is at least as new as any proof.
+  const listedShared = (name) => (listed.get(name) ?? 0) > 1;
+  // Why a page of this project can't be published now: no fresh list to prove the name is one
+  // project's, or a name two share, by that list or the live one.
+  const publishBlocked = (name, proved) => (!proved ? `the hub's list can't be read, so the box can't check that only one project is named ${name}: start the hub and try again` : sharedWhy(name, proved) || sharedWhy(name));
+  // The port a project's name stands for, as the list says after at most a second's re-read.
+  const projectPort = async (name) => {
+    await refreshWithin(1000);
+    const c = projects.get(name) ?? [];
+    return c.length > 1 ? { refused: sharedWhy(name) } : { port: c[0]?.port ?? null };
+  };
 
   // --- notifications: the gateway reads the hub's list itself, so they need no page open ----------
   // The signing key sits with the passkeys, where no agent can read it. Made the first time it's asked for.
@@ -1816,8 +1907,7 @@ export function createGateway(opts = {}) {
     if (polling) return;
     polling = true;
     try {
-      const body = await hubList();
-      takePreviews(body);
+      const body = await readList();
       let list = null;
       try { list = JSON.parse(body).instances; } catch {}
       if (!Array.isArray(list)) return;
@@ -1857,6 +1947,26 @@ export function createGateway(opts = {}) {
   // artifact's files don't need this: they load under a capability in the path (below).
   const IMAGE = /\.(png|jpe?g|gif|webp|avif|svg|ico)$/i;
   const PREVIEW_FRAMED = ['iframe', 'frame', 'object', 'embed', 'fencedframe'];
+  const CAP_LINK = /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/;
+  // An artifact navigating its own frame (a link, location.href, a reload, a meta refresh) arrives as
+  // a cross-site iframe request, since its sandbox has no allow-same-origin, with its capability as the
+  // only credential. (A nested frame never gets here: the kit's CSP blocks it.) So an exact capability
+  // path answers to its own check instead of the frame refusal. Judged on the
+  // raw path: anything a server could decode or normalise into another path keeps the refusal.
+  // Any escape at all, a backslash, or a doubled slash.
+  const CAP_NOT_EXACT = /%|\\|\/\//;
+  // The one exception: the kit's link to a draft on a fetched branch encodes the branch into one
+  // segment (/artifact/origin/ticket%2Fkit-1/<slug>/...). That segment may hold %2F and no other
+  // escape: with %2F decoded it must be a branch the kit accepts, whose characters hold no %. The
+  // path is forwarded unchanged, so the kit decodes this segment to this branch.
+  const capLinkExact = (raw) => {
+    const m = CAP_LINK.exec(raw);
+    if (!m) return false;
+    const [, branch, rest] = /^\/artifact\/origin\/([^/]+)(\/.*)$/.exec(m[4]) ?? [];
+    if (branch !== undefined && !BRANCH_AT.test(branch.replace(/%2f/gi, '/'))) return false;
+    const judged = branch !== undefined ? rest : raw;
+    return !CAP_NOT_EXACT.test(judged) && !judged.split('/').some((x) => x === '.' || x === '..');
+  };
   const crossSiteOk = (req, p, url) => {
     const site = req.headers['sec-fetch-site'];
     if (!site || site === 'same-origin' || site === 'none') return true;
@@ -1872,29 +1982,35 @@ export function createGateway(opts = {}) {
   // branch encoded into one segment: kit-750), or a published tree's (the owner's wrapper shows
   // exactly the version the public sees: spec §8).
   const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+|origin\/[^/]+|tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?)\/[^/]+\//;
-  // An instance's viewer, and an artifact at a published tree, may also be framed by the owner's
-  // wrapper on the public name (spec §8). frame-ancestors is checked against every ancestor, and the
-  // wrapper is one. Nothing else of an instance's is opened to it. The raw path, as the kit reads it.
-  // The viewer, which holds the owner's actions, only under the grant the wrapper put in its frame's
-  // URL: this port, this page, this version, for a few minutes, MACed with this process's secret.
+  // The grant the owner's wrapper puts in its frame's URL (spec §8): this project, this page, this
+  // published tree, for a few minutes, MACed with this process's secret. The wrapper is on the box's
+  // own name (<box>/w/<project>/<slug>/), off the dashboard's origin, whose page stops itself when a
+  // page of its own origin frames it. The kit's viewer names the hub as a frame ancestor, which is the
+  // box: so the gateway takes the box out of the viewer's ancestors, and puts it back only under a
+  // valid grant. It only widens who may frame the viewer; it never stands in for the session.
   const WRAP_GRANT_MS = 5 * 60 * 1000;
-  const wrapMac = (port, slug, at, exp) => b64u(mac('wrap', port, `/view/artifact/${slug}`, at, exp));
-  const wrapGrant = (port, slug, at, exp = Date.now() + WRAP_GRANT_MS) => `${exp}.${wrapMac(port, slug, at, exp)}`;
-  const viewerGranted = (port, raw, url) => {
-    const m = /^\/view\/artifact\/([^/]+)$/.exec(raw);
+  const wrapMac = (project, slug, at, exp) => b64u(mac('wrap', project, `/view/artifact/${slug}`, at, exp));
+  const wrapGrant = (project, slug, at, exp = Date.now() + WRAP_GRANT_MS) => `${exp}.${wrapMac(project, slug, at, exp)}`;
+  // The viewer's own path, as the kit reads it (dot segments resolved), and the exact raw path a grant is good for.
+  const VIEWER = /^\/view\/artifact\/([^/]+)$/;
+  const wrapGranted = (label, rawPath, url) => {
+    const m = VIEWER.exec(rawPath);
     if (!m || !LINK_ID.test(m[1]) || url.searchParams.getAll('at').length !== 1 || url.searchParams.getAll('w').length !== 1) return false;
+    const at = url.searchParams.get('at');
+    if (!/^tree:/.test(at) || !TREE.test(at.slice(5))) return false;
     const w = /^(\d{1,15})\.([\w-]{22})$/.exec(url.searchParams.get('w'));
     const exp = w ? Number(w[1]) : 0;
     if (!w || exp < Date.now() || exp > Date.now() + WRAP_GRANT_MS) return false;
-    return sameBytes(Buffer.from(w[2]), Buffer.from(wrapMac(port, m[1], url.searchParams.get('at'), exp)));
+    return sameBytes(Buffer.from(w[2]), Buffer.from(wrapMac(label, m[1], at, exp)));
   };
-  // An artifact's frame inside that viewer, only at a tree this port's binding published for that
-  // very page: what it shows is public already, so it needs no grant, and the kit passes none along.
-  const treeGranted = (port, raw) => {
-    const m = /^\/artifact\/tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?)\/([^/]+)\//.exec(raw);
-    if (!m || /\.\.|%2e|%5c|\\/i.test(raw)) return false;
-    try { return Object.values(store.load().public ?? {}).some((b) => b?.port === port && Object.hasOwn(b.artifacts ?? {}, m[2]) && b.artifacts[m[2]]?.tree === m[1]); } catch { return false; }
-  };
+  // The viewer's frame-ancestors: the box out of every list, and back in, alone, under the grant. A
+  // list left empty is 'none'; a policy that names no ancestors is left as it is.
+  const viewerAncestors = (csp, granted) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => {
+    if (!list.trim() || /^\s*'none'\s*$/i.test(list)) return all;
+    const kept = list.trim().split(/\s+/).filter((s) => s !== PUB);
+    const out = granted ? [...kept, PUB] : kept;
+    return `${sep}${sp}frame-ancestors ${out.length ? out.join(' ') : "'none'"}${/\s$/.test(list) ? ' ' : ''}`;
+  });
   const capMac = (port, prefix, exp, sid) => b64u(mac('artifact', port, prefix, exp, sid));
   const capFor = (port, prefix, session) => {
     const exp = Date.now() + CAPABILITY_MS;
@@ -1909,7 +2025,9 @@ export function createGateway(opts = {}) {
     const s = store.load();
     return sameBytes(got, want) && s.passkeys.length > 0 && liveSession(s, (x) => x.hash.startsWith(sid)) !== null;
   };
-  const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self'; frame-src ${[TERM, ...BLOCK.map(instanceOrigin)].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  // The hub page frames the terminal and each listed project's host: hubFrames, as the last list read
+  // said (a failed read keeps the last copy). Never a wildcard, which would admit any preview's name.
+  const hubCsp = () => `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self'; frame-src ${[TERM, ...hubFrames].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   // ttyd's page has no OSC 52, how tmux and a program in it (Claude Code's fullscreen) put text on
   // the clipboard. This adds it, to write only (a request to read is ignored), and only just after
   // the owner clicked or typed here, so what an agent prints can't quietly replace the clipboard.
@@ -2166,22 +2284,24 @@ export function createGateway(opts = {}) {
   // on both, a site that opens the page in a popup could tell from the window (its frame count, or
   // whether it can still see it) whether the visitor is the signed-in owner. The page's sandbox
   // has no allow-popups, so it opens no window that the policy could cut off.
-  const servePublic = (req, res) => {
+  // On <label>.<box>, the page is /<slug>/… of the project of that name.
+  const servePublic = (req, res, label) => {
     if (!['GET', 'HEAD'].includes(req.method)) return send(res, 405, 'text/plain; charset=utf-8', 'GET or HEAD only', { allow: 'GET, HEAD' });
     if (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker') return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
     const notFound = () => send(res, 404, 'text/plain; charset=utf-8', 'not found');
-    const m = /^\/([^/]+)\/([^/]+)(\/.*)?$/.exec(req.url.split('?')[0]);
-    if (!m || !PROJECT.test(m[1]) || !LINK_ID.test(m[2])) return notFound();
+    const raw = /^\/([^/]+)(\/.*)?$/.exec(req.url.split('?')[0]);
+    const m = raw ? [raw[0], label, raw[1], raw[2]] : null;
+    if (!m || !LINK_ID.test(m[2])) return notFound();
     const pub = store.load().public ?? {};
     const proj = Object.hasOwn(pub, m[1]) ? pub[m[1]] : null;
     const art = proj && Object.hasOwn(proj.artifacts ?? {}, m[2]) ? proj.artifacts[m[2]] : null;
     if (!art) return notFound();
-    if (m[3] === undefined) { res.writeHead(302, { location: `/${m[1]}/${m[2]}/`, 'cache-control': 'no-store', ...hsts }); return res.end(); }
+    if (m[3] === undefined) { res.writeHead(302, { location: `/${m[2]}/`, 'cache-control': 'no-store', ...hsts }); return res.end(); }
     const rel = m[3] === '/' ? 'index.html' : m[3].slice(1);
     const f = publicPathOk(rel) && Object.hasOwn(art.files ?? {}, rel) ? art.files[rel] : null;
     if (!f || !/^[0-9a-f]{64}$/.test(f.sha256 ?? '')) return notFound();
     const tag = `"${f.sha256}"`;
-    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(`${PUBLIC}/${m[1]}/${m[2]}/`), ...(rel === 'index.html' ? { vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' } : {}), ...hsts };
+    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(publicAddress(m[1], m[2])), ...(rel === 'index.html' ? { vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' } : {}), ...hsts };
     const asked = String(req.headers['if-none-match'] ?? '').split(',').map((t) => t.trim());
     if (asked.includes('*') || asked.includes(tag)) { res.writeHead(304, head); return res.end(); }
     // no range requests, as in the kit: the whole file or its headers
@@ -2236,10 +2356,18 @@ export function createGateway(opts = {}) {
     return m;
   };
   const manifestHash = (m) => hex256(canonicalJson(m));
+  // A page needs an address: <project>.<box>/<slug>/, where the slug is none of the dashboard's paths.
+  const addressProblem = (m) => {
+    if (RESERVED_SEGMENTS.includes(m.slug)) return `${m.slug} is a path of the dashboard, so a page can't be published under it: rename the artifact`;
+    if (!hostable(m.project)) return `${m.project} can't be a host name, so a page of it would have no address: rename the project (settings.md's project)`;
+    return null;
+  };
   // Whether this item may go on the box as it stands: bound to the root the owner saw, and under
   // the cap with this item's files in place of its old version. Checked before the slow work, and
   // again in the queue against the state it will change.
   const publishProblem = (pubNow, m, item) => {
+    const where = addressProblem(m);
+    if (where) return where;
     const bound = Object.hasOwn(pubNow, m.project) ? pubNow[m.project] : null;
     if (bound && bound.root !== m.root) {
       if (item.move !== true) return `${m.project} is published from ${bound.root}; this instance is ${m.root}: tick "move it" to publish it from here`;
@@ -2280,12 +2408,18 @@ export function createGateway(opts = {}) {
       ids[rel] = { oid: gitBlobId(r.body, algo), mode: f.mode };
     }
     if (gitTreeId(ids, algo) !== m.tree) throw new Error(`the files don't make the tree ${m.tree.slice(0, 12)} the manifest names; nothing was published`);
+    // this item's own proof that its name is one project's, from a list read begun now, taken
+    // outside the store's queue so a stalled hub never holds anyone else's change
+    const proof = await freshList(1000);
+    const blocked = publishBlocked(m.project, proof);
+    if (blocked) throw Object.assign(new Error(blocked), { noProof: !proof });
     return pstore.serial(async () => {
       try {
         // the budget may have run out while this item queued: refuse before any blob is written
         left();
-        // the state may have changed while this item waited: a move, another publish, the cap
-        why = publishProblem(store.load().public ?? {}, m, item);
+        // the state may have changed while this item waited: a move, another publish, the cap, a
+        // second project of this name listed since
+        why = publishProblem(store.load().public ?? {}, m, item) || publishBlocked(m.project, proof);
         if (why) throw new Error(why);
         for (const [sha, buf] of bytes) pstore.write(sha, buf);
         // the record gets the full deadline, whatever is left of the budget: cutting it short would leave a recorded-but-unsaved publish
@@ -2300,7 +2434,7 @@ export function createGateway(opts = {}) {
         const update = Object.hasOwn(kept, m.slug);
         pub[m.project] = { root: m.root, port, artifacts: { ...kept, [m.slug]: { tree: m.tree, title: m.title, at: new Date().toISOString(), files: Object.fromEntries(Object.entries(m.files).map(([rel, f]) => [rel, { sha256: f.sha256, size: f.size }])) } } };
         store.save({ ...now, public: pub });
-        return { url: `${PUBLIC}/${m.project}/${m.slug}/`, update };
+        return { url: publicAddress(m.project, m.slug), update };
       } finally { try { pstore.sweep(store.load().public); } catch {} }
     });
   };
@@ -2326,7 +2460,7 @@ export function createGateway(opts = {}) {
     return text.length <= 32 * 1024 ? text : asciiJson(Object.fromEntries(Object.entries(all).filter(([, x]) => x.port === port)));
   };
 
-  // The owner's page on the public name (spec §8): the project's viewer at the published version,
+  // The owner's page at a published page's address (spec §8): the project's viewer at the published version,
   // with threads. Only for a top-level visit (sec-fetch-dest: document; navigate also matches frames)
   // to a published page's index, by the signed-in owner, whose bound instance the hub's list (as last
   // polled) shows as that checkout with a kit that has viewers. Anything in doubt is null: a session
@@ -2336,22 +2470,46 @@ export function createGateway(opts = {}) {
   // on a miss, so its timing says nothing of who is visiting. The list can be up to a poll stale.
   // The root check is for consistency, against another real checkout on that port, not for
   // authenticity: that rests on the port binding, as it does for the dashboard on that name.
-  // The wrapper's own policy: styles and one frame, the bound instance's; no script, nothing to fetch.
-  const WRAP_CSP = (inst) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${inst}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
-  const ownerWrapper = (req, url) => {
+  // On <label>.<box> the binding is found by name and root, not by the port stored at publish: the
+  // listed project of that name, one port only, at the stored root, with viewers. A project whose
+  // port moved keeps its wrapper; a name two projects share gets the plain bytes.
+  // The viewer it frames is on the project's host, and the wrapper is on the box's own name
+  // (<box>/w/<project>/<slug>/): the dashboard's page stops itself when a page of its own origin
+  // frames it, so the wrapper can't share that origin. The owner's visit to the page's index is sent
+  // there; the wrapper page is signed in only and holds no byte of the artifact.
+  // The wrapper's own policy: styles and one frame, the project's host; no script, nothing to fetch.
+  const WRAP_CSP = (origin) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${origin}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  const WRAP_HEAD = { 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' };
+  // The binding, by name and root, of a page this project published, or null in any doubt.
+  const wrapBinding = (label, slug) => {
+    if (!LINK_ID.test(slug) || RESERVED_SEGMENTS.includes(slug)) return null;
+    const s = store.load();
+    const bound = Object.hasOwn(s.public ?? {}, label) ? s.public[label] : null;
+    const art = bound && Object.hasOwn(bound.artifacts ?? {}, slug) ? bound.artifacts[slug] : null;
+    if (!art || typeof bound.root !== 'string' || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
+    const c = projects.get(label) ?? [];
+    if (c.length !== 1 || !c[0].viewer || c[0].root !== bound.root) return null;
+    return { art, at: `tree:${art.tree}` };
+  };
+  // On <project>.<box>: the slug of the signed-in owner's own document visit to a bound page's index, or null.
+  const ownerVisit = (req, url, label) => {
     try {
       if (req.method !== 'GET' || req.headers['sec-fetch-dest'] !== 'document' || url.searchParams.has('plain')) return null;
-      const m = /^\/([^/]+)\/([^/]+)\/(?:index\.html)?$/.exec(req.url.split('?')[0]);
-      if (!m || !PROJECT.test(m[1]) || !LINK_ID.test(m[2])) return null;
-      const s = store.load();
-      if (!s.passkeys.length || !sessionOf(req)) return null;
-      const bound = Object.hasOwn(s.public ?? {}, m[1]) ? s.public[m[1]] : null;
-      const art = bound && Object.hasOwn(bound.artifacts ?? {}, m[2]) ? bound.artifacts[m[2]] : null;
-      if (!art || !BLOCK.includes(bound.port) || typeof bound.root !== 'string' || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
-      const x = listed.get(bound.port);
-      if (!x?.viewer || x.root !== bound.root) return null;
-      const at = `tree:${art.tree}`;
-      return { port: bound.port, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title: typeof art.title === 'string' && art.title ? art.title : m[2], frame: `${instanceOrigin(bound.port)}/view/artifact/${m[2]}?at=${at}&w=${wrapGrant(bound.port, m[2], at)}` }) };
+      const m = /^\/([^/]+)\/(?:index\.html)?$/.exec(req.url.split('?')[0]);
+      if (!m || !store.load().passkeys.length || !sessionOf(req)) return null;
+      return wrapBinding(label, m[1]) ? m[1] : null;
+    } catch { return null; }
+  };
+  // On the box, after the session: /w/<project>/<slug>/, or null for anything it can't bind.
+  const ownerWrapper = (rawPath) => {
+    try {
+      const m = /^\/w\/([^/]+)\/([^/]+)\/$/.exec(rawPath);
+      if (!m || !HOST_LABEL.test(m[1]) || RESERVED_LABELS.includes(m[1])) return null;
+      const b = wrapBinding(m[1], m[2]);
+      if (!b) return null;
+      const origin = projectOrigin(m[1]);
+      const title = typeof b.art.title === 'string' && b.art.title ? b.art.title : m[2];
+      return { origin, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title, plain: `${origin}/${m[2]}/?plain`, frame: `${origin}/view/artifact/${m[2]}?at=${b.at}&w=${wrapGrant(m[1], m[2], b.at)}` }) };
     } catch { return null; }
   };
 
@@ -2493,39 +2651,64 @@ export function createGateway(opts = {}) {
     let url;
     try { url = new URL(req.url, PUB); } catch { return send(res, 400, 'text/plain', 'bad request'); }
     // an app's own /healthz is reachable through its link; the platform's probe is on the service's name
-    if (url.pathname === '/healthz' && !previewOf(req.headers.host)) return send(res, 200, 'text/plain', 'ok');
+    // The gateway's own ok on every name, but for a live preview's own /healthz to its signed-in owner:
+    // signed out, a real name and a made-up one answer alike.
+    if (url.pathname === '/healthz') {
+      const l = labelOf(req.headers.host);
+      let app = false;
+      // the session work first, for every label, so its cost says nothing of which names are live
+      try {
+        const signedIn = !!l && store.load().passkeys.length > 0 && !!sessionOf(req);
+        app = signedIn && previews.has(l);
+      } catch {}
+      if (!app) return send(res, 200, 'text/plain', 'ok');
+    }
     // Our own names only; and anything but a read must come from a page on the same name.
     const isBox = req.headers.host === pubUrl.host;
     const isTerm = req.headers.host === termHost;
-    const isPublic = req.headers.host === publicHost;
-    const pv = previewOf(req.headers.host);
-    const port = isBox || isTerm || isPublic || pv ? null : instanceOf(req.headers.host);
-    if (!isBox && !isTerm && !isPublic && !port && !pv) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
-    // Anyone's, so before every check that is about the owner (Origin, cookie, session). The one
-    // exception reads the cookie to choose a page, never to refuse one: the owner's own visit gets
-    // the wrapper, and whatever that can't settle gets the public's bytes, exactly as before.
-    if (isPublic) {
-      const wrap = ownerWrapper(req, url);
-      if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(instanceOrigin(wrap.port)), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' });
-      try { return servePublic(req, res); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
-    }
-    const own = isBox ? PUB : isTerm ? TERM : pv ? previewOrigin(pv) : instanceOrigin(port);
+    const label = isBox || isTerm ? null : labelOf(req.headers.host);
+    if (!isBox && !isTerm && !label) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
+    const own = isBox ? PUB : isTerm ? TERM : projectOrigin(label);
     if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin !== own) return send(res, 403, 'text/plain; charset=utf-8', 'only from this box\'s own pages');
-    // The kit has no service workers. One an agent's page registers on an instance's name would
+    // The kit has no service workers. One an agent's page registers on a project's name would
     // outlive its server, and run as that name's real dashboard once one takes the port.
-    if ((port || pv) && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
-    const p = url.pathname;
-    const isAuth = isBox && (p === '/auth' || p.startsWith('/auth/'));
+    if (label && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
+    // Before any lookup, for every label: no other site lays one of these under its own page with
+    // the owner's session in it. An exact capability path, which an artifact navigating its own frame
+    // sends as a cross-site iframe request, has its own check instead, and reads no session.
     const rawPath = req.url.split('?')[0];
-    try {
-      const cm = port ? /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/.exec(rawPath) : null;
-      if (cm) {
-        if (!['GET', 'HEAD'].includes(req.method) || !capOk(port, cm[4], cm[1], cm[2], cm[3])) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
-        return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}`, publicFrame: treeGranted(port, cm[4]) });
+    if (label && !capLinkExact(rawPath) && PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, 'text/plain; charset=utf-8', 'not in another site\'s frame');
+    const p = url.pathname;
+    // A page this name published: anyone's, from the gateway's own store, before every check about
+    // the owner. The one exception reads the cookie to choose a page, never to refuse one: the
+    // owner's own visit is sent to the wrapper on the box (/w/), and whatever that can't settle gets
+    // the public's bytes. Nothing after this runs for a published page.
+    if (label) {
+      let published = false;
+      try { published = publishedBy(label, rawPath.split('/')[1]); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
+      if (published) {
+        const slug = ownerVisit(req, url, label);
+        if (slug) {
+          res.writeHead(302, { location: `${PUB}/w/${label}/${slug}/`, ...WRAP_HEAD, ...hsts });
+          return res.end();
+        }
+        try { return servePublic(req, res, label); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
       }
-      // A preview may be framed only by a page of this box (the dashboard's viewer, in time), so no
-      // other site can lay it under its own page with the owner's session in it.
-      if (pv && PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, 'text/plain; charset=utf-8', 'not in another site\'s frame');
+    }
+    const isAuth = isBox && (p === '/auth' || p.startsWith('/auth/'));
+    try {
+      const cm = label ? CAP_LINK.exec(rawPath) : null;
+      if (cm) {
+        // The same MAC and state read for every name: an unlisted one is checked against port 0,
+        // which no link is minted for, so a failure costs the same and says nothing of the list.
+        const only = projects.get(label);
+        const capPort = only?.length === 1 ? only[0].port : null;
+        const capGood = capOk(capPort ?? 0, cm[4], cm[1], cm[2], cm[3]);
+        if (!['GET', 'HEAD'].includes(req.method) || capPort === null || !capGood) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
+        // the capability is this request's only credential: no cookie of any name goes on to the port
+        delete req.headers.cookie;
+        return proxy(req, res, { port: capPort, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}` });
+      }
       if (!crossSiteOk(req, p, url)) return send(res, 403, 'text/plain; charset=utf-8', 'not for another site\'s page');
       const s = store.load();
       const claimed = s.passkeys.length > 0;
@@ -2577,25 +2760,45 @@ export function createGateway(opts = {}) {
       if (installed) return send(res, 200, installed.type, installed.body());
       const who = claimed ? sessionOf(req) : null;
       if (!who) {
-        // a lens open in a tab of its own is no use after sign-in: the preview itself is
-        const back = pv && p === '/.devteam/lens' ? `${own}/` : `${own}${req.url}`;
-        if (navigating(req)) return redirect(res, claimed ? loginAt(back) : loginAt());
+        // On a project's name, the same bytes for every name; only its script can read the hash.
+        if (label && claimed && navigating(req)) return send(res, 401, 'text/html; charset=utf-8', PAGES.signedOut(PUB), { 'content-security-policy': PAGE_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+        if (navigating(req)) return redirect(res, claimed ? loginAt(`${own}${req.url}`) : loginAt());
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
       const { session, person } = who;
+      // Only now, with the session, does the name mean anything: a miss asks the hub once, shared.
+      let port = null;
+      let pv = null;
+      if (label) {
+        let found = resolveLabel(label);
+        if (!found) { await refreshWithin(1000); found = resolveLabel(label); }
+        if (found?.shared) return previewUnavailable(req, res, () => PAGES.sharedName(label));
+        if (!found) {
+          let stored = false;
+          try { stored = Object.hasOwn(store.load().public ?? {}, label); } catch {}
+          return previewUnavailable(req, res, () => PAGES.unknownHost(label, listRead, stored, [...projects].filter(([, c]) => c.length === 1).map(([n]) => n).sort(), [...previews.keys()].sort(), projectOrigin));
+        }
+        port = found.port ?? null;
+        pv = found.preview ?? null;
+      }
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
-      if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': LENS_CSP, 'referrer-policy': 'no-referrer' });
+      if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': lensCsp(pv), 'referrer-policy': 'no-referrer' });
       if (pv) return servePreview(req, res, pv, own);
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
       if (port) {
+        // another project's page under this name is no page: 404, never the dashboard (reserved
+        // segments, /upload among them, are never another project's)
+        if (anotherProjects(label, rawPath)) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
         // dropped files, as on term. (receiveUpload, after the session and the Origin rule above), and served back
         if (rawPath === '/upload' && req.method === 'POST') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
         if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) return await serveUpload(req, res, rawPath);
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
         if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath]);
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, publicFrame: viewerGranted(port, rawPath, url) || treeGranted(port, rawPath), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        // the viewer, by its path as the kit resolves it: the box may frame it only under the wrapper's grant
+        const viewer = VIEWER.test(p) || VIEWER.test(rawPath) ? { granted: wrapGranted(label, rawPath, url) } : null;
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -2638,12 +2841,24 @@ export function createGateway(opts = {}) {
         return send(res, 404, 'text/plain', 'not found');
       }
       // The box's own name: the gateway's copy of the hub page, what it needs to know, and the list.
-      if (req.method === 'GET' && (p === '/' || p === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': HUB_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
-      // /box.json, box: 1: { box, terminal, instance, passkeys, previews, push, image }. image is what the
+      if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
+        // a project listed a moment ago is framed at once: one shared read first, a second at most
+        await refreshWithin(1000);
+        return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': hubCsp(), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+      }
+      // The owner's wrapper of a published page, on the box's own name (ownerWrapper). Anything it
+      // can't bind answers as any other unknown path here does.
+      if (req.method === 'GET' && isBox && rawPath.startsWith('/w/')) {
+        const wrap = ownerWrapper(rawPath);
+        if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(wrap.origin), ...WRAP_HEAD });
+        return send(res, 404, 'text/plain', 'not found');
+      }
+      // /box.json, box: 2: { box, terminal, project, passkeys, previews, push, image }. project is where a
+      // project is (project-hosts@1), {project} its name. image is what the
       // box's image says it is (boxImage, from the image's ENV: its release and its tools' pins):
       // { release: 'vX.Y.Z' | null, tools: { name: version } } in the ENV's order, or null with neither
-      // set (a laptop, an older image). Versions only. An additive change keeps box: 1.
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE });
+      // set (a laptop, an older image). Versions only. An additive change keeps box: 2.
+      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
@@ -2688,21 +2903,31 @@ export function createGateway(opts = {}) {
       }
       if (req.method === 'GET' && (p === '/public' || p.startsWith('/public/')) && req.headers['sec-fetch-dest'] !== undefined && req.headers['sec-fetch-dest'] !== 'document') return send(res, 403, 'text/plain; charset=utf-8', 'open this page on its own, not in a frame');
       if (req.method === 'GET' && p === '/public/publish') {
-        const port = Number(url.searchParams.get('port'));
+        // One proof for what the page shows; each item of the POST takes its own.
+        const proved = await freshList(1000);
+        const byName = url.searchParams.has('project') && !url.searchParams.has('port');
+        if (byName && !proved) return send(res, 503, 'text/plain; charset=utf-8', publishBlocked(url.searchParams.get('project'), null));
+        // by the project's name, or by an instance's port as an older dashboard sends it
+        const named = url.searchParams.has('port') ? { port: Number(url.searchParams.get('port')) } : byName ? await projectPort(url.searchParams.get('project')) : { port: NaN };
+        if (named.refused) return send(res, 409, 'text/plain; charset=utf-8', named.refused);
+        const port = named.port;
         const slugs = [...new Set(url.searchParams.getAll('slug'))];
-        if (!BLOCK.includes(port) || !slugs.length || slugs.length > 50 || !slugs.every((x) => LINK_ID.test(x))) return send(res, 400, 'text/plain; charset=utf-8', 'publish?port=<an instance of this box>&slug=<slug>[&slug=…], at most 50');
+        if (!BLOCK.includes(port) || !slugs.length || slugs.length > 50 || !slugs.every((x) => LINK_ID.test(x))) return send(res, 400, 'text/plain; charset=utf-8', 'publish?project=<project>&slug=<slug>[&slug=…] (or ?port=<an instance of this box>), at most 50');
         const pub = store.load().public ?? {};
         // at most four manifests at a time: each is a node child on the instance, and Restore all asks for up to 50
         const rows = await mapPool(slugs, 4, async (slug) => {
           try {
             const m = await fetchManifest(port, slug);
+            // however the instance was named, the manifest's project is judged against the proof
+            const why = addressProblem(m) || publishBlocked(m.project, proved);
+            if (why) throw new Error(why);
             const bound = Object.hasOwn(pub, m.project) ? pub[m.project] : null;
             const now = bound && Object.hasOwn(bound.artifacts ?? {}, slug) ? bound.artifacts[slug] : null;
             const moving = bound && bound.root !== m.root;
             // what the owner approved earlier, if this box still holds it: the only copy to compare with
             const held = now && !moving ? now : null;
             // a move takes down every other page of the old checkout: the page names them
-            return { slug, m, hash: manifestHash(m), url: `${PUBLIC}/${m.project}/${slug}/`, held: !!held, changes: held && held.tree !== m.tree ? fileChanges(held.files, m.files) : null, state: !held ? 'not on this box' : held.tree === m.tree ? 'already public at this version' : 'an update', movedFrom: moving ? bound.root : null, others: moving ? Object.keys(bound.artifacts ?? {}).filter((x) => x !== slug).sort() : [] };
+            return { slug, m, hash: manifestHash(m), url: publicAddress(m.project, slug), held: !!held, changes: held && held.tree !== m.tree ? fileChanges(held.files, m.files) : null, state: !held ? 'not on this box' : held.tree === m.tree ? 'already public at this version' : 'an update', movedFrom: moving ? bound.root : null, others: moving ? Object.keys(bound.artifacts ?? {}).filter((x) => x !== slug).sort() : [] };
           } catch (e) { return { slug, error: e.message }; }
         });
         return page(res, PAGES.publish(port, rows));
@@ -2713,9 +2938,12 @@ export function createGateway(opts = {}) {
         const items = Array.isArray(body?.items) ? body.items : [];
         if (!BLOCK.includes(port) || !items.length || items.length > 50 || !items.every((x) => x && typeof x.slug === 'string' && LINK_ID.test(x.slug) && typeof x.manifest === 'string' && /^[0-9a-f]{64}$/.test(x.manifest))) return json(res, 400, { error: 'publish takes { port, items: [{ slug, manifest, move, movedFrom }] }, 1 to 50 items' });
         const results = [];
+        // a proof that failed stops the request: the rest get the same refusal and are not asked for
+        let stopped = null;
         for (const it of items) {
+          if (stopped) { results.push({ slug: it.slug, ok: false, error: stopped }); continue; }
           try { results.push({ slug: it.slug, ok: true, ...(await publishItem(port, it)) }); }
-          catch (e) { results.push({ slug: it.slug, ok: false, error: e.message }); }
+          catch (e) { results.push({ slug: it.slug, ok: false, error: e.message }); if (e.noProof) stopped = e.message; }
         }
         log(`public: ${results.map((x) => `${x.slug} ${x.ok ? 'published' : 'refused'}`).join(', ')} from instance ${port}`);
         return json(res, 200, { results });
@@ -2724,7 +2952,7 @@ export function createGateway(opts = {}) {
       if (req.method === 'GET' && p === '/public/unpublish') {
         const pub = store.load().public ?? {};
         const slug = url.searchParams.get('slug') ?? '';
-        const port = url.searchParams.has('port') ? Number(url.searchParams.get('port')) : null;
+        let port = url.searchParams.has('port') ? Number(url.searchParams.get('port')) : null;
         let project = url.searchParams.get('project');
         if (project === null && port !== null) {
           const named = Object.keys(pub).filter((n) => pub[n].port === port && Object.hasOwn(pub[n].artifacts ?? {}, slug));
@@ -2733,14 +2961,25 @@ export function createGateway(opts = {}) {
         if (!LINK_ID.test(slug) || (port !== null && !BLOCK.includes(port)) || !PROJECT.test(project ?? '')) return send(res, 400, 'text/plain; charset=utf-8', 'unpublish?project=<project>&slug=<slug>[&port=<instance>]');
         const a = Object.hasOwn(pub, project) && Object.hasOwn(pub[project].artifacts ?? {}, slug) ? pub[project].artifacts[slug] : null;
         if (!a) return send(res, 404, 'text/plain; charset=utf-8', `${project}/${slug} is not public on this box`);
-        return page(res, PAGES.unpublish({ project, slug, port, title: a.title, url: `${PUBLIC}/${project}/${slug}/` }));
+        // by the project's name, the instance to tell is the one the list names (a shared name, none)
+        if (url.searchParams.has('project') && port === null) port = (await projectPort(project)).port ?? null;
+        // Never refused: a page nobody could take down is worse. Without a fresh list proving the name
+        // one project's, the box can't know which instance holds the record, so it tells none.
+        const proved = await freshList(1000);
+        const shared = listedShared(project);
+        return page(res, PAGES.unpublish({ project, slug, port: shared || !proved ? null : port, title: a.title, url: hostable(project) ? publicAddress(project, slug) : null, shared }));
       }
       if (req.method === 'POST' && p === '/public/unpublish') {
         const body = await readJson(req);
         const project = String(body?.project ?? '');
         const slug = String(body?.slug ?? '');
-        const port = body?.port === undefined || body?.port === null ? null : Number(body.port);
-        if (!PROJECT.test(project) || !LINK_ID.test(slug) || (port !== null && !BLOCK.includes(port))) return json(res, 400, { error: 'unpublish takes { project, slug, port? }' });
+        const asked = body?.port === undefined || body?.port === null ? null : Number(body.port);
+        if (!PROJECT.test(project) || !LINK_ID.test(slug) || (asked !== null && !BLOCK.includes(asked))) return json(res, 400, { error: 'unpublish takes { project, slug, port? }' });
+        // A shared name, or no fresh list to say it isn't: only the gateway's copy comes down, and no
+        // instance is told, even one sent, since the box can't know which one holds the record.
+        const proved = await freshList(1000);
+        const shared = listedShared(project);
+        const port = shared || !proved ? null : asked;
         const root = await pstore.serial(() => {
           const now = store.load();
           const pub = { ...(now.public ?? {}) };
@@ -2757,11 +2996,12 @@ export function createGateway(opts = {}) {
         });
         if (root === null) return json(res, 404, { error: `${project}/${slug} is not public on this box` });
         log(`public: ${project}/${slug} unpublished`);
-        if (port === null) return json(res, 200, { ok: true, recorded: false, note: 'no instance was named, so the record wasn\'t written; the Library\'s Forget clears it' });
+        if (shared) return json(res, 200, { ok: true, recorded: false, shared: true, note: `${project}/${slug} is down. Two listed projects share that name, so it may have been the other project's page. No instance's record was written; the Library's Forget clears it.` });
+        if (port === null) return json(res, 200, { ok: true, recorded: false, note: asked !== null ? 'the hub\'s list can\'t be read, so no instance\'s record was written; the Library\'s Forget clears it' : 'no instance was named, so the record wasn\'t written; the Library\'s Forget clears it' });
         try { await recordUnpublish(port, project, root, slug); return json(res, 200, { ok: true, recorded: true, note: null }); }
         catch (e) { return json(res, 200, { ok: true, recorded: false, note: `${e.message}; the Library's Forget clears it` }); }
       }
-      if (req.method === 'GET' && (p === '/public' || p === '/public/')) return page(res, PAGES.publicList(store.load().public ?? {}, PUBLIC));
+      if (req.method === 'GET' && (p === '/public' || p === '/public/')) return page(res, PAGES.publicList(store.load().public ?? {}, (n, s) => (hostable(n) ? publicAddress(n, s) : null)));
       return send(res, 404, 'text/plain', 'not found');
     } catch (e) {
       if (res.headersSent) return res.destroy();
@@ -2970,13 +3210,19 @@ const publishNote = (r) => {
 };
 const doc = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>${title}</title>${STYLE}</head><body><main>${body}</main>${CLIENT}`;
 const PREVIEW_REFRESH = '<meta http-equiv="refresh" content="5">';
+// A name not listed yet may be a moment away (a `preview` command takes one to show up): retry for a few minutes, never forever.
+const RETRY_UNLISTED = "<script>try{const k='dt-preview-since',t=Date.now();let s=Number(sessionStorage.getItem(k)||0);if(!s||t-s>600000){s=t;sessionStorage.setItem(k,String(s))}if(t-s<180000)setTimeout(()=>location.reload(),5000)}catch{}</script>";
 const PAGES = {
+  // Signed out on a project's host: the same bytes for every name. Only script can read the hash.
+  signedOut: (box) => `${doc('Sign in', '<h1>devteam</h1><p>Sign in to open this page.</p>')}<script>const here = location.pathname === '/.devteam/lens' ? location.origin + '/' : location.href; location.replace(${jsonIn(`${box}/auth/login?next=`)} + encodeURIComponent(here));</script></body></html>`,
+  sharedName: (name) => `${doc('No dashboard', `<h1>Two projects are named ${esc(name)}</h1><p>This box can't tell which one this address means, so it opens neither. Rename one (settings.md's project). Their published pages still answer.</p>`)}</body></html>`,
+  unknownHost: (name, read, stored, names, previewNames, originOf) => `${doc('Not found', `${RETRY_UNLISTED}<h1>${!read || stored ? `${esc(name)} isn't running` : `Nothing is named ${esc(name)} on this box`}</h1><p>${!read ? 'The hub isn\'t running, so the box can\'t list its projects.' : `Live now: ${[...names, ...previewNames].map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ') || 'none'}.`}</p>`)}</body></html>`,
   // Every preview on the box, by instance. Each value came through the hub's list and is shown as text.
   previewList: (rows) => doc('Previews', `<h1>Previews on this box</h1><p>Only you can open these, signed in. Each is a running server a session offered.</p>${rows.length ? Object.entries(rows.reduce((g, r) => { (g[r.root] ??= []).push(r); return g; }, Object.create(null))).map(([root, rs]) => `<h2 style="font-size:15px;margin:16px 0 4px">${esc(rs[0].project)} <small>${esc(root)}</small></h2><ul>${rs.map((r) => `<li class="pub"><span><b>${esc(r.name)}</b> <small>${[r.session && esc(r.session), r.label && esc(r.label), `port ${esc(r.port)}`, esc(r.state)].filter(Boolean).join(' · ')}</small></span>${r.link ? `<a href="${esc(r.link)}">Open</a>` : ''}</li>`).join('')}</ul>`).join('') : '<p>Nothing is offered right now.</p>'}`),
   previewDown: (name, l) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Preview ${esc(l.label || name)} isn't answering</h1><p>Offered by ${esc(l.session)} of ${esc(l.project)}, instance ${esc(l.root)}: nothing answers on port ${esc(l.port)}. Its server may be starting, or stopped. This page retries every 5 s.</p>`)}`,
   previewAmbiguous: (name, cs) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Two instances offer a preview named ${esc(name)}</h1><p>${cs.map((c) => `${esc(c.project)} at ${esc(c.root)} (port ${esc(c.port)})`).join(' and ')}. The box serves neither until one stops; run <code>devteam.mjs preview stop ${esc(name)}</code> in the one that shouldn't. This page retries every 5 s.</p>`)}`,
   // A preview command can be a second behind the link: the page retries for a few minutes, not forever.
-  previewUnknown: (name, names, originOf) => `${doc('Preview', `<script>try{const k='dt-preview-since',t=Date.now();let s=Number(sessionStorage.getItem(k)||0);if(!s||t-s>600000){s=t;sessionStorage.setItem(k,String(s))}if(t-s<180000)setTimeout(()=>location.reload(),5000)}catch{}</script><h1>No preview named ${esc(name)} on this box</h1><p>${names.length ? `Offered now: ${names.map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ')}.` : 'Nothing is offered right now.'} This page retries for a few minutes; a <code>preview</code> command takes a moment to show up.</p>`)}`,
+  previewUnknown: (name, names, originOf) => `${doc('Preview', `${RETRY_UNLISTED}<h1>No preview named ${esc(name)} on this box</h1><p>${names.length ? `Offered now: ${names.map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ')}.` : 'Nothing is offered right now.'} This page retries for a few minutes; a <code>preview</code> command takes a moment to show up.</p>`)}`,
   claim: (box) => `${doc('Claim this box', `<h1>Claim this devteam box</h1><p>Make a passkey for this box. Your password manager (1Password, iCloud Keychain…) saves it; from then on only a passkey made here opens the box.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and claim</button></p><p id="err"></p>`)}
 <script>
 const token = decodeURIComponent(location.hash.slice(1));
@@ -3018,7 +3264,7 @@ if (go) go.onclick = run(async () => {
   } finally { go.disabled = false; }
 });
 </script></body></html>`,
-  unpublish: (x) => `${doc('Unpublish', `<h1>Take this page down</h1><p><b>${esc(x.title)}</b> (${esc(x.project)} · ${esc(x.slug)}) comes down within a minute, for everyone:</p><p><code>${esc(x.url)}</code></p><p><button id="go">Unpublish</button></p><p id="err"></p><p id="out"></p>`)}
+  unpublish: (x) => `${doc('Unpublish', `<h1>Take this page down</h1><p><b>${esc(x.title)}</b> (${esc(x.project)} · ${esc(x.slug)}) comes down within a minute, for everyone:</p>${x.url ? `<p><code>${esc(x.url)}</code></p>` : ''}${x.shared ? `<p id="shared">Two listed projects share the name ${esc(x.project)}, so this page may be the other project's. Only this page comes down, and no instance's record is written; the Library's Forget clears it.</p>` : ''}<p><button id="go">Unpublish</button></p><p id="err"></p><p id="out"></p>`)}
 <script>
 const ITEM = ${jsonIn({ project: x.project, slug: x.slug, ...(x.port ? { port: x.port } : {}) })};
 const go = document.getElementById('go');
@@ -3028,18 +3274,19 @@ go.onclick = run(async () => {
   document.getElementById('out').textContent = 'Taken down.' + (r.recorded ? ' The Library shows it.' : ' ' + (r.note || ''));
 });
 </script></body></html>`,
-  publicList: (pub, site) => {
-    const rows = Object.entries(pub).flatMap(([n, x]) => Object.entries(x.artifacts ?? {}).map(([s, a]) => ({ n, s, a, root: x.root, link: `${site}/${n}/${s}/` })));
-    return `${doc('Public', `<h1>Public on this box</h1><p>Anyone can read these, with no sign-in. Each is the box's own copy of what you published.</p>${rows.length ? `<ul>${rows.map((r) => `<li class="pub"><b>${esc(r.a.title)}</b><small>${esc(r.n)} · ${esc(r.s)} · published ${esc(String(r.a.at).slice(0, 10))} from ${esc(r.root)}</small><code><a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">${esc(r.link)}</a></code><a href="${esc(`/public/unpublish?project=${r.n}&slug=${r.s}`)}">Unpublish</a></li>`).join('')}</ul>` : '<p>Nothing is public.</p>'}`)}</body></html>`;
+  // address(project, slug): a page's address, or null for a project whose name can't be a host
+  publicList: (pub, address) => {
+    const rows = Object.entries(pub).flatMap(([n, x]) => Object.entries(x.artifacts ?? {}).map(([s, a]) => ({ n, s, a, root: x.root, link: address(n, s) })));
+    return `${doc('Public', `<h1>Public on this box</h1><p>Anyone can read these, with no sign-in. Each is the box's own copy of what you published.</p>${rows.length ? `<ul>${rows.map((r) => `<li class="pub"><b>${esc(r.a.title)}</b><small>${esc(r.n)} · ${esc(r.s)} · published ${esc(String(r.a.at).slice(0, 10))} from ${esc(r.root)}</small>${r.link ? `<code><a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">${esc(r.link)}</a></code>` : '<small>this name can\'t be a host, so the page has no address</small>'}<a href="${esc(`/public/unpublish?project=${r.n}&slug=${r.s}`)}">Unpublish</a></li>`).join('')}</ul>` : '<p>Nothing is public.</p>'}`)}</body></html>`;
   },
   // The owner's view of a public page: the instance's viewer, framed full size under one line, and
   // no script of its own. The frame may not navigate this tab, nor open a window outside its
   // sandbox (an artifact viewer needs none); its sandbox keeps its origin.
-  ownerWrapper: ({ project, slug, title, frame }) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>${esc(title)}</title><style>
+  ownerWrapper: ({ project, slug, title, plain, frame }) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>${esc(title)}</title><style>
 html{touch-action:manipulation}:root{color-scheme:light dark;--bg:#fafafa;--fg:#171717;--fg2:#666;--line:#e5e5e5}@media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#ededed;--fg2:#a1a1a1;--line:#2e2e2e}}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.4 ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}body{display:flex;flex-direction:column}
 header{padding:6px 12px;border-bottom:1px solid var(--line);color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}a{color:var(--fg)}iframe{flex:1;border:0;width:100%}
-</style></head><body><header>Public · ${esc(project)}/${esc(slug)} · <a href="?plain">Open it as the public sees it</a></header><iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads" autofocus></iframe></body></html>`,
+</style></head><body><header>Public · ${esc(project)}/${esc(slug)} · <a href="${esc(plain)}">Open it as the public sees it</a></header><iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads" autofocus></iframe></body></html>`,
 };
 
 // --- command line ------------------------------------------------------------------------------
