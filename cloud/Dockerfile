@@ -384,8 +384,19 @@ LIST
 [ "$only_sup" = 1 ] || [ "${cut_short:-0}" = 1 ] && set -- "$@" "" "More windows…" m "choose-tree -Zw"
 exec tmux "$@"
 EOF
+# box-recover: one restore at a time. The boot's and the minute loop's runs hold ~/.box/recover.lock
+# (start_recover) and say so with BOX_RECOVER_LOCKED; a run by anyone else (the operator, told of a
+# restart before the boot's run has finished) waits for the lock first, so two restores never start
+# the same supervisor at once. The variable goes no further than this script.
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-recover
 #!/bin/sh
+if [ "$BOX_RECOVER_LOCKED" != 1 ]; then
+  lock="$HOME/.box/recover.lock"
+  mkdir -p "$HOME/.box"
+  flock -n "$lock" true 2>/dev/null || echo "box-recover: another restore is running (the boot's or the minute loop's); waiting for it to finish" >&2
+  exec env BOX_RECOVER_LOCKED=1 flock -w 3600 "$lock" /usr/local/bin/box-recover "$@"
+fi
+unset BOX_RECOVER_LOCKED
 exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs recover --machine --in "$HOME/code" --session home --was-up "$HOME/.devteam-supervisors.boot" "$@"
 EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-status
@@ -554,7 +565,7 @@ start_operator() {
     timeout 20 tmux new-session -d -s home -n operator -c "$HOME/operator" || return 1
     timeout 20 tmux new-window -d -t '=home:' -n shell -c "$HOME"
   fi
-  ask='You are the sanctuarycomputer/devteam operator for this box. The boot has run box-recover, and what it printed is in ~/.box/recover.log: read it, sort out anything NOT started, and make sure your supervisors are all up and running.'
+  ask='You are the sanctuarycomputer/devteam operator for this box. The boot is running box-recover, and what it prints lands in ~/.box/recover.log when it finishes (box-recover run by hand waits for it): read it, sort out anything NOT started, and make sure your supervisors are all up and running.'
   case $1 in lost) why='The tmux server on this box stopped, and every window on it went with it; it was started again as at a boot.' ;; *) why='The box restarted.' ;; esac
   if ls "$HOME"/.claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; ask="$why $ask"; else c=''; fi
   # its job is in its system prompt, so what it's told, and what the owner tells it, stays plain English
@@ -721,7 +732,7 @@ start_dashboards() {
 owed="$HOME/.box/recover.owed"
 start_recover() {
   if [ "$1" = wait ]; then f='-w 3600'; else flock -n "$HOME/.box/recover.lock" true 2>/dev/null || { : > "$owed"; return 1; }; f=-n; fi
-  ( flock $f 9 || { : > "$owed"; note "box-recover: another run held it; this one did not run, the next minute tries again"; exit 1; }; /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) 9> "$HOME/.box/recover.lock" &
+  ( flock $f 9 || { : > "$owed"; note "box-recover: another run held it; this one did not run, the next minute tries again"; exit 1; }; BOX_RECOVER_LOCKED=1 /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) 9> "$HOME/.box/recover.lock" &
 }
 start_dashboards
 # The restore runs here, after boot.sh and the dashboards, not by the operator's hand: an operator
