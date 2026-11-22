@@ -2121,6 +2121,28 @@ exit 0
       "owner_only": "governance-edit"
     },
     {
+      "key": "responder",
+      "group": "Agents and sessions",
+      "name": "Thread responder",
+      "description": "a quick session that answers your thread messages at once; off sends them all to the supervisor",
+      "shown": "value",
+      "value": true,
+      "set": false,
+      "default": true,
+      "owner_only": null
+    },
+    {
+      "key": "responder_command",
+      "group": "Agents and sessions",
+      "name": "Responder command",
+      "description": "what starts the thread responder; unset means the agent command",
+      "shown": "hidden",
+      "value": null,
+      "set": false,
+      "default": null,
+      "owner_only": "governance-edit"
+    },
+    {
       "key": "resume_command",
       "group": "Agents and sessions",
       "name": "Resume command",
