@@ -6,7 +6,8 @@
 // Two real dashboards, each on its own scratch fleet: W with fs.watch as it is, S with fs.watch
 // stubbed to a watcher that never fires, so on S only the 1-second look and the look each GET makes
 // can see a change. A probe (NODE_OPTIONS --import) records each dashboard-data child's start (the
-// process's own creation time) and end, can make it sleep, and records each fs.watch call.
+// process's own creation time) and end, can make it sleep, and records each fs.watch call and, in the
+// dashboard, when each `changed` frame is written to a connection (its send time, and the connection's port).
 // The tests run in file order: A12 on W, then A12, A13 and A14 on S (A12 makes no /api/data GET).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,6 +18,7 @@ import { fleetFixture, dashboardOnFreePort, PORTS, write } from './lib/kit.mjs';
 import { openPresence } from './lib/presence-fake.mjs';
 
 const PROBE = `import fs from 'node:fs';
+import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { performance } from 'node:perf_hooks';
 const argv = process.argv.slice(2);
@@ -28,6 +30,14 @@ if (argv.includes('dashboard-data') && process.env.ZQ_BUILDS) {
   if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   process.on('exit', () => fs.appendFileSync(process.env.ZQ_BUILDS, 'end ' + Date.now() + '\\n'));
 } else if (argv.includes('dashboard') && process.env.ZQ_WATCH) {
+  // a changed frame as the dashboard writes it to a connection: the time it was written, and the port the
+  // connection comes from (one line per connection), so the gaps are the dashboard's, not when a client read it
+  const CHANGED = Buffer.from('{"t":"changed"}');
+  const write = net.Socket.prototype.write;
+  net.Socket.prototype.write = function (chunk, ...rest) {
+    if (Buffer.isBuffer(chunk) && chunk.includes(CHANGED)) fs.appendFileSync(process.env.ZQ_SENT, Date.now() + ' ' + this.remotePort + '\\n');
+    return write.call(this, chunk, ...rest);
+  };
   const real = fs.watch;
   fs.watch = function (p, ...rest) {
     if (process.env.ZQ_STUB === '1') {
@@ -61,9 +71,9 @@ const fixtures = {};
 function dash(which) {
   fixtures[which] ??= (async () => {
     const F = fleetFixture(`presence-${which}`);
-    const files = { probe: path.join(F.base, 'probe.mjs'), builds: path.join(F.base, 'builds.txt'), sleep: path.join(F.base, 'sleep.txt'), watch: path.join(F.base, 'watch.txt') };
+    const files = { probe: path.join(F.base, 'probe.mjs'), builds: path.join(F.base, 'builds.txt'), sleep: path.join(F.base, 'sleep.txt'), watch: path.join(F.base, 'watch.txt'), sent: path.join(F.base, 'sent.txt') };
     write(files.probe, PROBE);
-    for (const f of [files.builds, files.sleep, files.watch]) write(f, '');
+    for (const f of [files.builds, files.sleep, files.watch, files.sent]) write(f, '');
     const off = which === 'w' ? 0 : 30;
     const env = F.env({
       DEVTEAM_HUB_PORT: String(PORTS + off), DEVTEAM_PORT_BASE: String(PORTS + off + 1),
@@ -74,7 +84,7 @@ function dash(which) {
       // checks are of kit-633's 3 s start gap and freshness, timed to it
       DEVTEAM_DATA_REUSE_MS: '3000',
       NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import ${pathToFileURL(files.probe).href}`].filter(Boolean).join(' '),
-      ZQ_BUILDS: files.builds, ZQ_SLEEP: files.sleep, ZQ_WATCH: files.watch, ZQ_STUB: which === 's' ? '1' : '0',
+      ZQ_BUILDS: files.builds, ZQ_SLEEP: files.sleep, ZQ_WATCH: files.watch, ZQ_SENT: files.sent, ZQ_STUB: which === 's' ? '1' : '0',
     });
     for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'DEVTEAM_PROJECT', 'TMUX', 'TMUX_PANE']) delete env[k];
     const { dash: d, port } = await dashboardOnFreePort(F.old, env);
@@ -115,6 +125,15 @@ function builds(X) {
   const starts = lines.filter((l) => l.startsWith('start ')).map((l) => Number(l.slice(6)));
   const ends = lines.filter((l) => l.startsWith('end ')).map((l) => Number(l.slice(4)));
   return starts.map((start, i) => ({ start, end: ends[i] ?? null }));
+}
+// the changed frames the dashboard wrote at or after `since`: { [connection's port]: [send times] }
+function sentSince(X, since) {
+  const by = {};
+  for (const l of fs.readFileSync(X.files.sent, 'utf8').split('\n').filter(Boolean)) {
+    const [at, port] = l.split(' ').map(Number);
+    if (at >= since) (by[port] ??= []).push(at);
+  }
+  return by;
 }
 const watched = (X) => fs.readFileSync(X.files.watch, 'utf8').split('\n').filter(Boolean);
 const setSleep = (X, ms) => fs.writeFileSync(X.files.sleep, String(ms));
@@ -185,22 +204,32 @@ test('presence A12: changed within 1 s, at most every 500 ms', { timeout: 240000
     await sleep(Math.max(0, t + 700 - Date.now()));
   }
 
-  // (b) an append every 20 ms for 3 s: changed at least 400 ms apart, never dropped, the last one followed
+  // (b) an append every 20 ms for 3 s: changed at least 450 ms apart, never dropped, the last one followed.
+  // The gaps are the dashboard's own (when it wrote each frame, the probe's sent records), never when a client
+  // read it: a client's clock reads a frame late when the test's own process is busy, and the next gap then
+  // looks short (618 then 383 ms on kit-279's CI), though the dashboard sent each 500 ms apart.
   await sleep(600);
   const marks = cs.map((c) => c.messages.length);
-  const end = Date.now() + 3000;
+  const since = Date.now();
+  const end = since + 3000;
   let last = 0;
   while (Date.now() < end) { last = append(W); await sleep(20); }
+  // every frame the dashboard wrote, read by every client: once each has as many as were sent (none dropped)
   await sleep(1200);
-  for (const [k, c] of cs.entries()) {
-    const ts = changedAt(c, marks[k]);
+  const sent = sentSince(W, since);
+  assert.equal(Object.keys(sent).length, cs.length, `a changed written to each client's connection (${JSON.stringify(sent)})`);
+  const n = Object.values(sent)[0].length;
+  for (const [port, ts] of Object.entries(sent)) {
     const gaps = ts.slice(1).map((t, i) => t - ts[i]);
-    assert.ok(gaps.every((g) => g >= 400), `client ${k + 1}: changed at most every 500 ms (gaps ${gaps.join(', ')})`);
+    assert.ok(gaps.every((g) => g >= 450), `connection :${port}: changed at most every 500 ms (gaps ${gaps.join(', ')})`);
     // at least 5: the watch gives about 7 (one at once, then each 500 ms, and the last); the 1-second
     // look alone gives about 4, so a watch whose events reach nothing is red here
-    assert.ok(ts.length >= 5 && ts.length <= 8, `client ${k + 1}: ${ts.length} changed in 3 s of growth (5 to 8)`);
-    assert.ok(ts.some((t) => t > last && t <= last + 1000), `client ${k + 1}: a changed within 1 s after the last append`);
+    assert.ok(ts.length >= 5 && ts.length <= 8, `connection :${port}: ${ts.length} changed in 3 s of growth (5 to 8)`);
+    assert.ok(ts.some((t) => t > last && t <= last + 1000), `connection :${port}: a changed within 1 s after the last append`);
+    assert.equal(ts.length, n, 'every connection is sent the same changed');
   }
+  await until(() => cs.every((c, k) => changedAt(c, marks[k]).length >= n), `every client to read the ${n} changed sent`, 10000);
+  for (const [k, c] of cs.entries()) assert.equal(changedAt(c, marks[k]).length, n, `client ${k + 1}: every changed sent, and no more`);
 
   // (c) no growth, no changed
   const quiet = cs.map((c) => c.messages.length);
