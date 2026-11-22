@@ -215,7 +215,7 @@ test('boardFixture: patched into /api/data by dataPatchInit, every page draws it
   assert.equal(await p.ev("document.querySelectorAll('#planners .plcard').length"), 4, 'four planners');
   assert.deepEqual(await p.ev('window.__errors'), []);
   // the Inbox draws a card for each open question the fixture holds
-  await go(`#q/${encodeURIComponent(ids.qTicket)}`);
+  await go('#board?th=inbox');
   await soon(`!!document.getElementById(${JSON.stringify(`q-${ids.qTicket}`)})`, "the Inbox card of the ticket's question");
   const cards = patch.questions.map((q) => q.id);
   await soon(`${JSON.stringify(cards)}.every((id) => document.querySelector('[data-qcard="' + id + '"]'))`, 'a card for each question');
@@ -532,6 +532,16 @@ test('the Board on the shell: planners strip, columns, card heads and pills, hel
     await go('#board');
     await soon(`${CARDS} === 12 && ${PLANNERS} === 4`, 'every card and planner');
   };
+  // plan Task 2: history.length once it has held still for 300ms
+  const heldLength = async () => {
+    let v = await p.ev('history.length'), since = Date.now();
+    while (Date.now() - since < 300) {
+      await new Promise((r) => setTimeout(r, 50));
+      const n = await p.ev('history.length');
+      if (n !== v) { v = n; since = Date.now(); }
+    }
+    return v;
+  };
   const size = (width, height) => p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   const qText = (id) => patch.questions.find((q) => q.id === id).question;
 
@@ -627,25 +637,25 @@ test('the Board on the shell: planners strip, columns, card heads and pills, hel
     }
   });
 
-  await t.test("a held ticket's question link opens the Inbox tab at its card, one history entry, no peek", async () => {
+  await t.test("a held ticket's question link opens the question's peek, one history entry, no ticket peek", async () => {
     await board();
-    const before = await p.ev('history.length');
+    const before = await heldLength();
     await p.click(`#board-cols [data-ticket="${ids.tBlockedQ}"] .att-q`);
-    await soon(`/[?&]th=inbox/.test(location.hash) && document.body.classList.contains('threads-open') && document.querySelector('#th-tabs [role="tab"][data-tab="inbox"]')?.getAttribute('aria-selected') === 'true'`, 'the panel on its Inbox tab');
-    await soon(`(() => { const e = document.getElementById(${J(`q-${ids.qTicket}`)}); if (!e) return false; const r = e.getBoundingClientRect(); return r.height > 0 && r.top >= 0 && r.bottom <= innerHeight + 1; })()`, 'its card on screen');
-    assert.equal(await p.ev('history.length'), before + 1, 'one entry');
-    assert.equal(await p.ev("document.body.classList.contains('peek-open') || !document.getElementById('drawer').hidden"), false, 'no ticket peek');
+    await soon(`DRAWER.kind === 'q' && DRAWER.id === ${J(ids.qTicket)} && !document.getElementById('drawer').hidden && !!document.querySelector(${J(`#drawer-body [id="p-q-${ids.qTicket}"]`)})`, "the question's peek with its card");
+    await soon(`history.length === ${before + 1}`, 'one entry');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await p.ev('history.length'), before + 1, 'still one entry');
   });
 
-  await t.test("a planner's question link opens the Inbox tab, one history entry, no planner peek", async () => {
+  await t.test("a planner's question link opens the question's peek, one history entry, no planner peek", async () => {
     await board();
-    const before = await p.ev('history.length');
+    const before = await heldLength();
     await p.click(`#planners [data-planner="${ids.planPromptQ}"] .att-q`);
-    await soon(`/[?&]th=inbox/.test(location.hash) && document.querySelector('#th-tabs [role="tab"][data-tab="inbox"]')?.getAttribute('aria-selected') === 'true'`, 'the panel on its Inbox tab');
-    await soon(`!!document.getElementById(${J(`q-${ids.qPlanner}`)})`, 'its card');
+    await soon(`DRAWER.kind === 'q' && DRAWER.id === ${J(ids.qPlanner)} && !document.getElementById('drawer').hidden && !!document.querySelector(${J(`#drawer-body [id="p-q-${ids.qPlanner}"]`)})`, "the question's peek with its card");
+    await soon(`history.length === ${before + 1}`, 'one entry');
     await new Promise((r) => setTimeout(r, 300));
-    assert.equal(await p.ev('history.length'), before + 1, 'one entry');
-    assert.equal(await p.ev("document.body.classList.contains('peek-open') || !document.getElementById('drawer').hidden || location.hash.includes('planner/')"), false, 'no planner peek');
+    assert.equal(await p.ev('history.length'), before + 1, 'still one entry');
+    assert.equal(await p.ev("location.hash.includes('planner/')"), false, 'no planner peek');
   });
 
   await t.test('the status pills keep their order when a card has several: usage limit, held, high risk, then the component', async () => {
