@@ -7705,11 +7705,33 @@ function markAnswered(id, text) {
 }
 
 /* preview-cards start */
-// A preview's link for where this page is. Through the gateway the dashboard is on <port>.<box>
-// and the preview on <name>.<box>; elsewhere it is 127.0.0.1:<port>, the owner's own machine.
-function previewHere(loc, served) {
-  const m = served ? /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(loc?.host || '') : null;
-  return m ? { proto: loc.protocol, box: m[2] } : null;
+// project-hosts@1's label rule, with its reserved labels.
+const PROJECT_LABEL = /^(?!\d+$)(?!(?:term|public|www)$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+// Who this dashboard is: /api/hello's answer; until it comes (or when it fails) the project the Library
+// names; else, on a page the gateway marked as served (only it can set x-devteam-previews), the host's
+// first label. The last two have no port.
+const pageHello = (loc) => {
+  const h = typeof HELLO === 'undefined' ? null : HELLO;
+  if (h?.name) return h;
+  const n = typeof DATA === 'undefined' ? null : DATA?.library?.public?.project;
+  if (n) return { name: n, port: null };
+  const served = typeof PREVIEWS !== 'undefined' && PREVIEWS;
+  return served ? { name: String(loc?.host ?? '').split('.')[0], port: null } : null;
+};
+// Where this page is on a box: <port>.<box>, or <project>.<box> when the first label is this
+// project's own name (so the box's own name, or another project's, is never read as this one).
+function hostHere(loc, name) {
+  const host = loc?.host || '';
+  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  if (m) return { box: m[2] };
+  const n = /^([^.]+)\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  return n && n[1] === name && PROJECT_LABEL.test(name) ? { box: n[2], named: true } : null;
+}
+// A preview's link for where this page is. Through the gateway the dashboard is on <port>.<box> or
+// <project>.<box> and the preview on <name>.<box>; elsewhere it is 127.0.0.1:<port>, the owner's own machine.
+function previewHere(loc, served, hello = pageHello(loc)) {
+  const h = served ? hostHere(loc, hello?.name) : null;
+  return h ? { proto: loc.protocol, box: h.box } : null;
 }
 const previewUrl = (me, p) => (me ? `${me.proto}//${p.name}.${me.box}/` : `http://127.0.0.1:${p.port}/`);
 // The Library card: what the state is and what the owner can do about it.
@@ -7731,11 +7753,23 @@ function previewLinkHtml(l, me, esc) {
 // Publishing, as a landed card shows it. The log's newest artifact-publish line (a.published) says
 // what the owner asked for, or what something wrote for them; the gateway's header says what the
 // box serves, and that is the truth. A forged line can only make a card ask, and drift says when
-// the line's tree isn't main's. Through the gateway this page is on <port>.<box>.
-function publicHere(loc, lib) {
-  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(loc?.host || '');
-  return m ? { proto: loc.protocol, port: Number(m[1]), box: m[2], project: lib?.public?.project ?? null, root: lib?.public?.root ?? null } : null;
+// the line's tree isn't main's. Through the gateway this page is on <port>.<box> or <project>.<box>.
+// This block loads alone in tests, so it reads the host itself; test/dashboard-host-links.test.mjs holds
+// it to previewHere's answer on every project-hosts@1 label.
+const PUBLIC_LABEL = /^(?!\d+$)(?!(?:term|public|www)$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+function publicHere(loc, lib, hello = typeof pageHello === 'function' ? pageHello(loc) : null) {
+  const host = loc?.host || '';
+  const project = lib?.public?.project ?? null, root = lib?.public?.root ?? null;
+  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  if (m) return { proto: loc.protocol, port: Number(m[1]), box: m[2], project, root };
+  const name = hello?.name ?? project;
+  const n = /^([^.]+)\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(host);
+  if (!n || n[1] !== name || !PUBLIC_LABEL.test(name)) return null;
+  // hello and the Library are read separately and can differ for a while: links name only this host's project
+  return { proto: loc.protocol, port: hello?.port ?? null, box: n[2], project: project === n[1] ? project : null, root, named: true };
 }
+// A link can be built: a project host's links name the project, so one with none in settings has none.
+const canPublish = (me) => !!me && (!me.named || !!me.project);
 function publicState(a, pub, me) {
   const rec = a.published || null;
   // main has changed since the recorded publish: what would go up is not what the record names
@@ -7745,15 +7779,16 @@ function publicState(a, pub, me) {
   // the box's copy is this project's only when it came from this checkout (a port can change)
   const ours = !!e && e.root === me.root;
   const served = ours && e.artifacts && Object.hasOwn(e.artifacts, a.slug) ? e.artifacts[a.slug] : null;
-  if (served) return { state: 'public', rec, drift, from: e.port !== me.port ? e.port : null, actions: [...(rec && served !== a.tree ? ['update'] : []), ...(rec ? ['copy'] : []), 'unpublish'] };
-  if (rec) return { state: 'not-live', rec, drift, from: null, actions: [drift ? 'review' : 'restore', 'forget'] };
+  if (served) return { state: 'public', rec, drift, from: me.port != null && e.port !== me.port ? e.port : null, actions: [...(rec && served !== a.tree ? ['update'] : []), ...(rec ? ['copy'] : []), 'unpublish'] };
+  if (rec) return { state: 'not-live', rec, drift, from: null, actions: canPublish(me) ? [drift ? 'review' : 'restore', 'forget'] : ['forget'] };
   return { state: 'none', rec, drift, from: null, actions: me.project ? ['publish'] : [] };
 }
-// The gateway's own pages, on the box's name; the public link, on public.<box>.
+// The gateway's own pages, on the box's name, by project on a project host and by port on <port>.<box>;
+// the public link, on the project's host, or on public.<box> from <port>.<box>.
 const publicLinks = (me) => ({
-  publish: (slugs) => `${me.proto}//${me.box}/public/publish?port=${me.port}${slugs.map((s) => `&slug=${encodeURIComponent(s)}`).join('')}`,
-  unpublish: (slug) => `${me.proto}//${me.box}/public/unpublish?port=${me.port}&project=${encodeURIComponent(me.project)}&slug=${encodeURIComponent(slug)}`,
-  page: (slug) => `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`,
+  publish: (slugs) => `${me.proto}//${me.box}/public/publish?${me.named ? `project=${encodeURIComponent(me.project)}` : `port=${me.port}`}${slugs.map((s) => `&slug=${encodeURIComponent(s)}`).join('')}`,
+  unpublish: (slug) => `${me.proto}//${me.box}/public/unpublish?${me.named ? '' : `port=${me.port}&`}project=${encodeURIComponent(me.project)}&slug=${encodeURIComponent(slug)}`,
+  page: (slug) => (me.named ? `${me.proto}//${me.project}.${me.box}/${encodeURIComponent(slug)}/` : `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`),
 });
 /* public-states end */
 /* library-items start */
@@ -7936,7 +7971,7 @@ function renderLibrary(lib) {
   // the gateway's pages open in a new tab this page can't later redirect
   const tab = (href, label) => `<a class="ghost" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
   const landed = (lib?.artifacts ?? []).filter((a) => a.at === 'main' && !a.error);
-  const notLive = me ? landed.filter((a) => publicState(a, PUBLIC, me).state === 'not-live') : [];
+  const notLive = canPublish(me) ? landed.filter((a) => publicState(a, PUBLIC, me).state === 'not-live') : [];
   const drifted = notLive.filter((a) => publicState(a, PUBLIC, me).drift).length;
   // Restore all in both cases (R4): what goes up is main's version, and the sentence says so
   const pubHead = !landed.length ? ''
@@ -8447,9 +8482,12 @@ async function helloLoad() {
   h = h && typeof h === 'object' ? h : null;
   const json = JSON.stringify(h);
   if (json === HELLO_JSON) return;
+  // who this dashboard is decides the Library's links, so a change of name or port redraws it
+  const moved = HELLO?.name !== h?.name || HELLO?.port !== h?.port;
   HELLO = h;
   HELLO_JSON = json;
   if (DATA) renderOverview();
+  if (DATA && moved && typeof PAGE_NOW !== 'undefined' && PAGE_NOW === 'library') renderLibrary(DATA.library);
 }
 // "2 min ago", as the hub says it
 function ovAgo(iso) {
