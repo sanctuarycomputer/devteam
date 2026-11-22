@@ -6991,8 +6991,10 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   // text read through it changes with no change here; a submodule or a folder pins no text at all.
   // The modes come from one read of the project folder's own listing (the three files sit in it),
   // never a walk of the tree, so check-pr with no lines still does no tree work (landing-git). A
-  // listing that doesn't read, or isn't a folder's, is refused, never read as plain files.
-  const listing = git(['cat-file', '-p', `${sha}:${projectRel}`]);
+  // listing that doesn't read, or isn't a folder's, is refused, never read as plain files. The type
+  // is asked first: a file or symlink in the folder's place prints its own text, which can look
+  // like a listing.
+  const listing = git(['cat-file', '-t', `${sha}:${projectRel}`]) === 'tree' ? git(['cat-file', '-p', `${sha}:${projectRel}`]) : null;
   const entries = listing === null ? null : listing.split('\n').filter(Boolean).map((l) => /^(\d{6}) \w+ [0-9a-f]+\t(.*)$/.exec(l));
   if (!entries || entries.some((m) => !m)) return [...fails, `could not read ${projectRel} at ${String(sha).slice(0, 12)} as a folder, so the owner's files can't be judged plain files: merge main into it, or fetch it, and run it again`];
   const modes = new Map(entries.map((m) => [`${projectRel}/${m[2]}`, m[1]]));

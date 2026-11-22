@@ -359,6 +359,9 @@ test('kit-773: the gate refuses on its own when it can\'t list the files a PR ad
     const lsha = chore('folder-link', (w) => { fs.rmSync(path.join(w, P), { recursive: true, force: true }); fs.symlinkSync('elsewhere', path.join(w, P)); });
     const unread = new RegExp(`could not read ${re(P)} at ${lsha.slice(0, 12)} as a folder, so the owner's files can't be judged plain files`);
     check(() => refused(checkPr('chore-folder-link', lsha, yes), unread, 'kit-773 DW1 the project folder unread, check-pr --approved'));
+    // a file in the folder's place whose text reads like a listing: still no folder (task-1 F1)
+    const fsha = chore('folder-forged', (w) => { fs.rmSync(path.join(w, P), { recursive: true, force: true }); write(path.join(w, P), `100644 blob ${'0'.repeat(40)}\tnotes.md\n`); });
+    check(() => refused(checkPr('chore-folder-forged', fsha, yes), new RegExp(`could not read ${re(P)} at ${fsha.slice(0, 12)} as a folder`), 'kit-773 DW1 a file forged as the project folder\'s listing, check-pr --approved'));
     none();
   } finally { W.done(); }
 });
