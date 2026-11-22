@@ -159,7 +159,7 @@ after(async () => {
 // The dashboard's 10 s refresh at 300 ms in the owner's dashboard tab.
 const FAST = `(() => { const si = window.setInterval; window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a); })();`;
 const card = (q) => `document.querySelector('#questions [data-qcard="${q}"]')`;
-let qid, waiting, viewUrl, logBefore, refused;
+let qid, waiting, waited, viewUrl, logBefore, refused;
 // The owner's secrets, and every session value the site issued, by name.
 const secrets = () => ({ password: site.password, code: site.code });
 const everything = () => ({ ...secrets(), ...Object.fromEntries(site.sessions().map((s, i) => [`session value ${i + 1}`, s])) });
@@ -247,6 +247,11 @@ test('E3 a redirect to the dashboard during the flow is refused', opts, async ()
   refused = await br(A, `click ${refOf(await ok(A, 'snapshot'), 'link', 'Continue')}`);
   assert.equal(refused.status, 1, refused.err || refused.out);
   assert.match(`${refused.out}\n${refused.err}`, new RegExp(`the browser's guard refused 127\\.0\\.0\\.1:${dash.port}\\b`));
+  // the message is the CLI's own: the page the browser is on shows what the guard did, the guard's
+  // blocked page and nothing of the dashboard
+  const s = await ok(A, 'snapshot');
+  assert.ok(heading(s, 'This page is blocked'), `the browser shows the guard's blocked page:\n${s}`);
+  assert.deepEqual(lines(s).filter((l) => /link "(Overview|Goals|Inbox)"/.test(l) || l.includes(`-> http://127.0.0.1:${dash.port}/`)), [], 'nothing of the dashboard in the browser');
 });
 
 test('E4 the refusal writes nothing to the log', opts, async () => {
@@ -267,6 +272,7 @@ test('E5 the supervisor opens the account page, finds the login and runs browser
   assert.ok(qid, h.out);
   // the supervisor waits from its shell while the owner signs in
   waiting = br(A, 'wait');
+  waiting.then((r) => { waited = r; }, () => {});
 });
 
 test('E6 the owner opens the live view from the Inbox card\'s preview link', opts, async () => {
@@ -329,11 +335,14 @@ test('E7 the owner types the password and the 2FA code into the live view and pr
   }
   if (!picked) assert.fail(`Done not picked on the card in 10 s: ${await pickState()}`);
   await dp.click(`#questions [data-qcard="${qid}"] [data-answer]`);
+  // taken: the dashboard's data shows it, or the supervisor's wait already returned (the data can lag
+  // behind under load); E8 checks what the wait printed
   const taken = await until(async () => {
+    if (waited) return true;
     const said = await dp.ev(`document.getElementById(${JSON.stringify(`e-${qid}`)})?.textContent.trim() ?? ''`);
     if (said) return { said };
     return dp.ev(`!DATA.questions.some((x) => x.id === ${JSON.stringify(qid)} && x.status === 'open')`);
-  }, 20000, 'the card\'s answer taken (the question no longer open in the dashboard\'s data)');
+  }, 60000, 'the card\'s answer taken (the question no longer open in the dashboard\'s data, or wait returned)');
   assert.equal(taken.said, undefined, `the card said: ${taken.said}`);
 });
 
@@ -367,6 +376,11 @@ test('E11 after browser stop and start the supervisor is still signed in', opts,
   assert.ok(heading(await account(A), 'Signed in as owner'), 'signed in after stop and start');
 });
 
+test('E19 after stop and start, the password and the code are still in no file of the profile', opts, async () => {
+  assert.ok(fs.existsSync(A.profile), `${A.name}'s profile`);
+  assert.deepEqual(filesHolding(A.profile, Object.values(secrets())), [], `${A.name}'s profile after stop and start`);
+});
+
 test('E12 a second fixture project\'s supervisor is not signed in, and its profile holds neither secret', opts, async () => {
   assert.notEqual(B.key, A.key);
   assert.ok(heading(await account(B), 'Not signed in'));
@@ -385,6 +399,13 @@ test('E13 Sign out of everything in the view signs it out', opts, async () => {
   await vp.click('#signout');
   await vp.click('#forget');
   await until(async () => heading(await account(A), 'Not signed in'), 30000, 'the supervisor signed out');
+});
+
+test('E20 after Sign out of everything, a stop and start leaves the supervisor signed out', opts, async () => {
+  captureWindows(A); // stop closes the daemon's window: its output is kept first
+  await ok(A, 'stop');
+  await ok(A, 'start');
+  assert.ok(heading(await account(A), 'Not signed in'), 'still signed out after stop and start');
 });
 
 // E14 to E18 look for the password, the code and the session cookie's value where the kit writes or
