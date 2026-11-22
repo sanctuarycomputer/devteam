@@ -30931,7 +30931,31 @@ function browserUserAgent(bin) {
 // DevToolsActivePort), up once it answers Browser.getVersion there within 30 s. No usable sandbox: once
 // more with --no-sandbox, and a note. Its stderr is kept (the last 64 KiB) only until then, for the
 // sandbox check; after, it is drained and dropped: Chrome's log lines can carry page URLs.
-const chromeTmpFor = (profile) => path.join(os.tmpdir(), `dc${crypto.createHash('sha1').update(profile).digest('hex').slice(0, 6)}`);
+const chromeTmpFor = (profile, base = os.tmpdir()) => path.join(base, `dc${crypto.createHash('sha1').update(profile).digest('hex').slice(0, 6)}`);
+// Chrome's TMPDIR for a profile (kit-777), in base (the daemon's temp folder: /tmp, as it runs under
+// env -i): { tmpdir, own, note }. own is the folder made for it, removed at stop; null when none was
+// made. Chrome's singleton socket is <TMPDIR>/org.chromium.Chromium.XXXXXX/SingletonSocket, 45 bytes
+// after TMPDIR, and a socket's path is at most 107 bytes on Linux (103 on macOS): when the dc… folder
+// would pass that, Chrome runs in base as it is and a note says so; when base would too, it throws,
+// naming the length. A folder already at the name is emptied only when it is this user's own folder,
+// closed to others (a killed daemon's); anything else throws and is left as it is. The mkdir is a
+// plain one: it fails if another process made the folder meanwhile.
+function browserChromeTmp(profile, { base = os.tmpdir(), uid = process.getuid(), platform = process.platform } = {}) {
+  const max = platform === 'linux' ? 107 : 103, socket = (d) => Buffer.byteLength(d) + 45;
+  const tmp = chromeTmpFor(profile, base);
+  if (socket(tmp) > max) {
+    if (socket(base) > max) throw new Error(`browser: Chrome's socket path would be ${socket(base)} bytes in ${base} (${max} at most here); Chrome can't start with that temp folder`);
+    return { tmpdir: base, own: null, note: `Chrome's temp folders are loose in ${base}: a folder of their own there would make its socket path too long.` };
+  }
+  const st = fs.lstatSync(tmp, { throwIfNoEntry: false });
+  if (st) {
+    const kind = st.isSymbolicLink() ? 'a symlink' : st.isDirectory() ? 'a folder' : 'a file';
+    if (!st.isDirectory() || st.uid !== uid || (st.mode & 0o077)) throw new Error(`browser: Chrome's temp folder ${tmp} is already there and isn't this user's own (${kind}, owner ${st.uid}, mode ${(st.mode & 0o777).toString(8)}); remove it and start again`);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  try { fs.mkdirSync(tmp, { mode: 0o700 }); } catch (e) { throw e.code === 'EEXIST' ? new Error(`browser: Chrome's temp folder ${tmp} was made by another process as this one made it; start again`) : e; }
+  return { tmpdir: tmp, own: tmp, note: null };
+}
 async function browserLaunchChrome(ctx, { headed }) {
   // read once per daemon (a spawn of Chrome, most of a second): a close or a forget relaunches the same binary
   if (ctx.ua === undefined) ctx.ua = browserUserAgent(ctx.bin);
@@ -30943,14 +30967,22 @@ async function browserLaunchChrome(ctx, { headed }) {
     ...(process.platform === 'linux' ? ['--password-store=basic'] : []), ...(ua ? [`--user-agent=${ua}`] : []),
   ];
   // Chrome's own temp folders (org.chromium.Chromium.*, its singleton socket among them) go in one short
-  // folder per profile, emptied at each launch: a Chrome that is killed leaves them behind, and loose
-  // in the machine's temp folder they piled up by the thousand. Short, beside the others, because a
-  // socket's path is capped (about 104 bytes) and a folder inside the profile would pass it.
-  const tmp = chromeTmpFor(ctx.profile);
+  // folder per profile (browserChromeTmp), made afresh at each launch and removed at stop: a Chrome that
+  // is killed leaves them behind, and loose in the machine's temp folder they piled up by the thousand.
+  // Short, beside the others, because a socket's path is capped and a folder inside the profile would
+  // pass it. The folder the last try or launch made is this daemon's own, so it goes first, and the
+  // check in browserChromeTmp meets only what someone else made. Any exit of the daemon removes the
+  // folder too (a start that fails after Chrome is up, a stop that came while this ran): a sync rm.
+  if (!ctx.chromeTmpOnExit) {
+    ctx.chromeTmpOnExit = true;
+    process.on('exit', () => { if (ctx.chromeTmp) { try { fs.rmSync(ctx.chromeTmp, { recursive: true, force: true }); } catch {} } });
+  }
   for (let tries = 0; ; tries++) {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    fs.mkdirSync(tmp, { recursive: true, mode: 0o700 });
-    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: tmp } });
+    if (ctx.chromeTmp) { fs.rmSync(ctx.chromeTmp, { recursive: true, force: true }); ctx.chromeTmp = null; }
+    const t = browserChromeTmp(ctx.profile);
+    ctx.chromeTmp = t.own;
+    if (t.note && !ctx.notes.includes(t.note)) ctx.notes.push(t.note);
+    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: t.tmpdir } });
     ctx.chrome = chrome;
     const r = await new Promise((resolve) => {
       let buf = '', over = false;
@@ -31818,6 +31850,11 @@ async function browserServe({ chrome: bin }) {
     await browserListen(ctx.view, viewPort);
     ctx.restarted = (await browserPrepareProfile(ctx.profile, ctx.notes)).restarted;
     ctx.guard = await startBrowserGuard();
+    // test hook: a stop signal that lands during the start steps, as one can (kit-777 final-1 F2)
+    if (browserTestEnv('DEVTEAM_TEST_BROWSER_STOP_BEFORE_LAUNCH')) process.emit('SIGTERM');
+    // a stop came during the start steps: no Chrome now. Detached, it would outlive the daemon, whose
+    // exit would also remove the temp folder it runs in.
+    if (ctx.stopping) return;
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
     ctx.cdp = cdp;
