@@ -30598,6 +30598,8 @@ function browserViewRead(ctx) {
 // handover known a failed read changes nothing.
 const BROWSER_READ_FAIL_MS = 10000;
 const BROWSER_UNREADABLE = "The browser can't read its log, so it shut down and ended this session.";
+// a new socket refused while reads fail inside the limit: the handover may still be open
+const BROWSER_UNREADABLE_NOW = "The browser can't read its log right now; if that lasts, it ends this session.";
 function browserReadFailed(ctx) {
   if (ctx.stopping || (!ctx.held && !ctx.pending)) { ctx.readFailedAt = 0; return; }
   const now = Date.now();
@@ -31195,7 +31197,8 @@ function browserViewServer(ctx) {
       if (v.ws.closed) return;
       // a close pending: refused with bye, before it can be the viewer, so it is never sent a frame.
       // A bye, not a 503: browser.html stops on it and offers Show it again, where a 503 has it retry
-      if (ctx.closing || browserViewPending(ctx, true)) { v.ws.send({ t: 'bye', why: BROWSER_BACK }); return v.ws.close(1000); }
+      // A refusal because the log can't be read says so: the handover may still be open (R3-1)
+      if (ctx.closing || browserViewPending(ctx, true)) { v.ws.send({ t: 'bye', why: !ctx.closing && ctx.readFailedAt ? BROWSER_UNREADABLE_NOW : BROWSER_BACK }); return v.ws.close(1000); }
       if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
       ctx.viewer = v;
       browserViewHeld(ctx, v); // the current hold, from the fold just read
@@ -31405,7 +31408,7 @@ async function browserWait() {
       const s = await browserEnsure();
       const r = await browserCall('settle', {}, { state: s });
       if (r.code === 0) listed = JSON.parse(r.out)?.handled?.find((x) => x?.qid === qid) ?? null;
-    } catch {}
+    } catch (e) { if (e?.timedOut) die(`browser wait: ${e.message}`); } // the ruled words, as every verb's (R3-2)
     h = find();
     if (h.status !== 'open' && listed && listed.outcome === h.outcome) {
       return out(JSON.stringify({ browser: 1, qid, outcome: h.outcome, ...(h.outcome === 'done' && Array.isArray(listed.reopened) ? { reopened: listed.reopened } : {}) }));

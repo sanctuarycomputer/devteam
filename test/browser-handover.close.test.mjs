@@ -751,8 +751,9 @@ onB('PC3 a close that never finishes (the daemon killed inside it): no socket is
   v.close();
   await refusedInGap(P, 'pc3-inside-the-close');
   // a verb that times out on the close says it may still be finishing, never how it ended
-  for (const args of [['tabs'], ['status'], ['stop']]) {
-    const t = await browser(P, args, { DEVTEAM_TEST_BROWSER_CALL_MS: '800' });
+  // wait (its settle call) too, its own bound short so a swallowed timeout ends it with other words (R3-2)
+  for (const args of [['tabs'], ['status'], ['stop'], ['wait']]) {
+    const t = await browser(P, args, { DEVTEAM_TEST_BROWSER_CALL_MS: '800', DEVTEAM_TEST_BROWSER_WAIT_MS: '2000' });
     assert.equal(t.status, 1, `${args[0]}: ${t.out} ${t.err}`);
     assert.match(t.err, /the daemon didn't answer in 1 s; a close may still be finishing/, `${args[0]}: ${t.err}`);
     assert.doesNotMatch(`${t.out} ${t.err}`, /stopped|failed|succeeded|not running/, `${args[0]} said how it ended`);
@@ -892,8 +893,18 @@ onC('RL1 failed reads inside the limit: input is dropped, nothing shuts down, an
   for (const spell of ['first', 'second']) {
     fs.writeFileSync(fails, '');
     const dropped = marker(`rl1-${spell}`);
+    const t0 = Date.now();
     v.paste(dropped);
-    await sleep(3500);
+    if (spell === 'first') {
+      // a socket opened while the log can't be read is told so, never that the supervisor has the
+      // browser back: the handover is still open (R3-1)
+      const n = await viewSocket(P);
+      const b = await n.waitFor((m) => m.t === 'bye', 5000);
+      n.close();
+      assert.match(b.why, /can't read its log right now/, b.why);
+      assert.notEqual(b.why, BACK);
+    }
+    await sleep(Math.max(0, 3500 - (Date.now() - t0)));
     assert.ok(!landed(dropped), `${spell} spell: input reached the page during failed reads`);
     assert.ok(alive(st.daemon_pid), `${spell} spell: the daemon shut down inside the limit`);
     fs.rmSync(fails, { force: true });
