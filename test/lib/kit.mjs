@@ -1,5 +1,7 @@
 // Helpers the kit's test files share. Importing it gives the process its own tmux server and its
 // own block of ports (ports.mjs), so test files run side by side.
+// first: a file run on its own gets its private TMPDIR before anything makes a folder
+import { privateTmp } from './private-tmp.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -64,6 +66,8 @@ process.env.PATH = `${tmuxShim}${path.delimiter}${process.env.PATH}`;
 process.on('exit', () => {
   spawnSync('tmux', ['kill-server']);
   fs.rmSync(tmuxRoot, { recursive: true, force: true });
+  // last, after its tmux server: the private TMPDIR of a file run on its own (lib/private-tmp.mjs)
+  if (privateTmp) fs.rmSync(privateTmp, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 });
 // Dashboards started by tests never use the machine's real ports or become its hub: the hub and
 // the instance block move to ports the tests own.
