@@ -853,3 +853,19 @@ test('A11f: a run of 2 seconds still starts 2 seconds before its line', () => {
   const p = JSON.parse(F.ok(['peek', 'recurring', 'cz', '--json']));
   assert.deepEqual(p.runs.map((r) => r.at), [F.at(F.T3 - 2000)]);
 });
+
+// kit-168 final-3 F1, final-3b F1 F2: the recurring-failing bullet's ack sits beside the fix, and the
+// way to take up a held or merged fix ticket names the steps that work
+const failingBullet = () => /\n- \*\*`recurring-failing`\*\*[^\n]*/.exec(fs.readFileSync(path.join(kit, 'process', 'supervisor.md'), 'utf8'))?.[0] ?? '';
+
+test("A11g: supervisor.md's recurring-failing bullet puts the ack right after the recurring ticket fix, before the held fix ticket", () => {
+  const b = failingBullet();
+  const ack = b.indexOf('Or `ack` the finding when the failure is understood');
+  assert.ok(ack > b.indexOf('that act is what clears the finding') && ack < b.indexOf('A fix ticket that is held'), b);
+});
+
+test("A11h: it names both ways to take up a held or merged fix ticket: supersede naming a new id and write it with recurring ticket, or link one with the act line recurring ticket prints", () => {
+  const b = failingBullet();
+  for (const w of ['"superseded_by":"<new>"', '`recurring ticket <name> --id <new>', '`act --class add-ticket']) assert.ok(b.includes(w), `has ${w}: ${b}`);
+  assert.ok(!b.includes('so `recurring ticket` can write the new one'), 'the old wording is gone');
+});
