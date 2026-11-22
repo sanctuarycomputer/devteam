@@ -3209,13 +3209,15 @@ const movedOff = (q) => { const m = movedText(q); return m ? ` disabled title="$
 // Secrets typed or chosen but not yet posted live only in memory, never in storage, and survive a
 // refresh. Each goes straight from the browser to the owner's process and on to its sink.
 const SECRET_DRAFTS = new Map();
+// A SOPS store takes all of a question's secrets in one post: its inputs carry the store.
+const sopsStore = (x) => x.sink_type === 'sops' ? ` data-sops-store="${esc(String(x.sink).slice(5, String(x.sink).lastIndexOf(':')))}"` : '';
 function secretsForm(q) {
   const posted = new Map((q.secrets_posted || []).map((p) => [p.name, p]));
   return `<div class="secrets">${q.secrets.map((x) => {
     const p = posted.get(x.name);
     const key = `${q.id}:${x.name}`;
     const where = x.sink_type === 'stdin' ? `<div class="sink-cmd">Runs as you, with the value on its input:<pre>${esc(x.sink.slice('stdin:'.length))}</pre></div>` : `<span class="muted small">goes to ${esc(x.to || x.sink)}</span>`;
-    return `<div class="secret"><span class="sname"><code>${esc(x.name)}</code> ${x.sink_type === 'stdin' ? '' : where}</span>${x.sink_type === 'stdin' ? where : ''}${x.warning && !p ? `<span class="err small" role="note">${esc(x.warning)}</span>` : ''}${p ? '<span class="badge good">posted</span>' : x.kind === 'file' ? `<input type="file" data-secret="${esc(key)}" aria-label="${esc(x.name)}">` : `<textarea class="masked" rows="2" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-form-type="other" data-secret="${esc(key)}" aria-label="${esc(x.name)}" placeholder="Paste the value (several lines are fine)"></textarea>`}</div>`;
+    return `<div class="secret"><span class="sname"><code>${esc(x.name)}</code> ${x.sink_type === 'stdin' ? '' : where}</span>${x.sink_type === 'stdin' ? where : ''}${x.warning && !p ? `<span class="err small" role="note">${esc(x.warning)}</span>` : ''}${p ? '<span class="badge good">posted</span>' : x.kind === 'file' ? `<input type="file" data-secret="${esc(key)}"${sopsStore(x)} aria-label="${esc(x.name)}">` : `<textarea class="masked" rows="2" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-form-type="other" data-secret="${esc(key)}"${sopsStore(x)} aria-label="${esc(x.name)}" placeholder="Paste the value (several lines are fine)"></textarea>`}</div>`;
   }).join('')}<p class="meta">devteam doesn’t save what you post or show it to an agent: it goes from this page through your own process to the place named, and the log records only the name. Check where each one goes before you post.</p></div>`;
 }
 function keepSecretDrafts() {
@@ -9048,7 +9050,7 @@ function tFrameOn(s, stage) {
 // about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
 // the dock keep their state. Its window listeners in the capture phase are registered here, before
 // the page's own (PRESSED below), so a click it takes reaches nothing else.
-const TL = { threads: [], raw: [], pend: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pressed: null, route: null };
+const TL = { threads: [], raw: [], pend: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pressed: null, route: null, prompts: [] };
 const tlEl = (id) => document.getElementById(id);
 // The layer's own: #tl and the Threads panel (a press there held, its focus leaving redraws it, its clicks
 // let through the Shift-point capture, no pin over it, its fields hold no page redraw), except the panel's
@@ -9695,6 +9697,14 @@ const askShown = () => (ASK.q && ASK.q.digest !== ASK.sent ? ASK.q : null);
 const askArmed = () => Date.now() - ASK.since >= ASK_ARM_MS;
 // Esc cancels this menu: kit-241's paneEscCancels (devteam.mjs) exactly, so the button shows only where the server sends the key
 const askEscCancels = (hint) => { const h = String(hint ?? ''); return /\bEsc to cancel\b/i.test(h) && !/\bEsc to (?:exit|quit)\b/i.test(h); };
+// The sessions other than the supervisor's stopped at a permission prompt, under its card: no buttons, the terminal answers them.
+function promptsHtml() {
+  const ps = typeof TL !== 'undefined' ? TL.prompts ?? [] : [];
+  if (!ps.length) return '';
+  return `<div class="card ask" data-ask-sessions><div><i class="icon-triangle-alert" aria-hidden="true"></i> <b>${ps.length === 1 ? 'A session is' : `${ps.length} sessions are`} stopped at a permission prompt</b></div>
+    <ul>${ps.map((x) => `<li><b>${esc(x.window)}</b>: <code style="overflow-wrap:anywhere">${esc(x.line)}</code></li>`).join('')}</ul>
+    <div class="small muted">Answer ${ps.length === 1 ? 'it' : 'them'} in the terminal; the supervisor may clear one it can (supervisor.md §11).</div></div>`;
+}
 function askHtml() {
   const q = askShown();
   if (!q) return ASK.note && Date.now() - ASK.sentAt < ASK_NOTE_MS ? `<div class="card small ask done"><i class="icon-circle-check" aria-hidden="true"></i> Sent to the supervisor's terminal: <b>${esc(ASK.note)}</b></div>` : '';
@@ -9712,9 +9722,11 @@ function askHtml() {
 }
 function askDraw() {
   if (ASK.sent && (!ASK.q || ASK.q.digest !== ASK.sent || Date.now() - ASK.sentAt > 30000)) ASK.sent = null;
-  const html = askHtml();
-  // only when it changed: a card rewritten on every poll would drop a press on a button
-  for (const id of ['ask-inbox', 'ask-threads', 'tl-c-ask']) { const el = document.getElementById(id); if (el && ASK_DRAWN.get(el) !== html) { ASK_DRAWN.set(el, html); el.innerHTML = html; } }
+  const card = askHtml();
+  const all = card + promptsHtml();
+  // only when it changed: a card rewritten on every poll would drop a press on a button. The sessions'
+  // prompts go where the Inbox is, not on a thread's card (which is the supervisor's).
+  for (const id of ['ask-inbox', 'ask-threads', 'tl-c-ask']) { const html = id === 'tl-c-ask' ? card : all; const el = document.getElementById(id); if (el && ASK_DRAWN.get(el) !== html) { ASK_DRAWN.set(el, html); el.innerHTML = html; } }
 }
 // The question as a read of the threads has it: another one (or the same one back) arms its buttons a second later.
 function askSet(q) {
@@ -9764,6 +9776,9 @@ async function tlRefresh() {
     // the sessions holding a thread's newest turn, for the card's line: a map, else none
     TL.working = j.working && typeof j.working === 'object' && !Array.isArray(j.working) ? j.working : {};
     askSet(j.supervisor?.question);
+    // the workers' and planners' sessions at a permission prompt: red questions, answered in their terminals
+    TL.prompts = Array.isArray(j.supervisor?.prompts) ? j.supervisor.prompts.filter((x) => x && typeof x.window === 'string') : [];
+    if (INBOX_D) inboxTitle(INBOX_D);
     const first = !TL.have;
     TL.have = n;
     // the first read, or one that brings in a t the route named before the threads had it: the Threads part of
@@ -10826,13 +10841,20 @@ function staleNote() {
 // The rest are about how the agents work, and the supervisor's to keep (supervisor.md §4).
 function ownerLesson(k) { return k.status === 'candidate' && k.for_owner === true; }
 
-// The Inbox's number (kit-100 spec §2.2): the open questions not answered on this page yet (ANSWERED), and the
-// lessons sent to the owner. Counted from the data inboxTitle last counted (newer data held back from a redraw
+// The Inbox's number (kit-100 spec §2.2): the open questions not answered on this page yet (ANSWERED), the
+// lessons sent to the owner, and the sessions at a permission prompt (promptCount). Counted from the data inboxTitle last counted (newer data held back from a redraw
 // included), else the data drawn, so the tab, the button and the tab title always agree; the /view/ tab has no
 // data: hello's number, in the button.
 function inboxCount(d = INBOX_D ?? DATA) {
   if (!d) return parseInt(document.getElementById('inbox-btn-n')?.textContent, 10) || 0;
-  return (d.questions || []).filter((q) => !ANSWERED.has(q.id)).length + (d.ooda?.knowledge ?? []).filter(ownerLesson).length;
+  return (d.questions || []).filter((q) => !ANSWERED.has(q.id)).length + (d.ooda?.knowledge ?? []).filter(ownerLesson).length + promptCount();
+}
+// The permission prompts and other dialogs at the top of the Inbox (askHtml), one red question each: the
+// supervisor's terminal's (not a usage-limit stop, and not one just answered here) and each session's
+// (hello's prompt_sessions), as hello counts them into the hub's number.
+function promptCount() {
+  const q = typeof ASK !== 'undefined' ? askShown() : null;
+  return (q && q.kind !== 'limit' ? 1 : 0) + (typeof TL !== 'undefined' ? (TL.prompts ?? []).length : 0);
 }
 // The tab title and the Inbox button's red count carry the Inbox's number. Notifications are the hub's, for every instance.
 function inboxTitle(d) {
@@ -10986,6 +11008,13 @@ document.addEventListener('click', async (ev) => {
       else if (el.value) values[name] = el.value;
     }
     if (!Object.keys(values).length) { if (err) err.textContent = 'Paste a value or choose a file first.'; return; }
+    // a store started is a store finished: name what's missing before anything is cleared or sent
+    const stores = new Map();
+    for (const el of inputs) if (el.dataset.sopsStore) stores.set(el.dataset.sopsStore, [...(stores.get(el.dataset.sopsStore) || []), el.dataset.secret.slice(id.length + 1)]);
+    for (const [file, names] of stores) {
+      const missing = names.filter((n) => !(n in values));
+      if (missing.length && missing.length < names.length) { if (err) err.textContent = `${file} takes these together: add ${missing.join(', ')} too, or post none of them yet.`; return; }
+    }
     if (err) err.textContent = '';
     // at once: the card says it is posting and takes no second press. It stays in the Inbox until the
     // server says the question is answered (every secret posted). The values never stay in the page:
