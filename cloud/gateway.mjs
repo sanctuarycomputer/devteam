@@ -1892,23 +1892,23 @@ export function createGateway(opts = {}) {
   const IMAGE = /\.(png|jpe?g|gif|webp|avif|svg|ico)$/i;
   const PREVIEW_FRAMED = ['iframe', 'frame', 'object', 'embed', 'fencedframe'];
   const CAP_LINK = /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/;
-  // A sandboxed artifact's own frames arrive cross-site, with their capability as the only credential,
-  // so an exact capability path answers to its own check instead of the frame refusal. Judged on the
+  // An artifact navigating its own frame (a link, location.href, a reload, a meta refresh) arrives as
+  // a cross-site iframe request, since its sandbox has no allow-same-origin, with its capability as the
+  // only credential. (A nested frame never gets here: the kit's CSP blocks it.) So an exact capability
+  // path answers to its own check instead of the frame refusal. Judged on the
   // raw path: anything a server could decode or normalise into another path keeps the refusal.
-  // An encoded slash, backslash or dot, at any depth of encoding (%2f, %252f, ...), a backslash, or a doubled slash.
-  const CAP_NOT_EXACT = /%(?:25)*(?:2f|5c|2e)|\\|\/\//i;
+  // Any escape at all, a backslash, or a doubled slash.
+  const CAP_NOT_EXACT = /%|\\|\/\//;
   // The one exception: the kit's link to a draft on a fetched branch encodes the branch into one
-  // segment (/artifact/origin/ticket%2Fkit-1/<slug>/...). There, and only there, %2F is allowed: it
-  // must decode to a branch the kit accepts, whose characters hold no %, so any other escape fails
-  // it, and leave no % after the segment. The path is forwarded unchanged, so the kit decodes this
-  // segment to this branch.
+  // segment (/artifact/origin/ticket%2Fkit-1/<slug>/...). That segment may hold %2F and no other
+  // escape: with %2F decoded it must be a branch the kit accepts, whose characters hold no %. The
+  // path is forwarded unchanged, so the kit decodes this segment to this branch.
   const capLinkExact = (raw) => {
     const m = CAP_LINK.exec(raw);
     if (!m) return false;
     const [, branch, rest] = /^\/artifact\/origin\/([^/]+)(\/.*)$/.exec(m[4]) ?? [];
-    const encoded = branch !== undefined && /%2f/i.test(branch);
-    if (encoded && (rest.includes('%') || !BRANCH_AT.test(branch.replace(/%2f/gi, '/')))) return false;
-    const judged = encoded ? rest : raw;
+    if (branch !== undefined && !BRANCH_AT.test(branch.replace(/%2f/gi, '/'))) return false;
+    const judged = branch !== undefined ? rest : raw;
     return !CAP_NOT_EXACT.test(judged) && !judged.split('/').some((x) => x === '.' || x === '..');
   };
   const crossSiteOk = (req, p, url) => {
@@ -2570,7 +2570,8 @@ export function createGateway(opts = {}) {
     // outlive its server, and run as that name's real dashboard once one takes the port.
     if (label && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
     // Before any lookup, for every label: no other site lays one of these under its own page with
-    // the owner's session in it. An exact capability path has its own check, and reads no session.
+    // the owner's session in it. An exact capability path, which an artifact navigating its own frame
+    // sends as a cross-site iframe request, has its own check instead, and reads no session.
     const rawPath = req.url.split('?')[0];
     if (label && !capLinkExact(rawPath) && PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, 'text/plain; charset=utf-8', 'not in another site\'s frame');
     const p = url.pathname;

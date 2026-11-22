@@ -3478,6 +3478,9 @@ on('C5g a cross-site frame keeps the refusal for every encoded form but one bran
     draftAt('ticket%2F.hidden'), draftAt('ticket%2Fkit.lock'), draftAt('ticket%2Fkit%2D1'), draftAt('ticket%2Fkit 1'.replace(' ', '%20')),
     draftAt('ticket%2Fkit-1', 'mo%2Fck/nested.html'), draftAt('ticket%2Fkit-1', 'mo%2fck/nested.html'), draftAt('ticket%2Fkit-1', 'mock/a%2Fb.html'), draftAt('ticket%2Fkit-1', 'mock/a%41.html'),
     draftAt('main', 'mo%2Fck/nested.html'),
+    draftAt('ticket%25%32%46kit-1'), draftAt('ticket%252%46kit-1'), draftAt('ticket%25%32Fkit-1'), draftAt('ticket%25%35%43kit-1'), draftAt('pl%61in-1'),
+    draftAt('main', 'mo%63k/nested.html'), draftAt('main', 'mock/%25%32%46.html'), '/artifact/main/mo%63k/nested.html', '/artifact/main/mo%25%32%46ck/nested.html',
+    draftAt('a..b'), draftAt('plain.lock'),
     draftAt('ticket%2Fkit-1', 'mock/../x.html'), draftAt('ticket%2Fkit-1', 'mock/./x.html'), draftAt('ticket%2Fkit-1', 'mock//x.html'), draftAt('ticket%2Fkit-1', 'mock/a\\b.html'),
     '/artifact/main/mo%2Fck/nested.html', '/artifact/wt/a%2Fb/mock/nested.html', `/artifact/tree/${TREE}/mo%2Fck/nested.html`, '/artifact/other%2Fx/mock/nested.html', '/artifact/origin%2Fx/mock/nested.html',
   ]) {
@@ -3506,7 +3509,11 @@ test('C5i the gateway\'s BRANCH_AT is the kit\'s, character for character', () =
   assert.ok(kit, 'the kit defines it');
   assert.equal(of('cloud/gateway.mjs'), kit);
 });
-test('C5j in Chrome, a ticket/<id> draft\'s nested frame loads through its capability', { skip: !canDrive, timeout: 90000 }, async () => {
+// A stand-in page, checking the gateway's half only: the stand-in instance sends no kit policy, so its
+// frame loads where a real artifact's nested frame would be blocked by the kit's CSP. The real
+// ticket/<id> draft's link click, location.href and reload, and that check of the kit's CSP, are plan
+// task 3's, since they need mapLoop.
+test('C5j in Chrome, a stand-in page under a ticket/<id> draft\'s capability: the gateway lets its cross-site frame request through', { skip: !canDrive, timeout: 90000 }, async () => {
   const b = await box();
   const chrome = await openChrome();
   try {
@@ -3524,6 +3531,32 @@ test('C5j in Chrome, a ticket/<id> draft\'s nested frame loads through its capab
     assert.ok(b.seen.get(P).includes(nested), `its nested frame is requested: ${JSON.stringify(b.seen.get(P))}`);
     assert.equal(b.cookies[b.seen.get(P).indexOf(nested)], undefined, 'with no cookie');
   } finally { await chrome.close(); await b.close(); }
+});
+on('C5k a frame on another site can\'t load a signed link for a page it wasn\'t given', undefined, async (b) => {
+  const mint = async (inner) => (await b.get('alpha', inner, { cookie: COOKIE, headers: SAME_FRAME })).headers.location;
+  const slugA = await mint('/artifact/main/mock/index.html');
+  const branchA = await mint(draftAt('ticket%2Fkit-1', 'mock/index.html'));
+  const [, exp, sid] = /^\/c\/(\d+)\.([\w-]+)\./.exec(slugA);
+  const tries = {
+    'another slug, slug A\'s token': slugA.replace('/main/mock/', '/main/other/'),
+    'another branch, branch A\'s token': branchA.replace('ticket%2Fkit-1', 'ticket%2Fkit-2'),
+    'a made-up MAC': `/c/${exp}.${sid}.${'A'.repeat(22)}/artifact/main/mock/index.html`,
+  };
+  const sigs = [];
+  const notRefused = [];
+  for (const [what, link] of Object.entries(tries)) {
+    const asked = b.cookies.length;
+    const r = await b.get('alpha', link, { headers: CROSS_FRAME });
+    if (r.status !== 403 || b.cookies.length !== asked) notRefused.push(what);
+    else sigs.push(shape(r));
+  }
+  const asked = b.cookies.length;
+  const bare = await b.get('alpha', '/artifact/main/mock/index.html', { headers: CROSS_FRAME });
+  if (bare.status !== 403 || bare.body !== 'not in another site\'s frame' || b.cookies.length !== asked) notRefused.push('no capability at all');
+  // every case that got through, in one run
+  assert.deepEqual(notRefused, [], `not refused: ${JSON.stringify(notRefused)}`);
+  assert.equal(new Set(sigs).size, 1, 'the signed links get one and the same refusal');
+  assert.deepEqual([b.seen.get(P), b.seen.get(P + 1)], [[], []], 'no port is asked');
 });
 on('C6 /healthz is the gateway\'s ok on a project label of a preview\'s shape', { list: [row('devteam-dev', P)] }, async (b) => {
   const r = await b.get('devteam-dev', '/healthz');
