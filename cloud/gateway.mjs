@@ -846,9 +846,9 @@ export const PUBLIC_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdeliv
 export const publicPathOk = (p) => /^[A-Za-z0-9._/-]+$/.test(p) && p.split('/').every((s) => s && !s.startsWith('.'));
 // The kit's artifact policy, its own folder as self, framed by nothing. The sandbox (no
 // allow-same-origin) makes the page an opaque origin, so it can't read or write the box's cookies.
-// frame-src 'none' is load-bearing too: an instance's viewer and published trees accept the public
-// name as a frame ancestor (viewerGranted, treeGranted), and frame-ancestors matches by URL, not
-// origin, so a published page that could frame would satisfy it, sandbox or not. A test pins both.
+// frame-src 'none' is load-bearing too: a published page is served on its project's own host, whose
+// dashboard pages accept 'self' as a frame ancestor, and frame-ancestors matches by URL, not origin,
+// so a published page that could frame would satisfy it, sandbox or not. A test pins both.
 export const publicCsp = (self) => {
   const cdns = PUBLIC_CDNS.join(' ');
   return [
@@ -860,9 +860,6 @@ export const publicCsp = (self) => {
 // The frame-ancestors directive of each policy in a header (several arrive joined by ", "), with
 // what precedes it and the list it names.
 const FRAME_ANCESTORS = /(^|[;,])(\s*)frame-ancestors(?=[\s;,]|$)([^;,]*)/gi;
-// One more origin that may frame the page, in every policy that names who may. A page that says no
-// one, or says nothing, is left as it is: adding a directive where there was none would narrow it.
-export const addFrameAncestor = (csp, origin) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => (!list.trim() || /^\s*'none'\s*$/i.test(list) ? all : `${sep}${sp}frame-ancestors ${list.trim()} ${origin}${/\s$/.test(list) ? ' ' : ''}`));
 // Who may frame the page, replaced in every policy that says. A policy that doesn't say gets nothing.
 export const replaceFrameAncestors = (csp, sources) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => `${sep}${sp}frame-ancestors ${sources}${/\s$/.test(list) ? ' ' : ''}`);
 export const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
@@ -1027,7 +1024,6 @@ export function createGateway(opts = {}) {
   const NAME = pubUrl.hostname;
   const SECURE = pubUrl.protocol === 'https:';
   const SUFFIX = pubUrl.port ? `:${pubUrl.port}` : '';
-  const instanceOrigin = (port) => `${pubUrl.protocol}//${port}.${NAME}${SUFFIX}`;
   const projectOrigin = (name) => `${pubUrl.protocol}//${name}.${NAME}${SUFFIX}`;
   // Exactly <label>.<box>: a look-alike suffix or a second label is no name of this box.
   const labelOf = (host) => {
@@ -1044,11 +1040,13 @@ export function createGateway(opts = {}) {
   };
   const previewOrigin = (name) => `${pubUrl.protocol}//${name}.${NAME}${SUFFIX}`;
   // Who may hold a preview's lens: frame-ancestors is checked against every ancestor, so the hub
-  // (which frames a dashboard) as well as each instance (whose viewer frames the lens). The lens is
-  // the same bytes and policy on every preview's name, as the kit's relay serves it, and neither can
-  // know which instance a name is for. The app inside it can: its own policy (downstreamHeaders)
-  // names only the instance that lists the preview, so a lens held by any other gets an empty frame.
-  const LENS_CSP = previewLensCsp([PUB, ...BLOCK.map(instanceOrigin)].join(' '));
+  // (which frames a dashboard) as well as the project host of the instance that lists the preview
+  // (whose viewer frames the lens), as the list last said. The bytes are the same on every preview's
+  // name, as the kit's relay serves them. A name two instances list, or none, gets the hub alone.
+  const lensCsp = (name) => {
+    const l = previews.get(name);
+    return previewLensCsp([PUB, l && !l.ambiguous ? portHost.get(l.instance) : null].filter(Boolean).join(' '));
+  };
   // Passkeys belong to the box's name. A page on an instance's subdomain may ask for one, but its
   // answer names that page's origin, and only an answer from the box's own origin is accepted.
   const RP_ID = NAME;
@@ -1532,7 +1530,8 @@ export function createGateway(opts = {}) {
     return h;
   };
   const LOOP = /http:\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
-  const mapLoop = (s) => s.replace(LOOP, (all, p) => (Number(p) === HUB_PORT ? PUB : BLOCK.includes(Number(p)) ? instanceOrigin(Number(p)) : all));
+  // A block port to its project's host, as the list last said; a port no one name holds stays as sent.
+  const mapLoop = (s) => s.replace(LOOP, (all, p) => (Number(p) === HUB_PORT ? PUB : BLOCK.includes(Number(p)) ? portHost.get(Number(p)) ?? all : all));
   // A preview's own headers: only this link's port, http and ws forms, to its own origin.
   const PREVIEW_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   const mapPreview = (s, port, own) => s.replace(PREVIEW_LOOP, (all, scheme, p) => (Number(p) !== port ? all : scheme === 'ws' ? own.replace(/^http/, 'ws') : own));
@@ -1552,7 +1551,7 @@ export function createGateway(opts = {}) {
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
     // a port off the block is no instance's: then nothing gives way
     if (previewPort && BLOCK.includes(lensOf)) {
-      const ancestors = `'self' ${PUB} ${instanceOrigin(lensOf)}`;
+      const ancestors = ["'self'", PUB, portHost.get(lensOf)].filter(Boolean).join(' ');
       delete out['x-frame-options'];
       const csp = out['content-security-policy'] ? String(out['content-security-policy']) : '';
       if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, ancestors);
@@ -1562,12 +1561,11 @@ export function createGateway(opts = {}) {
     }
     return { ...out, ...hsts };
   };
-  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, publicFrame = false }) => {
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null }) => {
     const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
       const head = downstreamHeaders(ur.headers, cap, publicOrigin);
-      if (publicFrame && head['content-security-policy']) head['content-security-policy'] = addFrameAncestor(String(head['content-security-policy']), PUBLIC);
       res.writeHead(ur.statusCode, { ...head, 'cache-control': 'no-store', ...(extra ?? {}) });
       // an upstream cut off mid-body cuts the browser's response too, rather than leaving it open
       pipeline(ur, res, () => {});
@@ -1941,29 +1939,12 @@ export function createGateway(opts = {}) {
   // branch encoded into one segment: kit-750), or a published tree's (the owner's wrapper shows
   // exactly the version the public sees: spec §8).
   const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+|origin\/[^/]+|tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?)\/[^/]+\//;
-  // An instance's viewer, and an artifact at a published tree, may also be framed by the owner's
-  // wrapper on the public name (spec §8). frame-ancestors is checked against every ancestor, and the
-  // wrapper is one. Nothing else of an instance's is opened to it. The raw path, as the kit reads it.
-  // The viewer, which holds the owner's actions, only under the grant the wrapper put in its frame's
-  // URL: this port, this page, this version, for a few minutes, MACed with this process's secret.
+  // The grant the owner's wrapper puts in its frame's URL (spec §8): this port, this page, this
+  // version, for a few minutes, MACed with this process's secret. The wrapper is on the project's own
+  // host now, so the viewer's frame-ancestors 'self' admits it, and no other name is ever added.
   const WRAP_GRANT_MS = 5 * 60 * 1000;
   const wrapMac = (port, slug, at, exp) => b64u(mac('wrap', port, `/view/artifact/${slug}`, at, exp));
   const wrapGrant = (port, slug, at, exp = Date.now() + WRAP_GRANT_MS) => `${exp}.${wrapMac(port, slug, at, exp)}`;
-  const viewerGranted = (port, raw, url) => {
-    const m = /^\/view\/artifact\/([^/]+)$/.exec(raw);
-    if (!m || !LINK_ID.test(m[1]) || url.searchParams.getAll('at').length !== 1 || url.searchParams.getAll('w').length !== 1) return false;
-    const w = /^(\d{1,15})\.([\w-]{22})$/.exec(url.searchParams.get('w'));
-    const exp = w ? Number(w[1]) : 0;
-    if (!w || exp < Date.now() || exp > Date.now() + WRAP_GRANT_MS) return false;
-    return sameBytes(Buffer.from(w[2]), Buffer.from(wrapMac(port, m[1], url.searchParams.get('at'), exp)));
-  };
-  // An artifact's frame inside that viewer, only at a tree this port's binding published for that
-  // very page: what it shows is public already, so it needs no grant, and the kit passes none along.
-  const treeGranted = (port, raw) => {
-    const m = /^\/artifact\/tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?)\/([^/]+)\//.exec(raw);
-    if (!m || /\.\.|%2e|%5c|\\/i.test(raw)) return false;
-    try { return Object.values(store.load().public ?? {}).some((b) => b?.port === port && Object.hasOwn(b.artifacts ?? {}, m[2]) && b.artifacts[m[2]]?.tree === m[1]); } catch { return false; }
-  };
   const capMac = (port, prefix, exp, sid) => b64u(mac('artifact', port, prefix, exp, sid));
   const capFor = (port, prefix, session) => {
     const exp = Date.now() + CAPABILITY_MS;
@@ -1978,7 +1959,9 @@ export function createGateway(opts = {}) {
     const s = store.load();
     return sameBytes(got, want) && s.passkeys.length > 0 && liveSession(s, (x) => x.hash.startsWith(sid)) !== null;
   };
-  const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self'; frame-src ${[TERM, ...BLOCK.map(instanceOrigin)].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  // The hub page frames the terminal and each listed project's host: hubFrames, as the last list read
+  // said (a failed read keeps the last copy). Never a wildcard, which would admit any preview's name.
+  const hubCsp = () => `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self'; frame-src ${[TERM, ...hubFrames].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   // ttyd's page has no OSC 52, how tmux and a program in it (Claude Code's fullscreen) put text on
   // the clipboard. This adds it, to write only (a request to read is ignored), and only just after
   // the owner clicked or typed here, so what an agent prints can't quietly replace the clipboard.
@@ -2621,7 +2604,7 @@ export function createGateway(opts = {}) {
         if (!['GET', 'HEAD'].includes(req.method) || capPort === null || !capGood) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
         // the capability is this request's only credential: no cookie of any name goes on to the port
         delete req.headers.cookie;
-        return proxy(req, res, { port: capPort, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}`, publicFrame: treeGranted(capPort, cm[4]) });
+        return proxy(req, res, { port: capPort, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}` });
       }
       if (!crossSiteOk(req, p, url)) return send(res, 403, 'text/plain; charset=utf-8', 'not for another site\'s page');
       const s = store.load();
@@ -2697,7 +2680,7 @@ export function createGateway(opts = {}) {
       }
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
-      if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': LENS_CSP, 'referrer-policy': 'no-referrer' });
+      if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': lensCsp(pv), 'referrer-policy': 'no-referrer' });
       if (pv) return servePreview(req, res, pv, own);
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
       if (port) {
@@ -2710,7 +2693,7 @@ export function createGateway(opts = {}) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
         if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath]);
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, publicFrame: viewerGranted(port, rawPath, url) || treeGranted(port, rawPath), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -2753,7 +2736,11 @@ export function createGateway(opts = {}) {
         return send(res, 404, 'text/plain', 'not found');
       }
       // The box's own name: the gateway's copy of the hub page, what it needs to know, and the list.
-      if (req.method === 'GET' && (p === '/' || p === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': HUB_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+      if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
+        // a project listed a moment ago is framed at once: one shared read first, a second at most
+        await refreshWithin(1000);
+        return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': hubCsp(), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+      }
       // /box.json, box: 1: { box, terminal, instance, passkeys, previews, push, image }. image is what the
       // box's image says it is (boxImage, from the image's ENV: its release and its tools' pins):
       // { release: 'vX.Y.Z' | null, tools: { name: version } } in the ENV's order, or null with neither
