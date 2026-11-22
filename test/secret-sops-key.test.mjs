@@ -160,9 +160,33 @@ test('a chore branch reset to main loses an earlier post: the next post refuses'
     F.g(['reset', '-q', '--hard', 'origin/main'], w);
     const r = F.run(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ TWO: 'value-two-9' }));
     assert.notEqual(r.status, 0);
-    assert.match(r.out + r.err, /no longer holds \["ONE"\]/);
+    assert.match(r.out + r.err, /not what its earlier post recorded/);
     assert.doesNotMatch(decrypt(good.id, path.join(w, 'secrets/app.enc.env')).stdout, /TWO=/, 'nothing was saved');
     assert.doesNotMatch(F.ok(F.old, ['questions', '--all', '--json']), /"name":\s*"TWO"[^}]*"at"/, 'TWO is not logged as posted');
+  } finally { F.done(); }
+});
+
+for (const [how, lose] of [
+  ['reset to main', (F, w) => F.g(['reset', '-q', '--hard', 'origin/main'], w)],
+  ['removed', (F, w) => F.g(['worktree', 'remove', '--force', w], F.old)],
+]) test(`a rotated value is not undone when its chore worktree is ${how}`, { skip: !real }, () => {
+  const F = fleetFixture('sops-rotate');
+  try {
+    const good = keygen();
+    const { old, g } = F;
+    write(path.join(old, 'secrets/app.enc.env'), 'ONE=old-value-9\n');
+    encrypt(good.pub, path.join(old, 'secrets/app.enc.env'));
+    fs.appendFileSync(path.join(old, '.gitignore'), 'secrets/*.dec\n');
+    g(['add', '-A', 'secrets', '.gitignore'], old);
+    g(['commit', '-qm', 'store'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    write(path.join(old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+    const q = asks(F, ['ONE', 'TWO']);
+    assert.equal(F.run(old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ ONE: 'new-value-9' })).status, 0);
+    lose(F, path.join(old, '.worktrees', fs.readdirSync(path.join(old, '.worktrees')).find((x) => x.startsWith('chore-secret-'))));
+    const r = F.run(old, ['secret', 'post', q, '--json'], {}, JSON.stringify({ TWO: 'value-two-9' }));
+    assert.notEqual(r.status, 0, 'the old value of ONE must not be kept and reported as rotated');
+    assert.match(r.out + r.err, /not what its earlier post recorded/);
   } finally { F.done(); }
 });
 
