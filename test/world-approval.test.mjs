@@ -96,13 +96,18 @@ for (const k of ['self', 'exterior']) {
       refused(merge('a', wrong), new RegExp(`is a ${FILES[otherK].cls} question; changing ${re(rel)} needs an answered ${cls} question`), 'DW1 the other file\'s class, merge');
       refused(checkPr('chore-a', sha, wrong), new RegExp(`is a ${FILES[otherK].cls} question; changing ${re(rel)} needs an answered ${cls} question`), 'DW1 the other file\'s class, check-pr');
       // a non-recommendation answer, a supervisor's answer and a defaulted question approve nothing
-      refused(merge('a', answered(k, 'a', {}, 'no, redraft it')), /not its recommendation/, 'DW2 non-recommendation');
+      const declined = answered(k, 'a', {}, 'no, redraft it');
+      refused(merge('a', declined), /not its recommendation/, 'DW2 non-recommendation');
+      // check-pr reads the answer only through the gate, so each of these is tried there too
+      refused(checkPr('chore-a', sha, declined), /check-pr --approved: .* not its recommendation/, 'DW2 non-recommendation, check-pr');
       const bySup = W.ask(k, 'a');
       supLine({ id: bySup, type: 'question', op: 'set', answer: 'yes' });
       refused(merge('a', bySup), /is not a question the owner answered/, 'DW2 supervisor answer');
+      refused(checkPr('chore-a', sha, bySup), /check-pr --approved: .* is not a question the owner answered/, 'DW2 supervisor answer, check-pr');
       const defaulted = W.ask(k, 'a');
       supLine({ id: defaulted, type: 'question', op: 'set', status: 'defaulted' });
       refused(merge('a', defaulted), /is not a question the owner answered/, 'DW2 defaulted');
+      refused(checkPr('chore-a', sha, defaulted), /check-pr --approved: .* is not a question the owner answered/, 'DW2 defaulted, check-pr');
       // the owner's yes lands it, at merge and at check-pr
       const yes = answered(k, 'a');
       const landed = merge('a', yes);
@@ -122,6 +127,8 @@ for (const k of ['self', 'exterior']) {
       const planSha = W.branchOf('plan/billing', draftA);
       const ticketSha = W.branchOf('ticket/billing-01-a', draftA);
       refused(checkPr('plan/billing', planSha, yes), new RegExp(`${yes} approves chore-a, not plan-billing`), 'DW1 plan PR, check-pr');
+      // a ticket whose id reads like the chore's act is still no chore
+      refused(checkPr('ticket/chore-a', sha, yes), new RegExp(`${yes} approves chore-a, not ticket/chore-a: a change to ${re(rel)}`), 'DW1 a ticket named chore-a, check-pr');
       refused(checkPr('ticket/billing-01-a', ticketSha, yes), new RegExp(`${yes} approves chore-a, not billing-01-a`), 'DW1 ticket PR, check-pr');
       refused(said(W.run(W.old, ['merge', '--plan', 'billing', '--dry-run', '--approved', yes], SUP)), new RegExp(`${yes} approves chore-a, not plan-billing: a change to ${re(rel)}`), 'DW1 plan PR, merge');
       refused(said(W.run(W.old, ['merge', 'billing-01-a', '--dry-run', '--approved', yes], SUP)), new RegExp(`${yes} approves chore-a, not billing-01-a: a change to ${re(rel)}`), 'DW1 ticket PR, merge');
@@ -161,7 +168,7 @@ for (const k of ['self', 'exterior']) {
       refused(merge('gone'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 deleted, no answer');
       assert.match(W.askRun(k, 'gone').err, /commit the draft to its branch first/, 'DW2 deleted: nothing to pin');
       refused(merge('gone', q), new RegExp(`${re(rel)} at the head is not the text ${q} asked the owner about \\(no file,`), 'DW1 deleted, never approved');
-      assert.match(W.checkPr('chore-gone', goneSha, q).text, new RegExp(`${re(rel)} at the head is not the text ${q} asked the owner about \\(no file,`), 'DW1 deleted, check-pr');
+      refused(W.checkPr('chore-gone', goneSha, q), new RegExp(`${re(rel)} at the head is not the text ${q} asked the owner about \\(no file,`), 'DW1 deleted, check-pr');
     } finally { W.done(); }
   });
 

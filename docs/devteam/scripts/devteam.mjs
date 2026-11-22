@@ -6958,10 +6958,10 @@ worldFileFails.files = () => [
 ];
 // what a question names for the PR on this branch: chore-<slug> for a chore, plan-<feature> for
 // a plan, the id for a ticket, and any other branch as it is (so it matches a chore act only on
-// that chore's own branch)
+// that chore's own branch). A ticket whose id reads chore-… keeps its ticket/ prefix: it is no chore.
 worldFileFails.actOf = (ref) => {
   const b = String(ref).replace(/^refs\/heads\//, '');
-  return b.startsWith('plan/') ? `plan-${b.slice(5)}` : b.startsWith('ticket/') ? b.slice(7) : b;
+  return b.startsWith('plan/') ? `plan-${b.slice(5)}` : b.startsWith('ticket/') && !b.startsWith('ticket/chore-') ? b.slice(7) : b;
 };
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
@@ -31815,7 +31815,7 @@ const HELP_GRAPH = `The graph (planning.md)
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines`;
 const HELP_CHECKS = `Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
-  check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
+  check-pr --head-ref r --sha s [--title t] [--body-file f] [--approved <qid>] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts; --approved holds a change to strategy.md, self.md or exterior.md to that owner answer, and without it such a change only warns); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
   merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid [qid …]] [--decision d-id] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
   review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's`;
 const HELP_SESSIONS = `Sessions (worker.md)
