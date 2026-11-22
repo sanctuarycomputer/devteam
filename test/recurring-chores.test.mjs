@@ -164,6 +164,21 @@ const due = group(() => {
   return T;
 });
 
+test('C1: a chore every 7d whose last run started 7 days ago raises recurring-due (medium), not recurring-overdue', () => {
+  const T = due();
+  const f = T.finding('recurring-due', 'weekly');
+  assert.equal(f.length, 1, 'recurring-due for weekly');
+  assert.equal(f[0].severity, 'medium');
+  assert.match(f[0].suggestion, /recurring start weekly/);
+  assert.equal(T.finding('recurring-overdue', 'weekly').length, 0, 'not overdue inside its grace day');
+});
+
+test('C2: past grace_days after its slot it raises recurring-overdue instead of recurring-due', () => {
+  const T = due();
+  assert.equal(T.finding('recurring-overdue', 'late').length, 1, 'recurring-overdue for late');
+  assert.equal(T.finding('recurring-due', 'late').length, 0, 'not recurring-due as well');
+});
+
 test("C3: a chore's schedule follows each chore case of test/fixtures/recurring/slots.json, its runs read from their starts", () => {
   const RC = choresFn();
   const cases = SLOTS.cases.filter((c) => c.entry.kind === 'chore');
@@ -196,11 +211,41 @@ const merging = group(() => {
   return T;
 });
 
+test('C4: a chore started and not merged is not due again when its next slots pass', () => {
+  const T = merging();
+  assert.equal(T.entryOf('daily')?.state, 'started', 'its state is started');
+  assert.equal(T.finding('recurring-due', 'daily').length + T.finding('recurring-overdue', 'daily').length, 0, 'no recurring-due or -overdue while it is started');
+});
+
+test('C5: once it merges, it is due once, for the latest slot that passed', () => {
+  const T = merging();
+  T.mergeChore(T.ref, NOW - 60000);
+  const e = T.entryOf('daily');
+  assert.ok(['due', 'overdue'].includes(e?.state), `due again (${e?.state})`);
+  assert.equal(e.next_at, isoSec(midnight(NOW)), "for today's slot, the latest");
+  assert.equal(T.finding('recurring-due', 'daily').length + T.finding('recurring-overdue', 'daily').length, 1, 'one finding, for one slot');
+});
+
 // ===== DW4: worker chores end only through their ticket =====
 const worker = group(() => {
   const jobs = { pins: wchore({ every: '1d' }), bump: wchore({ every: '1d' }), lint: wchore({ every: '1d' }) };
   const T = setup('worker', jobs, { gh: true });
   return T;
+});
+
+test('C6: a worker chore whose ticket is superseded reads as abandoned, and is due again by its slots', () => {
+  const T = worker();
+  // as recurring start writes them, two days back, so the run's next slot has passed
+  const id = 'ops-01-recurring-pins';
+  const tk = (tid, title) => ({ type: 'ticket', feature: 'chores', id: tid, title, component: 'ops', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['ops/**'], done_when: ['the chore is done'] });
+  T.hand('supervisor', tk(id, 'Recurring: A worker chore'), NOW - 2 * DAY);
+  T.hand('supervisor', { type: 'act', class: 'add-ticket', what: `added chore ticket ${id}`, refs: [id, 'recurring:pins'], reversible: true }, NOW - 2 * DAY);
+  T.addLine('pins', { slot: iso(NOW - 10 * DAY), ref: id, at: NOW - 2 * DAY });
+  T.hand('supervisor', tk('ops-02-other', 'Another way'), NOW - DAY);
+  assert.equal(T.peek('pins').runs[0].status, 'started', 'live before');
+  T.ok(['ticket', 'set', id, '--json', J({ superseded_by: 'ops-02-other' })]);
+  assert.equal(T.peek('pins').runs[0].status, 'abandoned', 'its run reads as abandoned');
+  assert.ok(['due', 'overdue'].includes(T.entryOf('pins').state), 'due again');
 });
 
 // ===== DW5: supervisor chores that end without a merge, and recurring-stuck =====
@@ -211,6 +256,24 @@ const sup = group(() => {
   T.addLine('drop', { slot: iso(NOW - 10 * DAY), ref: `chore-recurring-drop-${ymd(NOW - 2 * DAY)}`, at: NOW - 2 * DAY });
   T.addLine('slow', { slot: iso(NOW - 10 * DAY), ref: `chore-recurring-slow-${ymd(NOW - 2 * DAY)}`, at: NOW - 2 * DAY });
   return T;
+});
+
+test('C9b: dashboard-data, metrics and peek never ask gh, even with a supervisor chore open', () => {
+  const T = sup();
+  T.data();
+  assert.deepEqual(T.ghCalls(), [], 'no gh call from dashboard-data');
+  T.metrics();
+  assert.deepEqual(T.ghCalls(), [], 'no gh call from metrics');
+  T.peek('tidy');
+  assert.deepEqual(T.ghCalls(), [], 'no gh call from peek');
+});
+
+test('C11: recurring-stuck (medium) for a started run not finished grace_days after its start', () => {
+  const T = sup();
+  const f = T.finding('recurring-stuck', 'slow');
+  assert.equal(f.length, 1, 'recurring-stuck for slow');
+  assert.equal(f[0].severity, 'medium');
+  assert.match(f[0].detail, new RegExp(`chore-recurring-slow-${ymd(NOW - 2 * DAY)}`));
 });
 
 // ===== DW6, DW8 (merge --chore, --nothing): a supervisor chore start to finish =====
@@ -256,6 +319,15 @@ const held = group(() => {
   return T;
 });
 
+test('C19: dashboard-data upkeep.recurring lists chore entries with states due, started and overdue, in the fixture shape', () => {
+  const T = held();
+  const es = T.data().upkeep.recurring.entries;
+  const by = Object.fromEntries(es.map((e) => [e.name, e]));
+  assert.deepEqual(['ca', 'cb', 'cc'].map((n) => by[n]?.state), ['due', 'started', 'overdue']);
+  for (const n of ['ca', 'cb', 'cc', 'cd']) assert.deepEqual(schemaErrors(ENTRY_SHAPE, by[n], n), [], `${n} meets the entry shape`);
+  assert.deepEqual([by.cb.kind, by.cb.by, by.cb.last.status, by.cb.ticket], ['chore', 'supervisor', 'started', null]);
+});
+
 // ===== DW10: lines that don't count =====
 const forged = group(() => {
   const jobs = { solo: chore({ every: '1d' }), live: chore({ every: '1d' }) };
@@ -263,6 +335,24 @@ const forged = group(() => {
   T.liveRef = `chore-recurring-live-${ymd(NOW - HOUR)}`;
   T.addLine('live', { slot: iso(NOW - 6 * HOUR), ref: T.liveRef, at: NOW - HOUR });
   return T;
+});
+
+test('C18: a started line written by a ticket session, or by the supervisor without detector recurring, starts nothing', () => {
+  const T = forged();
+  T.addLine('solo', { slot: iso(NOW - 6 * HOUR), ref: `chore-recurring-solo-${ymd(NOW)}`, at: NOW - 60000, by: 'ops-01-x' });
+  T.addLine('solo', { slot: iso(NOW - 6 * HOUR), ref: `chore-recurring-solo-${ymd(NOW)}`, at: NOW - 50000, detector: null });
+  T.ok(['observe', '--subject', 'recurring:solo', '--kind', 'recurring-run', '--detector', 'recurring', '--detail', 'started by hand']);
+  assert.equal(T.entryOf('solo').state, 'due', 'still due');
+  assert.equal(T.finding('recurring-due', 'solo').length, 1);
+});
+
+test('C18b: a nothing or abandoned line written by a ticket session, or without detector recurring, closes nothing', () => {
+  const T = forged();
+  T.addLine('live', { status: 'nothing', slot: iso(NOW - 6 * HOUR), ref: T.liveRef, at: NOW - 30000, by: 'ops-01-x' });
+  T.addLine('live', { status: 'abandoned', slot: iso(NOW - 6 * HOUR), ref: T.liveRef, at: NOW - 20000, detector: null });
+  T.ok(['observe', '--subject', 'recurring:live', '--kind', 'recurring-run', '--detector', 'recurring', '--detail', 'nothing to do']);
+  assert.equal(T.entryOf('live').state, 'started', 'still started');
+  assert.equal(T.peek('live').runs[0].status, 'started');
 });
 
 // ===== DW13: peek recurring for chores =====

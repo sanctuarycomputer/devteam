@@ -16244,6 +16244,17 @@ function collectMetrics(since, reviewsSince = 0) {
       const from = st.results.at(-1)?.at ?? c.start;
       if (supervisorRunning && !lockLive && every && from && Date.now() - Date.parse(from) > 3 * Number(every[1]) * UNIT[every[2]]) add('medium', 'recurring-stale', subj, `not run since ${from}, over 3 intervals of ${c.entry.every}, while wait runs`, 'check that wait is running, and read run/recurring/runner.log');
     }
+    // Chores (kit-164): due and not started, overdue past grace_days, a started run not finished
+    // grace_days after its start. A held Upkeep holds due and overdue (the chore waits); a park holds stuck too.
+    const RC = recurringChores;
+    const mode = goalMode(upkeepOrVirtual());
+    for (const { name, entry } of rc.problem ? [] : RC.list().chores) {
+      const st = RC.state(name, entry, { mode });
+      if (!st) continue;
+      const subj = `recurring:${name}`;
+      if (st.due && !st.held) add('medium', st.overdue ? 'recurring-overdue' : 'recurring-due', subj, `${entry.title}: due since ${recurringFailures.isoSec(st.slot)}${st.overdue ? `, over its ${RC.grace(entry)} day(s) of grace` : ''} (a ${entry.by}'s chore)`, `recurring start ${name}`);
+      if (st.stuck && !['park', 'let-go'].includes(mode)) add('medium', 'recurring-stuck', subj, `${entry.title}: started ${recurringFailures.isoSec(st.open.start)} as ${st.open.ref} and not finished in ${RC.grace(entry)} day(s)`, RC.isTicketRef(st.open.ref) ? `see to ${st.open.ref}: start or unstick its worker, or supersede it` : `land it (chore pr, then merge --chore ${st.open.ref.replace(/^chore-/, '')}), or recurring done ${name} --nothing "<why>" | --abandoned "<why>"; if its PR was closed unmerged, recurring start ${name} reads that and starts it again`);
+    }
   }
   // A flake is a finding while it's recent: one that hasn't flipped for a week was fixed or
   // explained, and its history stays in gates.flaky_gates without raising it again every day.
@@ -26839,6 +26850,20 @@ function recurringDashboard() {
     { name: 'kit-sync', every: `${s.upstream_check_hours}h`, last_at: sec(syncs.at(-1)?.created_at), next_at: null, note: `Adopts each new devteam release; you check for one every ${s.upstream_check_hours} hours.`, setting: 'upstream_check_hours' },
     { name: 'sensors', every: 'each cycle', last_at: sec(sensorsAt), next_at: null, note: 'Production signals, read on every wait cycle.', setting: null },
   ];
+  const mode = goalMode(upkeepOrVirtual());
+  const lc = recurringChores.list();
+  for (const { name, entry } of lc.chores) {
+    const st = recurringChores.state(name, entry, { forge: false, mode });
+    if (!st) continue;
+    const lr = st.runs.at(-1) ?? null;
+    const reg = RF.registered(name, entry);
+    entries.push({
+      name, title: entry.title, what: entry.what, kind: 'chore', by: entry.by, every: entry.every, on: entry.on ?? null, at: entry.at ?? null,
+      state: st.state, fails_in_a_row: 0,
+      last: lr ? { status: lr.status, at: sec(lr.status === 'started' ? lr.start : lr.at), seconds: null, excerpt: null } : null,
+      next_at: sec(st.next), ticket: null, registered: reg ? { qid: reg.qid, at: sec(reg.at) } : null, signals: [],
+    });
+  }
   return { entries, builtin, proposals: [] };
 }
 
@@ -29255,6 +29280,11 @@ function peekView(kind, id) {
     if (!Object.hasOwn(r.jobs, id)) die(`no job ${id} on main`);
     const entry = r.jobs[id];
     const reg = RF.registered(id, entry);
+    if (entry.kind === 'chore') {
+      const st = recurringChores.state(id, entry, { forge: false });
+      const runs = (st?.runs ?? []).slice().reverse().slice(0, 20).map((x) => ({ status: x.status, at: RF.isoSec(x.start), slot: RF.isoSec(x.slot), seconds: null, excerpt: null, ref: x.ref }));
+      return { name: id, entry: { ...entry, registered: reg ? { qid: reg.qid, at: RF.isoSec(reg.at) } : null }, runs };
+    }
     const STATUSES = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
     const runs = logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && Number.isFinite(Date.parse(o.created_at)))
