@@ -2568,6 +2568,8 @@ export function createGateway(opts = {}) {
         const capPort = only?.length === 1 ? only[0].port : null;
         const capGood = capOk(capPort ?? 0, cm[4], cm[1], cm[2], cm[3]);
         if (!['GET', 'HEAD'].includes(req.method) || capPort === null || !capGood) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
+        // the capability is this request's only credential: no cookie of any name goes on to the port
+        delete req.headers.cookie;
         return proxy(req, res, { port: capPort, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}`, publicFrame: treeGranted(capPort, cm[4]) });
       }
       if (!crossSiteOk(req, p, url)) return send(res, 403, 'text/plain; charset=utf-8', 'not for another site\'s page');

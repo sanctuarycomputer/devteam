@@ -3446,6 +3446,13 @@ on('C5e the capability route never consults the session, even with a cookie that
   await b.get('alpha', '/api/data');
   assert.ok(sessionReads > 0, 'the trap does fire on a route that reads the session');
 });
+on('C5f a request served through a valid capability reaches the port with no cookie header, framed or not', undefined, async (b) => {
+  const link = await capLink(b);
+  const framed = await b.get('alpha', link, { cookie: `app=1; ${COOKIE}`, headers: CROSS_FRAME });
+  const plain = await b.get('alpha', link, { cookie: `app=1; ${COOKIE}` });
+  assert.deepEqual([framed.status, plain.status], [200, 200]);
+  assert.deepEqual(b.cookies, [undefined, undefined], 'no cookie of any name reaches the port');
+});
 on('C6 /healthz is the gateway\'s ok on a project label of a preview\'s shape', { list: [row('devteam-dev', P)] }, async (b) => {
   const r = await b.get('devteam-dev', '/healthz');
   assert.deepEqual([r.status, r.body], [200, 'ok']);
