@@ -29058,6 +29058,29 @@ function placeOf(o) {
 const fileHistory = (rel, ref = null, name = 'home') => { const R = name === 'home' ? repo('home') : repoReadable(name) ? repo(name) : null; return fileHistoryIn(R, rel, ref ?? (name === 'home' ? null : R?.mainRef())); };
 const fileHistoryIn = (R, rel, ref) => (!R ? '' : R.git(['log', '-n', '60', '--format=%H%x09%cI%x09%an%x09%s', ...(ref ? [ref] : []), '--', rel]) ?? '').split('\n').filter(Boolean).map((x) => { const [sha, at, author, subject] = x.split('\t'); return { sha, at, author, subject }; }).reverse();
 function peekView(kind, id) {
+  // a recurring job (kit-168): exactly test/fixtures/recurring/peek.json's shape, its entry as main has it
+  // with registered, and its newest 20 counted runs; a job not on main (or main's file not reading) dies,
+  // so /api/peek answers 404
+  if (kind === 'recurring') {
+    const RF = recurringFailures;
+    const ref = projectInRepo ? mainRef() : null;
+    if (!ref) die(`no ${loadSettings().main_branch} branch to read the jobs from`);
+    const c = recurringRunDue.checks();
+    if (c.problem) die(c.problem);
+    const r = recurringRegistry.read(ref);
+    if (r.problem) die(r.problem);
+    if (!Object.hasOwn(r.jobs, id)) die(`no job ${id} on main`);
+    const entry = r.jobs[id];
+    const reg = RF.registered(id, entry);
+    const STATUSES = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
+    const runs = logObjects('observation')
+      .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string')
+      .map((o) => ({ o, ms: Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0) }))
+      .sort((a, b) => b.ms - a.ms)
+      .slice(0, 20)
+      .map(({ o, ms }) => ({ status: o.run.status, at: RF.isoSec(ms), slot: RF.isoSec(o.run.slot), seconds: Number.isFinite(o.run.seconds) ? o.run.seconds : null, excerpt: typeof o.run.excerpt === 'string' ? o.run.excerpt.slice(-200) : null, ref: typeof o.run.ref === 'string' && o.run.ref ? o.run.ref : null }));
+    return { name: id, entry: { ...entry, registered: reg ? { qid: reg.qid, at: RF.isoSec(reg.at) } : null }, runs };
+  }
   // the stored record this object is, or lives in (a story in its feature, a milestone in its goal)
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
   // where a record sits in the loop, and where an observation came from
@@ -29177,7 +29200,7 @@ function peekView(kind, id) {
 }
 function cmdPeek() {
   const [kind, id] = positional;
-  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread|observation|signal|learning> <id> [--tickets ids] --json | --mermaid');
+  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread|observation|signal|learning|recurring> <id> [--tickets ids] --json | --mermaid');
   // a signal no observation is on is no signal, for --mermaid as for --json (lineageNode draws any key)
   if (kind === 'signal' && !signalGroups().has(id) && !logObjects('observation').some((o) => signalKeyOf(o) === id)) die(`no signal ${id}`);
   // its lineage as Mermaid text, for a retro, a PR body or the supervisor's own reading
