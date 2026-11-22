@@ -1029,7 +1029,72 @@ Object.assign(linkAnswerCovers, {
   any: (c) => questions().filter((q) => q.status === 'answered' && String(q.context ?? '').includes(`links.${c.id}`)).sort((a, b) => String(b.answered_at).localeCompare(String(a.answered_at))).find((q) => linkAnswerCovers(q.id, c))?.id ?? null,
 });
 let settingsCache;
-function loadSettings() {
+// opts.origin (kit-764): the owner's settings as they are at the commit origin names for its default
+// branch, for a process that isn't a launch but types an owner's command into a pane (accounts-tick's
+// supervisor restart): this process's own settings with the owner's keys from origin over them, or
+// { refused: why } when origin can't be read or its settings won't do. Never the local refs.
+function loadSettings({ origin = false } = {}) {
+  // origin's commit for main, read as a launch reads it: what it can't do goes to fail(message)
+  const readOrigin = (fail) => {
+    const no = (why) => fail(`could not read main from origin (${why}), so the owner's settings can't be confirmed and nothing was started; a local ref is any session's to move, so none is trusted to start one. Try again when origin answers`);
+    // origin gets 30 s in all, and a relaunch's child (DEVTEAM_SETUP_DEADLINE, accounts-tick) less,
+    // so a hung origin refuses with its reason before the tick's kill comes
+    const deadline = Number(process.env.DEVTEAM_SETUP_DEADLINE);
+    const end = Math.min(Date.now() + (Number(process.env.DEVTEAM_LAUNCH_ORIGIN_MS) || 30000), Number.isFinite(deadline) && deadline > Date.now() ? deadline - 5000 : Infinity);
+    const toOrigin = (args) => {
+      const ms = Math.floor(end - Date.now());
+      if (ms < 1000) return { status: 124, stdout: '', stderr: '' };
+      return spawnSync(process.execPath, ['-e', RESPONDER_GROUP_RUN, '--', String(ms), 'git', ...RESPONDER_GIT, ...args], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: ms + 10000 });
+    };
+    // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
+    const why = (r) => { const said = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean); return r.status === 124 ? 'it did not answer in time' : (said.find((l) => /^fatal: /.test(l)) ?? said.at(-1) ?? `git exited ${r.status}`).replace(/^fatal: /, '').slice(0, 200); };
+    const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
+    if (ls.status !== 0) no(why(ls));
+    const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
+    const branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
+    const sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
+    if (!branch || !sha) no('it names no default branch');
+    // always fetched, into the tracking ref by name: a new worktree is based on origin/<main>, so it
+    // is put back where origin has it before anything reads it
+    const f = toOrigin(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    if (f.status !== 0) no(why(f));
+    // read here only, never fetched on the side (a partial clone's lazy fetch would run outside the deadline)
+    const local = (args) => responderGit(args, mainRoot, { GIT_NO_LAZY_FETCH: '1' });
+    if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+    const ref = `origin's ${branch} (${sha.slice(0, 8)})`;
+    // before settings.md first lands on main (adoption), the working tree is all there is, as below;
+    // only a settings.md git says isn't there, never one git failed to read
+    const listed = local(['ls-tree', '--name-only', sha, '--', `${projectRel}/settings.md`]);
+    if (listed.status !== 0) no(`git could not read ${sha.slice(0, 8)}: ${why(listed)}`);
+    if (listed.stdout.trim()) {
+      const shown = local(['show', `${sha}:${projectRel}/settings.md`]);
+      if (shown.status !== 0) no(`git could not read settings.md at ${sha.slice(0, 8)}: ${why(shown)}`);
+      const block = String(shown.stdout ?? '').match(/```json devteam\s*\n([\s\S]*?)\n```/);
+      let own = null;
+      try { own = JSON.parse(block?.[1]); } catch {}
+      // never the kit's defaults or the working tree in place of the owner's commands: a block that
+      // isn't an object of settings (null, an array, {}, only unknown keys) starts nothing
+      if (!isObj(own) || !Object.keys(own).some((k) => SETTINGS_KEYS.includes(k))) fail(`settings.md at ${ref} has no settings block the kit can read (not an object of settings), so nothing was started`);
+      const onMain = { ...SETTINGS_DEFAULTS, ...own };
+      if (onMain.main_branch !== branch) fail(`origin's default branch is ${branch}, but settings.md there names ${onMain.main_branch} as main, so nothing was started; make them agree`);
+      return { ref, onMain };
+    }
+    return { ref, onMain: null };
+  };
+  if (origin) {
+    if (loadSettings.fromOrigin) return loadSettings.fromOrigin;
+    const mine = loadSettings();
+    if (!projectInRepo) return mine;
+    let read;
+    try { read = readOrigin((why) => { throw { refused: why }; }); } catch (e) { if (e?.refused) return { refused: e.refused }; throw e; }
+    const s = { ...mine };
+    if (read.onMain) {
+      for (const k of [...Object.keys(OWNER_SETTINGS), ...OWNER_ASKABLE]) s[k] = read.onMain[k];
+      s.links = pinOwnedLinks(mine.links, read.onMain.links).links;
+    }
+    loadSettings.fromOrigin = s;
+    return s;
+  }
   if (settingsCache) return settingsCache;
   const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
   if (!m) settingsCache = { ...SETTINGS_DEFAULTS };
@@ -1056,46 +1121,12 @@ function loadSettings() {
     // command reads the local refs, offline too.
     const launch = command === 'planner' || (command === 'worker' && !flags.remove)
       || (command === 'recover' && !flags['dry-run'] && !flags.machine)
-      || (command === 'operator-thread' && positional[0] === 'start');
+      // the operator's start, and the words that start it when none is up (deliverToOperator)
+      || (command === 'operator-thread' && ['start', 'new', 'say', 'reopen'].includes(positional[0]));
     let ref = null;
     let onMain = null;
-    if (launch) {
-      const no = (why) => die(`${command}: could not read main from origin (${why}), so the owner's settings can't be confirmed and nothing was started; a local ref is any session's to move, so none is trusted to start one. Try again when origin answers`);
-      // origin gets 30 s in all, and a relaunch's child (DEVTEAM_SETUP_DEADLINE, accounts-tick) less,
-      // so a hung origin refuses with its reason before the tick's kill comes
-      const deadline = Number(process.env.DEVTEAM_SETUP_DEADLINE);
-      const end = Math.min(Date.now() + (Number(process.env.DEVTEAM_LAUNCH_ORIGIN_MS) || 30000), Number.isFinite(deadline) && deadline > Date.now() ? deadline - 5000 : Infinity);
-      const toOrigin = (args) => {
-        const ms = Math.floor(end - Date.now());
-        if (ms < 1000) return { status: 124, stdout: '', stderr: '' };
-        return spawnSync(process.execPath, ['-e', RESPONDER_GROUP_RUN, '--', String(ms), 'git', ...RESPONDER_GIT, ...args], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: ms + 10000 });
-      };
-      // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
-      const why = (r) => { const said = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean); return r.status === 124 ? 'it did not answer in time' : (said.find((l) => /^fatal: /.test(l)) ?? said.at(-1) ?? `git exited ${r.status}`).replace(/^fatal: /, '').slice(0, 200); };
-      const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
-      if (ls.status !== 0) no(why(ls));
-      const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
-      const branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
-      const sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
-      if (!branch || !sha) no('it names no default branch');
-      // always fetched, into the tracking ref by name: a new worktree is based on origin/<main>, so it
-      // is put back where origin has it before anything reads it
-      const f = toOrigin(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-      if (f.status !== 0) no(why(f));
-      if (responderGit(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
-      ref = `origin's ${branch} (${sha.slice(0, 8)})`;
-      // before settings.md first lands on main (adoption), the working tree is all there is, as below
-      if (responderGit(['cat-file', '-e', `${sha}:${projectRel}/settings.md`]).status === 0) {
-        const block = String(responderGit(['show', `${sha}:${projectRel}/settings.md`]).stdout ?? '').match(/```json devteam\s*\n([\s\S]*?)\n```/);
-        let own = null;
-        try { own = JSON.parse(block?.[1]); } catch {}
-        // never the kit's defaults or the working tree in place of the owner's commands: a block that
-        // isn't an object of settings (null, an array, {}, only unknown keys) starts nothing
-        if (!isObj(own) || !Object.keys(own).some((k) => SETTINGS_KEYS.includes(k))) die(`${command}: settings.md at ${ref} has no settings block the kit can read (not an object of settings), so nothing was started`);
-        onMain = { ...SETTINGS_DEFAULTS, ...own };
-        if (onMain.main_branch !== branch) die(`${command}: origin's default branch is ${branch}, but settings.md there names ${onMain.main_branch} as main, so nothing was started; make them agree`);
-      }
-    } else {
+    if (launch) ({ ref, onMain } = readOrigin((why) => die(`${command}: ${why}`)));
+    else {
       const head = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
       ref = [head, `origin/${settingsCache.main_branch}`, settingsCache.main_branch].find((r) => r && git(['cat-file', '-e', `${r}:${projectRel}/settings.md`]) !== null);
       onMain = ref ? settingsAt(ref) : null;
@@ -18360,8 +18391,8 @@ function supervisorSessionId(t = supervisorTranscript()) {
 }
 // The repo's resume_command on this exact conversation (--continue replaced, as the box's boot
 // does), or null when it has no --continue to replace.
-function supervisorResumeCommand(id) {
-  const cmd = loadSettings().resume_command;
+function supervisorResumeCommand(id, s = loadSettings()) {
+  const cmd = s.resume_command;
   return /\s--continue(\s|$)/.test(cmd) ? cmd.replace(/(\s)--continue(?=\s|$)/, `$1--resume ${id}`) : null;
 }
 // A process's arguments and environment, from the OS, or null if they can't be read; a caller that
@@ -18424,7 +18455,12 @@ function supervisorToRestart() {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem || !target || !paneStoppedAtLimit(target) || !paneStartedIn(target, fs.realpathSync(mainRoot))) return null;
   const id = supervisorLimit()?.session;
-  const cmd = id ? supervisorResumeCommand(id) : null;
+  if (!id) return null;
+  // the owner's resume_command as origin has it, never a local ref's (kit-764): a refusal skips this
+  // restart and says why
+  const s = loadSettings({ origin: true });
+  if (s.refused) return { refused: s.refused };
+  const cmd = supervisorResumeCommand(id, s);
   if (!cmd) return null;
   const agent = paneAgentProcess(target);
   if (!agent?.env.length) return { refused: `could not read the environment of the process in ${target}` };
