@@ -1373,20 +1373,11 @@
             "x-tip": "Values it asked you to post, and where each goes. Values never reach the log."
           },
           "secrets_posted": {
-            "description": "Which declared secrets the owner has posted, cumulative: the name, when, and for an encrypted store the sha256 of its ciphertext after the post. Never the value or its size.",
+            "description": "Which declared secrets the owner has posted, cumulative: the name and when. Never the value or its size.",
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "store": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": ["file", "sha256"],
-                  "properties": {
-                    "file": { "type": "string", "minLength": 1 },
-                    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-                  }
-                },
                 "name": {
                   "type": "string"
                 },

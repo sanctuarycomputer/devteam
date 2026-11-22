@@ -11877,52 +11877,63 @@ function sopsKeyFor(file, blob, base) {
   }
   return {};
 }
-// One value into a store, on a private copy; only the finished, checked file reaches the worktree.
-// It starts from the remote's store, or from what an earlier post for this question recorded. When
-// the question posted to this store before and the worktree no longer holds that, it refuses: going
-// back to the remote's store would lose the earlier value while the log still says it was posted.
-function sopsSet(k, input, cwd, run, trust) {
-  const blob = sopsMainBlob(k.file);
-  if (!blob) return { ok: false, out: `could not read ${k.file} from the remote's main` };
-  const target = path.join(cwd, k.file);
-  const want = sopsRecipients(blob).join();
-  let now = null;
-  try { if (!fs.lstatSync(target).isSymbolicLink()) now = fs.readFileSync(target); } catch {}
-  // With an earlier post to this store, only a store the log recorded holds its values: the chore's,
-  // or main's once that chore has landed. Presence can't tell a rotated value from the old one.
-  const recorded = trust.stores.get(k.file);
-  let start = blob;
-  if (trust.earlier.has(k.file)) {
-    if (now && recorded === sopsHash(now) && sopsRecipients(now).join() === want) start = now;
-    else if (recorded !== sopsHash(blob)) return { ok: false, out: `${k.file} in this question's chore is not what its earlier post recorded, so saving here could lose or undo that value. Nothing was changed. To recover, the supervisor puts the chore branch back on its commit from that post, or asks again for all of this question's secrets in a new question` };
+// A question's secrets for one store go in together, or not at all: from a private copy of the store
+// on the remote's main, so nothing in a worktree or an ignored file can choose its data key, and with
+// no partial state for a later post to continue from.
+function sopsPostAll(sinks, declared, posted, values, cwd, redact) {
+  const results = new Map();
+  const groups = new Map();
+  for (const x of sinks) if (x.k.type === 'sops') groups.set(x.k.file, [...(groups.get(x.k.file) ?? []), x]);
+  for (const [file, group] of groups) {
+    const names = declared.filter((x) => { try { const k = parseSink(x.sink, { soft: true }); return k.type === 'sops' && k.file === file; } catch { return false; } }).map((x) => x.name);
+    const earlier = names.filter((n) => posted.some((p) => p.name === n));
+    const missing = names.filter((n) => !group.some((x) => x.name === n));
+    const r = earlier.length ? { ok: false, out: `${earlier.join(', ')} already went to ${file}, and a store takes all of a question's secrets in one post. Nothing was changed. Ask for all of them again in a new question` }
+      : missing.length ? { ok: false, out: `${file} takes all of this question's secrets in one post, and ${missing.join(', ')} ${missing.length > 1 ? 'are' : 'is'} missing. Nothing was saved` }
+        : sopsSetAll(file, group, values, cwd, redact);
+    for (const x of group) results.set(x.name, r);
   }
+  return results;
+}
+function sopsSetAll(file, group, values, cwd, redact) {
+  const target = path.join(cwd, file);
+  if (!fs.existsSync(target)) return { ok: false, out: `${file} does not exist on main; create it with sops first` };
+  for (const x of group) {
+    if (x.k.keys.some((part) => /^\d+$/.test(part))) return { ok: false, out: `${x.sink}: a sops sink names map keys, not list positions` };
+    if (x.kind === 'file' && !isUtf8(values.get(x.name))) return { ok: false, out: 'sops stores text; this file is binary (base64 it first, or use a file: sink)' };
+  }
+  const blob = sopsMainBlob(file);
+  if (!blob) return { ok: false, out: `could not read ${file} from the remote's main` };
+  const want = sopsRecipients(blob).join();
   const { dir, config } = sopsPrivateDir();
   try {
-    const copy = path.join(dir, path.basename(k.file));
-    fs.writeFileSync(copy, start, { mode: 0o600 });
-    const env = { ...ownerProcessEnv(), ...sopsKeyFor(k.file, blob, ownerProcessEnv()) };
-    const r = run('sops', ['--config', config, 'set', '--value-stdin', copy, k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')], { cwd: dir, input, env });
-    r.out = (r.out ?? '').split(copy).join(k.file);
-    if (!r.ok) {
-      if (want && /no master key|failed to load age|failed to get the data key/i.test(r.out)) r.out = `no usable age key for ${k.file}${sopsKeyNote ? ` (${sopsKeyNote})` : ''}. The kit looks in the environment, ~/.config/sops/age/ and this repo's gitignored files with age or sops in their name, needs age-keygen on PATH to match one, and uses a key only if it is one of the file's recipients on the remote's main. ${r.out}`;
-      return r;
+    const copy = path.join(dir, path.basename(file));
+    fs.writeFileSync(copy, blob, { mode: 0o600 });
+    const env = { ...ownerProcessEnv(), ...sopsKeyFor(file, blob, ownerProcessEnv()) };
+    for (const x of group) {
+      const text = values.get(x.name).toString('utf8');
+      const input = JSON.stringify(x.kind === 'file' ? text : text.replace(/\r?\n$/, ''));
+      const p = spawnSync('sops', ['--config', config, 'set', '--value-stdin', copy, x.k.keys.map((part) => `[${JSON.stringify(part)}]`).join('')], { cwd: dir, encoding: 'utf8', input, env, maxBuffer: 16 * 1024 * 1024 });
+      if (p.error && !(p.error.code === 'EPIPE' && p.status !== null && p.status !== 0)) return { ok: false, out: redact(p.error.message) };
+      let out = redact(`${p.stdout ?? ''}${p.stderr ?? ''}`.trim()).split(copy).join(file);
+      if (p.status !== 0) {
+        if (want && /no master key|failed to load age|failed to get the data key/i.test(out)) out = `no usable age key for ${file}${sopsKeyNote ? ` (${sopsKeyNote})` : ''}. The kit looks in the environment, ~/.config/sops/age/ and this repo's gitignored files with age or sops in their name, needs age-keygen on PATH to match one, and uses a key only if it is one of the file's recipients on the remote's main. ${out}`;
+        if (/value-stdin/.test(out)) out += ' (this sops is too old for set --value-stdin; update it)';
+        return { ok: false, out };
+      }
     }
     const done = fs.readFileSync(copy);
-    if (done.equals(start)) return { ok: false, out: `sops exited 0 but ${k.file} did not change${r.out ? `: ${r.out}` : ''}` };
-    if (sopsRecipients(done).join() !== want) return { ok: false, out: `${k.file}: its recipients changed; not saved` };
+    if (done.equals(blob)) return { ok: false, out: `sops exited 0 but ${file} did not change` };
+    if (sopsRecipients(done).join() !== want) return { ok: false, out: `${file}: its recipients changed; not saved` };
     const parent = path.dirname(target);
-    fs.mkdirSync(parent, { recursive: true });
-    if (!insideDir(fs.realpathSync(parent), fs.realpathSync(cwd))) return { ok: false, out: `${k.file} resolves outside the repo` };
+    if (!insideDir(fs.realpathSync(parent), fs.realpathSync(cwd))) return { ok: false, out: `${file} resolves outside the repo` };
     const tmp = path.join(parent, `.${path.basename(target)}.devteam-${process.pid}`);
     try { fs.writeFileSync(tmp, done, { flag: 'wx', mode: 0o644 }); fs.renameSync(tmp, target); } catch (e) { fs.rmSync(tmp, { force: true }); return { ok: false, out: e.message }; }
-    const sha256 = sopsHash(done);
-    trust.stores.set(k.file, sha256);
-    trust.earlier.add(k.file);
-    return { ...r, store: { file: k.file, sha256 } };
+    return { ok: true, out: '', files: [file] };
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 // Returns { ok, out, files }: files are the tracked paths a commit sink changed.
-function runSink(k, value, kind, cwd, redact, trust = { stores: new Map(), earlier: new Set() }) {
+function runSink(k, value, kind, cwd, redact) {
   const run = (cmd, args, opts) => {
     const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts });
     // a tool that refuses before reading its stdin (sops with no key) gives EPIPE: its own error is the one to show
@@ -11947,13 +11958,6 @@ function runSink(k, value, kind, cwd, redact, trust = { stores: new Map(), earli
     return { ok: true, out: `wrote ${k.file}` };
   }
   if (kind === 'file' && !isUtf8(value)) return { ok: false, out: `${k.type} stores text; this file is binary (base64 it first, or use a file: sink)` };
-  if (k.type === 'sops') {
-    if (!fs.existsSync(path.join(cwd, k.file))) return { ok: false, out: `${k.file} does not exist on main; create it with sops first` };
-    const text = value.toString('utf8');
-    const r = sopsSet(k, JSON.stringify(kind === 'string' ? text.replace(/\r?\n$/, '') : text), cwd, run, trust);
-    if (!r.ok && /value-stdin/.test(r.out)) r.out += ' (this sops is too old for set --value-stdin; update it)';
-    return { ...r, files: [k.file] };
-  }
   // rails-credentials: credentials:edit with an editor that sets one key. Without the environment's
   // key Rails would generate a new key and new credentials, so refuse instead.
   const enc = k.env === 'default' ? 'config/credentials.yml.enc' : `config/credentials/${k.env}.yml.enc`;
@@ -12049,22 +12053,6 @@ function cmdSecret() {
     }
   }
   if (!values.size) die('nothing to post');
-  // One post at a time: from reading what is posted, through the stores, to the log line.
-  fs.mkdirSync(runDir, { recursive: true });
-  const lock = path.join(runDir, 'secret-post');
-  return withLock(lock, () => {
-    // a post that dies (a sink failed, git refused) exits inside the lock, past withLock's finally
-    const release = () => fs.rmSync(`${lock}.lock`, { recursive: true, force: true });
-    process.once('exit', release);
-    try { return postSecrets(id, declared, values, by); } finally { process.off('exit', release); }
-  }, { staleMs: 600000, waitMs: 120000 });
-}
-function postSecrets(id, declared, values, by) {
-  logCache = null;
-  const v = openQuestion(id);
-  const posted = [...(v.secrets_posted ?? [])];
-  const todo = declared.filter((x) => !posted.some((p) => p.name === x.name));
-  if (!todo.some((x) => values.has(x.name))) die(`${id}: what you posted is already posted`);
   const redact = redactor(values);
   const sinks = todo.filter((x) => values.has(x.name)).map((x) => ({ ...x, k: parseSink(x.sink) }));
   // Encrypted stores change in one chore worktree per question, committed together; it starts clean.
@@ -12075,22 +12063,14 @@ function postSecrets(id, declared, values, by) {
     git(['checkout', '--quiet', '--', '.'], wt);
     git(['clean', '-fdq'], wt);
   }
-  // What this question already put in each store: the record that says a chore's store may be continued.
-  const trust = { stores: new Map(), earlier: new Set() };
-  for (const p of posted) {
-    const d = declared.find((x) => x.name === p.name);
-    let sink = null;
-    try { sink = d ? parseSink(d.sink, { soft: true }) : null; } catch {}
-    if (sink?.type === 'sops') trust.earlier.add(sink.file);
-    if (p.store?.file && typeof p.store.sha256 === 'string') trust.stores.set(p.store.file, p.store.sha256);
-  }
   const failures = [];
   const done = [];
   const files = new Set();
   try {
+    const sopsDone = sopsPostAll(sinks, declared, posted, values, wt, redact);
     for (const x of sinks) {
-      const r = runSink(x.k, values.get(x.name), x.kind, x.k.commits ? wt : mainRoot, redact, trust);
-      if (r.ok) { done.push({ name: x.name, at: nowIso(), ...(r.store ? { store: r.store } : {}) }); for (const f of r.files ?? []) files.add(f); }
+      const r = x.k.type === 'sops' ? sopsDone.get(x.name) : runSink(x.k, values.get(x.name), x.kind, x.k.commits ? wt : mainRoot, redact);
+      if (r.ok) { done.push({ name: x.name, at: nowIso() }); for (const f of r.files ?? []) files.add(f); }
       else failures.push(`${x.name} → ${sinkWords(x.sink)}: ${r.out || 'failed'}`);
     }
   } finally {
