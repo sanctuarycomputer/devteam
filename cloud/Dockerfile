@@ -135,7 +135,7 @@ RUN case "$(uname -m)" in \
  && echo "$sum  /tmp/uv.tgz" | sha256sum -c - && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 && rm /tmp/uv.tgz
 
 # claude-swap: with it devteam rotates this box's Claude accounts on its own; its logins land in $HOME, on the volume
-ARG CLAUDE_SWAP_VERSION=1.1.0
+ARG CLAUDE_SWAP_VERSION=1.2.0
 RUN UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python 3.12 "claude-swap==$CLAUDE_SWAP_VERSION" \
  && chmod -R a+rX /opt/uv
 
@@ -790,7 +790,7 @@ ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.75.0
+ARG DEVTEAM_RELEASE=v0.76.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 
