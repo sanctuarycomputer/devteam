@@ -18,8 +18,8 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as four chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, PC1, PC4, PC5, PC6, RF4, T4-1, T4-3, PC3, T4-2), cC's (C24, T6-3, RF2, RL0, RL1, RL2, RL3)
-// and cD's (C12, C13, C14, C16). onA, onB, onC and onD add a check.
+// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, PC3, T4-2), cC's (C24, T6-3, RF2, RL0, RL1, RL2, RL3)
+// and cD's (C12, C13, C14, C16, PC6). onA, onB, onC and onD add a check.
 const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
 const onB = (name, fn) => cBChecks.push([name, fn]);
@@ -598,8 +598,8 @@ onB('PC5 a close that arrives only through main: a socket opened then is refused
 
 // Main's own refresh and the watch are both slowed out of reach: only the input's own check can see main
 // move. Every case is collected, so one failing doesn't hide the others.
-onB('PC6 an input on an open socket checks main first: loose, packed, a same-size rewrite, and a failed check', async () => {
-  const P = cB();
+onD('PC6 an input on an open socket checks main first: loose, packed, a same-size rewrite, and a failed check', async () => {
+  const P = cD();
   const fails = path.join(P.home, 'main-check-fails');
   await ok(P, ['stop']);
   await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_WATCH_MS: '600000', DEVTEAM_TEST_BROWSER_MAIN_MS: '600000', DEVTEAM_TEST_BROWSER_MAIN_CHECK_FAILS: fails });
