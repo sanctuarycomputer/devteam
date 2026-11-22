@@ -329,6 +329,17 @@ test('origin unreadable at a relaunch or a recover: refused with the reason, and
         assert.match(r.stdout, /^left stopped \(stopped before the restart/);
         assert.deepEqual(F.claudeCalls().length, 1, 'nothing more started');
       });
+      await t.test('recover --was-up (box-recover\'s child), origin unreadable, a record that would leave it stopped: refused before the lock, none left behind', () => {
+        const upFile = path.join(F.root, 'docs/devteam/run/supervisor-up.json');
+        write(upFile, JSON.stringify({ up: false, at: new Date().toISOString() }));
+        down();
+        let r;
+        try { r = F.run(['recover', '--was-up', '--session', 'kit764', '--window', 'sup'], server); } finally { up(); }
+        assert.notEqual(r.status, 0, 'refused');
+        assert.match(r.stderr, /could not read main from origin/);
+        assert.ok(!fs.existsSync(path.join(F.root, 'docs/devteam/run/recover.lock')), 'no recover lock left behind');
+        assert.deepEqual(F.claudeCalls().length, 1, 'nothing more started');
+      });
       await t.test('recover, origin/main moved: the owner\'s command starts the supervisor', async () => {
         spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: dir } });
         fs.rmSync(path.join(F.root, '.claude-calls'), { force: true });
