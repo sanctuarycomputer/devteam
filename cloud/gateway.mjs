@@ -1561,11 +1561,13 @@ export function createGateway(opts = {}) {
     }
     return { ...out, ...hsts };
   };
-  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null }) => {
+  // viewer: null, or for the viewer's page whether the wrapper's grant holds (viewerAncestors)
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null }) => {
     const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
       const head = downstreamHeaders(ur.headers, cap, publicOrigin);
+      if (viewer !== null && head['content-security-policy']) head['content-security-policy'] = viewerAncestors(String(head['content-security-policy']), viewer.granted);
       res.writeHead(ur.statusCode, { ...head, 'cache-control': 'no-store', ...(extra ?? {}) });
       // an upstream cut off mid-body cuts the browser's response too, rather than leaving it open
       pipeline(ur, res, () => {});
@@ -1970,12 +1972,35 @@ export function createGateway(opts = {}) {
   // branch encoded into one segment: kit-750), or a published tree's (the owner's wrapper shows
   // exactly the version the public sees: spec §8).
   const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+|origin\/[^/]+|tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?)\/[^/]+\//;
-  // The grant the owner's wrapper puts in its frame's URL (spec §8): this port, this page, this
-  // version, for a few minutes, MACed with this process's secret. The wrapper is on the project's own
-  // host now, so the viewer's frame-ancestors 'self' admits it, and no other name is ever added.
+  // The grant the owner's wrapper puts in its frame's URL (spec §8): this project, this page, this
+  // published tree, for a few minutes, MACed with this process's secret. The wrapper is on the box's
+  // own name (<box>/w/<project>/<slug>/), off the dashboard's origin, whose page stops itself when a
+  // page of its own origin frames it. The kit's viewer names the hub as a frame ancestor, which is the
+  // box: so the gateway takes the box out of the viewer's ancestors, and puts it back only under a
+  // valid grant. It only widens who may frame the viewer; it never stands in for the session.
   const WRAP_GRANT_MS = 5 * 60 * 1000;
-  const wrapMac = (port, slug, at, exp) => b64u(mac('wrap', port, `/view/artifact/${slug}`, at, exp));
-  const wrapGrant = (port, slug, at, exp = Date.now() + WRAP_GRANT_MS) => `${exp}.${wrapMac(port, slug, at, exp)}`;
+  const wrapMac = (project, slug, at, exp) => b64u(mac('wrap', project, `/view/artifact/${slug}`, at, exp));
+  const wrapGrant = (project, slug, at, exp = Date.now() + WRAP_GRANT_MS) => `${exp}.${wrapMac(project, slug, at, exp)}`;
+  // The viewer's own path, as the kit reads it (dot segments resolved), and the exact raw path a grant is good for.
+  const VIEWER = /^\/view\/artifact\/([^/]+)$/;
+  const wrapGranted = (label, rawPath, url) => {
+    const m = VIEWER.exec(rawPath);
+    if (!m || !LINK_ID.test(m[1]) || url.searchParams.getAll('at').length !== 1 || url.searchParams.getAll('w').length !== 1) return false;
+    const at = url.searchParams.get('at');
+    if (!/^tree:/.test(at) || !TREE.test(at.slice(5))) return false;
+    const w = /^(\d{1,15})\.([\w-]{22})$/.exec(url.searchParams.get('w'));
+    const exp = w ? Number(w[1]) : 0;
+    if (!w || exp < Date.now() || exp > Date.now() + WRAP_GRANT_MS) return false;
+    return sameBytes(Buffer.from(w[2]), Buffer.from(wrapMac(label, m[1], at, exp)));
+  };
+  // The viewer's frame-ancestors: the box out of every list, and back in, alone, under the grant. A
+  // list left empty is 'none'; a policy that names no ancestors is left as it is.
+  const viewerAncestors = (csp, granted) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => {
+    if (!list.trim() || /^\s*'none'\s*$/i.test(list)) return all;
+    const kept = list.trim().split(/\s+/).filter((s) => s !== PUB);
+    const out = granted ? [...kept, PUB] : kept;
+    return `${sep}${sp}frame-ancestors ${out.length ? out.join(' ') : "'none'"}${/\s$/.test(list) ? ' ' : ''}`;
+  });
   const capMac = (port, prefix, exp, sid) => b64u(mac('artifact', port, prefix, exp, sid));
   const capFor = (port, prefix, session) => {
     const exp = Date.now() + CAPABILITY_MS;
@@ -2437,24 +2462,44 @@ export function createGateway(opts = {}) {
   // authenticity: that rests on the port binding, as it does for the dashboard on that name.
   // On <label>.<box> the binding is found by name and root, not by the port stored at publish: the
   // listed project of that name, one port only, at the stored root, with viewers. A project whose
-  // port moved keeps its wrapper; a name two projects share gets the plain bytes. The viewer it
-  // frames is on this same host, so the frame is 'self'.
-  // The wrapper's own policy: styles and one frame, its own host's; no script, nothing to fetch.
-  const WRAP_CSP = () => "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
-  const ownerWrapper = (req, url, label) => {
+  // port moved keeps its wrapper; a name two projects share gets the plain bytes.
+  // The viewer it frames is on the project's host, and the wrapper is on the box's own name
+  // (<box>/w/<project>/<slug>/): the dashboard's page stops itself when a page of its own origin
+  // frames it, so the wrapper can't share that origin. The owner's visit to the page's index is sent
+  // there; the wrapper page is signed in only and holds no byte of the artifact.
+  // The wrapper's own policy: styles and one frame, the project's host; no script, nothing to fetch.
+  const WRAP_CSP = (origin) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${origin}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  const WRAP_HEAD = { 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' };
+  // The binding, by name and root, of a page this project published, or null in any doubt.
+  const wrapBinding = (label, slug) => {
+    if (!LINK_ID.test(slug) || RESERVED_SEGMENTS.includes(slug)) return null;
+    const s = store.load();
+    const bound = Object.hasOwn(s.public ?? {}, label) ? s.public[label] : null;
+    const art = bound && Object.hasOwn(bound.artifacts ?? {}, slug) ? bound.artifacts[slug] : null;
+    if (!art || typeof bound.root !== 'string' || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
+    const c = projects.get(label) ?? [];
+    if (c.length !== 1 || !c[0].viewer || c[0].root !== bound.root) return null;
+    return { art, at: `tree:${art.tree}` };
+  };
+  // On <project>.<box>: the slug of the signed-in owner's own document visit to a bound page's index, or null.
+  const ownerVisit = (req, url, label) => {
     try {
       if (req.method !== 'GET' || req.headers['sec-fetch-dest'] !== 'document' || url.searchParams.has('plain')) return null;
       const m = /^\/([^/]+)\/(?:index\.html)?$/.exec(req.url.split('?')[0]);
-      if (!m || !LINK_ID.test(m[1])) return null;
-      const s = store.load();
-      if (!s.passkeys.length || !sessionOf(req)) return null;
-      const bound = Object.hasOwn(s.public ?? {}, label) ? s.public[label] : null;
-      const art = bound && Object.hasOwn(bound.artifacts ?? {}, m[1]) ? bound.artifacts[m[1]] : null;
-      if (!art || typeof bound.root !== 'string' || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
-      const c = projects.get(label) ?? [];
-      if (c.length !== 1 || !c[0].viewer || c[0].root !== bound.root) return null;
-      const at = `tree:${art.tree}`;
-      return { port: c[0].port, html: PAGES.ownerWrapper({ project: label, slug: m[1], title: typeof art.title === 'string' && art.title ? art.title : m[1], frame: `/view/artifact/${m[1]}?at=${at}&w=${wrapGrant(c[0].port, m[1], at)}` }) };
+      if (!m || !store.load().passkeys.length || !sessionOf(req)) return null;
+      return wrapBinding(label, m[1]) ? m[1] : null;
+    } catch { return null; }
+  };
+  // On the box, after the session: /w/<project>/<slug>/, or null for anything it can't bind.
+  const ownerWrapper = (rawPath) => {
+    try {
+      const m = /^\/w\/([^/]+)\/([^/]+)\/$/.exec(rawPath);
+      if (!m || !HOST_LABEL.test(m[1]) || RESERVED_LABELS.includes(m[1])) return null;
+      const b = wrapBinding(m[1], m[2]);
+      if (!b) return null;
+      const origin = projectOrigin(m[1]);
+      const title = typeof b.art.title === 'string' && b.art.title ? b.art.title : m[2];
+      return { origin, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title, plain: `${origin}/${m[2]}/?plain`, frame: `${origin}/view/artifact/${m[2]}?at=${b.at}&w=${wrapGrant(m[1], m[2], b.at)}` }) };
     } catch { return null; }
   };
 
@@ -2626,14 +2671,17 @@ export function createGateway(opts = {}) {
     const p = url.pathname;
     // A page this name published: anyone's, from the gateway's own store, before every check about
     // the owner. The one exception reads the cookie to choose a page, never to refuse one: the
-    // owner's own visit gets the wrapper, and whatever that can't settle gets the public's bytes.
-    // Nothing after this runs for a published page.
+    // owner's own visit is sent to the wrapper on the box (/w/), and whatever that can't settle gets
+    // the public's bytes. Nothing after this runs for a published page.
     if (label) {
       let published = false;
       try { published = publishedBy(label, rawPath.split('/')[1]); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
       if (published) {
-        const wrap = ownerWrapper(req, url, label);
-        if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' });
+        const slug = ownerVisit(req, url, label);
+        if (slug) {
+          res.writeHead(302, { location: `${PUB}/w/${label}/${slug}/`, ...WRAP_HEAD, ...hsts });
+          return res.end();
+        }
         try { return servePublic(req, res, label); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
       }
     }
@@ -2738,7 +2786,9 @@ export function createGateway(opts = {}) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
         if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath]);
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        // the viewer, by its path as the kit resolves it: the box may frame it only under the wrapper's grant
+        const viewer = VIEWER.test(p) || VIEWER.test(rawPath) ? { granted: wrapGranted(label, rawPath, url) } : null;
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -2785,6 +2835,13 @@ export function createGateway(opts = {}) {
         // a project listed a moment ago is framed at once: one shared read first, a second at most
         await refreshWithin(1000);
         return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': hubCsp(), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+      }
+      // The owner's wrapper of a published page, on the box's own name (ownerWrapper). Anything it
+      // can't bind answers as any other unknown path here does.
+      if (req.method === 'GET' && isBox && rawPath.startsWith('/w/')) {
+        const wrap = ownerWrapper(rawPath);
+        if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(wrap.origin), ...WRAP_HEAD });
+        return send(res, 404, 'text/plain', 'not found');
       }
       // /box.json, box: 2: { box, terminal, project, passkeys, previews, push, image }. project is where a
       // project is (project-hosts@1), {project} its name. image is what the
@@ -3215,11 +3272,11 @@ go.onclick = run(async () => {
   // The owner's view of a public page: the instance's viewer, framed full size under one line, and
   // no script of its own. The frame may not navigate this tab, nor open a window outside its
   // sandbox (an artifact viewer needs none); its sandbox keeps its origin.
-  ownerWrapper: ({ project, slug, title, frame }) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>${esc(title)}</title><style>
+  ownerWrapper: ({ project, slug, title, plain, frame }) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>${esc(title)}</title><style>
 html{touch-action:manipulation}:root{color-scheme:light dark;--bg:#fafafa;--fg:#171717;--fg2:#666;--line:#e5e5e5}@media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#ededed;--fg2:#a1a1a1;--line:#2e2e2e}}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.4 ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}body{display:flex;flex-direction:column}
 header{padding:6px 12px;border-bottom:1px solid var(--line);color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}a{color:var(--fg)}iframe{flex:1;border:0;width:100%}
-</style></head><body><header>Public · ${esc(project)}/${esc(slug)} · <a href="?plain">Open it as the public sees it</a></header><iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads" autofocus></iframe></body></html>`,
+</style></head><body><header>Public · ${esc(project)}/${esc(slug)} · <a href="${esc(plain)}">Open it as the public sees it</a></header><iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads" autofocus></iframe></body></html>`,
 };
 
 // --- command line ------------------------------------------------------------------------------

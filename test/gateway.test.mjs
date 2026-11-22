@@ -2772,20 +2772,22 @@ test('an artifact at a published tree goes under a capability, as main and a wor
   } finally { await K.close(); await S.close(); }
 });
 
-test('frame-ancestors on a project\'s viewer and published trees names its own host and the box, never the public name, grant or not', async () => {
+test('frame-ancestors on a project\'s viewer names the box only under the wrapper\'s grant; its published trees name its own host and the box, grant or not', async () => {
   const S = await previewSetup('public-ancestor');
   const { gw, hub } = S;
   const K = fakeKit(P + 20);
   await K.up();
   const T = 'b'.repeat(40);
   const fa = (r) => r.headers['content-security-policy'].split(/;\s*/).find((d) => d.startsWith('frame-ancestors'));
-  // the owner's wrapper is on the project's own host now, so the viewer's frame is a same-origin one
-  const fromWrapper = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' };
+  // the owner's wrapper is on the box's own name (/w/), one site with the project's host
+  const fromWrapper = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' };
   const framed = { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' };
   const opaque = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'style' };
   const inst = gw.inst('alpha');
   // the viewer and the dashboard: 'self' and the hub, as the kit says, the hub's port mapped to the box
   const own = `frame-ancestors 'self' ${gw.publicUrl}`;
+  // the viewer with no valid grant: the box taken out
+  const alone = "frame-ancestors 'self'";
   // an artifact: the kit's own loopback origin, mapped to the project's host, and the box
   const tree = `frame-ancestors ${inst} ${gw.publicUrl}`;
   try {
@@ -2798,10 +2800,10 @@ test('frame-ancestors on a project\'s viewer and published trees names its own h
     st.public.alpha.artifacts.mock.tree = T;
     st.public.beta.artifacts.big.tree = 'd'.repeat(64);
     fs.writeFileSync(path.join(gw.dir, 'state.json'), JSON.stringify(st));
-    // the viewer: the same with the wrapper's grant as with any other, or none; no other name is added
+    // the viewer: the box under the wrapper's grant (this project, page and tree), and under nothing else; no other name is added
     const at = `tree:${T}`;
     const viewer = (w, extra = '') => `/view/artifact/mock?at=${at}${w === null ? '' : `&w=${w}`}${extra}`;
-    const good = gw.g.wrapGrant(P + 20, 'mock', at);
+    const good = gw.g.wrapGrant('alpha', 'mock', at);
     assert.match(good, /^\d+\.[\w-]{22}$/);
     assert.equal(fa(await gw.req('GET', viewer(good), { on: 'alpha', headers: fromWrapper })), own, 'a valid grant');
     assert.equal((await gw.req('GET', viewer(good), { on: 'alpha', headers: fromWrapper })).headers['content-security-policy-report-only'], "frame-ancestors 'self'", 'a report-only policy is left as it is');
@@ -2812,17 +2814,18 @@ test('frame-ancestors on a project\'s viewer and published trees names its own h
       'an empty grant': viewer(''),
       'a forged mac': viewer(`${exp}.${sig.slice(0, -1)}${flip(sig.at(-1))}`),
       'a moved expiry': viewer(`${Number(exp) + 60000}.${sig}`),
-      'an expired grant': viewer(gw.g.wrapGrant(P + 20, 'mock', at, Date.now() - 1)),
-      'a grant good for a day': viewer(gw.g.wrapGrant(P + 20, 'mock', at, Date.now() + 86400000)),
-      'another port\'s grant': viewer(gw.g.wrapGrant(P + 21, 'mock', at)),
-      'another page\'s grant': viewer(gw.g.wrapGrant(P + 20, 'other', at)),
-      'another version\'s grant': viewer(gw.g.wrapGrant(P + 20, 'mock', 'main')),
+      'an expired grant': viewer(gw.g.wrapGrant('alpha', 'mock', at, Date.now() - 1)),
+      'a grant good for a day': viewer(gw.g.wrapGrant('alpha', 'mock', at, Date.now() + 86400000)),
+      'another project\'s grant': viewer(gw.g.wrapGrant('beta', 'mock', at)),
+      'another page\'s grant': viewer(gw.g.wrapGrant('alpha', 'other', at)),
+      'another version\'s grant': viewer(gw.g.wrapGrant('alpha', 'mock', 'main')),
       'a second at': viewer(good, '&at=main'),
       'a second grant': viewer(good, `&w=${good}`),
-      'a grant on another viewer': `/view/preview/cool-tiger?at=${at}&w=${good}`,
-      'a grant under a longer path': `/view/artifact/mock/x?at=${at}&w=${good}`,
     };
-    for (const [why, v] of Object.entries(others)) assert.equal(fa(await gw.req('GET', v, { on: 'alpha', headers: fromWrapper })), own, why);
+    for (const [why, v] of Object.entries(others)) assert.equal(fa(await gw.req('GET', v, { on: 'alpha', headers: fromWrapper })), alone, why);
+    // not the artifact viewer: today's ancestors, grant or not
+    for (const [why, v] of Object.entries({ 'a grant on another viewer': `/view/preview/cool-tiger?at=${at}&w=${good}`, 'a grant under a longer path': `/view/artifact/mock/x?at=${at}&w=${good}` }))
+      assert.equal(fa(await gw.req('GET', v, { on: 'alpha', headers: fromWrapper })), own, why);
     // a tree, published or not, under its capability or without: the project's host and the box
     assert.equal(fa(await gw.req('GET', `/artifact/tree/${'d'.repeat(64)}/big/s.css`, { on: 'alpha' })), tree, 'sha256 tree');
     const cap = /^(\/c\/[^/]+)\//.exec((await gw.req('GET', `/artifact/tree/${T}/mock/`, { on: 'alpha', headers: framed })).headers.location)[1];
@@ -3088,22 +3091,29 @@ test('<project>.<box>: the signed-in owner\'s own visit gets the viewer at the p
     hub.list = [listing()];
     plain(await get('/hello/'), 'before the hub\'s list is first read');
     await gw.g.pollPush();
+    // the owner's visit is sent to the wrapper on the box's own name, off the dashboard's origin
+    const inst = gw.inst('alpha');
+    const owner = (x, why) => assert.deepEqual([x.status, x.headers.location], [302, `${gw.publicUrl}/w/alpha/hello/`], why);
     let r = await get('/hello/');
+    owner(r, 'the wrapper, not the bytes');
+    assert.deepEqual([r.headers['cache-control'], r.headers.vary, r.headers['x-frame-options'], r.headers['referrer-policy'], r.headers['set-cookie'], r.headers['cross-origin-opener-policy']], ['no-store, private', 'cookie, sec-fetch-dest', 'DENY', 'no-referrer', undefined, 'same-origin'], 'the opener policy on the redirect and the plain index alike: a popup\'s window says nothing of who is visiting');
+    r = await gw.req('GET', '/w/alpha/hello/', { headers: NAV });
     assert.equal(r.status, 200);
     assert.notEqual(r.body, page, 'the wrapper, not the bytes');
-    assert.deepEqual([r.headers['cache-control'], r.headers.vary, r.headers['x-frame-options'], r.headers['referrer-policy'], r.headers['set-cookie'], r.headers['cross-origin-opener-policy']], ['no-store, private', 'cookie, sec-fetch-dest', 'DENY', 'no-referrer', undefined, 'same-origin'], 'the opener policy on the wrapper and the plain index alike: a popup\'s window says nothing of who is visiting');
-    assert.equal(r.headers['content-security-policy'], "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'", 'a policy of its own: no script, nothing to connect to, and it frames only its own host');
+    assert.deepEqual([r.headers['cache-control'], r.headers.vary, r.headers['x-frame-options'], r.headers['referrer-policy'], r.headers['set-cookie'], r.headers['cross-origin-opener-policy']], ['no-store, private', 'cookie, sec-fetch-dest', 'DENY', 'no-referrer', undefined, 'same-origin'], 'the wrapper\'s own headers');
+    assert.equal(r.headers['content-security-policy'], `default-src 'none'; style-src 'unsafe-inline'; frame-src ${inst}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, 'a policy of its own: no script, nothing to connect to, and it frames only the project\'s host');
     assert.match(r.body, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"/);
     assert.match(r.body, /<iframe [^>]*\bautofocus\b/, 'the viewer has the keyboard from the start, so Shift reaches it');
     assert.doesNotMatch(r.body, /allow-popups-to-escape-sandbox|allow-top-navigation/, 'its frame can neither navigate this tab nor open a window outside its sandbox');
     const src = /<iframe src="([^"]+)"/.exec(r.body)[1].replace(/&#38;|&amp;/g, '&');
-    assert.match(src, new RegExp(`^/view/artifact/hello\\?at=tree:${tree}&w=\\d+\\.[\\w-]{22}$`), src);
-    // the viewer, on this same host: its own 'self' admits the wrapper, and no other name is added, grant or not
+    assert.match(src, new RegExp(`^${inst}/view/artifact/hello\\?at=tree:${tree}&w=\\d+\\.[\\w-]{22}$`), src);
+    // the viewer, on the project's host: the box is an ancestor under the wrapper's grant, and only then
     const fa = (x) => x.headers['content-security-policy'].split(/;\s*/).find((d) => d.startsWith('frame-ancestors'));
-    const fromWrapper = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' };
-    assert.equal(fa(await gw.req('GET', src, { on: 'alpha', headers: fromWrapper })), `frame-ancestors 'self' ${gw.publicUrl}`, 'with the wrapper\'s grant');
-    assert.equal(fa(await gw.req('GET', src.replace(/&w=.*/, ''), { on: 'alpha', headers: fromWrapper })), `frame-ancestors 'self' ${gw.publicUrl}`, 'and without it, the same');
-    assert.match(r.body, /<a href="\?plain">Open it as the public sees it<\/a>/);
+    const fromWrapper = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' };
+    const rel = src.slice(inst.length);
+    assert.equal(fa(await gw.req('GET', rel, { on: 'alpha', headers: fromWrapper })), `frame-ancestors 'self' ${gw.publicUrl}`, 'with the wrapper\'s grant');
+    assert.equal(fa(await gw.req('GET', rel.replace(/&w=.*/, ''), { on: 'alpha', headers: fromWrapper })), "frame-ancestors 'self'", 'and without it, not the box');
+    assert.ok(r.body.includes(`<a href="${inst}/hello/?plain">Open it as the public sees it</a>`), r.body);
     assert.match(r.body, /Public · alpha\/hello/);
     assert.ok(r.body.includes('A &#60;b&#62;mock') && !r.body.includes('<b>mock'), 'the title is escaped');
     assert.doesNotMatch(r.body, /<script/i, 'no script of its own');
@@ -3116,7 +3126,7 @@ test('<project>.<box>: the signed-in owner\'s own visit gets the viewer at the p
     const hellos = () => K.seen.filter((x) => x.url === '/api/hello').length;
     const hits = hub.hits;
     assert.equal(hellos(), 0, 'the instance is never asked on the request path');
-    assert.ok((await get('/hello/index.html')).body.includes('<iframe'), 'its index by name too');
+    owner(await get('/hello/index.html'), 'its index by name too');
     // the plain bytes, with vary: cookie on the document
     plain(await get('/hello/?plain'), '?plain');
     plain(await get('/hello/', { ...NAV, 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' }), 'a frame load');
@@ -3125,8 +3135,8 @@ test('<project>.<box>: the signed-in owner\'s own visit gets the viewer at the p
     plain(await get('/hello/', NAV, `devteam_session=${'A'.repeat(43)}`), 'a cookie that is no session');
     // a signed-in owner arriving from a link elsewhere gets it too: nothing in it is readable to
     // that site, its frame is sandboxed, and the frame's URL comes from the binding, not the query
-    r = await get('/hello/?at=main&slug=other', { ...NAV, 'sec-fetch-site': 'cross-site' });
-    assert.ok(r.body.includes(`<iframe src="/view/artifact/hello?at=tree:${tree}&#38;w=`), 'a cross-site visit: the wrapper, framing the published tree whatever the query says');
+    owner(await get('/hello/?at=main&slug=other', { ...NAV, 'sec-fetch-site': 'cross-site' }), 'a cross-site visit: the wrapper, whatever the query says');
+    assert.ok((await gw.req('GET', '/w/alpha/hello/?at=main&slug=other', { headers: NAV })).body.includes(`<iframe src="${inst}/view/artifact/hello?at=tree:${tree}&#38;w=`), 'and the wrapper frames the published tree whatever its own query says');
     r = await gw.req('HEAD', '/hello/', { on: 'alpha', headers: NAV });
     assert.deepEqual([r.status, r.body, r.headers.vary, r.headers['cache-control']], [200, '', 'cookie, sec-fetch-dest', 'public, max-age=60'], 'HEAD');
     r = await get('/hello/app.js');
@@ -3135,7 +3145,7 @@ test('<project>.<box>: the signed-in owner\'s own visit gets the viewer at the p
     // a revalidation by the signed-in owner, the instance answering: the wrapper wins, never a 304 of the plain bytes
     const etag = `"${crypto.createHash('sha256').update(page).digest('hex')}"`;
     r = await get('/hello/', { ...NAV, 'if-none-match': etag });
-    assert.deepEqual([r.status, r.headers['cache-control'], r.body.includes('<iframe')], [200, 'no-store, private', true], 'If-None-Match: the wrapper');
+    assert.deepEqual([r.status, r.headers['cache-control'], r.headers.location], [302, 'no-store, private', `${gw.publicUrl}/w/alpha/hello/`], 'If-None-Match: the wrapper');
     assert.deepEqual([hellos(), hub.hits], [0, hits], 'no visit, with a session or without, asks the instance or the hub anything');
     // the list says whether threads can be had: a kit with viewers, at the bound checkout, as last polled
     const as = async (list, why) => { hub.list = list; await gw.g.pollPush(); plain(await get('/hello/'), why); };
@@ -3147,7 +3157,8 @@ test('<project>.<box>: the signed-in owner\'s own visit gets the viewer at the p
     // by name and root, not by port: the project's port moved, and the owner still gets the wrapper
     hub.list = [listing({ port: P + 21 })];
     await gw.g.pollPush();
-    assert.ok((await get('/hello/')).body.includes(`<iframe src="/view/artifact/hello?at=tree:${tree}&#38;w=`), 'listed on another port');
+    owner(await get('/hello/'), 'listed on another port');
+    assert.ok((await gw.req('GET', '/w/alpha/hello/', { headers: NAV })).body.includes(`<iframe src="${inst}/view/artifact/hello?at=tree:${tree}&#38;w=`), 'and its wrapper');
     // a binding without a root matches no listing (the list's roots are always strings)
     hub.list = [listing()];
     await gw.g.pollPush();
@@ -3158,10 +3169,10 @@ test('<project>.<box>: the signed-in owner\'s own visit gets the viewer at the p
     plain(await get('/hello/'), 'no root in the binding');
     fs.writeFileSync(state, rooted);
     // as last polled, and only then: a change waits for the next poll, and a visit never asks sooner
-    assert.ok((await get('/hello/')).body.includes('<iframe'), 'listed again');
+    owner(await get('/hello/'), 'listed again');
     hub.list = [];
     const before = hub.hits;
-    assert.ok((await get('/hello/')).body.includes('<iframe'), 'still the list as last polled (up to 10 s stale)');
+    owner(await get('/hello/'), 'still the list as last polled (up to 10 s stale)');
     assert.equal(hub.hits, before, 'a visit never refreshes the list');
     await gw.g.pollPush();
     plain(await get('/hello/'), 'gone at the next poll');
@@ -3323,7 +3334,7 @@ async function box(given) {
   fs.writeFileSync(path.join(dir, 'public', 'blobs', sha(PAGE).toString('hex')), PAGE);
   const seen = new Map();
   const cookies = []; // the Cookie header of each request a stand-in received
-  const pages = new Map(); // path to the HTML a stand-in answers there
+  const pages = new Map(); // a URL, or a path with any query, to what a stand-in answers there
   const stubs = [];
   const hub = { list: [], hits: 0, stall: false, held: [], release() { hub.stall = false; for (const x of hub.held.splice(0)) hubAnswer(x.r, x.list); } };
   // fixed: a port of the instance block; none: the OS's, never the hub's or one in the block
@@ -3333,7 +3344,9 @@ async function box(given) {
       const s = http.createServer((q, r) => {
         seen.get(port).push(q.url);
         cookies.push(q.headers.cookie);
-        if (pages.has(q.url)) { r.writeHead(200, { 'content-type': 'text/html' }); return r.end(pages.get(q.url)); }
+        // a page by its exact URL, or by its path whatever the query; a string, or { body, headers }
+        const pg = pages.get(q.url) ?? pages.get(q.url.split('?')[0]);
+        if (pg !== undefined) { r.writeHead(200, { 'content-type': 'text/html', ...(pg.headers ?? {}) }); return r.end(typeof pg === 'string' ? pg : pg.body); }
         const slug = /^\/public-manifest\/([^/?]+)$/.exec(q.url)?.[1];
         if (slug) { r.writeHead(200, { 'content-type': 'application/json' }); return r.end(JSON.stringify(manifest(slug))); }
         if (q.url === '/api/artifact-publish') { q.resume(); r.writeHead(200, { 'content-type': 'application/json' }); return r.end('{"ok":true}'); }
@@ -3659,10 +3672,10 @@ on('C7 a published page answers signed out under the public policy, never from t
   assert.match(r.headers.vary, /cookie/);
   assert.deepEqual(b.seen.get(P), []);
 });
-on('C8 signed in, a document visit gets the wrapper framing the viewer on the same host', undefined, async (b) => {
-  const r = await b.get('alpha', '/launch-notes/', { cookie: COOKIE, headers: NAV });
-  assert.match(r.body, new RegExp(`<iframe src="/view/artifact/launch-notes\\?at=tree:${TREE}&#38;w=\\d+\\.`), 'frames the viewer here');
-  assert.match(r.headers['content-security-policy'], /frame-src 'self'/);
+on('C8 signed in, the /w/ page on the box frames the viewer on the project\'s host', undefined, async (b) => {
+  const r = await b.get(null, '/w/alpha/launch-notes/', { cookie: COOKIE, headers: NAV });
+  assert.match(r.body, new RegExp(`<iframe src="${b.origin('alpha')}/view/artifact/launch-notes\\?at=tree:${TREE}&#38;w=\\d+\\.`), 'frames the viewer on alpha\'s host');
+  assert.match(r.headers['content-security-policy'], new RegExp(`frame-src ${b.origin('alpha')};`));
   assert.equal(r.headers['x-frame-options'], 'DENY');
   assert.deepEqual(b.seen.get(P), [], 'the wrapper asks the port nothing');
 });
@@ -3701,9 +3714,137 @@ on('C11b /upload stays the gateway\'s on a project host, whatever another projec
   assert.deepEqual([back.status, back.body], [200, 'hi'], 'served back by the gateway');
   assert.deepEqual(b.seen.get(P), [], 'never the port');
 });
-on('C13 after the project\'s port moves, the owner still gets the wrapper', { list: [row('alpha', P + 1)] }, async (b) => {
-  const r = await b.get('alpha', '/launch-notes/', { cookie: COOKIE, headers: NAV });
+on('C13 after the project\'s port moves, the owner still gets the /w/ page', { list: [row('alpha', P + 1)] }, async (b) => {
+  const r = await b.get(null, '/w/alpha/launch-notes/', { cookie: COOKIE, headers: NAV });
   assert.match(r.body, /\/view\/artifact\/launch-notes\?at=tree:/, 'the wrapper, by name and root');
+  assert.equal((await b.get('alpha', '/launch-notes/', { cookie: COOKIE, headers: NAV })).status, 302, 'and the visit is sent there');
+});
+// The owner's wrapper on the hub origin (ruling a-20261122-073738459): the dashboard stops itself
+// when framed by its own origin, so the wrapper lives on the box's name and frames the project's host.
+const WRAP_AT = `tree:${TREE}`;
+const faOf = (r) => String(r.headers['content-security-policy']).split(/;\s*/).find((d) => d.startsWith('frame-ancestors'));
+// the viewer's frame load from the /w/ page: the box and the project's host are one site
+const FROM_W = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' };
+on('C41 a signed-in owner\'s document visit is a 302 to <box>/w/<project>/<slug>/; signed out or ?plain keeps the public bytes', undefined, async (b) => {
+  for (const route of ['/launch-notes/', '/launch-notes/index.html']) {
+    const r = await b.get('alpha', route, { cookie: COOKIE, headers: NAV });
+    assert.deepEqual([r.status, r.headers.location, r.body], [302, `${b.origin()}/w/alpha/launch-notes/`, ''], route);
+    assert.equal(r.headers['cache-control'], 'no-store, private', `${route}: never kept`);
+    assert.equal(r.headers.vary, 'cookie, sec-fetch-dest', `${route}: it varies on the cookie`);
+  }
+  const out = await b.get('alpha', '/launch-notes/', { headers: NAV });
+  assert.deepEqual([out.status, out.body], [200, PAGE], 'signed out: the public bytes');
+  const plain = await b.get('alpha', '/launch-notes/?plain', { cookie: COOKIE, headers: NAV });
+  assert.deepEqual([plain.status, plain.body], [200, PAGE], '?plain: the public bytes');
+  const framed = await b.get('alpha', '/launch-notes/', { cookie: COOKIE, headers: { ...NAV, 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
+  assert.deepEqual([framed.status, framed.body], [200, PAGE], 'a frame load: the public bytes');
+  assert.deepEqual(b.seen.get(P), [], 'the port is never asked');
+});
+on('C42 the /w/ page: signed in only, no artifact bytes, x-frame-options DENY, frame-src exactly the project\'s origin, framing the viewer with its grant', undefined, async (b) => {
+  const r = await b.get(null, '/w/alpha/launch-notes/', { cookie: COOKIE, headers: NAV });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers['content-security-policy'], `default-src 'none'; style-src 'unsafe-inline'; frame-src ${b.origin('alpha')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
+  assert.deepEqual([r.headers['x-frame-options'], r.headers['cache-control'], r.headers['referrer-policy'], r.headers['cross-origin-opener-policy']], ['DENY', 'no-store, private', 'no-referrer', 'same-origin']);
+  assert.ok(!r.body.includes('<p>published'), 'no artifact bytes of its own');
+  assert.doesNotMatch(r.body, /<script/i, 'no script');
+  const src = /<iframe src="([^"]+)"/.exec(r.body)[1].replace(/&#38;|&amp;/g, '&');
+  const w = new URL(src).searchParams.get('w');
+  assert.equal(src, `${b.origin('alpha')}/view/artifact/launch-notes?at=${WRAP_AT}&w=${w}`, 'the viewer at the published tree, on the project\'s host');
+  assert.match(w, /^\d+\.[\w-]{22}$/);
+  assert.ok(r.body.includes(`<a href="${b.origin('alpha')}/launch-notes/?plain">Open it as the public sees it</a>`), 'the plain link goes to the project\'s host');
+  // signed out: no page, and nothing of it
+  const out = await b.get(null, '/w/alpha/launch-notes/', { headers: NAV });
+  assert.equal(out.status, 302, 'signed out: to sign-in');
+  assert.ok(!out.body.includes('<iframe'), 'no wrapper');
+  assert.deepEqual(b.seen.get(P), [], 'the port is never asked');
+});
+on('C43 under a valid grant the viewer\'s frame-ancestors gains exactly the hub origin', undefined, async (b) => {
+  const page = await b.get(null, '/w/alpha/launch-notes/', { cookie: COOKIE, headers: NAV });
+  const src = /<iframe src="([^"]+)"/.exec(page.body)[1].replace(/&#38;|&amp;/g, '&');
+  const r = await b.get('alpha', new URL(src).pathname + new URL(src).search, { cookie: COOKIE, headers: FROM_W });
+  assert.equal(r.status, 200);
+  assert.equal(faOf(r), `frame-ancestors 'self' ${b.origin()}`, 'the hub origin, no wildcard, no other project');
+  assert.doesNotMatch(String(r.headers['content-security-policy']), /\*|beta-app/);
+});
+on('C44 a missing, bad-mac, expired, other-slug, other-project or other-tree grant adds no ancestor', undefined, async (b) => {
+  const good = b.g.wrapGrant('alpha', 'launch-notes', WRAP_AT);
+  const viewer = (w, { at = WRAP_AT, slug = 'launch-notes', extra = '' } = {}) => `/view/artifact/${slug}?at=${at}${w === null ? '' : `&w=${w}`}${extra}`;
+  const [exp, sig] = good.split('.');
+  const flip = (c) => (c === 'A' ? 'B' : 'A');
+  const other = `tree:${'b'.repeat(40)}`;
+  const bad = {
+    'no grant': viewer(null),
+    'an empty grant': viewer(''),
+    'a bad mac': viewer(`${exp}.${sig.slice(0, -1)}${flip(sig.at(-1))}`),
+    'a moved expiry': viewer(`${Number(exp) + 60000}.${sig}`),
+    'an expired grant': viewer(b.g.wrapGrant('alpha', 'launch-notes', WRAP_AT, Date.now() - 1)),
+    'a grant good for a day': viewer(b.g.wrapGrant('alpha', 'launch-notes', WRAP_AT, Date.now() + 86400000)),
+    'another slug\'s grant': viewer(b.g.wrapGrant('alpha', 'other-notes', WRAP_AT)),
+    'another project\'s grant': viewer(b.g.wrapGrant('beta-app', 'launch-notes', WRAP_AT)),
+    'another tree\'s grant': viewer(b.g.wrapGrant('alpha', 'launch-notes', other)),
+    'a grant at main': viewer(b.g.wrapGrant('alpha', 'launch-notes', 'main'), { at: 'main' }),
+    'a second at': viewer(good, { extra: `&at=${other}` }),
+    'a second grant': viewer(good, { extra: `&w=${good}` }),
+    'a dot segment the kit resolves to the viewer': `/view/x/../artifact/launch-notes?at=${WRAP_AT}&w=${good}`,
+  };
+  // every case that admits the box, in one run
+  const admitted = [];
+  for (const [why, v] of Object.entries(bad)) if (faOf(await b.get('alpha', v, { cookie: COOKIE, headers: FROM_W })) !== "frame-ancestors 'self'") admitted.push(why);
+  // alpha's own grant on another project's host: beta-app's viewer
+  if (faOf(await b.get('beta-app', `/view/artifact/launch-notes?at=${WRAP_AT}&w=${good}`, { cookie: COOKIE, headers: FROM_W })) !== "frame-ancestors 'self'") admitted.push('alpha\'s grant on beta-app\'s host');
+  assert.deepEqual(admitted, [], `the box admitted under: ${JSON.stringify(admitted)}`);
+  assert.equal(faOf(await b.get('alpha', viewer(good), { cookie: COOKIE, headers: FROM_W })), `frame-ancestors 'self' ${b.origin()}`, 'and the good grant still admits it');
+  // and every other path of the dashboard keeps today's ancestors: the hub frames the dashboard
+  assert.equal(faOf(await b.get('alpha', '/', { cookie: COOKIE })), `frame-ancestors 'self' ${b.origin()}`, 'the dashboard itself');
+  assert.equal(faOf(await b.get('alpha', '/view/preview/cool-tiger', { cookie: COOKIE })), `frame-ancestors 'self' ${b.origin()}`, 'a preview\'s viewer');
+});
+on('C46 /w/ for an unknown project or an unpublished slug answers as any other unknown, and signed out tells nothing', { list: [row('alpha', P), row('beta-app', P + 1), row('twin', P), row('twin', P + 1, { root: '/srv/twin2' })], published: { alpha: { root: '/srv/alpha', port: P, artifacts: { 'launch-notes': art() } }, 'beta-app': { root: '/srv/beta-app', port: P + 1, artifacts: { 'beta-notes': art() } }, twin: { root: '/srv/twin', port: P, artifacts: { 'twin-notes': art() } } } }, async (b) => {
+  const unknown = shape(await b.get(null, '/no-such-page', { cookie: COOKIE, headers: NAV }));
+  const hits = b.hub.hits;
+  for (const route of ['/w/nobody/launch-notes/', '/w/alpha/nope/', '/w/alpha/beta-notes/', '/w/beta-app/launch-notes/', '/w/twin/twin-notes/', '/w/Alpha/launch-notes/', '/w/alpha/launch-notes', '/w/alpha/launch-notes/x', '/w/alpha/', '/w/4321/launch-notes/'])
+    assert.equal(shape(await b.get(null, route, { cookie: COOKIE, headers: NAV })), unknown, `signed in: ${route}`);
+  // signed out: a real page and a made-up one alike, sent to sign-in with their own address, as any hub path is
+  const out = (route, headers) => b.get(null, route, { headers }).then((r) => shape({ ...r, headers: { ...r.headers, location: r.headers.location?.replace(encodeURIComponent(route), '<route>') } }));
+  for (const headers of [NAV, {}]) {
+    const want = await out('/no-such-page/a/b/', headers);
+    for (const route of ['/w/alpha/launch-notes/', '/w/nobody/launch-notes/', '/w/alpha/nope/'])
+      assert.equal(await out(route, headers), want, `signed out, ${headers === NAV ? 'a navigation' : 'a fetch'}: ${route}`);
+  }
+  assert.equal(b.hub.hits, hits, 'no hub read');
+  assert.deepEqual([b.seen.get(P), b.seen.get(P + 1)], [[], []], 'no port is asked');
+});
+// C45 in Chrome: a stand-in viewer carrying the kit's own guard (index.html's first script, which stops
+// a dashboard framed by its own origin) and the kit's policy, framing an artifact at the published tree.
+const KIT_GUARD = /<script>\n\/\/ Framed by a page of its own origin[\s\S]*?<\/script>/.exec(fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8'))?.[0];
+test('C45 in Chrome, the owner\'s visit lands on the hub\'s /w/ page, the viewer and the artifact render; a bad grant\'s frame is blocked', { skip: !canDrive, timeout: 90000 }, async () => {
+  assert.ok(KIT_GUARD && KIT_GUARD.includes('window.frameElement'), 'the kit\'s own frame guard');
+  const b = await box();
+  const chrome = await openChrome();
+  try {
+    const kitCsp = { 'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'; frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB}` };
+    b.pages.set('/view/artifact/launch-notes', { headers: kitCsp, body: `<!doctype html><html><head>${KIT_GUARD}</head><body><p id="v">the viewer</p><iframe id="av-frame" sandbox="${AV_SANDBOX}" src="/artifact/tree/${TREE}/launch-notes/"></iframe></body></html>` });
+    b.pages.set(`/artifact/tree/${TREE}/launch-notes/`, { headers: { 'content-security-policy': `default-src 'none'; img-src http://127.0.0.1:${P}/artifact/tree/${TREE}/launch-notes/; frame-ancestors http://127.0.0.1:${P} http://127.0.0.1:${HUB}; sandbox allow-scripts` }, body: '<!doctype html><p id="art">the artifact</p><img src="dot.png">' });
+    const page = await chrome.newPage();
+    await page.send('Network.enable');
+    await page.send('Runtime.enable');
+    for (const at of [b.origin(), b.origin('alpha')]) await page.send('Network.setCookie', { name: 'devteam_session', value: u(TOK), url: `${at}/` });
+    await page.send('Page.navigate', { url: `${b.origin('alpha')}/launch-notes/` });
+    const dot = `/artifact/tree/${TREE}/launch-notes/dot.png`;
+    for (let i = 0; i < 100 && !b.seen.get(P).includes(dot); i++) await sleep(100);
+    assert.equal(await page.ev('location.href'), `${b.origin()}/w/alpha/launch-notes/`, 'the owner lands on the hub\'s /w/ page');
+    const shown = await page.evIn(b.origin('alpha'), 'document.body.textContent').catch((e) => String(e));
+    assert.equal(shown.trim(), 'the viewer', 'the viewer renders: it is not framed by its own origin');
+    assert.ok(b.seen.get(P).includes(dot), `the artifact renders, its image asked for: ${JSON.stringify(b.seen.get(P))}`);
+    // a bad grant: the same frame, its grant's mac changed, is blocked by the viewer's ancestors
+    const good = await page.ev('document.querySelector(\'iframe\').src');
+    const badUrl = good.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'));
+    const tree = async () => (await page.send('Page.getFrameTree')).frameTree.childFrames?.[0]?.frame ?? {};
+    await page.ev(`(document.querySelector('iframe').src = ${JSON.stringify(badUrl)}, true)`);
+    let f = {};
+    for (let i = 0; i < 100; i++) { f = await tree(); if (f.unreachableUrl || f.url === badUrl) break; await sleep(100); }
+    assert.equal(f.unreachableUrl, badUrl, `the bad grant's frame is blocked: ${JSON.stringify(f)}`);
+    assert.ok(b.seen.get(P).some((x) => badUrl.endsWith(x)), 'the viewer answered, and the browser refused to show it');
+  } finally { await chrome.close(); await b.close(); }
 });
 on('C15 a shared name gets no dashboard, and its stored page still answers signed out', { list: [row('twin', P), row('twin', P + 1, { root: '/srv/twin2' })], published: { twin: { root: '/srv/twin', port: P, artifacts: { 'twin-notes': art() } } } }, async (b) => {
   assert.deepEqual((await b.get('twin', '/twin-notes/', { headers: NAV })).body, PAGE);
@@ -3819,7 +3960,7 @@ on('C24 a preview framed from its own name gets its instance\'s project host as 
 });
 on('C25 the viewer is no longer frameable from public.<box>', undefined, async (b) => {
   const at = `tree:${TREE}`;
-  const r = await b.get('alpha', `/view/artifact/launch-notes?at=${at}&w=${b.g.wrapGrant(P, 'launch-notes', at)}`, { cookie: COOKIE });
+  const r = await b.get('alpha', `/view/artifact/launch-notes?at=${at}&w=${b.g.wrapGrant('alpha', 'launch-notes', at)}`, { cookie: COOKIE });
   assert.equal(r.status, 200, 'the viewer answers on the project host');
   assert.doesNotMatch(String(r.headers['content-security-policy']), /public\.box/);
 });

@@ -742,17 +742,20 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   const st = JSON.parse(fs.readFileSync(sf, 'utf8'));
   st.public = { ...(st.public ?? {}), standin: { root: '/srv/standin', port: SP, artifacts: { mock: { tree: T, title: 'Mock', at: new Date().toISOString(), files: { 'index.html': { sha256: sha, size: Buffer.byteLength(copy) } } } } } };
   fs.writeFileSync(sf, JSON.stringify(st, null, 2));
-  // published pages are on their project's own name now, at /<slug>/
+  // published pages are on their project's own name now, at /<slug>/; the owner's visit is sent to
+  // the wrapper on the box's own name (/w/<project>/<slug>/), off the dashboard's origin
   const page = `${inst}/mock/`;
+  const wrapped = `${pub}/w/standin/mock/`;
   await browser.navigate(tab, page);
+  await until(() => (tab.url ?? '') === wrapped, 'the owner\'s visit sent to the wrapper on the box');
   // the gateway reads the hub's list every 10 s: the stand-in has been listed far longer than that
   const viewerFrame = await until(() => browser.frameWhere(`${inst}/view/artifact/mock?at=tree:${T}&w=`), 'the viewer in the owner\'s view, under the wrapper\'s grant');
   assert.match(viewerFrame.url, /&w=\d+\.[\w-]{22}$/, viewerFrame.url);
   const shown = await until(() => browser.evalIn(`${inst}/c/`, `(() => { const p = document.getElementById('art'); return p && p.textContent + '|' + getComputedStyle(p).color; })()`), 'the artifact in the viewer in the owner\'s view');
   assert.equal(shown, 'the instance at the published tree|rgb(1, 2, 3)');
-  assert.match(await browser.evalIn(page, 'document.querySelector(\'header\').textContent'), /Public · standin\/mock/);
-  stepOk('signed in, the public link is the owner\'s view: the viewer at the published tree, the artifact under its capability, each frame allowed by every ancestor');
-  await browser.click(page, page, 'header a');
+  assert.match(await browser.evalIn(wrapped, 'document.querySelector(\'header\').textContent'), /Public · standin\/mock/);
+  stepOk('signed in, the public link is the owner\'s view on the box: the viewer at the published tree, the artifact under its capability, each frame allowed by every ancestor');
+  await browser.click(wrapped, wrapped, 'header a');
   await until(() => (tab.url ?? '') === `${page}?plain`, 'the plain link');
   assert.equal(await browser.evalIn(`${page}?plain`, 'document.getElementById(\'art\').textContent + \'|\' + document.querySelectorAll(\'iframe\').length'), 'the box\'s own copy|0');
   stepOk('"Open it as the public sees it" is the box\'s own copy, plain');
@@ -760,8 +763,8 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
 
 // ===== the same chain against the real kit (PR 3): the owner's view of a public page frames the
 // project's own dashboard's viewer, which frames the artifact at the published tree, with its lens.
-// Every frame must be allowed by every ancestor: the wrapper (the project's name), the viewer (same name,
-// under the wrapper's w= grant), the artifact (instance, under its capability, at the bound tree). =====
+// Every frame must be allowed by every ancestor: the wrapper (the box's own name, /w/), the viewer (the
+// project's name, under the wrapper's w= grant), the artifact (under its capability, at the bound tree). =====
 async function kitViewers({ G, DASH, tab, goal }) {
   // the dashboard's project's name, demo, which serves its published pages too
   const inst = `http://demo.box.localhost:${G}`;
@@ -784,9 +787,12 @@ async function kitViewers({ G, DASH, tab, goal }) {
   const st = JSON.parse(fs.readFileSync(sf, 'utf8'));
   st.public = { ...(st.public ?? {}), demo: { root: fs.realpathSync(repo), port: DASH, artifacts: { mock: { tree: T, title: 'Mock', at: new Date().toISOString(), files: { 'index.html': { sha256: sha, size: Buffer.byteLength(page) } } } } } };
   fs.writeFileSync(sf, JSON.stringify(st, null, 2));
-  const wrapper = `${inst}/mock/`;
+  // the owner's visit to the public link is sent to the wrapper on the box's own name, off the
+  // dashboard's origin: framed by its own origin, the dashboard's page stops itself
+  const wrapper = `http://box.localhost:${G}/w/demo/mock/`;
   const viewer = `${inst}/view/artifact/mock?at=tree:${T}`;
-  await browser.navigate(tab, wrapper);
+  await browser.navigate(tab, `${inst}/mock/`);
+  await until(() => (tab.url ?? '') === wrapper, 'the owner\'s visit sent to the wrapper on the box');
   await browser.cdp.send('Page.bringToFront', {}, tab.sessionId).catch(() => {});
   const vf = await until(() => browser.frameWhere(viewer), 'the kit\'s viewer in the owner\'s view');
   assert.match(vf.url, /^[^#]*\?at=tree:[0-9a-f]{40}&w=\d+\.[\w-]{22}$/, `the viewer under the wrapper's grant: ${vf.url}`);
@@ -887,13 +893,12 @@ async function kitViewers({ G, DASH, tab, goal }) {
   assert.equal(handle, true, 'window.open gave the viewer no handle on the new tab');
   stepOk('a tab opened from the viewer inside the wrapper has window.opener === null: from a link in a turn, and from a window.open that asks for one');
 
-  // and the grants are what let them in: the viewer without w=, or the artifact at a version the
-  // binding didn't publish (main), is refused inside the wrapper
-  await browser.evalIn(viewer, `(document.getElementById('av-frame').src = '/artifact/main/mock/', true)`);
-  await until(() => browser.refusedFrame((u) => u.startsWith(`${inst}/c/`) && u.endsWith('/artifact/main/mock/')), 'main\'s artifact to be refused in the owner\'s view', 15000);
+  // and the grant is what lets the viewer in: without w=, it is refused inside the wrapper. (The
+  // artifact's own ancestors are the project's host and the box, as in the hub: what the viewer frames
+  // is the viewer's to choose once it is in.)
   await browser.evalIn(wrapper, `(document.querySelector('iframe').src = ${JSON.stringify(viewer)}, true)`);
   await until(() => browser.refusedFrame((u) => u === viewer), 'the viewer without the wrapper\'s grant to be refused', 15000);
-  stepOk('inside the wrapper, the viewer without its w= grant is refused, and so is the artifact at a version the binding didn\'t publish');
+  stepOk('inside the wrapper, the viewer without its w= grant is refused');
 }
 
 async function main() {
