@@ -11772,6 +11772,34 @@ File.write(ENV.fetch("DEVTEAM_SECRET_DONE"), "ok")
 const isUtf8 = (buf) => { try { new TextDecoder('utf-8', { fatal: true }).decode(buf); return true; } catch { return false; } };
 // DEVTEAM_HUB_RECORD too: a session's mark, so the tmux server or owner action it starts records as usual
 const ownerProcessEnv = () => { const e = { ...process.env }; for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HUB_RECORD']) delete e[k]; return e; };
+// The age key that opens a SOPS file, so a repo's key is found wherever it keeps it. sops itself only
+// looks in the environment and ~/.config/sops/age/keys.txt, and a repo's key is often a gitignored
+// file in its main checkout (a chore worktree has no copy). Each candidate is proved by decrypting
+// the file with the output thrown away: only the key that opens this file is ever used, so one
+// repo's key can't be picked up for another's. Paths only: a key's contents never leave this check.
+function sopsKeyFiles(cwd) {
+  const common = gitCommonDirOf(cwd);
+  const root = path.basename(common) === '.git' ? path.dirname(common) : cwd;
+  const out = [];
+  for (const e of (git(['ls-files', '-o', '-i', '--exclude-standard', '--directory'], root) ?? '').split('\n').filter(Boolean)) {
+    if (e.endsWith('/')) {
+      if (/(^|\/)(node_modules|\.worktrees|\.git)\/$/.test(e) || !/secret|sops|age|key/i.test(e)) continue;
+      try { for (const n of fs.readdirSync(path.join(root, e))) out.push(path.join(root, e, n)); } catch {}
+    } else if (/(^|[-_./])(age|sops)([-_.]|$)/i.test(e)) out.push(path.join(root, e));
+  }
+  const home = path.join(process.env.HOME ?? os.homedir(), '.config', 'sops', 'age');
+  try { for (const n of fs.readdirSync(home)) out.push(path.join(home, n)); } catch {}
+  return [...new Set(out)].filter((f) => {
+    try { const st = fs.statSync(f); return st.isFile() && st.size <= 65536 && fs.readFileSync(f, 'utf8').includes('AGE-SECRET-KEY-'); } catch { return false; }
+  }).slice(0, 32);
+}
+function sopsKeyEnv(file, cwd, base = process.env) {
+  if (base.SOPS_AGE_KEY || base.SOPS_AGE_KEY_FILE || base.SOPS_AGE_KEY_CMD) return {};
+  const opens = (env) => spawnSync('sops', ['-d', file], { cwd, env: { ...base, ...env }, stdio: 'ignore', timeout: 30000 }).status === 0;
+  if (opens({})) return {};
+  for (const f of sopsKeyFiles(cwd)) if (opens({ SOPS_AGE_KEY_FILE: f })) return { SOPS_AGE_KEY_FILE: f };
+  return {};
+}
 // Returns { ok, out, files }: files are the tracked paths a commit sink changed.
 function runSink(k, value, kind, cwd, redact) {
   const run = (cmd, args, opts) => {
@@ -11800,7 +11828,8 @@ function runSink(k, value, kind, cwd, redact) {
   if (k.type === 'sops') {
     if (!fs.existsSync(path.join(cwd, k.file))) return { ok: false, out: `${k.file} does not exist on main; create it with sops first` };
     const text = value.toString('utf8');
-    const r = run('sops', ['set', '--value-stdin', k.file, k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')], { input: JSON.stringify(kind === 'string' ? text.replace(/\r?\n$/, '') : text), env: ownerProcessEnv() });
+    const r = run('sops', ['set', '--value-stdin', k.file, k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')], { input: JSON.stringify(kind === 'string' ? text.replace(/\r?\n$/, '') : text), env: { ...ownerProcessEnv(), ...sopsKeyEnv(k.file, cwd, ownerProcessEnv()) } });
+    if (!r.ok && /no master key|failed to load age/i.test(r.out)) r.out = `no age key on this machine opens ${k.file}. The kit looks in the environment, ~/.config/sops/age/ and this repo's gitignored files with age or sops in their name. ${r.out}`;
     if (r.ok && !changed(k.file)) return { ok: false, out: `sops exited 0 but ${k.file} did not change${r.out ? `: ${r.out}` : ''}` };
     if (!r.ok && /value-stdin/.test(r.out)) r.out += ' (this sops is too old for set --value-stdin; update it)';
     return { ...r, files: [k.file] };
@@ -26527,8 +26556,9 @@ const CREDENTIALS = new Map();
 function readCredential(source) {
   if (CREDENTIALS.has(source)) return CREDENTIALS.get(source);
   const k = parseSink(source, { soft: true });
+  const keyEnv = k.type === 'sops' ? sopsKeyEnv(k.file, mainRoot, ownerProcessEnv()) : {};
   const run = (cmd, args, input) => {
-    const r = spawnSync(cmd, args, { cwd: mainRoot, input, encoding: 'utf8', env: ownerProcessEnv(), timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
+    const r = spawnSync(cmd, args, { cwd: mainRoot, input, encoding: 'utf8', env: { ...ownerProcessEnv(), ...keyEnv }, timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
     if (r.status !== 0) throw new Error(`${path.basename(cmd)} ${args[0]} failed (${r.error?.code ?? `exit ${r.status}`})`);
     return r.stdout;
   };
