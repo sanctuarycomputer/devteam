@@ -690,6 +690,48 @@ const dockerScript = (dest) => {
   assert.ok(from >= 0, `the Dockerfile writes ${dest}`);
   return df.slice(from + 1, df.indexOf('EOF', from)).join('\n') + '\n';
 };
+test('box-recover waits for a restore already running, and the boot\'s own run does not wait on itself', { skip: spawnSync('flock', ['-V']).status !== 0 ? 'no flock' : false }, async () => {
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'br-')));
+  const h = path.join(d, 'home');
+  fs.mkdirSync(path.join(h, '.box'), { recursive: true });
+  const node = path.join(d, 'node');
+  // the restore itself: when it ran, and whether the lock's flag reached it
+  write(node, `#!/bin/sh\necho "ran \${BOX_RECOVER_LOCKED:-unset} $(date +%s%N)" >> "${d}/runs"\n`);
+  fs.chmodSync(node, 0o755);
+  const script = path.join(d, 'box-recover');
+  let text = dockerScript('/usr/local/bin/box-recover');
+  assert.ok(text.includes('exec /usr/local/bin/node ') && text.includes(' /usr/local/bin/box-recover "$@"'));
+  text = text.replace('exec /usr/local/bin/node ', `exec '${node}' `).replace(' /usr/local/bin/box-recover "$@"', ` '${script}' "$@"`);
+  fs.writeFileSync(script, text, { mode: 0o755 });
+  assert.equal(spawnSync('sh', ['-n', script]).status, 0, 'sh -n');
+  const env = { ...process.env, HOME: h };
+  delete env.BOX_RECOVER_LOCKED;
+  const runs = () => { try { return fs.readFileSync(path.join(d, 'runs'), 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } };
+  // nothing running: it runs at once, and the flag stops with the script
+  let r = spawnSync(script, [], { env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(runs()[0], /^ran unset /);
+  // the boot's run holds the lock (start_recover's fd): a run by hand says so, waits, then runs
+  const held = execFile('flock', [path.join(h, '.box', 'recover.lock'), 'sleep', '1.5']);
+  await new Promise((res) => setTimeout(res, 300));
+  const t0 = Date.now();
+  r = spawnSync(script, [], { env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Date.now() - t0 >= 900, `waited for the running restore (${Date.now() - t0} ms)`);
+  assert.match(r.stderr, /another restore is running/);
+  assert.equal(runs().length, 2);
+  await new Promise((res) => held.on('exit', res));
+  // the boot's own run, already under the lock, runs straight away
+  const held2 = execFile('flock', [path.join(h, '.box', 'recover.lock'), 'sleep', '3']);
+  await new Promise((res) => setTimeout(res, 300));
+  const t1 = Date.now();
+  r = spawnSync(script, [], { env: { ...env, BOX_RECOVER_LOCKED: '1' }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Date.now() - t1 < 2000, 'under the lock already: no wait');
+  assert.match(runs()[2], /^ran unset /);
+  held2.kill();
+});
+
 test('the box\'s tmux refuses a kill-server aimed at the box, and honours a private TMUX_TMPDIR inside a pane', { skip: !hasTmux || !realTmux }, () => {
   const uid = String(process.getuid());
   const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tw-')));
