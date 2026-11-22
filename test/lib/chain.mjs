@@ -4483,8 +4483,24 @@ http.createServer((req, res) => {
     pvClear();
   });
 
-  // a listener on a port a test chose
+  // a listener: on 0, a port the system gives (pvPort reads it); on a port a record already names (only once
+  // that port went down, as a step's own listener closed), pvRelisten. Never a port freePort found: it is free
+  // when freePort lets go of it, and anything listening on 0 (the step's own dashboard, Chrome's DevTools port,
+  // another test file) can be given it before the step listens, which is EADDRINUSE (kit-775)
   const pvListen = (port) => new Promise((resolve, reject) => { const v = net.createServer((c) => c.destroy()); v.once('error', reject); v.listen(port, '127.0.0.1', () => resolve(v)); });
+  const pvPort = (v) => v.address().port;
+  // the port a record names, listened on again (what: the step's words for it): while another listener was
+  // given it meanwhile, wait for it to let go, up to 30 s; any other error at once
+  const pvRelisten = async (port, what) => {
+    const end = Date.now() + 30000;
+    for (;;) {
+      try { return await pvListen(port); } catch (e) {
+        if (e.code !== 'EADDRINUSE') throw e;
+        if (Date.now() > end) throw new Error(`${what}: port ${port} still taken by another listener after 30 s (${e.message})`, { cause: e });
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
   const pvClose = (v) => new Promise((r) => v.close(r));
   // a hub that lists what it is told, or never answers
   const pvHub = async (instances) => {
@@ -4496,7 +4512,8 @@ http.createServer((req, res) => {
 
   step("previews: the link for here, list, url, stop, a clash with another instance, and a box that doesn't serve previews yet", async () => {
     pvClear();
-    const P = await freePort();
+    // nothing answers on P until the step listens: a port the system gave, let go of, and taken back below
+    const P = await pvListen(0).then(async (v) => { const port = pvPort(v); await pvClose(v); return port; });
     const laptop = pvOk(['preview', String(P)]);
     const name = pvName(laptop);
     assert.match(laptop, new RegExp(`preview ${name} is at http://127\\.0\\.0\\.1:${P} \\(open it on this machine; there is no gateway here\\)`));
@@ -4508,7 +4525,7 @@ http.createServer((req, res) => {
     assert.doesNotMatch(old, /box\.example\.com/, 'and never a link that would answer 421');
     const BOX = { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_PREVIEWS: '1' };
     assert.match(pvOk(['preview', String(P)], BOX), new RegExp(`preview ${name} is live at https://${name}\\.box\\.example\\.com \\(nothing answers on port ${P} yet; the link works once it does\\)`));
-    const lst = await pvListen(P);
+    const lst = await pvRelisten(P, 'the link for here: P listened on again, to answer');
     const live = pvOk(['preview', String(P)], BOX);
     assert.match(live, new RegExp(`preview ${name} is live at https://${name}\\.box\\.example\\.com \\(port ${P} answers\\)`));
     assert.match(live, /Only the signed-in owner can open it/);
@@ -4672,8 +4689,9 @@ http.createServer((req, res) => {
     assert.equal(fs.statSync(path.join(PV_DIR(), 'old-stale.json')).mtimeMs, beforeOp, 'hello writes nothing, and sweeps nothing');
     assert.deepEqual(pvFiles(), ['old-stale.json']);
     pvClear();
-    const P = await freePort();
-    const lst = await pvListen(P);
+    const lst = await pvListen(0);
+    t.after(() => (lst.listening ? pvClose(lst) : undefined));
+    const P = pvPort(lst);
     pvMake('cool-tiger', { port: P, label: 'L'.repeat(60), session: 's'.repeat(100), project: 'p'.repeat(100) });
     let d = await pvDashboard({ DEVTEAM_PREVIEW_TICK_MS: '86400000' });
     try {
@@ -4699,7 +4717,7 @@ http.createServer((req, res) => {
       await pvClose(lst);
       await until(async () => (await pvHello(d.base))[0]?.up === false, 'the tick to see the port stop');
       await until(() => pvRec('cool-tiger').down_since, 'down_since on a down record');
-      const again = await pvListen(P);
+      const again = await pvRelisten(P, 'hello lists them: P listened on again, after the tick saw it down');
       await until(() => !pvRec('cool-tiger').down_since, 'down_since cleared when it answers again');
       await pvClose(again);
       pvClear();
@@ -4796,10 +4814,12 @@ http.createServer((req, res) => {
     assert.ok(stale);
   });
 
-  step('previews: a question cites one by name, and the dashboard resolves it here', async () => {
+  step('previews: a question cites one by name, and the dashboard resolves it here', async (t) => {
     pvClear();
     const name = 'cool-tiger';
-    const P = await freePort();
+    const lst = await pvListen(0);
+    t.after(() => (lst.listening ? pvClose(lst) : undefined));
+    const P = pvPort(lst);
     pvMake(name, { port: P });
     const links = (over) => JSON.stringify([{ name: 'demo', title: 'The new flow', ...over }]);
     const ask = (l) => pv(['ask', '--question', 'Look at [[demo]]', '--links', l]);
@@ -4819,7 +4839,6 @@ http.createServer((req, res) => {
     const d = await pvDashboard();
     try {
       const ofData = async () => (await (await fetch(`${d.base}/api/data`)).json()).questions.find((x) => x.id === id).links.find((l) => l.name === 'demo');
-      const lst = await pvListen(P);
       await until(async () => (await pvHello(d.base))[0]?.up === true, 'the tick');
       let l = await ofData();
       assert.deepEqual([l.preview, l.port, l.state, l.url], [name, P, 'live', undefined]);
