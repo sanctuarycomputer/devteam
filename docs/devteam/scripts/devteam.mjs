@@ -26712,7 +26712,7 @@ const recurringChores = Object.freeze({
   // a supervisor chore's PR on the forge, closed without a merge: its closedAt, else null. Read through
   // run/recurring/prs.json: a closed PR for good, anything else again after PR_REUSE_MS. No forge (git),
   // no gh, or gh failing: null, so the run stays live.
-  prClosed(branch, nowMs = Date.now(), { ask = true } = {}) {
+  prClosed(branch, nowMs = Date.now(), { ask = false } = {}) {
     if (loadSettings().forge === 'git') return null;
     const file = path.join(runPath('recurring'), 'prs.json');
     let cache = {};
@@ -26750,7 +26750,8 @@ const recurringChores = Object.freeze({
         if (t?.type === 'ticket') {
           const m = mergedAt(ref);
           if (m !== null && m !== undefined) end('done', typeof m === 'number' ? new Date(m).toISOString() : m);
-          else if (t.superseded_by) end('abandoned', (t.updates ?? []).filter((u) => u.superseded_by).map((u) => u.at).sort()[0] ?? t.created_at ?? o.created_at, `superseded by ${t.superseded_by}`);
+          // the earliest finish holds: a ticket superseded and merged later stays abandoned
+          if (t.superseded_by) end('abandoned', (t.updates ?? []).filter((u) => u.superseded_by).map((u) => u.at).sort()[0] ?? t.created_at ?? o.created_at, `superseded by ${t.superseded_by}`);
         }
       } else {
         for (const a of acts) if (a.refs?.[0] === ref && Date.parse(a.created_at) >= start) end('done', a.created_at);
