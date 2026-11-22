@@ -11804,7 +11804,8 @@ function sopsKeyEnv(file, cwd, base = process.env) {
 function runSink(k, value, kind, cwd, redact) {
   const run = (cmd, args, opts) => {
     const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts });
-    if (r.error) return { ok: false, out: redact(r.error.message) };
+    // a tool that refuses before reading its stdin (sops with no key) gives EPIPE: its own error is the one to show
+    if (r.error && !(r.error.code === 'EPIPE' && r.status !== null)) return { ok: false, out: redact(r.error.message) };
     return { ok: r.status === 0, out: redact(`${r.stdout ?? ''}${r.stderr ?? ''}`.trim()) };
   };
   const changed = (rel) => (git(['status', '--porcelain', '--', rel], cwd) ?? '').trim() !== '';
