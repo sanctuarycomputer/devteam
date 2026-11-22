@@ -550,3 +550,57 @@ test('artifact remote main: in Chrome, the page asks only from the Library or a 
   spy.hang(false);
   await soon(8000 + L + 10000, `!/may be out of date/.test(document.getElementById('lib-top').textContent)`, 'S3: stale gone after a good fetch');
 });
+
+// kit-752: a question links an artifact as it did before kit-750. A branch fetched from origin into
+// refs/devteam-remote/* is a draft the Library shows, never a question's: `ask --links` with no "at"
+// picks main's copy, then this machine's worktrees', never the remote draft and never failing because
+// of it; "at": "origin:<branch>" is refused in plain words before any line is written (ruling
+// a-20261122-082323258-supervisor). No dashboard: the fetch is the dashboard's own refspec, by hand.
+test('artifact remote cli: ask --links with no at never picks a draft fetched from origin, and an origin: at is refused', { timeout: 120000 }, async (t) => {
+  const { F, other } = await setup(t, 'remote-cli');
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  other.push('main', 'on-main', art('on main v1'));
+  F.g(['pull', '-q', 'origin', 'main'], F.old);
+  // a draft in this machine's worktree, never landed
+  const wt = path.join(F.old, '.worktrees', 'bill-01-card');
+  F.g(['worktree', 'add', '-q', '-b', 'ticket/bill-01-card', wt], F.old);
+  for (const [rel, text] of Object.entries(art('wt only'))) write(path.join(wt, ARTS, 'wt-only', rel), text);
+  // another machine's branches: one changes on-main, one changes wt-only, one adds far-only
+  other.push('ticket/far-01', 'on-main', art('on main, far draft'));
+  other.push('ticket/far-02', 'wt-only', art('wt only, far draft'));
+  other.push('ticket/far-03', 'far-only', art('far only'));
+  F.g(['fetch', '-q', '--no-tags', '--refmap=', 'origin', '+refs/heads/*:refs/devteam-remote/*'], F.old);
+  const rows = JSON.parse(F.ok(F.old, ['artifacts', '--json'], SUP));
+  const fp = (slug, at) => rows.find((a) => a.slug === slug && a.at === at)?.fp;
+  assert.ok(fp('on-main', 'origin:ticket/far-01'), 'setup: the fetched branch is a draft the kit lists (kit-750)');
+  assert.ok(fp('far-only', 'origin:ticket/far-03'), 'setup: the fetched new artifact is listed too');
+  const ask = (link) => F.run(F.old, ['ask', '--kind', 'owner-decision', '--question', 'Is [[m]] right?', '--options', 'Yes', 'No', '--recommendation', 'Yes', '--stake', '1', '--urgency', '1', '--links', JSON.stringify([{ name: 'm', title: 'Mock', ...link }])], SUP);
+  const linkOf = (r, what) => { assert.equal(r.status, 0, `${what}: ask exits 0 (${r.err})`); return JSON.parse(F.ok(F.old, ['log', '--id', r.out.trim().split('\n')[0], '--json'], SUP))[0].links[0]; };
+  const questions = () => JSON.parse(F.ok(F.old, ['log', '--json'], SUP)).filter((x) => x.type === 'question').length;
+  // C1: on main and changed on a fetched branch, no at: main, as before kit-750
+  const c1 = linkOf(ask({ artifact: 'on-main' }), 'C1');
+  assert.deepEqual([c1.at, c1.sha256], ['main', fp('on-main', 'main')], 'C1: no at picks main, never the remote draft');
+  // C2: only in a worktree here and changed on a fetched branch, no at: the worktree, as before
+  const c2 = linkOf(ask({ artifact: 'wt-only' }), 'C2');
+  assert.deepEqual([c2.at, c2.sha256], ['bill-01-card', fp('wt-only', 'bill-01-card')], 'C2: no at picks the worktree draft');
+  // C3: at names a remote draft: refused in plain words, before any line is written
+  const n = questions();
+  const c3 = ask({ artifact: 'on-main', at: 'origin:ticket/far-01' });
+  assert.match(c3.err, /artifact "on-main" in origin:ticket\/far-01 is a draft from another machine, which a question can't link: check its branch out in a worktree here, or merge it to main, first/, 'C3: an origin: at is refused in plain words');
+  assert.equal(c3.status, 1, 'C3: and ask fails');
+  assert.equal(questions(), n, 'C3: no question line written');
+  // C3b: the guard is on the at, not on a row: a remote row a worktree draft hides, and a branch never fetched
+  const c3b = ask({ artifact: 'wt-only', at: 'origin:ticket/far-02' });
+  assert.match(c3b.err, /artifact "wt-only" in origin:ticket\/far-02 is a draft from another machine, which a question can't link/, 'C3b: an origin: at hidden by a worktree draft is refused the same way');
+  const c3c = ask({ artifact: 'on-main', at: 'origin:ticket/never' });
+  assert.match(c3c.err, /artifact "on-main" in origin:ticket\/never is a draft from another machine, which a question can't link/, 'C3c: an origin: at never fetched is refused the same way');
+  assert.equal(questions(), n, 'C3b, C3c: no question line written');
+  // C4: only on a fetched branch, no at: never picked, refused the same way
+  const c4 = ask({ artifact: 'far-only' });
+  assert.match(c4.err, /artifact "far-only" in origin:ticket\/far-03 is a draft from another machine, which a question can't link/, 'C4: a remote-only draft is never picked');
+  assert.equal(c4.status, 1, 'C4: and ask fails');
+  // C4b: only on a fetched branch, at naming a place here: the same refusal, never an empty "it is in"
+  const c4b = ask({ artifact: 'far-only', at: 'main' });
+  assert.match(c4b.err, /artifact "far-only" in origin:ticket\/far-03 is a draft from another machine, which a question can't link/, 'C4b: a remote-only draft named at main is refused the same way');
+  assert.equal(questions(), n, 'C4, C4b: no question line written');
+});

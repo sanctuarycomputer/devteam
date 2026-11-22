@@ -2682,7 +2682,7 @@ http.createServer((req, res) => {
     if (rubyOk) {
       // encrypted stores: a fake sops and a fake bin/rails stand in for the real tools
       const bin = path.join(tmp, 'fakebin');
-      write(path.join(bin, 'sops'), `#!/bin/sh\n[ "$1" = set ] && [ "$2" = --value-stdin ] || { echo "flag provided but not defined: $2" >&2; exit 1; }\nnode -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(0,"utf8"));fs.appendFileSync(process.argv[1], process.argv[2]+": "+JSON.stringify(v)+"\\n")' "$3" "$4"\n`);
+      write(path.join(bin, 'sops'), `#!/bin/sh\n[ "$1" = --config ] && shift 2\n[ "$1" = set ] && [ "$2" = --value-stdin ] || { echo "flag provided but not defined: $2" >&2; exit 1; }\nnode -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(0,"utf8"));fs.appendFileSync(process.argv[1], process.argv[2]+": "+JSON.stringify(v)+"\\n")' "$3" "$4"\n`);
       fs.chmodSync(path.join(bin, 'sops'), 0o755);
       write(path.join(repo, 'bin/rails'), `#!/bin/sh\n# fake credentials:edit: plaintext stands in for the encrypted file\nf=config/credentials/$3.yml.enc; t=$(mktemp); cp "$f" "$t"\n[ -n "$FAKE_RAILS_SKIP" ] || $EDITOR "$t"\ncp "$t" "$f"; rm -f "$t"; echo "File encrypted and saved."\n`);
       fs.chmodSync(path.join(repo, 'bin/rails'), 0o755);
