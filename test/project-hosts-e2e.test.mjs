@@ -162,8 +162,10 @@ const rig = () => (built ??= (async () => {
     const dashB = startDashboard(r.beta, env, ['--port', String(P + 1)]);
     stops.push(() => dashB.stop());
     // a project whose name can't be a host
+    r.wwwHits = [];
     const www = http.createServer((q, s) => {
       if (q.url === '/api/hello') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ devteam: 1, name: 'www', root: '/srv/www', port: P + 2 })); }
+      r.wwwHits.push(`${q.method} ${q.url}`);
       return s.end('www');
     });
     await listening(www, P + 2);
@@ -294,6 +296,9 @@ async function otherBrowser(t, r, { session = false, passkey = false } = {}) {
 const ADDRESSES = `[location.href, ...[...document.querySelectorAll('[href],[src],[action],[data-copy]')].flatMap((e) => ['href', 'src', 'action', 'data-copy'].map((a) => e.getAttribute(a)).filter(Boolean).map((v) => { try { return new URL(v, location.href).href; } catch { return v; } }))]`;
 // An address "names a port" when it reaches a project or the hub by its port. The gateway's own port
 // is in every address here only because a test can't listen on 80, so it is allowed.
+// the names the contract keeps off every project (cloud/gateway.mjs RESERVED_LABELS), written out so
+// a change to the gateway's list can't change what this scan looks for
+const RESERVED = ['term', 'public', 'www'];
 function namingPorts(r, addresses) {
   const block = new Set([HUB, ...Array.from({ length: 25 }, (_, i) => P + i)].map(String));
   return addresses.filter((a) => {
@@ -302,6 +307,7 @@ function namingPorts(r, addresses) {
     if (!/^https?:$/.test(u.protocol)) return false;
     if (block.has(u.port) || ['127.0.0.1', '[::1]', 'localhost'].includes(u.hostname)) return true;
     if (!u.hostname.endsWith('.localhost')) return false;
+    if (RESERVED.includes(u.hostname.split('.')[0])) return true;
     return u.port !== String(r.port) || /^\d+\./.test(u.hostname);
   });
 }
@@ -389,6 +395,22 @@ test('C5 PL-S8: signed out, a project address signs in on the box and lands back
   await q.click('#go');
   await waitFor(q, `location.host.startsWith('alpha.') && document.title.includes('alpha')`, 'the dashboard after sign-in');
   assert.equal(await q.ev('location.href'), want);
+});
+
+test('C5b PL-S8: signed out, a project host answers 401 to its API, and a made-up name answers as a real one', CHROME, async () => {
+  const r = await rig();
+  const own = r.at('alpha');
+  const before = r.reqs.length;
+  const read = await raw(r, `alpha.box.localhost:${r.port}`, '/api/data', { headers: { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' } });
+  assert.deepEqual([read.status, read.body], [401, 'sign in with your passkey'], 'GET /api/data, signed out');
+  const act = await raw(r, `alpha.box.localhost:${r.port}`, '/api/pane-answer', { method: 'POST', headers: { origin: own, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', 'content-type': 'application/json' }, body: JSON.stringify({ pane: 'x', answer: 'y' }) });
+  assert.deepEqual([act.status, act.body], [401, 'sign in with your passkey'], 'POST /api/pane-answer, signed out');
+  assert.equal(r.reqs.length - before, 2, 'both reached the gateway');
+  // a navigation: the same answer for a real name and a made-up one
+  const nav = { 'sec-fetch-site': 'none', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' };
+  const [real, made] = await Promise.all(['alpha', 'nosuchname'].map((n) => raw(r, `${n}.box.localhost:${r.port}`, '/', { headers: nav })));
+  assert.equal(real.status, 401);
+  assert.deepEqual([made.status, made.headers['content-type'], made.body], [real.status, real.headers['content-type'], real.body], 'a made-up name answers as a real one, signed out');
 });
 
 test("C6 PL-S8: the hub and its Passkeys link work on the box's name", CHROME, async () => {
@@ -508,6 +530,13 @@ test('C14 PL-S10: a project with a reserved name gets no host, and its tab says 
   await waitFor(r.page, `document.body.innerText.includes('This project has no address on this box: its name is reserved')`, "the tab's reason");
   assert.equal(await r.page.ev(shownFrame), null, 'no frame for it');
   assert.equal(await r.page.ev(`[...document.querySelectorAll('#frames iframe')].some((f) => (f.getAttribute('src') ?? '').includes('www.box.localhost'))`), false);
+  // and at the gateway, signed in: no host, and the project behind the name is never asked
+  r.wwwHits.length = 0;
+  for (const route of ['/', '/api/data']) {
+    const a = await raw(r, `www.box.localhost:${r.port}`, route, { headers: { cookie: `devteam_session=${r.session}`, 'sec-fetch-site': 'none', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } });
+    assert.equal(a.status, 421, `${route} on a reserved name`);
+  }
+  assert.deepEqual(r.wwwHits, [], 'the www project was asked nothing but its hello');
 });
 
 test('C14b PL-S10: two projects sharing a name get no host: the tab says why, and the gateway reaches neither', CHROME, async () => {
