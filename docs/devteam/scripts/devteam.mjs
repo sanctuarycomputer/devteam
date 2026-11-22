@@ -30803,6 +30803,7 @@ function browserUserAgent(bin) {
 // DevToolsActivePort), up once it answers Browser.getVersion there within 30 s. No usable sandbox: once
 // more with --no-sandbox, and a note. Its stderr is kept (the last 64 KiB) only until then, for the
 // sandbox check; after, it is drained and dropped: Chrome's log lines can carry page URLs.
+const chromeTmpFor = (profile) => path.join(os.tmpdir(), `dc${crypto.createHash('sha1').update(profile).digest('hex').slice(0, 6)}`);
 async function browserLaunchChrome(ctx, { headed }) {
   // read once per daemon (a spawn of Chrome, most of a second): a close or a forget relaunches the same binary
   if (ctx.ua === undefined) ctx.ua = browserUserAgent(ctx.bin);
@@ -30813,8 +30814,15 @@ async function browserLaunchChrome(ctx, { headed }) {
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync',
     ...(process.platform === 'linux' ? ['--password-store=basic'] : []), ...(ua ? [`--user-agent=${ua}`] : []),
   ];
+  // Chrome's own temp folders (org.chromium.Chromium.*, its singleton socket among them) go in one short
+  // folder per profile, emptied at each launch: a Chrome that is killed leaves them behind, and loose
+  // in the machine's temp folder they piled up by the thousand. Short, beside the others, because a
+  // socket's path is capped (about 104 bytes) and a folder inside the profile would pass it.
+  const tmp = chromeTmpFor(ctx.profile);
   for (let tries = 0; ; tries++) {
-    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.mkdirSync(tmp, { recursive: true, mode: 0o700 });
+    const chrome = spawn(ctx.bin, [...args, ...(tries ? ['--no-sandbox'] : []), 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: tmp } });
     ctx.chrome = chrome;
     const r = await new Promise((resolve) => {
       let buf = '', over = false;
