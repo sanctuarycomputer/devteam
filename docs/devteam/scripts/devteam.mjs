@@ -602,6 +602,10 @@ const SETTINGS_DEFAULTS = {
   // Run worktree_setup on every session start, even when nothing it installs from changed. Session and chore worktrees only; gate checkouts never.
   worktree_setup_always: false,
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
+  // The thread responder (kit-103): a quick session that answers the owner's thread turns while the
+  // supervisor works. The supervisor's switch; false is the rollback (every turn goes to the supervisor).
+  // What it runs is the owner's responder_command (OWNER_SETTINGS; unset means agent_command).
+  responder: true,
   dashboard_port: null,
   upstream_repo: KIT_UPSTREAM,
   upstream_base: null,
@@ -623,7 +627,7 @@ const SETTINGS_DEFAULTS = {
 // release is how a tag reaches production; project names every public link and the gateway's binding.
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
-  autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
+  autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', responder_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
@@ -665,6 +669,8 @@ const SETTINGS_WORDS = Object.freeze({
   tmux_session: ['Fleet and capacity', 'Terminal session name', 'the tmux session the windows live in; none means one named after the project', 'value'],
   dashboard_port: ['Fleet and capacity', 'Dashboard port', "where this dashboard listens; none means a free port in the hub's range", 'value'],
   agent_command: ['Agents and sessions', 'Agent command', 'what starts each worker, planner and the supervisor', 'hidden'],
+  responder: ['Agents and sessions', 'Thread responder', 'a quick session that answers your thread messages at once; off sends them all to the supervisor', 'value'],
+  responder_command: ['Agents and sessions', 'Responder command', 'what starts the thread responder; unset means the agent command', 'hidden'],
   resume_command: ['Agents and sessions', 'Resume command', 'what brings a stopped session back on its own conversation', 'hidden'],
   agent_trust_command: ['Agents and sessions', 'Folder-trust answer', 'a command run before each agent starts so it trusts its worktree; empty runs nothing', 'hidden'],
   worker_denied_commands: ['Agents and sessions', 'Commands workers may not run', 'patterns refused in every worker and planner', 'value'],
@@ -712,6 +718,7 @@ const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'str
 const SETTING_SHAPES = Object.freeze({
   ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
+  responder: (v) => typeof v === 'boolean',
   worktree_setup_always: (v) => typeof v === 'boolean',
   forge: (v) => ['github', 'git'].includes(v),
   merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),
@@ -1948,7 +1955,7 @@ function currentTicketId() {
 // Who this process writes the log as: the responder (its role wins over a ticket, a feature or a
 // branch), a ticket id, plan-<feature>, or supervisor. Never the owner.
 function logWriter() {
-  if (process.env.DEVTEAM_ROLE === 'responder') return 'responder';
+  if (process.env.DEVTEAM_ROLE === 'responder' || inResponderWorktree()) return 'responder';
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
@@ -1964,6 +1971,7 @@ function logWriter() {
 // for the command at hand.
 function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
+  if (inResponderWorktree()) die("owner commands don't run in the responder's worktree");
   const pane = process.env.TMUX_PANE;
   if (!pane || !process.env.TMUX) return { by: 'owner' };
   const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set'
@@ -9309,6 +9317,9 @@ function cmdThread() {
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
+    // --pending (a reply that says work follows) is a reply's; --anyway is the responder's alone
+    if (flags.pending && by === 'owner') die('--pending goes with a reply (thread reply), not the owner\'s own turn');
+    if (flags.anyway && by !== 'responder') die("--anyway is the responder's: it replies after the supervisor answered only to add something new");
     const early = by === 'owner' ? alone(2) : undefined;
     const words = turnText(filled(2, early));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
@@ -9321,9 +9332,15 @@ function cmdThread() {
     const files = early ?? filesFlag();
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
-    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files };
-    if (refs.length && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
+    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined };
+    if ((refs.length || line.pending) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
+    if (by !== 'owner') {
+      const objects = readLog().objects;
+      if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
+      // the owner's turns this reply answers, before it is written: on stderr, so the id stays the first line out
+      for (const o of owedTurns(t.id, objects)) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+    }
     const u = appendLog(line, by);
     out(u.id);
     if (by === 'owner') out(deliver(t, u, words, files));
@@ -9467,8 +9484,10 @@ function cmdThread() {
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
     // the owner's words are theirs, as in your session; your own turns are yours
+    const lines = readLog().objects;
     for (const u of v.turns) {
-      out(`${u.at} ${u.by} (${u.id})${u.question ? `, asking ${u.question}` : ''}:`);
+      // the responder's turns name it (the view keeps them on the supervisor's side); a pending one says so
+      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${u.question ? `, asking ${u.question}` : ''}:`);
       // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
       // (an escape, a bidi override, a CR)
       out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
@@ -9480,6 +9499,14 @@ function cmdThread() {
     return;
   }
   if (sub === 'list') {
+    if (flags.responder && !flags.waiting) die('--responder goes with --waiting: thread list --waiting --responder');
+    if (flags.responder) {
+      const q = responderQueue();
+      if (flags.json) return json(q);
+      if (!q.length) return out('no turn is waiting on the responder');
+      for (const x of q) out(`${x.turn} in ${x.thread} (${Math.max(0, Math.round((Date.now() - Date.parse(x.at)) / 60000))} min) "${turnGist(x.text)}"`);
+      return;
+    }
     let vs = threadViews(readLog().objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
     if (flags.waiting) vs = vs.filter((x) => x.status === 'open' && x.waiting === 'supervisor');
     else if (!flags.all) vs = vs.filter((x) => x.status === 'open');
@@ -9488,7 +9515,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s or the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -10802,9 +10829,10 @@ function artifactProblems(slug, entries) {
 }
 const WT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // A worktree a draft may come from: a session's own checkout directly under .worktrees/, never a
-// reviewer's (review-*) or a scratch one (tmp-*). Its real path, or null.
+// reviewer's (review-*), a scratch one (tmp-*), or the responder's (a copy of main that ages
+// between its starts, kit-103). Its real path, or null.
 function draftWorktree(name) {
-  if (!WT_NAME.test(name ?? '') || /^(review|tmp)-/.test(name)) return null;
+  if (!WT_NAME.test(name ?? '') || /^(review|tmp)-/.test(name) || name === 'responder') return null;
   try {
     const root = fs.realpathSync(path.join(mainRoot, '.worktrees'));
     const real = fs.realpathSync(path.join(root, name));
@@ -11166,7 +11194,7 @@ function cmdArtifact() {
     if (fs.existsSync(path.join(here, slugName))) die(`${ARTIFACTS_REL}/${slugName} already exists here`);
     const other = draftArtifacts().filter((a) => a.slug === slugName).map((a) => a.at);
     if (other.length) warn(`${slugName} is also being drawn in ${other.join(', ')}`);
-    const by = process.env.DEVTEAM_ROLE === 'responder' ? 'responder' : process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
+    const by = logWriter() === 'responder' ? 'responder' : process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
     // flags keep a repeated flag's last value; a kind given twice is refused rather than guessed
     const own = argv.indexOf('--') < 0 ? argv : argv.slice(0, argv.indexOf('--'));
     if (own.filter((a) => a === '--kind' || a.startsWith('--kind=')).length > 1) die('artifact new: give --kind once; kind is mock, diagram or docs');
@@ -15224,7 +15252,7 @@ function recordUsd(r) {
 }
 const realOrSelf = realPath;
 // Whose work ran in a directory: a ticket's worktree, a planner's, a reviewer's (charged to its
-// ticket), and the main checkout or a chore's (the supervisor's).
+// ticket), the thread responder's (.worktrees/responder), and the main checkout or a chore's (the supervisor's).
 function spenderFor(cwd, ts) {
   // a subagent the supervisor ran for one ticket (a reviewer): "ticket:<id>:<phase>"
   const sub = /^ticket:(.+):([a-z-]+)$/.exec(cwd ?? '');
@@ -15235,6 +15263,8 @@ function spenderFor(cwd, ts) {
   const wtRoot = path.join(main, '.worktrees') + path.sep;
   if (!at.startsWith(wtRoot)) return at.startsWith(main + path.sep) ? { who: 'supervisor', role: 'supervisor' } : null;
   const name = at.slice(wtRoot.length).split(path.sep)[0];
+  // the thread responder's own worktree (kit-103); no ticket id is ever `responder` (a keyed id has a -NN-)
+  if (name === 'responder') return { who: 'responder', role: 'responder' };
   if (ts.has(name)) return { who: name, role: 'worker' };
   if (name.startsWith('plan-')) return { who: name, role: 'planner' };
   const rv = /^review-(.+?-\d+)-[0-9a-f]{8}/.exec(name);
@@ -23164,6 +23194,7 @@ async function cmdDashboard() {
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code, its line in the acceptance table\'s red seen cell; every claim about code sourced with a file:line or a command in the spec\'s Today (sources) table; a Refusals and edges section in every spec; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3). Build each plan task marked `Model: fast` in a subagent on the fast model (`settings --get model_tiers`) unless the plan says `- Built here: <why>` under it (worker.md §3).',
+  responder: 'You are the responder for this repository: you answer the owner\'s thread messages at once, while the supervisor works. Read docs/devteam/process/supervisor.md §13 (The responder), the only part of that doc that is yours, and follow it. Your first action on any turn, typed or taken from the queue, is a reply: node docs/devteam/scripts/devteam.mjs thread reply <t-id> "…" (add --pending only when you will do the work yourself, then reply again when it is done). When you are done, run node docs/devteam/scripts/devteam.mjs thread list --waiting --responder and take the next turn. Hand anything else to the supervisor with node docs/devteam/scripts/devteam.mjs send supervisor "…" --kind handoff --thread <t-id>. Write to the owner in plain words. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write in your folder and then run, never inline, and remove it when it has run.',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
@@ -23293,7 +23324,9 @@ function cmdUnread() {
 
 function cmdPrompt() {
   const role = positional[0];
-  if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
+  if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>|responder');
+  // exactly what the responder's start writes to its prompt file, nothing added
+  if (role === 'responder') return out(promptFor('responder'));
   const t = role === 'worker' && positional[1] ? tickets().get(positional[1]) : null;
   const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : t ? promptFor('worker', t.id, repoAbout(repoOfTicketLink(t))) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
   if (role === 'supervisor') {
@@ -24084,14 +24117,7 @@ function makeSession(role) {
   // records worktree was removed gets it back)
   if (role === 'worker' && recordsInHomeId(id)) ensureRecordsWorktree(id);
   // the agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding
-  if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
-  else if (s.agent_trust_command?.trim()) {
-    try {
-      execFileSync('sh', ['-c', s.agent_trust_command], { cwd: wt, stdio: ['ignore', 2, 'inherit'], env: { ...gateEnv(null, R), DEVTEAM_WORKTREE: realPath(wt) }, timeout: 60000 });
-    } catch (e) {
-      warn(`agent_trust_command failed in ${wt}: ${e.code === 'ETIMEDOUT' ? 'it ran past 60 s' : e.signal ? `killed by ${e.signal}` : `exit ${e.status ?? '?'}`}; if the agent asks whether to trust its folder, the blocked-prompt finding shows it`);
-    }
-  }
+  trustWorktree(wt, s, R);
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
   // What the prompt's knowledge block carries, for the start's act (a lesson's effect is measured
@@ -24145,11 +24171,8 @@ function makeSession(role) {
     // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.
     let cmd = resume ? s.resume_command : s.agent_command;
     if (/^claude(\s|$)/.test(cmd)) {
-      // per session: the deny rules name the main branch of the repo this session works in
-      const policy = path.join(runDir, 'agent', `${name}-claude.json`);
-      fs.mkdirSync(path.dirname(policy), { recursive: true });
-      fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
-      cmd = cmd.replace(/^claude/, `claude --settings '${policy}'`);
+      // per session: the deny rules name the main branch of the repo this session works in (claudePolicy)
+      cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(name, s, mb, { stopHook: true })}'`);
     }
     // A tmux server started from inside an agent session (the supervisor's, on a new machine) hands
     // every window that session's markers; a worker that inherits them runs as its child (Claude Code
@@ -24396,6 +24419,9 @@ function cmdFleet() {
 // exactly what it changed.
 function fleetOp(mode) {
   const by = fleetWriter();
+  // a fleet park stops the thread responder (kit-103): only once the writer is allowed, and before
+  // any return below, so a park with every goal already parked, or a move's marking, stops it too
+  if (mode === 'park') { const at = stopResponder(); if (at) out(`stopped the responder (${at})`); }
   // A park or drain is a pause unless it says it is a move (--move): throttling spend, waiting on
   // the owner or on information, a quiet week. Only a move releases the host claim (hostClaimBody).
   const move = !!flags.move;
@@ -31855,16 +31881,408 @@ async function cmdBrowser() {
 }
 /* browser end */
 
+/* responder-session start */
+// The thread responder (kit-103; fast-threads.md §The session): a second, narrow session that
+// answers the owner's thread turns at once while the supervisor works, and hands the rest over.
+// One window, `responder`, in the fleet's tmux session; its worktree .worktrees/responder is
+// detached at main and moved to main again at each start. It writes as `responder` (logWriter),
+// is refused every supervisor command (supervisorOnly), runs the owner's responder_command (else
+// agent_command) with the workers' deny rules and no Stop hook, and makes no branch and no slot act.
+const RESPONDER_NAME = 'responder';
+// Whether this process runs in the responder's worktree, whatever its env says (final-1 F2). Both
+// sides are real paths, so a linked cwd counts, a look-alike (responder-x) doesn't; only the parent
+// of the folder is resolved, so a link AT .worktrees/responder never makes its target the responder's.
+function inResponderWorktree() {
+  let cwd;
+  try { cwd = realPath(process.cwd()); } catch { return false; }
+  const wt = path.join(realPath(path.join(mainRoot, '.worktrees')), 'responder');
+  return cwd === wt || cwd.startsWith(`${wt}${path.sep}`);
+}
+// git for the responder's start. What it could have planted never runs or counts: no shared hook
+// (final-1 F6), no fsmonitor (F4), no replaced object (F5).
+const RESPONDER_GIT = ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+const responderGit = (args, cwd = mainRoot, env = null) => spawnSync('git', [...RESPONDER_GIT, ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 120000, ...(env ? { env: { ...process.env, ...env } } : {}) });
+// A git call to origin, in its own process group: at the deadline the whole group goes, so a hung
+// transport (ssh) isn't left behind by a refused start (final-2b F4).
+const RESPONDER_GROUP_RUN = "const {spawn}=require('child_process');const [ms,...a]=process.argv.slice(1);const c=spawn(a[0],a.slice(1),{detached:true,stdio:'inherit'});const t=setTimeout(()=>{try{process.kill(-c.pid,'SIGKILL')}catch{}process.exit(124)},Number(ms));c.on('error',()=>process.exit(127));c.on('exit',(code)=>{clearTimeout(t);process.exit(code??1)});";
+function responderOrigin(args) {
+  const ms = Number(process.env.DEVTEAM_RESPONDER_GIT_MS) || 120000;
+  return spawnSync(process.execPath, ['-e', RESPONDER_GROUP_RUN, '--', String(ms), 'git', ...RESPONDER_GIT, ...args], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: ms + 10000 });
+}
+// The branch the kit treats as main, from the main checkout's own settings file: not through a local
+// ref, which the responder can move without a push, and not origin's HEAD (final-2b F3).
+function responderMainBranch() {
+  const block = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  try { const b = block ? JSON.parse(block[1]).main_branch : null; if (typeof b === 'string' && b) return b; } catch {}
+  return SETTINGS_DEFAULTS.main_branch;
+}
+// The owner's settings key that can't be what a start reads, or null. The keys the start reads
+// are checked strictly, so a junk value never starts the kit's defaults and a deny list that isn't
+// one never drops the workers' rules (final-6 F1, final-6b F1-F3). Every other owner key is checked
+// only for the kind the kit reads it as, with null allowed (unset): never SETTING_SHAPES, which
+// decides what the Settings page shows and refuses values the kit takes, such as init's
+// `project: "My App"` (final-7 F1, rulings-kit-103-r4.md Round 8). An empty deny list is the
+// owner's choice, as it is for workers (final-7 F2). A blank responder_command stays unset, as
+// done-when 1 has it (R1c); main_branch is checked by responderMain. Only owner keys are judged:
+// the start reads those from main, and every other key from the working file (Round 8 addendum).
+const RESPONDER_NEEDS = {
+  worker_denied_commands: (v) => Array.isArray(v) && v.every((c) => typeof c === 'string' && c.trim() !== ''),
+  agent_command: (v) => typeof v === 'string' && v.trim() !== '',
+  responder_command: (v) => v === null || typeof v === 'string',
+};
+// the kinds the kit reads where the default gives none (null or no default), or more than one
+const RESPONDER_KINDS = { usage_command: ['string'], remediations: ['object'], release: ['string', 'object'] };
+const settingKind = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : isObj(v) ? 'object' : typeof v);
+function responderBadSetting(own) {
+  for (const [k, v] of Object.entries(own)) {
+    if (!Object.hasOwn(OWNER_SETTINGS, k)) continue;
+    if (RESPONDER_NEEDS[k]) { if (!RESPONDER_NEEDS[k](v)) return k; continue; }
+    if (k === 'main_branch' || v === null) continue;
+    const def = SETTINGS_DEFAULTS[k] ?? REPO_OWN_DEFAULTS[k];
+    const kinds = RESPONDER_KINDS[k] ?? (def == null ? null : [settingKind(def)]);
+    if (kinds && !kinds.includes(settingKind(v))) return k;
+  }
+  return null;
+}
+// The commit origin has at that exact branch, and the owner's settings as that commit has them; a
+// commit that names another branch as main is refused. Refuses if origin can't be read (final-1 F5).
+function responderMain(s) {
+  const branch = responderMainBranch();
+  const ref = `refs/heads/${branch}`;
+  const ls = responderOrigin(['ls-remote', 'origin', ref]);
+  const sha = ls.status === 0 ? ls.stdout.split('\n').map((l) => l.split('\t')).find(([, r]) => r === ref)?.[0] : null;
+  if (ls.status === 0 && !sha) die(`responder: origin has no ${ref}, so the owner's command can't be confirmed; check main_branch in settings.md`);
+  if (!/^[0-9a-f]{40,64}$/.test(sha ?? '')) die(`responder: could not read main from origin (${ref}), so the owner's command can't be confirmed; try again when origin answers`);
+  if (responderOrigin(['fetch', '--quiet', 'origin', ref]).status !== 0 || responderGit(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) die(`responder: could not read main from origin (${sha.slice(0, 8)} did not arrive)`);
+  const settings = { ...s };
+  if (projectInRepo) {
+    const shown = responderGit(['show', `${sha}:${projectRel}/settings.md`]);
+    const block = shown.status === 0 ? shown.stdout.match(/```json devteam\s*\n([\s\S]*?)\n```/) : null;
+    // never the kit's defaults in place of the owner's command and deny rules (final-3 F3)
+    if (!block) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}), so nothing was started`);
+    let own;
+    try { own = JSON.parse(block[1]); } catch { die(`responder: settings.md on main (${sha.slice(0, 8)}) is not valid JSON`); }
+    // null, an array, a scalar, {} or only unknown keys (__proto__ among them) would leave every
+    // owner setting at the kit's default (final-4 F1, final-5 F1, m-20261122-080705821-supervisor;
+    // F1). A block without main_branch is a project on main, as init writes one; one present must be a
+    // branch name (m-20261122-054734545-supervisor).
+    if (!isObj(own) || !Object.keys(own).some((k) => SETTINGS_KEYS.includes(k)) || (Object.hasOwn(own, 'main_branch') && (typeof own.main_branch !== 'string' || !own.main_branch))) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): the settings block is not an object of settings, so nothing was started`);
+    if (Object.hasOwn(own, 'main_branch') && responderGit(['check-ref-format', '--branch', own.main_branch]).status !== 0) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): main_branch is not a branch name, so nothing was started`);
+    const bad = responderBadSetting(own);
+    if (bad) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): ${bad} is not a value it can take, so nothing was started`);
+    const onMain = { ...SETTINGS_DEFAULTS, ...own };
+    if (onMain.main_branch !== branch) die(`responder: could not read main from origin: ${ref} names ${onMain.main_branch} as main`);
+    for (const k of Object.keys(OWNER_SETTINGS)) settings[k] = onMain[k];
+  }
+  return { sha, settings };
+}
+// The tracked files that differ from a commit, read from the files themselves through a fresh index:
+// the worktree's own index can carry the stat of an edited file beside the original blob (final-2 F2).
+function responderDiffers(wt, sha) {
+  fs.mkdirSync(path.join(runDir, 'agent'), { recursive: true });
+  const dir = fs.mkdtempSync(path.join(runDir, 'agent', 'responder-index-'));
+  const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
+  try {
+    if (responderGit(['read-tree', sha], wt, env).status !== 0) return null;
+    // with --ignore-submodules, neither the refresh nor the compare looks inside a nested repo at a
+    // gitlink, so its own config (a clean filter) never runs here (final-3b F2, final-4 F7). The
+    // refresh's flag alone has no case that goes red: a refresh reads a nested repo's HEAD and runs
+    // no filter there, with the flag or without it (git 2.39, probed). It stays so the refresh never
+    // looks inside one; R12's planted-gitlink cases go red with all three flags removed.
+    responderGit(['update-index', '--ignore-submodules', '-q', '--really-refresh'], wt, env);
+    const d = responderGit(['diff-files', '--ignore-submodules=all', '--name-only', '-z'], wt, env);
+    return d.status === 0 ? d.stdout.split('\0').filter(Boolean) : null;
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+// Why .worktrees/responder isn't the responder's own worktree, or null, from the files alone: no git
+// runs in a folder whose .git it may have rewritten (final-1 F1, F4).
+function responderWorktreeProblem(wt) {
+  const no = `${wt} is not a git worktree of its own: move it aside or remove it, then responder again`;
+  try {
+    if (!fs.lstatSync(wt).isDirectory() || !fs.lstatSync(path.join(wt, '.git')).isFile()) return no;
+    const to = /^gitdir: (.+?)\n?$/.exec(fs.readFileSync(path.join(wt, '.git'), 'utf8'))?.[1];
+    const common = responderGit(['rev-parse', '--absolute-git-dir']).stdout.trim();
+    const own = path.join(common, 'worktrees', RESPONDER_NAME);
+    if (!to || !common || !fs.lstatSync(own).isDirectory() || realPath(path.resolve(wt, to)) !== realPath(own)) return no;
+    // git's own record of it points back here
+    return realPath(path.dirname(fs.readFileSync(path.join(own, 'gitdir'), 'utf8').trim())) === realPath(wt) ? null : no;
+  } catch { return no; }
+}
+// A commit's entries as [mode, path]; null if it can't be read.
+function responderTree(wt, rev) {
+  const r = responderGit(['ls-tree', '-r', '-z', rev], wt);
+  return r.status === 0 ? r.stdout.split('\0').filter(Boolean).map((e) => { const tab = e.indexOf('\t'); return [e.slice(0, 6), e.slice(tab + 1)]; }) : null;
+}
+// Why the worktree holds something git can't be trusted to report, or null, read without running any
+// filter. A gitlink the commit lacks, or files at one it has, would be a nested repo whose own config
+// runs in the start's git (final-3b F2). A folder git can't list, or a FIFO, socket or device, hides
+// from status and clean (final-3 F2), so the files are walked by lstat, following no link.
+function responderPlanted(wt, sha) {
+  const head = responderTree(wt, 'HEAD');
+  const main = responderTree(wt, sha);
+  const index = responderGit(['ls-files', '--stage', '-z'], wt);
+  if (!head || !main || index.status !== 0) return `${wt}: could not read its index or commits, so the responder's worktree is left as it is`;
+  const known = (mode) => new Set([...head, ...main].filter(([m]) => m === mode).map(([, f]) => f));
+  const gitlinks = known('160000');
+  const links = known('120000');
+  for (const e of index.stdout.split('\0').filter(Boolean)) {
+    if (!e.startsWith('160000 ')) continue;
+    const f = e.slice(e.indexOf('\t') + 1);
+    if (!gitlinks.has(f)) return `${wt} has a nested repository the commit doesn't have (${f}): remove the worktree, then responder again`;
+    let inside = [];
+    try { inside = fs.readdirSync(path.join(wt, f)); } catch (err) { if (err.code !== 'ENOENT') inside = [f]; }
+    if (inside.length) return `${wt} holds files at a nested repository's path (${f}), as an initialised submodule does, and a start can't check inside one: remove the worktree (git worktree remove --force ${wt}), then responder again`;
+  }
+  const cant = (f, why) => `${wt}: can't check ${f} (${why}): clear it or remove the worktree, then responder again`;
+  const loose = [];
+  const folders = [''];
+  while (folders.length) {
+    const dir = folders.pop();
+    let names;
+    try { names = fs.readdirSync(path.join(wt, dir)); } catch { return cant(dir, "a folder that can't be listed"); }
+    for (const n of names) {
+      if (!dir && n === '.git') continue;
+      const f = dir ? path.join(dir, n) : n;
+      // git never lists a path named .git, file or folder: a nested repo, or what hides in one (final-4 F2)
+      if (n === '.git') return `${wt}: can't check ${f} (a nested repository's .git): a submodule or a git dependency (a pip editable install, a git package in node_modules) keeps one there; remove the worktree (git worktree remove --force ${wt}), then responder again`;
+      let st;
+      try { st = fs.lstatSync(path.join(wt, f)); } catch { return cant(f, "it can't be read"); }
+      if (st.isDirectory()) folders.push(f);
+      else if (st.isSymbolicLink()) { if (!links.has(f)) loose.push(f); }
+      else if (!st.isFile()) return cant(f, 'not a file or a folder');
+    }
+  }
+  // A link the commit lacks is left only where git ignores it, so git clean -ffdX removes it, never
+  // following it (node_modules/.bin, a .venv); check-ignore runs no filter (final-4 F5).
+  if (loose.length) {
+    const ci = spawnSync('git', [...RESPONDER_GIT, 'check-ignore', '--no-index', '-z', '--stdin'], { cwd: wt, input: `${loose.join('\0')}\0`, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 120000 });
+    if (ci.status !== 0 && ci.status !== 1) return `${wt}: could not ask git which links it ignores, so the responder's worktree is left as it is`;
+    const ignored = new Set((ci.stdout ?? '').split('\0').filter(Boolean));
+    const kept = loose.find((f) => !ignored.has(f));
+    if (kept) return cant(kept, 'a link the commit does not have');
+  }
+  return null;
+}
+// The owner's worktree_files, each written as a new file: whatever is at the path goes first, so a
+// hard link or a symlink there is never written through (final-3b F3).
+function responderSeed(wt, files, R) {
+  for (const rel of files ?? []) {
+    const from = path.join(R.root, rel);
+    if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in the main checkout`); continue; }
+    const to = path.join(wt, rel);
+    try {
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.rmSync(to, { force: true });
+      const fd = fs.openSync(to, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+      try { fs.writeFileSync(fd, fs.readFileSync(from)); fs.fchmodSync(fd, fs.statSync(from).mode & 0o777); } finally { fs.closeSync(fd); }
+    } catch (e) { die(`${wt}: could not seed ${rel}: ${e.message}`); }
+  }
+}
+// What in the worktree would outlive a refresh, as full paths: tracked changes, files git was told
+// not to look at, and untracked files, but for a regular file the owner's worktree_files seeds from
+// a source that exists, so the copy replaces it (final-2 F3).
+function responderDirty(wt, seeded) {
+  // --ignore-submodules=all: status never enters a nested repo at a gitlink to run its filter
+  const st = responderGit(['status', '--ignore-submodules=all', '--porcelain=v1', '-z', '--untracked-files=all'], wt);
+  const flags = responderGit(['ls-files', '-v', '-z'], wt);
+  if (st.status !== 0 || flags.status !== 0) return null;
+  const seeds = new Set((seeded ?? []).map((f) => path.normalize(String(f))));
+  const isSeed = (f) => { try { return seeds.has(path.normalize(f)) && fs.existsSync(path.join(mainRoot, f)) && fs.lstatSync(path.join(wt, f)).isFile(); } catch { return false; } };
+  const hits = [];
+  const parts = st.stdout.split('\0').filter(Boolean);
+  for (let i = 0; i < parts.length; i++) {
+    const code = parts[i].slice(0, 2);
+    const f = parts[i].slice(3);
+    if (/[RC]/.test(code)) i++;
+    if (!(code === '??' && isSeed(f))) hits.push(f);
+  }
+  for (const e of flags.stdout.split('\0').filter(Boolean)) if (e[0] !== 'H') hits.push(e.slice(2));
+  return hits;
+}
+// A Claude Code policy file for one session, passed with --settings: the owner's worker deny rules,
+// naming the main branch of the repo it works in. A worker or planner also gets the Stop hook
+// (stop-ok); the responder doesn't. Its path.
+function claudePolicy(name, s, mb, { stopHook = false } = {}) {
+  const policy = path.join(runDir, 'agent', `${name}-claude.json`);
+  fs.mkdirSync(path.dirname(policy), { recursive: true });
+  const hooks = stopHook ? { hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } } : {};
+  fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, ...hooks }, null, 2)}\n`);
+  return policy;
+}
+// The agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding.
+function trustWorktree(wt, s, R) {
+  if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
+  else if (s.agent_trust_command?.trim()) {
+    try {
+      execFileSync('sh', ['-c', s.agent_trust_command], { cwd: wt, stdio: ['ignore', 2, 'inherit'], env: { ...gateEnv(null, R), DEVTEAM_WORKTREE: realPath(wt) }, timeout: 60000 });
+    } catch (e) {
+      warn(`agent_trust_command failed in ${wt}: ${e.code === 'ETIMEDOUT' ? 'it ran past 60 s' : e.signal ? `killed by ${e.signal}` : `exit ${e.status ?? '?'}`}; if the agent asks whether to trust its folder, the blocked-prompt finding shows it`);
+    }
+  }
+}
+// The responder's window in the fleet's session: whether the session and the window are there.
+function responderWindow(session = tmuxSession()) {
+  const has = tmux(['has-session', '-t', `=${session}`]);
+  const there = has && (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n').includes(RESPONDER_NAME);
+  return { session, has, there, target: `=${session}:${RESPONDER_NAME}`, shown: `${session}:${RESPONDER_NAME}` };
+}
+// Kill the responder's window if it is there; what was stopped (session:window), or null.
+function stopResponder() {
+  const w = responderWindow();
+  return w.there && tmux(['kill-window', '-t', w.target]) ? w.shown : null;
+}
+// Why the responder can't be started into its window now, or null: one there needs --resume, and
+// --resume never types into a live agent (a shell or dead pane is relaunched in).
+function responderWindowRefusal(w) {
+  if (!w.there) return null;
+  if (!flags.resume) return `the responder is already running in ${w.shown} (responder --stop first, or --resume to restart it there)`;
+  // a fresh look, never the few-seconds pane cache: a start just before this one may have an agent up by now
+  paneTable(`=${w.session}`, { fresh: true });
+  if (!resolvePane(w.target).problem) return `${w.shown} has a live agent; responder --stop first`;
+  return null;
+}
+// A thread's turns from the log's own lines (created_by, created_at), never the view, which names
+// every non-owner turn the supervisor's; oldest first.
+const logTurns = (threadId, objects = readLog().objects) => [...objects.values()].filter((o) => o.type === 'turn' && o.thread === threadId).sort(byTime);
+// The owner's turns in a thread still owed an answer (the spine's single rule, as kit-103's
+// done-when 3 words it): any later non-owner turn answers an owner turn, and a resolve of the
+// thread after it leaves it owed nothing, by time, so a reopen with no words doesn't bring it back.
+// Every "the owner said it" here is a line's writer, never its text. routed_to plays no part yet:
+// kit-104, which writes it, brings it into the answered rule.
+function owedTurns(threadId, objects = readLog().objects) {
+  const ts = logTurns(threadId, objects);
+  const resolvedAt = (objects.get(threadId)?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  const answeredAt = ts.filter((u) => u.created_by !== 'owner').pop()?.created_at ?? '';
+  return ts.filter((u) => u.created_by === 'owner' && u.created_at > answeredAt && u.created_at > resolvedAt);
+}
+// The responder's guard: since its own last turn in the thread (or ever, with none) the supervisor
+// has written, and the owner has said nothing after that. A reply then would answer what the
+// supervisor already answered (both backstop cases of the spine's Failure modes).
+function supervisorAnswered(threadId, objects = readLog().objects) {
+  const ts = logTurns(threadId, objects);
+  const mine = ts.filter((u) => u.created_by === 'responder').pop()?.created_at ?? '';
+  const sup = ts.filter((u) => u.created_by === 'supervisor').pop();
+  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at);
+}
+// A turn's first n characters on one line, for a terminal: control characters and runs of
+// whitespace as one space, … when cut.
+function turnGist(text, n = 60) {
+  const flat = Array.from(String(text ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim());
+  return `${flat.slice(0, n).join('')}${flat.length > n ? '…' : ''}`;
+}
+// The responder's queue: owed owner turns routed to it (routed_to, written by kit-104), in open
+// threads, oldest first.
+function responderQueue(objects = readLog().objects) {
+  const q = [];
+  for (const t of objects.values()) {
+    if (t.type !== 'thread' || t.status === 'resolved') continue;
+    for (const u of owedTurns(t.id, objects)) if (u.routed_to === 'responder') q.push({ turn: u.id, thread: t.id, at: u.created_at, text: String(u.text ?? '') });
+  }
+  return q.sort((a, b) => a.at.localeCompare(b.at));
+}
+// Its help lines, in Setup and roles (HELP_SETUP reads them; this region sits above HELP).
+const RESPONDER_HELP = `  responder [--resume | --stop]   supervisor: the thread responder, a quick session that answers the owner's thread turns (window responder, .worktrees/responder at main, the owner's responder_command); --stop ends it, --resume restarts it in its window
+  prompt responder   the responder's prompt: its section of supervisor.md (§13)`;
+// responder [--resume | --stop]: the supervisor starts, restarts or stops the responder.
+function cmdResponder() {
+  // every channel is one of the owner's surfaces (the dashboard, the hub, the owner's terminal)
+  if (flags.owner || process.env.DEVTEAM_CHANNEL) die('responder: the supervisor starts the responder (settings.responder turns it off)');
+  supervisorOnly('responder');
+  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  if (!sh('tmux', ['-V'])) die('tmux not found');
+  // a stop always works: nothing else is checked
+  if (flags.stop) { const at = stopResponder(); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
+  const s = loadSettings();
+  if (s.responder === false) die("settings.responder is off: the owner's thread turns go to the supervisor; set it true to start the responder");
+  // a fleet park stops it (fleetOp) and keeps it stopped; a drain, or a goal's own hold, doesn't
+  if (draining() || fleetMode() === 'park') die('the fleet is parked: the responder starts again after fleet unpark');
+  const session = tmuxSession({ save: true });
+  const early = responderWindowRefusal(responderWindow(session));
+  if (early) die(early);
+  const mem = memoryFull(s);
+  if (mem && !flags.resume) die(`${mem.words}: start the responder when some sessions finish, or responder --resume`);
+  // the owner's settings as origin's main has them: unset or blank responder_command means agent_command
+  const { sha, settings: owned } = responderMain(s);
+  const rc = owned.responder_command;
+  let cmd = typeof rc === 'string' && rc.trim() ? rc : owned.agent_command;
+  // its worktree, detached at that commit, moved there at each start. One that isn't its own is
+  // refused before any git runs in it, and so is any local change (a refresh would keep what git
+  // doesn't have to overwrite); ignored files, which git would keep too, are removed (final-1 F3).
+  const R = repo('home');
+  const mb = owned.main_branch;
+  const wt = path.join(mainRoot, '.worktrees', RESPONDER_NAME);
+  let found = null;
+  try { found = fs.lstatSync(wt); } catch {}
+  if (!found) {
+    // removed by hand: git's record of it goes first (final-1b F4)
+    responderGit(['worktree', 'prune']);
+    const add = responderGit(['worktree', 'add', '--quiet', '--detach', wt, sha]);
+    if (add.status !== 0) die(`${wt}: could not add it at ${sha.slice(0, 8)}: ${String(add.stderr ?? '').trim() || `exit ${add.status}`}`);
+  } else {
+    const bad = responderWorktreeProblem(wt);
+    if (bad) die(bad);
+    const planted = responderPlanted(wt, sha);
+    if (planted) die(planted);
+    const dirty = responderDirty(wt, owned.worktree_files);
+    if (dirty === null) die(`${wt}: git status failed there, so the responder's worktree is left as it is`);
+    const changed = (hits) => die(`${wt} has local changes (${plural(hits.length, 'path')}, first ${hits[0]}): the responder starts from main, so clear them or remove the worktree, then responder again`);
+    if (dirty.length) changed(dirty);
+    const clean = responderGit(['clean', '-ffdXq'], wt);
+    if (clean.status !== 0) die(`${wt}: could not clear its ignored files: ${String(clean.stderr ?? '').trim() || `exit ${clean.status}`}`);
+    const r = responderGit(['checkout', '--quiet', '--detach', sha], wt);
+    if (r.status !== 0) die(`${wt}: could not move it to ${sha.slice(0, 8)}: ${String(r.stderr ?? '').trim() || `exit ${r.status}`}`);
+    const differs = responderDiffers(wt, sha);
+    if (differs === null) die(`${wt}: could not compare it with ${sha.slice(0, 8)}, so the responder's worktree is left as it is`);
+    if (differs.length) changed(differs);
+    // again, with every git call behind it: a nested repo put at a gitlink after the first look,
+    // which the flagged status and compare never enter (final-4 F3)
+    const after = responderPlanted(wt, sha);
+    if (after) die(after);
+  }
+  responderSeed(wt, owned.worktree_files, R);
+  trustWorktree(wt, owned, R);
+  fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
+  const promptFile = path.join(runDir, 'prompts', `${RESPONDER_NAME}.txt`);
+  fs.writeFileSync(promptFile, `${promptFor(RESPONDER_NAME)}\n`);
+  class Refused extends Error {}
+  const refuse = (m) => { throw new Refused(m); };
+  try {
+    // the look at the window and the typing under one lock, so two starts at once can't both type
+    withLock(path.join(runDir, `launch-${RESPONDER_NAME}`), () => {
+      let w = responderWindow(session);
+      const late = responderWindowRefusal(w);
+      if (late) refuse(late);
+      // a window left there (a shell, or a pane that has exited) is opened anew, so the agent always
+      // starts in the worktree, never in whatever folder that shell was in (final-1b F1)
+      const again = w.there;
+      if (w.there) { tmux(['kill-window', '-t', w.target]); w = responderWindow(session); if (w.there) refuse(`could not close ${w.shown}; close it, then responder`); }
+      if (!w.has) { if (sh('tmux', ['new-session', '-d', '-s', session, '-n', RESPONDER_NAME, '-c', wt], { env: tmuxServerEnv() }) === null) refuse('could not start tmux'); }
+      else if (!w.there && !tmux(['new-window', '-d', '-t', `=${session}`, '-n', RESPONDER_NAME, '-c', wt])) refuse(`could not open ${w.shown}`);
+      const type = (line) => { if (!typeNow(w.target, line)) refuse(`could not type into ${w.shown}; responder --resume starts it`); };
+      type(`export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN=${shq(runDir)} DEVTEAM_ROLE='responder'`);
+      if (/^claude(\s|$)/.test(cmd)) cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(RESPONDER_NAME, owned, mb)}'`);
+      // a ticket or feature from the tmux server's environment is never the responder's: env -u, which works in any shell
+      type(`env -u DEVTEAM_TICKET -u DEVTEAM_FEATURE ${sessionMarkerPrefix(session)}${cmd} ${shq(promptPointer(promptFile))}`);
+      out(`${again ? 'restarted' : 'started'} the responder in ${w.shown} at ${wt}`);
+    });
+  } catch (e) {
+    if (e instanceof Refused) die(e.message);
+    throw e;
+  }
+}
+/* responder-session end */
+
 /* HELP start */
 /* helpSections start */
 const HELP_SETUP = `Setup and roles
   init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
-  prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
+  prompt supervisor | worker <id> | planner <feature> | responder    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
   recover [--dry-run] [--force] [--here] | recover --machine [--dry-run] [--force] [--in <dir>…] [--was-up <list>] [--session s] [--only <repo>]   after a restart (a dead laptop, a redeploy): bring back this repo's supervisor, or every repo's on this machine, if it was up and its fleet isn't held, on its exact conversation where the harness can (Claude Code); --force also starts one the owner stopped or whose fleet is held; --here runs it in this terminal; safe to run twice. --in adds every adopted repo in a folder; --was-up names a list of roots that were up (a box's), used up as they come back; --session puts each in that tmux session as sup-<repo>
   machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane> | machine limit-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
   operator-thread new "<words>" [--title t] [--subject json] | say <ot-id> "<words>" | close <ot-id> | reopen <ot-id> ["<words>"] | start | reply <ot-id> "<words>" | list [--open | --waiting] [--json] | show <ot-id> | status   the owner's threads with the machine's operator, as the hub's Overview keeps them (beside the operator, in no repo): new, say, close, reopen and start are the owner's (start brings up a laptop's operator, once, in tmux session devteam-home); reply is the operator's; each owner turn is typed into the operator's pane as one line
   worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, or (a resume of one that ran aside) while the machine's memory is at its machine_memory_ceiling, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
+${RESPONDER_HELP}
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists`;
 const HELP_HOLDS = `Holds and the fleet (planning.md §1, holds; supervisor.md §12)
@@ -31932,9 +32350,9 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
-  thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
+  thread show <t-id> [--json] | thread list [--waiting [--responder] | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
   ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)
   rate <qid> [--stake 1-3] [--urgency 1-3] [--settles <qid>… | --settles none] [--unsettles <qid>…] [--settles-if "<answer>"]   supervisor: rate an open question again; --settles adds to what it settles
@@ -32005,7 +32423,7 @@ const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 
 // of git processes). A command that writes never runs this way.
 const GIT_READ_ONLY = new Set(['status', 'ready', 'metrics']);
 const COMMANDS_SETUP = {
-  init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
+  init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), responder: cmdResponder, whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
 };
 const COMMANDS_GRAPH = {
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
