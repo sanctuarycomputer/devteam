@@ -1,5 +1,7 @@
 // Helpers the kit's test files share. Importing it gives the process its own tmux server and its
 // own block of ports (ports.mjs), so test files run side by side.
+// first: a file run on its own gets its private TMPDIR before anything makes a folder
+import { privateTmp } from './private-tmp.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -53,7 +55,8 @@ export const realTmux = (process.env.PATH ?? '').split(path.delimiter).filter(Bo
 // The shim lives at a path named for what it runs, written whole and never removed, so a process
 // that outlives the one that made it (a fork's child, a dashboard) still finds it.
 const shimText = `#!/bin/sh\ncase "$TMUX_TMPDIR" in */dt-tmux-*) [ -d "$TMUX_TMPDIR" ] && exec ${JSON.stringify(realTmux || 'tmux-not-installed')} "$@" ;; esac\necho "tmux refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not an existing private test directory" >&2\nexit 1\n`;
-export const tmuxShim = path.join(os.tmpdir(), `devteam-test-tmux-shim-${crypto.createHash('sha1').update(shimText).digest('hex').slice(0, 12)}`);
+// In the shared temp dir when the file runs on its own: its private TMPDIR goes as it exits.
+export const tmuxShim = path.join(privateTmp ? process.env.DEVTEAM_TEST_SHARED_TMP : os.tmpdir(), `devteam-test-tmux-shim-${crypto.createHash('sha1').update(shimText).digest('hex').slice(0, 12)}`);
 if (!isShim(path.join(tmuxShim, 'tmux'))) {
   fs.mkdirSync(tmuxShim, { recursive: true });
   const t = path.join(tmuxShim, `tmux.${process.pid}`);
@@ -64,6 +67,9 @@ process.env.PATH = `${tmuxShim}${path.delimiter}${process.env.PATH}`;
 process.on('exit', () => {
   spawnSync('tmux', ['kill-server']);
   fs.rmSync(tmuxRoot, { recursive: true, force: true });
+  // last, after its tmux server: the private TMPDIR of a file run on its own (lib/private-tmp.mjs).
+  // Never a throw: one in an exit listener skips every listener after it (Chrome's, a hub's).
+  if (privateTmp) try { fs.rmSync(privateTmp, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {}
 });
 // Dashboards started by tests never use the machine's real ports or become its hub: the hub and
 // the instance block move to ports the tests own.
