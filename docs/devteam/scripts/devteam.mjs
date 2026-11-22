@@ -31546,6 +31546,27 @@ function responderMainBranch() {
   try { const b = block ? JSON.parse(block[1]).main_branch : null; if (typeof b === 'string' && b) return b; } catch {}
   return SETTINGS_DEFAULTS.main_branch;
 }
+// The owner's settings key that can't be what a start reads, or null. Each key the start uses has
+// the shape it needs, and every other known key fits its SETTING_SHAPES entry or else the kind of its
+// default: a junk value never starts the kit's defaults, and a deny list that isn't one never drops
+// the workers' rules (final-6 F1, final-6b F1-F3, rulings-kit-103-r4.md Round 7). A blank
+// responder_command stays unset, as done-when 1 has it (R1c).
+const RESPONDER_NEEDS = {
+  worker_denied_commands: (v) => Array.isArray(v) && v.every((c) => typeof c === 'string' && c.trim() !== ''),
+  agent_command: (v) => typeof v === 'string' && v.trim() !== '',
+  responder_command: (v) => v === null || typeof v === 'string',
+  sensor_scrub: (v) => Array.isArray(v) && v.every((p) => typeof p === 'string' || isObj(p)),
+};
+const settingKind = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+function responderBadSetting(own) {
+  for (const [k, v] of Object.entries(own)) {
+    if (!SETTINGS_KEYS.includes(k)) continue;
+    const def = SETTINGS_DEFAULTS[k] ?? REPO_OWN_DEFAULTS[k];
+    const fits = [RESPONDER_NEEDS[k], SETTING_SHAPES[k], !RESPONDER_NEEDS[k] && !SETTING_SHAPES[k] && def != null ? (x) => settingKind(x) === settingKind(def) : null].filter(Boolean);
+    if (fits.some((f) => !f(v))) return k;
+  }
+  return null;
+}
 // The commit origin has at that exact branch, and the owner's settings as that commit has them; a
 // commit that names another branch as main is refused. Refuses if origin can't be read (final-1 F5).
 function responderMain(s) {
@@ -31569,6 +31590,8 @@ function responderMain(s) {
     // F1). A block without main_branch is a project on main, as init writes one; one present must be a
     // branch name (m-20261122-054734545-supervisor).
     if (!isObj(own) || !Object.keys(own).some((k) => SETTINGS_KEYS.includes(k)) || (Object.hasOwn(own, 'main_branch') && (typeof own.main_branch !== 'string' || !own.main_branch))) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): the settings block is not an object of settings, so nothing was started`);
+    const bad = responderBadSetting(own);
+    if (bad) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): ${bad} is not a value it can take, so nothing was started`);
     const onMain = { ...SETTINGS_DEFAULTS, ...own };
     if (onMain.main_branch !== branch) die(`responder: could not read main from origin: ${ref} names ${onMain.main_branch} as main`);
     for (const k of Object.keys(OWNER_SETTINGS)) settings[k] = onMain[k];
@@ -31803,7 +31826,6 @@ function cmdResponder() {
   // the owner's settings as origin's main has them: unset or blank responder_command means agent_command
   const { sha, settings: owned } = responderMain(s);
   const rc = owned.responder_command;
-  if (rc !== undefined && rc !== null && typeof rc !== 'string') die('responder_command is a shell command (a string): the owner fixes it on main through a PR');
   let cmd = typeof rc === 'string' && rc.trim() ? rc : owned.agent_command;
   // its worktree, detached at that commit, moved there at each start. One that isn't its own is
   // refused before any git runs in it, and so is any local change (a refresh would keep what git

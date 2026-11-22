@@ -280,7 +280,7 @@ test('R2: one at a time, --stop and --resume, its refusals, and the fleet holds'
     F.onMain({ responder_command: 42 });
     const r = F.run(F.old, ['responder'], SUP);
     assert.notEqual(r.status, 0);
-    assert.match(r.err, /responder_command is a shell command \(a string\)/);
+    assert.match(r.err, /could not read the owner's settings .*: responder_command is not a value it can take/);
     assert.ok(!F.windows().includes('responder'));
     });
   }
@@ -1078,13 +1078,14 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     }
   });
   // final-4: the owner's settings as anything but a plain object never start the kit's defaults
-  for (const shape of ['null', '[]', '"x"', '7', '42', 'true', '{}', '{"main_branch": 7}', '{"main_branch": ""}', '{"main_branch": null}', '{"main_branch": ["main"]}', '{"foo": 1}', '{"__proto__": {}}', '{"__proto__": null}', '{"constructor": 1}', '[{"main_branch": "main"}]']) {
-    await t.test(`final-4 F1: a settings block of ${shape} refuses and types nothing`, () => {
+  for (const shape of ['null', '[]', '"x"', '7', '42', 'true', '{}', '{"main_branch": 7}', '{"main_branch": ""}', '{"main_branch": null}', '{"main_branch": ["main"]}', '{"foo": 1}', '{"__proto__": {}}', '{"__proto__": null}', '{"constructor": 1}', '[{"main_branch": "main"}]', '{"project": 7}', '{"gates": "x"}', '{"responder": "yes"}', '{"sensor_scrub": null}', '{"upstream_base": {"x": 1}}', '{"links": 0}', `{"junk": "${'x'.repeat(6 * 1024 * 1024)}", "project": 7}`, '{"worker_denied_commands": "x"}', '{"worker_denied_commands": [5]}', '{"worker_denied_commands": null}', '{"worker_denied_commands": 42}', '{"worker_denied_commands": [""]}', '{"agent_command": ["claude"]}', '{"agent_command": ""}', '{"responder_command": ["x"]}']) {
+    const label = shape.length > 80 ? `${shape.slice(0, 40)}… (${shape.length} bytes)` : shape;
+    await t.test(`final-4 F1: a settings block of ${label} refuses and types nothing`, () => {
       fresh();
       const sf = path.join(F.old, settingsRel);
       const keep = fs.readFileSync(sf);
       fs.writeFileSync(sf, `# Project settings\n\n\`\`\`json devteam\n${shape}\n\`\`\`\n`);
-      F.g(['commit', '-qam', `settings: ${shape}`], F.old);
+      F.g(['commit', '-qam', `settings: ${label}`], F.old);
       F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
       let r;
       try { r = F.run(F.old, ['responder'], SUP); } finally {
