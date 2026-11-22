@@ -6,9 +6,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
+import { fileURLToPath } from 'node:url';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 import { until, sessionOf } from './lib/kit.mjs';
 import { validate } from './fixtures/browser/check.mjs';
@@ -72,10 +76,11 @@ test('status and stop: the round trip', { skip, timeout: 120000 }, async () => {
   await started(h);
   const s = readState(h);
   // Chrome's own temp folders go in one short folder of this profile's, never loose in the temp folder
+  let chromeTmp = null;
   if (process.platform === 'linux') {
-    const tmpdir = fs.readFileSync(`/proc/${s.chrome_pid}/environ`, 'utf8').split('\0').find((v) => v.startsWith('TMPDIR='))?.slice(7);
-    assert.match(path.basename(tmpdir ?? ''), /^dc[0-9a-f]{6}$/);
-    assert.ok(fs.statSync(tmpdir).isDirectory(), 'the folder is there');
+    chromeTmp = tmpdirOf(s.chrome_pid);
+    assert.match(path.basename(chromeTmp ?? ''), /^dc[0-9a-f]{6}$/);
+    assert.ok(fs.statSync(chromeTmp).isDirectory(), 'the folder is there');
   }
   const sj = await statusJson(h);
   assert.equal(sj.running, true);
@@ -86,11 +91,167 @@ test('status and stop: the round trip', { skip, timeout: 120000 }, async () => {
   assert.deepEqual(await statusJson(h), { browser: 1, instance: h.key, running: false, held: null });
   assert.equal(fs.existsSync(h.state), false);
   await until(() => !alive(s.chrome_pid), 'Chrome gone after stop');
+  // kit-777 F2: the daemon removes that folder at stop, so a run leaves no dc… behind
+  if (chromeTmp) {
+    await until(() => !alive(s.daemon_pid), 'the daemon gone after stop');
+    assert.equal(fs.existsSync(chromeTmp), false, "Chrome's temp folder is removed at stop");
+  }
   assert.deepEqual(devWindows(h), []);
   assert.equal(fs.existsSync(path.join(h.old, 'docs', 'devteam', 'run', 'previews', `${s.preview}.json`)), false);
   const again = await cli(h, ['stop']);
   assert.equal(again.status, 0, again.err);
   assert.equal(again.out, "browser wasn't running");
+});
+
+// kit-777: the daemon runs under env -i, so its temp folder is /tmp whatever this process's is.
+const daemonDc = (P) => dcIn('/tmp', P.profile);
+
+test("kit-777 F3: browser start refuses when a folder open to others is at its Chrome folder's name, and leaves it", { skip, timeout: 120000 }, async () => {
+  const dc = daemonDc(h);
+  fs.mkdirSync(dc);
+  try {
+    fs.chmodSync(dc, 0o755);
+    const before = fs.lstatSync(dc);
+    const r = await cli(h, ['start']);
+    assert.equal(r.status, 1, `start refused: ${r.out}`);
+    assert.match(r.err, /Chrome's temp folder \/tmp\/dc[0-9a-f]{6} is already there and isn't this user's own \(a folder, owner \d+, mode 755\)/);
+    const after = fs.lstatSync(dc);
+    assert.deepEqual([after.ino, after.mode], [before.ino, before.mode], 'left as it was');
+  } finally { await cli(h, ['stop']); fs.rmSync(dc, { recursive: true, force: true }); }
+});
+
+test("kit-777 F2: a Chrome that fails to launch leaves no folder of its own", { skip, timeout: 120000 }, async () => {
+  const fake = path.join(tmp, 'chrome-that-fails');
+  fs.writeFileSync(fake, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  try {
+    const r = await cli(h, ['start'], { CHROME_PATH: fake });
+    assert.equal(r.status, 1, `start failed: ${r.out}`);
+    assert.match(r.err, /Chrome exited before its DevTools pipe opened/);
+    assert.equal(fs.existsSync(daemonDc(h)), false, "the failed launch's folder is removed");
+  } finally { await cli(h, ['stop']); }
+});
+
+// kit-777 final-1 F2: a stop signal during the start steps (the hook sends it just before the
+// launch) ends the daemon with no Chrome launched: one launched anyway is detached, can outlive the
+// daemon, and would run in a temp folder the daemon's exit removes. The Chrome is a stand-in that
+// notes each launch (its --version, for the user agent, isn't one) and exits.
+test('kit-777 final-1 F2: a stop during the start steps launches no Chrome and leaves no folder', { skip, timeout: 120000 }, async () => {
+  const launches = path.join(tmp, 'f2-launches'), fake = path.join(tmp, 'chrome-that-notes');
+  fs.writeFileSync(fake, `#!/bin/sh\ncase "$1" in --version) exit 0;; esac\necho launched >> '${launches}'\nexit 1\n`, { mode: 0o755 });
+  try {
+    const r = await cli(h, ['start'], { CHROME_PATH: fake, DEVTEAM_TEST_BROWSER_STOP_BEFORE_LAUNCH: '1' });
+    assert.equal(r.status, 1, `start stopped: ${r.out}`);
+    assert.equal(fs.existsSync(launches), false, 'no Chrome launched after the stop');
+    assert.equal(fs.existsSync(daemonDc(h)), false, 'no temp folder left');
+  } finally { await cli(h, ['stop']); }
+});
+
+// ----- kit-777: the daemon's Chrome temp folder. browserChromeTmp is cut out of devteam.mjs and run
+// under node:vm with only what it uses in scope, on a base folder and uid the test gives (the daemon's
+// own base is /tmp, as it runs under env -i, so a long one can't be reached through a start) -----
+
+const kitSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'utf8');
+// browserChromeTmp with chromeTmpFor beside it, fs as given (a stand-in can race the mkdir).
+function chromeTmpFn(fsIn = fs) {
+  const i = kitSrc.indexOf('const chromeTmpFor = '), j = kitSrc.indexOf('async function browserLaunchChrome(');
+  assert.ok(i >= 0 && j > i, 'chromeTmpFor … browserLaunchChrome in devteam.mjs');
+  return vm.runInContext(`${kitSrc.slice(i, j)}\n;browserChromeTmp`, vm.createContext({ fs: fsIn, path, os, crypto, Buffer, process }));
+}
+// What Chrome put in its TMPDIR, from its environment (Linux: /proc).
+const tmpdirOf = (pid) => fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').find((v) => v.startsWith('TMPDIR='))?.slice(7);
+const dcIn = (base, profile) => path.join(base, `dc${crypto.createHash('sha1').update(profile).digest('hex').slice(0, 6)}`);
+// A new folder whose path is exactly n bytes, in a folder of its own under the temp folder (this
+// file's tmp can be too long), removed after the test.
+function dirOfLength(t, n) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'k7n'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const pad = n - root.length - 1;
+  assert.ok(pad >= 1, `this file's temp folder (${root}) is too long to make a ${n}-byte path in`);
+  const d = path.join(root, 'x'.repeat(pad));
+  fs.mkdirSync(d);
+  return d;
+}
+// A short base of its own, so the dc… folder fits (its path plus 54 bytes under 108).
+function shortBase(t) {
+  const b = fs.mkdtempSync(path.join(os.tmpdir(), 'k7b'));
+  t.after(() => fs.rmSync(b, { recursive: true, force: true }));
+  assert.ok(Buffer.byteLength(b) + 54 <= 107, `this file's temp folder (${b}) is too long for a dc… folder`);
+  return b;
+}
+const uid = process.getuid?.();
+
+// Chrome's singleton socket is <TMPDIR>/org.chromium.Chromium.XXXXXX/SingletonSocket, 45 bytes after
+// TMPDIR, and Linux refuses a socket path of 108 bytes or more (macOS: 104). 58: the plain folder
+// fits (103), a dc… folder in it doesn't (112). 70: neither fits (115).
+test("kit-777 F1: a temp folder too long for a dc… folder: Chrome's TMPDIR is that folder as it is, and a note says so", (t) => {
+  for (const platform of ['linux', 'darwin']) {
+    const base = dirOfLength(t, 58);
+    const r = chromeTmpFn()('/p/profile', { base, uid, platform });
+    assert.deepEqual([r.tmpdir, r.own], [base, null], `${platform}: the plain folder, nothing of its own`);
+    assert.match(r.note, /^Chrome's temp folders are loose in /);
+    assert.deepEqual(fs.readdirSync(base), [], `${platform}: nothing made there`);
+  }
+});
+
+test("kit-777 F1: a temp folder too long for Chrome's socket: refused, naming the length", (t) => {
+  const base = dirOfLength(t, 70);
+  assert.throws(() => chromeTmpFn()('/p/profile', { base, uid, platform: 'linux' }), /^Error: browser: Chrome's socket path would be 115 bytes in .* \(107 at most here\)/);
+  assert.throws(() => chromeTmpFn()('/p/profile', { base, uid, platform: 'darwin' }), /would be 115 bytes in .* \(103 at most here\)/);
+  assert.deepEqual(fs.readdirSync(base), [], 'nothing made there');
+});
+
+test('kit-777 F1: the longest base that fits a dc… folder gets one (Linux 53 bytes, macOS 49)', (t) => {
+  for (const [platform, n] of [['linux', 53], ['darwin', 49]]) {
+    const base = dirOfLength(t, n);
+    const r = chromeTmpFn()('/p/profile', { base, uid, platform });
+    assert.equal(r.own, dcIn(base, '/p/profile'), `${platform}: a dc… folder at ${n} bytes`);
+    assert.equal(chromeTmpFn()('/p/profile', { base: dirOfLength(t, n + 1), uid, platform }).own, null, `${platform}: none at ${n + 1}`);
+  }
+});
+
+// The folder's name can be guessed, so one already there is used only when it is this user's own
+// folder, closed to others (a killed daemon's); anything else is refused and left as it is.
+for (const [what, plant, as] of [
+  ['a folder open to others', (dc) => { fs.mkdirSync(dc); fs.chmodSync(dc, 0o755); }, uid],
+  ['a symlink to a folder', (dc) => fs.symlinkSync(fs.mkdtempSync(path.join(tmp, 'aim-')), dc), uid],
+  ['a file', (dc) => fs.writeFileSync(dc, '', { mode: 0o600 }), uid],
+  ["another user's folder", (dc) => fs.mkdirSync(dc, { mode: 0o700 }), uid + 1],
+]) {
+  test(`kit-777 F3: ${what} already at the folder's name: refused and left as it is`, (t) => {
+    const base = shortBase(t), dc = dcIn(base, '/p/profile');
+    plant(dc);
+    const before = fs.lstatSync(dc);
+    assert.throws(() => chromeTmpFn()('/p/profile', { base, uid: as, platform: 'linux' }), /^Error: browser: Chrome's temp folder .* is already there and isn't this user's own/);
+    const after = fs.lstatSync(dc);
+    assert.deepEqual([after.ino, after.mode], [before.ino, before.mode], 'left as it was');
+  });
+}
+
+test("kit-777 F3: a killed daemon's folder (this user's, closed to others) is emptied and made again", (t) => {
+  const base = shortBase(t), dc = dcIn(base, '/p/profile');
+  fs.mkdirSync(dc, { mode: 0o700 });
+  fs.writeFileSync(path.join(dc, 'stale'), '');
+  const r = chromeTmpFn()('/p/profile', { base, uid, platform: 'linux' });
+  assert.deepEqual([r.tmpdir, r.own, r.note], [dc, dc, null]);
+  assert.deepEqual(fs.readdirSync(dc), [], 'emptied');
+  assert.equal(fs.statSync(dc).mode & 0o777, 0o700);
+});
+
+test('kit-777 F3: a folder made by another process between the removal and the mkdir: refused', (t) => {
+  const base = shortBase(t), dc = dcIn(base, '/p/profile');
+  fs.mkdirSync(dc, { mode: 0o700 });
+  // the removal, then someone else's mkdir at once: the folder is there again when ours runs
+  const racing = { ...fs, rmSync: (p, o) => { fs.rmSync(p, o); fs.mkdirSync(p, { mode: 0o700 }); fs.writeFileSync(path.join(p, 'theirs'), ''); } };
+  assert.throws(() => chromeTmpFn(racing)('/p/profile', { base, uid, platform: 'linux' }), /^Error: browser: Chrome's temp folder .* was made by another process as this one made it/);
+  assert.deepEqual(fs.readdirSync(dc), ['theirs'], 'theirs left as it is');
+});
+
+// kit-777 F4: openChrome's own temp folder goes with its browser.
+test("kit-777 F4: a test browser's own temp folder is gone after close", { skip, timeout: 120000 }, async () => {
+  const ch = await openChrome();
+  assert.ok(ch.tmp && fs.statSync(ch.tmp).isDirectory(), 'openChrome names its temp folder');
+  await ch.close();
+  assert.equal(fs.existsSync(ch.tmp), false, "the test browser's temp folder is removed at close");
 });
 
 test('Review Focus 5: a stale state.json starts afresh', { skip, timeout: 120000 }, async () => {
