@@ -1078,7 +1078,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
     }
   });
   // final-4: the owner's settings as anything but a plain object never start the kit's defaults
-  for (const shape of ['null', '[]', '"x"', '7', '42', 'true', '{}', '{"main_branch": 7}', '{"main_branch": ""}', '{"main_branch": null}', '{"main_branch": ["main"]}']) {
+  for (const shape of ['null', '[]', '"x"', '7', '42', 'true', '{}', '{"main_branch": 7}', '{"main_branch": ""}', '{"main_branch": null}', '{"main_branch": ["main"]}', '{"foo": 1}', '{"__proto__": {}}', '{"__proto__": null}', '{"constructor": 1}', '[{"main_branch": "main"}]']) {
     await t.test(`final-4 F1: a settings block of ${shape} refuses and types nothing`, () => {
       fresh();
       const sf = path.join(F.old, settingsRel);
@@ -1129,6 +1129,7 @@ test('R12: what the responder plants does not run at its next start', { skip: NO
       fs.rmSync(path.join(F.wt, top === 'docs' ? 'docs/.git' : top), { recursive: true, force: true });
       assert.notEqual(r.status, 0, 'refused');
       assert.match(r.err, /can't check \S*\.git \(a nested repository's \.git\)/);
+      assert.match(r.err, /a git dependency \(a pip editable install, a git package in node_modules\)/);
       assert.ok(!F.windows().includes('responder'), 'no window');
     });
   }

@@ -30992,10 +30992,11 @@ function responderMain(s) {
     if (!block) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}), so nothing was started`);
     let own;
     try { own = JSON.parse(block[1]); } catch { die(`responder: settings.md on main (${sha.slice(0, 8)}) is not valid JSON`); }
-    // null, an array, a scalar or {} would leave every owner setting at the kit's default (final-4
+    // null, an array, a scalar, {} or only unknown keys (__proto__ among them) would leave every
+    // owner setting at the kit's default (final-4 F1, final-5 F1, m-20261122-080705821-supervisor;
     // F1). A block without main_branch is a project on main, as init writes one; one present must be a
     // branch name (m-20261122-054734545-supervisor).
-    if (!isObj(own) || !Object.keys(own).length || ('main_branch' in own && (typeof own.main_branch !== 'string' || !own.main_branch))) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): the settings block is not an object of settings, so nothing was started`);
+    if (!isObj(own) || !Object.keys(own).some((k) => SETTINGS_KEYS.includes(k)) || (Object.hasOwn(own, 'main_branch') && (typeof own.main_branch !== 'string' || !own.main_branch))) die(`responder: could not read the owner's settings at ${ref} (${sha.slice(0, 8)}): the settings block is not an object of settings, so nothing was started`);
     const onMain = { ...SETTINGS_DEFAULTS, ...own };
     if (onMain.main_branch !== branch) die(`responder: could not read main from origin: ${ref} names ${onMain.main_branch} as main`);
     for (const k of Object.keys(OWNER_SETTINGS)) settings[k] = onMain[k];
@@ -31070,7 +31071,7 @@ function responderPlanted(wt, sha) {
       if (!dir && n === '.git') continue;
       const f = dir ? path.join(dir, n) : n;
       // git never lists a path named .git, file or folder: a nested repo, or what hides in one (final-4 F2)
-      if (n === '.git') return cant(f, "a nested repository's .git");
+      if (n === '.git') return `${wt}: can't check ${f} (a nested repository's .git): a submodule or a git dependency (a pip editable install, a git package in node_modules) keeps one there; remove the worktree (git worktree remove --force ${wt}), then responder again`;
       let st;
       try { st = fs.lstatSync(path.join(wt, f)); } catch { return cant(f, "it can't be read"); }
       if (st.isDirectory()) folders.push(f);
