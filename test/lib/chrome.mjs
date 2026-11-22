@@ -144,8 +144,8 @@ export async function openChrome() {
     };
     return { send, ev, evIn, key, type, click, hold, at, move, clickAt, close: () => ws.close() };
   };
-  // pid: the leader of Chrome's process group; proc, its ChildProcess, for a test of close() itself
-  return { newPage, close, pid: proc.pid, proc };
+  // pid: the leader of Chrome's process group; proc, its ChildProcess, for a test of close() itself; tmp, its own temp folder (TMPDIR), removed by close()
+  return { newPage, close, pid: proc.pid, proc, tmp };
 }
 
 // A test's teardown, run last-registered first, each step on its own: a folder's removal registered

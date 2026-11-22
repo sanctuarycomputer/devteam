@@ -231,6 +231,14 @@ test('kit-777 F3: a folder made by another process between the removal and the m
   assert.deepEqual(fs.readdirSync(dc), ['theirs'], 'theirs left as it is');
 });
 
+// kit-777 F4: openChrome's own temp folder goes with its browser.
+test("kit-777 F4: a test browser's own temp folder is gone after close", { skip, timeout: 120000 }, async () => {
+  const ch = await openChrome();
+  assert.ok(ch.tmp && fs.statSync(ch.tmp).isDirectory(), 'openChrome names its temp folder');
+  await ch.close();
+  assert.equal(fs.existsSync(ch.tmp), false, "the test browser's temp folder is removed at close");
+});
+
 test('Review Focus 5: a stale state.json starts afresh', { skip, timeout: 120000 }, async () => {
   fs.mkdirSync(path.dirname(h.state), { recursive: true });
   fs.writeFileSync(h.state, '{');
