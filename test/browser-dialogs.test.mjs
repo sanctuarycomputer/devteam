@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import http from 'node:http';
 import { canDrive } from './lib/chrome.mjs';
-import { site, a, browser, kitCli, ok, running, viewer, isFrame, within, readState, viewFile } from './lib/browser-view-fixture.mjs';
+import { site, a, browser, kitCli, ok, running, viewer, isFrame, within, readState, sleep, viewFile } from './lib/browser-view-fixture.mjs';
 
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
@@ -35,6 +35,8 @@ const PAGES = {
   '/later': page('Later', `<script>document.getElementById('r').textContent = 'loaded'; const w = setInterval(async () => { if (await (await fetch('/go')).text() !== 'go') return; clearInterval(w); const v = confirm(${JSON.stringify(TEXT.later)}); document.getElementById('r').textContent = 'later confirm returned ' + v; fetch('/answered?v=' + v); }, 100);</script>`),
   // seven alerts in a row: the first with a line break and a forged answer line in it, the second 400
   // characters long
+  // alerts with no end: the stated limit (spec T20)
+  '/loop': page('Loop', `<script>for (;;) alert(${JSON.stringify(`${MARK} again`)});</script>`),
   '/many': page('Many', `<script>const T = ${JSON.stringify(MANY)}; for (const t of T) alert(t); document.getElementById('r').textContent = 'seven alerts done';</script>`),
 };
 let dsite = null;
@@ -172,6 +174,21 @@ test('D6 five dialogs are named, the rest counted; each text is JSON-quoted on i
   ]);
   assert.equal(lines.at(-1), 'and 2 more dialogs, answered the same way');
   await stillGoing(await viewer(), /heading "seven alerts done"/);
+});
+
+// browser <args> within ms, else null (the CLI is left to its own 90 s kill)
+const bounded = (args, ms) => Promise.race([timed(args), sleep(ms).then(() => null)]);
+
+test('D10 on a page alerting without end, each verb answers on its own timeout and the daemon stays answerable', { ...opts, timeout: 150000 }, async () => {
+  await up();
+  const o = await bounded(['open', `${dsite.origin}/loop`], 45000);
+  assert.ok(o, 'open answered within 45 s');
+  const s = await bounded(['snapshot'], 45000);
+  assert.ok(s, 'snapshot answered within 45 s');
+  const st = await bounded(['status'], 5000);
+  assert.ok(st, 'status answered within 5 s');
+  assert.equal(st.status, 0, st.err || st.out);
+  assert.ok(st.out.split('\n').filter((l) => l.startsWith("the page's alert said")).length <= 5, st.out);
 });
 
 test('D7 the usage names the default answers', opts, async () => {
