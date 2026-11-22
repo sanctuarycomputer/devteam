@@ -15,6 +15,10 @@ const FILES = {
   exterior: { rel: `${P}/exterior.md`, cls: 'exterior-change', title: 'The exterior' },
 };
 const said = (r) => ({ status: r.status, text: `${r.out}\n${r.err}` });
+// a refusal: a non-zero exit and its own words (a warning with the exit unchanged is not one)
+const refused = (r, pattern, m) => { assert.notEqual(r.status, 0, `${m}: exits non-zero\n${r.text}`); assert.match(r.text, pattern, m); };
+// a disk that ignores case (macOS, Windows) makes a twin the file itself; CI's disk doesn't
+const caseBlind = fs.existsSync(path.join(KIT, 'SCHEMA'));
 const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
 // A fixture with a chore per draft, the owner's answers and the two gates (merge --dry-run, check-pr).
@@ -63,7 +67,7 @@ function world(name) {
   const onMain = (rel, text) => { write(path.join(old, rel), text); g(['add', '-A'], old); g(['commit', '-qm', `main: ${rel}`], old); g(['push', '-q', 'origin', 'main'], old); };
   const supLine = (o) => fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ at: new Date().toISOString(), by: 'supervisor', ...o }));
   // check-pr's exit on a chore that changes only a project note: what a warning must leave it at
-  const baseline = () => { const sha = chore('notes-only', (w) => write(path.join(w, `${P}/designs/notes.md`), 'n\n')); return checkPr('chore-notes-only', sha).status; };
+  const baseline = () => { const sha = chore('notes-only', (w) => write(path.join(w, `${P}/designs/notes.md`), 'n\n')); const r = checkPr('chore-notes-only', sha); assert.equal(r.status, 0, `check-pr passes a chore that changes only a project note\n${r.text}`); return r.status; };
   return { ...F, branchOf, baseline, chore, merge, checkPr, link, askRun, ask, answered, other, onMain, supLine };
 }
 
@@ -85,20 +89,20 @@ for (const k of ['self', 'exterior']) {
       assert.match(cp0.text, new RegExp(`warn: changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 no answer, check-pr warns');
       assert.equal(cp0.status, W.baseline(), 'DW1 no answer, check-pr exits as a notes-only chore does');
       // answers of another class approve nothing, naming the file
-      assert.match(merge('a', other('release-scope')).text, new RegExp(`is a release-scope question; changing ${re(rel)} needs an answered ${cls} question`));
-      assert.match(merge('a', other(null)).text, new RegExp(`is a classless question; changing ${re(rel)} needs an answered ${cls} question`));
+      refused(merge('a', other('release-scope')), new RegExp(`is a release-scope question; changing ${re(rel)} needs an answered ${cls} question`));
+      refused(merge('a', other(null)), new RegExp(`is a classless question; changing ${re(rel)} needs an answered ${cls} question`));
       chore('o', (w) => write(path.join(w, FILES[otherK].rel), `# ${otherK}\n\nIts draft.\n`));
       const wrong = answered(otherK, 'o');
-      assert.match(merge('a', wrong).text, new RegExp(`is a ${FILES[otherK].cls} question; changing ${re(rel)} needs an answered ${cls} question`), 'DW1 the other file\'s class, merge');
-      assert.match(checkPr('chore-a', sha, wrong).text, new RegExp(`is a ${FILES[otherK].cls} question; changing ${re(rel)} needs an answered ${cls} question`), 'DW1 the other file\'s class, check-pr');
+      refused(merge('a', wrong), new RegExp(`is a ${FILES[otherK].cls} question; changing ${re(rel)} needs an answered ${cls} question`), 'DW1 the other file\'s class, merge');
+      refused(checkPr('chore-a', sha, wrong), new RegExp(`is a ${FILES[otherK].cls} question; changing ${re(rel)} needs an answered ${cls} question`), 'DW1 the other file\'s class, check-pr');
       // a non-recommendation answer, a supervisor's answer and a defaulted question approve nothing
-      assert.match(merge('a', answered(k, 'a', {}, 'no, redraft it')).text, /not its recommendation/, 'DW2 non-recommendation');
+      refused(merge('a', answered(k, 'a', {}, 'no, redraft it')), /not its recommendation/, 'DW2 non-recommendation');
       const bySup = W.ask(k, 'a');
       supLine({ id: bySup, type: 'question', op: 'set', answer: 'yes' });
-      assert.match(merge('a', bySup).text, /is not a question the owner answered/, 'DW2 supervisor answer');
+      refused(merge('a', bySup), /is not a question the owner answered/, 'DW2 supervisor answer');
       const defaulted = W.ask(k, 'a');
       supLine({ id: defaulted, type: 'question', op: 'set', status: 'defaulted' });
-      assert.match(merge('a', defaulted).text, /is not a question the owner answered/, 'DW2 defaulted');
+      refused(merge('a', defaulted), /is not a question the owner answered/, 'DW2 defaulted');
       // the owner's yes lands it, at merge and at check-pr
       const yes = answered(k, 'a');
       const landed = merge('a', yes);
@@ -109,7 +113,7 @@ for (const k of ['self', 'exterior']) {
       const hand = `q-20260105-000000001-supervisor`;
       supLine({ id: hand, type: 'question', op: 'new', kind: 'owner-decision', class: cls, reasons: ['owner-only'], question: 'Approve this draft (by hand)?', recommendation: 'yes', approves: ['chore-a'], links: [{ title: FILES[k].title, path: rel, ref: sha, blob: 'a'.repeat(40) }] });
       W.ok(W.old, ['answer', hand, 'yes']);
-      assert.match(merge('a', hand).text, new RegExp(`${hand} pins no draft of ${re(rel)} that this repo can show`), 'DW1 step 8: no pin the repo shows');
+      refused(merge('a', hand), new RegExp(`${hand} pins no draft of ${re(rel)} that this repo can show`), 'DW1 step 8: no pin the repo shows');
       // the same answer cited for a plan or a ticket PR carrying that very text: its question names the chore
       const G = W.goal('Billing', 1);
       W.feature('billing', G);
@@ -117,18 +121,18 @@ for (const k of ['self', 'exterior']) {
       const draftA = (w) => write(path.join(w, rel), `# ${k}\n\nDraft A.\n`);
       const planSha = W.branchOf('plan/billing', draftA);
       const ticketSha = W.branchOf('ticket/billing-01-a', draftA);
-      assert.match(checkPr('plan/billing', planSha, yes).text, new RegExp(`${yes} approves chore-a, not plan-billing`), 'DW1 plan PR, check-pr');
-      assert.match(checkPr('ticket/billing-01-a', ticketSha, yes).text, new RegExp(`${yes} approves chore-a, not billing-01-a`), 'DW1 ticket PR, check-pr');
-      assert.match(said(W.run(W.old, ['merge', '--plan', 'billing', '--dry-run', '--approved', yes], SUP)).text, new RegExp(`${yes} approves chore-a, not plan-billing: a change to ${re(rel)}`), 'DW1 plan PR, merge');
-      assert.match(said(W.run(W.old, ['merge', 'billing-01-a', '--dry-run', '--approved', yes], SUP)).text, new RegExp(`${yes} approves chore-a, not billing-01-a: a change to ${re(rel)}`), 'DW1 ticket PR, merge');
+      refused(checkPr('plan/billing', planSha, yes), new RegExp(`${yes} approves chore-a, not plan-billing`), 'DW1 plan PR, check-pr');
+      refused(checkPr('ticket/billing-01-a', ticketSha, yes), new RegExp(`${yes} approves chore-a, not billing-01-a`), 'DW1 ticket PR, check-pr');
+      refused(said(W.run(W.old, ['merge', '--plan', 'billing', '--dry-run', '--approved', yes], SUP)), new RegExp(`${yes} approves chore-a, not plan-billing: a change to ${re(rel)}`), 'DW1 plan PR, merge');
+      refused(said(W.run(W.old, ['merge', 'billing-01-a', '--dry-run', '--approved', yes], SUP)), new RegExp(`${yes} approves chore-a, not billing-01-a: a change to ${re(rel)}`), 'DW1 ticket PR, merge');
       // amended after the answer: the owner never saw it
       const sha2 = chore('a', (w) => write(path.join(w, rel), `# ${k}\n\nDraft B, never seen.\n`), { amend: true });
-      assert.match(merge('a', yes).text, new RegExp(`${re(rel)} at the head is not the text ${yes} asked the owner about`), 'DW1 amended, merge');
-      assert.match(checkPr('chore-a', sha2, yes).text, new RegExp(`${re(rel)} at the head is not the text ${yes} asked the owner about`), 'DW1 amended, check-pr');
+      refused(merge('a', yes), new RegExp(`${re(rel)} at the head is not the text ${yes} asked the owner about`), 'DW1 amended, merge');
+      refused(checkPr('chore-a', sha2, yes), new RegExp(`${re(rel)} at the head is not the text ${yes} asked the owner about`), 'DW1 amended, check-pr');
       // a case-twin of the file
       const twinSha = chore('twin', (w) => write(path.join(w, twinRel), `# ${k}\n\nA twin.\n`));
-      const twinSays = new RegExp(`adds ${re(twinRel)}, which a disk that ignores case can't tell from ${re(rel)}|changes ${re(rel)}`);
-      assert.match(merge('twin').text, twinSays, 'DW1 case-twin, merge');
+      const twinSays = new RegExp(`adds ${re(twinRel)}, which a disk that ignores case can't tell from ${re(rel)}${caseBlind ? `|changes ${re(rel)}` : ''}`);
+      refused(merge('twin'), twinSays, 'DW1 case-twin, merge');
       const tw = checkPr('chore-twin', twinSha, yes);
       assert.notEqual(tw.status, 0, 'DW1 case-twin, check-pr --approved');
       assert.match(tw.text, twinSays, 'DW1 case-twin, check-pr --approved');
@@ -144,19 +148,19 @@ for (const k of ['self', 'exterior']) {
     try {
       onMain(rel, `# ${k}\n\nThe approved version.\n`);
       chore('empty', (w) => write(path.join(w, rel), ''));
-      assert.match(merge('empty').text, new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 emptied');
+      refused(merge('empty'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 emptied');
       assert.equal(merge('empty', answered(k, 'empty')).status, 0, 'an empty version the owner saw and approved lands');
       // changed: a new text needs its own answer
       chore('edit', (w) => write(path.join(w, rel), `# ${k}\n\nThe next version.\n`));
-      assert.match(merge('edit').text, new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 changed, no answer');
+      refused(merge('edit'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 changed, no answer');
       assert.equal(merge('edit', answered(k, 'edit')).status, 0, 'DW1 changed, the owner\'s yes lands it');
       // deleted: no draft to pin (ask refuses), and an answer from before the deletion pins a text the head lacks
       chore('gone', (w) => write(path.join(w, rel), `# ${k}\n\nA last version.\n`));
       const q = answered(k, 'gone');
       const goneSha = chore('gone', (w) => fs.rmSync(path.join(w, rel)), { amend: true });
-      assert.match(merge('gone').text, new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 deleted, no answer');
+      refused(merge('gone'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 deleted, no answer');
       assert.match(W.askRun(k, 'gone').err, /commit the draft to its branch first/, 'DW2 deleted: nothing to pin');
-      assert.match(merge('gone', q).text, new RegExp(`${re(rel)} at the head is not the text ${q} asked the owner about \\(no file,`), 'DW1 deleted, never approved');
+      refused(merge('gone', q), new RegExp(`${re(rel)} at the head is not the text ${q} asked the owner about \\(no file,`), 'DW1 deleted, never approved');
       assert.match(W.checkPr('chore-gone', goneSha, q).text, new RegExp(`${re(rel)} at the head is not the text ${q} asked the owner about \\(no file,`), 'DW1 deleted, check-pr');
     } finally { W.done(); }
   });
@@ -167,7 +171,7 @@ for (const k of ['self', 'exterior']) {
     try {
       const head = chore('s', (w) => write(path.join(w, rel), `# ${k}\n\nDraft.\n`));
       chore('t', (w) => write(path.join(w, rel), `# ${k}\n\nAnother draft.\n`));
-      assert.match(askRun(k, 's', { approves: null }).err, new RegExp(`a ${cls} question names its chore: --approves chore-s`), 'DW2 --approves missing');
+      assert.match(askRun(k, 's', { approves: null }).err, new RegExp(`a ${cls} question names its chore: --approves chore-<slug>`), 'DW2 --approves missing');
       assert.match(askRun(k, 's', { approves: 'chore-t' }).err, /--approves chore-t: the link pins the draft on chore-s/, 'DW2 another chore');
       assert.match(askRun(k, 's', { approves: 'chore-s,chore-t' }).err, new RegExp(`a ${cls} question approves exactly one act`), 'DW2 more acts');
       assert.match(askRun(k, 's', { approves: 'plan-billing' }).err, new RegExp(`a ${cls} question approves exactly one act, the chore chore-<slug>`), 'DW2 not a chore');
@@ -184,6 +188,9 @@ for (const k of ['self', 'exterior']) {
       assert.equal(q.links[0].blob, g(['rev-parse', `chore-s:${rel}`], old), 'DW2 the draft\'s blob is pinned');
       // every other class keeps the two-act rule
       assert.match(askRun('strategy', 's', { approves: 'chore-s', links: [] }).err, /--approves names two or more acts/, 'DW2 other classes unchanged');
+      // and so does a question of no class, or a ladder class, naming one act (a-20261122-095055213-supervisor)
+      assert.match(askRun('strategy', 's', { cls: null, approves: 'chore-s', links: [] }).err, /--approves names two or more acts/, 'DW2 a classless one-act question is refused');
+      assert.match(W.run(old, ['ask', '--question', 'Ship it later?', '--recommendation', 'yes', '--class', 'release-scope', '--reasons', 'below-rung', '--no-default', 'the test waits', '--approves', 'chore-s'], SUP).err, /--approves names two or more acts/, 'DW2 a release-scope one-act question is refused');
     } finally { W.done(); }
   });
 }
@@ -205,7 +212,7 @@ test('one PR, one --approved: a PR changing two of strategy.md, self.md and exte
         const m = merge(slug, q);
         assert.notEqual(m.status, 0, `${slug} under ${FILES[by].cls}`);
         assert.match(m.text, new RegExp(`is a ${FILES[by].cls} question; changing ${re(FILES[left].rel)} needs an answered ${FILES[left].cls} question`), `DW1 ${slug} under ${FILES[by].cls}, merge`);
-        assert.match(checkPr(`chore-${slug}`, sha, q).text, new RegExp(`changing ${re(FILES[left].rel)} needs an answered ${FILES[left].cls} question`), `DW1 ${slug} under ${FILES[by].cls}, check-pr`);
+        refused(checkPr(`chore-${slug}`, sha, q), new RegExp(`changing ${re(FILES[left].rel)} needs an answered ${FILES[left].cls} question`), `DW1 ${slug} under ${FILES[by].cls}, check-pr`);
       }
     }
   } finally { W.done(); }
