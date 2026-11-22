@@ -3423,6 +3423,7 @@ on('C5c an expired capability and a bad MAC, as a cross-site frame, answer a lis
 });
 on('C5d any other /c/ form, as a cross-site frame, keeps the frame refusal and reaches no port', undefined, async (b) => {
   const cap = /^\/c\/[^/]+/.exec(await capLink(b))[0];
+  const notRefused = [];
   for (const form of [
     `${cap}/artifact/main/mock%2findex.html`, `${cap}/artifact/main/mock%2Findex.html`,
     `${cap}/artifact/main/mock%5cindex.html`, `${cap}/artifact/main/mock%5Cindex.html`, `${cap}/artifact/main/mock\\index.html`,
@@ -3433,9 +3434,12 @@ on('C5d any other /c/ form, as a cross-site frame, keeps the frame refusal and r
     `${cap}//artifact/main/mock/index.html`, `${cap}/artifact//main/mock/index.html`, `${cap}/artifact/main/mock//index.html`,
     '/c/', '/c/x/artifact/main/mock/index.html', '/c/1.a/artifact/main/mock/index.html', `${cap}/other/x`, cap,
   ]) {
+    const asked = b.cookies.length;
     const r = await b.get('alpha', form, { headers: CROSS_FRAME });
-    assert.deepEqual([r.status, r.body], [403, 'not in another site\'s frame'], form);
+    if (r.status !== 403 || r.body !== 'not in another site\'s frame' || b.cookies.length !== asked) notRefused.push(form.replace(cap, '<cap>'));
   }
+  // every form that got through, in one run
+  assert.deepEqual(notRefused, [], `not refused: ${JSON.stringify(notRefused)}`);
   assert.deepEqual([b.seen.get(P), b.seen.get(P + 1)], [[], []], 'no port is asked');
 });
 on('C5e the capability route never consults the session, even with a cookie that makes sessionOf throw', undefined, async (b) => {
