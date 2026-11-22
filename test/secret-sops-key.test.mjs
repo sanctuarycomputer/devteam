@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { fleetFixture, write } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -225,11 +226,9 @@ test('a dead holder\'s lock: posts racing to clear it never run together', { ski
     write(path.join(bin, 'sops'), `#!/bin/sh\n[ -e "${busy}" ] && touch "${overlap}"\ntouch "${busy}"\nsleep 1\n"${realSops}" "$@"\ns=$?\nrm -f "${busy}"\nexit $s\n`);
     fs.chmodSync(path.join(bin, 'sops'), 0o755);
     const env = F.env({ PATH: `${bin}${path.delimiter}${process.env.PATH}` });
-    // each post waits a little longer between finding the holder dead and clearing its lock, so the later
-    // ones find a live lock taken meanwhile: that one must never be cleared
-    const post = (tag, i) => new Promise((done) => {
+    const post = (tag) => new Promise((done) => {
       let err = '';
-      const c = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'secret', 'post', q, '--json'], { cwd: F.old, env: { ...env, DEVTEAM_TEST_LOCK_PAUSE_MS: String(i * 400) }, stdio: ['pipe', 'ignore', 'pipe'] });
+      const c = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'secret', 'post', q, '--json'], { cwd: F.old, env, stdio: ['pipe', 'ignore', 'pipe'] });
       c.stderr.on('data', (d) => { err += d; });
       c.stdin.end(JSON.stringify({ ONE: `one-${tag}-9`, TWO: `two-${tag}-9` }));
       c.on('close', (code) => done({ code, err, tag }));
@@ -244,6 +243,159 @@ test('a dead holder\'s lock: posts racing to clear it never run together', { ski
     assert.match(plain, new RegExp(`ONE=one-${won[0].tag}-9`));
     assert.match(plain, new RegExp(`TWO=two-${won[0].tag}-9`));
     assert.deepEqual(fs.readdirSync(path.join(F.old, 'docs/devteam/run/secret-locks')), [], 'no lock or claim file is left behind');
+  } finally { F.done(); }
+});
+
+// A preload for a post under test: it changes only that process's view of time, link() or rm().
+const preload = (F, name, body) => {
+  const f = path.join(F.base, `${name}.mjs`);
+  write(f, body);
+  return `--import=${pathToFileURL(f).href}`;
+};
+const noChore = (F) => !fs.existsSync(path.join(F.old, '.worktrees')) || !fs.readdirSync(path.join(F.old, '.worktrees')).some((x) => x.startsWith('chore-secret-'));
+const postBounded = (F, q, extra) => spawnSync(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'secret', 'post', q, '--json'], { cwd: F.old, env: F.env(extra), input: JSON.stringify({ ONE: 'value-one-9', TWO: 'value-two-9' }), encoding: 'utf8', timeout: 20000, killSignal: 'SIGKILL' });
+const lockFixture = (name) => {
+  const F = fleetFixture(name);
+  const good = keygen();
+  repo(F, good.pub);
+  write(path.join(F.old, 'secrets/sops-age-key.dec'), `${good.id}\n`);
+  const q = asks(F, ['ONE', 'TWO']);
+  const dir = path.join(F.old, 'docs/devteam/run/secret-locks');
+  fs.mkdirSync(dir, { recursive: true });
+  return { F, q, dir, lock: path.join(dir, encodeURIComponent(q)), good };
+};
+const plain = (r, lock, what) => {
+  assert.equal(r.signal, null, 'the post spun or hung until it was killed');
+  assert.notEqual(r.status, 0, 'the post went ahead');
+  assert.ok(r.stderr.includes(`${lock} is ${what}, not a lock file. Nothing was posted; remove it${what === 'a folder' ? ' (rm -r)' : ''} and post again`), r.stderr);
+  assert.doesNotMatch(r.stderr, /ERR_FS|^\s+at /m);
+};
+
+test('a dangling link at the lock path: the post waits, stops at the deadline and names it', { skip: !real }, () => {
+  const { F, q, lock } = lockFixture('sops-lock-dangling');
+  try {
+    fs.symlinkSync(path.join(F.base, 'nothing-here'), lock);
+    // the clock moves only when the post waits, so a post that never waits never reaches the deadline
+    const clock = preload(F, 'clock', 'const now = Date.now; const w = Atomics.wait; let skew = 0;\nAtomics.wait = (...a) => { skew += 61000; return w.apply(Atomics, a); };\nDate.now = () => now() + skew;\n');
+    plain(postBounded(F, q, { NODE_OPTIONS: clock }), lock, 'a link to nothing');
+    assert.ok(noChore(F), 'nothing was posted');
+  } finally { F.done(); }
+});
+
+for (const [what, label, plant] of [
+  ['a folder', 'a folder', (F, lock) => fs.mkdirSync(lock)],
+  ['a named pipe', 'a named pipe', (F, lock) => assert.equal(spawnSync('mkfifo', [lock]).status, 0)],
+  ['a link', 'a link to a folder', (F, lock) => { fs.mkdirSync(path.join(F.base, 'a-folder')); fs.symlinkSync(path.join(F.base, 'a-folder'), lock); }],
+  ['a link', 'a link to a dead holder\'s lock file', (F, lock) => { write(path.join(F.base, 'a-file'), '2147483646:dead'); fs.symlinkSync(path.join(F.base, 'a-file'), lock); }],
+]) test(`${label} at the lock path is named in a plain refusal, and nothing is posted`, { skip: !real }, () => {
+  const { F, q, lock } = lockFixture('sops-lock-odd');
+  try {
+    plant(F, lock);
+    plain(postBounded(F, q, {}), lock, what);
+    assert.ok(noChore(F), 'nothing was posted');
+  } finally { F.done(); }
+});
+
+test('a folder put at the lock path while a dead lock is cleared is named, and .clearing is let go', { skip: !real }, () => {
+  const { F, q, dir, lock } = lockFixture('sops-lock-swap');
+  try {
+    write(lock, ''); // an empty lock names no holder: it is a dead one's
+    const swap = preload(F, 'swap', `import fs from 'node:fs';
+const link = fs.linkSync; let first = true;
+fs.linkSync = (a, b) => { if (first && String(b).endsWith('.clearing')) { first = false; fs.unlinkSync(${JSON.stringify(lock)}); fs.mkdirSync(${JSON.stringify(lock)}); } return link(a, b); };
+`);
+    plain(postBounded(F, q, { NODE_OPTIONS: swap }), lock, 'a folder');
+    assert.ok(noChore(F), 'nothing was posted');
+    assert.deepEqual(fs.readdirSync(dir), [path.basename(lock)], 'only the planted folder is left: no .clearing');
+  } finally { F.done(); }
+});
+
+test('a filesystem that refuses hard links: both posts refuse plainly and neither holds the lock', { skip: !real }, async () => {
+  const { F, q, dir } = lockFixture('sops-lock-nolink');
+  try {
+    const nolink = preload(F, 'nolink', "import fs from 'node:fs';\nconst link = fs.linkSync;\nfs.linkSync = (a, b) => { if (String(b).includes('secret-locks')) throw Object.assign(new Error('EPERM: operation not permitted, link'), { code: 'EPERM' }); return link(a, b); };\n");
+    const post = () => new Promise((done) => {
+      let err = '';
+      const c = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'secret', 'post', q, '--json'], { cwd: F.old, env: F.env({ NODE_OPTIONS: nolink }), stdio: ['pipe', 'ignore', 'pipe'] });
+      c.stderr.on('data', (d) => { err += d; });
+      c.stdin.end(JSON.stringify({ ONE: 'value-one-9', TWO: 'value-two-9' }));
+      c.on('close', (code) => done({ code, err }));
+    });
+    for (const r of await Promise.all([post(), post()])) {
+      assert.notEqual(r.code, 0);
+      assert.match(r.err, /refused a hard link \(EPERM\)\. Nothing was posted/);
+      assert.doesNotMatch(r.err, /^\s+at /m);
+    }
+    assert.ok(noChore(F), 'nothing was posted');
+    assert.deepEqual(fs.readdirSync(dir), [], 'no lock or private file is left behind');
+  } finally { F.done(); }
+});
+
+test('a dead holder\'s lock: a post that saw it dead never clears the live lock taken meanwhile', { skip: !real }, async () => {
+  const { F, q, dir, lock, good } = lockFixture('sops-dead-lock-forced');
+  try {
+    // a post killed while holding the lock leaves it behind, naming a process that is gone
+    write(lock, '2147483646:dead');
+    const bin = path.join(F.base, 'slow-bin');
+    const realSops = spawnSync('sh', ['-c', 'command -v sops'], { encoding: 'utf8' }).stdout.trim();
+    const f = (n) => path.join(F.base, n);
+    const [busy, overlap, holding, sawDead, cleared, stuck, trace] = ['sops-busy', 'sops-overlap', 'holder-in-sops', 'late-saw-dead', 'late-cleared', 'gate-stuck', 'trace'].map(f);
+    const told = () => (fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8') : '(no trace)');
+    // A call notes another post's call still running. The holder, inside sops, waits for the late post to
+    // finish its clearing and checks its lock is still there and still its own.
+    write(path.join(bin, 'sops'), `#!/bin/sh
+mine=$(cat "${lock}" 2>/dev/null)
+[ -e "${busy}" ] && touch "${overlap}"
+touch "${busy}" "${holding}"
+echo "sops $$ start busy=$([ -e "${busy}" ] && echo y) lock=$mine" >> "${trace}"
+n=0; while [ ! -e "${cleared}" ]; do n=$((n+1)); [ $n -gt 600 ] && { touch "${stuck}"; break; }; sleep 0.1; done
+now=$(cat "${lock}" 2>/dev/null)
+echo "sops $$ checked lock=$now" >> "${trace}"
+[ -n "$mine" ] && [ "$now" = "$mine" ] || touch "${overlap}"
+"${realSops}" "$@"
+s=$?
+rm -f "${busy}"
+exit $s
+`);
+    fs.chmodSync(path.join(bin, 'sops'), 0o755);
+    // forced order: late sees the dead lock and stops; early clears it, takes it and enters sops; late then
+    // clears (or, with the lock right, declines to), and lets .clearing go
+    const gate = preload(F, 'gate', `import fs from 'node:fs';
+const role = process.env.LOCK_ROLE; let first = true;
+const note = (m) => fs.appendFileSync(${JSON.stringify(trace)}, role + ' ' + process.pid + ' ' + m + '\\n');
+const tail = (p) => String(p).split('/').pop().slice(-12);
+const until = (f) => { const t = Date.now(); while (!fs.existsSync(f)) { if (Date.now() - t > 60000) throw new Error('gate timed out: ' + f); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); } };
+const link = fs.linkSync; const rm = fs.rmSync;
+fs.linkSync = (a, b) => {
+  if (first && String(b).endsWith('.clearing')) {
+    first = false;
+    if (role === 'late') { fs.writeFileSync(${JSON.stringify(sawDead)}, ''); until(${JSON.stringify(holding)}); } else until(${JSON.stringify(sawDead)});
+  }
+  try { link(a, b); note('took ' + tail(b)); } catch (e) { note('link ' + tail(b) + ' ' + e.code); throw e; }
+};
+const unlink = fs.unlinkSync;
+fs.unlinkSync = (p) => { note('unlinked ' + tail(p)); return unlink(p); };
+fs.rmSync = (p, o) => { const r = rm(p, o); if (!String(p).includes('.' + process.pid + '.')) note('rm ' + tail(p)); if (role === 'late' && String(p).endsWith('.clearing')) fs.writeFileSync(${JSON.stringify(cleared)}, ''); return r; };
+`);
+    const post = (role) => new Promise((done) => {
+      let err = '';
+      const c = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'secret', 'post', q, '--json'], { cwd: F.old, env: F.env({ PATH: `${bin}${path.delimiter}${process.env.PATH}`, NODE_OPTIONS: gate, LOCK_ROLE: role }), stdio: ['pipe', 'ignore', 'pipe'] });
+      c.stderr.on('data', (d) => { err += d; });
+      c.stdin.end(JSON.stringify({ ONE: `one-${role}-9`, TWO: `two-${role}-9` }));
+      c.on('close', (code) => done({ code, err, role }));
+    });
+    const rs = await Promise.all([post('early'), post('late')]);
+    assert.ok(fs.existsSync(sawDead) && fs.existsSync(holding) && fs.existsSync(cleared) && !fs.existsSync(stuck), `the forced order ran\n${told()}`);
+    assert.ok(!fs.existsSync(overlap), `two posts held the lock at once\n${told()}`);
+    const won = rs.filter((r) => r.code === 0);
+    assert.equal(won.length, 1, `${rs.map((r) => r.err).join('\n')}\n${told()}`);
+    assert.equal(won[0].role, 'early', told());
+    for (const r of rs.filter((x) => x.code !== 0)) assert.match(r.err, /is already answered|nothing was posted from this run/);
+    const w = fs.readdirSync(path.join(F.old, '.worktrees')).find((x) => x.startsWith('chore-secret-'));
+    const text = decrypt(good.id, path.join(F.old, '.worktrees', w, 'secrets/app.enc.env')).stdout;
+    assert.match(text, /ONE=one-early-9/);
+    assert.match(text, /TWO=two-early-9/);
+    assert.deepEqual(fs.readdirSync(dir), [], 'no lock or claim file is left behind');
   } finally { F.done(); }
 });
 

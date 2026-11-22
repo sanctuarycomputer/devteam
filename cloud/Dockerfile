@@ -4,9 +4,6 @@
 # owner to the machine's devteam hub, a terminal on the box's tmux server (where supervisors and
 # workers run), and each project at a host of its own. What lasts lives on /data.
 #
-# Until the gateway change (kit-277) ships, the project hosts below don't answer and the older addresses
-# do (<box> is the box's name): <port>.<box> for a project's dashboard, public.<box>/<project>/<slug>/ for
-# a public page, <box>/public/publish?port=... for Publish, and /box.json says box: 1.
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com. Each project is
 # at <project>.box.example.com: its dashboard and every private view after sign-in, and its public
 # pages (what the owner published) at /<artifact>/ for anyone, from the gateway's own copy
@@ -44,7 +41,7 @@
 #   devteam-reclaim, which prints a new claim link (as another user, setpriv fails: use root).
 FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 
-ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1 DEVTEAM_PREVIEWS=1
+ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1 DEVTEAM_PREVIEWS=1 DEVTEAM_PROJECT_HOSTS=1
 
 RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
  && apt-get update \
@@ -280,7 +277,10 @@ COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
 # command first, after a ;, and anywhere after a command that is handed one as a word (if-shell,
 # confirm-before, set-hook, display-menu, choose-tree, command-prompt, bind-key, source-file). Not
 # caught: kill-session, kill-server typed at tmux's : prompt or inside a file source-file reads, or a
-# tmux earlier on PATH than this one (a mise or project install).
+# tmux earlier on PATH than this one (a mise or project install). (c) A TMUX_TMPDIR that is set (empty
+# included) but is no directory, with no -S, is refused whatever the command but a lone -V: tmux may
+# then fall back to /tmp, the box's server. On 2026-11-22, twice, a test's cleanup listed and killed "its" sessions through a private
+# TMUX_TMPDIR whose folder was already gone, and ended every session on the box.
 # Everything else goes straight to tmux, arguments untouched: every tmux call the kit makes runs this.
 RUN dpkg-divert --local --rename --divert /usr/bin/tmux.distrib --add /usr/bin/tmux
 COPY --chmod=755 <<'EOF' /usr/bin/tmux
@@ -312,6 +312,10 @@ for a do
   fi
   case $a in *\;) at=1 any= ;; *) at= ;; esac
 done
+if [ -n "${TMUX_TMPDIR+x}" ] && [ -z "$s" ] && [ ! -d "$TMUX_TMPDIR" ] && ! { [ "$#" -eq 1 ] && [ "$1" = -V ]; }; then
+  echo "tmux: refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not a directory, so tmux may use the box's server; use tmux -S <socket> …" >&2
+  exit 1
+fi
 if [ -n "$TMUX_TMPDIR" ] && [ -n "$TMUX" ] && [ -z "$s$l" ]; then
   case ${TMUX%%,*} in "${TMUX_TMPDIR%/}"/*) ;; *) unset TMUX TMUX_PANE ;; esac
 fi
@@ -806,7 +810,7 @@ ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.77.0
+ARG DEVTEAM_RELEASE=v0.78.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 
