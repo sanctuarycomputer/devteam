@@ -5013,6 +5013,8 @@ function cmdValidate() {
   const td = path.join(projectDir, 'tickets');
   // project/self.md, when there is one, against self@1 (its paths and names are the draft's checks: self check, check-pr)
   { const t = readText(path.join(projectDir, 'self.md')); if (t !== null) for (const e of selfDoc(t).errors) errors.push(`${projectRel}/self.md: ${e}`); }
+  // project/exterior.md against exterior@1 (and its blobs, at the draft only): kit-135
+  { const x = exteriorValidateLines(); errors.push(...x.errors.map((e) => `${EXTERIOR_REL()}: ${e}`)); warnings.push(...x.warnings.map((w) => `${EXTERIOR_REL()}: ${w}`)); }
   if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket; if the supervisor added it since the log last landed, land the log first (log-sync, then merge --chore log) and run the check again`);
   // Checking one ticket, another ticket's own errors (D3 and the rest, written "<id>: …") come
   // from the live graph, not this branch: e.g. a dependency on a plan that reached main after the
@@ -7788,6 +7790,62 @@ function cmdSelf() {
   die('usage: self show [--json] | self check');
 }
 /* self-model end */
+/* world-model start */
+// project/exterior.md, what the project relates to (log.schema.json#exterior@1): a markdown file whose
+// one fenced `exterior` block holds the contract. Rules 1 to 7 are kit-139's worldDocErrors; 8 to 10
+// follow test/fixtures/world/check.mjs, so the two refuse the same invalid/ cases.
+const EXTERIOR_REL = () => `${projectRel}/exterior.md`;
+const EXTERIOR_NOT_DRAFTED = 'exterior.md is not drafted yet: the supervisor drafts it from the strategy and self.md (supervisor.md, Monitoring)';
+// An exterior.md's text in: its parsed block (null unless it holds) and its contract errors. Past the
+// schema: an id shared across entities and signals (8), relation_word only and always for other (9),
+// and the prose outside the block naming each entity, as whole words in any case (10).
+function exteriorDoc(text) {
+  const errors = worldDocErrors(text, 'exterior');
+  if (errors.length) return { block: null, errors };
+  const b = fencedBlocks(text);
+  const v = JSON.parse(b.blocks.find((x) => x.info === 'exterior').body);
+  const seen = new Set();
+  const ids = v.entities.flatMap((e, i) => [[`exterior.entities[${i}].id`, e.id], ...e.signals.map((x, j) => [`exterior.entities[${i}].signals[${j}].id`, x.id])]);
+  for (const [where, id] of ids) {
+    if (seen.has(id)) errors.push(`${where} "${id}" is shared`);
+    seen.add(id);
+  }
+  v.entities.forEach((e, i) => {
+    if (e.relation === 'other' && e.relation_word === undefined) errors.push(`exterior.entities[${i}].relation_word is required when relation is other`);
+    if (e.relation !== 'other' && e.relation_word !== undefined) errors.push(`exterior.entities[${i}].relation_word is only for relation other`);
+    if (!namesWhole(b.prose, e.name)) errors.push(`exterior.entities[${i}] "${e.name}": the prose outside the block never names it`);
+  });
+  return { block: errors.length ? null : v, errors };
+}
+const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
+// exterior check's lines for the working tree's exterior.md (null text: none). errors exit 1;
+// warnings leave the exit as it is.
+function exteriorCheckLines({ draft = true } = {}) {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  const { errors } = exteriorDoc(text);
+  return { errors, warnings: [] };
+}
+// validate's lines for the working tree's exterior.md: the contract; none when there is no file.
+function exteriorValidateLines() {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  return { errors: exteriorDoc(text).errors, warnings: [] };
+}
+// exterior show [--json]: main's exterior.md. exterior check: the working tree's, the draft.
+function cmdExterior() {
+  const sub = positional[0];
+  if (sub === 'check') {
+    if (exteriorTreeText() === null) return out('no exterior.md: nothing to check');
+    gitReadCache = new Map();
+    const { errors, warnings } = exteriorCheckLines({ draft: true });
+    for (const e of errors) out(`error: exterior.md: ${e}`);
+    for (const w of warnings) out(`warn: exterior.md: ${w}`);
+    process.exit(errors.length ? 1 : 0);
+  }
+  die('usage: exterior show [--json] | exterior check');
+}
+/* world-model end */
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -34486,6 +34544,7 @@ const HELP_OBSERVE = `Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
   self show [--json]   main's project/self.md, what the project is: what it is, makes, its parts with their paths, what it controls and what not; --json is the dashboard's self block, null when not drafted
   self check   the working tree's self.md against self@1, each part's path on disk, and the names rule; errors exit 1, warnings don't
+  exterior show [--json] | exterior check   main's project/exterior.md, what the project relates to, by relation, with each entity's signals and scores (--json the dashboard's exterior block, null when not drafted); check: the working tree's against exterior@1, its blobs and quotes at the draft, and the names rule; errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
@@ -34556,7 +34615,7 @@ const COMMANDS_DECIDE = {
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
 };
 const COMMANDS_OBSERVE = {
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, self: cmdSelf, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, self: cmdSelf, exterior: cmdExterior, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
 };
 const COMMANDS_GOALS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
