@@ -226,6 +226,86 @@ test('org-access A2: the owner makes an invite: a link shown once, only its hash
   } finally { await gw.close(); }
 });
 
+// An invite as the gateway writes one (people@1: hash = b64u(sha256(token)), expires epoch ms), for
+// the claim path's checks, so each stands apart from the route that makes the link.
+function seedInvite(gw, personId, { expires = Date.now() + DAY } = {}) {
+  const token = u(crypto.randomBytes(32));
+  const s = gw.state();
+  gw.write({ ...s, invites: [...(s.invites ?? []), { hash: u(sha(token)), person: personId, expires }] });
+  return `${gw.publicUrl}/auth/claim#${token}`;
+}
+
+test('org-access A2: on a claimed box the claim link opens the invite page, which reads whose invite it is', async () => {
+  const { gw } = await setup('page');
+  try {
+    const [bea] = seed(gw, [{ name: 'Bea' }]);
+    const link = seedInvite(gw, bea.id);
+    const page = await gw.raw('GET', '/auth/claim');
+    assert.equal(page.status, 200, `the invite page, not the sign-in: ${page.status} ${page.headers.location ?? ''}`);
+    assert.match(page.body, /Join this devteam box/);
+    assert.equal(sessionCookieOf(page), null);
+    const peek = await gw.raw('POST', '/auth/claim/invite', { body: { token: tokenOf(link) } });
+    ok(peek, 'what the page shows before the passkey');
+    assert.deepEqual({ name: peek.json.name, level: peek.json.level, again: peek.json.again, expires: peek.json.expires }, { name: 'Bea', level: 'full', again: false, expires: gw.state().invites[0].expires });
+    assert.equal(sessionCookieOf(peek), null);
+    for (const token of [u(crypto.randomBytes(32)), '', 7]) {
+      const dead = await gw.raw('POST', '/auth/claim/invite', { body: { token } });
+      assert.deepEqual([dead.status, dead.json], [403, { error: T.gone }], `a dead token (${JSON.stringify(token).slice(0, 12)}) is refused alike`);
+    }
+  } finally { await gw.close(); }
+});
+
+test('org-access A2: the invite link adds a passkey for that person only and signs them in at its level', async () => {
+  const { gw, ana } = await setup('claim');
+  try {
+    const [bea] = seed(gw, [{ name: 'Bea' }]);
+    const link = seedInvite(gw, bea.id);
+    const ownerBefore = gw.state().passkeys;
+    const { b, fin, key } = await join(gw, link);
+    ok(fin, 'invite finish');
+    const sc = sessionCookieOf(fin);
+    assert.ok(sc, 'the invite signed Bea in');
+    const s = gw.state();
+    assert.deepEqual(s.people.find((p) => p.id === bea.id).methods.map((m) => [m.type, m.key]), [['passkey', u(key.id)]], 'Bea holds the passkey');
+    assert.deepEqual(s.people.find((p) => p.id === ana.id).methods, ana.methods, 'Ana is as she was');
+    assert.deepEqual(s.passkeys, ownerBefore, 'the owner\'s passkeys are as they were');
+    assert.equal(s.people.find((p) => p.role === 'owner').methods.length, 0, 'nothing in the owner\'s row');
+    const entry = s.peopleSessions.find((x) => x.hash === hashOf(sc.split(';')[0]));
+    assert.equal(entry?.person, bea.id, 'the session is Bea\'s');
+    assert.equal(s.people.find((p) => p.id === bea.id).level, 'full', 'at the invite\'s level');
+    assert.equal(s.sessions.some((x) => x.hash === entry.hash), false, 'not a top-level (owner) session');
+    ok(await b.req('GET', '/'), 'Bea opens the hub');
+    const { v } = await signIn(gw, key);
+    ok(v, 'Bea signs in later with it');
+    assert.equal(gw.state().peopleSessions.find((x) => x.hash === hashOf(sessionCookieOf(v).split(';')[0]))?.person, bea.id);
+  } finally { await gw.close(); }
+});
+
+test('org-access A2: an invite link works once', async () => {
+  const { gw } = await setup('once');
+  try {
+    const [bea] = seed(gw, [{ name: 'Bea' }]);
+    const link = seedInvite(gw, bea.id);
+    ok((await join(gw, link)).fin, 'the first use');
+    const second = await join(gw, link);
+    assert.equal(second.st.status, 403, 'the second use is refused');
+    assert.deepEqual(second.st.json, { error: T.gone });
+    assert.equal(rowOf(gw, bea.id).methods.length, 1, 'one link, one method');
+  } finally { await gw.close(); }
+});
+
+test('org-access A2: an invite link expires after 24 hours', async () => {
+  const { gw } = await setup('expiry');
+  try {
+    const [bea] = seed(gw, [{ name: 'Bea' }]);
+    const link = seedInvite(gw, bea.id, { expires: Date.now() - 1 });
+    const late = await join(gw, link);
+    assert.equal(late.st.status, 403, 'a day later the link does nothing');
+    assert.deepEqual(late.st.json, { error: T.gone });
+    assert.equal(rowOf(gw, bea.id).methods.length, 0);
+  } finally { await gw.close(); }
+});
+
 test('org-access A2: only the owner, signed in within five minutes, makes an invite, with a name that is theirs alone', async () => {
   const { gw, owner, ana } = await setup('who');
   try {
@@ -375,6 +455,55 @@ test('org-access A4: only the owner relinks, never their own row, at the row\'s 
     assert.deepEqual(gw.state().invites ?? [], []);
     assert.ok(before);
   } finally { await gw.close(); }
+});
+
+// --- A5: only a passkey -----------------------------------------------------------------------------
+
+test('org-access A5: no sign-in method type but passkey, and no password, email or link route', async () => {
+  const { gw } = await setup('only-passkey');
+  try {
+    for (const type of ['password', 'email', 'link', 'magic-link', 'oidc', 'token']) {
+      const r = await gw.raw('POST', `/auth/method/${type}/start`, { body: { purpose: 'sign-in' } });
+      assert.equal(r.status, 404, `${type}: no such type`);
+      assert.equal(sessionCookieOf(r), null);
+    }
+    for (const route of ['/auth/password', '/auth/email', '/auth/magic', '/auth/link', '/auth/token', '/auth/login?token=x', '/auth/claim/login']) {
+      for (const method of ['GET', 'POST']) {
+        const r = await gw.raw(method, route, method === 'POST' ? { body: { email: 'a@b.c', password: 'x', token: 'x' } } : {});
+        assert.equal(sessionCookieOf(r), null, `${method} ${route} opens no session`);
+      }
+    }
+  } finally { await gw.close(); }
+});
+
+test('org-access A5: an invite link signs nobody in until a passkey is made', async () => {
+  const { gw } = await setup('no-link-signin');
+  try {
+    const [bea] = seed(gw, [{ name: 'Bea' }]);
+    const tok = tokenOf(seedInvite(gw, bea.id));
+    const b = browser(gw);
+    for (const [what, step] of [['opening it', await b.req('GET', '/auth/claim')], ['reading it', await b.post('/auth/claim/invite', { token: tok })], ['starting', await b.post('/auth/method/passkey/start', { purpose: 'invite', token: tok })]]) {
+      assert.equal(sessionCookieOf(step), null, `${what} opens no session`);
+    }
+    const bogus = await b.post('/auth/method/passkey/finish', { purpose: 'invite', clientDataJSON: u('{}'), attestationObject: '', rawId: '' });
+    assert.notEqual(bogus.status, 200);
+    assert.equal(sessionCookieOf(bogus), null, 'a finish without a passkey opens none');
+    assert.notEqual((await b.req('GET', '/')).status, 200, 'still signed out');
+    assert.equal(gw.state().invites.length, 1, 'the link is still there for a real passkey');
+  } finally { await gw.close(); }
+});
+
+test('org-access A5: only a finished sign-in method flow mints a session (the gateway\'s source)', () => {
+  const src = fs.readFileSync(path.join(repo, 'cloud', 'gateway.mjs'), 'utf8');
+  const from = src.indexOf('const finishFlow = async');
+  const to = src.indexOf('const flowAnswer', from);
+  assert.ok(from > 0 && to > from, 'finishFlow is found');
+  const calls = [...src.matchAll(/\bsessionFor\(/g)].map((m) => m.index).filter((i) => !src.slice(i - 6, i).includes('const '));
+  assert.ok(calls.length >= 3, 'claim, sign-in and invite');
+  for (const i of calls) assert.ok(i > from && i < to, `a session is minted outside finishFlow, at offset ${i}: ${src.slice(i - 80, i + 40)}`);
+  const minted = [...src.matchAll(/cookie\(b64u\(/g)].map((m) => m.index);
+  const sf = src.indexOf('const sessionFor = ');
+  for (const i of minted) assert.ok(i > sf && i < sf + 800, `a session cookie is set outside sessionFor, at offset ${i}`);
 });
 
 // --- until kit-250: no View ---------------------------------------------------------------------------

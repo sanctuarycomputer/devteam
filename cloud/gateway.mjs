@@ -2806,7 +2806,17 @@ export function createGateway(opts = {}) {
           if (step === 'start') return flowAnswer(res, await startFlow(req, type, body?.purpose, body, claimed ? sessionOf(req) : null));
           return flowAnswer(res, await finishFlow(req, type, body?.purpose, body, 'POST'));
         }
-        if (p === '/auth/claim' && req.method === 'GET') return claimed ? redirect(res, '/auth/login') : page(res, PAGES.claim(PUB));
+        // on a claimed box a claim link is an invite's: its page reads the token from the fragment
+        if (p === '/auth/claim' && req.method === 'GET') return page(res, claimed ? PAGES.invite(PUB) : PAGES.claim(PUB));
+        // What the invite page shows before the passkey: whose invite, at what level, and whether it
+        // adds a method to someone already here. Reads only; every dead token gets the same answer.
+        if (p === '/auth/claim/invite' && req.method === 'POST') {
+          const body = await readJson(req, 4096);
+          const s2 = store.load();
+          const found = s2.passkeys.length && typeof body?.token === 'string' ? inviteOf(s2, b64u(sha256(body.token))) : null;
+          if (!found) return json(res, 403, { error: INVITE_GONE });
+          return json(res, 200, { name: found.person.name, level: found.person.level, again: (found.person.methods ?? []).length > 0, expires: found.inv.expires });
+        }
         // Today's passkey routes are aliases of the passkey row, each naming its purpose (today's
         // pages send none). The claim's keep today's 405 and 409 before reading the body.
         if (p === '/auth/claim/options' || p === '/auth/claim/verify') {
@@ -3296,6 +3306,32 @@ const PAGES = {
   previewAmbiguous: (name, cs) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Two instances offer a preview named ${esc(name)}</h1><p>${cs.map((c) => `${esc(c.project)} at ${esc(c.root)} (port ${esc(c.port)})`).join(' and ')}. The box serves neither until one stops; run <code>devteam.mjs preview stop ${esc(name)}</code> in the one that shouldn't. This page retries every 5 s.</p>`)}`,
   // A preview command can be a second behind the link: the page retries for a few minutes, not forever.
   previewUnknown: (name, names, originOf) => `${doc('Preview', `${RETRY_UNLISTED}<h1>No preview named ${esc(name)} on this box</h1><p>${names.length ? `Offered now: ${names.map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ')}.` : 'Nothing is offered right now.'} This page retries for a few minutes; a <code>preview</code> command takes a moment to show up.</p>`)}`,
+  // An invite's page: whose it is (POST /auth/claim/invite), then the passkey row's flow, purpose
+  // invite. Every name and level is set as text.
+  invite: (box) => `${doc('Join this box', `<h1 id="h">Join this devteam box</h1><p id="who"></p><p id="how">Make a passkey to join. Your password manager (1Password, iCloud Keychain…) saves it.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and join</button></p><p id="err"></p><p id="after" hidden><a href="${esc(box)}/">Open the hub</a></p><p id="signin" hidden><a href="/auth/login">Already have a sign-in method? Sign in</a></p>`)}
+<script>
+const token = decodeURIComponent(location.hash.slice(1));
+history.replaceState(null, '', location.pathname);
+const el = (id) => document.getElementById(id);
+const host = ${jsonIn(new URL(box).host)};
+const hide = (...ids) => { for (const id of ids) el(id).hidden = true; };
+const dead = () => { el('h').textContent = 'This invite can\\'t be used'; el('who').textContent = 'It has expired or was already used. Each link works once, for 24 hours. Ask the person who sent it for a new one.'; hide('how', 'name', 'go'); el('signin').hidden = false; };
+let again = false;
+if (!token) location.replace('/auth/login');
+else post('/auth/claim/invite', { token }).then((i) => {
+  again = i.again === true;
+  if (again) { el('h').textContent = 'Add a sign-in method to your account'; el('who').textContent = 'This link adds a sign-in method (a passkey) to ' + i.name + '\\'s account on ' + host + '. Your other sign-in methods keep working.'; el('how').textContent = ''; el('go').textContent = 'Create passkey'; }
+  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as Full: you can do everything on the box except manage people.';
+}, dead);
+el('go').onclick = run(async () => {
+  try { await create('/auth/method/passkey/start', '/auth/method/passkey/finish', { purpose: 'invite', token, name: el('name').value }); }
+  catch (e) { if (/expired or was used/.test(e.message)) return dead(); throw e; }
+  el('h').textContent = 'You\\'re in';
+  el('who').textContent = again ? 'The passkey is added. Sign in with it from now on.' : 'Your password manager saved the passkey. Use it to sign in here from now on.';
+  hide('how', 'name', 'go');
+  el('after').hidden = false;
+});
+</script></body></html>`,
   claim: (box) => `${doc('Claim this box', `<h1>Claim this devteam box</h1><p>Make a passkey for this box. Your password manager (1Password, iCloud Keychain…) saves it; from then on only a passkey made here opens the box.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and claim</button></p><p id="err"></p>`)}
 <script>
 const token = decodeURIComponent(location.hash.slice(1));
