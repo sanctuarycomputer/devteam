@@ -254,3 +254,98 @@ test('A1 A2 A3 A4 A8 exterior show, dashboard-data and search read exterior.md',
     W.g(['checkout', '--', EXT], W.old);
   });
 }));
+
+// An exterior.md of one entity, the prose naming it; on main's strategy and the fixture self.md.
+const oneEntity = (W, entity, prose = `It relates to ${entity.name}.`) => `# Exterior\n\n${prose}\n\n\`\`\`exterior\n${JSON.stringify({
+  exterior: 1, strategy_blob: W.blob(STRAT), self_blob: W.blob(SELF),
+  entities: [{ id: 'x', matters: 'It matters.', weight: 1, strategy: ['Independent researchers who write long notes and want them to last.'], signals: [], ...entity }],
+}, null, 2)}\n\`\`\`\n`;
+const NOT_NAMED = /is not named in origin main's strategy/;
+
+test('A9 exterior check holds an unnamed organisation by visibility', withProject('exterior-names-vis', {}, async (W, check) => {
+  const zentrix = extBlock((v) => { const e = v.entities.find((x) => x.id === 'press-fair'); e.name = 'Zentrix Labs'; }, EXTERIOR_MD.replace('And the Small Press Fair sponsors', 'And Zentrix Labs sponsors'));
+  await check('A9 public: an error; unknown: a warning; private: nothing', () => {
+    W.writeTree(EXT, zentrix);
+    const words = /"Zentrix Labs" \(organisation\) is not named in origin main's strategy\.md/;
+    W.setVisibility('public');
+    const p = W.run(['exterior', 'check']);
+    assert.equal(p.status, 1, `A9 public: exterior check exits 1\n${p.text}`);
+    assert.match(p.out, new RegExp(`error: exterior\\.md: .*${words.source}`), 'A9 public: an error naming Zentrix Labs');
+    W.setVisibility('unknown');
+    const u = W.run(['exterior', 'check']);
+    assert.equal(u.status, 0, `A9 unknown: exterior check exits 0\n${u.text}`);
+    assert.match(u.out, new RegExp(`warn: exterior\\.md: .*${words.source}`), 'A9 unknown: a warning naming Zentrix Labs');
+    W.setVisibility('private');
+    const q = W.run(['exterior', 'check']);
+    assert.doesNotMatch(q.out, NOT_NAMED, `A9 private: no names-rule line\n${q.out}`);
+    W.writeTree(EXT, null);
+  });
+  await check('A9 the fixture exterior.md, every name in the strategy, passes clean on a public repo', () => {
+    W.setVisibility('public');
+    W.writeTree(EXT, EXTERIOR_MD);
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 0, `A9 the fixture passes exterior check\n${r.text}`);
+    assert.doesNotMatch(r.out, /^(warn|error):/m, `A9 the fixture draws no line\n${r.out}`);
+    W.writeTree(EXT, null);
+  });
+}));
+
+test('A12 focus 3 focus 4 the names rule\'s cases', withProject('exterior-names-cases', {
+  visibility: 'public',
+  strategy: `${STRATEGY}- It reads from the zorblat archive.\n- The C++ Guild reviews its plugin interface.\n`,
+  files: { ...PARTS, 'package.json': JSON.stringify({ dependencies: { lodash: '1' }, devDependencies: { moment: '1', 'node.js': '1' } }), Gemfile: "source 'https://rubygems.org'\ngem 'rails'\n  gem \"faraday\", '~> 2'\ngem(\"puma\")\n", 'requirements.txt': '# pinned\nrequests==2.0\n' },
+}, async (W, check) => {
+  const run = (entity, prose) => { W.writeTree(EXT, oneEntity(W, entity, prose)); return W.run(['exterior', 'check']); };
+  const allowed = (why, entity) => {
+    const r = run(entity);
+    assert.equal(r.status, 0, `A12 allowed: ${why}\n${r.text}`);
+    assert.doesNotMatch(r.out, NOT_NAMED, `A12 allowed: ${why}: no names-rule line\n${r.out}`);
+  };
+  const refused = (why, entity, deps = false) => {
+    const r = run(entity);
+    assert.equal(r.status, 1, `A12 refused: ${why}\n${r.text}`);
+    const words = `exterior.entities[0] "${entity.name}" (${entity.kind}) is not named in origin main's strategy.md${deps ? ', nor its dependency files' : ''}: name it as a group, or have the strategy name it first`;
+    assert.ok(r.out.includes(`error: exterior.md: ${words}`), `A12 refused: ${why}: the rule's words\n${r.out}`);
+  };
+  await check('A12 allowed: in lower case in main\'s strategy', () => allowed('lower case', { name: 'Zorblat Archive', relation: 'depends_on', kind: 'organisation' }));
+  await check('A12 allowed: depends_on works in the dependency files', () => {
+    for (const name of ['lodash', 'moment', 'rails', 'faraday', 'puma', 'requests']) allowed(`dependency ${name}`, { name, relation: 'depends_on', kind: 'work' });
+  });
+  await check('A12 refused: a dependency name off depends_on, substrings, and the branch\'s own strategy', () => {
+    refused('lodash builds on it', { name: 'lodash', relation: 'builds_on_it', kind: 'work' });
+    refused('a longer word', { name: 'Acme Storages', relation: 'depends_on', kind: 'organisation' }, true);
+    refused('a prefixed word', { name: 'XAcme Storage', relation: 'depends_on', kind: 'organisation' }, true);
+    refused('an organisation named Zentrix Labs', { name: 'Zentrix Labs', relation: 'collaborates', kind: 'organisation' });
+    refused('a work named Zentrix Labs', { name: 'Zentrix Labs', relation: 'alternative', kind: 'work' });
+    const text = oneEntity(W, { name: 'Zentrix Labs', relation: 'collaborates', kind: 'organisation' });
+    W.writeTree(STRAT, `${fs.readFileSync(path.join(W.old, STRAT), 'utf8')}- It works with Zentrix Labs.\n`);
+    W.writeTree(EXT, text);
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 1, `A12 refused: named only in the branch's strategy\n${r.text}`);
+    assert.match(r.out, /error: exterior\.md: .*"Zentrix Labs" \(organisation\) is not named in origin main's strategy\.md/, 'A12 refused: the branch\'s strategy allows nothing');
+    W.g(['checkout', '--', STRAT], W.old);
+  });
+  await check('A12 a group is held by its words, never the rule', () => {
+    // the name starts its sentence, so only the group-name check (first word included) sees it
+    const r = run({ name: 'Zentrix customers', relation: 'serves', kind: 'group' }, 'Zentrix customers are who it serves.');
+    assert.equal(r.status, 0, `A12 warned: a group named Zentrix customers exits 0\n${r.text}`);
+    assert.match(r.out, /warn: exterior\.md: "Zentrix" \(entities\[0\]\.name\)/, 'A12 warned: the group\'s word Zentrix');
+    assert.doesNotMatch(r.out, NOT_NAMED, 'A12 a group is never checked by the rule');
+    W.onMain({ [STRAT]: `${fs.readFileSync(path.join(W.old, STRAT), 'utf8')}- Zentrix shops sell it.\n` }, 'strategy names Zentrix');
+    const a = run({ name: 'Zentrix customers', relation: 'serves', kind: 'group' });
+    assert.equal(a.status, 0, `A12 allowed: Zentrix customers with Zentrix in main's strategy\n${a.text}`);
+    assert.doesNotMatch(a.out, /"Zentrix"/, `A12 allowed: no warning once main's strategy names Zentrix\n${a.out}`);
+  });
+  await check('focus 4 names with regex characters', () => {
+    allowed('C++ Guild in the strategy', { name: 'C++ Guild', relation: 'collaborates', kind: 'work' });
+    allowed('Node.js in package.json', { name: 'Node.js', relation: 'depends_on', kind: 'work' });
+  });
+  await check('focus 3 a package.json that is not JSON, or whose dependencies is a list', () => {
+    W.onMain({ 'package.json': '{not json' }, 'a broken package.json');
+    const r = run({ name: 'Zorblat Archive', relation: 'depends_on', kind: 'organisation' });
+    assert.equal(r.status, 0, `focus 3 a broken package.json is no crash\n${r.text}`);
+    assert.equal(r.out.split('\n').filter((l) => /^warn: .*package\.json/.test(l)).length, 1, `focus 3 one warning names package.json\n${r.out}`);
+    W.onMain({ 'package.json': JSON.stringify({ dependencies: ['lodash'] }) }, 'dependencies as a list');
+    refused('a list of dependencies gives no names', { name: 'lodash', relation: 'depends_on', kind: 'work' }, true);
+  });
+}));

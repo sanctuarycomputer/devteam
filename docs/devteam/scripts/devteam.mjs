@@ -7858,14 +7858,89 @@ function exteriorBlobLines(block, { draft, strategyBlob, selfBlob, strategyText 
   }
   return { errors, warnings };
 }
-// exterior check's lines for the working tree's exterior.md (null text: none): the contract, then
-// the blobs as at the draft. errors exit 1; warnings leave the exit as it is.
+// A file at ref (the repo root's rel), or null: with ref null, nothing; with the project outside the
+// repo, the working tree's (as namesAllowedText reads it).
+const fileAtRef = (rel, ref) => (!ref ? null : projectInRepo ? git(['show', `${ref}:${rel}`], mainRoot) : readText(path.join(projectRoot, rel)));
+// The dependency names at ref, one per line (text): the keys of package.json's dependencies and
+// devDependencies (each only when a plain object), each Gemfile gem (quoted either way, with or
+// without parentheses), each requirements.txt name (comments stripped, cut at the first of =<>!~[;@
+// or a space). A file missing gives no names; a package.json that isn't JSON gives none and a warning.
+function dependencyNames(ref = mainRef()) {
+  const names = [];
+  const warnings = [];
+  const pkg = fileAtRef('package.json', ref);
+  if (pkg !== null) {
+    let v;
+    try { v = JSON.parse(pkg); } catch { warnings.push(`package.json at ${ref} is not JSON: its dependencies allow no names`); }
+    for (const k of ['dependencies', 'devDependencies']) if (isObj(v) && isObj(v[k])) names.push(...Object.keys(v[k]));
+  }
+  for (const line of (fileAtRef('Gemfile', ref) ?? '').split(/\r?\n/)) {
+    const m = /^\s*gem\s*\(?\s*(['"])([^'"]+)\1/.exec(line);
+    if (m) names.push(m[2]);
+  }
+  for (const line of (fileAtRef('requirements.txt', ref) ?? '').split(/\r?\n/)) {
+    const name = line.replace(/#.*/, '').trim().split(/[=<>!~[;@\s]/)[0];
+    if (name) names.push(name);
+  }
+  return { text: names.join('\n'), warnings };
+}
+// The names rule (spec, The names rule): an organisation or work is allowed when origin main's
+// strategy.md names it as whole words in any case, or, for depends_on, its dependency names do. The
+// branch's own strategy never counts; with no ref, nothing allows it. A group is never checked here
+// (its words are, in exteriorWords). refused: [{ index, name, line }]; warnings: the dependency files'.
+function exteriorNameLines(block, ref = mainRef()) {
+  const strategy = fileAtRef(strategyRel, ref) ?? '';
+  const deps = dependencyNames(ref);
+  const refused = [];
+  block.entities.forEach((e, i) => {
+    if (e.kind !== 'organisation' && e.kind !== 'work') return;
+    const dep = e.relation === 'depends_on';
+    if (namesWhole(strategy, e.name) || (dep && namesWhole(deps.text, e.name))) return;
+    refused.push({ index: i, name: e.name, line: `exterior.entities[${i}] "${e.name}" (${e.kind}) is not named in origin main's strategy.md${dep ? ', nor its dependency files' : ''}: name it as a group, or have the strategy name it first` });
+  });
+  return { refused, warnings: deps.warnings };
+}
+// An exterior.md's pieces for kit-139's capitalised words: the prose outside the block (sentences),
+// each name (every word, so a group's first word counts), each matters, strategy quote and signal
+// what (sentences), and each relation_word. With no parsed block, the whole text as prose.
+function exteriorPieces(text, block) {
+  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
+  const pieces = [{ where: 'prose', text: fencedBlocks(text).prose, sentences: true }];
+  const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
+  block.entities.forEach((e, i) => {
+    add(`entities[${i}].name`, e.name, false);
+    add(`entities[${i}].matters`, e.matters, true);
+    e.strategy.forEach((q, j) => add(`entities[${i}].strategy[${j}]`, q, true));
+    e.signals.forEach((x, j) => add(`entities[${i}].signals[${j}].what`, x.what, true));
+    if (e.relation_word !== undefined) add(`entities[${i}].relation_word`, e.relation_word, false);
+  });
+  return pieces;
+}
+// One exterior.md text's words that origin main's strategy and dependency files don't name.
+function exteriorWords(text, block, ref = mainRef()) {
+  return unknownNames(exteriorPieces(text, block), `${namesAllowedText(ref)}\n${dependencyNames(ref).text}`);
+}
+const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
+// exterior check's lines for the working tree's exterior.md (null text: none): the contract, the
+// blobs as at the draft, then (at the draft) the names rule by the repo's visibility (public an
+// error, unknown a warning, private nothing; gh asked only when a name is refused) and the words.
+// errors exit 1; warnings leave the exit as it is.
 function exteriorCheckLines({ draft = true } = {}) {
   const text = exteriorTreeText();
   if (text === null) return { errors: [], warnings: [] };
   const { block, errors } = exteriorDoc(text);
-  if (!block) return { errors, warnings: [] };
-  return exteriorBlobLines(block, { draft, ...headBlobs(null) });
+  if (!block) return { errors, warnings: draft ? exteriorWords(text, null).map(exteriorWordLine) : [] };
+  const r = exteriorBlobLines(block, { draft, ...headBlobs(null) });
+  if (!draft) return r;
+  const names = exteriorNameLines(block);
+  r.warnings.push(...names.warnings);
+  if (names.refused.length) {
+    const v = repoVisibility();
+    if (v === 'public') r.errors.push(...names.refused.map((x) => x.line));
+    else if (v === 'unknown') r.warnings.push(...names.refused.map((x) => `${x.line} (the repo's visibility is unknown, which counts as not private)`));
+  }
+  r.warnings.push(...exteriorWords(text, block).map(exteriorWordLine));
+  return r;
 }
 // validate's lines for the working tree's exterior.md: the contract and the quotes, and the blobs at
 // the draft (exteriorAtDraft); none when there is no file. Never the names rule.
