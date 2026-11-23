@@ -659,7 +659,7 @@ test('org-access A3: in Chrome, a member\'s Settings has no People section; the 
 // C25, its first half: Your sign-in as the mock words it, on a real gateway
 const dMon = (iso) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 const methodRows = `[...document.querySelectorAll('#hub-settings .set-row.method')].map((r) => r.textContent)`;
-const toast = `document.querySelector('.oa-toast.on')?.textContent ?? ''`;
+const toast = `(document.querySelector('.oa-toast.on')?.textContent ?? '')`;
 const removeOf = (label) => `[...document.querySelectorAll('#hub-settings .set-row.method')].find((r) => r.querySelector('.t').textContent.endsWith(${JSON.stringify(label)}))?.querySelector('button')?.click() ?? 'none'`;
 // a second passkey for the owner, as the claim stores one (top-level `passkeys`)
 function secondOwnerKey(gw, name = 'Phone') {
@@ -693,6 +693,7 @@ test('org-access A3: in Chrome, Your sign-in works as the mock does', CHROME, as
   // the owner's only passkey: refused in the hub, nothing sent
   const p = await hubAs(t, B, B.owner);
   await p.until('the owner\'s Your sign-in', `document.querySelectorAll('#hub-settings .set-row.method').length === 1`);
+  assert.equal(await p.ev(`document.querySelector('#hub-settings .oa-intro').textContent`), 'Any of these signs you in to this box as you. Today a sign-in method is a passkey; other ways to sign in can be added here later. Keep at least one, and as the owner, at least one passkey.', 'the owner\'s intro');
   const only = B.gw.state().passkeys[0];
   assert.match((await p.ev(methodRows))[0], new RegExp(`^Passkey · ${only.name}added ${dMon(only.createdAt)} · used `), 'the owner\'s row');
   await p.ev(removeOf(only.name));
