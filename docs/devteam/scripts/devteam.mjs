@@ -9761,7 +9761,8 @@ function cmdThread() {
       if (by && replyWriter() && ['supervisor', 'responder'].includes(process.env.DEVTEAM_ROLE) && v.status === 'open' && last?.by === 'owner') markThreadWorking(t.id, { by, stage: 'picked-up', turn: last.id }, { pickup: true });
     } catch {}
     if (flags.json) return json(v);
-    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${waitingWords(v)}` : ''}`);
+    // an overdue turn the responder has is now the supervisor's to take: show says so, as list --waiting does
+    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${waitingWords(v, v.waiting === 'responder' && responderOverdue(readLog().objects).some((o) => o.thread === v.id))}` : ''}`);
     out(threadDataFrame(v));
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
@@ -16748,8 +16749,9 @@ function collectMetrics(since, reviewsSince = 0) {
   // or with no route (kit-104): a turn the responder has is never the supervisor's to wait on, and
   // a later turn of the responder's never restarts the clock. By id only: a subject's title may be page-written.
   const logNow = readLog().objects;
+  const turnsNow = turnsByThread(logNow);
   for (const x of threadsNow.filter((y) => y.status === 'open' && y.waiting === 'supervisor')) {
-    const first = owedTurns(x.id, logNow).find((u) => u.routed_to !== 'responder');
+    const first = owedIn(turnsNow.get(x.id) ?? [], logNow.get(x.id)).find((u) => u.routed_to !== 'responder');
     if (!first) continue;
     const ago = now - Date.parse(first.created_at);
     if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
@@ -16758,7 +16760,7 @@ function collectMetrics(since, reviewsSince = 0) {
   // pending turn with nothing after it past RESPONDER_PENDING_MS; high, so wait brings the supervisor,
   // which takes it (and every turn routes to it until it is answered). From the log alone, so an
   // answer or a resolve clears it. By id only.
-  for (const o of responderOverdue(logNow, now)) add('high', 'responder-overdue', o.thread, o.why === 'owed' ? `the owner's turn ${o.turn} went to the responder ${o.min} min ago and has no answer` : `the responder's pending reply ${o.turn} has had nothing after it for ${o.min} min`, `answer it in the thread (thread show ${o.thread}, then thread reply ${o.thread}), then look at the responder (responder --resume)`);
+  for (const o of responderOverdue(logNow, now, turnsNow)) add('high', 'responder-overdue', o.thread, o.why === 'owed' ? `the owner's turn ${o.turn} went to the responder ${o.min} min ago and has no answer` : `the responder's pending reply ${o.turn} has had nothing after it for ${o.min} min`, `answer it in the thread (thread show ${o.thread}, then thread reply ${o.thread}), then look at the responder (responder --resume)`);
   // Down or stuck: only while settings.responder is on, the fleet's session is up and the fleet is
   // neither parked nor draining (a park stops it on purpose; a drain refuses its start), so a project
   // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
@@ -33167,8 +33169,9 @@ function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(ob
   }
   return found;
 }
-// The open handoffs to the supervisor, by thread: the newest one per thread not settled by a
-// supervisor turn after it (settledByLanding) and named by no reply's re. Map thread -> message id.
+// The open handoffs to the supervisor, by thread: of those not settled by a supervisor turn after
+// it (settledByLanding) and named by no reply's re, the newest per thread (an older one when the
+// newest was answered). Map thread -> message id.
 function openHandoffs(objects = readLog().objects) {
   const replied = new Set([...objects.values()].filter((o) => o.type === 'message' || o.type === 'question').map((o) => o.re).filter(Boolean));
   const m = new Map();

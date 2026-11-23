@@ -438,6 +438,12 @@ test('responder routing (kit-104)', { skip: NO_TMUX, timeout: 280000 }, async (t
     assert.equal(tCardState({ turns: [turnAt(1, { routed_to: 'responder', delivered: 'typed' })] }, Date.now(), undefined, true, sup), 'Sent to the responder.');
     assert.equal(tCardState({ turns: [turnAt(1, { routed_to: 'responder', delivered: 'queued' })] }, Date.now(), undefined, true, sup), 'The responder is busy; it takes this next.');
     assert.equal(tCardState({ turns: [turnAt(11, { routed_to: 'responder', delivered: 'typed' })] }, Date.now(), undefined, true, sup), "The responder hasn't replied yet.");
+    // end to end (plan T8): a queued turn from thread say, read back through thread show --json
+    const { T } = F.thread('Card, busy');
+    const q = F.say(T, 'card, queued words');
+    const v = F.show(T).turns.find((u) => u.id === q.U);
+    assert.equal(v?.delivered, 'queued', 'the view turn carries delivered');
+    assert.equal(tCardState({ turns: [v] }, Date.now(), undefined, true, sup), 'The responder is busy; it takes this next.', 'the landed queued turn reads the busy words');
   });
   await it('C3 tlSend maps the send\'s words: responder, queued, responder-late (its hold or failed typing), and today\'s values', () => {
     const fn = html.slice(html.indexOf('function tlSend('), html.indexOf('\n}\n', html.indexOf('function tlSend(')));

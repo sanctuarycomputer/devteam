@@ -8905,6 +8905,17 @@ function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.su
     const who = typeof b !== 'string' || !b ? 'A session' : b === 'supervisor' ? 'The supervisor' : b === 'responder' ? 'The responder' : plan ? `The planner for ${plan[1]}` : `The session on ${b}`;
     return w.stage === 'responding' ? `${who} is responding…` : `${who} picked it up.`;
   }
+  // a turn routed to the responder (kit-104): the landed turn's route says so (a turn in the log is
+  // the server's record's to say), else the page's own send; the responder's hold or failed typing
+  // stays late until a reply. Never "Not delivered" nor the supervisor's hold for it.
+  const landed = /^u-/.test(last.id ?? '');
+  const r = landed ? (last.routed_to === 'responder' ? (typed === 'responder-late' ? 'responder-late' : last.delivered === 'queued' ? 'queued' : 'responder') : null)
+    : typed === 'responder' || typed === 'queued' || typed === 'responder-late' ? typed : null;
+  if (r) {
+    if (now - Date.parse(last.at) > T_WAIT_MS) return "The responder hasn't replied yet.";
+    if (r === 'responder-late') return "The responder hasn't taken it yet; the supervisor takes it if it waits 3 minutes.";
+    return r === 'queued' ? 'The responder is busy; it takes this next.' : 'Sent to the responder.';
+  }
   // its terminal is asking a question: these words wait, and are never the answer to it
   if (typed === 'held' && pane) return "Held: the supervisor's terminal is asking something, and these words must not answer it. They reach the supervisor once it is answered (see the card).";
   // missed: a turn in the log is the server's record's to say (typed is the thread's last send, and
@@ -9921,7 +9932,7 @@ function tlSend() {
       if (!p.real) p.real = String(out.out || '').split('\n')[0].trim();
       // files dropped while the thread was being started go on with it, under its id (the box's key too)
       if (p.real && p.real !== p.thread) moveAttach(`tl:${p.thread}`, `tl:${p.real}`);
-      TL.typed[p.real] = /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || '');
+      TL.typed[p.real] = /(^|\n)(recorded and held: the responder's|not delivered to the responder)/.test(out.out || '') ? 'responder-late' : /(^|\n)sent to the responder/.test(out.out || '') ? 'responder' : /(^|\n)the responder is busy/.test(out.out || '') ? 'queued' : /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || '');
       if (TL.open === p.thread && p.real !== p.thread) {
         TL.open = p.real;
         // the card is this thread's under its id now, as it is: words typed since Send (kept under the pending
