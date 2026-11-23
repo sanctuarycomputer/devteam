@@ -61,6 +61,14 @@ test('responder routing (kit-104)', { skip: NO_TMUX, timeout: 280000 }, async (t
     assert.equal(routed(a.U), 'supervisor', 'routed_to never changes');
     assert.match(F.sup(['thread', 'list', '--waiting']), new RegExp(`^${T} \\[open, waiting on the supervisor\\]`, 'm'), 'still the supervisor\'s to answer');
   });
+  await it('R2d thread show prints each owner turn\'s route (task-6 review F1)', () => {
+    const { T, U } = F.thread('Shown routed');
+    ask(T);
+    const a = F.say(T, 'Purple');
+    const shown = F.sup(['thread', 'show', T]);
+    assert.match(shown, new RegExp(`owner \\(${U}\\), routed to the responder:`), 'the first turn, the responder\'s');
+    assert.match(shown, new RegExp(`owner \\(${a.U}\\), routed to the supervisor:`), 'the answer to its question, the supervisor\'s');
+  });
   await it('R3a a thread whose subject is an open question: supervisor', () => {
     const { U } = F.thread('On a question', `question:${inboxAsk()}`);
     assert.equal(routed(U), 'supervisor');

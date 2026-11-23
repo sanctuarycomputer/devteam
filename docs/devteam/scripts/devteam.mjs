@@ -9784,7 +9784,8 @@ function cmdThread() {
     const lines = readLog().objects;
     for (const u of v.turns) {
       // the responder's turns name it (the view keeps them on the supervisor's side); a pending one says so
-      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${u.question ? `, asking ${u.question}` : ''}:`);
+      // an owner turn names its route (kit-104), so the responder can see which turns are the supervisor's
+      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${u.routed_to ? `, routed to the ${u.routed_to}` : ''}${u.question ? `, asking ${u.question}` : ''}:`);
       // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
       // (an escape, a bidi override, a CR)
       out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
@@ -33217,7 +33218,8 @@ function nudgeResponder(now = Date.now()) {
   if (!responderIdle(objects, now)) return false;
   let at = 0;
   try { at = Date.parse(JSON.parse(readText(RESPONDER_NUDGE_FILE) ?? 'null')?.at) || 0; } catch {}
-  if (now - at < RESPONDER_NUDGE_MS) return false;
+  // a time in the future (the clock stepped back) is no record, so it can't hold the nudge off for long
+  if (at <= now && now - at < RESPONDER_NUDGE_MS) return false;
   const h = responderHealth();
   if (!h.target || h.stuck) return false;
   if (!typeInto(h.target, RESPONDER_NUDGE)) return false;
