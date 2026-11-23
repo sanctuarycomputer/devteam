@@ -14551,6 +14551,10 @@ async function cmdObserveMetrics() {
   out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
   // finished worktrees go, at most every 30 minutes (one line when any did)
   tidyFinishedWorktrees();
+  // the hub's cache, again after everything the tick wrote, from the log read afresh, so nothing
+  // the tick wrote is newer than it (next-moves)
+  logCache = null;
+  writeMovesCache();
 }
 // The tick's fetch of each repo link's main (home's is the tick's own git fetch), four at a time
 // inside the tick's budget, so status, metrics and the dashboard read every repo's main as its
@@ -17983,7 +17987,10 @@ function collectMetrics(since, reviewsSince = 0) {
   // in ready's order, so the workers it names first are fixes, then what a higher-priority goal waits on
   const prio = effectivePriorities(ts);
   const sevOf = (t) => { const inc = t.kind === 'fix' ? incidentOfTicket(t.id) : null; return inc ? incidentSeverity(inc) : 0; };
-  const startable = ready.filter((t) => !overlapsActive(t, activeIds, ts).length).map((t) => ({ t, kind: t.kind, severity: sevOf(t), priority: prio.get(t.id)?.priority })).sort(readyOrder).map((x) => x.t);
+  // and none its component's cap holds back, as the ticket rows' T12 reads it (a-20261123-192551256-supervisor);
+  // memory stays out of this list: memory-full speaks for it
+  const componentFull = (t) => activeIds.filter((x) => ts.get(x)?.component === t.component).length >= capOf(settings.max_active_per_component);
+  const startable = ready.filter((t) => !overlapsActive(t, activeIds, ts).length && !componentFull(t)).map((t) => ({ t, kind: t.kind, severity: sevOf(t), priority: prio.get(t.id)?.priority })).sort(readyOrder).map((x) => x.t);
   // a ready fix ticket may use an incident slot past the cap
   const readyFix = startable.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
   if (!drained && readyFix.length && active >= capOf(settings.max_active_tickets) && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${capWords(settings.max_active_tickets)} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
@@ -18221,6 +18228,10 @@ function collectMetrics(since, reviewsSince = 0) {
     }
   }
   linkDutyFindings(settings, now, add);
+  // The move findings come last: a move is covered by what the run raised above (next-moves).
+  const moves = nextMoves();
+  for (const x of moveFindings(moves, f, now)) add(x.severity, x.kind, x.subject, x.detail, x.suggestion);
+  writeMovesCache(moves);
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
@@ -18454,6 +18465,7 @@ function waitCause(ref) {
 // values chore: branch | ahead | pr | for
 // values wait.state: open | resolved | failed
 function nextMoves() {
+  movesReadAt();
   return memo('next-moves', () => [...goalMovesNow(), ...ticketMoves().values(), ...planners().map(plannerMove)]);
 }
 // The two thresholds, as numbers: a setting that isn't a number of zero or more counts as its default.
@@ -18784,6 +18796,44 @@ function cmdMoves() {
     for (const m of mine) L.push(`  ${m.subject}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`);
   }
   out(L.join('\n'));
+}
+// The three move findings, from the moves and the findings already raised in the same run: a pure
+// function of the two (and the clock), so a test can load it on its own. Only a move's own subject
+// raises one: never a quiet move (it waits on purpose), never a copied one (via: its source raises
+// it). A move is covered when a finding its covered_by names was raised in the run, on that subject
+// or, for "*", on any; a covered move raises nothing, though it keeps its flag. By the move's flag:
+// none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1) move-owed, stalled
+// (rung 2) move-stalled; each is high, so wait wakes on it. The finding's subject is
+// "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move or a new
+// ref is a new finding.
+function moveFindings(moves, raised, now = Date.now()) {
+  const covered = (m) => (m.covered_by ?? []).some((c) => raised.some((f) => f.kind === c.kind && (c.subject === '*' || String(f.subject) === c.subject)));
+  const ageOf = (since) => { const t = Date.parse(since); if (Number.isNaN(t)) return 'since ?'; const min = Math.max(0, Math.floor((now - t) / 60000)); return min < 120 ? `${min} min` : min < 2880 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`; };
+  const KIND = { none: 'no-next-move', owed: 'move-owed', stalled: 'move-stalled' };
+  const stalledHint = (m) => (m.holder === 'owner' ? 'remind the owner what it holds up; a question that needn\'t be the owner\'s is withdrawn and decided (W1)'
+    : m.holder === 'supervisor' ? `${m.command ? `${m.command}: ` : ''}do it, or record why it waits (ack with a reason)`
+      : 'look at its pane (capture it), and unstick it or record why it waits');
+  const out = [];
+  for (const m of moves) {
+    const kind = KIND[m.flag];
+    if (!kind || m.quiet || m.via || covered(m)) continue;
+    const subject = `${m.subject} ${m.move}:${m.ref?.id ?? ''}`;
+    const detail = `${m.title}: ${m.words} (${m.holder === 'nobody' ? 'no row knows this state' : `held by the ${m.holder}`}, ${ageOf(m.since)})`;
+    const suggestion = kind === 'no-next-move' ? 'work out the move by hand, and file the missing row as a kit lesson (knowledge add --kit)'
+      : kind === 'move-owed' ? (m.command ?? 'do it, or record why it waits (ack with a reason)') : stalledHint(m);
+    out.push({ severity: 'high', kind, subject, detail, suggestion });
+  }
+  return out;
+}
+// The hub's cache (next-move@1's fourth place): the goals' moves, with at the time the log they
+// come from was read, so a line written after that read is newer than the cache.
+// collectMetrics writes it each run, and observe-metrics again as its last step, from a fresh read
+// after every line the tick wrote. A write that fails costs one tick's view, never the run.
+// when the log the moves come from was read: taken on that same read, just after it
+const movesReadAt = () => memo('next-moves-at', nowIso);
+const MOVES_CACHE = () => path.join(runPath('cache'), 'next-moves.json');
+function writeMovesCache(moves = nextMoves(), at = movesReadAt()) {
+  try { writeJson(MOVES_CACHE(), { next_move: 1, at, moves: moves.filter((m) => m.subject.startsWith('goal:')) }); } catch {}
 }
 /* next-moves end */
 // Per-ticket progress data for the burn-up, board and roadmap.
