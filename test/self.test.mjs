@@ -254,7 +254,7 @@ test('the names rule: self check warns on a capitalised word main\'s strategy an
     // Postwick is in the working tree's strategy but not main's
     write(path.join(W.old, STRAT), `${STRATEGY}\nMail goes through Postwick.\n`);
     write(path.join(W.old, SELF), withBlock((v) => { v.not.push('Stripe'); v.parts[1].what = 'Keeps notes the same through Postwick and Ferrous.'; v.parts[2].name = 'Vellum plugins'; })
-      .replace('It controls its code', 'Brightline hosts it. It mails through Postwick, Inkpad and Quillsync, and `Zephyr` runs it.\n\nThe notes sync\nthrough Brightline today.\n\nIt controls its code'));
+      .replace('It controls its code', 'Brightline hosts it. It mails through Postwick, Inkpad and Quillsync, and `Zephyr` runs it.\n\nThe notes sync through\nBrightline today.\n\nIt controls its code'));
     const c = W.run(['self', 'check']);
     assert.equal(c.status, 0, `C13 a names warning leaves self check's exit at 0\n${c.text}`);
     const warned = [...c.out.matchAll(/warning: self\.md: "([^"]+)" \(([^)]+)\)/g)].map((m) => `${m[1]} ${m[2]}`);
