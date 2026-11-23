@@ -9349,15 +9349,18 @@ function threadViews(objects) {
   }
   return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime)));
 }
-// waiting: whose move it is (the owner's when the newest turn is the supervisor's or there is none).
+// waiting: whose reply is owed (supervisor, responder), or the owner's move (owedIn).
 // ready: the supervisor's proposal, until the owner says anything after it (a turn, a resolve or a
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
 function threadView(t, ts, qs) {
   // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [] }));
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], ...(u.created_by === 'owner' ? { routed_to: u.routed_to === 'supervisor' || u.routed_to === 'responder' ? u.routed_to : null, delivered: u.delivered === 'typed' || u.delivered === 'queued' ? u.delivered : null } : {}) }));
+  // whose reply is owed (owedIn, kit-104): the supervisor's when a turn routed to it, or with no
+  // route, is owed; else the responder's when one routed to it is; else the owner's move
+  const owed = owedIn(ts, t);
+  const waiting = owed.some((u) => u.routed_to !== 'responder') ? 'supervisor' : owed.length ? 'responder' : 'owner';
   const status = t.status === 'resolved' ? 'resolved' : 'open';
-  const last = turns[turns.length - 1] ?? null;
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
   const ownerSince = !!proposed && (turns.some((u) => u.by === 'owner' && u.at > proposed.at) || t.updates.some((u) => u.status !== undefined && u.at > proposed.at));
   const ready = status === 'open' && proposed && !ownerSince && isObj(t.ready) && typeof t.ready.outcome === 'string' ? { outcome: t.ready.outcome, at: proposed.at } : null;
@@ -9365,7 +9368,7 @@ function threadView(t, ts, qs) {
   const firstReply = firstOwner ? turns.find((u) => u.by === 'supervisor' && u.at > firstOwner.at) : null;
   return {
     id: t.id, title: String(t.title ?? ''), subject: isObj(t.subject) ? t.subject : null, status, outcome: status === 'resolved' ? t.outcome ?? null : null, ready,
-    turns, questions: qs.map(threadQuestion), waiting: last?.by === 'owner' ? 'supervisor' : 'owner',
+    turns, questions: qs.map(threadQuestion), waiting,
     created_at: t.created_at, resolved_at: status === 'resolved' ? t.updates.filter((u) => u.status === 'resolved').pop()?.at ?? null : null,
     activity_at: [t.created_at, ...turns.map((u) => u.at), ...t.updates.map((u) => u.at)].sort().pop(),
     first_reply_ms: firstReply ? Date.parse(firstReply.at) - Date.parse(firstOwner.at) : null,
@@ -9384,11 +9387,12 @@ function subjectWords(s) {
 }
 // The bare ids a subject names, as observation refs are elsewhere.
 const subjectIds = (s) => (!isObj(s) ? [] : s.kind === 'item' && SUBJECT_REF.test(s.ref ?? '') ? [s.ref.slice(s.ref.indexOf(':') + 1)] : s.kind === 'artifact' ? [s.slug] : s.kind === 'preview' ? [s.name] : []).filter((x) => typeof x === 'string');
-// An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), as one
+// An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), or into
+// the pane given (the responder's, kit-104), as one
 // line: a newline typed with send-keys -l would press Enter mid-message, and a control character
 // would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed.
-function deliverOwnerTurn(t, text, files) {
-  const { target, problem } = resolvePane(supervisorTarget());
+function deliverOwnerTurn(t, text, files, pane = supervisorTarget()) {
+  const { target, problem } = resolvePane(pane);
   if (problem) return false;
   const flat = text.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
@@ -9549,7 +9553,18 @@ function cmdThread() {
   // An owner's turn typed into the supervisor's pane, or held for it; one no terminal took is
   // recorded (UNDELIVERED_FILE, under its lock; entries over 7 days dropped) for the card and
   // undeliveredTurns. The words say which.
-  const deliver = (t, u, words, files) => {
+  // A turn routed to the responder (kit-104): typed into its pane when it was idle, else queued
+  // (typed into neither pane); never recorded as undelivered, since responder-overdue reaches the
+  // supervisor once it is RESPONDER_OVERDUE_MS old.
+  const deliver = (t, u, words, files, route = { to: 'supervisor' }) => {
+    if (route.to === 'responder') {
+      if (route.delivered === 'queued') return 'the responder is busy; it takes this next';
+      const pane = responderWindow().target;
+      const typed = deliverOwnerTurn(t, words, files, pane);
+      if (typed === true) return 'sent to the responder';
+      if (typed) return heldWords(typed, "the responder's");
+      return `not delivered to the responder: ${resolvePane(pane).problem ?? 'the typing failed'}; it stays owed, and the supervisor takes it once it is ${RESPONDER_OVERDUE_MS / 60000} minutes old`;
+    }
     const typed = deliverOwnerTurn(t, words, files);
     if (typed === false) withLock(UNDELIVERED_FILE, () => {
       const m = undeliveredTurns(Date.now(), { entries: true });
@@ -9577,6 +9592,8 @@ function cmdThread() {
   // comes in its usual order.
   const alone = (i) => (!wordsFrom(i) && flags.files !== undefined ? filesFlag() : undefined);
   const filled = (i, early) => (early ? `${plural(early.length, 'file')} dropped` : wordsFrom(i));
+  // routed_to (and delivered, the responder's) for an owner's turn line (kit-104)
+  const routedFields = (r) => ({ routed_to: r.to, ...(r.to === 'responder' ? { delivered: r.delivered } : {}) });
   if (sub === 'new') {
     const { by } = threadOwner();
     const early = alone(1);
@@ -9602,12 +9619,14 @@ function cmdThread() {
     if (had) die(`${had.id} is already open on this subject: say it there (thread say ${had.id} "<words>")`);
     const n = openThreadCount(views);
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
-    // both lines checked before the thread's is written: a refused first turn leaves no thread with none
-    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
+    // routed before either line is written (kit-104), and both lines checked with the route on the
+    // turn's: a refused first turn leaves no thread with none
+    const route = responderRoute({ subject });
+    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(FILES_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
-    const u = appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
+    const u = appendLog({ type: 'turn', thread: t.id, text: words, files, ...routedFields(route) }, by);
     out(t.id);
-    return out(deliver(t, u, words, files));
+    return out(deliver(t, u, words, files, route));
   }
   // say is the owner's and reply the supervisor's or the responder's, never one falling through to the
   // other: a reply with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the
@@ -9632,18 +9651,27 @@ function cmdThread() {
     const files = early ?? filesFlag();
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
-    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined };
+    // the owner's turn is routed before its line is written (kit-104), and the size check sees the route
+    const route = by === 'owner' ? responderRoute(t) : null;
+    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined, ...(route ? routedFields(route) : {}) };
     if ((refs.length || line.pending) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
     if (by !== 'owner') {
       const objects = readLog().objects;
       if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
       // the owner's turns this reply answers, before it is written: on stderr, so the id stays the first line out
-      for (const o of owedTurns(t.id, objects)) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+      for (const o of owedTurns(t.id, objects).filter((o) => answersTurn(o, by))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+      // and the responder's open promise it closes (pendingOpen), so the supervisor sees it takes that
+      // work over: the responder's follow-up is refused after it (final-3 F2, final-3b F1)
+      if (by === 'supervisor') {
+        const ts = logTurns(t.id, objects);
+        const p = pendingOpen(ts, objects.get(t.id));
+        if (p && !pendingOpen([...ts, { created_by: 'supervisor', created_at: nowIso() }], objects.get(t.id))) process.stderr.write(`taking over ${p.id}: "${turnGist(p.text)}"\n`);
+      }
     }
     const u = appendLog(line, by);
     out(u.id);
-    if (by === 'owner') out(deliver(t, u, words, files));
+    if (by === 'owner') out(deliver(t, u, words, files, route));
     else spoke(t);
     return;
   }
@@ -9686,6 +9714,9 @@ function cmdThread() {
     } else for (const k of ['seen-turn', 'at']) if (flags[k] !== undefined) die(`thread ask --${k} goes with --turn <u-id>`);
     if (encodedBytes(capBytes(`${lead}${flagStr('question') ?? ''}`, TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
     const q = askLine({ thread: t.id, about });
+    // the question's turn answers every owed owner turn before it, as a reply does (final-1b F1): named
+    // on stderr before it is written, so the supervisor sees each one, the responder's included
+    for (const o of owedTurns(t.id).filter((o) => answersTurn(o, 'supervisor'))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
     appendLog({ type: 'turn', thread: t.id, text: capBytes(`${lead}${q.question}`, TURN_MAX), question: q.id }, 'supervisor');
     out(q.id);
     spoke(t);
@@ -9739,10 +9770,12 @@ function cmdThread() {
     if (words) turnText(words);
     const n = openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
+    // its words routed before either line is written (kit-104), as the thread will be once open
+    const route = words ? responderRoute(t) : null;
     appendLog({ type: 'thread', op: 'set', id: t.id, status: 'open' }, by);
-    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words }, by) : null;
+    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words, ...routedFields(route) }, by) : null;
     out(`reopened ${t.id}`);
-    if (words) return out(deliver(t, u, words));
+    if (words) return out(deliver(t, u, words, undefined, route));
     return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
   // The session holding the owner's turn says it is on it; the card says so until it replies.
@@ -9779,7 +9812,8 @@ function cmdThread() {
       if (by && replyWriter() && ['supervisor', 'responder'].includes(process.env.DEVTEAM_ROLE) && v.status === 'open' && last?.by === 'owner') markThreadWorking(t.id, { by, stage: 'picked-up', turn: last.id }, { pickup: true });
     } catch {}
     if (flags.json) return json(v);
-    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}`);
+    // an overdue turn the responder has is now the supervisor's to take: show says so, as list --waiting does
+    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${waitingWords(v, v.waiting === 'responder' && responderOverdue(readLog().objects).some((o) => o.thread === v.id))}` : ''}`);
     out(threadDataFrame(v));
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
@@ -9787,7 +9821,8 @@ function cmdThread() {
     const lines = readLog().objects;
     for (const u of v.turns) {
       // the responder's turns name it (the view keeps them on the supervisor's side); a pending one says so
-      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${u.question ? `, asking ${u.question}` : ''}:`);
+      // an owner turn names its route (kit-104), so the responder can see which turns are the supervisor's
+      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${u.routed_to ? `, routed to the ${u.routed_to}` : ''}${u.question ? `, asking ${u.question}` : ''}:`);
       // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
       // (an escape, a bidi override, a CR)
       out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
@@ -9807,12 +9842,28 @@ function cmdThread() {
       for (const x of q) out(`${x.turn} in ${x.thread} (${Math.max(0, Math.round((Date.now() - Date.parse(x.at)) / 60000))} min) "${turnGist(x.text)}"`);
       return;
     }
-    let vs = threadViews(readLog().objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
-    if (flags.waiting) vs = vs.filter((x) => x.status === 'open' && x.waiting === 'supervisor');
-    else if (!flags.all) vs = vs.filter((x) => x.status === 'open');
+    const objects = readLog().objects;
+    let vs = threadViews(objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
+    const row = (x, words) => `${x.id} [${x.status}${words ? `, ${words}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`;
+    if (flags.waiting) {
+      // the supervisor's: an owed turn routed to it (or with no route) or an open handoff naming the
+      // thread; then the threads the responder has, marked so and never also as the supervisor's
+      // (kit-104). --json lists the supervisor's only, each with its open handoff's id or null.
+      const handoffs = openHandoffs(objects);
+      const late = new Set(responderOverdue(objects).map((o) => o.thread));
+      const open = vs.filter((x) => x.status === 'open');
+      const mine = open.filter((x) => x.waiting === 'supervisor' || handoffs.has(x.id));
+      const theirs = open.filter((x) => x.waiting === 'responder' && !handoffs.has(x.id));
+      if (flags.json) return json(mine.map((x) => ({ ...x, handoff: handoffs.get(x.id) ?? null })));
+      if (!mine.length) out('no thread is waiting on the supervisor');
+      for (const x of mine) out(row(x, `waiting on the supervisor${handoffs.has(x.id) ? ` · handoff ${handoffs.get(x.id)}` : ''}`));
+      for (const x of theirs) out(row(x, waitingWords(x, late.has(x.id))));
+      return;
+    }
+    if (!flags.all) vs = vs.filter((x) => x.status === 'open');
     if (flags.json) return json(vs);
-    if (!vs.length) return out(flags.waiting ? 'no thread is waiting on the supervisor' : flags.all ? 'no threads' : 'no open threads');
-    for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
+    if (!vs.length) return out(flags.all ? 'no threads' : 'no open threads');
+    for (const x of vs) out(row(x, x.status === 'open' ? waitingWords(x) : ''));
     return;
   }
   die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
@@ -16746,10 +16797,29 @@ function collectMetrics(since, reviewsSince = 0) {
   // A thread answer whose cited turn doesn't bear it out: a record for the owner to look at, never a block.
   for (const x of threadAnswersUnbound()) add('medium', 'thread-answer-unbound', x.id, `recorded from a thread as the owner's words, but it ${x.why}`, 'check it on the dashboard; if the owner never said it, correct the answer');
   // A thread the owner wrote in that has waited over 10 minutes for the supervisor: a reply dropped,
-  // or the supervisor busier than it said. By id only: a subject's title may be page-written.
+  // or the supervisor busier than it said. Timed from its oldest owed turn routed to the supervisor
+  // or with no route (kit-104): a turn the responder has is never the supervisor's to wait on, and
+  // a later turn of the responder's never restarts the clock. By id only: a subject's title may be page-written.
+  const logNow = readLog().objects;
+  const turnsNow = turnsByThread(logNow);
   for (const x of threadsNow.filter((y) => y.status === 'open' && y.waiting === 'supervisor')) {
-    const ago = now - Date.parse(x.turns[x.turns.length - 1].at);
+    const first = owedIn(turnsNow.get(x.id) ?? [], logNow.get(x.id)).find((u) => u.routed_to !== 'responder');
+    if (!first) continue;
+    const ago = now - Date.parse(first.created_at);
     if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
+  }
+  // The responder (kit-104). Overdue: a turn routed to it still owed past RESPONDER_OVERDUE_MS, or its
+  // pending turn not followed up past RESPONDER_PENDING_MS (pendingOpen); high, so wait brings the supervisor,
+  // which takes it (and every turn routes to it until it is answered). From the log alone, so an
+  // answer or a resolve clears it. By id only.
+  for (const o of responderOverdue(logNow, now, turnsNow)) add('high', 'responder-overdue', o.thread, o.why === 'owed' ? `the owner's turn ${o.turn} went to the responder ${o.min} min ago and has no answer` : `the responder's pending reply ${o.turn} has had no follow-up for ${o.min} min`, `answer it in the thread (thread show ${o.thread}, then thread reply ${o.thread}), then look at the responder (responder --resume)`);
+  // Down or stuck: only while settings.responder is on, the fleet's session is up and the fleet is
+  // neither parked nor draining (a park stops it on purpose; a drain refuses its start), so a project
+  // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
+  if (settings.responder !== false && fleetMode() !== 'park' && !draining()) {
+    const h = responderHealth();
+    if (h.session && h.problem) add('medium', 'responder-down', 'responder', `the responder isn't running: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
+    else if (h.stuck) add('medium', 'responder-stuck', 'responder', `the responder's pane is waiting on a prompt: "${h.stuck}"; the owner's turns go to the supervisor meanwhile`, `look (tmux select-window -t '${tmuxTarget(RESPONDER_NAME)}') and clear it, or responder --stop then responder`);
   }
   // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
   // it reaches past the stalled supervisor (hello's alert: machine status, the hub). By id only.
@@ -21060,6 +21130,9 @@ function cmdAccountsTick() {
   const session = tmuxSession();
   const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
   flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed.filter((n) => !(n === 'supervisor' && continued.has(n))), ...state.relaunched].map((n) => `${session}:${n}`)]);
+  // an idle responder with turns queued for it is told so, once a minute (kit-104); a failure here
+  // never stops the tick's own record
+  try { nudgeResponder(); } catch (e) { warn(`responder nudge: ${e?.message ?? e}`); }
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -29013,7 +29086,16 @@ function cmdWait() {
     else {
       // main's copy of the log as it is now: a wait can outlast many moves of main
       logCache = null;
-      const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      // not the owner's turns routed to the responder, nor the thread line (new, or a reopen) whose
+      // first owner turn at or after it is (kit-104): those are the responder's, and an overdue one
+      // comes back as responder-overdue. A thread line read before its turn is written wakes once.
+      const ls = readLog().lines.filter((l) => l.by === 'owner');
+      const turnsOf = new Map();
+      for (const l of ls) if (l.type === 'turn' && typeof l.thread === 'string') (turnsOf.get(l.thread) ?? turnsOf.set(l.thread, []).get(l.thread)).push(l);
+      for (const us of turnsOf.values()) us.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+      const opens = (l) => l.type === 'thread' && (l.op === 'new' || (l.op === 'set' && l.status === 'open'));
+      const responders = (l) => l.type === 'turn' ? l.routed_to === 'responder' : opens(l) && (turnsOf.get(l.id) ?? []).find((u) => u.at >= l.at)?.routed_to === 'responder';
+      const owner = ls.filter((l) => !responders(l)).map((l) => ({ k: l.id, at: Date.parse(l.at) }));
       const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
       const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
       last = got ? { key, owner, msgs } : null;
@@ -33054,25 +33136,56 @@ function responderWindowRefusal(w) {
 // A thread's turns from the log's own lines (created_by, created_at), never the view, which names
 // every non-owner turn the supervisor's; oldest first.
 const logTurns = (threadId, objects = readLog().objects) => [...objects.values()].filter((o) => o.type === 'turn' && o.thread === threadId).sort(byTime);
-// The owner's turns in a thread still owed an answer (the spine's single rule, as kit-103's
-// done-when 3 words it): any later non-owner turn answers an owner turn, and a resolve of the
-// thread after it leaves it owed nothing, by time, so a reopen with no words doesn't bring it back.
-// Every "the owner said it" here is a line's writer, never its text. routed_to plays no part yet:
-// kit-104, which writes it, brings it into the answered rule.
-function owedTurns(threadId, objects = readLog().objects) {
-  const ts = logTurns(threadId, objects);
-  const resolvedAt = (objects.get(threadId)?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
-  const answeredAt = ts.filter((u) => u.created_by !== 'owner').pop()?.created_at ?? '';
-  return ts.filter((u) => u.created_by === 'owner' && u.created_at > answeredAt && u.created_at > resolvedAt);
+// Whether a reply written by `by` answers the owner's turn u (the spine's Answered rule, kit-104):
+// a turn routed to the supervisor only by the supervisor; one routed to the responder by the
+// responder or the supervisor; one with no route (an older kit's) by any non-owner, as before.
+// Every "the owner said it" here is a line's writer (created_by), never its text.
+const answersTurn = (u, by) => by !== 'owner' && (!u.routed_to || by === 'supervisor' || by === u.routed_to);
+// The owner's turns still owed an answer, from a thread's turns (log lines, oldest first) and the
+// thread: an owner turn is answered by a turn in the thread at or after it (a tie answers) whose
+// writer answers it (answersTurn), and a resolve of the thread after it leaves it owed nothing, by
+// time, so a reopen with no words doesn't bring it back. One pure rule for the queue, idleness,
+// threadView.waiting, thread list --waiting, thread-waiting and responder-overdue (kit-104).
+function owedIn(ts, thread) {
+  const resolvedAt = (thread?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  return ts.filter((u) => u.created_by === 'owner' && String(u.created_at) > resolvedAt && !ts.some((w) => w.created_at >= u.created_at && answersTurn(u, w.created_by)));
+}
+// The owner's turns in a thread still owed an answer (owedIn on the log's own lines).
+const owedTurns = (threadId, objects = readLog().objects) => owedIn(logTurns(threadId, objects), objects.get(threadId));
+// The responder's open promise in a thread (final-1 F2, final-1b F2): its newest turn there is
+// pending, no resolve of the thread came after it, and no supervisor turn after it settled it. A
+// supervisor turn settles it unless it is a question, or it was written within RESPONDER_PENDING_MS
+// of the promise and every owed owner turn it answered came after the supervisor's own question asked
+// after the promise (its reply in that exchange answers the owner's answer, not the promise). Once the
+// promise is overdue any reply settles it: the supervisor takes it, as with an owed turn (final-2b
+// F1). A reply answering nothing owed takes it over too (the backstop). The turn, or null. On the
+// log's lines, oldest first.
+function pendingOpen(ts, thread) {
+  const mine = ts.filter((u) => u.created_by === 'responder').pop();
+  if (mine?.pending !== true) return null;
+  const resolvedAt = (thread?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  if (resolvedAt > String(mine.created_at)) return null;
+  const asked = ts.find((u) => u.created_by === 'supervisor' && u.question && u.created_at >= mine.created_at)?.created_at;
+  for (const s of ts) {
+    if (s.created_by !== 'supervisor' || s.created_at < mine.created_at || s.question) continue;
+    if (Date.parse(s.created_at) - Date.parse(mine.created_at) > RESPONDER_PENDING_MS) return null;
+    const answers = owedIn(ts.filter((u) => u.created_at < s.created_at), thread).filter((u) => answersTurn(u, 'supervisor'));
+    if (!asked || !answers.length || answers.some((u) => u.created_at < asked)) return null;
+  }
+  return mine;
 }
 // The responder's guard: since its own last turn in the thread (or ever, with none) the supervisor
 // has written, and the owner has said nothing after that. A reply then would answer what the
-// supervisor already answered (both backstop cases of the spine's Failure modes).
+// supervisor already answered (both backstop cases of the spine's Failure modes). Never while its
+// own promise there is open (pendingOpen): the follow-up it owes is its to write. After the
+// supervisor's own question (thread ask) only owner words routed to the responder lift it: the
+// owner's answer to that question is the supervisor's (final-3b F2).
 function supervisorAnswered(threadId, objects = readLog().objects) {
   const ts = logTurns(threadId, objects);
+  if (pendingOpen(ts, objects.get(threadId))) return false;
   const mine = ts.filter((u) => u.created_by === 'responder').pop()?.created_at ?? '';
   const sup = ts.filter((u) => u.created_by === 'supervisor').pop();
-  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at);
+  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at && (!sup.question || u.routed_to === 'responder'));
 }
 // A turn's first n characters on one line, for a terminal: control characters and runs of
 // whitespace as one space, … when cut.
@@ -33090,6 +33203,94 @@ function responderQueue(objects = readLog().objects) {
   }
   return q.sort((a, b) => a.at.localeCompare(b.at));
 }
+// kit-104: a turn routed to the responder still owed past this is overdue (the supervisor takes it,
+// and every turn after it until it is answered); so is the responder's pending turn not followed up
+// (pendingOpen) past RESPONDER_PENDING_MS, which is also how long a pending turn keeps it busy.
+const RESPONDER_OVERDUE_MS = 3 * 60000;
+const RESPONDER_PENDING_MS = 10 * 60000;
+// Every thread's turns from a fold's objects, oldest first, in one pass.
+function turnsByThread(objects) {
+  const m = new Map();
+  for (const o of objects.values()) if (o.type === 'turn' && typeof o.thread === 'string') (m.get(o.thread) ?? m.set(o.thread, []).get(o.thread)).push(o);
+  for (const ts of m.values()) ts.sort(byTime);
+  return m;
+}
+// Whether the responder can take a turn now, from tmux alone: { problem } (the fleet's session or
+// its window missing, its pane exited or at a shell; session says whether the fleet's session is
+// up), { stuck: line } (a blocked-prompt pattern, or a menu or dialog the kit reads, which would
+// hold a typed line), or { target } (an agent, asking nothing).
+function responderHealth() {
+  const w = responderWindow();
+  if (!w.has) return { problem: `no tmux session "${w.session}"`, session: false };
+  if (!w.there) return { problem: `no window ${w.shown}`, session: true };
+  const { target, problem } = resolvePane(w.target);
+  if (problem) return { problem, session: true };
+  const waits = paneWaitingIn(RESPONDER_NAME);
+  if (waits) return { stuck: waits.line, target, session: true };
+  const asking = paneAsking(target);
+  if (asking) {
+    const lines = String(asking.kind === 'menu' ? asking.question ?? '' : asking.text ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+    return { stuck: (lines.find((l) => ENTER_CONFIRMS.test(l)) ?? lines[0] ?? `a ${asking.kind}`).slice(0, 200), target, session: true };
+  }
+  return { target, session: true };
+}
+// Idle: no owner turn routed to it and typed is still owed, and its own newest turn (any thread)
+// is not a pending one under RESPONDER_PENDING_MS old. Turns queued for it never make it busy.
+function responderIdle(objects, now = Date.now(), byThread = turnsByThread(objects)) {
+  for (const [id, ts] of byThread) if (owedIn(ts, objects.get(id)).some((u) => u.routed_to === 'responder' && u.delivered === 'typed')) return false;
+  const mine = [...byThread.values()].flat().filter((u) => u.created_by === 'responder').sort(byTime).pop();
+  return !(mine?.pending === true && now - Date.parse(mine.created_at) < RESPONDER_PENDING_MS);
+}
+// The responder's overdue turns, per open thread: an owner turn routed to it, still owed, older
+// than RESPONDER_OVERDUE_MS; or its open promise (pendingOpen) older than RESPONDER_PENDING_MS.
+// [{ thread, turn, why, min }], from the log alone (owedIn), so an answer or a resolve clears it.
+function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(objects)) {
+  const found = [];
+  for (const [id, ts] of byThread) {
+    const t = objects.get(id);
+    if (t?.type !== 'thread' || t.status === 'resolved') continue;
+    const late = owedIn(ts, t).find((u) => u.routed_to === 'responder' && now - Date.parse(u.created_at) > RESPONDER_OVERDUE_MS);
+    if (late) { found.push({ thread: id, turn: late.id, why: 'owed', min: Math.floor((now - Date.parse(late.created_at)) / 60000) }); continue; }
+    const p = pendingOpen(ts, t);
+    if (p && now - Date.parse(p.created_at) > RESPONDER_PENDING_MS) found.push({ thread: id, turn: p.id, why: 'pending', min: Math.floor((now - Date.parse(p.created_at)) / 60000) });
+  }
+  return found;
+}
+// The open handoffs to the supervisor, by thread: of those not settled by a supervisor turn after
+// it (settledByLanding) and named by no reply's re, the newest per thread (an older one when the
+// newest was answered). Map thread -> message id.
+function openHandoffs(objects = readLog().objects) {
+  const replied = new Set([...objects.values()].filter((o) => o.type === 'message' || o.type === 'question').map((o) => o.re).filter(Boolean));
+  const m = new Map();
+  for (const o of [...objects.values()].filter((x) => x.type === 'message' && x.kind === 'handoff' && x.to === 'supervisor' && typeof x.thread === 'string').sort(byTime)) {
+    if (!replied.has(o.id) && !settledByLanding(o)) m.set(o.thread, o.id);
+  }
+  return m;
+}
+// The idle nudge (kit-104): when the responder's pane has an agent asking nothing, it is idle and its
+// queue isn't empty, the accounts tick types this line into it, at most once a minute
+// (RESPONDER_NUDGE_FILE, { at }, written after the typing: a crash between them costs one extra
+// nudge, never a turn). Never into a busy responder. Named at load, so the loose-file check knows it.
+const RESPONDER_NUDGE_FILE = runPath('responder-nudge.json');
+const RESPONDER_NUDGE = '[devteam responder] a turn is waiting — devteam.mjs thread list --waiting --responder';
+const RESPONDER_NUDGE_MS = 60000;
+function nudgeResponder(now = Date.now()) {
+  if (loadSettings().responder === false) return false;
+  const objects = readLog().objects;
+  if (!responderQueue(objects).length) return false;
+  if (!responderIdle(objects, now)) return false;
+  let at = 0;
+  try { at = Date.parse(JSON.parse(readText(RESPONDER_NUDGE_FILE) ?? 'null')?.at) || 0; } catch {}
+  // a time in the future (the clock stepped back) is no record, so it can't hold the nudge off for long
+  if (at <= now && now - at < RESPONDER_NUDGE_MS) return false;
+  const h = responderHealth();
+  if (!h.target || h.stuck) return false;
+  if (!typeInto(h.target, RESPONDER_NUDGE)) return false;
+  writeJsonAtomic(RESPONDER_NUDGE_FILE, { at: new Date(now).toISOString() });
+  return true;
+}
+// A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
+const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
 // Its help lines, in Setup and roles (HELP_SETUP reads them; this region sits above HELP).
 const RESPONDER_HELP = `  responder [--resume | --stop]   supervisor: the thread responder, a quick session that answers the owner's thread turns (window responder, .worktrees/responder at main, the owner's responder_command); --stop ends it, --resume restarts it in its window
   prompt responder   the responder's prompt: its section of supervisor.md (§13)`;
@@ -33181,6 +33382,39 @@ function cmdResponder() {
   }
 }
 /* responder-session end */
+// Who owes the reply to the owner's next turn in thread t (kit-104; the spine's routing rules 1, 3
+// and 4), worked out once, before the turn is written, and stored on it (routed_to, and delivered
+// for the responder); nothing recomputes it. t may be a thread not yet written ({ subject }).
+// { to: 'supervisor' } or { to: 'responder', delivered: 'typed' | 'queued', target }; why says why
+// the supervisor's. A subject naming a record not in the log takes the ordinary rules. Every "the
+// owner said it" here is a line's writer, never its text.
+function responderRoute(t, objects = readLog().objects, s = loadSettings(), now = Date.now()) {
+  const ownerCorrected = (r) => (r.updates ?? []).some((u) => u.corrected !== undefined && writerClass(u.by) === 'owner');
+  // 1: its own open question asked in the thread, or a subject still the supervisor's
+  if (t.id && [...objects.values()].some((o) => o.type === 'question' && o.thread === t.id && threadQuestion(o).status === 'open')) return { to: 'supervisor', why: 'its open question' };
+  const ref = isObj(t.subject) && t.subject.kind === 'item' && typeof t.subject.ref === 'string' ? t.subject.ref : '';
+  const rec = ref.includes(':') ? objects.get(ref.slice(ref.indexOf(':') + 1)) : null;
+  const kind = ref.slice(0, ref.indexOf(':'));
+  if (rec && rec.type === kind) {
+    if (kind === 'question' && threadQuestion(rec).status === 'open') return { to: 'supervisor', why: 'an open question' };
+    if (kind === 'decision' && !ownerCorrected(rec)) return { to: 'supervisor', why: 'an uncorrected decision' };
+    // the owner's own acts can't be corrected, so their threads take the ordinary rules; an act that
+    // carried out a decision follows that decision (F8-4)
+    if (kind === 'act' && rec.created_by !== 'owner') {
+      const d = typeof rec.decision === 'string' ? objects.get(rec.decision) : null;
+      if (!ownerCorrected(d?.type === 'decision' ? d : rec)) return { to: 'supervisor', why: 'an uncorrected act' };
+    }
+  }
+  // 2: the responder can't take it
+  if (s.responder === false) return { to: 'supervisor', why: 'the responder is off' };
+  const h = responderHealth();
+  if (h.problem) return { to: 'supervisor', why: h.problem };
+  if (h.stuck) return { to: 'supervisor', why: `the responder is stuck: ${h.stuck}` };
+  const byThread = turnsByThread(objects);
+  if (responderOverdue(objects, now, byThread).length) return { to: 'supervisor', why: 'a responder turn is overdue' };
+  // 3: the responder's, typed when idle
+  return { to: 'responder', delivered: responderIdle(objects, now, byThread) ? 'typed' : 'queued', target: h.target };
+}
 
 /* HELP start */
 /* helpSections start */
