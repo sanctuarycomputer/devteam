@@ -748,6 +748,128 @@
    "why": "thread\\.handed\\.by is not a field here",
    "readDropped": false
   },
+  "handed to not a session address": {
+   "task": 1,
+   "by": "owner",
+   "file": "owner-2026-11.jsonl",
+   "line": {
+    "v": 1,
+    "id": "t-20261120-100001000-owner",
+    "type": "thread",
+    "op": "set",
+    "handed": {
+     "to": "Plan_X",
+     "at": "2026-11-20T12:28:01.000Z"
+    },
+    "at": "2026-11-20T12:28:01.000Z",
+    "by": "owner",
+    "channel": "cli"
+   },
+   "why": "thread\\.handed\\.to \"Plan_X\" does not match",
+   "readDropped": false
+  },
+  "handed null": {
+   "task": 1,
+   "by": "owner",
+   "file": "owner-2026-11.jsonl",
+   "line": {
+    "v": 1,
+    "id": "t-20261120-100001000-owner",
+    "type": "thread",
+    "op": "set",
+    "handed": null,
+    "at": "2026-11-20T12:29:01.000Z",
+    "by": "owner",
+    "channel": "cli"
+   },
+   "why": "thread\\.handed must be object",
+   "readDropped": false
+  },
+  "shot h over 2160": {
+   "task": 1,
+   "by": "supervisor",
+   "file": "supervisor-2026-11.jsonl",
+   "line": {
+    "v": 1,
+    "id": "t-20261120-100001000-owner",
+    "type": "thread",
+    "op": "set",
+    "ready": {
+     "outcome": "Done.",
+     "at": "2026-11-20T12:30:01.000Z"
+    },
+    "shot": {
+     "stamp": "20261120-100500000",
+     "w": 480,
+     "h": 2161,
+     "src": "plan-pricing",
+     "sha": "3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f",
+     "dirty": false,
+     "anchor": "found",
+     "dark": true,
+     "sum": {
+      "light": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "dark": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+     }
+    },
+    "at": "2026-11-20T12:30:01.000Z",
+    "by": "supervisor"
+   },
+   "why": "thread\\.shot\\.h must be at most 2160",
+   "readDropped": false
+  },
+  "shot stamp not an id time": {
+   "task": 1,
+   "by": "supervisor",
+   "file": "supervisor-2026-11.jsonl",
+   "line": {
+    "v": 1,
+    "id": "t-20261120-100001000-owner",
+    "type": "thread",
+    "op": "set",
+    "ready": {
+     "outcome": "Done.",
+     "at": "2026-11-20T12:31:01.000Z"
+    },
+    "shot": {
+     "stamp": "2026-11-20",
+     "w": 480,
+     "h": 320,
+     "src": "plan-pricing",
+     "sha": "3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f",
+     "dirty": false,
+     "anchor": "found",
+     "dark": true,
+     "sum": {
+      "light": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "dark": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+     }
+    },
+    "at": "2026-11-20T12:31:01.000Z",
+    "by": "supervisor"
+   },
+   "why": "thread\\.shot\\.stamp \"2026-11-20\" does not match",
+   "readDropped": false
+  },
+  "addressed by the responder": {
+   "task": 1,
+   "by": "responder",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "m-20261120-123201000-responder",
+    "type": "message",
+    "op": "new",
+    "to": "owner",
+    "kind": "addressed",
+    "thread": "t-20261120-100001000-owner",
+    "text": "Trial button now says Start free trial.",
+    "at": "2026-11-20T12:32:01.000Z",
+    "by": "responder"
+   },
+   "why": "the responder sends handoff and info messages only",
+   "readDropped": true
+  },
   "unready without reason": {
    "task": 1,
    "by": "supervisor",
@@ -759,9 +881,9 @@
     "op": "set",
     "ready": null,
     "unready": {
-     "at": "2026-11-20T12:28:01.000Z"
+     "at": "2026-11-20T12:33:01.000Z"
     },
-    "at": "2026-11-20T12:28:01.000Z",
+    "at": "2026-11-20T12:33:01.000Z",
     "by": "supervisor"
    },
    "why": "thread\\.unready\\.reason is required",
@@ -773,14 +895,14 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-122901000-plan-pricing",
+    "id": "m-20261120-123401000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "owner",
     "kind": "addressed",
     "thread": "x-1",
     "text": "Trial button now says Start free trial.",
-    "at": "2026-11-20T12:29:01.000Z",
+    "at": "2026-11-20T12:34:01.000Z",
     "by": "plan-pricing"
    },
    "why": "message\\.thread \"x-1\" does not match",
@@ -792,7 +914,7 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-123001000-plan-pricing",
+    "id": "m-20261120-123501000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "owner",
@@ -800,7 +922,7 @@
     "thread": "t-20261120-100001000-owner",
     "text": "Trial button now says Start free trial.",
     "draft": "main",
-    "at": "2026-11-20T12:30:01.000Z",
+    "at": "2026-11-20T12:35:01.000Z",
     "by": "plan-pricing"
    },
    "why": "message\\.draft \"main\" does not match",
@@ -812,7 +934,7 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-123101000-plan-pricing",
+    "id": "m-20261120-123601000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "owner",
@@ -820,7 +942,7 @@
     "thread": "t-20261120-100001000-owner",
     "text": "Trial button now says Start free trial.",
     "draft": "a/b",
-    "at": "2026-11-20T12:31:01.000Z",
+    "at": "2026-11-20T12:36:01.000Z",
     "by": "plan-pricing"
    },
    "why": "message\\.draft \"a/b\" does not match",
@@ -832,7 +954,7 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-123201000-plan-pricing",
+    "id": "m-20261120-123701000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "owner",
@@ -853,7 +975,7 @@
       "dark": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
      }
     },
-    "at": "2026-11-20T12:32:01.000Z",
+    "at": "2026-11-20T12:37:01.000Z",
     "by": "plan-pricing"
    },
    "why": "message\\.shot\\.anchor must be one of",
@@ -882,7 +1004,7 @@
       "dark": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
      }
     },
-    "at": "2026-11-20T12:33:01.000Z",
+    "at": "2026-11-20T12:38:01.000Z",
     "by": "supervisor"
    },
    "why": "shot and noshot go on a line that writes ready",
@@ -898,7 +1020,7 @@
     "type": "thread",
     "op": "set",
     "noshot": "no-change",
-    "at": "2026-11-20T12:34:01.000Z",
+    "at": "2026-11-20T12:39:01.000Z",
     "by": "supervisor"
    },
    "why": "shot and noshot go on a line that writes ready",
@@ -928,7 +1050,7 @@
       "dark": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
      }
     },
-    "at": "2026-11-20T12:35:01.000Z",
+    "at": "2026-11-20T12:40:01.000Z",
     "by": "supervisor"
    },
    "why": "shot and noshot go on a line that writes ready",
@@ -944,10 +1066,10 @@
     "type": "thread",
     "op": "set",
     "unready": {
-     "at": "2026-11-20T12:36:01.000Z",
+     "at": "2026-11-20T12:41:01.000Z",
      "reason": "The mark no longer matches the page."
     },
-    "at": "2026-11-20T12:36:01.000Z",
+    "at": "2026-11-20T12:41:01.000Z",
     "by": "supervisor"
    },
    "why": "unready goes on a line that writes ready: null",
@@ -964,13 +1086,13 @@
     "op": "set",
     "ready": {
      "outcome": "Done.",
-     "at": "2026-11-20T12:37:01.000Z"
+     "at": "2026-11-20T12:42:01.000Z"
     },
     "unready": {
-     "at": "2026-11-20T12:37:01.000Z",
+     "at": "2026-11-20T12:42:01.000Z",
      "reason": "The mark no longer matches the page."
     },
-    "at": "2026-11-20T12:37:01.000Z",
+    "at": "2026-11-20T12:42:01.000Z",
     "by": "supervisor"
    },
    "why": "unready goes on a line that writes ready: null",
@@ -987,7 +1109,7 @@
     "op": "set",
     "ready": {
      "outcome": "Done.",
-     "at": "2026-11-20T12:38:01.000Z"
+     "at": "2026-11-20T12:43:01.000Z"
     },
     "shot": {
      "stamp": "20261120-100500000",
@@ -1004,7 +1126,7 @@
      }
     },
     "noshot": "no-change",
-    "at": "2026-11-20T12:38:01.000Z",
+    "at": "2026-11-20T12:43:01.000Z",
     "by": "supervisor"
    },
    "why": "shot and noshot never go together",
@@ -1016,7 +1138,7 @@
    "file": "owner-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "t-20261120-123901000-owner",
+    "id": "t-20261120-124401000-owner",
     "type": "thread",
     "op": "new",
     "title": "Start trial",
@@ -1029,7 +1151,7 @@
      "h": 860,
      "hash": ""
     },
-    "at": "2026-11-20T12:39:01.000Z",
+    "at": "2026-11-20T12:44:01.000Z",
     "by": "owner",
     "channel": "cli"
    },
@@ -1042,7 +1164,7 @@
    "file": "owner-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "t-20261120-124001000-owner",
+    "id": "t-20261120-124501000-owner",
     "type": "thread",
     "op": "new",
     "title": "Start trial",
@@ -1051,7 +1173,7 @@
      "h": 860,
      "hash": ""
     },
-    "at": "2026-11-20T12:40:01.000Z",
+    "at": "2026-11-20T12:45:01.000Z",
     "by": "owner",
     "channel": "cli"
    },
@@ -1064,14 +1186,14 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-124101000-plan-pricing",
+    "id": "m-20261120-124601000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "supervisor",
     "kind": "addressed",
     "thread": "t-20261120-100001000-owner",
     "text": "Trial button now says Start free trial.",
-    "at": "2026-11-20T12:41:01.000Z",
+    "at": "2026-11-20T12:46:01.000Z",
     "by": "plan-pricing"
    },
    "why": "an addressed message goes to the owner, names its thread, and is a session's",
@@ -1083,14 +1205,14 @@
    "file": "owner-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-124201000-owner",
+    "id": "m-20261120-124701000-owner",
     "type": "message",
     "op": "new",
     "to": "owner",
     "kind": "addressed",
     "thread": "t-20261120-100001000-owner",
     "text": "Trial button now says Start free trial.",
-    "at": "2026-11-20T12:42:01.000Z",
+    "at": "2026-11-20T12:47:01.000Z",
     "by": "owner",
     "channel": "cli"
    },
@@ -1103,13 +1225,13 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-124301000-plan-pricing",
+    "id": "m-20261120-124801000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "owner",
     "kind": "addressed",
     "text": "Trial button now says Start free trial.",
-    "at": "2026-11-20T12:43:01.000Z",
+    "at": "2026-11-20T12:48:01.000Z",
     "by": "plan-pricing"
    },
    "why": "an addressed message goes to the owner, names its thread, and is a session's",
@@ -1121,14 +1243,14 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-124401000-plan-pricing",
+    "id": "m-20261120-124901000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "supervisor",
     "kind": "info",
     "text": "Trial button now says Start free trial.",
     "draft": "plan-pricing",
-    "at": "2026-11-20T12:44:01.000Z",
+    "at": "2026-11-20T12:49:01.000Z",
     "by": "plan-pricing"
    },
    "why": "draft and shot are on an addressed message",
@@ -1140,7 +1262,7 @@
    "file": "kit-9-x.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-124501000-kit-9-x",
+    "id": "m-20261120-125001000-kit-9-x",
     "type": "message",
     "op": "new",
     "to": "supervisor",
@@ -1160,7 +1282,7 @@
       "dark": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
      }
     },
-    "at": "2026-11-20T12:45:01.000Z",
+    "at": "2026-11-20T12:50:01.000Z",
     "by": "kit-9-x"
    },
    "why": "draft and shot are on an addressed message",
@@ -1177,9 +1299,9 @@
     "op": "set",
     "handed": {
      "to": "owner",
-     "at": "2026-11-20T12:46:01.000Z"
+     "at": "2026-11-20T12:51:01.000Z"
     },
-    "at": "2026-11-20T12:46:01.000Z",
+    "at": "2026-11-20T12:51:01.000Z",
     "by": "owner",
     "channel": "cli"
    },
@@ -1197,9 +1319,9 @@
     "op": "set",
     "handed": {
      "to": "responder",
-     "at": "2026-11-20T12:47:01.000Z"
+     "at": "2026-11-20T12:52:01.000Z"
     },
-    "at": "2026-11-20T12:47:01.000Z",
+    "at": "2026-11-20T12:52:01.000Z",
     "by": "owner",
     "channel": "cli"
    },
@@ -1219,7 +1341,7 @@
      "to": "plan-pricing",
      "at": "yesterday"
     },
-    "at": "2026-11-20T12:48:01.000Z",
+    "at": "2026-11-20T12:53:01.000Z",
     "by": "owner",
     "channel": "cli"
    },
@@ -1240,7 +1362,7 @@
      "at": "2026-11-20",
      "reason": "The mark no longer matches the page."
     },
-    "at": "2026-11-20T12:49:01.000Z",
+    "at": "2026-11-20T12:54:01.000Z",
     "by": "supervisor"
    },
    "why": "thread\\.unready\\.at is an ISO timestamp",
@@ -1257,10 +1379,10 @@
     "op": "set",
     "ready": null,
     "unready": {
-     "at": "2026-11-20T12:50:01.000Z",
+     "at": "2026-11-20T12:55:01.000Z",
      "reason": "Not the pag"
     },
-    "at": "2026-11-20T12:50:01.000Z",
+    "at": "2026-11-20T12:55:01.000Z",
     "by": "supervisor"
    },
    "why": "thread\\.unready\\.reason is one line of 12 to 300 bytes",
@@ -1277,10 +1399,10 @@
     "op": "set",
     "ready": null,
     "unready": {
-     "at": "2026-11-20T12:51:01.000Z",
+     "at": "2026-11-20T12:56:01.000Z",
      "reason": "The mark moved.\nLook again."
     },
-    "at": "2026-11-20T12:51:01.000Z",
+    "at": "2026-11-20T12:56:01.000Z",
     "by": "supervisor"
    },
    "why": "thread\\.unready\\.reason is one line of 12 to 300 bytes",
@@ -1297,10 +1419,10 @@
     "op": "set",
     "ready": null,
     "unready": {
-     "at": "2026-11-20T12:52:01.000Z",
+     "at": "2026-11-20T12:57:01.000Z",
      "reason": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééx"
     },
-    "at": "2026-11-20T12:52:01.000Z",
+    "at": "2026-11-20T12:57:01.000Z",
     "by": "supervisor"
    },
    "why": "thread\\.unready\\.reason is one line of 12 to 300 bytes",
@@ -1312,7 +1434,7 @@
    "file": "owner-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "t-20261120-125301000-owner",
+    "id": "t-20261120-125801000-owner",
     "type": "thread",
     "op": "new",
     "title": "Start trial",
@@ -1331,7 +1453,7 @@
      "h": 860,
      "hash": "#éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
     },
-    "at": "2026-11-20T12:53:01.000Z",
+    "at": "2026-11-20T12:58:01.000Z",
     "by": "owner",
     "channel": "cli"
    },
@@ -1344,7 +1466,7 @@
    "file": "owner-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "t-20261120-125401000-owner",
+    "id": "t-20261120-125901000-owner",
     "type": "thread",
     "op": "new",
     "title": "Start trial",
@@ -1363,7 +1485,39 @@
      "h": 860,
      "hash": "#a\u0007b"
     },
-    "at": "2026-11-20T12:54:01.000Z",
+    "at": "2026-11-20T12:59:01.000Z",
+    "by": "owner",
+    "channel": "cli"
+   },
+   "why": "thread\\.frame\\.hash is one line of at most 200 bytes",
+   "readDropped": false
+  },
+  "frame hash bidi": {
+   "task": 2,
+   "by": "owner",
+   "file": "owner-2026-11.jsonl",
+   "line": {
+    "v": 1,
+    "id": "t-20261120-130001000-owner",
+    "type": "thread",
+    "op": "new",
+    "title": "Start trial",
+    "subject": {
+     "kind": "artifact",
+     "slug": "pricing-mock",
+     "at": "plan-pricing",
+     "path": "index.html",
+     "anchor": {
+      "selector": "#trial",
+      "text": "Start trial"
+     }
+    },
+    "frame": {
+     "w": 1400,
+     "h": 860,
+     "hash": "#a‮b"
+    },
+    "at": "2026-11-20T13:00:01.000Z",
     "by": "owner",
     "channel": "cli"
    },
@@ -1376,14 +1530,14 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-125501000-plan-pricing",
+    "id": "m-20261120-130101000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "owner",
     "kind": "addressed",
     "thread": "t-20261120-100001000-owner",
     "text": "Done.\nLook again.",
-    "at": "2026-11-20T12:55:01.000Z",
+    "at": "2026-11-20T13:01:01.000Z",
     "by": "plan-pricing"
    },
    "why": "an addressed message's text is one line of at most 300 bytes",
@@ -1395,14 +1549,14 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-125601000-plan-pricing",
+    "id": "m-20261120-130201000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "owner",
     "kind": "addressed",
     "thread": "t-20261120-100001000-owner",
     "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "at": "2026-11-20T12:56:01.000Z",
+    "at": "2026-11-20T13:02:01.000Z",
     "by": "plan-pricing"
    },
    "why": "an addressed message's text is one line of at most 300 bytes",
@@ -1419,7 +1573,7 @@
     "op": "set",
     "ready": {
      "outcome": "Done.",
-     "at": "2026-11-20T12:57:01.000Z"
+     "at": "2026-11-20T13:03:01.000Z"
     },
     "shot": {
      "stamp": "20261120-100500000",
@@ -1434,7 +1588,7 @@
       "light": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
      }
     },
-    "at": "2026-11-20T12:57:01.000Z",
+    "at": "2026-11-20T13:03:01.000Z",
     "by": "supervisor"
    },
    "why": "thread\\.shot\\.dark goes with sum\\.dark",
@@ -1451,7 +1605,7 @@
     "op": "set",
     "ready": {
      "outcome": "Done.",
-     "at": "2026-11-20T12:58:01.000Z"
+     "at": "2026-11-20T13:04:01.000Z"
     },
     "shot": {
      "stamp": "20261120-100600000",
@@ -1467,7 +1621,7 @@
       "dark": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
      }
     },
-    "at": "2026-11-20T12:58:01.000Z",
+    "at": "2026-11-20T13:04:01.000Z",
     "by": "supervisor"
    },
    "why": "thread\\.shot\\.dark goes with sum\\.dark",
@@ -1479,7 +1633,7 @@
    "file": "plan-pricing-2026-11.jsonl",
    "line": {
     "v": 1,
-    "id": "m-20261120-125901000-plan-pricing",
+    "id": "m-20261120-130501000-plan-pricing",
     "type": "message",
     "op": "new",
     "to": "owner",
@@ -1499,7 +1653,7 @@
       "light": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
      }
     },
-    "at": "2026-11-20T12:59:01.000Z",
+    "at": "2026-11-20T13:05:01.000Z",
     "by": "plan-pricing"
    },
    "why": "message\\.shot\\.dark goes with sum\\.dark",
@@ -1852,6 +2006,7 @@
  "readOnly": [
   "r1-handed-to-owner",
   "r2-addressed-text-not-string",
-  "r3-handed-without-to"
+  "r3-handed-without-to",
+  "r4-bad-handed-after-valid"
  ]
 }

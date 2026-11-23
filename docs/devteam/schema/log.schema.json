@@ -851,7 +851,7 @@
             "x-tip": "Where the change can be seen."
           },
           "shot": {
-            "description": "artifact-notes-1. The supervisor's picture of the marked spot, as the kit took it: stamp (the time form of a log id, and the file name's <stamp> in /shot/<t-id>/<stamp>-<light|dark>.png), its size in pixels (w, h), what it was taken from (src: main, a tree:<id> or a worktree name) at which commit (sha) and whether that tree had changes not committed (dirty), how the mark's element was found (anchor), whether a dark picture was taken too (dark, exactly when sum.dark is given), and each picture's sha256 (sum.light, sum.dark).",
+            "description": "artifact-notes-1. The kit's picture of the marked spot (on the supervisor's ready, or on the marking session's addressed message), as the kit took it: stamp (the time form of a log id, and the file name's <stamp> in /shot/<t-id>/<stamp>-<light|dark>.png), its size in pixels (w, h), what it was taken from (src: main, a tree:<id> or a worktree name) at which commit (sha) and whether that tree had changes not committed (dirty), how the mark's element was found (anchor), whether a dark picture was taken too (dark, exactly when sum.dark is given), and each picture's sha256 (sum.light, sum.dark).",
             "type": "object",
             "properties": {
               "stamp": { "description": "When it was taken, as a log id's time (yyyymmdd-hhmmssmmm).", "type": "string", "pattern": "^\\d{8}-\\d{9}$" },
@@ -2531,7 +2531,7 @@
             "x-tip": "Who you handed the note to."
           },
           "shot": {
-            "description": "artifact-notes-1. The supervisor's picture of the marked spot, as the kit took it: stamp (the time form of a log id, and the file name's <stamp> in /shot/<t-id>/<stamp>-<light|dark>.png), its size in pixels (w, h), what it was taken from (src: main, a tree:<id> or a worktree name) at which commit (sha) and whether that tree had changes not committed (dirty), how the mark's element was found (anchor), whether a dark picture was taken too (dark, exactly when sum.dark is given), and each picture's sha256 (sum.light, sum.dark).",
+            "description": "artifact-notes-1. The kit's picture of the marked spot (on the supervisor's ready, or on the marking session's addressed message), as the kit took it: stamp (the time form of a log id, and the file name's <stamp> in /shot/<t-id>/<stamp>-<light|dark>.png), its size in pixels (w, h), what it was taken from (src: main, a tree:<id> or a worktree name) at which commit (sha) and whether that tree had changes not committed (dirty), how the mark's element was found (anchor), whether a dark picture was taken too (dark, exactly when sum.dark is given), and each picture's sha256 (sum.light, sum.dark).",
             "type": "object",
             "properties": {
               "stamp": { "description": "When it was taken, as a log id's time (yyyymmdd-hhmmssmmm).", "type": "string", "pattern": "^\\d{8}-\\d{9}$" },

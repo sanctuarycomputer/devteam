@@ -2,21 +2,23 @@
 // and the expected.json its view must equal, and refused.json. Every expected value is written out
 // here by hand from the contract's rules (docs/devteam/process/supervisor.md, ### Artifact notes),
 // never read back from the kit's own view. Run it after changing a case, and commit what it writes:
-//   node test/fixtures/artifact-notes/build.mjs
-// Times are fixed (2026-11-20, 10:MM:NN, NN the case number), so every id is unique across folders
+//   node test/fixtures/artifact-notes/build.mjs [<dir>]
+// (into <dir> instead of beside this file: the test builds a copy there and compares it with what is
+// committed). Times are fixed (2026-11-20, 10:MM:NN, NN the case number), so every id is unique across folders
 // and folders can be combined into one log.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
+const HERE = path.resolve(process.argv[2] ?? path.dirname(fileURLToPath(import.meta.url)));
+fs.mkdirSync(HERE, { recursive: true });
 const SHA = '3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f';
 const SUM_L = 'a1'.repeat(32);
 const SUM_D = 'd4'.repeat(32);
 const SHOT = { stamp: '20261120-100500000', w: 480, h: 320, src: 'plan-pricing', sha: SHA, dirty: false, anchor: 'found', dark: true, sum: { light: SUM_L, dark: SUM_D } };
 const SHOT_LIGHT = { stamp: '20261120-100600000', w: 1400, h: 860, src: 'main', sha: SHA, dirty: true, anchor: 'point', dark: false, sum: { light: SUM_L } };
 const ART = { kind: 'artifact', slug: 'pricing-mock', at: 'plan-pricing', path: 'index.html', anchor: { selector: '#trial', text: 'Start trial' } };
-const FILE = { owner: 'owner-2026-11.jsonl', supervisor: 'supervisor-2026-11.jsonl', 'plan-pricing': 'plan-pricing-2026-11.jsonl', 'kit-9-x': 'kit-9-x.jsonl' };
+const FILE = { owner: 'owner-2026-11.jsonl', supervisor: 'supervisor-2026-11.jsonl', 'plan-pricing': 'plan-pricing-2026-11.jsonl', 'kit-9-x': 'kit-9-x.jsonl', responder: 'responder.jsonl' };
 const PREFIX = { thread: 't', turn: 'u', message: 'm' };
 
 const two = (n) => String(n).padStart(2, '0');
@@ -87,7 +89,16 @@ const add = (n, name, about, s, v, api) => CASES.push({ n, name, about, s, v, ap
 { const s = lines(24).open().hand(1, 'owner'); add(24, 'r1-handed-to-owner', 'a hand-written handed naming the owner: no hand-over', s, view()); }
 { const s = lines(25).open().hand(1, 'plan-pricing').addressed('plan-pricing', 2).addressed('plan-pricing', 3, { text: 42 }); add(25, 'r2-addressed-text-not-string', 'a newer mark whose text is not a string is skipped, and hides nothing', s, view({ handed: handedOf(25, 1, 'plan-pricing'), addressed: mark(25, 'plan-pricing', 2), check: 'addressed' }), view({ handed: handedOf(25, 1, 'plan-pricing'), waiting: 'session', with: 'plan-pricing' })); }
 { const s = lines(26).open().set('owner', 1, { handed: { at: at(26, 1) } }); add(26, 'r3-handed-without-to', 'a hand-written handed with no to: no hand-over', s, view()); }
-const READ_ONLY = ['r1-handed-to-owner', 'r2-addressed-text-not-string', 'r3-handed-without-to'];
+// contract-1 F6: a bad hand-written handed after a valid one is skipped, and the valid one stands
+{ const s = lines(30).open().hand(1, 'plan-pricing').hand(2, 'owner'); add(30, 'r4-bad-handed-after-valid', 'a hand-written handed naming the owner after a valid hand-over: the valid one stands', s, view({ handed: handedOf(30, 1, 'plan-pricing'), waiting: 'session', with: 'plan-pricing' })); }
+const READ_ONLY = ['r1-handed-to-owner', 'r2-addressed-text-not-string', 'r3-handed-without-to', 'r4-bad-handed-after-valid'];
+// contract-1 F1: each handed.at bound on its own. A mark made before the current hand-over counts for
+// nothing (the owner took the note back, then handed it over again); a supervisor turn before a
+// hand-over to the supervisor is not its first turn after it.
+{ const s = lines(27).open().hand(1, 'plan-pricing').addressed('plan-pricing', 2).turn('owner', 3).hand(4, 'plan-pricing'); add(27, 'c27-mark-before-rehand', 'a mark made before the owner handed the note over again counts for nothing', s, view({ handed: handedOf(27, 4, 'plan-pricing'), waiting: 'session', with: 'plan-pricing' })); }
+{ const s = lines(28).open().turn('supervisor', 1).hand(2, 'supervisor'); add(28, 'c28-supervisor-turn-before-handed', "a supervisor turn before the hand-over to it: still the supervisor's move", s, view({ handed: handedOf(28, 2, 'supervisor'), waiting: 'supervisor', with: 'supervisor' })); }
+// contract-1 F2: the supervisor may mark a note handed to another session
+{ const s = lines(29).open().hand(1, 'plan-pricing').addressed('supervisor', 2); add(29, 'c29-supervisor-marks-session-note', 'the supervisor marks a note handed to a planner', s, view({ handed: handedOf(29, 1, 'plan-pricing'), addressed: mark(29, 'supervisor', 2), check: 'addressed' }), view({ handed: handedOf(29, 1, 'plan-pricing'), waiting: 'session', with: 'plan-pricing' })); }
 
 // The refused lines, each alone beside c01's log (its thread, at minutes 30 and on). task: the plan
 // task whose change refuses it (1: the schema and its authority table; 2: integrity and the byte
@@ -129,6 +140,12 @@ no('shot src origin', 1, 'supervisor', setT(m, 'supervisor', { ready: READY(m), 
 no('shot missing stamp', 1, 'supervisor', setT(m, 'supervisor', { ready: READY(m), shot: (({ stamp, ...x }) => x)(SHOT) }), 'thread\\.shot\\.stamp is required', false); m++;
 no('handed without to', 1, 'owner', setT(m, 'owner', { handed: { at: rat(m) } }), 'thread\\.handed\\.to is required', false); m++;
 no('handed extra key', 1, 'owner', setT(m, 'owner', { handed: { to: 'plan-pricing', at: rat(m), by: 'owner' } }), 'thread\\.handed\\.by is not a field here', false); m++;
+// contract-1 F3: the rest the Refusals table names, and D1's stamp
+no('handed to not a session address', 1, 'owner', setT(m, 'owner', { handed: { to: 'Plan_X', at: rat(m) } }), 'thread\\.handed\\.to "Plan_X" does not match', false); m++;
+no('handed null', 1, 'owner', setT(m, 'owner', { handed: null }), 'thread\\.handed must be object', false); m++;
+no('shot h over 2160', 1, 'supervisor', setT(m, 'supervisor', { ready: READY(m), shot: { ...SHOT, h: 2161 } }), 'thread\\.shot\\.h must be at most 2160', false); m++;
+no('shot stamp not an id time', 1, 'supervisor', setT(m, 'supervisor', { ready: READY(m), shot: { ...SHOT, stamp: '2026-11-20' } }), 'thread\\.shot\\.stamp "2026-11-20" does not match', false); m++;
+no('addressed by the responder', 1, 'responder', msg(m, 'responder', {}), 'the responder sends handoff and info messages only', true); m++;
 no('unready without reason', 1, 'supervisor', setT(m, 'supervisor', { ready: null, unready: { at: rat(m) } }), 'thread\\.unready\\.reason is required', false); m++;
 no('addressed thread x-1', 1, 'plan-pricing', msg(m, 'plan-pricing', { thread: 'x-1' }), 'message\\.thread "x-1" does not match', false); m++;
 no('addressed draft main', 1, 'plan-pricing', msg(m, 'plan-pricing', { draft: 'main' }), 'message\\.draft "main" does not match', false); m++;
@@ -158,6 +175,7 @@ no('unready reason two lines', 2, 'supervisor', setT(m, 'supervisor', { ready: n
 no('unready reason 301 bytes', 2, 'supervisor', setT(m, 'supervisor', { ready: null, unready: { at: rat(m), reason: 'é'.repeat(150) + 'x' } }), 'thread\\.unready\\.reason is one line of 12 to 300 bytes', false); m++;
 no('frame hash 201 bytes', 2, 'owner', newT(m, { frame: { w: 1400, h: 860, hash: `#${'é'.repeat(100)}` } }), 'thread\\.frame\\.hash is one line of at most 200 bytes', false); m++;
 no('frame hash control', 2, 'owner', newT(m, { frame: { w: 1400, h: 860, hash: '#a\u0007b' } }), 'thread\\.frame\\.hash is one line of at most 200 bytes', false); m++;
+no('frame hash bidi', 2, 'owner', newT(m, { frame: { w: 1400, h: 860, hash: '#a‮b' } }), 'thread\\.frame\\.hash is one line of at most 200 bytes', false); m++;
 no('addressed text two lines', 2, 'plan-pricing', msg(m, 'plan-pricing', { text: 'Done.\nLook again.' }), "an addressed message's text is one line of at most 300 bytes", false); m++;
 no('addressed text 301 bytes', 2, 'plan-pricing', msg(m, 'plan-pricing', { text: 'x'.repeat(301) }), "an addressed message's text is one line of at most 300 bytes", false); m++;
 no('thread shot dark without sum.dark', 2, 'supervisor', setT(m, 'supervisor', { ready: READY(m), shot: { ...SHOT, sum: { light: SUM_L } } }), 'thread\\.shot\\.dark goes with sum\\.dark', false); m++;

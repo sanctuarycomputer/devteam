@@ -1,6 +1,6 @@
 // The artifact-notes contract (kit-143, log.schema.json@artifact-notes-1): who a note was handed to
 // (thread.handed, the owner's), a session's mark that it addressed the note (message kind addressed),
-// the supervisor's picture of a mark or of a ready (shot, noshot), its withdrawal (unready), and the
+// the kit's picture of a mark or of a ready (shot, noshot), its withdrawal (unready), and the
 // frame the owner saw (frame). The kit reads and checks them; kit-144, kit-145 and kit-147 write them.
 // The fake is test/fixtures/artifact-notes/: one folder per case (log/ and the expected.json its
 // view must equal) and refused.json; build.mjs there writes them.
@@ -8,7 +8,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { testDir, threadsFixture } from './lib/kit.mjs';
 
 const FAKE = path.join(testDir, 'fixtures', 'artifact-notes');
@@ -17,6 +19,27 @@ const SCHEMA = JSON.parse(fs.readFileSync(path.join(testDir, '..', 'docs', 'devt
 const FOLDERS = fs.readdirSync(FAKE, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 const expected = (f) => JSON.parse(fs.readFileSync(path.join(FAKE, f, 'expected.json'), 'utf8'));
 const C1 = 'c01-handed';
+
+// every file under a dir, by its path inside it, with its bytes
+const filesOf = (root) => {
+  const m = new Map();
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else m.set(path.relative(root, p), fs.readFileSync(p, 'utf8')); } };
+  walk(root);
+  return m;
+};
+
+test('artifact-notes-contract A1e: build.mjs writes exactly the committed fake', () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-notes-build-'));
+  try {
+    const r = spawnSync(process.execPath, [path.join(FAKE, 'build.mjs'), out], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
+    assert.equal(r.status, 0, r.stderr);
+    const built = filesOf(out);
+    const committed = filesOf(FAKE);
+    committed.delete('build.mjs');
+    assert.deepEqual([...built.keys()].sort(), [...committed.keys()].sort(), 'the same files');
+    for (const [p, text] of built) assert.equal(committed.get(p), text, `${p} is as build.mjs writes it`);
+  } finally { fs.rmSync(out, { recursive: true, force: true }); }
+});
 
 test('artifact-notes-contract: the schema, the fake, and what log-check refuses', async (t) => {
   const F = threadsFixture('artifact-notes');
