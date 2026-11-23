@@ -9883,13 +9883,14 @@ function cmdThread() {
   };
   // dies when the turn is unasked-for and names nothing, or something off subject; asks: the turn asks a
   // question of its own (thread ask), which is what it names
-  const askedFor = (t, by, objects, { refs = [], re, off, goal, asks = false } = {}) => {
+  // implied, when given, gets the --re a responder's follow-up of its open promise carries unnamed
+  const askedFor = (t, by, objects, { refs = [], re, off, goal, asks = false, implied } = {}) => {
     if (owedTurns(t.id, objects).length) return;
     // the responder's open promise there (pendingOpen, kit-104): the supervisor's to take over; the
     // responder's to keep, as a follow-up of that turn, held to the subject as a --re one is (task-3 F1)
     const promise = by === 'owner' ? null : pendingOpen(logTurns(t.id, objects), t);
     if (promise && by === 'supervisor') return;
-    if (promise && by === 'responder' && !re) re = promise.id;
+    if (promise && by === 'responder' && !re) { re = promise.id; if (implied) implied.re = re; }
     // an open handoff to the supervisor for this thread, as kit-104 reads one (openHandoffs: not settled
     // by a supervisor turn after it, named by no message's or question's re), never one it sent itself
     if (!re && by === 'supervisor') {
@@ -10011,7 +10012,10 @@ function cmdThread() {
     if (by !== 'owner') {
       const objects = readLog().objects;
       if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
-      askedFor(t, by, objects, { refs, re, off });
+      const implied = {};
+      askedFor(t, by, objects, { refs, re, off, implied });
+      // written as the follow-up it is, so show marks it and reOf sees the turn followed up (task-3-2 F2-1)
+      if (implied.re) { line.re = implied.re; if (!lineFits(line, by)) die('That reply is too long with its links; shorten it.'); }
       // the owner's turns this reply answers, before it is written: on stderr, so the id stays the first line out
       for (const o of owedTurns(t.id, objects).filter((o) => answersTurn(o, by))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
       // and the responder's open promise it closes (pendingOpen), so the supervisor sees it takes that

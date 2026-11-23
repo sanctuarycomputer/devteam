@@ -370,6 +370,19 @@ test('kit-108 A15: the responder\'s turns keep the same rules: its --re follow-u
     const r3 = F.run(F.old, ['thread', 'reply', T, 'Something else.'], RESPONDER);
     assert.notEqual(r3.status, 0);
     assert.match(r3.err, /is waiting on you/);
+    // a follow-up its promise asked for, sent without --re, is written as one: shown, and never followed up twice (task-3-2 F2-1)
+    F.hand('owner', { type: 'turn', thread: T, text: 'And the PRs?', routed_to: 'responder', delivered: 'typed' }, 0);
+    const p2 = F.run(F.old, ['thread', 'reply', T, 'Looking again', '--pending'], RESPONDER);
+    assert.equal(p2.status, 0, p2.err);
+    const P2 = p2.out.split('\n')[0];
+    const d2 = F.run(F.old, ['thread', 'reply', T, 'One PR is open.'], RESPONDER);
+    assert.equal(d2.status, 0, d2.err);
+    const D2 = d2.out.split('\n')[0];
+    assert.equal(lineOf(F, D2).re, P2, 'the implied --re is kept on the turn');
+    assert.match(F.sup(['thread', 'show', T]), new RegExp(`\\(${D2}\\) \\(following up ${P2}\\)`));
+    const again = F.run(F.old, ['thread', 'reply', T, 'Two now.', '--re', P2], RESPONDER);
+    assert.notEqual(again.status, 0, 'a second follow-up of the same turn');
+    assert.match(again.err, /already followed up/);
   } finally { F.done(); }
 });
 
