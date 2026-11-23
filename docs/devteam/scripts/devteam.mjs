@@ -7907,12 +7907,16 @@ function exteriorNameLines(block, ref = mainRef()) {
   });
   return { refused, warnings: deps.warnings };
 }
-// An exterior.md's pieces for kit-139's capitalised words: the prose outside the block (sentences),
-// each name (every word, so a group's first word counts), each matters, strategy quote and signal
+// An exterior.md's pieces for kit-139's capitalised words: the text outside the exterior block
+// (sentences; every other fenced block is in it, as selfPieces reads self.md), each name (every word, so a group's first word counts), each matters, strategy quote and signal
 // what (sentences), and each relation_word. With no parsed block, the whole text as prose.
 function exteriorPieces(text, block) {
   if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
-  const pieces = [{ where: 'prose', text: fencedBlocks(text).prose, sentences: true }];
+  const lines = String(text).split(/\r?\n/);
+  const b = fencedBlocks(text).blocks.find((x) => x.info === 'exterior');
+  // the block's lines, opening fence to closing, become one blank line
+  lines.splice(b.line - 1, b.body.split('\n').length + 2, '');
+  const pieces = [{ where: 'prose', text: lines.join('\n'), sentences: true }];
   const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
   block.entities.forEach((e, i) => {
     add(`entities[${i}].name`, e.name, false);
@@ -7961,23 +7965,25 @@ const exteriorCarries = (commit) => (commit ? `; commit ${commit.slice(0, 12)} c
 const EXTERIOR_NO_BASE = "no merge base with main: exterior.md's drafts can't be checked";
 // check-pr's hold on a PR changing exterior.md (spec, Commands), for checkPr in home: with exterior.md
 // at sha and a commit in merge-base..sha changing it, steps 1 to 3 at sha, and the names rule (public a
-// fail, unknown a warning, private nothing) and namesHoldLines over every version. A deletion is
-// kit-138's gate; with no main, one warning (merge, which has main, checks it). { fails, warns }.
+// fail, unknown a warning, private nothing) and namesHoldLines over every version. With no
+// exterior.md at sha, steps 1 to 3 are skipped (a deletion of main's is kit-138's gate) but every
+// version since the base is still read: one added then deleted would land in main's history (final-1
+// F2). With no main, one warning (merge, which has main, checks it). { fails, warns }.
 function exteriorDraftLines(base, sha, branch) {
   const rel = EXTERIOR_REL();
   const none = { fails: [], warns: [] };
-  if (!projectInRepo || git(['cat-file', '-e', `${sha}:${rel}`], mainRoot) === null) return none;
-  if (!mainRef()) return { fails: [], warns: ["no main to compare with: exterior.md's drafts are not checked here; merge checks them"] };
-  if (!base) return { fails: [EXTERIOR_NO_BASE], warns: [] };
+  if (!projectInRepo) return none;
+  const headBlob = git(['rev-parse', '--verify', '--quiet', `${sha}:${rel}`], mainRoot);
+  if (!mainRef()) return headBlob ? { fails: [], warns: ["no main to compare with: exterior.md's drafts are not checked here; merge checks them"] } : none;
+  if (!base) return headBlob ? { fails: [EXTERIOR_NO_BASE], warns: [] } : none;
   const blobs = draftBlobs(base, sha, rel);
   if (!blobs.length) return none;
-  const headBlob = git(['rev-parse', '--verify', '--quiet', `${sha}:${rel}`], mainRoot);
   const read = (b) => git(['cat-file', 'blob', b], mainRoot) ?? '';
-  const versions = [{ commit: null, text: read(headBlob) }, ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
-  const x = exteriorVersionsScan({ text: read(headBlob), blobs: headBlobs(sha) }, versions);
+  const versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
+  const x = exteriorVersionsScan(headBlob ? { text: read(headBlob), blobs: headBlobs(sha) } : null, versions);
   let vis;
   const visibility = () => (vis ??= repoVisibility());
-  const contract = new Set(exteriorDoc(read(headBlob)).errors);
+  const contract = new Set(headBlob ? exteriorDoc(read(headBlob)).errors : []);
   const fails = x.errors.map((e) => (contract.has(e) ? `${rel} breaks exterior@1 at ${sha.slice(0, 12)}: ${e}` : `${rel} at ${sha.slice(0, 12)}: ${e}`));
   const warns = x.warns.map((w) => `${rel}: ${w}`);
   if (x.named.length) {
@@ -34878,7 +34884,7 @@ const HELP_OBSERVE = `Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
   self show [--json]   main's project/self.md, what the project is: what it is, makes, its parts with their paths, what it controls and what not; --json is the dashboard's self block, null when not drafted
   self check   the working tree's self.md against self@1, each part's path on disk, and the names rule; errors exit 1, warnings don't
-  exterior show [--json] | exterior check   main's project/exterior.md, what the project relates to, by relation, with each entity's signals and scores (--json the dashboard's exterior block, null when not drafted); check: the working tree's against exterior@1, its blobs and quotes at the draft, and the names rule; errors exit 1
+  exterior show [--json] | exterior check   the working tree's project/exterior.md, what the project relates to, by relation, with each entity's signals and scores (--json the dashboard's exterior block, null when not drafted); check: the working tree's against exterior@1, its blobs and quotes at the draft, and the names rule; errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;

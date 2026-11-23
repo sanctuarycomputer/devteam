@@ -28,7 +28,8 @@ let mainBlobs = null;
 const draft = (k, words, name) => `# ${k}\n\n${words}\n${k === 'self' ? `\n\`\`\`self\n${JSON.stringify({ self: 1, what: 'a project the owner approves drafts of.', makes: 'the drafts these tests land.', parts: [{ id: 'project', name, what: 'the project folder.', code: ['docs/devteam/project/'] }], controls: ['its code'], not: [] }, null, 2)}\n\`\`\`\n` : k === 'exterior' ? `\n\`\`\`exterior\n${JSON.stringify({ exterior: 1, strategy_blob: mainBlobs.strategy, self_blob: mainBlobs.self, entities: [] }, null, 2)}\n\`\`\`\n` : ''}`;
 
 // A fixture with a chore per draft, the owner's answers and the two gates (merge --dry-run, check-pr).
-function world(name) {
+// selfOnMain: false keeps kit-138's self.md track on a main with no self.md (a chore adds the first)
+function world(name, { selfOnMain = true } = {}) {
   const F = fixture(name);
   const { old, ok, run, g } = F;
   const wts = new Map();
@@ -72,8 +73,8 @@ function world(name) {
   const other = (cls) => { const q = ok(old, ['ask', '--question', `Something else (${++n})?`, '--recommendation', 'yes', '--stake', '1', '--urgency', '1', '--new-because', 'the test asks again', ...(cls ? ['--class', cls, '--reasons', 'below-rung', '--no-default', 'the test waits'] : [])], SUP).trim(); ok(old, ['answer', q, 'yes']); return q; };
   const onMain = (rel, text) => { write(path.join(old, rel), text); g(['add', '-A'], old); g(['commit', '-qm', `main: ${rel}`], old); g(['push', '-q', 'origin', 'main'], old); };
   // a minimal valid self.md on main, which an exterior.md draft is drawn from
-  onMain(FILES.self.rel, draft('self', 'The approved self.', 'approved self'));
-  mainBlobs = { strategy: g(['rev-parse', `origin/main:${FILES.strategy.rel}`], old), self: g(['rev-parse', `origin/main:${FILES.self.rel}`], old) };
+  if (selfOnMain) onMain(FILES.self.rel, draft('self', 'The approved self.', 'approved self'));
+  mainBlobs = { strategy: g(['rev-parse', `origin/main:${FILES.strategy.rel}`], old), self: selfOnMain ? g(['rev-parse', `origin/main:${FILES.self.rel}`], old) : null };
   const supLine = (o) => fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ at: new Date().toISOString(), by: 'supervisor', ...o }));
   // check-pr's exit on a chore that changes only a project note: what a warning must leave it at
   const baseline = () => { const sha = chore('notes-only', (w) => write(path.join(w, `${P}/designs/notes.md`), 'n\n')); const r = checkPr('chore-notes-only', sha); assert.equal(r.status, 0, `check-pr passes a chore that changes only a project note\n${r.text}`); return r.status; };
@@ -86,7 +87,7 @@ for (const k of ['self', 'exterior']) {
   const twinRel = rel.replace(`${k}.md`, `${k.toUpperCase()}.md`);
 
   test(`${rel} is the owner's: check-pr and merge land a change only under an answered ${cls} question pinned to the text`, () => {
-    const W = world(`wa-${k}`);
+    const W = world(`wa-${k}`, { selfOnMain: k !== 'self' });
     const { chore, merge, checkPr, answered, other, supLine } = W;
     try {
       // a first draft, in a chore: refused with no answer, at merge and at check-pr
@@ -163,7 +164,7 @@ for (const k of ['self', 'exterior']) {
   });
 
   test(`${rel} on main: emptying it needs the owner's answer like any change, and deleting it is never approved`, () => {
-    const W = world(`wa-${k}-main`);
+    const W = world(`wa-${k}-main`, { selfOnMain: k !== 'self' });
     const { chore, merge, answered, onMain } = W;
     try {
       onMain(rel, `# ${k}\n\nThe approved version.\n`);

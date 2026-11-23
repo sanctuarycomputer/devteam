@@ -643,3 +643,55 @@ test('A17 Monitoring documents drafting exterior.md', () => {
   const c = para.indexOf('exterior check');
   assert.ok(c >= 0 && c < para.indexOf('chore pr'), 'A17 exterior check comes before chore pr');
 });
+
+// final-1 F1: a name in another fenced block is read; F2: a version added then deleted is still read
+const SECRET = `${EXTERIOR_MD}\n\`\`\`text\nZentrix Labs is our secret client.\n\`\`\`\n`;
+test('final-1 F1 F2 every fenced block and every version are read', withProject('exterior-final1', { visibility: 'public' }, async (W, check) => {
+  await check('F1 a word in another fenced block is held by exterior check, chore pr and check-pr', () => {
+    W.writeTree(EXT, SECRET);
+    const x = W.run(['exterior', 'check']);
+    assert.match(x.out, /^warn: exterior\.md: "Zentrix" \(prose\)/m, `F1 exterior check warns of the word in a text block\n${x.text}`);
+    W.writeTree(EXT, null);
+    const p = W.chorePr('fence', (w) => writeIn(w, EXT, SECRET));
+    assert.equal(p.status, 1, `F1 chore pr refuses\n${p.text}`);
+    assert.equal(p.pushed(), false, 'F1 nothing pushed');
+    const sha = W.branchOf('chore-fence2', (w) => writeIn(w, EXT, SECRET));
+    const k = W.checkPr('chore-fence2', sha);
+    assert.equal(k.status, 1, `F1 check-pr fails\n${k.text}`);
+    assert.match(k.text, /^fail: .*names "Zentrix" \(prose\)/m, 'F1 check-pr names the word');
+  });
+  await check('F2 an exterior.md added then deleted on a branch, main having none, is still held', () => {
+    const added = W.branchOf('chore-ad', (w) => writeIn(w, EXT, ZENTRIX));
+    const w = path.join(W.old, '.worktrees', 'chore-ad');
+    fs.rmSync(path.join(w, EXT));
+    const tip = commitIn(W, w, 'deleted again');
+    W.g(['push', '-q', 'origin', 'chore-ad'], w);
+    const k = W.checkPr('chore-ad', tip);
+    assert.equal(k.status, 1, `F2 check-pr fails\n${k.text}`);
+    assert.match(k.text, /"Zentrix Labs" \(organisation\) is not named/, 'F2 check-pr names it');
+    assert.ok(k.text.includes(added.slice(0, 12)), `F2 naming the commit ${added.slice(0, 12)}`);
+    const m = W.run(['merge', '--chore', 'ad', '--dry-run']);
+    assert.notEqual(m.status, 0, `F2 merge --chore refuses\n${m.text}`);
+  });
+}));
+
+// final-1b F3: steps 2 and 3 at the gates
+test('final-1b F3 check-pr, merge --chore and chore pr check the quotes and the blobs at the head', withProject('exterior-final1b', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
+  const staleSelf = extBlock((v) => { v.self_blob = 'c69d5ece56a6aa7dd72e1257f0eac0892e0c73c1'; }, REWORDED);
+  const badQuote = extBlock((v) => { v.entities[1].strategy[0] = 'Sync runs on Acme Storage, so it must stay fast and cheaq.'; }, REWORDED);
+  for (const [slug, text, words] of [['stale', staleSelf, /self_blob is not the head's self\.md/], ['quote', badQuote, /not found in strategy\.md at d4b0bd76/]]) {
+    await check(`F3 ${slug}: refused at check-pr, merge --chore and chore pr`, () => {
+      const sha = W.branchOf(`chore-${slug}`, (w) => writeIn(w, EXT, text));
+      const k = W.checkPr(`chore-${slug}`, sha);
+      assert.equal(k.status, 1, `F3 ${slug}: check-pr fails\n${k.text}`);
+      assert.match(k.text, new RegExp(`^fail: .*${words.source}`, 'm'), `F3 ${slug}: check-pr says why`);
+      const m = W.run(['merge', '--chore', slug, '--dry-run']);
+      assert.notEqual(m.status, 0, `F3 ${slug}: merge --chore refuses\n${m.text}`);
+      assert.match(m.text, words, `F3 ${slug}: merge --chore says why`);
+      const p = W.chorePr(`${slug}-c`, (w) => writeIn(w, EXT, text));
+      assert.equal(p.status, 1, `F3 ${slug}: chore pr refuses\n${p.text}`);
+      assert.match(p.text, words, `F3 ${slug}: chore pr says why`);
+      assert.equal(p.pushed(), false, `F3 ${slug}: nothing pushed`);
+    });
+  }
+}));
