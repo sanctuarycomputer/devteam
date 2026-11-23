@@ -477,6 +477,44 @@ test('responder routing (kit-104)', { skip: NO_TMUX, timeout: 280000 }, async (t
     assert.equal(s.status, 0, s.err);
     assert.match(s.err, new RegExp(`answering ${U}`), 'the supervisor\'s reply answers it');
   });
+  await it('Z1 thread ask prints answering for each owed turn its question answers, as thread reply does (final-1b F1)', () => {
+    const T = oldThread(30 * MIN);
+    const U = F.ownerTurn(T, 4 * MIN, 'responder', 'queued');
+    const r = after(() => F.run(['thread', 'ask', T, '--question', 'Which one?', '--goal', F.goal, '--stake', '1', '--urgency', '1'], SUP));
+    assert.equal(r.status, 0, r.err);
+    assert.match(r.err, new RegExp(`^answering ${U}: "an earlier turn`, 'm'), `the question answers the responder's owed turn, and says so: ${r.err}`);
+  });
+  await it('Z2 the responder\'s pending promise outlives the supervisor\'s own question and its answer: past 10 minutes responder-overdue, and its follow-up is taken (final-1 F2)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    F.writerTurn('responder', T, 15 * MIN, { pending: true });
+    after(() => ask(T));
+    const a = after(() => F.say(T, 'Teal'));
+    assert.equal(a.line.routed_to, 'supervisor', 'the answer to its question is the supervisor\'s');
+    after(() => F.sup(['thread', 'reply', T, '--', 'Teal it is']));
+    assert.equal(overdueIn(T)?.severity, 'high', 'the promise is still open past 10 minutes');
+    const r = after(() => F.run(['thread', 'reply', T, '--', 'the follow-up I promised'], RESPONDER));
+    assert.equal(r.status, 0, r.err);
+    assert.equal(overdueIn(T), undefined, 'kept');
+  });
+  await it('Z3 a stalled pending promise the supervisor answers is settled: no responder-overdue, and the responder\'s follow-up is refused', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    F.writerTurn('responder', T, 11 * MIN, { pending: true });
+    after(() => F.sup(['thread', 'reply', T, '--', 'I have it']));
+    assert.equal(overdueIn(T), undefined);
+    const r = after(() => F.run(['thread', 'reply', T, '--', 'a late follow-up'], RESPONDER));
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /the supervisor has answered this/);
+  });
+  await it('Z4 a pending promise before a resolve raises no responder-overdue after a reopen with no words (final-1b F2)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    F.writerTurn('responder', T, 11 * MIN, { pending: true });
+    F.owner(['thread', 'resolve', T]);
+    after(() => F.owner(['thread', 'reopen', T]));
+    assert.equal(overdueIn(T), undefined);
+  });
 
   // ---- done-when 14: kit-314's handoff case ----
   await it('H1 the supervisor runs thread working on a turn the responder holds: the supervisor responding, the responder\'s stage gone', () => {

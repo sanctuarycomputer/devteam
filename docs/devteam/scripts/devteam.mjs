@@ -9680,6 +9680,9 @@ function cmdThread() {
     } else for (const k of ['seen-turn', 'at']) if (flags[k] !== undefined) die(`thread ask --${k} goes with --turn <u-id>`);
     if (encodedBytes(capBytes(`${lead}${flagStr('question') ?? ''}`, TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
     const q = askLine({ thread: t.id, about });
+    // the question's turn answers every owed owner turn before it, as a reply does (final-1b F1): named
+    // on stderr before it is written, so the supervisor sees each one, the responder's included
+    for (const o of owedTurns(t.id).filter((o) => answersTurn(o, 'supervisor'))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
     appendLog({ type: 'turn', thread: t.id, text: capBytes(`${lead}${q.question}`, TURN_MAX), question: q.id }, 'supervisor');
     out(q.id);
     spoke(t);
@@ -16772,10 +16775,10 @@ function collectMetrics(since, reviewsSince = 0) {
     if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
   }
   // The responder (kit-104). Overdue: a turn routed to it still owed past RESPONDER_OVERDUE_MS, or its
-  // pending turn with nothing after it past RESPONDER_PENDING_MS; high, so wait brings the supervisor,
+  // pending turn not followed up past RESPONDER_PENDING_MS (pendingOpen); high, so wait brings the supervisor,
   // which takes it (and every turn routes to it until it is answered). From the log alone, so an
   // answer or a resolve clears it. By id only.
-  for (const o of responderOverdue(logNow, now, turnsNow)) add('high', 'responder-overdue', o.thread, o.why === 'owed' ? `the owner's turn ${o.turn} went to the responder ${o.min} min ago and has no answer` : `the responder's pending reply ${o.turn} has had nothing after it for ${o.min} min`, `answer it in the thread (thread show ${o.thread}, then thread reply ${o.thread}), then look at the responder (responder --resume)`);
+  for (const o of responderOverdue(logNow, now, turnsNow)) add('high', 'responder-overdue', o.thread, o.why === 'owed' ? `the owner's turn ${o.turn} went to the responder ${o.min} min ago and has no answer` : `the responder's pending reply ${o.turn} has had no follow-up for ${o.min} min`, `answer it in the thread (thread show ${o.thread}, then thread reply ${o.thread}), then look at the responder (responder --resume)`);
   // Down or stuck: only while settings.responder is on, the fleet's session is up and the fleet is
   // neither parked nor draining (a park stops it on purpose; a drain refuses its start), so a project
   // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
@@ -33115,11 +33118,32 @@ function owedIn(ts, thread) {
 }
 // The owner's turns in a thread still owed an answer (owedIn on the log's own lines).
 const owedTurns = (threadId, objects = readLog().objects) => owedIn(logTurns(threadId, objects), objects.get(threadId));
+// The responder's open promise in a thread (final-1 F2, final-1b F2): its newest turn there is
+// pending, no resolve of the thread came after it, and no supervisor turn after it settled it. A
+// supervisor turn settles it unless it is a question, or every owed owner turn it answered came after
+// the supervisor's own question asked after the promise (its reply in that exchange answers the
+// owner's answer, not the promise). A reply answering nothing owed takes the promise over and settles
+// it (the backstop). The turn, or null. On the log's lines, oldest first.
+function pendingOpen(ts, thread) {
+  const mine = ts.filter((u) => u.created_by === 'responder').pop();
+  if (mine?.pending !== true) return null;
+  const resolvedAt = (thread?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  if (resolvedAt > String(mine.created_at)) return null;
+  const asked = ts.find((u) => u.created_by === 'supervisor' && u.question && u.created_at >= mine.created_at)?.created_at;
+  for (const s of ts) {
+    if (s.created_by !== 'supervisor' || s.created_at < mine.created_at || s.question) continue;
+    const answers = owedIn(ts.filter((u) => u.created_at < s.created_at), thread).filter((u) => answersTurn(u, 'supervisor'));
+    if (!asked || !answers.length || answers.some((u) => u.created_at < asked)) return null;
+  }
+  return mine;
+}
 // The responder's guard: since its own last turn in the thread (or ever, with none) the supervisor
 // has written, and the owner has said nothing after that. A reply then would answer what the
-// supervisor already answered (both backstop cases of the spine's Failure modes).
+// supervisor already answered (both backstop cases of the spine's Failure modes). Never while its
+// own promise there is open (pendingOpen): the follow-up it owes is its to write.
 function supervisorAnswered(threadId, objects = readLog().objects) {
   const ts = logTurns(threadId, objects);
+  if (pendingOpen(ts, objects.get(threadId))) return false;
   const mine = ts.filter((u) => u.created_by === 'responder').pop()?.created_at ?? '';
   const sup = ts.filter((u) => u.created_by === 'supervisor').pop();
   return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at);
@@ -33141,8 +33165,8 @@ function responderQueue(objects = readLog().objects) {
   return q.sort((a, b) => a.at.localeCompare(b.at));
 }
 // kit-104: a turn routed to the responder still owed past this is overdue (the supervisor takes it,
-// and every turn after it until it is answered); so is the responder's pending turn with nothing
-// after it past RESPONDER_PENDING_MS, which is also how long a pending turn keeps it busy.
+// and every turn after it until it is answered); so is the responder's pending turn not followed up
+// (pendingOpen) past RESPONDER_PENDING_MS, which is also how long a pending turn keeps it busy.
 const RESPONDER_OVERDUE_MS = 3 * 60000;
 const RESPONDER_PENDING_MS = 10 * 60000;
 // Every thread's turns from a fold's objects, oldest first, in one pass.
@@ -33179,7 +33203,7 @@ function responderIdle(objects, now = Date.now(), byThread = turnsByThread(objec
   return !(mine?.pending === true && now - Date.parse(mine.created_at) < RESPONDER_PENDING_MS);
 }
 // The responder's overdue turns, per open thread: an owner turn routed to it, still owed, older
-// than RESPONDER_OVERDUE_MS; or its pending turn with no turn after it for RESPONDER_PENDING_MS.
+// than RESPONDER_OVERDUE_MS; or its open promise (pendingOpen) older than RESPONDER_PENDING_MS.
 // [{ thread, turn, why, min }], from the log alone (owedIn), so an answer or a resolve clears it.
 function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(objects)) {
   const found = [];
@@ -33188,8 +33212,8 @@ function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(ob
     if (t?.type !== 'thread' || t.status === 'resolved') continue;
     const late = owedIn(ts, t).find((u) => u.routed_to === 'responder' && now - Date.parse(u.created_at) > RESPONDER_OVERDUE_MS);
     if (late) { found.push({ thread: id, turn: late.id, why: 'owed', min: Math.floor((now - Date.parse(late.created_at)) / 60000) }); continue; }
-    const last = ts[ts.length - 1];
-    if (last?.created_by === 'responder' && last.pending === true && now - Date.parse(last.created_at) > RESPONDER_PENDING_MS) found.push({ thread: id, turn: last.id, why: 'pending', min: Math.floor((now - Date.parse(last.created_at)) / 60000) });
+    const p = pendingOpen(ts, t);
+    if (p && now - Date.parse(p.created_at) > RESPONDER_PENDING_MS) found.push({ thread: id, turn: p.id, why: 'pending', min: Math.floor((now - Date.parse(p.created_at)) / 60000) });
   }
   return found;
 }
