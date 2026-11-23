@@ -17,7 +17,7 @@ Your prompt may carry a **Links** block: the registry links your ticket, its com
 2. `project/tickets/<id>/` if it exists: you may be resuming; its files are what has been done.
 3. `devteam.mjs history <id>`: phases, messages, rulings and owner answers about your ticket and its dependencies. Then `devteam.mjs messages`. Make sure every `ruling` and `answer` is in your spec or plan before researching: someone may already have decided what you are about to investigate. Then `devteam.mjs search "<your ticket's title>"`: earlier tickets, lessons and incidents about the same thing.
 4. The design your feature cites (`devteam.mjs feature show <feature>`) and `project/designs/architecture.md`, the parts your ticket touches.
-5. `governance/code-style.md` and the settings, for your component's stack.
+5. `governance/code-style.md` and the settings, for your component's stack; `governance/testing.md` (which tests to write, with what); and the parts your ticket touches of `governance/operations.md` (environments, releases, backups), `ai.md` (an AI feature), `web-quality.md` (a web UI or public page) and `project-docs.md` (the README, an API, the architecture diagram).
 
 ## 3. The rules
 
