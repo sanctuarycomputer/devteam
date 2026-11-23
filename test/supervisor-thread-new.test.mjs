@@ -135,6 +135,11 @@ test('kit-108 A4: the responder, a worker and a planner can\'t start a thread', 
       const said = F.fails(['thread', 'new', '--subject', subjectOf(`question:${Q}`), '--title', 't', '--', 'words'], role);
       assert.match(said, /only the owner and the supervisor start threads/, `${role.DEVTEAM_ROLE}: ${said}`);
     }
+    // and a worker's or planner's session that says it is the supervisor (final-1b F1)
+    for (const env of [{ DEVTEAM_ROLE: 'supervisor', DEVTEAM_TICKET: 'demo-01-x' }, { DEVTEAM_ROLE: 'supervisor', DEVTEAM_FEATURE: 'demo' }]) {
+      const said = F.fails(['thread', 'new', '--subject', subjectOf(`question:${Q}`), '--title', 't', '--', 'words'], env);
+      assert.match(said, /the supervisor does this/, `${JSON.stringify(env)}: ${said}`);
+    }
     assert.equal(logLines(F).filter((o) => o.type === 'thread').length, 0);
   } finally { F.done(); }
 });
