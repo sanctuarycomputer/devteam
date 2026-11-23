@@ -254,11 +254,11 @@ test('the names rule: self check warns on a capitalised word main\'s strategy an
     // Postwick is in the working tree's strategy but not main's
     write(path.join(W.old, STRAT), `${STRATEGY}\nMail goes through Postwick.\n`);
     write(path.join(W.old, SELF), withBlock((v) => { v.not.push('Stripe'); v.parts[1].what = 'Keeps notes the same through Postwick and Ferrous.'; v.parts[2].name = 'Vellum plugins'; })
-      .replace('It controls its code', 'Brightline hosts it. It mails through Postwick, Inkpad and Quillsync, and `Zephyr` runs it.\n\nIt controls its code'));
+      .replace('It controls its code', 'Brightline hosts it. It mails through Postwick, Inkpad and Quillsync, and `Zephyr` runs it.\n\nThe notes sync\nthrough Brightline today.\n\nIt controls its code'));
     const c = W.run(['self', 'check']);
     assert.equal(c.status, 0, `C13 a names warning leaves self check's exit at 0\n${c.text}`);
     const warned = [...c.out.matchAll(/warning: self\.md: "([^"]+)" \(([^)]+)\)/g)].map((m) => `${m[1]} ${m[2]}`);
-    assert.deepEqual(warned, ['Postwick prose', 'Zephyr prose', 'Vellum parts[2].name', 'Stripe not[1]'], `C13 the words warned, each at its first place (code is public too)\n${c.out}`);
+    assert.deepEqual(warned, ['Postwick prose', 'Zephyr prose', 'Brightline prose', 'Vellum parts[2].name', 'Stripe not[1]'], `C13 the words warned, each at its first place (code is public too)\n${c.out}`);
   });
   await check('C18 one function, unknownNames, in the self-model region, says which words', () => {
     assert.equal((SRC.match(/\nfunction unknownNames\(/g) ?? []).length, 1, 'C18 unknownNames is defined once');

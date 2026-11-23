@@ -7335,9 +7335,90 @@ function selfDashboard() {
   const b = text === null ? null : selfDoc(text).block;
   return b && { what: b.what, makes: b.makes, parts: b.parts.map((p) => ({ id: p.id, name: p.name, what: p.what, code: p.code })), controls: b.controls, not: b.not };
 }
+// The names rule. A draft is pushed, and on a repo not known to be private it is public, so a
+// capitalised word main's strategy and dependency files don't contain is one to check before then:
+// a name of someone the project may not want named in public. A heuristic: a lowercase name is
+// never caught, and a one-word name that starts a sentence is skipped (spec §6).
+//
+// The capitalised words of pieces ([{ where, text, sentences }]): [{ word, where }], each word once,
+// at its first piece. A word is a run of letters, digits, ' ’ and - that starts with a letter, a
+// trailing 's or ’s (and then any trailing ' ’ or -) dropped; capitalised when its first letter is
+// upper case and it is two letters or more. With sentences, a sentence's first word is skipped: at
+// the start of the text, after a blank line, on a line that starts a markdown block (#, -, *, +,
+// >, | or 1.), after a | table cell, and after . ! or ? and a space. A newline inside a paragraph
+// (a wrapped line) starts nothing. Everything else counts, inline code, links and comments too.
+function capitalisedWords(pieces) {
+  const found = [];
+  const seen = new Set();
+  for (const { where, text, sentences } of pieces) {
+    const s = String(text);
+    let prevEnd = null;
+    for (const m of s.matchAll(/[\p{L}][\p{L}\p{N}'’-]*/gu)) {
+      const gap = s.slice(prevEnd ?? 0, m.index);
+      const starts = prevEnd === null || /[.!?]\s/.test(gap) || /\n[ \t]*\r?\n/.test(gap) || /\n[ \t]*(?:[#*+>|-]|\d+\.)/.test(gap) || gap.includes('|');
+      prevEnd = m.index + m[0].length;
+      if (sentences && starts) continue;
+      const word = m[0].replace(/['’]s$/, '').replace(/['’-]+$/, '');
+      if (!/^\p{Lu}/u.test(word) || [...word].length < 2 || seen.has(word)) continue;
+      seen.add(word);
+      found.push({ word, where });
+    }
+  }
+  return found;
+}
+// The text the names rule reads, at ref: the project's strategy.md and the repo root's
+// package.json, Gemfile and requirements.txt, joined; a missing file reads as ''. With no ref, or
+// the project outside the repo, the working tree's.
+function namesAllowedText(ref = mainRef()) {
+  const at = (rel) => (projectInRepo && ref ? git(['show', `${ref}:${rel}`]) : readText(path.join(projectRoot, rel))) ?? '';
+  return [strategyRel, 'package.json', 'Gemfile', 'requirements.txt'].map(at).join('\n');
+}
+// The capitalised words of pieces that allowed doesn't name (as a whole word, ignoring case). The
+// one names function: self check, chore pr and check-pr use it, and kit-135 for exterior.md.
+function unknownNames(pieces, allowed) {
+  return capitalisedWords(pieces).filter((w) => !namesWhole(allowed, w.word));
+}
+// A self.md's pieces for the names rule. The text outside the self block ('prose', with sentences;
+// every other fenced block is in it), then the block's what, makes and each part's what (with
+// sentences), each part's name, controls[i] and not[i] (every word). The ids are left out, and so is
+// each code path has(partPath(p)) finds: it names a file already in the repo. One it doesn't (an
+// earlier blob's) is read like any text. With no parsed block, the whole file is one prose piece.
+function selfPieces(text, block, has) {
+  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
+  const lines = String(text).split(/\r?\n/);
+  const b = fencedBlocks(text).blocks.find((x) => x.info === 'self');
+  // the block's lines, opening fence to closing, become one blank line
+  lines.splice(b.line - 1, b.body.split('\n').length + 2, '');
+  const pieces = [{ where: 'prose', text: lines.join('\n'), sentences: true }];
+  const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
+  add('what', block.what, true);
+  add('makes', block.makes, true);
+  block.parts.forEach((p, i) => {
+    add(`parts[${i}].name`, p.name, false);
+    add(`parts[${i}].what`, p.what, true);
+    p.code.forEach((c, j) => { if (!has(partPath(c))) add(`parts[${i}].code[${j}]`, c, false); });
+  });
+  block.controls.forEach((c, i) => add(`controls[${i}]`, c, false));
+  block.not.forEach((c, i) => add(`not[${i}]`, c, false));
+  return pieces;
+}
+// One self.md blob's unknown words: its pieces (the whole text as prose when the contract fails, so
+// a broken draft's words still count), less what allowed names.
+function selfWords(text, has, allowed) {
+  return unknownNames(selfPieces(text, selfDoc(text).block, has), allowed);
+}
+// Whether a strategy links self.md: in its prose (outside every fenced block), an inline link to
+// self.md or ./self.md (an optional #anchor and "title"), or a reference definition naming it.
+function linksSelf(strategyText) {
+  const prose = fencedBlocks(strategyText ?? '').prose;
+  return /\]\(\s*(?:\.\/)?self\.md(?:#[^\s)]*)?(?:\s+"[^"]*")?\s*\)/.test(prose) || /^\s*\[[^\]]+\]:\s*(?:\.\/)?self\.md(?:#\S*)?\s*$/m.test(prose);
+}
+// main's strategy.md, as strategyState reads it, or null when missing.
+const strategyMainText = () => (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md')));
 const SELF_NOT_DRAFTED = 'self.md is not drafted yet: the supervisor drafts it from the code and the strategy (supervisor.md, Monitoring)';
 // self show [--json]: main's self.md. self check: the working tree's, the draft, against the
-// contract and each part's path on disk; errors exit 1.
+// contract and each part's path on disk (errors, exit 1), then the names rule and whether main's
+// strategy links self.md (warnings, the exit unchanged).
 function cmdSelf() {
   const sub = positional[0];
   if (sub === 'show') {
@@ -7367,6 +7448,9 @@ function cmdSelf() {
     for (const e of errors) out(`error: self.md: ${e}`);
     const missing = block ? selfPathsMissing(block, hasOnDisk) : [];
     for (const m of missing) out(`error: self.md: part ${m.part}'s path ${m.path} is not in the repo`);
+    gitReadCache = new Map();
+    for (const w of selfWords(text, hasOnDisk, namesAllowedText())) out(`warning: self.md: "${w.word}" (${w.where}) is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: on a repo not known to be private, the draft is public once its branch is pushed`);
+    if (selfMainText() !== null && !linksSelf(strategyMainText())) out('warning: main\'s strategy.md does not link self.md: propose a strategy-change adding [self.md](./self.md), in its own PR');
     process.exit(errors.length || missing.length ? 1 : 0);
   }
   die('usage: self show [--json] | self check');
