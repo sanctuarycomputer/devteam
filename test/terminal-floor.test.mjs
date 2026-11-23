@@ -337,6 +337,46 @@ test('terminal A7b: a dead holder is taken over at once, a stale one at 60 s, a 
   assert.ok(!fs.existsSync(f), 'each writer removes its own lock when it is done');
 });
 
+// A tmux in front of the fixture's: the owner's-floor read (a display naming @devteam-owner-floor)
+// waits the ms in FLOOR_READ_DELAY_MS, inside the writer's hold and before its first stamp.
+const FLOOR_READ_SLOW = `#!${process.execPath}
+const { spawnSync } = require('child_process');
+const args = process.argv.slice(2);
+const ms = Number(process.env.FLOOR_READ_DELAY_MS || 0);
+if (ms && args.includes('display') && args.some((a) => a.includes('@devteam-owner-floor'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const r = spawnSync(process.env.FLOOR_NEXT_TMUX, args, { stdio: 'inherit' });
+process.exit(r.status ?? 1);
+`;
+test('terminal A7b: a holder whose lock was taken over lets go of nothing: the new holder keeps its lock', async () => {
+  const T = termFixture('floor-a7b-release-own');
+  after(() => T.done());
+  const s = sup(T, SCREEN.ready);
+  const slowDir = path.join(T.F.base, 'slow-floor-read');
+  write(path.join(slowDir, 'tmux'), FLOOR_READ_SLOW);
+  fs.chmodSync(path.join(slowDir, 'tmux'), 0o755);
+  const slow = (ms) => ({ PATH: `${slowDir}${path.delimiter}${T.env.PATH}`, FLOOR_NEXT_TMUX: T.wrapper, FLOOR_READ_DELAY_MS: String(ms) });
+  const f = lockFile(T, s.pane);
+  const pidOf = () => { try { return JSON.parse(fs.readFileSync(f, 'utf8')).pid; } catch { return null; } };
+  // the old holder: it takes the lock, then reads the floor for 6 s, stamping nothing meanwhile
+  let oldDone = false;
+  const old = sendAsync(T, 'the old holder', slow(6000)).then((r) => { oldDone = true; return r; });
+  const oldPid = await until(pidOf, 'the old holder\'s lock');
+  // its stamp gone stale while it holds
+  const stale = new Date(Date.now() - 61000);
+  fs.utimesSync(f, stale, stale);
+  // the new holder takes it over, and holds it through its own 10 s floor read
+  const next = sendAsync(T, 'the new holder', slow(10000));
+  const newPid = await until(() => { const p = pidOf(); return p && p !== oldPid ? p : null; }, 'the takeover');
+  assert.ok(!oldDone && !s.bytes().includes('the old holder'), 'taken over while the old holder still held it, before it typed');
+  const o = await old;
+  assert.equal(o.status, 0, o.err);
+  assert.ok(s.bytes().includes('the old holder'), 'the old holder wrote its line');
+  assert.equal(pidOf(), newPid, 'the old holder let go of nothing: the new holder\'s lock is still there');
+  const n = await next;
+  assert.equal(n.status, 0, n.err);
+  assert.ok(!fs.existsSync(f), 'and the new holder removed its own lock when it was done');
+});
+
 test('terminal A7b and A7d: paneAnswer holds the lock from its look to its Enter, answers whatever the floor, and lets go before pane answered', async () => {
   const T = termFixture('floor-a7b-answer');
   after(() => T.done());
@@ -352,7 +392,11 @@ test('terminal A7b and A7d: paneAnswer holds the lock from its look to its Enter
   // a key post inside the hold lands after the Enter, never between the digit and it
   const q1 = await question();
   const answered = answer(q1, 2);
-  await pause(500);
+  // posted only once paneAnswer holds the lock (its look runs a child first, which a loaded box
+  // slows), and once its digit is in, so the post lands between the digit and its Enter, with the
+  // rest of the hold well inside the key post's 2 s wait
+  await until(() => fs.existsSync(lockFile(T, pane)), "paneAnswer's hold");
+  for (const t = Date.now(); m.typed() === ''; await pause(10)) assert.ok(Date.now() - t < 30000, "paneAnswer's digit");
   const k = await keysTo(T, port, 'supervisor', keysBody(tok, pane, 1, { data: '7a' }));
   const a1 = await answered;
   assert.equal(a1.status, 200, a1.text);
@@ -479,6 +523,23 @@ test('terminal A7 (K3-1): a floor on a pane whose agent exited is cleared, befor
   assert.equal(floorOf(T, s.pane), '', 'the floor cleared on a shell pane');
   assert.equal(opt(T, s.pane, '@devteam-prompt-readable'), '', 'and the readable mark');
   assert.doesNotMatch(r.out, /owner's line open/);
+});
+
+test("terminal A7 (F2): a pane the floor's read just found isn't gone when a second tmux call fails: the floor holds", async () => {
+  const T = termFixture('floor-list-panes-fails');
+  after(() => T.done());
+  const s = sup(T, SCREEN.typing);
+  await s.show(SCREEN.typing);
+  setReadable(T, s.pane);
+  setFloor(T, s.pane, 'open');
+  // every list-panes fails, as a spawn failure or a timeout on a loaded box would
+  write(path.join(T.F.base, 'tmux-fail.json'), JSON.stringify({ 'list-panes': 'list-panes failed' }));
+  const r = await sendAsync(T, 'kit line', { PATH: T.dashEnv().PATH });
+  fs.rmSync(path.join(T.F.base, 'tmux-fail.json'));
+  assert.equal(r.status, 0, r.err);
+  assert.equal(floorOf(T, s.pane).split(' ')[1], 'open', 'the floor is still set');
+  assert.match(`${r.err}\n${r.out}`, HELD_FLOOR, 'the line held behind the owner\'s');
+  assert.equal(plain(await s.quiet()), '', 'nothing typed into the owner\'s line');
 });
 
 test('terminal A7d: a key post waiting on the lock never delays a screen read', async () => {

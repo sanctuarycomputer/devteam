@@ -2194,8 +2194,9 @@ function tryLock(file, fn, { staleMs = 10000 } = {}) {
 // runs at once, and fn(outer) says whether it is the outermost, the hold that reads the floor). A
 // target that doesn't resolve to a pane takes no lock, and its write goes on as before (tmux would
 // refuse it anyway). Back: { value } (fn's), or { busy: true } when the wait ran out, nothing done.
-const TYPE_LOCK_STALE_MS = 60000;
 const typeLock = {
+  // a stamp this old (or this far ahead: a clock moved back) is a holder gone
+  STALE_MS: 60000,
   // lock file → its hold ({ ino, text }): the locks this process's synchronous chain holds (its
   // re-entrance), and those the dashboard's chains hold (typeLockAsync's, for touch only)
   held: new Map(),
@@ -2231,7 +2232,7 @@ const typeLock = {
     let dead = false;
     if (Number.isInteger(pid) && pid > 0) { try { process.kill(pid, 0); } catch (e) { dead = e.code === 'ESRCH'; } }
     // unreadable, or no pid: dead once it is 60 s old, which the stamp's rule already says
-    if (!dead && Math.abs(Date.now() - was.mtimeMs) < TYPE_LOCK_STALE_MS) return null;
+    if (!dead && Math.abs(Date.now() - was.mtimeMs) < typeLock.STALE_MS) return null;
     const aside = `${file}.taken-${process.pid}-${++typeLock.seq}`;
     try { fs.renameSync(file, aside); } catch { return null; }
     const moved = typeLock.read(aside);
@@ -19474,26 +19475,28 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
 // holds. After: on a prompt read readable, ready or busy release it, and so do a dialog or a limit
 // a done floor; on one never read, a done floor is released and an open one holds. A release unsets
 // it, or the kit's own half-typed line would later read typing and hold its next write.
-const OWNER_FLOOR_SETTLE_MS = 3000;
 function ownerLineOpen(pane, { release = true } = {}) {
-  const got = sh('tmux', ['display', '-p', '-t', pane, '#{pane_id}\tR#{@devteam-prompt-readable}\tF#{@devteam-owner-floor}']);
-  const r = got?.indexOf('\tR') ?? -1;
+  const SETTLE_MS = 3000;
+  // the pane's command in the same read: a pane this read found is never gone by a second call failing
+  const got = sh('tmux', ['display', '-p', '-t', pane, '#{pane_id}\tC#{pane_current_command}\tR#{@devteam-prompt-readable}\tF#{@devteam-owner-floor}']);
+  const c = got?.indexOf('\tC') ?? -1;
+  const r = c === -1 ? -1 : got.indexOf('\tR', c + 2);
   const f = r === -1 ? -1 : got.indexOf('\tF', r + 2);
   if (f === -1) return false;
   const floor = got.slice(f + 2);
   if (!floor) return false;
-  const id = got.slice(0, r);
+  const id = got.slice(0, c);
   const m = /^(\d{13}) (done|open)$/.exec(floor);
   const at = m ? Number(m[1]) : 0;
   const kind = m ? m[2] : 'open';
-  const s = paneState(id);
+  const s = paneState(id, got.slice(c + 2, r));
   if (s === 'shell' || s === 'gone') {
     sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor', ';', 'set-option', '-p', '-u', '-t', id, '@devteam-prompt-readable']);
     return false;
   }
   const readable = promptReadable(id, s, got.slice(r + 2, f));
   const age = Date.now() - at;
-  if (age < OWNER_FLOOR_SETTLE_MS && age >= -OWNER_FLOOR_SETTLE_MS) return true;
+  if (age < SETTLE_MS && age >= -SETTLE_MS) return true;
   const released = readable ? s === 'ready' || s === 'busy' || (kind === 'done' && (s === 'dialog' || s === 'limit')) : kind === 'done';
   if (!released) return true;
   if (release) sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor']);
@@ -19544,9 +19547,9 @@ function machineAlert(words) {
 // An Enter that arrives as the agent redraws can be lost, and the line would then merge with
 // whatever is typed there next: pressed again, as the kit's lost Enter does, up to TELL_ENTER_TRIES
 // in all, each after a longer wait (a loaded machine redraws slowly). False when it's still there.
+const TELL_ENTER_TRIES = 3;
 // Run under machine tell's typing lock, so no owner post arrives meanwhile; a floor set by a writer
 // that takes no lock (an older kit) is read before each retry, and presses nothing: 'floor'.
-const TELL_ENTER_TRIES = 3;
 function enterLanded(p) {
   const settle = (n) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.DEVTEAM_TELL_SETTLE_SECONDS ?? 1) * 1000 * n);
   settle(1);
@@ -24142,10 +24145,10 @@ const promptPointer = (file) => `Your prompt for this session is in the file ${p
 // text goes in on stdin, never as an argument, under a name of this process's own; -d drops it
 // once pasted, and a paste that fails drops it too, so nothing is left on the server. Only the line
 // is recorded: the lost-Enter rescue matches the line's tail, and a pasted image shows as [Image #n].
+let dropSeq = 0;
 // All of it under the pane's typing lock: outermost, it first reads the owner's floor, and types
 // nothing (false) while that holds, or when the lock stays busy; under a caller's hold (typeInto,
 // flushHeld, loginChangedStop, a restart), the caller read it. The stamp is touched after each call.
-let dropSeq = 0;
 function typeNow(target, line, paste = null) {
   const files = Array.isArray(paste) && paste.length ? paste : null;
   const t = (args) => { const r = tmux(args); typeLock.touch(); return r; };
