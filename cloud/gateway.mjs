@@ -1134,6 +1134,8 @@ export function createGateway(opts = {}) {
   const mac = (...parts) => crypto.createHmac('sha256', secret).update(parts.join('|')).digest().subarray(0, 16);
 
   const isOwner = (person) => person?.role === 'owner';
+  // 'owner', 'admin' or 'member': any other role in a row reads as a member's, the least it can be
+  const roleOf = (person) => (isOwner(person) ? 'owner' : person?.role === 'admin' ? 'admin' : 'member');
   // A claimed file with no owner row (one restored from before people, read while running): its
   // top-level sessions are still the owner's, until the next start's upgrade writes the row.
   const STAND_IN = { id: null, role: 'owner', level: 'full', name: 'Owner' };
@@ -2941,7 +2943,9 @@ export function createGateway(opts = {}) {
         if (p === '/auth/people/invite' && req.method === 'POST') return await inviteRoute(req, res, who);
         if (p === '/auth/people/relink' && req.method === 'POST') return await relinkRoute(req, res, who);
         // Each of these acts on the signed-in person's own methods only (ownMethods, removeMethod).
-        if (p === '/auth/method/list' && req.method === 'GET') { const now = store.load(); return json(res, 200, { methods: ownMethods(now, person), notices: noticesOf(now, person) }); }
+        // fresh_ms: how long this sign-in still counts as fresh, so the hub asks to confirm it's you
+        // before trying a change that would be refused
+        if (p === '/auth/method/list' && req.method === 'GET') { const now = store.load(); return json(res, 200, { methods: ownMethods(now, person), notices: noticesOf(now, person), fresh_ms: Math.max(0, (session.at ?? 0) + CHALLENGE_MS - Date.now()) }); }
         if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(ownMethods(store.load(), person).filter((m) => m.type === 'passkey').map((m) => ({ id: m.id, name: m.label, createdAt: m.added_at })), PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
         if ((p.startsWith('/auth/passkeys/') || p === '/auth/method/remove') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
         // the passkey row's add, after the gate and the fresh rule above (today's place and answers);
@@ -2979,7 +2983,9 @@ export function createGateway(opts = {}) {
       // box's image says it is (boxImage, from the image's ENV: its release and its tools' pins):
       // { release: 'vX.Y.Z' | null, tools: { name: version } } in the ENV's order, or null with neither
       // set (a laptop, an older image). Versions only. An additive change keeps box: 2.
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE });
+      // role is the signed-in person's ('owner', 'admin' or 'member'); people, where the People list
+      // is, for the owner and admins only, so the hub draws People for them alone.
+      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE, role: roleOf(person), ...(roleOf(person) === 'member' ? {} : { people: `${PUB}/auth/people/list` }) });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
