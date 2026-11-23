@@ -42,7 +42,7 @@ function ghStandIn(F, pr) {
     '  "pr view")',
     `    if [ -f "${mergedAt}" ]; then`,
     `      pwd >> "${views}"`,
-    `      date +%s%3N >> "${times}"`,
+    `      "${process.execPath}" -p "Date.now()" >> "${times}"`,
     `      [ -f "${failAfter}" ] && exit 1`,
     `      n=$(cat "${lag}" 2>/dev/null || echo 0)`,
     `      if [ "$n" -gt 0 ]; then echo $((n - 1)) > "${lag}"; elif [ -f "${after}" ]; then cp "${after}" "${prFile}"; fi`,
