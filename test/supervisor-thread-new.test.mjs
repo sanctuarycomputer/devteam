@@ -173,6 +173,8 @@ test('kit-108 A7: a hand-written supervisor thread line that is born resolved (o
     const N = F.hand('supervisor', { type: 'thread', title: 'none' }, 40000);
     const all = JSON.parse(F.owner(['thread', 'list', '--all', '--json'])).map((x) => x.id);
     assert.ok(all.includes(T) && !all.includes(P) && !all.includes(N), `dropped: ${all.join(', ')}`);
+    // and thread list says which are the supervisor's, in the third person as the rest of its line
+    assert.match(F.owner(['thread', 'list']), new RegExp(`${T} \\[open, the owner's move, from the supervisor\\]`));
   } finally { F.done(); }
 });
 

@@ -9354,6 +9354,8 @@ function cmdRate() {
 // and page subjects the kit's rendering of log content (itself agent-written), for artifact and
 // preview subjects (a later kit's viewers) everything in it is page-written. It is shown escaped,
 // given to the supervisor only inside a data frame, and never typed into a pane.
+// The open threads a project keeps, counting the owner's only (kit-108): the supervisor's own have their
+// cap (supervisorThreadCap), so they never crowd out the owner's thread new or reopen.
 const THREAD_OPEN_MAX = 200;
 const TURN_MAX = 2000; // bytes
 // A turn as the line holds it, JSON-escaped (a quotation mark is two bytes there, a control character
@@ -9597,7 +9599,8 @@ function threadView(t, ts, qs, ms = []) {
   const firstOwner = turns.find((u) => u.by === 'owner');
   const firstReply = firstOwner ? turns.find((u) => u.by === 'supervisor' && u.at > firstOwner.at) : null;
   return {
-    id: t.id, title: String(t.title ?? ''), subject: isObj(t.subject) ? t.subject : null, status, outcome: status === 'resolved' ? t.outcome ?? null : null, ready,
+    // started_by: who started it, from the thread line's writer (kit-108): the owner, or the supervisor
+    id: t.id, title: String(t.title ?? ''), subject: isObj(t.subject) ? t.subject : null, started_by: t.created_by === 'supervisor' ? 'supervisor' : 'owner', status, outcome: status === 'resolved' ? t.outcome ?? null : null, ready,
     turns, questions: qs.map(threadQuestion), waiting, ...(withSession ? { with: withSession } : {}),
     handed, addressed, check, shot, noshot, unready, frame, source: null,
     created_at: t.created_at, resolved_at: status === 'resolved' ? t.updates.filter((u) => u.status === 'resolved').pop()?.at ?? null : null,
@@ -9702,7 +9705,17 @@ function threadOpen(id, by) {
   if (t.status === 'resolved') die(by === 'owner' ? `${t.id} is resolved; reopen it first (thread reopen ${t.id} "<words>")` : `${t.id} is resolved: the owner closed it, and a reply goes nowhere until they reopen it`);
   return t;
 }
-const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open').length;
+// The owner's open threads, which THREAD_OPEN_MAX caps: the supervisor's own count toward its cap alone.
+const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open' && x.started_by !== 'supervisor').length;
+// kit-108: the supervisor keeps at most 20 open threads of its own, the owner's reopens among them (a
+// reopen is never refused, so it can take the count past 20; the supervisor's next thread new waits).
+// null while under it, else the refusal, naming the oldest open ones.
+function supervisorThreadCap(views) {
+  const MAX = 20;
+  const mine = views.filter((x) => x.status === 'open' && x.started_by === 'supervisor').sort((a, b) => a.created_at.localeCompare(b.created_at));
+  if (mine.length < MAX) return null;
+  return `${mine.length} threads you started are open, the most you keep (${MAX}): propose resolving one the owner has read (thread ready <t-id> --outcome "<line>"), or say it in the most related of them with --off-subject "<why>". The oldest: ${mine.slice(0, 3).map((x) => x.id).join(', ')}`;
+}
 // Open threads by whose move: ready (the supervisor's proposal, or a session's mark on an artifact
 // note, awaits the owner's check), else you (the owner's move), else with (an artifact note a session
 // has, artifact-notes-1; the key only when one does), else waiting (on the supervisor).
@@ -9828,7 +9841,42 @@ function cmdThread() {
   const filled = (i, early) => (early ? `${plural(early.length, 'file')} dropped` : wordsFrom(i));
   // routed_to (and delivered, the responder's) for an owner's turn line (kit-104)
   const routedFields = (r) => ({ routed_to: r.to, ...(r.to === 'responder' ? { delivered: r.delivered } : {}) });
+  // kit-108: the supervisor's own thread, about a question or a goal: a thread line and a first turn,
+  // both by supervisor, the subject the turn's ref; nothing typed into any pane (the owner moves next)
+  const supervisorThread = () => {
+    supervisorOnly('thread new');
+    if (flags.files !== undefined) die("--files go with the owner's own turn");
+    if (flags.subject === undefined) die('owner commands don\'t run in an agent session (DEVTEAM_ROLE=supervisor), and a thread of your own needs --subject: thread new --subject \'{"kind":"item","ref":"question:q-…"}\' --title "<line>" -- "<words>", about a question or a goal');
+    let subject;
+    try { subject = uncapped(JSON.parse(flagStr('subject'))); } catch { die('--subject is JSON: {"kind":"item","ref":"question:q-…"}'); }
+    const p = subjectProblem(subject);
+    if (p) die(`--subject: ${p}`);
+    if (subject.kind !== 'item' || !/^(question|goal):/.test(subject.ref)) die('--subject: you start a thread about a question or a goal: {"kind":"item","ref":"question:q-…"} or {"kind":"item","ref":"goal:g-…"}');
+    const [kind, sid] = [subject.ref.slice(0, subject.ref.indexOf(':')), subject.ref.slice(subject.ref.indexOf(':') + 1)];
+    if (logGet(sid)?.type !== kind) die(`--subject: no ${kind} ${sid} in the log (${kind === 'question' ? 'questions --json' : 'goal list'})`);
+    const words = turnText(wordsFrom(1));
+    const given = uncapped(flagStr('title'));
+    if (given !== undefined && given.length > THREAD_TITLE_MAX) die(`--title is at most ${THREAD_TITLE_MAX} characters`);
+    if (given !== undefined && UNSAFE_TEXT.test(given)) die('--title is one line of plain text');
+    const title = threadTitle(given ?? words);
+    if (!title) die('--title: the thread needs a name');
+    const views = threadViews(readLog().objects);
+    const had = views.find((x) => x.status === 'open' && x.subject && subjectKey(x.subject) === subjectKey(subject));
+    if (had) die(`${had.id} is already open on this subject: say it there (thread reply ${had.id} "<words>" --refs ${subject.ref})`);
+    const capped = supervisorThreadCap(views);
+    if (capped) die(capped);
+    const line = { type: 'turn', thread: 't-00000000-000000000-supervisor', text: words, refs: [subject.ref] };
+    if (!lineFits(line, 'supervisor')) die('That first turn is too long with its link; shorten it.');
+    const t = appendLog({ type: 'thread', title, subject }, 'supervisor');
+    appendLog({ ...line, thread: t.id }, 'supervisor');
+    return out(t.id);
+  };
   if (sub === 'new') {
+    // the owner's, or the supervisor's own (kit-108); never the responder's, a worker's or a planner's
+    const role = process.env.DEVTEAM_ROLE;
+    if (role && role !== 'supervisor') die(`thread new: only the owner and the supervisor start threads (DEVTEAM_ROLE=${role}); ${role === 'responder' ? 'hand it over: send supervisor "…" --kind handoff --thread <t-id>' : 'tell the supervisor: send supervisor "…"'}`);
+    if (role === 'supervisor') return supervisorThread();
+    if (flags.re !== undefined || flags['off-subject'] !== undefined) die('--re goes with a reply (thread reply), and so does --off-subject: never the owner\'s own turn');
     const { by } = threadOwner();
     const early = alone(1);
     const words = turnText(filled(1, early));
@@ -9998,11 +10046,13 @@ function cmdThread() {
     const t = logGet(id ?? '');
     if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'}`);
     if (t.status !== 'resolved') die(`${t.id} is open`);
+    if (flags.re !== undefined || flags['off-subject'] !== undefined) die('--re goes with a reply (thread reply), and so does --off-subject: never the owner\'s own turn');
     // reopening takes words, never files: said so, not dropped without a word
     if (flags.files !== undefined) die("--files go with the owner's own turn");
     const words = wordsFrom(2);
     if (words) turnText(words);
-    const n = openThreadCount();
+    // a thread the supervisor started counts toward its own cap, never the owner's, and the owner's reopen of it is never refused
+    const n = t.created_by === 'supervisor' ? 0 : openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
     // its words routed before either line is written (kit-104), as the thread will be once open
     const route = words ? responderRoute(t) : null;
@@ -10049,7 +10099,8 @@ function cmdThread() {
     // an overdue turn the responder has is now the supervisor's to take: show says so, as list --waiting does
     // an artifact note with a session is that session's (artifact-notes-1), in the words the card uses
     out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'session' ? `with ${v.with}` : waitingWords(v, v.waiting === 'responder' && responderOverdue(readLog().objects).some((o) => o.thread === v.id))}` : ''}`);
-    out(threadDataFrame(v));
+    // a thread the supervisor started names what it is about; its title is the supervisor's own words, still data
+    out(v.started_by === 'supervisor' ? `The supervisor started this thread about: ${quoteData(v.subject?.ref ?? '')}. Its title, as written: ${quoteData(v.title)}` : threadDataFrame(v));
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
     // the owner's words are theirs, as in your session; your own turns are yours
@@ -10079,7 +10130,7 @@ function cmdThread() {
     }
     const objects = readLog().objects;
     let vs = threadViews(objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
-    const row = (x, words) => `${x.id} [${x.status}${words ? `, ${words}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`;
+    const row = (x, words) => `${x.id} [${x.status}${words ? `, ${words}` : ''}${x.started_by === 'supervisor' ? ', from the supervisor' : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`;
     if (flags.waiting) {
       // the supervisor's: an owed turn routed to it (or with no route) or an open handoff naming the
       // thread; then the threads the responder has, marked so and never also as the supervisor's
@@ -13458,7 +13509,8 @@ function ownerRefHolds(from, ref) {
   const o = ref ? logGet(ref) : null;
   if (!o) return false;
   const answered = o.type === 'question' && questionView(o).status === 'answered';
-  const spoke = (o.type === 'turn' && o.created_by === 'owner') || o.type === 'thread';
+  // a thread the owner started (kit-108: the supervisor starts its own, which holds none of the owner's words)
+  const spoke = (o.type === 'turn' || o.type === 'thread') && o.created_by === 'owner';
   return from === 'owner-answer' ? answered : from === 'owner-thread' ? spoke : from === 'owner-chat' ? answered || spoke : true;
 }
 // { from, ref }: from in x-ooda.sources, ref which one within it (a sensor's name, a finding's kind,
