@@ -30794,12 +30794,16 @@ The whole system as planned now: the sum of every design so far. Written at boot
 `;
 
 // project/strategy.md as init makes it: why the project exists and how it wins, the owner's. The
-// supervisor drafts it at adoption and judges each goal's impact against it; the kit never parses
-// it (it only knows missing, this template, or written).
+// supervisor drafts it at adoption and judges each goal's impact against it; the kit reads it only
+// for whether it links self.md (`linksSelf`), beside missing, this template, or written.
 const STRATEGY_TEMPLATE_MARK = 'devteam:strategy-template';
+// The template links self.md in its opening lines. The kit reads it for one thing, beside missing,
+// template or written: whether it carries the link to self.md (`linksSelf`).
 const STRATEGY_MD = `# Strategy
 
 <!-- ${STRATEGY_TEMPLATE_MARK}: delete this line when you write the strategy -->
+
+What the project is, what it makes and its parts are in [self.md](./self.md); this page says why it exists, who it serves and how it wins.
 
 Why this project exists and how it wins. The supervisor drafts it; only the owner approves a change (class strategy-change).
 Goals are judged against it (planning.md §1). Keep it to one page.
