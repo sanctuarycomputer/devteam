@@ -89,7 +89,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   await t.test('reads of the threads slower than the 2 s poll: a reply still shows, and the owner can still send twice', async () => {
     await p.ev('window.__threadsDelay = 2500');
     try {
-      F.sup(['thread', 'reply', T, 'Slow box: still here.']);
+      F.sup(['thread', 'reply', T, 'Slow box: still here.', '--off-subject', 'a note while the reads are slow']);
       await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn.supervisor')].some((e) => e.textContent.includes('Slow box'))`, 'the reply through slow reads');
       for (const w of ['First on a slow box', 'Second on a slow box']) {
         await p.ev("document.getElementById('tl-c-text').focus()");
