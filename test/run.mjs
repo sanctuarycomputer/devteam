@@ -522,8 +522,36 @@ export function schedule(plan, concurrency, chromeConcurrency = concurrency) {
   return [{ files: plan.filter((p) => p.group === 'alone'), limit: 1 }, { files: plan.filter((p) => p.group !== 'alone'), limit: concurrency, caps: { chrome: chromeConcurrency } }].filter((st) => st.files.length);
 }
 
+// lib/cli-runner.mjs keeps V8's code cache in <shared>/devteam-kit-compile-cache. Each test runs
+// the kit from a fresh temp repo, so every run adds entries for paths no later run uses, and nothing
+// else ever removes them (6.7 GB on one box). Trimmed at the start of each run, oldest first, to
+// half of maxBytes once it passes maxBytes: a missing entry only means V8 compiles that file again.
+export function pruneCompileCache(shared, maxBytes = 512 * 1024 * 1024) {
+  const root = path.join(shared, 'devteam-kit-compile-cache');
+  const files = [];
+  const walk = (d) => {
+    let ents = [];
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const f = path.join(d, e.name);
+      if (e.isDirectory()) walk(f);
+      else if (e.isFile()) { try { const st = fs.statSync(f); files.push({ f, size: st.size, mtime: st.mtimeMs }); } catch {} }
+    }
+  };
+  walk(root);
+  let total = files.reduce((n, x) => n + x.size, 0);
+  if (total <= maxBytes) return 0;
+  let removed = 0;
+  for (const x of files.sort((a, b) => a.mtime - b.mtime)) {
+    if (total <= maxBytes / 2) break;
+    try { fs.rmSync(x.f, { force: true }); total -= x.size; removed++; } catch {}
+  }
+  return removed;
+}
+
 async function runAll(opts, plan) {
   const shared = sharedDir(process.env);
+  pruneCompileCache(shared);
   const ctx = { shared, shimDir: ensureShim(shared, process.env.PATH), tmux: realTmux(process.env.PATH), running: new Set(), repeat: opts.repeat, stopping: false };
   try {
     return await runFiles(opts, plan, ctx);

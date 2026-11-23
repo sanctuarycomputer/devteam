@@ -894,3 +894,22 @@ test('openChrome starts Chrome with the lower-memory flags', async () => {
   assert.equal(a.at(-1), 'about:blank');
   assert.match(fs.readFileSync(path.join(lib, 'chrome.mjs'), 'utf8'), /spawn\(chromePath, chromeArgs\(profile\)/, 'openChrome spawns with the seam');
 });
+
+test('pruneCompileCache trims the shared compile cache, oldest first, once it passes its cap', () => {
+  const S = fs.mkdtempSync(path.join(os.tmpdir(), 'prune-'));
+  try {
+    const d = path.join(S, 'devteam-kit-compile-cache', 'v0-x64-test');
+    fs.mkdirSync(d, { recursive: true });
+    for (let i = 0; i < 10; i++) {
+      const f = path.join(d, `e${i}`);
+      fs.writeFileSync(f, Buffer.alloc(100));
+      fs.utimesSync(f, 1000 + i, 1000 + i);
+    }
+    assert.equal(R.pruneCompileCache(S, 2000), 0, 'under its cap: nothing removed');
+    assert.equal(R.pruneCompileCache(S, 800), 6, 'over its cap: trimmed to half of it');
+    assert.deepEqual(fs.readdirSync(d).sort(), ['e6', 'e7', 'e8', 'e9'], 'the oldest went first');
+    assert.equal(R.pruneCompileCache(path.join(S, 'none'), 800), 0, 'no cache yet: nothing to do');
+  } finally {
+    fs.rmSync(S, { recursive: true, force: true });
+  }
+});
