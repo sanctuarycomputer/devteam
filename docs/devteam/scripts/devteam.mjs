@@ -2055,6 +2055,19 @@ function logWriter() {
 function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   if (inResponderWorktree()) die("owner commands don't run in the responder's worktree");
+  // A worker's or planner's session, whatever DEVTEAM_ROLE says: DEVTEAM_TICKET or DEVTEAM_FEATURE
+  // set at all (a session that blanks one is still one), a checkout on a ticket/ or plan/ branch, or
+  // a folder under a .worktrees folder (every session's worktree, a detached one or another repo's
+  // included), even with every variable cleared.
+  const session = (() => {
+    for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (process.env[k] !== undefined) return `${k}=${JSON.stringify(process.env[k])}`;
+    const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (b && /^(ticket|plan)\//.test(b)) return `this checkout is on ${b}`;
+    let cwd;
+    try { cwd = realPath(process.cwd()); } catch { cwd = process.cwd(); }
+    return cwd.split(path.sep).includes('.worktrees') ? `${cwd} is under a .worktrees folder, where sessions work` : null;
+  })();
+  if (session) die(`owner commands don't run in a worker's or planner's session (${session}); the owner runs them in their own terminal from home's main checkout, or on the dashboard, and a session sends the supervisor what it needs`);
   const pane = process.env.TMUX_PANE;
   if (!pane || !process.env.TMUX) return { by: 'owner' };
   const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set'
