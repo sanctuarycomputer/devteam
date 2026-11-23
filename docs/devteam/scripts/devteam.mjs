@@ -9372,33 +9372,62 @@ function threadQuestion(q) {
 function threadViews(objects) {
   const turns = new Map();
   const asked = new Map();
+  // artifact-notes-1: a session's marks on a note (the dashboard's reader folds no messages, so none there until kit-144)
+  const marks = new Map();
   const push = (m, k, v) => (m.get(k) ?? m.set(k, []).get(k)).push(v);
   for (const o of objects.values()) {
     if (o.type === 'turn' && typeof o.thread === 'string') push(turns, o.thread, o);
     else if (o.type === 'question' && typeof o.thread === 'string') push(asked, o.thread, o);
+    else if (o.type === 'message' && o.kind === 'addressed' && typeof o.thread === 'string') push(marks, o.thread, o);
   }
-  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime)));
+  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime)));
 }
 // waiting: whose reply is owed (supervisor, responder), or the owner's move (owedIn).
 // ready: the supervisor's proposal, until the owner says anything after it (a turn, a resolve or a
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
-function threadView(t, ts, qs) {
+function threadView(t, ts, qs, ms = []) {
   // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
   const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], ...(u.created_by === 'owner' ? { routed_to: u.routed_to === 'supervisor' || u.routed_to === 'responder' ? u.routed_to : null, delivered: u.delivered === 'typed' || u.delivered === 'queued' ? u.delivered : null } : {}) }));
   // whose reply is owed (owedIn, kit-104): the supervisor's when a turn routed to it, or with no
   // route, is owed; else the responder's when one routed to it is; else the owner's move
   const owed = owedIn(ts, t);
-  const waiting = owed.some((u) => u.routed_to !== 'responder') ? 'supervisor' : owed.length ? 'responder' : 'owner';
+  let waiting = owed.some((u) => u.routed_to !== 'responder') ? 'supervisor' : owed.length ? 'responder' : 'owner';
   const status = t.status === 'resolved' ? 'resolved' : 'open';
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
   const ownerSince = !!proposed && (turns.some((u) => u.by === 'owner' && u.at > proposed.at) || t.updates.some((u) => u.status !== undefined && u.at > proposed.at));
   const ready = status === 'open' && proposed && !ownerSince && isObj(t.ready) && typeof t.ready.outcome === 'string' ? { outcome: t.ready.outcome, at: proposed.at } : null;
+  // artifact-notes-1 (supervisor.md, Artifact notes). Each from its line's own at, never a time the
+  // line carries; a hand-written field of the wrong shape is no field, and hides no older good one.
+  // The owner's last word: their newest turn, resolve or reopen; a hand-over is not one.
+  const open = status === 'open';
+  const art = isObj(t.subject) && t.subject.kind === 'artifact';
+  const lastWord = [...turns.filter((u) => u.by === 'owner').map((u) => u.at), ...t.updates.filter((u) => u.status !== undefined).map((u) => u.at)].sort().pop() ?? '';
+  // handed: the owner's newest hand-over to a session, while no word of theirs came after it
+  const handLine = t.updates.filter((u) => u.by === 'owner' && isObj(u.handed) && typeof u.handed.to === 'string' && /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(u.handed.to) && u.handed.to !== 'owner' && u.handed.to !== 'responder').pop();
+  const handed = open && handLine && handLine.at > lastWord ? { to: handLine.handed.to, at: handLine.at } : null;
+  // the supervisor's newest withdrawal; a mark before it no longer counts
+  const unreadyLine = t.updates.filter((u) => u.by === 'supervisor' && isObj(u.unready) && typeof u.unready.reason === 'string').pop() ?? null;
+  // addressed: the newest mark since the hand-over (and since any withdrawal) by the session it went to or the supervisor
+  const mark = handed ? ms.filter((m) => typeof m.text === 'string' && (m.created_by === handed.to || m.created_by === 'supervisor') && m.created_at > handed.at && m.created_at > (unreadyLine?.at ?? '')).pop() : null;
+  const addressed = mark ? { by: mark.created_by, at: mark.created_at, note: mark.text, sha: typeof mark.sha === 'string' ? mark.sha : null, draft: typeof mark.draft === 'string' ? mark.draft : null } : null;
+  // check: what the owner has to check, the mark or the supervisor's proposal; its picture or why none
+  const check = addressed ? 'addressed' : art && ready ? 'ready' : null;
+  const shot = check === 'addressed' ? (isObj(mark.shot) ? mark.shot : null) : check === 'ready' ? (isObj(proposed.shot) ? proposed.shot : null) : null;
+  const noshot = check === 'ready' && proposed.noshot === 'no-change' ? 'no-change' : null;
+  const unready = open && unreadyLine && unreadyLine.at > lastWord && !check ? { at: unreadyLine.at, reason: unreadyLine.unready.reason } : null;
+  const frame = isObj(t.frame) && Number.isInteger(t.frame.w) && Number.isInteger(t.frame.h) && typeof t.frame.hash === 'string' ? { w: t.frame.w, h: t.frame.h, hash: t.frame.hash } : null;
+  // On an open artifact note whose move it is follows its state alone (resolved; to check; with
+  // <session>; open): to check or open, the owner's; with a session, that session's; with the
+  // supervisor, the supervisor's until its first turn after the hand-over (D5: any non-owner turn).
+  if (open && art) waiting = check || !handed ? 'owner' : handed.to === 'supervisor' && !turns.some((u) => u.by !== 'owner' && u.at > handed.at) ? 'supervisor' : 'session';
+  const withSession = open && art && !check && handed ? handed.to : null;
   const firstOwner = turns.find((u) => u.by === 'owner');
   const firstReply = firstOwner ? turns.find((u) => u.by === 'supervisor' && u.at > firstOwner.at) : null;
   return {
     id: t.id, title: String(t.title ?? ''), subject: isObj(t.subject) ? t.subject : null, status, outcome: status === 'resolved' ? t.outcome ?? null : null, ready,
-    turns, questions: qs.map(threadQuestion), waiting,
+    turns, questions: qs.map(threadQuestion), waiting, ...(withSession ? { with: withSession } : {}),
+    handed, addressed, check, shot, noshot, unready, frame, source: null,
     created_at: t.created_at, resolved_at: status === 'resolved' ? t.updates.filter((u) => u.status === 'resolved').pop()?.at ?? null : null,
     activity_at: [t.created_at, ...turns.map((u) => u.at), ...t.updates.map((u) => u.at)].sort().pop(),
     first_reply_ms: firstReply ? Date.parse(firstReply.at) - Date.parse(firstOwner.at) : null,

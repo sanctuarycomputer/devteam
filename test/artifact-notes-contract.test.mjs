@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { testDir, threadsFixture } from './lib/kit.mjs';
+import { dashboardOnFreePort, testDir, threadsFixture } from './lib/kit.mjs';
 
 const FAKE = path.join(testDir, 'fixtures', 'artifact-notes');
 const REFUSED = JSON.parse(fs.readFileSync(path.join(FAKE, 'refused.json'), 'utf8'));
@@ -130,4 +130,52 @@ test('artifact-notes-contract: the schema, the fake, and what log-check refuses'
       withLogs([C1], () => { const [x] = record(T1); assert.equal(x.noshot, undefined, 'no noshot'); assert.ok(!x.updates.some((u) => 'noshot' in u), 'no noshot update'); }, [a2c]);
     });
   } finally { F.done(); }
+});
+
+// each folder's log files appended into a fixture's live log
+const placeLogs = (F, folders) => { for (const f of folders) for (const n of fs.readdirSync(path.join(FAKE, f, 'log'))) fs.appendFileSync(path.join(F.logDir, n), fs.readFileSync(path.join(FAKE, f, 'log', n))); };
+// the view's note fields a case names, and with absent where it names none
+const noteFieldsEqual = (got, want, what) => {
+  for (const [k, v] of Object.entries(want)) assert.deepEqual(got[k], v, `${what}: ${k}`);
+  if (!('with' in want)) assert.ok(!('with' in got), `${what}: no with (got ${JSON.stringify(got.with)})`);
+};
+
+test('artifact-notes-contract A2: each fixture\'s view, by thread show and thread list --waiting', () => {
+  const F = threadsFixture('artifact-notes-view');
+  try {
+    for (const f of FOLDERS) {
+      const snap = F.snapLog();
+      try {
+        placeLogs(F, [f]);
+        const e = expected(f);
+        const v = JSON.parse(F.ok(F.old, ['thread', 'show', e.thread, '--json']));
+        noteFieldsEqual(v, e.view, f);
+        assert.equal(v.source, null, `${f}: source`);
+        const waiting = JSON.parse(F.ok(F.old, ['thread', 'list', '--waiting', '--json'])).map((x) => x.id);
+        assert.equal(waiting.includes(e.thread), e.view.waiting === 'supervisor', `${f}: in thread list --waiting exactly when waiting is supervisor`);
+      } finally { F.restoreLog(snap); }
+    }
+  } finally { F.done(); }
+});
+
+test('artifact-notes-contract A4: /api/threads carries the note fields, with no change to the dashboard server', async () => {
+  const F = threadsFixture('artifact-notes-api');
+  let dash = null;
+  try {
+    const folders = ['c11-ready-with-shot', 'c13-unready-after-addressed', 'c16-frame', 'c17-ready-noshot', 'c18-handed-to-supervisor', 'c02-handed-then-addressed'];
+    placeLogs(F, folders);
+    const started = await dashboardOnFreePort(F.old, F.env({}));
+    dash = started.dash;
+    const B = `http://127.0.0.1:${started.port}`;
+    const r = await fetch(`${B}/api/threads`);
+    assert.equal(r.status, 200);
+    const threads = (await r.json()).threads;
+    for (const f of folders) {
+      const e = expected(f);
+      const v = threads.find((x) => x.id === e.thread);
+      assert.ok(v, `${f}: /api/threads lists ${e.thread}`);
+      noteFieldsEqual(v, { ...(e.api ?? e.view), addressed: null }, `${f} (api)`);
+      assert.equal(v.source, null, `${f}: source`);
+    }
+  } finally { if (dash) await dash.stop(); F.done(); }
 });
