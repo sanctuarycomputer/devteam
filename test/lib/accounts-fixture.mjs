@@ -31,6 +31,9 @@ function fixture(name) {
   const sf = path.join(root, 'docs/devteam/project/settings.md');
   fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"project":', `"resume_command": ${JSON.stringify(`${process.execPath} ${relaunch}`)},\n  "project":`));
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: root });
+  // a launch reads the owner's settings from origin (kit-764): the repo is its own origin, so origin's
+  // main is the local main these tests commit to, as it was when the kit read main with no origin
+  execFileSync('git', ['remote', 'add', 'origin', root], { cwd: root });
   const calls = path.join(base, 'calls.log');
   const stub = path.join(base, 'cswap');
   write(stub, `#!/bin/sh\necho "$*" >> ${JSON.stringify(calls)}\ncase "$1" in\n  list) [ -f ${JSON.stringify(path.join(base, 'list.hook'))} ] && sh ${JSON.stringify(path.join(base, 'list.hook'))}; cat ${JSON.stringify(path.join(base, 'list.json'))} ;;\n  auto) cat ${JSON.stringify(path.join(base, 'auto.out'))}; exit $(cat ${JSON.stringify(path.join(base, 'auto.status'))}) ;;\n  switch) cat ${JSON.stringify(path.join(base, 'switch.out'))} ;;\nesac\n`);

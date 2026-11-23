@@ -1029,7 +1029,87 @@ Object.assign(linkAnswerCovers, {
   any: (c) => questions().filter((q) => q.status === 'answered' && String(q.context ?? '').includes(`links.${c.id}`)).sort((a, b) => String(b.answered_at).localeCompare(String(a.answered_at))).find((q) => linkAnswerCovers(q.id, c))?.id ?? null,
 });
 let settingsCache;
-function loadSettings() {
+// opts.origin (kit-764): the owner's settings as they are at the commit origin names for its default
+// branch, for a process that isn't a launch but types an owner's command into a pane (accounts-tick's
+// supervisor restart): this process's own settings with the owner's keys from origin over them, or
+// { refused: why } when origin can't be read or its settings won't do. Never the local refs.
+// opts.until (kit-780): a time (ms) the origin read ends by, as well as its own bounds: a restart's budget.
+// Origin is read once a process: what it said, or why it refused, is kept for every later read, so the
+// operator's words (deliverToOperator) can ask first and the operator's start then reads the same.
+function loadSettings({ origin = false, until = null } = {}) {
+  // origin's commit for main, read as a launch reads it, once: what it can't do goes to fail(message)
+  const readOrigin = (fail) => {
+    if (!loadSettings.originRead) {
+      try { loadSettings.originRead = readOriginOnce((why) => { throw { refused: why }; }); } catch (e) { if (!e?.refused) throw e; loadSettings.originRead = { refused: e.refused }; }
+    }
+    const r = loadSettings.originRead;
+    // the operator starts with DEVTEAM_OPERATOR_COMMAND without reading settings at all (operatorStart)
+    return r.refused ? fail(command === 'operator-thread' ? `${r.refused}. DEVTEAM_OPERATOR_COMMAND, set to the agent command, starts the operator without reading settings` : r.refused) : r;
+  };
+  const readOriginOnce = (fail) => {
+    const no = (why) => fail(`could not read main from origin (${why}), so the owner's settings can't be confirmed and nothing was started; a local ref is any session's to move, so none is trusted to start one. Try again when origin answers`);
+    // origin gets 30 s in all, and a relaunch's child no longer than its DEVTEAM_SETUP_DEADLINE (5 s
+    // before the tick's kill, relaunchChild), so a hung origin refuses with its reason before the kill;
+    // a supervisor restart's read no later than until, inside its budget (restartSupervisor)
+    const deadline = Number(process.env.DEVTEAM_SETUP_DEADLINE);
+    const end = Math.min(Date.now() + (Number(process.env.DEVTEAM_LAUNCH_ORIGIN_MS) || 30000), Number.isFinite(deadline) && deadline > Date.now() ? deadline : Infinity, Number.isFinite(until) ? until : Infinity);
+    const toOrigin = (args) => {
+      const ms = Math.floor(end - Date.now());
+      if (ms < 100) return { status: 124, stdout: '', stderr: '' };
+      return spawnSync(process.execPath, ['-e', RESPONDER_GROUP_RUN, '--', String(ms), 'git', ...RESPONDER_GIT, ...args], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: ms + 10000 });
+    };
+    // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
+    const why = (r) => { const said = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean); return r.status === 124 ? 'it did not answer in time' : (said.find((l) => /^fatal: /.test(l)) ?? said.at(-1) ?? `git exited ${r.status}`).replace(/^fatal: /, '').slice(0, 200); };
+    const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
+    if (ls.status !== 0) no(why(ls));
+    const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
+    const branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
+    const sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
+    if (!branch || !sha) no('it names no default branch');
+    // always fetched, into the tracking ref by name: a new worktree is based on origin/<main>, so it
+    // is put back where origin has it before anything reads it
+    const f = toOrigin(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    if (f.status !== 0) no(why(f));
+    // read here only, never fetched on the side (a partial clone's lazy fetch would run outside the deadline)
+    const local = (args) => responderGit(args, mainRoot, { GIT_NO_LAZY_FETCH: '1' });
+    if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+    const ref = `origin's ${branch} (${sha.slice(0, 8)})`;
+    // before settings.md first lands on main (adoption), the working tree is all there is, as below;
+    // only a settings.md git says isn't there, never one git failed to read
+    const listed = local(['ls-tree', '--name-only', sha, '--', `${projectRel}/settings.md`]);
+    if (listed.status !== 0) no(`git could not read ${sha.slice(0, 8)}: ${why(listed)}`);
+    if (listed.stdout.trim()) {
+      const shown = local(['show', `${sha}:${projectRel}/settings.md`]);
+      if (shown.status !== 0) no(`git could not read settings.md at ${sha.slice(0, 8)}: ${why(shown)}`);
+      const block = String(shown.stdout ?? '').match(/```json devteam\s*\n([\s\S]*?)\n```/);
+      let own = null;
+      try { own = JSON.parse(block?.[1]); } catch {}
+      // never the kit's defaults or the working tree in place of the owner's commands: a block that
+      // isn't an object of settings (null, an array, {}, only unknown keys) starts nothing
+      if (!isObj(own) || !Object.keys(own).some((k) => SETTINGS_KEYS.includes(k))) fail(`settings.md at ${ref} has no settings block the kit can read (not an object of settings), so nothing was started`);
+      const onMain = { ...SETTINGS_DEFAULTS, ...own };
+      if (onMain.main_branch !== branch) fail(`origin's default branch is ${branch}, but settings.md there names ${onMain.main_branch} as main, so nothing was started; make them agree`);
+      return { ref, onMain };
+    }
+    return { ref, onMain: null };
+  };
+  if (origin) {
+    if (loadSettings.fromOrigin) return loadSettings.fromOrigin;
+    if (!projectInRepo) return loadSettings();
+    // origin first: a launch's own read (the operator's words) then has it, and never dies on it
+    let read;
+    try { read = readOrigin((why) => { throw { refused: why }; }); } catch (e) { if (e?.refused) return { refused: e.refused }; throw e; }
+    const mine = loadSettings();
+    const s = { ...mine };
+    // before adoption (no settings.md at origin's commit) the working tree is all there is, as for a
+    // launch: never what the local refs gave this process
+    let own = read.onMain;
+    if (!own) { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); let w = {}; try { w = JSON.parse(m?.[1]) ?? {}; } catch {} own = { ...SETTINGS_DEFAULTS, ...(isObj(w) ? w : {}) }; }
+    for (const k of [...Object.keys(OWNER_SETTINGS), ...OWNER_ASKABLE]) s[k] = own[k];
+    s.links = pinOwnedLinks(mine.links, own.links).links;
+    loadSettings.fromOrigin = s;
+    return s;
+  }
   if (settingsCache) return settingsCache;
   const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
   if (!m) settingsCache = { ...SETTINGS_DEFAULTS };
@@ -1049,9 +1129,23 @@ function loadSettings() {
   // the remote's default branch, so a local main_branch edit can't move it. Before settings.md
   // first lands on main (adoption), the working tree is all there is.
   if (projectInRepo) {
-    const head = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
-    const ref = [head, `origin/${settingsCache.main_branch}`, settingsCache.main_branch].find((r) => r && git(['cat-file', '-e', `${r}:${projectRel}/settings.md`]) !== null);
-    const onMain = ref ? settingsAt(ref) : null;
+    // A process that starts a session (a worker, a planner, the supervisor's recover, the laptop's
+    // operator) takes the owner's settings from the commit origin itself names for its default
+    // branch: every local ref (origin/main, origin/HEAD, main, a replace ref) is a session's to move
+    // without a push (kit-764). With origin unreadable it starts nothing and says why. Every other
+    // command reads the local refs, offline too.
+    const launch = command === 'planner' || (command === 'worker' && !flags.remove)
+      || (command === 'recover' && !flags['dry-run'] && !flags.machine)
+      // the operator's start, and the words that start it when none is up (deliverToOperator)
+      || (command === 'operator-thread' && ['start', 'new', 'say', 'reopen'].includes(positional[0]));
+    let ref = null;
+    let onMain = null;
+    if (launch) ({ ref, onMain } = readOrigin((why) => die(`${command}: ${why}`)));
+    else {
+      const head = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+      ref = [head, `origin/${settingsCache.main_branch}`, settingsCache.main_branch].find((r) => r && git(['cat-file', '-e', `${r}:${projectRel}/settings.md`]) !== null);
+      onMain = ref ? settingsAt(ref) : null;
+    }
     if (onMain) {
       const local = Object.keys(OWNER_SETTINGS).filter((k) => canonical(settingsCache[k]) !== canonical(onMain[k]));
       for (const k of local) settingsCache[k] = onMain[k];
@@ -1974,6 +2068,20 @@ function logWriter() {
 function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   if (inResponderWorktree()) die("owner commands don't run in the responder's worktree");
+  // A worker's or planner's session, whatever DEVTEAM_ROLE says: DEVTEAM_TICKET or DEVTEAM_FEATURE
+  // set at all (a session that blanks one is still one), a checkout on a ticket/ or plan/ branch, or
+  // a folder under a .worktrees folder (every session's worktree, a detached one or another repo's
+  // included; home's .worktrees by its real path too, for one that is a link), even with every
+  // variable cleared.
+  const session = (() => {
+    for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (process.env[k] !== undefined) return `${k}=${JSON.stringify(process.env[k])}`;
+    const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (b && /^(ticket|plan)\//.test(b)) return `this checkout is on ${b}`;
+    const cwd = realPath(process.cwd());
+    const homeWt = realPath(path.join(mainRoot, '.worktrees'));
+    return cwd.split(path.sep).includes('.worktrees') || cwd.startsWith(`${homeWt}${path.sep}`) ? `${cwd} is under a .worktrees folder, where sessions work` : null;
+  })();
+  if (session) die(`owner commands don't run in a worker's or planner's session (${session}); the owner runs them in their own terminal from home's main checkout, or on the dashboard, and a session sends the supervisor what it needs`);
   const pane = process.env.TMUX_PANE;
   if (!pane || !process.env.TMUX) return { by: 'owner' };
   const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set'
@@ -2758,12 +2866,13 @@ function cmdLogSync() {
   // origin/chore-log, dropped here, and the sync starts from main.
   const main = loadSettings().main_branch;
   if (!flags['dry-run'] && git(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:refs/remotes/origin/${LOG_BRANCH}`], wt) === null) git(['update-ref', '-d', `refs/remotes/origin/${LOG_BRANCH}`], wt);
+  // each checkout, merge and abort with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
   if (resolveCommit(`origin/${LOG_BRANCH}`)) {
-    gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
+    gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
     const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
-    if (git(['merge', '--quiet', '--no-edit', '-m', `chore-log: merge ${main}`, base], wt) === null) {
-      git(['merge', '--abort'], wt);
-      gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, base], wt);
+    if (git(['-c', 'core.useReplaceRefs=false', 'merge', '--quiet', '--no-edit', '-m', `chore-log: merge ${main}`, base], wt) === null) {
+      git(['-c', 'core.useReplaceRefs=false', 'merge', '--abort'], wt);
+      gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', LOG_BRANCH, base], wt);
       warn(`${LOG_BRANCH} could not take in ${main}; rebuilt from ${main}, so this push needs the forge to allow replacing ${LOG_BRANCH}`);
     }
   }
@@ -6653,7 +6762,8 @@ function detachedWorktree(sha, name, R = repo('home'), { seed = true } = {}) {
   const holder = R.name === 'home' ? null : fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${R.name}-`));
   if (!holder) sweepDeadTempWorktrees(R);
   const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
-  R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+  R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
   process.once('exit', () => {
     if (fs.existsSync(wt)) R.git(['worktree', 'remove', '--force', wt], R.root);
     // the empty holder only (rmdir refuses anything with files left in it)
@@ -6709,7 +6819,8 @@ function cmdReviewWorktree() {
   const short = /^(.+?-\d+)(-|$)/.exec(id)?.[1] ?? id;
   const wt = path.join(root, `review-${short}-${sha.slice(0, 8)}${suffix ? `-${suffix}` : ''}`);
   if (fs.existsSync(wt)) die(`${wt} exists; give this reviewer its own --name, or remove it: devteam.mjs review-worktree --remove ${wt}`);
-  R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  // both checkouts with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+  R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
   seedWorktree(wt, { repo: R });
   out(wt);
   // records in home: a detached checkout of home's ticket/<id> beside it, whose full sha the
@@ -6720,7 +6831,7 @@ function cmdReviewWorktree() {
     if (!rsha) warn(`no records for ${id} in home (home's ticket/${id}), so no records checkout was made`);
     else {
       const rwt = `${wt}-records`;
-      gitOrDie(['worktree', 'add', '--quiet', '--detach', rwt, rsha], mainRoot);
+      gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', rwt, rsha], mainRoot);
       out(`records: ${rwt} (${rsha})`);
     }
   }
@@ -6853,6 +6964,45 @@ const compareRelease = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 // without asking, when it changes only workflow files, deletes none, and keeps every job each had
 // on main, so a "fix" can't drop a check. Its CI must still pass (merge waits for the forge's checks).
 const CI_RULE_SCOPES = ['chore:ci-fix', 'chore:devteam-workflow'];
+// A standing approval for secret-scan exceptions: an accepted owner rule scoped chore:gitleaks-allowlist
+// lets the supervisor merge a gitleaks-<what> chore without asking, when it only adds fingerprints to the
+// repo's .gitleaksignore: each line `<commit>:<path>:<rule-id>:<line>`, with the full 40-hex commit (gitleaks
+// compares whole ids, and a line with no commit would exempt that file and line in every commit, a later
+// secret there included), exempts exactly one finding, so
+// the rule can neither change what the scan's config means nor allow anything broader than the findings
+// the owner's rule was about. Nothing else may change: .gitleaks.toml stays an owner answer, and a
+// fingerprint in the project log (quality.md, Secrets) or with a wildcard is refused. The file must be a
+// plain file, and the chore's CI must pass as usual.
+const SECRETS_RULE_SCOPES = ['chore:gitleaks-allowlist'];
+const SECRETS_IGNORE_FILE = '.gitleaksignore';
+const GITLEAKS_FINGERPRINT = /^[0-9a-f]{40}:([^:\s*?[\]]+):([A-Za-z0-9_.-]+):(\d+)$/;
+function secretsAllowlistApproval(chore, sha, base, changed) {
+  if (!/^gitleaks-/.test(chore)) return {};
+  const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && SECRETS_RULE_SCOPES.includes(k.scope) && k.status === 'accepted').sort(byTime).pop();
+  if (!rule) return {};
+  const off = changed.filter((f) => f !== SECRETS_IGNORE_FILE);
+  if (off.length) return { problem: `the owner's secret-scan exceptions rule covers only fingerprints added to ${SECRETS_IGNORE_FILE}; this also changes ${off.slice(0, 6).join(', ')}. The owner's answer is needed: merge --chore ${chore} --approved <qid>` };
+  const mode = (git(['ls-tree', sha, '--', SECRETS_IGNORE_FILE]) ?? '').split(/\s/)[0];
+  if (mode !== '100644') return { problem: `the owner's secret-scan exceptions rule covers only a plain ${SECRETS_IGNORE_FILE} (this one is ${mode ? `mode ${mode}` : 'deleted'})` };
+  const before = (git(['show', `${base}:${SECRETS_IGNORE_FILE}`]) ?? '').split('\n');
+  const now = git(['show', `${sha}:${SECRETS_IGNORE_FILE}`]).split('\n');
+  // every line main had is still there, in order: the change only adds
+  let i = 0;
+  for (const l of now) if (i < before.length && l === before[i]) i++;
+  const kept = before.slice(i).find((l) => l.trim());
+  if (kept !== undefined) return { problem: `the owner's secret-scan exceptions rule covers only adding fingerprints; ${SECRETS_IGNORE_FILE} changes or removes "${kept.trim().slice(0, 80)}"` };
+  const log = `${projectRel}/log/`;
+  for (const raw of now.filter((x) => !before.includes(x))) {
+    // printable ASCII only: invisible Unicode reads one way here and another way to gitleaks
+    if (/[^\x20-\x7e]/.test(raw)) return { problem: `the owner's secret-scan exceptions rule covers only plain-ASCII fingerprint lines; "${JSON.stringify(raw).slice(1, 81)}" has another character` };
+    const l = raw.trim();
+    if (!l || l.startsWith('#')) continue;
+    const m = GITLEAKS_FINGERPRINT.exec(l);
+    if (!m) return { problem: `the owner's secret-scan exceptions rule covers only one-finding fingerprints (<40-hex commit>:<path>:<rule-id>:<line>); "${l.slice(0, 80)}" isn't one` };
+    if (path.posix.normalize(m[1]).replace(/^\.\//, '').startsWith(log)) return { problem: `the owner's secret-scan exceptions rule never covers the project log (${m[1]}): a secret there is a leak to fix, not an exception` };
+  }
+  return { rule, what: 'secret-scan exception' };
+}
 const workflowJobs = (text) => {
   const lines = String(text ?? '').split('\n');
   const i = lines.findIndex((l) => /^jobs:\s*(#.*)?$/.test(l));
@@ -6985,20 +7135,23 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   const tree = [];
   for (let i = 0; i + 1 < parts.length; i += 2) tree.push({ verb: parts[i] === 'A' ? 'adds' : 'changes', f: parts[i + 1] });
   // A path as a disk that folds names reads it, part by part: Unicode compatibility normalisation
-  // (an NFD spelling is the NFC one, and ſ is s), lower case, and trailing dots and spaces dropped
-  // (as Windows drops them). It folds more than any one disk does; a stray path it catches is only
-  // refused.
-  const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toLowerCase().normalize('NFKC').replace(/[. ]+$/, '')).join('/');
+  // (an NFD spelling is the NFC one, and ſ is s), upper case then lower case (NTFS upper-cases, so
+  // a dotless ı is i), default-ignorable code points dropped (all of those HFS+ ignores, such as
+  // U+200C, and more, such as a soft hyphen), NFKC again (a mark left beside its letter composes),
+  // and then trailing dots and spaces dropped (as Windows drops them). It folds more than any one
+  // disk does; a stray path it catches is only refused.
+  const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toUpperCase().toLowerCase().replace(/\p{Default_Ignorable_Code_Point}/gu, '').normalize('NFKC').replace(/[. ]+$/, '')).join('/');
   // f is at, or inside the folder at; twin: such a disk puts f at at, or in it, where git doesn't.
   const under = (f, at) => f === at || f.startsWith(`${at}/`);
   const twin = (f, at) => under(fold(f), fold(at)) && !under(f, at);
   const says = ({ verb, f }, at) => `${verb} ${f}, ${fold(f) === fold(at) ? 'which' : 'in a folder'} a disk that ignores case can't tell from ${at}`;
   // a twin of an owner file is named with that file (below); a twin of a folder on their path (the
-  // project folder, or one above it), at the deepest folder it folds into. Only an added path: one
-  // already on main in such a folder is no owner file, so a PR may still change it.
+  // project folder, or one above it), at the deepest folder it folds into: a path the PR adds, or
+  // one an older kit let onto main that it changes (or the twin itself, repointed). Removing it is
+  // the fix, and isn't listed.
   const owned = worldFileFails.files().map((w) => w.rel);
   const folders = [...new Set(owned.flatMap((r) => r.split('/').slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join('/'))))].sort((a, b) => b.length - a.length);
-  const inFolder = tree.filter((t) => t.verb === 'adds' && !owned.some((r) => twin(t.f, r))).flatMap((t) => { const at = folders.find((d) => under(fold(t.f), fold(d))); return at && twin(t.f, at) ? [says(t, at)] : []; });
+  const inFolder = tree.filter((t) => !owned.some((r) => twin(t.f, r))).flatMap((t) => { const at = folders.find((d) => under(fold(t.f), fold(d))); return at && twin(t.f, at) ? [says(t, at)] : []; });
   if (inFolder.length) fails.push(`${inFolder.join('; ')}: the owner's files are read in ${projectRel}, and a twin of a folder on their path can put other files there; remove it`);
   // A plain file, whatever the owner answered: a symlink's blob is the path it points at, so the
   // text read through it changes with no change here; a submodule or a folder pins no text at all.
@@ -7283,7 +7436,20 @@ function landRecords(id, rec, linkName) {
     if (!recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot }).ok) return `couldn't fetch home's ${HS.main_branch} to check it hasn't moved since the checks; run merge again`;
     const tip = resolveCommit(`refs/remotes/origin/${HS.main_branch}`);
     if (tip !== checked) return `home's ${HS.main_branch} moved since the checks (${String(checked).slice(0, 12)} to ${String(tip).slice(0, 12)}); run merge again`;
-    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) {
+      // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
+      // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. The PR
+      // was open (pinRecords); MERGED at the pinned records now is their landing, as a clean merge's (kit-782)
+      let st = null;
+      for (let i = 0; i < 3; i++) {
+        if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+        st = null;
+        try { st = JSON.parse(HR.gh(['pr', 'view', String(rec.pr), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+        if (st?.state !== 'OPEN') break;
+      }
+      if (!(st?.state === 'MERGED' && st.headRefOid === rec.sha)) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+      out(`gh pr merge of home's records PR #${rec.pr} exited non-zero, but GitHub has #${rec.pr} merged at ${rec.sha.slice(0, 12)}: landed`);
+    }
   }
   git(['fetch', '--quiet', 'origin', HS.main_branch]);
   mainRefCache = undefined; mainLogCache = undefined; mergeShaCache.clear();
@@ -7313,7 +7479,7 @@ function cmdMerge() {
     }
   }
   if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die(`forge is git: merge needs the PR text, in ${path.relative(mainRoot, path.join(runDir, 'pr', `${branch}.md`))} ('# <title>' then the body) or as --title and --body-file`);
-  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url,statusCheckRollup']);
+  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,state,url,statusCheckRollup']);
   if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch}${inR} (gh pr view failed; with no forge CLI set forge: "git")`);
   R.git(['fetch', '--quiet', 'origin', branch]);
   // main as each origin has it now: home's (the settings) and the ticket's repo's (what it lands on)
@@ -7540,6 +7706,10 @@ function cmdMerge() {
       const r = ciFixApproval(chore, sha, base, outside);
       if (r.rule) { kitRule = standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
+    if (outside.length && !approved && !kitRule && base) {
+      const r = secretsAllowlistApproval(chore, sha, base, outside);
+      if (r.rule) { kitRule = standing = r; out(`only adds secret-scan exceptions; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
+    }
     if (outside.length && !approved && !kitRule) fails.push(`touches files outside project/ (${outside.slice(0, 6).join(', ')}${outside.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
     else if (approved && !kitRule && !kitApproved) fails.push(`changes kit files (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); that needs the owner's answer in a ${KIT_CLASSES.join(', ')} question, and ${approved} is ${kitAnswer.class ?? 'classless'}`);
   }
@@ -7759,7 +7929,21 @@ function cmdMerge() {
     const gone = moved();
     if (gone) return gone;
     const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
-    return merged === null ? 'gh pr merge refused (did the head move?)' : null;
+    if (merged !== null) return null;
+    // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
+    // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. A PR that
+    // was OPEN when merge began and is MERGED at the gated head now is this merge's landing, and its
+    // act is written; one merged before (a squash elsewhere) or anything else is refused (kit-782)
+    let st = null;
+    if (pr.state === 'OPEN') for (let i = 0; i < 3; i++) {
+      if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+      st = null;
+      try { st = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+      if (st?.state !== 'OPEN') break;
+    }
+    if (!(st?.state === 'MERGED' && st.headRefOid === sha)) return 'gh pr merge refused (did the head move?)';
+    out(`gh pr merge of #${pr.number} exited non-zero, but GitHub has #${pr.number} merged at ${sha.slice(0, 12)}: landed`);
+    return null;
   };
   let pushTimedOut = false;
   const codeFail = relanded ? null : landCode();
@@ -15043,8 +15227,9 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
   const existed = fs.existsSync(wt);
-  if (!existed) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
-  else if (reset) gitOrDie(['checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
+  // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+  if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
+  else if (reset) gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
   else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
   // one there already whose setup never passed (cut short at the deadline, held for a slot, failed:
@@ -16244,6 +16429,17 @@ function collectMetrics(since, reviewsSince = 0) {
       const from = st.results.at(-1)?.at ?? c.start;
       if (supervisorRunning && !lockLive && every && from && Date.now() - Date.parse(from) > 3 * Number(every[1]) * UNIT[every[2]]) add('medium', 'recurring-stale', subj, `not run since ${from}, over 3 intervals of ${c.entry.every}, while wait runs`, 'check that wait is running, and read run/recurring/runner.log');
     }
+    // Chores (kit-164): due and not started, overdue past grace_days, a started run not finished
+    // grace_days after its start. A held Upkeep holds due and overdue (the chore waits); a park holds stuck too.
+    const RC = recurringChores;
+    const mode = goalMode(upkeepOrVirtual());
+    for (const { name, entry } of rc.problem ? [] : RC.list().chores) {
+      const st = RC.state(name, entry, { mode });
+      if (!st) continue;
+      const subj = `recurring:${name}`;
+      if (st.due && !st.held) add('medium', st.overdue ? 'recurring-overdue' : 'recurring-due', subj, `${entry.title}: due since ${recurringFailures.isoSec(st.slot)}${st.overdue ? `, over its ${RC.grace(entry)} day(s) of grace` : ''} (a ${entry.by}'s chore)`, `recurring start ${name}`);
+      if (st.stuck && !['park', 'let-go'].includes(mode)) add('medium', 'recurring-stuck', subj, `${entry.title}: started ${recurringFailures.isoSec(st.open.start)} as ${st.open.ref} and not finished in ${RC.grace(entry)} day(s)`, RC.isTicketRef(st.open.ref) ? `see to ${st.open.ref}: start or unstick its worker, or supersede it` : `land it (chore pr, then merge --chore ${st.open.ref.replace(/^chore-/, '')}), or recurring done ${name} --nothing "<why>" | --abandoned "<why>"; if its PR was closed unmerged, recurring start ${name} reads it as abandoned (it starts again when its next slot is due)`);
+    }
   }
   // A flake is a finding while it's recent: one that hasn't flipped for a week was fixed or
   // explained, and its history stays in gates.flaky_gates without raising it again every day.
@@ -16699,6 +16895,10 @@ function cmdAck() {
   const subject = subj.join(' ').trim();
   const reason = flagStr('reason');
   if (!kind || !subject || !reason) die('usage: ack <finding-kind> <subject> --reason "<why it can wait>" [--owner]');
+  // a worker's or planner's session is never the owner's, whatever DEVTEAM_ROLE says (kit-783): its
+  // ack would be recorded as the owner's, and one of a merge commit would never lapse
+  const session = ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE'].find((k) => process.env[k]);
+  if (flags.owner && session) die(`ack --owner is the owner's: it doesn't run in a worker's or planner's session (${session}=${process.env[session]}); send the supervisor what can wait`);
   const live = collectMetrics(0).findings.find((x) => x.kind === kind && x.subject === subject);
   if (!live) die(`no current finding ${kind} "${subject}" (devteam.mjs metrics lists them)`);
   const by = flags.owner ? ownerWriter().by : (supervisorOnly('ack'), 'supervisor');
@@ -18355,8 +18555,8 @@ function supervisorSessionId(t = supervisorTranscript()) {
 }
 // The repo's resume_command on this exact conversation (--continue replaced, as the box's boot
 // does), or null when it has no --continue to replace.
-function supervisorResumeCommand(id) {
-  const cmd = loadSettings().resume_command;
+function supervisorResumeCommand(id, s = loadSettings()) {
+  const cmd = s.resume_command;
   return /\s--continue(\s|$)/.test(cmd) ? cmd.replace(/(\s)--continue(?=\s|$)/, `$1--resume ${id}`) : null;
 }
 // A process's arguments and environment, from the OS, or null if they can't be read; a caller that
@@ -18415,33 +18615,50 @@ const SUPERVISOR_RESTART_PROMPT = 'You were restarted after a usage limit, on th
 // recorded pane says nothing about whose conversation it is, so the id comes from a transcript that
 // itself ends on a limit, and the pane's process must be running as the supervisor. It keeps the
 // permissions it had: a supervisor started by hand without the flag is not given it.
-function supervisorToRestart() {
+// until (kit-780): when its origin read must end, inside the restart's budget; null only looks, and
+// origin isn't asked (no restart follows, so no command is needed).
+function supervisorToRestart(until) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem || !target || !paneStoppedAtLimit(target) || !paneStartedIn(target, fs.realpathSync(mainRoot))) return null;
   const id = supervisorLimit()?.session;
-  const cmd = id ? supervisorResumeCommand(id) : null;
-  if (!cmd) return null;
+  if (!id) return null;
+  // a pane whose process is plainly not the supervisor needs no command, so origin isn't asked
   const agent = paneAgentProcess(target);
+  if (agent?.env.length && !isSupervisorProcess(agent)) return null;
+  if (!until) return agent?.env.length && isSupervisorProcess(agent) ? { target, id, cmd: null } : null;
+  // the owner's resume_command as origin has it, never a local ref's (kit-764): a refusal skips this
+  // restart and says why
+  const s = loadSettings({ origin: true, until });
+  if (s.refused) return { refused: s.refused };
+  const cmd = supervisorResumeCommand(id, s);
+  if (!cmd) return null;
   if (!agent?.env.length) return { refused: `could not read the environment of the process in ${target}` };
   if (!isSupervisorProcess(agent)) return null;
   return { target, id, cmd: startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd) };
 }
 function restartSupervisor(budget) {
   if (draining() || fleetMode()) return null;
+  // a test's smaller budget (DEVTEAM_TEST only): a whole number of ms, 0 only looks
+  const cap = process.env.DEVTEAM_TEST ? process.env.DEVTEAM_RESTART_BUDGET_MS : undefined;
+  if (/^\d+$/.test(cap ?? '')) budget = Math.min(budget, Number(cap));
+  // origin's read ends within 15 s (a healthy read takes seconds, and a refusal spends no attempt, so
+  // the next due tick asks again), and 5 s before the budget, as a relaunch's child does
+  // (relaunchChild), so the pane is still typed into inside it; no budget, no read (kit-780)
+  const until = budget ? Date.now() + Math.min(15000, budget - 5000) : null;
   // stopped by a login change: a prompt into its own pane, no transcript or resume command needed
   const { target: pane, problem } = resolvePane(supervisorTarget());
   if (!problem && pane) {
     const login = loginChangedStop(pane, 'supervisor', budget, () => paneStartedIn(pane, fs.realpathSync(mainRoot)) && isSupervisorProcess(paneAgentProcess(pane)));
     if (login !== false) return login;
   }
-  const found = supervisorToRestart();
+  const found = supervisorToRestart(until);
   if (!found || found.refused) return found;
   const { target, id, cmd } = found;
   const now = Date.now();
   const verdict = claimRestart('supervisor', budget, now);
   if (verdict !== 'go') return verdict;
   // the same order as --replace-agent: everything is checked once more, right before it is replaced
-  const again = supervisorToRestart();
+  const again = supervisorToRestart(until);
   if (again?.target !== target || again.id !== id) { releaseRestart('supervisor', now); return null; }
   let failed = replacePaneProcess(target, mainRoot);
   if (!failed && !typeNow(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) failed = `could not type into ${target}; run ${cmd} there`;
@@ -18640,7 +18857,6 @@ function recoverOne() {
   // never two: first, under any flag
   if (supervisorRunningNow(rec)) return { say: 'already running' };
   if (recoverStarting(rec)) return { say: 'already running (brought back moments ago)' };
-  const s = loadSettings();
   // A supervisor is never down by accident: a parked or drained fleet's comes back like any other.
   // Under a pause it answers threads and questions and keeps the Inbox and log current; under a move
   // its prompt has it carry the move on and start nothing. It is down only when someone exited it
@@ -18649,6 +18865,9 @@ function recoverOne() {
     const no = recoverRefusal(rec);
     if (no) return { say: no };
   }
+  // after every early return, as cmdRecover's line before the lock: a supervisor left stopped needs
+  // no owner's command, so origin is read only for a start (kit-764)
+  const s = loadSettings();
   const id = supervisorSessionId();
   const exact = /^claude(\s|$)/.test(s.resume_command);
   const missing = (s.worktree_files ?? []).filter((f) => !fs.existsSync(path.join(mainRoot, f)));
@@ -18710,6 +18929,10 @@ function cmdRecover() {
   if (writer !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`recover: not from here: ${writer !== 'supervisor' ? `this session or checkout is ${writer}'s (a ticket or plan branch)` : `this session is a ${process.env.DEVTEAM_ROLE}`}. The owner, the operator or the supervisor runs it, from the main checkout (${mainRoot})`);
   if (flags.machine) return recoverMachine();
   if (!flags['dry-run']) fs.mkdirSync(runDir, { recursive: true });
+  // the owner's settings before the lock, unless nothing will start (one is up, or recoverOne's own
+  // refusal leaves it stopped; offline too): a start refused for them (an unreadable origin, kit-764)
+  // exits, and an exit under the lock would leave it held for the next recover to wait out
+  { const rec = supervisorUpRecord(); if (!supervisorRunningNow(rec) && !recoverStarting(rec) && (flags.force || flags['was-up'] || !recoverRefusal(rec))) loadSettings(); }
   // One recover at a time, for longer than the usual lock: on a loaded box tmux alone can take most
   // of 10 s. Still stale in the end, so a crash halfway can't wedge the next one.
   const { say, run } = flags['dry-run'] ? recoverOne() : withLock(path.join(runDir, 'recover'), recoverOne, { staleMs: 90000, waitMs: 100000 });
@@ -19636,6 +19859,12 @@ const operatorHeld = (state) => `recorded; ${OPERATOR_HELD[state] ?? `the operat
 function deliverToOperator(t, text) {
   let st = operatorState();
   if (st.can_start) {
+    // the turn is kept: origin's settings are asked first, so a start it refuses is words and an exit
+    // of 0, never a failed press the hub would show for a kept turn (kit-780). Its start then reads the same.
+    if (process.env.DEVTEAM_OPERATOR_COMMAND === undefined) {
+      const s = loadSettings({ origin: true });
+      if (s.refused) return { typed: false, words: `recorded; the operator was NOT started (${s.refused})` };
+    }
     const r = operatorStart();
     if (!r.started && !r.say.startsWith('already running')) return { typed: false, words: `recorded; the operator was ${r.say}` };
     // a first start may stop at Claude Code's own dialog (whether to trust its folder), which only the owner answers
@@ -21224,7 +21453,8 @@ async function imageChanges(since, to, { smoke = false } = {}) {
         if (r.error || r.status !== 0) cant(`--smoke: ${what} failed (${r.error ? r.error.code ?? r.error.message : r.signal ?? `exit ${r.status}`})${why ? `: ${why.slice(0, 300)}` : ''}`);
         return r;
       };
-      must(await run('git', ['worktree', 'add', '-q', '--detach', imageDir, since], { cwd: repoRoot }), `git worktree add of ${since}`);
+      // the image and the fixtures' kits with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+      must(await run('git', ['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '-q', '--detach', imageDir, since], { cwd: repoRoot }), `git worktree add of ${since}`);
       const kitIn = (root) => path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
       const sides = [];
       for (const [side, sha] of [['since', since], ['to', to]]) {
@@ -21232,7 +21462,7 @@ async function imageChanges(since, to, { smoke = false } = {}) {
         fs.mkdirSync(root, { recursive: true });
         fs.mkdirSync(home);
         must(await run('git', ['init', '-q', '-b', 'main'], { cwd: root, home }), `git init of the ${side} fixture`);
-        const tar = must(await run('git', ['archive', '--format=tar', sha, 'docs/devteam'], { cwd: repoRoot, binary: true }), `git archive of ${sha}`);
+        const tar = must(await run('git', ['-c', 'core.useReplaceRefs=false', 'archive', '--format=tar', sha, 'docs/devteam'], { cwd: repoRoot, binary: true }), `git archive of ${sha}`);
         must(await run('tar', ['-x', '-C', root], { input: tar.stdout }), `unpacking the ${side} fixture's kit`);
         for (const d of ['project', 'run']) fs.rmSync(path.join(root, 'docs', 'devteam', d), { recursive: true, force: true });
         const own = async (args, what) => must(await run(process.execPath, [kitIn(root), ...args], { cwd: root, home }), `the ${side} fixture's ${what}`);
@@ -23958,9 +24188,10 @@ function ensureRecordsWorktree(id) {
   const mb = loadSettings().main_branch;
   git(['fetch', '--quiet', 'origin', mb]);
   git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-  if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', rw, branch], mainRoot);
-  else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, rw, `origin/${branch}`], mainRoot);
-  else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb], mainRoot);
+  // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+  if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', rw, branch], mainRoot);
+  else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--track', '-b', branch, rw, `origin/${branch}`], mainRoot);
+  else gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb], mainRoot);
   return rw;
 }
 function removeWorkerWorktree(id) {
@@ -24217,9 +24448,10 @@ function makeSession(role) {
     // a branch pushed from another machine (a moved fleet) continues from origin, never from main
     R.git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
     const base = R.resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb;
-    if (R.resolveCommit(`refs/heads/${branch}`)) R.gitOrDie(['worktree', 'add', '--quiet', wt, branch], R.root);
-    else if (R.resolveCommit(`refs/remotes/origin/${branch}`)) R.gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], R.root);
-    else R.gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], R.root);
+    // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+    if (R.resolveCommit(`refs/heads/${branch}`)) R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', wt, branch], R.root);
+    else if (R.resolveCommit(`refs/remotes/origin/${branch}`)) R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], R.root);
+    else R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-b', branch, wt, base], R.root);
     madeWorktree = true;
   }
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
@@ -25863,7 +26095,7 @@ function recurringBindingFails(main, landed, approved) {
 function cmdRecurring() {
   const R = recurringRegistry;
   const [sub, arg] = positional;
-  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid> | recurring run --due | recurring run <name> --draft | recurring due [--json] | recurring ticket <name> --id <id> --touches <glob>… [--component <c>]';
+  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid> | recurring run --due | recurring run <name> --draft | recurring due [--json] | recurring ticket <name> --id <id> --touches <glob>… [--component <c>] | recurring start <name> | recurring done <name> --nothing "<why>" | --abandoned "<why>"';
   const P = R.path();
   // main's jobs, as read(ref) reads them: a problem (a broken file, or git failing) stops here
   const mainJobs = () => {
@@ -25944,6 +26176,91 @@ function cmdRecurring() {
     }, 'supervisor');
     appendLog({ type: 'act', decision: citing(), class: 'add-ticket', what: `added ticket ${id} to fix the failing check ${arg}`, refs: [id, `recurring:${arg}`], reversible: true }, 'supervisor');
     return out(`added ${id}`);
+  }
+  // a due chore begins (kit-164): the supervisor's in a chore worktree, a worker's as a chores ticket;
+  // its run for the slot is the started line, finished by its merge or by recurring done
+  if (sub === 'start' || sub === 'done') {
+    supervisorOnly(`recurring ${sub}`);
+    const RC = recurringChores;
+    if (!arg) die(sub === 'start' ? 'usage: recurring start <name>' : 'usage: recurring done <name> --nothing "<why>" | --abandoned "<why>"');
+    const l = RC.list();
+    if (l.problem) die(l.problem);
+    const jobs = mainJobs();
+    if (!Object.hasOwn(jobs, arg)) die(`no job ${arg} on main; recurring list`);
+    const entry = jobs[arg];
+    if (entry.kind !== 'chore') die(`${arg} is a ${entry.kind ?? 'kindless'} job; only a chore starts and finishes here (a check runs on its own)`);
+    if (sub === 'done') {
+      const how = ['nothing', 'abandoned'].filter((f) => flags[f] !== undefined);
+      if (how.length !== 1) die('usage: recurring done <name> --nothing "<why>" | --abandoned "<why>" (one of them)');
+      const status = how[0];
+      const why = flagStr(status)?.trim();
+      if (!why) die(`recurring done --${status} needs the reason: --${status} "<why>"`);
+      if (UNSAFE_TEXT.test(why) || why.length > 300) die(`--${status}: one line of at most 300 characters`);
+      if (entry.by === 'worker') die(`${arg} is a worker's chore: it ends only through its ticket (its merge, or a ticket set … superseded_by), so a live ticket is never written twice`);
+      const st = RC.state(arg, entry, { forge: true });
+      const open = st?.open;
+      if (!open) die(`${arg} has no started run to finish${st?.runs.length ? ` (its last, ${st.runs.at(-1).ref}, is ${st.runs.at(-1).status})` : ''}`);
+      if (RC.isTicketRef(open.ref)) die(`${arg}'s run ${open.ref} is a ticket: it ends only through that ticket`);
+      if (!RC.REF.test(open.ref)) die(`${arg}'s run ${open.ref} is not a chore branch (chore-recurring-<name>-<yyyymmdd>); finish it by hand`);
+      const wt = path.join(mainRoot, '.worktrees', open.ref);
+      let removed = '';
+      // a symlink there is never followed: it could lead to another chore's worktree
+      if (status === 'nothing' && fs.lstatSync(wt, { throwIfNoEntry: false })?.isSymbolicLink()) die(`.worktrees/${open.ref} is a symlink, not this chore's worktree; move it aside, then recurring done again`);
+      if (status === 'nothing' && fs.existsSync(wt)) {
+        // empty: nothing uncommitted and no commit main lacks; anything else is work, never removed here
+        const g = (args) => recurringRegistry.git(args, { cwd: wt });
+        const top = g(['rev-parse', '--show-toplevel']);
+        if (!top.ok || realPath(top.out.trim()) !== realPath(wt)) die(`.worktrees/${open.ref} is not a worktree; move it aside, then recurring done again`);
+        // every untracked file and submodule change counts, whatever the user's git config hides
+        const dirty = g(['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none']);
+        const main = mainSha();
+        const ahead = main ? g(['rev-list', '--count', 'HEAD', '--not', main]) : { ok: false };
+        if (!dirty.ok || !ahead.ok) die(`couldn't read .worktrees/${open.ref} (git ${recurringRegistry.why(dirty.ok ? ahead : dirty)}); nothing was logged`);
+        if (dirty.out.trim() || Number(ahead.out.trim()) > 0) die(`.worktrees/${open.ref} holds work (${dirty.out.trim() ? 'uncommitted changes' : `${ahead.out.trim()} commit(s) main lacks`}): land it (chore pr ${open.ref.replace(/^chore-/, '')}, then merge --chore), or --abandoned "<why>"`);
+        const rm = recurringRegistry.git(['worktree', 'remove', wt], { cwd: mainRoot });
+        if (!rm.ok) die(`couldn't remove .worktrees/${open.ref} (git worktree remove ${recurringRegistry.why(rm)}); nothing was logged`);
+        removed = `; removed the empty .worktrees/${open.ref}`;
+      }
+      appendLog({ type: 'observation', source: 'recurring', kind: 'recurring-run', subject: `recurring:${arg}`, detector: 'recurring', severity: 0, valence: 0, detail: why, source_key: `recurring:${arg}:${open.slot}:${status}:${open.ref}`, run: { status, slot: open.slot, ref: open.ref } }, 'supervisor');
+      return out(`${arg}: ${status === 'nothing' ? 'nothing to do' : 'abandoned'} for ${open.slot} (${open.ref})${removed}; due again by its slots`);
+    }
+    // start: Upkeep running, an answered job, due, and no run of it live
+    const mode = goalMode(upkeepOrVirtual());
+    if (mode !== 'run') die(`Upkeep is ${holdWords(mode)}: recurring chores wait until it runs (goal hold upkeep run --owner)`);
+    const reg = recurringFailures.registered(arg, entry);
+    if (!reg) die(`${arg} on main was not registered through an answered recurring-edit question: only a job the owner approved starts`);
+    const st = RC.state(arg, entry, { mode, forge: true });
+    if (!st) die(`${arg} has no schedule the kit can read`);
+    if (st.open) die(`${arg} is already started (${st.open.ref}, for ${st.open.slot}): it finishes when that merges${RC.isTicketRef(st.open.ref) ? ' or is superseded' : ', or with recurring done --nothing | --abandoned'}`);
+    if (!st.due) die(`${arg} is not due: next ${st.next}`);
+    const now = Date.now();
+    const header = `${arg}: ${entry.title}. Approved by ${reg.qid}; due for ${st.slot}.`;
+    const body = ['Its instructions, as the owner approved them:', entry.prompt].join('\n');
+    if (entry.by === 'supervisor') {
+      const ref = RC.slug(arg, now);
+      const slug = ref.replace(/^chore-/, '');
+      if (st.runs.some((r) => r.ref === ref)) die(`${arg} already started as ${ref} today: start it again tomorrow`);
+      if (fs.existsSync(path.join(mainRoot, '.worktrees', ref))) die(`.worktrees/${ref} is there already: land or remove it first`);
+      const wt = choreWorktree(slug, { setup: true });
+      RC.logStart(arg, st.slot, ref, `chore ${slug}`);
+      return out([header, `Started in ${path.relative(mainRoot, wt)}.`, '', body, '', 'Then:', `  devteam.mjs chore pr ${slug} --title "…"   and merge --chore ${slug} (that merge finishes it)`, `  or devteam.mjs recurring done ${arg} --nothing "<why>"   (nothing to do; removes the empty worktree)`, `  or devteam.mjs recurring done ${arg} --abandoned "<why>"`].join('\n'));
+    }
+    // a ticket an earlier start wrote and logged no line for is taken up, never written twice
+    const stray = RC.stray(arg, entry, st.runs);
+    if (stray) {
+      RC.logStart(arg, st.slot, stray, `ticket ${stray}, taken up`);
+      return out([header, `Took up the chores ticket ${stray}, written by an earlier start that logged no run; start its worker as any chore ticket's (devteam.mjs worker ${stray}). It finishes when ${stray} merges, or is superseded.`, '', body].join('\n'));
+    }
+    const id = RC.nextId(entry.component, arg);
+    if (!new RegExp(SCHEMA['x-id'].keyed.ticket).test(id)) die(`the chore ticket's id ${id} must match ${SCHEMA['x-id'].keyed.ticket}`);
+    if (logGet(id)) die(`${id} exists`);
+    appendLog({
+      type: 'ticket', op: 'new', id, feature: CHORES, title: `Recurring: ${entry.title}`, component: entry.component, kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: entry.touches, done_when: entry.done_when,
+      notes: `${header}\n${body}`,
+    }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'add-ticket', what: `added chore ticket ${id} for the recurring chore ${arg}`, refs: [id, `recurring:${arg}`], reversible: true }, 'supervisor');
+    RC.logStart(arg, st.slot, id, `ticket ${id}`);
+    return out([header, `Wrote the chores ticket ${id}; start its worker as any chore ticket's (devteam.mjs worker ${id}). It finishes when ${id} merges, or is superseded.`, '', body].join('\n'));
   }
   if (sub === 'run') {
     supervisorOnly('recurring run');
@@ -26276,7 +26593,7 @@ const recurringRunDue = Object.freeze({
   results(name) {
     return logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${name}` && o.detector === 'recurring' && o.created_by === 'supervisor' && ['pass', 'fail', 'error'].includes(o.run?.status) && typeof o.run.slot === 'string')
-      .map((o) => ({ slot: o.run.slot, at: new Date(Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0)).toISOString() }));
+      .map((o) => ({ slot: o.run.slot, at: new Date(recurringFailures.runStart(o.created_at, o.run.seconds)).toISOString() }));
   },
   // the entry's landings: each merge-chore act citing an answered recurring-edit question that shows
   // this name, oldest first; main's entry when the last of them isn't it, at main's last commit to the file
@@ -26336,7 +26653,8 @@ const recurringRunDue = Object.freeze({
     const hook = process.env.DEVTEAM_TEST_RECURRING_NO_CHECKOUT === name;
     if (hook) fs.writeFileSync(wt, 'kit-163 test hook\n');
     // no hook runs there: a tracked core.hooksPath (husky) would run a command no entry names (final-2 F3)
-    const add = recurringRegistry.git(['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot });
+    // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+    const add = recurringRegistry.git(['-c', 'core.useReplaceRefs=false', '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot });
     if (hook) try { fs.unlinkSync(wt); } catch {}
     if (!add.ok) {
       // git's first error line, with the checkout's path made short so the excerpt keeps all of it
@@ -26555,6 +26873,15 @@ const recurringRunDue = Object.freeze({
 // gives is ISO to the second, as the dashboard contract has them.
 const recurringFailures = Object.freeze({
   isoSec: (t) => `${new Date(typeof t === 'number' ? t : Date.parse(t)).toISOString().slice(0, 19)}Z`,
+  // a run's start, in ms: its line's time less its seconds (the runner logs at the end); a seconds
+  // that isn't a positive number, or would put the start before 1970 (no date, or one the
+  // contract's times can't show), is ignored as a duration, and the start is the line's time (kit-781)
+  runStart(createdAt, seconds) {
+    const t = Date.parse(createdAt);
+    if (!(Number.isFinite(seconds) && seconds > 0)) return t;
+    const start = t - seconds * 1000;
+    return start >= 0 ? start : t;
+  },
   counts: (o) => o?.created_by === 'supervisor' && o?.detector === 'recurring',
   failAfter: (entry) => (Number.isInteger(entry?.fail_after) ? entry.fail_after : 1),
   // the answered landings that show this name, oldest first (a stop shows it as null)
@@ -26599,7 +26926,7 @@ const recurringFailures = Object.freeze({
       if (o.kind !== 'recurring-run' || o.subject !== `recurring:${name}` || !RF.counts(o)) continue;
       const r = o.run;
       if (!r || !['pass', 'fail', 'error'].includes(r.status) || typeof r.slot !== 'string' || !Number.isFinite(Date.parse(r.slot))) continue;
-      const ms = Date.parse(o.created_at) - (Number.isFinite(r.seconds) && r.seconds > 0 ? r.seconds * 1000 : 0);
+      const ms = RF.runStart(o.created_at, r.seconds);
       if (!(ms >= floor)) continue;
       const cur = first.get(r.slot);
       if (!cur || ms < cur.ms) first.set(r.slot, { ms, id: o.id, status: r.status, slot: r.slot, seconds: Number.isFinite(r.seconds) ? r.seconds : null, excerpt: typeof r.excerpt === 'string' ? r.excerpt : null });
@@ -26672,9 +26999,165 @@ const recurringFailures = Object.freeze({
   },
 });
 
+// ===== recurring: chores come due, start and finish (kit-164) =====
+// A chore is due by its slots (recurringNextSlot over its landings and its started runs), as a check
+// is. Its run for a slot is its start: `recurring start` logs a started line (ref the chore branch
+// chore-recurring-<name>-<yyyymmdd>, or the chores ticket it wrote) and the run finishes when that ref
+// merges (done), with `recurring done --nothing` or `--abandoned` (a supervisor chore's only), when a
+// supervisor chore's PR is closed unmerged (abandoned) or when a worker chore's ticket is superseded
+// (abandoned). Nothing else ends a worker chore: a ticket written but not started, or whose PR was
+// closed, is live. A run started and not finished keeps the chore from coming due again; once it
+// finishes, the slots that passed meanwhile are one, due for the latest. Only the supervisor's
+// detector recurring lines count (design C2, P5). Every time it gives is ISO to the second.
+const recurringChores = Object.freeze({
+  REF: /^chore-recurring-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-(\d{8})$/,
+  // a closed PR's state is kept this long before gh is asked again; a closed one is kept for good
+  PR_REUSE_MS: 10 * 60000,
+  // a start dated more than this far ahead (the clock was off when it started) reads stuck at once
+  SKEW_MS: 10 * 60000,
+  grace: (entry) => (Number.isInteger(entry?.grace_days) ? entry.grace_days : entry?.by === 'worker' ? 3 : 1),
+  // a started run's ref: the chore branch (a supervisor chore) or a chores ticket id (a worker chore). A
+  // branch can match the ticket pattern (a job named deps-02-bump makes chore-recurring-deps-02-bump-<date>),
+  // so a ref that is a chore branch is never a ticket
+  isTicketRef: (ref) => new RegExp(SCHEMA['x-id'].keyed.ticket).test(ref) && !recurringChores.REF.test(ref),
+  // the job a run's ref names: a chore branch's name, or a recurring chores ticket's (<c>-<NN>-recurring-<name>);
+  // null for any other ref
+  refJob(ref) { const RC = recurringChores; return RC.REF.exec(ref)?.[1] ?? (RC.isTicketRef(ref) ? /-\d{2,}-recurring-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(ref)?.[1] ?? null : null); },
+  slug: (name, ms) => `chore-recurring-${name}-${new Date(ms).toISOString().slice(0, 10).replace(/-/g, '')}`,
+  // main's chores in name order, each { name, entry }, read and gated as main's checks are (a file that
+  // doesn't read, an entry that breaks the shape, a registry over the cap: none, with the problem)
+  list() {
+    const R = recurringRegistry;
+    const ref = projectInRepo ? mainRef() : null;
+    if (!ref) return { chores: [], ref: null, problem: projectInRepo ? `no ${loadSettings().main_branch} branch to read the jobs from` : null };
+    const r = R.read(ref);
+    if (r.problem) return { chores: [], ref, problem: r.problem };
+    for (const [n, e] of Object.entries(r.jobs)) {
+      const p = recurringEntryProblems(n, e);
+      if (p.length) return { chores: [], ref, problem: p[0] };
+    }
+    const cap = R.capProblem(r.jobs, 'on main');
+    if (cap) return { chores: [], ref, problem: cap };
+    return { chores: Object.keys(r.jobs).sort().filter((n) => r.jobs[n].kind === 'chore').map((name) => ({ name, entry: r.jobs[name] })), ref, problem: null };
+  },
+  // the counted chore lines for this name since it was last added (started, nothing, abandoned), oldest first
+  lines(name) {
+    const from = recurringFailures.addedAt(name);
+    const floor = from ? Date.parse(from) : -Infinity;
+    return logObjects('observation')
+      .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${name}` && recurringFailures.counts(o) && ['started', 'nothing', 'abandoned'].includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && typeof o.run.ref === 'string' && o.run.ref && Date.parse(o.created_at) >= floor)
+      .sort(byTime);
+  },
+  // a supervisor chore's PR on the forge, closed without a merge: its closedAt, else null. Read through
+  // run/recurring/prs.json: a closed PR for good, anything else again after PR_REUSE_MS. No forge (git),
+  // no gh, or gh failing: null, so the run stays live.
+  prClosed(branch, nowMs = Date.now(), { ask = false } = {}) {
+    if (loadSettings().forge === 'git') return null;
+    const file = path.join(runPath('recurring'), 'prs.json');
+    let cache = {};
+    try { cache = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    if (!isObj(cache)) cache = {};
+    const c = isObj(cache[branch]) ? cache[branch] : null;
+    if (c && typeof c.closed_at === 'string') return c.closed_at;
+    if (!ask || (c && Number.isFinite(Date.parse(c.at)) && nowMs - Date.parse(c.at) < recurringChores.PR_REUSE_MS)) return null;
+    const raw = repo('home').gh(['pr', 'list', '--head', branch, '--state', 'closed', '--json', 'number,closedAt,mergedAt', '--limit', '20'], { timeout: 10000 });
+    let prs = null;
+    try { prs = raw === null ? null : JSON.parse(raw); } catch { prs = null; }
+    if (!Array.isArray(prs)) return null;
+    const closed = prs.filter((p) => isObj(p) && !p.mergedAt && Number.isFinite(Date.parse(p.closedAt))).map((p) => p.closedAt).sort()[0] ?? null;
+    cache[branch] = { at: new Date(nowMs).toISOString(), closed_at: closed };
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, `${JSON.stringify(cache, null, 2)}\n`); } catch {}
+    return closed;
+  },
+  // each started run, oldest first: { id, ref, slot, start, status: started | done | nothing | abandoned,
+  // at (when it finished, or its start), why (a nothing or abandoned line's detail) }. forge: true asks gh
+  // about an open supervisor run's PR (recurring start and done only); without it a closed PR is read from
+  // run/recurring/prs.json alone, so metrics, the dashboard and peek never wait on gh.
+  runs(name, { nowMs = Date.now(), forge = false } = {}) {
+    const RC = recurringChores;
+    const lines = RC.lines(name);
+    const acts = logObjects('act').filter((a) => a.class === 'merge-chore' && a.created_by === 'supervisor');
+    const out = [];
+    // a finish counts whatever its date against the start (one before it shows the clock was off), from
+    // when the job was last added, as its lines do
+    const from = recurringFailures.addedAt(name);
+    const floor = from ? Date.parse(from) : -Infinity;
+    for (const o of lines.filter((l) => l.run.status === 'started')) {
+      const ref = o.run.ref;
+      // a line whose ref names another job is no run of this one: it can't finish or remove that job's work
+      const job = RC.refJob(ref);
+      if (job !== null && job !== name) continue;
+      const run = { id: o.id, ref, slot: o.run.slot, start: o.created_at, status: 'started', at: o.created_at, why: null };
+      const end = (status, at, why = null) => { const ms = Date.parse(at); if (Number.isFinite(ms) && (run.status === 'started' || ms < Date.parse(run.at))) Object.assign(run, { status, at: new Date(ms).toISOString(), why }); };
+      if (RC.isTicketRef(ref)) {
+        // a worker chore ends only through its ticket: merged (done) or superseded (abandoned)
+        const t = logGet(ref);
+        if (t?.type === 'ticket') {
+          const m = mergedAt(ref);
+          if (m !== null && m !== undefined) end('done', typeof m === 'number' ? new Date(m).toISOString() : m);
+          // the earliest finish holds: a ticket superseded and merged later stays abandoned
+          if (t.superseded_by) end('abandoned', (t.updates ?? []).filter((u) => u.superseded_by).map((u) => u.at).sort()[0] ?? t.created_at ?? o.created_at, `superseded by ${t.superseded_by}`);
+        }
+      } else {
+        for (const a of acts) if (a.refs?.[0] === ref && Date.parse(a.created_at) >= floor) end('done', a.created_at);
+        for (const l of lines) if (l !== o && ['nothing', 'abandoned'].includes(l.run.status) && l.run.ref === ref && Date.parse(l.created_at) >= floor) end(l.run.status, l.created_at, typeof l.detail === 'string' ? l.detail : null);
+        if (run.status === 'started') { const c = RC.prClosed(ref, nowMs, { ask: forge }); if (c) end('abandoned', c, 'its PR was closed without a merge'); }
+      }
+      out.push(run);
+    }
+    return out;
+  },
+  // When a chore is due, from its landings and its runs ([{ slot, start, status }], status started for a
+  // run not finished): the newest started run is open, and while one is open nothing is due; else
+  // recurringNextSlot over the runs' starts, so slots that passed meanwhile are one, due for the latest.
+  // { open, due, slot, next }, or null with no schedule. Names nothing but recurringNextSlot (the test
+  // runs it on test/fixtures/recurring/slots.json's chore cases).
+  schedule(landings, runs, nowMs) {
+    const open = runs.findLast((r) => r.status === 'started') ?? null;
+    // a run that finished before its own start (a clock that ran fast) takes its slot from when it finished
+    const s = recurringNextSlot(landings, runs.map((r) => ({ slot: r.slot, at: Math.min(Date.parse(r.start), Date.parse(r.at ?? r.start)) })), nowMs);
+    return s ? { open, due: !open && s.due, slot: s.slot, next: s.next } : null;
+  },
+  // one chore's state now: { runs, open (the started run not finished, or null), due, slot, next, overdue,
+  // stuck, held, state: started | due | overdue | held | never | passing }, or null when it has no schedule
+  state(name, entry, { nowMs = Date.now(), forge = false, mode = goalMode(upkeepOrVirtual()) } = {}) {
+    const RC = recurringChores;
+    const runs = RC.runs(name, { nowMs, forge });
+    const s = RC.schedule(recurringRunDue.landings(name, entry, mainRef()), runs, nowMs);
+    if (!s) return null;
+    const { open } = s;
+    const graceMs = RC.grace(entry) * DAY;
+    const held = mode !== 'run';
+    const { due } = s;
+    const overdue = due && nowMs - Date.parse(s.slot) > graceMs;
+    // stuck grace_days after its start, or at once while its start is more than SKEW_MS ahead (kit-785 R1)
+    const startMs = open ? Date.parse(open.start) : NaN;
+    const stuck = !!open && (nowMs - startMs > graceMs || startMs - nowMs > RC.SKEW_MS);
+    const state = open ? 'started' : due ? (held ? 'held' : overdue ? 'overdue' : 'due') : runs.length ? 'passing' : 'never';
+    return { runs, open, due, slot: s.slot, next: s.next, overdue, stuck, held, mode, state };
+  },
+  // the started line: as the supervisor, detector recurring, for the slot it was due for
+  logStart(name, slot, ref, how) {
+    return appendLog({ type: 'observation', source: 'recurring', kind: 'recurring-run', subject: `recurring:${name}`, detector: 'recurring', severity: 0, valence: 0, detail: `${name}: started for ${slot} (${how})`, source_key: `recurring:${name}:${slot}:started:${ref}`, run: { status: 'started', slot, ref } }, 'supervisor');
+  },
+  // a live chores ticket of this job's that no started line names: a start cut short after writing it
+  // (before its line). The next start takes it up rather than write a second.
+  stray(name, entry, runs) {
+    const named = new Set(runs.map((r) => r.ref));
+    const re = new RegExp(`^${entry.component.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d{2,}-recurring-${name}$`);
+    return logObjects('ticket').filter((t) => re.test(t.id) && t.feature === CHORES && !t.superseded_by && !named.has(t.id) && (mergedAt(t.id) === null || mergedAt(t.id) === undefined)).sort(byTime)[0]?.id ?? null;
+  },
+  // the next free ticket number for a component: one past the highest <component>-<NN>- id, two digits at least
+  nextId(component, name) {
+    const re = new RegExp(`^${component.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(\\d{2,})-`);
+    const n = Math.max(0, ...logObjects('ticket').map((t) => re.exec(t.id)?.[1]).filter(Boolean).map(Number)) + 1;
+    return `${component}-${String(n).padStart(2, '0')}-recurring-${name}`;
+  },
+});
+
 // The dashboard's upkeep.recurring (kit-168), in test/fixtures/recurring/dashboard.json's shape: main's
-// checks with their state, and the built-in schedules. Chores come with kit-164, proposals with kit-165,
-// signals with kit-175. Every time is ISO to the second.
+// checks with their state, then main's chores (kit-164), and the built-in schedules. Proposals come with
+// kit-165, signals with kit-175. Every time is ISO to the second.
 function recurringDashboard() {
   const RF = recurringFailures;
   const sec = (t) => (t === null || t === undefined || t === '' ? null : RF.isoSec(t));
@@ -26704,6 +27187,20 @@ function recurringDashboard() {
     { name: 'kit-sync', every: `${s.upstream_check_hours}h`, last_at: sec(syncs.at(-1)?.created_at), next_at: null, note: `Adopts each new devteam release; you check for one every ${s.upstream_check_hours} hours.`, setting: 'upstream_check_hours' },
     { name: 'sensors', every: 'each cycle', last_at: sec(sensorsAt), next_at: null, note: 'Production signals, read on every wait cycle.', setting: null },
   ];
+  const mode = goalMode(upkeepOrVirtual());
+  const lc = recurringChores.list();
+  for (const { name, entry } of lc.chores) {
+    const st = recurringChores.state(name, entry, { forge: false, mode });
+    if (!st) continue;
+    const lr = st.runs.at(-1) ?? null;
+    const reg = RF.registered(name, entry);
+    entries.push({
+      name, title: entry.title, what: entry.what, kind: 'chore', by: entry.by, every: entry.every, on: entry.on ?? null, at: entry.at ?? null,
+      state: st.state, fails_in_a_row: 0,
+      last: lr ? { status: lr.status, at: sec(lr.status === 'started' ? lr.start : lr.at), seconds: null, excerpt: null } : null,
+      next_at: sec(st.next), ticket: null, registered: reg ? { qid: reg.qid, at: sec(reg.at) } : null, signals: [],
+    });
+  }
   return { entries, builtin, proposals: [] };
 }
 
@@ -29120,10 +29617,15 @@ function peekView(kind, id) {
     if (!Object.hasOwn(r.jobs, id)) die(`no job ${id} on main`);
     const entry = r.jobs[id];
     const reg = RF.registered(id, entry);
+    if (entry.kind === 'chore') {
+      const st = recurringChores.state(id, entry, { forge: false });
+      const runs = (st?.runs ?? []).slice().reverse().slice(0, 20).map((x) => ({ status: x.status, at: RF.isoSec(x.start), slot: RF.isoSec(x.slot), seconds: null, excerpt: null, ref: x.ref }));
+      return { name: id, entry: { ...entry, registered: reg ? { qid: reg.qid, at: RF.isoSec(reg.at) } : null }, runs };
+    }
     const STATUSES = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
     const runs = logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && Number.isFinite(Date.parse(o.created_at)))
-      .map((o) => ({ o, ms: Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0) }))
+      .map((o) => ({ o, ms: RF.runStart(o.created_at, o.run.seconds) }))
       .sort((a, b) => b.ms - a.ms)
       .slice(0, 20)
       .map(({ o, ms }) => ({ status: o.run.status, at: RF.isoSec(ms), slot: RF.isoSec(o.run.slot), seconds: Number.isFinite(o.run.seconds) ? o.run.seconds : null, excerpt: typeof o.run.excerpt === 'string' ? o.run.excerpt.slice(-200) : null, ref: typeof o.run.ref === 'string' && o.run.ref ? o.run.ref : null }));
@@ -32279,8 +32781,9 @@ function inResponderWorktree() {
   return cwd === wt || cwd.startsWith(`${wt}${path.sep}`);
 }
 // git for the responder's start. What it could have planted never runs or counts: no shared hook
-// (final-1 F6), no fsmonitor (F4), no replaced object (F5).
-const RESPONDER_GIT = ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+// (final-1 F6), no fsmonitor (F4), no replaced object (F5; kit-778: core.useReplaceRefs=true in a
+// config beats --no-replace-objects, and the command line's -c beats every config).
+const RESPONDER_GIT = ['--no-replace-objects', '-c', 'core.useReplaceRefs=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
 const responderGit = (args, cwd = mainRoot, env = null) => spawnSync('git', [...RESPONDER_GIT, ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 120000, ...(env ? { env: { ...process.env, ...env } } : {}) });
 // A git call to origin, in its own process group: at the deadline the whole group goes, so a hung
 // transport (ssh) isn't left behind by a refused start (final-2b F4).
@@ -32772,7 +33275,9 @@ const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring run <name> --draft   supervisor: run this checkout's entry once the same way, to try it before asking; prints the status and excerpt, logs and keeps nothing
   recurring due [--json]   when each of main's checks is due, from the log alone: { checks: [{ name, due, slot, next, start }], runner: { pid, start, budget_s, current } | null }; a problem with main's file exits 1 naming it
   recurring ticket <name> --id <id> --touches <glob>… [--component <c>]   supervisor: a chores ticket to fix a failing check, cited by its add-ticket act (which clears recurring-failing); refused unless the check has failed fail_after runs in a row with no fix ticket
-  metrics raises recurring-failing (a check failing fail_after runs in a row, no fix ticket), recurring-stale (not run in 3 intervals while wait runs) and recurring-invalid (main's recurring.json doesn't read, breaks the shape, or is over the 100-runs-a-day cap); recurring run --due logs recurring-failed and recurring-recovered after each pass`;
+  recurring start <name>   supervisor: begin a due chore while Upkeep runs: yours opens .worktrees/chore-recurring-<name>-<yyyymmdd>, a worker's writes the chores ticket <component>-<NN>-recurring-<name>; logs a started run and prints the instructions headed with the approving question. It finishes when that chore PR or ticket merges
+  recurring done <name> --nothing "<why>" | --abandoned "<why>"   supervisor: finish your started chore without a merge (--nothing removes its empty worktree); refused for a worker's chore, which ends only through its ticket (merged, or superseded)
+  metrics raises recurring-failing (a check failing fail_after runs in a row, no fix ticket), recurring-stale (not run in 3 intervals while wait runs), recurring-invalid (main's recurring.json doesn't read, breaks the shape, or is over the 100-runs-a-day cap), recurring-due and recurring-overdue (a chore due and not started, past its grace_days; neither raised while Upkeep is drained or parked) and recurring-stuck (a chore started grace_days ago and not finished); recurring run --due logs recurring-failed and recurring-recovered after each pass`;
 const HELP_LOG = `The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text

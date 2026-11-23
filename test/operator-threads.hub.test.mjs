@@ -32,7 +32,7 @@ async function hubFixture(later, name, { box: boxed = false } = {}) {
   const a = agentProgram([box(prompt)]);
   const env = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(P), DEVTEAM_HUB_RETRY_MS: '500', DEVTEAM_TELL_SETTLE_SECONDS: '0.3', CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex'), ...(boxed ? { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: GW_PUBLIC } : {}) };
   const A = bareProject(base, 'alpha');
-  execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
+  execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init && git remote add origin "$PWD"'], { cwd: A }); // its own origin: the operator's start reads origin (kit-764)
   const dash = startDashboard(A, env);
   // last registered runs first: the dashboard stops, then its operator's session, as before
   later(() => tmuxSh(['kill-session', '-t', `=devteam-home-${HUB}`]));
