@@ -3986,6 +3986,8 @@ function workerState(id) {
   return {
     phase: last?.to ?? null, task: last?.task ?? null, note: last?.note ?? null, head_sha: last?.sha ?? null,
     started_at: phases[0]?.at ?? mine[0].at, last_seen: lastSeen,
+    // the first line of the current phase run (liveness pings after it keep it)
+    phase_started_at: phaseRunStart(phases)?.at ?? null,
     minutes_silent: Math.round((Date.now() - Date.parse(lastSeen)) / 60000),
     ...(spendByWho().get(id) ?? { usd: cost?.usd ?? 0, input_tokens: cost?.input_tokens ?? 0, output_tokens: cost?.output_tokens ?? 0 }),
   };
@@ -18430,7 +18432,7 @@ function waitCause(ref) {
 // values chore: branch | ahead | pr | for
 // values wait.state: open | resolved | failed
 function nextMoves() {
-  return memo('next-moves', () => [...goalMovesNow(), ...planners().map(plannerMove)]);
+  return memo('next-moves', () => [...goalMovesNow(), ...ticketMoves().values(), ...planners().map(plannerMove)]);
 }
 // The two thresholds, as numbers: a setting that isn't a number of zero or more counts as its default.
 const moveSetting = (key) => { const v = loadSettings()[key]; return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : SETTINGS_DEFAULTS[key]; };
@@ -18448,7 +18450,9 @@ function moveFlag(m) {
 }
 function newMove(subject, title, o) {
   const m = { subject, move: o.move, words: o.words, holder: o.holder, ref: o.ref ?? null, title, since: isoOf(o.since), command: o.command ?? null, covered_by: o.covered_by ?? [], quiet: o.quiet ?? null, via: null, flag: null, rung: 0 };
-  return Object.assign(m, moveFlag(m));
+  const f = moveFlag(m);
+  // a row that is never owed (T2b) is only ever stalled
+  return Object.assign(m, o.neverOwed && f.flag === 'owed' ? { flag: null, rung: 0 } : f);
 }
 // A copied move: its source's holder, since, flag and rung (and what it is, unless the row says),
 // on this subject, via the source.
@@ -18592,6 +18596,111 @@ function milestoneSince(g) {
 function ticketSince(t) {
   const lines = memo('lines-by', () => { const m = new Map(); for (const l of readLog().lines) if (l.at && l.by) m.set(l.by, l.at > (m.get(l.by) ?? '') ? l.at : m.get(l.by)); return m; });
   return lines.get(t.id) ?? (t.updates ?? []).at(-1)?.at ?? t.created_at;
+}
+// The first line of a writer's current phase run: walking back over its phase lines (oldest first),
+// the first with the last line's `to` after one with another (liveness pings repeat the same to).
+function phaseRunStart(phases) {
+  const last = phases.at(-1);
+  if (!last) return null;
+  let i = phases.length - 1;
+  while (i > 0 && phases[i - 1].to === last.to) i--;
+  return phases[i];
+}
+// A ticket's phase in words, for the worker's move (T8).
+const PHASE_WORDS = Object.freeze({ starting: 'Starting', spec: 'Writing the spec', plan: 'Writing the plan', contract: 'Landing the contract', build: 'Building', verify: 'Verifying', 'final-review': 'In final review' });
+// The open messages that ask for a reply, oldest first per session: from it, or about its ticket
+// (idsAwaitingReply's rule: not info, ruling or answer; no message or question re it; not settled
+// by a landing).
+function openAsksBy() {
+  return memo('open-asks-by', () => {
+    const msgs = logObjects('message');
+    const replied = new Set([...msgs, ...logObjects('question')].map((m) => m.re).filter(Boolean));
+    const by = new Map();
+    for (const m of msgs.filter((x) => !['info', 'ruling', 'answer'].includes(x.kind) && !replied.has(x.id) && !settledByLanding(x)).sort(byTime)) for (const who of [m.created_by, m.ticket]) if (who && !by.has(who)) by.set(who, m);
+    return by;
+  });
+}
+// The ticket rows, T1 to T14 (T2b after T3), first match wins: one move per active, unmerged
+// ticket, by id (designs/every-goal-always-has-a-next-move.md). A ticket waiting on a dependency
+// copies that dependency's move (T9, via).
+function ticketMoves() {
+  return memo('ticket-moves', () => {
+    const ts = tickets();
+    const s = loadSettings();
+    const openQs = questions().filter((q) => q.status === 'open').sort((a, b) => a.asked_at.localeCompare(b.asked_at));
+    const asks = openAsksBy();
+    const fleetDrain = draining();
+    const activeIds = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
+    let memFull;
+    // when a slot last freed: the latest merge of any ticket, or the latest park
+    let freed;
+    const slotFreed = () => (freed ??= Math.max(0, ...[...ts.keys()].map((id) => mergedAt(id) ?? 0), ...logObjects('phase').filter((p) => p.to === 'parked' && writerClass(p.created_by) !== 'planner').map((p) => Date.parse(p.created_at) || 0)));
+    // when it became ready: the later of its line and its dependencies' latest merge
+    const readySince = (t) => Math.max(Date.parse(t.created_at) || 0, ...(t.depends_on ?? []).map((d) => mergedAt(d) ?? 0));
+    const done = new Map();
+    const visiting = new Set();
+    const moveOf = (t) => {
+      if (!done.has(t.id)) { visiting.add(t.id); done.set(t.id, ticketRow(t)); visiting.delete(t.id); }
+      return done.get(t.id);
+    };
+    function ticketRow(t) {
+      const id = t.id;
+      const title = t.title ?? id;
+      const at = (o) => newMove(`ticket:${id}`, title, o);
+      if (!isActive(t) || mergeShaFor(id)) return null; // T1
+      const mode = ticketMode(t);
+      if (mode === 'park' || mode === 'let-go') {
+        const g = ticketGoals(t).find((x) => ['park', 'let-go'].includes(goalMode(x)));
+        const hv = g ? holdView(g) : null;
+        return at({ move: 'held-by-goal', words: `Held: ${hv?.reason ?? (mode === 'let-go' ? 'its goal is let go' : 'its goal is parked')}`, holder: hv?.by === 'owner' ? 'owner' : 'supervisor', quiet: 'hold', since: hv?.since ?? (t.updates ?? []).at(-1)?.at ?? t.created_at }); // T2
+      }
+      const q = openQs.find((x) => x.ticket === id || (x.blocks ?? []).includes(id));
+      if (q) return at({ ...askedMove(q), covered_by: [{ kind: 'blocked-on-owner', subject: id }, { kind: 'owner-question-waiting', subject: q.id }] }); // T3
+      if (isHeld(t)) return at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+      const w = workerState(id);
+      const phase = w?.phase ?? null;
+      const run = w?.phase_started_at ?? null;
+      const msg = asks.get(id);
+      if (['done', 'merging'].includes(phase)) return at({ move: 'merge-it', words: 'Merge it', holder: 'supervisor', since: run, command: `merge ${id}` }); // T4
+      if (phase === 'awaiting-word') return at({ move: 'give-word', words: 'Give the word, or merge', holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
+      const depOpen = (t.depends_on ?? []).find((d) => !mergeShaFor(d));
+      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: 'Answer its message', holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
+      if (phase === 'parked' && ['run', 'drain'].includes(mode) && !fleetDrain) return at({ move: 'resume', words: 'Resume it', holder: 'supervisor', since: run, command: `worker ${id} --resume`, covered_by: [{ kind: 'parked-under-run', subject: id }] }); // T7
+      // an Upkeep chore ticket runs a recurring job: recurring-stuck on that job covers its move too
+      const job = t.feature === CHORES ? recurringChores.refJob(id) : null;
+      const stuck = job ? [{ kind: 'recurring-stuck', subject: `recurring:${job}` }] : [];
+      const notStarted = !phase || (phase === 'starting' && stoppedLaunch(id));
+      if (phase in PHASE_WORDS && !notStarted) return at({ move: phase === 'final-review' ? 'final-review' : phase, words: PHASE_WORDS[phase], holder: 'worker', since: run, covered_by: [...['stale-worker', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: id })), ...stuck] }); // T8
+      if ((notStarted || phase === 'blocked') && depOpen) {
+        const d = ts.get(depOpen);
+        const src = d && !visiting.has(depOpen) ? moveOf(d) : null;
+        const since = isoOf(readySince(t));
+        if (src) return copiedMove(`ticket:${id}`, title, src, { move: 'waits-for-ticket', words: `Waits for ${depOpen} to merge`, ref: { kind: 'ticket', id: depOpen }, since }); // T9
+        return at({ move: 'no-next-move', words: `No next move: it waits for ${depOpen}, which has none`, holder: 'nobody', since: readySince(t) }); // T14, a dependency with no move
+      }
+      if (notStarted) {
+        const why = notSchedulable(t);
+        if (why && why !== 'parked') return at({ move: 'cant-start', words: `Can't start: ${why}`, holder: 'supervisor', since: readySince(t), covered_by: ['link-unreachable', 'repo-unreachable', 'unowned-files'].map((kind) => ({ kind, subject: '*' })) }); // T10
+      }
+      const goalDrain = mode === 'drain' ? ticketGoals(t).find((x) => goalMode(x) === 'drain') : null;
+      if ((notStarted && (goalDrain || fleetDrain)) || (phase === 'parked' && fleetDrain)) {
+        const hv = goalDrain && !fleetDrain ? holdView(goalDrain) : null;
+        return at({ move: 'draining', words: 'Draining: it starts after', holder: hv?.by === 'owner' ? 'owner' : 'supervisor', quiet: 'drain', since: hv?.since ?? fleetDrain?.created_at ?? readySince(t) }); // T11
+      }
+      if (notStarted && mode === 'run') {
+        const since = readySince(t);
+        const overlap = overlapsActive(t, activeIds, ts);
+        if (overlap.length) return at({ move: 'waits-for-slot', words: `Waits for ${overlap[0]}`, holder: 'supervisor', quiet: 'queue', since }); // T12, touches overlap
+        const cap = capOf(s.max_active_tickets) + (t.kind === 'fix' ? (s.incident_slots ?? 0) : 0);
+        const inComponent = activeIds.filter((x) => ts.get(x)?.component === t.component).length;
+        if (activeIds.length >= cap || inComponent >= capOf(s.max_active_per_component) || (memFull ??= !!memoryFull(s))) return at({ move: 'waits-for-slot', words: 'Waits for a worker slot', holder: 'supervisor', quiet: 'queue', since }); // T12
+        return at({ move: 'start-worker', words: 'Start a worker', holder: 'supervisor', since: Math.max(since, slotFreed()), command: `worker ${id}`, covered_by: [{ kind: 'idle-capacity', subject: '*' }, ...stuck] }); // T13
+      }
+      return at({ move: 'no-next-move', words: 'No next move', holder: 'nobody', since: ticketSince(t) }); // T14
+    }
+    for (const t of ts.values()) moveOf(t);
+    return new Map([...done].filter(([, m]) => m));
+  });
 }
 // The planner rows, P1 to P4.
 function plannerMove(p) {
