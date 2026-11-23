@@ -2058,14 +2058,15 @@ function ownerWriter(hint) {
   // A worker's or planner's session, whatever DEVTEAM_ROLE says: DEVTEAM_TICKET or DEVTEAM_FEATURE
   // set at all (a session that blanks one is still one), a checkout on a ticket/ or plan/ branch, or
   // a folder under a .worktrees folder (every session's worktree, a detached one or another repo's
-  // included), even with every variable cleared.
+  // included; home's .worktrees by its real path too, for one that is a link), even with every
+  // variable cleared.
   const session = (() => {
     for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (process.env[k] !== undefined) return `${k}=${JSON.stringify(process.env[k])}`;
     const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
     if (b && /^(ticket|plan)\//.test(b)) return `this checkout is on ${b}`;
-    let cwd;
-    try { cwd = realPath(process.cwd()); } catch { cwd = process.cwd(); }
-    return cwd.split(path.sep).includes('.worktrees') ? `${cwd} is under a .worktrees folder, where sessions work` : null;
+    const cwd = realPath(process.cwd());
+    const homeWt = realPath(path.join(mainRoot, '.worktrees'));
+    return cwd.split(path.sep).includes('.worktrees') || cwd.startsWith(`${homeWt}${path.sep}`) ? `${cwd} is under a .worktrees folder, where sessions work` : null;
   })();
   if (session) die(`owner commands don't run in a worker's or planner's session (${session}); the owner runs them in their own terminal from home's main checkout, or on the dashboard, and a session sends the supervisor what it needs`);
   const pane = process.env.TMUX_PANE;

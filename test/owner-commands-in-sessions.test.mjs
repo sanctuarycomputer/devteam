@@ -26,23 +26,29 @@ test('every owner command refuses in a worker\'s or planner\'s session, and the 
     // a review question, as ask --kind review leaves it (review draft looks it up before ownerWriter)
     const QR = 'q-20260101-000000000-supervisor';
     fs.appendFileSync(path.join(logDir, `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), `${JSON.stringify({ v: 1, op: 'new', type: 'question', kind: 'review', review: { page: 'p.html' }, id: QR, at: new Date().toISOString(), by: 'supervisor', text: 'review these' })}\n`);
-    // the checkouts a session works in: a ticket worktree, a detached one (both under .worktrees),
-    // and a plan/ and a ticket/ checkout outside .worktrees
+    // the checkouts a session works in: a ticket worktree and a detached one in home's .worktrees,
+    // which is a link to a folder elsewhere (moved to a bigger disk), so their real paths have no
+    // .worktrees in them; a detached one under another .worktrees folder (another repo's); and a
+    // plan/ and a ticket/ checkout outside any .worktrees
+    fs.mkdirSync(path.join(F.base, 'disk'));
+    fs.symlinkSync(path.join(F.base, 'disk'), path.join(old, '.worktrees'));
     const wt = path.join(old, '.worktrees', 'web-1');
     const loose = path.join(old, '.worktrees', 'loose');
+    const elsewhere = path.join(F.base, 'other', '.worktrees', 'loose2');
     const planCo = path.join(F.base, 'plan-co');
     const ticketCo = path.join(F.base, 'ticket-co');
     g(['worktree', 'add', '-q', '-b', 'ticket/web-1', wt], old);
     g(['worktree', 'add', '-q', '--detach', loose], old);
+    g(['worktree', 'add', '-q', '--detach', elsewhere], old);
     g(['worktree', 'add', '-q', '-b', 'plan/f', planCo], old);
     g(['worktree', 'add', '-q', '-b', 'ticket/web-2', ticketCo], old);
     // home's kit, by absolute path from any checkout
     const kitDT = path.join(old, 'docs/devteam/scripts/devteam.mjs');
-    const runAt = (cwd, args, env) => { const r = spawnSync(process.execPath, [kitDT, ...args], { cwd, env: F.env(env), encoding: 'utf8', input: '' }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+    const runAt = (cwd, args, env) => { const r = spawnSync(process.execPath, [kitDT, ...args], { cwd, env: F.env(env), encoding: 'utf8', input: '', timeout: 120000 }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
     // the same, without waiting: a refused run writes nothing, so a few run at once (the file stays
     // well inside CI's 300 s watchdog on its slowest runner)
     const runLater = (cwd, args, env) => new Promise((resolve) => {
-      const c = spawn(process.execPath, [kitDT, ...args], { cwd, env: F.env(env), stdio: ['ignore', 'pipe', 'pipe'] });
+      const c = spawn(process.execPath, [kitDT, ...args], { cwd, env: F.env(env), stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000 });
       let out = '';
       let err = '';
       c.stdout.on('data', (d) => { out += d; });
@@ -116,6 +122,7 @@ test('every owner command refuses in a worker\'s or planner\'s session, and the 
       emptyFeature: [old, { DEVTEAM_FEATURE: '' }],
       wt: [wt, {}],
       loose: [loose, {}],
+      elsewhere: [elsewhere, {}],
       plan: [planCo, {}],
       ticketCo: [ticketCo, {}],
     };
@@ -141,6 +148,8 @@ test('every owner command refuses in a worker\'s or planner\'s session, and the 
     assert.match(runAt(old, ['observe', '--owner', '--subject', 'kit', '--kind', 'note', '--detail', 'd'], { DEVTEAM_TICKET: '' }).err, /\(DEVTEAM_TICKET=""\)/, 'R: names the variable, set empty');
     assert.match(runAt(ticketCo, ['observe', '--owner', '--subject', 'kit', '--kind', 'note', '--detail', 'd'], {}).err, /this checkout is on ticket\/web-2/, 'R: names the branch');
     assert.match(runAt(loose, ['observe', '--owner', '--subject', 'kit', '--kind', 'note', '--detail', 'd'], {}).err, /is under a \.worktrees folder/, 'R: names the folder');
+    assert.match(runAt(planCo, ['observe', '--owner', '--subject', 'kit', '--kind', 'note', '--detail', 'd'], {}).err, /this checkout is on plan\/f/, 'R: names a plan/ branch');
+    assert.match(runAt(old, ['observe', '--owner', '--subject', 'kit', '--kind', 'note', '--detail', 'd'], { DEVTEAM_FEATURE: 'f' }).err, /\(DEVTEAM_FEATURE="f"\)/, 'R: names DEVTEAM_FEATURE');
     // O: the owner's own terminal (no variables, home's main checkout): no command is refused as a
     // session, and each that has what it needs writes an owner line
     for (const c of COMMANDS) {
