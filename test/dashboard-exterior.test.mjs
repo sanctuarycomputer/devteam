@@ -94,7 +94,9 @@ test('self.md and exterior.md beside the strategy', { skip: canDrive ? false : '
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'a blank page');
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
-    await soon("typeof DATA !== 'undefined' && !!DATA && !document.querySelector('main.waiting')", 'the dashboard drawn');
+    // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+    // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+    await soon("document.readyState === 'complete' && typeof DATA !== 'undefined' && !!DATA && !document.querySelector('main.waiting')", 'the dashboard drawn');
   };
   const drawerOpen = "!document.getElementById('drawer').hidden && document.body.classList.contains('peek-open')";
   // the peek of a file, opened by its link, drawn (no loading marker, its rendered Markdown there)

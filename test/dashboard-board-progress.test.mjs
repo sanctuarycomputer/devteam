@@ -166,7 +166,9 @@ async function openOn(later, root, env, { width = 1440, height = 900, init } = {
   await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   if (init) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: init });
   const soon = soonIn(p, 20000, () => dash.out());
-  const loaded = "!document.querySelector('main.waiting') && typeof DATA !== 'undefined' && !!DATA";
+  // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+  // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+  const loaded = "document.readyState === 'complete' && !document.querySelector('main.waiting') && typeof DATA !== 'undefined' && !!DATA";
   // a fresh document at a head (from about:blank, so a head that differs only in its hash loads anew)
   const go = async (hash) => {
     await p.send('Page.navigate', { url: 'about:blank' });
