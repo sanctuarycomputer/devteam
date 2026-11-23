@@ -441,7 +441,7 @@ test('C24: a start cut short after writing its ticket (no started line) is taken
 
 // ===== refusals the done-whens imply =====
 const refuse = group(() => {
-  const jobs = { kept: chore({ every: '1d' }), hide: chore({ every: '1d' }), lnk: chore({ every: '1d' }), other: chore({ every: '1d' }), chk: { kind: 'check', title: 'A check', what: 'runs', every: '1d', run: 'true' } };
+  const jobs = { kept: chore({ every: '1d' }), ahead: chore({ every: '1d' }), hide: chore({ every: '1d' }), lnk: chore({ every: '1d' }), other: chore({ every: '1d' }), chk: { kind: 'check', title: 'A check', what: 'runs', every: '1d', run: 'true' } };
   const T = setup('refuse', jobs);
   // a job put on main by a plain commit, with no answer
   const file = path.join(T.old, JOBS);
@@ -480,6 +480,19 @@ test('C25c: recurring done --nothing refuses a chore worktree that holds work, l
   assert.match(r.err, /holds work \(uncommitted changes\)/);
   assert.equal(T.runLines('kept').length, n, 'no line');
   assert.ok(fs.existsSync(path.join(T.old, '.worktrees', ref, PROJ, 'notes', 'work.md')), 'the work is kept');
+  // a clean worktree whose branch holds a commit main lacks (committed, never pushed) is work too (kit-785)
+  T.ok(['recurring', 'start', 'ahead']);
+  const aref = `chore-recurring-ahead-${ymd(Date.now())}`;
+  const awt = path.join(T.old, '.worktrees', aref);
+  write(path.join(awt, PROJ, 'notes', 'done.md'), 'work\n');
+  T.g(['add', '-A'], awt);
+  T.g(['commit', '-qm', 'the chore, committed and not pushed'], awt);
+  const an = T.runLines('ahead').length;
+  const ra = T.dt(['recurring', 'done', 'ahead', '--nothing', 'nothing']);
+  assert.match(ra.err, /holds work \(1 commit\(s\) main lacks\)/, ra.text);
+  assert.equal(ra.status, 1);
+  assert.equal(T.runLines('ahead').length, an, 'no line for the unpushed commit');
+  assert.ok(fs.existsSync(path.join(awt, PROJ, 'notes', 'done.md')), 'the worktree with the commit is kept');
 });
 
 test('C25d: recurring done --nothing sees an untracked file even when git config hides untracked files, and keeps it', () => {
@@ -678,4 +691,14 @@ test('C22: supervisor.md documents chores: when they come due, recurring start, 
   const chores = /\n### Chores\n[\s\S]*?(?=\n### |\n## )/.exec(sec)?.[0] ?? '';
   assert.ok(chores, 'a Chores part under Recurring jobs');
   for (const w of ['recurring-due', 'recurring-overdue', 'recurring-stuck', 'grace_days', 'recurring start', 'chore-recurring-<name>-<yyyymmdd>', '<component>-<NN>-recurring-<name>', 'recurring done <name> --nothing', '--abandoned', 'superseded', 'drained or parked']) assert.ok(chores.includes(w), `names ${w}`);
+});
+
+test('C22b: supervisor.md says --nothing removes ignored files with the worktree, and that the owner superseding a worker chore\'s ticket ends it as abandoned', () => {
+  const sec = /\n## Recurring jobs\n[\s\S]*?\n## /.exec(SUPERVISOR_MD)?.[0] ?? '';
+  const chores = /\n### Chores\n[\s\S]*?(?=\n### |\n## )/.exec(sec)?.[0] ?? '';
+  const finishing = /\n- \*\*Finishing\.\*\*[^\n]*/.exec(chores)?.[0] ?? '';
+  assert.match(finishing, /ignored files[^.]*go with it/i, 'Finishing: ignored files go with the worktree');
+  assert.match(finishing, /only uncommitted changes or a commit main lacks/, 'Finishing: only uncommitted or unpushed work is refused');
+  const counts = /\n- \*\*Only what you record counts\.\*\*[^\n]*/.exec(chores)?.[0] ?? '';
+  assert.match(counts, /owner[^.]*supersed[^.]*abandoned/, 'Only what you record counts: the owner superseding the ticket ends the run as abandoned');
 });
