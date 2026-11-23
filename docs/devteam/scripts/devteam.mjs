@@ -33138,10 +33138,12 @@ function owedIn(ts, thread) {
 const owedTurns = (threadId, objects = readLog().objects) => owedIn(logTurns(threadId, objects), objects.get(threadId));
 // The responder's open promise in a thread (final-1 F2, final-1b F2): its newest turn there is
 // pending, no resolve of the thread came after it, and no supervisor turn after it settled it. A
-// supervisor turn settles it unless it is a question, or every owed owner turn it answered came after
-// the supervisor's own question asked after the promise (its reply in that exchange answers the
-// owner's answer, not the promise). A reply answering nothing owed takes the promise over and settles
-// it (the backstop). The turn, or null. On the log's lines, oldest first.
+// supervisor turn settles it unless it is a question, or it was written within RESPONDER_PENDING_MS
+// of the promise and every owed owner turn it answered came after the supervisor's own question asked
+// after the promise (its reply in that exchange answers the owner's answer, not the promise). Once the
+// promise is overdue any reply settles it: the supervisor takes it, as with an owed turn (final-2b
+// F1). A reply answering nothing owed takes it over too (the backstop). The turn, or null. On the
+// log's lines, oldest first.
 function pendingOpen(ts, thread) {
   const mine = ts.filter((u) => u.created_by === 'responder').pop();
   if (mine?.pending !== true) return null;
@@ -33150,6 +33152,7 @@ function pendingOpen(ts, thread) {
   const asked = ts.find((u) => u.created_by === 'supervisor' && u.question && u.created_at >= mine.created_at)?.created_at;
   for (const s of ts) {
     if (s.created_by !== 'supervisor' || s.created_at < mine.created_at || s.question) continue;
+    if (Date.parse(s.created_at) - Date.parse(mine.created_at) > RESPONDER_PENDING_MS) return null;
     const answers = owedIn(ts.filter((u) => u.created_at < s.created_at), thread).filter((u) => answersTurn(u, 'supervisor'));
     if (!asked || !answers.length || answers.some((u) => u.created_at < asked)) return null;
   }
