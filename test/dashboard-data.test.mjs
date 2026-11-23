@@ -341,8 +341,8 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   const A = govFixture('gov-sync', 'v0.1.0');
   const before = logAt(A.root);
   let files = gov(A);
-  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/devteam/project/strategy.md', 'docs/devteam/project/exterior.md'], 'every file, in its group, by name');
-  assert.deepEqual(files.map((r) => r.group), [...kitFiles('governance').map(() => 'governance'), ...kitFiles('process').map(() => 'process'), 'project', 'project']);
+  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/devteam/project/strategy.md', 'docs/devteam/project/self.md', 'docs/devteam/project/exterior.md'], 'every file, in its group, by name');
+  assert.deepEqual(files.map((r) => r.group), [...kitFiles('governance').map(() => 'governance'), ...kitFiles('process').map(() => 'process'), 'project', 'project', 'project']);
   const con = row(files, 'docs/devteam/governance/constitution.md');
   assert.equal(con.title, 'Constitution');
   assert.equal(con.differs, false, 'untouched since the sync');
@@ -401,7 +401,7 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   const B = govFixture('gov-none', null, 'docs/elsewhere');
   const beforeB = logAt(B.root);
   files = gov(B);
-  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/elsewhere/strategy.md', 'docs/elsewhere/exterior.md']);
+  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/elsewhere/strategy.md', 'docs/elsewhere/self.md', 'docs/elsewhere/exterior.md']);
   for (const r of files.filter((x) => x.group !== 'project')) {
     assert.equal(r.differs, null, `${r.path}: no sync commit`);
     assert.equal(r.state, null);
