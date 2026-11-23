@@ -619,7 +619,7 @@ test('C21: peek recurring <name> --json for a supervisor chore and a worker chor
 
 // ===== kit-785: a start dated in the future, and a ref that names another job =====
 const skew = group(() => {
-  const jobs = { fmerge: chore({ every: '1d' }), fpast: chore({ every: '1d' }), fstuck: chore({ every: '1d' }), fsoon: chore({ every: '1d' }), fdrop: chore({ every: '1d' }), xa: chore({ every: '1d' }), xb: chore({ every: '1d' }), xc: chore({ every: '1d' }) };
+  const jobs = { fmerge: chore({ every: '1d' }), fpast: chore({ every: '1d' }), fstuck: chore({ every: '1d' }), fsoon: chore({ every: '1d' }), f11: chore({ every: '1d' }), fdrop: chore({ every: '1d' }), xa: chore({ every: '1d' }), xb: chore({ every: '1d' }), xc: chore({ every: '1d' }) };
   const T = setup('skew', jobs);
   // started lines dated two days ahead (a clock that ran fast), and fsoon's a minute ahead
   for (const n of ['fmerge', 'fstuck', 'fdrop']) T.addLine(n, { slot: iso(NOW - DAY), ref: `chore-recurring-${n}-${ymd(NOW + 2 * DAY)}`, at: NOW + 2 * DAY });
@@ -652,6 +652,19 @@ test('C26b: a started line dated more than ten minutes ahead is recurring-stuck 
   assert.equal(f.length, 1, 'recurring-stuck for fstuck');
   assert.match(f[0].detail, new RegExp(`chore-recurring-fstuck-${ymd(NOW + 2 * DAY)}`));
   assert.equal(T.finding('recurring-stuck', 'fsoon').length, 0, 'a minute of skew is not stuck');
+  // eleven minutes ahead, written just before metrics reads it: past the ten-minute allowance, so stuck now
+  T.addLine('f11', { slot: iso(NOW - DAY), ref: `chore-recurring-f11-${ymd(Date.now() + 11 * 60000)}`, at: Date.now() + 11 * 60000 });
+  assert.equal(T.finding('recurring-stuck', 'f11').length, 1, 'eleven minutes of skew is stuck');
+  // a right-clock line after it, so the file's newest line isn't in the future: a later write in this
+  // file would otherwise be stamped after it (appendLog keeps a file's lines in order)
+  T.mergeChore('chore-recurring-none-00000000', Date.now());
+});
+
+test('C26e: a run that finished before its own start takes its next slot from when it finished, not from the start', () => {
+  const T = skew();
+  // fmerge: started two days ahead, merged an hour ago, every 1d: next slot a day after the merge
+  const next = Date.parse(T.entryOf('fmerge').next_at);
+  assert.ok(next < NOW + 2 * DAY, `next_at ${T.entryOf('fmerge').next_at} is a day after the merge, before the future start`);
 });
 
 test('C26c: recurring done --abandoned ends a run whose started line is dated in the future', () => {
