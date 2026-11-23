@@ -719,7 +719,8 @@ test('org-access A3: in Chrome, Your sign-in works as the mock does', CHROME, as
   await p.until('two methods', `document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
   await p.ev(removeOf('Phone'));
   await p.until('the removed toast', `${toast} === 'Removed. Sessions opened with it were signed out'`);
-  await p.until('one method again', `document.querySelectorAll('#hub-settings .set-row.method').length === 1`);
+  // the list asked again right after the change, not at the next 10 s draw
+  await p.until('one method again, at once', `document.querySelectorAll('#hub-settings .set-row.method').length === 1`, 1500);
   assert.equal(B.gw.state().passkeys.some((k) => k.id === phone.id), false, 'the box no longer holds it');
   // fresh by the page's count, but the box says otherwise (the session aged meanwhile): the refusal
   // makes the hub ask again, and the answer brings Confirm it's you
