@@ -33379,7 +33379,8 @@ function responderDraft() {
     const t = /^ticket\/(.+)$/.exec(b), p = /^plan\/(.+)$/.exec(b);
     const session = t && known.has(t[1]) ? t[1] : p ? `plan-${p[1]}` : null;
     const where = `branch ${b} on origin`;
-    found.set(`~${b}`, session ? `${slug} is being drawn in ${where} (${session}); ${relay(session)}` : `${slug} is being drawn in ${where} (${b}); ${handOver}`);
+    // keyed by the branch's own name, so it sorts among the worktrees by name
+    found.set(`${b}\0branch`, session ? `${slug} is being drawn in ${where} (${session}); ${relay(session)}` : `${slug} is being drawn in ${where} (${b}); ${handOver}`);
   }
   if (found.size) die(`responder draft ${slug}: refused, nothing made:\n${[...found.keys()].sort().map((k) => `  ${found.get(k)}`).join('\n')}`);
   const landed = landedArtifacts().some((a) => a.slug === slug);
