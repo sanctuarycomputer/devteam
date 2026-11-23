@@ -1,0 +1,14 @@
+{
+ "about": "a thread that is not an artifact note, its owner turn unanswered: kit-104's waiting, the supervisor's",
+ "thread": "t-20261120-100036000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "supervisor"
+ }
+}

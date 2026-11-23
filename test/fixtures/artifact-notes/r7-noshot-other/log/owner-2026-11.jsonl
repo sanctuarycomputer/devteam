@@ -1,0 +1,2 @@
+{"v":1,"id":"t-20261120-100039000-owner","type":"thread","op":"new","title":"Start trial","subject":{"kind":"artifact","slug":"pricing-mock","at":"plan-pricing","path":"index.html","anchor":{"selector":"#trial","text":"Start trial"}},"at":"2026-11-20T10:00:39.000Z","by":"owner","channel":"cli"}
+{"v":1,"id":"u-20261120-100039000-owner","type":"turn","op":"new","thread":"t-20261120-100039000-owner","text":"The trial button should say Start free trial.","at":"2026-11-20T10:00:39.000Z","by":"owner","channel":"cli"}
