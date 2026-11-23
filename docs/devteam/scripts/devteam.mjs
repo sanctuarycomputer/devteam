@@ -2182,43 +2182,60 @@ function tryLock(file, fn, { staleMs = 10000 } = {}) {
 }
 // The typing lock (kit-618, terminal@1 §11): every kit write into a pane holds <run>/type-lock-<pane
 // id> for the whole write, so two writers, or a writer and the owner's key post, never interleave.
-// The file holds its holder's pid; its mtime is the stamp, refreshed after each tmux call (touch). A
-// waiter takes it over when the pid is dead, or when the stamp is 60 s old (either way: a clock moved
-// back must not hold it forever), by renaming it to a name of its own and checking it renamed the
-// inode it judged (another waiter's fresh lock is linked back). A holder unlinks only its own inode.
+// The file holds its holder's pid and a token of that take's own; its mtime is the stamp, refreshed
+// after each tmux call (touch). It is written whole beside the lock and linked into place, so a lock
+// is never seen empty or half written. A waiter takes it over when the pid is dead, or when the stamp
+// is 60 s old (either way: a clock moved back must not hold it forever), by renaming it to a name of
+// its own and checking it renamed the lock it judged, by its inode and its text (another waiter's
+// fresh lock is linked back). The text, not the inode alone, because a filesystem gives a file made
+// after an unlink the freed inode again (ext4 does, every time). A holder unlinks, or stamps, only a
+// lock whose inode and text are still its own, never the lock of someone who took over.
 // Re-entrant along a call chain: in a CLI process, by the files this process holds (a nested take
 // runs at once, and fn(outer) says whether it is the outermost, the hold that reads the floor). A
 // target that doesn't resolve to a pane takes no lock, and its write goes on as before (tmux would
 // refuse it anyway). Back: { value } (fn's), or { busy: true } when the wait ran out, nothing done.
 const TYPE_LOCK_STALE_MS = 60000;
 const typeLock = {
-  // lock file → its inode: the locks this process's synchronous chain holds (its re-entrance), and
-  // those the dashboard's chains hold (typeLockAsync's, for touch only)
+  // lock file → its hold ({ ino, text }): the locks this process's synchronous chain holds (its
+  // re-entrance), and those the dashboard's chains hold (typeLockAsync's, for touch only)
   held: new Map(),
   heldAsync: new Map(),
   seq: 0,
   file: (pane, run = runDir) => path.join(run, `type-lock-${pane}`),
-  // one try: the inode taken, or null (someone else holds it); throws on anything but a held lock
+  // the lock as it is now, or null: its inode and its text, read from one open file
+  read(file) {
+    let fd;
+    try { fd = fs.openSync(file, 'r'); } catch { return null; }
+    try { return { ino: fs.fstatSync(fd).ino, mtimeMs: fs.fstatSync(fd).mtimeMs, text: fs.readFileSync(fd, 'utf8') }; } catch { return null; } finally { fs.closeSync(fd); }
+  },
+  // still this hold's: the same inode and the same text (its token)
+  ours: (file, hold) => { const now = typeLock.read(file); return !!now && now.ino === hold.ino && now.text === hold.text; },
+  // one try: the hold taken ({ ino, text }), or null (someone else holds it); throws on anything but a held lock
   take(file) {
     const create = () => {
-      let fd;
-      try { fd = fs.openSync(file, 'wx'); } catch (e) { if (e.code === 'EEXIST') return null; throw e; }
-      try { fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() })); return fs.fstatSync(fd).ino; } finally { fs.closeSync(fd); }
+      const token = `${process.pid}-${++typeLock.seq}-${crypto.randomBytes(6).toString('hex')}`;
+      const text = JSON.stringify({ pid: process.pid, at: Date.now(), token });
+      const tmp = `${file}.new-${token}`;
+      try {
+        fs.writeFileSync(tmp, text, { flag: 'wx' });
+        try { fs.linkSync(tmp, file); } catch (e) { if (e.code === 'EEXIST') return null; throw e; }
+        return { ino: fs.statSync(tmp).ino, text };
+      } finally { try { fs.unlinkSync(tmp); } catch {} }
     };
     const got = create();
     if (got !== null) return got;
-    const st = fs.statSync(file, { throwIfNoEntry: false });
-    if (!st) return null; // let go meanwhile: the next try takes it
+    const was = typeLock.read(file);
+    if (!was) return null; // let go meanwhile: the next try takes it
     let pid = null;
-    try { pid = JSON.parse(fs.readFileSync(file, 'utf8'))?.pid; } catch {}
+    try { pid = JSON.parse(was.text)?.pid; } catch {}
     let dead = false;
     if (Number.isInteger(pid) && pid > 0) { try { process.kill(pid, 0); } catch (e) { dead = e.code === 'ESRCH'; } }
     // unreadable, or no pid: dead once it is 60 s old, which the stamp's rule already says
-    if (!dead && Math.abs(Date.now() - st.mtimeMs) < TYPE_LOCK_STALE_MS) return null;
+    if (!dead && Math.abs(Date.now() - was.mtimeMs) < TYPE_LOCK_STALE_MS) return null;
     const aside = `${file}.taken-${process.pid}-${++typeLock.seq}`;
     try { fs.renameSync(file, aside); } catch { return null; }
-    const moved = fs.statSync(aside, { throwIfNoEntry: false });
-    if (moved?.ino !== st.ino) {
+    const moved = typeLock.read(aside);
+    if (moved?.ino !== was.ino || moved?.text !== was.text) {
       // another waiter took it over first, and this renamed its fresh lock: back where it was
       try { fs.linkSync(aside, file); } catch {}
       try { fs.unlinkSync(aside); } catch {}
@@ -2227,14 +2244,14 @@ const typeLock = {
     try { fs.unlinkSync(aside); } catch {}
     return create();
   },
-  release(file, ino) {
-    try { if (fs.statSync(file).ino === ino) fs.unlinkSync(file); } catch {}
+  release(file, hold) {
+    try { if (typeLock.ours(file, hold)) fs.unlinkSync(file); } catch {}
   },
   // the stamp of every lock this process holds (a holder has one pane's, or, in flushHeld, the same
   // window's pane's too), after each tmux call of a write
   touch() {
     const now = new Date();
-    for (const [file, ino] of [...typeLock.held, ...typeLock.heldAsync]) { try { if (fs.statSync(file).ino === ino) fs.utimesSync(file, now, now); } catch {} }
+    for (const [file, hold] of [...typeLock.held, ...typeLock.heldAsync]) { try { if (typeLock.ours(file, hold)) fs.utimesSync(file, now, now); } catch {} }
   },
   // the pane id a target names, or null
   pane: (out) => (/^%\d+$/.test(out?.trim() ?? '') ? out.trim() : null),
@@ -2243,16 +2260,16 @@ const typeLock = {
     if (!pane) return { value: fn(true) };
     const file = typeLock.file(pane, run);
     if (typeLock.held.has(file)) return { value: fn(false) };
-    let ino = null;
+    let hold = null;
     try {
       fs.mkdirSync(run, { recursive: true });
-      for (const start = Date.now(); (ino = typeLock.take(file)) === null;) {
+      for (const start = Date.now(); (hold = typeLock.take(file)) === null;) {
         if (Date.now() - start >= waitMs) return { busy: true };
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
       }
     } catch { return { value: fn(true) }; } // a run folder that can't hold a lock: written as before
-    typeLock.held.set(file, ino);
-    try { return { value: fn(true) }; } finally { typeLock.held.delete(file); typeLock.release(file, ino); }
+    typeLock.held.set(file, hold);
+    try { return { value: fn(true) }; } finally { typeLock.held.delete(file); typeLock.release(file, hold); }
   },
 };
 // The dashboard's typing lock: typeLock's file and rules, never blocking the server. The pane id comes
@@ -2266,16 +2283,16 @@ async function typeLockAsync(target, fn, { run = runDir, waitMs = 10000 } = {}) 
   const file = typeLock.file(pane, run);
   const mine = store.getStore();
   if (mine?.has(file)) return { value: await fn(false) };
-  let ino = null;
+  let hold = null;
   try {
     fs.mkdirSync(run, { recursive: true });
-    for (const start = Date.now(); (ino = typeLock.take(file)) === null;) {
+    for (const start = Date.now(); (hold = typeLock.take(file)) === null;) {
       if (Date.now() - start >= waitMs) return { busy: true };
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   } catch { return { value: await fn(true) }; }
-  typeLock.heldAsync.set(file, ino);
-  try { return { value: await store.run(new Set([...(mine ?? []), file]), () => fn(true)) }; } finally { typeLock.heldAsync.delete(file); typeLock.release(file, ino); }
+  typeLock.heldAsync.set(file, hold);
+  try { return { value: await store.run(new Set([...(mine ?? []), file]), () => fn(true)) }; } finally { typeLock.heldAsync.delete(file); typeLock.release(file, hold); }
 }
 
 let mainRefCache;
@@ -24101,8 +24118,9 @@ function typeInto(target, line, paste = null) {
     return asking ? (asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal') : floor ? 'held-floor' : 'held-queued';
   });
   if (!held.busy) return held.value;
+  // held under the window's own lock, as every hold is: a flusher's claim can't fall inside it
   const key = paneKey(target);
-  return key && holdLine(key, target, line, paste) ? 'held-busy' : false;
+  return key && heldLock(key, () => holdLine(key, target, line, paste)) ? 'held-busy' : false;
 }
 // Why a line is held, in words: every one begins "recorded and held" (the dashboard reads that).
 const heldWords = (why, whose) => `recorded and held: ${{
