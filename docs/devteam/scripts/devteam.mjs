@@ -1718,6 +1718,12 @@ function integrity(o, file) {
     // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
     if (o.type === 'message' && o.kind === 'handoff' && typeof o.thread !== 'string') return 'a handoff names its thread';
     if (o.type === 'message' && o.kind === 'handoff' && o.to !== 'supervisor') return 'a handoff goes to the supervisor';
+    // artifact-notes-1, from anyone: a session's mark on an artifact note goes to the owner and names
+    // the note, and only a session marks (the owner hands over, the responder hands off); its draft and
+    // picture are on it and nothing else; a frame is the size the owner saw an artifact at
+    if (o.type === 'message' && o.kind === 'addressed' && (typeof o.thread !== 'string' || o.to !== 'owner' || !['supervisor', 'planner', 'ticket'].includes(cls))) return "an addressed message goes to the owner, names its thread, and is a session's";
+    if (o.type === 'message' && o.kind !== 'addressed' && (o.draft !== undefined || o.shot !== undefined)) return 'draft and shot are on an addressed message';
+    if (o.type === 'thread' && o.frame !== undefined && !(isObj(o.subject) && o.subject.kind === 'artifact')) return "frame is on an artifact note's first line";
     if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
     if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
     if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
@@ -1739,6 +1745,11 @@ function integrity(o, file) {
     if (f && o.type === 'ticket' && o.feature !== f) return `${o.by} may only create tickets of the feature "${f}"`;
     return null;
   }
+  // artifact-notes-1: a picture (or why there is none) goes with the proposal it shows, and a
+  // withdrawal with the ready it clears, so no reader keeps one without the other
+  if (o.type === 'thread' && (o.shot !== undefined || o.noshot !== undefined) && !isObj(o.ready)) return 'shot and noshot go on a line that writes ready';
+  if (o.type === 'thread' && o.unready !== undefined && o.ready !== null) return 'unready goes on a line that writes ready: null';
+  if (o.type === 'thread' && o.shot !== undefined && o.noshot !== undefined) return 'shot and noshot never go together';
   const allowed = auth.set[o.type]?.[cls];
   if (!allowed) return `${cls} may not change ${o.type} lines`;
   if (!body.length) return 'a set line changes at least one field';
@@ -1799,7 +1810,7 @@ function checkLine(o, file) {
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
   errs.push(...schemaErrors(t, body, o.type));
-  if (o.type === 'thread' || o.type === 'turn') errs.push(...threadLineProblems(o));
+  if (o.type === 'thread' || o.type === 'turn' || o.type === 'message') errs.push(...threadLineProblems(o));
   if (o.op === 'new') {
     for (const k of t['x-required-new'] ?? []) if (!(k in body)) errs.push(`${o.type}.${k} is required`);
     for (const k of t['x-set-only'] ?? []) if (k in body) errs.push(`${o.type}.${k} is set later, not at creation`);
@@ -9306,7 +9317,25 @@ const subjectKey = (s) => { const spot = () => (s.anchor ? `${s.anchor.selector 
 function threadLineProblems(o) {
   const errs = [];
   const over = (k, v, max) => { if (typeof v === 'string' && Buffer.byteLength(v) > max) errs.push(`${o.type}.${k} is ${Buffer.byteLength(v)} bytes; at most ${max}`); };
+  // artifact-notes-1: one line of text within its bytes; a time as the log stamps it; a picture
+  // that says it has a dark copy exactly when it gives that copy's sum
+  const oneLine = (v, min, max) => typeof v !== 'string' || (!UNSAFE_TEXT.test(v) && Buffer.byteLength(v) >= min && Buffer.byteLength(v) <= max);
+  const iso = (k, v) => { if (typeof v === 'string' && !READY_AT.test(v)) errs.push(`${o.type}.${k} is an ISO timestamp (2026-11-10T10:30:00.000Z)`); };
+  if (isObj(o.shot) && (o.shot.dark === true) !== (isObj(o.shot.sum) && o.shot.sum.dark !== undefined)) errs.push(`${o.type}.shot.dark goes with sum.dark`);
+  if (o.type === 'message') {
+    if (o.kind === 'addressed' && !oneLine(o.text, 0, 300)) errs.push("an addressed message's text is one line of at most 300 bytes");
+    return errs;
+  }
   if (o.type === 'thread') {
+    if (isObj(o.handed)) {
+      if (o.handed.to === 'owner' || o.handed.to === 'responder') errs.push('thread.handed.to is a session (supervisor, plan-<feature> or a ticket)');
+      iso('handed.at', o.handed.at);
+    }
+    if (isObj(o.unready)) {
+      iso('unready.at', o.unready.at);
+      if (!oneLine(o.unready.reason, 12, 300)) errs.push('thread.unready.reason is one line of 12 to 300 bytes');
+    }
+    if (isObj(o.frame) && !oneLine(o.frame.hash, 0, 200)) errs.push('thread.frame.hash is one line of at most 200 bytes');
     if (typeof o.title === 'string' && UNSAFE_TEXT.test(o.title)) errs.push('thread.title is one line of plain text');
     if (o.subject !== undefined) { const p = subjectProblem(o.subject); if (p) errs.push(`thread.subject: ${p}`); }
     over('outcome', o.outcome, OUTCOME_MAX);

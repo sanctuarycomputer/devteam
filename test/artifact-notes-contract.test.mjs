@@ -100,5 +100,34 @@ test('artifact-notes-contract: the schema, the fake, and what log-check refuses'
         assert.match(r.said, new RegExp(c.why), name);
       }, [c]);
     });
+
+    await t.test('A1b-rules: what integrity and the byte rules refuse, by name', () => {
+      const cases = Object.entries(REFUSED.cases).filter(([, c]) => c.task === 2);
+      assert.ok(cases.length >= 25, `refused.json has the line checks' cases: ${cases.length}`);
+      for (const [name, c] of cases) withLogs([C1], () => {
+        const r = logCheck();
+        assert.equal(r.status, 1, `${name}: log-check should refuse it: ${r.said}`);
+        assert.match(r.said, new RegExp(c.why), name);
+      }, [c]);
+      // each read-only folder holds a line log-check refuses (else it belongs with the rest)
+      for (const f of REFUSED.readOnly) withLogs([f], () => assert.equal(logCheck().status, 1, `${f} holds a line log-check refuses`));
+    });
+
+    await t.test('A1c: every reader drops a line integrity refuses', () => {
+      const record = (id) => JSON.parse(F.ok(F.old, ['log', '--json', '--id', id]));
+      const T1 = expected(C1).thread;
+      const before = withLogs([C1], () => record(T1));
+      assert.equal(before.length, 1, "c01's thread is read");
+      const cases = Object.entries(REFUSED.cases).filter(([, c]) => c.readDropped);
+      assert.ok(cases.length >= 20, `refused.json has the read-dropped cases: ${cases.length}`);
+      for (const [name, c] of cases) withLogs([C1], () => {
+        // a set line on c01's thread leaves it as it was; a new line (a thread, a message) is not read at all
+        if (c.line.op === 'set') assert.deepEqual(record(T1), before, `${name}: the thread reads as without the line`);
+        else assert.deepEqual(record(c.line.id), [], `${name}: no record ${c.line.id}`);
+      }, [c]);
+      // A2c by name: the supervisor's noshot with no ready leaves no noshot on the thread
+      const a2c = REFUSED.cases['noshot without ready'];
+      withLogs([C1], () => { const [x] = record(T1); assert.equal(x.noshot, undefined, 'no noshot'); assert.ok(!x.updates.some((u) => 'noshot' in u), 'no noshot update'); }, [a2c]);
+    });
   } finally { F.done(); }
 });
