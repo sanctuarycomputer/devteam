@@ -3,8 +3,11 @@
 // head, for a PR open when merge began, is a landing (the act is written, records land as for a
 // clean merge), read again while GitHub still says OPEN (three reads, ~2s apart); anything else is
 // refused as before. Each test is a fixture with bare origins and a gh first on PATH whose pr merge
-// can really merge into the bare origin (as GitHub would) and then exit 1. Run with TMUX unset: no
-// fixture here starts or stops a tmux server.
+// can really merge into the bare origin (as GitHub would) and then exit 1. Every gh call after the
+// gates has a timeout (kit-787): a gh pr merge or a state read that never answers is killed at its
+// bound and read as failed, so merge refuses as before instead of waiting on it; and a PR GitHub
+// reports CLOSED at the gated head is refused, never adopted. Run with TMUX unset: no fixture here
+// starts or stops a tmux server.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,13 +18,23 @@ import { readyInHome, recordsFixture } from './lib/multirepo-home-fixture.mjs';
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const VERIF = '| Done-when | Command | Result |\n|---|---|---|\n| s | t | pass |\n';
 const REFUSED = /gh pr merge refused \(did the head move\?\); verify from the start/;
+// A gh that never answers hangs this long, far past the bound merge is given here (GH_BOUND, through
+// DEVTEAM_GH_TIMEOUT_MS); a merge that waits on it can't finish inside WITHIN, so an unbounded call
+// turns the check red at about HANG_MS rather than hanging the suite.
+const HANG_MS = 120000;
+const GH_BOUND = { DEVTEAM_GH_TIMEOUT_MS: '5000' };
+const WITHIN = 60000;
+const timed = (fn) => { const t0 = Date.now(); const r = fn(); return { ...r, ms: Date.now() - t0 }; };
 
 // A gh first on PATH. pr view answers the file pr.json; pr list answers no merged PR. pr merge runs
 // merge.sh when it exists (the merge GitHub makes: into the bare origin), marks the PR merged-at-gh,
 // prints an error and exits 1, as a gh that errored. Each pr view after that logs its working
 // directory to views.log and its time in milliseconds to times.log and, once `lag` such reads have
 // answered as before, copies after.json over pr.json (what GitHub says once it has finished); with
-// fail-views-after, every pr view after it fails.
+// fail-views-after, every pr view after it fails. With hangs-merge, pr merge marks the PR
+// merged-at-gh and then never answers (it exits 1 after HANG_MS, far past the bound merge is given);
+// with hangs-views-after, so does each pr view after it. Each hang is an exec of node, so the kill at
+// merge's timeout reaches the process that hangs.
 function ghStandIn(F, pr) {
   const dir = path.join(F.base, 'gh-stand-in');
   const bin = path.join(dir, 'bin');
@@ -34,6 +47,9 @@ function ghStandIn(F, pr) {
   const mergedAt = path.join(dir, 'merged-at-gh');
   const failAfter = path.join(dir, 'fail-views-after');
   const mergeSh = path.join(dir, 'merge.sh');
+  const hangsMerge = path.join(dir, 'hangs-merge');
+  const hangsViews = path.join(dir, 'hangs-views-after');
+  const hang = `exec "${process.execPath}" -e "setTimeout(() => process.exit(1), ${HANG_MS})"`;
   write(prFile, JSON.stringify(pr));
   write(path.join(bin, 'gh'), [
     '#!/bin/sh',
@@ -44,6 +60,7 @@ function ghStandIn(F, pr) {
     `      pwd >> "${views}"`,
     `      "${process.execPath}" -p "Date.now()" >> "${times}"`,
     `      [ -f "${failAfter}" ] && exit 1`,
+    `      [ -f "${hangsViews}" ] && ${hang}`,
     `      n=$(cat "${lag}" 2>/dev/null || echo 0)`,
     `      if [ "$n" -gt 0 ]; then echo $((n - 1)) > "${lag}"; elif [ -f "${after}" ]; then cp "${after}" "${prFile}"; fi`,
     '    fi',
@@ -52,6 +69,7 @@ function ghStandIn(F, pr) {
     '  "pr merge")',
     `    if [ -f "${mergeSh}" ]; then sh "${mergeSh}" >/dev/null 2>&1 || exit 2; fi`,
     `    touch "${mergedAt}"`,
+    `    [ -f "${hangsMerge}" ] && ${hang}`,
     '    echo "GraphQL: something went wrong" >&2; exit 1 ;;',
     'esac',
     'exit 1',
@@ -71,6 +89,10 @@ function ghStandIn(F, pr) {
     answersAfter: (p, lagReads = 0) => { write(after, JSON.stringify(p)); write(lag, `${lagReads}\n`); },
     // after pr merge, every pr view fails (GitHub can't be read)
     failsAfter: () => write(failAfter, ''),
+    // pr merge never answers (GitHub took the call and went quiet)
+    hangsMerge: () => write(hangsMerge, ''),
+    // after pr merge, every pr view never answers
+    hangsAfter: () => write(hangsViews, ''),
     // pr merge really merges origin's `from` onto origin's `onto`, in a clone of `bare` of its own
     merges: (bare, onto, from) => {
       const clone = path.join(dir, 'github');
@@ -204,6 +226,73 @@ test('C6 code, forge github: gh pr merge exits non-zero and GitHub still says OP
   } finally { F.done(); }
 });
 
+test('C7 code, forge github: gh pr merge never answers; merge kills it at its bound, reads the state (still OPEN) and refuses as today, no act', { timeout: 300000 }, () => {
+  const F = multiFixture('kit787-code-merge-hangs');
+  const id = 'console-01-a';
+  try {
+    const { sha, gh } = readyOnGithub(F, id);
+    gh.hangsMerge();
+    const trunk = tipOf(F, F.console, 'trunk');
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, ...GH_BOUND }));
+    assert.ok(r.ms < WITHIN, `merge refused inside the bound, not after the hung gh pr merge returned (${r.ms} ms)`);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, REFUSED);
+    assert.equal(gh.prMerges().length, 1, 'one gh pr merge, never a second');
+    assert.equal(gh.stateReads().length, 3, 'a killed gh pr merge reads as not merged: the state is read, three times while OPEN');
+    assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'nothing landed');
+    assert.equal(landedOn(F, F.console, sha, 'trunk'), false);
+    assert.deepEqual(mergeActs(F, id), [], 'no merge act');
+  } finally { F.done(); }
+});
+
+test('C8 code, forge github: gh pr merge exits non-zero and the state read never answers; merge kills it at its bound and refuses as today, no act', { timeout: 300000 }, () => {
+  const F = multiFixture('kit787-code-read-hangs');
+  const id = 'console-01-a';
+  try {
+    const { gh } = readyOnGithub(F, id);
+    gh.hangsAfter();
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, ...GH_BOUND }));
+    assert.ok(r.ms < WITHIN, `merge refused inside the bound, not after the hung state read returned (${r.ms} ms)`);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, REFUSED);
+    assert.equal(gh.stateReads().length, 1, 'a killed read is no answer: one read, then refused');
+    assert.deepEqual(mergeActs(F, id), [], 'no merge act');
+  } finally { F.done(); }
+});
+
+test('C10 code, forge github: gh pr merge merges on GitHub, then never answers; merge kills it at its bound, reads MERGED at the head and writes the act', { timeout: 300000 }, () => {
+  const F = multiFixture('kit787-code-killed-merged');
+  const id = 'console-01-a';
+  try {
+    const { sha, pr, gh } = readyOnGithub(F, id);
+    gh.merges(F.consoleOrigin, 'trunk', `ticket/${id}`);
+    gh.hangsMerge();
+    gh.answersAfter({ ...pr, state: 'MERGED' });
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, ...GH_BOUND }));
+    assert.equal(landedOn(F, F.console, sha, 'trunk'), true, 'GitHub merged the head (the stand-in did)');
+    assert.equal(r.status, 0, `a killed gh pr merge reads its state like any error, and MERGED at the head is adopted: ${r.err}`);
+    assert.ok(r.ms < WITHIN, `adopted inside the bound (${r.ms} ms)`);
+    assert.match(r.out, new RegExp(`gh pr merge of #7 exited non-zero, but GitHub has #7 merged at ${sha.slice(0, 12)}: landed`));
+    assert.equal(gh.stateReads().length, 1, 'one state read: MERGED on the first');
+    assert.equal(mergeActs(F, id).length, 1, 'one merge act');
+  } finally { F.done(); }
+});
+
+test('C9 code, forge github: gh pr merge exits non-zero and GitHub has the PR CLOSED at the gated head: refused, never adopted, no act', () => {
+  const F = multiFixture('kit787-code-closed');
+  const id = 'console-01-a';
+  try {
+    const { sha, pr, gh } = readyOnGithub(F, id);
+    gh.answersAfter({ ...pr, state: 'CLOSED' });
+    const r = F.runIn(F.old, ['merge', id], SUP, gh.env);
+    assert.equal(pr.headRefOid, sha, 'CLOSED at the very head the checks judged');
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, REFUSED);
+    assert.equal(gh.stateReads().length, 1, 'CLOSED is an answer: one read');
+    assert.deepEqual(mergeActs(F, id), [], 'no merge act');
+  } finally { F.done(); }
+});
+
 // Records in home with home on forge github and console on forge git: the stand-in answers home's
 // records PR #9 (open, clean, at the records head) and its pr merge can really merge home's
 // ticket/<id> into home's main.
@@ -302,5 +391,59 @@ test('R5 records in home, home forge github: the records PR\'s gh pr merge exits
     for (let i = 1; i < t.length; i++) assert.ok(t[i] - t[i - 1] >= 1500, `reads ${i} and ${i + 1} are ${t[i] - t[i - 1]} ms apart, not ~2s`);
     assert.equal(recordsActs(F, id).length, 1, 'the records act');
     assert.equal(mergeActs(F, id).length, 1, 'the code act');
+  } finally { F.done(); }
+});
+
+test('R6 records in home, home forge github: the records PR\'s gh pr merge never answers; merge kills it at its bound, reads the state (still OPEN) and refuses as today, nothing lands', { timeout: 300000 }, () => {
+  const F = recordsFixture('kit787-records-merge-hangs');
+  const id = 'console-01-a';
+  try {
+    const { r0, gh } = recordsOnGithub(F, id);
+    gh.hangsMerge();
+    const trunk = tipOf(F, F.console, 'trunk');
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, ...GH_BOUND }));
+    assert.ok(r.ms < WITHIN, `merge refused inside the bound, not after the hung gh pr merge returned (${r.ms} ms)`);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, new RegExp(`the records of ${id} did not land in home \\(gh pr merge of home's records PR #9 refused \\(did its head move\\?\\)\\); nothing landed: verify from the start`));
+    assert.equal(gh.prMerges().length, 1, 'one gh pr merge');
+    assert.equal(gh.stateReads().length, 3, 'a killed gh pr merge reads as not merged: the state is read, three times while OPEN');
+    assert.equal(landedOn(F, F.old, r0.head, 'main'), false);
+    assert.deepEqual(recordsActs(F, id), [], 'no records act');
+    assert.deepEqual(mergeActs(F, id), [], 'no merge act');
+    assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'the code did not land');
+  } finally { F.done(); }
+});
+
+test('R7 records in home, home forge github: the records PR\'s gh pr merge exits non-zero and the state read never answers; merge kills it at its bound and refuses, nothing lands', { timeout: 300000 }, () => {
+  const F = recordsFixture('kit787-records-read-hangs');
+  const id = 'console-01-a';
+  try {
+    const { gh } = recordsOnGithub(F, id);
+    gh.hangsAfter();
+    const trunk = tipOf(F, F.console, 'trunk');
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, ...GH_BOUND }));
+    assert.ok(r.ms < WITHIN, `merge refused inside the bound, not after the hung state read returned (${r.ms} ms)`);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, new RegExp(`the records of ${id} did not land in home \\(gh pr merge of home's records PR #9 refused`));
+    assert.equal(gh.stateReads().length, 1, 'a killed read is no answer: one read, then refused');
+    assert.deepEqual(recordsActs(F, id), [], 'no records act');
+    assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'the code did not land');
+  } finally { F.done(); }
+});
+
+test('R8 records in home, home forge github: the records PR\'s gh pr merge exits non-zero and GitHub has it CLOSED at the pinned records: refused, nothing lands', () => {
+  const F = recordsFixture('kit787-records-closed');
+  const id = 'console-01-a';
+  try {
+    const { r0, pr, gh } = recordsOnGithub(F, id);
+    const trunk = tipOf(F, F.console, 'trunk');
+    gh.answersAfter({ ...pr, state: 'CLOSED' });
+    const r = F.runIn(F.old, ['merge', id], SUP, gh.env);
+    assert.equal(pr.headRefOid, r0.head, 'CLOSED at the very records the checks pinned');
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, new RegExp(`the records of ${id} did not land in home \\(gh pr merge of home's records PR #9 refused`));
+    assert.equal(gh.stateReads().length, 1, 'CLOSED is an answer: one read');
+    assert.deepEqual(recordsActs(F, id), [], 'no records act');
+    assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'the code did not land');
   } finally { F.done(); }
 });
