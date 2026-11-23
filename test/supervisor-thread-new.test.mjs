@@ -400,6 +400,8 @@ test('kit-108 A16: supervisor.md says how to start a thread, follow up a pending
   assert.match(s6, /belongs to no open thread[^\n]*`DEVTEAM_ROLE=supervisor devteam\.mjs thread new --subject/);
   assert.match(s6, /never post it into an unrelated thread/i);
   assert.match(s6, /`--pending`[^\n]*`--re <that turn>`/);
+  // and Reply first's own example follows the rule (task-5 F1)
+  assert.match(s6, /\*\*Reply first\.\*\*[^\n]*"On it: opening a ticket" --pending`[^\n]*"Done: …" --re <u-id>/);
   assert.match(s6, /propose resolving[^\n]*own thread/i);
   const s13 = section('## 13. The responder');
   assert.match(s13, /follow-up[^\n]*`--re <that turn>`/);
