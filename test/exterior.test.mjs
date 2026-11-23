@@ -349,3 +349,210 @@ test('A12 focus 3 focus 4 the names rule\'s cases', withProject('exterior-names-
     refused('a list of dependencies gives no names', { name: 'lodash', relation: 'depends_on', kind: 'work' }, true);
   });
 }));
+
+// the live log's lines
+const logLines = (W) => { const d = path.join(W.old, 'docs/devteam/run/log'); return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(d, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))) : []; };
+const namesActs = (W) => logLines(W).filter((o) => o.type === 'act' && o.class === 'names-checked');
+// the fixture with the Small Press Fair renamed Zentrix Labs, in block and prose
+const ZENTRIX = extBlock((v) => { v.entities.find((x) => x.id === 'press-fair').name = 'Zentrix Labs'; }, EXTERIOR_MD.replace('And the Small Press Fair sponsors', 'And Zentrix Labs sponsors'));
+// the fixture with one more sentence of prose, every word in the strategy
+const REWORDED = EXTERIOR_MD.replace('locks notes in.', 'locks notes in, which researchers dislike.');
+const inWt = (W, slug) => path.join(W.old, '.worktrees', `chore-${slug}`);
+const writeIn = (w, rel, text) => write(path.join(w, rel), text);
+const commitIn = (W, w, msg) => { W.g(['add', '-A'], w); W.g(['commit', '-qm', msg], w); return W.g(['rev-parse', 'HEAD'], w); };
+
+test('A10 chore pr pushes nothing it refuses, in any commit since main', withProject('exterior-chore', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
+  const main = () => W.g(['rev-parse', 'origin/main'], W.old);
+  await check('A10 public and unknown: refused before any commit, nothing pushed', () => {
+    for (const [slug, vis] of [['zp', 'public'], ['zu', 'unknown']]) {
+      W.setVisibility(vis);
+      const p = W.chorePr(slug, (w) => writeIn(w, EXT, ZENTRIX));
+      assert.equal(p.status, 1, `A10 ${vis}: chore pr refuses\n${p.text}`);
+      assert.match(p.text, /Zentrix Labs/, `A10 ${vis}: naming Zentrix Labs`);
+      if (vis === 'unknown') assert.match(p.text, /visibility is unknown/, 'A10 unknown: says the visibility is unknown');
+      assert.equal(p.pushed(), false, `A10 ${vis}: nothing pushed`);
+      assert.equal(p.sha(), main(), `A10 ${vis}: no commit made`);
+    }
+  });
+  await check('A10 --names-checked never clears the names rule', () => {
+    W.setVisibility('public');
+    const p = W.chorePr('zp', () => {}, ['--names-checked', 'Zentrix,Labs']);
+    assert.equal(p.status, 1, `A10 --names-checked: still refused\n${p.text}`);
+    assert.match(p.text, /"Zentrix Labs" \(organisation\) is not named/, 'A10 the names rule still speaks');
+    assert.equal(p.pushed(), false, 'A10 --names-checked: nothing pushed');
+  });
+  await check('A10 private: pushed', () => {
+    W.setVisibility('private');
+    const p = W.chorePr('zv', (w) => writeIn(w, EXT, ZENTRIX));
+    assert.equal(p.status, 0, `A10 private: chore pr pushes\n${p.text}`);
+    assert.equal(p.pushed(), true, 'A10 private: pushed');
+    W.setVisibility('public');
+  });
+  await check('A10 history 1: a name in a hand commit refuses before chore pr commits', () => {
+    W.ok(['chore', 'start', 'h1']);
+    const w = inWt(W, 'h1');
+    writeIn(w, EXT, ZENTRIX);
+    const hand = commitIn(W, w, 'a draft, by hand');
+    const p = W.chorePr('h1', (x) => writeIn(x, EXT, REWORDED));
+    assert.equal(p.status, 1, `A10 history 1: refused\n${p.text}`);
+    assert.ok(p.text.includes(hand.slice(0, 12)), `A10 history 1: names the hand commit ${hand.slice(0, 12)}\n${p.text}`);
+    assert.equal(p.sha(), hand, 'A10 history 1: no new commit');
+    assert.equal(p.pushed(), false, 'A10 history 1: nothing pushed');
+  });
+  await check('A10 history 2: a name put back since is still refused, until the branch is rewritten', () => {
+    W.ok(['chore', 'start', 'h2']);
+    const w = inWt(W, 'h2');
+    writeIn(w, EXT, ZENTRIX);
+    const first = commitIn(W, w, 'a draft naming it');
+    writeIn(w, EXT, EXTERIOR_MD);
+    commitIn(W, w, 'put back');
+    const p = W.chorePr('h2', () => {});
+    assert.equal(p.status, 1, `A10 history 2: refused\n${p.text}`);
+    assert.ok(p.text.includes(first.slice(0, 12)), `A10 history 2: names ${first.slice(0, 12)}\n${p.text}`);
+    assert.equal(p.pushed(), false, 'A10 history 2: nothing pushed');
+    W.g(['reset', '-q', '--soft', 'origin/main'], w);
+    const q = W.chorePr('h2', (x) => writeIn(x, EXT, REWORDED));
+    assert.equal(q.status, 0, `A10 history 2: pushed once rewritten\n${q.text}`);
+    assert.equal(q.pushed(), true, 'A10 history 2: pushed');
+    assert.doesNotMatch(W.g(['log', '-p', 'origin/main..origin/chore-h2'], W.old) + W.g(['log', '-p', '-1', 'origin/chore-h2'], W.old), /Zentrix/, 'A10 history 2: the pushed branch never holds Zentrix');
+  });
+}));
+
+test('A11 check-pr and merge --chore hold every commit of a PR changing exterior.md', withProject('exterior-checkpr', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
+  const plain = W.branchOf('chore-plain', (w) => writeIn(w, `${P}/designs/n.md`, 'n\n'));
+  const baseline = W.checkPr('chore-plain', plain).status;
+  assert.equal(baseline, 0, `check-pr passes a chore changing only a note\n${W.checkPr('chore-plain', plain).text}`);
+  const zx = W.branchOf('chore-zx', (w) => writeIn(w, EXT, ZENTRIX));
+  await check('A11 public: check-pr fails naming it', () => {
+    const r = W.checkPr('chore-zx', zx);
+    assert.equal(r.status, 1, `A11 public: check-pr fails\n${r.text}`);
+    assert.match(r.text, /^fail: .*"Zentrix Labs" \(organisation\) is not named/m, 'A11 public: a fail naming Zentrix Labs');
+  });
+  await check('A11 unknown: check-pr warns, its exit unchanged', () => {
+    W.setVisibility('unknown');
+    const r = W.checkPr('chore-zx', zx);
+    assert.equal(r.status, baseline, `A11 unknown: exit unchanged\n${r.text}`);
+    assert.match(r.out, /^warn: .*"Zentrix Labs" \(organisation\) is not named/m, 'A11 unknown: a warning naming Zentrix Labs');
+    W.setVisibility('public');
+  });
+  await check('A11 a range whose tip rewords it still fails on the earlier commit', () => {
+    const w = path.join(W.old, '.worktrees', 'chore-zx');
+    writeIn(w, EXT, REWORDED);
+    const tip = commitIn(W, w, 'reworded');
+    W.g(['push', '-q', 'origin', 'chore-zx'], w);
+    const r = W.checkPr('chore-zx', tip);
+    assert.equal(r.status, 1, `A11 the earlier commit fails check-pr\n${r.text}`);
+    assert.ok(r.text.includes(zx.slice(0, 12)), `A11 naming the earlier commit ${zx.slice(0, 12)}\n${r.text}`);
+  });
+  await check('A11 merge --chore --dry-run fails the same', () => {
+    const m = W.run(['merge', '--chore', 'zx', '--dry-run']);
+    assert.notEqual(m.status, 0, `A11 merge --chore refuses\n${m.text}`);
+    assert.match(m.text, /^(?!warn).*"Zentrix Labs" \(organisation\) is not named/m, 'A11 merge --chore names it, not as a warning');
+  });
+  await check('A11 a PR not changing exterior.md gets no exterior line, whatever main\'s names', () => {
+    W.onMain({ [EXT]: oneEntity(W, { name: 'lodash', relation: 'depends_on', kind: 'work' }), 'package.json': JSON.stringify({ dependencies: { lodash: '1' } }) }, 'an exterior on a dependency');
+    W.onMain({ 'package.json': JSON.stringify({ dependencies: {} }) }, 'the dependency removed');
+    const deps = W.branchOf('chore-deps', (w) => writeIn(w, `${P}/designs/m.md`, 'm\n'));
+    const r = W.checkPr('chore-deps', deps);
+    assert.equal(r.status, 0, `A11 chore-deps passes check-pr\n${r.text}`);
+    assert.doesNotMatch(r.text, /exterior\.md/, 'A11 chore-deps: no exterior.md line');
+  });
+}));
+
+test('A16 focus 1 exterior.md\'s capitalised words are held as self.md\'s', withProject('exterior-words', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
+  const hosted = EXTERIOR_MD.replace('And the Small Press Fair sponsors its yearly meetup.', 'And the Small Press Fair sponsors its yearly meetup, which Zentrix hosts.');
+  const G = W.goal('Billing', 1);
+  W.feature('billing', G);
+  W.ticket('billing-01-a', 'billing');
+  const planSha = W.branchOf('plan/billing', (w) => writeIn(w, EXT, hosted));
+  const ticketSha = W.branchOf('ticket/billing-01-a', (w) => writeIn(w, EXT, hosted));
+  await check('A16 exterior check warns of the word', () => {
+    W.writeTree(EXT, hosted);
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 0, `A16 exterior check exits 0\n${r.text}`);
+    assert.match(r.out, /^warn: exterior\.md: "Zentrix" \(prose\)/m, 'A16 exterior check warns of Zentrix in the prose');
+    W.g(['checkout', '--', EXT], W.old);
+  });
+  await check('A16 chore pr holds the word until --names-checked names it, then logs the act', () => {
+    const p = W.chorePr('w', (w) => writeIn(w, EXT, hosted));
+    assert.equal(p.status, 1, `A16 chore pr refuses the unchecked word\n${p.text}`);
+    assert.match(p.text, /"Zentrix" \(prose\)/, 'A16 naming the word');
+    assert.equal(p.pushed(), false, 'A16 nothing pushed');
+    const q = W.chorePr('w', () => {}, ['--names-checked', 'Zentrix']);
+    assert.equal(q.status, 0, `A16 --names-checked Zentrix pushes\n${q.text}`);
+    assert.equal(q.pushed(), true, 'A16 pushed');
+    assert.deepEqual(namesActs(W).map((a) => [a.scope, [...a.refs].sort()]), [['exterior', ['chore-w', 'name:Zentrix']]], `A16 the act is logged with scope exterior\n${JSON.stringify(namesActs(W))}`);
+    write(path.join(W.old, 'docs/devteam/run/pr/chore-w.md'), '# chore-w: x\n\n## One-way doors\n\nNone.\n');
+    const k = W.checkPr('chore-w', q.sha());
+    assert.equal(k.status, 0, `A16 check-pr passes the checked chore\n${k.text}`);
+  });
+  await check('A16 a plan or ticket PR with the word clears only by rewording', () => {
+    for (const [ref, sha] of [['plan/billing', planSha], ['ticket/billing-01-a', ticketSha]]) {
+      const r = W.checkPr(ref, sha);
+      assert.notEqual(r.status, 0, `A16 ${ref} fails\n${r.text}`);
+      assert.match(r.text, /^fail: .*names "Zentrix" \(prose\)[^\n]*reword it/m, `A16 ${ref} fails on the word, saying reword it\n${r.text}`);
+    }
+  });
+  await check('A16 a lower-case name in prose draws no line (the accepted P6 risk)', () => {
+    W.writeTree(EXT, EXTERIOR_MD.replace('locks notes in.', 'locks notes in. zentrix labs hosts it.'));
+    const r = W.run(['exterior', 'check']);
+    assert.doesNotMatch(r.out, /zentrix/i, `A16 no line for a lower-case name\n${r.out}`);
+    W.g(['checkout', '--', EXT], W.old);
+  });
+  await check('focus 1 one --names-checked for self.md and exterior.md: each held on its own words, an act per scope', () => {
+    const both = (slug) => (w) => {
+      const self = SELF_MD.replace('It controls its code', 'It mails through Quux.\n\nIt controls its code');
+      writeIn(w, SELF, self);
+      const selfBlob = W.g(['hash-object', path.join(w, SELF)], w);
+      writeIn(w, EXT, extBlock((v) => { v.self_blob = selfBlob; }, hosted));
+      void slug;
+    };
+    const only = W.chorePr('both1', both('both1'), ['--names-checked', 'Zentrix']);
+    assert.equal(only.status, 1, `focus 1 naming only Zentrix still refuses\n${only.text}`);
+    assert.match(only.text, /Quux/, 'focus 1 on Quux');
+    assert.equal(only.pushed(), false, 'focus 1 nothing pushed');
+    const before = namesActs(W).length;
+    const all = W.chorePr('both2', both('both2'), ['--names-checked', 'Quux,Zentrix']);
+    assert.equal(all.status, 0, `focus 1 naming both pushes\n${all.text}`);
+    const acts = namesActs(W).slice(before).map((a) => [a.scope, [...a.refs].sort()]).sort();
+    assert.deepEqual(acts, [['exterior', ['chore-both2', 'name:Zentrix']], ['self', ['chore-both2', 'name:Quux']]], `focus 1 one act per scope\n${JSON.stringify(acts)}`);
+  });
+}));
+
+test('focus 2 focus 5 a deleted exterior.md, and a branch with no merge base', withProject('exterior-edges', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
+  await check('focus 2 a branch deleting exterior.md gets no names line and no crash', () => {
+    const sha = W.branchOf('chore-del', (w) => fs.rmSync(path.join(w, EXT)));
+    const r = W.checkPr('chore-del', sha);
+    assert.doesNotMatch(r.text, /TypeError|ReferenceError|at file:/, `focus 2 no crash\n${r.text}`);
+    assert.doesNotMatch(r.text, /is not named|exterior\.md names|no merge base/, `focus 2 no exterior names line\n${r.text}`);
+  });
+  await check('focus 5 an orphan chore holding exterior.md: chore pr and check-pr refuse, naming why', () => {
+    W.ok(['chore', 'start', 'orph']);
+    const w = inWt(W, 'orph');
+    W.g(['checkout', '-q', '--orphan', 'orph-tmp'], w);
+    W.g(['commit', '-qm', 'unrelated history'], w);
+    W.g(['branch', '-qf', 'chore-orph', 'orph-tmp'], w);
+    W.g(['checkout', '-q', 'chore-orph'], w);
+    const p = W.chorePr('orph', (x) => writeIn(x, EXT, REWORDED));
+    assert.equal(p.status, 1, `focus 5 chore pr refuses\n${p.text}`);
+    assert.match(p.text, /no merge base/, 'focus 5 chore pr says no merge base');
+    assert.equal(p.pushed(), false, 'focus 5 nothing pushed');
+    W.g(['push', '-q', 'origin', 'chore-orph'], w);
+    write(path.join(W.old, 'docs/devteam/run/pr/chore-orph.md'), '# chore-orph: x\n\n## One-way doors\n\nNone.\n');
+    const k = W.checkPr('chore-orph', W.g(['rev-parse', 'HEAD'], w));
+    assert.equal(k.status, 1, `focus 5 check-pr refuses\n${k.text}`);
+    assert.match(k.text, /no merge base with main: exterior\.md's drafts can't be checked/, 'focus 5 check-pr says no merge base');
+  });
+  await check('focus 5 an orphan without exterior.md gets no exterior line', () => {
+    const w = inWt(W, 'orph');
+    W.g(['checkout', '-q', '--', '.'], w);
+    fs.rmSync(path.join(w, EXT), { force: true });
+    W.g(['checkout', '-q', '--orphan', 'orph-bare'], w);
+    W.g(['add', '-A'], w);
+    W.g(['commit', '-qm', 'unrelated, no exterior.md'], w);
+    W.g(['push', '-q', 'origin', 'orph-bare:chore-bare'], w);
+    write(path.join(W.old, 'docs/devteam/run/pr/chore-bare.md'), '# chore-bare: x\n\n## One-way doors\n\nNone.\n');
+    const k = W.checkPr('chore-bare', W.g(['rev-parse', 'HEAD'], w));
+    assert.doesNotMatch(k.text, /exterior\.md/, `focus 5 no exterior line\n${k.text}`);
+  });
+}));

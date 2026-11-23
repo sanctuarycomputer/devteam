@@ -6414,6 +6414,13 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     fails.push(...held.fails);
     for (const w of held.warns) out(`warn: ${w}`);
   }
+  // a PR changing exterior.md: steps 1 to 3 at the head, the names rule and its words over every
+  // version (exteriorDraftLines, kit-135); with no main, one warning
+  if (R.name === 'home') {
+    const held = exteriorDraftLines(mainRef() ? git(['merge-base', mainRef(), sha]) : null, sha, branch);
+    fails.push(...held.fails);
+    for (const w of held.warns) out(`warn: ${w}`);
+  }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records, inHome }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -7686,7 +7693,7 @@ function namesHoldLines({ rel, words, act, checked, visibility }) {
   const chore = String(act).startsWith('chore-');
   const tail = chore
     ? `; check it and name it on the chore (chore pr ${String(act).slice(6)} --names-checked …), or reword it; if you named it with chore pr --names-checked and this check runs where the live log isn't (a forge's CI), land the log (log-sync, then merge --chore log) and run the check again`
-    : '; a plan or ticket PR has no chore to name it on, so reword it (a self.md change belongs in a chore)';
+    : `; a plan or ticket PR has no chore to name it on, so reword it (a change to ${path.basename(rel)} belongs in a chore)`;
   const lines = open.map((w) => `${rel} names "${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}, which main's strategy.md and dependency files don't, on a public repo${tail}`);
   return v === 'public' ? { fails: lines, warns: [] } : { fails: [], warns: lines };
 }
@@ -7698,9 +7705,9 @@ function logNamesChecked(slug, rel, blob, words) {
 // chore pr's hold on a self.md draft (spec §3.3), run after its commit and before its push: the
 // contract and each part's path at head, then the names of every draft blob. Returns null to push
 // (any warnings printed), or the refusal. named: the --names-checked words, or null.
-function choreSelfHold(slug, base, head, named) {
+function choreSelfHold(slug, base, head, named, exteriorChanged = false) {
   const rel = selfRel();
-  if (!projectInRepo || !draftBlobs(base, head, rel).length) return named ? 'chore pr: --names-checked is for a chore changing self.md' : null;
+  if (!projectInRepo || !draftBlobs(base, head, rel).length) return named && !exteriorChanged ? 'chore pr: --names-checked is for a chore changing self.md or exterior.md' : null;
   if (git(['cat-file', '-e', `${head}:${rel}`], mainRoot) !== null) {
     const { block, errors } = selfDoc(git(['show', `${head}:${rel}`], mainRoot) ?? '');
     if (errors.length) return `chore pr: self.md breaks self@1: ${errors.join('; ')}; run self check`;
@@ -7821,14 +7828,14 @@ const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
 // The head's strategy.md and self.md blobs (null for no file): ref's, or with ref null the working
 // tree's (git hash-object, so an uncommitted draft counts), with the strategy's text when it was read
 // from the tree (a blob hash-object didn't write can't be read back with cat-file).
-function headBlobs(ref) {
+function headBlobs(ref, root = projectDir) {
   const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
   if (ref) {
     const at = (rel) => git(['rev-parse', '--verify', '--quiet', `${ref}:${rel}`], mainRoot);
     return { strategyBlob: at(rels.strategy), selfBlob: at(rels.self), strategyText: null };
   }
-  const tree = (name) => { const f = path.join(projectDir, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
-  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(projectDir, 'strategy.md')) };
+  const tree = (name) => { const f = path.join(root, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
+  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(root, 'strategy.md')) };
 }
 // Whether validate is at the draft: main can be read and the working tree's exterior.md is not
 // main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not: the
@@ -7921,6 +7928,118 @@ function exteriorWords(text, block, ref = mainRef()) {
   return unknownNames(exteriorPieces(text, block), `${namesAllowedText(ref)}\n${dependencyNames(ref).text}`);
 }
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
+// The draft's history (spec, The check, every version): steps 1 to 3 on head ({ text, blobs }, or
+// null when there is no exterior.md at the head), then the names rule and the words on each version
+// ([{ commit, text }], commit null for the head's own, each name and word kept at its first version).
+// { errors, warns, named: [{ line, commit }], words: [{ word, where, commit }] }.
+function exteriorVersionsScan(head, versions) {
+  const errors = [];
+  const warns = [];
+  if (head) {
+    const { block, errors: e } = exteriorDoc(head.text);
+    errors.push(...e);
+    if (block) { const b = exteriorBlobLines(block, { draft: true, ...head.blobs }); errors.push(...b.errors); warns.push(...b.warnings); }
+  }
+  const named = [];
+  const words = [];
+  const seen = new Set();
+  let depWarns = null;
+  for (const { commit, text } of versions) {
+    const block = exteriorDoc(text).block;
+    if (block) {
+      const n = exteriorNameLines(block);
+      depWarns ??= n.warnings;
+      for (const r of n.refused) if (!seen.has(`n:${r.name}`)) { seen.add(`n:${r.name}`); named.push({ line: r.line, commit }); }
+    }
+    for (const w of exteriorWords(text, block)) if (!seen.has(`w:${w.word}`)) { seen.add(`w:${w.word}`); words.push({ ...w, commit }); }
+  }
+  warns.push(...(depWarns ?? []));
+  return { errors, warns, named, words };
+}
+// A line's tail naming the commit that carries it, for a version that isn't the head's own.
+const exteriorCarries = (commit) => (commit ? `; commit ${commit.slice(0, 12)} carries it: rewrite the branch (git reset --soft origin/main, then chore pr again)` : '');
+const EXTERIOR_NO_BASE = "no merge base with main: exterior.md's drafts can't be checked";
+// check-pr's hold on a PR changing exterior.md (spec, Commands), for checkPr in home: with exterior.md
+// at sha and a commit in merge-base..sha changing it, steps 1 to 3 at sha, and the names rule (public a
+// fail, unknown a warning, private nothing) and namesHoldLines over every version. A deletion is
+// kit-138's gate; with no main, one warning (merge, which has main, checks it). { fails, warns }.
+function exteriorDraftLines(base, sha, branch) {
+  const rel = EXTERIOR_REL();
+  const none = { fails: [], warns: [] };
+  if (!projectInRepo || git(['cat-file', '-e', `${sha}:${rel}`], mainRoot) === null) return none;
+  if (!mainRef()) return { fails: [], warns: ["no main to compare with: exterior.md's drafts are not checked here; merge checks them"] };
+  if (!base) return { fails: [EXTERIOR_NO_BASE], warns: [] };
+  const blobs = draftBlobs(base, sha, rel);
+  if (!blobs.length) return none;
+  const headBlob = git(['rev-parse', '--verify', '--quiet', `${sha}:${rel}`], mainRoot);
+  const read = (b) => git(['cat-file', 'blob', b], mainRoot) ?? '';
+  const versions = [{ commit: null, text: read(headBlob) }, ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
+  const x = exteriorVersionsScan({ text: read(headBlob), blobs: headBlobs(sha) }, versions);
+  let vis;
+  const visibility = () => (vis ??= repoVisibility());
+  const contract = new Set(exteriorDoc(read(headBlob)).errors);
+  const fails = x.errors.map((e) => (contract.has(e) ? `${rel} breaks exterior@1 at ${sha.slice(0, 12)}: ${e}` : `${rel} at ${sha.slice(0, 12)}: ${e}`));
+  const warns = x.warns.map((w) => `${rel}: ${w}`);
+  if (x.named.length) {
+    const lines = x.named.map((n) => `${rel}: ${n.line}${exteriorCarries(n.commit)}`);
+    if (visibility() === 'public') fails.push(...lines);
+    else if (visibility() === 'unknown') warns.push(...lines);
+  }
+  const act = worldFileFails.actOf(branch);
+  const ct = git(['show', '-s', '--format=%ct', base], mainRoot);
+  const since = ct && /^\d+$/.test(ct) ? Number(ct) * 1000 : NaN;
+  const h = namesHoldLines({ rel, words: x.words, act, checked: namesChecked(act, 'exterior', since), visibility });
+  return { fails: [...fails, ...h.fails], warns: [...warns, ...h.warns] };
+}
+// chore pr's hold on an exterior.md draft (spec, Commands), every read in the chore's worktree wt.
+// phase 'tree', before git add: the working tree's exterior.md and every blob already committed
+// since base, so a name in a hand commit refuses before anything new is committed. phase 'range',
+// after the commit and before the push: every blob since base, the head's first. At the draft only:
+// the tree's file differs from main's, a commit since base changes it, or there is no origin main
+// (then only the tree and HEAD's blob are read). A refused name, or on a repo not known to be
+// private a word checkedWords doesn't name, fails; unknown visibility counts as not private.
+// { fails, warns, words (to log once named), changed }.
+function exteriorChoreLines(wt, phase, { base, checkedWords }) {
+  const rel = EXTERIOR_REL();
+  const none = { fails: [], warns: [], words: [], changed: false };
+  if (!projectInRepo) return none;
+  const head = git(['rev-parse', 'HEAD'], wt);
+  const at = (ref) => (ref ? git(['rev-parse', '--verify', '--quiet', `${ref}:${rel}`], wt) : null);
+  const headBlob = at(head);
+  const treeFile = path.join(wt, rel);
+  const treeText = phase === 'tree' ? readText(treeFile) : null;
+  const main = mainRef();
+  if (main && !base) return headBlob || treeText !== null ? { ...none, fails: [EXTERIOR_NO_BASE] } : none;
+  const blobs = main ? draftBlobs(base, head, rel) : headBlob ? [{ commit: head, blob: headBlob }] : [];
+  const treeDraft = treeText !== null && (!main || git(['hash-object', '--', treeFile], wt) !== at(main));
+  if (!treeDraft && !blobs.length) return none;
+  const read = (b) => git(['cat-file', 'blob', b], wt) ?? '';
+  const root = path.join(wt, projectRel);
+  let versions;
+  let headDoc;
+  if (phase === 'tree') {
+    versions = [...blobs.map((b) => ({ commit: b.commit, text: read(b.blob) })), ...(treeText !== null ? [{ commit: null, text: treeText }] : [])];
+    headDoc = treeText !== null ? { text: treeText, blobs: headBlobs(null, root) } : null;
+  } else {
+    versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
+    headDoc = headBlob ? { text: read(headBlob), blobs: headBlobs(head) } : null;
+  }
+  const x = exteriorVersionsScan(headDoc, versions);
+  const fails = [...x.errors];
+  const warns = [...x.warns];
+  let vis;
+  const visibility = () => (vis ??= repoVisibility());
+  const unknown = "the repo's visibility is unknown, which counts as not private";
+  if (x.named.length && visibility() !== 'private') fails.push(...x.named.map((n) => `${n.line}${visibility() === 'unknown' ? ` (${unknown})` : ''}${exteriorCarries(n.commit)}`));
+  const shown = (w) => `"${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}`;
+  const open = x.words.filter((w) => !checkedWords?.has(w.word));
+  if (open.length && visibility() === 'private') warns.push(...open.map((w) => `${shown(w)} is in neither origin main's strategy.md nor its dependency files: the repo is private, so it may be pushed`));
+  else if (open.length) {
+    fails.push(`exterior.md names words origin main's strategy.md and dependency files don't, and ${visibility() === 'public' ? 'this repo is public' : unknown}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${x.words.map((w) => w.word).join(',')}`);
+    for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) fails.push(`${c.slice(0, 12)} carries a word: rewrite the branch (git reset --soft origin/main, then chore pr again), or check and name the word`);
+  }
+  return { fails, warns, words: open.length ? [] : x.words.map((w) => w.word), changed: true };
+}
 // exterior check's lines for the working tree's exterior.md (null text: none): the contract, the
 // blobs as at the draft, then (at the draft) the names rule by the repo's visibility (public an
 // error, unknown a warning, private nothing; gh asked only when a name is refused) and the words.
@@ -16298,7 +16417,7 @@ function cmdChore() {
     return out(wt);
   }
   if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>" [--names-checked <word,…>]');
-  // --names-checked a,b: the self.md draft's words the supervisor has checked are fine to name in public
+  // --names-checked a,b: the self.md and exterior.md drafts' words the supervisor has checked are fine to name in public
   const named = flags['names-checked'] === undefined ? null : asList(flags['names-checked']).flatMap((v) => String(v).split(',')).map((x) => x.trim());
   if (named && (!named.length || named.some((x) => !x))) die('--names-checked needs one or more words, comma-separated');
   supervisorOnly('chore');
@@ -16309,17 +16428,31 @@ function cmdChore() {
   if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die(`.worktrees/chore-${slugName} is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start ${slugName}`);
   // origin's main as it is now: the base and the names the strategy and dependency files allow
   fetchMain();
+  // the exterior.md hold (kit-135), before anything is staged: the working tree's draft and every
+  // version already committed since main, so a refused name is never committed by this run
+  const named0 = named && new Set(named);
+  const exTree = exteriorChoreLines(wt, 'tree', { base: mainRef() ? git(['merge-base', mainRef(), gitOrDie(['rev-parse', 'HEAD'], wt)]) : null, checkedWords: named0 });
+  if (exTree.fails.length) die(exTree.fails.map((f) => `chore pr: ${f}`).join('\n'));
   gitOrDie(['add', '-A'], wt);
   const committed = Boolean(gitOrDie(['status', '--porcelain'], wt));
   if (committed) gitOrDie(['commit', '--quiet', '-m', `chore-${slugName}: ${flagStr('title')}`], wt);
   // the self.md hold (spec §3.3): a refusal undoes this run's commit, and only it, so the draft stays
   // staged as it was and the refused words never reach a pushed commit
   const head = gitOrDie(['rev-parse', 'HEAD'], wt);
-  const held = choreSelfHold(slugName, mainRef() ? git(['merge-base', mainRef(), head]) : null, head, named && new Set(named));
+  const base = mainRef() ? git(['merge-base', mainRef(), head]) : null;
+  // and again over every version since main, after the commit and before the push (kit-135)
+  const exRange = exteriorChoreLines(wt, 'range', { base, checkedWords: named0 });
+  if (exRange.fails.length) {
+    if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
+    die(exRange.fails.map((f) => `chore pr: ${f}`).join('\n'));
+  }
+  const held = choreSelfHold(slugName, base, head, named0, exRange.changed);
   if (held) {
     if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
     die(held);
   }
+  for (const w of exRange.warns) warn(`exterior.md: ${w}`);
+  if (named && exRange.words.length) logNamesChecked(slugName, EXTERIOR_REL(), git(['rev-parse', '--verify', '--quiet', `${head}:${EXTERIOR_REL()}`], wt) ?? 'none', exRange.words);
   gitOrDie(['push', '--quiet', '--force', 'origin', `chore-${slugName}:chore-${slugName}`], wt);
   const pr = openPr(wt, `chore-${slugName}`, `chore-${slugName}: ${flagStr('title')}`, flagStr('body') ?? flagStr('title'));
   out(`pushed chore-${slugName}${pr ? `: ${pr}` : ''}\nmerge it once CI passes, then: git worktree remove .worktrees/chore-${slugName}`);
@@ -34730,7 +34863,7 @@ const HELP_GOALS = `Goals and retros
   goal order [<g-id> …] --approved <qid>   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
-  chore start <slug> | chore pr <slug> --title t [--names-checked <word,…>]    a supervisor-written file (design, retro, architecture) and its PR; on a public or unknown repo it holds a self.md draft's unchecked names (capitalised words main's strategy.md and dependency files don't contain) until --names-checked names each`;
+  chore start <slug> | chore pr <slug> --title t [--names-checked <word,…>]    a supervisor-written file (design, retro, architecture) and its PR; on a public or unknown repo it holds a self.md or exterior.md draft's unchecked names (capitalised words main's strategy.md and dependency files don't contain) until --names-checked names each, and an exterior.md naming an organisation or work main's strategy.md doesn't, which --names-checked never clears`;
 const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring list [--json]   main's jobs (project/recurring.json at main) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions; a file on main that doesn't read prints its problem and exits 1. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null, problems?: ["…"] }], runs_a_day, cap, pending: [{ qid, name, change, status }] }; problems is there only when an entry breaks the shape (validate says the same)
   recurring show <name> [--json]   one job on main in full, who registered it, its problems if it breaks the shape, and its pending questions
