@@ -377,6 +377,19 @@ test('next-moves A6: the trigger case: an owner-read goal all merged is asked wh
     assert.equal(m.move, 'lead-ticket');
     assert.deepEqual(m.ref, { kind: 'ticket', id: 'ch-64-open' });
   });
+  await t.test('the last ticket merging while the goal-met question is open, then a No: the re-plan (G18), not asked again', () => {
+    const J = P.ready('Merged while asked');
+    P.feature('mergedasked', J);
+    P.ticket('ch-65-last', 'mergedasked');
+    const N = P.ask(['--class', 'goal-met', '--goal', J, '--recommendation', 'yes']);
+    P.merge('ch-65-last');
+    assert.equal(goalMove(P, J).move, 'answer-goal-met', 'open: the owner (G4)');
+    P.owner(['answer', N, 'No — needs more']);
+    const m = goalMove(P, J);
+    assert.notEqual(m.move, 'ask-goal-met', 'the owner judged the merged work: not asked again');
+    assert.equal(m.move, 're-plan-after-no');
+    assert.equal(m.since, P.question(N).answered_at);
+  });
   await t.test('a goal with no tickets at all is not asked (not G13)', () => {
     const E = P.ready('No tickets');
     P.feature('notickets', E);

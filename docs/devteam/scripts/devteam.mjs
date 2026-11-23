@@ -18542,8 +18542,10 @@ function goalMovesNow() {
     const allMerged = ts.length > 0 && ts.every((t) => mergeShaFor(t.id));
     const lastMerge = allMerged ? isoOf(Math.max(...ts.map((t) => mergedAt(t.id) ?? 0))) : null;
     const m = measureOf(g);
-    // a goal-met question withdrawn (or defaulted) since the merge asked nothing: it is asked again
-    if (allMerged && m.source === 'owner' && !qs.some((q) => q.class === 'goal-met' && q.goal === id && ['open', 'answered'].includes(q.status) && q.asked_at > lastMerge)) return at({ move: 'ask-goal-met', words: 'Ask you whether it is met', holder: 'supervisor', since: lastMerge, command: ask, covered_by: [{ kind: 'goal-work-merged', subject: id }] }); // G13
+    // a goal-met question withdrawn (or defaulted) since the merge asked nothing: it is asked again.
+    // An answered one counts by when it was answered: one asked while the last ticket was in flight
+    // and answered after it merged judged the merged work (a No there is G18's, not a re-ask).
+    if (allMerged && m.source === 'owner' && !qs.some((q) => q.class === 'goal-met' && q.goal === id && ['open', 'answered'].includes(q.status) && (q.status === 'answered' ? q.answered_at : q.asked_at) > lastMerge)) return at({ move: 'ask-goal-met', words: 'Ask you whether it is met', holder: 'supervisor', since: lastMerge, command: ask, covered_by: [{ kind: 'goal-work-merged', subject: id }] }); // G13
     if (needsFeatures(g)) return at({ move: 'plan-next-features', words: 'Plan the next features', holder: 'supervisor', quiet: mode === 'drain' || fleetDrain ? 'drain' : queued() ? 'queue' : null, since: milestoneSince(g), command: `planner <feature> --goal ${id}`, covered_by: PLANNING_COVER }); // G14
     const bare = feats.find((f) => !ts.some((t) => t.feature === f));
     if (bare) return at({ move: 'plan-tickets', words: `Plan the tickets for ${features().get(bare).title ?? bare}`, holder: 'supervisor', since: features().get(bare).created_at, command: `planner ${bare} --goal ${id}` }); // G15
@@ -18587,7 +18589,7 @@ function plannerMove(p) {
   const q = p.waiting_on_owner.map((id) => questions().find((x) => x.id === id)).filter(Boolean).sort((a, b) => a.asked_at.localeCompare(b.asked_at))[0];
   if (q) return at(askedMove(q)); // P1
   const msg = p.waiting_on_supervisor[0];
-  if (msg) return at({ move: 'answer-planner', words: `Answer the planner: ${msg.kind}`, holder: 'supervisor', ref: { kind: 'm', id: msg.id }, since: logGet(msg.id)?.created_at ?? p.last_seen, command: `send ${by} "…" --kind ruling`, covered_by: [{ kind: 'unanswered-message', subject: msg.id }, { kind: 'blocked-without-question', subject: by }] }); // P2
+  if (msg) return at({ move: 'answer-planner', words: `Answer the planner: ${msg.kind}`, holder: 'supervisor', ref: { kind: 'm', id: msg.id }, since: logGet(msg.id)?.created_at ?? p.last_seen ?? nowIso(), command: `send ${by} "…" --kind ruling`, covered_by: [{ kind: 'unanswered-message', subject: msg.id }, { kind: 'blocked-without-question', subject: by }] }); // P2
   const seen = p.last_seen ?? nowIso();
   const held = p.goals.length && p.goals.every((id) => ['park', 'let-go'].includes(goalMode(logGet(id))));
   if (p.parked || held) return at({ move: 'parked', words: 'Parked', holder: 'planner', quiet: 'hold', since: lastPhaseOf(by)?.created_at ?? seen }); // P3
