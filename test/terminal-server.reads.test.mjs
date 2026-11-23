@@ -263,7 +263,7 @@ test('terminal A3: the screen in one call, its etag and 304, history above it; n
     assert.deepEqual(j.cursor, { x: 5, y: 3, visible: true }, what);
     assert.deepEqual(j.modes, { app_cursor: false, app_keypad: false }, what);
     assert.equal(typeof j.history_size, 'number', what);
-    assert.deepEqual(j.held, { count: 0, oldest_ms: 0, prompt: 'readable' }, what);
+    assert.deepEqual(j.held, { count: 0, oldest_ms: 0, prompt: 'unknown' }, what);
     assert.equal(j.lines.length, j.rows, `${what}: exactly rows lines`);
     assert.equal(j.lines[0], 'plain', what);
     assert.match(j.lines[1], RED_LINE, `${what}: the red line, its SGR only`);
