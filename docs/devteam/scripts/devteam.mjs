@@ -16744,10 +16744,28 @@ function collectMetrics(since, reviewsSince = 0) {
   // A thread answer whose cited turn doesn't bear it out: a record for the owner to look at, never a block.
   for (const x of threadAnswersUnbound()) add('medium', 'thread-answer-unbound', x.id, `recorded from a thread as the owner's words, but it ${x.why}`, 'check it on the dashboard; if the owner never said it, correct the answer');
   // A thread the owner wrote in that has waited over 10 minutes for the supervisor: a reply dropped,
-  // or the supervisor busier than it said. By id only: a subject's title may be page-written.
+  // or the supervisor busier than it said. Timed from its oldest owed turn routed to the supervisor
+  // or with no route (kit-104): a turn the responder has is never the supervisor's to wait on, and
+  // a later turn of the responder's never restarts the clock. By id only: a subject's title may be page-written.
+  const logNow = readLog().objects;
   for (const x of threadsNow.filter((y) => y.status === 'open' && y.waiting === 'supervisor')) {
-    const ago = now - Date.parse(x.turns[x.turns.length - 1].at);
+    const first = owedTurns(x.id, logNow).find((u) => u.routed_to !== 'responder');
+    if (!first) continue;
+    const ago = now - Date.parse(first.created_at);
     if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
+  }
+  // The responder (kit-104). Overdue: a turn routed to it still owed past RESPONDER_OVERDUE_MS, or its
+  // pending turn with nothing after it past RESPONDER_PENDING_MS; high, so wait brings the supervisor,
+  // which takes it (and every turn routes to it until it is answered). From the log alone, so an
+  // answer or a resolve clears it. By id only.
+  for (const o of responderOverdue(logNow, now)) add('high', 'responder-overdue', o.thread, o.why === 'owed' ? `the owner's turn ${o.turn} went to the responder ${o.min} min ago and has no answer` : `the responder's pending reply ${o.turn} has had nothing after it for ${o.min} min`, `answer it in the thread (thread show ${o.thread}, then thread reply ${o.thread}), then look at the responder (responder --resume)`);
+  // Down or stuck: only while settings.responder is on, the fleet's session is up and the fleet is
+  // neither parked nor draining (a park stops it on purpose; a drain refuses its start), so a project
+  // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
+  if (settings.responder !== false && fleetMode() !== 'park' && !draining()) {
+    const h = responderHealth();
+    if (h.session && h.problem) add('medium', 'responder-down', 'responder', `the responder isn't running: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
+    else if (h.stuck) add('medium', 'responder-stuck', 'responder', `the responder's pane is waiting on a prompt: "${h.stuck}"; the owner's turns go to the supervisor meanwhile`, `look (tmux select-window -t '${tmuxTarget(RESPONDER_NAME)}') and clear it, or responder --stop then responder`);
   }
   // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
   // it reaches past the stalled supervisor (hello's alert: machine status, the hub). By id only.
