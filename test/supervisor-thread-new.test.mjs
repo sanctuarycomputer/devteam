@@ -205,6 +205,7 @@ test('kit-108 A9: --re follows up the writer\'s own pending turn once; a second 
     const P = F.sup(['thread', 'reply', T, 'On it: opening a ticket', '--pending']).split('\n')[0];
     const D = F.sup(['thread', 'reply', T, 'Done: the ticket is open.', '--re', P]).split('\n')[0];
     assert.equal(lineOf(F, D).re, P, 're kept on the turn');
+    assert.match(F.sup(['thread', 'show', T]), new RegExp(`\\(${D}\\) \\(following up ${P}\\)`), 'show says what it follows up (task-3 F4)');
     assert.match(F.fails(['thread', 'reply', T, 'Done again.', '--re', P], F.SUP), /already followed up/);
     // not pending, not the writer's, not this thread's
     const N = F.sup(['thread', 'reply', T, 'A plain note.', '--refs', `ticket:demo-01-x`]).split('\n')[0];
@@ -250,6 +251,7 @@ test('kit-108 A11: an unsolicited turn naming a question or goal off the thread\
     assert.match(F.fails(['thread', 'reply', T, 'About the other goal.', '--refs', `goal:${other}`], F.SUP), new RegExp(`goal:${other} is off this thread's subject`));
     const u = F.sup(['thread', 'reply', T, 'About the other goal.', '--refs', `goal:${other}`, '--off-subject', 'at my cap; nearest thread']).split('\n')[0];
     assert.equal(lineOf(F, u).off_subject, 'at my cap; nearest thread');
+    assert.match(F.sup(['thread', 'show', T]), new RegExp(`\\(${u}\\)[^\\n]*, off subject: "at my cap; nearest thread"`), 'show gives the reason (task-3 F4)');
     // a thread ask whose --goal is off subject: refused, then let through
     const T2 = quietThread(F, 'EU');
     F.sup(['thread', 'reply', T2, 'Keeping to the launch goal.', '--refs', `goal:${F.goal}`, '--off-subject', 'naming the goal']);
@@ -294,11 +296,11 @@ test('kit-108 A12: an unsolicited turn whose question and goal refs are all on s
 test('kit-108 A13: an open handoff for the thread makes the supervisor\'s turn solicited', () => {
   const F = threadsFixture('sup-thread-a13');
   try {
-    const T = F.owner(['thread', 'new', 'Merge it', '--title', 'Merge']).split('\n')[0];
-    for (const args of [['thread', 'reply', T, 'Passed to the supervisor.'], ['send', 'supervisor', 'needs a merge', '--kind', 'handoff', '--thread', T]]) {
-      const r = F.run(F.old, args, RESPONDER);
-      assert.equal(r.status, 0, `${args[0]}: ${r.err}`);
-    }
+    // a quiet thread, owed nothing, so the handoff is the only thing that asks (task-3 F3)
+    const T = quietThread(F, 'Merge');
+    assert.match(F.fails(['thread', 'reply', T, 'Merged.'], F.SUP), /is waiting on you/, 'nothing asks before the handoff');
+    const h0 = F.run(F.old, ['send', 'supervisor', 'needs a merge', '--kind', 'handoff', '--thread', T], RESPONDER);
+    assert.equal(h0.status, 0, h0.err);
     assert.match(F.sup(['thread', 'reply', T, 'Merged.']).split('\n')[0], /^u-/);
     // settled now: the next one is unsolicited
     assert.match(F.fails(['thread', 'reply', T, 'Another note.'], F.SUP), /is waiting on you/);
@@ -308,6 +310,12 @@ test('kit-108 A13: an open handoff for the thread makes the supervisor\'s turn s
     const H = logLines(F).filter((o) => o.type === 'message' && o.kind === 'handoff').pop().id;
     F.sup(['send', 'responder', 'done', '--kind', 'info', '--re', H]);
     assert.match(F.fails(['thread', 'reply', T, 'And another.'], F.SUP), /is waiting on you/);
+    // and one a question answered, naming it with --re, as kit-104's openHandoffs reads it (task-3 F2)
+    const r2 = F.run(F.old, ['send', 'supervisor', 'and this', '--kind', 'handoff', '--thread', T], RESPONDER);
+    assert.equal(r2.status, 0, r2.err);
+    const H2 = logLines(F).filter((o) => o.type === 'message' && o.kind === 'handoff').pop().id;
+    F.sup(['ask', '--question', 'Merge the other one too?', '--goal', F.goal, '--stake', '1', '--urgency', '1', '--re', H2]);
+    assert.match(F.fails(['thread', 'reply', T, 'And more.'], F.SUP), /is waiting on you/);
     // any open handoff solicits, whoever wrote it (cmdSend says who may send one; kit-109 widens it)
     const d = new Date(Date.now() + 2000);
     const mid = `m-${d.toISOString().replace(/[-:TZ.]/g, '').replace(/^(\d{8})(\d{9})$/, '$1-$2')}-demo-01-x`;
@@ -351,6 +359,12 @@ test('kit-108 A15: the responder\'s turns keep the same rules: its --re follow-u
     const r1 = F.run(F.old, ['thread', 'reply', T, 'Looking now', '--pending'], RESPONDER);
     assert.equal(r1.status, 0, r1.err);
     const P = r1.out.split('\n')[0];
+    // the promise asks for its follow-up, held to the thread's subject as a --re one is (task-3 F1)
+    for (const extra of [[], ['--re', P]]) {
+      const off = F.run(F.old, ['thread', 'reply', T, 'About the goal.', '--refs', `goal:${F.goal}`, ...extra], RESPONDER);
+      assert.notEqual(off.status, 0, `refused: ${extra.join(' ') || 'no --re'}`);
+      assert.match(off.err, /off this thread's subject: a follow-up/);
+    }
     const r2 = F.run(F.old, ['thread', 'reply', T, 'Two tickets are open.', '--re', P], RESPONDER);
     assert.equal(r2.status, 0, r2.err);
     const r3 = F.run(F.old, ['thread', 'reply', T, 'Something else.'], RESPONDER);

@@ -9885,12 +9885,16 @@ function cmdThread() {
   // question of its own (thread ask), which is what it names
   const askedFor = (t, by, objects, { refs = [], re, off, goal, asks = false } = {}) => {
     if (owedTurns(t.id, objects).length) return;
-    // the responder's open promise there (pendingOpen, kit-104): the supervisor's to take over, the responder's to keep
-    if (by !== 'owner' && pendingOpen(logTurns(t.id, objects), t)) return;
+    // the responder's open promise there (pendingOpen, kit-104): the supervisor's to take over; the
+    // responder's to keep, as a follow-up of that turn, held to the subject as a --re one is (task-3 F1)
+    const promise = by === 'owner' ? null : pendingOpen(logTurns(t.id, objects), t);
+    if (promise && by === 'supervisor') return;
+    if (promise && by === 'responder' && !re) re = promise.id;
+    // an open handoff to the supervisor for this thread, as kit-104 reads one (openHandoffs: not settled
+    // by a supervisor turn after it, named by no message's or question's re), never one it sent itself
     if (!re && by === 'supervisor') {
-      const mine = logTurns(t.id, objects).filter((u) => u.created_by === 'supervisor').pop()?.created_at ?? '';
-      const replied = new Set([...objects.values()].filter((m) => m.type === 'message' && typeof m.re === 'string').map((m) => m.re));
-      for (const m of objects.values()) if (m.type === 'message' && m.kind === 'handoff' && m.thread === t.id && m.created_by !== 'supervisor' && m.created_at > mine && !replied.has(m.id)) return;
+      const h = openHandoffs(objects).get(t.id);
+      if (h && objects.get(h)?.created_by !== 'supervisor') return;
     }
     if (off !== undefined) return;
     const elsewhere = by === 'responder' ? 'hand it to the supervisor (send supervisor "…" --kind handoff --thread <t-id>)' : 'start its own thread (thread new --subject \'{"kind":"item","ref":"question:q-…"}\' -- "<words>")';
