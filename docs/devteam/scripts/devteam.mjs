@@ -7066,20 +7066,23 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   const tree = [];
   for (let i = 0; i + 1 < parts.length; i += 2) tree.push({ verb: parts[i] === 'A' ? 'adds' : 'changes', f: parts[i + 1] });
   // A path as a disk that folds names reads it, part by part: Unicode compatibility normalisation
-  // (an NFD spelling is the NFC one, and ſ is s), lower case, and trailing dots and spaces dropped
-  // (as Windows drops them). It folds more than any one disk does; a stray path it catches is only
-  // refused.
-  const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toLowerCase().normalize('NFKC').replace(/[. ]+$/, '')).join('/');
+  // (an NFD spelling is the NFC one, and ſ is s), upper case then lower case (NTFS upper-cases, so
+  // a dotless ı is i), default-ignorable code points dropped (all of those HFS+ ignores, such as
+  // U+200C, and more, such as a soft hyphen), NFKC again (a mark left beside its letter composes),
+  // and then trailing dots and spaces dropped (as Windows drops them). It folds more than any one
+  // disk does; a stray path it catches is only refused.
+  const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toUpperCase().toLowerCase().replace(/\p{Default_Ignorable_Code_Point}/gu, '').normalize('NFKC').replace(/[. ]+$/, '')).join('/');
   // f is at, or inside the folder at; twin: such a disk puts f at at, or in it, where git doesn't.
   const under = (f, at) => f === at || f.startsWith(`${at}/`);
   const twin = (f, at) => under(fold(f), fold(at)) && !under(f, at);
   const says = ({ verb, f }, at) => `${verb} ${f}, ${fold(f) === fold(at) ? 'which' : 'in a folder'} a disk that ignores case can't tell from ${at}`;
   // a twin of an owner file is named with that file (below); a twin of a folder on their path (the
-  // project folder, or one above it), at the deepest folder it folds into. Only an added path: one
-  // already on main in such a folder is no owner file, so a PR may still change it.
+  // project folder, or one above it), at the deepest folder it folds into: a path the PR adds, or
+  // one an older kit let onto main that it changes (or the twin itself, repointed). Removing it is
+  // the fix, and isn't listed.
   const owned = worldFileFails.files().map((w) => w.rel);
   const folders = [...new Set(owned.flatMap((r) => r.split('/').slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join('/'))))].sort((a, b) => b.length - a.length);
-  const inFolder = tree.filter((t) => t.verb === 'adds' && !owned.some((r) => twin(t.f, r))).flatMap((t) => { const at = folders.find((d) => under(fold(t.f), fold(d))); return at && twin(t.f, at) ? [says(t, at)] : []; });
+  const inFolder = tree.filter((t) => !owned.some((r) => twin(t.f, r))).flatMap((t) => { const at = folders.find((d) => under(fold(t.f), fold(d))); return at && twin(t.f, at) ? [says(t, at)] : []; });
   if (inFolder.length) fails.push(`${inFolder.join('; ')}: the owner's files are read in ${projectRel}, and a twin of a folder on their path can put other files there; remove it`);
   // A plain file, whatever the owner answered: a symlink's blob is the path it points at, so the
   // text read through it changes with no change here; a submodule or a folder pins no text at all.
