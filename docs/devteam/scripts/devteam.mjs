@@ -17763,8 +17763,7 @@ function collectMetrics(since, reviewsSince = 0) {
       const r = goalAtTarget(g);
       if (!r) continue;
       // a No about this same value stands until the value moves or the goal changes
-      const basis = goalMetBasis(g);
-      if (all.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && (q.asked_at > r.created_at || (q.met?.basis === basis && q.met?.reading?.value === r.measure.value && !sameAnswer(q.answer, GOAL_MET_CHOICES[0].label))))))) continue;
+      if (goalAtTargetQuiet(g, r, all)) continue;
       const m = measureOf(g);
       add('medium', 'goal-at-target', g.id, `"${g.title}" reads ${r.measure.value}${m.unit ? ` ${m.unit}` : ''} (${r.created_at.slice(0, 10)}), its target ${m.target}, and is still running: only the owner marks it met`, `ask the owner in the Inbox, never only in chat: ask --class goal-met --goal ${g.id} --recommendation yes (the kit writes the question; planning.md §1)`);
     }
@@ -17793,16 +17792,8 @@ function collectMetrics(since, reviewsSince = 0) {
   // planner in flight for it while planner slots are free.
   {
     const ps = planners();
-    const busy = new Set(ps.flatMap((p) => p.goals));
     // a goal whose design waits on another goal's (plan_after) waits until that one is approved
-    // (a goal let go, or one that doesn't exist, holds nothing back)
-    const blockedBy = (g) => (g.plan_after ?? []).filter((d) => logGet(d.goal)?.type === 'goal' && (logGet(d.goal).status ?? 'draft') === 'draft');
-    const waiting = logObjects('goal').filter((g) => {
-      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || blockedBy(g).length || goalMode(g) !== 'run') return false;
-      const c = goalCheck(g);
-      if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
-      return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
-    }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+    const { waiting } = idlePlanningGoals(ps);
     const cap = settings.max_active_planners;
     // while the fleet drains for a move, nothing new starts: no idle planning, no idle capacity
     if (!drained && waiting.length && (cap == null || ps.length < cap)) idlePlanning = waiting.length;
@@ -18285,6 +18276,34 @@ function waitCause(ref) {
 // values wait.state: open | resolved | failed
 function nextMoves() {
   return [];
+}
+// goal-at-target's quiet rule: a goal-met question about the goal open, or one answered after this
+// reading, or a No about the same value and basis, which stands until the value moves or the goal
+// changes. collectMetrics' finding and the goal rows (G12) both ask it.
+function goalAtTargetQuiet(g, r, qs = questions()) {
+  const basis = goalMetBasis(g);
+  return qs.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && (q.asked_at > r.created_at || (q.met?.basis === basis && q.met?.reading?.value === r.measure.value && !sameAnswer(q.answer, GOAL_MET_CHOICES[0].label))))));
+}
+// A goal whose design waits on another goal's (plan_after) waits while that one is a draft (a goal
+// let go, or one that doesn't exist, holds nothing back).
+const planAfterBlockers = (g) => (g.plan_after ?? []).filter((d) => logGet(d.goal)?.type === 'goal' && (logGet(d.goal).status ?? 'draft') === 'draft');
+// A ready goal whose current milestone has a precondition no feature covers (or no feature at all).
+function needsFeatures(g, c = goalCheck(g)) {
+  return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
+}
+// The goals that need planning with nobody planning them: a fully defined draft goal with no open
+// question, or a ready goal that needsFeatures, with no planner on it, running, and waiting on no
+// other goal's design; highest priority first. full: the planner slots are all taken.
+function idlePlanningGoals(ps = planners()) {
+  const busy = new Set(ps.flatMap((p) => p.goals));
+  const waiting = logObjects('goal').filter((g) => {
+    if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || planAfterBlockers(g).length || goalMode(g) !== 'run') return false;
+    const c = goalCheck(g);
+    if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
+    return needsFeatures(g, c);
+  }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+  const cap = loadSettings().max_active_planners;
+  return { waiting, cap, full: cap != null && ps.length >= cap };
 }
 // The move whose subject is this one ("goal:<g-id>", …), or null.
 function nextMoveOf(subject) {
