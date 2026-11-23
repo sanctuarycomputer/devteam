@@ -1378,6 +1378,19 @@ export function createGateway(opts = {}) {
     return person && !isOwner(person) ? { inv, person } : null;
   };
 
+  // A method a new link added to someone who already had one: a notice in their row, shown once at
+  // their next sign-in with another method (never the added one's own, so whoever holds a leaked
+  // link can't spend the warning), and always in their own method list. The newest 20 are kept.
+  const NOTICES_KEPT = 20;
+  const withNotice = (row, n) => {
+    const all = [...(row.notices ?? []), n];
+    const added = all.filter((x) => x?.kind === 'method-added');
+    const drop = new Set(added.slice(0, Math.max(0, added.length - NOTICES_KEPT)));
+    return all.filter((x) => !drop.has(x));
+  };
+  const noticeOut = ({ kind, at, type, label }) => ({ kind, at, type, label });
+  const noticesOf = (s, person) => (person.id === null ? [] : ((s.people ?? []).find((p) => p.id === person.id)?.notices ?? []).filter((x) => x?.kind === 'method-added').map(noticeOut));
+
   // --- the owner's People routes (kit-249's route contract): a refusal is { error, code } --------
   const refuse = (res, status, code, error) => json(res, status, { error, code });
   const INVITE_MS = 24 * 3600 * 1000;
@@ -1553,13 +1566,15 @@ export function createGateway(opts = {}) {
       // another finish of this state may have landed while this one's finish was awaited
       if (usedSignIns.has(state)) return no(403, START_AGAIN);
       if (!holder) return no(403, 'no one on this box signs in with that');
-      const people = s.people?.map((x) => (x.id !== holder.person.id ? x : { ...x, last_seen: iso, methods: holder.top ? x.methods : x.methods.map((m) => (m.id === holder.method.id ? { ...m, data, last_used: iso } : m)) }));
+      const usedId = holder.top ? key : holder.method.id;
+      const shown = ((s.people ?? []).find((x) => x.id === holder.person.id)?.notices ?? []).filter((n) => n?.kind === 'method-added' && !n.shown_at && n.method !== usedId);
+      const people = s.people?.map((x) => (x.id !== holder.person.id ? x : { ...x, last_seen: iso, methods: holder.top ? x.methods : x.methods.map((m) => (m.id === holder.method.id ? { ...m, data, last_used: iso } : m)), ...(shown.length ? { notices: x.notices.map((n) => (shown.includes(n) ? { ...n, shown_at: iso } : n)) } : {}) }));
       // a top-level passkey takes back only its counter and last use, as today
       const used = { ...s, ...(holder.top ? { passkeys: s.passkeys.map((x) => (x.id === key ? { ...x, signCount: data?.signCount, usedAt: iso } : x)) } : {}), ...(people ? { people } : {}) };
-      const { next, set } = sessionFor(used, holder.person, holder.top ? key : holder.method.id);
+      const { next, set } = sessionFor(used, holder.person, usedId);
       store.save(next);
       spendSignIn(state);
-      return { status: 200, body: { ok: true }, cookies: [set, ...dropped] };
+      return { status: 200, body: { ok: true, ...(shown.length ? { notices: shown.map(noticeOut) } : {}) }, cookies: [set, ...dropped] };
     }
     if (holder) return no(400, type === 'passkey' ? 'that passkey is already registered' : 'that sign-in method is already registered', after);
     const owner = p === 'claim' || isOwner(person);
@@ -1586,7 +1601,10 @@ export function createGateway(opts = {}) {
       return { status: 200, body: { ok: true }, cookies: dropped };
     }
     // an invite: the method to its person, the invite gone in the same write, and a session
-    const { next, set } = sessionFor({ ...addTo(s), invites: (s.invites ?? []).filter((x) => x.hash !== rec.invite) }, person, m.id);
+    const had = (person.methods ?? []).length > 0;
+    const added = addTo(s);
+    const noted = had ? { ...added, people: added.people.map((x) => (x.id !== person.id ? x : { ...x, notices: withNotice(x, { kind: 'method-added', at: iso, type, label, method: m.id, shown_at: null }) })) } : added;
+    const { next, set } = sessionFor({ ...noted, invites: (s.invites ?? []).filter((x) => x.hash !== rec.invite) }, person, m.id);
     store.save(next);
     log(`an invite added a ${type} sign-in method "${label}"`);
     return { status: 200, body: { ok: true }, cookies: [set, ...dropped] };
@@ -2903,7 +2921,7 @@ export function createGateway(opts = {}) {
         if (p === '/auth/people/invite' && req.method === 'POST') return await inviteRoute(req, res, who);
         if (p === '/auth/people/relink' && req.method === 'POST') return await relinkRoute(req, res, who);
         // Each of these acts on the signed-in person's own methods only (ownMethods, removeMethod).
-        if (p === '/auth/method/list' && req.method === 'GET') return json(res, 200, { methods: ownMethods(store.load(), person) });
+        if (p === '/auth/method/list' && req.method === 'GET') { const now = store.load(); return json(res, 200, { methods: ownMethods(now, person), notices: noticesOf(now, person) }); }
         if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(ownMethods(store.load(), person).filter((m) => m.type === 'passkey').map((m) => ({ id: m.id, name: m.label, createdAt: m.added_at })), PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
         if ((p.startsWith('/auth/passkeys/') || p === '/auth/method/remove') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
         // the passkey row's add, after the gate and the fresh rule above (today's place and answers);
@@ -3340,7 +3358,27 @@ if (!token) err('This link has no claim token. Use the full link from the box\\'
 document.getElementById('go').onclick = run(async () => { await create('/auth/claim/options', '/auth/claim/verify', { token, name: document.getElementById('name').value }); location.replace(${jsonIn(`${box}/`)}); });
 </script></body></html>`,
   login: (next) => `${doc('Sign in', '<h1>devteam</h1><p>Sign in with this box\'s passkey.</p><p><button id="go" autofocus>Sign in with a passkey</button></p><p id="err"></p>')}
-<script>const next = ${jsonIn(next)}; document.getElementById('go').onclick = run(async () => { await signIn(); location.replace(next); });</script></body></html>`,
+<div id="notes" hidden></div>
+<script>const next = ${jsonIn(next)};
+// a notice the sign-in hands back is shown, as text, before going on
+const day = (at) => { const d = new Date(at); return Number.isNaN(d.getTime()) ? 'a recent day' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); };
+document.getElementById('go').onclick = run(async () => {
+  const j = await signIn();
+  const ns = Array.isArray(j?.notices) ? j.notices.filter((n) => n && n.kind === 'method-added') : [];
+  if (!ns.length) return location.replace(next);
+  const box = document.getElementById('notes');
+  for (const n of ns) {
+    const p = document.createElement('p');
+    p.textContent = 'A sign-in method (a ' + String(n.type) + ') was added to your account on ' + day(n.at) + ', from a new link the box\\'s owner sent. If you didn\\'t ask for one, tell them.' + (n.label ? ' It is named "' + String(n.label) + '".' : '');
+    box.append(p);
+  }
+  const ok = document.createElement('button');
+  ok.textContent = 'OK';
+  ok.onclick = () => location.replace(next);
+  box.append(ok);
+  box.hidden = false;
+  document.getElementById('go').hidden = true;
+});</script></body></html>`,
   unclaimed: () => `${doc('Unclaimed', '<h1>This box is unclaimed</h1><p>Open the claim link from the box\'s logs (it ends in <code>/auth/claim#…</code>). Lost it? In a shell on the box, run <code>devteam-reclaim</code>.</p>')}</body></html>`,
   passkeys: (list, box) => `${doc('Passkeys', `<h1>Passkeys</h1><p>Any of these opens the box. Add one for another device or password manager; keep at least one. Removing one signs out every other session.</p><ul>${list.map((p) => `<li><span>${esc(p.name)} <small style="color:var(--fg2)">${esc(p.createdAt.slice(0, 10))}</small></span>${list.length > 1 ? `<button class="quiet" data-id="${esc(p.id)}">Remove</button>` : ''}</li>`).join('')}</ul><input id="name" placeholder="Name the new passkey" maxlength="60"><p><button id="add">Add a passkey</button> <button class="quiet" id="out">Sign out</button> <a href="${esc(`${box}/`)}">Back to the hub</a></p><p id="err"></p>`)}
 <script>

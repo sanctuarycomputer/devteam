@@ -435,6 +435,85 @@ test('org-access A4: a new link adds a sign-in method to someone who joined and 
   } finally { await gw.close(); }
 });
 
+test('org-access A4: the added-method notice comes with the next sign-in, once, and always with GET /auth/method/list', async () => {
+  const { gw, ana, anaKey } = await setup('notice');
+  try {
+    // a new link for Ana, who already has a passkey, as the relink route writes it
+    const link = seedInvite(gw, ana.id);
+    const { fin: added, key: phone } = await join(gw, link, authenticator(), 'phone');
+    ok(added, 'the link adds a passkey');
+    const notes = rowOf(gw, ana.id).notices.filter((n) => n.kind === 'method-added');
+    assert.equal(notes.length, 1, 'one notice in Ana\'s row');
+    assert.deepEqual([notes[0].type, notes[0].label], ['passkey', 'phone']);
+    assert.ok(Date.parse(notes[0].at) > Date.now() - 60000);
+    // a sign-in with the passkey that link added neither shows nor spends it: whoever holds a leaked
+    // link can't use up the warning meant for Ana
+    const own = await signIn(gw, phone);
+    ok(own.v, 'the new passkey signs in');
+    assert.deepEqual(own.v.json, { ok: true }, 'the new method\'s own sign-in shows nothing');
+    const one = await signIn(gw, anaKey);
+    ok(one.v, 'her next sign-in');
+    assert.deepEqual(one.v.json.notices?.map((n) => [n.kind, n.type, n.label, n.at]), [['method-added', 'passkey', 'phone', notes[0].at]], 'shown at the next sign-in');
+    const two = await signIn(gw, anaKey);
+    ok(two.v, 'and the one after');
+    assert.deepEqual(two.v.json, { ok: true }, 'once');
+    const list = await two.b.req('GET', '/auth/method/list');
+    ok(list, 'method list');
+    assert.deepEqual(list.json.notices, [{ kind: 'method-added', at: notes[0].at, type: 'passkey', label: 'phone' }], 'always in her own list');
+    assert.equal(list.json.methods.length, 2);
+    // a first invite leaves no notice: nothing was added to an account that had none
+    const [bea] = seed(gw, [{ name: 'Bea' }]);
+    ok((await join(gw, seedInvite(gw, bea.id))).fin, 'Bea joins');
+    assert.deepEqual(rowOf(gw, bea.id).notices, [], 'no notice for a first invite');
+  } finally { await gw.close(); }
+});
+
+// The sign-in page's own scripts, run in a stand-in browser: the sign-in answers with a notice.
+function fakePage(html, answer) {
+  const els = new Map();
+  const replaced = [];
+  const el = (id = null) => {
+    const e = { id, textContent: '', innerHTML: '', value: '', hidden: false, disabled: false, children: [], style: {}, dataset: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      append(...c) { this.children.push(...c); }, appendChild(c) { this.children.push(c); return c; }, replaceChildren(...c) { this.children = c; }, prepend(...c) { this.children.unshift(...c); }, remove() {}, setAttribute(k, v) { this[k] = v; }, removeAttribute() {}, addEventListener(t, f) { this[`on${t}`] = f; }, querySelector: () => null, querySelectorAll: () => [], focus() {} };
+    return e;
+  };
+  const document = { addEventListener() {}, removeEventListener() {}, getElementById: (id) => { if (!els.has(id)) els.set(id, el(id)); return els.get(id); }, createElement: () => { const e = el(); els.set(Symbol('made'), e); return e; }, createTextNode: (t) => ({ textContent: String(t), children: [] }), querySelector: () => null, querySelectorAll: () => [], body: el('body') };
+  const fetch = async (url) => ({ ok: true, json: async () => (String(url).includes('options') ? { challenge: 'AAAA', rpId: 'box.localhost', allowCredentials: [] } : answer) });
+  const navigator = { credentials: { get: async () => ({ rawId: new Uint8Array([1]).buffer, response: { clientDataJSON: new Uint8Array([2]).buffer, authenticatorData: new Uint8Array([3]).buffer, signature: new Uint8Array([4]).buffer, userHandle: null } }) } };
+  const location = { href: 'http://box.localhost/auth/login', pathname: '/auth/login', hash: '', search: '', replace: (to) => replaced.push(to), assign: (to) => replaced.push(to) };
+  const ctx = vm.createContext({ addEventListener() {}, document, fetch, navigator, location, history: { replaceState() {} }, window: {}, console, atob, btoa, Uint8Array, ArrayBuffer, TextEncoder, TextDecoder, setTimeout, clearTimeout, Promise, JSON, Date, encodeURIComponent, decodeURIComponent, confirm: () => true, matchMedia: () => ({ matches: false }) });
+  for (const [, code] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) vm.runInContext(code, ctx);
+  // every word on the page: text as text, markup as it would parse
+  const words = () => { const all = []; const walk = (e) => { if (!e) return; all.push(e.textContent ?? '', e.innerHTML ?? ''); for (const c of e.children ?? []) walk(c); }; for (const e of els.values()) walk(e); return all.join('\n'); };
+  const button = (text) => { let hit = null; const walk = (e) => { if (!e || hit) return; if (typeof e.onclick === 'function' && (e.textContent ?? '').trim() === text) hit = e; for (const c of e.children ?? []) walk(c); }; for (const e of els.values()) walk(e); return hit; };
+  return { els, words, button, replaced };
+}
+
+test('org-access A4: the sign-in page shows the added-method notice it is given, as text, before going on', async () => {
+  const gw = await gateway('notice-words');
+  try {
+    await claim(gw);
+    const login = await gw.raw('GET', '/auth/login?next=' + encodeURIComponent(`${gw.publicUrl}/#settings`));
+    ok(login, 'the sign-in page');
+    const page = fakePage(login.body, { ok: true, notices: [{ kind: 'method-added', at: '2026-11-17T10:00:00.000Z', type: 'passkey', label: '<b>phone</b>' }] });
+    await page.els.get('go').onclick();
+    await new Promise((r) => setTimeout(r, 20));
+    const said = page.words();
+    assert.ok(said.includes(T.noticeWords), `the notice is shown: ${said.slice(0, 300)}`);
+    assert.ok(!/<b>phone<\/b>/.test([...page.els.values()].map((e) => e.innerHTML).join('')), 'the label is text, never markup');
+    assert.deepEqual(page.replaced, [], 'it waits on the person');
+    const okBtn = page.button('OK');
+    assert.ok(okBtn, 'with OK');
+    await okBtn.onclick();
+    assert.deepEqual(page.replaced, [`${gw.publicUrl}/#settings`], 'then goes on');
+    // with nothing to show, straight on
+    const plain = fakePage(login.body, { ok: true });
+    await plain.els.get('go').onclick();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(plain.replaced, [`${gw.publicUrl}/#settings`]);
+  } finally { await gw.close(); }
+});
+
 test('org-access A4: only the owner relinks, never their own row, at the row\'s rev', async () => {
   const { gw, owner, ana } = await setup('relink-who');
   try {
