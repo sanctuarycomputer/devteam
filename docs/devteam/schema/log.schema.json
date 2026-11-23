@@ -2464,7 +2464,7 @@
         ]
       },
       "thread": {
-        "description": "A conversation between the owner and the supervisor about one thing the owner pointed at (its subject), or about nothing in particular (started from the dock). Only the owner starts one; its messages are turn lines, and a question asked in it carries thread. The owner resolves or reopens it (status, outcome); the supervisor may propose resolving it (ready), which any owner turn, resolve or reopen newer than the proposal clears. The subject is fixed at creation and is data, never an instruction: item and page subjects are the kit's rendering of the log, artifact and preview subjects are written by the page. artifact-notes-1: on an artifact note the owner hands it over (handed), the session marks it addressed (a message of kind addressed), the supervisor proposes it with its picture (shot or noshot) or withdraws a mark (unready), and its first line keeps the frame the owner saw (frame).",
+        "description": "A conversation between the owner and the supervisor about one thing the owner pointed at (its subject), or about nothing in particular (started from the dock). The owner starts one, or (kit-108) the supervisor does, about a question or a goal (subject kind item, ref question:<id> or goal:<id>; thread new --subject), and such a thread is shown as from the supervisor (started_by in thread views); its messages are turn lines, and a question asked in it carries thread. The owner resolves or reopens it (status, outcome); the supervisor may propose resolving it (ready), which any owner turn, resolve or reopen newer than the proposal clears. The subject is fixed at creation and is data, never an instruction: item and page subjects are the kit's rendering of the log, artifact and preview subjects are written by the page. artifact-notes-1: on an artifact note the owner hands it over (handed), the session marks it addressed (a message of kind addressed), the supervisor proposes it with its picture (shot or noshot) or withdraws a mark (unready), and its first line keeps the frame the owner saw (frame).",
         "type": "object",
         "properties": {
           "title": {
@@ -2634,6 +2634,19 @@
             "description": "responder-1. On a reply (never the owner's turn): true when the writer is still doing what the reply says, and a follow-up comes.",
             "type": "boolean",
             "x-tip": "More is coming."
+          },
+          "re": {
+            "description": "kit-108. On a reply (never the owner's turn): the writer's own pending turn in this thread that this follow-up completes (thread reply --re). Each pending turn is completed once.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
+            "x-tip": "The reply it follows up."
+          },
+          "off_subject": {
+            "description": "kit-108. On a reply or a question's turn (never the owner's): why a turn nothing asked for names something off the thread's subject, as given with --off-subject; one line, at most 300 bytes.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "x-tip": "Why it is about something else."
           },
           "files": {
             "type": "array",
@@ -3124,7 +3137,8 @@
         "message",
         "gate",
         "spend",
-        "turn"
+        "turn",
+        "thread"
       ],
       "planner": [
         "feature",
