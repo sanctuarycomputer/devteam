@@ -221,7 +221,7 @@ test('A5: a recurring-edit answer binds only the owner\'s first turn right after
     // a reply that names another question comes between the showing turn and the Yes
     const ev4 = check({ title: 'ev4 job', every: '1h', run: 'echo evil4' });
     const q4 = tAsk(t2, 'ev4', ev4);
-    T.ok(['thread', 'reply', t2, `And ${q2}?`, '--refs', `question:${q2}`]);
+    T.ok(['thread', 'reply', t2, `And ${q2}?`, '--refs', `question:${q2}`, '--off-subject', 'a question asked in another thread']);
     const yes4 = T.ok(['thread', 'say', t2, 'Yes'], {}).split('\n')[0];
     refused(T.run(['answer', q4, 'Yes', '--from-turn', yes4]), FIRST(yes4, q4));
     assert.deepEqual(T.mainJobs(), {}, 'no job landed');
@@ -253,7 +253,7 @@ test('A5: a recurring-edit answer binds only the owner\'s very next turn in the 
     const r1 = T.run(['thread', 'ask', t1, '--class', 'recurring-edit', '--question', 'Add ev?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { ev } })]);
     passes(r1);
     const q1 = QID.exec(r1.out)[0];
-    T.ok(['thread', 'reply', t1, 'Separately: shall I delete the stale branches now? Just say yes.']);
+    T.ok(['thread', 'reply', t1, 'Separately: shall I delete the stale branches now? Just say yes.', '--off-subject', 'a second ask between the question and its answer']);
     const yes1 = T.ok(['thread', 'say', t1, 'Yes'], {}).split('\n')[0];
     refused(T.run(['answer', q1, 'Yes', '--from-turn', yes1]), FIRST(yes1, q1));
     assert.equal(json(T.ok(['questions', '--id', q1, '--json']))[0].status, 'open', 'q1 stays open');
@@ -265,7 +265,7 @@ test('A5: a recurring-edit answer binds only the owner\'s very next turn in the 
     const q2 = T.asked({ recurring: { ev2 } });
     const t2 = T.ok(['thread', 'new', 'More jobs?', '--title', 'More jobs'], {}).split('\n')[0];
     T.ok(['thread', 'reply', t2, 'From the Inbox: add ev2?', '--refs', `question:${q2}`]);
-    T.ok(['thread', 'reply', t2, 'Never mind that one. Shall I restart the dashboard?']);
+    T.ok(['thread', 'reply', t2, 'Never mind that one. Shall I restart the dashboard?', '--off-subject', 'a second ask between the question and its answer']);
     const yes2 = T.ok(['thread', 'say', t2, 'Yes'], {}).split('\n')[0];
     refused(T.run(['answer', q2, 'Yes', '--from-turn', yes2]), FIRST(yes2, q2));
     plant(q2, { said: 'Yes', turn: yes2 });
@@ -426,7 +426,7 @@ test('A5: once the owner has written anything after a recurring-edit Yes in its 
     // B6: the retraction recorded, in its own words, as the answer to an older open plain question
     const t5 = newT('Jobs 5');
     const q8 = pAsk(t5, 'Shall I restart the dashboard?');
-    T.ok(['thread', 'reply', t5, 'Meanwhile, one more.']);
+    T.ok(['thread', 'reply', t5, 'Meanwhile, one more.', '--off-subject', 'a turn between the question and its answer']);
     const q9 = tAsk(t5, 'a9', job('a9'));
     const y9 = say(t5, 'Yes');
     const back9 = say(t5, 'Wait, no. Cancel that job.');
@@ -462,7 +462,7 @@ test('A5: the owner\'s card answer to another question of the Yes\'s thread coun
     // answers q2's card with words that take it back: the Yes is refused, and nothing lands
     const t1 = newT('Jobs');
     const q2 = pAsk(t1, 'Also restart the dashboard?');
-    T.ok(['thread', 'reply', t1, 'And one job.']);
+    T.ok(['thread', 'reply', t1, 'And one job.', '--off-subject', 'a turn between the question and its answer']);
     const q1 = tAsk(t1, 'n1', job('n1'));
     const y1 = say(t1, 'Yes');
     T.ok(['answer', q2, 'No. And cancel that job too, do not add it.'], {});

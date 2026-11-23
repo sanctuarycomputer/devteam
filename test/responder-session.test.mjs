@@ -377,7 +377,6 @@ test('R4: prompt responder names its section of supervisor.md, and that section 
     const p = F.ok(F.old, ['prompt', 'responder']);
     assert.match(p, /docs\/devteam\/process\/supervisor\.md/);
     assert.match(p, /§13/);
-    assert.doesNotMatch(p, /--re\b/, 'no command a later ticket builds');
     // it prints the prompt alone, as the start writes it: accepted knowledge is not added
     const k = F.ok(F.old, ['knowledge', 'add', '--kind', 'fact', '--scope', 'project', '--statement', 'Releases go out on Tuesdays'], SUP).match(/k-\S+/)[0];
     F.ok(F.old, ['knowledge', 'set', k, '--status', 'accepted'], SUP);
@@ -401,7 +400,6 @@ test('R4: prompt responder names its section of supervisor.md, and that section 
       ['refs as <type>:<id>, as the code takes them', /`--refs` as `<type>:<id>`/],
       ['scripts in its folder, removed once run', /script files the shell rule asks for in your folder[^.]*remove each when it has run/],
     ]) assert.match(s, re, what);
-    assert.doesNotMatch(s, /--re\b/, 'names no command a later ticket builds');
   } finally { F.done(); }
 });
 
@@ -424,7 +422,7 @@ test('R6: a responder reply to turns the supervisor answered since its last turn
   const F = fixture('responder-anyway');
   try {
     const T = F.owner(['thread', 'new', '--title', 'Copy', '--', 'Shorten the hero line.']).split('\n')[0];
-    F.ok(F.old, ['thread', 'reply', T, 'On it.', '--pending'], RESPONDER);
+    const P = F.ok(F.old, ['thread', 'reply', T, 'On it.', '--pending'], RESPONDER).split('\n')[0];
     F.owner(['thread', 'say', T, 'Also the footer.']);
     F.sup(['thread', 'reply', T, 'Both done.']);
     const turns = () => json(F.ok(F.old, ['thread', 'show', T, '--json'])).turns.length;
@@ -433,7 +431,7 @@ test('R6: a responder reply to turns the supervisor answered since its last turn
     assert.notEqual(r.status, 0, 'refused');
     assert.match(r.err, /the supervisor has answered this/);
     assert.equal(turns(), n, 'nothing written');
-    const ok = F.run(F.old, ['thread', 'reply', T, 'Done too.', '--anyway'], RESPONDER);
+    const ok = F.run(F.old, ['thread', 'reply', T, 'Done too.', '--anyway', '--re', P], RESPONDER);
     assert.equal(ok.status, 0, ok.err);
     assert.equal(turns(), n + 1, '--anyway writes the turn');
     // new owner words after the supervisor's: the responder answers them with no --anyway
@@ -548,12 +546,12 @@ test('R6b: the responder\'s late follow-up to its own pending turn, after the su
   try {
     // the other backstop: the responder said it was on it, stalled, and the supervisor answered; its late follow-up needs --anyway too
     const T2 = F.owner(['thread', 'new', '--title', 'Stalled', '--', 'Rename the footer link.']).split('\n')[0];
-    F.ok(F.old, ['thread', 'reply', T2, 'Doing it.', '--pending'], RESPONDER);
+    const P2 = F.ok(F.old, ['thread', 'reply', T2, 'Doing it.', '--pending'], RESPONDER).split('\n')[0];
     F.sup(['thread', 'reply', T2, 'Done: renamed.']);
     const late = F.run(F.old, ['thread', 'reply', T2, 'Renamed.'], RESPONDER);
     assert.notEqual(late.status, 0, 'a late follow-up after the supervisor answered is refused');
     assert.match(late.err, /the supervisor has answered this/);
-    assert.equal(F.run(F.old, ['thread', 'reply', T2, 'Renamed.', '--anyway'], RESPONDER).status, 0);
+    assert.equal(F.run(F.old, ['thread', 'reply', T2, 'Renamed.', '--anyway', '--re', P2], RESPONDER).status, 0);
   } finally { F.done(); }
 });
 
@@ -564,7 +562,7 @@ test('R7b: a turn before a resolve is owed nothing after a reopen with no words:
     const T2 = F.owner(['thread', 'new', '--title', 'Later', '--', 'Never mind.']).split('\n')[0];
     F.owner(['thread', 'resolve', T2]);
     F.owner(['thread', 'reopen', T2]);
-    const after = F.run(F.old, ['thread', 'reply', T2, 'Anything else?'], SUP);
+    const after = F.run(F.old, ['thread', 'reply', T2, 'Anything else?', '--off-subject', 'checking in after the reopen'], SUP);
     assert.equal(after.status, 0, after.err);
     assert.doesNotMatch(after.err, /answering/, 'a turn before a resolve is owed nothing after a bare reopen');
   } finally { F.done(); }
@@ -592,7 +590,7 @@ test('R7c: an owner turn and a non-owner turn at the same millisecond: the owner
     put('owner', { type: 'turn', thread: T, text: 'Same moment', routed_to: 'responder' });
     put('supervisor', { type: 'turn', thread: T, text: 'Same moment too' });
     assert.deepEqual(json(F.ok(F.old, ['thread', 'list', '--waiting', '--responder', '--json'], RESPONDER)), [], 'a tie is answered: nothing owed');
-    const r = F.run(F.old, ['thread', 'reply', T, 'Anything else?'], SUP);
+    const r = F.run(F.old, ['thread', 'reply', T, 'Anything else?', '--off-subject', 'checking in after the tie'], SUP);
     assert.equal(r.status, 0, r.err);
     assert.doesNotMatch(r.err, /answering/, 'nothing printed as answered');
   } finally { F.done(); }
@@ -1394,7 +1392,7 @@ test('R13: with DEVTEAM_ROLE unset, its worktree writes as the responder, never 
   const aside = `${F.wt}-aside`;
   F.g(['worktree', 'move', F.wt, aside], F.old);
   fs.symlinkSync(F.old, F.wt);
-  const main = F.run(F.old, ['thread', 'reply', T, 'From the main checkout.'], SUP);
+  const main = F.run(F.old, ['thread', 'reply', T, 'From the main checkout.', '--off-subject', 'which checkout writes as whom'], SUP);
   fs.rmSync(F.wt);
   F.g(['worktree', 'move', aside, F.wt], F.old);
   assert.equal(main.status, 0, main.err);

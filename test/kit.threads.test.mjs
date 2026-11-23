@@ -106,7 +106,7 @@ test('threads: records and the thread commands', async (t) => {
     const target = (env) => F.owner(['whoami'], env).match(/^DEVTEAM_SUPERVISOR=(.*)$/m)[1];
     try {
       // a role-less command is the supervisor's, but it claims no pane: the owner's own terminal is role-less too
-      F.owner(['thread', 'reply', T, 'Role-less, in a pane'], OWN);
+      F.owner(['thread', 'reply', T, 'Role-less, in a pane', '--refs', `goal:${F.goal}`], OWN);
       assert.notEqual(noted(), '%7', 'a role-less command records no pane');
       F.owner(['thread', 'say', T, 'still my own terminal'], OWN);
       assert.equal(show(T).turns.at(-1).by, 'owner', "and the owner's commands there still work");
