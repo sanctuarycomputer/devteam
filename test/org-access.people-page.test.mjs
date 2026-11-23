@@ -724,3 +724,136 @@ test('org-access A3: in Chrome, Your sign-in works as the mock does', CHROME, as
   const want = `${B.gw.publicUrl}/auth/login?next=${encodeURIComponent(`${B.gw.publicUrl}/#settings`)}`;
   await q.until('the sign-in page', `location.href === ${JSON.stringify(want)}`);
 });
+
+// C25, its second half: the owner's People, each step against the gateway's state
+const personSel = (id) => `#hub-settings .person[data-id=${JSON.stringify(id)}]`;
+const menuOf = async (p, id) => {
+  await p.ev(`document.querySelector(${JSON.stringify(`${personSel(id)} .menu-btn`)}).click()`);
+  await p.until('its menu', `Boolean(document.querySelector('.oa-menu'))`);
+  return p.ev(`[...document.querySelectorAll('.oa-menu button')].map((b) => b.textContent)`);
+};
+const pick = (p, words) => p.ev(`[...document.querySelectorAll('.oa-menu button')].find((b) => b.textContent === ${JSON.stringify(words)}).click()`);
+const typeIn = (sel, v) => `(() => { const i = document.querySelector(${JSON.stringify(sel)}); i.value = ${JSON.stringify(v)}; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`;
+const clickText = (sel, words) => `[...document.querySelectorAll(${JSON.stringify(sel)})].find((b) => b.textContent === ${JSON.stringify(words)}).click()`;
+const textOf = (sel) => `(document.querySelector(${JSON.stringify(sel)})?.textContent ?? null)`;
+const invitesOf = (gw, id) => (gw.state().invites ?? []).filter((x) => x.person === id);
+
+test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHROME, async (t) => {
+  const B = await box('a3-people');
+  t.after(() => B.gw.close());
+  const p = await hubAs(t, B, B.owner);
+  if (!p) return t.skip('headless Chrome can\'t load box.localhost here');
+  await p.until('People', `document.querySelectorAll('#hub-settings .person').length === 4`);
+  assert.equal(await p.ev(textOf('#oa-people .oa-intro')), 'Everyone here sees everything on this box. Full people can also change anything but People. Admins move members between Full and View only, and rename or remove people; only you invite, make admins or hand the box over. For someone who must not see the rest, set up a box of their own.');
+  assert.equal(await p.ev(textOf(`${personSel(B.lee.id)} .pmeta`)), 'Full · invite link not used yet · expires in 24 hours', 'Lee, invited');
+  assert.equal(await p.ev(textOf(`${personSel(B.ana.id)} .pmeta`)), '1 sign-in method · never signed in', 'Ana, joined');
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#hub-settings .person .badge')].map((b) => b.textContent)`), ['Owner', 'Admin', 'Full', 'invited']);
+
+  // Ana's menu; Rename
+  assert.deepEqual(await menuOf(p, B.ana.id), ['Rename', 'Send a new link', 'Remove']);
+  await pick(p, 'Rename');
+  await p.until('the rename box', `Boolean(document.querySelector('#oa-rename input'))`);
+  assert.equal(await p.ev(textOf('#oa-rename p')), 'Their name, as everyone here sees it:');
+  for (const [v, words] of [['', 'A name is needed.'], ['Sam Rivera', 'Someone here already has that name.']]) {
+    await p.ev(typeIn('#oa-rename input', v));
+    await p.ev(clickText('#oa-rename button', 'Save'));
+    await p.until(`"${words}"`, `${JSON.stringify(words)} === ${textOf('#oa-rename .oa-err')}`);
+    assert.deepEqual([rowOf(B.gw, B.ana.id).name, rowOf(B.gw, B.ana.id).rev], ['Ana Costa', 1], `nothing changed for ${JSON.stringify(v)}`);
+  }
+  await p.ev(typeIn('#oa-rename input', 'Ana C'));
+  await p.ev(clickText('#oa-rename button', 'Save'));
+  await p.until('the rename toast', `${toast} === 'Renamed to Ana C'`);
+  assert.deepEqual([rowOf(B.gw, B.ana.id).name, rowOf(B.gw, B.ana.id).rev], ['Ana C', 2], 'renamed, rev moved on');
+  await p.until('the row renamed', `${textOf(`${personSel(B.ana.id)} .nm`)}?.startsWith('Ana C')`);
+
+  // Send a new link: the confirm, the link card, kept across a repaint
+  const old = seedInvite(B.gw, B.ana.id, { expires: Date.now() - 1000 });
+  await menuOf(p, B.ana.id);
+  await pick(p, 'Send a new link');
+  assert.equal(await p.ev(textOf('#oa-confirm p')), 'Make a new link for Ana? Opening it adds a sign-in method (a passkey) to their account; their others keep working. Use it when they lost theirs. They are told one was added.');
+  await p.ev(clickText('#oa-confirm button', 'Make the link'));
+  await p.until('the link card', `Boolean(document.querySelector('#oa-link code'))`);
+  assert.equal(await p.ev(textOf('#oa-link h3')), 'Send this link to Ana yourself');
+  assert.equal(await p.ev(textOf('#oa-link p')), 'It works once, for 24 hours. Opening it adds a passkey to Ana\'s account.');
+  assert.equal(await p.ev(textOf('#oa-link .oa-warn')), 'Send it privately, in a message to them, not in a thread on this box: whoever opens it first can use it. It is shown only now.');
+  assert.equal(await p.ev(`document.querySelector('#oa-people .oa-plist').hidden`), true, 'the rows hide under the card');
+  const url = await p.ev(textOf('#oa-link code'));
+  assert.ok(url.startsWith(`${B.gw.publicUrl}/auth/claim#`), url);
+  const ana = invitesOf(B.gw, B.ana.id);
+  assert.equal(ana.length, 1, 'one invite for Ana');
+  assert.notEqual(ana[0].hash, u(sha(old)), 'the old one gone, a new one made');
+  await p.ev(clickText('#oa-link button', 'Copy'));
+  await p.until('Copied', `${JSON.stringify('Copied')} === [...document.querySelectorAll('#oa-link button')].map((b) => b.textContent).find((x) => x.startsWith('Cop'))`);
+  await sleep(11000);
+  assert.equal(await p.ev(textOf('#oa-link code')), url, 'the card and its link outlive the repaint');
+  await p.ev(clickText('#oa-link button', 'Done'));
+  await p.until('the rows again', `!document.querySelector('#oa-link') && !document.querySelector('#oa-people .oa-plist').hidden`);
+  await p.until('Ana\'s new link shows', `${textOf(`${personSel(B.ana.id)} .pmeta`)}?.endsWith(' · a new link not used yet')`);
+
+  // Revoke Lee's invite
+  assert.deepEqual(await menuOf(p, B.lee.id), ['Revoke the link']);
+  await pick(p, 'Revoke the link');
+  assert.equal(await p.ev(textOf('#oa-confirm p')), 'Revoke Lee\'s invite link? It stops working now.');
+  await p.ev(clickText('#oa-confirm button', 'Revoke'));
+  await p.until('the revoke toast', `${toast} === "Lee's invite link no longer works"`);
+  assert.deepEqual([rowOf(B.gw, B.lee.id), invitesOf(B.gw, B.lee.id)], [null, []], 'Lee\'s row and invite gone');
+  await p.until('three rows', `document.querySelectorAll('#hub-settings .person').length === 3`);
+
+  // Remove Ana
+  assert.deepEqual(await menuOf(p, B.ana.id), ['Revoke the link', 'Rename', 'Remove']);
+  await pick(p, 'Remove');
+  assert.equal(await p.ev(textOf('#oa-confirm p')), 'Remove Ana? They are signed out everywhere now, and their sign-in methods stop working. What they did with the terminal stays, such as a program left running or a login copied; if that matters, change the box\'s logins.');
+  await p.ev(clickText('#oa-confirm button', 'Remove'));
+  await p.until('the remove toast', `${toast} === 'Ana was removed and signed out'`);
+  const s = B.gw.state();
+  assert.deepEqual([rowOf(B.gw, B.ana.id), (s.peopleSessions ?? []).filter((x) => x.person === B.ana.id), invitesOf(B.gw, B.ana.id)], [null, [], []], 'Ana\'s row, sessions and invites gone');
+  await p.until('two rows', `document.querySelectorAll('#hub-settings .person').length === 2`);
+
+  // Invite someone: the Full card alone
+  await p.ev(clickText('#oa-people button', 'Invite someone'));
+  await p.until('the invite card', `Boolean(document.querySelector('#oa-invite input'))`);
+  assert.equal(await p.ev(textOf('#oa-invite h3')), 'Invite someone');
+  assert.equal(await p.ev(textOf('#oa-invite p')), 'They get a link that works once, for 24 hours. You send it to them yourself.');
+  assert.equal(await p.ev(`document.querySelector('#oa-invite input').placeholder`), 'Their name');
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#oa-invite .lvl-opt b')].map((b) => b.textContent)`), ['Full'], 'Full alone');
+  assert.equal(await p.ev(`[...document.querySelectorAll('#oa-people button')].some((b) => b.textContent === 'Invite someone')`), false, 'no second card while one is open');
+  const count = B.gw.state().people.length;
+  await p.ev(clickText('#oa-invite button', 'Make the invite link'));
+  await p.until('the blank-name words', `${textOf('#oa-invite .oa-err')} === 'Give them a name, so you can tell people apart here.'`);
+  assert.equal(B.gw.state().people.length, count, 'nothing made');
+  await p.ev(typeIn('#oa-invite input', 'Kim Lee'));
+  await p.ev(clickText('#oa-invite button', 'Make the invite link'));
+  await p.until('Kim\'s link card', `${textOf('#oa-link h3')} === 'Send this link to Kim yourself'`);
+  assert.equal(await p.ev(textOf('#oa-link p')), 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as full.');
+  const kim = B.gw.state().people.find((x) => x.name === 'Kim Lee');
+  assert.ok(kim, 'Kim\'s row');
+  assert.equal(invitesOf(B.gw, kim.id).length, 1, 'and her invite');
+  await p.ev(clickText('#oa-link button', 'Done'));
+  await p.until('three rows again', `document.querySelectorAll('#hub-settings .person').length === 3`);
+
+  // a rename box with typed text outlives the repaint; then Sam goes in another tab
+  await menuOf(p, B.sam.id);
+  await pick(p, 'Rename');
+  await p.until('Sam\'s rename box', `Boolean(document.querySelector('#oa-rename input'))`);
+  await p.ev(typeIn('#oa-rename input', 'Sam typed'));
+  await sleep(11000);
+  assert.equal(await p.ev(`document.querySelector('#oa-rename input')?.value ?? null`), 'Sam typed', 'still open, with what was typed');
+  const t2 = B.gw.state();
+  B.gw.write({ ...t2, people: t2.people.filter((x) => x.id !== B.sam.id) });
+  await p.ev(clickText('#oa-rename button', 'Save'));
+  await p.until('the stale toast', `${toast} === ${JSON.stringify(STALE)}`);
+  await p.until('Sam\'s row gone', `!document.querySelector(${JSON.stringify(personSel(B.sam.id))})`);
+
+  // signed in ten minutes ago: Confirm it's you, nothing sent
+  const q = await hubAs(t, B, mint(B.gw, ownerOf(B.gw), { at: STALE_AT() }));
+  const o = ownerOf(B.gw);
+  await q.until('the stale owner\'s People', `document.querySelectorAll('#hub-settings .person').length === 2`);
+  assert.deepEqual(await menuOf(q, o.id), ['Rename']);
+  await pick(q, 'Rename');
+  await q.until('the rename box', `Boolean(document.querySelector('#oa-rename input'))`);
+  assert.equal(await q.ev(textOf('#oa-rename p')), 'Your name, as others here see it:');
+  await q.ev(typeIn('#oa-rename input', 'Robin'));
+  await q.ev(clickText('#oa-rename button', 'Save'));
+  await q.until('Confirm it\'s you', `Boolean(document.querySelector('#oa-fresh'))`);
+  assert.deepEqual(ownerOf(B.gw), o, 'the owner\'s row unchanged');
+});
