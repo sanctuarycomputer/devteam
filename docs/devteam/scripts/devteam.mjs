@@ -2132,6 +2132,8 @@ function recordSupervisorPane(run, pane) {
   fs.mkdirSync(run, { recursive: true });
   fs.writeFileSync(supervisorPaneFile(run), pane);
   fs.writeFileSync(supervisorPaneMark(run), pane);
+  // a new agent in it: no line of the owner's, nor a reading of its prompt, carries over (terminal@1 §11)
+  sh('tmux', ['set-option', '-p', '-u', '-t', pane, '@devteam-owner-floor', ';', 'set-option', '-p', '-u', '-t', pane, '@devteam-prompt-readable']);
 }
 // Only a command run as the supervisor (DEVTEAM_ROLE=supervisor, as recover and the README start it)
 // records its pane. A role-less command is the supervisor's too (supervisorOnly), but the owner's own
@@ -2188,6 +2190,121 @@ function tryLock(file, fn, { staleMs = 10000 } = {}) {
   } finally {
     fs.rmSync(lock, { recursive: true, force: true });
   }
+}
+// The typing lock (kit-618, terminal@1 §11): every kit write into a pane holds <run>/type-lock-<pane
+// id> for the whole write, so two writers, or a writer and the owner's key post, never interleave.
+// The file holds its holder's pid and a token of that take's own; its mtime is the stamp, refreshed
+// after each tmux call (touch). It is written whole beside the lock and linked into place, so a lock
+// is never seen empty or half written. A waiter takes it over when the pid is dead, or when the stamp
+// is 60 s old (either way: a clock moved back must not hold it forever), by renaming it to a name of
+// its own and checking it renamed the lock it judged, by its inode and its text (another waiter's
+// fresh lock is linked back). The text, not the inode alone, because a filesystem gives a file made
+// after an unlink the freed inode again (ext4 does, every time). A holder unlinks, or stamps, only a
+// lock whose inode and text are still its own, never the lock of someone who took over.
+// Re-entrant along a call chain: in a CLI process, by the files this process holds (a nested take
+// runs at once, and fn(outer) says whether it is the outermost, the hold that reads the floor). A
+// target that doesn't resolve to a pane takes no lock, and its write goes on as before (tmux would
+// refuse it anyway). Back: { value } (fn's), or { busy: true } when the wait ran out, nothing done.
+const typeLock = {
+  // a stamp this old (or this far ahead: a clock moved back) is a holder gone
+  STALE_MS: 60000,
+  // lock file → its hold ({ ino, text }): the locks this process's synchronous chain holds (its
+  // re-entrance), and those the dashboard's chains hold (typeLockAsync's, for touch only)
+  held: new Map(),
+  heldAsync: new Map(),
+  seq: 0,
+  file: (pane, run = runDir) => path.join(run, `type-lock-${pane}`),
+  // the lock as it is now, or null: its inode and its text, read from one open file
+  read(file) {
+    let fd;
+    try { fd = fs.openSync(file, 'r'); } catch { return null; }
+    try { return { ino: fs.fstatSync(fd).ino, mtimeMs: fs.fstatSync(fd).mtimeMs, text: fs.readFileSync(fd, 'utf8') }; } catch { return null; } finally { fs.closeSync(fd); }
+  },
+  // still this hold's: the same inode and the same text (its token)
+  ours: (file, hold) => { const now = typeLock.read(file); return !!now && now.ino === hold.ino && now.text === hold.text; },
+  // one try: the hold taken ({ ino, text }), or null (someone else holds it); throws on anything but a held lock
+  take(file) {
+    const create = () => {
+      const token = `${process.pid}-${++typeLock.seq}-${crypto.randomBytes(6).toString('hex')}`;
+      const text = JSON.stringify({ pid: process.pid, at: Date.now(), token });
+      const tmp = `${file}.new-${token}`;
+      try {
+        fs.writeFileSync(tmp, text, { flag: 'wx' });
+        try { fs.linkSync(tmp, file); } catch (e) { if (e.code === 'EEXIST') return null; throw e; }
+        return { ino: fs.statSync(tmp).ino, text };
+      } finally { try { fs.unlinkSync(tmp); } catch {} }
+    };
+    const got = create();
+    if (got !== null) return got;
+    const was = typeLock.read(file);
+    if (!was) return null; // let go meanwhile: the next try takes it
+    let pid = null;
+    try { pid = JSON.parse(was.text)?.pid; } catch {}
+    let dead = false;
+    if (Number.isInteger(pid) && pid > 0) { try { process.kill(pid, 0); } catch (e) { dead = e.code === 'ESRCH'; } }
+    // unreadable, or no pid: dead once it is 60 s old, which the stamp's rule already says
+    if (!dead && Math.abs(Date.now() - was.mtimeMs) < typeLock.STALE_MS) return null;
+    const aside = `${file}.taken-${process.pid}-${++typeLock.seq}`;
+    try { fs.renameSync(file, aside); } catch { return null; }
+    const moved = typeLock.read(aside);
+    if (moved?.ino !== was.ino || moved?.text !== was.text) {
+      // another waiter took it over first, and this renamed its fresh lock: back where it was
+      try { fs.linkSync(aside, file); } catch {}
+      try { fs.unlinkSync(aside); } catch {}
+      return null;
+    }
+    try { fs.unlinkSync(aside); } catch {}
+    return create();
+  },
+  release(file, hold) {
+    try { if (typeLock.ours(file, hold)) fs.unlinkSync(file); } catch {}
+  },
+  // the stamp of every lock this process holds (a holder has one pane's, or, in flushHeld, the same
+  // window's pane's too), after each tmux call of a write
+  touch() {
+    const now = new Date();
+    for (const [file, hold] of [...typeLock.held, ...typeLock.heldAsync]) { try { if (typeLock.ours(file, hold)) fs.utimesSync(file, now, now); } catch {} }
+  },
+  // the pane id a target names, or null
+  pane: (out) => (/^%\d+$/.test(out?.trim() ?? '') ? out.trim() : null),
+  run(target, fn, { run = runDir, waitMs = 10000 } = {}) {
+    const pane = typeLock.pane(sh('tmux', ['display', '-p', '-t', target, '#{pane_id}']));
+    if (!pane) return { value: fn(true) };
+    const file = typeLock.file(pane, run);
+    if (typeLock.held.has(file)) return { value: fn(false) };
+    let hold = null;
+    try {
+      fs.mkdirSync(run, { recursive: true });
+      for (const start = Date.now(); (hold = typeLock.take(file)) === null;) {
+        if (Date.now() - start >= waitMs) return { busy: true };
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      }
+    } catch { return { value: fn(true) }; } // a run folder that can't hold a lock: written as before
+    typeLock.held.set(file, hold);
+    try { return { value: fn(true) }; } finally { typeLock.held.delete(file); typeLock.release(file, hold); }
+  },
+};
+// The dashboard's typing lock: typeLock's file and rules, never blocking the server. The pane id comes
+// from tmuxAsync, the wait polls with a timer, and the locks a chain holds are in an AsyncLocalStorage
+// (loaded here, once), so one request's hold is never entered by another request's.
+async function typeLockAsync(target, fn, { run = runDir, waitMs = 10000 } = {}) {
+  const { AsyncLocalStorage } = await (typeLockAsync.hooks ??= import('node:async_hooks'));
+  const store = (typeLockAsync.store ??= new AsyncLocalStorage());
+  const pane = typeLock.pane(await tmuxAsync(['display', '-p', '-t', target, '#{pane_id}']));
+  if (!pane) return { value: await fn(true) };
+  const file = typeLock.file(pane, run);
+  const mine = store.getStore();
+  if (mine?.has(file)) return { value: await fn(false) };
+  let hold = null;
+  try {
+    fs.mkdirSync(run, { recursive: true });
+    for (const start = Date.now(); (hold = typeLock.take(file)) === null;) {
+      if (Date.now() - start >= waitMs) return { busy: true };
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  } catch { return { value: await fn(true) }; }
+  typeLock.heldAsync.set(file, hold);
+  try { return { value: await store.run(new Set([...(mine ?? []), file]), () => fn(true)) }; } finally { typeLock.heldAsync.delete(file); typeLock.release(file, hold); }
 }
 
 let mainRefCache;
@@ -4017,17 +4134,24 @@ function resendLostEnter(key, target, lines) {
   // tests only: the pause a loaded machine can put between the first read and the claim
   const pause = Number(process.env.DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS ?? 0);
   if (pause > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
-  const cur = claim();
-  if (!cur) return;
-  const done = Math.max(0, Number(cur.tries) || 0);
-  // after a press, only an untouched pane: a reply, a submission or a line being typed ends the rescue
-  if (done >= LOST_ENTER_TRIES || (done > 0 && cur.bottom !== digest)) return void drop();
-  const pressed = tmux(['send-keys', '-t', target, 'Enter']);
-  const tries = done + 1;
-  const typedAt = cur.typed_at ?? cur.at;
-  // another try later, unless that was the last or the key failed; a newer delivery keeps the slot
-  if (pressed && tries < LOST_ENTER_TRIES) { try { writeJson(claimed, { ...cur, tries, bottom: digest, at: nowIso(), typed_at: typedAt }); putBack(); } catch { drop(); } } else drop();
-  if (!pressed) return;
+  // the claim and the press under the pane's typing lock (kit-618): while the owner's floor holds, or
+  // the lock stays busy, nothing is claimed and the record stays as it was for a later look
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return null;
+    const cur = claim();
+    if (!cur) return null;
+    const done = Math.max(0, Number(cur.tries) || 0);
+    // after a press, only an untouched pane: a reply, a submission or a line being typed ends the rescue
+    if (done >= LOST_ENTER_TRIES || (done > 0 && cur.bottom !== digest)) return void drop();
+    const pressed = tmux(['send-keys', '-t', target, 'Enter']);
+    const tries = done + 1;
+    const typedAt = cur.typed_at ?? cur.at;
+    // another try later, unless that was the last or the key failed; a newer delivery keeps the slot
+    if (pressed && tries < LOST_ENTER_TRIES) { try { writeJson(claimed, { ...cur, tries, bottom: digest, at: nowIso(), typed_at: typedAt }); putBack(); } catch { drop(); } } else drop();
+    return pressed ? { cur, tries, typedAt } : null;
+  });
+  if (!held.value) return;
+  const { cur, tries, typedAt } = held.value;
   const hash = crypto.createHash('sha1').update(cur.text).digest('hex').slice(0, 12);
   appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter (try ${tries} of ${LOST_ENTER_TRIES}): text typed ${Math.round((Date.now() - Date.parse(typedAt)) / 1000)}s ago was still unsubmitted in an idle pane ("${cur.text.slice(0, 60)}${cur.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${typedAt}`, measure: { value: Math.round((Date.now() - Date.parse(cur.at)) / 1000), unit: 's' } });
 }
@@ -4316,6 +4440,18 @@ const heldClaims = (key) => {
     return { dir: path.join(heldRoot(), n), pid, stale: !pidAlive(pid) || Date.now() - touched > HELD_CLAIM_STALE_MS };
   });
 };
+// The supervisor's held lines, for the screen route's held (terminal@1 §6, kit-618): the lines in its
+// window's folder and in the live claim folders a flusher is typing from, and the oldest one's age by
+// its name (0 when none is held). A folder that can't be read counts 0: it never fails the read.
+function supervisorHeld(key) {
+  try {
+    const names = [heldDir(key), ...heldClaims(key).filter((c) => !c.stale).map((c) => c.dir)].flatMap(heldFiles);
+    // a loop, not a spread: a backlog of any size never overflows the call's arguments
+    let oldest = Infinity;
+    for (const n of names) { const at = Number(n.slice(0, 15)); if (Number.isFinite(at) && at < oldest) oldest = at; }
+    return { count: names.length, oldest_ms: Number.isFinite(oldest) ? Math.max(0, Date.now() - oldest) : 0 };
+  } catch { return { count: 0, oldest_ms: 0 }; }
+}
 let heldSeq = 0;
 function holdLine(key, target, line, paste = null) {
   const dir = heldDir(key);
@@ -4406,11 +4542,17 @@ function flushHeld(key) {
       let pane = typeof rec.target === 'string' ? resolvePane(rec.target) : { problem: 'no pane recorded' };
       if (pane.problem || paneKey(pane.target) !== key) pane = resolvePane(key);
       if (pane.problem) { if (heldAge(n) > HELD_GONE_MS && dropHeld(key, f, `its pane is gone: ${pane.problem}`)) continue; stopped = true; break; }
-      const screen = paneScreen(pane.target);
-      const ready = paneReadyIn(screen) || (!paneAskingIn(screen) && heldAge(live[0]) > HELD_NO_INPUT_MS);
       // a paste only as typeNow takes one, paths as text: anything else in the file is typed as a line alone
       const paste = Array.isArray(rec.paste) && rec.paste.length && rec.paste.every((p) => typeof p === 'string') ? rec.paste : null;
-      if (!ready || !typeNow(pane.target, rec.line, paste)) { stopped = true; break; }
+      // under the pane's typing lock (kit-618): the owner's floor first, so it holds the line even past
+      // HELD_NO_INPUT_MS; the floor or a busy lock stops the flush here, this line and those after it held
+      const done = typeLock.run(pane.target, (outer) => {
+        if (outer && ownerLineOpen(pane.target)) return false;
+        const screen = paneScreen(pane.target);
+        const ready = paneReadyIn(screen) || (!paneAskingIn(screen) && heldAge(live[0]) > HELD_NO_INPUT_MS);
+        return ready && typeNow(pane.target, rec.line, paste);
+      });
+      if (done.busy || !done.value) { stopped = true; break; }
       try { fs.unlinkSync(f); } catch {}
       try { const now = new Date(); fs.utimesSync(claimed, now, now); } catch {}
       typed++;
@@ -5272,6 +5414,10 @@ function cmdStatus() {
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
+  // the owner's floor (kit-618): status only looks, so it releases no floor, though ownerLineOpen
+  // still clears both marks from a pane whose agent exited to a shell (spec, Readers that only look)
+  const pane = markedPane(runDir);
+  if (pane && ownerLineOpen(pane, { release: false })) out(`supervisor         ${pane}  [owner's line open]`);
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}${v.last_7d?.first_passes ? `, last ${RECENT_DAYS} days ${v.last_7d.rejected}/${v.last_7d.first_passes}` : ''}`);
 }
 
@@ -18541,9 +18687,17 @@ function loginChangedStop(target, name, budget, ours) {
   if (raw.map((l) => l.trim()).some((l) => PANE_BUSY.test(l) || promptRe.test(l) || PANE_TRUST.test(l) || /Enter to confirm/.test(l) || LIMIT_MENU.test(l))) return false;
   if (clientActiveOn(target) || !ours()) return null;
   const now = Date.now();
-  const verdict = claimRestart(name, budget, now);
-  if (verdict !== 'go') return verdict;
-  const ok = draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt);
+  // the claim and the key under the pane's typing lock (kit-618): the owner's floor, or a busy lock,
+  // is not due (null), before any restart is spent on it
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return { verdict: null };
+    const verdict = claimRestart(name, budget, now);
+    if (verdict !== 'go') return { verdict };
+    return { ok: draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt) };
+  });
+  if (held.busy) return null;
+  if ('verdict' in held.value) return held.value.verdict;
+  const { ok } = held.value;
   appendLog({ type: 'observation', source: 'pane', kind: 'login-continued', subject: name, detail: !ok ? 'a session stopped by a login change could not be sent its continue prompt' : draft ? "a session stopped by a login change had the kit's continue prompt unsent in its input: Enter was pressed" : 'a session stopped by a login change was sent a continue prompt on the active account, which has room', detector: 'pane', source_key: `login-continued ${name} ${now}` });
   if (!ok) out(`could not continue ${name}: tmux did not take the keys`);
   return ok ? 'continued' : 'failed';
@@ -18843,8 +18997,17 @@ function restartSupervisor(budget) {
   // the same order as --replace-agent: everything is checked once more, right before it is replaced
   const again = supervisorToRestart(until);
   if (again?.target !== target || again.id !== id) { releaseRestart('supervisor', now); return null; }
-  let failed = replacePaneProcess(target, mainRoot);
-  if (!failed && !typeNow(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) failed = `could not type into ${target}; run ${cmd} there`;
+  // the respawn and its typing under the pane's typing lock (kit-618), taken only now, so the owner's
+  // keys never wait on origin's read: while the owner's line is open, or another writer holds the
+  // lock, nothing is replaced and the attempt is given back (the next due tick asks again)
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return null;
+    let why = replacePaneProcess(target, mainRoot);
+    if (!why && !typeNow(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) why = `could not type into ${target}; run ${cmd} there`;
+    return { why };
+  });
+  if (held.busy || !held.value) { releaseRestart('supervisor', now); return null; }
+  const failed = held.value.why;
   appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: 'supervisor', detail: failed ? `the supervisor, stopped at a usage limit, could not be restarted: ${failed}` : `the supervisor, stopped at a usage limit, was restarted on conversation ${id}`, detector: 'pane', source_key: `limit-restarted supervisor ${now}` });
   if (failed) out(`could not restart the supervisor: ${failed}`);
   return failed ? 'failed' : 'restarted';
@@ -19339,8 +19502,11 @@ function legacyRecover(root, name, { dry, force, session, window }) {
     // bare, as that kit writes it: a supervisor-pane-role there is a file its kit doesn't know, which
     // its fleet status says holds a move
     fs.writeFileSync(paneFile, pane);
-    // by pane id: a dot in a window name reads as a pane to tmux
-    if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} ${id ? `"$(cat '${promptFile}')"` : shq(promptPointer(promptFile))}`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
+    // by pane id: a dot in a window name reads as a pane to tmux; under that pane's typing lock in the
+    // repo's own run folder (kit-618). A pane just opened has no floor of the owner's; a busy lock is
+    // a window that could not be typed into
+    const typed = typeLock.run(pane, (outer) => !(outer && ownerLineOpen(pane)) && tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} ${id ? `"$(cat '${promptFile}')"` : shq(promptPointer(promptFile))}`]) && tmux(['send-keys', '-t', pane, 'Enter']), { run });
+    if (typed.busy || !typed.value) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
     return `${id ? `resumed session ${id}` : 'started fresh'}${missing.length ? ` (asked to get: ${missing.join(' ')})` : ''}`;
   };
   if (dry) return go();
@@ -19386,6 +19552,50 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
   if (plainText(dim === -1 ? text : text.slice(0, dim)).trim()) return 'typing';
   return busy ? 'busy' : 'ready';
 }
+// The owner's floor (kit-618, terminal@1 §11): the keys route records `<ms> done|open` on the
+// supervisor's pane as @devteam-owner-floor, and while it holds no kit writer types there or presses
+// Enter. Whether it still holds, read by a writer under the pane's typing lock (or, release: false,
+// by a reader that only looks). With no floor, false, and nothing more is read. A value that doesn't
+// parse is open, from time 0. A pane at a shell or gone took the owner's line with its agent: both
+// marks go, and false, before the settle. Within 3 s of its stamp (or up to 3 s ahead of it) it
+// holds. After: on a prompt read readable, ready or busy release it, and so do a dialog or a limit
+// a done floor; on one never read, a done floor is released and an open one holds. A release unsets
+// it, or the kit's own half-typed line would later read typing and hold its next write.
+function ownerLineOpen(pane, { release = true } = {}) {
+  const SETTLE_MS = 3000;
+  // the pane's command in the same read: a pane this read found is never gone by a second call failing
+  const got = sh('tmux', ['display', '-p', '-t', pane, '#{pane_id}\tC#{pane_current_command}\tR#{@devteam-prompt-readable}\tF#{@devteam-owner-floor}']);
+  const c = got?.indexOf('\tC') ?? -1;
+  const r = c === -1 ? -1 : got.indexOf('\tR', c + 2);
+  const f = r === -1 ? -1 : got.indexOf('\tF', r + 2);
+  if (f === -1) return false;
+  const floor = got.slice(f + 2);
+  if (!floor) return false;
+  const id = got.slice(0, c);
+  const m = /^(\d{13}) (done|open)$/.exec(floor);
+  const at = m ? Number(m[1]) : 0;
+  const kind = m ? m[2] : 'open';
+  const s = paneState(id, got.slice(c + 2, r));
+  if (s === 'shell' || s === 'gone') {
+    sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor', ';', 'set-option', '-p', '-u', '-t', id, '@devteam-prompt-readable']);
+    return false;
+  }
+  const readable = promptReadable(id, s, got.slice(r + 2, f));
+  const age = Date.now() - at;
+  if (age < SETTLE_MS && age >= -SETTLE_MS) return true;
+  const released = readable ? s === 'ready' || s === 'busy' || (kind === 'done' && (s === 'dialog' || s === 'limit')) : kind === 'done';
+  if (!released) return true;
+  if (release) sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor']);
+  return false;
+}
+// Whether the pane's prompt has ever been read as one (@devteam-prompt-readable, the first time
+// at ready, busy or typing, recorded then): until it has, a floor's release can't trust a reading.
+function promptReadable(pane, s, mark = sh('tmux', ['display', '-p', '-t', pane, '#{@devteam-prompt-readable}'])) {
+  if (mark) return true;
+  if (!['ready', 'busy', 'typing'].includes(s)) return false;
+  sh('tmux', ['set-option', '-p', '-t', pane, '@devteam-prompt-readable', String(Date.now())]);
+  return true;
+}
 const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine limit-state <pane> | machine pane-state <pane>';
 // tell and alert speak on the machine: the operator's, or the owner's at a terminal; never a session
 // in a fleet, which would be speaking as someone else.
@@ -19424,12 +19634,16 @@ function machineAlert(words) {
 // whatever is typed there next: pressed again, as the kit's lost Enter does, up to TELL_ENTER_TRIES
 // in all, each after a longer wait (a loaded machine redraws slowly). False when it's still there.
 const TELL_ENTER_TRIES = 3;
+// Run under machine tell's typing lock, so no owner post arrives meanwhile; a floor set by a writer
+// that takes no lock (an older kit) is read before each retry, and presses nothing: 'floor'.
 function enterLanded(p) {
   const settle = (n) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.DEVTEAM_TELL_SETTLE_SECONDS ?? 1) * 1000 * n);
   settle(1);
   for (let tries = 1; paneState(p) === 'typing'; tries++) {
     if (tries >= TELL_ENTER_TRIES) return false;
+    if (ownerLineOpen(p)) return 'floor';
     tmux(['send-keys', '-t', p, 'Enter']);
+    typeLock.touch();
     settle(tries + 1);
   }
   return true;
@@ -19452,11 +19666,19 @@ function machineTell(words) {
   try { rec = readJson(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json')); } catch {}
   const p = supervisorPaneIn(root, notedPaneOf(root), rec && typeof rec === 'object' ? rec : null, { strict: true });
   if (!p || p === process.env.TMUX_PANE) return say('not told: no supervisor is up in its root', 3);
-  const s = paneState(p);
-  if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
-  if (!tmux(['send-keys', '-t', p, '-l', `${TELL_PREFIX}${text}`]) || !tmux(['send-keys', '-t', p, 'Enter'])) return say(`not told: could not type into pane ${p}`, 3);
-  if (!enterLanded(p)) return say(`not delivered: the message is still in its input (pane ${p}) after ${TELL_ENTER_TRIES} presses; clear it before anyone types there`, 3);
-  say(`told (pane ${p})`, 0);
+  // from the look to the last Enter under the pane's typing lock, in that root's run folder (kit-618)
+  const held = typeLock.run(p, (outer) => {
+    if (outer && ownerLineOpen(p)) return say("not told: the owner's line is open", 3);
+    const s = paneState(p);
+    if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
+    if (!tmux(['send-keys', '-t', p, '-l', `${TELL_PREFIX}${text}`]) || !tmux(['send-keys', '-t', p, 'Enter'])) return say(`not told: could not type into pane ${p}`, 3);
+    typeLock.touch();
+    const landed = enterLanded(p);
+    if (landed === 'floor') return say(`not delivered: the owner began a line in its terminal (pane ${p}) after the message was typed; look at it before anyone types there`, 3);
+    if (!landed) return say(`not delivered: the message is still in its input (pane ${p}) after ${TELL_ENTER_TRIES} presses; clear it before anyone types there`, 3);
+    say(`told (pane ${p})`, 0);
+  }, { run: path.join(root, 'docs', 'devteam', 'run') });
+  if (held.busy) say('not told: its terminal is busy; try again', 3);
 }
 // ===== operator threads: the owner and the machine's operator, from the hub's Overview =====
 //
@@ -21948,7 +22170,9 @@ function termRoutes({ port, host, log }) {
     child.stdin.end(typeof input === 'string' ? input : undefined);
   });
   const root = realPath(mainRoot);
-  const fmt = TERM_FIELDS.map((f) => `#{${f}}`).join('\t');
+  // the display's two lines (S14, S34): TERM_FIELDS, then the supervisor's held key's window and its
+  // prompt-readable mark, kept off TERM_FIELDS; capture's rows follow
+  const fmt = `${TERM_FIELDS.map((f) => `#{${f}}`).join('\t')}\n#{@devteam-prompt-readable}\t#{window_name}`;
   // the display line, by field name (a tab in the start path stays in it)
   const fieldsOf = (line) => { const v = line.split('\t'); const n = TERM_FIELDS.length; if (v.length > n) v.splice(n - 2, v.length - n + 1, v.slice(n - 2, -1).join('\t')); return Object.fromEntries(TERM_FIELDS.map((f, i) => [f, v[i] ?? ''])); };
   // the supervisor's: the marked pane only, as an id (S11)
@@ -21967,8 +22191,13 @@ function termRoutes({ port, host, log }) {
     const ids = got.out.split('\n').map((l) => l.split('\t')).map(([id, dead, ...tag]) => [id, dead, tag.join('\t')]).filter(([id, dead, tag]) => /^%\d+$/.test(id) && dead === '0' && tag === root && id !== m).map(([id]) => id);
     return (shellPane = ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))[0] ?? null);
   }
-  // held is kit-618's; until the floor ships it is this (§6). The etag covers only whether oldest_ms is due.
+  // held (§6): the Shell's, and a screen not read, is this; the supervisor's is read with each screen
+  // (kit-618), from its window's held lines and its pane's prompt-readable mark. The etag covers only
+  // whether oldest_ms is due.
   const held = () => ({ count: 0, oldest_ms: 0, prompt: 'readable' });
+  // the keys route's 503 (§8, kit-618): the typing lock busy for 2 s, or the floor not recorded
+  const busyWords = 'the terminal is busy; try again';
+  const heldOf = (which, f, mark, win) => (which === 'supervisor' ? { ...supervisorHeld(`${f.session_name}:${win}`), prompt: mark ? 'readable' : 'unknown' } : held());
   const withEtag = (s, raw) => {
     const etag = sha256(JSON.stringify({ ...s, held: { ...s.held, oldest_ms: s.held.oldest_ms >= 120000 } })).slice(0, 20);
     // raw, the read's fields, for the keys route's 423s and 409s: never sent
@@ -21993,21 +22222,31 @@ function termRoutes({ port, host, log }) {
     const got = await tmuxCall(['display', '-p', '-t', P, fmt, ';', 'capture-pane', '-e', '-p', '-t', P]);
     if (!got.ok && !got.missing) { log(`/api/term/${which}: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
     const out = got.ok ? got.out.split('\n') : [];
+    if (out.length > 1 && out.at(-1) === '') out.pop();
     const f = got.ok ? fieldsOf(out[0]) : null;
     // a display line that didn't parse is a failed read, never a screen
     if (f && !(/^%\d+$/.test(f.pane_id) && /^\d+$/.test(f.pane_width) && /^\d+$/.test(f.pane_height))) { log(`/api/term/${which}: tmux's display line didn't parse`); return { error: TERM_WORDS.read }; }
     const why = f ? notOurs(which, f) : 'missing';
     // the Shell's pane moved or went: forget it, and look once more
     if (why && which === 'shell') { shellPane = null; if (again) return readNow(which, false); }
+    const rows = Number(f?.pane_height ?? 0);
+    // the screen is the last rows lines, so a newline in the window's name never shifts a row; the
+    // second line is everything between: the mark, a tab, the window's name
+    const top = Math.max(2, out.length - rows);
+    const [mark = '', ...win] = out.slice(1, top).join('\n').split('\t');
+    // the agent that read the prompt is gone: so is its reading (K3-1); a failed unset is read again next time
+    if (which === 'supervisor' && (why === 'shell' || why === 'dead') && mark) {
+      const unset = await tmuxCall(['set-option', '-p', '-u', '-t', P, '@devteam-prompt-readable']);
+      if (!unset.ok) log(`/api/term/${which}: tmux failed to unset @devteam-prompt-readable: ${unset.timedOut ? 'timed out' : unset.err.trim()}`);
+    }
     if (why) return gone(which, { pane: P, why, fields: f });
-    const rows = Number(f.pane_height);
-    const lines = out.slice(1, 1 + rows).map(termLine);
+    const lines = out.slice(top, top + rows).map(termLine);
     while (lines.length < rows) lines.push('');
     return withEtag({
       v: 1, which, pane: f.pane_id, state: 'live', cols: Number(f.pane_width), rows,
       cursor: { x: Number(f.cursor_x), y: Number(f.cursor_y), visible: f.cursor_flag === '1' },
       modes: { app_cursor: f.keypad_cursor_flag === '1', app_keypad: f.keypad_flag === '1' },
-      history_size: Number(f.history_size), held: held(), lines,
+      history_size: Number(f.history_size), held: heldOf(which, f, mark, win.join('\t')), lines,
     }, { pane: P, why: null, fields: f });
   }
   // Per which: the read in flight, shared, and its result for cacheMs. A send voids it and bumps the
@@ -22086,10 +22325,40 @@ function termRoutes({ port, host, log }) {
     if (went()) return;
     const key = `${b.page}\n${which}`;
     if (b.seq <= (lastSeq.get(key) ?? 0)) return json(res, 200, { ...s, taken: false });
-    // taken the moment the send starts: a send that fails part way is never typed again
-    lastSeq.set(key, b.seq);
-    // kit-618: the typing lock, then the owner's floor, go here (supervisor only)
-    const sent = 'data' in b ? await sendData(s.pane, Buffer.from(b.data, 'hex')) : await sendPaste(s.pane, b.paste);
+    const keysNow = async () => {
+      // taken the moment the send starts: a send that fails part way is never typed again
+      lastSeq.set(key, b.seq);
+      return 'data' in b ? sendData(s.pane, Buffer.from(b.data, 'hex')) : sendPaste(s.pane, b.paste);
+    };
+    let sent;
+    if (which === 'supervisor') {
+      // §3 steps 13 and 14 (kit-618, §11): the pane's typing lock, then the owner's floor, then the
+      // send, all in one hold. An Enter or a Ctrl+C ends the line (done); a paste, Escape or any other
+      // key leaves it open. A refusal here keeps the seq free.
+      const data = 'data' in b ? Buffer.from(b.data, 'hex') : null;
+      const kind = data?.length && [0x0d, 0x03].includes(data[data.length - 1]) ? 'done' : 'open';
+      const floor = () => tmuxCall(['set-option', '-p', '-t', s.pane, '@devteam-owner-floor', `${Date.now()} ${kind}`]);
+      const locked = await typeLockAsync(s.pane, async () => {
+        // the marked pane, again: it can have moved while the post waited for the lock
+        if (marked() !== s.pane) return { refused: [423, TERM_WORDS.moved, 'the marked pane moved while the post waited for the typing lock'] };
+        if (went()) return { gone: true };
+        // the lock's stamp refreshed after each tmux call of the hold (spec, The lock; terminal@1 §11)
+        const set = await floor();
+        typeLock.touch();
+        if (!set.ok) return { refused: [503, busyWords, `the owner's floor could not be recorded: ${set.timedOut ? 'timed out' : set.err.trim()}`] };
+        const got = await keysNow();
+        typeLock.touch();
+        // stamped again once the keys reached tmux, so the settle runs from then; the first stands if not
+        const again = await floor();
+        typeLock.touch();
+        if (!again.ok) log(`/api/term/${which}/keys: tmux failed to record the owner's floor again after the send: ${again.timedOut ? 'timed out' : again.err.trim()}`);
+        return { sent: got };
+      }, { waitMs: 2000 });
+      if (locked.busy) return no(503, busyWords, 'the pane\'s typing lock stayed busy for 2 s');
+      if (locked.value.refused) return no(...locked.value.refused);
+      if (locked.value.gone) return;
+      sent = locked.value.sent;
+    } else sent = await keysNow();
     voidScreen(which);
     if (!sent.ok) { log(`/api/term/${which}/keys: tmux failed on the send: ${sent.timedOut ? 'timed out' : sent.err.trim()}`); return json(res, 500, { error: TERM_WORDS.sent }); }
     // the screen after the change: read until it differs, for up to SETTLE_MS; a failed read keeps the
@@ -23534,19 +23803,12 @@ async function cmdDashboard() {
     // Esc only where the menu itself says it cancels: on a menu whose Esc exits (a folder-trust form) it ends the session
     const notCancel = `nothing was answered: Esc here may not cancel (the terminal says: ${String(st.ask.hint ?? '').replace(/\s+/g, ' ').trim() || 'nothing about Esc'}); answer it in the terminal`;
     if (escape && !paneEscCancels(st.ask.hint)) return no(notCancel);
-    const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); return t === null ? null : screenLines(t); };
+    // look and keyed run only inside the typing lock's hold below, so each refreshes its stamp after its tmux call
+    const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); typeLock.touch(); return t === null ? null : screenLines(t); };
+    const keyed = async (args) => { const r = await tmuxAsync(args); typeLock.touch(); return r; };
     const menuIn = (lines) => { const a = lines ? paneAskingIn(lines) : null; return a?.kind === 'menu' && a.digest === digest ? a : null; };
-    // once more, right before the key
-    const last = menuIn(await look());
-    if (!last) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
-    if (escape && !paneEscCancels(last.hint)) return no(notCancel);
-    // tests only: the moment between that look and the key, in which a question can go
-    const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
-    if (pause > 0) await new Promise((w) => setTimeout(w, pause));
     // until the question is gone or changed, or its cursor has moved
     const settle = async (was) => { let lines = null; for (let t = 0; t < PANE_SETTLE_MS; t += 100) { await new Promise((w) => setTimeout(w, 100)); lines = await look(); const m = menuIn(lines); if (!lines || !m || m.selected !== was) break; } return lines; };
-    // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
-    // still up is reported as a key that may not have landed, as a digit's is, with no second key.
     const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
     const finish = async (rec, keys, why, after) => {
       // the prompt it was is answered: out of the Inbox's count now, not at the next look
@@ -23557,33 +23819,53 @@ async function cmdDashboard() {
       if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal${after}.`, 409);
       return { status: 200, body: { ok: true, out: said } };
     };
-    if (escape) {
-      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Escape'])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
-      const lines = await settle(st.ask.selected);
-      const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
-      return finish(await record({ escape: true, keys: 'Escape' }, why), 'Escape', why, '');
-    }
-    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
-    let lines = await settle(st.ask.selected);
-    let keys = String(option);
-    let still = menuIn(lines);
-    // the same question showing with the cursor where it was: a menu that took the digit and was asked
-    // again at once (a retry, two calls in parallel) looks just like one that ignored it, so no Enter,
-    // which would answer a question the owner never saw; the digit is logged as one that may not have landed
-    const again = !!still && still.selected === st.ask.selected && st.ask.selected === option;
-    if (still && !again) {
-      // still up, and the digit moved the cursor onto the option: Enter takes it
-      if (still.selected !== option) return no(`not answered: the terminal did not take the key ${option} (the question is still up, on option ${still.selected}); answer it in the terminal`);
-      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Enter'])) === null) return no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500);
-      keys = `${option}, Enter`;
-      lines = await settle(option);
-      still = menuIn(lines);
-      if (still) return no(`not answered: the question is still up with option ${option} selected, after ${keys}; answer it in the terminal`);
-    }
-    // what the pane shows after: the menu took the key unless the digit is sitting in the input box
-    const draft = lines ? paneDraftIn(lines) : null;
-    const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
-    return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
+    // From the last look through the last settle under the pane's typing lock (kit-618, terminal@1
+    // §11), so no key post or kit writer lands between the look and the key, or between the digit and
+    // its Enter. The owner's floor isn't read: this is the owner's own press on a card. The lock is let
+    // go before record runs pane answered, whose flush takes it afresh. Back: { answer } (a refusal),
+    // or what was sent, for record.
+    const pressed = await typeLockAsync(st.target, async () => {
+      // once more, right before the key
+      const last = menuIn(await look());
+      if (!last) return { answer: no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now") };
+      if (escape && !paneEscCancels(last.hint)) return { answer: no(notCancel) };
+      // tests only: the moment between that look and the key, in which a question can go
+      const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
+      if (pause > 0) await new Promise((w) => setTimeout(w, pause));
+      // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
+      // still up is reported as a key that may not have landed, as a digit's is, with no second key.
+      if (escape) {
+        if ((await keyed(['send-keys', '-t', st.target, 'Escape'])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
+        const lines = await settle(st.ask.selected);
+        const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
+        return { fields: { escape: true, keys: 'Escape' }, keys: 'Escape', why, after: '' };
+      }
+      if ((await keyed(['send-keys', '-t', st.target, '-l', String(option)])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
+      let lines = await settle(st.ask.selected);
+      let keys = String(option);
+      let still = menuIn(lines);
+      // the same question showing with the cursor where it was: a menu that took the digit and was asked
+      // again at once (a retry, two calls in parallel) looks just like one that ignored it, so no Enter,
+      // which would answer a question the owner never saw; the digit is logged as one that may not have landed
+      const again = !!still && still.selected === st.ask.selected && st.ask.selected === option;
+      if (still && !again) {
+        // still up, and the digit moved the cursor onto the option: Enter takes it
+        if (still.selected !== option) return { answer: no(`not answered: the terminal did not take the key ${option} (the question is still up, on option ${still.selected}); answer it in the terminal`) };
+        if ((await keyed(['send-keys', '-t', st.target, 'Enter'])) === null) return { answer: no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500) };
+        keys = `${option}, Enter`;
+        lines = await settle(option);
+        still = menuIn(lines);
+        if (still) return { answer: no(`not answered: the question is still up with option ${option} selected, after ${keys}; answer it in the terminal`) };
+      }
+      // what the pane shows after: the menu took the key unless the digit is sitting in the input box
+      const draft = lines ? paneDraftIn(lines) : null;
+      const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
+      return { fields: { option, label: opt.label, keys }, keys, why, after: ', and clear its input box if the digit is there' };
+    }, { waitMs: 10000 });
+    if (pressed.busy) return no('nothing was answered: the terminal is busy; try again', 503);
+    const p = pressed.value;
+    if (p.answer) return p.answer;
+    return finish(await record(p.fields, p.why), p.keys, p.why, p.after);
   }
   const bodyMs = uploadLimits().bodyMs;
   // set while it hands over to a new kit (kit-288): what it still answers closes its connection
@@ -23950,21 +24232,29 @@ const promptPointer = (file) => `Your prompt for this session is in the file ${p
 // once pasted, and a paste that fails drops it too, so nothing is left on the server. Only the line
 // is recorded: the lost-Enter rescue matches the line's tail, and a pasted image shows as [Image #n].
 let dropSeq = 0;
+// All of it under the pane's typing lock: outermost, it first reads the owner's floor, and types
+// nothing (false) while that holds, or when the lock stays busy; under a caller's hold (typeInto,
+// flushHeld, loginChangedStop, a restart), the caller read it. The stamp is touched after each call.
 function typeNow(target, line, paste = null) {
   const files = Array.isArray(paste) && paste.length ? paste : null;
-  let ok;
-  if (!files) ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
-  else {
-    const buf = `devteam-drop-${process.pid}-${++dropSeq}`;
-    // the paths loaded first, the line typed only then: a load that fails leaves nothing in the input
-    // box, so a held line typed again later isn't typed after a copy of itself
-    ok = sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
-    if (ok && !tmux(['send-keys', '-t', target, '-l', `${line} `])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
-    if (ok && !tmux(['paste-buffer', '-p', '-d', '-b', buf, '-t', target])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
-    ok = ok && (!dropSpace(files) || tmux(['send-keys', '-t', target, '-l', ' '])) && tmux(['send-keys', '-t', target, 'Enter']);
-  }
-  if (ok) recordSent(target, line);
-  return ok;
+  const t = (args) => { const r = tmux(args); typeLock.touch(); return r; };
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return false;
+    let ok;
+    if (!files) ok = t(['send-keys', '-t', target, '-l', line]) && t(['send-keys', '-t', target, 'Enter']);
+    else {
+      const buf = `devteam-drop-${process.pid}-${++dropSeq}`;
+      // the paths loaded first, the line typed only then: a load that fails leaves nothing in the input
+      // box, so a held line typed again later isn't typed after a copy of itself
+      ok = sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
+      if (ok && !t(['send-keys', '-t', target, '-l', `${line} `])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
+      if (ok && !t(['paste-buffer', '-p', '-d', '-b', buf, '-t', target])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
+      ok = ok && (!dropSpace(files) || t(['send-keys', '-t', target, '-l', ' '])) && t(['send-keys', '-t', target, 'Enter']);
+    }
+    if (ok) recordSent(target, line);
+    return ok;
+  });
+  return held.busy ? false : held.value;
 }
 // A message for an agent: typed now, or held while its pane asks (flushHeld types it once the pane
 // is ready again) and behind any line already held for it, so they arrive in order. True once
@@ -23972,18 +24262,30 @@ function typeNow(target, line, paste = null) {
 // (a dialog answered in the terminal), 'held-limit' (the usage-limit menu), 'held-queued' (nothing
 // asked now, but lines held earlier go first and the pane is not ready for them); false when it
 // could be neither. A launch command typed into a fresh window is typeNow's: it must not wait.
+// The whole decision under the pane's typing lock (kit-618): the owner's floor first, whatever the
+// pane asks (a writer's look can release a done floor on a dialog), then the asking look, then the
+// hold. While the floor holds the line is held: 'held-floor', or the asking reason when it asks.
+// The lock busy for 10 s: held outside it (a hold types nothing), 'held-busy'.
 function typeInto(target, line, paste = null) {
+  const held = typeLock.run(target, (outer) => {
+    const floor = outer && ownerLineOpen(target);
+    const key = paneKey(target);
+    if (!key) return floor ? false : typeNow(target, line, paste);
+    const asking = paneAsking(target);
+    const waits = floor || asking;
+    // the look and the hold under the window's lock: a put-back can't fall between them. null: type
+    // now; false: it could not be held
+    const file = heldLock(key, () => (!waits && !heldPending(key)) ? null : holdLine(key, target, line, paste) ?? false);
+    if (file === null) return typeNow(target, line, paste);
+    if (!file) return waits ? false : typeNow(target, line, paste);
+    if (!waits) flushHeld(key);
+    if (!fs.existsSync(file)) return true;
+    return asking ? (asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal') : floor ? 'held-floor' : 'held-queued';
+  });
+  if (!held.busy) return held.value;
+  // held under the window's own lock, as every hold is: a flusher's claim can't fall inside it
   const key = paneKey(target);
-  if (!key) return typeNow(target, line, paste);
-  const asking = paneAsking(target);
-  // the look and the hold under the window's lock: a put-back can't fall between them. null: type
-  // now; false: it could not be held
-  const file = heldLock(key, () => (!asking && !heldPending(key)) ? null : holdLine(key, target, line, paste) ?? false);
-  if (file === null) return typeNow(target, line, paste);
-  if (!file) return asking ? false : typeNow(target, line, paste);
-  if (!asking) flushHeld(key);
-  if (!fs.existsSync(file)) return true;
-  return !asking ? 'held-queued' : asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal';
+  return key && heldLock(key, () => holdLine(key, target, line, paste)) ? 'held-busy' : false;
 }
 // Why a line is held, in words: every one begins "recorded and held" (the dashboard reads that).
 const heldWords = (why, whose) => `recorded and held: ${{
@@ -23991,6 +24293,8 @@ const heldWords = (why, whose) => `recorded and held: ${{
   'held-terminal': `${whose} terminal has a dialog up that only the terminal can answer (no card can), and typing now would answer it. It is typed once someone answers it there`,
   'held-limit': `${whose} terminal is stopped at a usage-limit menu, and typing now would answer it. It is typed once the session is running again`,
   'held-queued': `${whose} terminal asks nothing now, but lines held for it earlier go first and it is not showing its input box yet. It is typed, in order, at the next look`,
+  'held-floor': 'the owner is typing a line in that terminal, and typing now would join it. It is typed once they send or clear their line',
+  'held-busy': 'another writer has been typing into that terminal for 10 s. It is typed, in order, at the next look',
 }[why]}`;
 // paste: the paths of files the owner dropped with it, pasted after the line (typeNow)
 function nudgeSupervisor(line, paste = null) {
