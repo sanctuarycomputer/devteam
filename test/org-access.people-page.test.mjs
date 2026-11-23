@@ -840,8 +840,8 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   const ana = invitesOf(B.gw, B.ana.id);
   assert.equal(ana.length, 1, 'one invite for Ana');
   assert.notEqual(ana[0].hash, u(sha(old)), 'the old one gone, a new one made');
-  await p.ev(`(() => { const f = window.fetch; window.fetch = (u, o) => (String(u).includes('people/list') ? (window.fetch = f, Promise.resolve(new Response('', { status: 502 }))) : f(u, o)); return oaLoad().then(() => true); })()`);
-  assert.equal(await p.ev(textOf('#oa-link code')), url, 'a failed fetch of the list keeps the card');
+  await p.ev(`(() => { const f = window.fetch; window.fetch = (u, o) => (String(u).includes('people/list') ? (window.fetch = f, Promise.resolve(new Response('', { status: 502 }))) : f(u, o)); return oaLoad().then(() => { paintSettings(); return true; }); })()`);
+  assert.equal(await p.ev(textOf('#oa-link code')), url, 'a failed fetch of the list keeps the card, through a repaint');
   assert.equal(await p.ev(`Boolean(document.querySelector('#oa-people')?.isConnected)`), true, 'and People');
   await p.ev(clickText('#oa-link button', 'Copy'));
   await p.until('Copied', `${JSON.stringify('Copied')} === [...document.querySelectorAll('#oa-link button')].map((b) => b.textContent).find((x) => x.startsWith('Cop'))`);
