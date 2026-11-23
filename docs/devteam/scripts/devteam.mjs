@@ -16328,6 +16328,17 @@ function collectMetrics(since, reviewsSince = 0) {
       const from = st.results.at(-1)?.at ?? c.start;
       if (supervisorRunning && !lockLive && every && from && Date.now() - Date.parse(from) > 3 * Number(every[1]) * UNIT[every[2]]) add('medium', 'recurring-stale', subj, `not run since ${from}, over 3 intervals of ${c.entry.every}, while wait runs`, 'check that wait is running, and read run/recurring/runner.log');
     }
+    // Chores (kit-164): due and not started, overdue past grace_days, a started run not finished
+    // grace_days after its start. A held Upkeep holds due and overdue (the chore waits); a park holds stuck too.
+    const RC = recurringChores;
+    const mode = goalMode(upkeepOrVirtual());
+    for (const { name, entry } of rc.problem ? [] : RC.list().chores) {
+      const st = RC.state(name, entry, { mode });
+      if (!st) continue;
+      const subj = `recurring:${name}`;
+      if (st.due && !st.held) add('medium', st.overdue ? 'recurring-overdue' : 'recurring-due', subj, `${entry.title}: due since ${recurringFailures.isoSec(st.slot)}${st.overdue ? `, over its ${RC.grace(entry)} day(s) of grace` : ''} (a ${entry.by}'s chore)`, `recurring start ${name}`);
+      if (st.stuck && !['park', 'let-go'].includes(mode)) add('medium', 'recurring-stuck', subj, `${entry.title}: started ${recurringFailures.isoSec(st.open.start)} as ${st.open.ref} and not finished in ${RC.grace(entry)} day(s)`, RC.isTicketRef(st.open.ref) ? `see to ${st.open.ref}: start or unstick its worker, or supersede it` : `land it (chore pr, then merge --chore ${st.open.ref.replace(/^chore-/, '')}), or recurring done ${name} --nothing "<why>" | --abandoned "<why>"; if its PR was closed unmerged, recurring start ${name} reads it as abandoned (it starts again when its next slot is due)`);
+    }
   }
   // A flake is a finding while it's recent: one that hasn't flipped for a week was fixed or
   // explained, and its history stays in gates.flaky_gates without raising it again every day.
@@ -25960,7 +25971,7 @@ function recurringBindingFails(main, landed, approved) {
 function cmdRecurring() {
   const R = recurringRegistry;
   const [sub, arg] = positional;
-  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid> | recurring run --due | recurring run <name> --draft | recurring due [--json] | recurring ticket <name> --id <id> --touches <glob>… [--component <c>]';
+  const usage = 'usage: recurring list [--json] | recurring show <name> [--json] | recurring apply <qid> | recurring run --due | recurring run <name> --draft | recurring due [--json] | recurring ticket <name> --id <id> --touches <glob>… [--component <c>] | recurring start <name> | recurring done <name> --nothing "<why>" | --abandoned "<why>"';
   const P = R.path();
   // main's jobs, as read(ref) reads them: a problem (a broken file, or git failing) stops here
   const mainJobs = () => {
@@ -26041,6 +26052,91 @@ function cmdRecurring() {
     }, 'supervisor');
     appendLog({ type: 'act', decision: citing(), class: 'add-ticket', what: `added ticket ${id} to fix the failing check ${arg}`, refs: [id, `recurring:${arg}`], reversible: true }, 'supervisor');
     return out(`added ${id}`);
+  }
+  // a due chore begins (kit-164): the supervisor's in a chore worktree, a worker's as a chores ticket;
+  // its run for the slot is the started line, finished by its merge or by recurring done
+  if (sub === 'start' || sub === 'done') {
+    supervisorOnly(`recurring ${sub}`);
+    const RC = recurringChores;
+    if (!arg) die(sub === 'start' ? 'usage: recurring start <name>' : 'usage: recurring done <name> --nothing "<why>" | --abandoned "<why>"');
+    const l = RC.list();
+    if (l.problem) die(l.problem);
+    const jobs = mainJobs();
+    if (!Object.hasOwn(jobs, arg)) die(`no job ${arg} on main; recurring list`);
+    const entry = jobs[arg];
+    if (entry.kind !== 'chore') die(`${arg} is a ${entry.kind ?? 'kindless'} job; only a chore starts and finishes here (a check runs on its own)`);
+    if (sub === 'done') {
+      const how = ['nothing', 'abandoned'].filter((f) => flags[f] !== undefined);
+      if (how.length !== 1) die('usage: recurring done <name> --nothing "<why>" | --abandoned "<why>" (one of them)');
+      const status = how[0];
+      const why = flagStr(status)?.trim();
+      if (!why) die(`recurring done --${status} needs the reason: --${status} "<why>"`);
+      if (UNSAFE_TEXT.test(why) || why.length > 300) die(`--${status}: one line of at most 300 characters`);
+      if (entry.by === 'worker') die(`${arg} is a worker's chore: it ends only through its ticket (its merge, or a ticket set … superseded_by), so a live ticket is never written twice`);
+      const st = RC.state(arg, entry, { forge: true });
+      const open = st?.open;
+      if (!open) die(`${arg} has no started run to finish${st?.runs.length ? ` (its last, ${st.runs.at(-1).ref}, is ${st.runs.at(-1).status})` : ''}`);
+      if (RC.isTicketRef(open.ref)) die(`${arg}'s run ${open.ref} is a ticket: it ends only through that ticket`);
+      if (!RC.REF.test(open.ref)) die(`${arg}'s run ${open.ref} is not a chore branch (chore-recurring-<name>-<yyyymmdd>); finish it by hand`);
+      const wt = path.join(mainRoot, '.worktrees', open.ref);
+      let removed = '';
+      // a symlink there is never followed: it could lead to another chore's worktree
+      if (status === 'nothing' && fs.lstatSync(wt, { throwIfNoEntry: false })?.isSymbolicLink()) die(`.worktrees/${open.ref} is a symlink, not this chore's worktree; move it aside, then recurring done again`);
+      if (status === 'nothing' && fs.existsSync(wt)) {
+        // empty: nothing uncommitted and no commit main lacks; anything else is work, never removed here
+        const g = (args) => recurringRegistry.git(args, { cwd: wt });
+        const top = g(['rev-parse', '--show-toplevel']);
+        if (!top.ok || realPath(top.out.trim()) !== realPath(wt)) die(`.worktrees/${open.ref} is not a worktree; move it aside, then recurring done again`);
+        // every untracked file and submodule change counts, whatever the user's git config hides
+        const dirty = g(['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none']);
+        const main = mainSha();
+        const ahead = main ? g(['rev-list', '--count', 'HEAD', '--not', main]) : { ok: false };
+        if (!dirty.ok || !ahead.ok) die(`couldn't read .worktrees/${open.ref} (git ${recurringRegistry.why(dirty.ok ? ahead : dirty)}); nothing was logged`);
+        if (dirty.out.trim() || Number(ahead.out.trim()) > 0) die(`.worktrees/${open.ref} holds work (${dirty.out.trim() ? 'uncommitted changes' : `${ahead.out.trim()} commit(s) main lacks`}): land it (chore pr ${open.ref.replace(/^chore-/, '')}, then merge --chore), or --abandoned "<why>"`);
+        const rm = recurringRegistry.git(['worktree', 'remove', wt], { cwd: mainRoot });
+        if (!rm.ok) die(`couldn't remove .worktrees/${open.ref} (git worktree remove ${recurringRegistry.why(rm)}); nothing was logged`);
+        removed = `; removed the empty .worktrees/${open.ref}`;
+      }
+      appendLog({ type: 'observation', source: 'recurring', kind: 'recurring-run', subject: `recurring:${arg}`, detector: 'recurring', severity: 0, valence: 0, detail: why, source_key: `recurring:${arg}:${open.slot}:${status}:${open.ref}`, run: { status, slot: open.slot, ref: open.ref } }, 'supervisor');
+      return out(`${arg}: ${status === 'nothing' ? 'nothing to do' : 'abandoned'} for ${open.slot} (${open.ref})${removed}; due again by its slots`);
+    }
+    // start: Upkeep running, an answered job, due, and no run of it live
+    const mode = goalMode(upkeepOrVirtual());
+    if (mode !== 'run') die(`Upkeep is ${holdWords(mode)}: recurring chores wait until it runs (goal hold upkeep run --owner)`);
+    const reg = recurringFailures.registered(arg, entry);
+    if (!reg) die(`${arg} on main was not registered through an answered recurring-edit question: only a job the owner approved starts`);
+    const st = RC.state(arg, entry, { mode, forge: true });
+    if (!st) die(`${arg} has no schedule the kit can read`);
+    if (st.open) die(`${arg} is already started (${st.open.ref}, for ${st.open.slot}): it finishes when that merges${RC.isTicketRef(st.open.ref) ? ' or is superseded' : ', or with recurring done --nothing | --abandoned'}`);
+    if (!st.due) die(`${arg} is not due: next ${st.next}`);
+    const now = Date.now();
+    const header = `${arg}: ${entry.title}. Approved by ${reg.qid}; due for ${st.slot}.`;
+    const body = ['Its instructions, as the owner approved them:', entry.prompt].join('\n');
+    if (entry.by === 'supervisor') {
+      const ref = RC.slug(arg, now);
+      const slug = ref.replace(/^chore-/, '');
+      if (st.runs.some((r) => r.ref === ref)) die(`${arg} already started as ${ref} today: start it again tomorrow`);
+      if (fs.existsSync(path.join(mainRoot, '.worktrees', ref))) die(`.worktrees/${ref} is there already: land or remove it first`);
+      const wt = choreWorktree(slug, { setup: true });
+      RC.logStart(arg, st.slot, ref, `chore ${slug}`);
+      return out([header, `Started in ${path.relative(mainRoot, wt)}.`, '', body, '', 'Then:', `  devteam.mjs chore pr ${slug} --title "…"   and merge --chore ${slug} (that merge finishes it)`, `  or devteam.mjs recurring done ${arg} --nothing "<why>"   (nothing to do; removes the empty worktree)`, `  or devteam.mjs recurring done ${arg} --abandoned "<why>"`].join('\n'));
+    }
+    // a ticket an earlier start wrote and logged no line for is taken up, never written twice
+    const stray = RC.stray(arg, entry, st.runs);
+    if (stray) {
+      RC.logStart(arg, st.slot, stray, `ticket ${stray}, taken up`);
+      return out([header, `Took up the chores ticket ${stray}, written by an earlier start that logged no run; start its worker as any chore ticket's (devteam.mjs worker ${stray}). It finishes when ${stray} merges, or is superseded.`, '', body].join('\n'));
+    }
+    const id = RC.nextId(entry.component, arg);
+    if (!new RegExp(SCHEMA['x-id'].keyed.ticket).test(id)) die(`the chore ticket's id ${id} must match ${SCHEMA['x-id'].keyed.ticket}`);
+    if (logGet(id)) die(`${id} exists`);
+    appendLog({
+      type: 'ticket', op: 'new', id, feature: CHORES, title: `Recurring: ${entry.title}`, component: entry.component, kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: entry.touches, done_when: entry.done_when,
+      notes: `${header}\n${body}`,
+    }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'add-ticket', what: `added chore ticket ${id} for the recurring chore ${arg}`, refs: [id, `recurring:${arg}`], reversible: true }, 'supervisor');
+    RC.logStart(arg, st.slot, id, `ticket ${id}`);
+    return out([header, `Wrote the chores ticket ${id}; start its worker as any chore ticket's (devteam.mjs worker ${id}). It finishes when ${id} merges, or is superseded.`, '', body].join('\n'));
   }
   if (sub === 'run') {
     supervisorOnly('recurring run');
@@ -26778,9 +26874,151 @@ const recurringFailures = Object.freeze({
   },
 });
 
+// ===== recurring: chores come due, start and finish (kit-164) =====
+// A chore is due by its slots (recurringNextSlot over its landings and its started runs), as a check
+// is. Its run for a slot is its start: `recurring start` logs a started line (ref the chore branch
+// chore-recurring-<name>-<yyyymmdd>, or the chores ticket it wrote) and the run finishes when that ref
+// merges (done), with `recurring done --nothing` or `--abandoned` (a supervisor chore's only), when a
+// supervisor chore's PR is closed unmerged (abandoned) or when a worker chore's ticket is superseded
+// (abandoned). Nothing else ends a worker chore: a ticket written but not started, or whose PR was
+// closed, is live. A run started and not finished keeps the chore from coming due again; once it
+// finishes, the slots that passed meanwhile are one, due for the latest. Only the supervisor's
+// detector recurring lines count (design C2, P5). Every time it gives is ISO to the second.
+const recurringChores = Object.freeze({
+  REF: /^chore-recurring-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-(\d{8})$/,
+  // a closed PR's state is kept this long before gh is asked again; a closed one is kept for good
+  PR_REUSE_MS: 10 * 60000,
+  grace: (entry) => (Number.isInteger(entry?.grace_days) ? entry.grace_days : entry?.by === 'worker' ? 3 : 1),
+  // a started run's ref: the chore branch (a supervisor chore) or a chores ticket id (a worker chore). A
+  // branch can match the ticket pattern (a job named deps-02-bump makes chore-recurring-deps-02-bump-<date>),
+  // so a ref that is a chore branch is never a ticket
+  isTicketRef: (ref) => new RegExp(SCHEMA['x-id'].keyed.ticket).test(ref) && !recurringChores.REF.test(ref),
+  slug: (name, ms) => `chore-recurring-${name}-${new Date(ms).toISOString().slice(0, 10).replace(/-/g, '')}`,
+  // main's chores in name order, each { name, entry }, read and gated as main's checks are (a file that
+  // doesn't read, an entry that breaks the shape, a registry over the cap: none, with the problem)
+  list() {
+    const R = recurringRegistry;
+    const ref = projectInRepo ? mainRef() : null;
+    if (!ref) return { chores: [], ref: null, problem: projectInRepo ? `no ${loadSettings().main_branch} branch to read the jobs from` : null };
+    const r = R.read(ref);
+    if (r.problem) return { chores: [], ref, problem: r.problem };
+    for (const [n, e] of Object.entries(r.jobs)) {
+      const p = recurringEntryProblems(n, e);
+      if (p.length) return { chores: [], ref, problem: p[0] };
+    }
+    const cap = R.capProblem(r.jobs, 'on main');
+    if (cap) return { chores: [], ref, problem: cap };
+    return { chores: Object.keys(r.jobs).sort().filter((n) => r.jobs[n].kind === 'chore').map((name) => ({ name, entry: r.jobs[name] })), ref, problem: null };
+  },
+  // the counted chore lines for this name since it was last added (started, nothing, abandoned), oldest first
+  lines(name) {
+    const from = recurringFailures.addedAt(name);
+    const floor = from ? Date.parse(from) : -Infinity;
+    return logObjects('observation')
+      .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${name}` && recurringFailures.counts(o) && ['started', 'nothing', 'abandoned'].includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && typeof o.run.ref === 'string' && o.run.ref && Date.parse(o.created_at) >= floor)
+      .sort(byTime);
+  },
+  // a supervisor chore's PR on the forge, closed without a merge: its closedAt, else null. Read through
+  // run/recurring/prs.json: a closed PR for good, anything else again after PR_REUSE_MS. No forge (git),
+  // no gh, or gh failing: null, so the run stays live.
+  prClosed(branch, nowMs = Date.now(), { ask = false } = {}) {
+    if (loadSettings().forge === 'git') return null;
+    const file = path.join(runPath('recurring'), 'prs.json');
+    let cache = {};
+    try { cache = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    if (!isObj(cache)) cache = {};
+    const c = isObj(cache[branch]) ? cache[branch] : null;
+    if (c && typeof c.closed_at === 'string') return c.closed_at;
+    if (!ask || (c && Number.isFinite(Date.parse(c.at)) && nowMs - Date.parse(c.at) < recurringChores.PR_REUSE_MS)) return null;
+    const raw = repo('home').gh(['pr', 'list', '--head', branch, '--state', 'closed', '--json', 'number,closedAt,mergedAt', '--limit', '20'], { timeout: 10000 });
+    let prs = null;
+    try { prs = raw === null ? null : JSON.parse(raw); } catch { prs = null; }
+    if (!Array.isArray(prs)) return null;
+    const closed = prs.filter((p) => isObj(p) && !p.mergedAt && Number.isFinite(Date.parse(p.closedAt))).map((p) => p.closedAt).sort()[0] ?? null;
+    cache[branch] = { at: new Date(nowMs).toISOString(), closed_at: closed };
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, `${JSON.stringify(cache, null, 2)}\n`); } catch {}
+    return closed;
+  },
+  // each started run, oldest first: { id, ref, slot, start, status: started | done | nothing | abandoned,
+  // at (when it finished, or its start), why (a nothing or abandoned line's detail) }. forge: true asks gh
+  // about an open supervisor run's PR (recurring start and done only); without it a closed PR is read from
+  // run/recurring/prs.json alone, so metrics, the dashboard and peek never wait on gh.
+  runs(name, { nowMs = Date.now(), forge = false } = {}) {
+    const RC = recurringChores;
+    const lines = RC.lines(name);
+    const acts = logObjects('act').filter((a) => a.class === 'merge-chore' && a.created_by === 'supervisor');
+    const out = [];
+    for (const o of lines.filter((l) => l.run.status === 'started')) {
+      const ref = o.run.ref;
+      const start = Date.parse(o.created_at);
+      const run = { id: o.id, ref, slot: o.run.slot, start: o.created_at, status: 'started', at: o.created_at, why: null };
+      const end = (status, at, why = null) => { const ms = Date.parse(at); if (Number.isFinite(ms) && (run.status === 'started' || ms < Date.parse(run.at))) Object.assign(run, { status, at: new Date(Math.max(ms, start)).toISOString(), why }); };
+      if (RC.isTicketRef(ref)) {
+        // a worker chore ends only through its ticket: merged (done) or superseded (abandoned)
+        const t = logGet(ref);
+        if (t?.type === 'ticket') {
+          const m = mergedAt(ref);
+          if (m !== null && m !== undefined) end('done', typeof m === 'number' ? new Date(m).toISOString() : m);
+          // the earliest finish holds: a ticket superseded and merged later stays abandoned
+          if (t.superseded_by) end('abandoned', (t.updates ?? []).filter((u) => u.superseded_by).map((u) => u.at).sort()[0] ?? t.created_at ?? o.created_at, `superseded by ${t.superseded_by}`);
+        }
+      } else {
+        for (const a of acts) if (a.refs?.[0] === ref && Date.parse(a.created_at) >= start) end('done', a.created_at);
+        for (const l of lines) if (l !== o && ['nothing', 'abandoned'].includes(l.run.status) && l.run.ref === ref && Date.parse(l.created_at) >= start) end(l.run.status, l.created_at, typeof l.detail === 'string' ? l.detail : null);
+        if (run.status === 'started') { const c = RC.prClosed(ref, nowMs, { ask: forge }); if (c) end('abandoned', c, 'its PR was closed without a merge'); }
+      }
+      out.push(run);
+    }
+    return out;
+  },
+  // When a chore is due, from its landings and its runs ([{ slot, start, status }], status started for a
+  // run not finished): the newest started run is open, and while one is open nothing is due; else
+  // recurringNextSlot over the runs' starts, so slots that passed meanwhile are one, due for the latest.
+  // { open, due, slot, next }, or null with no schedule. Names nothing but recurringNextSlot (the test
+  // runs it on test/fixtures/recurring/slots.json's chore cases).
+  schedule(landings, runs, nowMs) {
+    const open = runs.findLast((r) => r.status === 'started') ?? null;
+    const s = recurringNextSlot(landings, runs.map((r) => ({ slot: r.slot, at: r.start })), nowMs);
+    return s ? { open, due: !open && s.due, slot: s.slot, next: s.next } : null;
+  },
+  // one chore's state now: { runs, open (the started run not finished, or null), due, slot, next, overdue,
+  // stuck, held, state: started | due | overdue | held | never | passing }, or null when it has no schedule
+  state(name, entry, { nowMs = Date.now(), forge = false, mode = goalMode(upkeepOrVirtual()) } = {}) {
+    const RC = recurringChores;
+    const runs = RC.runs(name, { nowMs, forge });
+    const s = RC.schedule(recurringRunDue.landings(name, entry, mainRef()), runs, nowMs);
+    if (!s) return null;
+    const { open } = s;
+    const graceMs = RC.grace(entry) * DAY;
+    const held = mode !== 'run';
+    const { due } = s;
+    const overdue = due && nowMs - Date.parse(s.slot) > graceMs;
+    const stuck = !!open && nowMs - Date.parse(open.start) > graceMs;
+    const state = open ? 'started' : due ? (held ? 'held' : overdue ? 'overdue' : 'due') : runs.length ? 'passing' : 'never';
+    return { runs, open, due, slot: s.slot, next: s.next, overdue, stuck, held, mode, state };
+  },
+  // the started line: as the supervisor, detector recurring, for the slot it was due for
+  logStart(name, slot, ref, how) {
+    return appendLog({ type: 'observation', source: 'recurring', kind: 'recurring-run', subject: `recurring:${name}`, detector: 'recurring', severity: 0, valence: 0, detail: `${name}: started for ${slot} (${how})`, source_key: `recurring:${name}:${slot}:started:${ref}`, run: { status: 'started', slot, ref } }, 'supervisor');
+  },
+  // a live chores ticket of this job's that no started line names: a start cut short after writing it
+  // (before its line). The next start takes it up rather than write a second.
+  stray(name, entry, runs) {
+    const named = new Set(runs.map((r) => r.ref));
+    const re = new RegExp(`^${entry.component.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d{2,}-recurring-${name}$`);
+    return logObjects('ticket').filter((t) => re.test(t.id) && t.feature === CHORES && !t.superseded_by && !named.has(t.id) && (mergedAt(t.id) === null || mergedAt(t.id) === undefined)).sort(byTime)[0]?.id ?? null;
+  },
+  // the next free ticket number for a component: one past the highest <component>-<NN>- id, two digits at least
+  nextId(component, name) {
+    const re = new RegExp(`^${component.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(\\d{2,})-`);
+    const n = Math.max(0, ...logObjects('ticket').map((t) => re.exec(t.id)?.[1]).filter(Boolean).map(Number)) + 1;
+    return `${component}-${String(n).padStart(2, '0')}-recurring-${name}`;
+  },
+});
+
 // The dashboard's upkeep.recurring (kit-168), in test/fixtures/recurring/dashboard.json's shape: main's
-// checks with their state, and the built-in schedules. Chores come with kit-164, proposals with kit-165,
-// signals with kit-175. Every time is ISO to the second.
+// checks with their state, then main's chores (kit-164), and the built-in schedules. Proposals come with
+// kit-165, signals with kit-175. Every time is ISO to the second.
 function recurringDashboard() {
   const RF = recurringFailures;
   const sec = (t) => (t === null || t === undefined || t === '' ? null : RF.isoSec(t));
@@ -26810,6 +27048,20 @@ function recurringDashboard() {
     { name: 'kit-sync', every: `${s.upstream_check_hours}h`, last_at: sec(syncs.at(-1)?.created_at), next_at: null, note: `Adopts each new devteam release; you check for one every ${s.upstream_check_hours} hours.`, setting: 'upstream_check_hours' },
     { name: 'sensors', every: 'each cycle', last_at: sec(sensorsAt), next_at: null, note: 'Production signals, read on every wait cycle.', setting: null },
   ];
+  const mode = goalMode(upkeepOrVirtual());
+  const lc = recurringChores.list();
+  for (const { name, entry } of lc.chores) {
+    const st = recurringChores.state(name, entry, { forge: false, mode });
+    if (!st) continue;
+    const lr = st.runs.at(-1) ?? null;
+    const reg = RF.registered(name, entry);
+    entries.push({
+      name, title: entry.title, what: entry.what, kind: 'chore', by: entry.by, every: entry.every, on: entry.on ?? null, at: entry.at ?? null,
+      state: st.state, fails_in_a_row: 0,
+      last: lr ? { status: lr.status, at: sec(lr.status === 'started' ? lr.start : lr.at), seconds: null, excerpt: null } : null,
+      next_at: sec(st.next), ticket: null, registered: reg ? { qid: reg.qid, at: sec(reg.at) } : null, signals: [],
+    });
+  }
   return { entries, builtin, proposals: [] };
 }
 
@@ -29226,6 +29478,11 @@ function peekView(kind, id) {
     if (!Object.hasOwn(r.jobs, id)) die(`no job ${id} on main`);
     const entry = r.jobs[id];
     const reg = RF.registered(id, entry);
+    if (entry.kind === 'chore') {
+      const st = recurringChores.state(id, entry, { forge: false });
+      const runs = (st?.runs ?? []).slice().reverse().slice(0, 20).map((x) => ({ status: x.status, at: RF.isoSec(x.start), slot: RF.isoSec(x.slot), seconds: null, excerpt: null, ref: x.ref }));
+      return { name: id, entry: { ...entry, registered: reg ? { qid: reg.qid, at: RF.isoSec(reg.at) } : null }, runs };
+    }
     const STATUSES = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
     const runs = logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && Number.isFinite(Date.parse(o.created_at)))
@@ -32878,7 +33135,9 @@ const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring run <name> --draft   supervisor: run this checkout's entry once the same way, to try it before asking; prints the status and excerpt, logs and keeps nothing
   recurring due [--json]   when each of main's checks is due, from the log alone: { checks: [{ name, due, slot, next, start }], runner: { pid, start, budget_s, current } | null }; a problem with main's file exits 1 naming it
   recurring ticket <name> --id <id> --touches <glob>… [--component <c>]   supervisor: a chores ticket to fix a failing check, cited by its add-ticket act (which clears recurring-failing); refused unless the check has failed fail_after runs in a row with no fix ticket
-  metrics raises recurring-failing (a check failing fail_after runs in a row, no fix ticket), recurring-stale (not run in 3 intervals while wait runs) and recurring-invalid (main's recurring.json doesn't read, breaks the shape, or is over the 100-runs-a-day cap); recurring run --due logs recurring-failed and recurring-recovered after each pass`;
+  recurring start <name>   supervisor: begin a due chore while Upkeep runs: yours opens .worktrees/chore-recurring-<name>-<yyyymmdd>, a worker's writes the chores ticket <component>-<NN>-recurring-<name>; logs a started run and prints the instructions headed with the approving question. It finishes when that chore PR or ticket merges
+  recurring done <name> --nothing "<why>" | --abandoned "<why>"   supervisor: finish your started chore without a merge (--nothing removes its empty worktree); refused for a worker's chore, which ends only through its ticket (merged, or superseded)
+  metrics raises recurring-failing (a check failing fail_after runs in a row, no fix ticket), recurring-stale (not run in 3 intervals while wait runs), recurring-invalid (main's recurring.json doesn't read, breaks the shape, or is over the 100-runs-a-day cap), recurring-due and recurring-overdue (a chore due and not started, past its grace_days; neither raised while Upkeep is drained or parked) and recurring-stuck (a chore started grace_days ago and not finished); recurring run --due logs recurring-failed and recurring-recovered after each pass`;
 const HELP_LOG = `The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
