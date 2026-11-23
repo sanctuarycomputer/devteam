@@ -905,10 +905,21 @@ test('pruneCompileCache trims the shared compile cache, oldest first, once it pa
       fs.writeFileSync(f, Buffer.alloc(100));
       fs.utimesSync(f, 1000 + i, 1000 + i);
     }
-    assert.equal(R.pruneCompileCache(S, 2000), 0, 'under its cap: nothing removed');
+    assert.equal(R.pruneCompileCache(S, 1500), 0, 'past half its cap but under it: nothing removed');
     assert.equal(R.pruneCompileCache(S, 800), 6, 'over its cap: trimmed to half of it');
     assert.deepEqual(fs.readdirSync(d).sort(), ['e6', 'e7', 'e8', 'e9'], 'the oldest went first');
     assert.equal(R.pruneCompileCache(path.join(S, 'none'), 800), 0, 'no cache yet: nothing to do');
+    // a cache path that is a link (someone else's, in a shared /tmp): nothing it points at is touched
+    const L = path.join(S, 'linked');
+    const target = path.join(S, 'elsewhere');
+    fs.mkdirSync(L);
+    fs.mkdirSync(target);
+    for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(target, `f${i}`), Buffer.alloc(100));
+    fs.symlinkSync(target, path.join(L, 'devteam-kit-compile-cache'));
+    assert.equal(R.pruneCompileCache(L, 100), 0, 'a linked cache dir is left alone');
+    assert.equal(fs.readdirSync(target).length, 10, "the link's target keeps every file");
+    const body = src('test/run.mjs').split('async function runAll(')[1].split('\n}\n')[0];
+    assert.match(body, /pruneCompileCache\(shared\)/, 'runAll trims the cache before each run');
   } finally {
     fs.rmSync(S, { recursive: true, force: true });
   }

@@ -528,6 +528,12 @@ export function schedule(plan, concurrency, chromeConcurrency = concurrency) {
 // half of maxBytes once it passes maxBytes: a missing entry only means V8 compiles that file again.
 export function pruneCompileCache(shared, maxBytes = 512 * 1024 * 1024) {
   const root = path.join(shared, 'devteam-kit-compile-cache');
+  // the shared dir may be /tmp, which others write to: trim only a real folder of this user's, never
+  // what a link put there points at (links inside it aren't followed either: the walk takes files only)
+  let st;
+  try { st = fs.lstatSync(root); } catch { return 0; }
+  if (!st.isDirectory() || (process.getuid && st.uid !== process.getuid())) return 0;
+  // sizes are file lengths, not disk blocks, so du shows somewhat more than the cap
   const files = [];
   const walk = (d) => {
     let ents = [];
