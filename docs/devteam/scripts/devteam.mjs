@@ -7420,7 +7420,20 @@ function landRecords(id, rec, linkName) {
     if (!recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot }).ok) return `couldn't fetch home's ${HS.main_branch} to check it hasn't moved since the checks; run merge again`;
     const tip = resolveCommit(`refs/remotes/origin/${HS.main_branch}`);
     if (tip !== checked) return `home's ${HS.main_branch} moved since the checks (${String(checked).slice(0, 12)} to ${String(tip).slice(0, 12)}); run merge again`;
-    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) {
+      // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
+      // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. The PR
+      // was open (pinRecords); MERGED at the pinned records now is their landing, as a clean merge's (kit-782)
+      let st = null;
+      for (let i = 0; i < 3; i++) {
+        if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+        st = null;
+        try { st = JSON.parse(HR.gh(['pr', 'view', String(rec.pr), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+        if (st?.state !== 'OPEN') break;
+      }
+      if (!(st?.state === 'MERGED' && st.headRefOid === rec.sha)) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+      out(`gh pr merge of home's records PR #${rec.pr} exited non-zero, but GitHub has #${rec.pr} merged at ${rec.sha.slice(0, 12)}: landed`);
+    }
   }
   git(['fetch', '--quiet', 'origin', HS.main_branch]);
   mainRefCache = undefined; mainLogCache = undefined; mergeShaCache.clear();
@@ -7450,7 +7463,7 @@ function cmdMerge() {
     }
   }
   if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die(`forge is git: merge needs the PR text, in ${path.relative(mainRoot, path.join(runDir, 'pr', `${branch}.md`))} ('# <title>' then the body) or as --title and --body-file`);
-  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url,statusCheckRollup']);
+  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,state,url,statusCheckRollup']);
   if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch}${inR} (gh pr view failed; with no forge CLI set forge: "git")`);
   R.git(['fetch', '--quiet', 'origin', branch]);
   // main as each origin has it now: home's (the settings) and the ticket's repo's (what it lands on)
@@ -7900,7 +7913,21 @@ function cmdMerge() {
     const gone = moved();
     if (gone) return gone;
     const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
-    return merged === null ? 'gh pr merge refused (did the head move?)' : null;
+    if (merged !== null) return null;
+    // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
+    // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. A PR that
+    // was OPEN when merge began and is MERGED at the gated head now is this merge's landing, and its
+    // act is written; one merged before (a squash elsewhere) or anything else is refused (kit-782)
+    let st = null;
+    if (pr.state === 'OPEN') for (let i = 0; i < 3; i++) {
+      if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+      st = null;
+      try { st = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+      if (st?.state !== 'OPEN') break;
+    }
+    if (!(st?.state === 'MERGED' && st.headRefOid === sha)) return 'gh pr merge refused (did the head move?)';
+    out(`gh pr merge of #${pr.number} exited non-zero, but GitHub has #${pr.number} merged at ${sha.slice(0, 12)}: landed`);
+    return null;
   };
   let pushTimedOut = false;
   const codeFail = relanded ? null : landCode();
@@ -26949,11 +26976,16 @@ const recurringChores = Object.freeze({
   REF: /^chore-recurring-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-(\d{8})$/,
   // a closed PR's state is kept this long before gh is asked again; a closed one is kept for good
   PR_REUSE_MS: 10 * 60000,
+  // a start dated more than this far ahead (the clock was off when it started) reads stuck at once
+  SKEW_MS: 10 * 60000,
   grace: (entry) => (Number.isInteger(entry?.grace_days) ? entry.grace_days : entry?.by === 'worker' ? 3 : 1),
   // a started run's ref: the chore branch (a supervisor chore) or a chores ticket id (a worker chore). A
   // branch can match the ticket pattern (a job named deps-02-bump makes chore-recurring-deps-02-bump-<date>),
   // so a ref that is a chore branch is never a ticket
   isTicketRef: (ref) => new RegExp(SCHEMA['x-id'].keyed.ticket).test(ref) && !recurringChores.REF.test(ref),
+  // the job a run's ref names: a chore branch's name, or a recurring chores ticket's (<c>-<NN>-recurring-<name>);
+  // null for any other ref
+  refJob(ref) { const RC = recurringChores; return RC.REF.exec(ref)?.[1] ?? (RC.isTicketRef(ref) ? /-\d{2,}-recurring-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(ref)?.[1] ?? null : null); },
   slug: (name, ms) => `chore-recurring-${name}-${new Date(ms).toISOString().slice(0, 10).replace(/-/g, '')}`,
   // main's chores in name order, each { name, entry }, read and gated as main's checks are (a file that
   // doesn't read, an entry that breaks the shape, a registry over the cap: none, with the problem)
@@ -27009,11 +27041,17 @@ const recurringChores = Object.freeze({
     const lines = RC.lines(name);
     const acts = logObjects('act').filter((a) => a.class === 'merge-chore' && a.created_by === 'supervisor');
     const out = [];
+    // a finish counts whatever its date against the start (one before it shows the clock was off), from
+    // when the job was last added, as its lines do
+    const from = recurringFailures.addedAt(name);
+    const floor = from ? Date.parse(from) : -Infinity;
     for (const o of lines.filter((l) => l.run.status === 'started')) {
       const ref = o.run.ref;
-      const start = Date.parse(o.created_at);
+      // a line whose ref names another job is no run of this one: it can't finish or remove that job's work
+      const job = RC.refJob(ref);
+      if (job !== null && job !== name) continue;
       const run = { id: o.id, ref, slot: o.run.slot, start: o.created_at, status: 'started', at: o.created_at, why: null };
-      const end = (status, at, why = null) => { const ms = Date.parse(at); if (Number.isFinite(ms) && (run.status === 'started' || ms < Date.parse(run.at))) Object.assign(run, { status, at: new Date(Math.max(ms, start)).toISOString(), why }); };
+      const end = (status, at, why = null) => { const ms = Date.parse(at); if (Number.isFinite(ms) && (run.status === 'started' || ms < Date.parse(run.at))) Object.assign(run, { status, at: new Date(ms).toISOString(), why }); };
       if (RC.isTicketRef(ref)) {
         // a worker chore ends only through its ticket: merged (done) or superseded (abandoned)
         const t = logGet(ref);
@@ -27024,8 +27062,8 @@ const recurringChores = Object.freeze({
           if (t.superseded_by) end('abandoned', (t.updates ?? []).filter((u) => u.superseded_by).map((u) => u.at).sort()[0] ?? t.created_at ?? o.created_at, `superseded by ${t.superseded_by}`);
         }
       } else {
-        for (const a of acts) if (a.refs?.[0] === ref && Date.parse(a.created_at) >= start) end('done', a.created_at);
-        for (const l of lines) if (l !== o && ['nothing', 'abandoned'].includes(l.run.status) && l.run.ref === ref && Date.parse(l.created_at) >= start) end(l.run.status, l.created_at, typeof l.detail === 'string' ? l.detail : null);
+        for (const a of acts) if (a.refs?.[0] === ref && Date.parse(a.created_at) >= floor) end('done', a.created_at);
+        for (const l of lines) if (l !== o && ['nothing', 'abandoned'].includes(l.run.status) && l.run.ref === ref && Date.parse(l.created_at) >= floor) end(l.run.status, l.created_at, typeof l.detail === 'string' ? l.detail : null);
         if (run.status === 'started') { const c = RC.prClosed(ref, nowMs, { ask: forge }); if (c) end('abandoned', c, 'its PR was closed without a merge'); }
       }
       out.push(run);
@@ -27039,7 +27077,8 @@ const recurringChores = Object.freeze({
   // runs it on test/fixtures/recurring/slots.json's chore cases).
   schedule(landings, runs, nowMs) {
     const open = runs.findLast((r) => r.status === 'started') ?? null;
-    const s = recurringNextSlot(landings, runs.map((r) => ({ slot: r.slot, at: r.start })), nowMs);
+    // a run that finished before its own start (a clock that ran fast) takes its slot from when it finished
+    const s = recurringNextSlot(landings, runs.map((r) => ({ slot: r.slot, at: Math.min(Date.parse(r.start), Date.parse(r.at ?? r.start)) })), nowMs);
     return s ? { open, due: !open && s.due, slot: s.slot, next: s.next } : null;
   },
   // one chore's state now: { runs, open (the started run not finished, or null), due, slot, next, overdue,
@@ -27054,7 +27093,9 @@ const recurringChores = Object.freeze({
     const held = mode !== 'run';
     const { due } = s;
     const overdue = due && nowMs - Date.parse(s.slot) > graceMs;
-    const stuck = !!open && nowMs - Date.parse(open.start) > graceMs;
+    // stuck grace_days after its start, or at once while its start is more than SKEW_MS ahead (kit-785 R1)
+    const startMs = open ? Date.parse(open.start) : NaN;
+    const stuck = !!open && (nowMs - startMs > graceMs || startMs - nowMs > RC.SKEW_MS);
     const state = open ? 'started' : due ? (held ? 'held' : overdue ? 'overdue' : 'due') : runs.length ? 'passing' : 'never';
     return { runs, open, due, slot: s.slot, next: s.next, overdue, stuck, held, mode, state };
   },
