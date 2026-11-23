@@ -7421,6 +7421,27 @@ function linksSelf(strategyText) {
 }
 // main's strategy.md, as strategyState reads it, or null when missing.
 const strategyMainText = () => (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md')));
+// metrics' self findings, read from main (none with no main, or the project outside the repo), each
+// keyed so observeFindings keeps one observation per path or strategy blob: self-drift once per part
+// path missing at main while main's self.md holds; self-unlinked while main has a self.md its
+// strategy doesn't link; self-missing while the strategy is written and main has no self.md, its
+// next step the strategy-change link first when the strategy doesn't link it. All low.
+function selfFindings(add) {
+  const main = projectInRepo ? mainRef() : null;
+  if (!main) return;
+  const text = selfMainText();
+  const strategy = strategyMainText();
+  const strategyKey = git(['rev-parse', '--verify', '--quiet', `${main}:${strategyRel}`]) ?? undefined;
+  const linked = linksSelf(strategy);
+  if (text !== null) {
+    const { block } = selfDoc(text);
+    if (block) for (const m of selfPathsMissing(block, hasAt(main))) add('low', 'self-drift', 'self', `part ${m.part}'s path ${m.path} is not on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: m.path });
+    if (!linked) add('low', 'self-unlinked', 'self', 'main has self.md and its strategy.md does not link it', 'propose a strategy-change linking [self.md](./self.md) in place of any lines restating what the project is, in its own PR', { key: strategyKey });
+  } else if (strategyState() === 'written') {
+    const draft = 'draft self.md from the code and the strategy in a chore, run self check, and ask self-change (supervisor.md, Monitoring)';
+    add('low', 'self-missing', 'self', 'the strategy is written and main has no self.md', linked ? draft : `first propose a strategy-change linking [self.md](./self.md), in its own PR; then ${draft}`, { key: strategyKey });
+  }
+}
 // The draft's history. Every self.md blob the branch carries since its merge base is pushed with it
 // and lands with merge --no-ff, so the names rule reads each, not only the head's.
 //
@@ -13774,7 +13795,7 @@ function observeFindings(m) {
   for (const o of logObjects('observation')) if (o.source_key && o.created_by === 'supervisor' && o.detector === 'metrics') recent.set(o.source_key, Math.max(recent.get(o.source_key) ?? 0, Date.parse(o.created_at)));
   let n = 0;
   for (const f of m.findings) {
-    const key = `metrics:${f.kind}:${f.subject}`;
+    const key = `metrics:${f.kind}:${f.subject}${f.key ? `:${f.key}` : ''}`;
     if (Date.now() - (recent.get(key) ?? 0) < DAY) continue;
     appendLog({ type: 'observation', source: 'metrics', subject: String(f.subject), kind: f.kind, detector: 'metrics', detail: f.detail, severity: f.sev ?? SEV[f.severity] ?? 1, valence: -1, source_key: key, fix_hint: f.suggestion }, 'supervisor');
     n++;
@@ -17157,6 +17178,7 @@ function collectMetrics(since, reviewsSince = 0) {
     // draft in front of the owner, then medium while the owner reads it.
     const strategyAsked = questions().some((q) => q.status === 'open' && q.class === 'strategy-change');
     if (live.length && sState !== 'written') add(strategyAsked ? 'medium' : 'high', 'strategy-unwritten', strategyRel, sState === 'missing' ? `${plural(live.length, 'goal')} running and no strategy on ${settings.main_branch}` : `${plural(live.length, 'goal')} running and the strategy is still the template`, `draft it next, while work carries on, in a chore from what you can read, then ask the owner to approve it (ask --class strategy-change; supervisor.md §1)${sState === 'missing' ? '; init writes the template' : ''}`);
+    selfFindings(add);
     const all = questions();
     const open = all.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
     for (const g of goals.filter((x) => x.status === 'ready' || ((x.status ?? 'draft') === 'draft' && open.some((q) => q.goal === x.id)))) {
