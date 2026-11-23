@@ -90,7 +90,7 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   // A: no subject, the supervisor spoke last and asked a question in it (your move)
   const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
   F.sup(['thread', 'reply', A, 'Here, I think.']);
-  F.sup(['thread', 'ask', A, '--question', 'Which colour?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+  F.sup(['thread', 'ask', A, '--question', 'Which colour?', '--goal', F.goal, '--stake', '1', '--urgency', '1', '--off-subject', 'a question after the reply']);
   // B: the owner's only (waiting on the supervisor)
   const B = idOf(F.owner(['thread', 'new', 'Is the build green?']));
   // C: proposed resolved (ready to accept)
@@ -246,7 +246,7 @@ test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
   // A: no subject, with a question asked in it (in the panel)
   const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
   F.sup(['thread', 'reply', A, 'Here, I think.']);
-  const QA = F.sup(['thread', 'ask', A, '--question', 'Which colour?', '--goal', F.goal, '--stake', '1', '--urgency', '1']).split('\n')[0].trim();
+  const QA = F.sup(['thread', 'ask', A, '--question', 'Which colour?', '--goal', F.goal, '--stake', '1', '--urgency', '1', '--off-subject', 'a question after the reply']).split('\n')[0].trim();
   // G: on the first goal (floating, beside its pin on Goals)
   const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
   F.sup(['thread', 'reply', G, 'On it.']);

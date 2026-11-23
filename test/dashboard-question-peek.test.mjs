@@ -44,7 +44,7 @@ test('an open question is answered from its side peek, with the Inbox card', { s
   Q.act = F.sup(['ask', '--kind', 'owner-action', '--question', 'Tidy these two', '--context', `Retire ${K}. Let go ${G2}.`, '--goal', F.goal, ...RATE]);
   const T = F.owner(['thread', 'new', 'About the two copies', '--title', 'The two copies']).split('\n')[0];
   const inThread = F.sup(['thread', 'ask', T, '--kind', 'owner-decision', '--question', 'Which way in the thread?', '--choices', CHOICES, '--goal', F.goal, ...RATE]);
-  const apart = F.sup(['thread', 'ask', T, '--kind', 'owner-decision', '--question', 'Which way apart?', '--choices', CHOICES, '--goal', F.goal, ...RATE]);
+  const apart = F.sup(['thread', 'ask', T, '--kind', 'owner-decision', '--question', 'Which way apart?', '--choices', CHOICES, '--goal', F.goal, ...RATE, '--off-subject', 'a second question in the thread']);
 
   const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   later(() => dash.stop());

@@ -9567,7 +9567,8 @@ function tlCardBody(t) {
     // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
     const note = !t ? '' : (s?.kind === 'item' && !now) || tlRowOf(s)?.el === null ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
-    tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
+    // a thread the supervisor started (kit-108) says so in its header
+    tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, [t?.started_by === 'supervisor' ? 'From the supervisor' : '', note].filter(Boolean).join(' · '));
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
     turns.innerHTML = t ? tlTurns(t) : '';
     const box = tlEl('tl-c-text');
@@ -10099,7 +10100,8 @@ function thRow(t, nums) {
   const mark = !st ? '' : st === 'ready' ? `<i class="th-st ok icon-check" role="img" aria-label="${words}" title="${words}"></i>` : `<span class="th-st ${cls}" role="img" aria-label="${words}" title="${words}"></span>`;
   const gone = thGone(t);
   const n = st && !gone ? nums.get(t.id) : null;
-  const where = t.subject ? `${tWhere(t.subject)}${gone ? ' · subject gone' : ''}` : '';
+  // a thread the supervisor started (kit-108) says so first
+  const where = [t.started_by === 'supervisor' ? 'From the supervisor' : '', t.subject ? `${tWhere(t.subject)}${gone ? ' · subject gone' : ''}` : ''].filter(Boolean).join(' · ');
   const on = TL.open === t.id;
   return `<li><button type="button" class="th-row${st ? ` st-${st}` : ''}${on ? ' on' : ''}" data-tl-open="${esc(t.id)}"${on ? ' aria-current="true"' : ''}>${mark}<span class="th-s">${n ? `<span class="pinchip">${n}</span>` : ''}<span class="th-where">${esc(where)}</span></span><span class="th-tm">${esc(thAgo(t.activity_at))}</span><span class="th-w">${esc(t.title)}</span></button></li>`;
 }
