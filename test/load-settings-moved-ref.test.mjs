@@ -475,4 +475,63 @@ test('accounts-tick restarts a supervisor stopped at a limit with origin\'s resu
       assert.ok(!fs.existsSync(F.restartsFile) || !/"supervisor"/.test(fs.readFileSync(F.restartsFile, 'utf8')), 'no attempt spent');
     } finally { F.done(); }
   });
+  // kit-780: the restart's origin read ends inside the restart's budget (5 s before it, as a
+  // relaunch's child is given), so a hung origin can't hold the tick for the launch's own 30 s.
+  // DEVTEAM_RESTART_BUDGET_MS (tests only, under DEVTEAM_TEST) makes the budget small enough to see.
+  const hung = (F, g) => {
+    const hang = path.join(F.base, 'hang-ssh.sh');
+    fs.writeFileSync(hang, '#!/bin/sh\nexec sleep 300\n', { mode: 0o755 });
+    g(['remote', 'set-url', 'origin', 'ssh://probe.invalid/x.git']);
+    g(['config', 'core.sshCommand', hang]);
+  };
+  const timed = (F, env) => { const t0 = Date.now(); const said = F.tick({ ...cswap(F), ...env }); return { said, took: Date.now() - t0 }; };
+  await t.test('origin hung, a tick\'s own budget: the restart\'s read ends within 15 s, not after 30 s; nothing typed', async () => {
+    const F = recoveryFixture('origin-supcap', { resume: CLAUDE_RESUME });
+    const g = (args) => spawnSync('git', args, { cwd: F.root, encoding: 'utf8' }).stdout.trim();
+    try {
+      const pane = await stopped(F);
+      hung(F, g);
+      const { said, took } = timed(F, {});
+      assert.match(said, /the supervisor is stopped at a usage limit and was not restarted: could not read main from origin \(it did not answer in time\)/);
+      assert.ok(took < 20000, `the read ended within its 15 s (the tick took ${took} ms), not after the launch's own 30 s`);
+      assert.deepEqual(F.claudeCalls(), [], 'nothing started');
+      assert.equal(pane.keys(), '', 'nothing typed');
+    } finally { F.done(); }
+  });
+  await t.test('origin hung: the restart\'s read ends 5 s inside its budget, not after 30 s; nothing typed', async () => {
+    const F = recoveryFixture('origin-suphung', { resume: CLAUDE_RESUME });
+    const g = (args) => spawnSync('git', args, { cwd: F.root, encoding: 'utf8' }).stdout.trim();
+    try {
+      const pane = await stopped(F);
+      hung(F, g);
+      const { said, took } = timed(F, { DEVTEAM_TEST: '1', DEVTEAM_RESTART_BUDGET_MS: '8000' });
+      assert.match(said, /the supervisor is stopped at a usage limit and was not restarted: could not read main from origin \(it did not answer in time\)/);
+      assert.ok(took < 7000, `the read ended 5 s inside the restart's 8 s budget (the tick took ${took} ms), not after the launch's own 30 s`);
+      assert.deepEqual(F.claudeCalls(), [], 'nothing started');
+      assert.equal(pane.keys(), '', 'nothing typed');
+    } finally { F.done(); }
+  });
+  await t.test('DEVTEAM_RESTART_BUDGET_MS without DEVTEAM_TEST: ignored, the read keeps its own bound', async () => {
+    const F = recoveryFixture('origin-supknob', { resume: CLAUDE_RESUME });
+    const g = (args) => spawnSync('git', args, { cwd: F.root, encoding: 'utf8' }).stdout.trim();
+    try {
+      await stopped(F);
+      hung(F, g);
+      const { said, took } = timed(F, { DEVTEAM_TEST: '', DEVTEAM_RESTART_BUDGET_MS: '8000', DEVTEAM_LAUNCH_ORIGIN_MS: '9000' });
+      assert.match(said, /was not restarted: could not read main from origin \(it did not answer in time\)/);
+      assert.ok(took >= 8500, `the knob is a test's only: the read ran to its own 9 s (the tick took ${took} ms)`);
+    } finally { F.done(); }
+  });
+  await t.test('a budget of 0 only looks: origin isn\'t asked, so a hung origin costs the tick nothing and nothing is said', async () => {
+    const F = recoveryFixture('origin-suplook', { resume: CLAUDE_RESUME });
+    const g = (args) => spawnSync('git', args, { cwd: F.root, encoding: 'utf8' }).stdout.trim();
+    try {
+      const pane = await stopped(F);
+      hung(F, g);
+      const { said, took } = timed(F, { DEVTEAM_TEST: '1', DEVTEAM_RESTART_BUDGET_MS: '0', DEVTEAM_LAUNCH_ORIGIN_MS: '9000' });
+      assert.doesNotMatch(said, /could not read main from origin/);
+      assert.ok(took < 8000, `origin wasn't asked (the tick took ${took} ms)`);
+      assert.equal(pane.keys(), '', 'nothing typed');
+    } finally { F.done(); }
+  });
 });
