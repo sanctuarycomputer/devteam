@@ -9308,15 +9308,18 @@ function threadViews(objects) {
   }
   return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime)));
 }
-// waiting: whose move it is (the owner's when the newest turn is the supervisor's or there is none).
+// waiting: whose reply is owed (supervisor, responder), or the owner's move (owedIn).
 // ready: the supervisor's proposal, until the owner says anything after it (a turn, a resolve or a
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
 function threadView(t, ts, qs) {
   // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [] }));
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], ...(u.created_by === 'owner' ? { routed_to: u.routed_to === 'supervisor' || u.routed_to === 'responder' ? u.routed_to : null, delivered: u.delivered === 'typed' || u.delivered === 'queued' ? u.delivered : null } : {}) }));
+  // whose reply is owed (owedIn, kit-104): the supervisor's when a turn routed to it, or with no
+  // route, is owed; else the responder's when one routed to it is; else the owner's move
+  const owed = owedIn(ts, t);
+  const waiting = owed.some((u) => u.routed_to !== 'responder') ? 'supervisor' : owed.length ? 'responder' : 'owner';
   const status = t.status === 'resolved' ? 'resolved' : 'open';
-  const last = turns[turns.length - 1] ?? null;
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
   const ownerSince = !!proposed && (turns.some((u) => u.by === 'owner' && u.at > proposed.at) || t.updates.some((u) => u.status !== undefined && u.at > proposed.at));
   const ready = status === 'open' && proposed && !ownerSince && isObj(t.ready) && typeof t.ready.outcome === 'string' ? { outcome: t.ready.outcome, at: proposed.at } : null;
@@ -9324,7 +9327,7 @@ function threadView(t, ts, qs) {
   const firstReply = firstOwner ? turns.find((u) => u.by === 'supervisor' && u.at > firstOwner.at) : null;
   return {
     id: t.id, title: String(t.title ?? ''), subject: isObj(t.subject) ? t.subject : null, status, outcome: status === 'resolved' ? t.outcome ?? null : null, ready,
-    turns, questions: qs.map(threadQuestion), waiting: last?.by === 'owner' ? 'supervisor' : 'owner',
+    turns, questions: qs.map(threadQuestion), waiting,
     created_at: t.created_at, resolved_at: status === 'resolved' ? t.updates.filter((u) => u.status === 'resolved').pop()?.at ?? null : null,
     activity_at: [t.created_at, ...turns.map((u) => u.at), ...t.updates.map((u) => u.at)].sort().pop(),
     first_reply_ms: firstReply ? Date.parse(firstReply.at) - Date.parse(firstOwner.at) : null,
@@ -9598,7 +9601,7 @@ function cmdThread() {
       const objects = readLog().objects;
       if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
       // the owner's turns this reply answers, before it is written: on stderr, so the id stays the first line out
-      for (const o of owedTurns(t.id, objects)) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+      for (const o of owedTurns(t.id, objects).filter((o) => answersTurn(o, by))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
     }
     const u = appendLog(line, by);
     out(u.id);
@@ -33013,17 +33016,22 @@ function responderWindowRefusal(w) {
 // A thread's turns from the log's own lines (created_by, created_at), never the view, which names
 // every non-owner turn the supervisor's; oldest first.
 const logTurns = (threadId, objects = readLog().objects) => [...objects.values()].filter((o) => o.type === 'turn' && o.thread === threadId).sort(byTime);
-// The owner's turns in a thread still owed an answer (the spine's single rule, as kit-103's
-// done-when 3 words it): any later non-owner turn answers an owner turn, and a resolve of the
-// thread after it leaves it owed nothing, by time, so a reopen with no words doesn't bring it back.
-// Every "the owner said it" here is a line's writer, never its text. routed_to plays no part yet:
-// kit-104, which writes it, brings it into the answered rule.
-function owedTurns(threadId, objects = readLog().objects) {
-  const ts = logTurns(threadId, objects);
-  const resolvedAt = (objects.get(threadId)?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
-  const answeredAt = ts.filter((u) => u.created_by !== 'owner').pop()?.created_at ?? '';
-  return ts.filter((u) => u.created_by === 'owner' && u.created_at > answeredAt && u.created_at > resolvedAt);
+// Whether a reply written by `by` answers the owner's turn u (the spine's Answered rule, kit-104):
+// a turn routed to the supervisor only by the supervisor; one routed to the responder by the
+// responder or the supervisor; one with no route (an older kit's) by any non-owner, as before.
+// Every "the owner said it" here is a line's writer (created_by), never its text.
+const answersTurn = (u, by) => by !== 'owner' && (!u.routed_to || by === 'supervisor' || by === u.routed_to);
+// The owner's turns still owed an answer, from a thread's turns (log lines, oldest first) and the
+// thread: an owner turn is answered by a turn in the thread at or after it (a tie answers) whose
+// writer answers it (answersTurn), and a resolve of the thread after it leaves it owed nothing, by
+// time, so a reopen with no words doesn't bring it back. One pure rule for the queue, idleness,
+// threadView.waiting, thread list --waiting, thread-waiting and responder-overdue (kit-104).
+function owedIn(ts, thread) {
+  const resolvedAt = (thread?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  return ts.filter((u) => u.created_by === 'owner' && String(u.created_at) > resolvedAt && !ts.some((w) => w.created_at >= u.created_at && answersTurn(u, w.created_by)));
 }
+// The owner's turns in a thread still owed an answer (owedIn on the log's own lines).
+const owedTurns = (threadId, objects = readLog().objects) => owedIn(logTurns(threadId, objects), objects.get(threadId));
 // The responder's guard: since its own last turn in the thread (or ever, with none) the supervisor
 // has written, and the owner has said nothing after that. A reply then would answer what the
 // supervisor already answered (both backstop cases of the spine's Failure modes).
