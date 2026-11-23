@@ -1573,7 +1573,19 @@ export function createGateway(opts = {}) {
     log(stays ? 'a new link was revoked' : 'an invite was revoked, with its person who never joined');
     return json(res, 200, { ok: true });
   };
-  const PEOPLE_POSTS = { rename: renameRoute, revoke: revokeRoute };
+  // One write ends everything the row held (its methods and devices go with it), every session and
+  // invite naming them; then the terminal and preview sockets they hold close. The owner's row is
+  // never removed (mayNot).
+  const removeRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'remove');
+    if (!g) return;
+    const { s, row } = g;
+    store.save({ ...s, people: s.people.filter((x) => x.id !== row.id), peopleSessions: (s.peopleSessions ?? []).filter((x) => x.person !== row.id), invites: (s.invites ?? []).filter((x) => x.person !== row.id) });
+    dropPerson(row.id);
+    log('a person was removed: their sessions, invites and open sockets ended');
+    return json(res, 200, { ok: true });
+  };
+  const PEOPLE_POSTS = { rename: renameRoute, revoke: revokeRoute, remove: removeRoute };
 
   // Start, guards in the spec's order. `who`: the request's session (sessionOf), for an add.
   const startFlow = async (req, type, purpose, body, who) => {
@@ -3278,6 +3290,15 @@ export function createGateway(opts = {}) {
   // a miss: the page that opened the socket already made one.
   const PREVIEW_SOCKETS = 32;
   const previewSockets = new Map();
+  // Every relayed socket (the terminal's and each preview's) by the person whose session opened it:
+  // their row's id, or null for the stand-in owner. Added the moment the handshake's session check
+  // passes, before anything is awaited, so a removal at any point after closes it.
+  const heldSockets = new Map();
+  const holdSocket = (socket, person) => {
+    heldSockets.set(socket, person?.id ?? null);
+    socket.once('close', () => heldSockets.delete(socket));
+  };
+  const dropPerson = (id) => { for (const [sock, holder] of heldSockets) if (holder === id) sock.destroy(); };
   // The supervisor's browser view (the preview the hub labels so): whoever opens it drives the
   // owner's signed-in browser, so it is the owner's alone, under any name its port is listed by.
   const ownerOnlyPreview = (name) => {
@@ -3292,6 +3313,7 @@ export function createGateway(opts = {}) {
     try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
     if (!who) return refuse(401, 'Unauthorized');
     if (!isOwner(who.person) && ownerOnlyPreview(name)) return refuse(403, 'Forbidden');
+    holdSocket(socket, who.person);
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
     const link = previews.get(name);
     if (!link || link.ambiguous) return refuse(503, 'Service Unavailable');
@@ -3347,7 +3369,10 @@ export function createGateway(opts = {}) {
     if (pv) return previewUpgrade(req, socket, head, pv, refuse).catch(() => socket.destroy());
     if (req.headers.host !== termHost) return refuse(421, 'Misdirected Request');
     if (req.headers.origin !== TERM) return refuse(403, 'Forbidden');
-    try { if (!store.load().passkeys.length || !sessionOf(req)) return refuse(401, 'Unauthorized'); } catch { return refuse(503, 'Service Unavailable'); }
+    let who = null;
+    try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
+    if (!who) return refuse(401, 'Unauthorized');
+    holdSocket(socket, who.person);
     let p;
     try { p = new URL(req.url, PUB); } catch { return refuse(400, 'Bad Request'); }
     if (!req.url.startsWith('/') || p.pathname !== '/ws') return refuse(404, 'Not Found');

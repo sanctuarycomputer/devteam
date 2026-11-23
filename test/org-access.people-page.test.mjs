@@ -325,6 +325,8 @@ test('org-access A3: a change from a stale tab is refused: an old rev, or a pers
     const s = B.gw.state();
     B.gw.write({ ...s, people: s.people.map((p) => (p.id === B.ana.id ? { ...p, name: 'Ana C', rev: 2 } : p)) });
     for (const action of ['rename', 'remove', 'relink']) refused(await post(B.gw, action, B.owner, bodyFor(action, { ...B.ana, rev: 1 })), 409, 'stale', `${action} at the row's old rev`);
+    const o = ownerOf(B.gw);
+    refused(await post(B.gw, 'rename', B.samC, { id: o.id, rev: o.rev + 5, name: 'X' }), 409, 'stale', 'an admin at a wrong rev: the rev is asked before who may');
     // Sam removed meanwhile (by another tab): nothing brings him back
     const t = B.gw.state();
     B.gw.write({ ...t, people: t.people.filter((p) => p.id !== B.sam.id) });
@@ -333,8 +335,6 @@ test('org-access A3: a change from a stale tab is refused: an old rev, or a pers
     refused(await post(B.gw, 'rename', B.owner, ['a list']), 400, 'bad-request', 'a body that isn\'t an object');
     refused(await B.gw.req('POST', '/auth/people/list', { cookie: B.owner, body: {} }), 405, 'bad-request', 'a POST to the list');
     refused(await B.gw.req('GET', '/auth/people/rename', { cookie: B.owner }), 404, 'not-found', 'a GET of an action');
-    const o = ownerOf(B.gw);
-    refused(await post(B.gw, 'rename', B.samC, { id: o.id, rev: o.rev + 5, name: 'X' }), 409, 'stale', 'an admin at a wrong rev: the rev is asked before who may');
     assert.deepEqual([rowOf(B.gw, B.sam.id), rowOf(B.gw, B.ana.id).name], [null, 'Ana C'], 'nothing changed');
   } finally { await B.gw.close(); }
 });
@@ -543,7 +543,9 @@ test('org-access A7: after Remove, the person\'s next request is refused, their 
     const o = await B.gw.req('POST', '/auth/login/options', { body: {} });
     const flow = o.cookies.map((c) => c.split(';')[0]).join('; ');
     const v = await B.gw.req('POST', '/auth/login/verify', { cookie: flow, body: B.anaKey.get(o.json, B.gw.publicUrl) });
-    assert.equal(v.status, 403, `her passkey: ${v.body}`);
+    assert.notEqual(v.status, 200, `her passkey: ${v.body}`);
+    assert.match(v.body, /unknown passkey/, 'her passkey is no one\'s now');
+    assert.equal(v.cookies.some((c) => c.startsWith('devteam_session=') && !c.startsWith('devteam_session=;')), false, 'and opens no session');
     const st = await B.gw.req('POST', '/auth/method/passkey/start', { body: { purpose: 'invite', token: link } });
     assert.equal(st.status, 403, 'an invite made for her before the removal');
     assert.equal(st.json?.error, 'This invite has expired or was used; ask for a new one.');
