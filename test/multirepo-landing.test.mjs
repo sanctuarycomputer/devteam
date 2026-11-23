@@ -335,5 +335,27 @@ test('merged-without-merge: a merge whose head a merge act names raises nothing,
     const SUP = { DEVTEAM_ROLE: 'supervisor' };
     assert.match(okIn(old, ['ack', 'merged-without-merge', btn2, '--reason', 'checked'], SUP), /set aside for good: a merge commit can't change/, 'K: ack says a merge commit is set aside for good');
     assert.match(okIn(old, ['ack', 'merged-without-merge', 'console-01-a', '--reason', 'checked'], SUP), /set aside for 24h/, 'K: and the window for a ticket');
+    // a third forge merge, set aside two days ago by the supervisor with observe (source supervisor,
+    // not ack): only ack's own line lasts, so this one lapses
+    const [button3] = mergeOn(F.companion, 'main', 'side3', 'app/z.js');
+    const btn3 = `companion:${button3.slice(0, 12)}`;
+    hand({ type: 'observation', source: 'supervisor', kind: 'finding-ack', subject: `merged-without-merge ${btn3}`, detail: 'looked at', source_ref: `metrics:merged-without-merge:${btn3}` }, 48 * H + 3000);
+    ({ raised } = mwm());
+    assert.ok(raised.some((x) => x.subject === btn3), `L: a supervisor's finding-ack of a merge commit with a source other than ack lapses, so the merge raises again: ${JSON.stringify(raised.map(subj))}`);
+    // ack --owner from a worker's or planner's session is refused, whatever DEVTEAM_ROLE says
+    for (const env of [{ DEVTEAM_TICKET: 'console-01-a' }, { DEVTEAM_FEATURE: 'feat-x' }, { DEVTEAM_ROLE: 'supervisor', DEVTEAM_TICKET: 'console-01-a' }]) {
+      const r = F.runIn(old, ['ack', 'merged-without-merge', btn3, '--reason', 'mine now', '--owner'], env);
+      assert.notEqual(r.status, 0, `M: ack --owner with ${JSON.stringify(env)} is refused: ${r.out}`);
+      ({ raised } = mwm());
+      assert.ok(raised.some((x) => x.subject === btn3), `M: nothing was set aside, with ${JSON.stringify(env)}`);
+      const named = env.DEVTEAM_TICKET ? `DEVTEAM_TICKET=${env.DEVTEAM_TICKET}` : `DEVTEAM_FEATURE=${env.DEVTEAM_FEATURE}`;
+      assert.ok(r.err.includes(`ack --owner is the owner's: it doesn't run in a worker's or planner's session (${named})`), `M: and says why, naming ${named}: ${r.err}`);
+    }
+    // the session refusal comes before the finding lookup: a finding that doesn't exist gets it too
+    assert.match(F.runIn(old, ['ack', 'merged-without-merge', 'companion:000000000000', '--reason', 'x', '--owner'], { DEVTEAM_TICKET: 'console-01-a' }).err, /ack --owner is the owner's/, 'M5: the session refusal comes before the finding lookup');
+    // the owner's own ack --owner still sets it aside, for good
+    assert.match(okIn(old, ['ack', 'merged-without-merge', btn3, '--reason', 'mine', '--owner']), /set aside for good/, "N: the owner's ack --owner still works");
+    ({ raised, acked } = mwm());
+    assert.equal(acked.find((x) => x.subject === btn3)?.ack.until, null, "N: the owner's ack of a merge commit has no end");
   } finally { F.done(); }
 });
