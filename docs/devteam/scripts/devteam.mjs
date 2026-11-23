@@ -7876,9 +7876,63 @@ function exteriorValidateLines() {
   if (!block) return { errors, warnings: [] };
   return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
 }
-// exterior show [--json]: main's exterior.md. exterior check: the working tree's, the draft.
+// The contract's relations, in the order show and the dashboard group them by.
+const EXTERIOR_RELATIONS = ['serves', 'depends_on', 'builds_on_it', 'alternative', 'collaborates', 'governs', 'affects', 'other'];
+// dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), as check.mjs's
+// dashboardExterior gives it: file order, relation_word or null, each signal's score weight×value.
+function exteriorDashboard(block) {
+  return {
+    entities: block.entities.map((e) => ({
+      entity: e.id, relation: e.relation, relation_word: e.relation_word ?? null, kind: e.kind, name: e.name, matters: e.matters, weight: e.weight,
+      signals: e.signals.map((x) => ({ signal: x.id, what: x.what, value: x.value, score: e.weight * x.value })),
+    })),
+  };
+}
+// main's exterior.md: { text, blob }, or null when main has none; with no main, or the project
+// outside the repo, the working tree's (as selfMainText reads self.md).
+function exteriorOnMain() {
+  if (projectInRepo && mainRef()) {
+    const text = git(['show', `${mainRef()}:${EXTERIOR_REL()}`], mainRoot);
+    return text === null ? null : { text, blob: git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${EXTERIOR_REL()}`], mainRoot) };
+  }
+  const text = exteriorTreeText();
+  return text === null ? null : { text, blob: null };
+}
+// exterior show's lines: the Self's what, then each relation that has entities, in the contract's
+// order; under it its entities in file order, each with why it matters and its signals by score,
+// high to low, ties in file order (a stable sort).
+function exteriorShowLines(block, selfWhat) {
+  const lines = [`Self: ${selfWhat ?? 'not drafted yet'}`];
+  if (!block.entities.length) return [...lines, 'no entity drawn yet'];
+  for (const rel of EXTERIOR_RELATIONS) {
+    const es = block.entities.filter((e) => e.relation === rel);
+    if (!es.length) continue;
+    lines.push('', rel);
+    for (const e of es) {
+      lines.push(`  ${e.name} (${e.kind}, weight ${e.weight})${e.relation === 'other' ? `: ${e.relation_word}` : ''}`, `    ${e.matters}`);
+      const sig = e.signals.map((x) => ({ score: e.weight * x.value, what: x.what })).sort((a, b) => b.score - a.score);
+      for (const x of sig) lines.push(`    ${x.score}  ${x.what}`);
+    }
+  }
+  return lines;
+}
+// exterior show [--json]: the working tree's exterior.md and self.md. exterior check: the working
+// tree's, the draft.
 function cmdExterior() {
   const sub = positional[0];
+  if (sub === 'show') {
+    const text = exteriorTreeText();
+    if (text === null) return flags.json ? json(null) : out(EXTERIOR_NOT_DRAFTED);
+    const { block, errors } = exteriorDoc(text);
+    if (errors.length) {
+      for (const e of errors) out(`error: exterior.md: ${e}`);
+      process.exit(1);
+    }
+    if (flags.json) return json(exteriorDashboard(block));
+    const selfText = readText(path.join(projectDir, 'self.md'));
+    const self = selfText === null ? null : selfDoc(selfText).block;
+    return out(exteriorShowLines(block, self?.what ?? null).join('\n'));
+  }
   if (sub === 'check') {
     if (exteriorTreeText() === null) return out('no exterior.md: nothing to check');
     gitReadCache = new Map();
@@ -14464,7 +14518,7 @@ function mdSections(text) {
 function searchFileDocs() {
   const main = projectInRepo ? mainSha() : null;
   if (!main) return [];
-  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && (SEARCH_FILES.test(e.p) || e.p === 'self.md') && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
+  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && (SEARCH_FILES.test(e.p) || e.p === 'self.md' || e.p === 'exterior.md') && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
   const mainFiles = listAt(main, ['']);
   const mainOid = new Map(mainFiles.map((e) => [e.p, e.oid]));
   const reads = mainFiles.map((e) => ({ ...e, sha: main, ref: 'main' }));
@@ -18167,6 +18221,7 @@ function dashboardDataRead() {
     next_moves: nextMoves(),
     ooda: collectOoda(),
     self: selfDashboard(),
+    exterior: (() => { const m = exteriorOnMain(); const d = m && exteriorDoc(m.text); return d?.block ? exteriorDashboard(d.block) : null; })(),
     autonomy,
     autonomy_score: autonomyScore(autonomy, efficiency, awareness),
     threads: threadCounts(),

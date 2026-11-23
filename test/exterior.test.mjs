@@ -190,3 +190,67 @@ test('A7 self_blob at the draft only', withProject('exterior-self', {}, async (W
     assert.doesNotMatch(x.out, /exterior\.md/, `A7 validate in a clone with no main says nothing of exterior.md\n${x.out}`);
   });
 }));
+
+const DATA = JSON.parse(world('dashboard-data.json'));
+const RELATIONS = ['serves', 'depends_on', 'builds_on_it', 'alternative', 'collaborates', 'governs', 'affects', 'other'];
+// the relation headings exterior show prints, in its order
+const headings = (out) => out.split('\n').map((l) => l.trim()).filter((l) => RELATIONS.includes(l));
+const before = (out, a, b, why) => {
+  const i = out.indexOf(a);
+  const j = out.indexOf(b);
+  assert.ok(i >= 0 && j >= 0 && i < j, `${why}: "${a}" prints before "${b}"\n${out}`);
+};
+
+test('A1 A2 A3 A4 A8 exterior show, dashboard-data and search read exterior.md', withProject('exterior-show', { exterior: EXTERIOR_MD }, async (W, check) => {
+  await check('A1 show ranks by relation, then file order, then score', () => {
+    const s = W.run(['exterior', 'show']);
+    assert.equal(s.status, 0, `A1 exterior show exits 0\n${s.text}`);
+    assert.equal(s.out.split('\n')[0], 'Self: A note app for independent researchers that keeps every note as plain text.', 'A1 line 1 is the Self');
+    assert.deepEqual(headings(s.out), RELATIONS, 'A1 the relations print in the contract\'s order');
+    before(s.out, '9  Their storage prices, which set what sync costs.', '6  Incidents on their status page.', 'A1 signals by score');
+    assert.match(s.out, /Small Press Fair.*sponsors/, 'A1 an other entity shows its relation_word');
+    W.writeTree(EXT, extBlock((v) => {
+      v.entities.reverse();
+      const acme = v.entities.find((e) => e.id === 'acme-storage');
+      acme.signals.reverse();
+      acme.signals.push({ id: 'storage-limits', what: 'Their storage limits.', value: 3 });
+      const at = v.entities.findIndex((e) => e.id === 'researchers');
+      v.entities.splice(at, 0, { id: 'students', name: 'Visiting students', relation: 'serves', kind: 'group', matters: 'Some come back as researchers.', weight: 1, strategy: ['Independent researchers who write long notes and want them to last.'], signals: [{ id: 'student-visits', what: 'Visits from students.', value: 4 }] });
+    }, EXTERIOR_MD.replace('It serves independent researchers', 'It serves visiting students and independent researchers')));
+    const r = W.run(['exterior', 'show']);
+    assert.equal(r.status, 0, `A1 exterior show exits 0 on the reordered copy\n${r.text}`);
+    assert.deepEqual(headings(r.out), RELATIONS, 'A1 the reordered copy keeps the contract\'s relation order');
+    before(r.out, '9  Their storage prices, which set what sync costs.', '9  Their storage limits.', 'A1 a tie keeps file order');
+    before(r.out, '9  Their storage limits.', '6  Incidents on their status page.', 'A1 the reordered signals go by score');
+    before(r.out, 'Visiting students', 'Independent researchers', 'A1 within a relation, entities keep file order');
+    W.g(['checkout', '--', EXT], W.old);
+  });
+  await check('A2 show --json is the contract\'s dashboard block', () => {
+    const j = W.run(['exterior', 'show', '--json']);
+    assert.deepEqual(j.status === 0 ? JSON.parse(j.out) : j.text, DATA.exterior, 'A2 exterior show --json is the dashboard exterior block');
+  });
+  await check('A3 dashboard-data carries main\'s exterior.md, or null', () => {
+    assert.deepEqual(json(W.ok(['dashboard-data'])).exterior, DATA.exterior, 'A3 dashboard-data carries main\'s exterior block');
+    W.onMain({ [EXT]: world('invalid/exterior-bad-relation.md') }, 'an invalid exterior.md');
+    W.writeTree(EXT, EXTERIOR_MD);
+    assert.equal(json(W.ok(['dashboard-data'])).exterior, null, 'A3 dashboard-data is null when main\'s exterior.md breaks the contract, whatever the working tree holds');
+    W.g(['checkout', '--', EXT], W.old);
+    W.onMain({ [EXT]: null }, 'no exterior.md');
+    assert.equal(json(W.ok(['dashboard-data'])).exterior, null, 'A3 dashboard-data is null with no exterior.md on main');
+    W.onMain({ [EXT]: EXTERIOR_MD }, 'exterior.md again');
+  });
+  await check('A4 search finds a word of exterior.md', () => {
+    const s = W.run(['search', 'outages', '--type', 'doc']);
+    assert.match(s.out, /exterior\.md/, `A4 search "outages" finds exterior.md\n${s.text}`);
+  });
+  await check('A8 show with no exterior.md, and with no entity', () => {
+    W.writeTree(EXT, null);
+    const s = W.run(['exterior', 'show']);
+    assert.equal(s.status, 0, `A8 exterior show exits 0 with no exterior.md\n${s.text}`);
+    assert.match(s.out, /exterior\.md is not drafted yet/, 'A8 exterior show says not drafted yet');
+    assert.equal(W.run(['exterior', 'show', '--json']).out.trim(), 'null', 'A8 exterior show --json prints null');
+    W.writeTree(EXT, world('exterior-empty.md'));
+    assert.match(W.run(['exterior', 'show']).out, /no entity drawn yet/, 'A8 an empty list prints no entity drawn yet');
+    W.g(['checkout', '--', EXT], W.old);
+  });
+}));

@@ -1614,6 +1614,7 @@ exit 0
     }
   },
   "self": null,
+  "exterior": null,
   "autonomy": {
     "decisions": {
       "score": {
