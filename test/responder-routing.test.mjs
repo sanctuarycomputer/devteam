@@ -452,6 +452,18 @@ test('responder routing (kit-104)', { skip: NO_TMUX, timeout: 280000 }, async (t
     ], ['responder', 'queued', 'responder-late', 'responder-late', true, 'held']);
   });
 
+  // ---- done-when 3, 6: a reply's answering line names only the turns its writer answers (task-1 review F2) ----
+  await it('Y1 thread reply prints answering only for the turns its writer answers: the responder\'s never names a turn routed to the supervisor', () => {
+    const T = oldThread(30 * MIN);
+    const U = F.ownerTurn(T, MIN, 'supervisor');
+    const r = F.run(['thread', 'reply', T, '--', 'the responder adds a note'], RESPONDER);
+    assert.equal(r.status, 0, r.err);
+    assert.ok(!r.err.includes(`answering ${U}`), `the responder's reply: ${r.err}`);
+    const s = after(() => F.run(['thread', 'reply', T, '--', 'the supervisor answers'], SUP));
+    assert.equal(s.status, 0, s.err);
+    assert.match(s.err, new RegExp(`answering ${U}`), 'the supervisor\'s reply answers it');
+  });
+
   // ---- done-when 14: kit-314's handoff case ----
   await it('H1 the supervisor runs thread working on a turn the responder holds: the supervisor responding, the responder\'s stage gone', () => {
     const { T } = F.thread('Held by the responder');
