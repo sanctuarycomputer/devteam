@@ -2429,6 +2429,28 @@ exit 0
       "owner_only": null
     },
     {
+      "key": "next_move_owed_minutes",
+      "group": "Questions and findings",
+      "name": "A move owed after",
+      "description": "minutes a next move the supervisor holds may wait before it is owed",
+      "shown": "value",
+      "value": 60,
+      "set": false,
+      "default": 60,
+      "owner_only": null
+    },
+    {
+      "key": "next_move_stall_hours",
+      "group": "Questions and findings",
+      "name": "A move stalled after",
+      "description": "hours any next move may stay the same before it is stalled, whoever holds it",
+      "shown": "value",
+      "value": 24,
+      "set": false,
+      "default": 24,
+      "owner_only": null
+    },
+    {
       "key": "upstream_repo",
       "group": "Upstream and releases",
       "name": "Kit source",

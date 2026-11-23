@@ -555,6 +555,10 @@ const SETTINGS_DEFAULTS = {
   hold_review_days: 14,
   // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
   finding_ack_hours: 24,
+  // A move the supervisor holds is owed past this many minutes, and any move is stalled past this many
+  // hours (the next-move table, its flag); a value that isn't a number of zero or more counts as the default.
+  next_move_owed_minutes: 60,
+  next_move_stall_hours: 24,
   tick_minutes: 15,
   question_default_after_hours: 24,
   // fix tickets that may run past max_active_tickets, so an incident never waits for a slot
@@ -694,6 +698,8 @@ const SETTINGS_WORDS = Object.freeze({
   hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
   question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
   finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good', 'value'],
+  next_move_owed_minutes: ['Questions and findings', 'A move owed after', "minutes a next move the supervisor holds may wait before it is owed", 'value'],
+  next_move_stall_hours: ['Questions and findings', 'A move stalled after', 'hours any next move may stay the same before it is stalled, whoever holds it', 'value'],
   upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
@@ -716,7 +722,7 @@ const settingNum = (v) => v === null || Number.isFinite(v);
 const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
 const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
 const SETTING_SHAPES = Object.freeze({
-  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'next_move_owed_minutes', 'next_move_stall_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
   responder: (v) => typeof v === 'boolean',
   worktree_setup_always: (v) => typeof v === 'boolean',
