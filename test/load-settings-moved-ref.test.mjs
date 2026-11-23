@@ -169,6 +169,15 @@ test('a launch reads the owner\'s settings from origin, never from a local ref a
       try { return fn(); } finally { F.g(['remote', 'set-url', 'origin', url], F.old); }
     };
     const REFUSED = /^recorded; the operator was NOT started \(could not read main from origin \('[^']*no-such-remote\.git' does not appear to be a git repository\)[^\n]*DEVTEAM_OPERATOR_COMMAND[^\n]*\)$/;
+    // nothing started: a second for an agent to write its mark, then the marks as they are (F.started()
+    // waits up to 30 s for a mark that never comes, which took the file past CI's 300 s watchdog); and no
+    // operator session, which operatorStart opens before it types anything
+    const nothing = () => {
+      sleep(1000);
+      const m = fs.readdirSync(path.join(F.base, 'marks'));
+      const sessions = (spawnSync('tmux', ['list-sessions', '-F', '#S'], { env: F.env(), encoding: 'utf8' }).stdout ?? '').split('\n');
+      return { own: m.includes('own'), evil: m.includes('evil'), setup: m.includes('evil-setup'), operator: sessions.some((x) => x.startsWith('devteam-home')), ...(m.includes('claude') ? { claude: true } : {}) };
+    };
     const turns = (tid) => { const r = F.run(['operator-thread', 'show', tid, '--json'], LAPTOP); assert.equal(r.status, 0, r.err); return JSON.parse(r.out).turns.length; };
     // a thread made while origin answers (its first words start the operator), then no operator up
     const thread = () => {
@@ -186,8 +195,7 @@ test('a launch reads the owner\'s settings from origin, never from a local ref a
       assert.match(tid, /^ot-/);
       assert.match(said ?? '', REFUSED);
       assert.equal(turns(tid), 1, 'the turn is kept once');
-      sleep(1000);
-      assert.deepEqual(F.started(), { own: false, evil: false, setup: false });
+      assert.deepEqual(nothing(), { own: false, evil: false, setup: false, operator: false });
     });
     await t.test('operator-thread say, origin unreadable, no operator up: one more turn, said in words, exit 0', () => {
       const tid = thread();
@@ -195,8 +203,7 @@ test('a launch reads the owner\'s settings from origin, never from a local ref a
       assert.equal(r.status, 0, r.err);
       assert.match(r.out.split('\n')[1] ?? '', REFUSED);
       assert.equal(turns(tid), 2, 'one turn per press');
-      sleep(1000);
-      assert.deepEqual(F.started(), { own: false, evil: false, setup: false });
+      assert.deepEqual(nothing(), { own: false, evil: false, setup: false, operator: false });
     });
     await t.test('operator-thread reopen with words, origin unreadable, no operator up: reopened with one more turn, said in words, exit 0', () => {
       const tid = thread();
@@ -205,16 +212,14 @@ test('a launch reads the owner\'s settings from origin, never from a local ref a
       assert.equal(r.status, 0, r.err);
       assert.match(r.out.split('\n')[1] ?? '', REFUSED);
       assert.equal(turns(tid), 2, 'one turn per press');
-      sleep(1000);
-      assert.deepEqual(F.started(), { own: false, evil: false, setup: false });
+      assert.deepEqual(nothing(), { own: false, evil: false, setup: false, operator: false });
     });
     await t.test('operator-thread start, origin unreadable: refused, and the refusal names DEVTEAM_OPERATOR_COMMAND', () => {
       F.reset();
       const r = offline(() => F.run(['operator-thread', 'start'], LAPTOP));
       assert.equal(r.status, 1);
       assert.match(r.err, /could not read main from origin[^\n]*DEVTEAM_OPERATOR_COMMAND[^\n]*without reading settings/);
-      sleep(1000);
-      assert.deepEqual(F.started(), { own: false, evil: false, setup: false });
+      assert.deepEqual(nothing(), { own: false, evil: false, setup: false, operator: false });
     });
     await t.test('operator-thread start, origin unreadable, DEVTEAM_OPERATOR_COMMAND set: it starts the operator, reading no settings', () => {
       F.reset();
