@@ -73,12 +73,15 @@ async function open(t, F, hash) {
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
   const soon = soonIn(p, 30000, () => dash.out());
-  await soon('typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page and its threads read');
+  // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+  // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+  await soon('document.readyState === "complete" && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page and its threads read');
   // a reload: the old document marked, then a new one (without the mark) with its data and threads read
   const reload = async () => {
     await p.ev('window.__old = true; void 0');
     await p.send('Page.reload');
-    await soon('!window.__old && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page reloaded and read');
+    // and loaded, as the visit (kit-784)
+    await soon('!window.__old && document.readyState === "complete" && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page reloaded and read');
   };
   return { p, soon, size, reload, chrome, port, dash };
 }
