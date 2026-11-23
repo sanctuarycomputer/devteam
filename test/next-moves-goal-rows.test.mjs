@@ -301,12 +301,11 @@ test('next-moves A4: next features: unplanned preconditions and featureless tick
     assert.equal(m.holder, 'supervisor');
     assert.equal(m.words, 'Plan the tickets for Feature first');
   });
-  await t.test('once every feature has tickets: the lead ticket\'s move (G16), until kit-289 the first unmerged one, in progress', () => {
+  await t.test('once every feature has tickets: the lead ticket\'s move (G16)', () => {
     P.ticket('ch-42-first', 'first');
     const m = goalMove(P, G);
-    assert.equal(m.move, 'lead-ticket');
-    assert.equal(m.words, 'In progress');
-    assert.deepEqual(m.ref, { kind: 'ticket', id: 'ch-41-later' });
+    assert.equal(m.via, 'ticket:ch-41-later');
+    assert.equal(m.move, 'start-worker');
   });
 });
 
@@ -356,8 +355,7 @@ test('next-moves A6: the trigger case: an owner-read goal all merged is asked wh
   await t.test('once a ticket is added for the re-plan: the lead ticket\'s move (G16)', () => {
     P.ticket('ch-62-replan', 'ownerread');
     const m = goalMove(P, G);
-    assert.equal(m.move, 'lead-ticket');
-    assert.deepEqual(m.ref, { kind: 'ticket', id: 'ch-62-replan' });
+    assert.equal(m.via, 'ticket:ch-62-replan');
   });
   await t.test('once that merges: asked again (G13), since the new merge', () => {
     const again = P.merge('ch-62-replan');
@@ -374,8 +372,7 @@ test('next-moves A6: the trigger case: an owner-read goal all merged is asked wh
     const N = P.ask(['--class', 'goal-met', '--goal', H, '--recommendation', 'yes']);
     P.owner(['answer', N, 'No — wait for the rest']);
     const m = goalMove(P, H);
-    assert.equal(m.move, 'lead-ticket');
-    assert.deepEqual(m.ref, { kind: 'ticket', id: 'ch-64-open' });
+    assert.equal(m.via, 'ticket:ch-64-open');
   });
   await t.test('the last ticket merging while the goal-met question is open, then a No: the re-plan (G18), not asked again', () => {
     const J = P.ready('Merged while asked');
