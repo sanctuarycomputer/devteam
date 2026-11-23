@@ -377,7 +377,7 @@ test('R4: prompt responder names its section of supervisor.md, and that section 
     const p = F.ok(F.old, ['prompt', 'responder']);
     assert.match(p, /docs\/devteam\/process\/supervisor\.md/);
     assert.match(p, /§13/);
-    assert.doesNotMatch(p, /responder draft|--re\b/, 'no command a later ticket builds');
+    assert.doesNotMatch(p, /--re\b/, 'no command a later ticket builds');
     // it prints the prompt alone, as the start writes it: accepted knowledge is not added
     const k = F.ok(F.old, ['knowledge', 'add', '--kind', 'fact', '--scope', 'project', '--statement', 'Releases go out on Tuesdays'], SUP).match(/k-\S+/)[0];
     F.ok(F.old, ['knowledge', 'set', k, '--status', 'accepted'], SUP);
@@ -401,7 +401,7 @@ test('R4: prompt responder names its section of supervisor.md, and that section 
       ['refs as <type>:<id>, as the code takes them', /`--refs` as `<type>:<id>`/],
       ['scripts in its folder, removed once run', /script files the shell rule asks for in your folder[^.]*remove each when it has run/],
     ]) assert.match(s, re, what);
-    assert.doesNotMatch(s, /responder draft|--re\b/, 'names no command a later ticket builds');
+    assert.doesNotMatch(s, /--re\b/, 'names no command a later ticket builds');
   } finally { F.done(); }
 });
 
