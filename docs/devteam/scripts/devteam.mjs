@@ -7386,8 +7386,8 @@ function landRecords(id, rec, linkName) {
     // (cmdMerge's landCode): no hook runs, directory renames are a conflict, the merge must be
     // exactly the records onto that main with main's jobs, and it is pushed by sha, only while
     // origin's main is still that commit. The merge, its checks, the push and the fetch after a
-    // failed push are bounded (recurringRegistry.git); the worktree's add and remove, and the fetch
-    // after landing, are not (final-12 F5).
+    // failed push are bounded (recurringRegistry.git), and so is the fetch after landing (kit-791); the
+    // worktree's add and remove are not (final-12 F5).
     const checked = mainSha();
     if (!checked) return `no home ${HS.main_branch} to land on`;
     const lg = (args, cwd) => recurringRegistry.git(args, { cwd });
@@ -7434,7 +7434,7 @@ function landRecords(id, rec, linkName) {
     // Each gh call here is killed at its bound, as landCode's are (kit-787): gh pr merge at 60 s, each
     // state read at 15 s (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests),
     // so the records' gh calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s; a killed call reads as failed.
-    // The git fetches are apart: the one below is bounded (120 s), the one after landing is not.
+    // Both git fetches are bounded (120 s): the one below, and the one after landing (kit-791).
     const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
     const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
     const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
@@ -7459,7 +7459,11 @@ function landRecords(id, rec, linkName) {
       out(`gh pr merge of home's records PR #${rec.pr} exited non-zero, but GitHub has #${rec.pr} merged at ${rec.sha.slice(0, 12)}: landed`);
     }
   }
-  git(['fetch', '--quiet', 'origin', HS.main_branch]);
+  // The fetch after the landing only refreshes origin/<main> here: the records have landed. It is
+  // bounded (recurringRegistry.git: 120 s, then SIGKILL; DEVTEAM_GIT_TIMEOUT_MS for tests), and one
+  // that fails or times out is said, never a refusal: their act is written next, and the code lands (kit-791)
+  const fetched = recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot });
+  if (!fetched.ok) warn(`the records landed, but the fetch of home's ${HS.main_branch} after them ${recurringRegistry.why(fetched)}; origin/${HS.main_branch} in ${mainRoot} may not show them yet: check with git fetch origin ${HS.main_branch} there`);
   mainRefCache = undefined; mainLogCache = undefined; mergeShaCache.clear();
   return null;
 }
@@ -7938,7 +7942,7 @@ function cmdMerge() {
     // (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests), so the code's gh
     // calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s (with records in home, 218 s for both landings'
     // gh calls). The git fetches are apart: moved()'s is bounded (recurringRegistry.git, 120 s),
-    // the one after landing is not. A killed call reads as failed: gh pr merge as not merged (its
+    // the one after landing is too (kit-791: 120 s, 240 s with records in home). A killed call reads as failed: gh pr merge as not merged (its
     // state is read, as for any error), a state read as no answer; refused as before
     const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
     const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
@@ -7967,7 +7971,11 @@ function cmdMerge() {
   const codeFail = relanded ? null : landCode();
   if (codeFail && pushTimedOut) die(`${rec ? `the records of ${id} landed in home at ${rec.sha.slice(0, 12)}; ` : ''}the code may have landed${inR} (${codeFail}): run ${rerun} again; it recognises the kit's own landing merge and logs its act, or lands it`);
   if (codeFail) die(rec ? `the records of ${id} landed in home at ${rec.sha.slice(0, 12)}; the code did not land in ${R.name} (${codeFail}): run merge ${id} again` : `${codeFail}; verify from the start`);
-  R.git(['fetch', '--quiet', 'origin', mainBranch]);
+  // The fetch after the landing only refreshes origin/<main> here: the code has landed. It is bounded
+  // (recurringRegistry.git: 120 s, then SIGKILL; DEVTEAM_GIT_TIMEOUT_MS for tests), and one that fails
+  // or times out is said, never a refusal: the act below is still written (kit-791)
+  const fetched = recurringRegistry.git(['fetch', '--quiet', 'origin', mainBranch], { cwd: R.root });
+  if (!fetched.ok) warn(`merged, but the fetch of ${mainBranch}${inR} after the landing ${recurringRegistry.why(fetched)}; origin/${mainBranch} in ${R.root} may not show it yet: check with git fetch origin ${mainBranch} there`);
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
