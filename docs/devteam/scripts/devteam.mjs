@@ -6853,6 +6853,33 @@ const compareRelease = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 // without asking, when it changes only workflow files, deletes none, and keeps every job each had
 // on main, so a "fix" can't drop a check. Its CI must still pass (merge waits for the forge's checks).
 const CI_RULE_SCOPES = ['chore:ci-fix', 'chore:devteam-workflow'];
+// A standing approval for secret-scan exceptions: an accepted owner rule scoped chore:gitleaks-allowlist
+// lets the supervisor merge a gitleaks-* chore without asking, when it only adds lines to the repo's
+// .gitleaks.toml or .gitleaksignore: it removes and changes nothing there, and adds no rule, no
+// [extend] and no useDefault, so it can only allow a finding, never switch the scan's rules off.
+const SECRETS_RULE_SCOPES = ['chore:gitleaks-allowlist'];
+const SECRETS_ALLOW_FILES = [GITLEAKS_FILE, '.gitleaksignore'];
+function secretsAllowlistApproval(chore, sha, base, changed) {
+  if (!/^gitleaks/.test(chore)) return {};
+  const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && SECRETS_RULE_SCOPES.includes(k.scope) && k.status === 'accepted').sort(byTime).pop();
+  if (!rule) return {};
+  const off = changed.filter((f) => !SECRETS_ALLOW_FILES.includes(f));
+  if (off.length) return { problem: `the owner's secret-scan exceptions rule covers only ${SECRETS_ALLOW_FILES.join(' and ')}; this also changes ${off.slice(0, 6).join(', ')}. The owner's answer is needed: merge --chore ${chore} --approved <qid>` };
+  for (const f of changed) {
+    const after = git(['show', `${sha}:${f}`]);
+    if (after === null) return { problem: `the owner's secret-scan exceptions rule doesn't cover deleting ${f}` };
+    const before = (git(['show', `${base}:${f}`]) ?? '').split('\n');
+    const now = after.split('\n');
+    // every line main had is still there, in order: the change only adds
+    let i = 0;
+    for (const l of now) if (i < before.length && l === before[i]) i++;
+    if (i < before.length && before.slice(i).some((l) => l.trim())) return { problem: `the owner's secret-scan exceptions rule covers only adding lines; ${f} changes or removes "${before.slice(i).find((l) => l.trim()).trim().slice(0, 80)}"` };
+    const added = now.filter((l) => !before.includes(l));
+    const bad = added.find((l) => /^\s*(\[\[rules\]\]|\[extend\]|useDefault\b)/.test(l));
+    if (bad) return { problem: `the owner's secret-scan exceptions rule doesn't cover adding "${bad.trim()}" to ${f}: only allowlist entries` };
+  }
+  return { rule, what: 'secret-scan exception' };
+}
 const workflowJobs = (text) => {
   const lines = String(text ?? '').split('\n');
   const i = lines.findIndex((l) => /^jobs:\s*(#.*)?$/.test(l));
@@ -7539,6 +7566,10 @@ function cmdMerge() {
     if (outside.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, outside);
       if (r.rule) { kitRule = standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
+    }
+    if (outside.length && !approved && !kitRule && base) {
+      const r = secretsAllowlistApproval(chore, sha, base, outside);
+      if (r.rule) { kitRule = standing = r; out(`only adds secret-scan exceptions; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
     if (outside.length && !approved && !kitRule) fails.push(`touches files outside project/ (${outside.slice(0, 6).join(', ')}${outside.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
     else if (approved && !kitRule && !kitApproved) fails.push(`changes kit files (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); that needs the owner's answer in a ${KIT_CLASSES.join(', ')} question, and ${approved} is ${kitAnswer.class ?? 'classless'}`);

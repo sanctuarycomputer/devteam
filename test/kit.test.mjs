@@ -29,6 +29,7 @@ const FORKS = [
   ['a PR of any kind that changes owner settings'],
   ['an answer one act recorded'],
   ["the owner's CI-fix rule"],
+  ["the owner's secret-scan exceptions rule"],
   ['a standing owner rule approves upstream syncs'],
   ['a planner in flight'],
   ['parallel planners'],
