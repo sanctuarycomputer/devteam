@@ -26895,6 +26895,9 @@ const recurringChores = Object.freeze({
   // branch can match the ticket pattern (a job named deps-02-bump makes chore-recurring-deps-02-bump-<date>),
   // so a ref that is a chore branch is never a ticket
   isTicketRef: (ref) => new RegExp(SCHEMA['x-id'].keyed.ticket).test(ref) && !recurringChores.REF.test(ref),
+  // the job a run's ref names: a chore branch's name, or a recurring chores ticket's (<c>-<NN>-recurring-<name>);
+  // null for any other ref
+  refJob(ref) { const RC = recurringChores; return RC.REF.exec(ref)?.[1] ?? (RC.isTicketRef(ref) ? /-\d{2,}-recurring-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(ref)?.[1] ?? null : null); },
   slug: (name, ms) => `chore-recurring-${name}-${new Date(ms).toISOString().slice(0, 10).replace(/-/g, '')}`,
   // main's chores in name order, each { name, entry }, read and gated as main's checks are (a file that
   // doesn't read, an entry that breaks the shape, a registry over the cap: none, with the problem)
@@ -26956,6 +26959,9 @@ const recurringChores = Object.freeze({
     const floor = from ? Date.parse(from) : -Infinity;
     for (const o of lines.filter((l) => l.run.status === 'started')) {
       const ref = o.run.ref;
+      // a line whose ref names another job is no run of this one: it can't finish or remove that job's work
+      const job = RC.refJob(ref);
+      if (job !== null && job !== name) continue;
       const run = { id: o.id, ref, slot: o.run.slot, start: o.created_at, status: 'started', at: o.created_at, why: null };
       const end = (status, at, why = null) => { const ms = Date.parse(at); if (Number.isFinite(ms) && (run.status === 'started' || ms < Date.parse(run.at))) Object.assign(run, { status, at: new Date(ms).toISOString(), why }); };
       if (RC.isTicketRef(ref)) {

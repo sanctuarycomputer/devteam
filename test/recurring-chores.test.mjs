@@ -652,6 +652,25 @@ test('C26c: recurring done --abandoned ends a run whose started line is dated in
   assert.equal(T.finding('recurring-stuck', 'fdrop').length, 0, 'not stuck once ended');
 });
 
+test('C27a: a supervisor line for xa whose ref is xb\'s chore branch is ignored: recurring done xa --nothing is refused and xb\'s worktree stays', () => {
+  const T = skew();
+  T.ok(['recurring', 'start', 'xb']);
+  const ref = `chore-recurring-xb-${ymd(Date.now())}`;
+  T.addLine('xa', { slot: iso(NOW - DAY), ref, at: Date.now() });
+  const r = T.dt(['recurring', 'done', 'xa', '--nothing', 'nothing']);
+  assert.match(r.err, /xa has no started run to finish/, r.text);
+  assert.equal(r.status, 1);
+  assert.ok(fs.existsSync(path.join(T.old, '.worktrees', ref, '.git')), "xb's worktree is kept");
+  assert.deepEqual(T.peek('xa').runs, [], 'xa has no run');
+  assert.equal(T.peek('xb').runs[0].status, 'started', "xb's run is untouched");
+});
+
+test('C27b: a supervisor line for xc whose ref is another job\'s chores ticket is ignored', () => {
+  const T = skew();
+  T.addLine('xc', { slot: iso(NOW - DAY), ref: 'ops-01-recurring-xd', at: NOW - HOUR });
+  assert.deepEqual(T.peek('xc').runs, [], 'xc has no run');
+});
+
 // ===== DW14: supervisor.md =====
 
 test('C22: supervisor.md documents chores: when they come due, recurring start, done with --nothing and --abandoned, and holds', () => {
