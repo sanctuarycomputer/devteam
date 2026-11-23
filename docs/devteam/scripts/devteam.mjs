@@ -9470,7 +9470,7 @@ function anchorProblem(a) {
 // A subject's key: one open thread per key (kit-97). An item by its ref, a page spot by its view and point,
 // an artifact's or a preview's spot by its page and the element the lens named, else the point. index.html's
 // tKey (with tFrameSpot) is the same function; test/thread-per-subject.test.mjs holds the two equal.
-const subjectKey = (s) => { const spot = () => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
+const subjectKey = (s) => { const spot = () => (s.anchor?.node !== undefined ? `node:${s.anchor.node}` : s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
 // What a thread, turn or message line holds beyond what the schema's walk can say: sizes in bytes, a
 // title of one line, a subject with only its kind's keys, the supervisor's fields on its own turns,
 // and (artifact-notes-1) the hand-over's, withdrawal's, frame's, picture's and mark's text and times.

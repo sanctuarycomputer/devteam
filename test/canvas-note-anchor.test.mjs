@@ -108,3 +108,29 @@ test('canvas-note-anchor A9: every artifact-notes@1 fixture still passes log-che
     } finally { F.restoreLog(snap); }
   }
 });
+
+test('canvas-note-anchor A11: pins on two layers of one canvas are two threads, and a second pin on one layer is refused, naming the open one', (t) => {
+  const F = threadsFixture('canvas-note-anchor-layers');
+  t.after(() => F.done());
+  const on = (node) => JSON.stringify(pin({ node }));
+  const first = F.owner(['thread', 'new', 'On layer one', '--subject', on('k3f9a2-1')]).split('\n')[0].trim();
+  const second = F.owner(['thread', 'new', 'On layer two', '--subject', on('k3f9a2-2')]).split('\n')[0].trim();
+  assert.notEqual(first, second, 'two threads');
+  const said = F.fails(['thread', 'new', 'Again on layer one', '--subject', on('k3f9a2-1')]);
+  assert.match(said, new RegExp(`${first} is already open on this subject`), 'the second pin on layer one');
+});
+
+// The two keys, each loaded by itself in vm, as test/thread-per-subject.test.mjs loads them
+test("canvas-note-anchor A12: subjectKey and the page's tKey (with tFrameSpot) key a node anchor as node:<id>, alike", () => {
+  const line = (src, name) => { const m = src.match(new RegExp(`^const ${name} = .*;$`, 'm')); assert.ok(m, `${name} on one line`); return m[0]; };
+  const subjectKey = vm.runInNewContext(`${line(SRC, 'subjectKey')}\nsubjectKey`, {});
+  const tKey = vm.runInNewContext(`${line(PAGE, 'tFrameSpot')}\n${line(PAGE, 'tKey')}\ntKey`, {});
+  for (const node of ['k3f9a2-1', 'k3f9a2-2', 'Layer 7 (hero) / title']) {
+    const s = pin({ node });
+    assert.equal(subjectKey(s), `artifact:checkout-canvas:index.html:node:${node}`, `subjectKey of ${node}`);
+    assert.equal(tKey(s), subjectKey(s), `tKey of ${node}`);
+  }
+  // a page element's key is as it was
+  const el = { kind: 'artifact', slug: 'checkout-canvas', at: 'main', anchor: { selector: '#buy', text: 'Buy' } };
+  assert.deepEqual([subjectKey(el), tKey(el)], ['artifact:checkout-canvas:index.html:#buy|Buy', 'artifact:checkout-canvas:index.html:#buy|Buy']);
+});
