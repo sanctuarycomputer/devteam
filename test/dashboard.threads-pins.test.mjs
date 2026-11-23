@@ -50,7 +50,9 @@ async function openThreadsPage(t, name) {
   const shown = (id) => `!document.getElementById('${id}').hidden`;
   // the peek slid in (kit-88): shown, and at rest, so a point read on it stays where it is
   const slid = () => `${shown('drawer')} && getComputedStyle(document.getElementById('drawer')).transform === 'none'`;
-  await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
+  // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+  // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+  await soon(`document.readyState === 'complete' && !!document.querySelector('${goalSel}')`, 'the goal card');
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   // An Enter keyDown as a keyboard sends it, with its '\r' (p.key sends none), so a newline lands
   // unless the page cancels the key. It can be sent with Shift, Ctrl, Alt or Meta, as a key repeat, or as 229
