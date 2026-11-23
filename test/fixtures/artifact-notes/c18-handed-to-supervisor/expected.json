@@ -1,0 +1,18 @@
+{
+ "about": "handed to the supervisor, which has not written since",
+ "thread": "t-20261120-100018000-owner",
+ "view": {
+  "handed": {
+   "to": "supervisor",
+   "at": "2026-11-20T10:01:18.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "supervisor",
+  "with": "supervisor"
+ }
+}
