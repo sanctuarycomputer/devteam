@@ -1,0 +1,37 @@
+{
+ "about": "the supervisor marks a note handed to a planner",
+ "thread": "t-20261120-100029000-owner",
+ "view": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:29.000Z"
+  },
+  "addressed": {
+   "by": "supervisor",
+   "at": "2026-11-20T10:02:29.000Z",
+   "note": "Trial button now says Start free trial.",
+   "sha": "3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f",
+   "draft": "supervisor"
+  },
+  "check": "addressed",
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner"
+ },
+ "api": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:29.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "session",
+  "with": "plan-pricing"
+ }
+}

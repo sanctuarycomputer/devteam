@@ -1,0 +1,18 @@
+{
+ "about": "a ready on a thread that is not an artifact note: check stays null",
+ "thread": "t-20261120-100010000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner",
+  "ready": {
+   "outcome": "The trial button reads Start free trial.",
+   "at": "2026-11-20T10:02:10.000Z"
+  }
+ }
+}

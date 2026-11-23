@@ -1,0 +1,44 @@
+{
+ "about": "a --no-change ready, then a session's mark: the mark is to check, and noshot goes",
+ "thread": "t-20261120-100033000-owner",
+ "view": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:33.000Z"
+  },
+  "addressed": {
+   "by": "plan-pricing",
+   "at": "2026-11-20T10:03:33.000Z",
+   "note": "Trial button now says Start free trial.",
+   "sha": "3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f",
+   "draft": "plan-pricing"
+  },
+  "check": "addressed",
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner",
+  "ready": {
+   "outcome": "The trial button reads Start free trial.",
+   "at": "2026-11-20T10:02:33.000Z"
+  }
+ },
+ "api": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:33.000Z"
+  },
+  "addressed": null,
+  "check": "ready",
+  "shot": null,
+  "noshot": "no-change",
+  "unready": null,
+  "frame": null,
+  "waiting": "owner",
+  "ready": {
+   "outcome": "The trial button reads Start free trial.",
+   "at": "2026-11-20T10:02:33.000Z"
+  }
+ }
+}

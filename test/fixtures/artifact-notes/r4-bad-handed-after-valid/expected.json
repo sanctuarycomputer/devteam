@@ -1,0 +1,18 @@
+{
+ "about": "a hand-written handed naming the owner after a valid hand-over: the valid one stands",
+ "thread": "t-20261120-100030000-owner",
+ "view": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:30.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "session",
+  "with": "plan-pricing"
+ }
+}

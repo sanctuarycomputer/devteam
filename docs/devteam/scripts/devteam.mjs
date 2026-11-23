@@ -1718,6 +1718,12 @@ function integrity(o, file) {
     // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
     if (o.type === 'message' && o.kind === 'handoff' && typeof o.thread !== 'string') return 'a handoff names its thread';
     if (o.type === 'message' && o.kind === 'handoff' && o.to !== 'supervisor') return 'a handoff goes to the supervisor';
+    // artifact-notes-1, from anyone: a session's mark on an artifact note goes to the owner and names
+    // the note, and only a session marks (the owner hands over, the responder hands off); its draft and
+    // picture are on it and nothing else; a frame is the size the owner saw an artifact at
+    if (o.type === 'message' && o.kind === 'addressed' && (typeof o.thread !== 'string' || o.to !== 'owner' || !['supervisor', 'planner', 'ticket'].includes(cls))) return "an addressed message goes to the owner, names its thread, and is a session's";
+    if (o.type === 'message' && o.kind !== 'addressed' && (o.draft !== undefined || o.shot !== undefined)) return 'draft and shot are on an addressed message';
+    if (o.type === 'thread' && o.frame !== undefined && !(isObj(o.subject) && o.subject.kind === 'artifact')) return "frame is on an artifact note's first line";
     if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
     if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
     if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
@@ -1739,6 +1745,11 @@ function integrity(o, file) {
     if (f && o.type === 'ticket' && o.feature !== f) return `${o.by} may only create tickets of the feature "${f}"`;
     return null;
   }
+  // artifact-notes-1: a picture (or why there is none) goes with the proposal it shows, and a
+  // withdrawal with the ready it clears, so no reader keeps one without the other
+  if (o.type === 'thread' && (o.shot !== undefined || o.noshot !== undefined) && !isObj(o.ready)) return 'shot and noshot go on a line that writes ready';
+  if (o.type === 'thread' && o.unready !== undefined && o.ready !== null) return 'unready goes on a line that writes ready: null';
+  if (o.type === 'thread' && o.shot !== undefined && o.noshot !== undefined) return 'shot and noshot never go together';
   const allowed = auth.set[o.type]?.[cls];
   if (!allowed) return `${cls} may not change ${o.type} lines`;
   if (!body.length) return 'a set line changes at least one field';
@@ -1799,7 +1810,7 @@ function checkLine(o, file) {
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
   errs.push(...schemaErrors(t, body, o.type));
-  if (o.type === 'thread' || o.type === 'turn') errs.push(...threadLineProblems(o));
+  if (o.type === 'thread' || o.type === 'turn' || o.type === 'message') errs.push(...threadLineProblems(o));
   if (o.op === 'new') {
     for (const k of t['x-required-new'] ?? []) if (!(k in body)) errs.push(`${o.type}.${k} is required`);
     for (const k of t['x-set-only'] ?? []) if (k in body) errs.push(`${o.type}.${k} is set later, not at creation`);
@@ -9301,12 +9312,31 @@ function anchorProblem(a) {
 // an artifact's or a preview's spot by its page and the element the lens named, else the point. index.html's
 // tKey (with tFrameSpot) is the same function; test/thread-per-subject.test.mjs holds the two equal.
 const subjectKey = (s) => { const spot = () => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
-// What a thread or turn line holds beyond what the schema's walk can say: sizes in bytes, a title
-// of one line, a subject with only its kind's keys, and the supervisor's fields on its own turns.
+// What a thread, turn or message line holds beyond what the schema's walk can say: sizes in bytes, a
+// title of one line, a subject with only its kind's keys, the supervisor's fields on its own turns,
+// and (artifact-notes-1) the hand-over's, withdrawal's, frame's, picture's and mark's text and times.
 function threadLineProblems(o) {
   const errs = [];
   const over = (k, v, max) => { if (typeof v === 'string' && Buffer.byteLength(v) > max) errs.push(`${o.type}.${k} is ${Buffer.byteLength(v)} bytes; at most ${max}`); };
+  // artifact-notes-1: one line of text within its bytes; a time as the log stamps it; a picture
+  // that says it has a dark copy exactly when it gives that copy's sum
+  const oneLine = (v, min, max) => typeof v !== 'string' || (!UNSAFE_TEXT.test(v) && Buffer.byteLength(v) >= min && Buffer.byteLength(v) <= max);
+  const iso = (k, v) => { if (typeof v === 'string' && !READY_AT.test(v)) errs.push(`${o.type}.${k} is an ISO timestamp (2026-11-10T10:30:00.000Z)`); };
+  if (isObj(o.shot) && (o.shot.dark === true) !== (isObj(o.shot.sum) && o.shot.sum.dark !== undefined)) errs.push(`${o.type}.shot.dark goes with sum.dark`);
+  if (o.type === 'message') {
+    if (o.kind === 'addressed' && !oneLine(o.text, 0, 300)) errs.push("an addressed message's text is one line of at most 300 bytes");
+    return errs;
+  }
   if (o.type === 'thread') {
+    if (isObj(o.handed)) {
+      if (o.handed.to === 'owner' || o.handed.to === 'responder') errs.push('thread.handed.to is a session (supervisor, plan-<feature> or a ticket)');
+      iso('handed.at', o.handed.at);
+    }
+    if (isObj(o.unready)) {
+      iso('unready.at', o.unready.at);
+      if (!oneLine(o.unready.reason, 12, 300)) errs.push('thread.unready.reason is one line of 12 to 300 bytes');
+    }
+    if (isObj(o.frame) && !oneLine(o.frame.hash, 0, 200)) errs.push('thread.frame.hash is one line of at most 200 bytes');
     if (typeof o.title === 'string' && UNSAFE_TEXT.test(o.title)) errs.push('thread.title is one line of plain text');
     if (o.subject !== undefined) { const p = subjectProblem(o.subject); if (p) errs.push(`thread.subject: ${p}`); }
     over('outcome', o.outcome, OUTCOME_MAX);
@@ -9342,33 +9372,62 @@ function threadQuestion(q) {
 function threadViews(objects) {
   const turns = new Map();
   const asked = new Map();
+  // artifact-notes-1: a session's marks on a note (the dashboard's reader folds no messages, so none there until kit-144)
+  const marks = new Map();
   const push = (m, k, v) => (m.get(k) ?? m.set(k, []).get(k)).push(v);
   for (const o of objects.values()) {
     if (o.type === 'turn' && typeof o.thread === 'string') push(turns, o.thread, o);
     else if (o.type === 'question' && typeof o.thread === 'string') push(asked, o.thread, o);
+    else if (o.type === 'message' && o.kind === 'addressed' && typeof o.thread === 'string') push(marks, o.thread, o);
   }
-  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime)));
+  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime)));
 }
 // waiting: whose reply is owed (supervisor, responder), or the owner's move (owedIn).
 // ready: the supervisor's proposal, until the owner says anything after it (a turn, a resolve or a
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
-function threadView(t, ts, qs) {
+function threadView(t, ts, qs, ms = []) {
   // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
   const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], ...(u.created_by === 'owner' ? { routed_to: u.routed_to === 'supervisor' || u.routed_to === 'responder' ? u.routed_to : null, delivered: u.delivered === 'typed' || u.delivered === 'queued' ? u.delivered : null } : {}) }));
   // whose reply is owed (owedIn, kit-104): the supervisor's when a turn routed to it, or with no
   // route, is owed; else the responder's when one routed to it is; else the owner's move
   const owed = owedIn(ts, t);
-  const waiting = owed.some((u) => u.routed_to !== 'responder') ? 'supervisor' : owed.length ? 'responder' : 'owner';
+  let waiting = owed.some((u) => u.routed_to !== 'responder') ? 'supervisor' : owed.length ? 'responder' : 'owner';
   const status = t.status === 'resolved' ? 'resolved' : 'open';
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
   const ownerSince = !!proposed && (turns.some((u) => u.by === 'owner' && u.at > proposed.at) || t.updates.some((u) => u.status !== undefined && u.at > proposed.at));
   const ready = status === 'open' && proposed && !ownerSince && isObj(t.ready) && typeof t.ready.outcome === 'string' ? { outcome: t.ready.outcome, at: proposed.at } : null;
+  // artifact-notes-1 (supervisor.md, Artifact notes). Each from its line's own at, never a time the
+  // line carries; a hand-written field of the wrong shape is no field, and hides no older good one.
+  // The owner's last word: their newest turn, resolve or reopen; a hand-over is not one.
+  const open = status === 'open';
+  const art = isObj(t.subject) && t.subject.kind === 'artifact';
+  const lastWord = [...turns.filter((u) => u.by === 'owner').map((u) => u.at), ...t.updates.filter((u) => u.status !== undefined).map((u) => u.at)].sort().pop() ?? '';
+  // handed: the owner's newest hand-over to a session, while no word of theirs came after it
+  const handLine = t.updates.filter((u) => u.by === 'owner' && isObj(u.handed) && typeof u.handed.to === 'string' && /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(u.handed.to) && u.handed.to !== 'owner' && u.handed.to !== 'responder').pop();
+  const handed = open && handLine && handLine.at > lastWord ? { to: handLine.handed.to, at: handLine.at } : null;
+  // the supervisor's newest withdrawal; a mark before it no longer counts
+  const unreadyLine = t.updates.filter((u) => u.by === 'supervisor' && isObj(u.unready) && typeof u.unready.reason === 'string').pop() ?? null;
+  // addressed: the newest mark since the hand-over (and since any withdrawal) by the session it went to or the supervisor
+  const mark = handed ? ms.filter((m) => typeof m.text === 'string' && (m.created_by === handed.to || m.created_by === 'supervisor') && m.created_at > handed.at && m.created_at > (unreadyLine?.at ?? '')).pop() : null;
+  const addressed = mark ? { by: mark.created_by, at: mark.created_at, note: mark.text, sha: typeof mark.sha === 'string' ? mark.sha : null, draft: typeof mark.draft === 'string' ? mark.draft : null } : null;
+  // check: what the owner has to check, the mark or the supervisor's proposal; its picture or why none
+  const check = addressed ? 'addressed' : art && ready ? 'ready' : null;
+  const shot = check === 'addressed' ? (isObj(mark.shot) ? mark.shot : null) : check === 'ready' ? (isObj(proposed.shot) ? proposed.shot : null) : null;
+  const noshot = check === 'ready' && proposed.noshot === 'no-change' ? 'no-change' : null;
+  const unready = open && unreadyLine && unreadyLine.at > lastWord && !check ? { at: unreadyLine.at, reason: unreadyLine.unready.reason } : null;
+  const frame = isObj(t.frame) && Number.isInteger(t.frame.w) && Number.isInteger(t.frame.h) && typeof t.frame.hash === 'string' ? { w: t.frame.w, h: t.frame.h, hash: t.frame.hash } : null;
+  // On an open artifact note whose move it is follows its state alone (resolved; to check; with
+  // <session>; open): to check or open, the owner's; with a session, that session's; with the
+  // supervisor, the supervisor's until its first turn after the hand-over (D5: any non-owner turn).
+  if (open && art) waiting = check || !handed ? 'owner' : handed.to === 'supervisor' && !turns.some((u) => u.by !== 'owner' && u.at > handed.at) ? 'supervisor' : 'session';
+  const withSession = open && art && !check && handed ? handed.to : null;
   const firstOwner = turns.find((u) => u.by === 'owner');
   const firstReply = firstOwner ? turns.find((u) => u.by === 'supervisor' && u.at > firstOwner.at) : null;
   return {
     id: t.id, title: String(t.title ?? ''), subject: isObj(t.subject) ? t.subject : null, status, outcome: status === 'resolved' ? t.outcome ?? null : null, ready,
-    turns, questions: qs.map(threadQuestion), waiting,
+    turns, questions: qs.map(threadQuestion), waiting, ...(withSession ? { with: withSession } : {}),
+    handed, addressed, check, shot, noshot, unready, frame, source: null,
     created_at: t.created_at, resolved_at: status === 'resolved' ? t.updates.filter((u) => u.status === 'resolved').pop()?.at ?? null : null,
     activity_at: [t.created_at, ...turns.map((u) => u.at), ...t.updates.map((u) => u.at)].sort().pop(),
     first_reply_ms: firstReply ? Date.parse(firstReply.at) - Date.parse(firstOwner.at) : null,
@@ -9436,7 +9495,8 @@ function undeliveredTurns(now = Date.now(), { entries = false } = {}) {
     if (v.status !== 'open' || v.waiting !== 'supervisor') continue;
     let i = v.turns.length;
     while (i > 0 && v.turns[i - 1].by === 'owner') i--;
-    const mine = v.turns.slice(i);
+    // on an artifact note handed over, only the owner's turns since the hand-over (its own message is the delivery, artifact-notes-1)
+    const mine = v.turns.slice(i).filter((u) => !(v.subject?.kind === 'artifact' && v.handed) || u.at > v.handed.at);
     if (!mine.length || !mine.every((u) => Object.hasOwn(m, u.id))) continue;
     const firstMs = Date.parse(mine[0].at);
     const waited = now - firstMs;
@@ -9471,11 +9531,13 @@ function threadOpen(id, by) {
   return t;
 }
 const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open').length;
-// Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
-// owner's move), else waiting (on the supervisor).
+// Open threads by whose move: ready (the supervisor's proposal, or a session's mark on an artifact
+// note, awaits the owner's check), else you (the owner's move), else with (an artifact note a session
+// has, artifact-notes-1; the key only when one does), else waiting (on the supervisor).
 function threadCounts() {
-  const r = { you: 0, waiting: 0, ready: 0 };
-  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready ? 'ready' : v.waiting === 'owner' ? 'you' : 'waiting']++;
+  const r = { you: 0, waiting: 0, ready: 0, with: 0 };
+  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready || v.check ? 'ready' : v.waiting === 'owner' ? 'you' : v.waiting === 'session' ? 'with' : 'waiting']++;
+  if (!r.with) delete r.with;
   return r;
 }
 // A thread's stage set ({ by, stage, turn }) or, given null, dropped, in THREAD_WORKING_FILE under
@@ -9813,7 +9875,8 @@ function cmdThread() {
     } catch {}
     if (flags.json) return json(v);
     // an overdue turn the responder has is now the supervisor's to take: show says so, as list --waiting does
-    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${waitingWords(v, v.waiting === 'responder' && responderOverdue(readLog().objects).some((o) => o.thread === v.id))}` : ''}`);
+    // an artifact note with a session is that session's (artifact-notes-1), in the words the card uses
+    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'session' ? `with ${v.with}` : waitingWords(v, v.waiting === 'responder' && responderOverdue(readLog().objects).some((o) => o.thread === v.id))}` : ''}`);
     out(threadDataFrame(v));
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
@@ -9863,7 +9926,7 @@ function cmdThread() {
     if (!flags.all) vs = vs.filter((x) => x.status === 'open');
     if (flags.json) return json(vs);
     if (!vs.length) return out(flags.all ? 'no threads' : 'no open threads');
-    for (const x of vs) out(row(x, x.status === 'open' ? waitingWords(x) : ''));
+    for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : ''));
     return;
   }
   die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
@@ -16807,6 +16870,12 @@ function collectMetrics(since, reviewsSince = 0) {
   const logNow = readLog().objects;
   const turnsNow = turnsByThread(logNow);
   for (const x of threadsNow.filter((y) => y.status === 'open' && y.waiting === 'supervisor')) {
+    // an artifact note the owner handed to the supervisor waits from the hand-over (artifact-notes-1)
+    if (x.subject?.kind === 'artifact' && x.handed?.to === 'supervisor') {
+      const since = now - Date.parse(x.handed.at);
+      if (since > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner handed this note over ${Math.round(since / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
+      continue;
+    }
     const first = owedIn(turnsNow.get(x.id) ?? [], logNow.get(x.id)).find((u) => u.routed_to !== 'responder');
     if (!first) continue;
     const ago = now - Date.parse(first.created_at);
