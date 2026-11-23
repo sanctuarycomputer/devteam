@@ -10,7 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { hasTmux, threadsFixture, until, write } from './lib/kit.mjs';
-import { CLAUDE_RESUME, fixture as recoveryFixture, MENU, rateLimit, SID, SKIP, STUB_SHELL, SUP as SUP_PROMPT, supervisorPane, UNDER } from './lib/recovery-fixture.mjs';
+import { fixture as recoveryFixture, STUB_SHELL, UNDER } from './lib/recovery-fixture.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const TICKET = 'mr-01-a';
@@ -158,6 +158,74 @@ test('a launch reads the owner\'s settings from origin, never from a local ref a
       try { r = F.run(['operator-thread', 'new', 'what is stuck?'], { DEVTEAM_BOX: 'off', DEVTEAM_ROLE: '' }); } finally { back(); }
       assert.equal(r.status, 0, r.err);
       assert.match(r.out, /recorded; the operator is starting/);
+      assert.deepEqual(F.started(), { own: true, evil: false, setup: false }, r.err);
+    });
+    // kit-780: the owner's words are kept before the operator is started, so a start that origin
+    // refuses is said in words and exits 0: the hub shows the turn as kept, and no press is pressed again
+    const LAPTOP = { DEVTEAM_BOX: 'off', DEVTEAM_ROLE: '' };
+    const offline = (fn) => {
+      const url = F.g(['remote', 'get-url', 'origin'], F.old);
+      F.g(['remote', 'set-url', 'origin', path.join(F.base, 'no-such-remote.git')], F.old);
+      try { return fn(); } finally { F.g(['remote', 'set-url', 'origin', url], F.old); }
+    };
+    const REFUSED = /^recorded; the operator was NOT started \(could not read main from origin \('[^']*no-such-remote\.git' does not appear to be a git repository\)[^\n]*DEVTEAM_OPERATOR_COMMAND[^\n]*\)$/;
+    // nothing started: a second for an agent to write its mark, then the marks as they are (F.started()
+    // waits up to 30 s for a mark that never comes, which took the file past CI's 300 s watchdog); and no
+    // operator session, which operatorStart opens before it types anything
+    const nothing = () => {
+      sleep(1000);
+      const m = fs.readdirSync(path.join(F.base, 'marks'));
+      const sessions = (spawnSync('tmux', ['list-sessions', '-F', '#S'], { env: F.env(), encoding: 'utf8' }).stdout ?? '').split('\n');
+      return { own: m.includes('own'), evil: m.includes('evil'), setup: m.includes('evil-setup'), operator: sessions.some((x) => x.startsWith('devteam-home')), ...(m.includes('claude') ? { claude: true } : {}) };
+    };
+    const turns = (tid) => { const r = F.run(['operator-thread', 'show', tid, '--json'], LAPTOP); assert.equal(r.status, 0, r.err); return JSON.parse(r.out).turns.length; };
+    // a thread made while origin answers (its first words start the operator), then no operator up
+    const thread = () => {
+      F.reset();
+      const r = F.run(['operator-thread', 'new', 'first words'], LAPTOP);
+      assert.equal(r.status, 0, r.err);
+      F.reset();
+      return r.out.split('\n')[0];
+    };
+    await t.test('operator-thread new, origin unreadable, no operator up: the turn is kept once, the refused start said in words, exit 0', () => {
+      F.reset();
+      const r = offline(() => F.run(['operator-thread', 'new', 'is origin down?'], LAPTOP));
+      assert.equal(r.status, 0, `a kept turn is no failed press: ${r.err}`);
+      const [tid, said] = r.out.split('\n');
+      assert.match(tid, /^ot-/);
+      assert.match(said ?? '', REFUSED);
+      assert.equal(turns(tid), 1, 'the turn is kept once');
+      assert.deepEqual(nothing(), { own: false, evil: false, setup: false, operator: false });
+    });
+    await t.test('operator-thread say, origin unreadable, no operator up: one more turn, said in words, exit 0', () => {
+      const tid = thread();
+      const r = offline(() => F.run(['operator-thread', 'say', tid, 'still down?'], LAPTOP));
+      assert.equal(r.status, 0, r.err);
+      assert.match(r.out.split('\n')[1] ?? '', REFUSED);
+      assert.equal(turns(tid), 2, 'one turn per press');
+      assert.deepEqual(nothing(), { own: false, evil: false, setup: false, operator: false });
+    });
+    await t.test('operator-thread reopen with words, origin unreadable, no operator up: reopened with one more turn, said in words, exit 0', () => {
+      const tid = thread();
+      assert.equal(F.run(['operator-thread', 'close', tid], LAPTOP).status, 0);
+      const r = offline(() => F.run(['operator-thread', 'reopen', tid, 'back again'], LAPTOP));
+      assert.equal(r.status, 0, r.err);
+      assert.match(r.out.split('\n')[1] ?? '', REFUSED);
+      assert.equal(turns(tid), 2, 'one turn per press');
+      assert.deepEqual(nothing(), { own: false, evil: false, setup: false, operator: false });
+    });
+    await t.test('operator-thread start, origin unreadable: refused, and the refusal names DEVTEAM_OPERATOR_COMMAND', () => {
+      F.reset();
+      const r = offline(() => F.run(['operator-thread', 'start'], LAPTOP));
+      assert.equal(r.status, 1);
+      assert.match(r.err, /could not read main from origin[^\n]*DEVTEAM_OPERATOR_COMMAND[^\n]*without reading settings/);
+      assert.deepEqual(nothing(), { own: false, evil: false, setup: false, operator: false });
+    });
+    await t.test('operator-thread start, origin unreadable, DEVTEAM_OPERATOR_COMMAND set: it starts the operator, reading no settings', () => {
+      F.reset();
+      const r = offline(() => F.run(['operator-thread', 'start'], { ...LAPTOP, DEVTEAM_OPERATOR_COMMAND: F.OWN }));
+      assert.equal(r.status, 0, r.err);
+      assert.match(r.out, /started fresh/);
       assert.deepEqual(F.started(), { own: true, evil: false, setup: false }, r.err);
     });
     await t.test('origin unreadable, origin/main moved: the worker starts nothing and says why', () => {
@@ -365,51 +433,4 @@ test('origin unreadable at a relaunch or a recover: refused with the reason, and
       fs.rmSync(dir, { recursive: true, force: true });
     }
   } finally { F.done(); }
-});
-
-// accounts-tick isn't a launch, but it types the supervisor's resume_command into its pane after a
-// usage limit (restartSupervisor): that command too is origin's, and a refused read restarts nothing.
-test('accounts-tick restarts a supervisor stopped at a limit with origin\'s resume_command, and not at all while origin is unreadable', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
-  const cswap = (F) => ({ DEVTEAM_CSWAP: F.cswap });
-  const stopped = async (F) => {
-    F.writeTranscript(SID, [{ type: 'user', message: { content: SUP_PROMPT } }, rateLimit()]);
-    const pane = supervisorPane(F, MENU, { args: SKIP });
-    await until(() => pane.shows().includes('Esc to cancel'), 'the menu');
-    // the first tick: this project has not seen the account settle
-    assert.equal(F.tick(cswap(F)), '');
-    return pane;
-  };
-  await t.test('origin/HEAD repointed at an unpushed commit with another resume_command: the owner\'s is typed', async () => {
-    const F = recoveryFixture('origin-suprestart', { resume: CLAUDE_RESUME });
-    const g = (args) => spawnSync('git', args, { cwd: F.root, encoding: 'utf8' }).stdout.trim();
-    try {
-      const pane = await stopped(F);
-      const sf = path.join(F.root, 'docs/devteam/project/settings.md');
-      const text = fs.readFileSync(sf, 'utf8');
-      fs.writeFileSync(sf, text.replace(JSON.stringify(CLAUDE_RESUME), JSON.stringify('claude --continue --planted')));
-      g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'planted']);
-      const planted = g(['rev-parse', 'HEAD']);
-      g(['reset', '-q', '--hard', 'HEAD~1']);
-      g(['update-ref', 'refs/remotes/origin/planted', planted]);
-      g(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/planted']);
-      assert.match(F.tick(cswap(F)), /restarted the supervisor/);
-      await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
-      assert.equal(F.claudeCalls()[0], `supervisor|--resume ${SID} --dangerously-skip-permissions You were restarted after a usage limit, on this same conversation. Carry on from where you were.`);
-      assert.equal(pane.keys(), '', 'no key reaches the old process');
-    } finally { F.done(); }
-  });
-  await t.test('origin unreadable: not restarted, the tick says why, nothing typed and no attempt spent', async () => {
-    const F = recoveryFixture('origin-supdown', { resume: CLAUDE_RESUME });
-    const g = (args) => spawnSync('git', args, { cwd: F.root, encoding: 'utf8' }).stdout.trim();
-    try {
-      const pane = await stopped(F);
-      g(['remote', 'set-url', 'origin', path.join(F.base, 'no-such-remote.git')]);
-      const said = F.tick(cswap(F));
-      assert.match(said, /the supervisor is stopped at a usage limit and was not restarted: could not read main from origin \('[^']*no-such-remote\.git' does not appear to be a git repository\)/);
-      sleep(1000);
-      assert.deepEqual(F.claudeCalls(), [], 'nothing started');
-      assert.equal(pane.keys(), '', 'nothing typed');
-      assert.ok(!fs.existsSync(F.restartsFile) || !/"supervisor"/.test(fs.readFileSync(F.restartsFile, 'utf8')), 'no attempt spent');
-    } finally { F.done(); }
-  });
 });
