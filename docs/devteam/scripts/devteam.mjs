@@ -693,7 +693,7 @@ const SETTINGS_WORDS = Object.freeze({
   autonomy_ceilings: ['Merging and checks', 'Autonomy ceilings', "the highest level the supervisor may reach for a kind of decision, below the kit's", 'value'],
   hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
   question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
-  finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes', 'value'],
+  finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good', 'value'],
   upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
@@ -16691,11 +16691,16 @@ function collectMetrics(since, reviewsSince = 0) {
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
   const ackWindow = settings.finding_ack_hours * 3600000;
-  const acks = logObjects('observation').filter((o) => o.kind === 'finding-ack' && now - Date.parse(o.created_at) < ackWindow);
+  // A merge commit on a main never changes, so an ack of one (merged-without-merge on <repo>:<sha>)
+  // never lapses: it would only bring the same merge back a day later (kit-348). Only ack's own
+  // lines, by the supervisor or the owner: a worker's finding-ack (observe) keeps the window, so it
+  // can't hide a merge it pushed for good (final-1 F1). cmdAck words the same subjects "for good".
+  const lasting = (a) => a.source === 'ack' && ['supervisor', 'owner'].includes(writerClass(a.created_by)) && /^merged-without-merge [^\s:]+:[0-9a-f]{12}$/.test(a.subject);
+  const acks = logObjects('observation').filter((o) => o.kind === 'finding-ack' && (lasting(o) || now - Date.parse(o.created_at) < ackWindow));
   const ackOf = (x) => acks.filter((a) => a.subject === `${x.kind} ${x.subject}`).sort(byTime).pop();
   const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
   m.findings = sorted.filter((x) => !ackOf(x));
-  m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
+  m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: lasting(a) ? null : new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
   return m;
 }
 // ack <finding-kind> <subject> --reason r [--owner]: set a metrics finding aside for
@@ -16714,7 +16719,9 @@ function cmdAck() {
   const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
   const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
   const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
-  out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
+  // a merge commit's ack never lapses (collectMetrics' lasting(), kit-348)
+  const forGood = kind === 'merged-without-merge' && /^[^\s:]+:[0-9a-f]{12}$/.test(subject);
+  out(`${line.id}: ${kind} ${subject} set aside ${forGood ? 'for good: a merge commit can\'t change' : `for ${loadSettings().finding_ack_hours}h`}`);
 }
 
 // Merged tickets (the last 30 days) rated light (S, normal risk, not high uncertainty) whose results
@@ -32999,7 +33006,7 @@ const HELP_OBSERVE = `Observe and orient
   observe-link --url u | --path p --title t [--for scope…] [--notes n] [--owner]   a resource the work uses; orient proposes it for the registry
   wait [--minutes n]   supervisor, between ticks: blocks until a new message to you, a new owner line, a new high finding, or the tick is due (tick_minutes, default 15); an open high finding returns at once until acted on or acked
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
-  ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
+  ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours (a merge commit: for good)
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
   governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
