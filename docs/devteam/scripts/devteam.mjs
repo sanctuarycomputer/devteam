@@ -1033,14 +1033,26 @@ let settingsCache;
 // branch, for a process that isn't a launch but types an owner's command into a pane (accounts-tick's
 // supervisor restart): this process's own settings with the owner's keys from origin over them, or
 // { refused: why } when origin can't be read or its settings won't do. Never the local refs.
-function loadSettings({ origin = false } = {}) {
-  // origin's commit for main, read as a launch reads it: what it can't do goes to fail(message)
+// opts.until (kit-780): a time (ms) the origin read ends by, as well as its own bounds: a restart's budget.
+// Origin is read once a process: what it said, or why it refused, is kept for every later read, so the
+// operator's words (deliverToOperator) can ask first and the operator's start then reads the same.
+function loadSettings({ origin = false, until = null } = {}) {
+  // origin's commit for main, read as a launch reads it, once: what it can't do goes to fail(message)
   const readOrigin = (fail) => {
+    if (!loadSettings.originRead) {
+      try { loadSettings.originRead = readOriginOnce((why) => { throw { refused: why }; }); } catch (e) { if (!e?.refused) throw e; loadSettings.originRead = { refused: e.refused }; }
+    }
+    const r = loadSettings.originRead;
+    // the operator starts with DEVTEAM_OPERATOR_COMMAND without reading settings at all (operatorStart)
+    return r.refused ? fail(command === 'operator-thread' ? `${r.refused}. DEVTEAM_OPERATOR_COMMAND, set to the agent command, starts the operator without reading settings` : r.refused) : r;
+  };
+  const readOriginOnce = (fail) => {
     const no = (why) => fail(`could not read main from origin (${why}), so the owner's settings can't be confirmed and nothing was started; a local ref is any session's to move, so none is trusted to start one. Try again when origin answers`);
     // origin gets 30 s in all, and a relaunch's child no longer than its DEVTEAM_SETUP_DEADLINE (5 s
-    // before the tick's kill, relaunchChild), so a hung origin refuses with its reason before the kill
+    // before the tick's kill, relaunchChild), so a hung origin refuses with its reason before the kill;
+    // a supervisor restart's read no later than until, inside its budget (restartSupervisor)
     const deadline = Number(process.env.DEVTEAM_SETUP_DEADLINE);
-    const end = Math.min(Date.now() + (Number(process.env.DEVTEAM_LAUNCH_ORIGIN_MS) || 30000), Number.isFinite(deadline) && deadline > Date.now() ? deadline : Infinity);
+    const end = Math.min(Date.now() + (Number(process.env.DEVTEAM_LAUNCH_ORIGIN_MS) || 30000), Number.isFinite(deadline) && deadline > Date.now() ? deadline : Infinity, Number.isFinite(until) ? until : Infinity);
     const toOrigin = (args) => {
       const ms = Math.floor(end - Date.now());
       if (ms < 100) return { status: 124, stdout: '', stderr: '' };
@@ -1083,10 +1095,11 @@ function loadSettings({ origin = false } = {}) {
   };
   if (origin) {
     if (loadSettings.fromOrigin) return loadSettings.fromOrigin;
-    const mine = loadSettings();
-    if (!projectInRepo) return mine;
+    if (!projectInRepo) return loadSettings();
+    // origin first: a launch's own read (the operator's words) then has it, and never dies on it
     let read;
     try { read = readOrigin((why) => { throw { refused: why }; }); } catch (e) { if (e?.refused) return { refused: e.refused }; throw e; }
+    const mine = loadSettings();
     const s = { ...mine };
     // before adoption (no settings.md at origin's commit) the working tree is all there is, as for a
     // launch: never what the local refs gave this process
@@ -18584,7 +18597,9 @@ const SUPERVISOR_RESTART_PROMPT = 'You were restarted after a usage limit, on th
 // recorded pane says nothing about whose conversation it is, so the id comes from a transcript that
 // itself ends on a limit, and the pane's process must be running as the supervisor. It keeps the
 // permissions it had: a supervisor started by hand without the flag is not given it.
-function supervisorToRestart() {
+// until (kit-780): when its origin read must end, inside the restart's budget; null only looks, and
+// origin isn't asked (no restart follows, so no command is needed).
+function supervisorToRestart(until) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem || !target || !paneStoppedAtLimit(target) || !paneStartedIn(target, fs.realpathSync(mainRoot))) return null;
   const id = supervisorLimit()?.session;
@@ -18592,9 +18607,10 @@ function supervisorToRestart() {
   // a pane whose process is plainly not the supervisor needs no command, so origin isn't asked
   const agent = paneAgentProcess(target);
   if (agent?.env.length && !isSupervisorProcess(agent)) return null;
+  if (!until) return agent?.env.length && isSupervisorProcess(agent) ? { target, id, cmd: null } : null;
   // the owner's resume_command as origin has it, never a local ref's (kit-764): a refusal skips this
   // restart and says why
-  const s = loadSettings({ origin: true });
+  const s = loadSettings({ origin: true, until });
   if (s.refused) return { refused: s.refused };
   const cmd = supervisorResumeCommand(id, s);
   if (!cmd) return null;
@@ -18604,20 +18620,27 @@ function supervisorToRestart() {
 }
 function restartSupervisor(budget) {
   if (draining() || fleetMode()) return null;
+  // a test's smaller budget (DEVTEAM_TEST only): a whole number of ms, 0 only looks
+  const cap = process.env.DEVTEAM_TEST ? process.env.DEVTEAM_RESTART_BUDGET_MS : undefined;
+  if (/^\d+$/.test(cap ?? '')) budget = Math.min(budget, Number(cap));
+  // origin's read ends within 15 s (a healthy read takes seconds, and a refusal spends no attempt, so
+  // the next due tick asks again), and 5 s before the budget, as a relaunch's child does
+  // (relaunchChild), so the pane is still typed into inside it; no budget, no read (kit-780)
+  const until = budget ? Date.now() + Math.min(15000, budget - 5000) : null;
   // stopped by a login change: a prompt into its own pane, no transcript or resume command needed
   const { target: pane, problem } = resolvePane(supervisorTarget());
   if (!problem && pane) {
     const login = loginChangedStop(pane, 'supervisor', budget, () => paneStartedIn(pane, fs.realpathSync(mainRoot)) && isSupervisorProcess(paneAgentProcess(pane)));
     if (login !== false) return login;
   }
-  const found = supervisorToRestart();
+  const found = supervisorToRestart(until);
   if (!found || found.refused) return found;
   const { target, id, cmd } = found;
   const now = Date.now();
   const verdict = claimRestart('supervisor', budget, now);
   if (verdict !== 'go') return verdict;
   // the same order as --replace-agent: everything is checked once more, right before it is replaced
-  const again = supervisorToRestart();
+  const again = supervisorToRestart(until);
   if (again?.target !== target || again.id !== id) { releaseRestart('supervisor', now); return null; }
   let failed = replacePaneProcess(target, mainRoot);
   if (!failed && !typeNow(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) failed = `could not type into ${target}; run ${cmd} there`;
@@ -19818,6 +19841,12 @@ const operatorHeld = (state) => `recorded; ${OPERATOR_HELD[state] ?? `the operat
 function deliverToOperator(t, text) {
   let st = operatorState();
   if (st.can_start) {
+    // the turn is kept: origin's settings are asked first, so a start it refuses is words and an exit
+    // of 0, never a failed press the hub would show for a kept turn (kit-780). Its start then reads the same.
+    if (process.env.DEVTEAM_OPERATOR_COMMAND === undefined) {
+      const s = loadSettings({ origin: true });
+      if (s.refused) return { typed: false, words: `recorded; the operator was NOT started (${s.refused})` };
+    }
     const r = operatorStart();
     if (!r.started && !r.say.startsWith('already running')) return { typed: false, words: `recorded; the operator was ${r.say}` };
     // a first start may stop at Claude Code's own dialog (whether to trust its folder), which only the owner answers
