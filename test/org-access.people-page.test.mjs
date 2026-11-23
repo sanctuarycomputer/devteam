@@ -267,6 +267,11 @@ test('org-access A3: the owner reads People with a session only, each row with t
     assert.equal(st.status, 200, `the stand-in owner: ${st.body}`);
     assert.deepEqual([st.json.viewer.id, st.json.viewer.role], [null, 'owner']);
     assert.ok(st.json.people.every((p) => p.you === false && p.role !== 'owner'), 'no owner row, and no row is theirs');
+    // someone who never joined and whose link was swept (an invite's save keeps only live ones)
+    const u = B.gw.state();
+    B.gw.write({ ...u, invites: u.invites.filter((x) => x.person !== B.lee.id) });
+    const lee = (await B.gw.req('GET', '/auth/people/list', { cookie: B.owner })).json.people.find((p) => p.id === B.lee.id);
+    assert.deepEqual([lee.link, has(lee.actions, ['remove'], ['revoke', 'relink'])], [null, true], `no link left: Remove only, nothing to revoke: ${lee.actions}`);
     const sb = (await B.gw.req('GET', '/box.json', { cookie: B.owner })).json;
     assert.deepEqual([sb.role, sb.people], ['owner', `${B.gw.publicUrl}/auth/people/list`], 'the stand-in owner\'s /box.json names People');
   } finally { await B.gw.close(); }
@@ -325,6 +330,11 @@ test('org-access A3: a change from a stale tab is refused: an old rev, or a pers
     B.gw.write({ ...t, people: t.people.filter((p) => p.id !== B.sam.id) });
     for (const action of ['rename', 'remove', 'relink']) refused(await post(B.gw, action, B.owner, bodyFor(action, B.sam)), 409, 'stale', `${action} of someone removed`);
     refused(await post(B.gw, 'revoke', B.owner, { id: B.ana.id, rev: 2 }), 409, 'stale', 'a revoke with no link to revoke');
+    refused(await post(B.gw, 'rename', B.owner, ['a list']), 400, 'bad-request', 'a body that isn\'t an object');
+    refused(await B.gw.req('POST', '/auth/people/list', { cookie: B.owner, body: {} }), 405, 'bad-request', 'a POST to the list');
+    refused(await B.gw.req('GET', '/auth/people/rename', { cookie: B.owner }), 404, 'not-found', 'a GET of an action');
+    const o = ownerOf(B.gw);
+    refused(await post(B.gw, 'rename', B.samC, { id: o.id, rev: o.rev + 5, name: 'X' }), 409, 'stale', 'an admin at a wrong rev: the rev is asked before who may');
     assert.deepEqual([rowOf(B.gw, B.sam.id), rowOf(B.gw, B.ana.id).name], [null, 'Ana C'], 'nothing changed');
   } finally { await B.gw.close(); }
 });
@@ -376,8 +386,10 @@ test('org-access A3: a change whose body arrives after its row went, or its sess
 test('org-access A3: a name is required, one line, at most 60 characters and unique ignoring case', async () => {
   const B = await box('a3-names');
   try {
-    for (const [name, code] of [['', 'bad-name'], ['   ', 'bad-name'], ['a\nb', 'bad-name'], ['a‮b', 'bad-name'], ['x'.repeat(61), 'bad-name'], [7, 'bad-name'], ['owner', 'name-taken'], [' SAM RIVERA ', 'name-taken']]) refused(await post(B.gw, 'rename', B.owner, { id: B.ana.id, rev: 1, name }), 400, code, `rename to ${JSON.stringify(name)}`);
+    for (const [name, code] of [['', 'bad-name'], ['   ', 'bad-name'], ['a\nb', 'bad-name'], ['a‮b', 'bad-name'], ['x'.repeat(61), 'bad-name'], ['a\u2066b', 'bad-name'], ['a\u2069b', 'bad-name'], ['\u{1F600}'.repeat(61), 'bad-name'], [7, 'bad-name'], ['owner', 'name-taken'], [' SAM RIVERA ', 'name-taken']]) refused(await post(B.gw, 'rename', B.owner, { id: B.ana.id, rev: 1, name }), 400, code, `rename to ${JSON.stringify(name)}`);
     assert.equal(rowOf(B.gw, B.ana.id).name, 'Ana Costa', 'nothing changed');
+    const wide = await post(B.gw, 'rename', B.owner, { id: B.lee.id, rev: 1, name: '\u{1F600}'.repeat(60) });
+    assert.equal(wide.status, 200, `60 characters counted as characters, not UTF-16 units: ${wide.body}`);
     const s = B.gw.state();
     B.gw.write({ ...s, people: s.people.map((p) => (p.id === B.ana.id ? { ...p, name: '\u00c1na Costa' } : p)) });
     refused(await post(B.gw, 'rename', B.owner, { id: B.sam.id, rev: 1, name: 'A\u0301na Costa' }), 400, 'name-taken', 'Sam renamed to Ana\'s name in another Unicode form');
@@ -406,6 +418,7 @@ test('org-access A3: Revoke: someone who never joined goes with their link; some
     const r = await post(B.gw, 'revoke', B.owner, { id: B.lee.id, rev: 1 });
     assert.equal(r.status, 200, r.body);
     assert.deepEqual([rowOf(B.gw, B.lee.id), B.gw.state().invites.length], [null, 0], 'Lee\'s row goes with the only link');
+    seedInvite(B.gw, B.ana.id, { expires: Date.now() - 1000 });
     seedInvite(B.gw, B.ana.id);
     assert.equal((await post(B.gw, 'revoke', B.owner, { id: B.ana.id, rev: 1 })).status, 200);
     assert.deepEqual([rowOf(B.gw, B.ana.id)?.name, B.gw.state().invites.length], ['Ana Costa', 0], 'Ana stays; only the link goes');

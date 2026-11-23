@@ -1422,8 +1422,6 @@ export function createGateway(opts = {}) {
     const token = b64u(crypto.randomBytes(32));
     return { link: `${PUB}/auth/claim#${token}`, invite: { hash: b64u(sha256(token)), person: personId, expires: Date.now() + INVITE_MS } };
   };
-  // Who may: the owner, signed in in the last five minutes. Asked before the body is read and again,
-  // of the state as it is, after (stillHeld): a reclaim or a removal meanwhile wins.
   // The one name rule, for an invite's name and a rename: one line of 1 to 60 characters, kept
   // trimmed and in NFC, and no other row's in NFC ignoring case. `except`: the row being renamed,
   // whose own name never clashes. A name, or the refusal's { code, error }.
@@ -1434,6 +1432,8 @@ export function createGateway(opts = {}) {
     if ((s.people ?? []).some((p) => p.id !== except && String(p.name).normalize('NFC').toLowerCase() === key)) return { code: 'name-taken', error: 'Someone on this box already has that name.' };
     return { name };
   };
+  // Who may: the owner, signed in in the last five minutes. Asked before the body is read and again,
+  // of the state as it is, after (stillHeld): a reclaim or a removal meanwhile wins.
   const ownerGuard = (res, who) => {
     if (!isOwner(who.person)) return refuse(res, 403, 'not-allowed', 'Only the box\'s owner can do this.'), false;
     if (!fresh(who.session)) return refuse(res, 403, 'fresh-sign-in', 'Sign in again to change who is on this box (reload this page).'), false;
@@ -1534,7 +1534,8 @@ export function createGateway(opts = {}) {
     return null;
   };
   // The guards, in the spec's order: role and fresh (before the body), the body, still held and still
-  // fresh (on the state as it is: no await from here to the write), the row, its rev, then may.
+  // fresh (on the state as it is: no I/O between this load and the route's save, only the one
+  // microtask the route's await of this guard takes; the store is synchronous), the row, its rev, then may.
   const peopleGuard = async (req, res, who, action) => {
     if (!seesPeople(who.person)) return refuse(res, 403, 'not-allowed', 'Only the owner and admins can change People.'), null;
     if (!fresh(who.session)) return refuse(res, 403, 'fresh-sign-in', FRESH_AGAIN), null;
@@ -3036,7 +3037,7 @@ export function createGateway(opts = {}) {
         if (p === '/auth/people/invite' && req.method === 'POST') return await inviteRoute(req, res, who);
         if (p === '/auth/people/relink' && req.method === 'POST') return await relinkRoute(req, res, who);
         if (p === '/auth/people/list') {
-          if (req.method !== 'GET') return refuse(res, 405, 'not-found', 'the People list is read with GET');
+          if (req.method !== 'GET') return refuse(res, 405, 'bad-request', 'the People list is read with GET');
           if (!seesPeople(person)) return refuse(res, 403, 'not-allowed', 'only the owner and admins see People');
           return json(res, 200, peopleList(store.load(), person));
         }
