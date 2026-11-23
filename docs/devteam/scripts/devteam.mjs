@@ -555,6 +555,10 @@ const SETTINGS_DEFAULTS = {
   hold_review_days: 14,
   // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
   finding_ack_hours: 24,
+  // A move the supervisor holds is owed past this many minutes, and any move is stalled past this many
+  // hours (the next-move table, its flag); a value that isn't a number of zero or more counts as the default.
+  next_move_owed_minutes: 60,
+  next_move_stall_hours: 24,
   tick_minutes: 15,
   question_default_after_hours: 24,
   // fix tickets that may run past max_active_tickets, so an incident never waits for a slot
@@ -694,6 +698,8 @@ const SETTINGS_WORDS = Object.freeze({
   hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
   question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
   finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good', 'value'],
+  next_move_owed_minutes: ['Questions and findings', 'A move owed after', "minutes a next move the supervisor holds may wait before it is owed", 'value'],
+  next_move_stall_hours: ['Questions and findings', 'A move stalled after', 'hours any next move may stay the same before it is stalled, whoever holds it', 'value'],
   upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
@@ -716,7 +722,7 @@ const settingNum = (v) => v === null || Number.isFinite(v);
 const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
 const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
 const SETTING_SHAPES = Object.freeze({
-  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'next_move_owed_minutes', 'next_move_stall_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
   responder: (v) => typeof v === 'boolean',
   worktree_setup_always: (v) => typeof v === 'boolean',
@@ -17929,8 +17935,7 @@ function collectMetrics(since, reviewsSince = 0) {
       const r = goalAtTarget(g);
       if (!r) continue;
       // a No about this same value stands until the value moves or the goal changes
-      const basis = goalMetBasis(g);
-      if (all.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && (q.asked_at > r.created_at || (q.met?.basis === basis && q.met?.reading?.value === r.measure.value && !sameAnswer(q.answer, GOAL_MET_CHOICES[0].label))))))) continue;
+      if (goalAtTargetQuiet(g, r, all)) continue;
       const m = measureOf(g);
       add('medium', 'goal-at-target', g.id, `"${g.title}" reads ${r.measure.value}${m.unit ? ` ${m.unit}` : ''} (${r.created_at.slice(0, 10)}), its target ${m.target}, and is still running: only the owner marks it met`, `ask the owner in the Inbox, never only in chat: ask --class goal-met --goal ${g.id} --recommendation yes (the kit writes the question; planning.md §1)`);
     }
@@ -17959,16 +17964,8 @@ function collectMetrics(since, reviewsSince = 0) {
   // planner in flight for it while planner slots are free.
   {
     const ps = planners();
-    const busy = new Set(ps.flatMap((p) => p.goals));
     // a goal whose design waits on another goal's (plan_after) waits until that one is approved
-    // (a goal let go, or one that doesn't exist, holds nothing back)
-    const blockedBy = (g) => (g.plan_after ?? []).filter((d) => logGet(d.goal)?.type === 'goal' && (logGet(d.goal).status ?? 'draft') === 'draft');
-    const waiting = logObjects('goal').filter((g) => {
-      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || blockedBy(g).length || goalMode(g) !== 'run') return false;
-      const c = goalCheck(g);
-      if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
-      return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
-    }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+    const { waiting } = idlePlanningGoals(ps);
     const cap = settings.max_active_planners;
     // while the fleet drains for a move, nothing new starts: no idle planning, no idle capacity
     if (!drained && waiting.length && (cap == null || ps.length < cap)) idlePlanning = waiting.length;
@@ -18450,7 +18447,181 @@ function waitCause(ref) {
 // values chore: branch | ahead | pr | for
 // values wait.state: open | resolved | failed
 function nextMoves() {
-  return [];
+  return memo('next-moves', () => [...goalMovesNow(), ...planners().map(plannerMove)]);
+}
+// The two thresholds, as numbers: a setting that isn't a number of zero or more counts as its default.
+const moveSetting = (key) => { const v = loadSettings()[key]; return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : SETTINGS_DEFAULTS[key]; };
+const isoOf = (t) => new Date(t).toISOString();
+// A move's flag and rung, by its holder and age alone: none for no next move, nothing while quiet,
+// stalled past next_move_stall_hours whoever holds it, owed past next_move_owed_minutes when the
+// supervisor does. Rung 2 from acks is the age ladder's (kit-297).
+function moveFlag(m) {
+  if (m.quiet) return { flag: null, rung: 0 };
+  if (m.holder === 'nobody') return { flag: 'none', rung: 0 };
+  const age = Date.now() - Date.parse(m.since);
+  if (age > moveSetting('next_move_stall_hours') * 3600000) return { flag: 'stalled', rung: 2 };
+  if (m.holder === 'supervisor' && age > moveSetting('next_move_owed_minutes') * 60000) return { flag: 'owed', rung: 1 };
+  return { flag: null, rung: 0 };
+}
+function newMove(subject, title, o) {
+  const m = { subject, move: o.move, words: o.words, holder: o.holder, ref: o.ref ?? null, title, since: isoOf(o.since), command: o.command ?? null, covered_by: o.covered_by ?? [], quiet: o.quiet ?? null, via: null, flag: null, rung: 0 };
+  return Object.assign(m, moveFlag(m));
+}
+// A copied move: its source's holder, since, flag and rung (and what it is, unless the row says),
+// on this subject, via the source.
+const copiedMove = (subject, title, src, o = {}) => ({ ...src, ...o, subject, title, via: src.subject });
+const qRef = (q) => ({ kind: 'q', id: q.id });
+const askedMove = (q) => ({ move: 'answer-question', words: `Answer: ${q.question}`, holder: 'owner', ref: qRef(q), since: q.asked_at, covered_by: [{ kind: 'owner-question-waiting', subject: q.id }] });
+const PLANNING_COVER = [{ kind: 'idle-planning', subject: '*' }, { kind: 'memory-full', subject: '*' }];
+// goal-at-target's quiet rule: a goal-met question about the goal open, or one answered after this
+// reading, or a No about the same value and basis, which stands until the value moves or the goal
+// changes. collectMetrics' finding and the goal rows (G12) both ask it.
+function goalAtTargetQuiet(g, r, qs = questions()) {
+  const basis = goalMetBasis(g);
+  return qs.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && (q.asked_at > r.created_at || (q.met?.basis === basis && q.met?.reading?.value === r.measure.value && !sameAnswer(q.answer, GOAL_MET_CHOICES[0].label))))));
+}
+// A goal whose design waits on another goal's (plan_after) waits while that one is a draft (a goal
+// let go, or one that doesn't exist, holds nothing back).
+const planAfterBlockers = (g) => (g.plan_after ?? []).filter((d) => logGet(d.goal)?.type === 'goal' && (logGet(d.goal).status ?? 'draft') === 'draft');
+// A ready goal whose current milestone has a precondition no feature covers (or no feature at all).
+function needsFeatures(g, c = goalCheck(g)) {
+  return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
+}
+// The goals that need planning with nobody planning them: a fully defined draft goal with no open
+// question, or a ready goal that needsFeatures, with no planner on it, running, and waiting on no
+// other goal's design; highest priority first. full: the planner slots are all taken.
+function idlePlanningGoals(ps = planners()) {
+  const busy = new Set(ps.flatMap((p) => p.goals));
+  const waiting = logObjects('goal').filter((g) => {
+    if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || planAfterBlockers(g).length || goalMode(g) !== 'run') return false;
+    const c = goalCheck(g);
+    if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
+    return needsFeatures(g, c);
+  }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+  const cap = loadSettings().max_active_planners;
+  return { waiting, cap, full: cap != null && ps.length >= cap };
+}
+// The goal rows, G1 to G20, first match wins (designs/every-goal-always-has-a-next-move.md). G4b and
+// G4c are kit-298's; a chore started --for a goal (G16) is kit-293's; until kit-289's ticket rows,
+// G16 names the first unmerged ticket, in progress.
+function goalMovesNow() {
+  const qs = questions();
+  const ps = planners();
+  const pMoves = new Map(ps.map((p) => [p.feature, plannerMove(p)]));
+  const idle = idlePlanningGoals(ps);
+  let memFull;
+  const queued = () => idle.full || !!(memFull ??= memoryFull());
+  const goals = logObjects('goal').filter((g) => !isUpkeep(g));
+  const done = new Map();
+  const visiting = new Set();
+  const moveOf = (g) => {
+    if (!done.has(g.id)) { visiting.add(g.id); done.set(g.id, goalRow(g)); visiting.delete(g.id); }
+    return done.get(g.id);
+  };
+  // the plan_after chain from g comes back to g
+  const loops = (g) => { const seen = new Set(); const walk = (x) => planAfterBlockers(x).some((d) => d.goal === g.id || (!seen.has(d.goal) && (seen.add(d.goal), walk(logGet(d.goal))))); return walk(g); };
+  function goalRow(g) {
+    const status = g.status ?? 'draft';
+    const id = g.id;
+    const title = g.title ?? id;
+    const at = (o) => newMove(`goal:${id}`, title, o);
+    const lastChange = (g.updates ?? []).at(-1)?.at ?? g.created_at;
+    // the log's schema allows draft, ready, met and abandoned only (a line off it isn't folded), so
+    // what isn't met or abandoned is draft or ready
+    if (['met', 'abandoned'].includes(status)) return null; // G1
+    const mode = goalMode(g);
+    if (mode !== 'run') {
+      const hv = holdView(g);
+      const holder = hv.by === 'owner' ? 'owner' : 'supervisor';
+      if (mode === 'park' || mode === 'let-go') return at({ move: mode === 'park' ? 'parked' : 'let-go', words: mode === 'let-go' ? 'Let go' : holder === 'owner' ? 'Parked by you' : 'Parked', holder, quiet: 'hold', since: hv.since ?? lastChange }); // G2
+      if (hv.state === 'drained') return at({ move: 'draining', words: 'Draining: nothing new starts', holder, quiet: 'drain', since: hv.since ?? lastChange }); // G3
+    }
+    // a fleet drain (the drain act, draining()) with nothing of the goal's running
+    const fleetDrain = mode === 'run' ? draining() : null;
+    if (fleetDrain && !liveSessions().some((x) => sessionGoals(x.name).some((y) => y.id === id))) return at({ move: 'draining', words: 'Draining: nothing new starts', holder: 'supervisor', quiet: 'drain', since: fleetDrain.created_at }); // G3, a fleet drain
+    const open = qs.filter((q) => q.goal === id && q.status === 'open').sort((a, b) => a.asked_at.localeCompare(b.asked_at));
+    const met = open.find((q) => q.class === 'goal-met');
+    if (met) return at({ ...askedMove(met), move: 'answer-goal-met', words: 'Answer: is it met?' }); // G4
+    const draft = status === 'draft';
+    if (draft && open.length) return at(askedMove(open[0])); // G5
+    if (draft && goalCheck(g).definition.length) return at({ move: 'ask-definition', words: "Ask you what's missing from its definition", holder: 'supervisor', since: lastChange, command: `ask --kind goal-definition --goal ${id} --question "…"` }); // G6
+    const mineP = ps.filter((p) => p.goals.includes(id)).sort((a, b) => b.waiting_on_supervisor.length - a.waiting_on_supervisor.length || a.feature.localeCompare(b.feature))[0];
+    const verdict = (g.updates ?? []).filter((u) => u.decision).at(-1);
+    if (draft && !mineP && verdict?.decision.verdict === 'refine') return at({ move: 'rework-design', words: 'Rework the design with your notes', holder: 'supervisor', since: verdict.at, command: `planner <feature> --goal ${id}` }); // G7
+    if (mineP) return copiedMove(`goal:${id}`, title, pMoves.get(mineP.feature)); // G8 (its move is P2), G9
+    if (draft) {
+      const ahead = planAfterBlockers(g);
+      if (ahead.length) {
+        if (loops(g)) return at({ move: 'break-plan-after-loop', words: 'Break the plan_after loop', holder: 'supervisor', since: lastChange, command: `goal set ${id} --plan-after <g-id> --reason "…"` }); // G10, a loop
+        const a = logGet(ahead[0].goal);
+        const src = visiting.has(a.id) ? null : moveOf(a);
+        if (src) return copiedMove(`goal:${id}`, title, src, { move: 'waits-for-goal', words: `Waits for ${a.title ?? a.id}'s design`, ref: { kind: 'goal', id: a.id } }); // G10
+      }
+      // since it became defined: its last change, or the baseline reading that completed it
+      const defined = [lastChange, currentReadings(id)[0]?.created_at].filter(Boolean).sort().at(-1);
+      return at({ move: 'start-planner', words: 'Start a planner', holder: 'supervisor', quiet: queued() ? 'queue' : null, since: defined, command: `planner <feature> --goal ${id}`, covered_by: PLANNING_COVER }); // G11
+    }
+    // ready
+    const r = goalAtTarget(g);
+    const ask = `ask --class goal-met --goal ${id} --recommendation yes`;
+    if (r && !goalAtTargetQuiet(g, r, qs)) return at({ move: 'ask-goal-met', words: 'Ask you whether it is met', holder: 'supervisor', since: r.created_at, command: ask, covered_by: [{ kind: 'goal-at-target', subject: id }] }); // G12
+    const feats = goalFeatures(id);
+    const ts = [...tickets().values()].filter((t) => isActive(t) && feats.includes(t.feature)).sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const allMerged = ts.length > 0 && ts.every((t) => mergeShaFor(t.id));
+    const lastMerge = allMerged ? isoOf(Math.max(...ts.map((t) => mergedAt(t.id) ?? 0))) : null;
+    const m = measureOf(g);
+    // a goal-met question withdrawn (or defaulted) since the merge asked nothing: it is asked again.
+    // An answered one counts by when it was answered: one asked while the last ticket was in flight
+    // and answered after it merged judged the merged work (a No there is G18's, not a re-ask).
+    if (allMerged && m.source === 'owner' && !qs.some((q) => q.class === 'goal-met' && q.goal === id && ['open', 'answered'].includes(q.status) && (q.status === 'answered' ? q.answered_at : q.asked_at) > lastMerge)) return at({ move: 'ask-goal-met', words: 'Ask you whether it is met', holder: 'supervisor', since: lastMerge, command: ask, covered_by: [{ kind: 'goal-work-merged', subject: id }] }); // G13
+    if (needsFeatures(g)) return at({ move: 'plan-next-features', words: 'Plan the next features', holder: 'supervisor', quiet: mode === 'drain' || fleetDrain ? 'drain' : queued() ? 'queue' : null, since: milestoneSince(g), command: `planner <feature> --goal ${id}`, covered_by: PLANNING_COVER }); // G14
+    const bare = feats.find((f) => !ts.some((t) => t.feature === f));
+    if (bare) return at({ move: 'plan-tickets', words: `Plan the tickets for ${features().get(bare).title ?? bare}`, holder: 'supervisor', since: features().get(bare).created_at, command: `planner ${bare} --goal ${id}` }); // G15
+    const lead = ts.find((t) => !mergeShaFor(t.id));
+    if (lead) return at({ move: 'lead-ticket', words: 'In progress', holder: 'worker', ref: { kind: 'ticket', id: lead.id }, since: ticketSince(lead) }); // G16, until kit-289
+    const read = ['repo', 'prod'].includes(m.source);
+    const readings = goalReadings(id);
+    const last = readings.at(-1) ?? null;
+    if (read && !readings.some((x) => x.created_at > lastMerge)) return at({ move: 'take-reading', words: 'Take a reading', holder: 'supervisor', since: lastMerge, command: `goal reading ${id} --run` }); // G17
+    const change = open.find((q) => q.class === 'goal-change' && isObj(q.change) && ('measure' in q.change || 'milestones' in q.change));
+    if (change) return at(askedMove(change)); // G17b
+    const no = qs.filter((q) => q.class === 'goal-met' && q.goal === id && q.status === 'answered').sort((a, b) => a.answered_at.localeCompare(b.answered_at)).at(-1);
+    if (no && !sameAnswer(no.answer, GOAL_MET_CHOICES[0].label)) {
+      const note = String(no.answer).includes(' — ') ? String(no.answer).split(' — ').slice(1).join(' — ').trim() : '';
+      if (!ts.some((t) => t.created_at > no.answered_at)) return at({ move: 're-plan-after-no', words: `Re-plan: you said it isn't met yet${note ? ` (${note})` : ''}`, holder: 'supervisor', since: no.answered_at }); // G18
+      if (read && lastMerge > no.answered_at && last && no.met?.basis === goalMetBasis(g) && no.met?.reading?.value === last.measure.value) return at({ move: 're-plan-or-change-measure', words: "Work merged since your No and the measure hasn't moved: re-plan, or propose a change to the measure", holder: 'supervisor', since: lastMerge, command: `ask --class goal-change --goal ${id} --change '{"measure": …}' --question "…"` }); // G18b
+    }
+    if (last && (currentMilestone(g) || !reached(g, m.target, last.measure.value))) return at({ move: 're-plan-measure-short', words: "Re-plan: the work merged but the measure didn't move enough", holder: 'supervisor', since: last.created_at }); // G19
+    return at({ move: 'no-next-move', words: 'No next move', holder: 'nobody', since: lastChange }); // G20
+  }
+  return goals.map(moveOf).filter(Boolean);
+}
+// When a ready goal's current milestone became current: the first reading that reached the one
+// before it, else the owner's approval, else when the goal was written.
+function milestoneSince(g) {
+  const cur = currentMilestone(g);
+  const approved = (g.updates ?? []).filter((u) => u.decision?.verdict === 'approve' || u.status === 'ready').at(-1)?.at ?? g.created_at;
+  if (!cur || cur.n === 1) return approved;
+  const prev = g.milestones[cur.n - 2];
+  return goalReadings(g.id).find((r) => r.created_at >= approved && reached(g, prev.target, r.measure.value))?.created_at ?? approved;
+}
+// A ticket's last sign: its worker's newest line, else its own line's last change.
+function ticketSince(t) {
+  const lines = memo('lines-by', () => { const m = new Map(); for (const l of readLog().lines) if (l.at && l.by) m.set(l.by, l.at > (m.get(l.by) ?? '') ? l.at : m.get(l.by)); return m; });
+  return lines.get(t.id) ?? (t.updates ?? []).at(-1)?.at ?? t.created_at;
+}
+// The planner rows, P1 to P4.
+function plannerMove(p) {
+  const by = `plan-${p.feature}`;
+  const at = (o) => newMove(`planner:${p.feature}`, p.title ?? p.feature, o);
+  const q = p.waiting_on_owner.map((id) => questions().find((x) => x.id === id)).filter(Boolean).sort((a, b) => a.asked_at.localeCompare(b.asked_at))[0];
+  if (q) return at(askedMove(q)); // P1
+  const msg = p.waiting_on_supervisor[0];
+  if (msg) return at({ move: 'answer-planner', words: `Answer the planner: ${msg.kind}`, holder: 'supervisor', ref: { kind: 'm', id: msg.id }, since: logGet(msg.id)?.created_at ?? p.last_seen ?? nowIso(), command: `send ${by} "…" --kind ruling`, covered_by: [{ kind: 'unanswered-message', subject: msg.id }, { kind: 'blocked-without-question', subject: by }] }); // P2
+  const seen = p.last_seen ?? nowIso();
+  const held = p.goals.length && p.goals.every((id) => ['park', 'let-go'].includes(goalMode(logGet(id))));
+  if (p.parked || held) return at({ move: 'parked', words: 'Parked', holder: 'planner', quiet: 'hold', since: lastPhaseOf(by)?.created_at ?? seen }); // P3
+  return at({ move: 'planning', words: 'Planning', holder: 'planner', since: seen, covered_by: ['stale-planner', 'planner-gone', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: by })) }); // P4
 }
 // The move whose subject is this one ("goal:<g-id>", …), or null.
 function nextMoveOf(subject) {
