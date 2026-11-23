@@ -279,6 +279,43 @@ test('next-moves A13: ticket rows: waits, start, the owner, merge, resume, block
   });
 });
 
+test('next-moves A5: the lead ticket: a goal takes its move, via it, flag and all; awaiting the word beats building', async (t) => {
+  const P = project('a5', { next_move_owed_minutes: 0, max_active_tickets: 5 });
+  const G = readyGoal(P, 'Lead', 'lead');
+  addTicket(P, 'ch-11-build', 'lead');
+  addTicket(P, 'ch-12-word', 'lead');
+  phase(P, 'ch-11-build', 'build');
+  phase(P, 'ch-12-word', 'spec');
+  await t.test('both in flight: the furthest along leads (build before spec)', () => {
+    const m = goalMove(P, G);
+    assert.equal(m.via, 'ticket:ch-11-build');
+    assert.equal(m.move, 'build');
+    assert.equal(m.holder, 'worker');
+    assert.equal(m.title, 'Lead', 'the goal keeps its own title');
+  });
+  await t.test('one awaiting the word: it leads (the supervisor owes it), and the goal carries its flag', () => {
+    phase(P, 'ch-12-word', 'awaiting-word');
+    const tk = ticketMove(P, 'ch-12-word');
+    const m = goalMove(P, G);
+    assert.equal(m.via, 'ticket:ch-12-word');
+    assert.equal(m.move, 'give-word');
+    assert.equal(tk.flag, 'owed', 'owed past next_move_owed_minutes (0 here)');
+    for (const k of ['holder', 'since', 'flag', 'rung', 'words']) assert.equal(m[k], tk[k], `the goal's move carries the ticket's ${k}`);
+  });
+  await t.test('an Upkeep chore ticket\'s T13 and T8 moves list recurring-stuck on its job; another ticket\'s don\'t', () => {
+    P.sup(['ticket', 'add', 'ch-13-recurring-tidy', '--json', JSON.stringify({ title: 'Tidy', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['tidy/**'], done_when: ['the tidy job runs clean'] })]);
+    const stuck = { kind: 'recurring-stuck', subject: 'recurring:tidy' };
+    const ready = ticketMove(P, 'ch-13-recurring-tidy');
+    assert.equal(ready.move, 'start-worker');
+    assert.deepEqual(ready.covered_by, [{ kind: 'idle-capacity', subject: '*' }, stuck]);
+    phase(P, 'ch-13-recurring-tidy', 'build');
+    const built = ticketMove(P, 'ch-13-recurring-tidy');
+    assert.equal(built.move, 'build');
+    assert.ok(built.covered_by.some((c) => c.kind === stuck.kind && c.subject === stuck.subject), JSON.stringify(built.covered_by));
+    assert.ok(!ticketMove(P, 'ch-11-build').covered_by.some((c) => c.kind === 'recurring-stuck'), 'a ticket that runs no job lists none');
+  });
+});
+
 test('next-moves: a held ticket turns stalled after next_move_stall_hours, never owed', () => {
   const P = project('held-stall', { next_move_owed_minutes: 0, next_move_stall_hours: 0 });
   readyGoal(P, 'Held long', 'heldlong');

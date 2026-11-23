@@ -18564,8 +18564,8 @@ function goalMovesNow() {
     if (needsFeatures(g)) return at({ move: 'plan-next-features', words: 'Plan the next features', holder: 'supervisor', quiet: mode === 'drain' || fleetDrain ? 'drain' : queued() ? 'queue' : null, since: milestoneSince(g), command: `planner <feature> --goal ${id}`, covered_by: PLANNING_COVER }); // G14
     const bare = feats.find((f) => !ts.some((t) => t.feature === f));
     if (bare) return at({ move: 'plan-tickets', words: `Plan the tickets for ${features().get(bare).title ?? bare}`, holder: 'supervisor', since: features().get(bare).created_at, command: `planner ${bare} --goal ${id}` }); // G15
-    const lead = ts.find((t) => !mergeShaFor(t.id));
-    if (lead) return at({ move: 'lead-ticket', words: 'In progress', holder: 'worker', ref: { kind: 'ticket', id: lead.id }, since: ticketSince(lead) }); // G16, until kit-289
+    const lead = leadTicketMove(ts.filter((t) => !mergeShaFor(t.id)));
+    if (lead) return copiedMove(`goal:${id}`, title, lead); // G16
     const read = ['repo', 'prod'].includes(m.source);
     const readings = goalReadings(id);
     const last = readings.at(-1) ?? null;
@@ -18701,6 +18701,23 @@ function ticketMoves() {
     for (const t of ts.values()) moveOf(t);
     return new Map([...done].filter(([, m]) => m));
   });
+}
+// A ready goal's lead ticket's move (G16), from its open tickets (oldest first): one the supervisor
+// holds (it owes something), else one the owner holds, else the furthest along in flight (T8), else
+// the first ready (T12, T13) in ready's order, else the first not yet ready. Quiet moves hold
+// nothing up, so they lead only when nothing else is there; ties go to the oldest move.
+const PHASE_RANK = ['starting', 'spec', 'plan', 'contract', 'build', 'verify', 'final-review'];
+function leadTicketMove(open) {
+  const all = ticketMoves();
+  const ms = open.map((t) => all.get(t.id)).filter(Boolean);
+  const oldest = (xs) => xs.sort((a, b) => a.since.localeCompare(b.since))[0];
+  const loud = ms.filter((m) => !m.quiet);
+  const idOf = (m) => m.subject.slice('ticket:'.length);
+  return oldest(loud.filter((m) => m.holder === 'supervisor'))
+    ?? oldest(loud.filter((m) => m.holder === 'owner'))
+    ?? loud.filter((m) => !m.via && m.holder === 'worker').sort((a, b) => PHASE_RANK.indexOf(b.move) - PHASE_RANK.indexOf(a.move) || a.since.localeCompare(b.since))[0]
+    ?? ((prio) => ms.filter((m) => ['start-worker', 'waits-for-slot'].includes(m.move)).map((m) => ({ m, kind: tickets().get(idOf(m))?.kind, severity: 0, priority: prio.get(idOf(m))?.priority })).sort(readyOrder)[0]?.m)(effectivePriorities(tickets()))
+    ?? ms[0] ?? null;
 }
 // The planner rows, P1 to P4.
 function plannerMove(p) {
