@@ -6948,6 +6948,45 @@ const compareRelease = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 // without asking, when it changes only workflow files, deletes none, and keeps every job each had
 // on main, so a "fix" can't drop a check. Its CI must still pass (merge waits for the forge's checks).
 const CI_RULE_SCOPES = ['chore:ci-fix', 'chore:devteam-workflow'];
+// A standing approval for secret-scan exceptions: an accepted owner rule scoped chore:gitleaks-allowlist
+// lets the supervisor merge a gitleaks-<what> chore without asking, when it only adds fingerprints to the
+// repo's .gitleaksignore: each line `<commit>:<path>:<rule-id>:<line>`, with the full 40-hex commit (gitleaks
+// compares whole ids, and a line with no commit would exempt that file and line in every commit, a later
+// secret there included), exempts exactly one finding, so
+// the rule can neither change what the scan's config means nor allow anything broader than the findings
+// the owner's rule was about. Nothing else may change: .gitleaks.toml stays an owner answer, and a
+// fingerprint in the project log (quality.md, Secrets) or with a wildcard is refused. The file must be a
+// plain file, and the chore's CI must pass as usual.
+const SECRETS_RULE_SCOPES = ['chore:gitleaks-allowlist'];
+const SECRETS_IGNORE_FILE = '.gitleaksignore';
+const GITLEAKS_FINGERPRINT = /^[0-9a-f]{40}:([^:\s*?[\]]+):([A-Za-z0-9_.-]+):(\d+)$/;
+function secretsAllowlistApproval(chore, sha, base, changed) {
+  if (!/^gitleaks-/.test(chore)) return {};
+  const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && SECRETS_RULE_SCOPES.includes(k.scope) && k.status === 'accepted').sort(byTime).pop();
+  if (!rule) return {};
+  const off = changed.filter((f) => f !== SECRETS_IGNORE_FILE);
+  if (off.length) return { problem: `the owner's secret-scan exceptions rule covers only fingerprints added to ${SECRETS_IGNORE_FILE}; this also changes ${off.slice(0, 6).join(', ')}. The owner's answer is needed: merge --chore ${chore} --approved <qid>` };
+  const mode = (git(['ls-tree', sha, '--', SECRETS_IGNORE_FILE]) ?? '').split(/\s/)[0];
+  if (mode !== '100644') return { problem: `the owner's secret-scan exceptions rule covers only a plain ${SECRETS_IGNORE_FILE} (this one is ${mode ? `mode ${mode}` : 'deleted'})` };
+  const before = (git(['show', `${base}:${SECRETS_IGNORE_FILE}`]) ?? '').split('\n');
+  const now = git(['show', `${sha}:${SECRETS_IGNORE_FILE}`]).split('\n');
+  // every line main had is still there, in order: the change only adds
+  let i = 0;
+  for (const l of now) if (i < before.length && l === before[i]) i++;
+  const kept = before.slice(i).find((l) => l.trim());
+  if (kept !== undefined) return { problem: `the owner's secret-scan exceptions rule covers only adding fingerprints; ${SECRETS_IGNORE_FILE} changes or removes "${kept.trim().slice(0, 80)}"` };
+  const log = `${projectRel}/log/`;
+  for (const raw of now.filter((x) => !before.includes(x))) {
+    // printable ASCII only: invisible Unicode reads one way here and another way to gitleaks
+    if (/[^\x20-\x7e]/.test(raw)) return { problem: `the owner's secret-scan exceptions rule covers only plain-ASCII fingerprint lines; "${JSON.stringify(raw).slice(1, 81)}" has another character` };
+    const l = raw.trim();
+    if (!l || l.startsWith('#')) continue;
+    const m = GITLEAKS_FINGERPRINT.exec(l);
+    if (!m) return { problem: `the owner's secret-scan exceptions rule covers only one-finding fingerprints (<40-hex commit>:<path>:<rule-id>:<line>); "${l.slice(0, 80)}" isn't one` };
+    if (path.posix.normalize(m[1]).replace(/^\.\//, '').startsWith(log)) return { problem: `the owner's secret-scan exceptions rule never covers the project log (${m[1]}): a secret there is a leak to fix, not an exception` };
+  }
+  return { rule, what: 'secret-scan exception' };
+}
 const workflowJobs = (text) => {
   const lines = String(text ?? '').split('\n');
   const i = lines.findIndex((l) => /^jobs:\s*(#.*)?$/.test(l));
@@ -7637,6 +7676,10 @@ function cmdMerge() {
     if (outside.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, outside);
       if (r.rule) { kitRule = standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
+    }
+    if (outside.length && !approved && !kitRule && base) {
+      const r = secretsAllowlistApproval(chore, sha, base, outside);
+      if (r.rule) { kitRule = standing = r; out(`only adds secret-scan exceptions; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
     if (outside.length && !approved && !kitRule) fails.push(`touches files outside project/ (${outside.slice(0, 6).join(', ')}${outside.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
     else if (approved && !kitRule && !kitApproved) fails.push(`changes kit files (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); that needs the owner's answer in a ${KIT_CLASSES.join(', ')} question, and ${approved} is ${kitAnswer.class ?? 'classless'}`);
