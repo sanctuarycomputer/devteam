@@ -22,7 +22,8 @@ const REFUSED = /gh pr merge refused \(did the head move\?\); verify from the st
 // DEVTEAM_GH_TIMEOUT_MS); a merge that waits on it can't finish inside WITHIN, so an unbounded call
 // turns the check red at about HANG_MS rather than hanging the suite. Five such reds wait ~10 minutes, so
 // on CI a regressed bound shows as the 300 s watchdog stopping this file, not as named not-ok lines:
-// run the file here to see which check failed.
+// run the file here to see which check failed. The same holds for the hung fetches after a landing
+// (C11, R9, R10, kit-791; their bound is DEVTEAM_GIT_TIMEOUT_MS).
 const HANG_MS = 120000;
 const GH_BOUND = { DEVTEAM_GH_TIMEOUT_MS: '5000' };
 const WITHIN = 60000;
@@ -449,5 +450,101 @@ test('R8 records in home, home forge github: the records PR\'s gh pr merge exits
     assert.equal(gh.stateReads().length, 1, 'CLOSED is an answer: one read');
     assert.deepEqual(recordsActs(F, id), [], 'no records act');
     assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'the code did not land');
+  } finally { F.done(); }
+});
+
+// The git fetch merge runs after a landing (kit-791) only refreshes origin/<main> in a checkout; the
+// landing is done by then. A git first on PATH passes every call to the real git, except a fetch in a
+// checkout of `bare` once `bare`'s `branch` holds `sha` (the landing): that one logs its working
+// directory to fetches.log and never answers (it exits 1 after HANG_MS; SIGTERM ignored, so only
+// SIGKILL at merge's bound ends it). So the fetches before the landing (moved(), the records' check)
+// answer, and only the one after the landing hangs.
+const realGit = process.env.PATH.split(path.delimiter).map((d) => path.join(d, 'git')).find((p) => { try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; } });
+function fetchHangsAfterLanding(F, gh, { bare, branch, sha }) {
+  const dir = path.join(F.base, 'git-stand-in');
+  const bin = path.join(dir, 'bin');
+  const fetches = path.join(dir, 'fetches.log');
+  write(path.join(bin, 'git'), [
+    '#!/bin/sh',
+    `if [ "$1" = fetch ] && [ "$("${realGit}" config --get remote.origin.url 2>/dev/null)" = "${bare}" ] && "${realGit}" --git-dir="${bare}" merge-base --is-ancestor ${sha} refs/heads/${branch} 2>/dev/null; then`,
+    `  pwd >> "${fetches}"`,
+    `  exec "${process.execPath}" -e "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(1), ${HANG_MS})"`,
+    'fi',
+    `exec "${realGit}" "$@"`,
+    '',
+  ].join('\n'));
+  fs.chmodSync(path.join(bin, 'git'), 0o755);
+  return {
+    env: { ...gh.env, PATH: `${bin}${path.delimiter}${gh.env.PATH}`, DEVTEAM_GIT_TIMEOUT_MS: '5000' },
+    // the working directory of each fetch that hung
+    hung: () => (fs.existsSync(fetches) ? fs.readFileSync(fetches, 'utf8').split('\n').filter(Boolean) : []),
+  };
+}
+// the checkout a warning's words name ("origin/<main> in <checkout> may not show"), as a real path
+const namedIn = (err) => { const m = / in (\S+) may not show /.exec(err); assert.ok(m, `the warning names a checkout: ${err}`); return fs.existsSync(m[1]) ? fs.realpathSync(m[1]) : m[1]; };
+
+test('C11 code, forge github: GitHub merges the PR and the fetch after the landing never answers; merge kills it at its bound, writes the act and says what is left to check', { timeout: 300000 }, () => {
+  const F = multiFixture('kit791-code-fetch-hangs');
+  const id = 'console-01-a';
+  try {
+    const { sha, pr, gh } = readyOnGithub(F, id);
+    gh.merges(F.consoleOrigin, 'trunk', `ticket/${id}`);
+    gh.answersAfter({ ...pr, state: 'MERGED' });
+    const fx = fetchHangsAfterLanding(F, gh, { bare: F.g(['config', '--get', 'remote.origin.url'], F.console), branch: 'trunk', sha });
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, fx.env));
+    assert.ok(r.ms < WITHIN, `merge ended inside the bound, not after the hung fetch returned (${r.ms} ms)`);
+    assert.equal(fx.hung().length, 1, 'one fetch after the landing, and it hung');
+    assert.equal(fs.realpathSync(fx.hung()[0]), fs.realpathSync(F.console), 'the fetch ran in console\'s checkout');
+    assert.equal(r.status, 0, `the landing stands: ${r.err}`);
+    assert.match(r.err, /warning: merged, but the fetch of trunk in console after the landing timed out; origin\/trunk in \S+ may not show it yet: check with git fetch origin trunk there/);
+    assert.equal(namedIn(r.err), fs.realpathSync(F.console), 'the words name console\'s checkout');
+    assert.match(r.out, new RegExp(`merged ticket/${id} at ${sha.slice(0, 12)} in console`));
+    assert.equal(landedOn(F, F.console, sha, 'trunk'), true);
+    assert.equal(mergeActs(F, id).length, 1, 'the merge act is written');
+  } finally { F.done(); }
+});
+
+test('R9 records in home, home forge github: the records land and the fetch of home\'s main after them never answers; merge kills it at its bound, says what is left to check, writes the records act and lands the code', { timeout: 300000 }, () => {
+  const F = recordsFixture('kit791-records-fetch-hangs');
+  const id = 'console-01-a';
+  try {
+    const homeOrigin = F.g(['config', '--get', 'remote.origin.url'], F.old);
+    const { r0, pr, gh } = recordsOnGithub(F, id);
+    gh.merges(homeOrigin, 'main', `ticket/${id}`);
+    gh.answersAfter({ ...pr, state: 'MERGED' });
+    const fx = fetchHangsAfterLanding(F, gh, { bare: homeOrigin, branch: 'main', sha: r0.head });
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, fx.env));
+    assert.ok(r.ms < WITHIN, `merge ended inside the bound, not after the hung fetch returned (${r.ms} ms)`);
+    assert.equal(fx.hung().length, 1, 'one fetch after the records landed, and it hung');
+    assert.equal(fs.realpathSync(fx.hung()[0]), fs.realpathSync(F.old), 'the fetch ran in home\'s main checkout');
+    assert.equal(r.status, 0, `the landings stand: ${r.err}`);
+    assert.match(r.err, /warning: the records landed, but the fetch of home's main after them timed out; origin\/main in \S+ may not show them yet: check with git fetch origin main there/);
+    assert.equal(namedIn(r.err), fs.realpathSync(F.old), 'the words name home\'s main checkout');
+    assert.match(r.out, new RegExp(`landed the records of ${id} at ${r0.head.slice(0, 12)} in home`));
+    assert.equal(recordsActs(F, id).length, 1, 'the records act is written');
+    assert.equal(mergeActs(F, id).length, 1, 'the code act is written');
+    assert.equal(landedOn(F, F.console, r0.code, 'trunk'), true, 'the code landed');
+  } finally { F.done(); }
+});
+
+test('R10 records in home, console forge git: the records land, then the code, and the fetch after the code\'s landing never answers; the records act stays, the code act is written, and merge says what is left to check', { timeout: 300000 }, () => {
+  const F = recordsFixture('kit791-records-code-fetch-hangs');
+  const id = 'console-01-a';
+  try {
+    const homeOrigin = F.g(['config', '--get', 'remote.origin.url'], F.old);
+    const { r0, pr, gh } = recordsOnGithub(F, id);
+    gh.merges(homeOrigin, 'main', `ticket/${id}`);
+    gh.answersAfter({ ...pr, state: 'MERGED' });
+    const fx = fetchHangsAfterLanding(F, gh, { bare: F.g(['config', '--get', 'remote.origin.url'], F.console), branch: 'trunk', sha: r0.code });
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, fx.env));
+    assert.ok(r.ms < WITHIN, `merge ended inside the bound, not after the hung fetch returned (${r.ms} ms)`);
+    assert.equal(fx.hung().length, 1, 'one fetch after the code landed, and it hung');
+    assert.equal(fs.realpathSync(fx.hung()[0]), fs.realpathSync(F.console), 'the fetch ran in console\'s checkout');
+    assert.equal(r.status, 0, `the landings stand: ${r.err}`);
+    assert.match(r.err, /warning: merged, but the fetch of trunk in console after the landing timed out; origin\/trunk in \S+ may not show it yet: check with git fetch origin trunk there/);
+    assert.equal(namedIn(r.err), fs.realpathSync(F.console), 'the words name console\'s checkout');
+    assert.equal(recordsActs(F, id).length, 1, 'the records act stays written');
+    assert.equal(mergeActs(F, id).length, 1, 'the code act is written');
+    assert.equal(landedOn(F, F.console, r0.code, 'trunk'), true, 'the code landed');
   } finally { F.done(); }
 });
