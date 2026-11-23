@@ -532,6 +532,8 @@ test('org-access A7: after Remove, the person\'s next request is refused, their 
   const B = await box('a7-access');
   try {
     const link = seedInvite(B.gw, B.ana.id);
+    const before = B.gw.state();
+    const others = (x) => ({ rows: x.people.filter((q) => q.id === B.sam.id || q.id === B.lee.id), sessions: (x.peopleSessions ?? []).filter((q) => q.person !== B.ana.id), invites: (x.invites ?? []).filter((q) => q.person !== B.ana.id) });
     const r = await post(B.gw, 'remove', B.owner, { id: B.ana.id, rev: 1 });
     assert.equal(r.status, 200, r.body);
     assert.equal((await B.gw.req('GET', '/box.json', { cookie: B.anaC })).status, 401, 'her next request');
@@ -540,6 +542,9 @@ test('org-access A7: after Remove, the person\'s next request is refused, their 
     assert.equal(JSON.stringify(s).includes('web.push.apple.com/ana'), false, 'her push subscription');
     assert.deepEqual((s.peopleSessions ?? []).filter((x) => x.person === B.ana.id), [], 'her sessions');
     assert.deepEqual((s.invites ?? []).filter((x) => x.person === B.ana.id), [], 'her invites');
+    // no one else's: Sam's and Lee's rows, Sam's session, Lee's invite, each as it was
+    assert.deepEqual(others(s), others(before), 'everyone else\'s rows, sessions and invites are as they were');
+    assert.equal(others(s).sessions.length > 0 && others(s).invites.length > 0, true, 'there was something else to keep');
     const o = await B.gw.req('POST', '/auth/login/options', { body: {} });
     const flow = o.cookies.map((c) => c.split(';')[0]).join('; ');
     const v = await B.gw.req('POST', '/auth/login/verify', { cookie: flow, body: B.anaKey.get(o.json, B.gw.publicUrl) });
@@ -550,6 +555,8 @@ test('org-access A7: after Remove, the person\'s next request is refused, their 
     assert.equal(st.status, 403, 'an invite made for her before the removal');
     assert.equal(st.json?.error, 'This invite has expired or was used; ask for a new one.');
     assert.equal((await B.gw.req('GET', '/box.json', { cookie: B.owner })).status, 200, 'the owner is still in');
+    assert.equal((await B.gw.req('GET', '/box.json', { cookie: B.samC })).status, 200, 'Sam is still in');
+    assert.equal((await B.gw.req('POST', '/auth/claim/invite', { body: { token: B.leeToken } })).status, 200, 'Lee\'s link still opens');
   } finally { await B.gw.close(); }
 });
 
