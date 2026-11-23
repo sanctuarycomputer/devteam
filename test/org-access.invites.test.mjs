@@ -333,6 +333,35 @@ test('org-access A2: only the owner, signed in within five minutes, makes an inv
   } finally { await gw.close(); }
 });
 
+// The owner's operator threads: the gateway signs each press, and the signed body is what the hub
+// keeps in threads.jsonl, so the token goes before the gateway signs it.
+test('org-access A2: a claim link in an operator thread turn has its token replaced before the gateway signs and sends it', async () => {
+  const gw = await gateway('operator');
+  const seen = [];
+  const hub = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => { seen.push({ url: req.url, headers: req.headers, body: Buffer.concat(chunks) }); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); });
+  });
+  await until(() => new Promise((r) => { hub.once('error', () => r(false)); hub.listen(HUB, '127.0.0.1', () => r(true)); }), 'the hub port');
+  try {
+    const { owner } = await claim(gw);
+    const tok = u(crypto.randomBytes(32));
+    const link = `${gw.publicUrl}/auth/claim#${tok}`;
+    for (const [route, body] of [['/operator/thread-new', { text: `join here: ${link}`, title: `invite ${link}` }], ['/operator/thread-say', { id: 'ot-20261114-101500123-abcdef', text: `again ${link}.` }]]) {
+      ok(await owner.post(route, body), route);
+      const sent = seen.at(-1);
+      const got = JSON.parse(sent.body.toString('utf8'));
+      assert.ok(!sent.body.toString('utf8').includes(tok), `${route}: the token never reaches the hub`);
+      assert.match(got.text, /\/auth\/claim#…/, `${route}: the link stays, its token replaced`);
+      if (got.title) assert.match(got.title, /\/auth\/claim#…/);
+      const pub = crypto.createPublicKey(gw.g.threadPublicKey());
+      const msg = Buffer.from(`devteam-operator-post-v1\n${sent.url}\n${sent.headers['x-devteam-gateway-ts']}\n${sent.headers['x-devteam-gateway-nonce']}\n${sha(sent.body).toString('hex')}`);
+      assert.ok(crypto.verify(null, msg, pub, Buffer.from(sent.headers['x-devteam-gateway-sig'], 'base64url')), `${route}: the signature is over what was sent`);
+    }
+  } finally { hub.closeAllConnections?.(); await new Promise((r) => hub.close(r)); await gw.close(); }
+});
+
 test('org-access A2: a claim link in a thread turn, answer or pane answer has its token replaced before the log, threads.jsonl or a pane', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('invites-redact');
   t.after(() => F.done());
@@ -387,6 +416,50 @@ test('org-access A2: a claim link in a thread turn, answer or pane answer has it
   });
 });
 
+// The supervisor's browser view is a preview the hub labels "Supervisor's browser": whoever opens it
+// drives the owner's signed-in browser, so only the owner may (kit-66 spec S1-8).
+test('kit-248: the supervisor\'s browser view opens for the owner only', async () => {
+  const dev = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('the view'); });
+  const DEV = await freePort();
+  const DEV2 = await freePort();
+  await new Promise((r) => dev.listen(DEV, '127.0.0.1', r));
+  const dev2 = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('an app'); });
+  await new Promise((r) => dev2.listen(DEV2, '127.0.0.1', r));
+  const list = { hub: 1, instances: [{ devteam: 1, name: 'alpha', root: '/srv/alpha', port: INSTANCE, viewer: 1, previews: [
+    { name: 'cool-tiger', port: DEV, project: 'alpha', session: 'supervisor', label: "Supervisor's browser" },
+    { name: 'calm-otter', port: DEV2, project: 'alpha', session: 'alpha-01', label: 'checkout' },
+    { name: 'sly-fox', port: DEV, project: 'alpha', session: 'alpha-02', label: 'mine' },
+  ] }] };
+  const hub = http.createServer((req, res) => { req.resume(); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(list)); });
+  await until(() => new Promise((r) => { hub.once('error', () => r(false)); hub.listen(HUB, '127.0.0.1', () => r(true)); }), 'the hub port');
+  const { gw, owner, ana } = await setup('browser-view');
+  try {
+    const anaB = browser(gw, { session: mintSession(gw, ana.id, ana.methods[0].id) });
+    const page = await anaB.req('GET', '/', { on: 'cool-tiger' });
+    assert.equal(page.status, 403, `Ana is refused the view: ${page.status} ${page.body}`);
+    assert.doesNotMatch(page.body, /the view/);
+    const twin = await anaB.req('GET', '/', { on: 'sly-fox' });
+    assert.notEqual(twin.body, 'the view', 'nor under another name on its port');
+    const app = await anaB.req('GET', '/', { on: 'calm-otter' });
+    assert.equal(app.body, 'an app', 'another preview opens for Ana');
+    const mine = await owner.req('GET', '/', { on: 'cool-tiger' });
+    assert.equal(mine.body, 'the view', 'the owner opens it');
+    const shake = (cookie) => new Promise((resolve, reject) => {
+      const c = net.connect(gw.port, '127.0.0.1');
+      let got = '';
+      c.on('data', (d) => { got += d; c.end(); });
+      c.on('error', reject);
+      c.on('close', () => resolve(got.split('\r\n')[0]));
+      c.write(['GET /ws HTTP/1.1', `Host: cool-tiger.${gw.host}`, `Origin: http://cool-tiger.${gw.host}`, `Cookie: ${cookie}`, 'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', '', ''].join('\r\n'));
+    });
+    assert.match(await shake(anaB.jar.session), /^HTTP\/1\.1 403/, 'and its socket');
+    assert.doesNotMatch(await shake(owner.jar.session), /^HTTP\/1\.1 40[13]/, 'the owner\'s socket is not refused');
+  } finally {
+    await gw.close();
+    for (const s of [hub, dev, dev2]) { s.closeAllConnections?.(); await new Promise((r) => s.close(r)); }
+  }
+});
+
 test('org-access A2: invites and people stop at their caps', async () => {
   const { gw, owner, ana } = await setup('caps');
   try {
@@ -397,6 +470,24 @@ test('org-access A2: invites and people stop at their caps', async () => {
     gw.write({ ...s, invites: [], people: [...s.people, ...Array.from({ length: 198 }, (_, i) => ({ id: rid('p-'), name: `P${i}`, role: 'member', level: 'full', methods: [], pushSubs: [], added_at: new Date().toISOString(), last_seen: null, notices: [], rev: 1 }))] });
     refusedAs(await owner.post('/auth/people/invite', { name: 'Bea' }), 409, 'too-many', '200 people');
   } finally { await gw.close(); }
+});
+
+// The gateway's copy of the rule and devteam.mjs's are one rule: a press the gateway redacted is
+// kept by the operator's store word for word, so it still reads as the gateway's.
+const CLAIM_RULE = /const CLAIM_LINK = (\/.*\/[a-z]*);/;
+test('org-access A2: the gateway\'s and devteam.mjs\'s claim-link rules are one, and a press the gateway redacted still reads as signed', async () => {
+  const gwRule = CLAIM_RULE.exec(fs.readFileSync(path.join(repo, 'cloud', 'gateway.mjs'), 'utf8'))?.[1];
+  const dtRule = CLAIM_RULE.exec(fs.readFileSync(path.join(repo, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'utf8'))?.[1];
+  assert.ok(gwRule, 'the gateway has the rule');
+  assert.equal(dtRule, gwRule, 'devteam.mjs has the same rule');
+  const tok = u(crypto.randomBytes(32));
+  const M = machine({ box: true, starts: false });
+  const body = G.redactClaimLinks({ text: `join at https://box.example.com/auth/claim?x=1#${tok}. and /auth/claim%23${tok}`, title: `invite https://box.example.com/auth/claim#${tok}` });
+  assert.ok(!JSON.stringify(body).includes(tok));
+  const r = M.press('thread-new', body);
+  assert.equal(r.status === 0 || r.status === 3, true, r.stderr);
+  const [t] = M.list();
+  assert.deepEqual(t.turns.map((x) => [x.text, x.signed]), [[body.text.trim(), true]], 'kept word for word, signed');
 });
 
 test('org-access A2: an older gateway\'s raw press leaves no token in threads.jsonl, proof included', async () => {

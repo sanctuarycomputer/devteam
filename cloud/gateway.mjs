@@ -299,6 +299,19 @@ export function threadKey(store) {
 }
 // The headers a signed press carries: the route, when, a nonce, and the body's hash, signed. The
 // hub checks each within two minutes and takes each nonce once.
+// A box's claim and invite links carry their token after the fragment: one pasted into an operator
+// thread turn would reach the hub, be signed and kept, and sit in threads.jsonl for anyone on the box
+// to reuse. The token goes before the gateway signs the press; the link's shape stays
+// (/auth/claim#…). devteam.mjs's redactClaimLinks holds the same CLAIM_LINK line, byte for byte
+// (test/org-access.invites.test.mjs compares them), so a press redacted here is kept word for word
+// there and still reads as signed. Strings anywhere in an object or array, keys kept.
+export function redactClaimLinks(v, depth = 0) {
+  const CLAIM_LINK = /((?:\/|%2F)auth(?:\/|%2F)claim(?:\?[^\s#"'<>`]*)?(?:#|%23))(?!…)[^\s"'<>`)\]}…]+/gi;
+  if (typeof v === 'string') return v.replace(CLAIM_LINK, '$1…');
+  if (!v || typeof v !== 'object' || depth >= 6) return v;
+  if (Array.isArray(v)) return v.map((x) => redactClaimLinks(x, depth + 1));
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactClaimLinks(x, depth + 1)]));
+}
 export function hubSignature(privateKeyPem, route, body, ts = Date.now(), nonce = b64u(crypto.randomBytes(24))) {
   const msg = Buffer.from(`devteam-operator-post-v1\n${route}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
   return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
@@ -1870,7 +1883,7 @@ export function createGateway(opts = {}) {
   // hub, a hub on a kit from before these threads, something else on the port) is a 502.
   const operatorThreads = async (req, res, action) => {
     let body = null;
-    if (action) { body = await readJson(req, 20000); if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'missing or invalid fields' }); }
+    if (action) { body = await readJson(req, 20000); if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'missing or invalid fields' }); body = redactClaimLinks(body); }
     const r = await hubAsk(action ? 'POST' : 'GET', action ? `/operator/${action}` : '/operator/threads', body);
     const answered = r && r.json && typeof r.json === 'object' && !Array.isArray(r.json);
     if (answered && r.status === 200) return json(res, 200, r.json);
@@ -2880,6 +2893,7 @@ export function createGateway(opts = {}) {
         port = found.port ?? null;
         pv = found.preview ?? null;
       }
+      if (pv && !isOwner(person) && ownerOnlyPreview(pv)) return send(res, 403, 'text/plain; charset=utf-8', 'Only the box\'s owner can open the supervisor\'s browser.');
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
       if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': lensCsp(pv), 'referrer-policy': 'no-referrer' });
@@ -3148,10 +3162,22 @@ export function createGateway(opts = {}) {
   // a miss: the page that opened the socket already made one.
   const PREVIEW_SOCKETS = 32;
   const previewSockets = new Map();
+  // The supervisor's browser view (the preview the hub labels so): whoever opens it drives the
+  // owner's signed-in browser, so it is the owner's alone, under any name its port is listed by.
+  const BROWSER_VIEW = "Supervisor's browser";
+  const ownerOnlyPreview = (name) => {
+    const link = previews.get(name);
+    if (!link || link.ambiguous) return false;
+    for (const x of previews.values()) if (!x.ambiguous && x.label === BROWSER_VIEW && x.port === link.port) return true;
+    return false;
+  };
   const previewUpgrade = async (req, socket, head, name, refuse) => {
     const own = previewOrigin(name);
     if (req.headers.origin !== own) return refuse(403, 'Forbidden');
-    try { if (!store.load().passkeys.length || !sessionOf(req)) return refuse(401, 'Unauthorized'); } catch { return refuse(503, 'Service Unavailable'); }
+    let who = null;
+    try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
+    if (!who) return refuse(401, 'Unauthorized');
+    if (!isOwner(who.person) && ownerOnlyPreview(name)) return refuse(403, 'Forbidden');
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
     const link = previews.get(name);
     if (!link || link.ambiguous) return refuse(503, 'Service Unavailable');
