@@ -320,6 +320,8 @@ const project = () => {
   if (P) return P;
   const F = fleetFixture('next-moves');
   const goal = F.ok(F.old, ['goal', 'add', '--title', 'A goal to point at'], { DEVTEAM_ROLE: 'supervisor' }).split('\n')[0].trim();
+  // let go, so no row gives it a move (G1, kit-288) and the table stays empty here
+  F.ok(F.old, ['goal', 'decide', goal, 'let-go']);
   P = { F, goal };
   return P;
 };
