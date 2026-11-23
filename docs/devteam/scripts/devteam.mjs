@@ -19488,7 +19488,7 @@ function ownerLineOpen(pane, { release = true } = {}) {
   const kind = m ? m[2] : 'open';
   const s = paneState(id);
   if (s === 'shell' || s === 'gone') {
-    if (s === 'shell') sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor', ';', 'set-option', '-p', '-u', '-t', id, '@devteam-prompt-readable']);
+    sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor', ';', 'set-option', '-p', '-u', '-t', id, '@devteam-prompt-readable']);
     return false;
   }
   const readable = promptReadable(id, s, got.slice(r + 2, f));

@@ -545,6 +545,14 @@ test("terminal A7e: status shows the supervisor's pane as owner's line open whil
   assert.notEqual(floorOf(T, s.pane), '', 'status only looks: it releases nothing');
   unsetOpt(T, s.pane, '@devteam-owner-floor');
   assert.doesNotMatch(T.run(['status']).out, /owner's line open/);
+  // a floor a writer would release (past the settle, on a readable ready prompt): status shows no
+  // open line, and leaves the floor set
+  await s.show(SCREEN.ready);
+  setFloor(T, s.pane, 'open', 5000);
+  const ready = T.run(['status']);
+  assert.equal(ready.status, 0, ready.err);
+  assert.doesNotMatch(ready.out, /owner's line open/);
+  assert.notEqual(floorOf(T, s.pane), '', 'status releases no floor, even one a writer would release');
 });
 
 test('terminal A7 (K3-1): a prompt-readable mark goes when the pane is marked anew or its agent exits', async () => {
