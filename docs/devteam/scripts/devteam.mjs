@@ -9346,11 +9346,12 @@ function subjectWords(s) {
 }
 // The bare ids a subject names, as observation refs are elsewhere.
 const subjectIds = (s) => (!isObj(s) ? [] : s.kind === 'item' && SUBJECT_REF.test(s.ref ?? '') ? [s.ref.slice(s.ref.indexOf(':') + 1)] : s.kind === 'artifact' ? [s.slug] : s.kind === 'preview' ? [s.name] : []).filter((x) => typeof x === 'string');
-// An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), as one
+// An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), or into
+// the pane given (the responder's, kit-104), as one
 // line: a newline typed with send-keys -l would press Enter mid-message, and a control character
 // would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed.
-function deliverOwnerTurn(t, text, files) {
-  const { target, problem } = resolvePane(supervisorTarget());
+function deliverOwnerTurn(t, text, files, pane = supervisorTarget()) {
+  const { target, problem } = resolvePane(pane);
   if (problem) return false;
   const flat = text.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
@@ -9511,7 +9512,18 @@ function cmdThread() {
   // An owner's turn typed into the supervisor's pane, or held for it; one no terminal took is
   // recorded (UNDELIVERED_FILE, under its lock; entries over 7 days dropped) for the card and
   // undeliveredTurns. The words say which.
-  const deliver = (t, u, words, files) => {
+  // A turn routed to the responder (kit-104): typed into its pane when it was idle, else queued
+  // (typed into neither pane); never recorded as undelivered, since responder-overdue reaches the
+  // supervisor once it is RESPONDER_OVERDUE_MS old.
+  const deliver = (t, u, words, files, route = { to: 'supervisor' }) => {
+    if (route.to === 'responder') {
+      if (route.delivered === 'queued') return 'the responder is busy; it takes this next';
+      const pane = responderWindow().target;
+      const typed = deliverOwnerTurn(t, words, files, pane);
+      if (typed === true) return 'sent to the responder';
+      if (typed) return heldWords(typed, "the responder's");
+      return `not delivered to the responder: ${resolvePane(pane).problem ?? 'the typing failed'}; it stays owed, and the supervisor takes it once it is ${RESPONDER_OVERDUE_MS / 60000} minutes old`;
+    }
     const typed = deliverOwnerTurn(t, words, files);
     if (typed === false) withLock(UNDELIVERED_FILE, () => {
       const m = undeliveredTurns(Date.now(), { entries: true });
@@ -9539,6 +9551,8 @@ function cmdThread() {
   // comes in its usual order.
   const alone = (i) => (!wordsFrom(i) && flags.files !== undefined ? filesFlag() : undefined);
   const filled = (i, early) => (early ? `${plural(early.length, 'file')} dropped` : wordsFrom(i));
+  // routed_to (and delivered, the responder's) for an owner's turn line (kit-104)
+  const routedFields = (r) => ({ routed_to: r.to, ...(r.to === 'responder' ? { delivered: r.delivered } : {}) });
   if (sub === 'new') {
     const { by } = threadOwner();
     const early = alone(1);
@@ -9564,12 +9578,14 @@ function cmdThread() {
     if (had) die(`${had.id} is already open on this subject: say it there (thread say ${had.id} "<words>")`);
     const n = openThreadCount(views);
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
-    // both lines checked before the thread's is written: a refused first turn leaves no thread with none
-    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
+    // routed before either line is written (kit-104), and both lines checked with the route on the
+    // turn's: a refused first turn leaves no thread with none
+    const route = responderRoute({ subject });
+    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(FILES_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
-    const u = appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
+    const u = appendLog({ type: 'turn', thread: t.id, text: words, files, ...routedFields(route) }, by);
     out(t.id);
-    return out(deliver(t, u, words, files));
+    return out(deliver(t, u, words, files, route));
   }
   // say is the owner's and reply the supervisor's or the responder's, never one falling through to the
   // other: a reply with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the
@@ -9594,7 +9610,9 @@ function cmdThread() {
     const files = early ?? filesFlag();
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
-    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined };
+    // the owner's turn is routed before its line is written (kit-104), and the size check sees the route
+    const route = by === 'owner' ? responderRoute(t) : null;
+    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined, ...(route ? routedFields(route) : {}) };
     if ((refs.length || line.pending) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
     if (by !== 'owner') {
@@ -9605,7 +9623,7 @@ function cmdThread() {
     }
     const u = appendLog(line, by);
     out(u.id);
-    if (by === 'owner') out(deliver(t, u, words, files));
+    if (by === 'owner') out(deliver(t, u, words, files, route));
     else spoke(t);
     return;
   }
@@ -9701,10 +9719,12 @@ function cmdThread() {
     if (words) turnText(words);
     const n = openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
+    // its words routed before either line is written (kit-104), as the thread will be once open
+    const route = words ? responderRoute(t) : null;
     appendLog({ type: 'thread', op: 'set', id: t.id, status: 'open' }, by);
-    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words }, by) : null;
+    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words, ...routedFields(route) }, by) : null;
     out(`reopened ${t.id}`);
-    if (words) return out(deliver(t, u, words));
+    if (words) return out(deliver(t, u, words, undefined, route));
     return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
   // The session holding the owner's turn says it is on it; the card says so until it replies.
@@ -33057,6 +33077,59 @@ function responderQueue(objects = readLog().objects) {
   }
   return q.sort((a, b) => a.at.localeCompare(b.at));
 }
+// kit-104: a turn routed to the responder still owed past this is overdue (the supervisor takes it,
+// and every turn after it until it is answered); so is the responder's pending turn with nothing
+// after it past RESPONDER_PENDING_MS, which is also how long a pending turn keeps it busy.
+const RESPONDER_OVERDUE_MS = 3 * 60000;
+const RESPONDER_PENDING_MS = 10 * 60000;
+// Every thread's turns from a fold's objects, oldest first, in one pass.
+function turnsByThread(objects) {
+  const m = new Map();
+  for (const o of objects.values()) if (o.type === 'turn' && typeof o.thread === 'string') (m.get(o.thread) ?? m.set(o.thread, []).get(o.thread)).push(o);
+  for (const ts of m.values()) ts.sort(byTime);
+  return m;
+}
+// Whether the responder can take a turn now, from tmux alone: { problem } (the fleet's session or
+// its window missing, its pane exited or at a shell; session says whether the fleet's session is
+// up), { stuck: line } (a blocked-prompt pattern, or a menu or dialog the kit reads, which would
+// hold a typed line), or { target } (an agent, asking nothing).
+function responderHealth() {
+  const w = responderWindow();
+  if (!w.has) return { problem: `no tmux session "${w.session}"`, session: false };
+  if (!w.there) return { problem: `no window ${w.shown}`, session: true };
+  const { target, problem } = resolvePane(w.target);
+  if (problem) return { problem, session: true };
+  const waits = paneWaitingIn(RESPONDER_NAME);
+  if (waits) return { stuck: waits.line, target, session: true };
+  const asking = paneAsking(target);
+  if (asking) {
+    const lines = String(asking.kind === 'menu' ? asking.question ?? '' : asking.text ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+    return { stuck: (lines.find((l) => ENTER_CONFIRMS.test(l)) ?? lines[0] ?? `a ${asking.kind}`).slice(0, 200), target, session: true };
+  }
+  return { target, session: true };
+}
+// Idle: no owner turn routed to it and typed is still owed, and its own newest turn (any thread)
+// is not a pending one under RESPONDER_PENDING_MS old. Turns queued for it never make it busy.
+function responderIdle(objects, now = Date.now(), byThread = turnsByThread(objects)) {
+  for (const [id, ts] of byThread) if (owedIn(ts, objects.get(id)).some((u) => u.routed_to === 'responder' && u.delivered === 'typed')) return false;
+  const mine = [...byThread.values()].flat().filter((u) => u.created_by === 'responder').sort(byTime).pop();
+  return !(mine?.pending === true && now - Date.parse(mine.created_at) < RESPONDER_PENDING_MS);
+}
+// The responder's overdue turns, per open thread: an owner turn routed to it, still owed, older
+// than RESPONDER_OVERDUE_MS; or its pending turn with no turn after it for RESPONDER_PENDING_MS.
+// [{ thread, turn, why, min }], from the log alone (owedIn), so an answer or a resolve clears it.
+function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(objects)) {
+  const found = [];
+  for (const [id, ts] of byThread) {
+    const t = objects.get(id);
+    if (t?.type !== 'thread' || t.status === 'resolved') continue;
+    const late = owedIn(ts, t).find((u) => u.routed_to === 'responder' && now - Date.parse(u.created_at) > RESPONDER_OVERDUE_MS);
+    if (late) { found.push({ thread: id, turn: late.id, why: 'owed', min: Math.floor((now - Date.parse(late.created_at)) / 60000) }); continue; }
+    const last = ts[ts.length - 1];
+    if (last?.created_by === 'responder' && last.pending === true && now - Date.parse(last.created_at) > RESPONDER_PENDING_MS) found.push({ thread: id, turn: last.id, why: 'pending', min: Math.floor((now - Date.parse(last.created_at)) / 60000) });
+  }
+  return found;
+}
 // Its help lines, in Setup and roles (HELP_SETUP reads them; this region sits above HELP).
 const RESPONDER_HELP = `  responder [--resume | --stop]   supervisor: the thread responder, a quick session that answers the owner's thread turns (window responder, .worktrees/responder at main, the owner's responder_command); --stop ends it, --resume restarts it in its window
   prompt responder   the responder's prompt: its section of supervisor.md (§13)`;
@@ -33148,6 +33221,39 @@ function cmdResponder() {
   }
 }
 /* responder-session end */
+// Who owes the reply to the owner's next turn in thread t (kit-104; the spine's routing rules 1, 3
+// and 4), worked out once, before the turn is written, and stored on it (routed_to, and delivered
+// for the responder); nothing recomputes it. t may be a thread not yet written ({ subject }).
+// { to: 'supervisor' } or { to: 'responder', delivered: 'typed' | 'queued', target }; why says why
+// the supervisor's. A subject naming a record not in the log takes the ordinary rules. Every "the
+// owner said it" here is a line's writer, never its text.
+function responderRoute(t, objects = readLog().objects, s = loadSettings(), now = Date.now()) {
+  const ownerCorrected = (r) => (r.updates ?? []).some((u) => u.corrected !== undefined && writerClass(u.by) === 'owner');
+  // 1: its own open question asked in the thread, or a subject still the supervisor's
+  if (t.id && [...objects.values()].some((o) => o.type === 'question' && o.thread === t.id && threadQuestion(o).status === 'open')) return { to: 'supervisor', why: 'its open question' };
+  const ref = isObj(t.subject) && t.subject.kind === 'item' && typeof t.subject.ref === 'string' ? t.subject.ref : '';
+  const rec = ref.includes(':') ? objects.get(ref.slice(ref.indexOf(':') + 1)) : null;
+  const kind = ref.slice(0, ref.indexOf(':'));
+  if (rec && rec.type === kind) {
+    if (kind === 'question' && threadQuestion(rec).status === 'open') return { to: 'supervisor', why: 'an open question' };
+    if (kind === 'decision' && !ownerCorrected(rec)) return { to: 'supervisor', why: 'an uncorrected decision' };
+    // the owner's own acts can't be corrected, so their threads take the ordinary rules; an act that
+    // carried out a decision follows that decision (F8-4)
+    if (kind === 'act' && rec.created_by !== 'owner') {
+      const d = typeof rec.decision === 'string' ? objects.get(rec.decision) : null;
+      if (!ownerCorrected(d?.type === 'decision' ? d : rec)) return { to: 'supervisor', why: 'an uncorrected act' };
+    }
+  }
+  // 2: the responder can't take it
+  if (s.responder === false) return { to: 'supervisor', why: 'the responder is off' };
+  const h = responderHealth();
+  if (h.problem) return { to: 'supervisor', why: h.problem };
+  if (h.stuck) return { to: 'supervisor', why: `the responder is stuck: ${h.stuck}` };
+  const byThread = turnsByThread(objects);
+  if (responderOverdue(objects, now, byThread).length) return { to: 'supervisor', why: 'a responder turn is overdue' };
+  // 3: the responder's, typed when idle
+  return { to: 'responder', delivered: responderIdle(objects, now, byThread) ? 'typed' : 'queued', target: h.target };
+}
 
 /* HELP start */
 /* helpSections start */

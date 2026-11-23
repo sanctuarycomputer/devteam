@@ -99,7 +99,7 @@ test('responder routing (kit-104)', { skip: NO_TMUX, timeout: 280000 }, async (t
   });
   await it('R4f a thread on one of the owner\'s own acts (never corrected): by the ordinary rules', () => {
     const A = 'a-20261118-000000199-owner';
-    F.hand('owner', { id: A, type: 'act', class: 'artifact-publish', what: 'published a page' }, 3500000);
+    F.hand('owner', { id: A, type: 'act', class: 'artifact-publish', what: 'unpublish', artifact: 'a-page', refs: ['artifact:a-page'] }, 3500000);
     const { U } = F.thread('On the owner\'s act', `act:${A}`);
     assert.equal(routed(U), 'responder');
   });
