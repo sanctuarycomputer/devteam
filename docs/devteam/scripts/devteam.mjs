@@ -16837,6 +16837,10 @@ function cmdAck() {
   const subject = subj.join(' ').trim();
   const reason = flagStr('reason');
   if (!kind || !subject || !reason) die('usage: ack <finding-kind> <subject> --reason "<why it can wait>" [--owner]');
+  // a worker's or planner's session is never the owner's, whatever DEVTEAM_ROLE says (kit-783): its
+  // ack would be recorded as the owner's, and one of a merge commit would never lapse
+  const session = ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE'].find((k) => process.env[k]);
+  if (flags.owner && session) die(`ack --owner is the owner's: it doesn't run in a worker's or planner's session (${session}=${process.env[session]}); send the supervisor what can wait`);
   const live = collectMetrics(0).findings.find((x) => x.kind === kind && x.subject === subject);
   if (!live) die(`no current finding ${kind} "${subject}" (devteam.mjs metrics lists them)`);
   const by = flags.owner ? ownerWriter().by : (supervisorOnly('ack'), 'supervisor');
