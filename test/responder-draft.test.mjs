@@ -153,6 +153,11 @@ test('D2: a ticket\'s or planner\'s worktree that changed the artifact is named,
     fs.writeFileSync(path.join(plain, ARTS, 'demo', 'index.html'), '<!-- a copy -->\n');
     assert.match(F.fails(rw, ['responder', 'draft', 'demo'], RESPONDER), /kit-notes.*can't be read.*send supervisor .*--kind handoff/s, 'a plain folder with a copy: handed over');
     fs.rmSync(path.join(plain, ARTS), { recursive: true });
+    // a worktree whose .git git can't read, with no copy of demo (its change may delete it): git
+    // can't say, so it is handed over, never skipped (final-2 F3)
+    fs.writeFileSync(path.join(plain, '.git'), 'gitdir: /nowhere/.git/worktrees/kit-notes\n');
+    assert.match(F.fails(rw, ['responder', 'draft', 'demo'], RESPONDER), /kit-notes.*can't be read.*send supervisor .*--kind handoff/s, 'a broken worktree with no copy: handed over');
+    fs.rmSync(path.join(plain, '.git'));
     fs.writeFileSync(path.join(plain, 'notes.txt'), 'notes\n');
     // what's left is web-09-z, whose copy is older than main's but unchanged by it, and a plain
     // folder with no copy of demo: no draft is blocked
@@ -268,6 +273,9 @@ test('D5: anyone but the responder is refused, and nothing is made', () => {
       // a worker's or planner's session with no role set is still that session (final-1 F3)
       ['a ticket\'s env, no role, in the responder\'s folder', rw, { DEVTEAM_TICKET: 'web-01-a' }, []],
       ['a planner\'s env, no role, in the responder\'s folder', rw, { DEVTEAM_FEATURE: 'checkout' }, []],
+      // blanked is still set, as ownerWriter reads it (final-2 F2)
+      ['DEVTEAM_TICKET blank, in the responder\'s folder', rw, { DEVTEAM_TICKET: '' }, []],
+      ['DEVTEAM_FEATURE blank, in the responder\'s folder', rw, { DEVTEAM_FEATURE: '' }, []],
     ]) {
       const before = F.state('demo');
       assert.match(F.fails(cwd, ['responder', 'draft', 'demo', ...extra], role), /responder draft: the responder's/, who);

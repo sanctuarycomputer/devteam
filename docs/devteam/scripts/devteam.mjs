@@ -33302,9 +33302,12 @@ const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'wait
 function artifactChangedIn(dir, slug, main) {
   const top = responderGit(['rev-parse', '--show-toplevel'], dir);
   if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(dir)) {
-    // not its own worktree, so git can't say; one with no copy of the slug at all can't be drawing
-    // it (a stray notes folder never blocks every draft; final-1 F2)
-    try { fs.lstatSync(path.join(dir, ARTIFACTS_REL, slug)); } catch { return false; }
+    // not its own worktree, so git can't say. A stray plain folder (no .git entry at all) holding no
+    // copy of the slug can't be drawing it, and never blocks every draft (final-1 F2); one with a
+    // .git git can't read may be deleting the slug, so it stays unreadable (final-2 F3)
+    let stray = false;
+    try { fs.lstatSync(path.join(dir, '.git')); } catch { stray = true; }
+    if (stray) try { fs.lstatSync(path.join(dir, ARTIFACTS_REL, slug)); } catch { return false; }
     return 'unreadable';
   }
   const mb = responderGit(['merge-base', 'HEAD', `origin/${main}`], dir);
@@ -33327,8 +33330,8 @@ function artifactChangedIn(dir, slug, main) {
 function responderDraft() {
   const slug = positional[1];
   const role = process.env.DEVTEAM_ROLE;
-  // DEVTEAM_TICKET or DEVTEAM_FEATURE set at all is a worker's or planner's session, as ownerWriter reads it (final-1 F3)
-  if (flags.owner || process.env.DEVTEAM_CHANNEL || process.env.DEVTEAM_TICKET || process.env.DEVTEAM_FEATURE || logWriter() !== 'responder' || ![undefined, '', 'responder'].includes(role)) die("responder draft: the responder's command; the supervisor opens a draft with chore start artifact-<slug>");
+  // DEVTEAM_TICKET or DEVTEAM_FEATURE set at all, blank included, is a worker's or planner's session, as ownerWriter reads it (final-1 F3, final-2 F2)
+  if (flags.owner || process.env.DEVTEAM_CHANNEL || process.env.DEVTEAM_TICKET !== undefined || process.env.DEVTEAM_FEATURE !== undefined || logWriter() !== 'responder' || ![undefined, '', 'responder'].includes(role)) die("responder draft: the responder's command; the supervisor opens a draft with chore start artifact-<slug>");
   const usage = 'usage: responder draft <slug> [--new --title "…" --summary "…" [--for \'["goal:g"]\'] [--kind mock|diagram|docs]]';
   if (!slug || !LINK_ID.test(slug) || positional.length > 2) die(usage);
   const title = flagStr('title'), summary = flagStr('summary');
