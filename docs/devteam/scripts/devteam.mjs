@@ -4868,6 +4868,8 @@ function cmdValidate() {
     for (const [r, at] of rs) { const bad = releaseProblem(r, at); if (bad) (releaseMayBeOnMerge(r) ? errors : warnings).push(releaseMayBeOnMerge(r) ? bad : `${bad}; read as not deploying on merge`); }
   }
   const td = path.join(projectDir, 'tickets');
+  // project/self.md, when there is one, against self@1 (its paths and names are the draft's checks: self check, check-pr)
+  { const t = readText(path.join(projectDir, 'self.md')); if (t !== null) for (const e of selfDoc(t).errors) errors.push(`${projectRel}/self.md: ${e}`); }
   if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket; if the supervisor added it since the log last landed, land the log first (log-sync, then merge --chore log) and run the check again`);
   // Checking one ticket, another ticket's own errors (D3 and the rest, written "<id>: …") come
   // from the live graph, not this branch: e.g. a dependency on a plan that reached main after the
@@ -7217,6 +7219,159 @@ worldFileFails.actOf = (ref) => {
   const b = String(ref).replace(/^refs\/heads\//, '');
   return b.startsWith('plan/') ? `plan-${b.slice(5)}` : b.startsWith('ticket/') && !b.startsWith('ticket/chore-') ? b.slice(7) : b;
 };
+/* self-model start */
+// project/self.md, what the project is (log.schema.json#self@1): a markdown file whose one fenced
+// `self` block holds the contract. The parser and the contract check follow
+// test/fixtures/world/check.mjs rule for rule, so the two refuse the same invalid/ cases; kit-135
+// reuses them for exterior.md.
+//
+// The fenced blocks of a markdown file. A fence is a line at column 0 of three or more backticks;
+// one opens a block when none is open, its info string the rest of the line, its spaces and tabs
+// trimmed (possibly empty). The block closes at the next line of at least as many backticks and
+// nothing else but spaces or tabs. Indented and ~~~ fences are prose. Lines split on \r?\n, so a
+// file saved with CRLF reads alike. Returns the blocks, the text outside every block (prose), and
+// the line of a block that never closes (or null).
+function fencedBlocks(text) {
+  const blocks = [];
+  const prose = [];
+  let open = null;
+  String(text).split(/\r?\n/).forEach((line, i) => {
+    const m = /^(`{3,})(.*)$/.exec(line);
+    if (!open) {
+      if (m) open = { ticks: m[1].length, info: m[2].replace(/^[ \t]+|[ \t]+$/g, ''), line: i + 1, body: [] };
+      else prose.push(line);
+    } else if (m && m[1].length >= open.ticks && /^[ \t]*$/.test(m[2])) {
+      blocks.push({ info: open.info, line: open.line, body: open.body.join('\n') });
+      open = null;
+    } else open.body.push(line);
+  });
+  return { blocks, prose: prose.join('\n'), unclosed: open ? open.line : null };
+}
+// Whether text names name: as whole words (no letter or digit just before or after), ignoring case.
+function namesWhole(text, name) {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+}
+// A self.md's or exterior.md's contract errors (doc 'self' or 'exterior'), empty when it holds.
+// The fence, the other doc's block, one block, JSON, an object and the version stop at their first
+// error; the schema ($defs[doc].block) gives every error; self's part ids are unique once the schema
+// holds. Exterior's own rules past the schema are kit-135's.
+function worldDocErrors(text, doc) {
+  const home = { self: 'self.md', exterior: 'exterior.md' };
+  const other = doc === 'self' ? 'exterior' : 'self';
+  const article = (w) => (/^[aeiou]/.test(w) ? 'an' : 'a');
+  const b = fencedBlocks(text);
+  if (b.unclosed) return [`a fenced block opened at line ${b.unclosed} never closes`];
+  if (b.blocks.some((x) => x.info === other)) return [`${article(other)} ${other} block belongs in ${home[other]}, not ${home[doc]}`];
+  const mine = b.blocks.filter((x) => x.info === doc);
+  if (mine.length === 0) return [`no ${doc} block`];
+  if (mine.length > 1) return [`more than one ${doc} block`];
+  let v;
+  try {
+    v = JSON.parse(mine[0].body);
+  } catch (e) {
+    return [`the ${doc} block is not JSON: ${e.message}`];
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return [`the ${doc} block is not a JSON object`];
+  if (Number.isInteger(v[doc]) && v[doc] > 1) return [`${doc}: ${v[doc]} needs a newer kit`];
+  const errs = schemaErrors(SCHEMA.$defs[doc].block, v, doc);
+  if (errs.length) return errs;
+  if (doc === 'self') {
+    const seen = new Set();
+    v.parts.forEach((p, i) => {
+      if (seen.has(p.id)) errs.push(`self.parts[${i}].id "${p.id}" is shared`);
+      seen.add(p.id);
+    });
+  }
+  return errs;
+}
+// A self.md's text in: its parsed self block (null unless it holds) and its contract errors.
+function selfDoc(text) {
+  const errors = worldDocErrors(text, 'self');
+  if (errors.length) return { block: null, errors };
+  return { block: JSON.parse(fencedBlocks(text).blocks.find((x) => x.info === 'self').body), errors };
+}
+// A part's code path as the disk and git checks both read it: split on /, empty and . segments
+// dropped, joined. '' is the repo root. (The schema refuses a leading / and any .. segment.)
+function partPath(p) {
+  return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
+}
+// The parts' code paths that has(partPath(p)) doesn't find: [{ part, path }], each path as written,
+// once, in file order.
+function selfPathsMissing(block, has) {
+  const missing = [];
+  const seen = new Set();
+  for (const p of block.parts) for (const c of p.code) {
+    if (seen.has(c)) continue;
+    seen.add(c);
+    if (!has(partPath(c))) missing.push({ part: p.id, path: c });
+  }
+  return missing;
+}
+// Whether a normalised path is on disk under the repo root, each segment matched by its exact case
+// (as git reads it), so App/ is missing beside app/ on a disk that folds case too.
+function hasOnDisk(n) {
+  let dir = projectRoot;
+  for (const seg of n === '' ? [] : n.split('/')) {
+    let names;
+    try { names = fs.readdirSync(dir); } catch { return false; }
+    if (!names.includes(seg)) return false;
+    dir = path.join(dir, seg);
+  }
+  return true;
+}
+// Whether a normalised path is in a commit's tree.
+const hasAt = (commit) => (n) => n === '' || git(['cat-file', '-e', `${commit}:${n}`]) !== null;
+const selfRel = () => `${projectRel}/self.md`;
+// main's self.md, or null when main has none; with no main, or the project outside the repo, the
+// working tree's (as strategyState reads the strategy).
+function selfMainText() {
+  return projectInRepo && mainRef() ? git(['show', `${mainRef()}:${selfRel()}`]) : readText(path.join(projectDir, 'self.md'));
+}
+// dashboard-data's self block (log.schema.json#self@1 dashboard): main's self.md as check.mjs's
+// dashboardSelf gives it, or null when main has none or it breaks the contract.
+function selfDashboard() {
+  const text = selfMainText();
+  const b = text === null ? null : selfDoc(text).block;
+  return b && { what: b.what, makes: b.makes, parts: b.parts.map((p) => ({ id: p.id, name: p.name, what: p.what, code: p.code })), controls: b.controls, not: b.not };
+}
+const SELF_NOT_DRAFTED = 'self.md is not drafted yet: the supervisor drafts it from the code and the strategy (supervisor.md, Monitoring)';
+// self show [--json]: main's self.md. self check: the working tree's, the draft, against the
+// contract and each part's path on disk; errors exit 1.
+function cmdSelf() {
+  const sub = positional[0];
+  if (sub === 'show') {
+    gitReadCache = new Map();
+    const text = selfMainText();
+    if (text === null) return flags.json ? json(null) : out(SELF_NOT_DRAFTED);
+    const { block: b, errors } = selfDoc(text);
+    if (errors.length) {
+      for (const e of errors) out(`error: self.md: ${e}`);
+      process.exit(1);
+    }
+    if (flags.json) return json(selfDashboard());
+    const list = (xs) => (xs.length ? xs.join('; ') : 'nothing listed');
+    out(`Self: ${selfRel()} ${projectInRepo && mainRef() ? 'on main' : 'in the working tree'}`);
+    out(`What it is: ${b.what}`);
+    out(`What it makes or does: ${b.makes}`);
+    out('Parts:');
+    for (const p of b.parts) out(`  ${p.id}  ${p.name}: ${p.what} (${p.code.join(', ')})`);
+    out(`Controls: ${list(b.controls)}`);
+    out(`Does not control: ${list(b.not)}`);
+    return;
+  }
+  if (sub === 'check') {
+    const text = readText(path.join(projectDir, 'self.md'));
+    if (text === null) return out(SELF_NOT_DRAFTED);
+    const { block, errors } = selfDoc(text);
+    for (const e of errors) out(`error: self.md: ${e}`);
+    const missing = block ? selfPathsMissing(block, hasOnDisk) : [];
+    for (const m of missing) out(`error: self.md: part ${m.part}'s path ${m.path} is not in the repo`);
+    process.exit(errors.length || missing.length ? 1 : 0);
+  }
+  die('usage: self show [--json] | self check');
+}
+/* self-model end */
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -33714,7 +33869,9 @@ const HELP_OBSERVE = `Observe and orient
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours (a merge commit: for good)
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
-  governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
+  governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
+  self show [--json]   main's project/self.md, what the project is: what it is, makes, its parts with their paths, what it controls and what not; --json is the dashboard's self block, null when not drafted
+  self check   the working tree's self.md against self@1, each part's path on disk, and the names rule; errors exit 1, warnings don't
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
@@ -33785,7 +33942,7 @@ const COMMANDS_DECIDE = {
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
 };
 const COMMANDS_OBSERVE = {
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, self: cmdSelf, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
 };
 const COMMANDS_GOALS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
