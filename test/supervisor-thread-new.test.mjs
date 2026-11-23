@@ -430,6 +430,14 @@ test('kit-108 A17: in Chrome, a supervisor-started thread is labelled from the s
   await soon(`!!document.querySelector('${row(T)}')`, 'listed');
   assert.match(await p.ev(`document.querySelector('${row(T)}').textContent`), /From the supervisor/, 'the list labels it');
   assert.doesNotMatch(await p.ev(`document.querySelector('${row(O)}').textContent`), /From the supervisor/, "the owner's is not");
+  // and the owner's own card says nothing of the supervisor (task-4 F1)
+  await click(row(O));
+  await soon(`TL.open === '${O}' && /Mine/.test(document.getElementById('tl-c-ctx')?.textContent ?? '')`, "the owner's card open");
+  assert.doesNotMatch(await p.ev(`document.getElementById('tl-c-ctx').textContent`), /from the supervisor/i, "the owner's card is not labelled");
+  await p.ev("location.hash = '#goals?th=open'");
+  await soon(`!TL.open`, 'the card closed');
+  await onThreads();
+  await soon(`!!document.querySelector('${row(T)}')`, 'listed again');
   await click(row(T));
   await soon(`!!document.querySelector('#tl-c-ctx') && /from the supervisor/i.test(document.getElementById('tl-c-ctx').textContent)`, 'the card labels it');
   // reply
