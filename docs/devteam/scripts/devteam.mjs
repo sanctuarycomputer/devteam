@@ -33295,14 +33295,18 @@ function nudgeResponder(now = Date.now()) {
 }
 // A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
 const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
-// Its help lines, in Setup and roles (HELP_SETUP reads them; this region sits above HELP).
 // Whether the worktree at dir changed <slug>'s folder since it left main: a tracked change against
 // its merge-base with origin's main (committed or not), or an untracked file there. A copy older than
 // main's but unchanged since the worktree was cut draws nothing. 'unreadable' when git can't say
 // (no merge-base, a folder that isn't its own worktree, an error): the caller fails closed on it.
 function artifactChangedIn(dir, slug, main) {
   const top = responderGit(['rev-parse', '--show-toplevel'], dir);
-  if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(dir)) return 'unreadable';
+  if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(dir)) {
+    // not its own worktree, so git can't say; one with no copy of the slug at all can't be drawing
+    // it (a stray notes folder never blocks every draft; final-1 F2)
+    try { fs.lstatSync(path.join(dir, ARTIFACTS_REL, slug)); } catch { return false; }
+    return 'unreadable';
+  }
   const mb = responderGit(['merge-base', 'HEAD', `origin/${main}`], dir);
   const base = mb.status === 0 ? mb.stdout.trim() : '';
   if (!base) return 'unreadable';
@@ -33323,7 +33327,8 @@ function artifactChangedIn(dir, slug, main) {
 function responderDraft() {
   const slug = positional[1];
   const role = process.env.DEVTEAM_ROLE;
-  if (flags.owner || process.env.DEVTEAM_CHANNEL || logWriter() !== 'responder' || ![undefined, '', 'responder'].includes(role)) die("responder draft: the responder's command; the supervisor opens a draft with chore start artifact-<slug>");
+  // DEVTEAM_TICKET or DEVTEAM_FEATURE set at all is a worker's or planner's session, as ownerWriter reads it (final-1 F3)
+  if (flags.owner || process.env.DEVTEAM_CHANNEL || process.env.DEVTEAM_TICKET || process.env.DEVTEAM_FEATURE || logWriter() !== 'responder' || ![undefined, '', 'responder'].includes(role)) die("responder draft: the responder's command; the supervisor opens a draft with chore start artifact-<slug>");
   const usage = 'usage: responder draft <slug> [--new --title "…" --summary "…" [--for \'["goal:g"]\'] [--kind mock|diagram|docs]]';
   if (!slug || !LINK_ID.test(slug) || positional.length > 2) die(usage);
   const title = flagStr('title'), summary = flagStr('summary');
@@ -33333,9 +33338,15 @@ function responderDraft() {
   const wt = path.join(mainRoot, '.worktrees', name);
   const touch = () => { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} };
   // a draft already there is the responder's own: used, whoever else draws the slug
-  if (fs.existsSync(wt)) {
+  let there = null;
+  try { there = fs.lstatSync(wt); } catch {}
+  if (there) {
+    // a link planted at the draft's path (to a ticket's worktree, say) is never taken as the draft,
+    // and no git runs there: only the folder itself, at .worktrees/<name> (final-1 F1)
+    const notHere = () => die(`.worktrees/${name} is not a git worktree: move it aside, then responder draft ${slug} again`);
+    if (there.isSymbolicLink() || realPath(wt) !== path.join(realPath(path.join(mainRoot, '.worktrees')), name)) notHere();
     const top = responderGit(['rev-parse', '--show-toplevel'], wt);
-    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) die(`.worktrees/${name} is not a git worktree: move it aside, then responder draft ${slug} again`);
+    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) notHere();
     if (flags.new) die(`.worktrees/${name} is already there: responder draft ${slug} edits it`);
     const st = responderGit(['status', '--porcelain'], wt);
     if (st.status !== 0) die(`.worktrees/${name}: git status failed: ${(st.stderr || '').trim()}`);
@@ -33405,6 +33416,7 @@ function responderDraft() {
   }
   out(realPath(wt));
 }
+// Its help lines, in Setup and roles (HELP_SETUP reads them; this region sits above HELP).
 const RESPONDER_HELP = `  responder [--resume | --stop]   supervisor: the thread responder, a quick session that answers the owner's thread turns (window responder, .worktrees/responder at main, the owner's responder_command); --stop ends it, --resume restarts it in its window
   responder draft <slug> [--new --title t --summary s]   the responder: open (or reuse) .worktrees/chore-artifact-<slug> to edit a landed artifact, or start one there with --new; refused, naming the session, while a ticket or planner draws it
   prompt responder   the responder's prompt: its section of supervisor.md (§13)`;

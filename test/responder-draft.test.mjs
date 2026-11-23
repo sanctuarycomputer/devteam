@@ -146,7 +146,16 @@ test('D2: a ticket\'s or planner\'s worktree that changed the artifact is named,
     assert.match(F.fails(rw, ['responder', 'draft', 'demo'], RESPONDER), /web-07-g.*send web-07-g/s, 'another machine\'s branch, behind a stale local copy');
     assert.ok(!fs.existsSync(draftOf('demo')), 'no draft worktree for it');
     g(['update-ref', '-d', 'refs/devteam-remote/ticket/web-07-g'], old);
-    // what's left is web-09-z, whose copy is older than main's but unchanged by it: no draft
+    // a plain folder under .worktrees/ (no worktree of its own) holding a copy of demo can't be read:
+    // handed over; one that holds no demo can't be drawing it, and never blocks (final-1 F2)
+    const plain = path.join(old, '.worktrees', 'kit-notes');
+    fs.mkdirSync(path.join(plain, ARTS, 'demo'), { recursive: true });
+    fs.writeFileSync(path.join(plain, ARTS, 'demo', 'index.html'), '<!-- a copy -->\n');
+    assert.match(F.fails(rw, ['responder', 'draft', 'demo'], RESPONDER), /kit-notes.*can't be read.*send supervisor .*--kind handoff/s, 'a plain folder with a copy: handed over');
+    fs.rmSync(path.join(plain, ARTS), { recursive: true });
+    fs.writeFileSync(path.join(plain, 'notes.txt'), 'notes\n');
+    // what's left is web-09-z, whose copy is older than main's but unchanged by it, and a plain
+    // folder with no copy of demo: no draft is blocked
     assert.equal(F.ok(rw, ['responder', 'draft', 'demo'], RESPONDER), fs.realpathSync(draftOf('demo')), 'a worktree that changed nothing never blocks a draft');
   } finally { F.done(); }
 });
@@ -256,12 +265,25 @@ test('D5: anyone but the responder is refused, and nothing is made', () => {
       ['a worker in the responder\'s folder', rw, { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'web-01-a' }, []],
       ['the supervisor in the responder\'s folder', rw, SUP, []],
       ['the responder with --owner', rw, RESPONDER, ['--owner']],
+      // a worker's or planner's session with no role set is still that session (final-1 F3)
+      ['a ticket\'s env, no role, in the responder\'s folder', rw, { DEVTEAM_TICKET: 'web-01-a' }, []],
+      ['a planner\'s env, no role, in the responder\'s folder', rw, { DEVTEAM_FEATURE: 'checkout' }, []],
     ]) {
       const before = F.state('demo');
       assert.match(F.fails(cwd, ['responder', 'draft', 'demo', ...extra], role), /responder draft: the responder's/, who);
       assert.ok(!fs.existsSync(draftOf('demo')), `${who}: no draft worktree`);
       assert.deepEqual(F.state('demo'), before, `${who}: nothing changed`);
     }
+    // a link planted at the draft's path, to a ticket's worktree, is never taken as the draft: the
+    // ticket's worktree stays on its branch at its commit (final-1 F1)
+    const head = (at) => [g(['rev-parse', '--abbrev-ref', 'HEAD'], at), g(['rev-parse', 'HEAD'], at)];
+    const was = head(w);
+    fs.symlinkSync(w, draftOf('demo'));
+    for (const args of [['demo'], ['demo', '--new', '--title', 't', '--summary', 's']]) {
+      assert.match(F.fails(rw, ['responder', 'draft', ...args], RESPONDER), /chore-artifact-demo is not .*move it aside/s, `a link at the draft's path: ${args.join(' ')}`);
+      assert.deepEqual(head(w), was, 'the ticket\'s worktree stays on its branch at its commit');
+    }
+    fs.unlinkSync(draftOf('demo'));
   } finally { F.done(); }
 });
 
