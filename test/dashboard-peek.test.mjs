@@ -64,7 +64,10 @@ async function peekPage(t, { seed, fixture, name = 'peek' } = {}) {
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'about:blank');
     await p.send('Page.navigate', { url: url(hash) });
-    await soon("location.protocol === 'http:' && !!document.querySelector('main') && !document.querySelector('main.waiting')", 'the dashboard drawn');
+    // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+    // p.ev here) replace the entry rather than add one. The page draws before its CDN fonts and scripts arrive, so
+    // on a slow CDN a peek opened then took the page's entry, and its close went back to about:blank
+    await soon("location.protocol === 'http:' && document.readyState === 'complete' && !!document.querySelector('main') && !document.querySelector('main.waiting')", 'the dashboard drawn');
   };
   return { p, port, root, ids, dt, size, url, soon, load };
 }
