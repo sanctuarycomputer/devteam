@@ -160,6 +160,69 @@ test('a launch reads the owner\'s settings from origin, never from a local ref a
       assert.match(r.out, /recorded; the operator is starting/);
       assert.deepEqual(F.started(), { own: true, evil: false, setup: false }, r.err);
     });
+    // kit-780: the owner's words are kept before the operator is started, so a start that origin
+    // refuses is said in words and exits 0: the hub shows the turn as kept, and no press is pressed again
+    const LAPTOP = { DEVTEAM_BOX: 'off', DEVTEAM_ROLE: '' };
+    const offline = (fn) => {
+      const url = F.g(['remote', 'get-url', 'origin'], F.old);
+      F.g(['remote', 'set-url', 'origin', path.join(F.base, 'no-such-remote.git')], F.old);
+      try { return fn(); } finally { F.g(['remote', 'set-url', 'origin', url], F.old); }
+    };
+    const REFUSED = /^recorded; the operator was NOT started \(could not read main from origin \('[^']*no-such-remote\.git' does not appear to be a git repository\)[^\n]*DEVTEAM_OPERATOR_COMMAND[^\n]*\)$/;
+    const turns = (tid) => { const r = F.run(['operator-thread', 'show', tid, '--json'], LAPTOP); assert.equal(r.status, 0, r.err); return JSON.parse(r.out).turns.length; };
+    // a thread made while origin answers (its first words start the operator), then no operator up
+    const thread = () => {
+      F.reset();
+      const r = F.run(['operator-thread', 'new', 'first words'], LAPTOP);
+      assert.equal(r.status, 0, r.err);
+      F.reset();
+      return r.out.split('\n')[0];
+    };
+    await t.test('operator-thread new, origin unreadable, no operator up: the turn is kept once, the refused start said in words, exit 0', () => {
+      F.reset();
+      const r = offline(() => F.run(['operator-thread', 'new', 'is origin down?'], LAPTOP));
+      assert.equal(r.status, 0, `a kept turn is no failed press: ${r.err}`);
+      const [tid, said] = r.out.split('\n');
+      assert.match(tid, /^ot-/);
+      assert.match(said ?? '', REFUSED);
+      assert.equal(turns(tid), 1, 'the turn is kept once');
+      sleep(1000);
+      assert.deepEqual(F.started(), { own: false, evil: false, setup: false });
+    });
+    await t.test('operator-thread say, origin unreadable, no operator up: one more turn, said in words, exit 0', () => {
+      const tid = thread();
+      const r = offline(() => F.run(['operator-thread', 'say', tid, 'still down?'], LAPTOP));
+      assert.equal(r.status, 0, r.err);
+      assert.match(r.out.split('\n')[1] ?? '', REFUSED);
+      assert.equal(turns(tid), 2, 'one turn per press');
+      sleep(1000);
+      assert.deepEqual(F.started(), { own: false, evil: false, setup: false });
+    });
+    await t.test('operator-thread reopen with words, origin unreadable, no operator up: reopened with one more turn, said in words, exit 0', () => {
+      const tid = thread();
+      assert.equal(F.run(['operator-thread', 'close', tid], LAPTOP).status, 0);
+      const r = offline(() => F.run(['operator-thread', 'reopen', tid, 'back again'], LAPTOP));
+      assert.equal(r.status, 0, r.err);
+      assert.match(r.out.split('\n')[1] ?? '', REFUSED);
+      assert.equal(turns(tid), 2, 'one turn per press');
+      sleep(1000);
+      assert.deepEqual(F.started(), { own: false, evil: false, setup: false });
+    });
+    await t.test('operator-thread start, origin unreadable: refused, and the refusal names DEVTEAM_OPERATOR_COMMAND', () => {
+      F.reset();
+      const r = offline(() => F.run(['operator-thread', 'start'], LAPTOP));
+      assert.equal(r.status, 1);
+      assert.match(r.err, /could not read main from origin[^\n]*DEVTEAM_OPERATOR_COMMAND[^\n]*without reading settings/);
+      sleep(1000);
+      assert.deepEqual(F.started(), { own: false, evil: false, setup: false });
+    });
+    await t.test('operator-thread start, origin unreadable, DEVTEAM_OPERATOR_COMMAND set: it starts the operator, reading no settings', () => {
+      F.reset();
+      const r = offline(() => F.run(['operator-thread', 'start'], { ...LAPTOP, DEVTEAM_OPERATOR_COMMAND: F.OWN }));
+      assert.equal(r.status, 0, r.err);
+      assert.match(r.out, /started fresh/);
+      assert.deepEqual(F.started(), { own: true, evil: false, setup: false }, r.err);
+    });
     await t.test('origin unreadable, origin/main moved: the worker starts nothing and says why', () => {
       F.reset();
       const url = F.g(['remote', 'get-url', 'origin'], F.old);
