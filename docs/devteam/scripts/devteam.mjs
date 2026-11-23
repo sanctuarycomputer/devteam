@@ -21076,6 +21076,9 @@ function cmdAccountsTick() {
   const session = tmuxSession();
   const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
   flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed.filter((n) => !(n === 'supervisor' && continued.has(n))), ...state.relaunched].map((n) => `${session}:${n}`)]);
+  // an idle responder with turns queued for it is told so, once a minute (kit-104); a failure here
+  // never stops the tick's own record
+  try { nudgeResponder(); } catch (e) { warn(`responder nudge: ${e?.message ?? e}`); }
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -33173,6 +33176,27 @@ function openHandoffs(objects = readLog().objects) {
     if (!replied.has(o.id) && !settledByLanding(o)) m.set(o.thread, o.id);
   }
   return m;
+}
+// The idle nudge (kit-104): when the responder's pane has an agent asking nothing, it is idle and its
+// queue isn't empty, the accounts tick types this line into it, at most once a minute
+// (RESPONDER_NUDGE_FILE, { at }, written after the typing: a crash between them costs one extra
+// nudge, never a turn). Never into a busy responder. Named at load, so the loose-file check knows it.
+const RESPONDER_NUDGE_FILE = runPath('responder-nudge.json');
+const RESPONDER_NUDGE = '[devteam responder] a turn is waiting — devteam.mjs thread list --waiting --responder';
+const RESPONDER_NUDGE_MS = 60000;
+function nudgeResponder(now = Date.now()) {
+  if (loadSettings().responder === false) return false;
+  const objects = readLog().objects;
+  if (!responderQueue(objects).length) return false;
+  if (!responderIdle(objects, now)) return false;
+  let at = 0;
+  try { at = Date.parse(JSON.parse(readText(RESPONDER_NUDGE_FILE) ?? 'null')?.at) || 0; } catch {}
+  if (now - at < RESPONDER_NUDGE_MS) return false;
+  const h = responderHealth();
+  if (!h.target || h.stuck) return false;
+  if (!typeInto(h.target, RESPONDER_NUDGE)) return false;
+  writeJsonAtomic(RESPONDER_NUDGE_FILE, { at: new Date(now).toISOString() });
+  return true;
 }
 // A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
 const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");

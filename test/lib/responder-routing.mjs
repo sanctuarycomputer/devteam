@@ -103,9 +103,11 @@ export function helpers(F, t) {
   const inboxAsk = () => F.sup(['ask', '--question', 'Ship on Friday?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
   const routed = (U) => F.turn(U).routed_to;
   const queue = () => F.run(['thread', 'list', '--waiting', '--responder'], RESPONDER).out;
-  // a thread the owner opened agoMs ago, written by hand, so lines can be put before now in order
+  // a thread the owner opened agoMs ago, written by hand, so lines can be put before now in order;
+  // each a second further back than the last, so two in one case never share a millisecond's id
+  // (a 1 ms step collided whenever the clock ticked between the calls, merging the two threads)
   let olds = 0;
-  const oldThread = (agoMs) => { olds++; return F.hand('owner', { type: 'thread', title: `An older thread ${olds}` }, agoMs + olds); };
+  const oldThread = (agoMs) => { olds++; return F.hand('owner', { type: 'thread', title: `An older thread ${olds}` }, agoMs + olds * 1000); };
   // a line written after everything before it (the log orders by time, to the millisecond)
   const after = (fn) => { sleep(5); return fn(); };
   return { only, it, settingsFile, setResponder, call, ask, inboxAsk, routed, queue, oldThread, after };
