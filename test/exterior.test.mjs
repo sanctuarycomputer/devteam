@@ -629,3 +629,17 @@ test('A14 A15 exterior-stale and exterior-missing', withProject('exterior-stale'
     assert.equal(W.findings('exterior-missing').length, 0, 'A15 no self.md: none');
   });
 }));
+
+test('A17 Monitoring documents drafting exterior.md', () => {
+  const sup = fs.readFileSync(new URL('../docs/devteam/process/supervisor.md', import.meta.url), 'utf8');
+  const mon = /\n### Monitoring\n([\s\S]*?)(?=\n#{2,3} )/.exec(sup)?.[1] ?? '';
+  const para = /\*\*Drafting exterior\.md\.\*\*\n([\s\S]*?)(?=\n\n|$)/.exec(mon)?.[1] ?? '';
+  assert.ok(para, 'A17 Monitoring has a paragraph headed Drafting exterior.md');
+  for (const want of [
+    /after .*self\.md.* is on main/, /serves, depends on, builds on it, alternative, collaborates, governs it, affects/, /business roles.*only examples/i,
+    /never a private person/, /what matters/, /signals that would show it, in words/, /1 to 4/, /strategy quote/, /names rule/,
+    /exterior-drift/, /exterior-stale.*re-read `?self\.md`? first/, /exterior-missing/,
+  ]) assert.match(para, want, `A17 the paragraph says ${want}`);
+  const c = para.indexOf('exterior check');
+  assert.ok(c >= 0 && c < para.indexOf('chore pr'), 'A17 exterior check comes before chore pr');
+});
