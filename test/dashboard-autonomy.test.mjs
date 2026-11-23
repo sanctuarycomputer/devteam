@@ -55,7 +55,9 @@ test('the Autonomy pages', { skip: canDrive ? false : 'needs Chrome and a Node w
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'a blank page');
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
-    await soon("typeof DATA !== 'undefined' && !!DATA && !document.querySelector('main.waiting')", 'the dashboard drawn');
+    // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+    // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+    await soon("document.readyState === 'complete' && typeof DATA !== 'undefined' && !!DATA && !document.querySelector('main.waiting')", 'the dashboard drawn');
     // and its charts drawn at their width: fitCharts draws a chart on a later frame when its page wasn't shown yet,
     // and a chart drawn after this would move what a test then clicks (a chart with no width is skipped, as there)
     await soon("[...document.querySelectorAll('main.page > section.on .fit[data-fit]')].every((e) => !e.clientWidth || +e.dataset.w === Math.floor(e.clientWidth))", "the page's charts drawn");
