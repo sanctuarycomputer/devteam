@@ -7942,8 +7942,9 @@ function cmdMerge() {
     // (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests), so the code's gh
     // calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s (with records in home, 218 s for both landings'
     // gh calls). The git fetches are apart: moved()'s is bounded (recurringRegistry.git, 120 s),
-    // the one after landing is too (kit-791: 120 s, 240 s with records in home). A killed call reads as failed: gh pr merge as not merged (its
-    // state is read, as for any error), a state read as no answer; refused as before
+    // the one after landing is too (kit-791: 120 s, 240 s with records in home). A killed call
+    // reads as failed: gh pr merge as not merged (its state is read, as for any error), a state
+    // read as no answer; refused as before
     const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
     const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
     const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };

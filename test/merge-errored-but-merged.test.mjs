@@ -20,8 +20,8 @@ const VERIF = '| Done-when | Command | Result |\n|---|---|---|\n| s | t | pass |
 const REFUSED = /gh pr merge refused \(did the head move\?\); verify from the start/;
 // A gh that never answers hangs this long, far past the bound merge is given here (GH_BOUND, through
 // DEVTEAM_GH_TIMEOUT_MS); a merge that waits on it can't finish inside WITHIN, so an unbounded call
-// turns the check red at about HANG_MS rather than hanging the suite. Five such reds wait ~10 minutes, so
-// on CI a regressed bound shows as the 300 s watchdog stopping this file, not as named not-ok lines:
+// turns the check red at about HANG_MS rather than hanging the suite. Eight such reds (five hung gh
+// calls, three hung fetches) wait ~16 minutes, so on CI a regressed bound shows as the 300 s watchdog stopping this file, not as named not-ok lines:
 // run the file here to see which check failed. The same holds for the hung fetches after a landing
 // (C11, R9, R10, kit-791; their bound is DEVTEAM_GIT_TIMEOUT_MS).
 const HANG_MS = 120000;
