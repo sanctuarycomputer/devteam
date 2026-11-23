@@ -9495,7 +9495,8 @@ function undeliveredTurns(now = Date.now(), { entries = false } = {}) {
     if (v.status !== 'open' || v.waiting !== 'supervisor') continue;
     let i = v.turns.length;
     while (i > 0 && v.turns[i - 1].by === 'owner') i--;
-    const mine = v.turns.slice(i);
+    // on an artifact note handed over, only the owner's turns since the hand-over (its own message is the delivery, artifact-notes-1)
+    const mine = v.turns.slice(i).filter((u) => !(v.subject?.kind === 'artifact' && v.handed) || u.at > v.handed.at);
     if (!mine.length || !mine.every((u) => Object.hasOwn(m, u.id))) continue;
     const firstMs = Date.parse(mine[0].at);
     const waited = now - firstMs;
@@ -9530,11 +9531,13 @@ function threadOpen(id, by) {
   return t;
 }
 const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open').length;
-// Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
-// owner's move), else waiting (on the supervisor).
+// Open threads by whose move: ready (the supervisor's proposal, or a session's mark on an artifact
+// note, awaits the owner's check), else you (the owner's move), else with (an artifact note a session
+// has, artifact-notes-1; the key only when one does), else waiting (on the supervisor).
 function threadCounts() {
-  const r = { you: 0, waiting: 0, ready: 0 };
-  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready ? 'ready' : v.waiting === 'owner' ? 'you' : 'waiting']++;
+  const r = { you: 0, waiting: 0, ready: 0, with: 0 };
+  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready || v.check ? 'ready' : v.waiting === 'owner' ? 'you' : v.waiting === 'session' ? 'with' : 'waiting']++;
+  if (!r.with) delete r.with;
   return r;
 }
 // A thread's stage set ({ by, stage, turn }) or, given null, dropped, in THREAD_WORKING_FILE under
@@ -9872,7 +9875,8 @@ function cmdThread() {
     } catch {}
     if (flags.json) return json(v);
     // an overdue turn the responder has is now the supervisor's to take: show says so, as list --waiting does
-    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${waitingWords(v, v.waiting === 'responder' && responderOverdue(readLog().objects).some((o) => o.thread === v.id))}` : ''}`);
+    // an artifact note with a session is that session's (artifact-notes-1), in the words the card uses
+    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'session' ? `with ${v.with}` : waitingWords(v, v.waiting === 'responder' && responderOverdue(readLog().objects).some((o) => o.thread === v.id))}` : ''}`);
     out(threadDataFrame(v));
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
@@ -9922,7 +9926,7 @@ function cmdThread() {
     if (!flags.all) vs = vs.filter((x) => x.status === 'open');
     if (flags.json) return json(vs);
     if (!vs.length) return out(flags.all ? 'no threads' : 'no open threads');
-    for (const x of vs) out(row(x, x.status === 'open' ? waitingWords(x) : ''));
+    for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : ''));
     return;
   }
   die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
@@ -16862,6 +16866,12 @@ function collectMetrics(since, reviewsSince = 0) {
   const logNow = readLog().objects;
   const turnsNow = turnsByThread(logNow);
   for (const x of threadsNow.filter((y) => y.status === 'open' && y.waiting === 'supervisor')) {
+    // an artifact note the owner handed to the supervisor waits from the hand-over (artifact-notes-1)
+    if (x.subject?.kind === 'artifact' && x.handed?.to === 'supervisor') {
+      const since = now - Date.parse(x.handed.at);
+      if (since > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner handed this note over ${Math.round(since / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
+      continue;
+    }
     const first = owedIn(turnsNow.get(x.id) ?? [], logNow.get(x.id)).find((u) => u.routed_to !== 'responder');
     if (!first) continue;
     const ago = now - Date.parse(first.created_at);

@@ -179,3 +179,66 @@ test('artifact-notes-contract A4: /api/threads carries the note fields, with no 
     }
   } finally { if (dash) await dash.stop(); F.done(); }
 });
+
+test('artifact-notes-contract A3: the readers of waiting (thread show and list, hello\'s counts, thread-waiting, thread-undelivered)', async (t) => {
+  const F = threadsFixture('artifact-notes-readers');
+  const MIN = 60000;
+  const run = path.join(F.old, 'docs/devteam/run');
+  const undelivered = path.join(run, 'undelivered-turns.json');
+  const fresh = (fn) => () => { const snap = F.snapLog(); try { fn(); } finally { F.restoreLog(snap); fs.rmSync(undelivered, { force: true }); } };
+  const ART = { kind: 'artifact', slug: 'pricing-mock', at: 'plan-pricing', path: 'index.html', anchor: { selector: '#trial', text: 'Start trial' } };
+  // an artifact note (or, art false, a plain thread) with the owner's first turn agoMs back
+  const note = (agoMs, { art = true } = {}) => {
+    const T = F.hand('owner', { type: 'thread', title: 'Start trial', ...(art ? { subject: ART } : {}) }, agoMs + 1000);
+    const U = F.hand('owner', { type: 'turn', thread: T, text: 'Say Start free trial.' }, agoMs);
+    return { T, U };
+  };
+  const handTo = (T, to, agoMs) => { const at = new Date(Date.now() - agoMs).toISOString(); F.hand('owner', { id: T, op: 'set', type: 'thread', handed: { to, at } }, agoMs); };
+  const findings = (kind) => JSON.parse(F.sup(['metrics', '--json'])).findings.filter((f) => f.kind === kind);
+  try {
+    await t.test('A3a: thread show and thread list say who has the note', fresh(() => {
+      placeLogs(F, [C1]);
+      const T = expected(C1).thread;
+      assert.match(F.owner(['thread', 'show', T]).split('\n')[0], new RegExp(`^${T} · open · with plan-pricing$`));
+      assert.match(F.owner(['thread', 'list']), new RegExp(`^${T} \\[open, with plan-pricing\\] `, 'm'));
+    }));
+
+    await t.test("A3b: hello's thread counts: with, and a note to check counted as ready", fresh(() => {
+      placeLogs(F, ['c02-handed-then-addressed', 'c20-open-never-handed']);
+      assert.deepEqual(JSON.parse(F.owner(['hello', '--json'])).threads, { you: 1, waiting: 0, ready: 1 }, 'none with a session: no with key');
+      placeLogs(F, [C1]);
+      assert.deepEqual(JSON.parse(F.owner(['hello', '--json'])).threads, { you: 1, waiting: 0, ready: 1, with: 1 });
+    }));
+
+    await t.test('A3c: thread-waiting on a note handed to the supervisor counts from the hand-over', fresh(() => {
+      const { T } = note(60 * MIN);
+      handTo(T, 'supervisor', 11 * MIN);
+      const f = findings('thread-waiting').filter((x) => x.subject === T);
+      assert.equal(f.length, 1, JSON.stringify(f));
+      assert.match(f[0].detail, /^the owner handed this note over 11 min ago and has no reply$/);
+      // its first turn since: at work, no finding
+      F.hand('supervisor', { type: 'turn', thread: T, text: 'On it.' }, 5 * MIN);
+      assert.deepEqual(findings('thread-waiting').filter((x) => x.subject === T), []);
+    }));
+
+    await t.test('A3c: a hand-over to the supervisor of a note already answered still waits on it', fresh(() => {
+      const { T } = note(60 * MIN);
+      F.hand('supervisor', { type: 'turn', thread: T, text: 'Which button?' }, 50 * MIN);
+      handTo(T, 'supervisor', 12 * MIN);
+      const f = findings('thread-waiting').filter((x) => x.subject === T);
+      assert.equal(f.length, 1, JSON.stringify(f));
+      assert.match(f[0].detail, /handed this note over 12 min ago/);
+    }));
+
+    await t.test('A3d: an old undelivered turn raises no thread-undelivered at a fresh hand-over; on a plain thread it does', fresh(() => {
+      const a = note(30 * MIN);
+      handTo(a.T, 'supervisor', 1 * MIN);
+      const b = note(30 * MIN + 5000, { art: false });
+      const ago = (ms) => new Date(Date.now() - ms).toISOString();
+      fs.writeFileSync(undelivered, JSON.stringify({ [a.U]: { thread: a.T, at: ago(30 * MIN) }, [b.U]: { thread: b.T, at: ago(30 * MIN + 5000) } }));
+      const f = findings('thread-undelivered').map((x) => x.subject);
+      assert.ok(f.includes(b.T), `the plain thread's undelivered turn is found: ${f.join(', ')}`);
+      assert.ok(!f.includes(a.T), `the handed note raises none: ${f.join(', ')}`);
+    }));
+  } finally { F.done(); }
+});
