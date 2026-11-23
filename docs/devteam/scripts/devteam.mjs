@@ -9661,6 +9661,13 @@ function cmdThread() {
       if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
       // the owner's turns this reply answers, before it is written: on stderr, so the id stays the first line out
       for (const o of owedTurns(t.id, objects).filter((o) => answersTurn(o, by))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+      // and the responder's open promise it closes (pendingOpen), so the supervisor sees it takes that
+      // work over: the responder's follow-up is refused after it (final-3 F2, final-3b F1)
+      if (by === 'supervisor') {
+        const ts = logTurns(t.id, objects);
+        const p = pendingOpen(ts, objects.get(t.id));
+        if (p && !pendingOpen([...ts, { created_by: 'supervisor', created_at: nowIso() }], objects.get(t.id))) process.stderr.write(`taking over ${p.id}: "${turnGist(p.text)}"\n`);
+      }
     }
     const u = appendLog(line, by);
     out(u.id);
@@ -33170,13 +33177,15 @@ function pendingOpen(ts, thread) {
 // The responder's guard: since its own last turn in the thread (or ever, with none) the supervisor
 // has written, and the owner has said nothing after that. A reply then would answer what the
 // supervisor already answered (both backstop cases of the spine's Failure modes). Never while its
-// own promise there is open (pendingOpen): the follow-up it owes is its to write.
+// own promise there is open (pendingOpen): the follow-up it owes is its to write. After the
+// supervisor's own question (thread ask) only owner words routed to the responder lift it: the
+// owner's answer to that question is the supervisor's (final-3b F2).
 function supervisorAnswered(threadId, objects = readLog().objects) {
   const ts = logTurns(threadId, objects);
   if (pendingOpen(ts, objects.get(threadId))) return false;
   const mine = ts.filter((u) => u.created_by === 'responder').pop()?.created_at ?? '';
   const sup = ts.filter((u) => u.created_by === 'supervisor').pop();
-  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at);
+  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at && (!sup.question || u.routed_to === 'responder'));
 }
 // A turn's first n characters on one line, for a terminal: control characters and runs of
 // whitespace as one space, … when cut.

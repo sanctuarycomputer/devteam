@@ -519,6 +519,29 @@ test('responder routing (kit-104)', { skip: NO_TMUX, timeout: 280000 }, async (t
     assert.notEqual(r.status, 0, 'refused');
     assert.match(r.err, /the supervisor has answered this/);
   });
+  await it('Z6 after the supervisor\'s thread ask answered the responder\'s turn, the owner\'s answer to the question doesn\'t lift the responder\'s guard; owner words routed to it do (final-3b F2, final-3 F3)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, MIN, 'responder', 'typed');
+    after(() => ask(T));
+    const a = after(() => F.say(T, 'Teal'));
+    assert.equal(a.line.routed_to, 'supervisor');
+    const r = after(() => F.run(['thread', 'reply', T, '--', 'a second reply to the first turn'], RESPONDER));
+    assert.notEqual(r.status, 0, `refused: the supervisor's question answered that turn: ${r.out}`);
+    assert.match(r.err, /the supervisor has answered this/);
+    after(() => F.ownerTurn(T, 0, 'responder', 'typed'));
+    const ok = after(() => F.run(['thread', 'reply', T, '--', 'on the new words'], RESPONDER));
+    assert.equal(ok.status, 0, ok.err);
+  });
+  await it('Z7 a supervisor reply that closes the responder\'s open promise says so: taking over <u-id>; a reply with none open says nothing (final-3 F2, final-3b F1)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    const P = F.writerTurn('responder', T, 5 * MIN, { pending: true });
+    const s = after(() => F.run(['thread', 'reply', T, '--', 'I have it from here'], SUP));
+    assert.equal(s.status, 0, s.err);
+    assert.match(s.err, new RegExp(`^taking over ${P}: "responder's turn"`, 'm'), s.err);
+    const again = after(() => F.run(['thread', 'reply', T, '--', 'and done'], SUP));
+    assert.doesNotMatch(again.err, /taking over/);
+  });
   await it('Z4 a pending promise before a resolve raises no responder-overdue after a reopen with no words (final-1b F2)', () => {
     const T = oldThread(30 * MIN);
     F.ownerTurn(T, 20 * MIN);
