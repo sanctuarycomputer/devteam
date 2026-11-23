@@ -25,7 +25,6 @@ import { startPresenceFake } from './lib/presence-fake.mjs';
 import { CANVAS, devtools, pageClient, serve } from './lib/canvas-cursors-fixture.mjs';
 import { threadsFixture, dashboardOnFreePort, until } from './lib/kit.mjs';
 
-const SKIP = canDrive ? false : 'needs Chrome and WebSocket';
 const SLUGS = ['pins-place', 'pins-follow', 'pins-gone', 'pins-view'];
 // N1's canvas: too many components to draw (test/canvas-editor.test.mjs's fanDoc: 20 components each
 // holding 3 instances of the next), so the page shows its cap note, the stage-top's longest line
@@ -192,7 +191,7 @@ async function load(p, slug) {
   await within(async () => (await p.ev('document.body.dataset.live')) === 'on', `${slug} live`);
 }
 
-test('canvas pins: a pin placed on a layer with the Comment tool is an artifact note with a node anchor, naming the canvas (DW1: P1)', { skip: SKIP, timeout: 280000 }, async (t) => {
+test('canvas pins: a pin placed on a layer with the Comment tool is an artifact note with a node anchor, naming the canvas (DW1: P1)', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 280000 }, async (t) => {
   const s = await setup();
   const slug = 'pins-place';
   const A = await pageFor(t, s, s.ana);
@@ -216,7 +215,7 @@ test('canvas pins: a pin placed on a layer with the Comment tool is an artifact 
   noExceptions(A, 'Ana');
 });
 
-test('canvas pins: a pin follows its layer, and a supervisor\'s reply shows on it (DW1: P2, P3)', { skip: SKIP, timeout: 280000 }, async (t) => {
+test('canvas pins: a pin follows its layer, and a supervisor\'s reply shows on it (DW1: P2, P3)', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 280000 }, async (t) => {
   const s = await setup();
   const slug = 'pins-follow';
   const id = openPin(s, slug, 'n-card', 'Make the card wider?');
@@ -246,7 +245,7 @@ test('canvas pins: a pin follows its layer, and a supervisor\'s reply shows on i
   noExceptions(A, 'Ana');
 });
 
-test('canvas pins: a pin whose layer is deleted keeps its thread and shows at the top-left, marked "on a deleted layer" (DW2: P4)', { skip: SKIP, timeout: 280000 }, async (t) => {
+test('canvas pins: a pin whose layer is deleted keeps its thread and shows at the top-left, marked "on a deleted layer" (DW2: P4)', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 280000 }, async (t) => {
   const s = await setup();
   const slug = 'pins-gone';
   const id = openPin(s, slug, 'n-side', 'Is this panel needed?');
@@ -279,7 +278,7 @@ test('canvas pins: a pin whose layer is deleted keeps its thread and shows at th
   noExceptions(A, 'Ana');
 });
 
-test('canvas pins: a View person sees pins and their threads, with no Comment tool and no reply box (DW2: P5)', { skip: SKIP, timeout: 280000 }, async (t) => {
+test('canvas pins: a View person sees pins and their threads, with no Comment tool and no reply box (DW2: P5)', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 280000 }, async (t) => {
   const s = await setup();
   const slug = 'pins-view';
   const id = openPin(s, slug, 'n-card', 'Bigger title?');
@@ -312,7 +311,7 @@ test('canvas pins: a View person sees pins and their threads, with no Comment to
   noExceptions(A, 'Ana');
 });
 
-test('canvas pins: at 390 px the Comment tool covers none of the stage\'s own controls (N1)', { skip: SKIP, timeout: 280000 }, async (t) => {
+test('canvas pins: at 390 px the Comment tool covers none of the stage\'s own controls (N1)', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 280000 }, async (t) => {
   const s = await setup();
   const A = await pageFor(t, s, s.ana);
   await A.size(390, 844);
@@ -331,7 +330,7 @@ test('canvas pins: at 390 px the Comment tool covers none of the stage\'s own co
   noExceptions(A, 'Ana');
 });
 
-test('canvas pins: Escape in a pin\'s card closes it and leaves the selection alone (N2)', { skip: SKIP, timeout: 280000 }, async (t) => {
+test('canvas pins: Escape in a pin\'s card closes it and leaves the selection alone (N2)', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 280000 }, async (t) => {
   const s = await setup();
   const slug = 'pins-place';
   const A = await pageFor(t, s, s.ana);
