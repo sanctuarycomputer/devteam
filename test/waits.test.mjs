@@ -279,7 +279,10 @@ test('waits A2: waitCause() reads each cause form, the contract carries the new 
     logLine(dir, 'kit-01-probe', { type: 'observation', kind: 'follow-up', subject: TICKET, source: 'worker', detail: 'the empty state was left for later' });
     const r = logCheck(dir);
     assert.equal(r.status, 0, r.out + r.err);
-    assert.equal(ok(dir, ['moves', '--json']).trim(), '{"next_move":1,"moves":[]}');
+    // the held ticket has its own row now (kit-289, T2b); the new subjects still have none
+    const moves = JSON.parse(ok(dir, ['moves', '--json']));
+    assert.equal(moves.next_move, 1);
+    assert.deepEqual(moves.moves.filter((m) => /^(follow-up|thread|answer|duty|record):/.test(m.subject)), []);
   });
 
   await t.test("the fixtures hold one move of each new subject, each fitting the comment's shape", () => {
