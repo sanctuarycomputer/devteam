@@ -1591,6 +1591,7 @@ const CLASS_WORDS = Object.freeze({
   'goal-change': 'Changing a goal',
   'strategy-change': 'Changing the strategy',
   'self-change': 'Changing what the project is',
+  'names-checked': 'Checking the names in a draft before it is public',
   'exterior-change': 'Changing what the project relates to',
   'goal-met': 'Saying a goal is met',
   'registry-attest': 'Confirming the registry is complete',
@@ -5018,6 +5019,8 @@ function cmdValidate() {
     for (const [r, at] of rs) { const bad = releaseProblem(r, at); if (bad) (releaseMayBeOnMerge(r) ? errors : warnings).push(releaseMayBeOnMerge(r) ? bad : `${bad}; read as not deploying on merge`); }
   }
   const td = path.join(projectDir, 'tickets');
+  // project/self.md, when there is one, against self@1 (its paths and names are the draft's checks: self check, check-pr)
+  { const t = readText(path.join(projectDir, 'self.md')); if (t !== null) for (const e of selfDoc(t).errors) errors.push(`${projectRel}/self.md: ${e}`); }
   if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket; if the supervisor added it since the log last landed, land the log first (log-sync, then merge --chore log) and run the check again`);
   // Checking one ticket, another ticket's own errors (D3 and the rest, written "<id>: …") come
   // from the live graph, not this branch: e.g. a dependency on a plan that reached main after the
@@ -6411,6 +6414,12 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const own = settingsAt(sha, { orNull: true });
     if (own && Object.hasOwn(own, 'recurring')) fails.push(recurringRegistry.inSettings());
   }
+  // a PR changing self.md: its contract, its parts' paths and the names hold (selfDraftLines), every kind
+  if (R.name === 'home' && mainRef()) {
+    const held = selfDraftLines(git(['merge-base', mainRef(), sha]), sha, branch);
+    fails.push(...held.fails);
+    for (const w of held.warns) out(`warn: ${w}`);
+  }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records, inHome }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -7226,7 +7235,7 @@ function governanceView() {
     ? (git(['ls-tree', '--full-tree', '--name-only', main, '--', ...kitDirs.map((d) => `${kitRel}/${d}/`)], projectRoot) ?? '').split('\n')
     : kitDirs.flatMap((d) => { try { return fs.readdirSync(path.join(projectRoot, kitRel, d)).map((f) => `${kitRel}/${d}/${f}`); } catch { return []; } });
   const kit = kitDirs.flatMap((d) => listed.filter((p) => p.startsWith(`${kitRel}/${d}/`) && p.endsWith('.md')).sort().map((p) => ({ group: d, path: p })));
-  const project = [['strategy', 'Strategy'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback, template: f === 'strategy' }));
+  const project = [['strategy', 'Strategy'], ['self', 'Self'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback, template: f === 'strategy' }));
   const settingsRel = `${projectRel}/settings.md`;
   const newest = new Map();
   const syncs = new Set();
@@ -7253,7 +7262,7 @@ function governanceView() {
   const files = [...kit, ...project].map(({ group, path: p, fallback, template }) => {
     const text = at(p);
     // init's untouched strategy template counts as not written, by its marker line, as strategyState
-    // reads it; exterior.md has no template, so it is written once it exists
+    // reads it; self.md and exterior.md have no template, so each is written once it exists
     const written = text !== null && !(template && text.includes(STRATEGY_TEMPLATE_MARK));
     const c = newest.get(p);
     const known = c && !shallow.has(c.sha);
@@ -7371,6 +7380,422 @@ worldFileFails.actOf = (ref) => {
   const b = String(ref).replace(/^refs\/heads\//, '');
   return b.startsWith('plan/') ? `plan-${b.slice(5)}` : b.startsWith('ticket/') && !b.startsWith('ticket/chore-') ? b.slice(7) : b;
 };
+/* self-model start */
+// project/self.md, what the project is (log.schema.json#self@1): a markdown file whose one fenced
+// `self` block holds the contract. The parser and the contract check follow
+// test/fixtures/world/check.mjs rule for rule, so the two refuse the same invalid/ cases; kit-135
+// reuses them for exterior.md.
+//
+// The fenced blocks of a markdown file. A fence is a line at column 0 of three or more backticks;
+// one opens a block when none is open, its info string the rest of the line, its spaces and tabs
+// trimmed (possibly empty). The block closes at the next line of at least as many backticks and
+// nothing else but spaces or tabs. Indented and ~~~ fences are prose. Lines split on \r?\n, so a
+// file saved with CRLF reads alike. Returns the blocks, the text outside every block (prose), and
+// the line of a block that never closes (or null).
+function fencedBlocks(text) {
+  const blocks = [];
+  const prose = [];
+  let open = null;
+  String(text).split(/\r?\n/).forEach((line, i) => {
+    const m = /^(`{3,})(.*)$/.exec(line);
+    if (!open) {
+      if (m) open = { ticks: m[1].length, info: m[2].replace(/^[ \t]+|[ \t]+$/g, ''), line: i + 1, body: [] };
+      else prose.push(line);
+    } else if (m && m[1].length >= open.ticks && /^[ \t]*$/.test(m[2])) {
+      blocks.push({ info: open.info, line: open.line, body: open.body.join('\n') });
+      open = null;
+    } else open.body.push(line);
+  });
+  return { blocks, prose: prose.join('\n'), unclosed: open ? open.line : null };
+}
+// Whether text names name: as whole words (no letter or digit just before or after), ignoring case.
+function namesWhole(text, name) {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+}
+// A self.md's or exterior.md's contract errors (doc 'self' or 'exterior'), empty when it holds.
+// The fence, the other doc's block, one block, JSON, an object and the version stop at their first
+// error; the schema ($defs[doc].block) gives every error; self's part ids are unique once the schema
+// holds. Exterior's own rules past the schema are kit-135's.
+function worldDocErrors(text, doc) {
+  const home = { self: 'self.md', exterior: 'exterior.md' };
+  const other = doc === 'self' ? 'exterior' : 'self';
+  const article = (w) => (/^[aeiou]/.test(w) ? 'an' : 'a');
+  const b = fencedBlocks(text);
+  if (b.unclosed) return [`a fenced block opened at line ${b.unclosed} never closes`];
+  if (b.blocks.some((x) => x.info === other)) return [`${article(other)} ${other} block belongs in ${home[other]}, not ${home[doc]}`];
+  const mine = b.blocks.filter((x) => x.info === doc);
+  if (mine.length === 0) return [`no ${doc} block`];
+  if (mine.length > 1) return [`more than one ${doc} block`];
+  let v;
+  try {
+    v = JSON.parse(mine[0].body);
+  } catch (e) {
+    return [`the ${doc} block is not JSON: ${e.message}`];
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return [`the ${doc} block is not a JSON object`];
+  if (Number.isInteger(v[doc]) && v[doc] > 1) return [`${doc}: ${v[doc]} needs a newer kit`];
+  const errs = schemaErrors(SCHEMA.$defs[doc].block, v, doc);
+  if (errs.length) return errs;
+  if (doc === 'self') {
+    const seen = new Set();
+    v.parts.forEach((p, i) => {
+      if (seen.has(p.id)) errs.push(`self.parts[${i}].id "${p.id}" is shared`);
+      seen.add(p.id);
+    });
+  }
+  return errs;
+}
+// A self.md's text in: its parsed self block (null unless it holds) and its contract errors.
+function selfDoc(text) {
+  const errors = worldDocErrors(text, 'self');
+  if (errors.length) return { block: null, errors };
+  return { block: JSON.parse(fencedBlocks(text).blocks.find((x) => x.info === 'self').body), errors };
+}
+// A part's code path as the disk and git checks both read it: split on /, empty and . segments
+// dropped, joined. '' is the repo root. (The schema refuses a leading / and any .. segment.)
+function partPath(p) {
+  return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
+}
+// The parts' code paths that has(partPath(p)) doesn't find: [{ part, path }], each path as written,
+// once, in file order.
+function selfPathsMissing(block, has) {
+  const missing = [];
+  const seen = new Set();
+  for (const p of block.parts) for (const c of p.code) {
+    if (seen.has(c)) continue;
+    seen.add(c);
+    if (!has(partPath(c))) missing.push({ part: p.id, path: c });
+  }
+  return missing;
+}
+// Whether a normalised path is on disk under the repo root, each segment matched by its exact case
+// (as git reads it), so App/ is missing beside app/ on a disk that folds case too.
+function hasOnDisk(n) {
+  let dir = projectRoot;
+  for (const seg of n === '' ? [] : n.split('/')) {
+    let names;
+    try { names = fs.readdirSync(dir); } catch { return false; }
+    if (!names.includes(seg)) return false;
+    dir = path.join(dir, seg);
+  }
+  return true;
+}
+// Whether a normalised path is in a commit's tree.
+const hasAt = (commit) => (n) => n === '' || git(['cat-file', '-e', `${commit}:${n}`]) !== null;
+const selfRel = () => `${projectRel}/self.md`;
+// main's self.md, or null when main has none; with no main, or the project outside the repo, the
+// working tree's (as strategyState reads the strategy).
+function selfMainText() {
+  return projectInRepo && mainRef() ? git(['show', `${mainRef()}:${selfRel()}`]) : readText(path.join(projectDir, 'self.md'));
+}
+// dashboard-data's self block (log.schema.json#self@1 dashboard): main's self.md as check.mjs's
+// dashboardSelf gives it, or null when main has none or it breaks the contract.
+function selfDashboard() {
+  const text = selfMainText();
+  const b = text === null ? null : selfDoc(text).block;
+  return b && { what: b.what, makes: b.makes, parts: b.parts.map((p) => ({ id: p.id, name: p.name, what: p.what, code: p.code })), controls: b.controls, not: b.not };
+}
+// The names rule. A draft is pushed, and on a repo not known to be private it is public, so a
+// capitalised word main's strategy and dependency files don't contain is one to check before then:
+// a name of someone the project may not want named in public. A heuristic: a lowercase name is
+// never caught, and a one-word name that starts a sentence is skipped (spec §6).
+//
+// The capitalised words of pieces ([{ where, text, sentences }]): [{ word, where }], each word once,
+// at its first piece. A word is a run of letters, digits, ' ’ and - that starts with a letter, a
+// trailing 's or ’s (and then any trailing ' ’ or -) dropped; capitalised when its first letter is
+// upper case and it is two letters or more. With sentences, a sentence's first word is skipped: at
+// the start of the text, after a blank line, on a line that starts a markdown block (#, -, *, +,
+// >, | or 1.), after a | table cell, and after . ! or ? and a space. A newline inside a paragraph
+// (a wrapped line) starts nothing. Everything else counts, inline code, links and comments too.
+function capitalisedWords(pieces) {
+  const found = [];
+  const seen = new Set();
+  for (const { where, text, sentences } of pieces) {
+    const s = String(text);
+    let prevEnd = null;
+    for (const m of s.matchAll(/[\p{L}][\p{L}\p{N}'’-]*/gu)) {
+      const gap = s.slice(prevEnd ?? 0, m.index);
+      const starts = prevEnd === null || /[.!?]\s/.test(gap) || /\n[ \t]*\r?\n/.test(gap) || /\n[ \t]*(?:[#*+>|-]|\d+\.)/.test(gap) || gap.includes('|');
+      prevEnd = m.index + m[0].length;
+      if (sentences && starts) continue;
+      const word = m[0].replace(/['’]s$/, '').replace(/['’-]+$/, '');
+      if (!/^\p{Lu}/u.test(word) || [...word].length < 2 || seen.has(word)) continue;
+      seen.add(word);
+      found.push({ word, where });
+    }
+  }
+  return found;
+}
+// The text the names rule reads, at ref: the project's strategy.md and the repo root's
+// package.json, Gemfile and requirements.txt, joined; a missing file reads as ''. With no ref, or
+// the project outside the repo, the working tree's.
+function namesAllowedText(ref = mainRef()) {
+  const at = (rel) => (projectInRepo && ref ? git(['show', `${ref}:${rel}`]) : readText(path.join(projectRoot, rel))) ?? '';
+  return [strategyRel, 'package.json', 'Gemfile', 'requirements.txt'].map(at).join('\n');
+}
+// The capitalised words of pieces that allowed doesn't name (as a whole word, ignoring case). The
+// one names function: self check, chore pr and check-pr use it, and kit-135 for exterior.md.
+function unknownNames(pieces, allowed) {
+  return capitalisedWords(pieces).filter((w) => !namesWhole(allowed, w.word));
+}
+// A self.md's pieces for the names rule. The text outside the self block ('prose', with sentences;
+// every other fenced block is in it), then the block's what, makes and each part's what (with
+// sentences), each part's name, controls[i] and not[i] (every word). The ids are left out, and so is
+// each code path has(partPath(p)) finds: it names a file already in the repo. One it doesn't (an
+// earlier blob's) is read like any text. With no parsed block, the whole file is one prose piece.
+function selfPieces(text, block, has) {
+  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
+  const lines = String(text).split(/\r?\n/);
+  const b = fencedBlocks(text).blocks.find((x) => x.info === 'self');
+  // the block's lines, opening fence to closing, become one blank line
+  lines.splice(b.line - 1, b.body.split('\n').length + 2, '');
+  const pieces = [{ where: 'prose', text: lines.join('\n'), sentences: true }];
+  const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
+  add('what', block.what, true);
+  add('makes', block.makes, true);
+  block.parts.forEach((p, i) => {
+    add(`parts[${i}].name`, p.name, false);
+    add(`parts[${i}].what`, p.what, true);
+    p.code.forEach((c, j) => { if (!has(partPath(c))) add(`parts[${i}].code[${j}]`, c, false); });
+  });
+  block.controls.forEach((c, i) => add(`controls[${i}]`, c, false));
+  block.not.forEach((c, i) => add(`not[${i}]`, c, false));
+  return pieces;
+}
+// One self.md blob's unknown words: its pieces (the whole text as prose when the contract fails, so
+// a broken draft's words still count), less what allowed names.
+function selfWords(text, has, allowed) {
+  return unknownNames(selfPieces(text, selfDoc(text).block, has), allowed);
+}
+// Whether a strategy links self.md: in its prose (outside every fenced block), an inline link to
+// self.md or ./self.md (an optional #anchor and "title"), or a reference definition naming it.
+function linksSelf(strategyText) {
+  const prose = fencedBlocks(strategyText ?? '').prose;
+  return /\]\(\s*(?:\.\/)?self\.md(?:#[^\s)]*)?(?:\s+"[^"]*")?\s*\)/.test(prose) || /^\s*\[[^\]]+\]:\s*(?:\.\/)?self\.md(?:#\S*)?\s*$/m.test(prose);
+}
+// main's strategy.md, as strategyState reads it, or null when missing.
+const strategyMainText = () => (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md')));
+// metrics' self findings, read from main (none with no main, or the project outside the repo), each
+// keyed so observeFindings keeps one observation per path or strategy blob: self-drift once per part
+// path missing at main while main's self.md holds; self-unlinked while main has a self.md its
+// strategy doesn't link; self-missing while the strategy is written and main has no self.md, its
+// next step the strategy-change link first when the strategy doesn't link it. All low.
+function selfFindings(add) {
+  const main = projectInRepo ? mainRef() : null;
+  if (!main) return;
+  const text = selfMainText();
+  const strategy = strategyMainText();
+  const strategyKey = git(['rev-parse', '--verify', '--quiet', `${main}:${strategyRel}`]) ?? undefined;
+  const linked = linksSelf(strategy);
+  if (text !== null) {
+    const { block } = selfDoc(text);
+    if (block) for (const m of selfPathsMissing(block, hasAt(main))) add('low', 'self-drift', 'self', `part ${m.part}'s path ${m.path} is not on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: m.path });
+    if (!linked) add('low', 'self-unlinked', 'self', 'main has self.md and its strategy.md does not link it', 'propose a strategy-change linking [self.md](./self.md) in place of any lines restating what the project is, in its own PR', { key: strategyKey });
+  } else if (strategyState() === 'written') {
+    const draft = 'draft self.md from the code and the strategy in a chore, run self check, and ask self-change (supervisor.md, Monitoring)';
+    add('low', 'self-missing', 'self', 'the strategy is written and main has no self.md', linked ? draft : `first propose a strategy-change linking [self.md](./self.md), in its own PR; then ${draft}`, { key: strategyKey });
+  }
+}
+// The draft's history. Every self.md blob the branch carries since its merge base is pushed with it
+// and lands with merge --no-ff, so the names rule reads each, not only the head's.
+//
+// Every distinct blob of rel that a commit in base..head introduces, oldest first: [{ commit, blob }].
+// A commit's entry is kept only when it is a plain file (mode 100644 or 100755: a folder, link or
+// submodule is the owner's-files gate's to refuse), and only when its blob is neither base's nor any
+// parent's at rel (a merge bringing main's blob in introduces nothing). A commit with no file is
+// skipped. With no base, head's whole history is read. kit-135 reuses it for exterior.md.
+function draftBlobs(base, head, rel) {
+  const blobAt = (c) => {
+    const m = /^(\d{6}) (\w+) ([0-9a-f]+)\t/.exec(git(['ls-tree', c, '--', rel], mainRoot) ?? '');
+    return m && m[2] === 'blob' && (m[1] === '100644' || m[1] === '100755') ? m[3] : null;
+  };
+  const listed = git(['rev-list', '--reverse', '--full-history', '--parents', head, ...(base ? [`^${base}`] : []), '--', rel], mainRoot);
+  const known = new Set();
+  if (base) known.add(git(['rev-parse', '--verify', '--quiet', `${base}:${rel}`], mainRoot));
+  const found = [];
+  for (const line of (listed ?? '').split('\n').filter(Boolean)) {
+    const [commit, ...parents] = line.split(' ');
+    const blob = blobAt(commit);
+    if (!blob || known.has(blob) || parents.some((p) => git(['rev-parse', '--verify', '--quiet', `${p}:${rel}`], mainRoot) === blob)) continue;
+    known.add(blob);
+    found.push({ commit, blob });
+  }
+  return found;
+}
+// The words of every draft blob of rel in base..head, as wordsOf(text, has) gives them, with has the
+// head's tree (a path the head has names the project's own file; one it lacks is read as text):
+// [{ word, where, commit }]. The head's own blob first, its words carrying commit null; then each
+// earlier blob, oldest first, a word only it holds carrying its commit. Each word once, at its first place.
+function draftWords(base, head, rel, wordsOf) {
+  const has = hasAt(head);
+  const headBlob = git(['rev-parse', '--verify', '--quiet', `${head}:${rel}`], mainRoot);
+  const blobs = draftBlobs(base, head, rel);
+  const order = [...blobs.filter((b) => b.blob === headBlob).map((b) => ({ ...b, commit: null })), ...blobs.filter((b) => b.blob !== headBlob)];
+  const words = [];
+  const seen = new Set();
+  for (const { commit, blob } of order) {
+    for (const w of wordsOf(git(['cat-file', 'blob', blob], mainRoot) ?? '', has)) {
+      if (seen.has(w.word)) continue;
+      seen.add(w.word);
+      words.push({ word: w.word, where: w.where, commit });
+    }
+  }
+  return words;
+}
+// The repo's visibility as GitHub says, for the names hold: origin's repo by name (never gh's own
+// default), PUBLIC public, PRIVATE or INTERNAL private, anything else (no owner/repo for origin, gh
+// missing, logged out, offline, or past its timeout: 15 s, DEVTEAM_GH_TIMEOUT_MS for tests) unknown,
+// which holds like public. Each answer is recorded, whole, in run/repo-visibility.json for metrics
+// (lastRepoVisibility), which makes no network call.
+const REPO_VISIBILITY = runPath('repo-visibility.json');
+function repoVisibility() {
+  const spec = ghSpec(git(['config', '--get', 'remote.origin.url']));
+  const said = spec ? repo('home').gh(['repo', 'view', spec, '--json', 'visibility', '--jq', '.visibility'], { cwd: mainRoot, timeout: Number(process.env.DEVTEAM_GH_TIMEOUT_MS) || 15000, killSignal: 'SIGKILL' }) : null;
+  const visibility = said === 'PUBLIC' ? 'public' : said === 'PRIVATE' || said === 'INTERNAL' ? 'private' : 'unknown';
+  try { writeJson(REPO_VISIBILITY, { visibility, at: new Date().toISOString() }); } catch {}
+  return visibility;
+}
+function lastRepoVisibility() {
+  try {
+    const v = readJson(REPO_VISIBILITY).visibility;
+    return ['public', 'private', 'unknown'].includes(v) ? v : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+// The words the supervisor has checked for act's draft of scope ('self', or kit-135's 'exterior'):
+// those its names-checked acts name (each a name:<word> ref, matched exactly) whose refs include act,
+// logged at or after since (the branch's merge base's committer time, in ms, as Date.parse reads the
+// log's created_at; not a finite number: nothing counts, failing closed). Only a chore's act clears
+// anything: a plan or ticket PR has no chore to name it on.
+function namesChecked(act, scope, since) {
+  const words = new Set();
+  if (!String(act).startsWith('chore-')) return words;
+  const from = Number.isFinite(since) ? since : Infinity;
+  for (const a of logObjects('act')) {
+    if (a.class !== 'names-checked' || a.scope !== scope || writerClass(a.created_by) !== 'supervisor') continue;
+    const refs = Array.isArray(a.refs) ? a.refs : [];
+    if (!refs.includes(act) || !(Date.parse(a.created_at) >= from)) continue;
+    for (const r of refs) if (typeof r === 'string' && r.startsWith('name:')) words.add(r.slice(5));
+  }
+  return words;
+}
+// check-pr's names rule for a draft: each word of words ([{ word, where, commit }]) not in checked
+// is a fail on a public repo and a warning on an unknown one; a private repo holds nothing.
+// visibility is called only when a word is unchecked, so a PR without one makes no gh call.
+function namesHoldLines({ rel, words, act, checked, visibility }) {
+  const open = words.filter((w) => !checked.has(w.word));
+  if (!open.length) return { fails: [], warns: [] };
+  const v = visibility();
+  if (v === 'private') return { fails: [], warns: [] };
+  const chore = String(act).startsWith('chore-');
+  const tail = chore
+    ? `; check it and name it on the chore (chore pr ${String(act).slice(6)} --names-checked …), or reword it; if you named it with chore pr --names-checked and this check runs where the live log isn't (a forge's CI), land the log (log-sync, then merge --chore log) and run the check again`
+    : '; a plan or ticket PR has no chore to name it on, so reword it (a self.md change belongs in a chore)';
+  const lines = open.map((w) => `${rel} names "${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}, which main's strategy.md and dependency files don't, on a public repo${tail}`);
+  return v === 'public' ? { fails: lines, warns: [] } : { fails: [], warns: lines };
+}
+// The names-checked act chore pr logs once every word is named: the words, the draft's blob, the chore.
+function logNamesChecked(slug, rel, blob, words) {
+  const scope = path.basename(rel, '.md');
+  return appendLog({ type: 'act', class: 'names-checked', scope, what: `checked the names ${words.join(', ')} in ${rel} (blob ${String(blob).slice(0, 12)}) before pushing chore-${slug}`, refs: [`chore-${slug}`, ...words.map((w) => `name:${w}`)], reversible: false }, 'supervisor');
+}
+// chore pr's hold on a self.md draft (spec §3.3), run after its commit and before its push: the
+// contract and each part's path at head, then the names of every draft blob. Returns null to push
+// (any warnings printed), or the refusal. named: the --names-checked words, or null.
+function choreSelfHold(slug, base, head, named) {
+  const rel = selfRel();
+  if (!projectInRepo || !draftBlobs(base, head, rel).length) return named ? 'chore pr: --names-checked is for a chore changing self.md' : null;
+  if (git(['cat-file', '-e', `${head}:${rel}`], mainRoot) !== null) {
+    const { block, errors } = selfDoc(git(['show', `${head}:${rel}`], mainRoot) ?? '');
+    if (errors.length) return `chore pr: self.md breaks self@1: ${errors.join('; ')}; run self check`;
+    const missing = selfPathsMissing(block, hasAt(head));
+    if (missing.length) return missing.map((m) => `chore pr: part ${m.part}'s path ${m.path} is not at ${head.slice(0, 12)}`).join('\n');
+  }
+  const allowed = namesAllowedText();
+  const words = draftWords(base, head, rel, (text, has) => selfWords(text, has, allowed));
+  const shown = (w) => `"${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}`;
+  const open = words.filter((w) => !named?.has(w.word));
+  if (open.length) {
+    const v = repoVisibility();
+    if (v === 'private') {
+      for (const w of open) warn(`self.md: ${shown(w)} is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: the repo is private, so it may be pushed`);
+      return null;
+    }
+    const lines = [`chore pr: self.md names words main's strategy.md and dependency files don't, and ${v === 'public' ? 'this repo is public' : 'this repo\'s visibility is unknown'}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${words.map((w) => w.word).join(',')}`];
+    const theirs = git(['ls-remote', 'origin', `refs/heads/chore-${slug}`], mainRoot)?.split('\t')[0] || null;
+    for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) {
+      const pushed = theirs && git(['merge-base', '--is-ancestor', c, theirs], mainRoot) !== null;
+      lines.push(`${c.slice(0, 12)}: ${pushed ? `that commit is pushed already, so the word is public on chore-${slug}: name it once checked, or start the chore again from main` : `that commit is not pushed yet: drop it from the branch (git -C .worktrees/chore-${slug} rebase or reset) and run chore pr again, or check and name the word`}`);
+    }
+    return lines.join('\n');
+  }
+  if (named && words.length) logNamesChecked(slug, rel, git(['rev-parse', '--verify', '--quiet', `${head}:${rel}`], mainRoot) ?? draftBlobs(base, head, rel).pop().blob, words.map((w) => w.word));
+  return null;
+}
+// check-pr's hold on a PR changing self.md (spec §3.3), for checkPr in home: when a commit in
+// merge-base..sha changes it, the contract at sha and each part's path there (both only while sha
+// holds the file: a deletion is kit-138's gate), then namesHoldLines over every draft blob, whether
+// or not the contract holds. { fails, warns }.
+function selfDraftLines(base, sha, branch) {
+  const rel = selfRel();
+  if (!projectInRepo || !draftBlobs(base, sha, rel).length) return { fails: [], warns: [] };
+  const fails = [];
+  if (git(['cat-file', '-e', `${sha}:${rel}`], mainRoot) !== null) {
+    const { block, errors } = selfDoc(git(['show', `${sha}:${rel}`], mainRoot) ?? '');
+    fails.push(...errors.map((e) => `${rel} breaks self@1 at ${sha.slice(0, 12)}: ${e}`));
+    if (block) fails.push(...selfPathsMissing(block, hasAt(sha)).map((m) => `${rel}: part ${m.part}'s path ${m.path} is not at ${sha.slice(0, 12)}`));
+  }
+  const allowed = namesAllowedText();
+  const words = draftWords(base, sha, rel, (text, has) => selfWords(text, has, allowed));
+  const act = worldFileFails.actOf(branch);
+  const ct = base ? git(['show', '-s', '--format=%ct', base], mainRoot) : null;
+  const since = ct && /^\d+$/.test(ct) ? Number(ct) * 1000 : NaN;
+  const names = namesHoldLines({ rel, words, act, checked: namesChecked(act, 'self', since), visibility: repoVisibility });
+  return { fails: [...fails, ...names.fails], warns: names.warns };
+}
+const SELF_NOT_DRAFTED = 'self.md is not drafted yet: the supervisor drafts it from the code and the strategy (supervisor.md, Monitoring)';
+// self show [--json]: main's self.md. self check: the working tree's, the draft, against the
+// contract and each part's path on disk (errors, exit 1), then the names rule and whether main's
+// strategy links self.md (warnings, the exit unchanged).
+function cmdSelf() {
+  const sub = positional[0];
+  if (sub === 'show') {
+    gitReadCache = new Map();
+    const text = selfMainText();
+    if (text === null) return flags.json ? json(null) : out(SELF_NOT_DRAFTED);
+    const { block: b, errors } = selfDoc(text);
+    if (errors.length) {
+      for (const e of errors) out(`error: self.md: ${e}`);
+      process.exit(1);
+    }
+    if (flags.json) return json(selfDashboard());
+    const list = (xs) => (xs.length ? xs.join('; ') : 'nothing listed');
+    out(`Self: ${selfRel()} ${projectInRepo && mainRef() ? 'on main' : 'in the working tree'}`);
+    out(`What it is: ${b.what}`);
+    out(`What it makes or does: ${b.makes}`);
+    out('Parts:');
+    for (const p of b.parts) out(`  ${p.id}  ${p.name}: ${p.what} (${p.code.join(', ')})`);
+    out(`Controls: ${list(b.controls)}`);
+    out(`Does not control: ${list(b.not)}`);
+    return;
+  }
+  if (sub === 'check') {
+    const text = readText(path.join(projectDir, 'self.md'));
+    if (text === null) return out(SELF_NOT_DRAFTED);
+    const { block, errors } = selfDoc(text);
+    for (const e of errors) out(`error: self.md: ${e}`);
+    const missing = block ? selfPathsMissing(block, hasOnDisk) : [];
+    for (const m of missing) out(`error: self.md: part ${m.part}'s path ${m.path} is not in the repo`);
+    gitReadCache = new Map();
+    for (const w of selfWords(text, hasOnDisk, namesAllowedText())) out(`warning: self.md: "${w.word}" (${w.where}) is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: on a repo not known to be private, the draft is public once its branch is pushed`);
+    if (selfMainText() !== null && !linksSelf(strategyMainText())) out('warning: main\'s strategy.md does not link self.md: propose a strategy-change adding [self.md](./self.md), in its own PR');
+    process.exit(errors.length || missing.length ? 1 : 0);
+  }
+  die('usage: self show [--json] | self check');
+}
+/* self-model end */
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -11939,7 +12364,14 @@ function cmdArtifact() {
     const m = publicManifest(args[0] ?? die('usage: artifact manifest <slug> [--json]'));
     if (flags.json) return out(JSON.stringify(m));
     const bytes = Object.values(m.files).reduce((n, f) => n + f.size, 0);
-    return out(`${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, it is https://public.<box>/${m.project}/${m.slug}/`);
+    const said = `${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, `;
+    // A box image whose gateway serves each project at a host of its own (project-hosts@1) sets
+    // DEVTEAM_PROJECT_HOSTS=1; one from before it still serves public.<box>/<project>/<slug>/.
+    if (process.env.DEVTEAM_PROJECT_HOSTS !== '1') return out(`${said}it is https://public.<box>/${m.project}/${m.slug}/`);
+    // project-hosts@1's rules, as the gateway's Publish checks them, slug first
+    if (['api', 'artifact', 'c', 'healthz', 'presence', 'public-manifest', 'review', 'upload', 'view'].includes(m.slug)) return out(`${said}it would have no address: ${m.slug} is a path of the dashboard, so rename the artifact`);
+    if (!/^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(m.project) || ['term', 'public', 'www'].includes(m.project)) return out(`${said}it would have no address: ${m.project} can't be a host name, so rename the project (settings.md's project)`);
+    return out(`${said}it is https://${m.project}.<box>/${m.slug}/`);
   }
   // artifact publish|unpublish: the owner's record of what the gateway made public. The gateway's
   // confirm page runs them through the dashboard; by hand they record intent only.
@@ -13674,7 +14106,7 @@ function observeFindings(m) {
   for (const o of logObjects('observation')) if (o.source_key && o.created_by === 'supervisor' && o.detector === 'metrics') recent.set(o.source_key, Math.max(recent.get(o.source_key) ?? 0, Date.parse(o.created_at)));
   let n = 0;
   for (const f of m.findings) {
-    const key = `metrics:${f.kind}:${f.subject}`;
+    const key = `metrics:${f.kind}:${f.subject}${f.key ? `:${f.key}` : ''}`;
     if (Date.now() - (recent.get(key) ?? 0) < DAY) continue;
     appendLog({ type: 'observation', source: 'metrics', subject: String(f.subject), kind: f.kind, detector: 'metrics', detail: f.detail, severity: f.sev ?? SEV[f.severity] ?? 1, valence: -1, source_key: key, fix_hint: f.suggestion }, 'supervisor');
     n++;
@@ -14074,7 +14506,7 @@ function mdSections(text) {
 function searchFileDocs() {
   const main = projectInRepo ? mainSha() : null;
   if (!main) return [];
-  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && SEARCH_FILES.test(e.p) && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
+  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && (SEARCH_FILES.test(e.p) || e.p === 'self.md') && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
   const mainFiles = listAt(main, ['']);
   const mainOid = new Map(mainFiles.map((e) => [e.p, e.oid]));
   const reads = mainFiles.map((e) => ({ ...e, sha: main, ref: 'main' }));
@@ -15778,15 +16210,29 @@ function cmdChore() {
     if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: holdRefs, reversible: true }, 'supervisor');
     return out(wt);
   }
-  if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
+  if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>" [--names-checked <word,…>]');
+  // --names-checked a,b: the self.md draft's words the supervisor has checked are fine to name in public
+  const named = flags['names-checked'] === undefined ? null : asList(flags['names-checked']).flatMap((v) => String(v).split(',')).map((x) => x.trim());
+  if (named && (!named.length || named.some((x) => !x))) die('--names-checked needs one or more words, comma-separated');
   supervisorOnly('chore');
   choreSlug(slugName);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
   if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
   // a plain folder left where the worktree was would have git add the main checkout's changes
   if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die(`.worktrees/chore-${slugName} is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start ${slugName}`);
+  // origin's main as it is now: the base and the names the strategy and dependency files allow
+  fetchMain();
   gitOrDie(['add', '-A'], wt);
-  if (gitOrDie(['status', '--porcelain'], wt)) gitOrDie(['commit', '--quiet', '-m', `chore-${slugName}: ${flagStr('title')}`], wt);
+  const committed = Boolean(gitOrDie(['status', '--porcelain'], wt));
+  if (committed) gitOrDie(['commit', '--quiet', '-m', `chore-${slugName}: ${flagStr('title')}`], wt);
+  // the self.md hold (spec §3.3): a refusal undoes this run's commit, and only it, so the draft stays
+  // staged as it was and the refused words never reach a pushed commit
+  const head = gitOrDie(['rev-parse', 'HEAD'], wt);
+  const held = choreSelfHold(slugName, mainRef() ? git(['merge-base', mainRef(), head]) : null, head, named && new Set(named));
+  if (held) {
+    if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
+    die(held);
+  }
   gitOrDie(['push', '--quiet', '--force', 'origin', `chore-${slugName}:chore-${slugName}`], wt);
   const pr = openPr(wt, `chore-${slugName}`, `chore-${slugName}: ${flagStr('title')}`, flagStr('body') ?? flagStr('title'));
   out(`pushed chore-${slugName}${pr ? `: ${pr}` : ''}\nmerge it once CI passes, then: git worktree remove .worktrees/chore-${slugName}`);
@@ -17043,6 +17489,7 @@ function collectMetrics(since, reviewsSince = 0) {
     // draft in front of the owner, then medium while the owner reads it.
     const strategyAsked = questions().some((q) => q.status === 'open' && q.class === 'strategy-change');
     if (live.length && sState !== 'written') add(strategyAsked ? 'medium' : 'high', 'strategy-unwritten', strategyRel, sState === 'missing' ? `${plural(live.length, 'goal')} running and no strategy on ${settings.main_branch}` : `${plural(live.length, 'goal')} running and the strategy is still the template`, `draft it next, while work carries on, in a chore from what you can read, then ask the owner to approve it (ask --class strategy-change; supervisor.md §1)${sState === 'missing' ? '; init writes the template' : ''}`);
+    selfFindings(add);
     const all = questions();
     const open = all.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
     for (const g of goals.filter((x) => x.status === 'ready' || ((x.status ?? 'draft') === 'draft' && open.some((q) => q.goal === x.id)))) {
@@ -17761,6 +18208,7 @@ function dashboardDataRead() {
     // next-move@1: every move the table names (the comment above nextMoves())
     next_moves: nextMoves(),
     ooda: collectOoda(),
+    self: selfDashboard(),
     autonomy,
     autonomy_score: autonomyScore(autonomy, efficiency, awareness),
     threads: threadCounts(),
@@ -30815,12 +31263,16 @@ The whole system as planned now: the sum of every design so far. Written at boot
 `;
 
 // project/strategy.md as init makes it: why the project exists and how it wins, the owner's. The
-// supervisor drafts it at adoption and judges each goal's impact against it; the kit never parses
-// it (it only knows missing, this template, or written).
+// supervisor drafts it at adoption and judges each goal's impact against it; the kit reads it only
+// for whether it links self.md (`linksSelf`), beside missing, this template, or written.
 const STRATEGY_TEMPLATE_MARK = 'devteam:strategy-template';
+// The template links self.md in its opening lines. The kit reads it for one thing, beside missing,
+// template or written: whether it carries the link to self.md (`linksSelf`).
 const STRATEGY_MD = `# Strategy
 
 <!-- ${STRATEGY_TEMPLATE_MARK}: delete this line when you write the strategy -->
+
+What the project is, what it makes and its parts are in [self.md](./self.md); this page says why it exists, who it serves and how it wins.
 
 Why this project exists and how it wins. The supervisor drafts it; only the owner approves a change (class strategy-change).
 Goals are judged against it (planning.md §1). Keep it to one page.
@@ -34176,7 +34628,9 @@ const HELP_OBSERVE = `Observe and orient
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours (a merge commit: for good)
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
-  governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
+  governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
+  self show [--json]   main's project/self.md, what the project is: what it is, makes, its parts with their paths, what it controls and what not; --json is the dashboard's self block, null when not drafted
+  self check   the working tree's self.md against self@1, each part's path on disk, and the names rule; errors exit 1, warnings don't
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
@@ -34188,7 +34642,7 @@ const HELP_GOALS = `Goals and retros
   goal order [<g-id> …] --approved <qid>   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
-  chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR`;
+  chore start <slug> | chore pr <slug> --title t [--names-checked <word,…>]    a supervisor-written file (design, retro, architecture) and its PR; on a public or unknown repo it holds a self.md draft's unchecked names (capitalised words main's strategy.md and dependency files don't contain) until --names-checked names each`;
 const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring list [--json]   main's jobs (project/recurring.json at main) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions; a file on main that doesn't read prints its problem and exits 1. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null, problems?: ["…"] }], runs_a_day, cap, pending: [{ qid, name, change, status }] }; problems is there only when an entry breaks the shape (validate says the same)
   recurring show <name> [--json]   one job on main in full, who registered it, its problems if it breaks the shape, and its pending questions
@@ -34247,7 +34701,7 @@ const COMMANDS_DECIDE = {
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
 };
 const COMMANDS_OBSERVE = {
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, self: cmdSelf, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
 };
 const COMMANDS_GOALS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
