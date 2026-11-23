@@ -1,0 +1,31 @@
+{
+ "about": "a ready carrying the supervisor's picture",
+ "thread": "t-20261120-100011000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": "ready",
+  "shot": {
+   "stamp": "20261120-100500000",
+   "w": 480,
+   "h": 320,
+   "src": "plan-pricing",
+   "sha": "3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f",
+   "dirty": false,
+   "anchor": "found",
+   "dark": true,
+   "sum": {
+    "light": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "dark": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+   }
+  },
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner",
+  "ready": {
+   "outcome": "The trial button reads Start free trial.",
+   "at": "2026-11-20T10:01:11.000Z"
+  }
+ }
+}

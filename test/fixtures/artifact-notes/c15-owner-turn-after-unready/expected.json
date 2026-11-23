@@ -1,0 +1,14 @@
+{
+ "about": "an owner turn after the withdrawal clears it and leaves the note open",
+ "thread": "t-20261120-100015000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner"
+ }
+}

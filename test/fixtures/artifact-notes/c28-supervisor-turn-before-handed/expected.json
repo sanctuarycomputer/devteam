@@ -1,0 +1,18 @@
+{
+ "about": "a supervisor turn before the hand-over to it: still the supervisor's move",
+ "thread": "t-20261120-100028000-owner",
+ "view": {
+  "handed": {
+   "to": "supervisor",
+   "at": "2026-11-20T10:02:28.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "supervisor",
+  "with": "supervisor"
+ }
+}

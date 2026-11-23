@@ -1,0 +1,14 @@
+{
+ "about": "a --no-change ready, then an owner turn: nothing to check, no noshot",
+ "thread": "t-20261120-100031000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner"
+ }
+}

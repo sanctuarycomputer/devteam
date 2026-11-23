@@ -1,0 +1,18 @@
+{
+ "about": "handed to one session, then another: the newer wins, the first session marks for nothing",
+ "thread": "t-20261120-100021000-owner",
+ "view": {
+  "handed": {
+   "to": "kit-9-x",
+   "at": "2026-11-20T10:02:21.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "session",
+  "with": "kit-9-x"
+ }
+}

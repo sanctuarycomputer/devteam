@@ -1,0 +1,18 @@
+{
+ "about": "a resolved note handed over: no hand-over on a resolved note, and its frame stays",
+ "thread": "t-20261120-100035000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": {
+   "w": 1400,
+   "h": 860,
+   "hash": ""
+  },
+  "waiting": "owner"
+ }
+}
