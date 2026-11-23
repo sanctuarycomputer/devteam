@@ -1612,6 +1612,7 @@ exit 0
       "unknown": 0
     }
   },
+  "self": null,
   "autonomy": {
     "decisions": {
       "score": {
