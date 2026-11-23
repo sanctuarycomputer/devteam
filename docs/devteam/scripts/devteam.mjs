@@ -6259,6 +6259,12 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const own = settingsAt(sha, { orNull: true });
     if (own && Object.hasOwn(own, 'recurring')) fails.push(recurringRegistry.inSettings());
   }
+  // a PR changing self.md: its contract, its parts' paths and the names hold (selfDraftLines), every kind
+  if (R.name === 'home' && mainRef()) {
+    const held = selfDraftLines(git(['merge-base', mainRef(), sha]), sha, branch);
+    fails.push(...held.fails);
+    for (const w of held.warns) out(`warn: ${w}`);
+  }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records, inHome }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -7484,12 +7490,13 @@ function lastRepoVisibility() {
 }
 // The words the supervisor has checked for act's draft of scope ('self', or kit-135's 'exterior'):
 // those its names-checked acts name (each a name:<word> ref, matched exactly) whose refs include act,
-// logged at or after since (the branch's merge base's committer time, in ms; not a number: from the
-// start). Only a chore's act clears anything: a plan or ticket PR has no chore to name it on.
+// logged at or after since (the branch's merge base's committer time, in ms, as Date.parse reads the
+// log's created_at; not a finite number: nothing counts, failing closed). Only a chore's act clears
+// anything: a plan or ticket PR has no chore to name it on.
 function namesChecked(act, scope, since) {
   const words = new Set();
   if (!String(act).startsWith('chore-')) return words;
-  const from = Number.isFinite(since) ? since : 0;
+  const from = Number.isFinite(since) ? since : Infinity;
   for (const a of logObjects('act')) {
     if (a.class !== 'names-checked' || a.scope !== scope || writerClass(a.created_by) !== 'supervisor') continue;
     const refs = Array.isArray(a.refs) ? a.refs : [];
@@ -7537,7 +7544,7 @@ function choreSelfHold(slug, base, head, named) {
   if (open.length) {
     const v = repoVisibility();
     if (v === 'private') {
-      for (const w of open) warn(`self.md: ${shown(w)} is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: on a repo not known to be private, the draft is public once its branch is pushed`);
+      for (const w of open) warn(`self.md: ${shown(w)} is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: the repo is private, so it may be pushed`);
       return null;
     }
     const lines = [`chore pr: self.md names words main's strategy.md and dependency files don't, and ${v === 'public' ? 'this repo is public' : 'this repo\'s visibility is unknown'}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${words.map((w) => w.word).join(',')}`];
@@ -7550,6 +7557,27 @@ function choreSelfHold(slug, base, head, named) {
   }
   if (named && words.length) logNamesChecked(slug, rel, git(['rev-parse', '--verify', '--quiet', `${head}:${rel}`], mainRoot) ?? draftBlobs(base, head, rel).pop().blob, words.map((w) => w.word));
   return null;
+}
+// check-pr's hold on a PR changing self.md (spec §3.3), for checkPr in home: when a commit in
+// merge-base..sha changes it, the contract at sha and each part's path there (both only while sha
+// holds the file: a deletion is kit-138's gate), then namesHoldLines over every draft blob, whether
+// or not the contract holds. { fails, warns }.
+function selfDraftLines(base, sha, branch) {
+  const rel = selfRel();
+  if (!projectInRepo || !draftBlobs(base, sha, rel).length) return { fails: [], warns: [] };
+  const fails = [];
+  if (git(['cat-file', '-e', `${sha}:${rel}`], mainRoot) !== null) {
+    const { block, errors } = selfDoc(git(['show', `${sha}:${rel}`], mainRoot) ?? '');
+    fails.push(...errors.map((e) => `${rel} breaks self@1 at ${sha.slice(0, 12)}: ${e}`));
+    if (block) fails.push(...selfPathsMissing(block, hasAt(sha)).map((m) => `${rel}: part ${m.part}'s path ${m.path} is not at ${sha.slice(0, 12)}`));
+  }
+  const allowed = namesAllowedText();
+  const words = draftWords(base, sha, rel, (text, has) => selfWords(text, has, allowed));
+  const act = worldFileFails.actOf(branch);
+  const ct = base ? git(['show', '-s', '--format=%ct', base], mainRoot) : null;
+  const since = ct && /^\d+$/.test(ct) ? Number(ct) * 1000 : NaN;
+  const names = namesHoldLines({ rel, words, act, checked: namesChecked(act, 'self', since), visibility: repoVisibility });
+  return { fails: [...fails, ...names.fails], warns: names.warns };
 }
 const SELF_NOT_DRAFTED = 'self.md is not drafted yet: the supervisor drafts it from the code and the strategy (supervisor.md, Monitoring)';
 // self show [--json]: main's self.md. self check: the working tree's, the draft, against the
