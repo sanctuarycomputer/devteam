@@ -7818,19 +7818,63 @@ function exteriorDoc(text) {
   return { block: errors.length ? null : v, errors };
 }
 const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
-// exterior check's lines for the working tree's exterior.md (null text: none). errors exit 1;
-// warnings leave the exit as it is.
+// The head's strategy.md and self.md blobs (null for no file): ref's, or with ref null the working
+// tree's (git hash-object, so an uncommitted draft counts), with the strategy's text when it was read
+// from the tree (a blob hash-object didn't write can't be read back with cat-file).
+function headBlobs(ref) {
+  const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
+  if (ref) {
+    const at = (rel) => git(['rev-parse', '--verify', '--quiet', `${ref}:${rel}`], mainRoot);
+    return { strategyBlob: at(rels.strategy), selfBlob: at(rels.self), strategyText: null };
+  }
+  const tree = (name) => { const f = path.join(projectDir, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
+  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(projectDir, 'strategy.md')) };
+}
+// Whether validate is at the draft: main can be read and the working tree's exterior.md is not
+// main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not: the
+// stale state never errors, and check-pr and merge --chore run the draft's checks (spec, The check).
+function exteriorAtDraft() {
+  if (!projectInRepo || !mainRef()) return false;
+  const f = path.join(projectDir, 'exterior.md');
+  if (!fs.existsSync(f)) return false;
+  return git(['hash-object', '--', f], mainRoot) !== git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${EXTERIOR_REL()}`], mainRoot);
+}
+// Steps 2 and 3 of the check (spec, The check). Each quote is a verbatim part of the strategy_blob
+// object's text, always; a strategy_blob the repo can't read is an error at the draft and a warning
+// otherwise. At the draft, strategy_blob and self_blob are the head's strategy.md and self.md.
+function exteriorBlobLines(block, { draft, strategyBlob, selfBlob, strategyText = null }) {
+  const errors = [];
+  const warnings = [];
+  const sb = block.strategy_blob;
+  const text = strategyText !== null && sb === strategyBlob ? strategyText : git(['cat-file', 'blob', sb], mainRoot);
+  if (text === null) (draft ? errors : warnings).push(`strategy_blob ${sb.slice(0, 12)}: the repo can't read it, so its quotes go unchecked`);
+  else block.entities.forEach((e, i) => e.strategy.forEach((q, j) => {
+    if (!String(text).includes(q)) errors.push(`exterior.entities[${i}].strategy[${j}] "${q}" is not found in strategy.md at ${sb.slice(0, 8)}`);
+  }));
+  if (draft) {
+    if (sb !== strategyBlob) errors.push(`strategy_blob is not the head's strategy.md: draft from it (it names ${sb.slice(0, 12)}; the head's is ${strategyBlob ? strategyBlob.slice(0, 12) : 'missing'})`);
+    if (!selfBlob) errors.push('there is no self.md at the head: draw self.md first');
+    else if (block.self_blob !== selfBlob) errors.push(`self_blob is not the head's self.md: draw from it (it names ${block.self_blob.slice(0, 12)}; the head's is ${selfBlob.slice(0, 12)})`);
+  }
+  return { errors, warnings };
+}
+// exterior check's lines for the working tree's exterior.md (null text: none): the contract, then
+// the blobs as at the draft. errors exit 1; warnings leave the exit as it is.
 function exteriorCheckLines({ draft = true } = {}) {
   const text = exteriorTreeText();
   if (text === null) return { errors: [], warnings: [] };
-  const { errors } = exteriorDoc(text);
-  return { errors, warnings: [] };
+  const { block, errors } = exteriorDoc(text);
+  if (!block) return { errors, warnings: [] };
+  return exteriorBlobLines(block, { draft, ...headBlobs(null) });
 }
-// validate's lines for the working tree's exterior.md: the contract; none when there is no file.
+// validate's lines for the working tree's exterior.md: the contract and the quotes, and the blobs at
+// the draft (exteriorAtDraft); none when there is no file. Never the names rule.
 function exteriorValidateLines() {
   const text = exteriorTreeText();
   if (text === null) return { errors: [], warnings: [] };
-  return { errors: exteriorDoc(text).errors, warnings: [] };
+  const { block, errors } = exteriorDoc(text);
+  if (!block) return { errors, warnings: [] };
+  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
 }
 // exterior show [--json]: main's exterior.md. exterior check: the working tree's, the draft.
 function cmdExterior() {

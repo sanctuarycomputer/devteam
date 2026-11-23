@@ -39,7 +39,8 @@ function proj(name, { strategy = STRATEGY, self = SELF_MD, exterior = null, file
   const setVisibility = (v) => fs.writeFileSync(visFile, v === 'unknown' ? '' : `${v.toUpperCase()}\n`);
   setVisibility(visibility);
   const ENV = { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
-  const run = (args, env = ENV) => { const r = F.run(old, args, env); return { status: r.status, out: r.out, err: r.err, text: `${r.out}\n${r.err}` }; };
+  const runIn = (cwd, args, env = ENV) => { const r = F.run(cwd, args, env); return { status: r.status, out: r.out, err: r.err, text: `${r.out}\n${r.err}` }; };
+  const run = (args, env = ENV) => runIn(old, args, env);
   const ok = (args) => { const r = run(args); assert.equal(r.status, 0, `${args.join(' ')}\n${r.text}`); return r.out; };
   const onMain = (changes, msg = 'main') => {
     for (const [rel, text] of Object.entries(changes)) {
@@ -76,7 +77,7 @@ function proj(name, { strategy = STRATEGY, self = SELF_MD, exterior = null, file
   const checkPr = (headRef, sha) => run(['check-pr', '--head-ref', headRef, '--sha', sha, '--title', `${headRef}: x`, '--body-file', body]);
   const findings = (kind) => json(ok(['metrics', '--json'])).findings.filter((f) => f.kind === kind);
   const writeTree = (rel, text) => (text === null ? fs.rmSync(path.join(old, rel), { force: true }) : write(path.join(old, rel), text));
-  return { ...F, run, ok, onMain, blob, chorePr, branchOf, checkPr, findings, setVisibility, writeTree, ENV };
+  return { ...F, run, runIn, ok, onMain, blob, chorePr, branchOf, checkPr, findings, setVisibility, writeTree, ENV };
 }
 
 // Each check is a subtest of its fixture's test, so one red check leaves the next to run.
@@ -115,5 +116,77 @@ test('A5 A8 exterior check and validate hold the contract', withProject('exterio
     const e = W.run(['exterior', 'check']);
     assert.equal(e.status, 0, `A8 exterior check passes an exterior.md with no entities\n${e.text}`);
     W.writeTree(EXT, null);
+  });
+}));
+
+// the fixture exterior.md with its block changed
+const extBlock = (edit, text = EXTERIOR_MD) => text.replace(/```exterior\n([\s\S]*?)\n```/, (_, b) => { const v = JSON.parse(b); edit(v); return `\`\`\`exterior\n${JSON.stringify(v, null, 2)}\n\`\`\``; });
+
+test('A6 the quotes and strategy_blob', withProject('exterior-strategy', {}, async (W, check) => {
+  await check('A6 a quote not in the strategy is refused by exterior check and validate', () => {
+    W.writeTree(EXT, extBlock((v) => { v.entities[1].strategy[0] = 'Sync runs on Acme Storage, so it must stay fast and cheaq.'; }));
+    const x = W.run(['exterior', 'check']);
+    assert.equal(x.status, 1, `A6 exterior check refuses a changed quote\n${x.text}`);
+    assert.match(x.out, /not found in strategy\.md at d4b0bd76/, 'A6 exterior check names the quote\'s strategy blob');
+    const v = W.run(['validate']);
+    assert.notEqual(v.status, 0, `A6 validate refuses a changed quote\n${v.text}`);
+    assert.match(v.out, /exterior\.md: .*not found in strategy\.md at d4b0bd76/, 'A6 validate names the quote\'s strategy blob');
+  });
+  await check('A6 a strategy_blob holding every quote but not the head\'s strategy.md is refused at the draft', () => {
+    const f = path.join(W.base, 'strategy-plus.md');
+    fs.writeFileSync(f, `${STRATEGY}\nOne more line.\n`);
+    const other = W.g(['hash-object', '-w', f], W.old);
+    W.writeTree(EXT, extBlock((v) => { v.strategy_blob = other; }));
+    const x = W.run(['exterior', 'check']);
+    assert.equal(x.status, 1, `A6 exterior check refuses another strategy blob\n${x.text}`);
+    assert.match(x.out, /strategy_blob is not the head's strategy\.md/, 'A6 exterior check says draft from the head\'s strategy');
+  });
+  await check('A6 a strategy_blob the repo can\'t read is an error at the draft and a warning on main', () => {
+    const zero = extBlock((v) => { v.strategy_blob = '0'.repeat(40); });
+    W.writeTree(EXT, zero);
+    const x = W.run(['exterior', 'check']);
+    assert.equal(x.status, 1, `A6 exterior check refuses an unreadable strategy_blob\n${x.text}`);
+    assert.match(x.out, /error: exterior\.md: .*can't read/, 'A6 exterior check says it can\'t read the blob');
+    W.onMain({ [EXT]: zero }, 'exterior.md with an unreadable strategy_blob');
+    const v = W.run(['validate']);
+    assert.equal(v.status, 0, `A6 validate on main only warns of an unreadable strategy_blob\n${v.text}`);
+    assert.match(v.out, /exterior\.md: .*can't read/, `A6 validate warns of the unreadable blob\n${v.out}`);
+    assert.doesNotMatch(v.out, /error: .*exterior\.md/, 'A6 validate has no exterior.md error on main');
+    W.onMain({ [EXT]: null }, 'no exterior.md');
+  });
+}));
+
+test('A7 self_blob at the draft only', withProject('exterior-self', {}, async (W, check) => {
+  await check('A7 a self_blob not the head\'s self.md is refused at the draft', () => {
+    W.writeTree(EXT, extBlock((v) => { v.self_blob = 'c69d5ece56a6aa7dd72e1257f0eac0892e0c73c1'; }));
+    for (const args of [['exterior', 'check'], ['validate']]) {
+      const r = W.run(args);
+      assert.notEqual(r.status, 0, `A7 ${args[0]} refuses another self_blob\n${r.text}`);
+      assert.match(r.out, /exterior\.md: .*not the head's self\.md/, `A7 ${args[0]} says self_blob is not the head's self.md\n${r.out}`);
+    }
+  });
+  await check('A7 with no self.md at the head, draw self.md first', () => {
+    W.writeTree(EXT, EXTERIOR_MD);
+    W.writeTree(SELF, null);
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 1, `A7 exterior check refuses with no self.md\n${r.text}`);
+    assert.match(r.out, /draw self\.md first/, 'A7 exterior check says draw self.md first');
+    W.g(['checkout', '--', SELF], W.old);
+  });
+  await check('A7 on main, a later self.md change leaves validate passing', () => {
+    W.onMain({ [EXT]: EXTERIOR_MD }, 'exterior.md');
+    W.onMain({ [SELF]: `${SELF_MD}\nIt also keeps a changelog.\n` }, 'self.md moves on');
+    const v = W.run(['validate']);
+    assert.equal(v.status, 0, `A7 validate passes on main after self.md moved on\n${v.text}`);
+    assert.doesNotMatch(v.out, /exterior\.md/, 'A7 validate says nothing of exterior.md on main');
+  });
+  await check('A7 with no main to read, validate is not at the draft', () => {
+    W.g(['push', '-q', 'origin', 'HEAD:refs/heads/side'], W.old);
+    const c = path.join(W.base, 'side-clone');
+    W.g(['clone', '-q', '--single-branch', '--branch', 'side', W.org, c], W.base);
+    W.g(['remote', 'remove', 'origin'], c);
+    const x = W.runIn(c, ['validate']);
+    assert.equal(x.status, 0, `A7 validate in a clone with no main passes\n${x.text}`);
+    assert.doesNotMatch(x.out, /exterior\.md/, `A7 validate in a clone with no main says nothing of exterior.md\n${x.out}`);
   });
 }));
