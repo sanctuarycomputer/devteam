@@ -604,6 +604,54 @@ test('C21: peek recurring <name> --json for a supervisor chore and a worker chor
   assert.deepEqual([w.entry.by, w.entry.prompt, w.runs[0].status, w.runs[0].ref], ['worker', 'Bump the pins in ops/.', 'started', 'ops-01-recurring-wk']);
 });
 
+// ===== kit-785: a start dated in the future, and a ref that names another job =====
+const skew = group(() => {
+  const jobs = { fmerge: chore({ every: '1d' }), fpast: chore({ every: '1d' }), fstuck: chore({ every: '1d' }), fsoon: chore({ every: '1d' }), fdrop: chore({ every: '1d' }), xa: chore({ every: '1d' }), xb: chore({ every: '1d' }), xc: chore({ every: '1d' }) };
+  const T = setup('skew', jobs);
+  // started lines dated two days ahead (a clock that ran fast), and fsoon's a minute ahead
+  for (const n of ['fmerge', 'fstuck', 'fdrop']) T.addLine(n, { slot: iso(NOW - DAY), ref: `chore-recurring-${n}-${ymd(NOW + 2 * DAY)}`, at: NOW + 2 * DAY });
+  T.addLine('fsoon', { slot: iso(NOW - DAY), ref: `chore-recurring-fsoon-${ymd(NOW + 60000)}`, at: NOW + 60000 });
+  // fmerge's chore branch merged an hour ago, by the right clock: the newest line in its file, so a
+  // later write isn't stamped after the future lines
+  // fpast: the clock was an hour fast when it started and has since passed that date; its merge, by the
+  // right clock, is dated before its start
+  T.addLine('fpast', { slot: iso(NOW - DAY), ref: `chore-recurring-fpast-${ymd(NOW - HOUR)}`, at: NOW - HOUR });
+  T.mergeChore(`chore-recurring-fpast-${ymd(NOW - HOUR)}`, NOW - 2 * HOUR);
+  T.mergeChore(`chore-recurring-fmerge-${ymd(NOW + 2 * DAY)}`, NOW - HOUR);
+  return T;
+});
+
+test('C26a: a started line dated in the future still finishes on its chore\'s merge', () => {
+  const T = skew();
+  assert.equal(T.peek('fmerge').runs[0].status, 'done');
+  assert.notEqual(T.entryOf('fmerge').state, 'started');
+});
+
+test('C26d: a run whose start the clock has since passed still reads done by a merge dated before that start', () => {
+  const T = skew();
+  assert.equal(T.peek('fpast').runs[0].status, 'done');
+  assert.equal(T.finding('recurring-stuck', 'fpast').length, 0);
+});
+
+test('C26b: a started line dated more than ten minutes ahead is recurring-stuck now; one a minute ahead is not', () => {
+  const T = skew();
+  const f = T.finding('recurring-stuck', 'fstuck');
+  assert.equal(f.length, 1, 'recurring-stuck for fstuck');
+  assert.match(f[0].detail, new RegExp(`chore-recurring-fstuck-${ymd(NOW + 2 * DAY)}`));
+  assert.equal(T.finding('recurring-stuck', 'fsoon').length, 0, 'a minute of skew is not stuck');
+});
+
+test('C26c: recurring done --abandoned ends a run whose started line is dated in the future', () => {
+  const T = skew();
+  T.ok(['recurring', 'done', 'fdrop', '--abandoned', 'the clock ran fast']);
+  assert.equal(T.peek('fdrop').runs[0].status, 'abandoned');
+  // peek prints a run's start as its at; dashboard-data's last.at is when it finished
+  const e = T.entryOf('fdrop');
+  assert.ok(Date.parse(e.last.at) <= Date.now(), `finished when the line was written, not at the future start (${e.last.at})`);
+  assert.notEqual(e.state, 'started');
+  assert.equal(T.finding('recurring-stuck', 'fdrop').length, 0, 'not stuck once ended');
+});
+
 // ===== DW14: supervisor.md =====
 
 test('C22: supervisor.md documents chores: when they come due, recurring start, done with --nothing and --abandoned, and holds', () => {
