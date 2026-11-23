@@ -20,7 +20,9 @@ const VERIF = '| Done-when | Command | Result |\n|---|---|---|\n| s | t | pass |
 const REFUSED = /gh pr merge refused \(did the head move\?\); verify from the start/;
 // A gh that never answers hangs this long, far past the bound merge is given here (GH_BOUND, through
 // DEVTEAM_GH_TIMEOUT_MS); a merge that waits on it can't finish inside WITHIN, so an unbounded call
-// turns the check red at about HANG_MS rather than hanging the suite.
+// turns the check red at about HANG_MS rather than hanging the suite. Five such reds wait ~10 minutes, so
+// on CI a regressed bound shows as the 300 s watchdog stopping this file, not as named not-ok lines:
+// run the file here to see which check failed.
 const HANG_MS = 120000;
 const GH_BOUND = { DEVTEAM_GH_TIMEOUT_MS: '5000' };
 const WITHIN = 60000;
@@ -34,7 +36,7 @@ const timed = (fn) => { const t0 = Date.now(); const r = fn(); return { ...r, ms
 // fail-views-after, every pr view after it fails. With hangs-merge, pr merge marks the PR
 // merged-at-gh and then never answers (it exits 1 after HANG_MS, far past the bound merge is given);
 // with hangs-views-after, so does each pr view after it. Each hang is an exec of node, so the kill at
-// merge's timeout reaches the process that hangs.
+// merge's timeout reaches the process that hangs; it ignores SIGTERM, so only merge's SIGKILL ends it.
 function ghStandIn(F, pr) {
   const dir = path.join(F.base, 'gh-stand-in');
   const bin = path.join(dir, 'bin');
@@ -49,7 +51,7 @@ function ghStandIn(F, pr) {
   const mergeSh = path.join(dir, 'merge.sh');
   const hangsMerge = path.join(dir, 'hangs-merge');
   const hangsViews = path.join(dir, 'hangs-views-after');
-  const hang = `exec "${process.execPath}" -e "setTimeout(() => process.exit(1), ${HANG_MS})"`;
+  const hang = `exec "${process.execPath}" -e "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(1), ${HANG_MS})"`;
   write(prFile, JSON.stringify(pr));
   write(path.join(bin, 'gh'), [
     '#!/bin/sh',
@@ -418,7 +420,7 @@ test('R7 records in home, home forge github: the records PR\'s gh pr merge exits
   const F = recordsFixture('kit787-records-read-hangs');
   const id = 'console-01-a';
   try {
-    const { gh } = recordsOnGithub(F, id);
+    const { r0, gh } = recordsOnGithub(F, id);
     gh.hangsAfter();
     const trunk = tipOf(F, F.console, 'trunk');
     const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, ...GH_BOUND }));
@@ -426,7 +428,9 @@ test('R7 records in home, home forge github: the records PR\'s gh pr merge exits
     assert.notEqual(r.status, 0, r.out);
     assert.match(r.err, new RegExp(`the records of ${id} did not land in home \\(gh pr merge of home's records PR #9 refused`));
     assert.equal(gh.stateReads().length, 1, 'a killed read is no answer: one read, then refused');
+    assert.equal(landedOn(F, F.old, r0.head, 'main'), false, 'the records did not land');
     assert.deepEqual(recordsActs(F, id), [], 'no records act');
+    assert.deepEqual(mergeActs(F, id), [], 'no merge act');
     assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'the code did not land');
   } finally { F.done(); }
 });

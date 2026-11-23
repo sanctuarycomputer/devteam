@@ -7436,8 +7436,9 @@ function landRecords(id, rec, linkName) {
     // so the records' gh calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s; a killed call reads as failed.
     // The git fetches are apart: the one below is bounded (120 s), the one after landing is not.
     const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
-    const ghMerge = { timeout: ghMs > 0 ? ghMs : 60000, killSignal: 'SIGKILL' };
-    const ghRead = { timeout: ghMs > 0 ? ghMs : 15000, killSignal: 'SIGKILL' };
+    const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
+    const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
+    const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
     const checked = mainSha();
     if (!checked) return `no home ${HS.main_branch} to land on`;
     if (!recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot }).ok) return `couldn't fetch home's ${HS.main_branch} to check it hasn't moved since the checks; run merge again`;
@@ -7940,8 +7941,9 @@ function cmdMerge() {
     // the one after landing is not. A killed call reads as failed: gh pr merge as not merged (its
     // state is read, as for any error), a state read as no answer; refused as before
     const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
-    const ghMerge = { timeout: ghMs > 0 ? ghMs : 60000, killSignal: 'SIGKILL' };
-    const ghRead = { timeout: ghMs > 0 ? ghMs : 15000, killSignal: 'SIGKILL' };
+    const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
+    const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
+    const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
     const gone = moved();
     if (gone) return gone;
     const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha], ghMerge);
