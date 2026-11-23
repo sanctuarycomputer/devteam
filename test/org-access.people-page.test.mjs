@@ -267,6 +267,8 @@ test('org-access A3: the owner reads People with a session only, each row with t
     assert.equal(st.status, 200, `the stand-in owner: ${st.body}`);
     assert.deepEqual([st.json.viewer.id, st.json.viewer.role], [null, 'owner']);
     assert.ok(st.json.people.every((p) => p.you === false && p.role !== 'owner'), 'no owner row, and no row is theirs');
+    const sb = (await B.gw.req('GET', '/box.json', { cookie: B.owner })).json;
+    assert.deepEqual([sb.role, sb.people], ['owner', `${B.gw.publicUrl}/auth/people/list`], 'the stand-in owner\'s /box.json names People');
   } finally { await B.gw.close(); }
 });
 
