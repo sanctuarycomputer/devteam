@@ -242,3 +242,33 @@ test('artifact-notes-contract A3: the readers of waiting (thread show and list, 
     }));
   } finally { F.done(); }
 });
+
+test('artifact-notes-contract A5: supervisor.md states the contract, and every expected.json fits its shape', () => {
+  const doc = fs.readFileSync(path.join(testDir, '..', 'docs', 'devteam', 'process', 'supervisor.md'), 'utf8');
+  const heads = [...doc.matchAll(/^(#{2,3}) (.+)$/gm)].map((m) => ({ level: m[1].length, title: m[2], at: m.index }));
+  const k = heads.findIndex((h) => h.title === 'Artifacts: pages that show an idea');
+  assert.ok(k >= 0, 'the Artifacts part');
+  assert.deepEqual([heads[k + 1]?.level, heads[k + 1]?.title], [3, 'Artifact notes'], '### Artifact notes comes right after it');
+  const end = heads[k + 2]?.at ?? doc.length;
+  assert.equal(heads[k + 2]?.level, 2, 'and is the last part of its section');
+  const sec = doc.slice(heads[k + 1].at, end);
+  for (const s of ['handed', 'addressed', 'check', 'shot', 'noshot', 'unready', 'frame', 'source', "'owner'", "'supervisor'", "'session'", 'with', 'last word', '/shot/<t-id>/<stamp>-<light|dark>.png', '404', 'frame {w, h, hash}', 'thread-new', 'artifact-handoff {slug, at}', '{to, typed, count}', 'thread-accept-addressed {id, at}', 'The note changed; read it again', 'artifact notes <slug> --json'])
+    assert.ok(sec.includes(s), `the section names ${s}`);
+  assert.match(sec, /^resolved; to check; with <session>; open$/m, 'the state order, as one line');
+  assert.match(sec, /kit-144[^.]*kit-147[^.]*release|release[^.]*kit-144[^.]*kit-147/, 'the release rule');
+  assert.match(sec, /addressed[^.]*no reply/, 'an addressed message awaits no reply');
+  assert.match(sec, /until Hand over[^.]*unread/, "the rule until Hand over ships (design-change 1 B)");
+  const blocks = [...sec.matchAll(/^```json\n([\s\S]*?)^```$/gm)].map((m) => JSON.parse(m[1]));
+  assert.equal(blocks.length, 2, 'two json blocks: the view\'s note fields, and artifact notes --json');
+  const [fields, notes] = blocks;
+  const typeOf = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+  for (const f of FOLDERS) {
+    const e = expected(f);
+    for (const [part, o] of [['view', e.view], ['api', e.api ?? {}]]) for (const [key, v] of Object.entries(o)) {
+      assert.ok(Object.hasOwn(fields, key), `${f} ${part}.${key} is a field the doc names`);
+      if (v !== null) assert.equal(typeOf(v), typeOf(fields[key]), `${f} ${part}.${key} has the doc's type`);
+    }
+  }
+  assert.ok(Array.isArray(notes) && notes.length === 1, 'artifact notes --json is an array of notes');
+  assert.deepEqual(Object.keys(notes[0]), ['id', 'path', 'state', 'title', 'subject', 'turns', 'handed', 'addressed', 'check', 'shot', 'noshot', 'unready', 'frame', 'source']);
+});
