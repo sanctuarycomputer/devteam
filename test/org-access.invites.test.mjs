@@ -430,6 +430,9 @@ test('kit-248: the supervisor\'s browser view opens for the owner only', async (
     { name: 'calm-otter', port: DEV2, project: 'alpha', session: 'alpha-01', label: 'checkout' },
     { name: 'sly-fox', port: DEV, project: 'alpha', session: 'alpha-02', label: 'mine' },
   ] }] };
+  // then a second instance lists the browser's own name, which makes that name no one's and its row
+  // label-less (previewLinks): the twin on the browser's port must stay the owner's
+  const collide = { devteam: 1, name: 'beta', root: '/srv/beta', port: INSTANCE + 1, viewer: 1, previews: [{ name: 'cool-tiger', port: DEV2 + 1, project: 'beta', session: 'beta-01', label: 'other' }] };
   const hub = http.createServer((req, res) => { req.resume(); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(list)); });
   await until(() => new Promise((r) => { hub.once('error', () => r(false)); hub.listen(HUB, '127.0.0.1', () => r(true)); }), 'the hub port');
   const { gw, owner, ana } = await setup('browser-view');
@@ -439,25 +442,54 @@ test('kit-248: the supervisor\'s browser view opens for the owner only', async (
     assert.equal(page.status, 403, `Ana is refused the view: ${page.status} ${page.body}`);
     assert.doesNotMatch(page.body, /the view/);
     const twin = await anaB.req('GET', '/', { on: 'sly-fox' });
-    assert.notEqual(twin.body, 'the view', 'nor under another name on its port');
+    assert.equal(twin.status, 403, `nor under another name on its port: ${twin.status} ${twin.body}`);
+    assert.equal(page.body, 'Only the box\'s owner can open the supervisor\'s browser.', 'the refusal says why');
     const app = await anaB.req('GET', '/', { on: 'calm-otter' });
     assert.equal(app.body, 'an app', 'another preview opens for Ana');
     const mine = await owner.req('GET', '/', { on: 'cool-tiger' });
     assert.equal(mine.body, 'the view', 'the owner opens it');
-    const shake = (cookie) => new Promise((resolve, reject) => {
+    const shake = (cookie, name = 'cool-tiger') => new Promise((resolve, reject) => {
       const c = net.connect(gw.port, '127.0.0.1');
       let got = '';
       c.on('data', (d) => { got += d; c.end(); });
       c.on('error', reject);
       c.on('close', () => resolve(got.split('\r\n')[0]));
-      c.write(['GET /ws HTTP/1.1', `Host: cool-tiger.${gw.host}`, `Origin: http://cool-tiger.${gw.host}`, `Cookie: ${cookie}`, 'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', '', ''].join('\r\n'));
+      c.write(['GET /ws HTTP/1.1', `Host: ${name}.${gw.host}`, `Origin: http://${name}.${gw.host}`, `Cookie: ${cookie}`, 'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', '', ''].join('\r\n'));
     });
     assert.match(await shake(anaB.jar.session), /^HTTP\/1\.1 403/, 'and its socket');
+    assert.match(await shake(anaB.jar.session, 'sly-fox'), /^HTTP\/1\.1 403/, 'and the twin name\'s socket');
     assert.doesNotMatch(await shake(owner.jar.session), /^HTTP\/1\.1 40[13]/, 'the owner\'s socket is not refused');
+    assert.match(await shake(''), /^HTTP\/1\.1 401/, 'no session is still 401, before who');
+    // the collision
+    list.instances.push(collide);
+    // a name not listed makes the gateway read the list again
+    await anaB.req('GET', '/', { on: 'zz-not-listed' });
+    assert.equal((await owner.req('GET', '/', { on: 'cool-tiger' })).status === 200, false, 'cool-tiger is no one\'s now');
+    const twin2 = await anaB.req('GET', '/', { on: 'sly-fox' });
+    assert.equal(twin2.status, 403, `the twin stays the owner's when another instance lists the browser's name: ${twin2.status} ${twin2.body}`);
+    assert.match(await shake(anaB.jar.session, 'sly-fox'), /^HTTP\/1\.1 403/, 'and its socket');
   } finally {
     await gw.close();
     for (const s of [hub, dev, dev2]) { s.closeAllConnections?.(); await new Promise((r) => s.close(r)); }
   }
+});
+
+test('org-access A2: an invite on a box whose state predates people is stamped, so the next start keeps it', async () => {
+  const { gw, owner } = await setup('pre-people');
+  try {
+    const s = gw.state();
+    delete s.people; delete s.peopleStamp; delete s.peopleSessions; delete s.invites;
+    gw.write(s);
+    ok(await owner.post('/auth/people/invite', { name: 'Bea' }), 'the stand-in owner invites');
+    const t = gw.state();
+    assert.equal(t.people.filter((p) => p.role === 'owner').length, 1, 'the owner\'s row is written with it');
+    assert.equal(typeof t.peopleStamp, 'string', 'and the people list is stamped');
+    // the next start: the same file, read by a new gateway
+    const again = G.createGateway({ publicUrl: gw.publicUrl, dir: gw.dir, ttydPort: await freePort(), ttydPage: path.join(tmp, 'pre-people-ttyd.html'), uploadsDir: fs.mkdtempSync(path.join(tmp, 'pre-people-up-')), hubPage: HUB_PAGE, log: () => {} });
+    again.server.close?.();
+    assert.equal(gw.state().invites.length, 1, 'the invite survives the next start');
+    assert.ok(!(gw.state().people.find((p) => p.role === 'owner').notices ?? []).some((n) => n.kind === 'people-reset'), 'with no reset notice');
+  } finally { await gw.close(); }
 });
 
 test('org-access A2: invites and people stop at their caps', async () => {
@@ -560,25 +592,42 @@ test('org-access A4: the added-method notice comes with the next sign-in, once, 
 });
 
 // The sign-in page's own scripts, run in a stand-in browser: the sign-in answers with a notice.
-function fakePage(html, answer) {
+function fakePage(html, answer, { refuse = null, hash = '', pathname = '/auth/login' } = {}) {
   const els = new Map();
   const replaced = [];
+  const states = [];
   const el = (id = null) => {
     const e = { id, textContent: '', innerHTML: '', value: '', hidden: false, disabled: false, children: [], style: {}, dataset: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
       append(...c) { this.children.push(...c); }, appendChild(c) { this.children.push(c); return c; }, replaceChildren(...c) { this.children = c; }, prepend(...c) { this.children.unshift(...c); }, remove() {}, setAttribute(k, v) { this[k] = v; }, removeAttribute() {}, addEventListener(t, f) { this[`on${t}`] = f; }, querySelector: () => null, querySelectorAll: () => [], focus() {} };
     return e;
   };
   const document = { addEventListener() {}, removeEventListener() {}, getElementById: (id) => { if (!els.has(id)) els.set(id, el(id)); return els.get(id); }, createElement: () => { const e = el(); els.set(Symbol('made'), e); return e; }, createTextNode: (t) => ({ textContent: String(t), children: [] }), querySelector: () => null, querySelectorAll: () => [], body: el('body') };
-  const fetch = async (url) => ({ ok: true, json: async () => (String(url).includes('options') ? { challenge: 'AAAA', rpId: 'box.localhost', allowCredentials: [] } : answer) });
+  const fetch = async (url) => (refuse ? { ok: false, statusText: 'Forbidden', json: async () => refuse } : { ok: true, json: async () => (String(url).includes('options') ? { challenge: 'AAAA', rpId: 'box.localhost', allowCredentials: [] } : answer) });
   const navigator = { credentials: { get: async () => ({ rawId: new Uint8Array([1]).buffer, response: { clientDataJSON: new Uint8Array([2]).buffer, authenticatorData: new Uint8Array([3]).buffer, signature: new Uint8Array([4]).buffer, userHandle: null } }) } };
-  const location = { href: 'http://box.localhost/auth/login', pathname: '/auth/login', hash: '', search: '', replace: (to) => replaced.push(to), assign: (to) => replaced.push(to) };
-  const ctx = vm.createContext({ addEventListener() {}, document, fetch, navigator, location, history: { replaceState() {} }, window: {}, console, atob, btoa, Uint8Array, ArrayBuffer, TextEncoder, TextDecoder, setTimeout, clearTimeout, Promise, JSON, Date, encodeURIComponent, decodeURIComponent, confirm: () => true, matchMedia: () => ({ matches: false }) });
+  const location = { href: `http://box.localhost${pathname}${hash}`, pathname, hash, search: '', replace: (to) => replaced.push(to), assign: (to) => replaced.push(to) };
+  const ctx = vm.createContext({ addEventListener() {}, document, fetch, navigator, location, history: { replaceState: (...a) => states.push(a) }, window: {}, console, atob, btoa, Uint8Array, ArrayBuffer, TextEncoder, TextDecoder, setTimeout, clearTimeout, Promise, JSON, Date, encodeURIComponent, decodeURIComponent, confirm: () => true, matchMedia: () => ({ matches: false }) });
   for (const [, code] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) vm.runInContext(code, ctx);
   // every word on the page: text as text, markup as it would parse
   const words = () => { const all = []; const walk = (e) => { if (!e) return; all.push(e.textContent ?? '', e.innerHTML ?? ''); for (const c of e.children ?? []) walk(c); }; for (const e of els.values()) walk(e); return all.join('\n'); };
   const button = (text) => { let hit = null; const walk = (e) => { if (!e || hit) return; if (typeof e.onclick === 'function' && (e.textContent ?? '').trim() === text) hit = e; for (const c of e.children ?? []) walk(c); }; for (const e of els.values()) walk(e); return hit; };
-  return { els, words, button, replaced };
+  return { els, words, button, replaced, states };
 }
+
+test('org-access A4: a row keeps its newest 20 added-method notices', async () => {
+  const { gw, ana } = await setup('notice-cap');
+  try {
+    const s = gw.state();
+    const old = Array.from({ length: 20 }, (_, i) => ({ kind: 'method-added', at: new Date(Date.UTC(2026, 0, 1 + i)).toISOString(), type: 'passkey', label: `old ${i}`, method: rid('m-'), shown_at: null }));
+    const other = { kind: 'people-reset', at: '2026-01-01T00:00:00.000Z' };
+    gw.write({ ...s, people: s.people.map((p) => (p.id === ana.id ? { ...p, notices: [other, ...old] } : p)) });
+    ok((await join(gw, seedInvite(gw, ana.id), authenticator(), 'newest')).fin, 'a 21st method');
+    const kept = rowOf(gw, ana.id).notices;
+    const added = kept.filter((n) => n.kind === 'method-added');
+    assert.equal(added.length, 20, 'twenty kept');
+    assert.deepEqual([added[0].label, added.at(-1).label], ['old 1', 'newest'], 'the oldest one goes');
+    assert.ok(kept.some((n) => n.kind === 'people-reset'), 'a notice of another kind stays');
+  } finally { await gw.close(); }
+});
 
 test('org-access A4: the sign-in page shows the added-method notice it is given, as text, before going on', async () => {
   const gw = await gateway('notice-words');
@@ -624,6 +673,65 @@ test('org-access A4: only the owner relinks, never their own row, at the row\'s 
     refusedAs(await owner.post('/auth/people/relink', { id: ana.id, rev: 1 }), 403, 'fresh-sign-in', 'not fresh');
     assert.deepEqual(gw.state().invites ?? [], []);
     assert.ok(before);
+  } finally { await gw.close(); }
+});
+
+test('org-access A2: a dead invite link\'s page says it can\'t be used, and the page takes the token out of the address', async () => {
+  const { gw } = await setup('dead-page');
+  try {
+    const page = await gw.raw('GET', '/auth/claim');
+    ok(page, 'the invite page');
+    const tok = u(crypto.randomBytes(32));
+    const p = fakePage(page.body, null, { refuse: { error: T.gone }, hash: `#${tok}`, pathname: '/auth/claim' });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(p.states, [[null, '', '/auth/claim']], 'the token leaves the address bar at once');
+    const said = p.words();
+    assert.ok(said.includes('This invite can\'t be used'), `the dead link's words: ${said.slice(0, 300)}`);
+    assert.ok(said.includes('Each link works once, for 24 hours.'));
+    assert.ok(!said.includes(tok), 'the token is nowhere on the page');
+    // any other failure is an error to retry, never a dead link
+    const busy = fakePage(page.body, null, { refuse: { error: 'the box is busy' }, hash: `#${tok}`, pathname: '/auth/claim' });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(!busy.words().includes('This invite can\'t be used'), 'another failure is not a dead link');
+    assert.equal(busy.els.get('go').hidden, false, 'the button stays');
+    assert.match(busy.els.get('err').textContent, /the box is busy/);
+  } finally { await gw.close(); }
+});
+
+test('org-access A2: on an unclaimed box an invite link reads as dead', async () => {
+  const gw = await gateway('peek-unclaimed');
+  try {
+    for (const token of [u(crypto.randomBytes(32)), gw.token]) {
+      const r = await gw.raw('POST', '/auth/claim/invite', { body: { token } });
+      assert.deepEqual([r.status, r.json], [403, { error: T.gone }], 'refused alike, the box\'s own claim token included');
+      assert.equal(sessionCookieOf(r), null);
+    }
+  } finally { await gw.close(); }
+});
+
+test('org-access A2: an invite whose owner session ends while its body is in flight lands nothing', async () => {
+  const { gw, owner } = await setup('reclaim-mid');
+  try {
+    const before = gw.state();
+    const answer = new Promise((resolve, reject) => {
+      const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: '/auth/people/invite', headers: { host: gw.host, origin: gw.publicUrl, 'content-type': 'application/json', cookie: owner.jar.session } }, (res) => {
+        let b = '';
+        res.on('data', (c) => { b += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: b }));
+      });
+      r.on('error', reject);
+      r.write('{"name":"Be');
+      // what the reclaim writes (cloud/gateway.mjs's devteam-reclaim): nobody's passkey or session stands
+      setTimeout(() => {
+        gw.write({ ...before, passkeys: [], sessions: [], pushSubs: [], peopleSessions: [], invites: [] });
+        setTimeout(() => r.end('a"}'), 50);
+      }, 50);
+    });
+    const got = await answer;
+    assert.ok([401, 403].includes(got.status), `refused: ${got.status} ${got.body}`);
+    const s = gw.state();
+    assert.equal(s.people.some((p) => p.name === 'Bea'), false, 'no row');
+    assert.deepEqual(s.invites, [], 'no invite');
   } finally { await gw.close(); }
 });
 

@@ -305,6 +305,8 @@ export function threadKey(store) {
 // (/auth/claim#…). devteam.mjs's redactClaimLinks holds the same CLAIM_LINK line, byte for byte
 // (test/org-access.invites.test.mjs compares them), so a press redacted here is kept word for word
 // there and still reads as signed. Strings anywhere in an object or array, keys kept.
+// The preview the hub labels so is the supervisor's browser view: the owner's alone (kit-248).
+const BROWSER_VIEW = "Supervisor's browser";
 export function redactClaimLinks(v, depth = 0) {
   const CLAIM_LINK = /((?:\/|%2F)auth(?:\/|%2F)claim(?:\?[^\s#"'<>`]*)?(?:#|%23))(?!…)[^\s"'<>`)\]}…]+/gi;
   if (typeof v === 'string') return v.replace(CLAIM_LINK, '$1…');
@@ -1444,7 +1446,9 @@ export function createGateway(opts = {}) {
     }
     const name = typeof body.name === 'string' ? body.name.normalize('NFC').trim() : null;
     if (!name || [...name].length > 60 || NAME_BAD.test(name)) return refuse(res, 400, 'bad-name', 'A name is one line of 1 to 60 characters.');
-    const base = withOwner(s);
+    // a file from before people gets its owner row here, stamped as start stamps it: a people list
+    // with no stamp reads, at the next start, as an older gateway's change and is reset
+    const base = s.people ? s : stamped(withOwner(s));
     const key = name.toLowerCase();
     if (base.people.some((p) => String(p.name).normalize('NFC').toLowerCase() === key)) return refuse(res, 400, 'name-taken', 'Someone on this box already has that name.');
     const open = liveInvites(base);
@@ -1897,6 +1901,7 @@ export function createGateway(opts = {}) {
   // hub once more, with every waiter sharing one read, so no anonymous request can make it poll.
   const ownPort = opts.port ?? null;
   let previews = new Map();
+  let browserPorts = new Set();
   // Each name the list gives to the ports that hold it (with each one's root and whether its kit has
   // viewers, as the hub's list last said, every poll, PUSH_POLL_MS: the owner wrapper's choice is a
   // lookup in it, so no visit asks anything, spec §8); a port's origin only for a name one port holds;
@@ -1919,6 +1924,7 @@ export function createGateway(opts = {}) {
     projects = names;
     portHost = new Map([...names].filter(([, c]) => c.length === 1).map(([n, c]) => [c[0].port, projectOrigin(n)]));
     previews = previewLinks(ok, BLOCK, ownPort, ttydPort);
+    browserPorts = new Set(ok.flatMap((x) => (Array.isArray(x?.previews) ? x.previews : [])).filter((p) => p?.label === BROWSER_VIEW && Number.isInteger(p.port)).map((p) => p.port));
     // a preview whose generated name is a project's is not served under it
     for (const n of names.keys()) previews.delete(n);
     listRead = Array.isArray(list);
@@ -3164,12 +3170,10 @@ export function createGateway(opts = {}) {
   const previewSockets = new Map();
   // The supervisor's browser view (the preview the hub labels so): whoever opens it drives the
   // owner's signed-in browser, so it is the owner's alone, under any name its port is listed by.
-  const BROWSER_VIEW = "Supervisor's browser";
   const ownerOnlyPreview = (name) => {
     const link = previews.get(name);
     if (!link || link.ambiguous) return false;
-    for (const x of previews.values()) if (!x.ambiguous && x.label === BROWSER_VIEW && x.port === link.port) return true;
-    return false;
+    return browserPorts.has(link.port);
   };
   const previewUpgrade = async (req, socket, head, name, refuse) => {
     const own = previewOrigin(name);
@@ -3365,8 +3369,8 @@ if (!token) location.replace('/auth/login');
 else post('/auth/claim/invite', { token }).then((i) => {
   again = i.again === true;
   if (again) { el('h').textContent = 'Add a sign-in method to your account'; el('who').textContent = 'This link adds a sign-in method (a passkey) to ' + i.name + '\\'s account on ' + host + '. Your other sign-in methods keep working.'; el('how').textContent = ''; el('go').textContent = 'Create passkey'; }
-  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as Full: you can do everything on the box except manage people.';
-}, dead);
+  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'full' ? 'Full: you can do everything on the box except manage people.' : String(i.level) + '.');
+}, (e) => (/expired or was used/.test(e.message) ? dead() : err(e.message + ' Reload to try again.')));
 el('go').onclick = run(async () => {
   try { await create('/auth/method/passkey/start', '/auth/method/passkey/finish', { purpose: 'invite', token, name: el('name').value }); }
   catch (e) { if (/expired or was used/.test(e.message)) return dead(); throw e; }
@@ -3383,8 +3387,7 @@ history.replaceState(null, '', location.pathname);
 if (!token) err('This link has no claim token. Use the full link from the box\\'s logs (it ends in #…).');
 document.getElementById('go').onclick = run(async () => { await create('/auth/claim/options', '/auth/claim/verify', { token, name: document.getElementById('name').value }); location.replace(${jsonIn(`${box}/`)}); });
 </script></body></html>`,
-  login: (next) => `${doc('Sign in', '<h1>devteam</h1><p>Sign in with this box\'s passkey.</p><p><button id="go" autofocus>Sign in with a passkey</button></p><p id="err"></p>')}
-<div id="notes" hidden></div>
+  login: (next) => `${doc('Sign in', '<h1>devteam</h1><p>Sign in with this box\'s passkey.</p><p><button id="go" autofocus>Sign in with a passkey</button></p><p id="err"></p><div id="notes" hidden></div>')}
 <script>const next = ${jsonIn(next)};
 // a notice the sign-in hands back is shown, as text, before going on
 const day = (at) => { const d = new Date(at); return Number.isNaN(d.getTime()) ? 'a recent day' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); };
